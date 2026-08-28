@@ -11,6 +11,7 @@ import {
   CLAUDE_MD_BOOTSTRAP_MARKER,
   SESSION_START_HOOK_MARKER,
 } from "../../src/doctor-client.ts";
+import { hookSettingsPath } from "../../src/hook-install.ts";
 
 /**
  * flair#597 — `flair init`'s claude-code wiring used to write the MCP block
@@ -187,6 +188,17 @@ describe("applyOrReportSessionStartHook", () => {
     applyOrReportSessionStartHook(isoHome, "my-agent", false);
     const check = checkSessionStartHook(isoHome);
     expect(check.present).toBe(true);
+  });
+
+  it("writes the Codex hook into ~/.codex/hooks.json when given that path (flair#1439)", () => {
+    const path = hookSettingsPath(isoHome, "codex");
+    const res = applyOrReportSessionStartHook(isoHome, "local", false, path);
+    expect(res.applied).toBe(true);
+    expect(res.ok).toBe(true);
+    const check = checkSessionStartHook(isoHome, path);
+    expect(check.present).toBe(true);
+    expect(check.path).toBe(path);
+    expect(existsSync(join(isoHome, ".claude", "settings.json"))).toBe(false);
   });
 });
 

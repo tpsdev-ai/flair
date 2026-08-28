@@ -164,11 +164,19 @@ import {
   isDetached,
   pickInstancePid,
   renderDetachedWarning,
-  renderVerifiedSummary,
   LAUNCHCTL_QUERY_TIMEOUT_MS,
   type LaunchctlLister,
   type LaunchdManagement,
 } from "./lib/launchd-management.js";
+import {
+  missingHookWithoutConsentLines,
+  renderVerifiedSummary,
+  resolveHookInstallConsent,
+  resolveUpgradeHookInstall,
+  runDoctorChecks,
+  sessionStartHookMissing,
+  type DoctorRun,
+} from "./lib/doctor-run.js";
 // Value-only static import so `--interval`'s advertised default cannot drift
 // from the one the scheduler actually validates against. The module itself is
 // still loaded lazily at call time (the `await import()`s below) for the
@@ -3502,7 +3510,7 @@ program
   .option("--no-mcp", "Skip MCP client wiring (instance + agent only)")
   .option("--skip-smoke", "Skip the MCP smoke test")
   .option("--skip-claude-md", "Skip appending the Flair bootstrap line to CLAUDE.md (claude-code only)")
-  .option("--skip-hook", "Skip installing the flair-session-start SessionStart hook (claude-code only)")
+  .option("--skip-hook", "Skip installing the flair-session-start SessionStart hook (claude-code and Codex)")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
   .option("--remote", "When used with --target, init as hub for remote federation")
   .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
@@ -4363,6 +4371,22 @@ program
             }
             wiringResults.push({ client: clientId, message: result.message, wired: result.ok });
             console.log(`   ${result.ok ? "✓" : "•"} ${result.message}`);
+            // Codex SessionStart hook (flair#1148 / #1439) — the hook is not
+            // optional on Codex (no CLAUDE.md alternative). Init is the
+            // consent to set up the client, same as the Claude Code hook
+            // applied above. --skip-hook opts out and prints the JSON.
+            if (clientId === "codex" && result.ok) {
+              const hookResult = applyOrReportSessionStartHook(
+                homedir(),
+                agentId,
+                !!opts.skipHook,
+                hookSettingsPath(homedir(), "codex"),
+              );
+              console.log(`   ${hookResult.ok ? "✓" : "•"} ${hookResult.message}`);
+              if (hookResult.hint) {
+                for (const line of hookResult.hint.split("\n")) console.log(`   ${line}`);
+              }
+            }
           }
         }
       }
@@ -11348,6 +11372,7 @@ program
   .option("--project <name>", "Fabric component name for --target", "flair")
   .option("--no-replicated", "Disable cluster-wide replication for --target (default: replicated=true)")
   .option("--yes", "Skip the confirmation prompt for --target")
+  .option("--install-hooks", "Consent to installing missing SessionStart hooks (claude-code / Codex) during upgrade. The hook executes at every session start — upgrade will not write it unprompted. Interactive runs prompt; non-interactive runs state the gap and withhold ✅ unless this flag is passed.")
   .option("--no-fleet-verify", "Skip the automatic post-upgrade fleet convergence sweep for --target (default: sweep runs — see flair#636)")
   // ── flair#878 ─────────────────────────────────────────────────────────────
   // These existed on `flair deploy` but stopped at the upgrade boundary, so
@@ -12052,17 +12077,16 @@ program
     const verdict = decideAfterVerify(verify, previousFlairVersion);
 
     if (verdict.kind === "ok") {
-      // flair#1022: the verified facts are unchanged and still stated — the
-      // upgrade did land. What changes is the MARKER and the claim around it.
-      // A run that ended up outside its process manager has not fully
-      // succeeded, so it does not get a ✅, and the line names the property
-      // that is wrong rather than only the ones that are right. The choice
-      // lives in renderVerifiedSummary so it is testable without performing an
-      // upgrade — no CI lane runs this darwin path.
-      const summary = renderVerifiedSummary(verify.version, management);
-      for (const line of summary.lines) {
-        if (summary.degraded) console.error(line); else console.log(line);
-      }
+      // flair#1439: the success marker is the doctor runner's verdict, not
+      // a second, narrower notion of "verified". Launchd detach is one
+      // catalog member; the Codex SessionStart hook is another. Adding a
+      // doctor check widens this claim automatically.
+      const run = await doctorRunAfterUpgrade({
+        management,
+        port,
+        installHooksFlag: !!opts.installHooks,
+      });
+      printVerifiedSummary(renderVerifiedSummary(verify.version, run));
       return;
     }
 
@@ -12075,21 +12099,22 @@ program
     // "print an honest note but roll back anyway" branch that used to sit below
     // is gone — that credentials case can no longer reach the rollback path.)
     if (verdict.kind === "healthy-unverified") {
-      // flair#1022: same rule as the "ok" branch above — the ✅ is withheld
-      // when the run left the instance outside launchd, and the reason is
-      // named. This branch already qualifies the version claim; the process
-      // manager is a second, independent qualification.
-      console.log(detached
-        ? `⚠️  upgrade complete: the instance is up and healthy${expectedFlairVersion ? ` on @tpsdev-ai/flair@${expectedFlairVersion}` : ""}, but NOT under launchd.`
-        : `✅ upgrade complete: the instance is up and healthy${expectedFlairVersion ? ` on @tpsdev-ai/flair@${expectedFlairVersion}` : ""}.`);
+      // Same doctor runner as the "ok" branch — an unverified version must
+      // not restore the unqualified ✅ while a catalog member is failing.
+      const run = await doctorRunAfterUpgrade({
+        management,
+        port,
+        installHooksFlag: !!opts.installHooks,
+      });
+      const versionNote = expectedFlairVersion ? ` on @tpsdev-ai/flair@${expectedFlairVersion}` : "";
+      if (run.healthy) {
+        console.log(`✅ upgrade complete: the instance is up and healthy${versionNote}.`);
+      } else {
+        printVerifiedSummary(renderVerifiedSummary(verify.version, run));
+      }
       console.log(`   The version could not be verified — the checker couldn't authenticate to /HealthDetail (${verdict.reason}).`);
       console.log("   The server is confirmed running (public /Health passed); this is a verification gap, not an upgrade failure — nothing was rolled back.");
       console.log("   To enable full post-upgrade verification: set FLAIR_ADMIN_PASS, or run `flair init` to provision ~/.flair/admin-pass or an agent key.");
-      if (detached) {
-        for (const line of renderDetachedWarning(management, "The instance is NOT running under launchd.")) {
-          console.error(line);
-        }
-      }
       return;
     }
 
@@ -12430,6 +12455,105 @@ function resolveInstanceServingPid(dataDir: string, port: number): number | null
     isAlive: isProcessAlive,
     listeningPids,
   });
+}
+
+/** Agent signing-key ids under `keysDir` — node-scoped federation keys excluded. */
+function collectKeyAgentIds(keysDir: string): string[] {
+  if (!existsSync(keysDir)) return [];
+  try {
+    const keyFiles = readdirSync(keysDir).filter((f) => f.endsWith(".key"));
+    const { agentKeyIds } = partitionKeyIds(
+      keyFiles.map((f) => f.replace(/\.key$/, "")),
+      keysDir,
+    );
+    return agentKeyIds;
+  } catch {
+    return [];
+  }
+}
+
+async function confirmYes(question: string): Promise<boolean> {
+  if (!process.stdin.isTTY) return false;
+  const { createInterface } = await import("node:readline");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer: string = await new Promise((res) =>
+    rl.question(question, (a) => { rl.close(); res(a); }),
+  );
+  return /^y(es)?$/i.test(answer.trim());
+}
+
+/**
+ * flair#1439 — run the enumerable doctor catalog after upgrade's instance
+ * probe, and offer a consented SessionStart-hook install when that check
+ * fails. Silent writes are refused: `--install-hooks` or an interactive
+ * yes is the only consent.
+ */
+async function doctorRunAfterUpgrade(args: {
+  management: LaunchdManagement;
+  port: number;
+  installHooksFlag: boolean;
+}): Promise<DoctorRun> {
+  const homeDir = homedir();
+  const keysDir = defaultKeysDir();
+  const ctx = {
+    homeDir,
+    cwd: process.cwd(),
+    detectedClientIds: detectClients().filter((c) => c.detected).map((c) => c.id),
+    launchd: args.management,
+    keysDir,
+    keyAgentIds: collectKeyAgentIds(keysDir),
+  };
+  let run = runDoctorChecks(ctx);
+  if (!sessionStartHookMissing(run)) return run;
+
+  const missing = run.results.find((r) => r.id === "session-start-hook")?.missingHarnesses ?? [];
+  let consent = resolveHookInstallConsent({
+    installHooksFlag: args.installHooksFlag,
+    interactive: !!process.stdin.isTTY,
+  });
+  if (consent === "prompt") {
+    const harness = missing[0] ?? "codex";
+    const path = hookSettingsPath(homeDir, harness);
+    console.log(`\n  SessionStart hook (${harness}) is not installed at ${path}.`);
+    console.log("  Without it, memory never bootstraps on that harness (no CLAUDE.md alternative on Codex).");
+    const accepted = await confirmYes("  Install the flair-session-start hook now? [y/N] ");
+    consent = resolveHookInstallConsent({
+      installHooksFlag: false,
+      interactive: true,
+      promptAccepted: accepted,
+    });
+  }
+  if (consent === "install") {
+    for (const harness of missing) {
+      const inputs = resolveUpgradeHookInstall(homeDir, harness, { port: args.port });
+      if ("error" in inputs) {
+        console.error(`   ${inputs.error}`);
+        continue;
+      }
+      const installed = installHook({
+        homeDir,
+        harness,
+        agentId: inputs.agentId,
+        flairUrl: inputs.flairUrl,
+      });
+      console.log(`   ${installed.ok ? "✓" : "•"} ${installed.message}`);
+    }
+    return runDoctorChecks(ctx);
+  }
+  if (consent === "skip-noninteractive") {
+    for (const harness of missing) {
+      for (const line of missingHookWithoutConsentLines(harness, hookSettingsPath(homeDir, harness))) {
+        console.error(`   ${line}`);
+      }
+    }
+  }
+  return run;
+}
+
+function printVerifiedSummary(summary: { degraded: boolean; lines: string[] }): void {
+  for (const line of summary.lines) {
+    if (summary.degraded) console.error(line); else console.log(line);
+  }
 }
 
 /**

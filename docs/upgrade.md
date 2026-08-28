@@ -65,7 +65,15 @@ actually running:
 - **Post-restart verification** (skip with `--no-verify`) confirms the
   restarted instance answers `/Health`, that an authenticated request
   round-trips, and that the reported running version matches what was just
-  installed.
+  installed. It then runs the same enumerable doctor install-health checks
+  (`flair doctor`'s client-integration catalog, plus launchd management)
+  and prints `✅ verified: healthy` only when every check ran and none
+  failed. A missing Codex SessionStart hook — which `flair init` before
+  0.50.0 never wrote — is one of those checks. Installing the hook is
+  consent-bearing (it executes at every session start): an interactive
+  upgrade prompts; a non-interactive upgrade states the gap and withholds
+  ✅. Pass `--install-hooks` to consent without a prompt, then `flair
+  doctor` exits 0.
 - **On a failed restart OR a failed verification**, `flair upgrade`
   automatically reinstalls the previously-running `@tpsdev-ai/flair` version,
   restarts again, and re-verifies — then exits nonzero with a clear report of

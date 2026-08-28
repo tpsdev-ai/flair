@@ -66,9 +66,13 @@ import {
   readLaunchctlJobState,
   readPlistProgramRefs,
   renderDetachedWarning,
-  renderVerifiedSummary,
   type LaunchctlLister,
 } from "../../src/lib/launchd-management.ts";
+import {
+  renderVerifiedSummary,
+  runDoctorChecks,
+  type DoctorRunContext,
+} from "../../src/lib/doctor-run.ts";
 import { launchdLabel, launchdPlistPath } from "../../src/cli";
 
 const isDarwin = process.platform === "darwin";
@@ -427,8 +431,18 @@ describe("flair#1022 — renderVerifiedSummary is the reported defect, reduced t
     remedy: ["flair init", "flair restart"],
   };
 
+  /** A complete catalog run: no clients (hook/mcp/claude-md skip), launchd as given. */
+  function runWithLaunchd(launchd: DoctorRunContext["launchd"]) {
+    return runDoctorChecks({
+      homeDir: "/tmp/flair-no-home",
+      cwd: "/tmp/flair-no-cwd",
+      detectedClientIds: [],
+      launchd,
+    });
+  }
+
   test("THE INCIDENT LINE: a detached run does not emit `✅ verified: ...`", () => {
-    const s = renderVerifiedSummary("0.33.0", detached);
+    const s = renderVerifiedSummary("0.33.0", runWithLaunchd(detached));
     expect(s.degraded).toBe(true);
     const text = s.lines.join("\n");
     // The literal string from the incident report must not be produced.
@@ -443,11 +457,11 @@ describe("flair#1022 — renderVerifiedSummary is the reported defect, reduced t
   });
 
   test("POSITIVE CONTROL: a managed run still reports exactly the success line it always did", () => {
-    const s = renderVerifiedSummary("0.33.0", {
+    const s = renderVerifiedSummary("0.33.0", runWithLaunchd({
       state: "managed",
       label: "ai.tpsdev.flair.deadbeef",
       detail: "launchd job is running as process 4242",
-    });
+    }));
     expect(s.degraded).toBe(false);
     expect(s.lines).toEqual(["✅ verified: healthy, authenticated, running 0.33.0"]);
   });
@@ -457,23 +471,23 @@ describe("flair#1022 — renderVerifiedSummary is the reported defect, reduced t
       { state: "not-applicable" as const, detail: "linux does not use launchd" },
       { state: "no-service" as const, detail: "no launchd service is registered for this instance" },
     ]) {
-      const s = renderVerifiedSummary("0.33.0", m);
+      const s = renderVerifiedSummary("0.33.0", runWithLaunchd(m));
       expect(s.degraded).toBe(false);
       expect(s.lines).toEqual(["✅ verified: healthy, authenticated, running 0.33.0"]);
     }
   });
 
   test("an unknown version is omitted rather than printed as null, on both paths", () => {
-    expect(renderVerifiedSummary(null, { state: "managed", detail: "ok" }).lines)
+    expect(renderVerifiedSummary(null, runWithLaunchd({ state: "managed", detail: "ok" })).lines)
       .toEqual(["✅ verified: healthy, authenticated"]);
-    expect(renderVerifiedSummary(null, detached).lines.join("\n")).toContain("(healthy, authenticated)");
+    expect(renderVerifiedSummary(null, runWithLaunchd(detached)).lines.join("\n")).toContain("(healthy, authenticated)");
   });
 
   test("a degraded summary is never routed to stdout as a success", () => {
     // `degraded` is what selects stderr at the call site, so the two must not
     // disagree: a degraded:false result carrying a warning, or vice versa,
     // would put the warning on the success channel.
-    const s = renderVerifiedSummary("0.33.0", detached);
+    const s = renderVerifiedSummary("0.33.0", runWithLaunchd(detached));
     expect(s.degraded).toBe(true);
     expect(s.lines[0].startsWith("⚠️")).toBe(true);
   });
