@@ -96,6 +96,19 @@ async function measureWithRuns(
 }
 
 async function run(): Promise<void> {
+  // The harness reads thread count and peak RSS from /proc/<pid>/status, which
+  // is Linux-only. Refuse at boot on any other platform rather than throwing
+  // ENOENT partway through a measurement someone is waiting on. Failing loudly
+  // at start is fine; failing obscurely at minute three is not.
+  if (process.platform !== "linux") {
+    console.error(
+      `BLOCKED: this harness requires Linux — it reads thread count and peak RSS ` +
+      `from /proc/<pid>/status, which does not exist on ${process.platform}. ` +
+      `Run it on a Linux x86_64 host (e.g. tps-bench).`,
+    );
+    process.exit(1);
+  }
+
   const datasetPath = arg("--dataset");
   if (!datasetPath || !existsSync(datasetPath)) {
     console.error("usage: run.ts run --dataset <path> [--n 500] [--seed 0] [--runs 3] [--out <dir>]");
@@ -106,7 +119,7 @@ async function run(): Promise<void> {
   const seed = Number(arg("--seed", String(DEFAULT_SEED)));
   const runs = Number(arg("--runs", String(DEFAULT_RUNS)));
   const outDir = arg("--out", path.join(REPO_ROOT, "test/bench/ingest-throughput/artifacts"));
-  const benchHost = process.env.INGEST_BENCH_HOST ?? "rockit";
+  const benchHost = process.env.INGEST_BENCH_HOST ?? "tps-bench";
 
   const log = (m: string) => console.error(m);
 

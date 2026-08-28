@@ -57,7 +57,11 @@ anchor — re-derivable by anyone with the repo. `artifactHash` is a seal
 
 ## Host requirement
 
+Linux only: the harness reads thread count and peak RSS from
+`/proc/<pid>/status`, which does not exist on macOS or Windows. It refuses at
+boot on any other platform rather than failing partway through a measurement.
+
 The sweep `{6, 7, 8}` is only meaningful on a host with ≥8 cores: node-llama-cpp
 caps the thread count at `max(4, cores)`, so on a smaller host every sweep value
 collapses to the same cap. The #1436 baseline (86,550 tokens / 80.1s ≈ 159
-tok/s/core) was measured on an 8-core host (`rockit`).
+tok/s/core) was measured on an 8-core Linux x86_64 host (`tps-bench`).
