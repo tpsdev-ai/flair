@@ -29,6 +29,7 @@ import { join } from "node:path";
 import {
   DOCTOR_CHECK_IDS,
   DOCTOR_CHECKS,
+  missingHookPromptLines,
   missingHookWithoutConsentLines,
   renderVerifiedSummary,
   resolveHookInstallConsent,
@@ -244,5 +245,37 @@ describe("flair#1439 — REGRESSION LOCK: hook write is consent-bearing", () => 
     write0490CodexHome(isoHome, "local");
     const resolved = resolveUpgradeHookInstall(isoHome, "codex", { port: 9926 });
     expect(resolved).toEqual({ agentId: "local", flairUrl: "http://127.0.0.1:9926" });
+  });
+
+  test("interactive prompt names every missing harness — a yes is not consent to an unnamed extra", () => {
+    const { preamble, question } = missingHookPromptLines(["claude-code", "codex"], isoHome);
+    const text = [...preamble, question].join("\n");
+    expect(text).toContain("claude-code");
+    expect(text).toContain("codex");
+    expect(text).toContain(hookSettingsPath(isoHome, "claude-code"));
+    expect(text).toContain(hookSettingsPath(isoHome, "codex"));
+    expect(question).toContain("claude-code and codex");
+    expect(text).toContain("no CLAUDE.md alternative on Codex");
+  });
+
+  test("Claude-Code-only prompt does not use the Codex-only rationale", () => {
+    const { preamble, question } = missingHookPromptLines(["claude-code"], isoHome);
+    const text = [...preamble, question].join("\n");
+    expect(text).toContain("claude-code");
+    expect(text).not.toContain("Codex");
+    expect(text).not.toContain("codex");
+    expect(question).not.toContain("and");
+  });
+});
+
+describe("flair#1439 — Bugbot: healthy-unverified must not claim authenticated", () => {
+  test("renderVerifiedSummary({ authenticated: false }) omits the authenticated fact", () => {
+    write0490CodexHome(isoHome);
+    const run = runOn(isoHome, ["codex"]);
+    const s = renderVerifiedSummary("0.50.0", run, { authenticated: false });
+    const text = s.lines.join("\n");
+    expect(text).not.toContain("authenticated");
+    expect(text).not.toContain("✅");
+    expect(text).toContain("healthy");
   });
 });

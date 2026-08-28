@@ -201,9 +201,12 @@ function runSessionStartHook(ctx: DoctorRunContext): DoctorCheckResult {
   if (missing.length > 0) {
     const harness = missing[0]!;
     const path = hookSettingsPath(ctx.homeDir, harness);
+    const detail = missing.length === 1
+      ? `SessionStart hook (${harness}): not found in ${path}`
+      : `SessionStart hook: not found for ${missing.join(", ")} (${missing.map((h) => hookSettingsPath(ctx.homeDir, h)).join("; ")})`;
     return result(id, label, "fail", {
-      detail: `SessionStart hook (${harness}): not found in ${path}`,
-      remedy: hookInstallHint(harness),
+      detail,
+      remedy: missing.map((h) => hookInstallHint(h)).join(" ; "),
       missingHarnesses: missing,
     });
   }
@@ -384,8 +387,14 @@ export interface VerifiedSummary {
 export function renderVerifiedSummary(
   version: string | null,
   run: DoctorRun,
+  opts?: { authenticated?: boolean },
 ): VerifiedSummary {
-  const facts = `healthy, authenticated${version ? `, running ${version}` : ""}`;
+  // `authenticated` is a probe fact, not a doctor-check special case. The
+  // healthy-unverified upgrade branch could not read /HealthDetail; claiming
+  // "authenticated" there contradicts the next line. Default stays true so
+  // the ok path is unchanged.
+  const authed = opts?.authenticated !== false;
+  const facts = `healthy${authed ? ", authenticated" : ""}${version ? `, running ${version}` : ""}`;
   if (run.healthy) {
     return { degraded: false, lines: [`✅ verified: ${facts}`] };
   }
@@ -440,6 +449,34 @@ export function resolveHookInstallConsent(opts: {
   if (opts.interactive && opts.promptAccepted) return "install";
   if (opts.interactive) return "skip-declined";
   return "skip-noninteractive";
+}
+
+/**
+ * Interactive upgrade prompt for missing SessionStart hooks.
+ *
+ * Names EVERY missing harness (and its path) before asking. A yes after
+ * this prompt is consent to write each named hook — not an unnamed extra.
+ * Codex-only rationale is attached only when Codex is in the set.
+ */
+export function missingHookPromptLines(
+  missing: readonly Harness[],
+  homeDir: string,
+): { preamble: string[]; question: string } {
+  const named = missing.length > 0 ? [...missing] : (["codex"] as Harness[]);
+  const preamble: string[] = [];
+  for (const h of named) {
+    preamble.push(`SessionStart hook (${h}) is not installed at ${hookSettingsPath(homeDir, h)}.`);
+  }
+  if (named.includes("codex")) {
+    preamble.push("Without the Codex hook, memory never bootstraps (no CLAUDE.md alternative on Codex).");
+  }
+  if (named.length > 1) {
+    preamble.push(`A yes installs the hook for ${named.join(" and ")} — each executes at session start.`);
+  }
+  const question = named.length === 1
+    ? "  Install the flair-session-start hook now? [y/N] "
+    : `  Install the flair-session-start hook for ${named.join(" and ")} now? [y/N] `;
+  return { preamble, question };
 }
 
 /** Plain-language lines when upgrade will not write the hook. */

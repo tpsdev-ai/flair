@@ -169,6 +169,7 @@ import {
   type LaunchdManagement,
 } from "./lib/launchd-management.js";
 import {
+  missingHookPromptLines,
   missingHookWithoutConsentLines,
   renderVerifiedSummary,
   resolveHookInstallConsent,
@@ -12110,7 +12111,7 @@ program
       if (run.healthy) {
         console.log(`✅ upgrade complete: the instance is up and healthy${versionNote}.`);
       } else {
-        printVerifiedSummary(renderVerifiedSummary(verify.version, run));
+        printVerifiedSummary(renderVerifiedSummary(verify.version, run, { authenticated: false }));
       }
       console.log(`   The version could not be verified — the checker couldn't authenticate to /HealthDetail (${verdict.reason}).`);
       console.log("   The server is confirmed running (public /Health passed); this is a verification gap, not an upgrade failure — nothing was rolled back.");
@@ -12512,11 +12513,10 @@ async function doctorRunAfterUpgrade(args: {
     interactive: !!process.stdin.isTTY,
   });
   if (consent === "prompt") {
-    const harness = missing[0] ?? "codex";
-    const path = hookSettingsPath(homeDir, harness);
-    console.log(`\n  SessionStart hook (${harness}) is not installed at ${path}.`);
-    console.log("  Without it, memory never bootstraps on that harness (no CLAUDE.md alternative on Codex).");
-    const accepted = await confirmYes("  Install the flair-session-start hook now? [y/N] ");
+    const prompt = missingHookPromptLines(missing, homeDir);
+    console.log("");
+    for (const line of prompt.preamble) console.log(`  ${line}`);
+    const accepted = await confirmYes(prompt.question);
     consent = resolveHookInstallConsent({
       installHooksFlag: false,
       interactive: true,
