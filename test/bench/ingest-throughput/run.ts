@@ -23,7 +23,7 @@ import {
 } from "./config";
 import { loadDataset, selectSlice } from "../longmemeval/dataset";
 import { measureSetting, type SettingMetrics } from "./measure";
-import { decideNegativeControl } from "./control";
+import { decideNegativeControl } from "../../unit/ingest-throughput-control";
 import {
   buildArtifact, writeArtifact, verifyArtifactHash, hashRunResults,
   type SettingAggregate, type NegativeControlResult,

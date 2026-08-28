@@ -1,8 +1,11 @@
 /**
- * control.ts — the negative-control decision as a pure function (flair#1436).
+ * ingest-throughput-control.ts — the negative-control decision as a pure
+ * function (flair#1436).
  *
- * Extracted from run.ts so the gate's pass/fail logic is unit-testable with
- * pure inputs — no Harper, no model, no CI lane. The whole point of the
+ * Extracted from test/bench/ingest-throughput/run.ts so the gate's pass/fail
+ * logic is unit-testable with pure inputs — no Harper, no model, no CI lane.
+ * Lives in test/unit/ (not test/bench/) so the test that proves the control
+ * can fire is itself reachable from a CI command. The whole point of the
  * negative control is that its PASS must carry information: it must be able to
  * FAIL. A control that can only pass (e.g. one that proceeds on missing data)
  * is the same defect this harness exists to prevent, one layer up.

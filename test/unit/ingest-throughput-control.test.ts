@@ -1,5 +1,5 @@
 /**
- * control.test.ts — flair#1436.
+ * ingest-throughput-control.test.ts — flair#1436.
  *
  * Unit test over the negative-control decision alone. Pure inputs, no Harper,
  * no model, no CI lane. The control's PASS must carry information: it must be
@@ -8,7 +8,7 @@
  * proceed on missing data.
  */
 import { describe, expect, test } from "bun:test";
-import { decideNegativeControl } from "./control";
+import { decideNegativeControl } from "./ingest-throughput-control";
 
 const THRESHOLD = 0.75;
 
