@@ -169,13 +169,11 @@ import {
   type LaunchdManagement,
 } from "./lib/launchd-management.js";
 import {
-  missingHookPromptLines,
-  missingHookWithoutConsentLines,
+  applyUpgradeHookConsent,
+  catalogIssueDelta,
+  renderCatalogDoctorLines,
   renderVerifiedSummary,
-  resolveHookInstallConsent,
-  resolveUpgradeHookInstall,
   runDoctorChecks,
-  sessionStartHookMissing,
   type DoctorRun,
 } from "./lib/doctor-run.js";
 // Value-only static import so `--interval`'s advertised default cannot drift
@@ -12487,7 +12485,9 @@ async function confirmYes(question: string): Promise<boolean> {
  * flair#1439 — run the enumerable doctor catalog after upgrade's instance
  * probe, and offer a consented SessionStart-hook install when that check
  * fails. Silent writes are refused: `--install-hooks` or an interactive
- * yes is the only consent.
+ * yes is the only consent. The consent→write composition lives in
+ * applyUpgradeHookConsent so tests can drive the path that actually
+ * writes (or does not write) the hook file.
  */
 async function doctorRunAfterUpgrade(args: {
   management: LaunchdManagement;
@@ -12504,50 +12504,35 @@ async function doctorRunAfterUpgrade(args: {
     keysDir,
     keyAgentIds: collectKeyAgentIds(keysDir),
   };
-  let run = runDoctorChecks(ctx);
-  if (!sessionStartHookMissing(run)) return run;
-
-  const missing = run.results.find((r) => r.id === "session-start-hook")?.missingHarnesses ?? [];
-  let consent = resolveHookInstallConsent({
-    installHooksFlag: args.installHooksFlag,
-    interactive: !!process.stdin.isTTY,
-  });
-  if (consent === "prompt") {
-    const prompt = missingHookPromptLines(missing, homeDir);
-    console.log("");
-    for (const line of prompt.preamble) console.log(`  ${line}`);
-    const accepted = await confirmYes(prompt.question);
-    consent = resolveHookInstallConsent({
-      installHooksFlag: false,
-      interactive: true,
-      promptAccepted: accepted,
+  const run = runDoctorChecks(ctx);
+  const apply = (promptAccepted?: boolean) =>
+    applyUpgradeHookConsent({
+      homeDir,
+      ctx,
+      run,
+      installHooksFlag: args.installHooksFlag,
+      interactive: !!process.stdin.isTTY,
+      promptAccepted,
+      port: args.port,
     });
+
+  let outcome = apply();
+  if (outcome.consent === "prompt" && outcome.prompt) {
+    console.log("");
+    for (const line of outcome.prompt.preamble) console.log(`  ${line}`);
+    outcome = apply(await confirmYes(outcome.prompt.question));
   }
-  if (consent === "install") {
-    for (const harness of missing) {
-      const inputs = resolveUpgradeHookInstall(homeDir, harness, { port: args.port });
-      if ("error" in inputs) {
-        console.error(`   ${inputs.error}`);
-        continue;
-      }
-      const installed = installHook({
-        homeDir,
-        harness,
-        agentId: inputs.agentId,
-        flairUrl: inputs.flairUrl,
-      });
-      console.log(`   ${installed.ok ? "✓" : "•"} ${installed.message}`);
-    }
-    return runDoctorChecks(ctx);
-  }
-  if (consent === "skip-noninteractive") {
-    for (const harness of missing) {
-      for (const line of missingHookWithoutConsentLines(harness, hookSettingsPath(homeDir, harness))) {
-        console.error(`   ${line}`);
-      }
+  if (outcome.consent === "install") {
+    for (const w of outcome.writes) {
+      console.log(`   ${w.ok ? "✓" : "•"} ${w.message}`);
     }
   }
-  return run;
+  if (outcome.consent === "skip-noninteractive") {
+    for (const line of outcome.messages) {
+      console.error(`   ${line}`);
+    }
+  }
+  return outcome.run;
 }
 
 function printVerifiedSummary(summary: { degraded: boolean; lines: string[] }): void {
@@ -14361,6 +14346,21 @@ program
     }
 
     const detectedClients = detectClients().filter((c) => c.detected);
+    // flair#1439 — install-health (MCP, FLAIR_URL, CLAUDE.md, SessionStart
+    // hook, verified-read plan, keys classification, launchd) is the same
+    // catalog upgrade asserts. Adding a check to DOCTOR_CHECK_IDS widens
+    // both. Extra doctor UX (pi, --fix, execution probe, continuity,
+    // agent registration) stays below and does not redefine those checks.
+    const doctorCtx = {
+      homeDir: homedir(),
+      cwd: process.cwd(),
+      detectedClientIds: detectedClients.map((c) => c.id),
+      launchd: observeLaunchdManagement(defaultDataDir(), effectivePort),
+      keysDir,
+      keyAgentIds,
+      agentFlag: typeof opts.agent === "string" ? opts.agent : undefined,
+    };
+    const catalogBefore = runDoctorChecks(doctorCtx);
     if (detectedClients.length === 0) {
       console.log(`  ${render.icons.info} No MCP client detected — skipping client-integration checks`);
     } else {
@@ -14583,7 +14583,6 @@ program
                     wireCursor(wireEnv);
                   console.log(`     ${wireResult.ok ? render.icons.ok : render.icons.warn} ${wireResult.message}`);
                   if (wireResult.ok) {
-                    fixed++;
                     if (client.id === "claude-code") claudeCodeAgentId = fixAgentId;
                     if (client.id === "codex") codexAgentId = fixAgentId;
                     anyKnownAgentId = anyKnownAgentId ?? fixAgentId;
@@ -14600,7 +14599,6 @@ program
             const agentHint = knownAgentId ? "" : fixCommandAgentHint(keyAgentIds);
             console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix${agentHint} ${render.wrap(render.c.dim, `(wires ${client.label} automatically)`)}`);
           }
-          issues++;
           continue;
         }
 
@@ -14658,13 +14656,11 @@ program
               } else {
                 const fixRes = fixClaudeMdBootstrap(process.cwd());
                 console.log(`     ${fixRes.ok ? render.icons.ok : render.icons.warn} ${fixRes.message}`);
-                if (fixRes.ok) fixed++;
               }
             }
           } else {
             console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(adds the mcp__flair__bootstrap line to ./CLAUDE.md)")}`);
           }
-          issues++;
         }
 
         // flair#1007: presence was never the problem — the failing entry was
@@ -14729,7 +14725,6 @@ program
                   } else {
                     const upgrade = upgradeSessionStartHookCommand(homedir());
                     console.log(`     ${upgrade.ok ? render.icons.ok : render.icons.warn} ${upgrade.message}`);
-                    if (upgrade.ok && upgrade.changed) fixed++;
                   }
                 }
               } else {
@@ -14738,7 +14733,6 @@ program
             } else {
               console.log(`     ${render.wrap(render.c.dim, "This hook was hand-edited, so Flair will not rewrite it. To adopt the current form:")} flair hook install`);
             }
-            issues++;
           }
         } else {
           console.log(`  ${render.icons.error} SessionStart hook: not found in ${render.wrap(render.c.dim, hook.path)}`);
@@ -14753,13 +14747,11 @@ program
                 const fixAgentId = claudeCodeAgentId || opts.agent || process.env.FLAIR_AGENT_ID;
                 const fixRes = fixSessionStartHook(homedir(), fixAgentId);
                 console.log(`     ${fixRes.ok ? render.icons.ok : render.icons.warn} ${fixRes.message}`);
-                if (fixRes.ok) fixed++;
               }
             }
           } else {
             console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(adds the flair-session-start SessionStart hook)")}`);
           }
-          issues++;
         }
 
         // flair#1257 slice 2 — continuity capture pair (the check-5 twin of
@@ -14850,7 +14842,6 @@ program
                   } else {
                     const upgrade = upgradeSessionStartHookCommand(homedir(), hook.path);
                     console.log(`     ${upgrade.ok ? render.icons.ok : render.icons.warn} ${upgrade.message}`);
-                    if (upgrade.ok && upgrade.changed) fixed++;
                   }
                 }
               } else {
@@ -14859,7 +14850,6 @@ program
             } else {
               console.log(`     ${render.wrap(render.c.dim, "This hook was hand-edited, so Flair will not rewrite it. To adopt the current form:")} flair hook install --harness codex`);
             }
-            issues++;
           }
         } else {
           console.log(`  ${render.icons.error} SessionStart hook (codex): not found in ${render.wrap(render.c.dim, hook.path)}`);
@@ -14874,15 +14864,26 @@ program
                 const fixAgentId = resolveHookAgentId({ agent: opts.agent }, homedir(), "codex");
                 const fixRes = fixSessionStartHook(homedir(), fixAgentId, hook.path);
                 console.log(`     ${fixRes.ok ? render.icons.ok : render.icons.warn} ${fixRes.message}`);
-                if (fixRes.ok) fixed++;
               }
             }
           } else {
             console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair hook install --harness codex`);
           }
-          issues++;
         }
       }
+    }
+
+    // Catalog is the install-health verdict — count fail/unrun here, not
+    // via a second issues++ on MCP / CLAUDE.md / SessionStart hook above.
+    // --fix that cleared a catalog member shows up in the found→fixed delta.
+    const catalogAfter = autoFix ? runDoctorChecks(doctorCtx) : catalogBefore;
+    const catalogDelta = catalogIssueDelta(catalogBefore, catalogAfter);
+    issues += catalogDelta.found;
+    if (autoFix) fixed += catalogDelta.fixed;
+
+    console.log(`\n  ${render.wrap(render.c.bold, "Install health")}`);
+    for (const row of renderCatalogDoctorLines(catalogAfter)) {
+      console.log(`  ${render.icons[row.icon]} ${row.line}`);
     }
 
     // 7a. Resolve which agent identities the two verified-read sections below

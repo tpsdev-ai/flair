@@ -34,8 +34,10 @@ import {
 import {
   hookInstallHint,
   hookSettingsPath,
+  installHook,
   SUPPORTED_HARNESSES,
   type Harness,
+  type HookMutationResult,
 } from "../hook-install.js";
 import {
   isDetached,
@@ -519,4 +521,147 @@ export function resolveUpgradeHookInstall(
     return { error: "no agent id known — pass --agent or set FLAIR_AGENT_ID so the hook can be wired" };
   }
   return { agentId, flairUrl };
+}
+
+/**
+ * How many catalog members block doctor / withhold upgrade's ✅.
+ * `fail` and `unrun` both count — an unrun member is never a pass.
+ */
+export function catalogBlockingCount(run: DoctorRun): number {
+  return run.results.filter((r) => r.status === "fail" || r.status === "unrun").length;
+}
+
+/**
+ * Found/fixed delta for `flair doctor --fix`. `found` is the pre-fix
+ * catalog blocking count; `fixed` is how many of those cleared after.
+ */
+export function catalogIssueDelta(before: DoctorRun, after: DoctorRun): { found: number; fixed: number } {
+  const found = catalogBlockingCount(before);
+  const remaining = catalogBlockingCount(after);
+  return { found, fixed: Math.max(0, found - remaining) };
+}
+
+/** Compact catalog lines for doctor's Install health section. */
+export function renderCatalogDoctorLines(
+  run: DoctorRun,
+): { icon: "ok" | "error" | "warn"; line: string }[] {
+  return run.results.map((r) => {
+    const icon = r.status === "pass" || r.status === "skip" ? "ok" : r.status === "unrun" ? "warn" : "error";
+    const word = r.status === "skip" ? "n/a" : r.status;
+    const detail = r.detail ? ` — ${r.detail}` : "";
+    return { icon, line: `${r.label}: ${word}${detail}` };
+  });
+}
+
+export type HookWriteFn = (opts: {
+  homeDir: string;
+  harness: Harness;
+  agentId: string;
+  flairUrl: string;
+}) => Pick<HookMutationResult, "ok" | "message">;
+
+export interface ApplyUpgradeHookConsentOpts {
+  /** Injectable home — tests pass a temp dir; production passes homedir(). */
+  homeDir: string;
+  ctx: DoctorRunContext;
+  run: DoctorRun;
+  installHooksFlag: boolean;
+  /** Injectable TTY/non-TTY. Production passes `!!process.stdin.isTTY`. */
+  interactive: boolean;
+  promptAccepted?: boolean;
+  port?: number;
+  agentId?: string;
+  flairUrl?: string;
+  /** Defaults to `installHook` — the real write. Tests cover that path. */
+  writeHook?: HookWriteFn;
+}
+
+export interface ApplyUpgradeHookConsentResult {
+  run: DoctorRun;
+  consent: HookInstallConsent;
+  missing: Harness[];
+  written: Harness[];
+  writes: { harness: Harness; ok: boolean; message: string }[];
+  messages: string[];
+  prompt?: { preamble: string[]; question: string };
+}
+
+/**
+ * Consent → write composition for missing SessionStart hooks after a
+ * catalog run. Silence (no flag, not interactive) never creates a hook
+ * file. `--install-hooks` or an accepted prompt writes every named
+ * missing harness via `installHook` (or `writeHook`).
+ *
+ * This is the path `flair upgrade` actually uses. Testing
+ * `resolveHookInstallConsent` alone would stay green if the caller
+ * always wrote anyway.
+ */
+export function applyUpgradeHookConsent(opts: ApplyUpgradeHookConsentOpts): ApplyUpgradeHookConsentResult {
+  const homeDir = opts.homeDir;
+  const empty: ApplyUpgradeHookConsentResult = {
+    run: opts.run,
+    consent: "skip-declined",
+    missing: [],
+    written: [],
+    writes: [],
+    messages: [],
+  };
+  if (!sessionStartHookMissing(opts.run)) {
+    return { ...empty, consent: "install" };
+  }
+  const missing = opts.run.results.find((r) => r.id === "session-start-hook")?.missingHarnesses ?? [];
+  const consent = resolveHookInstallConsent({
+    installHooksFlag: opts.installHooksFlag,
+    interactive: opts.interactive,
+    promptAccepted: opts.promptAccepted,
+  });
+  const prompt = missingHookPromptLines(missing, homeDir);
+
+  if (consent === "prompt") {
+    return { ...empty, consent, missing, prompt };
+  }
+
+  if (consent === "install") {
+    const write = opts.writeHook ?? installHook;
+    const writes: { harness: Harness; ok: boolean; message: string }[] = [];
+    const written: Harness[] = [];
+    const messages: string[] = [];
+    for (const harness of missing) {
+      const inputs = resolveUpgradeHookInstall(homeDir, harness, {
+        port: opts.port,
+        agentId: opts.agentId,
+        flairUrl: opts.flairUrl,
+      });
+      if ("error" in inputs) {
+        messages.push(inputs.error);
+        writes.push({ harness, ok: false, message: inputs.error });
+        continue;
+      }
+      const installed = write({
+        homeDir,
+        harness,
+        agentId: inputs.agentId,
+        flairUrl: inputs.flairUrl,
+      });
+      writes.push({ harness, ok: installed.ok, message: installed.message });
+      messages.push(installed.message);
+      if (installed.ok) written.push(harness);
+    }
+    return {
+      run: runDoctorChecks(opts.ctx),
+      consent,
+      missing,
+      written,
+      writes,
+      messages,
+    };
+  }
+
+  const messages: string[] = [];
+  if (consent === "skip-noninteractive") {
+    for (const harness of missing) {
+      messages.push(...missingHookWithoutConsentLines(harness, hookSettingsPath(homeDir, harness)));
+    }
+  }
+  return { ...empty, consent, missing, messages };
 }

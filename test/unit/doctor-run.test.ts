@@ -17,8 +17,11 @@
  *   REGRESSION LOCKS:
  *     Shape — a catalog member stubbed `unrun` withholds the success marker.
  *     Fresh-init — Codex MCP + hook (what 0.50.0 init now writes) is healthy.
- *     Consent — `--install-hooks` writes; silence does not.
+ *     Consent — `--install-hooks` writes; silence does not. The composed
+ *       applyUpgradeHookConsent path is what is asserted (file present/absent),
+ *       not resolveHookInstallConsent literals alone.
  *     Catalog hole — an id with no runner is `unrun`, not a pass.
+ *     One catalog — `flair doctor` calls runDoctorChecks; a new id widens both.
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
@@ -27,10 +30,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  applyUpgradeHookConsent,
+  catalogBlockingCount,
+  catalogIssueDelta,
   DOCTOR_CHECK_IDS,
   DOCTOR_CHECKS,
   missingHookPromptLines,
   missingHookWithoutConsentLines,
+  renderCatalogDoctorLines,
   renderVerifiedSummary,
   resolveHookInstallConsent,
   resolveUpgradeHookInstall,
@@ -70,6 +77,20 @@ function write0490CodexHome(home: string, agentId = "local"): void {
   );
 }
 
+function write0490ClaudeCodeMcp(home: string, agentId = "local"): void {
+  writeFileSync(
+    join(home, ".claude.json"),
+    JSON.stringify({
+      mcpServers: {
+        flair: {
+          command: "npx",
+          env: { FLAIR_AGENT_ID: agentId, FLAIR_URL: "http://127.0.0.1:9926" },
+        },
+      },
+    }) + "\n",
+  );
+}
+
 const linuxLaunchd = { state: "not-applicable" as const, detail: "linux does not use launchd" };
 
 function runOn(home: string, detected: readonly string[] = ["codex"]) {
@@ -97,6 +118,28 @@ describe("flair#1439 — catalog is the contract", () => {
     for (const id of DOCTOR_CHECK_IDS) {
       expect(implemented.has(id)).toBe(true);
     }
+  });
+
+  test("flair doctor drives install-health through runDoctorChecks — one catalog widens both", () => {
+    const src = readFileSync(join(import.meta.dirname, "../../src/cli.ts"), "utf-8");
+    const doctorIdx = src.indexOf('.command("doctor")');
+    expect(doctorIdx).toBeGreaterThan(-1);
+    const nextCommand = src.indexOf(".command(\"", doctorIdx + '.command("doctor")'.length);
+    const doctorBody = src.slice(doctorIdx, nextCommand === -1 ? undefined : nextCommand);
+    expect(doctorBody).toContain("runDoctorChecks(");
+    expect(doctorBody).toContain("catalogIssueDelta(");
+    expect(doctorBody).toContain("Install health");
+  });
+
+  test("a new catalog id with no runner blocks doctor the same way it withholds upgrade ✅", () => {
+    const run = runDoctorChecks(
+      { homeDir: isoHome, cwd: isoCwd, detectedClientIds: [], launchd: linuxLaunchd },
+      { catalogIds: [...DOCTOR_CHECK_IDS, "injected-future-check"] },
+    );
+    expect(catalogBlockingCount(run)).toBeGreaterThan(0);
+    expect(run.results.some((r) => r.id === "injected-future-check" && r.status === "unrun")).toBe(true);
+    expect(renderCatalogDoctorLines(run).some((row) => row.line.includes("injected-future-check"))).toBe(true);
+    expect(renderVerifiedSummary("0.50.0", run).lines.join("\n")).not.toContain("✅ verified:");
   });
 });
 
@@ -265,6 +308,121 @@ describe("flair#1439 — REGRESSION LOCK: hook write is consent-bearing", () => 
     expect(text).not.toContain("Codex");
     expect(text).not.toContain("codex");
     expect(question).not.toContain("and");
+  });
+});
+
+describe("flair#1439 — REGRESSION LOCK: consent→write composition actually writes (or does not)", () => {
+  function ctxFor(detected: readonly string[]) {
+    return {
+      homeDir: isoHome,
+      cwd: isoCwd,
+      detectedClientIds: detected,
+      launchd: linuxLaunchd,
+    };
+  }
+
+  test("0.49.0-shaped home, installHooksFlag false, interactive false → ~/.codex/hooks.json is not created", () => {
+    write0490CodexHome(isoHome, "local");
+    const ctx = ctxFor(["codex"]);
+    const run = runDoctorChecks(ctx);
+    expect(sessionStartHookMissing(run)).toBe(true);
+    expect(existsSync(join(isoHome, ".codex", "hooks.json"))).toBe(false);
+
+    const outcome = applyUpgradeHookConsent({
+      homeDir: isoHome,
+      ctx,
+      run,
+      installHooksFlag: false,
+      interactive: false,
+    });
+    expect(outcome.consent).toBe("skip-noninteractive");
+    expect(outcome.written).toEqual([]);
+    expect(existsSync(join(isoHome, ".codex", "hooks.json"))).toBe(false);
+    expect(outcome.run.healthy).toBe(false);
+  });
+
+  test("same composed path with --install-hooks writes hooks.json (positive control — skip is not a no-op writer)", () => {
+    write0490CodexHome(isoHome, "local");
+    const ctx = ctxFor(["codex"]);
+    const run = runDoctorChecks(ctx);
+    const outcome = applyUpgradeHookConsent({
+      homeDir: isoHome,
+      ctx,
+      run,
+      installHooksFlag: true,
+      interactive: false,
+    });
+    expect(outcome.consent).toBe("install");
+    expect(outcome.written).toEqual(["codex"]);
+    expect(existsSync(join(isoHome, ".codex", "hooks.json"))).toBe(true);
+    expect(readFileSync(join(isoHome, ".codex", "hooks.json"), "utf-8")).toContain(SESSION_START_HOOK_MARKER);
+    expect(outcome.run.results.find((r) => r.id === "session-start-hook")?.status).toBe("pass");
+  });
+
+  test("dual-harness: composed prompt names every harness a yes will write; silence writes neither file", () => {
+    write0490CodexHome(isoHome, "local");
+    write0490ClaudeCodeMcp(isoHome, "local");
+    const ctx = ctxFor(["claude-code", "codex"]);
+    const run = runDoctorChecks(ctx);
+    expect(run.results.find((r) => r.id === "session-start-hook")?.missingHarnesses).toEqual([
+      "claude-code",
+      "codex",
+    ]);
+
+    const prompted = applyUpgradeHookConsent({
+      homeDir: isoHome,
+      ctx,
+      run,
+      installHooksFlag: false,
+      interactive: true,
+    });
+    expect(prompted.consent).toBe("prompt");
+    const promptText = [...(prompted.prompt?.preamble ?? []), prompted.prompt?.question ?? ""].join("\n");
+    expect(promptText).toContain("claude-code");
+    expect(promptText).toContain("codex");
+    expect(promptText).toContain(hookSettingsPath(isoHome, "claude-code"));
+    expect(promptText).toContain(hookSettingsPath(isoHome, "codex"));
+    expect(existsSync(hookSettingsPath(isoHome, "claude-code"))).toBe(false);
+    expect(existsSync(hookSettingsPath(isoHome, "codex"))).toBe(false);
+
+    const silent = applyUpgradeHookConsent({
+      homeDir: isoHome,
+      ctx,
+      run,
+      installHooksFlag: false,
+      interactive: false,
+    });
+    expect(silent.consent).toBe("skip-noninteractive");
+    expect(existsSync(hookSettingsPath(isoHome, "claude-code"))).toBe(false);
+    expect(existsSync(hookSettingsPath(isoHome, "codex"))).toBe(false);
+
+    const accepted = applyUpgradeHookConsent({
+      homeDir: isoHome,
+      ctx,
+      run,
+      installHooksFlag: false,
+      interactive: true,
+      promptAccepted: true,
+    });
+    expect(accepted.consent).toBe("install");
+    expect(accepted.written).toEqual(["claude-code", "codex"]);
+    expect(existsSync(hookSettingsPath(isoHome, "claude-code"))).toBe(true);
+    expect(existsSync(hookSettingsPath(isoHome, "codex"))).toBe(true);
+  });
+
+  test("catalogIssueDelta counts a catalog fail as found and a cleared fail as fixed", () => {
+    write0490CodexHome(isoHome, "local");
+    const ctx = ctxFor(["codex"]);
+    const before = runDoctorChecks(ctx);
+    expect(catalogIssueDelta(before, before)).toEqual({ found: 1, fixed: 0 });
+    const after = applyUpgradeHookConsent({
+      homeDir: isoHome,
+      ctx,
+      run: before,
+      installHooksFlag: true,
+      interactive: false,
+    }).run;
+    expect(catalogIssueDelta(before, after)).toEqual({ found: 1, fixed: 1 });
   });
 });
 

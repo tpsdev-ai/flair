@@ -1,9 +1,10 @@
-- **`flair upgrade` reports the same install-health verdict as `flair doctor`.** Post-restart
-  verification runs an enumerable catalog of doctor checks (MCP block, FLAIR_URL, CLAUDE.md,
-  SessionStart hook, verified-read plan, keys classification, launchd) and prints
-  `✅ verified: healthy` only when every member ran and none failed. An unrun check can
-  never look like a pass. A missing Codex SessionStart hook (which 0.49.0 `init` never
-  wrote) no longer hides behind a green upgrade line.
+- **`flair upgrade` reports the same install-health verdict as `flair doctor`.** Both
+  commands run one enumerable catalog (MCP block, FLAIR_URL, CLAUDE.md, SessionStart
+  hook, verified-read plan, keys classification, launchd). Adding a check to that
+  catalog widens both. `✅ verified: healthy` prints only when every member ran and
+  none failed. An unrun check can never look like a pass. A missing Codex
+  SessionStart hook (which 0.49.0 `init` never wrote) no longer hides behind a
+  green upgrade line.
 
   Installing the hook is consent-bearing — it executes at every session start. Interactive
   upgrades prompt; non-interactive upgrades name the gap and withhold ✅. Pass
