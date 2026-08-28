@@ -315,10 +315,28 @@ function isLockFree(lockPath: string): boolean {
   }
 }
 
-/** Wait (bounded) for every RocksDB LOCK under `installDir` to be released. */
-export async function waitForLocksFree(installDir: string, timeoutMs = LOCK_WAIT_TIMEOUT_MS): Promise<void> {
+/** Wait (bounded) for every RocksDB LOCK under `installDir` to be released.
+ *
+ *  The probe reads /proc/locks, which is Linux-only. On any other platform the
+ *  fcntl lock is UNVERIFIABLE — there is no /proc/locks to read. We must not
+ *  silently assume "free" (that reintroduces the exact race this fix removes)
+ *  nor assume "held" (that hard-fails every restart on the platform). So we
+ *  fall back to the pre-change behaviour — wait for the process to exit, which
+ *  `killProcess` already did — and LOG that the lock is unverifiable here. */
+export async function waitForLocksFree(
+  installDir: string,
+  timeoutMs = LOCK_WAIT_TIMEOUT_MS,
+  platform: NodeJS.Platform = process.platform,
+): Promise<void> {
   const locks = lockFilesUnder(installDir);
   if (locks.length === 0) return;
+  if (platform !== "linux") {
+    console.warn(
+      `[harper-lifecycle] RocksDB lock unverifiable on ${platform} (no /proc/locks); ` +
+        `falling back to exit-wait — the restart lock race is not mitigated on this platform.`,
+    );
+    return;
+  }
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (locks.every(isLockFree)) return;

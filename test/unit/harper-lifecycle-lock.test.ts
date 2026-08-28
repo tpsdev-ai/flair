@@ -98,4 +98,23 @@ describe("waitForLocksFree (flair#1440)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("on darwin, falls back to exit-wait and logs the unverifiable signal (no throw)", async () => {
+    const { dir, lock } = makeLockTree();
+    const holder = holdLock(lock); // held — would throw on linux
+    const warns: string[] = [];
+    const orig = console.warn;
+    console.warn = (...args: unknown[]) => { warns.push(args.join(" ")); };
+    try {
+      await new Promise((r) => setTimeout(r, 200));
+      // Must NOT throw on darwin: the fcntl lock is unverifiable (no /proc/locks),
+      // so we fall back to exit-wait and log the signal — never silently "free".
+      await waitForLocksFree(dir, 500, "darwin");
+      expect(warns.some((w) => w.includes("unverifiable"))).toBe(true);
+    } finally {
+      console.warn = orig;
+      releaseLock(holder);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
