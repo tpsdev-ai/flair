@@ -21,7 +21,7 @@ describe("mock-isolation tripwire (flair#691)", () => {
     // Modules that (a) are imported for-real by other unit files and (b) get
     // module-scope mocked by the isolated files. Extend if a new such module
     // is isolated. Path forms as they appear in mock.module() specifiers.
-    const isolatedModules = ["resources/embeddings-provider"];
+    const isolatedModules = ["resources/embeddings-provider", "bench/longmemeval/ollama"];
     const offenders: string[] = [];
     for (const name of readdirSync(UNIT_DIR)) {
       if (!name.endsWith(".test.ts")) continue;
