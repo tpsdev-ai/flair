@@ -23,6 +23,7 @@ import {
 } from "./config";
 import { loadDataset, selectSlice } from "../longmemeval/dataset";
 import { measureSetting, type SettingMetrics } from "./measure";
+import { decideNegativeControl } from "./control";
 import {
   buildArtifact, writeArtifact, verifyArtifactHash, hashRunResults,
   type SettingAggregate, type NegativeControlResult,
@@ -64,12 +65,16 @@ function aggregate(runs: SettingMetrics[]): SettingAggregate {
 }
 
 function checkNegativeControl(low: SettingAggregate, high: SettingAggregate): NegativeControlResult {
-  const ratio = low.meanTokPerSec / high.meanTokPerSec;
+  const decision = decideNegativeControl(
+    low.meanTokPerSec,
+    high.meanTokPerSec,
+    NEGATIVE_CONTROL_THRESHOLD,
+  );
   return {
     low: NEGATIVE_CONTROL.low,
     high: NEGATIVE_CONTROL.high,
-    ratio,
-    passed: ratio < NEGATIVE_CONTROL_THRESHOLD,
+    ratio: decision.ratio,
+    passed: decision.passed,
     threshold: NEGATIVE_CONTROL_THRESHOLD,
   };
 }
