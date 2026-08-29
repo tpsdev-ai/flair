@@ -427,7 +427,8 @@ The four-way read:
 
 `readerContext` is the formatter-admitted id set, not a prompt-string scan.
 Harper arms use `ctx.items` ids (`formatRetrieved` does not truncate, so
-`readerContext === topK` structurally). Full-context uses
+`readerContext === topK` structurally; guarded by
+`assertRetrievedReaderContextEqualsTopK`, flair#1430). Full-context uses
 `formatFullContext.includedEventIds` — events written before the char-budget
 break. A truncated event is simply not in that set.
 

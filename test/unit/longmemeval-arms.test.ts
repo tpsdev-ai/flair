@@ -7,7 +7,10 @@
  * without changing the configHash. Both claims get a positive control here.
  */
 import { describe, expect, test } from "bun:test";
-import { formatRetrieved, formatFullContext, READER_PAYLOAD_FORMAT } from "../bench/longmemeval/arms";
+import {
+  formatRetrieved, formatFullContext, READER_PAYLOAD_FORMAT, HARPER_ARMS,
+  assertRetrievedReaderContextEqualsTopK,
+} from "../bench/longmemeval/arms";
 import { entryToSessions, type LmeEntry } from "../bench/longmemeval/dataset";
 import { configManifest, hashConfig } from "../bench/longmemeval/config";
 import type { RetrievedItem } from "../../packages/flair-bench/lib/index";
@@ -18,7 +21,7 @@ describe("formatRetrieved (v2-dated payload)", () => {
       { id: "m1", score: 0.9, content: "adopted a puppy named Biscuit", createdAt: "2023-05-20T02:21:00.000Z" },
       { id: "m2", score: 0.8, content: "Biscuit graduated obedience school", createdAt: "2023-07-11T18:00:00.000Z" },
     ];
-    expect(formatRetrieved(items)).toBe(
+    expect(formatRetrieved(items).text).toBe(
       "- [2023-05-20] adopted a puppy named Biscuit\n" +
       "- [2023-07-11] Biscuit graduated obedience school",
     );
@@ -29,11 +32,64 @@ describe("formatRetrieved (v2-dated payload)", () => {
       { id: "m1", score: 0.9, content: "dated", createdAt: "2024-01-02T00:00:00.000Z" },
       { id: "m2", score: 0.8, content: "undated" },
     ];
-    expect(formatRetrieved(items)).toBe("- [2024-01-02] dated\n- undated");
+    expect(formatRetrieved(items).text).toBe("- [2024-01-02] dated\n- undated");
   });
 
   test("empty retrieval keeps the explicit no-memory marker", () => {
-    expect(formatRetrieved([])).toBe("(no relevant memory found)");
+    expect(formatRetrieved([]).text).toBe("(no relevant memory found)");
+    expect(formatRetrieved([]).admittedIds).toEqual([]);
+  });
+});
+
+/**
+ * flair#1430 — regression lock on the #1429 claim that Harper / retrieved
+ * arms have readerContext === topK by construction. Set equality, not
+ * length: a formatter that swapped an id while preserving count must fail,
+ * and the message must name the arm and the differing ids.
+ *
+ * This passes on unmodified main by design. The powered check is a scratch
+ * mutate of formatRetrieved (drop or substitute one item) that must go red.
+ */
+describe("retrieved-arm readerContext === topK (flair#1430)", () => {
+  const items: RetrievedItem[] = [
+    { id: "mem-a", score: 0.9, content: "alpha" },
+    { id: "mem-b", score: 0.8, content: "beta" },
+    { id: "mem-c", score: 0.7, content: "gamma" },
+  ];
+  // retrieve.ts: rankedIds = items.map(i => i.id) — the same array, same order.
+  const topK = items.map((i) => i.id);
+
+  test("formatRetrieved admits the same id set as topK for every Harper arm", () => {
+    const readerContext = formatRetrieved(items).admittedIds;
+    expect(HARPER_ARMS).toEqual(["flair", "vector-only"]);
+    for (const arm of HARPER_ARMS) {
+      assertRetrievedReaderContextEqualsTopK(arm, readerContext, topK);
+    }
+  });
+
+  test("empty retrieval is set-equal (both empty) for every Harper arm", () => {
+    const readerContext = formatRetrieved([]).admittedIds;
+    for (const arm of HARPER_ARMS) {
+      assertRetrievedReaderContextEqualsTopK(arm, readerContext, []);
+    }
+  });
+
+  test("a length-preserving id swap fails and names the arm and the differing ids", () => {
+    const swapped = ["mem-a", "mem-swapped", "mem-c"];
+    expect(swapped.length).toBe(topK.length);
+    expect(() => assertRetrievedReaderContextEqualsTopK("flair", swapped, topK)).toThrow(
+      /readerContext and topK are not set-equal for retrieved arm "flair".*only in readerContext: \[mem-swapped\].*only in topK: \[mem-b\]/,
+    );
+    expect(() => assertRetrievedReaderContextEqualsTopK("vector-only", swapped, topK)).toThrow(
+      /retrieved arm "vector-only".*mem-swapped.*mem-b/,
+    );
+  });
+
+  test("dropping an id fails and names the arm and the missing id", () => {
+    const dropped = ["mem-a", "mem-c"];
+    expect(() => assertRetrievedReaderContextEqualsTopK("flair", dropped, topK)).toThrow(
+      /retrieved arm "flair".*only in readerContext: \[\].*only in topK: \[mem-b\]/,
+    );
   });
 });
 
