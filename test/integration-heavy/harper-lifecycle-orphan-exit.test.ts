@@ -8,15 +8,41 @@
 // Kill by the pid startHarper returned. Never by process name — production
 // / spoke Harpers share `harper.js`.
 import { describe, expect, test } from "bun:test";
-import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 const REPO_ROOT = process.cwd();
 const PARENT = join(import.meta.dir, "..", "helpers", "harper-orphan-parent.ts");
 const GONE_WITHIN_MS = 8_000;
 const PARENT_ALIVE_MS = 4_000;
+
+/** Harper engines are `^22.18.0 || >=24`. Cloud images may have a stale `node` on PATH. */
+function compatibleNodeBin(): string {
+  if (process.env.NODE_BIN) return process.env.NODE_BIN;
+  const versionOf = (bin: string): string | null => {
+    try {
+      return execFileSync(bin, ["-p", "process.versions.node"], { encoding: "utf8", timeout: 3000 }).trim();
+    } catch {
+      return null;
+    }
+  };
+  const ok = (v: string | null) => {
+    if (!v) return false;
+    const [maj, min] = v.split(".").map(Number);
+    return maj > 22 || (maj === 22 && min >= 18);
+  };
+  if (ok(versionOf("node"))) return "node";
+  const nvmRoot = join(homedir(), ".nvm", "versions", "node");
+  if (existsSync(nvmRoot)) {
+    for (const v of readdirSync(nvmRoot).sort().reverse()) {
+      const bin = join(nvmRoot, v, "bin", "node");
+      if (existsSync(bin) && ok(versionOf(bin))) return bin;
+    }
+  }
+  return "node";
+}
 
 function isAlive(pid: number): boolean {
   try {
@@ -51,15 +77,21 @@ async function bootParent(): Promise<{ proc: ChildProcess; status: ParentStatus;
   const dir = mkdtempSync(join(tmpdir(), "flair-1450-"));
   const statusFile = join(dir, "status.json");
   writeFileSync(statusFile, "");
+  let parentLog = "";
   const proc = spawn("bun", [PARENT, statusFile], {
     cwd: REPO_ROOT,
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env },
+    env: { ...process.env, NODE_BIN: compatibleNodeBin() },
   });
+  proc.stdout?.on("data", (d: Buffer) => { parentLog += d.toString(); });
+  proc.stderr?.on("data", (d: Buffer) => { parentLog += d.toString(); });
   const deadline = Date.now() + 180_000;
   while (Date.now() < deadline) {
     if (proc.exitCode !== null || proc.signalCode !== null) {
-      throw new Error(`orphan-parent exited before ready (code=${proc.exitCode} signal=${proc.signalCode})`);
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+      throw new Error(
+        `orphan-parent exited before ready (code=${proc.exitCode} signal=${proc.signalCode})\n${parentLog}`,
+      );
     }
     try {
       const raw = readFileSync(statusFile, "utf8").trim();
@@ -71,7 +103,8 @@ async function bootParent(): Promise<{ proc: ChildProcess; status: ParentStatus;
     await new Promise((r) => setTimeout(r, 200));
   }
   killPid(proc.pid);
-  throw new Error("orphan-parent did not write status within 180s");
+  try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  throw new Error(`orphan-parent did not write status within 180s\n${parentLog}`);
 }
 
 function cleanup(status: ParentStatus | undefined, proc?: ChildProcess, statusFile?: string): void {
