@@ -1,4 +1,4 @@
-// Behaviour of scripts/check-impl-term-leaks.sh (flair#1381, flair#1420).
+// Behaviour of scripts/check-impl-term-leaks.sh (flair#1381, flair#1420, flair#1427).
 //
 // The gate exists to keep bead IDs and impl labels out of user-facing docs.
 // Two defects landed together: English compounds such as "ops-port" were
@@ -27,6 +27,11 @@ const DEAD_BEAD_ID = "ops-0000";
 
 const created: string[] = [];
 
+// Clean filler for required sources. Must not match the bead or impl-label
+// patterns — otherwise the floor tests cannot isolate "source missing" from
+// "source leaked".
+const CLEAN = "no implementation terms here\n";
+
 function writeCorpus(dir: string, relPath: string, body: string) {
   const dest = join(dir, relPath);
   mkdirSync(dirname(dest), { recursive: true });
@@ -39,18 +44,34 @@ function emptyCorpus(): string {
   return dir;
 }
 
-function fixtureWith(files: Record<string, string>): string {
+// Every source the gate intends to scan. `null` omits that path so a powered
+// floor test can drop one source and keep the rest (the all-or-nothing floor
+// used to stay green in that shape).
+const COMPLETE_SOURCES: Record<string, string> = {
+  "README.md": CLEAN,
+  "CHANGELOG.md": CLEAN,
+  ".changelog/unreleased/clean.md": CLEAN,
+  "docs/integrations.md": CLEAN,
+  "packages/fixture-pkg/README.md": CLEAN,
+  "packages/fixture-pkg/dist/index.js": CLEAN,
+};
+
+function completeCorpus(overrides: Record<string, string | null> = {}): string {
   const dir = emptyCorpus();
-  mkdirSync(join(dir, "docs"), { recursive: true });
-  mkdirSync(join(dir, "packages"), { recursive: true });
+  const files = { ...COMPLETE_SOURCES, ...overrides };
   for (const [relPath, body] of Object.entries(files)) {
+    if (body === null) continue;
     writeCorpus(dir, relPath, body);
   }
   return dir;
 }
 
+function fixtureWith(files: Record<string, string>): string {
+  return completeCorpus(files);
+}
+
 function fixture(body: string, filename = "integrations.md"): string {
-  return fixtureWith({ [`docs/${filename}`]: body });
+  return completeCorpus({ [`docs/${filename}`]: body });
 }
 
 function runGate(dir: string, scriptPath = SCRIPT) {
@@ -215,7 +236,81 @@ describe("impl-term-leak gate: CHANGELOG.md and .changelog/ are in scope (flair#
     const dir = emptyCorpus();
     const res = runGate(dir);
     expect(res.status).not.toBe(0);
-    expect(res.out).toContain("found 0 files to search");
-    expect(res.out).toContain("CHANGELOG.md and .changelog/");
+    expect(res.out).toContain("CHANGELOG.md contributed 0 files");
+    expect(res.out).toContain(".changelog/ contributed 0 files");
+    expect(res.out).toContain("packages/ is missing");
+    expect(res.out).toContain("README.md contributed 0 files");
+    expect(res.out).toContain("docs/ contributed 0 files");
+  });
+});
+
+describe("impl-term-leak gate: the floor is per-source (flair#1427)", () => {
+  // Powered check: drop one source, keep the rest so the *total* corpus stays
+  // non-empty. Against the all-or-nothing `! -s $TMPFILE` floor that shape
+  // exits 0 — coverage narrows and the gate reports green. That gap is the
+  // defect. The gate must go red and name the source that came up empty.
+
+  test("a complete corpus PASSES (negative control)", () => {
+    const dir = completeCorpus();
+    const res = runGate(dir);
+    expect(res.status).toBe(0);
+    expect(res.out).toContain("No leaks found");
+    expect(res.out).not.toContain("contributed 0 files");
+  });
+
+  test("missing CHANGELOG.md FAILS and names that source", () => {
+    const dir = completeCorpus({ "CHANGELOG.md": null });
+    const res = runGate(dir);
+    expect(res.status).not.toBe(0);
+    expect(res.out).toContain("CHANGELOG.md contributed 0 files");
+    expect(res.out).toContain("that source was not scanned");
+    expect(res.out).not.toContain("docs/ contributed 0 files");
+    expect(res.out).not.toContain("packages/*/dist/ contributed 0 files");
+  });
+
+  test("missing .changelog/ FAILS and names that source", () => {
+    const dir = completeCorpus({ ".changelog/unreleased/clean.md": null });
+    const res = runGate(dir);
+    expect(res.status).not.toBe(0);
+    expect(res.out).toContain(".changelog/ contributed 0 files");
+    expect(res.out).toContain(".changelog/ is missing");
+    expect(res.out).not.toContain("CHANGELOG.md contributed 0 files");
+  });
+
+  test("unbuilt packages/*/dist/ FAILS and names that source as not built", () => {
+    const dir = completeCorpus({ "packages/fixture-pkg/dist/index.js": null });
+    const res = runGate(dir);
+    expect(res.status).not.toBe(0);
+    expect(res.out).toContain("packages/*/dist/ contributed 0 files");
+    expect(res.out).toContain("have not been built");
+    expect(res.out).not.toContain("built and empty");
+    expect(res.out).not.toContain("CHANGELOG.md contributed 0 files");
+  });
+
+  test("built-and-empty packages/*/dist/ FAILS and names that source as empty", () => {
+    const dir = completeCorpus({ "packages/fixture-pkg/dist/index.js": null });
+    mkdirSync(join(dir, "packages/fixture-pkg/dist"), { recursive: true });
+    const res = runGate(dir);
+    expect(res.status).not.toBe(0);
+    expect(res.out).toContain("packages/*/dist/ contributed 0 files");
+    expect(res.out).toContain("built and empty");
+    expect(res.out).not.toContain("have not been built");
+  });
+
+  test("missing docs/ FAILS and names that source", () => {
+    const dir = completeCorpus({ "docs/integrations.md": null });
+    const res = runGate(dir);
+    expect(res.status).not.toBe(0);
+    expect(res.out).toContain("docs/ contributed 0 files");
+    expect(res.out).toContain("docs/ is missing");
+    expect(res.out).not.toContain("CHANGELOG.md contributed 0 files");
+  });
+
+  test("missing README.md FAILS and names that source", () => {
+    const dir = completeCorpus({ "README.md": null });
+    const res = runGate(dir);
+    expect(res.status).not.toBe(0);
+    expect(res.out).toContain("README.md contributed 0 files");
+    expect(res.out).not.toContain("docs/ contributed 0 files");
   });
 });
