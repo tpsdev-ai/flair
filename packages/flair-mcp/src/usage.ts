@@ -20,30 +20,21 @@ export function withCiteNudge(text: string): string {
   return `${text}\n\n${CITE_USAGE_NUDGE}`;
 }
 
+/** Stated on the stdio `record_usage` schema so a caller can predict the merge without reading source. */
+export const RECORD_USAGE_ID_MERGE_CONTRACT =
+  "When both memoryId and memoryIds are supplied they are merged (union, then deduped) — a caller who passes both means both.";
+
 /**
  * Build the POST /RecordUsage body from the MCP tool args.
  * Accepts singular `memoryId` and/or `memoryIds`. Returns null when there is
  * nothing to send (the tool should fail locally rather than POST an empty list).
  * Never includes agentId — the server attributes from the signature.
  *
- * MERGE vs PREFER (deliberate, named — Sherlock/Kern #1404):
- * This helper MERGES `memoryId` + `memoryIds`, then dedupes. Native `/mcp`
- * `recordUsage` (resources/mcp-tools.ts) PREFERS `memoryIds` and drops
- * `memoryId` when both are supplied. The HTTP endpoint does the same:
- * `RecordUsage.post()` is `data?.memoryIds ?? [data?.memoryId]` — PREFER,
- * not union. If `memoryIds` is present (even `[]`, which is truthy),
- * `memoryId` is never read.
- *
- * The stdio merge is load-bearing because it flattens first: we send only
- * a single `memoryIds` array, so the server's prefer is never exercised
- * on two fields. A future path that POSTs both fields through to
- * `/RecordUsage` without flattening would silently drop `memoryId`
- * (delivered-but-uncounted; empty `memoryIds: []` alongside a real
- * `memoryId` would 400 rather than fall through).
- *
- * Native prefer is a pre-existing delivered-but-uncounted bug on a
- * different surface, tracked in flair#1410 — not a regression from this
- * PR, and not a blocker for #1147. Do not "align" this helper to prefer.
+ * MERGE (flair#1410): this helper unions `memoryId` + `memoryIds`, then
+ * dedupes. Native `/mcp` and `POST /RecordUsage` do the same — a caller
+ * who passes both means both. Do not "align" this helper to prefer
+ * `memoryIds` and drop `memoryId`; that is the delivered-but-uncounted
+ * bug #1410 closed.
  */
 export function buildRecordUsageBody(args: {
   memoryId?: string;

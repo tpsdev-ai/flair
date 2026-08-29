@@ -54,6 +54,7 @@
 import type { RecordTypeName } from "./record-types.js";
 import { resolveVersion } from "./version.js";
 import { agentContext, adminContext, collectionResource } from "./in-process.js";
+import { RECORD_USAGE_ID_MERGE_CONTRACT, unionUsageMemoryIds } from "./usage-ids.js";
 
 type HandlerKey = "SemanticSearch" | "Memory" | "BootstrapMemories" | "Soul" | "WorkspaceState" | "OrgEvent" | "AttentionQuery" | "RecordUsage";
 const H: Partial<Record<HandlerKey, any>> = {};
@@ -581,9 +582,10 @@ async function attention(agent: ResolvedAgent, args: any) {
 async function recordUsage(agent: ResolvedAgent, args: any) {
   const Cls = await handler("RecordUsage");
   const h = new Cls(undefined, delegationContext(agent));
-  const memoryIds = Array.isArray(args?.memoryIds)
-    ? args.memoryIds
-    : typeof args?.memoryId === "string" ? [args.memoryId] : undefined;
+  // flair#1410: MERGE, do not prefer. The previous ternary dropped
+  // `memoryId` whenever `memoryIds` was an array (including `[]`).
+  const merged = unionUsageMemoryIds(args?.memoryId, args?.memoryIds);
+  const memoryIds = merged.length > 0 ? merged : undefined;
   return unwrap(await h.post({ memoryIds, attribution: args?.attribution }));
 }
 
@@ -1351,12 +1353,13 @@ export const TOOLS: Record<string, ToolEntry> = {
       description:
         "Report that one or more memories were actually USED — cited or relied on to ground an answer or decision. " +
         "Distinct from search (surfacing a memory is not usage). Drives the recall-quality usage signal; dedup'd " +
-        "(you can only count once per memory) and rate-limited.",
+        "(you can only count once per memory) and rate-limited. " +
+        RECORD_USAGE_ID_MERGE_CONTRACT,
       inputSchema: {
         type: "object",
         properties: {
-          memoryIds: { type: "array", items: { type: "string" }, description: "IDs of the memories that were used (max 20 per call)" },
-          memoryId: { type: "string", description: "Convenience alias for a single memory id (use memoryIds for multiple)" },
+          memoryIds: { type: "array", items: { type: "string" }, description: "IDs of the memories that were used (max 20 per call). Merged with memoryId when both are supplied." },
+          memoryId: { type: "string", description: "Convenience alias for a single memory id. Merged with memoryIds when both are supplied — not dropped." },
           attribution: { type: "string", description: "Optional free-text note on what used it (opaque — stored for audit only, max 500 chars)" },
         },
       },
