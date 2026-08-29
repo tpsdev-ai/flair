@@ -64,6 +64,34 @@ import { isAllowedBm25Candidate, type Condition } from "./bm25-filter.js";
 import { indexedBm25Ids } from "./bm25-index-service.js";
 import { byRecencyThenId } from "./sort-comparators.js";
 
+/**
+ * Internal ranked retrieval row (flair#1415). `_rank` is required so a
+ * construction that omits it is a compile error — the sort's
+ * `(b._rank - a._rank) || byRecencyThenId(...)` treats a missing/NaN
+ * primary as falsy and would silently fall through to the recency
+ * tie-break (undefined behaviour for `Array.prototype.sort`). Stripped
+ * before return; never part of the response shape.
+ */
+export type RetrievalRankedRow = {
+  id: string;
+  createdAt?: string | null;
+  _rank: number;
+  [key: string]: any;
+};
+
+/**
+ * The only way a row enters the ranked pool. `_rank` is a required
+ * argument — not an object property that `...any` can swallow — so a
+ * push site that omits it is a compile error (flair#1415).
+ */
+function pushRanked<T extends { id: string }>(
+  rows: RetrievalRankedRow[],
+  row: T,
+  _rank: number,
+): void {
+  rows.push({ ...row, _rank });
+}
+
 // Convert HNSW cosine distance (1 - similarity) to similarity score.
 function distanceToSimilarity(distance: number): number {
   return 1 - distance;
@@ -214,7 +242,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
   const passesAllowed = (record: any) => !isAllowed || isAllowed(record);
   const hnswSelect = [...select, "$distance"];
 
-  const results: any[] = [];
+  const results: RetrievalRankedRow[] = [];
   const hnswLegIds: string[] = [];
   const bm25LegIds: string[] = [];
 
@@ -387,14 +415,13 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
 
         const isFlagged = record._safetyFlags && Array.isArray(record._safetyFlags) && record._safetyFlags.length > 0;
         const source = record.agentId !== agentId ? record.agentId : undefined;
-        results.push({
+        pushRanked(results, {
           ...record,
           content: isFlagged ? wrapUntrusted(record.content, source) : record.content,
           _score: Math.round(finalScore * 1000) / 1000,
           _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
           _source: source,
-          _rank: finalScore,
-        });
+        }, finalScore);
       }
     } else {
       // ── Candidate-union RRF → normalized [0,1] RANKING value ────────────
@@ -442,22 +469,21 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
 
         const isFlagged = record._safetyFlags && Array.isArray(record._safetyFlags) && record._safetyFlags.length > 0;
         const source = record.agentId !== agentId ? record.agentId : undefined;
-        results.push({
+        // Ordering key: fused rank for raw mode; composite value for
+        // composite mode (composite ordering is unchanged by #985 — its
+        // rrfRaw input and result order are exactly the pre-#985 behavior).
+        pushRanked(results, {
           ...record,
           content: isFlagged ? wrapUntrusted(record.content, source) : record.content,
           _score: Math.round(finalScore * 1000) / 1000,
           _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
           _source: source,
-          // Ordering key: fused rank for raw mode; composite value for
-          // composite mode (composite ordering is unchanged by #985 — its
-          // rrfRaw input and result order are exactly the pre-#985 behavior).
-          _rank: scoring === "raw" ? rrfRaw : finalScore,
           // flair#744 slice 2: the opt-in absolute-confidence field for the
           // abstention decision. Attach remains OPT-IN so non-abstain
           // responses stay byte-identical (the capture above is now
           // unconditional, but the response field is not).
           ...(withSemSimilarity && semSim !== undefined ? { _semSimilarity: semSim } : {}),
-        });
+        }, scoring === "raw" ? rrfRaw : finalScore);
       }
     }
   } else if (qEmb) {
@@ -514,15 +540,14 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
       // flair#744 slice 2: the absolute cosine (`semanticScore`, pre keyword
       // bump) is the abstention confidence signal on this legacy/bootstrap
       // (HNSW-leg-only) path.
-      results.push({
+      pushRanked(results, {
         ...rest,
         content: isFlagged ? wrapUntrusted(rest.content, source) : rest.content,
         _score: Math.round(finalScore * 1000) / 1000,
         _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
         _source: source,
-        _rank: finalScore,
         ...(withSemSimilarity ? { _semSimilarity: semanticScore } : {}),
-      });
+      }, finalScore);
       hnswLegIds.push(record.id);
     }
   } else {
@@ -555,14 +580,13 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
 
       const isFlagged = rest._safetyFlags && Array.isArray(rest._safetyFlags) && rest._safetyFlags.length > 0;
       const source = record.agentId !== agentId ? record.agentId : undefined;
-      results.push({
+      pushRanked(results, {
         ...rest,
         content: isFlagged ? wrapUntrusted(rest.content, source) : rest.content,
         _score: Math.round(finalScore * 1000) / 1000,
         _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
         _source: source,
-        _rank: finalScore,
-      });
+      }, finalScore);
     }
   }
 
@@ -590,7 +614,9 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
 
   // Order by the internal ranking key (fused RRF rank on the hybrid raw path;
   // identical to `_score` everywhere else), then strip it — `_rank` is an
-  // ordering key, never part of the response shape. Note the hybrid raw
+  // ordering key, never part of the response shape. Required on
+  // RetrievalRankedRow / pushRanked (flair#1415) so a missing value cannot
+  // silently NaN this comparator into the recency tail. Note the hybrid raw
   // ordering is deliberately NOT by `_score`: the recall win of hybrid
   // retrieval lives in the fused ORDER (a BM25 rank-1 rescue outranks weak
   // semantic hits), while `_score` carries the honest absolute evidence for
@@ -602,8 +628,8 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
   // Determinism is the id ASC total order. createdAt is best-effort recency
   // within an exact `_rank` tie — federated writer clocks can skew, and
   // that cannot reintroduce nondeterminism (see byRecencyThenId).
-  filteredResults.sort((a: any, b: any) => (b._rank - a._rank) || byRecencyThenId(a, b));
-  for (const r of filteredResults) delete r._rank;
+  filteredResults.sort((a, b) => (b._rank - a._rank) || byRecencyThenId(a, b));
+  for (const r of filteredResults) delete (r as { _rank?: number })._rank;
   onLegs?.({
     hnsw: hnswLegIds,
     bm25: bm25LegIds,
