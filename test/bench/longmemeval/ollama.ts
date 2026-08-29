@@ -105,13 +105,26 @@ export async function generate(
   // into "the same answer this call was always going to produce". It cannot
   // select among answers — there is no resampling and no prompt mutation.
   //
-  // Deliberately NARROW: only 429 and 5xx retry, and only for a bounded number
-  // of rounds. Any other status still fails loud. Retrying a 4xx (a malformed
-  // prompt, a wrong model name) would be masking a broken call, and retrying
-  // until success would let a flaky endpoint quietly shape the sample.
+  // Deliberately NARROW: only 429, 5xx, and transport-level failures retry, and
+  // only for a bounded number of rounds. Any other status still fails loud.
+  // Retrying a 4xx (a malformed prompt, a wrong model name) would be masking a
+  // broken call, and retrying until success would let a flaky endpoint quietly
+  // shape the sample.
+  //
+  // Transport failures (timeout, connection reset, DNS, socket hangup) are a
+  // distinct category: fetch() rejects BEFORE any response is received, so
+  // there is no answer to mask and nothing to bias. The same determinism
+  // argument that justifies the 5xx retry applies — a retry can only turn "no
+  // answer" into "the same answer this call was always going to produce". The
+  // retry is scoped to the fetch() rejection ONLY: a failure after a response
+  // was received (res.text()/JSON parse) is NOT retried, because that would be
+  // retrying something that already had an effect.
   const RATE_WAITS = [60_000, 300_000, 300_000];
+  const TRANSPORT_RETRIES = 2; // bounded: two retries after the initial attempt
+  const TRANSPORT_WAIT_MS = 30_000;
   let rateAttempt = 0;
   let serverRetried = false;
+  let transportAttempt = 0;
   let t0: number, res: Response, latencyMs: number, text: string;
   for (;;) {
     t0 = performance.now();
@@ -122,6 +135,12 @@ export async function generate(
         body: JSON.stringify(body),
       });
     } catch (err) {
+      if (transportAttempt < TRANSPORT_RETRIES) {
+        transportAttempt++;
+        console.error(`[ollama] transport failure to ${host} — retry ${transportAttempt}/${TRANSPORT_RETRIES} in ${TRANSPORT_WAIT_MS / 1000}s (${err instanceof Error ? err.message : String(err)})`);
+        await new Promise((r) => setTimeout(r, TRANSPORT_WAIT_MS));
+        continue;
+      }
       throw new OllamaError(`generate(${spec.model}) transport failure to ${host}: ${err instanceof Error ? err.message : String(err)}`);
     }
     latencyMs = performance.now() - t0;

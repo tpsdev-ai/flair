@@ -1,0 +1,102 @@
+# First-Run-Hostile CI Lane (flair#1460) — the guardrail, not a fix.
+#
+# Every environment we test has the same conveniences, and every recent
+# first-run defect lived in their absence. This lane deliberately withholds
+# what our machines provide, so a defect that reaches a real user fails here
+# instead of surviving to a founder's laptop:
+#
+#   - lsof ABSENT (removed explicitly if the base ships it, so absence is
+#     asserted rather than assumed) — #1454 `flair stop` says "not running"
+#     while the daemon is alive.
+#   - npm global prefix set to a user dir NOT on PATH
+#     (`npm config set prefix ~/.npm-global`) — #1459 `flair: command not found`.
+#   - non-root user.
+#   - follow ONLY README.md to the first working command, then the daemon
+#     lifecycle (init → start → stop → status) with lsof still absent.
+#
+# ACCEPTANCE (unusual, deliberate): this lane MUST be RED on main the day it
+# lands. #1454 and #1459 are unfixed, so a green lane would prove it is not
+# testing what it claims. Land it failing, name which failure maps to which
+# issue, and let the fixes turn it green. It is deliberately NOT
+# required-for-merge yet — a lane that blocks every PR before its findings are
+# fixed is the cry-wolf problem we already have with one gate.
+#
+# Security (Sherlock §4, flair#695): this workflow runs arbitrary code from the
+# PR (Dockerfile + test script). It uses `pull_request` (never
+# `pull_request_target` with PR-code checkout); no secrets are exposed to the
+# job (public npm install + public GITHUB_TOKEN-default only — no NPM_TOKEN, no
+# deploy credentials); every third-party action is pinned to a full commit SHA,
+# not a tag; and no `${{ }}` interpolation of PR-controlled metadata
+# (title/body/branch) into any `run:` block — the only `${{ }}` uses here are
+# `github.workspace` (runner-controlled) and this workflow's own step outputs.
+# Ensure "Require approval for first-time contributors" is enabled in repo
+# Settings → Actions → General to prevent abuse from fork PRs.
+name: First-Run-Hostile Lane
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "docker/**"
+      - "package.json"
+      - "tsconfig.cli.json"
+      - ".github/workflows/first-run-hostile.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "docker/**"
+      - "package.json"
+      - "tsconfig.cli.json"
+      - ".github/workflows/first-run-hostile.yml"
+  workflow_dispatch:
+
+jobs:
+  first-run-hostile:
+    name: First-run-hostile (no lsof, npm prefix off PATH, non-root)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
+
+      # Stage the embeddings model in the build context BEFORE the build so the
+      # Dockerfile COPYs it in (no live HuggingFace curl during `docker build`).
+      # HF intermittently 429s/503s the model download — a bare in-build curl
+      # flaked the clean-vm gate and blocked merges (the #463/#465 429/503
+      # issue). actions/cache persists the ~80MB .gguf across runs, keyed on the
+      # model filename, so we download it at most once.
+      - name: Cache embeddings model
+        id: model-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: models/nomic-embed-text-v1.5.Q4_K_M.gguf
+          key: nomic-embed-text-v1.5-Q4_K_M-gguf
+
+      - name: Download embeddings model into build context
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        # Resolves first-party GitHub release mirror → HuggingFace (last), with
+        # sha256 verification regardless of source (flair#715).
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
+
+      - name: Build first-run-hostile image
+        uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 # v6
+        with:
+          context: .
+          file: docker/Dockerfile.first-run-hostile
+          push: false
+          load: true
+          tags: flair-first-run-hostile:ci
+          cache-from: type=gha,scope=first-run-hostile
+          cache-to: type=gha,mode=max,scope=first-run-hostile
+
+      - name: Run first-run-hostile gate (expect RED until #1454 + #1459 fixed)
+        run: docker run --rm flair-first-run-hostile:ci
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker run --rm flair-first-run-hostile:ci || true
