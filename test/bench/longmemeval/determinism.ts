@@ -238,7 +238,7 @@ export function probeContext(entry: LmeEntry): string {
       content: ev.content,
       createdAt: typeof ev.createdAt === "string" ? ev.createdAt : undefined,
     }));
-  return formatRetrieved(items);
+  return formatRetrieved(items).text;
 }
 
 /** The shape returned when the probe could not run. Defined here so a failed

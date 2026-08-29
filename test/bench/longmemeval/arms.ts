@@ -55,21 +55,59 @@ export const PAYLOAD_FORMATS: PayloadFormat[] = ["v1-undated", "v2-dated"];
  *  full-context arm always sees session dates. payload-ab.ts is the experiment
  *  that tests it; this function is the single place the two formats are
  *  defined, so the A/B and the headline run can never drift apart. */
-export function formatRetrievedAs(items: RetrievedItem[], format: PayloadFormat): string {
-  if (items.length === 0) return "(no relevant memory found)";
-  return items.map((it) => {
+function formatRetrievedResult(
+  items: RetrievedItem[], format: PayloadFormat,
+): { text: string; admittedIds: string[] } {
+  if (items.length === 0) return { text: "(no relevant memory found)", admittedIds: [] };
+  const admittedIds: string[] = [];
+  const text = items.map((it) => {
+    // Admission is this push. A future char budget / top-N cut / swap must
+    // skip or change it, or the #1430 set-equality assert cannot fire.
+    admittedIds.push(it.id);
     const content = (it.content ?? "").trim();
     if (format === "v1-undated") return `- ${content}`;
     const date = typeof it.createdAt === "string" ? it.createdAt.slice(0, 10) : "";
     return date ? `- [${date}] ${content}` : `- ${content}`;
   }).join("\n");
+  return { text, admittedIds };
+}
+
+/** Format retrieved memories in an explicit payload format. The A/B
+ *  (`payload-ab.ts`) calls this; the headline run calls `formatRetrieved`. */
+export function formatRetrievedAs(items: RetrievedItem[], format: PayloadFormat): string {
+  return formatRetrievedResult(items, format).text;
 }
 
 /** Format retrieved memories at the payload format this build is PINNED to
  *  (READER_PAYLOAD_FORMAT — hashed into the config manifest). The four-arm
- *  headline run calls this; the A/B calls formatRetrievedAs directly. */
-export function formatRetrieved(items: RetrievedItem[]): string {
-  return formatRetrievedAs(items, READER_PAYLOAD_FORMAT);
+ *  headline run calls this; the A/B calls formatRetrievedAs directly.
+ *
+ *  `admittedIds` is the formatter-admitted id set (flair#1430). Today every
+ *  item is admitted — no char budget, no selection. Mirrors
+ *  `formatFullContext.includedEventIds`. */
+export function formatRetrieved(items: RetrievedItem[]): { text: string; admittedIds: string[] } {
+  return formatRetrievedResult(items, READER_PAYLOAD_FORMAT);
+}
+
+/** Harper / retrieved-arm invariant (flair#1430, documented by #1429):
+ *  `readerContext` (formatter-admitted ids) and `topK` must be set-equal.
+ *  Length-only would miss a swap that preserves count. Names the arm and
+ *  the differing ids so a future formatter cut fails CI with a diagnosis. */
+export function assertRetrievedReaderContextEqualsTopK(
+  arm: Arm,
+  readerContext: readonly string[],
+  topK: readonly string[],
+): void {
+  const readerSet = new Set(readerContext);
+  const topKSet = new Set(topK);
+  const onlyInReaderContext = [...readerSet].filter((id) => !topKSet.has(id)).sort();
+  const onlyInTopK = [...topKSet].filter((id) => !readerSet.has(id)).sort();
+  if (onlyInReaderContext.length === 0 && onlyInTopK.length === 0) return;
+  throw new Error(
+    `readerContext and topK are not set-equal for retrieved arm "${arm}": ` +
+    `only in readerContext: [${onlyInReaderContext.join(", ")}]; ` +
+    `only in topK: [${onlyInTopK.join(", ")}]`,
+  );
 }
 
 /** Format the full haystack (full-context arm), in chronological session order

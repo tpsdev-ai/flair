@@ -26,7 +26,10 @@ import {
 import { OLLAMA_HOST, READER, JUDGE, RETRIEVAL, FULL_CONTEXT } from "./config";
 import { generate, type OllamaModelSpec } from "./ollama";
 import { buildJudgePrompt, parseVerdict, JudgeParseError, type LmeTask } from "./judge";
-import { buildReaderPrompt, formatRetrieved, formatFullContext, HARPER_ARMS, ALL_ARMS, type Arm } from "./arms";
+import {
+  buildReaderPrompt, formatRetrieved, formatFullContext, HARPER_ARMS, ALL_ARMS,
+  assertRetrievedReaderContextEqualsTopK, type Arm,
+} from "./arms";
 import { writeFileSync, rmSync, appendFileSync, readFileSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { scoreExtraction } from "./extraction";
@@ -281,10 +284,16 @@ function extractionFor(entry: LmeEntry, answer: string) {
 /** flair#1358 — coverage from a Harper retrieval. formatRetrieved includes
  *  every ranked item, so the handoff set is the item ids (not a substring
  *  scan of the prompt — overlapping event text would otherwise count a
- *  truncated event as present). */
+ *  truncated event as present).
+ *
+ *  flair#1430 — assert the formatter-admitted set against topK here, where
+ *  both id sets exist. The coverage record still uses `ctx.items` ids
+ *  (#1426 / #1429); the assert watches `formatRetrieved.admittedIds` so a
+ *  future formatter cut fails CI instead of silently reaching truncation. */
 function coverageForRetrieved(
-  entry: LmeEntry, arm: Arm, ctx: RetrievedContext,
+  entry: LmeEntry, arm: Arm, ctx: RetrievedContext, admittedIds: string[],
 ): EvidenceCoverageRecord {
+  assertRetrievedReaderContextEqualsTopK(arm, admittedIds, ctx.rankedIds);
   return measureEvidenceCoverage({
     entry, arm,
     stages: {
@@ -424,10 +433,10 @@ async function runHarperArm(
         limit: RETRIEVAL.readerTopK, scoring: RETRIEVAL.scoring, includeLegs: true,
       });
       const retrievalMs = performance.now() - t0;
-      const context = formatRetrieved(ctx.items);
-      out.push(await evalOne(host, entry, arm, context, {
+      const formatted = formatRetrieved(ctx.items);
+      out.push(await evalOne(host, entry, arm, formatted.text, {
         retrievalMs, rankedIds: ctx.rankedIds,
-        evidenceCoverage: coverageForRetrieved(entry, arm, ctx),
+        evidenceCoverage: coverageForRetrieved(entry, arm, ctx, formatted.admittedIds),
       }));
       if ((qi + 1) % 5 === 0 || qi === entries.length - 1) {
         log(`  [${arm}] ${qi + 1}/${entries.length} (last ingest ${ingest.written} events, ${ingest.elapsedMs.toFixed(0)}ms)`);
@@ -644,10 +653,10 @@ async function runHarperArmsShared(
       limit: RETRIEVAL.readerTopK, scoring: RETRIEVAL.scoring, includeLegs: true,
     });
     const retrievalMs = performance.now() - t0;
-    const context = formatRetrieved(ctx.items);
-    out.push(await evalOne(host, entry, arm, context, {
+    const formatted = formatRetrieved(ctx.items);
+    out.push(await evalOne(host, entry, arm, formatted.text, {
       retrievalMs, rankedIds: ctx.rankedIds,
-      evidenceCoverage: coverageForRetrieved(entry, arm, ctx),
+      evidenceCoverage: coverageForRetrieved(entry, arm, ctx, formatted.admittedIds),
     }));
   }
 
