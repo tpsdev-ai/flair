@@ -44,9 +44,11 @@ export type ResolveUsageIdsResult =
 
 /**
  * HTTP-endpoint resolver: union both fields, then apply RecordUsage.post()'s
- * existing validation (non-empty strings, per-call cap on the raw concatenated
- * list). A present-but-invalid `memoryIds` still 400s — this does not relax
- * anti-gaming bounds; it only stops preferring `memoryIds` over `memoryId`.
+ * existing validation (non-empty strings, per-call cap on the unique credited
+ * set). Cap after dedupe so an overlapping `memoryId` does not 400 a legal
+ * unique set that native `/mcp` and stdio already accept. A present-but-invalid
+ * `memoryIds` still 400s. The max-20 anti-gaming bound is unchanged — it
+ * limits unique ids credited, not raw concatenation length.
  */
 export function resolveRecordUsageIds(
   data: { memoryId?: unknown; memoryIds?: unknown } | null | undefined,
@@ -66,6 +68,7 @@ export function resolveRecordUsageIds(
   if (typeof memoryId === "string" && memoryId.length > 0) raw.push(memoryId);
 
   if (raw.length === 0) return { ok: false, error: "empty" };
-  if (raw.length > maxIds) return { ok: false, error: "cap" };
-  return { ok: true, ids: [...new Set(raw)] };
+  const ids = [...new Set(raw)];
+  if (ids.length > maxIds) return { ok: false, error: "cap" };
+  return { ok: true, ids };
 }

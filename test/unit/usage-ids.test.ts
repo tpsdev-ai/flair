@@ -69,10 +69,24 @@ describe("resolveRecordUsageIds (POST /RecordUsage)", () => {
     expect(resolveRecordUsageIds({ memoryIds: "mem-a" }, MAX)).toEqual({ ok: false, error: "invalid" });
   });
 
-  test("per-call cap is on the raw concatenated list (anti-gaming bound unchanged)", () => {
-    const ids = Array.from({ length: MAX }, (_, i) => `m${i}`);
-    expect(resolveRecordUsageIds({ memoryIds: ids }, MAX).ok).toBe(true);
-    expect(resolveRecordUsageIds({ memoryId: "extra", memoryIds: ids }, MAX)).toEqual({ ok: false, error: "cap" });
+  test("per-call cap is on the unique credited set — overlap at cap succeeds, over cap 400s", () => {
+    // Distinguishes raw-concat vs unique-set. 20 unique + overlapping
+    // memoryId is still 20 unique (legal). A raw-concat cap 400s that
+    // (length 21 before dedupe) and would stay green on a disjoint extra
+    // id, which both implementations reject. Against raw-concat this
+    // overlap-at-cap case fails — that is the pin.
+    const atCap = Array.from({ length: MAX }, (_, i) => `m${i}`);
+    const overlapAtCap = resolveRecordUsageIds({ memoryId: atCap[0], memoryIds: atCap }, MAX);
+    expect(overlapAtCap.ok, "unique set at cap with overlapping memoryId must succeed").toBe(true);
+    if (overlapAtCap.ok) {
+      expect(overlapAtCap.ids).toEqual(atCap);
+    }
+
+    const overCap = Array.from({ length: MAX }, (_, i) => `m${i}`);
+    expect(resolveRecordUsageIds({ memoryId: "extra", memoryIds: overCap }, MAX)).toEqual({
+      ok: false,
+      error: "cap",
+    });
   });
 });
 
