@@ -255,10 +255,13 @@ function decodeXmlEntities(value) {
     .replace(/&amp;/g, "&");
 }
 
-function xmlAttr(attrs, key) {
-  const dq = attrs.match(new RegExp(`(?:^|[\\s])${key}="([^"]*)"`));
+const JUNIT_NAME_DQ = /(?:^|[\s])name="([^"]*)"/;
+const JUNIT_NAME_SQ = /(?:^|[\s])name='([^']*)'/;
+
+function junitCaseName(attrs) {
+  const dq = attrs.match(JUNIT_NAME_DQ);
   if (dq) return decodeXmlEntities(dq[1]);
-  const sq = attrs.match(new RegExp(`(?:^|[\\s])${key}='([^']*)'`));
+  const sq = attrs.match(JUNIT_NAME_SQ);
   if (sq) return decodeXmlEntities(sq[1]);
   return "";
 }
@@ -276,7 +279,7 @@ function parseJunitCases(xml) {
   let m;
   while ((m = re.exec(xml)) !== null) {
     cases.push({
-      name: xmlAttr(m[1], "name"),
+      name: junitCaseName(m[1]),
       kind: m[2] === "/>" ? "pass" : caseKind(m[3]),
     });
   }
