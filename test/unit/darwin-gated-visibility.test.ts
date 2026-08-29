@@ -40,18 +40,47 @@ const ORIGINAL_TITLES = [
 
 function runGate(
   extraArgs: string[] = [],
-  opts: { root?: string } = {},
+  opts: { root?: string; env?: Record<string, string | undefined> } = {},
 ): { status: number | null; out: string } {
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    DARWIN_GATE_ROOT: opts.root ?? REPO_ROOT,
+    GITHUB_STEP_SUMMARY: "",
+    ...opts.env,
+  };
+  // Drop keys set to undefined so the child cannot see them. Live-mutating
+  // process.env is not enough — bun/os read the spawned env (flair#1418).
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) delete env[key];
+  }
   const r = spawnSync(process.execPath, [SCRIPT, ...extraArgs], {
     cwd: REPO_ROOT,
     encoding: "utf8",
-    env: {
-      ...process.env,
-      DARWIN_GATE_ROOT: opts.root ?? REPO_ROOT,
-      GITHUB_STEP_SUMMARY: "",
-    },
+    env: env as NodeJS.ProcessEnv,
   });
   return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+}
+
+type GateJson = {
+  ok: boolean;
+  error?: string;
+  platform?: string;
+  tests: Array<{ file: string; title: string; form: string; status?: string }>;
+};
+
+function parseGateJson(out: string): GateJson {
+  return JSON.parse(out) as GateJson;
+}
+
+function verdictOf(res: { status: number | null; out: string }) {
+  const body = parseGateJson(res.out);
+  return {
+    exit: res.status,
+    ok: body.ok,
+    tests: (body.tests ?? [])
+      .map((t) => ({ file: t.file, title: t.title, status: t.status ?? null }))
+      .sort((a, b) => a.file.localeCompare(b.file) || a.title.localeCompare(b.title)),
+  };
 }
 
 function fixture(contents: Record<string, string>): string {
@@ -188,4 +217,67 @@ describe("check-darwin-gated-tests.mjs skip count on this platform", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 15_000);
+});
+
+describe("check-darwin-gated-tests.mjs reads JUnit, not bun stdout (flair#1418)", () => {
+  test("the gate no longer scrapes (pass)/(skip)/(fail) console lines", () => {
+    const src = readFileSync(SCRIPT, "utf8");
+    expect(src).toContain("--reporter=junit");
+    expect(src).toContain("--reporter-outfile=");
+    expect(src).not.toContain("function lineKind");
+    expect(src).not.toContain("function lineLeaf");
+    expect(src.includes('line.startsWith("(pass) ")')).toBe(false);
+    expect(src.includes('line.startsWith("(skip) ")')).toBe(false);
+    expect(src.includes('line.startsWith("(fail) ")')).toBe(false);
+  });
+
+  test("clean env and CLAUDECODE=1 produce the identical verdict", () => {
+    // Against current main this fails: CLAUDECODE collapses bun's console
+    // reporter, so the second spawn reports every inventoried title absent
+    // while the first reports them skipped (linux) / passed (darwin).
+    const clean = runGate(["--json"], { env: { CLAUDECODE: undefined } });
+    const claude = runGate(["--json"], { env: { CLAUDECODE: "1" } });
+    const cleanVerdict = verdictOf(clean);
+    const claudeVerdict = verdictOf(claude);
+    expect(claudeVerdict).toEqual(cleanVerdict);
+    expect(cleanVerdict.exit).toBe(0);
+    expect(cleanVerdict.ok).toBe(true);
+    expect(cleanVerdict.tests.length).toBeGreaterThanOrEqual(9);
+    const expected = process.platform === "darwin" ? "pass" : "skip";
+    expect(cleanVerdict.tests.every((t) => t.status === expected)).toBe(true);
+  }, 60_000);
+
+  test("a title bun never registers is absent under both environments", () => {
+    // Inventory finds statement-level skipIf; bun does not register a test
+    // inside `if (false)`. If the fix "passed" by never reporting absent,
+    // both environments would hide this.
+    const ghost = "ghost title that bun never registers";
+    const visible = "visible darwin case";
+    const dir = fixture({
+      "test/unit/ghost.test.ts": [
+        `import { test, expect } from "bun:test";`,
+        `const isDarwin = process.platform === "darwin";`,
+        `if (false) {`,
+        `  test.skipIf(!isDarwin)("${ghost}", () => { expect(true).toBe(true); });`,
+        `}`,
+        `test.skipIf(!isDarwin)("${visible}", () => { expect(true).toBe(true); });`,
+        "",
+      ].join("\n"),
+    });
+    try {
+      const clean = runGate(["--json"], { root: dir, env: { CLAUDECODE: undefined } });
+      const claude = runGate(["--json"], { root: dir, env: { CLAUDECODE: "1" } });
+      const cleanVerdict = verdictOf(clean);
+      const claudeVerdict = verdictOf(claude);
+      expect(claudeVerdict).toEqual(cleanVerdict);
+      expect(cleanVerdict.exit).not.toBe(0);
+      expect(cleanVerdict.ok).toBe(false);
+      const ghostRow = cleanVerdict.tests.find((t) => t.title === ghost);
+      const visibleRow = cleanVerdict.tests.find((t) => t.title === visible);
+      expect(ghostRow?.status).toBe("absent");
+      expect(visibleRow?.status).toBe(process.platform === "darwin" ? "pass" : "skip");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

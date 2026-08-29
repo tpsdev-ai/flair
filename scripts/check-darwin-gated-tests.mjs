@@ -17,9 +17,14 @@
  *      that went silent once already. `skipIf` is the form that cannot
  *      vanish from the tally.
  *   3. Unless `--inventory-only`, run the inventoried files and require:
- *        linux  — every inventoried title appears as `(skip)`; print
- *                 "0 darwin tests ran on this platform" as information.
- *        darwin — every inventoried title appears as `(pass)`, never skip.
+ *        linux  — every inventoried title appears as skipped in the JUnit
+ *                 report; print "0 darwin tests ran on this platform".
+ *        darwin — every inventoried title appears as passed, never skip.
+ *
+ * Statuses come from `bun test --reporter=junit --reporter-outfile=`, not
+ * from scraping human-readable stdout. Bun's console reporter is ambient-
+ * environment-dependent (CLAUDECODE and friends collapse `(pass)`/`(skip)`
+ * lines); the JUnit file names every case with its status (flair#1418).
  *
  * Usage:
  *   node scripts/check-darwin-gated-tests.mjs
@@ -35,9 +40,10 @@
  *       darwin-gated test failed / skipped on darwin
  */
 
-import { readFileSync, readdirSync, appendFileSync } from "node:fs";
+import { readFileSync, readdirSync, appendFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join, relative, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -217,46 +223,83 @@ if (inventoryOnly) {
 
 const files = [...new Set(tests.map((t) => t.file))];
 const bun = process.env.BUN_BIN || "bun";
-const ran = spawnSync(bun, ["test", ...files], {
-  cwd: REPO_ROOT,
-  encoding: "utf8",
-  env: process.env,
-});
-const output = `${ran.stdout ?? ""}${ran.stderr ?? ""}`;
-
-function lineKind(line) {
-  if (line.startsWith("(fail) ")) return "fail";
-  if (line.startsWith("(skip) ")) return "skip";
-  if (line.startsWith("(pass) ")) return "pass";
-  return null;
+const junitDir = mkdtempSync(join(tmpdir(), "darwin-gate-junit-"));
+const junitPath = join(junitDir, "junit.xml");
+let ran = { status: 1 };
+let output = "";
+let junitXml = "";
+try {
+  ran = spawnSync(
+    bun,
+    ["test", "--reporter=junit", `--reporter-outfile=${junitPath}`, ...files],
+    {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: process.env,
+    },
+  );
+  output = `${ran.stdout ?? ""}${ran.stderr ?? ""}`;
+  if (existsSync(junitPath)) junitXml = readFileSync(junitPath, "utf8");
+} finally {
+  rmSync(junitDir, { recursive: true, force: true });
 }
 
-function lineLeaf(line) {
-  // `(skip) describe > title` / `(pass) describe > title [12.3ms]`
-  const rest = line.slice(7); // after "(skip) " / "(pass) " / "(fail) "
-  const timed = rest.lastIndexOf(" [");
-  return timed >= 0 && rest.endsWith("ms]") ? rest.slice(0, timed) : rest;
+function decodeXmlEntities(value) {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, n) => String.fromCharCode(parseInt(n, 16)))
+    .replace(/&amp;/g, "&");
 }
 
-function statusFor(title) {
+function xmlAttr(attrs, key) {
+  const dq = attrs.match(new RegExp(`(?:^|[\\s])${key}="([^"]*)"`));
+  if (dq) return decodeXmlEntities(dq[1]);
+  const sq = attrs.match(new RegExp(`(?:^|[\\s])${key}='([^']*)'`));
+  if (sq) return decodeXmlEntities(sq[1]);
+  return "";
+}
+
+function caseKind(inner) {
+  if (inner == null) return "pass";
+  if (/<failure\b|<error\b/.test(inner)) return "fail";
+  if (/<skipped\b/.test(inner)) return "skip";
+  return "pass";
+}
+
+function parseJunitCases(xml) {
+  const cases = [];
+  const re = /<testcase\b([^>]*?)(\/>|>([\s\S]*?)<\/testcase>)/g;
+  let m;
+  while ((m = re.exec(xml)) !== null) {
+    cases.push({
+      name: xmlAttr(m[1], "name"),
+      kind: m[2] === "/>" ? "pass" : caseKind(m[3]),
+    });
+  }
+  return cases;
+}
+
+function statusFor(title, cases) {
   // Prefer fail > skip > pass so a rerun summary cannot hide a failure.
   // Leaf match (endsWith the title) so a describe prefix cannot hide it,
   // and a shorter title cannot match a longer one.
   let seen = "absent";
-  for (const raw of output.split("\n")) {
-    const line = raw.trimEnd();
-    const kind = lineKind(line);
-    if (!kind) continue;
-    const leaf = lineLeaf(line);
+  for (const c of cases) {
+    const leaf = c.name;
     if (leaf !== title && !leaf.endsWith(`> ${title}`)) continue;
-    if (kind === "fail") return "fail";
-    if (kind === "skip") seen = "skip";
-    else if (kind === "pass" && seen === "absent") seen = "pass";
+    if (c.kind === "fail") return "fail";
+    if (c.kind === "skip") seen = "skip";
+    else if (c.kind === "pass" && seen === "absent") seen = "pass";
   }
   return seen;
 }
 
-const results = tests.map((t) => ({ ...t, status: statusFor(t.title) }));
+const junitCases = parseJunitCases(junitXml);
+const results = tests.map((t) => ({ ...t, status: statusFor(t.title, junitCases) }));
 const skipped = results.filter((t) => t.status === "skip");
 const passed = results.filter((t) => t.status === "pass");
 const failed = results.filter((t) => t.status === "fail");
@@ -269,7 +312,7 @@ if (isDarwin) {
   if (bad.length > 0 || ran.status !== 0) {
     fail(
       `darwin-gated tests must RUN on darwin (flair#1012). ${passed.length} passed, ${skipped.length} skipped, ${failed.length} failed, ${absent.length} absent from bun output.`,
-      tests,
+      results,
       [
         "",
         output.trimEnd(),
@@ -279,7 +322,11 @@ if (isDarwin) {
     );
   }
   const summary = `${passed.length} darwin-gated unit tests ran on darwin (0 skipped).`;
-  printHuman(tests, ["", summary]);
+  if (asJson) {
+    console.log(JSON.stringify({ ok: true, platform: process.platform, tests: results }, null, 2));
+  } else {
+    printHuman(tests, ["", summary]);
+  }
   writeStepSummary(`## Darwin-gated unit tests (flair#1012)\n\n${summary}\n`);
   process.exit(0);
 }
@@ -289,7 +336,7 @@ if (isDarwin) {
 if (absent.length > 0 || skipped.length !== tests.length) {
   fail(
     `linux must report every darwin-gated test as skipped, not omit it (flair#1012). ${skipped.length} skipped, ${passed.length} passed, ${failed.length} failed, ${absent.length} absent — expected ${tests.length} skipped.`,
-    tests,
+    results,
     [
       "",
       ...results
@@ -300,6 +347,10 @@ if (absent.length > 0 || skipped.length !== tests.length) {
 }
 
 const summary = `${skipped.length} darwin-gated unit tests skipped on ${process.platform}. 0 darwin tests ran on this platform.`;
-printHuman(tests, ["", summary]);
+if (asJson) {
+  console.log(JSON.stringify({ ok: true, platform: process.platform, tests: results }, null, 2));
+} else {
+  printHuman(tests, ["", summary]);
+}
 writeStepSummary(`## Darwin-gated unit tests (flair#1012)\n\n${summary}\n`);
 process.exit(0);
