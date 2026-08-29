@@ -160,7 +160,8 @@ function normalise(body: any): any {
     return o;
   };
   const results = (body.results ?? []).map(strip)
-    .sort((a, b) => String(a.id ?? "").localeCompare(String(b.id ?? "")));
+    .sort((a: Record<string, any>, b: Record<string, any>) =>
+      String(a.id ?? "").localeCompare(String(b.id ?? "")));
   return { ...body, results };
 }
 
