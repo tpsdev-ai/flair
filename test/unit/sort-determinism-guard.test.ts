@@ -1,5 +1,5 @@
 /**
- * sort-determinism-guard.test.ts — AST guard for flair#1412.
+ * sort-determinism-guard.test.ts — AST guard for flair#1412 / flair#1415.
  *
  * Grep cannot tell a real `.sort` from a comment mentioning one, and cannot
  * see comparator shape. This walks the TypeScript AST and flags a `.sort()`
@@ -10,11 +10,18 @@
  * Widen the list as those follow-ups land.
  *
  * Opt-out (exact marker, not any comment): `// deterministic: key is unique`
+ *
+ * flair#1415 also pins the `_rank` push-site count in
+ * semantic-retrieval-core.ts. Kern counted four; Sherlock counted three.
+ * Current main has four (no-signal listing, candidate-union RRF, HNSW
+ * embedding leg, keyword-only fallback). Adding or dropping a site must
+ * fail this pin — do not re-derive the number from the file.
  */
 import { describe, test, expect } from "bun:test";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import ts from "typescript";
+import type { RetrievalRankedRow } from "../../resources/semantic-retrieval-core.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 
@@ -141,6 +148,84 @@ function scanRepoFile(rel: string): BareSortHit[] {
   return findBareSingleKeySorts(rel, readFileSync(abs, "utf8"));
 }
 
+export type RankPushHit = { line: number; excerpt: string };
+
+/**
+ * Pinned count of `pushRanked` call sites in semantic-retrieval-core.ts
+ * (flair#1415). Four on current main: no-signal listing, candidate-union
+ * RRF, HNSW embedding leg, keyword-only fallback. A fifth (or a dropped)
+ * site must fail CI rather than be re-counted by a reader.
+ */
+export const EXPECTED_RANK_PUSH_SITES = 4;
+
+const RETRIEVAL_CORE = "resources/semantic-retrieval-core.ts";
+
+function callExcerpt(sf: ts.SourceFile, source: string, node: ts.Node): string {
+  return source.slice(node.getStart(sf), Math.min(node.getEnd(), node.getStart(sf) + 80)).replace(/\s+/g, " ");
+}
+
+/** Sites that supply `_rank` via `pushRanked(rows, row, rank)`. */
+export function findPushRankedCalls(filePath: string, source: string): RankPushHit[] {
+  const sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const hits: RankPushHit[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "pushRanked") {
+      const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+      hits.push({ line: line + 1, excerpt: callExcerpt(sf, source, node) });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return hits;
+}
+
+/**
+ * Raw `results.push(...)` — a bypass of `pushRanked` that can omit `_rank`
+ * because Harper rows are `any` and `...any` swallows a missing property.
+ */
+export function findResultsPushes(filePath: string, source: string): RankPushHit[] {
+  const sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const hits: RankPushHit[] = [];
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isCallExpression(node)
+      && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === "push"
+      && ts.isIdentifier(node.expression.expression)
+      && node.expression.expression.text === "results"
+    ) {
+      const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+      hits.push({ line: line + 1, excerpt: callExcerpt(sf, source, node) });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return hits;
+}
+
+/** Property / shorthand assignments of `_rank` (the helper's `{ ...row, _rank }`). */
+export function findRankAssignments(filePath: string, source: string): RankPushHit[] {
+  const sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const hits: RankPushHit[] = [];
+  const visit = (node: ts.Node) => {
+    const isAssign = ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node);
+    if (isAssign && ts.isIdentifier(node.name) && node.name.text === "_rank") {
+      const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+      hits.push({ line: line + 1, excerpt: callExcerpt(sf, source, node) });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return hits;
+}
+
+// Compile-time pin (flair#1415). Evaluated by `tsc -p tsconfig.test.check.json`.
+// A row-shaped object that omits `_rank` must be a type error. If `_rank` is
+// ever made optional, this unused `@ts-expect-error` fails CI.
+// @ts-expect-error _rank is required on the internal retrieval row
+const _rowOmittingRank: RetrievalRankedRow = { id: "x", createdAt: "2024-01-01T00:00:00.000Z" };
+void _rowOmittingRank;
+
 describe("sort-determinism guard scope (flair#1412)", () => {
   test("is scoped to the two paths this PR fixes — not repo-wide", () => {
     expect([...SCOPED_PATHS].sort()).toEqual([
@@ -211,5 +296,53 @@ describe("sort-determinism guard detector", () => {
       xs.sort((a, b) => b.n - a.n);
     `;
     expect(findBareSingleKeySorts("scratch.ts", src).length).toBe(1);
+  });
+});
+
+describe("retrieval _rank push-site pin (flair#1415)", () => {
+  test(`semantic-retrieval-core.ts has exactly ${EXPECTED_RANK_PUSH_SITES} pushRanked sites`, () => {
+    const src = readFileSync(join(REPO_ROOT, RETRIEVAL_CORE), "utf8");
+    const hits = findPushRankedCalls(RETRIEVAL_CORE, src);
+    expect(hits.map((h) => `${RETRIEVAL_CORE}:${h.line} ${h.excerpt}`)).toHaveLength(EXPECTED_RANK_PUSH_SITES);
+    expect(hits).toHaveLength(EXPECTED_RANK_PUSH_SITES);
+  });
+
+  test("ranked rows cannot enter via raw results.push (would swallow a missing _rank)", () => {
+    const src = readFileSync(join(REPO_ROOT, RETRIEVAL_CORE), "utf8");
+    const hits = findResultsPushes(RETRIEVAL_CORE, src);
+    expect(hits.map((h) => `${RETRIEVAL_CORE}:${h.line} ${h.excerpt}`)).toEqual([]);
+  });
+
+  test("the helper is the single _rank assignment site", () => {
+    const src = readFileSync(join(REPO_ROOT, RETRIEVAL_CORE), "utf8");
+    const hits = findRankAssignments(RETRIEVAL_CORE, src);
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.excerpt).toContain("_rank");
+  });
+
+  test("FAILS when a new results.push bypasses pushRanked", () => {
+    const src = `const results = []; results.push({ id: "x", _score: 1 });`;
+    const hits = findResultsPushes("scratch.ts", src);
+    expect(hits.length).toBe(1);
+    expect(hits[0]!.excerpt).toContain("results.push");
+  });
+
+  test("finder counts each pushRanked call", () => {
+    const src = `
+      pushRanked(results, { id: "a" }, 1);
+      pushRanked(results, { id: "b" }, 2);
+      pushRanked(results, { id: "c" }, 3);
+    `;
+    expect(findPushRankedCalls("scratch.ts", src).length).toBe(3);
+  });
+
+  test("does not count a comment that merely mentions pushRanked or _rank", () => {
+    const src = `
+      // pushRanked(results, row, _rank)
+      const x = 1;
+    `;
+    expect(findPushRankedCalls("scratch.ts", src)).toEqual([]);
+    expect(findRankAssignments("scratch.ts", src)).toEqual([]);
+    expect(findResultsPushes("scratch.ts", src)).toEqual([]);
   });
 });
