@@ -1,0 +1,112 @@
+# Dockerfile.first-run-hostile — the first-run-hostile guardrail (flair#1460)
+#
+# Reproduces the environment a brand-new user actually has, and which every
+# other CI lane accidentally provides: lsof ABSENT, npm global prefix set to a
+# user directory NOT on PATH, and a non-root user. Following only README.md,
+# the first working command (`flair init`) must fail with "command not found"
+# (#1459), and the daemon lifecycle's `flair stop` must fail to find a live
+# daemon without lsof (#1454). The lane is RED until both are fixed.
+#
+# Build:  docker build -f docker/Dockerfile.first-run-hostile -t flair-first-run-hostile .
+# Run:    docker run --rm flair-first-run-hostile
+#
+# Tests the LOCAL HEAD build (the tarball packed from this branch), not the
+# published npm version.
+
+# ── Builder: build + pack the HEAD tarball ──────────────────────────────────
+FROM node:24-slim AS builder
+
+WORKDIR /app
+
+# Install bun (pinned to match bun.lock version — bump together).
+RUN apt-get update && apt-get install -y --no-install-recommends curl unzip ca-certificates && \
+    curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.10" && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.bun/bin:$PATH"
+ENV BUN_INSTALL="/root/.bun"
+
+# Copy repo (include workspace packages so bun lockfile is consistent).
+COPY package.json bun.lock* tsconfig.json tsconfig.cli.json config.yaml ./
+COPY src/ ./src/
+COPY resources/ ./resources/
+COPY schemas/ ./schemas/
+COPY packages/ ./packages/
+COPY scripts/write-build-info.mjs ./scripts/
+
+RUN bun install --frozen-lockfile
+RUN bun run build && bun run build:cli
+
+# Pack the exact published file set (dist/, schemas/, templates/, config.yaml…).
+# `npm pack` honors the package.json "files" array — this is byte-for-byte what
+# a user installs from the registry, so the gate exercises the published surface.
+RUN npm pack && mv tpsdev-ai-flair-*.tgz /flair-head.tgz && \
+    echo "Packed HEAD tarball: $(du -sh /flair-head.tgz | cut -f1)"
+
+# ── Runtime: minimal base with hostile conditions ────────────────────────────
+FROM node:24-slim AS hostile
+
+# ca-certificates for npm/HTTPS.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# lsof ABSENT — the #1454 half of this lane. node:24-slim (Debian bookworm-slim)
+# does not ship lsof, but we remove it explicitly if a future base adds it, and
+# ASSERT the absence so the lane cannot silently pass because the tool happened
+# to be here (the exact failure mode of migration-ci-lanes.yml on ubuntu-latest).
+RUN if command -v lsof >/dev/null 2>&1; then \
+      apt-get update && apt-get remove -y lsof && apt-get clean && rm -rf /var/lib/apt/lists/*; \
+    fi && \
+    if command -v lsof >/dev/null 2>&1; then \
+      echo "ERROR: lsof still present after removal — cannot assert absence" >&2; exit 1; \
+    fi && \
+    echo "lsof absent (asserted)"
+
+# Create the realistic NON-ROOT user.
+RUN useradd --create-home --shell /bin/bash flairuser
+
+# The HEAD tarball, readable by flairuser for the user-prefix install below.
+COPY --from=builder /flair-head.tgz /flair-head.tgz
+RUN chown flairuser:flairuser /flair-head.tgz
+
+# Pre-stage the model in flairuser's home at the default path, owned by
+# flairuser, with NO FLAIR_MODELS_DIR set. (Same reason as clean-vm-gate: a
+# live ~80MB download during `flair init` can outlast the Harper seed retry
+# loop and flake the lane on an HF 503.)
+#
+# COPY runs as root (the active stage user before `USER flairuser` below). Its
+# --chown lands the file at the default path (<ROOTPATH=~/.flair/data>/models)
+# owned by the non-root flairuser, and COPY auto-creates the parent dirs.
+COPY --chown=flairuser:flairuser models/nomic-embed-text-v1.5.Q4_K_M.gguf \
+     /home/flairuser/.flair/data/models/nomic-embed-text-v1.5.Q4_K_M.gguf
+RUN echo "Model staged at the default path (user-owned): $(du -sh /home/flairuser/.flair/data/models/*.gguf | cut -f1)"
+
+# ── Install flair as the NON-ROOT user, with npm prefix OFF PATH ─────────────
+# This is the #1459 half: `npm config set prefix ~/.npm-global` (a user dir NOT
+# on PATH), then `npm install -g` lands the binary at ~/.npm-global/bin/flair,
+# which is NOT on PATH — so the bare `flair` command a new user types is
+# "command not found".
+USER flairuser
+WORKDIR /home/flairuser
+
+RUN npm config set prefix "$HOME/.npm-global" && \
+    npm install -g /flair-head.tgz && \
+    echo "Installed flair to user prefix (off PATH):" && \
+    ls -la "$HOME/.npm-global/bin/"
+
+# Native embedding binary (same need as clean-vm-gate): flair declares mac-arm64
+# as the optional dep present on dev machines; on linux x64 we ensure the
+# matching native variant is resolvable next to the user-installed package so
+# Harper's embeddings component can load it.
+RUN GLOBAL_FLAIR_DIR="$HOME/.npm-global/lib/node_modules/@tpsdev-ai/flair" && \
+    cd "$GLOBAL_FLAIR_DIR" && \
+    npm install --no-save @node-llama-cpp/linux-x64@3 && \
+    echo "Installed linux-x64 native addon into the user package."
+
+# The test runs as flairuser.
+COPY --chown=flairuser:flairuser docker/test-first-run-hostile.sh /home/flairuser/test-first-run-hostile.sh
+USER root
+RUN chmod +x /home/flairuser/test-first-run-hostile.sh
+USER flairuser
+
+CMD ["/home/flairuser/test-first-run-hostile.sh"]
