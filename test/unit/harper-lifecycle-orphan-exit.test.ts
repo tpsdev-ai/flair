@@ -31,8 +31,15 @@ const CODE = SRC.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "
 const PRELOAD_SRC = readFileSync(ORPHAN_EXIT_PRELOAD, "utf8");
 
 const CHILD_SCRIPT = `
+// Model Harper, not Node's default: Harper's logger catches EPIPE and
+// keeps writing (the 17.8 GB loop). An unhandled stream 'error' would
+// kill this stand-in and make the known-answer a lie.
+process.stdout.on("error", () => {});
+process.stderr.on("error", () => {});
 process.stdout.write(JSON.stringify({ pid: process.pid, ppid: process.ppid }) + "\\n");
-setInterval(() => { console.error("heartbeat"); }, 50);
+setInterval(() => {
+  try { console.error("heartbeat"); } catch { /* Harper logs this and continues */ }
+}, 50);
 `;
 
 const PARENT_SCRIPT = `
