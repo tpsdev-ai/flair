@@ -111,6 +111,39 @@
       "added": "2026-07-27",
       "expires": "2026-10-25",
       "removeWhen": "validate.js publishes a fixed release AND harper picks it up, or flair stops depending on harper. The gate flags the first half automatically."
+    },
+    {
+      "ghsa": "GHSA-cqhc-2h57-wpxf",
+      "package": "mariadb",
+      "severity": "high",
+      "class": "vendor-pinned",
+      "introducedBy": "packages/adk-flair-js -> @google/adk -> @mikro-orm/mariadb -> mariadb",
+      "reason": "mariadb is resolved only inside @mikro-orm/mariadb@6.6.16, which pins it exactly at 3.4.5; that pin is owned by @google/adk's non-optional peerDependencies, a tree we do not control. The patched 3.4.6 was never published (the 3.4 line stops at 3.4.5; latest is 3.5.3), so the only 'fix' is a major bump that violates mikro-orm's exact pin. mariadb IS present in the shipped @tpsdev-ai/adk-flair tree (verified: a fresh npm i @tpsdev-ai/adk-flair@0.50.0 --omit=dev contains mariadb@3.4.5) and absent from the @tpsdev-ai/flair CLI tree, which has no @google/adk edge. It is never loaded: @google/adk's sessions/db/operations.js requires @mikro-orm/mariadb only inside the mariadb:// URI branch, and adk-flair imports @google/adk type-only with no runtime import in dist/.",
+      "added": "2026-08-29",
+      "expires": "2026-10-28",
+      "removeWhen": "If anything in dev or CI ever connects to a real MariaDB, or @google/adk starts eager-loading the driver (importing @mikro-orm/mariadb outside the mariadb:// branch), this entry is stale and must be re-reviewed. Re-check at each @mikro-orm/mariadb or @google/adk bump."
+    },
+    {
+      "ghsa": "GHSA-42r5-vhpq-m858",
+      "package": "mariadb",
+      "severity": "moderate",
+      "class": "vendor-pinned",
+      "introducedBy": "packages/adk-flair-js -> @google/adk -> @mikro-orm/mariadb -> mariadb",
+      "reason": "Same vendored edge as GHSA-cqhc-2h57-wpxf: mariadb is pinned at 3.4.5 by @mikro-orm/mariadb inside @google/adk's non-optional peers, and the patched 3.4.6 was never published. Cleartext transmission of credentials applies only when the connector is actually used, and the driver loads lazily only on an explicit mariadb:// URI that flair never issues.",
+      "added": "2026-08-29",
+      "expires": "2027-02-25",
+      "removeWhen": "Same trigger as GHSA-cqhc-2h57-wpxf: any dev/CI connection to a real MariaDB, or @google/adk eager-loading the driver, retires this entry. Re-check at each @mikro-orm/mariadb or @google/adk bump."
+    },
+    {
+      "ghsa": "GHSA-g5xc-5w98-jfvm",
+      "package": "mariadb",
+      "severity": "moderate",
+      "class": "vendor-pinned",
+      "introducedBy": "packages/adk-flair-js -> @google/adk -> @mikro-orm/mariadb -> mariadb",
+      "reason": "Same vendored edge as GHSA-cqhc-2h57-wpxf: mariadb pinned at 3.4.5 by @mikro-orm/mariadb, patched 3.4.6 never published. The SQL-injection-in-Buffer-escaping path (big5/gbk/sjis/cp932/gb18030 charsets) is only reachable through the connector, which loads lazily only on an explicit mariadb:// URI flair never issues.",
+      "added": "2026-08-29",
+      "expires": "2027-02-25",
+      "removeWhen": "Same trigger as GHSA-cqhc-2h57-wpxf: any dev/CI connection to a real MariaDB, or @google/adk eager-loading the driver, retires this entry. Re-check at each @mikro-orm/mariadb or @google/adk bump."
     }
   ]
 }
