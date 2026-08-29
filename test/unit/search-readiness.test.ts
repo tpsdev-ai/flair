@@ -8,9 +8,13 @@
  * with store size). The decision lives in resources/search-readiness.ts so
  * this file drives the shipped function — no Harper, no 66k-row store.
  */
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 import {
   buildPublicHealthBody,
+  MISSING_REGISTRY_WARN,
+  SEARCH_READY_REASON_REGISTRY_UNAVAILABLE_TABLE_ONLY,
+  SEARCH_READY_REASON_VERIFIED_VIA_ROUTE_REGISTRY,
+  _resetMissingRegistryWarnForTests,
   resolveSearchReadiness,
   type ResourceRegistry,
 } from "../../resources/search-readiness.ts";
@@ -74,7 +78,10 @@ describe("resolveSearchReadiness (flair#1326)", () => {
       bm25: { state: "ready" },
       hybridEnabled: true,
     });
-    expect(r).toEqual({ searchReady: true, ok: true, status: 200 });
+    expect(r.searchReady).toBe(true);
+    expect(r.ok).toBe(true);
+    expect(r.status).toBe(200);
+    expect(r.searchReadyReason).toBe(SEARCH_READY_REASON_REGISTRY_UNAVAILABLE_TABLE_ONLY);
   });
 
   test("cold BM25 index after restart → 200 liveness, searchReady false names the lag", () => {
@@ -104,15 +111,17 @@ describe("resolveSearchReadiness (flair#1326)", () => {
     expect(r.searchReadyReason).toMatch(/bm25 index building/i);
   });
 
-  test("BM25 ready + routes mounted → searchReady true, no reason", () => {
+  test("BM25 ready + routes mounted → searchReady true, registry-verified reason", () => {
     const r = resolveSearchReadiness({
       resources: mounted,
       memoryTable,
       bm25: { state: "ready" },
       hybridEnabled: true,
     });
-    expect(r).toEqual({ searchReady: true, ok: true, status: 200 });
-    expect(r.searchReadyReason).toBeUndefined();
+    expect(r.searchReady).toBe(true);
+    expect(r.ok).toBe(true);
+    expect(r.status).toBe(200);
+    expect(r.searchReadyReason).toBe(SEARCH_READY_REASON_VERIFIED_VIA_ROUTE_REGISTRY);
   });
 
   test("hybrid off: a cold BM25 index is not a lie — lexical fallback is the path", () => {
@@ -141,7 +150,7 @@ describe("resolveSearchReadiness (flair#1326)", () => {
     expect(r.searchReady).toBe(true);
     expect(r.ok).toBe(true);
     expect(r.status).toBe(200);
-    expect(r.searchReadyReason).toBeUndefined();
+    expect(r.searchReadyReason).toBe(SEARCH_READY_REASON_VERIFIED_VIA_ROUTE_REGISTRY);
   });
 
   test("BM25 disabled (legacy per-query scan) is still serving, so searchReady stays true", () => {
@@ -153,6 +162,45 @@ describe("resolveSearchReadiness (flair#1326)", () => {
     });
     expect(r.searchReady).toBe(true);
     expect(r.ok).toBe(true);
+    expect(r.searchReadyReason).toBe(SEARCH_READY_REASON_VERIFIED_VIA_ROUTE_REGISTRY);
+  });
+});
+
+describe("missing registry once-warn (flair#1411)", () => {
+  beforeEach(() => {
+    _resetMissingRegistryWarnForTests();
+  });
+
+  test("opts.resources null: warn fires once across two calls; reason is table-only", () => {
+    const warns: string[] = [];
+    const opts = {
+      resources: null,
+      memoryTable,
+      bm25: { state: "ready" as const },
+      hybridEnabled: true,
+      warn: (message: string) => { warns.push(message); },
+    };
+    const first = resolveSearchReadiness(opts);
+    const second = resolveSearchReadiness(opts);
+    expect(warns).toEqual([MISSING_REGISTRY_WARN]);
+    expect(first.searchReady).toBe(true);
+    expect(second.searchReady).toBe(true);
+    expect(first.searchReadyReason).toBe(SEARCH_READY_REASON_REGISTRY_UNAVAILABLE_TABLE_ONLY);
+    expect(second.searchReadyReason).toBe(SEARCH_READY_REASON_REGISTRY_UNAVAILABLE_TABLE_ONLY);
+  });
+
+  test("registry present and routes mounted: verified reason, warn does not fire", () => {
+    const warns: string[] = [];
+    const r = resolveSearchReadiness({
+      resources: mounted,
+      memoryTable,
+      bm25: { state: "ready" },
+      hybridEnabled: true,
+      warn: (message) => { warns.push(message); },
+    });
+    expect(warns).toEqual([]);
+    expect(r.searchReady).toBe(true);
+    expect(r.searchReadyReason).toBe(SEARCH_READY_REASON_VERIFIED_VIA_ROUTE_REGISTRY);
   });
 });
 
@@ -171,6 +219,28 @@ describe("buildPublicHealthBody (flair#1326)", () => {
       searchReady: true,
     });
     expect("searchReadyReason" in ready).toBe(false);
+
+    // Ready-path verification constants stay off the public body (flair#1411).
+    const verified = buildPublicHealthBody(
+      {
+        searchReady: true,
+        ok: true,
+        status: 200,
+        searchReadyReason: SEARCH_READY_REASON_VERIFIED_VIA_ROUTE_REGISTRY,
+      },
+      identity,
+    );
+    expect("searchReadyReason" in verified).toBe(false);
+    const tableOnly = buildPublicHealthBody(
+      {
+        searchReady: true,
+        ok: true,
+        status: 200,
+        searchReadyReason: SEARCH_READY_REASON_REGISTRY_UNAVAILABLE_TABLE_ONLY,
+      },
+      identity,
+    );
+    expect("searchReadyReason" in tableOnly).toBe(false);
 
     const cold = buildPublicHealthBody(
       {
