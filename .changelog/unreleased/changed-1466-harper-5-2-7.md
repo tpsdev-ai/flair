@@ -5,3 +5,7 @@
   codes on shutdown (HarperFast/harper#2316). 5.2.7 adds durable `@computed` /
   `@relationship` integrity (HarperFast/harper#2368). Harper-related work stays
   on latest stable so Flair is not working around something already shipped.
+
+  Downgrade from a 5.2.7-written store to 5.2.0 is forward-only: 5.2.0 cannot
+  open the LZ4-compressed RocksDB (`LZ4 not supported in this build`). Restore
+  the pre-upgrade snapshot. Same recovery as the 5.1 → 5.2 break.

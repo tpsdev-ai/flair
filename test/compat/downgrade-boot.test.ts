@@ -407,12 +407,18 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
           );
         }
 
-        // Baseline refused to boot. Assert the refusal message names the
-        // engine version change and a recovery path (flair#1049/#1050).
-        if (!msg.includes("Harper") || !msg.includes("data directory")) {
+        // Baseline refused to boot. Two loud forms are valid:
+        //   - Flair's engine-version stamp (names Harper + data directory)
+        //   - Harper itself: 5.2.7 writes LZ4 that 5.2.0 cannot open
+        //     ("LZ4 not supported in this build"). The stamp check does not
+        //     run here — this suite boots Harper via startHarper, not
+        //     `flair start`. Do not require the stamp phrasing.
+        const stampRefusal = msg.includes("Harper") && msg.includes("data directory");
+        const lz4Refusal = /LZ4 not supported/i.test(msg);
+        if (!stampRefusal && !lz4Refusal) {
           throw new Error(
             `Engine version changed and baseline refused to boot, but the refusal ` +
-            `message does not name the engine version or data directory — ` +
+            `is neither the engine-version stamp nor Harper's LZ4 storage break — ` +
             `unexpected failure mode:\n${msg}`,
           );
         }
@@ -425,6 +431,11 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
     }
 
     if (baselineBootError) {
+      // Even if version strings failed to resolve, Harper 5.2.7 → 5.2.0 is
+      // a documented LZ4 storage break (docs/upgrade.md). Loud and prompt.
+      if (/LZ4 not supported/i.test(baselineBootError.message)) {
+        return;
+      }
       throw new Error(
         `npm baseline failed to boot against current-build data — this is a REAL downgrade break, ` +
         `not a test bug. docs/upgrade.md's compatibility statement must be updated to say so.\n` +
@@ -437,7 +448,7 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
   }, CLI_TIMEOUT_MS);
 
   test("memory written by the current build is readable via the npm baseline after downgrade", async () => {
-    if (engineVersionChanged && baselineBootError) {
+    if (baselineBootError && (engineVersionChanged || /LZ4 not supported/i.test(baselineBootError.message))) {
       // Baseline refused — the "loud refusal" branch of the invariant.
       // Data readability is not expected; the recovery path is the snapshot.
       return;
@@ -450,7 +461,7 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
   }, CLI_TIMEOUT_MS);
 
   test("presence written by the current build is readable via the npm baseline after downgrade", async () => {
-    if (engineVersionChanged && baselineBootError) {
+    if (baselineBootError && (engineVersionChanged || /LZ4 not supported/i.test(baselineBootError.message))) {
       // Baseline refused — the "loud refusal" branch of the invariant.
       return;
     }
