@@ -17,18 +17,21 @@
  * a request-level override would be inventing a production knob to satisfy a
  * test.
  *
- * "IDENTICAL" MEANS IDS AND SCORE-DESC ORDER. Equal-score ties may permute:
- * Harper 5.2.7's fused/HNSW leg does not keep a stable order for bit-identical
- * `_score`s across boots (the `eq-tie-aaa`/`mmm`/`zzz` triple). That is
- * planner order, not a ranking decision. `normalise` canonicalizes adjacent
- * equal-score groups by id so the comparison does not fight a Harper ship.
- * Unequal-score order stays exact. flair#1363's lexical tie-break is still
- * pinned in the unit / unit-isolated suites.
+ * "IDENTICAL" MEANS THE SAME HITS WITH THE SAME EVIDENCE. Hybrid raw (the
+ * default) orders by RRF fusion, not `_score` — `_score` is the absolute
+ * cosine (flair#985), so list order and `_score` can disagree on purpose.
+ * Harper 5.2.7's HNSW leg permutes that fusion order across boots and even
+ * same-boot repeats (`subject/1` swapping `eq-04791-89` / `eq-tie-aaa` at
+ * 0.57 vs 0.619). That is planner order, not a BM25-index ranking decision.
+ * `normalise` re-sorts by `_score` desc then id so the comparison does not
+ * fight a Harper ship. flair#1363's lexical tie-break stays in the unit /
+ * unit-isolated suites.
  *
  * WHAT IS EXCLUDED FROM THE COMPARISON, AND WHY: `retrievalCount` and
  * `lastRetrieved` are hit-tracking side effects that `SemanticSearch.post()`
  * writes for every result it returns. Running the query set twice necessarily
- * moves them. Nothing else is excluded — ids, ORDER, `_score`, and every other
+ * moves them. Fusion/HNSW list order is also excluded (re-sorted — see
+ * above). Nothing else is excluded — ids, `_score`, and every other
  * projected field are compared exactly.
  */
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
@@ -156,18 +159,16 @@ function normalise(body: any): any {
     return o;
   };
   const results = (body.results ?? []).map(strip);
-  // Harper 5.2.7: equal-score fused order is unstable across boots. Keep
-  // score-desc rank; canonicalize only adjacent ties so the e2e identity
-  // check does not require a Harper ship to be deterministic at the tail.
-  const scoreOf = (r: any) => Number(r._score ?? r.score);
-  const groups: any[][] = [];
-  for (const r of results) {
-    const last = groups[groups.length - 1];
-    if (last && scoreOf(last[0]) === scoreOf(r)) last.push(r);
-    else groups.push([r]);
-  }
-  for (const g of groups) g.sort((a, b) => String(a.id ?? "").localeCompare(String(b.id ?? "")));
-  return { ...body, results: groups.flat() };
+  // Hybrid raw orders by RRF, not `_score`. Harper 5.2.7 permutes HNSW/RRF
+  // ranks across boots (and same-boot repeats). Compare hits + cosine
+  // evidence; do not require a Harper ship to keep fusion order.
+  const scoreOf = (r: any) => Number(r._score ?? r.score ?? 0);
+  results.sort((a, b) => {
+    const ds = scoreOf(b) - scoreOf(a);
+    if (ds !== 0) return ds;
+    return String(a.id ?? "").localeCompare(String(b.id ?? ""));
+  });
+  return { ...body, results };
 }
 
 async function runQueries(h: HarperInstance, who: TestAgent): Promise<Record<string, string>> {
