@@ -258,6 +258,42 @@ describe("RecordUsage e2e (real Harper) — flair#683 usage-feedback signal", ()
     expect((await alreadyCheck.json()).usageCount).toBe(1);
   }, 60_000);
 
+  test("flair#1410: POST /RecordUsage MERGES memoryId + memoryIds — singular id not in the array is credited", async () => {
+    // The endpoint previously preferred memoryIds (`data?.memoryIds ?? …`)
+    // and silently dropped memoryId. A client that POSTs both fields
+    // without flattening first must still credit the singular id.
+    const owner = mkAgent(`ru-1410-owner-${randomUUID()}`);
+    const reporter = mkAgent(`ru-1410-reporter-${randomUUID()}`);
+    await registerAgent(harper, owner);
+    await registerAgent(harper, reporter);
+
+    const memA = `${owner.id}-a`;
+    const memB = `${owner.id}-b`;
+    const memSolo = `${owner.id}-solo`;
+    for (const id of [memA, memB, memSolo]) {
+      const put = await putMemory(harper, owner, id, {
+        agentId: owner.id,
+        content: `flair#1410 merge test memory ${id}, long enough for the dedup gate.`,
+        durability: "standard",
+      });
+      expect(put.status).toBe(200);
+    }
+
+    const res = await recordUsage(harper, reporter, { memoryId: memSolo, memoryIds: [memA, memB] });
+    expect(res.status, `RecordUsage returned ${res.status}: ${JSON.stringify(res.body).slice(0, 300)}`).toBe(200);
+    expect(res.body).toEqual({ recorded: true });
+
+    const counts: Record<string, number> = {};
+    for (const id of [memA, memB, memSolo]) {
+      const rec: any = await (await getMemory(harper, owner, id)).json();
+      counts[id] = rec.usageCount ?? 0;
+    }
+    expect(counts[memA], "plural id A credited").toBe(1);
+    expect(counts[memB], "plural id B credited").toBe(1);
+    // Powered: stays red if the endpoint still prefers memoryIds and drops memoryId.
+    expect(counts[memSolo], "singular memoryId not in memoryIds must be credited").toBe(1);
+  }, 60_000);
+
   test("input validation: empty/missing memoryIds is a 400 (not silently a no-op 200)", async () => {
     const agent = mkAgent(`ru-badinput-${randomUUID()}`);
     await registerAgent(harper, agent);

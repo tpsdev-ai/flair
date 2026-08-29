@@ -234,6 +234,17 @@ describe("tools/list — exactly the 12 curated tools", () => {
     // mutator — it's explicitly allow-listed here rather than excluded.)
     expect(names.some((n: string) => /^(create|delete)_/.test(n))).toBe(false);
   });
+
+  it("record_usage schema states the memoryId+memoryIds merge contract (flair#1410)", async () => {
+    const res = await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { sub: "s" }));
+    const body = await parse(res);
+    const tool = body.result.tools.find((t: any) => t.name === "record_usage");
+    expect(tool.description).toContain("merged");
+    expect(tool.description).toContain("union");
+    expect(tool.description).toMatch(/memoryId.*memoryIds/);
+    expect(tool.inputSchema.properties.memoryId.description).toMatch(/[Mm]erged/);
+    expect(tool.inputSchema.properties.memoryIds.description).toMatch(/[Mm]erged/);
+  });
 });
 
 // ─── initialize / ping ───────────────────────────────────────────────────────
@@ -722,6 +733,26 @@ describe("tools/call — scopes to the resolved agent (no forging)", () => {
     ));
     expect(lastCall?.resource).toBe("RecordUsage.post");
     expect(lastCall?.args).toEqual({ memoryIds: ["mem-solo"], attribution: undefined });
+  });
+
+  it("record_usage MERGES memoryId + memoryIds — singular id not in the array is still forwarded (flair#1410)", async () => {
+    await mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "record_usage", arguments: { memoryId: "mem-solo", memoryIds: ["mem-a", "mem-b"] } } },
+      { sub: "sub-bob" },
+    ));
+    expect(lastCall?.resource).toBe("RecordUsage.post");
+    const credited = new Set(lastCall?.args.memoryIds);
+    // Powered: this fails if native still prefers memoryIds and drops memoryId.
+    expect(credited.has("mem-solo"), "native /mcp must credit the singular memoryId when it is not in memoryIds").toBe(true);
+    expect(credited).toEqual(new Set(["mem-a", "mem-b", "mem-solo"]));
+  });
+
+  it("record_usage merges overlapping memoryId + memoryIds without duplicating (flair#1410)", async () => {
+    await mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "record_usage", arguments: { memoryId: "mem-a", memoryIds: ["mem-a", "mem-b"] } } },
+      { sub: "sub-bob" },
+    ));
+    expect(new Set(lastCall?.args.memoryIds)).toEqual(new Set(["mem-a", "mem-b"]));
   });
 });
 

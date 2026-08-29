@@ -3,6 +3,7 @@ import {
   buildRecordUsageBody,
   citationIds,
   CITE_USAGE_NUDGE,
+  RECORD_USAGE_ID_MERGE_CONTRACT,
   withCiteNudge,
 } from "../src/usage.ts";
 
@@ -26,18 +27,19 @@ describe("record_usage body (flair#1147)", () => {
     });
   });
 
-  test("when BOTH memoryId and memoryIds are supplied, MERGE (do not prefer-and-drop like native /mcp)", () => {
-    // Native /mcp and RecordUsage.post() PREFER memoryIds (never union).
-    // Stdio merge is load-bearing because it flattens first (Sherlock/Kern
-    // #1404). Native prefer is the pre-existing delivered-but-uncounted
-    // bug tracked in flair#1410 — not this PR's to fix.
+  test("when BOTH memoryId and memoryIds are supplied, MERGE (flair#1410 — same contract as native /mcp)", () => {
     expect(buildRecordUsageBody({ memoryId: "mem-b", memoryIds: ["mem-a"] })).toEqual({
       memoryIds: ["mem-a", "mem-b"],
     });
-    // Contrast: native prefer would have returned ["mem-a"] only.
     expect(buildRecordUsageBody({ memoryId: "mem-solo", memoryIds: ["mem-a", "mem-b"] })).toEqual({
       memoryIds: ["mem-a", "mem-b", "mem-solo"],
     });
+  });
+
+  test("schema states the merge contract (flair#1410)", () => {
+    expect(RECORD_USAGE_ID_MERGE_CONTRACT).toContain("merged");
+    expect(RECORD_USAGE_ID_MERGE_CONTRACT).toContain("union");
+    expect(RECORD_USAGE_ID_MERGE_CONTRACT).toMatch(/memoryId.*memoryIds/);
   });
 
   test("optional attribution is forwarded only when non-empty", () => {

@@ -97,6 +97,7 @@ import { Resource } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { recordUsageContribution, MAX_USAGE_IDS_PER_CALL } from "./usage-recording.js";
+import { resolveRecordUsageIds } from "./usage-ids.js";
 
 const UNAUTH = () =>
   new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
@@ -166,14 +167,20 @@ export class RecordUsage extends Resource {
     const rl = checkRateLimit(agentId, "usage");
     if (!rl.allowed) return rateLimitResponse(rl.retryAfterMs!, "usage");
 
-    const rawIds: unknown = data?.memoryIds ?? (typeof data?.memoryId === "string" ? [data.memoryId] : undefined);
-    if (!Array.isArray(rawIds) || rawIds.length === 0 || !rawIds.every((id) => typeof id === "string" && id.length > 0)) {
+    // flair#1410: MERGE memoryId + memoryIds (union, then dedupe). The
+    // previous `data?.memoryIds ?? [data?.memoryId]` preferred the plural
+    // and silently dropped the singular — quiet data loss. Unioning HERE
+    // means a client that POSTs both fields straight through (without
+    // flattening first) still credits both. Native `/mcp` also unions
+    // before calling this; the endpoint is the guarantee, not the client.
+    const resolved = resolveRecordUsageIds(data, MAX_IDS_PER_CALL);
+    if (!resolved.ok) {
+      if (resolved.error === "cap") {
+        return BAD_REQUEST(`memoryIds exceeds the per-call limit of ${MAX_IDS_PER_CALL}`);
+      }
       return BAD_REQUEST("memoryIds must be a non-empty array of memory id strings");
     }
-    if (rawIds.length > MAX_IDS_PER_CALL) {
-      return BAD_REQUEST(`memoryIds exceeds the per-call limit of ${MAX_IDS_PER_CALL}`);
-    }
-    const memoryIds = [...new Set(rawIds as string[])]; // dedupe within THIS call too
+    const memoryIds = resolved.ids;
 
     const attribution = sanitizeAttribution(data?.attribution);
     const now = new Date().toISOString();

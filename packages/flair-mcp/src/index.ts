@@ -54,7 +54,7 @@ import {
   type PresenceActivity,
 } from "./presence.js";
 import { readEnvOrUnset, stripInterpolationLiteralsFromEnv } from "./env-guard.js";
-import { buildRecordUsageBody, citationIds, withCiteNudge } from "./usage.js";
+import { buildRecordUsageBody, citationIds, withCiteNudge, RECORD_USAGE_ID_MERGE_CONTRACT } from "./usage.js";
 import { serverInfo } from "./version.js";
 
 // ─── Error helpers ──────────────────────────────────────────────────────────
@@ -609,10 +609,11 @@ server.tool(
 server.tool(
   "record_usage",
   "Report that one or more memories were actually USED — cited or relied on to ground an answer or decision. " +
-    "Distinct from search (surfacing a memory is not usage). Dedup'd (you can only count once per memory) and rate-limited.",
+    "Distinct from search (surfacing a memory is not usage). Dedup'd (you can only count once per memory) and rate-limited. " +
+    RECORD_USAGE_ID_MERGE_CONTRACT,
   {
-    memoryId: z.string().optional().describe("A single memory id that was used"),
-    memoryIds: z.array(z.string()).optional().describe("IDs of the memories that were used (max 20 per call)"),
+    memoryId: z.string().optional().describe("A single memory id that was used. Merged with memoryIds when both are supplied — not dropped."),
+    memoryIds: z.array(z.string()).optional().describe("IDs of the memories that were used (max 20 per call). Merged with memoryId when both are supplied."),
     attribution: z.string().optional().describe("Optional one-line note on how it was used (opaque — stored for audit only)"),
   },
   async ({ memoryId, memoryIds, attribution }) => {
