@@ -119,24 +119,18 @@ export class Health extends Resource {
 }
 
 /** Same sources /Health and /HealthDetail consult so they cannot disagree. */
-let _warnedMissingRegistry = false;
-function currentSearchReadiness(): SearchReadiness {
-  // Shipped Harper launch: this Resource is already registered, so
-  // server.resources is populated. The null skip is a stated fail-open
-  // (Sherlock on #1406) for the injectable/test path — not an accident.
+export function currentSearchReadiness(): SearchReadiness {
+  // Fail-open when the registry is missing (Sherlock on #1406 / flair#1411):
+  // do not 503 forever. resolveSearchReadiness warns once and names the
+  // degradation; we do not treat "registry should always be here" as a given.
   const resources = (server as { resources?: ResourceRegistry }).resources ?? null;
-  if (!resources && !_warnedMissingRegistry) {
-    _warnedMissingRegistry = true;
-    logger.warn?.(
-      "Health: server.resources is absent — skipping the search-route mount check (table-only fail-open). Shipped Harper launch always exposes the registry.",
-    );
-  }
   return resolveSearchReadiness({
     resources,
     memoryTable: db.flair?.Memory,
     bm25: bm25IndexStatus(),
     hybridEnabled: hybridEnabled(),
     bm25IndexEnabled: bm25IndexEnabled(),
+    warn: (message) => { logger.warn?.(message); },
   });
 }
 
@@ -171,7 +165,10 @@ export class HealthDetail extends Resource {
     // and a warning name the lag so `flair status` / operators can see it.
     const readiness = currentSearchReadiness();
     stats.searchReady = readiness.searchReady;
-    if (readiness.searchReadyReason) {
+    // Public/detail shape is unchanged: searchReadyReason stays a lag signal
+    // (present iff !searchReady). Ready-path verification constants stay on
+    // the decision object (flair#1411).
+    if (!readiness.searchReady && readiness.searchReadyReason) {
       stats.searchReadyReason = readiness.searchReadyReason;
       warnings.push({ level: "warn", message: readiness.searchReadyReason });
     }

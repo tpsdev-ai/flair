@@ -29,6 +29,28 @@
  *     a search that never comes.
  */
 
+/**
+ * How a ready result was verified. Constant strings — no interpolation
+ * (flair#1411). Public /Health still omits this field when searchReady is
+ * true; the values live on the decision object so a caller of
+ * resolveSearchReadiness can tell registry-verified from table-only.
+ */
+export const SEARCH_READY_REASON_VERIFIED_VIA_ROUTE_REGISTRY =
+  "verified via route registry";
+export const SEARCH_READY_REASON_REGISTRY_UNAVAILABLE_TABLE_ONLY =
+  "registry unavailable, table check only";
+
+/** Once-warn when the route-mount check is skipped (flair#1411). */
+export const MISSING_REGISTRY_WARN =
+  "search route-mount verification is degraded; searchReady now rests on the table check alone";
+
+let warnedMissingRegistry = false;
+
+/** Test-only: forget the one-shot missing-registry warning. */
+export function _resetMissingRegistryWarnForTests(): void {
+  warnedMissingRegistry = false;
+}
+
 export type SearchReadiness = {
   /** False when search routes/table are down OR the hybrid index is still cold. */
   searchReady: boolean;
@@ -36,7 +58,12 @@ export type SearchReadiness = {
   ok: boolean;
   /** HTTP status for the public /Health endpoint. */
   status: number;
-  /** Present iff !searchReady — names the lag instead of implying "healthy." */
+  /**
+   * When !searchReady: names the lag instead of implying "healthy."
+   * When searchReady: names how readiness was verified (route registry vs
+   * table check only). Public /Health still omits the field when ready —
+   * that shape is unchanged (flair#1411).
+   */
   searchReadyReason?: string;
 };
 
@@ -63,14 +90,11 @@ function routeMounted(resources: ResourceRegistry, name: string): boolean {
  * Decide whether search is actually usable, and whether /Health should claim
  * the process is healthy.
  *
- * `resources` is optional. Stated fail-open (Sherlock on #1406): when the
- * registry is missing we skip the route-mount check rather than 503 forever.
- * A table handle can exist while `/Memory` and `/SemanticSearch` still 404,
- * so this is weaker than the primary defense. In the shipped launch path
- * `/Health` is served by this Resource after Harper has registered us, so
- * `server.resources` is populated; the skip is the injectable/test path
- * (and a theoretical export without a registry). Health.ts logs once if
- * the live call site actually takes it.
+ * `resources` is optional. Stated fail-open (Sherlock on #1406 / flair#1411):
+ * when the registry is missing we skip the route-mount check rather than
+ * 503 forever. A table handle can exist while `/Memory` and `/SemanticSearch`
+ * still 404, so this is weaker than the primary defense. We do not fail
+ * closed. We warn once and name the degradation on `searchReadyReason`.
  */
 export function resolveSearchReadiness(opts: {
   resources?: ResourceRegistry | null;
@@ -79,7 +103,10 @@ export function resolveSearchReadiness(opts: {
   hybridEnabled?: boolean;
   /** Persistent BM25 index kill switch (`FLAIR_BM25_INDEX`). Default on. */
   bm25IndexEnabled?: boolean;
+  /** Optional sink for the missing-registry once-warn (live path: harper logger). */
+  warn?: (message: string) => void;
 }): SearchReadiness {
+  let readyReason: string = SEARCH_READY_REASON_REGISTRY_UNAVAILABLE_TABLE_ONLY;
   if (opts.resources) {
     const memoryMounted = routeMounted(opts.resources, "Memory");
     const searchMounted = routeMounted(opts.resources, "SemanticSearch");
@@ -89,6 +116,12 @@ export function resolveSearchReadiness(opts: {
         !searchMounted ? "SemanticSearch" : null,
       ].filter(Boolean).join(", ");
       return notServing(`search routes not mounted (${missing})`);
+    }
+    readyReason = SEARCH_READY_REASON_VERIFIED_VIA_ROUTE_REGISTRY;
+  } else {
+    if (!warnedMissingRegistry) {
+      warnedMissingRegistry = true;
+      opts.warn?.(MISSING_REGISTRY_WARN);
     }
   }
 
@@ -115,7 +148,7 @@ export function resolveSearchReadiness(opts: {
     }
   }
 
-  return { searchReady: true, ok: true, status: 200 };
+  return { searchReady: true, ok: true, status: 200, searchReadyReason: readyReason };
 }
 
 function notServing(searchReadyReason: string): SearchReadiness {
@@ -137,6 +170,10 @@ export function buildPublicHealthBody(
     buildCommit: identity.buildCommit,
     searchReady: readiness.searchReady,
   };
-  if (readiness.searchReadyReason) body.searchReadyReason = readiness.searchReadyReason;
+  // Public shape is unchanged: searchReadyReason is still present iff !searchReady.
+  // Ready-path verification constants stay on the decision object (flair#1411).
+  if (!readiness.searchReady && readiness.searchReadyReason) {
+    body.searchReadyReason = readiness.searchReadyReason;
+  }
   return body;
 }
