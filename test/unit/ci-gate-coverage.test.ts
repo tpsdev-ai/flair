@@ -254,9 +254,17 @@ describe("the impl-term-leak gate cannot report clean without scanning", () => {
     expect(src).toContain("GREP_RC");
   });
 
-  test("an empty corpus is a failure, not a pass", () => {
+  test("an empty source is a failure, not a pass (flair#1427)", () => {
+    // The all-or-nothing `! -s $TMPFILE` floor never fired in a real checkout
+    // (README.md / docs/ keep the total non-empty). The floor must refuse
+    // per source, naming the one that came up empty.
     expect(src).not.toContain('echo "No files to search."');
-    expect(src).toMatch(/found 0 files to search[\s\S]*?exit 1/);
+    expect(src).toContain("contributed 0 files");
+    expect(src).toContain("FLOOR_FAILED");
+    expect(src).toContain("CHANGELOG.md contributed 0 files");
+    expect(src).toContain("packages/*/dist/ contributed 0 files");
+    expect(src).toContain("have not been built");
+    expect(src).toContain("built and empty");
   });
 
   test("CHANGELOG.md and .changelog/ are in the scan corpus (flair#1420)", () => {
@@ -265,7 +273,8 @@ describe("the impl-term-leak gate cannot report clean without scanning", () => {
     // docs/ + packages/ unnoticed.
     expect(src).toMatch(/echo "CHANGELOG\.md"/);
     expect(src).toMatch(/find \.changelog -type f/);
-    expect(src).toContain("CHANGELOG.md and .changelog/");
+    expect(src).toContain("CHANGELOG.md contributed 0 files");
+    expect(src).toContain(".changelog/ contributed 0 files");
   });
 
   test("the file list is not word-split", () => {
