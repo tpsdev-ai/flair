@@ -1441,8 +1441,13 @@ function sessionStartHookHint(agentId: string, path: string): string {
  * after the hook is present (whether from a prior call or already there)
  * reports ok:true, applied:false — safe to call on every `flair init`.
  */
-export function applyOrReportSessionStartHook(homeDir: string, agentId: string, skip: boolean): ApplyOrReportResult {
-  const existing = checkSessionStartHook(homeDir);
+export function applyOrReportSessionStartHook(
+  homeDir: string,
+  agentId: string,
+  skip: boolean,
+  settingsPath?: string,
+): ApplyOrReportResult {
+  const existing = checkSessionStartHook(homeDir, settingsPath);
   if (existing.present) {
     return { applied: false, ok: true, message: `SessionStart hook already wired in ${existing.path}` };
   }
@@ -1452,7 +1457,7 @@ export function applyOrReportSessionStartHook(homeDir: string, agentId: string, 
     return { applied: false, ok: false, message: "SessionStart hook skipped (--skip-hook)", hint };
   }
 
-  const fix = fixSessionStartHook(homeDir, agentId);
+  const fix = fixSessionStartHook(homeDir, agentId, settingsPath ?? existing.path);
   return { applied: fix.ok, ok: fix.ok, message: fix.message, hint: fix.ok ? undefined : hint };
 }
 

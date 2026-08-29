@@ -60,6 +60,7 @@ describe("flair upgrade — Commander flag wiring (flair#635)", () => {
     expect(optionNames).toContain("--restart");
     expect(optionNames).toContain("--no-restart");
     expect(optionNames).toContain("--no-verify");
+    expect(optionNames).toContain("--install-hooks");
   });
 
   test("--check is still a distinct flag, unaffected by the restart/verify additions", () => {

@@ -417,37 +417,10 @@ export function renderDetachedWarning(m: LaunchdManagement, headline: string): s
   return lines;
 }
 
-/** What `flair upgrade` prints once its post-restart probe has PASSED. */
-export interface VerifiedSummary {
-  /** True when the run finished outside launchd — no unqualified success marker is emitted. */
-  degraded: boolean;
-  /** Exactly what to print. Written to stderr when degraded, stdout otherwise. */
-  lines: string[];
-}
-
-/**
- * The final status line of a successful `flair upgrade`, given what the probe
- * found AND what launchd is doing.
- *
- * This is the reported defect reduced to a function, on purpose. The bug was
- * never in the probe — `healthy, authenticated, running <version>` was true —
- * it was that those three facts were rendered as an unqualified ✅ while a
- * fourth, unmeasured fact (the instance had been dropped out of its process
- * manager) was the one that mattered. Deciding it here rather than inline in
- * the command means the decision is testable without performing an upgrade,
- * which on the darwin path nothing else can do: no CI lane runs it.
- *
- * The verified facts are still reported in the degraded case. The upgrade DID
- * land, and hiding that would swap one misleading summary for another; what
- * changes is the marker and the sentence around it.
- */
-export function renderVerifiedSummary(version: string | null, m: LaunchdManagement): VerifiedSummary {
-  const facts = `healthy, authenticated${version ? `, running ${version}` : ""}`;
-  if (!isDetached(m)) {
-    return { degraded: false, lines: [`✅ verified: ${facts}`] };
-  }
-  return {
-    degraded: true,
-    lines: renderDetachedWarning(m, `upgrade landed (${facts}) but the instance is NOT running under launchd.`),
-  };
-}
+// renderVerifiedSummary used to live here and qualify ✅ from version +
+// LaunchdManagement alone (flair#1022). That signature was the ceiling on
+// what it could notice — a blacklist of one known-unhealthy form. The
+// enumerated doctor runner in doctor-run.ts is now the source of the
+// success marker (flair#1439). renderDetachedWarning stays: it is the
+// wording for a detached launchd check, used by the runner and by
+// `flair restart`.
