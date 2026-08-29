@@ -101,6 +101,29 @@ export function classifyDowngradeOutcome(
   return { kind: "refusal", exitCode: exitCode ?? -1, stderr };
 }
 
+/** startHarper timeout text — a hang, not a refusal (flair#1050).
+ *  `waitForHealth` says "did not respond within"; the startup timer says
+ *  "timed out" and appends the Harper log, so LZ4 can appear on a hang. */
+export function isHungBootMessage(msg: string): boolean {
+  return msg.includes("timed out") || msg.includes("did not respond within");
+}
+
+/** Harper 5.2.7→5.2.0 LZ4 crash is loud refusal only if the process did not hang. */
+export function isLz4LoudRefusal(msg: string): boolean {
+  if (isHungBootMessage(msg)) return false;
+  return /LZ4 not supported/i.test(msg);
+}
+
+function assertBaselineDidNotHang(err: Error | null): void {
+  if (!err) return;
+  if (isHungBootMessage(err.message)) {
+    throw new Error(
+      `baseline HUNG (timeout) — this is the silent-bad-outcome case ` +
+      `the invariant forbids:\n${err.message}`,
+    );
+  }
+}
+
 // Generous but bounded — a fresh `npm install` from the public registry plus
 // two real Harper installs/boots easily takes 1-3 minutes on a cold cache
 // (same figure federation-mixed-version.test.ts uses for the same reason).
@@ -400,12 +423,7 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
 
         // Distinguish refusal (prompt non-zero exit) from hang (timeout).
         // A hang is the silent-bad-outcome case the invariant forbids.
-        if (msg.includes("timed out") || msg.includes("did not respond within")) {
-          throw new Error(
-            `baseline HUNG (timeout) — this is the silent-bad-outcome case ` +
-            `the invariant forbids:\n${msg}`,
-          );
-        }
+        assertBaselineDidNotHang(baselineBootError);
 
         // Baseline refused to boot. Two loud forms are valid:
         //   - Flair's engine-version stamp (names Harper + data directory)
@@ -414,7 +432,7 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
         //     run here — this suite boots Harper via startHarper, not
         //     `flair start`. Do not require the stamp phrasing.
         const stampRefusal = msg.includes("Harper") && msg.includes("data directory");
-        const lz4Refusal = /LZ4 not supported/i.test(msg);
+        const lz4Refusal = isLz4LoudRefusal(msg);
         if (!stampRefusal && !lz4Refusal) {
           throw new Error(
             `Engine version changed and baseline refused to boot, but the refusal ` +
@@ -433,7 +451,10 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
     if (baselineBootError) {
       // Even if version strings failed to resolve, Harper 5.2.7 → 5.2.0 is
       // a documented LZ4 storage break (docs/upgrade.md). Loud and prompt.
-      if (/LZ4 not supported/i.test(baselineBootError.message)) {
+      // Hang first: startHarper timeouts append the Harper log, so LZ4 can
+      // appear on a hung baseline. A timeout is hung, not refusal.
+      assertBaselineDidNotHang(baselineBootError);
+      if (isLz4LoudRefusal(baselineBootError.message)) {
         return;
       }
       throw new Error(
@@ -448,7 +469,8 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
   }, CLI_TIMEOUT_MS);
 
   test("memory written by the current build is readable via the npm baseline after downgrade", async () => {
-    if (baselineBootError && (engineVersionChanged || /LZ4 not supported/i.test(baselineBootError.message))) {
+    assertBaselineDidNotHang(baselineBootError);
+    if (baselineBootError && (engineVersionChanged || isLz4LoudRefusal(baselineBootError.message))) {
       // Baseline refused — the "loud refusal" branch of the invariant.
       // Data readability is not expected; the recovery path is the snapshot.
       return;
@@ -461,7 +483,8 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
   }, CLI_TIMEOUT_MS);
 
   test("presence written by the current build is readable via the npm baseline after downgrade", async () => {
-    if (baselineBootError && (engineVersionChanged || /LZ4 not supported/i.test(baselineBootError.message))) {
+    assertBaselineDidNotHang(baselineBootError);
+    if (baselineBootError && (engineVersionChanged || isLz4LoudRefusal(baselineBootError.message))) {
       // Baseline refused — the "loud refusal" branch of the invariant.
       return;
     }
@@ -517,5 +540,19 @@ describe("classifyDowngradeOutcome", () => {
     // the timeout command killed it, not that it printed a message and exited.
     const result = classifyDowngradeOutcome(124, "Harper engine version mismatch");
     expect(result.kind).toBe("hung");
+  });
+
+  test("LZ4 in a startHarper timeout is hung, not loud refusal", () => {
+    const timedOut =
+      "Harper startup timed out after 60000ms. Log:\nLZ4 not supported in this build";
+    const noHealth =
+      "Harper at http://127.0.0.1:1 did not respond within 60000ms (120 attempts). " +
+      "Process still alive. Harper log:\nLZ4 not supported in this build";
+    expect(isHungBootMessage(timedOut)).toBe(true);
+    expect(isHungBootMessage(noHealth)).toBe(true);
+    expect(isLz4LoudRefusal(timedOut)).toBe(false);
+    expect(isLz4LoudRefusal(noHealth)).toBe(false);
+    expect(isLz4LoudRefusal("Error: LZ4 not supported in this build")).toBe(true);
+    expect(isHungBootMessage("Error: LZ4 not supported in this build")).toBe(false);
   });
 });
