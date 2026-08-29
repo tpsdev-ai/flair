@@ -268,6 +268,84 @@ async function killProcess(proc: ChildProcess): Promise<void> {
   proc.removeAllListeners();
 }
 
+// ─── flair#1440: wait for the RocksDB LOCK, not just the process exit ────────
+//
+// Harper spawns detached child services (processManagement.js forks them with
+// `detached: true`) that hold the database LOCK. `killProcess` above waits for
+// the PARENT to exit, but the children outlive it by a beat — and the next
+// `harper install` contends for the LOCK, not for the parent's exit. Exit is
+// observable and insufficient: ~1-in-500 restarts lose that race and fail with
+// "Resource temporarily unavailable" on <installDir>/database/*/LOCK.
+//
+// So a restart that keeps the install dir must wait for the LOCK to be free.
+// The wait is BOUNDED and keys on the lock specifically: our own exiting
+// children release it within a couple of seconds, while a genuinely-occupied
+// database (a DIFFERENT live Harper) holds it indefinitely and is surfaced as
+// a loud failure naming the lock — never retried into, never force-cleared.
+const LOCK_WAIT_TIMEOUT_MS = 5_000;
+const LOCK_POLL_INTERVAL_MS = 50;
+
+/** RocksDB LOCK files under <installDir>/database/<db>/LOCK. */
+function lockFilesUnder(installDir: string): string[] {
+  const dbDir = join(installDir, "database");
+  let dbs: string[];
+  try { dbs = readdirSync(dbDir); } catch { return []; }
+  return dbs
+    .map((d) => join(dbDir, d, "LOCK"))
+    .filter((p) => existsSync(p));
+}
+
+/** True when no process holds a POSIX (fcntl) record lock on `lockPath`.
+ *
+ *  RocksDB locks its LOCK file with fcntl(F_SETLK) — a POSIX record lock —
+ *  NOT flock(2). A `flock -n` probe would therefore report "free" while the
+ *  lock is actually held (the two are separate namespaces). We read
+ *  /proc/locks (Linux) and match the file's device:inode against POSIX locks.
+ *  Non-destructive: we only READ the lock table, never touch the LOCK file. */
+function isLockFree(lockPath: string): boolean {
+  const st = statSync(lockPath);
+  const major = (st.dev >> 8) & 0xfff;
+  const minor = (st.dev & 0xff) | ((st.dev >> 12) & 0xfff00);
+  const needle = `${major.toString(16).padStart(2, "0")}:${minor.toString(16).padStart(2, "0")}:${st.ino} `;
+  try {
+    const locks = readFileSync("/proc/locks", "utf8");
+    return !locks.split("\n").some((line) => line.includes("POSIX") && line.includes(needle));
+  } catch {
+    return false; // /proc/locks unreadable → assume held (fail safe)
+  }
+}
+
+/** Wait (bounded) for every RocksDB LOCK under `installDir` to be released.
+ *
+ *  The probe reads /proc/locks, which is Linux-only. On any other platform the
+ *  fcntl lock is UNVERIFIABLE — there is no /proc/locks to read. We must not
+ *  silently assume "free" (that reintroduces the exact race this fix removes)
+ *  nor assume "held" (that hard-fails every restart on the platform). So we
+ *  fall back to the pre-change behaviour — wait for the process to exit, which
+ *  `killProcess` already did — and LOG that the lock is unverifiable here. */
+export async function waitForLocksFree(
+  installDir: string,
+  timeoutMs = LOCK_WAIT_TIMEOUT_MS,
+  platform: NodeJS.Platform = process.platform,
+): Promise<void> {
+  const locks = lockFilesUnder(installDir);
+  if (locks.length === 0) return;
+  if (platform !== "linux") {
+    console.warn(
+      `[harper-lifecycle] RocksDB lock unverifiable on ${platform} (no /proc/locks); ` +
+        `falling back to exit-wait — the restart lock race is not mitigated on this platform.`,
+    );
+    return;
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (locks.every(isLockFree)) return;
+    await new Promise((r) => setTimeout(r, LOCK_POLL_INTERVAL_MS));
+  }
+  const held = locks.filter((l) => !isLockFree(l));
+  throw new Error(`Harper database lock still held after ${timeoutMs}ms: ${held.join(", ")}`);
+}
+
 async function waitForHealth(
   httpURL: string,
   timeoutMs = 60_000,
@@ -619,6 +697,14 @@ export async function stopHarper(inst: HarperInstance, opts: StopHarperOptions =
   if (inst.__tracked) LIVE_INSTANCES.delete(inst.__tracked);
 
   if (inst.process) await killProcess(inst.process);
+  // flair#1440: when the install dir is kept for reuse, wait for the RocksDB
+  // LOCK to be released — not just for the process to exit. The next install
+  // contends for the LOCK, and Harper's detached children release it a beat
+  // after the parent exits.
+  const keepDir = !inst.ownsInstallDir || opts.keepInstallDir;
+  if (inst.installDir && keepDir) {
+    await waitForLocksFree(inst.installDir);
+  }
   // Never remove a directory this instance didn't create (ownsInstallDir
   // false — the caller supplied it and owns its lifecycle), and never remove
   // one the caller explicitly asked to keep.

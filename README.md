@@ -16,17 +16,28 @@ Runs on a laptop, a VPS, or anywhere Node does. Needs **Node.js 22+**.
 # 1. Install the CLI (no sudo)
 npm install -g @tpsdev-ai/flair
 
-# 2. Bootstrap the instance and register an agent
+# 2. Verify the command is on your PATH
+flair --version
+
+# 3. Bootstrap the instance and register an agent
 flair init --agent mybot
 
-# 3. Write a memory
+# 4. Write a memory
 flair memory add --agent mybot "Harper v5 sandbox blocks node:module but process.dlopen works"
 
-# 4. Find it back by meaning, not by keyword
+# 5. Find it back by meaning, not by keyword
 flair search --agent mybot "native addon loading in sandboxed runtimes"
 ```
 
-Step 4 finds the memory you never keyword-matched:
+If `flair --version` prints `command not found`, your npm global bin directory is not on `PATH`:
+
+```bash
+export PATH="$(npm prefix -g)/bin:$PATH"
+```
+
+Re-run `flair --version` to confirm, then continue.
+
+Step 5 finds the memory you never keyword-matched:
 
 ```
   Harper v5 sandbox blocks node:module but process.dlopen works
