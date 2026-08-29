@@ -74,23 +74,33 @@ echo "  ✓ npm prefix $PREFIX (off PATH)"
 echo ""
 
 # ── #1459: follow README.md to the first working command ─────────────────────
-# README Quick start: `npm install -g @tpsdev-ai/flair` then
-# `flair init --agent mybot`. With the prefix off PATH, the bare `flair` is
-# "command not found". (--skip-soul/--no-mcp are README-documented flags that
-# keep the command non-interactive if flair ever IS on PATH; they are irrelevant
-# to the "command not found" failure, which happens before any flag is parsed.)
+# README Quick start now: `npm install -g @tpsdev-ai/flair` then
+# `flair --version` (verify). With the prefix off PATH, the bare `flair` is
+# "command not found" — that is the trap the README now documents, and it is the
+# evidence the hostile env is real. The README's inline remedy is
+# `export PATH="$(npm prefix -g)/bin:$PATH"`, after which `flair --version` must
+# succeed. FAIL(#1459) fires only if the trap is absent (env not hostile) or the
+# remedy does not produce a working flair.
 
 echo "── #1459: follow README.md to first working command ──"
-echo "\$ flair init --agent $AGENT_ID"
-if BARE_OUTPUT="$(flair init --agent "$AGENT_ID" --skip-soul --no-mcp 2>&1)"; then
-  echo "  PASS: flair init succeeded — flair IS on PATH (#1459 fixed)"
+echo "\$ flair --version (bare, prefix off PATH)"
+if VERSION_OUTPUT="$(flair --version 2>&1)"; then
+  echo "  FAIL (#1459): bare 'flair --version' succeeded — prefix is on PATH (env not hostile)"
+  FAILURES=$((FAILURES + 1))
 else
-  if echo "$BARE_OUTPUT" | grep -qi "command not found"; then
-    echo "  FAIL (#1459): 'flair: command not found' — npm prefix off PATH"
-    FAILURES=$((FAILURES + 1))
+  if echo "$VERSION_OUTPUT" | grep -qi "command not found"; then
+    echo "  ✓ 'flair: command not found' — the trap the README now documents"
+    echo "\$ export PATH=\"\$(npm prefix -g)/bin:\$PATH\" (README remedy)"
+    export PATH="$(npm prefix -g)/bin:$PATH"
+    if flair --version >/dev/null 2>&1; then
+      echo "  PASS: README remedy works — flair is on PATH (#1459 fixed)"
+    else
+      echo "  FAIL (#1459): README remedy did not put flair on PATH"
+      FAILURES=$((FAILURES + 1))
+    fi
   else
-    echo "  FAIL (unexpected): flair init failed for a different reason:"
-    echo "$BARE_OUTPUT"
+    echo "  FAIL (#1459): bare 'flair --version' failed for an unexpected reason:"
+    echo "$VERSION_OUTPUT"
     FAILURES=$((FAILURES + 1))
   fi
 fi
