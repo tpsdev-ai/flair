@@ -1,1 +1,0 @@
-- **The mock-isolation tripwire now rejects any `mock.module()` specifier containing a path separator, replacing a hand-maintained blacklist that was one entry behind.** The new rule catches every repo-internal mock by construction — including the LongMemEval determinism test's `bench/longmemeval/ollama` mock, which the old enumeration silently missed. (Refs #1435)

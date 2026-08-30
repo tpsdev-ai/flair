@@ -18,6 +18,119 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.51.0] - 2026-08-30
+
+### Added
+
+- **Added a `first-run-hostile` CI lane that withholds the conveniences every other lane provides.** It runs on a minimal base with `lsof` removed (absence asserted, not assumed), a non-root user, and the npm global prefix set to a user dir NOT on `PATH` (`npm config set prefix ~/.npm-global`), then follows only `README.md` to the first working command and the daemon lifecycle (`init` → `start` → `stop` → `status`). It is deliberately RED on main the day it lands: it reproduces `flair: command not found` (flair#1459) and `flair stop` reporting "not running" while the daemon is alive (flair#1454), and turns green only when those fixes land. Not required-for-merge yet. (flair#1460)
+
+- **Added an ingest-only throughput benchmark for the `FLAIR_EMBED_THREADS` axis.** `test/bench/ingest-throughput/` spawns an ephemeral Harper, warms the embedder, ingests a LongMemEval_s slice, and reports tokens/s and tokens/s/core per thread setting — with no retrieval, reader, or judge, so the thread measurement is not confounded by the read path. It runs a negative control first (`FLAIR_EMBED_THREADS=1` vs `8`): if 1 is not materially slower than 8, the env var is not reaching the embedder and the run aborts as `BLOCKED` rather than emitting a misleading sweep. Results are written to a content-addressed artifact (hashed CONTENT vs unhashed PROVENANCE, mirroring the LongMemEval artifact) and are never published. (Refs #1436)
+
+- **LongMemEval artifacts now record per-question, per-arm evidence coverage at three stages.** Each `(question, arm)` carries `evidenceEventsInPool` (BM25 / HNSW / fused), `evidenceEventsInFinalTopK`, and `evidenceEventsInReaderContext`, counted at event granularity from the dataset's `has_answer` turns. When ground truth does not name events, the record falls back to per-session event-count and token-count in the top-k and flags any session represented by a single fragment. Truncation is a separate outcome from ranker crowding. Existing artifact fields and the aggregate shape are unchanged — the new `evidenceCoverage` key is additive, so prior hashes stay interpretable. Reader-free; no extra model calls. `POST /SemanticSearch` grows an opt-in `includeLegs` flag that returns per-leg candidate ids without changing the ranked `results`; the default response is byte-identical. Session-diversity selection is not in this change. (flair#1358)
+
+### Changed
+
+- **The mock-isolation tripwire now rejects any `mock.module()` specifier containing a path separator, replacing a hand-maintained blacklist that was one entry behind.** The new rule catches every repo-internal mock by construction — including the LongMemEval determinism test's `bench/longmemeval/ollama` mock, which the old enumeration silently missed. (Refs #1435)
+
+- **The first-run-hostile CI lane is now a two-way xfail, so red means act on this PR.** Observed `FAIL (#NNNN)` markers are compared to `docker/first-run-hostile.expected.json`. An unexpected failure, or an expected marker that does not fire, is red and names which. Exact match is green and prints the known defects loudly. Not required-for-merge yet. (flair#1462)
+
+- **Harper is now 5.2.7.** Flair pinned `harper@5.2.0`; latest stable is
+  5.2.7 (GitHub 2026-08-28). Exact-pin bump within 5.2 — dependency + lockfile
+  only. 5.2.6 stops worker respawn from resurrecting the pool mid-shutdown,
+  runs `tini -g` as PID 1 in the container image, and preserves failure exit
+  codes on shutdown (HarperFast/harper#2316). 5.2.7 adds durable `@computed` /
+  `@relationship` integrity (HarperFast/harper#2368). Harper-related work stays
+  on latest stable so Flair is not working around something already shipped.
+
+  Downgrade from a 5.2.7-written store to 5.2.0 is forward-only: 5.2.0 cannot
+  open the LZ4-compressed RocksDB (`LZ4 not supported in this build`). Restore
+  the pre-upgrade snapshot. Same recovery as the 5.1 → 5.2 break.
+
+### Fixed
+
+- **`record_usage` merges `memoryId` and `memoryIds` on every surface** (flair#1410).
+  Native `/mcp` previously preferred `memoryIds` and silently dropped
+  `memoryId` when both were supplied; `POST /RecordUsage` did the same
+  (`data?.memoryIds ?? …`). Both now union, matching stdio `flair-mcp`.
+  Anti-gaming bounds (RPM, one contribution per `(agentId, memoryId)`,
+  capped boost) are unchanged.
+
+- **`/Health` now warns once when search route-mount verification is skipped** (flair#1411).
+  If Harper's `server.resources` registry is absent, `searchReady` still
+  fail-opens on the table check alone — that decision is unchanged — and
+  names the degradation in a once-only warn instead of staying silent. The
+  public `{ok, searchReady}` shape is unchanged.
+
+- **`flair doctor` detects MCP clients from their config file, not just the CLI binary** (flair#1417).
+  Cursor is a GUI app whose `cursor` shell command is opt-in; a working
+  install with `~/.cursor/mcp.json` and no `cursor` on `PATH` was reported
+  as absent, so `doctor --fix` skipped it. Detection now treats a known
+  config path as presence for every `kind: mcp` client that already has
+  one (Claude Code, Codex, Gemini, Cursor, Antigravity). Per-client
+  `detect` stays the exception.
+
+- **The impl-term-leak gate now scans `CHANGELOG.md` and `.changelog/`.**
+  Release notes and unreleased fragments are consumer-facing; a bead-shaped
+  token in a fragment used to survive until the release cut. The empty-scan
+  refusal is unchanged. Allowlisted English compounds (`ops-port`, `ops-api`,
+  `ops-target`, `ops-server`) still pass.
+
+- **The impl-term-leak gate now refuses per source, not only when the whole corpus is empty** (flair#1427).
+  A missing `CHANGELOG.md`, an absent `.changelog/`, or an unbuilt
+  `packages/*/dist/` used to scan less and still report green because
+  `README.md` and `docs/` kept the total non-empty. Each intended source
+  must contribute at least one file. Unbuilt `dist/` and built-and-empty
+  `dist/` fail with different messages; neither is a passing scan.
+
+- **The bench judge seam now retries transport-level failures (timeout, connection reset, DNS, socket hangup) a bounded number of times.** A single transport timeout on one judge call previously killed a multi-hour run with no retry, no resume, and no artifact — the harness was most patient with the failure patience cannot fix (a spent 429 quota) and least patient with the one it can. Transport failures are a distinct category from HTTP statuses: `fetch()` rejects before any response is received, so there is no answer to mask and nothing to bias, and the same determinism argument that already justifies the 5xx retry applies (byte-identical request, pinned model, temperature 0 / seed 0). The retry is scoped to the `fetch()` rejection only — a failure after a response was received is not retried — and stays out of the hashed config, exactly like the existing 429/5xx policy. A 4xx that is not 429 still fails loud and immediately. (Refs #1435)
+
+- **`flair upgrade` reports the same install-health verdict as `flair doctor`.** Both
+  commands run one enumerable catalog (MCP block, FLAIR_URL, CLAUDE.md, SessionStart
+  hook, verified-read plan, keys classification, launchd). Adding a check to that
+  catalog widens both. `✅ verified: healthy` prints only when every member ran and
+  none failed. An unrun check can never look like a pass. A missing Codex
+  SessionStart hook (which 0.49.0 `init` never wrote) no longer hides behind a
+  green upgrade line.
+
+  Installing the hook is consent-bearing — it executes at every session start. Interactive
+  upgrades prompt; non-interactive upgrades name the gap and withhold ✅. Pass
+  `--install-hooks` to consent without a prompt. `flair init` now writes the Codex hook
+  when wiring Codex (opt out with `--skip-hook`), so a fresh install still passes `doctor`.
+
+- **The bench harness now waits for Harper's RocksDB lock to be released before a restart, not just for the process to exit** (Refs #1440).
+  Harper's detached child services hold the database `LOCK` (an `fcntl` record
+  lock) for a beat after the parent exits, so a restart that only waited for
+  exit could lose a ~1-in-500 race and fail the next `install` with
+  "Resource temporarily unavailable". `stopHarper` now probes `/proc/locks`
+  for the lock and waits (bounded, 5s) for it to clear when the install
+  directory is kept for reuse. A genuinely-occupied database — a different live
+  Harper on the same directory — still fails loudly, naming the lock; the wait
+  never deletes or force-clears a `LOCK` file. On non-Linux platforms (where
+  `/proc/locks` does not exist) the lock is unverifiable, so the harness falls
+  back to the previous exit-wait behaviour and logs that the lock is
+  unverifiable there rather than silently assuming it is free.
+
+- **An orphaned test-harness Harper now exits instead of EPIPE-looping until the disk fills** (Refs #1450).
+  Harper's `detached: true` children survive a SIGKILL'd harness parent and were
+  reparented to `systemd --user`; each failed write logged an error, logging that
+  error also failed, and `hdb.log` grew ~3 GB/hour (17.8 GB in two hours on
+  tps-anvil). `startHarper` now injects a child-side preload that exits on EPIPE
+  or reparent (identified by ppid, never by process name). A Harper whose parent
+  is alive and whose stdout is open is left running. Not a log-size cap: the
+  process must stop. Distinct from #1440 (lock contention on the next start).
+
+- **The README quick start now verifies `flair` is on `PATH` before the first command that needs it** (Refs #1459).
+  `npm install -g @tpsdev-ai/flair` puts `flair` in the npm global bin directory,
+  which is not on `PATH` when the prefix is a user directory. The quick start
+  claimed "one install gives you one command" and then failed at line two with
+  `flair: command not found`. It now adds a `flair --version` check right after
+  the install, with the one-line remedy inline — `export PATH="$(npm prefix -g)/bin:$PATH"` —
+  instead of leaving the trap in the file everyone opens first.
+
+### Security
+
+- **Federation now signs `principalId` (`v: 2`) and validates it on Memory apply.** Receivers reconstruct the verify body from the record and default absent `v` to `1`, so existing records keep verifying. A `v: 2` Memory record whose `principalId` is missing or does not equal `data.agentId` is skipped as `principal_mismatch` (absent is not an accept). Soul, Agent, and Relationship still sync without a principal. Deploy receivers first; mixed-version peers skip `v: 2` records until they upgrade (per-record, not a batch outage). Optional `FLAIR_FEDERATION_REQUIRE_RECORD_PRINCIPAL=true` skips leftover `v: 1` Memory records lacking `principalId`. (flair#1416)
+
 ## [0.50.0] - 2026-08-25
 
 ### Added
