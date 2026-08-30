@@ -36,17 +36,6 @@
   },
   "entries": [
     {
-      "ghsa": "GHSA-86vw-mfpg-wwv9",
-      "package": "jsonata",
-      "severity": "high",
-      "class": "vendor-pinned",
-      "introducedBy": "harper -> jsonata",
-      "reason": "harper is pinned to an unreleased v5 build (see docs/supply-chain-policy.md section 1a, keep-current allow-list) and resolves jsonata itself. jsonata 2.2.0 fixes this upstream, but forcing it under harper means a global bun override \u2014 bun overrides are flat and cannot be scoped to one dependency edge, so it would silently re-resolve jsonata for every consumer including harper's own internal expression engine. That is a correctness risk taken to fix a DoS in a code path flair does not call.",
-      "added": "2026-07-27",
-      "expires": "2026-09-25",
-      "removeWhen": "harper ships a v5 build resolving jsonata >=2.2.0, or flair stops depending on harper. Re-check at each harper bump."
-    },
-    {
       "ghsa": "GHSA-83w8-p2f5-377r",
       "package": "@fastify/static",
       "severity": "high",

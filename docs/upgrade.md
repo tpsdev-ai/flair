@@ -525,6 +525,14 @@ The backwards-boot refusal (flair#1049) catches this: the old binary refuses to 
 naming both versions and the data directory, with recovery instructions. A pre-upgrade
 snapshot exists at the named path. Restoring it returns the store to a working state.
 
+**Patch-level break inside 5.2:** Harper 5.2.7 writes LZ4-compressed RocksDB that
+Harper 5.2.0 cannot open (`LZ4 not supported in this build`). Downgrade from a
+5.2.7-written store to the npm-published 5.2.0 pin is forward-only — same
+recovery as the 5.1 → 5.2 break: `flair snapshot restore <path>`. The
+`downgrade-boot` suite treats that Harper crash as the loud-refusal branch of
+the flair#1050 invariant (it boots Harper via `startHarper`, so the CLI stamp
+phrasing is not on that path).
+
 **As observed when this suite was added (2026-07-08):** the npm-published baseline
 (0.21.0) boots cleanly against data written by a HEAD build roughly 14 commits ahead of
 it (several security-hardening and CLI-behavior changes, no Flair schema migration, and
