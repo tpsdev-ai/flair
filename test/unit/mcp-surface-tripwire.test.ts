@@ -26,7 +26,7 @@
  *   3. absence means absence: a table with no `mcp` field (Relationship, in
  *      this slice) contributes zero tools carrying its table-name-style
  *      prefix.
- *   4. the full 12-tool `tools/list` surface is pinned as a golden value —
+ *   4. the full 14-tool `tools/list` surface is pinned as a golden value —
  *      belt-and-suspenders on the single highest-value invariant (an
  *      undeclared tool silently reaching a client is exactly flair#541's
  *      failure mode), independent of whether the bidirectional checks above

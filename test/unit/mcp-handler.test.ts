@@ -4,7 +4,7 @@
  * These are the auth-critical assertions the integration harness can't make at
  * the unit level:
  *
- *   - tools/list returns EXACTLY the 12 curated tools (no raw CRUD, no extras).
+ *   - tools/list returns EXACTLY the 14 curated tools (no raw CRUD, no extras).
  *   - sub → Agent resolution: an existing Credential(kind:"idp", idpSubject=sub)
  *     maps to its principalId; an unknown sub with JIT OFF is DENIED (not run as
  *     anonymous/admin); an unknown sub with JIT ON provisions a NON-admin agent.
@@ -210,8 +210,8 @@ afterAll(() => {
 });
 
 // ─── tools/list ──────────────────────────────────────────────────────────────
-describe("tools/list — exactly the 12 curated tools", () => {
-  it("returns exactly 12, matching the flair-mcp surface plus attention (flair#677) + record_usage (flair#683), no raw CRUD mutators", async () => {
+describe("tools/list — exactly the 14 curated tools", () => {
+  it("returns exactly 14, matching the flair-mcp surface plus attention (flair#677) + record_usage (flair#683) + memory_basement/memory_restore (flair#1472), no raw CRUD mutators", async () => {
     const res = await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { sub: "s" }));
     const body = await parse(res);
     const names = body.result.tools.map((t: any) => t.name).sort();
@@ -220,8 +220,10 @@ describe("tools/list — exactly the 12 curated tools", () => {
       "bootstrap",
       "flair_orgevent",
       "flair_workspace_set",
+      "memory_basement",
       "memory_delete",
       "memory_get",
+      "memory_restore",
       "memory_search",
       "memory_store",
       "memory_update",
