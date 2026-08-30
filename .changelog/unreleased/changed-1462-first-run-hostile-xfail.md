@@ -1,1 +1,0 @@
-- **The first-run-hostile CI lane is now a two-way xfail, so red means act on this PR.** Observed `FAIL (#NNNN)` markers are compared to `docker/first-run-hostile.expected.json`. An unexpected failure, or an expected marker that does not fire, is red and names which. Exact match is green and prints the known defects loudly. Not required-for-merge yet. (flair#1462)
