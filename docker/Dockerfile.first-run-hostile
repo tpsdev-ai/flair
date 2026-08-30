@@ -5,7 +5,9 @@
 # user directory NOT on PATH, and a non-root user. Following only README.md,
 # the first working command (`flair init`) must fail with "command not found"
 # (#1459), and the daemon lifecycle's `flair stop` must fail to find a live
-# daemon without lsof (#1454). The lane is RED until both are fixed.
+# daemon without lsof (#1454). The container is the detector (non-zero while
+# FAIL markers fire). CI applies two-way xfail via
+# docker/first-run-hostile.expected.json (flair#1462).
 #
 # Build:  docker build -f docker/Dockerfile.first-run-hostile -t flair-first-run-hostile .
 # Run:    docker run --rm flair-first-run-hostile
