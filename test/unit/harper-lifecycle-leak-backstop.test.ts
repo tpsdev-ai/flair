@@ -165,6 +165,13 @@ describe("the harness registers no process-wide signal handlers", () => {
     expect(CODE).not.toMatch(/for \(const sig of/);
   });
 
+  test("flair#1450 orphan-exit is the child's job, not a runner signal handler", () => {
+    // SIGKILL of the harness skips the exit hook. The child must exit itself
+    // (EPIPE / reparent preload). A handler here would re-break federation-watch.
+    expect(CODE).toMatch(/applyOrphanExitPreload\(baseEnv\)/);
+    expect(CODE).not.toMatch(/pkill|killall/);
+  });
+
   test("the exit hook is still installed — clean exits must still reap", () => {
     expect(CODE).toMatch(/process\.on\("exit", reapLiveInstances\)/);
   });

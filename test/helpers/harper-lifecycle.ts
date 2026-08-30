@@ -4,13 +4,30 @@ import type { AddressInfo, Server } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { existsSync, rmSync, readdirSync, readFileSync, appendFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   hasScratchOwnerStamp,
   hdbPidIsLive,
   scratchOwnerIsLive,
   writeScratchOwnerStamp,
 } from "../../src/lib/scratch-owner.js";
+
+// flair#1450: test-harness Harper only. NODE_OPTIONS --require of this file
+// makes the child exit on EPIPE / reparent rather than loop into a multi-GB
+// log. Production / spoke Harpers are not spawned through startHarper and
+// never receive this preload.
+const HELPER_DIR = dirname(fileURLToPath(import.meta.url));
+export const ORPHAN_EXIT_PRELOAD = join(HELPER_DIR, "harper-orphan-exit.cjs");
+
+/** Merge `--require=<orphan-exit preload>` into NODE_OPTIONS without clobbering. */
+export function applyOrphanExitPreload(env: Record<string, string>): Record<string, string> {
+  const flag = `--require=${ORPHAN_EXIT_PRELOAD}`;
+  const existing = env.NODE_OPTIONS ?? "";
+  if (existing.includes("harper-orphan-exit.cjs")) return env;
+  env.NODE_OPTIONS = existing.length > 0 ? `${existing} ${flag}` : flag;
+  return env;
+}
 
 // ─── Leak backstop: clean up even when the test framework never gets to ──────
 //
@@ -564,6 +581,11 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
     THREADS_COUNT: "1",
     NODE_HOSTNAME: "127.0.0.1",     // IPv4 only — avoids bun uv_ip6_addr panic
   };
+  // flair#1450: the child must exit when this process dies. The exit hook
+  // above cannot cover SIGKILL of the harness (and we cannot install signal
+  // handlers — federation-watch.test.ts SIGTERMs the runner as a fixture).
+  // The preload runs IN the Harper process and exits on EPIPE / reparent.
+  applyOrphanExitPreload(baseEnv);
 
   // models (flair#504 Phase 1): no env var needed here anymore — the spawned
   // build's own dist/resources/embeddings-boot.js self-registers the backend
