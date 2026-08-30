@@ -64,7 +64,11 @@ describe("waitForLocksFree is wired into stopHarper", () => {
 });
 
 describe("waitForLocksFree (flair#1440)", () => {
-  test("resolves once the lock is released", async () => {
+  // waitForLocksFree's real probe reads /proc/locks and DOCUMENTEDLY falls back
+  // to exit-wait on non-Linux (see harper-lifecycle.ts) — on darwin it returns
+  // immediately, so both behavioral tests below would pass/fail for platform
+  // reasons, not lock reasons. skipIf (reported), never if (hidden) — flair#1012.
+  test.skipIf(process.platform !== "linux")("resolves once the lock is released", async () => {
     const { dir, lock } = makeLockTree();
     const holder = holdLock(lock);
     try {
@@ -78,7 +82,7 @@ describe("waitForLocksFree (flair#1440)", () => {
     }
   });
 
-  test("throws naming the lock when it stays held (positive control)", async () => {
+  test.skipIf(process.platform !== "linux")("throws naming the lock when it stays held (positive control)", async () => {
     const { dir, lock } = makeLockTree();
     const holder = holdLock(lock);
     try {
