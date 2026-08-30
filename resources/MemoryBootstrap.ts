@@ -736,6 +736,7 @@ export class BootstrapMemories extends Resource {
       conditions: [
         { attribute: "agentId", comparator: "equals", value: agentId },
         { attribute: "durability", comparator: "equals", value: "permanent" },
+        { attribute: "archived", comparator: "not_equal", value: true },
       ],
       select: OWN_SELECT,
     }));
@@ -800,6 +801,7 @@ export class BootstrapMemories extends Resource {
       conditions: [
         { attribute: "agentId", comparator: "equals", value: agentId },
         { attribute: "durability", comparator: "not_equal", value: "permanent" },
+        { attribute: "archived", comparator: "not_equal", value: true },
       ],
       select: OWN_SELECT,
       sort: { attribute: "createdAt", descending: true },
@@ -989,7 +991,7 @@ export class BootstrapMemories extends Resource {
 
         const candidates = await retrieveCandidates({
           queryEmbedding,
-          conditions: [scope.condition],
+          conditions: [scope.condition, { attribute: "archived", comparator: "not_equal", value: true }],
           limit: candidatePoolK,
           // flair#1246 — ONE RANKER, ONE SCALE: this pass now invokes the
           // core in the SAME mode memory_search does (hybrid + q via the

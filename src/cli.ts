@@ -16947,6 +16947,7 @@ memory.command("search [query]")
   .option("--q <query>", "search query (alias for positional arg)")
   .option("--limit <n>", "Max results", "5")
   .option("--tag <tag>")
+  .option("--include-archived", "Include basemented (archived) memories in results (default: excluded)")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET; alias for --url)")
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--port <port>", "Harper HTTP port")
@@ -16960,8 +16961,48 @@ memory.command("search [query]")
     if (!q) { console.error("error: query required (positional arg or --q)"); process.exit(1); }
     const body: Record<string, any> = { agentId, q, limit: parseInt(opts.limit, 10) || 5 };
     if (opts.tag) body.tag = opts.tag;
+    if (opts.includeArchived) body.includeArchived = true;
     const baseUrl = resolveBaseUrl(opts);
     const res = await api("POST", "/SemanticSearch", body, { baseUrl, agentId });
+    console.log(JSON.stringify(res, null, 2));
+  });
+// ─── flair memory basement / restore ────────────────────────────────────────
+// flair#1472 Deliverable A — the user-facing archive action. `basement` sends a
+// memory to the basement (archived=true + stamps archivedAt); `restore`
+// un-basements it (clears archived/archivedAt/archivedBy). Both are GLOBAL and
+// deliberate: restore un-retires the memory for EVERY session, not a
+// session-local view (per-session reuse is drawers, Deliverable B, which does
+// not exist yet). Scoped to the caller's own memories (own-lane write).
+memory.command("basement <id>")
+  .description("Send a memory to the basement (archive it). Removes it from bootstrap + default search; still retrievable via `memory search --include-archived`. GLOBAL and deliberate — scoped to your own memories.")
+  .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
+  .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET; alias for --url)")
+  .option("--url <url>", "Flair base URL (overrides --port)")
+  .option("--port <port>", "Harper HTTP port")
+  .action(async (id, opts) => {
+    const agentId = resolveSigningAgentId(opts, "memory basement");
+    if (!agentId) {
+      console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
+      process.exit(2);
+    }
+    const baseUrl = resolveBaseUrl(opts);
+    const res = await api("POST", "/MemoryArchive", { id, action: "basement" }, { baseUrl, agentId });
+    console.log(JSON.stringify(res, null, 2));
+  });
+memory.command("restore <id>")
+  .description("Restore a basemented (archived) memory. Clears archived/archivedAt/archivedBy. GLOBAL and deliberate — this un-retires the memory for EVERY session, not a session-local view (per-session reuse is drawers, which do not exist yet). Scoped to your own memories.")
+  .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
+  .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET; alias for --url)")
+  .option("--url <url>", "Flair base URL (overrides --port)")
+  .option("--port <port>", "Harper HTTP port")
+  .action(async (id, opts) => {
+    const agentId = resolveSigningAgentId(opts, "memory restore");
+    if (!agentId) {
+      console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
+      process.exit(2);
+    }
+    const baseUrl = resolveBaseUrl(opts);
+    const res = await api("POST", "/MemoryArchive", { id, action: "restore" }, { baseUrl, agentId });
     console.log(JSON.stringify(res, null, 2));
   });
 memory.command("list")
