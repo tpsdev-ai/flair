@@ -14,12 +14,14 @@
 #   - follow ONLY README.md to the first working command, then the daemon
 #     lifecycle (init → start → stop → status) with lsof still absent.
 #
-# ACCEPTANCE (unusual, deliberate): this lane MUST be RED on main the day it
-# lands. #1454 and #1459 are unfixed, so a green lane would prove it is not
-# testing what it claims. Land it failing, name which failure maps to which
-# issue, and let the fixes turn it green. It is deliberately NOT
-# required-for-merge yet — a lane that blocks every PR before its findings are
-# fixed is the cry-wolf problem we already have with one gate.
+# VERDICT (flair#1462): two-way xfail against docker/first-run-hostile.expected.json.
+# The container is the detector — it still exits non-zero while known defects
+# fire, and prints `FAIL (#NNNN)` for each. The wrapper compares those markers
+# to the file. RED if a FAIL fires that is not in the file (new regression)
+# OR an entry in the file does not fire (fix landed, or the check went blind).
+# GREEN only on exact match, with the known defects printed loudly. Marker
+# match is per-issue, not a count. Deliberately NOT required-for-merge until
+# the file is empty and the lane is actually green of defects.
 #
 # Security (Sherlock §4, flair#695): this workflow runs arbitrary code from the
 # PR (Dockerfile + test script). It uses `pull_request` (never
@@ -42,6 +44,7 @@ on:
       - "package.json"
       - "tsconfig.cli.json"
       - ".github/workflows/first-run-hostile.yml"
+      - "scripts/ci/first-run-hostile-verdict.mjs"
   pull_request:
     branches: [main]
     paths:
@@ -50,6 +53,7 @@ on:
       - "package.json"
       - "tsconfig.cli.json"
       - ".github/workflows/first-run-hostile.yml"
+      - "scripts/ci/first-run-hostile-verdict.mjs"
   workflow_dispatch:
 
 jobs:
@@ -94,9 +98,28 @@ jobs:
           cache-from: type=gha,scope=first-run-hostile
           cache-to: type=gha,mode=max,scope=first-run-hostile
 
-      - name: Run first-run-hostile gate (expect RED until #1454 + #1459 fixed)
-        run: docker run --rm flair-first-run-hostile:ci
+      # Detector still exits non-zero while known defects fire. Capture that
+      # output and let the two-way xfail decide the job — container non-zero
+      # is not the lane verdict (flair#1462).
+      - name: Run first-run-hostile gate (two-way xfail)
+        run: |
+          set +e
+          docker run --rm flair-first-run-hostile:ci > first-run-hostile.log 2>&1
+          status=$?
+          set -e
+          cat first-run-hostile.log
+          echo ""
+          node "$GITHUB_WORKSPACE/scripts/ci/first-run-hostile-verdict.mjs" \
+            --expected "$GITHUB_WORKSPACE/docker/first-run-hostile.expected.json" \
+            --log first-run-hostile.log \
+            --container-status "$status"
 
-      - name: Show container logs on failure
+      - name: Show captured container log on failure
         if: failure()
-        run: docker run --rm flair-first-run-hostile:ci || true
+        run: |
+          if [ -f first-run-hostile.log ]; then
+            echo "── captured first-run-hostile.log ──"
+            cat first-run-hostile.log
+          else
+            echo "no captured log; container never ran"
+          fi

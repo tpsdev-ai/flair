@@ -6,12 +6,13 @@
 # actually has, and which every other CI lane accidentally provides:
 #   lsof ABSENT, npm global prefix OFF PATH, non-root user.
 #
-# The lane is RED until #1459 (flair off PATH) and #1454 (stop without lsof)
-# are both fixed. Each failure is reported with the issue it maps to.
-#
-# Exit 0 (GREEN) only when BOTH defects are fixed; non-zero (RED) while either
-# is present. Deliberately NOT `set -e`: both expected failures must be
-# recorded before the script reports RED.
+# This script is the detector, not the CI verdict. Each failure is reported
+# with the issue it maps to (`FAIL (#1459)`, `FAIL (#1454)`). Exit 0 only
+# when no FAIL markers fire; non-zero while any are present. CI applies
+# two-way xfail against docker/first-run-hostile.expected.json
+# (scripts/ci/first-run-hostile-verdict.mjs, flair#1462) so a known defect
+# does not paint every PR red. Deliberately NOT `set -e`: every failure
+# must be recorded before the script exits.
 
 set -uo pipefail
 
