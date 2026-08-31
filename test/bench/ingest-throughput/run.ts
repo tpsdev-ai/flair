@@ -16,7 +16,7 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { execSync } from "node:child_process";
+import { resolveBenchGitCommit } from "../git-commit";
 import {
   DEFAULT_RUNS, DEFAULT_SLICE_N, DEFAULT_SEED, INGEST_CONCURRENCY,
   NEGATIVE_CONTROL, THREAD_SWEEP, configManifest, hashConfig,
@@ -38,10 +38,6 @@ function arg(flag: string, dflt?: string): string | undefined {
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : dflt;
 }
 const hasFlag = (f: string) => process.argv.includes(f);
-
-function gitCommit(): string | null {
-  try { return execSync("git rev-parse HEAD", { cwd: REPO_ROOT }).toString().trim(); } catch { return null; }
-}
 
 /** low is "materially slower" than high when its mean tok/s is below this
  *  fraction of high's. 0.75 ⇒ low must be ≥25% slower. On a real host the
@@ -120,6 +116,10 @@ async function run(): Promise<void> {
   const runs = Number(arg("--runs", String(DEFAULT_RUNS)));
   const outDir = arg("--out", path.join(REPO_ROOT, "test/bench/ingest-throughput/artifacts"));
   const benchHost = process.env.INGEST_BENCH_HOST ?? "tps-bench";
+  // Fail CLOSED before the measurement: a run whose code cannot be named is not
+  // reproducible. Resolved from the flair code location (REPO_ROOT), checkout
+  // HEAD else its dist/build-info.json stamp; throws, never null (flair#1432).
+  const gitCommit = resolveBenchGitCommit(REPO_ROOT);
 
   const log = (m: string) => console.error(m);
 
@@ -172,7 +172,7 @@ async function run(): Promise<void> {
     runHashes,
     settings,
     negativeControl: nc,
-    gitCommit: gitCommit(),
+    gitCommit,
     benchHost,
   });
   const outPath = writeArtifact(art, outDir);

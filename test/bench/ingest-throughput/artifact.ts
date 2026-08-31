@@ -13,6 +13,7 @@
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalJson, sha256hex } from "./config";
+import { assertBenchGitCommit } from "../git-commit";
 import type { SettingMetrics } from "./measure";
 
 export interface SettingAggregate {
@@ -78,7 +79,10 @@ export interface BuildArtifactInput {
   runHashes: string[];
   settings: SettingAggregate[];
   negativeControl: NegativeControlResult;
-  gitCommit: string | null;
+  /** The commit of the flair code measured — a 40-hex sha, NEVER null. Resolve
+   *  with resolveBenchGitCommit() (fail-closed); re-asserted in buildArtifact so
+   *  the seal can never content-address a null (flair#1432). */
+  gitCommit: string;
   benchHost: string;
 }
 
@@ -90,7 +94,9 @@ export function buildArtifact(input: BuildArtifactInput): Artifact {
       "publish them. Publishing any number requires a recorded human sign-off referencing this " +
       "artifact's artifactHash.",
     generatedAt: new Date().toISOString(),
-    gitCommit: input.gitCommit,
+    // Defense-in-depth: refuse to seal an artifact that cannot name its code
+    // (flair#1432). Already fail-closed at resolution; re-asserted at the seal.
+    gitCommit: assertBenchGitCommit(input.gitCommit, "ingest-throughput artifact"),
     host: { benchHost: input.benchHost },
     configHash: input.configHash,
     config: input.config,

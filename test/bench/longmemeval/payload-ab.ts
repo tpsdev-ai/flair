@@ -44,7 +44,7 @@
 import { existsSync, appendFileSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { execSync } from "node:child_process";
+import { resolveBenchGitCommit, assertBenchGitCommit } from "../git-commit";
 import { randomUUID } from "node:crypto";
 import { startHarper, stopHarper, type HarperInstance } from "../../helpers/harper-lifecycle";
 import {
@@ -70,6 +70,10 @@ import { stampArtifactHash, verifyStampedHash } from "./artifact";
 import { mcnemarExact, pairedTable, type PairedTable } from "./paired-stats";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+// The flair code under test — a checkout, or an installed/exported package when
+// LME_FLAIR_PKG_DIR is set. gitCommit is resolved from HERE (checkout HEAD, else
+// its dist/build-info.json stamp), fail-closed — see ../git-commit.ts.
+const FLAIR_DIR = process.env.LME_FLAIR_PKG_DIR ?? REPO_ROOT;
 const clean = (s: string) => s.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
 const pct = (x: number) => (x * 100).toFixed(1) + "%";
 
@@ -78,12 +82,6 @@ function arg(flag: string, dflt?: string): string | undefined {
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : dflt;
 }
 const hasFlag = (f: string) => process.argv.includes(f);
-
-function gitCommit(): string | null {
-  // stdio pipe: the bench VM runs from an exported tree with no .git, and a
-  // "fatal: not a git repository" on stderr mid-report reads like a run failure.
-  try { return execSync("git rev-parse HEAD", { cwd: REPO_ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString().trim(); } catch { return null; }
-}
 
 /** The A and B sides. A is the CONTROL (what every run before 2026-08-23 fed
  *  the reader); B is the variant under test. Order is fixed and recorded — the
@@ -153,6 +151,9 @@ async function readAndJudge(
 async function main(): Promise<void> {
   assertCrossFamily();
   assertSidesDiffer();
+  // Fail CLOSED before spending the run: a run whose code cannot be named is not
+  // reproducible. resolveBenchGitCommit throws (never returns null) — flair#1432.
+  const gitCommit = resolveBenchGitCommit(FLAIR_DIR);
   const host = arg("--host", OLLAMA_HOST)!;
   const datasetPath = arg("--dataset");
   if (!datasetPath) { console.error("payload-ab requires --dataset <path to longmemeval_s.json>"); process.exit(2); }
@@ -166,7 +167,7 @@ async function main(): Promise<void> {
   const resumePath = arg("--resume");
 
   // Harper serves resources from dist/ — a missing build is a silent no-op run.
-  const marker = path.join(process.env.LME_FLAIR_PKG_DIR ?? REPO_ROOT, "dist", "resources", "SemanticSearch.js");
+  const marker = path.join(FLAIR_DIR, "dist", "resources", "SemanticSearch.js");
   if (!existsSync(marker)) { console.error(`FATAL: ${marker} not found — run \`bun run build\` first.`); process.exit(2); }
 
   console.log(`\n=== LongMemEval_s — PAIRED reader-payload A/B (${SIDE_A} vs ${SIDE_B}) ===`);
@@ -411,7 +412,7 @@ async function main(): Promise<void> {
     else process.env.FLAIR_HYBRID_RETRIEVAL = prevHybrid;
   }
 
-  report(records, manifest, configHash, outDir, host, slice.length);
+  report(records, manifest, configHash, outDir, host, slice.length, gitCommit);
 }
 
 /** A judge error on EITHER side voids the pair: it is excluded from the table
@@ -430,7 +431,7 @@ function tableFor(records: PairRecord[]): PairedTable {
 
 function report(
   records: PairRecord[], manifest: unknown, configHash: string, outDir: string,
-  host: string, sliceSize: number,
+  host: string, sliceSize: number, gitCommit: string,
 ): void {
   const { usable, voided } = usablePairs(records);
   const table = tableFor(usable);
@@ -475,7 +476,12 @@ function report(
   const artifact = stampArtifactHash({
     schema: "longmemeval-s.payload-ab.artifact/1",
     validationSlice: true,
-    gitCommit: gitCommit(),
+    // Re-assert at the seal, parity with the artifact.ts builders (flair#1432):
+    // resolveBenchGitCommit already threw up front if this could not be named,
+    // but the seal must never content-address anything but a 40-hex — this
+    // stampArtifactHash call reaches the hash directly, without buildArtifact's
+    // guard, so it carries its own.
+    gitCommit: assertBenchGitCommit(gitCommit, "payload-ab.artifact"),
     configHash,
     config: manifest,
     resultsHash: hashConfig(results),
