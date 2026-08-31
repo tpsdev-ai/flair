@@ -10,9 +10,10 @@
  * per-source scoping — see resources/AttentionQuery.ts's module doc), so the
  * MCP surface inherits the SAME security model as the signed-REST path. There
  * is no raw CRUD surface — the only way to reach the datastore through /mcp is
- * via one of these 12 semantic tools.
+ * via one of these 14 semantic tools.
  *
  *   memory_search · memory_store · memory_update · memory_get · memory_delete ·
+ *   memory_basement · memory_restore ·
  *   bootstrap · soul_set · soul_get · flair_workspace_set · flair_orgevent ·
  *   attention · record_usage
  *
@@ -228,6 +229,9 @@ async function memorySearch(agent: ResolvedAgent, args: any) {
   // flair#744 slice 2 — opt-in abstention verdict. Forwarded ONLY when
   // requested so a plain search delegates a byte-identical body.
   if (args?.abstain === true) body.abstain = true;
+  // flair#1472 — opt-in basement inclusion. Forwarded ONLY when requested so a
+  // plain search delegates a byte-identical body (archived excluded by default).
+  if (args?.includeArchived === true) body.includeArchived = true;
   return unwrap(await h.post(body));
 }
 
@@ -394,6 +398,56 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
   // Memory.put()'s own ownership gate — no scope change, same as the read.
   // flair#1188 — strip the embedding from the echoed write response (Memory.put
   // regenerates the vector server-side); no-op when the response carries none.
+  return stripInternalFields(await unwrap(await Cls.put(merged, delegationContext(agent))));
+}
+
+// ── flair#1472 memory_basement / memory_restore ──────────────────────────────
+// The user-facing archive action. `archived` is a VISIBILITY flag, not a
+// deletion: basementing a memory removes it from bootstrap + default search
+// but leaves the row, its provenance, and its history fully intact (still
+// retrievable via memory_get and memory_search(includeArchived:true)). Restore
+// is the deliberate, GLOBAL inverse — it un-retires the memory for EVERY
+// session, not a session-local view (that is drawers, Deliverable B, which does
+// not exist yet). Both are writes scoped to the caller's own lane: the read
+// uses Memory.get()'s read-scope gate and the write uses Memory.put()'s
+// ownership gate (stampAttribution), so a caller can neither read nor write
+// another agent's memory here.
+async function memoryBasement(agent: ResolvedAgent, args: any) {
+  const Cls = await handler("Memory");
+  const id = args?.id;
+  const existing = await unwrap(await Cls.get(id, delegationContext(agent)));
+  if (!existing || (existing as any).error != null || (existing as any).status === 404) {
+    return { error: "memory not found", status: 404 };
+  }
+  const merged: Record<string, unknown> = {
+    ...existing,
+    archived: true,
+    archivedBy: agent.agentId,
+    updatedAt: new Date().toISOString(),
+  };
+  // Memory.put() stamps archivedAt when archived===true (see Memory.ts). The
+  // content is unchanged, so the existing embedding stays valid — do NOT clear
+  // it (clearing would force a needless re-embed and, if the embedding engine
+  // is unavailable, would silently drop the vector).
+  if (agent.clientId) merged.claimedClient = agent.clientId;
+  return stripInternalFields(await unwrap(await Cls.put(merged, delegationContext(agent))));
+}
+
+async function memoryRestore(agent: ResolvedAgent, args: any) {
+  const Cls = await handler("Memory");
+  const id = args?.id;
+  const existing = await unwrap(await Cls.get(id, delegationContext(agent)));
+  if (!existing || (existing as any).error != null || (existing as any).status === 404) {
+    return { error: "memory not found", status: 404 };
+  }
+  const merged: Record<string, unknown> = {
+    ...existing,
+    archived: false,
+    updatedAt: new Date().toISOString(),
+  };
+  delete merged.archivedAt;
+  delete merged.archivedBy;
+  if (agent.clientId) merged.claimedClient = agent.clientId;
   return stripInternalFields(await unwrap(await Cls.put(merged, delegationContext(agent))));
 }
 
@@ -970,6 +1024,7 @@ export const TOOLS: Record<string, ToolEntry> = {
           limit: { type: "number", description: "Max results (default 5)" },
           includeTrust: { type: "boolean", description: "Attach a per-result trust-evidence block (provenance, author, usage, freshness, supersession). Default false." },
           abstain: { type: "boolean", description: "Opt into first-class abstention: when the best match is below a global confidence threshold, return { abstained: true, reason, bestScore } with no weak matches instead of the N weakest results. Default false." },
+          includeArchived: { type: "boolean", description: "Include basemented (archived) memories in results. Default false — archived memories are excluded from normal search. When true, archived memories are returned under the SAME read-scope gate as a normal search (never a wider scope)." },
         },
         required: ["query"],
       },
@@ -1048,6 +1103,57 @@ export const TOOLS: Record<string, ToolEntry> = {
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
       invariants: { fullyResolved: true },
       errorShape: { trigger: "updating a non-existent id", fields: ["error", "status"] },
+    },
+  },
+  memory_basement: {
+    def: {
+      name: "memory_basement",
+      description:
+        "Send a memory to the basement (archive it). Sets archived=true and stamps archivedAt. " +
+        "The memory is removed from bootstrap and default search but remains retrievable via " +
+        "memory_get and memory_search(includeArchived:true). Deliberate and GLOBAL — this is a " +
+        "visibility flag, not a deletion: provenance and history are untouched. Scoped to your own memories only.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "ID of the memory to basement (archive)" },
+        },
+        required: ["id"],
+      },
+    },
+    impl: memoryBasement,
+    contract: {
+      summary: "Write echo of the archived record { id, archived:true, archivedAt, ... }. No internal embedding fields; the flip round-trips via memory_get.",
+      requiredFields: ["id", "archived"],
+      fieldTypes: { id: "string", archived: "boolean" },
+      forbiddenFields: INTERNAL_MEMORY_FIELDS,
+      invariants: { fullyResolved: true },
+      errorShape: { trigger: "basementing a non-existent or non-owned id", fields: ["error", "status"] },
+    },
+  },
+  memory_restore: {
+    def: {
+      name: "memory_restore",
+      description:
+        "Restore a basemented (archived) memory. Clears archived and archivedAt. Deliberate and GLOBAL — " +
+        "this un-retires the memory for EVERY session, not a session-local view (per-session reuse is " +
+        "drawers, which do not exist yet). Scoped to your own memories only.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "ID of the memory to restore (un-archive)" },
+        },
+        required: ["id"],
+      },
+    },
+    impl: memoryRestore,
+    contract: {
+      summary: "Write echo of the restored record { id, archived:false, ... }. No internal embedding fields; the flip round-trips via memory_get.",
+      requiredFields: ["id", "archived"],
+      fieldTypes: { id: "string", archived: "boolean" },
+      forbiddenFields: INTERNAL_MEMORY_FIELDS,
+      invariants: { fullyResolved: true },
+      errorShape: { trigger: "restoring a non-existent or non-owned id", fields: ["error", "status"] },
     },
   },
   memory_get: {

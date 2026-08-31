@@ -477,8 +477,10 @@ export type RecordTypeName = keyof typeof RECORD_TYPES;
 //   bootstrap    — Soul + Memory + predicted-context composite (BootstrapMemories)
 //   attention    — cross-table aggregate query (AttentionQuery.ts), not a table verb
 //   record_usage — usage-signal resource (RecordUsage.ts), not a table verb
+//   memory_basement — archive action (flair#1472), not a table verb
+//   memory_restore  — un-archive action (flair#1472), not a table verb
 //
-export const COMPOSITE_MCP_TOOLS = ["bootstrap", "attention", "record_usage"] as const;
+export const COMPOSITE_MCP_TOOLS = ["bootstrap", "attention", "record_usage", "memory_basement", "memory_restore"] as const;
 
 export type CompositeMcpTool = (typeof COMPOSITE_MCP_TOOLS)[number];
 

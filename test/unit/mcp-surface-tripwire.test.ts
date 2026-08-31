@@ -26,7 +26,7 @@
  *   3. absence means absence: a table with no `mcp` field (Relationship, in
  *      this slice) contributes zero tools carrying its table-name-style
  *      prefix.
- *   4. the full 12-tool `tools/list` surface is pinned as a golden value —
+ *   4. the full 14-tool `tools/list` surface is pinned as a golden value —
  *      belt-and-suspenders on the single highest-value invariant (an
  *      undeclared tool silently reaching a client is exactly flair#541's
  *      failure mode), independent of whether the bidirectional checks above
@@ -114,15 +114,17 @@ describe("MCP surface tripwire — RECORD_TYPES.mcp + COMPOSITE_MCP_TOOLS vs. re
     });
   });
 
-  describe("golden value: the complete 12-tool tools/list surface is pinned", () => {
+  describe("golden value: the complete 14-tool tools/list surface is pinned", () => {
     it("sorted TOOLS keys deep-equal the pinned list (tools/list byte-identical)", () => {
       expect(SHIPPED_TOOL_NAMES).toEqual([
         "attention",
         "bootstrap",
         "flair_orgevent",
         "flair_workspace_set",
+        "memory_basement",
         "memory_delete",
         "memory_get",
+        "memory_restore",
         "memory_search",
         "memory_store",
         "memory_update",
@@ -132,8 +134,8 @@ describe("MCP surface tripwire — RECORD_TYPES.mcp + COMPOSITE_MCP_TOOLS vs. re
       ]);
     });
 
-    it("the declared surface (registry verbs ∪ composites) also totals exactly 12 unique names", () => {
-      expect(declaredToolNames().size).toBe(12);
+    it("the declared surface (registry verbs ∪ composites) also totals exactly 14 unique names", () => {
+      expect(declaredToolNames().size).toBe(14);
     });
   });
 

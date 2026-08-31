@@ -66,7 +66,7 @@ export class SemanticSearch extends Resource {
     // recall-harness (test/bench/recall-harness/run.ts) and `recall-eval.mjs`
     // before reconsidering this default if the compositeScore formula or
     // corpus changes.
-    const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "raw", minScore = 0, since, asOf, includeTrust = false, includeMetadata = false, abstain = false, explain = false, includeLegs = false } = data || {};
+    const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "raw", minScore = 0, since, asOf, includeTrust = false, includeMetadata = false, abstain = false, explain = false, includeLegs = false, includeArchived = false } = data || {};
 
     // Authenticated identity lives on the Harper Resource context (getContext().request).
     // `this.request` is NOT populated on Harper v5 Resources — prior reads here
@@ -170,7 +170,12 @@ export class SemanticSearch extends Resource {
 
     // Exclude archived records. Use "not_equal" (Harper v5 comparator) instead of
     // "equals false" so records without the archived field are included.
-    conditions.push({ attribute: "archived", comparator: "not_equal", value: true });
+    // flair#1472 — `includeArchived` opts back IN to the basement: when true the
+    // archived predicate is omitted entirely, so basemented memories are returned
+    // under the SAME read-scope gate as a normal search (never a wider scope).
+    if (!includeArchived) {
+      conditions.push({ attribute: "archived", comparator: "not_equal", value: true });
+    }
 
     if (tag) {
       conditions.push({ attribute: "tags", comparator: "equals", value: tag });
