@@ -55,6 +55,7 @@
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalJson, sha256hex } from "./config";
+import { assertBenchGitCommit } from "../git-commit";
 import type { ArmAggregate, ArmRunMetrics } from "./metrics";
 import type { ReaderDeterminism } from "./determinism";
 import type { EvidenceCoverageArtifact } from "./evidence-coverage";
@@ -116,7 +117,11 @@ export interface BuildArtifactInput {
   config: unknown;
   runHashes: string[];
   aggregate: ArmAggregate[];
-  gitCommit: string | null;
+  /** The commit of the flair code measured. A 40-hex sha — NEVER null: a
+   *  benchmark that cannot name its code is not reproducible. Resolve it with
+   *  resolveBenchGitCommit() (fail-closed); buildArtifact re-asserts it below
+   *  so the seal can never again seal a null (flair#1432). */
+  gitCommit: string;
   ollamaHost: string;
   benchHost: string;
   validationSlice: boolean;
@@ -169,7 +174,10 @@ export function buildArtifact(input: BuildArtifactInput): Artifact {
       "artifact's artifactHash. Spend and outward-publishing are the founder's gates.",
     validationSlice: input.validationSlice,
     generatedAt: new Date().toISOString(),
-    gitCommit: input.gitCommit,
+    // Defense-in-depth: refuse to seal an artifact that cannot name its code.
+    // The value is already fail-closed at resolution (resolveBenchGitCommit),
+    // but the seal must never again content-address a null (flair#1432).
+    gitCommit: assertBenchGitCommit(input.gitCommit, "longmemeval artifact"),
     host: { ollama: input.ollamaHost, benchHost: input.benchHost },
     configHash: input.configHash,
     config: input.config,

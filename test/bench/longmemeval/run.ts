@@ -28,7 +28,7 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { execSync } from "node:child_process";
+import { resolveBenchGitCommit } from "../git-commit";
 import {
   OLLAMA_HOST, JUDGE, READER, DATASET, RETRIEVAL, FULL_CONTEXT, INGESTION,
   assertCrossFamily, configManifest, hashConfig,
@@ -54,23 +54,23 @@ function arg(flag: string, dflt?: string): string | undefined {
 }
 const hasFlag = (f: string) => process.argv.includes(f);
 
-function gitCommit(): string | null {
-  try { return execSync("git rev-parse HEAD", { cwd: REPO_ROOT }).toString().trim(); } catch { return null; }
-}
+// The flair code under test: an npm-installed / exported package when
+// LME_FLAIR_PKG_DIR is set, otherwise this checkout. gitCommit is resolved from
+// THIS directory (checkout HEAD, else its dist/build-info.json stamp), never
+// from process.cwd(), and FAILS CLOSED if it cannot — see ../git-commit.ts.
+const FLAIR_DIR = process.env.LME_FLAIR_PKG_DIR ?? REPO_ROOT;
 
 // LME_FLAIR_PKG_DIR / LME_HARPER_BIN_DIR (ported from tps-bench): point the
 // harness at an npm-installed published @tpsdev-ai/flair instead of the
 // worktree, so the bench can run on a VM that has the package but not the repo.
 //
-// OPERATIONAL-ONLY, with a caveat worth stating: these do not change the
-// harness's behavior at all — they only say WHERE the system under test lives.
-// But they do mean the system under test may not be a git checkout, in which
-// case gitCommit() below returns null and the artifact records no build
-// identity for Flair itself. That is a pre-existing provenance gap in the
-// artifact schema (the headline artifact has gitCommit: null), not something
-// these variables introduce; it is called out on #1366 for a follow-up.
+// OPERATIONAL-ONLY: these do not change the harness's behavior at all — they
+// only say WHERE the system under test lives. When that is a non-checkout
+// export, the build identity comes from the package's dist/build-info.json
+// commit stamp (flair#1076); a run that can resolve NO commit refuses to write
+// an artifact rather than recording gitCommit: null (flair#1432).
 function assertBuilt(): void {
-  const marker = path.join(process.env.LME_FLAIR_PKG_DIR ?? REPO_ROOT, "dist", "resources", "SemanticSearch.js");
+  const marker = path.join(FLAIR_DIR, "dist", "resources", "SemanticSearch.js");
   if (!existsSync(marker)) {
     console.error(`FATAL: ${marker} not found — Harper serves resources from dist/. Run \`bun run build\` first.`);
     process.exit(2);
@@ -121,6 +121,11 @@ async function verifyJudge(host: string, repeats: number): Promise<void> {
 async function runSlice(): Promise<void> {
   assertBuilt();
   assertCrossFamily();
+  // Fail CLOSED before spending a multi-hour run (and shared inference quota):
+  // a run whose code cannot be named is not reproducible, so refuse up front
+  // rather than after the loop. resolveBenchGitCommit throws with an actionable
+  // message; it never returns null (flair#1432).
+  const gitCommit = resolveBenchGitCommit(FLAIR_DIR);
   const host = arg("--host", OLLAMA_HOST)!;
   const datasetPath = arg("--dataset");
   if (!datasetPath) { console.error("run requires --dataset <path to longmemeval_s.json>"); process.exit(2); }
@@ -213,7 +218,7 @@ async function runSlice(): Promise<void> {
   const aggregate = SELECTED_ARMS.map((a) => aggregateArmAcrossRuns(a, perArmRuns.get(a)!));
   const artifact = buildArtifact({
     configHash, config: manifest, runHashes, aggregate,
-    gitCommit: gitCommit(), ollamaHost: host, benchHost: process.env.LME_BENCH_HOST ?? "rockit", validationSlice,
+    gitCommit, ollamaHost: host, benchHost: process.env.LME_BENCH_HOST ?? "rockit", validationSlice,
     readerDeterminism,
     evidenceCoverage: collectEvidenceCoverage(coverageRuns),
   });

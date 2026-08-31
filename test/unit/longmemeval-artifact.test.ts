@@ -24,7 +24,9 @@ const baseInput = () => ({
   config: { schema: "test", a: 1 },
   runHashes: ["r1", "r2"],
   aggregate: [] as any[],
-  gitCommit: "abc123",
+  // A well-formed 40-hex sha: buildArtifact now fail-closes on anything else,
+  // so the fixture must supply a real commit shape (flair#1432).
+  gitCommit: "1234567890abcdef1234567890abcdef12345678",
   ollamaHost: "http://host:11434",
   benchHost: "rockit",
   validationSlice: true,
