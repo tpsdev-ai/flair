@@ -8,6 +8,8 @@ import {
   mkdirSync,
   writeFileSync,
   readFileSync,
+  openSync,
+  closeSync,
   chmodSync,
   renameSync,
   cpSync,
@@ -19,6 +21,7 @@ import {
   realpathSync,
   unlinkSync,
   chownSync,
+  constants as fsConstants,
 } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
 import { join, resolve, sep, dirname } from "node:path";
@@ -176,6 +179,19 @@ import {
   runDoctorChecks,
   type DoctorRun,
 } from "./lib/doctor-run.js";
+import {
+  classifyDaemonState,
+  verifyIdentity,
+  parseProcStatStartTime,
+  procStartTimeToEpochMs,
+  parsePsLstart,
+  parseSidecarJson,
+  type DaemonEvidence,
+  type PidLiveness,
+  type HealthResult,
+  type PidfileRead,
+  type SidecarRead,
+} from "./lib/daemon-liveness.js";
 // Value-only static import so `--interval`'s advertised default cannot drift
 // from the one the scheduler actually validates against. The module itself is
 // still loaded lazily at call time (the `await import()`s below) for the
@@ -3973,6 +3989,10 @@ program
         console.log(`Starting Harper on port ${httpPort}...`);
         const proc = spawn(process.execPath, [bin, "run", "."], { cwd: flairPackageDir(), env, detached: true, stdio: "ignore" });
         proc.unref();
+        // flair#1454: write the identity sidecar immediately after spawn so
+        // `flair stop` and `flair status` can classify this daemon's state
+        // without lsof. Same call as startFlairProcess() uses.
+        if (proc.pid) writeDaemonSidecar(dataDir, proc.pid, httpPort);
       }
 
       console.log("Waiting for Harper health check...");
@@ -12128,6 +12148,245 @@ program
     await rollbackTo(verdict.toVersion, verdict.reason);
   });
 
+// ─── daemon liveness machine (flair#1454) ────────────────────────────────────
+//
+// The pure classifier lives in src/lib/daemon-liveness.ts. These adapters are
+// the only places that touch the real filesystem, network, or a process, so
+// every classifier branch is unit-testable without a daemon. External tools
+// (lsof/ss/ps) may appear in diagnostic text only — none decides a verdict.
+
+/** A pidfile/sidecar read that refuses to follow a symlink (O_NOFOLLOW). */
+type NoFollowRead =
+  | { kind: "absent" }
+  | { kind: "unreadable"; reason: string }
+  | { kind: "present"; content: string };
+
+/**
+ * Read a file with O_NOFOLLOW so a symlink planted at the pidfile/sidecar path
+ * cannot redirect the read (flair#1454 decision 6). `readFileSync` has no such
+ * flag, so this opens the fd first and reads from it.
+ */
+function readFileNoFollow(path: string): NoFollowRead {
+  let fd: number;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (err: any) {
+    if (err?.code === "ENOENT") return { kind: "absent" };
+    if (err?.code === "ELOOP") return { kind: "unreadable", reason: `${path} is a symbolic link` };
+    return { kind: "unreadable", reason: `cannot open ${path}: ${err?.code ?? err?.message}` };
+  }
+  try {
+    return { kind: "present", content: readFileSync(fd, "utf-8") };
+  } catch (err: any) {
+    return { kind: "unreadable", reason: `cannot read ${path}: ${err?.code ?? err?.message}` };
+  } finally {
+    try { closeSync(fd); } catch { /* already closed */ }
+  }
+}
+
+/**
+ * Refuse to trust a data dir that is a symlink or world-writable (flair#1454
+ * decision 6). Returns a reason, or null when the dir is safe (or absent — a
+ * missing dir is "no data", not "unsafe"; the pidfile read reports absent).
+ */
+function checkDataDirSafe(dataDir: string): string | null {
+  let lst;
+  try {
+    lst = lstatSync(dataDir);
+  } catch {
+    return null;
+  }
+  if (lst.isSymbolicLink()) {
+    return `data directory ${dataDir} is a symbolic link — refusing to trust its pidfile`;
+  }
+  let st;
+  try {
+    st = statSync(dataDir);
+  } catch {
+    return null;
+  }
+  if (st.mode & 0o002) {
+    return `data directory ${dataDir} is world-writable — refusing to trust its pidfile`;
+  }
+  return null;
+}
+
+/** Read `hdb.pid` (O_NOFOLLOW) into a `PidfileRead`. */
+function readPidfile(dataDir: string): PidfileRead {
+  const r = readFileNoFollow(join(dataDir, "hdb.pid"));
+  if (r.kind !== "present") return r;
+  const n = Number(r.content.trim());
+  if (!Number.isInteger(n) || n <= 0) {
+    return { kind: "unreadable", reason: `${join(dataDir, "hdb.pid")} does not contain a valid pid` };
+  }
+  return { kind: "present", pid: n };
+}
+
+/** Read `flair-daemon.json` (O_NOFOLLOW) into a `SidecarRead`. */
+function readSidecar(dataDir: string): SidecarRead {
+  const r = readFileNoFollow(join(dataDir, "flair-daemon.json"));
+  if (r.kind !== "present") return r;
+  const parsed = parseSidecarJson(r.content);
+  if (parsed === null) {
+    return { kind: "unreadable", reason: `${join(dataDir, "flair-daemon.json")} is malformed` };
+  }
+  return { kind: "present", ...parsed };
+}
+
+/** `kill(pid, 0)` as a three-way: alive / gone (ESRCH) / eperm (another user's). */
+function probePidLiveness(pid: number): PidLiveness {
+  try {
+    process.kill(pid, 0);
+    return { kind: "alive" };
+  } catch (err: any) {
+    if (err?.code === "ESRCH") return { kind: "gone" };
+    if (err?.code === "EPERM") return { kind: "eperm" };
+    return { kind: "gone" };
+  }
+}
+
+/**
+ * The live process's start time in epoch ms, or null when it cannot be read.
+ * Linux reads `/proc/<pid>/stat` field 22 (starttime in clock ticks) plus
+ * `/proc/uptime`; macOS shells out to `ps -o lstart=`. A null answer degrades
+ * to "identity unverified" — it never decides a verdict toward the destructive
+ * branch (flair#1454 decision 4).
+ */
+function readProcessStartTimeMs(pid: number): number | null {
+  if (process.platform === "linux") {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+      const starttime = parseProcStatStartTime(stat);
+      if (starttime === null) return null;
+      const uptimeRaw = readFileSync("/proc/uptime", "utf-8").trim().split(/\s+/)[0];
+      const uptime = Number(uptimeRaw);
+      if (!Number.isFinite(uptime)) return null;
+      return procStartTimeToEpochMs(starttime, uptime, Date.now());
+    } catch {
+      return null;
+    }
+  }
+  if (process.platform === "darwin") {
+    try {
+      const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+        encoding: "utf-8",
+        env: { ...(process.env as Record<string, string>), LC_ALL: "C" },
+        timeout: 2000,
+      });
+      return parsePsLstart(out);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/** The health probe, three-way: ok / refused (ECONNREFUSED) / unreachable. */
+async function probeHealth(port: number): Promise<HealthResult> {
+  try {
+    await fetch(`http://127.0.0.1:${port}/Health`, { signal: AbortSignal.timeout(2000) });
+    return { kind: "ok" };
+  } catch (err: any) {
+    // Node's undici fetch reports ECONNREFUSED on `err.cause.code`; Bun reports
+    // `ConnectionRefused` on `err.code`. Both mean "nothing is listening".
+    const code = err?.cause?.code ?? err?.code;
+    if (code === "ECONNREFUSED" || code === "ConnectionRefused") {
+      return { kind: "refused" };
+    }
+    return { kind: "unreachable" };
+  }
+}
+
+/** Gather every piece of evidence the classifier needs, in one place. */
+async function gatherDaemonEvidence(port: number, dataDir: string): Promise<DaemonEvidence> {
+  const dataDirUnsafe = checkDataDirSafe(dataDir);
+  const pidfile = readPidfile(dataDir);
+  const pidLiveness = pidfile.kind === "present" ? probePidLiveness(pidfile.pid) : null;
+  let sidecar = readSidecar(dataDir);
+
+  // Probe health first so the self-heal gate below can use it without a
+  // second round-trip. Also consumed at the end for the classifier.
+  const health = await probeHealth(port);
+
+  // flair#1454 self-heal: a daemon started by a pre-sidecar version of flair
+  // (upgrade-across-#1454) has a live pid in hdb.pid but no flair-daemon.json.
+  // Without this path, classifyDaemonState returns DISAGREEMENT and `flair stop`
+  // refuses — breaking the upgrade flow for every existing user.
+  //
+  // SECURITY: the real guard is /Health, NOT the ±2s start-time check.
+  // The ±2s check is circular in the self-heal path: we write the sidecar
+  // with the live process's OWN start time, then verifyIdentity reads the
+  // same process — it matches by construction for ANY live pid, including a
+  // recycled pid belonging to an unrelated process. Requiring /Health OK is
+  // the correct proof: only the flair daemon responds 200 at
+  // http://127.0.0.1:<port>/Health. An unrelated recycled pid does not.
+  //
+  // Therefore: self-heal is gated on health.kind === "ok". A live pid that
+  // does NOT serve /Health — a recycled pid, a wedged pre-#1454 daemon that
+  // can no longer respond — is left as DISAGREEMENT (refuse to signal).
+  // Never WEDGED, never SIGTERM, on an unverified pid.
+  //
+  // The write uses the same O_NOFOLLOW / 0600 / atomic-rename posture as every
+  // other sidecar write. We skip self-heal when the dataDir is unsafe
+  // (symlink / world-writable) — the check has already happened above.
+  if (
+    sidecar.kind === "absent" &&
+    dataDirUnsafe === null &&
+    pidfile.kind === "present" &&
+    pidLiveness?.kind === "alive" &&
+    health.kind === "ok"              // ← the real proof: only flair serves this
+  ) {
+    const pid = pidfile.pid;
+    const startTimeMs = readProcessStartTimeMs(pid);
+    if (startTimeMs !== null) {
+      try {
+        writeDaemonSidecar(dataDir, pid, port, startTimeMs);
+        // Re-read: now that the sidecar exists, classify through the normal path.
+        sidecar = readSidecar(dataDir);
+      } catch {
+        // Self-heal is best-effort. If the write fails (e.g. read-only dataDir),
+        // we proceed with sidecar === absent and fall through to DISAGREEMENT
+        // — the same outcome as before the self-heal path, so no regression.
+      }
+    }
+  }
+
+  const identity = verifyIdentity({
+    pidfilePid: pidfile.kind === "present" ? pidfile.pid : null,
+    sidecar,
+    readStartTime: readProcessStartTimeMs,
+  });
+  return { dataDirUnsafe, pidfile, pidLiveness, identity, health };
+}
+
+/**
+ * Write the identity sidecar atomically (temp + rename) at spawn time or
+ * during self-heal (flair#1454 decision 3). `pid` is the spawned process's
+ * pid — the same number Harper writes to `hdb.pid`, since Harper runs
+ * in-process. `startTimeMs` defaults to `Date.now()` for a fresh spawn.
+ *
+ * Self-heal callers pass the live process's actual start time (from
+ * readProcessStartTimeMs) so the sidecar records an accurate epoch, not a
+ * wall-clock approximation. Note: in the self-heal path the ±2s start-time
+ * check in verifyIdentity is NOT what prevents recycled-pid adoption —
+ * that guard is the /Health probe that the self-heal caller already required
+ * before reaching this point. The start time is recorded faithfully for
+ * forward compatibility and audit, not as a security gate here.
+ */
+function writeDaemonSidecar(dataDir: string, pid: number, port: number, startTimeMs = Date.now()): void {
+  const sidecar = { pid, startTimeMs, port, flairVersion: __pkgVersion };
+  const tmpPath = join(dataDir, `.flair-daemon.json.${process.pid}.${randomBytes(4).toString("hex")}.tmp`);
+  // Write with mode 0600 so the tmp file is never world-readable (flair#1454
+  // decision 6 — same posture as admin-pass and key material).
+  writeFileSync(tmpPath, JSON.stringify(sidecar, null, 2) + "\n", { encoding: "utf-8", mode: 0o600 });
+  const finalPath = join(dataDir, "flair-daemon.json");
+  renameSync(tmpPath, finalPath);
+  // Re-assert 0600 after the rename: rename preserves the tmp permissions but
+  // a pre-existing file at the destination retains its original mode on some
+  // kernels. An explicit chmod is the only guarantee (flair#1454 decision 6).
+  chmodSync(finalPath, 0o600);
+}
+
 // ─── flair stop ───────────────────────────────────────────────────────────────
 
 program
@@ -12155,46 +12414,54 @@ program
       }
     }
 
-    // Fallback: find process by port. Listening sockets only, never our own
-    // PID — see parseListeningPids (flair#800/flair#905): this used to SIGTERM
-    // every process holding ANY socket on the port, so `flair stop` could kill
-    // itself (leaving Flair running) or kill an unrelated client of it.
-    //
-    // Attribution guard (flair#915): the port is not an identity. Refuse to
-    // SIGTERM a PID that cannot be attributed to this instance.
-    try {
-      const { execSync } = await import("node:child_process");
-      const pids = listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
-      if (pids.length > 0) {
-        const dataDir = defaultDataDir();
-        const harperPid = readHarperPid(dataDir);
-        if (harperPid !== null && !pids.includes(harperPid)) {
-          console.error(
-            `⚠️  Process(es) on port ${port} (PID${pids.length > 1 ? "s" : ""}: ${pids.join(", ")}) `
-              + `do not match this Flair instance (PID ${harperPid}). `
-              + `Not stopping — cannot attribute the process to this instance. `
-              + `Stop the process manually if it is not Flair.`,
-          );
-          process.exit(1);
-        } else if (harperPid === null) {
-          console.error(
-            `⚠️  Process(es) on port ${port} (PID${pids.length > 1 ? "s" : ""}: ${pids.join(", ")}) `
-              + `but no PID file in data directory — not a running Flair instance. `
-              + `Not stopping — cannot attribute the process to this instance. `
-              + `Stop the process manually if it is not Flair.`,
-          );
-          process.exit(1);
-        } else {
-          for (const pid of pids) {
-            try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+    // Non-launchd: the five-state liveness machine (flair#1454). The old
+    // decision tree (launchd -> lsof -> "not running") is REPLACED, not
+    // patched: `lsof` absence used to render as a definite "not running", and
+    // the pidfile was only consulted to attribute port-derived PIDs. Now the
+    // pidfile + identity sidecar are the primary evidence, and the health
+    // probe is a cross-check — never the verdict.
+    const dataDir = defaultDataDir();
+    const evidence = await gatherDaemonEvidence(port, dataDir);
+    const state = classifyDaemonState(evidence, { port, dataDir });
+
+    switch (state.state) {
+      case "RUNNING":
+      case "WEDGED": {
+        // Identity is already proven for both of these — killing a wedged
+        // daemon is recovery, not a recycled-PID gamble.
+        const pid = state.pid;
+        const label = state.state === "WEDGED" ? "wedged daemon" : "daemon";
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch (err: any) {
+          if (err?.code !== "ESRCH") {
+            console.error(`❌ failed to signal pid ${pid}: ${err?.code ?? err?.message}`);
+            process.exit(1);
           }
-          console.log(`✅ Flair stopped (killed PID${pids.length > 1 ? "s" : ""}: ${pids.join(", ")})`);
         }
-      } else {
-        console.log("Flair is not running.");
+        await waitForProcessExit(pid, STARTUP_TIMEOUT_MS);
+        const after = await probeHealth(port);
+        if (after.kind === "refused") {
+          console.log(`✅ Flair stopped (${label}, pid ${pid})`);
+        } else {
+          console.log(`✅ Flair stopped (${label}, pid ${pid}; port ${port} may still be releasing)`);
+        }
+        return;
       }
-    } catch {
-      console.log("Flair is not running (nothing found on port " + port + ").");
+      case "NOT_RUNNING":
+        console.log("Flair is not running.");
+        return;
+      case "DISAGREEMENT":
+        console.error(`⚠️  ${state.detail}`);
+        console.error(`   Not stopping — the evidence conflicts.`);
+        console.error(`   pidfile: ${join(dataDir, "hdb.pid")}`);
+        console.error(`   port: ${port}`);
+        console.error(`   To inspect: flair doctor`);
+        process.exit(1);
+      case "UNKNOWN":
+        console.error(`⚠️  ${state.detail}`);
+        console.error(`   Not stopping — could not determine whether Flair is running.`);
+        process.exit(1);
     }
   });
 
@@ -12206,17 +12473,38 @@ program
   .option("--port <port>", "Harper HTTP port")
   .action(async (opts) => {
     const port = resolveHttpPort(opts);
-
-    // Check if already running
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/Health`, { signal: AbortSignal.timeout(2000) });
-      if (res.status > 0) {
-        console.log(`Flair is already running on port ${port}.`);
-        return;
-      }
-    } catch { /* not running — good */ }
-
     const dataDir = defaultDataDir();
+
+    // Already-running check via the five-state liveness machine (flair#1454).
+    // The old check was a bare `fetch /Health` that treated "got a response"
+    // as "already running" and exited 0 — half of #1454. Now the machine
+    // classifies, and every non-NOT_RUNNING state refuses with a non-zero exit.
+    const evidence = await gatherDaemonEvidence(port, dataDir);
+    const state = classifyDaemonState(evidence, { port, dataDir });
+
+    switch (state.state) {
+      case "NOT_RUNNING":
+        break; // proceed to boot
+      case "RUNNING":
+        console.error(`Flair is already running on port ${port} (pid ${state.pid}).`);
+        process.exit(1);
+      case "WEDGED":
+        console.error(`⚠️  A wedged Flair daemon (pid ${state.pid}) is holding port ${port}.`);
+        console.error(`   Run 'flair stop' first — never start over a live pid.`);
+        process.exit(1);
+      case "DISAGREEMENT":
+        console.error(`⚠️  ${state.detail}`);
+        console.error(`   Refusing to start — the evidence conflicts.`);
+        console.error(`   pidfile: ${join(dataDir, "hdb.pid")}`);
+        console.error(`   port: ${port}`);
+        console.error(`   To inspect: flair doctor`);
+        process.exit(1);
+      case "UNKNOWN":
+        console.error(`⚠️  ${state.detail}`);
+        console.error(`   Refusing to start — could not determine whether Flair is running.`);
+        process.exit(1);
+    }
+
     if (!existsSync(dataDir)) {
       console.error("❌ No Flair data directory found. Run 'flair init' first.");
       process.exit(1);
@@ -12296,6 +12584,12 @@ program
     });
     proc.unref();
 
+    // Write the identity sidecar immediately after spawn (flair#1454 decision
+    // 3) — BEFORE waitForHealth, so startTimeMs stays within the ±2s tolerance
+    // of the process's real start time. `proc.pid` is the pid Harper writes to
+    // hdb.pid, since Harper runs in-process.
+    if (proc.pid) writeDaemonSidecar(dataDir, proc.pid, port);
+
     try {
       await waitForHealth(port, DEFAULT_ADMIN_USER, adminPass, STARTUP_TIMEOUT_MS);
       readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture on the freshly-created socket
@@ -12364,56 +12658,6 @@ export function assertLaunchdServiceOwnedBy(
       `${resolve(declared)}, not ${resolve(dataDir)} — that is a different Flair instance. ` +
       `Re-run with --data-dir ${resolve(declared)} to act on that one, or run ` +
       `'flair init --data-dir ${resolve(dataDir)}' to register a service for this one.`,
-  );
-}
-
-/**
- * Refuse a port-based SIGTERM that cannot be attributed to `dataDir`
- * (flair#902).
- *
- * The port fallback below identifies its target by port number and nothing
- * else, so `--data-dir <scratch>` with a port that scratch instance does not
- * serve signals whichever instance DOES serve it. That is the whole of this
- * bug on Linux, where there is no launchd path at all.
- *
- * Scoped deliberately to a non-default data dir. For the default install the
- * port genuinely is that instance's port by every convention in this CLI
- * (`writeConfig`/`readPortFromConfig`), and the only evidence available here
- * — `<dataDir>/hdb.pid` vs the listening PIDs — is not something we can
- * require without risking a false refusal on a working install whose PID file
- * is missing or whose listener is a worker. So the default path keeps today's
- * behavior exactly, and the residual gap is stated rather than papered over:
- * a default-dir port stop is still unattributed. The new refusal can only
- * fire for a caller that explicitly named another data dir — the case that is
- * wrong today whenever the port does not match.
- */
-function assertPortInstanceOwnedBy(port: number, dataDir: string, listeningPids: number[]): void {
-  // (flair#915) Apply the attribution check for ALL data directories, not
-  // just non-default ones. The default-dir bypass was the residual gap that
-  // #910 left behind — it allowed an unattributed SIGTERM on the default
-  // install's port. The old concern (false refusal when hdb.pid is missing)
-  // is actually the RIGHT behavior: no PID file means we cannot attribute the
-  // listener, so we refuse. That is safer than killing the wrong process.
-  const expected = readHarperPid(dataDir);
-  // No PID file — Harper is not (or was not) running in this directory.
-  // The port is stale or held by something else; refuse to SIGTERM it.
-  if (expected === null) {
-    throw new Error(
-      `refusing to stop the process listening on port ${port}: no hdb.pid under `
-        + `${resolve(dataDir)}, so that is not a running instance. `
-        + `Stopping by port alone would signal a process we cannot attribute. `
-        + `If it is not Flair, stop it manually.`,
-    );
-  }
-  // PID file exists — the PID on the port must be Harper.
-  if (listeningPids.includes(expected)) return;
-
-  throw new Error(
-    `refusing to stop the process listening on port ${port}: its recorded PID ${expected} `
-      + `is not the process listening on ${port}. `
-      + `Stopping by port alone would signal a different instance. `
-      + `Pass --port with the port ${resolve(dataDir)} actually serves, `
-      + `or stop the process manually.`,
   );
 }
 
@@ -12586,13 +12830,13 @@ function observeLaunchdManagement(dataDir: string, port: number): LaunchdManagem
  * data dir does, via `resolveLaunchdLabel`.
  *
  * Idempotent-ish: stopping an already-stopped instance is a harmless no-op
- * on both paths (launchctl stop on an unloaded/idle service, or an empty
- * `lsof` match).
+ * on both paths (launchctl stop on an unloaded/idle service, or a
+ * NOT_RUNNING classification from the liveness machine).
  *
  * Throws when the resolved target provably belongs to a different instance
- * — see assertLaunchdServiceOwnedBy / assertPortInstanceOwnedBy. Callers
- * already treat a failed stop as fatal, which is the point: refusing beats
- * quiescing the wrong install.
+ * — see assertLaunchdServiceOwnedBy, or a DISAGREEMENT/UNKNOWN verdict from
+ * the liveness machine. Callers already treat a failed stop as fatal, which
+ * is the point: refusing beats quiescing the wrong install.
  */
 async function stopFlairProcess(port: number, dataDir: string): Promise<void> {
   if (process.platform === "darwin") {
@@ -12662,38 +12906,37 @@ async function stopFlairProcess(port: number, dataDir: string): Promise<void> {
     }
   }
 
-  // Port-based stop (Linux, or macOS fallback when no launchd plist)
+  // Port-based stop (Linux, or macOS fallback when no launchd plist) — the
+  // five-state liveness machine (flair#1454). The old lsof-based tree is
+  // REPLACED, not patched: `lsof` absence used to render as "not running", and
+  // the pidfile was only consulted to attribute port-derived PIDs. Now the
+  // pidfile + identity sidecar are the primary evidence, and the health probe
+  // is a cross-check — never the verdict.
   console.log("Stopping...");
-  const { execSync } = await import("node:child_process");
-  // -sTCP:LISTEN plus a self-PID guard, both inside listeningPidsOnPort: a bare
-  // `lsof -ti :port` also matches CLIENT sockets referencing the port, including
-  // THIS CLI's own keep-alive connections left by the credential pre-flight's
-  // probeInstance() HTTP calls (flair#741). Without the filter, the upgrade
-  // path SIGTERM'd its own process mid-restart — "Stopping..." then death
-  // (exit 143) before "Starting..." ever ran, leaving the server down
-  // (flair#800, deterministic on the Linux/non-launchd default path).
-  // flair#905 moved both halves into that one helper because the same
-  // unfiltered pattern had survived in `flair stop`, `flair uninstall` and
-  // `flair doctor` — one guarded resolver is what keeps the next site honest.
-  // It returns [] when lsof matches nothing, which is this path's "not running".
-  const targets = listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
-  if (targets.length === 0) return;
+  const evidence = await gatherDaemonEvidence(port, dataDir);
+  const state = classifyDaemonState(evidence, { port, dataDir });
 
-  // Deliberately outside any catch: a refusal must reach the caller, not be
-  // swallowed as "not running" and reported as a successful stop.
-  assertPortInstanceOwnedBy(port, dataDir, targets);
-
-  for (const target of targets) {
-    try { process.kill(target, "SIGTERM"); } catch {}
-  }
-  // flair#905 / lrf5: wait for every signalled process to actually exit.
-  // A blind 2-second sleep is not a guarantee — Harper may be flushing
-  // RocksDB WAL/MANIFEST, and the next start will fail with a locked data
-  // directory if the old process hasn't released it yet. The launchd path
-  // above already does this via waitForProcessExit; the port-based path
-  // must match that guarantee.
-  for (const target of targets) {
-    try { await waitForProcessExit(target, STARTUP_TIMEOUT_MS); } catch { /* best-effort — the next start will surface the real problem */ }
+  switch (state.state) {
+    case "RUNNING":
+    case "WEDGED": {
+      // Identity is already proven for both — killing a wedged daemon is
+      // recovery, not a recycled-PID gamble.
+      const pid = state.pid;
+      try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+      // flair#905 / lrf5: wait for the signalled process to actually exit. A
+      // blind sleep is not a guarantee — Harper may be flushing RocksDB
+      // WAL/MANIFEST, and the next start fails with a locked data directory if
+      // the old process hasn't released it yet.
+      try { await waitForProcessExit(pid, STARTUP_TIMEOUT_MS); } catch { /* best-effort — the next start will surface the real problem */ }
+      return;
+    }
+    case "NOT_RUNNING":
+      return; // idempotent no-op
+    case "DISAGREEMENT":
+    case "UNKNOWN":
+      // Deliberately outside any catch: a refusal must reach the caller, not
+      // be swallowed as "not running" and reported as a successful stop.
+      throw new Error(`refusing to stop: ${state.detail}`);
   }
 }
 
@@ -12824,6 +13067,10 @@ async function startFlairProcess(port: number, dataDir: string): Promise<void> {
     cwd: flairPackageDir(), env, detached: true, stdio: "ignore",
   });
   proc.unref();
+
+  // Identity sidecar immediately after spawn (flair#1454 decision 3), before
+  // waitForHealth so startTimeMs stays within the ±2s tolerance.
+  if (proc.pid) writeDaemonSidecar(dataDir, proc.pid, port);
 
   await waitForHealth(port, DEFAULT_ADMIN_USER, adminPass, STARTUP_TIMEOUT_MS);
   readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture across restart/upgrade

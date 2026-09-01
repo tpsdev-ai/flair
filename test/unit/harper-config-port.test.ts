@@ -227,7 +227,10 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
     // still fires on it.
     expect(exitCode).not.toBe(0);
     expect(stderr).toContain(`port ${stub.port}`);
-    expect(stderr).toContain("cannot attribute");
+    // flair#1454: the refusal is now a DISAGREEMENT verdict from the liveness
+    // machine — no pidfile under the scratch dir, yet something is serving the
+    // port. The old "cannot attribute" wording is gone with the lsof tree.
+    expect(stderr).toContain("no pid is recorded");
     expect(stderr).toContain(resolve(scratch));
     expect(stderr).not.toContain(String(LEGACY_PER_USER_PORT));
 
@@ -250,7 +253,7 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
 
     expect(exitCode).not.toBe(0);
     expect(stderr).toContain(`port ${stub.port}`);
-    expect(stderr).toContain("cannot attribute");
+    expect(stderr).toContain("no pid is recorded");
     expect(await stub.alive()).toBe(true);
   }, 30_000);
 
@@ -552,6 +555,15 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
     writeHarperConfig(scratch, { httpPort: stub.port });
     // The stub IS this instance, as far as the data directory is concerned.
     writeFileSync(join(resolve(scratch), "hdb.pid"), `${stub.pid}\n`);
+    // flair#1454: identity is now carried by a sidecar, not just hdb.pid. The
+    // stub was spawned moments ago, so Date.now() is within the ±2s tolerance
+    // of its real start time — this is what makes the stop attributable.
+    writeFileSync(join(resolve(scratch), "flair-daemon.json"), JSON.stringify({
+      pid: stub.pid,
+      startTimeMs: Date.now(),
+      port: stub.port,
+      flairVersion: "0.0.0-test",
+    }));
 
     // A deliberately unopenable "snapshot" (a directory — tar's first read is
     // EISDIR). restore stops FIRST, then validates the archive, so this
@@ -636,5 +648,104 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
       expect(flairOwnedPortFiles(dest)).toEqual([]);
     },
     60_000,
+  );
+});
+
+// ─── flair#1454 self-heal security gate ──────────────────────────────────────
+//
+// The self-heal path in gatherDaemonEvidence reconstructs a missing sidecar
+// for a pre-#1454 daemon (upgrade path). The self-heal check MUST be gated on
+// /Health responding, NOT on the pid being alive and a start-time match:
+//
+//   CIRCULAR LOGIC (WRONG): write sidecar from pid's own start time -> verify
+//   against same pid -> always matches by construction for ANY live pid,
+//   including a recycled pid from an unrelated process.
+//
+//   CORRECT: require /Health OK first. Only the flair daemon serves 200 at
+//   http://127.0.0.1:<port>/Health. An unrelated recycled pid does not.
+//
+// This test catches the regression: a live pid that is NOT serving /Health
+// must classify DISAGREEMENT and must NOT be signalled.
+describe("flair#1454 — self-heal requires /Health proof, not just a live pid", () => {
+  let tmpHome: string;
+  let dataDir: string;
+  const spawned: Array<{ kill: (sig?: NodeJS.Signals | number) => void }> = [];
+
+  beforeEach(() => {
+    tmpHome = mkdtempSync(join(tmpdir(), "flair1454-selfheal-"));
+    dataDir = join(tmpHome, ".flair", "data");
+    mkdirSync(dataDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    for (const proc of spawned.splice(0)) {
+      try { proc.kill(9); } catch { /* already gone */ }
+    }
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  test(
+    "self-heal: a live pid that is NOT serving /Health must classify DISAGREEMENT and must not be signalled",
+    async () => {
+      // Spawn a process that stays alive but NEVER binds a socket.
+      // `bun -e 'await new Promise(()=>{})' is the simplest infinite sleep.
+      // This is the 'recycled pid' scenario: a live process in hdb.pid that is
+      // not the flair daemon.
+      const sleeper = Bun.spawn(["bun", "-e", "await new Promise(()=>{})"], {
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      spawned.push(sleeper as unknown as { kill: (sig?: NodeJS.Signals | number) => void });
+      const pid = (sleeper as unknown as { pid: number }).pid;
+      expect(pid).toBeGreaterThan(0);
+
+      // Write hdb.pid for this 'recycled' process but NO sidecar.
+      writeFileSync(join(dataDir, "hdb.pid"), String(pid));
+
+      // Use a port that is NOT being served — so /Health returns ECONNREFUSED.
+      // Port 59989 is far from any CI default.
+      const PORT = 59989;
+
+      // flair stop must refuse: the pid is alive, there's no sidecar, and
+      // /Health is not responding. Self-heal must NOT fire (no health proof),
+      // so the classifier must return DISAGREEMENT and exit nonzero without
+      // signalling the sleeper.
+      const env: Record<string, string> = {
+        ...(process.env as Record<string, string>),
+        HOME: tmpHome,
+      };
+      delete (env as Record<string, string | undefined>)["FLAIR_URL"];
+      delete (env as Record<string, string | undefined>)["FLAIR_TARGET"];
+      const cliPath = join(import.meta.dirname, "..", "..", "src", "cli.ts");
+      const proc = Bun.spawn(["bun", cliPath, "stop", "--port", String(PORT)], {
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const stdout = await new Response(proc.stdout).text();
+      const stderr = await new Response(proc.stderr).text();
+      const exitCode = await proc.exited;
+
+      // Must refuse with a nonzero exit.
+      expect(exitCode).not.toBe(0);
+      // Must mention refusal or disagreement — never "Stopped".
+      expect(stdout + stderr).not.toContain("Stopped");
+      expect(stdout + stderr).toMatch(/refusing|disagreement|DISAGREEMENT|could not be verified/i);
+
+      // THE KEY ASSERTION: the sleeper must still be alive — it was NOT signalled.
+      // If self-heal incorrectly adopted the recycled pid and SIGTERMed it, this fails.
+      const liveness = await new Promise<"alive" | "gone">((resolve) => {
+        setTimeout(() => {
+          try {
+            process.kill(pid, 0);
+            resolve("alive");
+          } catch {
+            resolve("gone");
+          }
+        }, 200);
+      });
+      expect(liveness).toBe("alive");
+    },
+    30_000,
   );
 });

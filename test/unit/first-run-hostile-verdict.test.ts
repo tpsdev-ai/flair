@@ -80,9 +80,12 @@ function runCli(args: string[], files: Record<string, string> = {}) {
 }
 
 describe("loadExpected", () => {
-  test("accepts the committed file", () => {
+  test("accepts the committed file (empty — #1454 fixed)", () => {
     const entries = loadExpected(readFileSync(COMMITTED, "utf8"), COMMITTED);
-    expect(entries).toEqual(only1454());
+    // After flair#1454 is fixed the expected array is empty: the five-state
+    // liveness machine classifies the daemon from the identity sidecar, not
+    // lsof, so stop finds the live daemon even without lsof.
+    expect(entries).toEqual([]);
   });
 
   test("refuses a marker that does not name its issue", () => {
@@ -118,15 +121,18 @@ describe("observedFailIssues — per-issue, not a count", () => {
 });
 
 describe("judge — negative: current main matches the committed file", () => {
-  test("FAIL (#1454) only + committed inventory is GREEN and names the known defect", () => {
+  test("empty committed file + clean detector log is GREEN (flair#1454 fixed)", () => {
+    // After flair#1454 the committed expected array is empty and the detector
+    // exits 0 with a clean log. Both sides of the two-way xfail are satisfied:
+    // no unexpected FAIL markers, no missing expected markers.
     const expected = loadExpected(readFileSync(COMMITTED, "utf8"));
-    const v = judge({ expected, log: CURRENT_MAIN_LOG, containerStatus: 1 });
+    const v = judge({ expected, log: CLEAN_LOG, containerStatus: 0 });
     expect(v.ok).toBe(true);
-    expect(v.known).toEqual([1454]);
+    expect(v.known).toEqual([]);
     expect(v.missing).toEqual([]);
     expect(v.unexpected).toEqual([]);
     expect(v.abort).toBe(false);
-    expect(v.summary).toContain("GREEN: 1 known first-run defect present: #1454");
+    expect(v.summary).toContain("GREEN: no first-run defects");
   });
 });
 
