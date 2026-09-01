@@ -1,6 +1,4 @@
 {
-  "comment": "Two-way xfail inventory for the first-run-hostile lane (flair#1462). Each entry's marker must appear in the detector log. An unexpected FAIL, or an expected marker that does not fire, is RED and names which. Exact match is GREEN. #1459 is omitted: after #1463 the detector prints PASS for the README remedy, not FAIL (#1459). Re-add that entry only if FAIL (#1459) fires again. Not required-for-merge until this array is empty.",
-  "expected": [
-    { "issue": 1454, "marker": "FAIL (#1454)" }
-  ]
+  "comment": "Two-way xfail inventory for the first-run-hostile lane (flair#1462). Each entry's marker must appear in the detector log. An unexpected FAIL, or an expected marker that does not fire, is RED and names which. Exact match is GREEN. #1459 is omitted: after #1463 the detector prints PASS for the README remedy, not FAIL (#1459). Re-add that entry only if FAIL (#1459) fires again. #1454 is omitted: after #1454 the five-state liveness machine classifies the daemon from the identity sidecar, not lsof, so stop finds the live daemon even when lsof is absent. Not required-for-merge until this array is empty.",
+  "expected": []
 }

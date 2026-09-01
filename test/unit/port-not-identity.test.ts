@@ -355,7 +355,11 @@ describe("flair#915 — the default install attribution gap is closed", () => {
     // The foreign server survived — stop refused.
     expect(await foreign.alive()).toBe(true);
     expect(exitCode).not.toBe(0);
-    expect(stderr).toContain("cannot attribute");
+    // flair#1454: the refusal is now a DISAGREEMENT verdict from the liveness
+    // machine — the recorded pid is not alive, yet something is serving the
+    // port. The old "cannot attribute" wording is gone with the lsof tree.
+    expect(stderr).toContain("not alive");
+    expect(stderr).toContain("88888");
   }, 30_000);
 
   test("flair stop refuses when the default install has no PID file but something is on the port", async () => {
@@ -370,8 +374,9 @@ describe("flair#915 — the default install attribution gap is closed", () => {
 
     expect(await foreign.alive()).toBe(true);
     expect(exitCode).not.toBe(0);
-    expect(stderr).toContain("no PID file");
-    expect(stderr).toContain("cannot attribute");
+    // flair#1454: no pidfile + something serving = DISAGREEMENT. The old
+    // "no PID file" / "cannot attribute" wording is gone with the lsof tree.
+    expect(stderr).toContain("no pid is recorded");
   }, 30_000);
 });
 

@@ -332,7 +332,10 @@ describe("flair#902 — snapshot commands target the instance named by --data-di
     ]);
 
     expect(exitCode).not.toBe(0);
-    expect(stderr).toContain("cannot attribute");
+    // flair#1454: the refusal is now a DISAGREEMENT verdict from the liveness
+    // machine — no pidfile under the scratch dir, yet something is serving the
+    // port. The old "cannot attribute" wording is gone with the lsof tree.
+    expect(stderr).toContain("no pid is recorded");
     expect(stderr).toContain(resolve(scratchDataDir));
 
     // The instance on that port is still serving — it was never this
