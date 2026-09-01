@@ -18,6 +18,85 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.51.1] - 2026-09-01
+
+### Added
+
+- **User-facing memory basement/restore action.** New `memory_basement(id)` and
+  `memory_restore(id)` MCP tools (plus `flair memory basement <id>` /
+  `flair memory restore <id>` CLI verbs) set and clear the `archived` flag on a
+  memory. `basement` sends a memory to the basement (removed from bootstrap and
+  default search, still retrievable via `memory_get` and
+  `memory_search(includeArchived: true)`); `restore` un-basements it. Both are
+  deliberate and **global** — restore un-retires a memory for *every* session,
+  not a session-local view — and both are scoped to the caller's own memories.
+  `memory search` also gains `--include-archived` to opt back into basemented
+  results under the same read-scope gate as a normal search.
+
+### Fixed
+
+- **Benchmark artifacts can no longer silently record `gitCommit: null`.** The
+  LongMemEval, payload-A/B and ingest-throughput harnesses resolve the flair
+  commit under test from the flair code location — a checkout's `HEAD`, else the
+  installed/exported package's `dist/build-info.json` stamp — and FAIL CLOSED
+  with an actionable error (run from a checkout, build the package, or set
+  `FLAIR_BENCH_COMMIT`) rather than sealing a null-commit artifact. A benchmark
+  that cannot name the code it measured now refuses to produce one, so
+  reproducibility is not silently lost (flair#1432). The checkout `HEAD` is
+  trusted only when the code directory IS the repo root: an export unpacked
+  inside an unrelated repo can no longer inherit that repo's `HEAD` via git's
+  upward `.git` discovery — a real-but-wrong commit that would otherwise
+  self-verify (flair#1477).
+
+- **`flair upgrade` no longer contradicts `flair doctor` on the same machine.**
+  Previously, upgrading from 0.49.0 to 0.50.0 with Codex already wired printed
+  "✅ verified: healthy, authenticated, running 0.50.0" immediately followed by
+  `flair doctor` exiting 1 with "✗ SessionStart hook (codex): not found" —
+  two controls disagreeing about the same machine seconds apart (flair#1439).
+
+  Two root causes fixed together:
+
+  1. **Upgrade now applies pending version migrations automatically.** A new
+     `applyUpgradeMigrations(fromVersion, toVersion, ctx)` step runs before the
+     post-upgrade catalog run. The first migration (`session-start-hook@0.50.0`)
+     installs the missing SessionStart hook for harnesses already wired on the
+     machine — the user consented when they ran `flair init`. No new flag
+     required; no consent prompt needed (the integration was already approved).
+     Idempotent: a no-op when the hook already exists. Only fires for harnesses
+     the user actually wired (never newly wires a harness they never had).
+
+  2. **Upgrade's success marker now means the same thing as `flair doctor`.**
+     `renderVerifiedSummary` gates the unqualified "✅ verified: healthy" on the
+     shared `runDoctorChecks` catalog — the same set `flair doctor` runs.
+     Adding a doctor check automatically widens upgrade's claim. "healthy" is
+     printed only when every catalog member passes or skips. Refs #1439.
+
+- **`flair stop` and `flair start` now decide liveness with a five-state machine instead of a single `lsof` probe** (Refs #1454).
+  The old stop path ran `lsof -ti :<port>` and treated its `catch` as "nothing
+  is listening" — so on a host without `lsof`, `flair stop` reported "not
+  running" against a live daemon and `flair start` silently "succeeded" over it,
+  and a `stop; start` wrapper (a systemd `Type=forking` unit's `ExecStop`, say)
+  produced a second daemon while the first kept running. The new classifier
+  distinguishes `RUNNING`, `NOT_RUNNING`, `WEDGED`, `DISAGREEMENT`, and
+  `UNKNOWN`, and `lsof` absence no longer changes any verdict. Identity is
+  carried by a sidecar (`<dataDir>/flair-daemon.json`) that flair writes at
+  spawn — `{ pid, startTimeMs, port, flairVersion }` — and a pid is only ever
+  signalled when its identity is verified (pidfile pid matches the sidecar, and
+  the live process's start time matches within ±2s). A wedged daemon is
+  recoverable only through that verified identity; the same evidence without
+  proof is a `DISAGREEMENT` that refuses to act, so a recycled PID can no longer
+  be mistaken for the instance. `flair start` over a live daemon now exits
+  non-zero instead of 0.
+
+- **Memory bootstrap now honors the `archived` flag.** A memory sent to the
+  basement (`archived: true`) is no longer force-injected into bootstrap recall
+  — previously the three bootstrap query paths (permanent, recent, and the
+  task-relevant candidate pool) omitted the `archived` predicate, so a retired
+  `durability: permanent` memory reappeared in every session's bootstrap even
+  though it was already excluded from search and attention. No schema change;
+  the fix matches the exact condition shape the other four read paths already
+  use.
+
 ## [0.51.0] - 2026-08-30
 
 ### Added
