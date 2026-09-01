@@ -197,6 +197,7 @@ import {
 // still loaded lazily at call time (the `await import()`s below) for the
 // functions — this pulls in nothing but node builtins.
 import { DEFAULT_INTERVAL_SECONDS as FEDERATION_SYNC_DEFAULT_INTERVAL } from "./federation/scheduler.js";
+import { applyUpgradeMigrations, type UpgradeMigrationContext } from "./lib/upgrade-migrations.js";
 
 // Federation crypto helpers — inlined to avoid cross-boundary imports from
 // src/ into resources/, which don't survive npm packaging (see also
@@ -12104,6 +12105,8 @@ program
         management,
         port,
         installHooksFlag: !!opts.installHooks,
+        fromVersion: previousFlairVersion,
+        toVersion: expectedFlairVersion,
       });
       printVerifiedSummary(renderVerifiedSummary(verify.version, run));
       return;
@@ -12124,6 +12127,8 @@ program
         management,
         port,
         installHooksFlag: !!opts.installHooks,
+        fromVersion: previousFlairVersion,
+        toVersion: expectedFlairVersion,
       });
       const versionNote = expectedFlairVersion ? ` on @tpsdev-ai/flair@${expectedFlairVersion}` : "";
       if (run.healthy) {
@@ -12732,18 +12737,59 @@ async function confirmYes(question: string): Promise<boolean> {
  * yes is the only consent. The consent→write composition lives in
  * applyUpgradeHookConsent so tests can drive the path that actually
  * writes (or does not write) the hook file.
+ *
+ * Before the catalog run, `applyUpgradeMigrations` fires any version-keyed
+ * migrations that are pending for the fromVersion→toVersion pair. These do
+ * NOT require `--install-hooks` because the user already consented to the
+ * affected integration when they ran `flair init` — the migration just
+ * applies a new artifact that the old init could not have written.
  */
 async function doctorRunAfterUpgrade(args: {
   management: LaunchdManagement;
   port: number;
   installHooksFlag: boolean;
+  /** Previously installed version — null when unknown. */
+  fromVersion: string | null;
+  /** Newly installed (target) version — null when unknown. */
+  toVersion: string | null;
 }): Promise<DoctorRun> {
   const homeDir = homedir();
   const keysDir = defaultKeysDir();
+  const detectedClientIds = detectClients().filter((c) => c.detected).map((c) => c.id);
+
+  // ── Version-keyed upgrade migrations (flair#1439) ─────────────────────────
+  // Apply any pending migrations BEFORE the doctor catalog run so that the
+  // catalog sees the post-migration state (e.g. the hook is present, so the
+  // session-start-hook check passes and the upgrade prints ✅ verified: healthy).
+  const migCtx: UpgradeMigrationContext = {
+    homeDir,
+    port: args.port,
+    detectedClientIds,
+  };
+  const migrations = applyUpgradeMigrations(args.fromVersion, args.toVersion, migCtx);
+  for (const { results } of migrations.applied) {
+    for (const r of results) {
+      if (r.wrote) {
+        console.log(`   ✓ ${r.message}`);
+      } else if (!r.ok) {
+        console.error(`   • ${r.message}`);
+      }
+      // Silently skip no-op (ok, !wrote) — nothing changed, nothing to say.
+    }
+  }
+  if (!migrations.allOk) {
+    // A migration reported a non-fatal issue (each is logged above). Say so
+    // plainly rather than let the upcoming ✅ verified summary imply the upgrade
+    // finished cleanly — the doctor catalog below reflects the real state.
+    console.error(
+      "   • one or more upgrade migrations did not complete cleanly — the doctor check below shows the current state.",
+    );
+  }
+
   const ctx = {
     homeDir,
     cwd: process.cwd(),
-    detectedClientIds: detectClients().filter((c) => c.detected).map((c) => c.id),
+    detectedClientIds,
     launchd: args.management,
     keysDir,
     keyAgentIds: collectKeyAgentIds(keysDir),
