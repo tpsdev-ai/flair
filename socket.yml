@@ -1,0 +1,18 @@
+# Socket.dev policy — OUR trust anchor, not Socket's default.
+# Same rules as tpsdev-ai/cli (the first repo to pin one). Supply-chain risk,
+# vulnerabilities and anomalies are errors; quality signals only warn.
+# Pinned 2026-09-02 (ops-3pdm). Change it here, in review — never in the dashboard alone.
+version: 2
+projectIgnorePaths:
+  - "node_modules"
+  - "test"
+  - "docs"
+issueRules:
+  supplyChainRisk:
+    deferTo: error
+  vulnerabilities:
+    deferTo: error
+  quality:
+    deferTo: warn
+  anomalies:
+    deferTo: error
