@@ -102,10 +102,11 @@ fi
 #
 # Plain `git push origin` fails auth on hosts without a working cred helper for
 # the flair remote (rockit: "Password authentication is not supported"). Push
-# via the gh token embedded in the remote URL instead — same pattern we use
-# everywhere else. The token is read once here and NEVER echoed/printed (it would
-# leak into CI/operator logs); `set -x`-safe because we don't expand $TOK inline
-# in any traced command.
+# with the gh token supplied through a per-invocation credential helper. The
+# token is read once here and NEVER echoed/printed, and it is never placed in
+# a URL or any other argv position (flair#955): an embedded-token URL is visible
+# to `ps`, to `set -x`, to CI step logs and to any transcript that captured the
+# command line, and each of those has burned a rotation before.
 TOK="$($GH auth token 2>/dev/null || gh auth token 2>/dev/null || true)"
 git_push_auth() {
   # Usage: git_push_auth <refspec> [<refspec>...]
@@ -114,7 +115,20 @@ git_push_auth() {
     echo "   Authenticate first (e.g. 'gh auth login') so release pushes can authenticate." >&2
     return 1
   fi
-  git -C "$ROOT" push "https://x-access-token:${TOK}@github.com/tpsdev-ai/flair.git" "$@"
+  # The token must never appear in argv (ps, shell traces, CI logs, transcripts —
+  # flair#955). Hand it to git through a one-shot credential helper that reads
+  # it from the environment at call time: the single-quoted helper string is
+  # literal in argv, and only the helper's own shell expands $GH_PUSH_TOKEN.
+  # Subshell with tracing off: under `set -x` even an env-prefix assignment
+  # prints its value, so the export happens where the trace cannot see it.
+  (
+    set +x
+    export GH_PUSH_TOKEN="$TOK"
+    exec git -C "$ROOT" \
+      -c credential.helper= \
+      -c 'credential.helper=!f() { echo "username=x-access-token"; echo "password=${GH_PUSH_TOKEN}"; }; f' \
+      push "https://github.com/tpsdev-ai/flair.git" "$@"
+  )
 }
 
 # -----------------------------------------------------------------------------
