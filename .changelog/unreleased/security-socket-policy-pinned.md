@@ -1,5 +1,5 @@
-- **Socket.dev policy is now pinned in the repository (`socket.yml`).** Supply-chain
-  risk, vulnerabilities and anomalies flagged on a pull request's dependency diff are
-  errors; quality signals warn. Previously the repo ran Socket's default policy. No
-  runtime change; accepting a legitimately flagged package is done per package in the
-  Socket dashboard with a reason, not by loosening the file.
+- **Socket.dev repo config added (`socket.yml`).** The Socket GitHub App's pull-request
+  alerts, project reports and dependency overview are now enabled from the repository,
+  ignore paths are explicit, and no user is exempt. Alert *actions* (block/warn) are
+  not expressible in this file; they live in the org Security Policy and are enforced
+  by the `main` ruleset requiring the "Socket Security: Pull Request Alerts" check.
