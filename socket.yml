@@ -1,18 +1,21 @@
-# Socket.dev policy — OUR trust anchor, not Socket's default.
-# Same rules as tpsdev-ai/cli (the first repo to pin one). Supply-chain risk,
-# vulnerabilities and anomalies are errors; quality signals only warn.
-# Pinned 2026-09-02 (ops-3pdm). Change it here, in review — never in the dashboard alone.
+# Socket.dev repo config (socket.yml v2; schema = @socketsecurity/config 3.0.1).
+#
+# WHAT THIS FILE BINDS: which Socket GitHub App surfaces run on this repo (the
+# "Socket Security: Pull Request Alerts" and "Project Report" checks, the PR
+# dependency table), the paths Socket ignores, and that no user is exempt.
+#
+# WHAT IT CANNOT BIND: the ACTION per alert type (block / warn / monitor / ignore).
+# That lives in the org Security Policy in the Socket dashboard, scoped by repo
+# label, and is enforced here by the branch ruleset requiring the
+# "Socket Security: Pull Request Alerts" check. A `deferTo:` block in this file is
+# SILENTLY DROPPED by the parser (verified 2026-09-02 with readSocketConfig, ops-3pdm)
+# — do not add one. `issueRules` here only takes booleans keyed by alert type.
 version: 2
 projectIgnorePaths:
-  - "node_modules"
-  - "test"
-  - "docs"
-issueRules:
-  supplyChainRisk:
-    deferTo: error
-  vulnerabilities:
-    deferTo: error
-  quality:
-    deferTo: warn
-  anomalies:
-    deferTo: error
+  - node_modules
+githubApp:
+  enabled: true
+  projectReportsEnabled: true
+  pullRequestAlertsEnabled: true
+  dependencyOverviewEnabled: true
+  ignoreUsers: []
