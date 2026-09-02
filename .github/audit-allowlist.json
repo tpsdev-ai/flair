@@ -14,7 +14,7 @@
     "Adding an entry is a REVIEWED act, not a way to get green. Each one must carry the",
     "advisory id, what pulls it in, why it cannot be fixed from this repo, a hard expiry",
     "date, and the concrete condition that retires it. The gate enforces all of that",
-    "mechanically, including a severity-scaled cap on how long an entry may live \u2014 you",
+    "mechanically, including a severity-scaled cap on how long an entry may live — you",
     "cannot park a critical for a year.",
     "",
     "When an entry expires the build FAILS and a human re-decides. That is the mechanism",
@@ -55,7 +55,7 @@
       "reason": "Same vendored edge and same upstream fix as GHSA-83w8-p2f5-377r; both clear when harper's pinned build moves to @fastify/static 10.1.2.",
       "added": "2026-07-27",
       "expires": "2026-10-25",
-      "removeWhen": "harper ships a v5 build resolving @fastify/static >=10.1.2 \u2014 the same move that retires GHSA-83w8-p2f5-377r."
+      "removeWhen": "harper ships a v5 build resolving @fastify/static >=10.1.2 — the same move that retires GHSA-83w8-p2f5-377r."
     },
     {
       "ghsa": "GHSA-r5fr-rjxr-66jc",
@@ -63,7 +63,7 @@
       "severity": "high",
       "class": "vendor-pinned",
       "introducedBy": "harper -> lodash, and workspace @tpsdev-ai/n8n-nodes-flair -> n8n-workflow -> lodash",
-      "reason": "Two independent edges resolve the same vulnerable lodash, one of them inside harper's pinned build. lodash 4.18.1 fixes it, but a bun override is global \u2014 it would move harper's copy too, and lodash 4.18 is a minor bump across a package harper uses pervasively. The vulnerable API (_.template with attacker-controlled imports keys) is not reachable from flair's own code.",
+      "reason": "Two independent edges resolve the same vulnerable lodash, one of them inside harper's pinned build. lodash 4.18.1 fixes it, but a bun override is global — it would move harper's copy too, and lodash 4.18 is a minor bump across a package harper uses pervasively. The vulnerable API (_.template with attacker-controlled imports keys) is not reachable from flair's own code.",
       "added": "2026-07-27",
       "expires": "2026-09-25",
       "removeWhen": "harper ships a v5 build resolving lodash >=4.18.1 AND n8n-workflow does the same, or the n8n-nodes-flair workspace package is dropped. Both edges must clear."
@@ -77,7 +77,7 @@
       "reason": "Same two vendored edges as GHSA-r5fr-rjxr-66jc; prototype pollution in _.unset/_.omit, neither of which flair calls with attacker-controlled paths.",
       "added": "2026-07-27",
       "expires": "2026-10-25",
-      "removeWhen": "Both lodash edges (harper and n8n-workflow) resolve >=4.18.1 \u2014 the same move that retires GHSA-r5fr-rjxr-66jc."
+      "removeWhen": "Both lodash edges (harper and n8n-workflow) resolve >=4.18.1 — the same move that retires GHSA-r5fr-rjxr-66jc."
     },
     {
       "ghsa": "GHSA-f23m-r3pf-42rh",
@@ -88,7 +88,7 @@
       "reason": "Same two vendored edges as GHSA-r5fr-rjxr-66jc; array-path bypass variant of the _.unset/_.omit prototype pollution.",
       "added": "2026-07-27",
       "expires": "2026-10-25",
-      "removeWhen": "Both lodash edges (harper and n8n-workflow) resolve >=4.18.1 \u2014 the same move that retires GHSA-r5fr-rjxr-66jc."
+      "removeWhen": "Both lodash edges (harper and n8n-workflow) resolve >=4.18.1 — the same move that retires GHSA-r5fr-rjxr-66jc."
     },
     {
       "ghsa": "GHSA-rv73-9c8w-jp4c",
@@ -96,43 +96,10 @@
       "severity": "moderate",
       "class": "no-patch-published",
       "introducedBy": "harper -> validate.js",
-      "reason": "No fixed release exists \u2014 the latest published validate.js is itself inside the vulnerable range, and the package is effectively unmaintained. It is also resolved inside harper's pinned build, so even a future fix arrives via harper rather than directly. ReDoS in a validator flair does not invoke.",
+      "reason": "No fixed release exists — the latest published validate.js is itself inside the vulnerable range, and the package is effectively unmaintained. It is also resolved inside harper's pinned build, so even a future fix arrives via harper rather than directly. ReDoS in a validator flair does not invoke.",
       "added": "2026-07-27",
       "expires": "2026-10-25",
       "removeWhen": "validate.js publishes a fixed release AND harper picks it up, or flair stops depending on harper. The gate flags the first half automatically."
-    },
-    {
-      "ghsa": "GHSA-cqhc-2h57-wpxf",
-      "package": "mariadb",
-      "severity": "high",
-      "class": "vendor-pinned",
-      "introducedBy": "packages/adk-flair-js -> @google/adk -> @mikro-orm/mariadb -> mariadb",
-      "reason": "mariadb is resolved only inside @mikro-orm/mariadb@6.6.16, which pins it exactly at 3.4.5; that pin is owned by @google/adk's non-optional peerDependencies, a tree we do not control. The patched 3.4.6 was never published (the 3.4 line stops at 3.4.5; latest is 3.5.3), so the only 'fix' is a major bump that violates mikro-orm's exact pin. mariadb IS present in the shipped @tpsdev-ai/adk-flair tree (verified: a fresh npm i @tpsdev-ai/adk-flair@0.50.0 --omit=dev contains mariadb@3.4.5) and absent from the @tpsdev-ai/flair CLI tree, which has no @google/adk edge. It is never loaded: @google/adk's sessions/db/operations.js requires @mikro-orm/mariadb only inside the mariadb:// URI branch, and adk-flair imports @google/adk type-only with no runtime import in dist/.",
-      "added": "2026-08-29",
-      "expires": "2026-10-28",
-      "removeWhen": "If anything in dev or CI ever connects to a real MariaDB, or @google/adk starts eager-loading the driver (importing @mikro-orm/mariadb outside the mariadb:// branch), this entry is stale and must be re-reviewed. Re-check at each @mikro-orm/mariadb or @google/adk bump."
-    },
-    {
-      "ghsa": "GHSA-42r5-vhpq-m858",
-      "package": "mariadb",
-      "severity": "moderate",
-      "class": "vendor-pinned",
-      "introducedBy": "packages/adk-flair-js -> @google/adk -> @mikro-orm/mariadb -> mariadb",
-      "reason": "Same vendored edge as GHSA-cqhc-2h57-wpxf: mariadb is pinned at 3.4.5 by @mikro-orm/mariadb inside @google/adk's non-optional peers, and the patched 3.4.6 was never published. Cleartext transmission of credentials applies only when the connector is actually used, and the driver loads lazily only on an explicit mariadb:// URI that flair never issues.",
-      "added": "2026-08-29",
-      "expires": "2027-02-25",
-      "removeWhen": "Same trigger as GHSA-cqhc-2h57-wpxf: any dev/CI connection to a real MariaDB, or @google/adk eager-loading the driver, retires this entry. Re-check at each @mikro-orm/mariadb or @google/adk bump."
-    },
-    {
-      "ghsa": "GHSA-g5xc-5w98-jfvm",
-      "package": "mariadb",
-      "severity": "moderate",
-      "class": "vendor-pinned",
-      "introducedBy": "packages/adk-flair-js -> @google/adk -> @mikro-orm/mariadb -> mariadb",
-      "reason": "Same vendored edge as GHSA-cqhc-2h57-wpxf: mariadb pinned at 3.4.5 by @mikro-orm/mariadb, patched 3.4.6 never published. The SQL-injection-in-Buffer-escaping path (big5/gbk/sjis/cp932/gb18030 charsets) is only reachable through the connector, which loads lazily only on an explicit mariadb:// URI flair never issues.",
-      "added": "2026-08-29",
-      "expires": "2027-02-25",
-      "removeWhen": "Same trigger as GHSA-cqhc-2h57-wpxf: any dev/CI connection to a real MariaDB, or @google/adk eager-loading the driver, retires this entry. Re-check at each @mikro-orm/mariadb or @google/adk bump."
     }
   ]
 }
