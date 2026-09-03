@@ -74,6 +74,7 @@ const REQUIRED_ENTRY_FIELDS = [
   "expires",
   "removeWhen",
   "sources",
+  "approvedBy",
 ];
 
 // The two observations the gate can run. `bun` is the lockfile observation
@@ -512,6 +513,40 @@ async function main() {
       );
       blocked.push(adv);
       continue;
+    }
+
+    // Classification — vendor-pinned (harper npm-shrinkwrap). An advisory the
+    // npm observation reports under node_modules/harper/ is pinned by harper's
+    // shrinkwrap, not by flair's own overrides. Such an entry must say so.
+    if (
+      adv.source === "npm-install" &&
+      (adv.nodes ?? []).some((n) => n.includes("node_modules/harper/"))
+    ) {
+      if (entry.class !== "vendor-pinned") {
+        fail(
+          `allowlist entry ${entry.ghsa} (${entry.package}) is observed under node_modules/harper/ in the ` +
+            `npm-install tree but is classed "${entry.class}". Re-class it "vendor-pinned" with ` +
+            `introducedBy "harper -> ${entry.package}" and a removeWhen naming the harper version.`,
+        );
+        blocked.push(adv);
+        continue;
+      }
+      if (!String(entry.introducedBy ?? "").startsWith("harper -> ")) {
+        fail(
+          `allowlist entry ${entry.ghsa} (${entry.package}) is vendor-pinned under harper but its ` +
+            `introducedBy ("${entry.introducedBy}") does not start with "harper -> ". Fix it.`,
+        );
+        blocked.push(adv);
+        continue;
+      }
+      if (!/harper/i.test(String(entry.removeWhen ?? ""))) {
+        fail(
+          `allowlist entry ${entry.ghsa} (${entry.package}) is vendor-pinned under harper but its ` +
+            `removeWhen ("${entry.removeWhen}") does not name a harper version. Fix it.`,
+        );
+        blocked.push(adv);
+        continue;
+      }
     }
 
     allowed.push({ adv, entry });
