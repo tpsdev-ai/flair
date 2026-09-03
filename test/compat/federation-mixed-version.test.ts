@@ -673,10 +673,15 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
     expect(statusA.peers.length).toBeGreaterThan(0);
     expect(statusB.peers.length).toBeGreaterThan(0);
 
-    // B (HEAD) received A's v:1 Memory — lastMergeAt must be set either way.
+    // B (HEAD) received A's Memory — lastMergeAt is set only when B merged it.
     const hubOnB = statusB.peers.find((p: any) => p.role === "hub");
     expect(hubOnB).toBeDefined();
-    expect(hubOnB.lastMergeAt).toBeTruthy();
+    if (baselineSubstitutesAdmin) {
+      // A signed as admin → B skipped as principal_mismatch → no merge.
+      expect(hubOnB.lastMergeAt == null || hubOnB.lastMergeAt === "").toBe(true);
+    } else {
+      expect(hubOnB.lastMergeAt).toBeTruthy();
+    }
 
     const hubOnA = statusA.peers.find((p: any) => p.role === "hub");
     expect(hubOnA).toBeDefined();
