@@ -25,6 +25,25 @@
 import { describe, it, expect } from "bun:test";
 import { createServer, IncomingMessage, ServerResponse, Server } from "node:http";
 import { spawn } from "node:child_process";
+import { mkdirSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import nacl from "tweetnacl";
+
+// flair#1500: `--agent flint` is a flag-pinned identity and must sign as flint
+// (a keyless flag-pinned agent is a hard error, never an admin fallback), so the
+// spawned CLI gets an ISOLATED HOME holding a generated key for "flint". Before
+// this the test inherited the runner's HOME and passed only on hosts that happen
+// to own a real flint key — and sent the PUT unauthenticated everywhere else.
+const tmpHome = join(tmpdir(), `flair-1500-rel-home-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+mkdirSync(join(tmpHome, ".flair", "keys"), { recursive: true });
+{
+  const kp = nacl.sign.keyPair();
+  const p = join(tmpHome, ".flair", "keys", "flint.key");
+  writeFileSync(p, Buffer.from(kp.secretKey.slice(0, 32)));
+  chmodSync(p, 0o600);
+}
+process.on("exit", () => { try { rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ } });
 import { canonicalRelationshipId } from "../../packages/flair-client/src/client";
 
 type Capture = { method?: string; path?: string; body?: any };
@@ -67,7 +86,7 @@ describe("flair relationship add (relationship-write-path)", () => {
     try {
       const { code, stderr } = await runCli(
         ["relationship", "add", "--agent", "flint", "--subject", "nathan", "--predicate", "manages", "--object", "flair"],
-        { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        { ...process.env, HOME: tmpHome, FLAIR_ADMIN_PASS: undefined, HDB_ADMIN_PASSWORD: undefined, FLAIR_TOKEN: undefined, FLAIR_KEY_DIR: undefined, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
       );
       expect(code, stderr).toBe(0);
 
@@ -93,7 +112,7 @@ describe("flair relationship add (relationship-write-path)", () => {
           "--subject", "nathan", "--predicate", "manages", "--object", "flair",
           "--confidence", "0.8", "--valid-from", "2026-01-01T00:00:00Z", "--source", "mem-123",
         ],
-        { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        { ...process.env, HOME: tmpHome, FLAIR_ADMIN_PASS: undefined, HDB_ADMIN_PASSWORD: undefined, FLAIR_TOKEN: undefined, FLAIR_KEY_DIR: undefined, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
       );
       expect(code, stderr).toBe(0);
       const put = captures.find((c) => c.method === "PUT" && c.path?.startsWith("/Relationship/"));
@@ -112,11 +131,11 @@ describe("flair relationship add (relationship-write-path)", () => {
     try {
       await runCli(
         ["relationship", "add", "--agent", "flint", "--subject", "nathan", "--predicate", "manages", "--object", "flair", "--confidence", "1.0"],
-        { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        { ...process.env, HOME: tmpHome, FLAIR_ADMIN_PASS: undefined, HDB_ADMIN_PASSWORD: undefined, FLAIR_TOKEN: undefined, FLAIR_KEY_DIR: undefined, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
       );
       await runCli(
         ["relationship", "add", "--agent", "flint", "--subject", "nathan", "--predicate", "manages", "--object", "flair", "--confidence", "0.5"],
-        { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        { ...process.env, HOME: tmpHome, FLAIR_ADMIN_PASS: undefined, HDB_ADMIN_PASSWORD: undefined, FLAIR_TOKEN: undefined, FLAIR_KEY_DIR: undefined, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
       );
       const puts = captures.filter((c) => c.method === "PUT" && c.path?.startsWith("/Relationship/"));
       expect(puts).toHaveLength(2);
@@ -132,11 +151,11 @@ describe("flair relationship add (relationship-write-path)", () => {
     try {
       await runCli(
         ["relationship", "add", "--agent", "flint", "--subject", "nathan", "--predicate", "manages", "--object", "flair"],
-        { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        { ...process.env, HOME: tmpHome, FLAIR_ADMIN_PASS: undefined, HDB_ADMIN_PASSWORD: undefined, FLAIR_TOKEN: undefined, FLAIR_KEY_DIR: undefined, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
       );
       await runCli(
         ["relationship", "add", "--agent", "flint", "--subject", "nathan", "--predicate", "advises", "--object", "flair"],
-        { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        { ...process.env, HOME: tmpHome, FLAIR_ADMIN_PASS: undefined, HDB_ADMIN_PASSWORD: undefined, FLAIR_TOKEN: undefined, FLAIR_KEY_DIR: undefined, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
       );
       const puts = captures.filter((c) => c.method === "PUT" && c.path?.startsWith("/Relationship/"));
       expect(puts).toHaveLength(2);
@@ -152,7 +171,7 @@ describe("flair relationship add (relationship-write-path)", () => {
     try {
       const { code, stderr } = await runCli(
         ["relationship", "add", "--agent", "flint", "--subject", "Nathan", "--predicate", "MANAGES", "--object", "Flair"],
-        { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        { ...process.env, HOME: tmpHome, FLAIR_ADMIN_PASS: undefined, HDB_ADMIN_PASSWORD: undefined, FLAIR_TOKEN: undefined, FLAIR_KEY_DIR: undefined, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
       );
       expect(code, stderr).toBe(0);
       const put = captures.find((c) => c.method === "PUT" && c.path?.startsWith("/Relationship/"));
