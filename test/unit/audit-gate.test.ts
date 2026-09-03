@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 // @ts-expect-error — plain .mjs helper, no type declarations by design.
 import {
@@ -59,6 +60,21 @@ describe("the audit step must remain able to fail", () => {
     // escape hatch was removed, which is how it got reinstated last time.
     expect(auditJob).toContain("PROMOTION CRITERION");
     expect(auditJob).toContain("BLOCKING");
+  });
+});
+
+// ─── No bun-only mode (flair#1498) ───────────────────────────────────────────
+
+describe("the gate refuses to run bun-only", () => {
+  it("exits non-zero with the named-observation line when --npm-install-prefix is absent", () => {
+    // A bun-only pass is the exact escape Sherlock's verdict forbade: a PR whose
+    // tarball lane is skipped would merge with the npm observation never made.
+    const res = spawnSync("node", [join(REPO_ROOT, "scripts", "audit-gate.mjs")], {
+      encoding: "utf8",
+    });
+    expect(res.status).not.toBe(0);
+    expect(res.stderr).toContain("--npm-install-prefix");
+    expect(res.stderr).toContain("npm-install observation");
   });
 });
 
