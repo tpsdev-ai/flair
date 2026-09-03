@@ -676,7 +676,7 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
     }
   }, CLI_TIMEOUT_MS * 6);
 
-  test("federation status lastMergeAt follows the same skew gate as B→A", async () => {
+  test("federation status lastMergeAt on B is set by the Agent-row merge regardless of the Memory-row skew skip", async () => {
     async function statusOf(inst: Instance): Promise<any> {
       const { stdout } = await runFlairCli(
         inst.cliPath,
