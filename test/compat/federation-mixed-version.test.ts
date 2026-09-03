@@ -347,8 +347,13 @@ function baselineSenderSubstitutesAdmin(pkgDir: string): boolean {
   for (const p of candidates) {
     if (!existsSync(p)) continue;
     const src = readFileSync(p, "utf8");
-    // Any #1504+ copy has the tier-1.5 flag-pinned step.
-    if (src.includes("agentIdSource")) return false;
+    // Any #1504+ copy has the tier-1.5 flag-pinned step: it threads
+    // `agentIdSource` AND hard-errors with "has no signing key". Both strings
+    // are required so a refactor that keeps the field but drops the refusal
+    // does not read as "fixed". Coupled to auth-resolve.ts being its own
+    // compilation unit; if a bundler inlines it, update the candidates above
+    // (a miss fails closed to "substitutes admin", the safe direction).
+    if (src.includes("agentIdSource") && src.includes("has no signing key")) return false;
   }
   return true;
 }
@@ -422,6 +427,8 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
   let baselineIsPreV2Receiver = true;
   /** Set in beforeAll from the installed npm package, not assumed. */
   let baselineSubstitutesAdmin = true;
+  /** The installed baseline's version, for the skew gate's log line. */
+  let baselineVersionA = "unknown";
 
   beforeAll(async () => {
     // ── 1. Install the previous published baseline from npm ──────────────
@@ -463,6 +470,7 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
     const pkgDirA = join(baselineDir, "node_modules", "@tpsdev-ai", "flair");
     baselineIsPreV2Receiver = baselineReceiverHardcodesV1(pkgDirA);
     baselineSubstitutesAdmin = baselineSenderSubstitutesAdmin(pkgDirA);
+    try { baselineVersionA = JSON.parse(readFileSync(join(pkgDirA, "package.json"), "utf8")).version ?? "unknown"; } catch { /* log line only */ }
 
     // ── 2. Start both Harper instances ────────────────────────────────────
     // A: baseline component + baseline's own bundled harper.
@@ -609,6 +617,12 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
       });
       expect(skipRows.length).toBe(1);
       const skipRow = skipRows[0];
+      console.log(
+        `[compat] sender skew gate: baseline ${baselineVersionA} predates flair#1504 — ` +
+        `A's Memory write was admin-signed; B skipped it as principal_mismatch ` +
+        `(SyncLog recordCount=${skipRow.recordCount}, skippedReasons=${skipRow.skippedReasons}). ` +
+        `Flips to "must merge" once @latest carries the flag-pinned step.`,
+      );
       expect(skipRow.recordCount).toBe(0); // merged === 0
       const reasons = JSON.parse(skipRow.skippedReasons ?? "{}");
       expect(reasons.principal_mismatch).toBeGreaterThan(0);
