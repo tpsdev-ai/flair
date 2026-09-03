@@ -51,7 +51,7 @@ describe("flair memory add --derived-from (Flair #503)", () => {
     const { server, url } = await startMockServer((c) => captures.push(c));
     try {
       const { code } = await runCli(
-        ["memory", "add", "an insight distilled from episodics", "--agent", "krais", "--durability", "persistent", "--derived-from", "krais-111, krais-222 ,krais-333"],
+        ["memory", "add", "an insight distilled from episodics", "--agent", "krais", "--admin-pass", "test-admin", "--durability", "persistent", "--derived-from", "krais-111, krais-222 ,krais-333"],
         { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
       );
       expect(code).toBe(0);
@@ -73,7 +73,7 @@ describe("flair memory add --derived-from (Flair #503)", () => {
     const { server, url } = await startMockServer((c) => captures.push(c));
     try {
       const { code } = await runCli(
-        ["memory", "add", "a plain memory", "--agent", "krais"],
+        ["memory", "add", "a plain memory", "--agent", "krais", "--admin-pass", "test-admin"],
         { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
       );
       expect(code).toBe(0);

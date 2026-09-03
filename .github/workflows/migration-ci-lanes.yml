@@ -762,7 +762,7 @@ jobs:
           for i in $(seq 1 "$ROW_COUNT"); do
             CONTENT="snapshot-drill-row-${i}-${RUN_ID}"
             echo "$CONTENT" >> "$EXPECTED_CONTENT_FILE"
-            $FLAIR memory add --agent "$RESERVED_TEST_AGENT_ID" --content "$CONTENT" > /dev/null
+            $FLAIR memory add --agent "$RESERVED_TEST_AGENT_ID" --admin-pass "$FLAIR_ADMIN_PASS" --content "$CONTENT" > /dev/null
           done
           echo "Seed complete."
 
