@@ -324,6 +324,35 @@ function baselineReceiverHardcodesV1(pkgDir: string): boolean {
   return true;
 }
 
+/**
+ * True when the installed npm baseline predates flair#1504 — the window
+ * where `flair memory add --agent X` with FLAIR_ADMIN_PASS in the env signs
+ * the write as ADMIN (the ambient credential wins over the flag), so the row
+ * carries verified.agentId = "admin" and a HEAD receiver correctly skips it
+ * as principal_mismatch. False once `@latest` includes the tier-1.5
+ * flag-pinned step (`agentIdSource === "flag"`), after which A signs as
+ * itself and A→B must merge again.
+ *
+ * Coupled to the tier-1.5 step in src/lib/auth-resolve.ts (flair#1500/#1504):
+ * the probe keys on the `agentIdSource` field that step introduced, so it
+ * flips back to "must merge" automatically once a fixed baseline ships — no
+ * one has to remember to revert it (same shape as baselineReceiverHardcodesV1).
+ */
+function baselineSenderSubstitutesAdmin(pkgDir: string): boolean {
+  const candidates = [
+    join(pkgDir, "dist", "lib", "auth-resolve.js"),
+    join(pkgDir, "lib", "auth-resolve.js"),
+    join(pkgDir, "lib", "auth-resolve.ts"),
+  ];
+  for (const p of candidates) {
+    if (!existsSync(p)) continue;
+    const src = readFileSync(p, "utf8");
+    // Any #1504+ copy has the tier-1.5 flag-pinned step.
+    if (src.includes("agentIdSource")) return false;
+  }
+  return true;
+}
+
 function parseHeadSyncCounts(stdout: string): { merged: number; skipped: number } {
   const m = stdout.match(/Synced (\d+) records \((\d+) skipped\)/);
   if (!m) {
@@ -360,6 +389,8 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
   let tokenDir: string;
   /** Set in beforeAll from the installed npm package, not assumed. */
   let baselineIsPreV2Receiver = true;
+  /** Set in beforeAll from the installed npm package, not assumed. */
+  let baselineSubstitutesAdmin = true;
 
   beforeAll(async () => {
     // ── 1. Install the previous published baseline from npm ──────────────
@@ -400,6 +431,7 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
 
     const pkgDirA = join(baselineDir, "node_modules", "@tpsdev-ai", "flair");
     baselineIsPreV2Receiver = baselineReceiverHardcodesV1(pkgDirA);
+    baselineSubstitutesAdmin = baselineSenderSubstitutesAdmin(pkgDirA);
 
     // ── 2. Start both Harper instances ────────────────────────────────────
     // A: baseline component + baseline's own bundled harper.
