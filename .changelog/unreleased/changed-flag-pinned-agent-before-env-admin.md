@@ -4,7 +4,3 @@
   disk is now a hard error naming the agent and the expected key path — the CLI
   no longer silently signs as the admin. Env-pinned agents (`FLAIR_AGENT_ID`)
   are unchanged and still use `FLAIR_ADMIN_PASS` when it is set.
-- **`flair memory search --admin-pass <pass>`** — search another agent's memories as admin
-  while `--agent` names whose memories to read. Callers that used to rely on the
-  ambient `FLAIR_ADMIN_PASS` substituting for a keyless `--agent` now say so
-  explicitly (`memory add` already had the flag).
