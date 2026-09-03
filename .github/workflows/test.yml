@@ -1486,7 +1486,7 @@ jobs:
           PREFIX=$(mktemp -d)
           cd "$PREFIX"
           npm init -y > /dev/null
-          npm install --omit=dev "$GITHUB_WORKSPACE/$TGZ"
+          npm install --ignore-scripts --omit=dev "$GITHUB_WORKSPACE/$TGZ"
           bun "$GITHUB_WORKSPACE/scripts/audit-gate.mjs" --explain --npm-install-prefix "$PREFIX"
 
   sast-semgrep:
