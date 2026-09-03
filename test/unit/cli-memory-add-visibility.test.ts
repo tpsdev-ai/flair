@@ -71,7 +71,7 @@ describe("flair memory add --visibility (Flair #509)", () => {
     const { server, url } = await startMockServer((c) => captures.push(c));
     try {
       const { code } = await runCli(
-        ["memory", "add", "team-wide announcement", "--agent", "krais", "--visibility", "shared"],
+        ["memory", "add", "team-wide announcement", "--agent", "krais", "--admin-pass", "test-admin", "--visibility", "shared"],
         { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
       );
       expect(code).toBe(0);
@@ -90,7 +90,7 @@ describe("flair memory add --visibility (Flair #509)", () => {
     const { server, url } = await startMockServer((c) => captures.push(c));
     try {
       const { code } = await runCli(
-        ["memory", "add", "a deliberately private note", "--agent", "krais", "--visibility", "private"],
+        ["memory", "add", "a deliberately private note", "--agent", "krais", "--admin-pass", "test-admin", "--visibility", "private"],
         { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
       );
       expect(code).toBe(0);
@@ -106,7 +106,7 @@ describe("flair memory add --visibility (Flair #509)", () => {
     const { server, url } = await startMockServer((c) => captures.push(c));
     try {
       const { code } = await runCli(
-        ["memory", "add", "another shared note", "--agent", "krais", "--visibility", "  shared  "],
+        ["memory", "add", "another shared note", "--agent", "krais", "--admin-pass", "test-admin", "--visibility", "  shared  "],
         { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
       );
       expect(code).toBe(0);
@@ -122,7 +122,7 @@ describe("flair memory add --visibility (Flair #509)", () => {
     const { server, url } = await startMockServer((c) => captures.push(c));
     try {
       const { code } = await runCli(
-        ["memory", "add", "a private memory", "--agent", "krais"],
+        ["memory", "add", "a private memory", "--agent", "krais", "--admin-pass", "test-admin"],
         { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
       );
       expect(code).toBe(0);
@@ -146,7 +146,7 @@ describe("flair memory add --visibility (Flair #509)", () => {
         const { server, url } = await startMockServer((c) => captures.push(c));
         try {
           const { code, stderr } = await runCli(
-            ["memory", "add", "a memory whose visibility is misspelled", "--agent", "krais", "--visibility", bad],
+            ["memory", "add", "a memory whose visibility is misspelled", "--agent", "krais", "--admin-pass", "test-admin", "--visibility", bad],
             { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
           );
           expect(code).not.toBe(0);

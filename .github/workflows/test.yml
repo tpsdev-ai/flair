@@ -1206,7 +1206,7 @@ jobs:
             exit 1
           }
 
-          MIGRATION_RECALL=$($FLAIR memory search --agent "$RESERVED_TEST_AGENT_ID" --q "upgrade-lane-migration-seed-row-0")
+          MIGRATION_RECALL=$($FLAIR memory search --agent "$RESERVED_TEST_AGENT_ID" --admin-pass "$FLAIR_ADMIN_PASS" --q "upgrade-lane-migration-seed-row-0")
           echo "$MIGRATION_RECALL" | grep -q "upgrade-lane-migration-seed-row-0" || {
             echo "FAIL: migration-seeded ground truth not retrievable by search post-migration (recall parity broken)"
             exit 1

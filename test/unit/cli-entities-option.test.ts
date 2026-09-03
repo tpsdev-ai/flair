@@ -136,7 +136,7 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
     const { server, url } = await startCaptureServer(captures);
     try {
       const { code } = await runCli(
-        ["memory", "add", "attention-plane memory", "--agent", "krais",
+        ["memory", "add", "attention-plane memory", "--agent", "krais", "--admin-pass", "test-admin",
          "--entities", "repo:tpsdev-ai/flair, issue:tpsdev-ai/flair#1288"],
         { FLAIR_URL: url, FLAIR_AGENT_ID: "" },
       );
@@ -154,7 +154,7 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
     const { server, url } = await startCaptureServer(captures);
     try {
       const { code } = await runCli(
-        ["memory", "add", "a plain memory", "--agent", "krais"],
+        ["memory", "add", "a plain memory", "--agent", "krais", "--admin-pass", "test-admin"],
         { FLAIR_URL: url, FLAIR_AGENT_ID: "" },
       );
       expect(code).toBe(0);
@@ -171,7 +171,7 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
     const { server, url } = await startCaptureServer(captures);
     try {
       const { code, stderr } = await runCli(
-        ["memory", "add", "content", "--agent", "krais", "--entities", "repo:tpsdev-ai/flair,project:foo"],
+        ["memory", "add", "content", "--agent", "krais", "--admin-pass", "test-admin", "--entities", "repo:tpsdev-ai/flair,project:foo"],
         { FLAIR_URL: url, FLAIR_AGENT_ID: "" },
       );
       expect(code).toBe(1);
@@ -187,7 +187,7 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
     const { server, url } = await startCaptureServer(captures);
     try {
       const { code, stderr } = await runCli(
-        ["memory", "add", "content", "--agent", "krais", "--entities", "not-a-vocab-string"],
+        ["memory", "add", "content", "--agent", "krais", "--admin-pass", "test-admin", "--entities", "not-a-vocab-string"],
         { FLAIR_URL: url, FLAIR_AGENT_ID: "" },
       );
       expect(code).toBe(1);

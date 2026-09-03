@@ -139,6 +139,56 @@ describe("authedRequest — tier ordering (flair#747)", () => {
     await authedRequest("GET", "/HealthDetail", undefined, { baseUrl: REMOTE_BASE, agentId: "agent-b", keysDir });
   });
 
+  test("tier 1.5: a flag-pinned agent (agentIdSource 'flag') signs as itself BEFORE env admin — Ed25519, not Basic (flair#1500)", async () => {
+    process.env.FLAIR_ADMIN_PASS = "env-pass-must-lose";
+    process.env.FLAIR_KEY_DIR = keysDir;
+    await writeAgentKey(keysDir, "flag-agent");
+    let sawEd25519 = false;
+    try {
+      globalThis.fetch = (async (_url: any, opts: any) => {
+        const auth = authHeaderOf(opts);
+        sawEd25519 = typeof auth === "string" && auth.startsWith("TPS-Ed25519 flag-agent:");
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }) as unknown as typeof fetch;
+
+      await authedRequest("GET", "/HealthDetail", undefined, {
+        baseUrl: REMOTE_BASE, agentId: "flag-agent", agentIdSource: "flag", keysDir,
+      });
+      expect(sawEd25519).toBe(true);
+    } finally {
+      delete process.env.FLAIR_KEY_DIR;
+    }
+  });
+
+  test("tier 1.5: a flag-pinned agent with NO key is a hard error — never falls back to env admin or the local admin-pass file (flair#1500)", async () => {
+    process.env.FLAIR_ADMIN_PASS = "env-pass-must-not-win";
+    // No key written for "flag-agent" — resolveKeyPath returns null.
+    let caught: unknown;
+    try {
+      await authedRequest("GET", "/HealthDetail", undefined, {
+        baseUrl: REMOTE_BASE, agentId: "flag-agent", agentIdSource: "flag", keysDir,
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain("flag-agent");
+    expect((caught as Error).message).toContain(".key");
+  });
+
+  test("tier 1.5 does NOT trigger for an env-pinned agent (agentIdSource 'env'): FLAIR_ADMIN_PASS still wins → Basic (flair#1500)", async () => {
+    process.env.FLAIR_ADMIN_PASS = "env-admin-pass";
+    await writeAgentKey(keysDir, "env-agent");
+    globalThis.fetch = (async (_url: any, opts: any) => {
+      expect(authHeaderOf(opts)).toBe(`Basic ${Buffer.from("admin:env-admin-pass").toString("base64")}`);
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await authedRequest("GET", "/HealthDetail", undefined, {
+      baseUrl: REMOTE_BASE, agentId: "env-agent", agentIdSource: "env", keysDir,
+    });
+  });
+
   test("tier 3: a pinned agentId signs with its own key via resolveKeyPath (FLAIR_KEY_DIR)", async () => {
     process.env.FLAIR_KEY_DIR = keysDir;
     await writeAgentKey(keysDir, "pinned-agent");
@@ -340,11 +390,11 @@ describe("flair status / flair bootstrap — floor adoption (flair#747, subproce
     expect(out.authTier).toBe("admin");
   });
 
-  test("flair status: FLAIR_ADMIN_PASS env still wins over a pinned agent key (explicit/env precedence preserved)", async () => {
+  test("flair status: FLAIR_ADMIN_PASS env still wins over an ENV-pinned agent (FLAIR_AGENT_ID) — env-pinned unchanged (flair#1500)", async () => {
     await writeHomeAgentKey("agent-that-should-lose");
     const { exitCode, stdout } = await runCli(
-      ["status", "--target", serverUrl, "--agent", "agent-that-should-lose", "--json"],
-      { HOME: tmpHome, FLAIR_ADMIN_PASS: "env-wins", HDB_ADMIN_PASSWORD: undefined, FLAIR_AGENT_ID: undefined },
+      ["status", "--target", serverUrl, "--json"],
+      { HOME: tmpHome, FLAIR_ADMIN_PASS: "env-wins", HDB_ADMIN_PASSWORD: undefined, FLAIR_AGENT_ID: "agent-that-should-lose" },
     );
     expect(exitCode).toBe(0);
     const out = JSON.parse(stdout);
@@ -376,15 +426,15 @@ describe("flair status / flair bootstrap — floor adoption (flair#747, subproce
     expect(out.authTier).toBe("agent-key");
   });
 
-  test("flair bootstrap --agent <id>: NEW capability — a machine with ONLY admin-pass (no key for that agent) now authenticates via Basic admin auth instead of failing", async () => {
+  test("flair bootstrap --agent <id>: a flag-pinned agent with NO key is a hard error (flair#1500) — never falls back to the admin-pass file", async () => {
     writeHomeAdminPassFile("file-secret-pass\n");
-    const { exitCode, stdout } = await runCli(
+    const { exitCode, stderr } = await runCli(
       ["bootstrap", "--agent", "agent-with-no-local-key", "--target", serverUrl, "--json"],
       { HOME: tmpHome, ...CLEAR_AUTH_ENV },
     );
-    expect(exitCode).toBe(0);
-    const out = JSON.parse(stdout);
-    expect(out.authTier).toBe("admin");
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("agent-with-no-local-key");
+    expect(stderr).toContain(".key");
   });
 
   test("flair bootstrap --key <path>: an explicit key path still wins (tier 1), even with FLAIR_ADMIN_PASS set in env", async () => {
@@ -532,7 +582,7 @@ describe("structural: adopted commands consolidate onto authedRequest, not their
       '.command("bootstrap")',
       // flair#1183: bootstrap now resolves its signer through the canonical
       // seam (resolveSigningAgentId) instead of the low-level resolveAgentIdOrEnv.
-      'const agentId = resolveSigningAgentId(opts, "bootstrap");',
+      'const { agentId, source } = resolveSigningAgentId(opts, "bootstrap");',
     );
     expect(body).toContain("authedRequest(");
     expect(body).not.toContain("buildEd25519Auth(");

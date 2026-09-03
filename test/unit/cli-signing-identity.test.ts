@@ -236,6 +236,17 @@ describe("signing identity honored end-to-end across command families (flair#118
     expect(signedAgentIdOf(requests)).toBe("alpha");
   });
 
+  // ── flair#1500: a flag-pinned agent signs BEFORE env admin ──
+
+  test("flag-pinned agent signs BEFORE env admin: --agent alpha + FLAIR_ADMIN_PASS → Ed25519, not Basic (flair#1500)", async () => {
+    await runCli(["memory", "search", "hello", "--agent", "alpha", "--target", serverUrl],
+      { HOME: tmpHome, ...CLEAR, FLAIR_ADMIN_PASS: "sekret" });
+    // Pre-fix: env admin (FLAIR_ADMIN_PASS) won over the pinned agent → Basic.
+    expect(signedAgentIdOf(requests)).toBe("alpha");
+    // And it must NOT have fallen back to Basic admin auth.
+    expect(requests.some((r) => (r.authorization ?? "").startsWith("Basic "))).toBe(false);
+  });
+
   // ── (b) FLAIR_AGENT_ID env is honored when no flag — signs as x ──
 
   test("`FLAIR_AGENT_ID=bravo flair search` (no --agent) signs as bravo", async () => {

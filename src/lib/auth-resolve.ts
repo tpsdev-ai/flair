@@ -60,6 +60,7 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createPrivateKey, randomUUID, sign as nodeCryptoSign } from "node:crypto";
+import type { SigningIdentitySource } from "./signing-identity.js";
 
 // ─── Failure classification ─────────────────────────────────────────────────
 
@@ -501,6 +502,11 @@ export interface AuthedRequestOptions {
    *  identity `explicitKeyPath` signs for) and tier 3's standard
    *  resolveKeyPath(agentId) lookup. */
   agentId?: string;
+  /** Which tier resolved `agentId` — "flag" (--agent), "env" (FLAIR_AGENT_ID),
+   *  "config", or "none". Only "flag" triggers the flag-pinned step
+   *  (flair#1500): a flag-pinned agent signs as itself BEFORE env admin, and a
+   *  flag-pinned agent with no key on disk is a hard error. */
+  agentIdSource?: SigningIdentitySource;
   /** Directory scanned for tier 5, the floor. Default ~/.flair/keys. */
   keysDir?: string;
   /** Admin USERNAME for the Basic-auth tiers (1, 2 and 4) — an already-
@@ -538,6 +544,24 @@ export async function authedRequest(
       const message = err instanceof Error ? err.message : String(err);
       console.error(`Warning: Ed25519 auth failed for agent '${opts.agentId}': ${message}`);
     }
+  }
+
+  // Tier 1.5: flag-pinned agent (flair#1500) — an --agent flag identity signs
+  // as THAT agent BEFORE env admin. A flag-pinned agent with no key on disk is
+  // a hard error (never a warning, never a silent substitution to env admin or
+  // the local admin-pass file): the operator named a specific identity and the
+  // CLI must not quietly sign as someone else.
+  if (!authHeader && opts.agentIdSource === "flag" && opts.agentId) {
+    const keyPath = resolveKeyPath(opts.agentId);
+    if (!keyPath) {
+      throw new Error(
+        `--agent '${opts.agentId}' has no signing key. Expected a key at ` +
+        `${join(defaultKeysDir(), `${opts.agentId}.key`)} (or set FLAIR_KEY_DIR ` +
+        `to a directory containing it). Refusing to fall back to FLAIR_ADMIN_PASS ` +
+        `or the local admin-pass file.`
+      );
+    }
+    authHeader = buildEd25519Auth(opts.agentId, method, path, keyPath);
   }
 
   // Tier 2: env — FLAIR_TOKEN (Bearer), else FLAIR_ADMIN_PASS/HDB_ADMIN_PASSWORD (Basic).
