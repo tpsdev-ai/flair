@@ -139,6 +139,56 @@ describe("authedRequest — tier ordering (flair#747)", () => {
     await authedRequest("GET", "/HealthDetail", undefined, { baseUrl: REMOTE_BASE, agentId: "agent-b", keysDir });
   });
 
+  test("tier 1.5: a flag-pinned agent (agentIdSource 'flag') signs as itself BEFORE env admin — Ed25519, not Basic (flair#1500)", async () => {
+    process.env.FLAIR_ADMIN_PASS = "env-pass-must-lose";
+    process.env.FLAIR_KEY_DIR = keysDir;
+    await writeAgentKey(keysDir, "flag-agent");
+    let sawEd25519 = false;
+    try {
+      globalThis.fetch = (async (_url: any, opts: any) => {
+        const auth = authHeaderOf(opts);
+        sawEd25519 = typeof auth === "string" && auth.startsWith("TPS-Ed25519 flag-agent:");
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }) as unknown as typeof fetch;
+
+      await authedRequest("GET", "/HealthDetail", undefined, {
+        baseUrl: REMOTE_BASE, agentId: "flag-agent", agentIdSource: "flag", keysDir,
+      });
+      expect(sawEd25519).toBe(true);
+    } finally {
+      delete process.env.FLAIR_KEY_DIR;
+    }
+  });
+
+  test("tier 1.5: a flag-pinned agent with NO key is a hard error — never falls back to env admin or the local admin-pass file (flair#1500)", async () => {
+    process.env.FLAIR_ADMIN_PASS = "env-pass-must-not-win";
+    // No key written for "flag-agent" — resolveKeyPath returns null.
+    let caught: unknown;
+    try {
+      await authedRequest("GET", "/HealthDetail", undefined, {
+        baseUrl: REMOTE_BASE, agentId: "flag-agent", agentIdSource: "flag", keysDir,
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain("flag-agent");
+    expect((caught as Error).message).toContain(".key");
+  });
+
+  test("tier 1.5 does NOT trigger for an env-pinned agent (agentIdSource 'env'): FLAIR_ADMIN_PASS still wins → Basic (flair#1500)", async () => {
+    process.env.FLAIR_ADMIN_PASS = "env-admin-pass";
+    await writeAgentKey(keysDir, "env-agent");
+    globalThis.fetch = (async (_url: any, opts: any) => {
+      expect(authHeaderOf(opts)).toBe(`Basic ${Buffer.from("admin:env-admin-pass").toString("base64")}`);
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await authedRequest("GET", "/HealthDetail", undefined, {
+      baseUrl: REMOTE_BASE, agentId: "env-agent", agentIdSource: "env", keysDir,
+    });
+  });
+
   test("tier 3: a pinned agentId signs with its own key via resolveKeyPath (FLAIR_KEY_DIR)", async () => {
     process.env.FLAIR_KEY_DIR = keysDir;
     await writeAgentKey(keysDir, "pinned-agent");
