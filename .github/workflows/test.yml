@@ -726,6 +726,12 @@ jobs:
           cd "$TMPDIR"
           npm init -y > /dev/null
           npm install "${{ steps.pack.outputs.TGZ_PATH }}"
+          # flair#1498 — the installed-tree audit observation. `bun audit` only
+          # sees the lockfile; harper's npm-shrinkwrap pins versions the root
+          # overrides never reach under npm, so a real `npm install` carries
+          # advisories the lockfile observation cannot. Run the gate against
+          # this freshly-installed tree (mandatory npm observation).
+          bun "$GITHUB_WORKSPACE/scripts/audit-gate.mjs" --npm-install-prefix "$TMPDIR"
           # Native embedding binary — flair declares mac-arm64 as optional; on linux
           # CI we install the matching variant so Harper's embeddings component can
           # resolve it when started by `flair init`.
