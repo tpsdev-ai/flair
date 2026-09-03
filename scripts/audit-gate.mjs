@@ -581,6 +581,25 @@ async function main() {
     }
   }
 
+  // FIXED-FOR-BUN-ONLY — advisories the bun lockfile observation no longer
+  // reports (the override fixed them) but the npm-install tree still carries
+  // under harper's shrinkwrap pin.
+  const fixedForBunOnly = [];
+  for (const entry of allowlist.entries) {
+    if (!entry?.ghsa) continue;
+    const g = entry.ghsa.toUpperCase();
+    const observed = matchedBySource.get(g) ?? new Set();
+    if (observed.has("bun") || !observed.has("npm-install")) continue;
+    const npmAdv = advisories.find(
+      (a) =>
+        a.source === "npm-install" &&
+        a.ghsa?.toUpperCase() === g &&
+        (a.nodes ?? []).some((n) => n.includes("node_modules/harper/")),
+    );
+    if (!npmAdv) continue;
+    fixedForBunOnly.push({ entry, npmAdv });
+  }
+
   // Check 7 — fixability drift.
   const drift = allowlist.entries.filter((e) => matchedGhsa.has(String(e.ghsa).toUpperCase()));
   const pkgs = [...new Set(drift.map((e) => e.package))];
@@ -634,9 +653,16 @@ async function main() {
       .join(", ") || "none";
 
   console.log(`\nDependency audit gate — ${todayStr}`);
-  console.log(`  advisories reported by bun audit: ${advisories.length} (${countStr})`);
+  console.log(`  advisories reported: ${advisories.length} (${countStr})`);
   console.log(`  allowlisted (justified + dated):  ${allowed.length}`);
   console.log(`  blocking:                         ${blocked.length}\n`);
+
+  for (const { entry } of fixedForBunOnly) {
+    console.log(
+      `  FIXED-FOR-BUN-ONLY: ${entry.ghsa} ${entry.package} — npm installs carry harper's pin until harper ${entry.removeWhen}`,
+    );
+  }
+  if (fixedForBunOnly.length) console.log("");
 
   if (allowed.length) {
     console.log("  Allowlisted:");
@@ -655,6 +681,9 @@ async function main() {
     console.log("");
   }
 
+  notes.unshift(
+    "the Fabric hub runs harper-pro, a tree this gate cannot install; ops-p8ls carries a standing step to audit the hub's installed tree before each deploy.",
+  );
   for (const n of notes) console.log(`  note: ${n}`);
   if (notes.length) console.log("");
 
