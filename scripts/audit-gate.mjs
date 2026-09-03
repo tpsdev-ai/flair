@@ -551,16 +551,25 @@ async function main() {
   }
 
   // Check 6 — staleness + sources mismatch.
+  //
+  // Staleness is source-aware: an entry is STALE only when its advisory no
+  // longer appears in a source it DECLARES that was actually run this
+  // invocation. The `audit` job runs bun-only (no --npm-install-prefix), so an
+  // entry whose only declared source is npm-install is simply not checked
+  // there — it is not stale, because the observation that would prove it stale
+  // never ran. The tarball lane runs both and checks both.
+  const runSources = new Set(["bun", ...(npmPrefix ? ["npm-install"] : [])]);
   const matchedGhsa = new Set(matchedBySource.keys());
   for (const entry of allowlist.entries) {
     if (!entry?.ghsa) continue;
     const g = entry.ghsa.toUpperCase();
     const observed = matchedBySource.get(g) ?? new Set();
     const declared = new Set(entry.sources ?? []);
-    if (observed.size === 0) {
+    const checkedDeclared = [...declared].filter((s) => runSources.has(s));
+    if (checkedDeclared.length > 0 && observed.size === 0) {
       fail(
         `allowlist entry ${entry.ghsa} (${entry.package}) is STALE — that advisory no longer appears ` +
-          `in any declared source (${[...declared].join(", ") || "none"}). Delete the entry. An ` +
+          `in any declared source that ran (${[...checkedDeclared].join(", ") || "none"}). Delete the entry. An ` +
           `allowlist that only ever grows is the same failure with more ceremony.`,
       );
     } else {
