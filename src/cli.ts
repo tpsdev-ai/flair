@@ -16647,7 +16647,7 @@ export async function fetchPreviousQualitySnapshot(
  *  `PUT /Memory/{id}` write shape `memory write-task-summary` already uses.
  *  Throws on a write failure — the CLI action below is responsible for
  *  surfacing that as a clear error, same as every other write path here. */
-async function storeQualitySnapshot(agentId: string, baseUrl: string, subject: string, snapshot: QualitySnapshotCore): Promise<string> {
+async function storeQualitySnapshot(agentId: string, agentIdSource: SigningIdentitySource, baseUrl: string, subject: string, snapshot: QualitySnapshotCore): Promise<string> {
   const memId = `${agentId}-quality-snapshot-${Date.now()}`;
   const body: Record<string, unknown> = {
     id: memId,
@@ -16659,7 +16659,7 @@ async function storeQualitySnapshot(agentId: string, baseUrl: string, subject: s
     type: "quality-snapshot",
     createdAt: new Date().toISOString(),
   };
-  const out = await api("PUT", `/Memory/${encodeURIComponent(memId)}`, body, { baseUrl, agentId });
+  const out = await api("PUT", `/Memory/${encodeURIComponent(memId)}`, body, { baseUrl, agentId, agentIdSource });
   if (out?.error) throw new Error(String(out.error));
   return memId;
 }
@@ -16729,7 +16729,7 @@ program
         }
       }
       try {
-        emitResult.snapshotId = await storeQualitySnapshot(agentId, baseUrl, subject, current);
+        emitResult.snapshotId = await storeQualitySnapshot(agentId, source, baseUrl, subject, current);
       } catch (err: any) {
         emitResult.errors.push(`snapshot store failed: ${err?.message ?? String(err)}`);
       }
