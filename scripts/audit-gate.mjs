@@ -222,6 +222,24 @@ export function flattenAdvisories(auditJson) {
  * Like `runBunAudit`, a non-zero exit is expected when advisories exist and is
  * NOT itself the failure signal — unparseable stdout is.
  */
+export function parseNpmAuditOutput(stdout, prefix, status, stderr = "") {
+  const trimmed = (stdout || "").trim();
+  if (!trimmed) {
+    throw new Error(
+      `\`npm audit --omit=dev --json\` in ${prefix} produced no output on stdout (exit ${status}). ` +
+        `stderr: ${(stderr || "").trim().slice(0, 500) || "<empty>"}`,
+    );
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch (e) {
+    throw new Error(
+      `\`npm audit --omit=dev --json\` in ${prefix} stdout was not valid JSON (exit ${status}): ${e.message}. ` +
+        `First 300 chars: ${trimmed.slice(0, 300)}`,
+    );
+  }
+}
+
 export function runNpmAudit(prefix) {
   const res = spawnSync("npm", ["audit", "--omit=dev", "--json"], {
     cwd: prefix,
@@ -233,22 +251,7 @@ export function runNpmAudit(prefix) {
     throw new Error(`could not execute \`npm audit\` in ${prefix}: ${res.error.message}`);
   }
 
-  const stdout = (res.stdout || "").trim();
-  if (!stdout) {
-    throw new Error(
-      `\`npm audit --omit=dev --json\` in ${prefix} produced no output on stdout (exit ${res.status}). ` +
-        `stderr: ${(res.stderr || "").trim().slice(0, 500) || "<empty>"}`,
-    );
-  }
-
-  try {
-    return JSON.parse(stdout);
-  } catch (e) {
-    throw new Error(
-      `\`npm audit --omit=dev --json\` in ${prefix} stdout was not valid JSON (exit ${res.status}): ${e.message}. ` +
-        `First 300 chars: ${stdout.slice(0, 300)}`,
-    );
-  }
+  return parseNpmAuditOutput(res.stdout, prefix, res.status, res.stderr);
 }
 
 /**

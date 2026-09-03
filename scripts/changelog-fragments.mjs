@@ -296,12 +296,13 @@ export function fixedForBunOnlyGhsas(allowlist) {
 
 // Fragments whose body uses the word "fixed" for a pinned GHSA. The word check is
 // case-insensitive and word-bounded so "fixed" in prose still counts, but
-// "FIXED-FOR-BUN-ONLY" (the gate's own label) does not.
+// "FIXED-FOR-BUN-ONLY" (the gate's own label) does not — that label is the gate
+// saying the advisory is NOT fixed for npm installs, so quoting it is not a claim.
 export function fixedFragmentsClaimingPinned(fragments, pinnedGhsas) {
   const offenders = [];
   for (const f of fragments) {
     const body = f.body.toUpperCase();
-    if (!/\bFIXED\b/.test(body)) continue;
+    if (!/\bFIXED\b(?!-FOR-BUN-ONLY)/.test(body)) continue;
     for (const ghsa of pinnedGhsas) {
       if (body.includes(ghsa)) {
         offenders.push({ name: f.name, ghsa });
