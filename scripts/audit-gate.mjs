@@ -423,15 +423,17 @@ async function main() {
   }
   const todayStr = today.toISOString().slice(0, 10);
 
-  // --npm-install-prefix <dir>: run a second observation — `npm audit
-  // --omit=dev --json` on the packed-and-installed tree the Install-from-tarball
-  // lane produces. When given, the npm observation is MANDATORY: if it cannot
-  // produce parseable output the gate FAILS, exactly as it does for `bun audit`.
-  // It never degrades to bun-only.
+  // --npm-install-prefix <dir>: the npm-install observation is MANDATORY. The
+  // gate refuses to run without it — a bun-only pass is the exact escape
+  // Sherlock's verdict forbade (a PR whose tarball lane is skipped or optional
+  // would merge with the npm observation never made). Both observations run in
+  // every invocation.
   const npmPrefixIdx = process.argv.indexOf("--npm-install-prefix");
   const npmPrefix = npmPrefixIdx !== -1 ? process.argv[npmPrefixIdx + 1] : null;
-  if (npmPrefixIdx !== -1 && !npmPrefix) {
-    console.error("--npm-install-prefix requires a directory argument");
+  if (!npmPrefix) {
+    console.error(
+      "DEPENDENCY AUDIT GATE: missing --npm-install-prefix <dir> — the npm-install observation is mandatory; the gate refuses to run bun-only.",
+    );
     process.exit(2);
   }
 
@@ -440,9 +442,7 @@ async function main() {
   try {
     allowlist = loadAllowlist();
     advisories = flattenAdvisories(runBunAudit());
-    if (npmPrefix) {
-      advisories = advisories.concat(flattenNpmAdvisories(runNpmAudit(npmPrefix)));
-    }
+    advisories = advisories.concat(flattenNpmAdvisories(runNpmAudit(npmPrefix)));
   } catch (e) {
     console.error(`\n  DEPENDENCY AUDIT GATE: FAILED TO RUN\n\n  ${e.message}\n`);
     console.error("  The gate fails closed: an audit that cannot run is not an audit that passed.\n");
@@ -555,24 +555,20 @@ async function main() {
 
   // Check 6 — staleness + sources mismatch.
   //
-  // Staleness is source-aware: an entry is STALE only when its advisory no
-  // longer appears in a source it DECLARES that was actually run this
-  // invocation. The `audit` job runs bun-only (no --npm-install-prefix), so an
-  // entry whose only declared source is npm-install is simply not checked
-  // there — it is not stale, because the observation that would prove it stale
-  // never ran. The tarball lane runs both and checks both.
-  const runSources = new Set(["bun", ...(npmPrefix ? ["npm-install"] : [])]);
+  // The gate always runs BOTH observations (bun lockfile + npm-install tree), so
+  // every declared source is observed in every invocation. An entry is STALE when
+  // its advisory appears in no source at all; a SOURCES MISMATCH when the observed
+  // sources and the declared sources do not agree in either direction.
   const matchedGhsa = new Set(matchedBySource.keys());
   for (const entry of allowlist.entries) {
     if (!entry?.ghsa) continue;
     const g = entry.ghsa.toUpperCase();
     const observed = matchedBySource.get(g) ?? new Set();
     const declared = new Set(entry.sources ?? []);
-    const checkedDeclared = [...declared].filter((s) => runSources.has(s));
-    if (checkedDeclared.length > 0 && observed.size === 0) {
+    if (observed.size === 0) {
       fail(
         `allowlist entry ${entry.ghsa} (${entry.package}) is STALE — that advisory no longer appears ` +
-          `in any declared source that ran (${[...checkedDeclared].join(", ") || "none"}). Delete the entry. An ` +
+          `in any declared source (${[...declared].join(", ") || "none"}). Delete the entry. An ` +
           `allowlist that only ever grows is the same failure with more ceremony.`,
       );
     } else {
@@ -581,6 +577,14 @@ async function main() {
           fail(
             `allowlist entry ${entry.ghsa} (${entry.package}) declares sources [${[...declared].join(", ")}] ` +
               `but the advisory was observed in [${s}]. SOURCES MISMATCH — fix the entry's sources.`,
+          );
+        }
+      }
+      for (const s of declared) {
+        if (!observed.has(s)) {
+          fail(
+            `allowlist entry ${entry.ghsa} (${entry.package}) declares source [${s}] but the advisory was ` +
+              `not observed in it. SOURCES MISMATCH — fix the entry's sources.`,
           );
         }
       }
