@@ -340,11 +340,11 @@ describe("flair status / flair bootstrap — floor adoption (flair#747, subproce
     expect(out.authTier).toBe("admin");
   });
 
-  test("flair status: FLAIR_ADMIN_PASS env still wins over a pinned agent key (explicit/env precedence preserved)", async () => {
+  test("flair status: FLAIR_ADMIN_PASS env still wins over an ENV-pinned agent (FLAIR_AGENT_ID) — env-pinned unchanged (flair#1500)", async () => {
     await writeHomeAgentKey("agent-that-should-lose");
     const { exitCode, stdout } = await runCli(
-      ["status", "--target", serverUrl, "--agent", "agent-that-should-lose", "--json"],
-      { HOME: tmpHome, FLAIR_ADMIN_PASS: "env-wins", HDB_ADMIN_PASSWORD: undefined, FLAIR_AGENT_ID: undefined },
+      ["status", "--target", serverUrl, "--json"],
+      { HOME: tmpHome, FLAIR_ADMIN_PASS: "env-wins", HDB_ADMIN_PASSWORD: undefined, FLAIR_AGENT_ID: "agent-that-should-lose" },
     );
     expect(exitCode).toBe(0);
     const out = JSON.parse(stdout);
@@ -376,15 +376,15 @@ describe("flair status / flair bootstrap — floor adoption (flair#747, subproce
     expect(out.authTier).toBe("agent-key");
   });
 
-  test("flair bootstrap --agent <id>: NEW capability — a machine with ONLY admin-pass (no key for that agent) now authenticates via Basic admin auth instead of failing", async () => {
+  test("flair bootstrap --agent <id>: a flag-pinned agent with NO key is a hard error (flair#1500) — never falls back to the admin-pass file", async () => {
     writeHomeAdminPassFile("file-secret-pass\n");
-    const { exitCode, stdout } = await runCli(
+    const { exitCode, stderr } = await runCli(
       ["bootstrap", "--agent", "agent-with-no-local-key", "--target", serverUrl, "--json"],
       { HOME: tmpHome, ...CLEAR_AUTH_ENV },
     );
-    expect(exitCode).toBe(0);
-    const out = JSON.parse(stdout);
-    expect(out.authTier).toBe("admin");
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("agent-with-no-local-key");
+    expect(stderr).toContain(".key");
   });
 
   test("flair bootstrap --key <path>: an explicit key path still wins (tier 1), even with FLAIR_ADMIN_PASS set in env", async () => {
@@ -532,7 +532,7 @@ describe("structural: adopted commands consolidate onto authedRequest, not their
       '.command("bootstrap")',
       // flair#1183: bootstrap now resolves its signer through the canonical
       // seam (resolveSigningAgentId) instead of the low-level resolveAgentIdOrEnv.
-      'const agentId = resolveSigningAgentId(opts, "bootstrap");',
+      'const { agentId, source } = resolveSigningAgentId(opts, "bootstrap");',
     );
     expect(body).toContain("authedRequest(");
     expect(body).not.toContain("buildEd25519Auth(");

@@ -157,6 +157,7 @@ import {
   resolveSigningIdentity,
   emitSigningIdentityDebug,
   type ResolvedSigningIdentity,
+  type SigningIdentitySource,
 } from "./lib/signing-identity.js";
 import { validateSnapshotArchive, extractSnapshotSafely } from "./lib/safe-snapshot-extract.js";
 import { entityFormatHint, parseEntitiesCsv } from "./lib/entity-vocab-cli.js";
@@ -925,10 +926,14 @@ function resolveSigningIdentityFor(
   return resolved;
 }
 
-// Same seam, returning just the agentId (or null) for the common call site that
-// only needs the id. Still emits the debug line via resolveSigningIdentityFor.
-function resolveSigningAgentId(opts: { agent?: string }, command?: string): string | null {
-  return resolveSigningIdentityFor(opts, command).agentId;
+// Same seam, returning the full ResolvedSigningIdentity (agentId + source) so
+// callers can thread the source down to api()/authedRequest. The source is what
+// lets authedRequest distinguish a flag-pinned agent (--agent X, flair#1500)
+// from an env-pinned one (FLAIR_AGENT_ID) — the flag must sign as itself BEFORE
+// env admin, while the env keeps its legacy Basic behavior. Still emits the
+// debug line via resolveSigningIdentityFor.
+function resolveSigningAgentId(opts: { agent?: string }, command?: string): ResolvedSigningIdentity {
+  return resolveSigningIdentityFor(opts, command);
 }
 
 // ── Shared credential/identity flag surface (flair#1106) ─────────────────────
@@ -1787,7 +1792,7 @@ function b64url(bytes: Uint8Array): string {
  * / disabling authorizeLocal there) is tracked separately in flair#654 and is
  * out of scope for this HTTP/REST auth path.
  */
-async function api(method: string, path: string, body?: any, options?: { baseUrl?: string; keysDir?: string; agentId?: string | null; explicitAdminPass?: string; adminUser?: string }): Promise<any> {
+async function api(method: string, path: string, body?: any, options?: { baseUrl?: string; keysDir?: string; agentId?: string | null; agentIdSource?: SigningIdentitySource; explicitAdminPass?: string; adminUser?: string }): Promise<any> {
   // Resolve port via the canonical path (flair#1129): options.baseUrl > FLAIR_URL > resolveHttpPort.
   // api() callers mean the default install, so resolveHttpPort({}) with no --data-dir is correct.
   const base = options?.baseUrl ?? (process.env.FLAIR_URL || `http://127.0.0.1:${resolveHttpPort({})}`);
@@ -1816,6 +1821,7 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
     keysDir: options?.keysDir,
     explicitAdminPass: options?.explicitAdminPass,
     adminUser: options?.adminUser,
+    agentIdSource: options?.agentIdSource,
   });
 }
 
@@ -9844,7 +9850,7 @@ export async function discoverLocalFlairPort(originalUrl: string): Promise<numbe
 // pass it in, so this verified read signs as the SAME agent the rest of the
 // command does. Undefined = resolve locally via the legacy flag>env pair (all
 // other callers, unchanged).
-async function fetchHealthDetail(opts: { port?: string; url?: string; target?: string; agent?: string }, signingAgentIdOverride?: string | null): Promise<{
+async function fetchHealthDetail(opts: { port?: string; url?: string; target?: string; agent?: string }, signingAgentIdOverride?: string | null, signingAgentSource?: SigningIdentitySource): Promise<{
   healthy: boolean;
   baseUrl: string;
   healthData: any | null;
@@ -9885,6 +9891,7 @@ async function fetchHealthDetail(opts: { port?: string; url?: string; target?: s
         agentId: signingAgentIdOverride !== undefined
           ? (signingAgentIdOverride ?? undefined)
           : (opts.agent || process.env.FLAIR_AGENT_ID),
+        agentIdSource: signingAgentSource,
       });
     } catch {
       // No credential tier resolved a verified read — healthData stays
@@ -9904,8 +9911,8 @@ const statusCmd = program
   .option("--json", "Output as JSON")
   .option("--agent <id>", "Agent ID for authenticated detail (or set FLAIR_AGENT_ID)")
   .action(async (opts) => {
-    const statusAgentId = resolveSigningAgentId(opts, "status");
-    const { healthy, baseUrl, healthData } = await fetchHealthDetail(opts, statusAgentId);
+    const { agentId: statusAgentId, source: statusSource } = resolveSigningAgentId(opts, "status");
+    const { healthy, baseUrl, healthData } = await fetchHealthDetail(opts, statusAgentId, statusSource);
 
     // When unreachable on a localhost URL, probe candidate ports to detect
     // config-vs-daemon port drift. Surface the actually-listening
@@ -16671,8 +16678,8 @@ program
     "Slice 2: snapshot this report, diff it against the previous quality-snapshot memory, and emit OrgEvents (quality.threshold_crossed / quality.regression) for any crossings/regressions found. Requires an agent identity (--agent or FLAIR_AGENT_ID) — the opt-in write boundary; without this flag `flair quality` remains fully read-only",
   )
   .action(async (opts) => {
-    const agentId: string | null = resolveSigningAgentId(opts, "quality");
-    const { healthy, baseUrl, healthData } = await fetchHealthDetail(opts, agentId);
+    const { agentId, source } = resolveSigningAgentId(opts, "quality");
+    const { healthy, baseUrl, healthData } = await fetchHealthDetail(opts, agentId, source);
 
     if (opts.emit && !agentId) {
       console.error("Error: --emit requires an agent identity. Pass --agent <id> or set FLAIR_AGENT_ID.");
@@ -17109,7 +17116,7 @@ addSharedCredentialOptions(
     const content = contentArg ?? opts.content;
     if (!content) { console.error("error: content required (positional arg or --content)"); process.exit(1); }
     applyAdminPassFile(opts);
-    const agentId = resolveSigningAgentId(opts, "memory add");
+    const { agentId, source } = resolveSigningAgentId(opts, "memory add");
     if (!agentId) {
       console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
       process.exit(2);
@@ -17148,6 +17155,7 @@ addSharedCredentialOptions(
     }
     const out = await api("PUT", `/Memory/${memId}`, body, {
       agentId,
+      agentIdSource: source,
       explicitAdminPass: opts.adminPass,
       adminUser: opts.adminUser,
     });
@@ -17207,7 +17215,7 @@ memory.command("write-task-summary")
     }
     const content = lines.join("\n");
 
-    const agentId = resolveSigningAgentId(opts, "memory write-task-summary") ?? opts.agent;
+    const { agentId, source } = resolveSigningAgentId(opts, "memory write-task-summary");
     const memId = `${opts.agent}-task-${opts.beads}-${Date.now()}`;
     const body: any = {
       id: memId,
@@ -17224,7 +17232,7 @@ memory.command("write-task-summary")
       body.derivedFrom = String(opts.derivedFrom).split(",").map((x: string) => x.trim()).filter(Boolean);
     }
 
-    const out = await api("PUT", `/Memory/${encodeURIComponent(memId)}`, body, { agentId });
+    const out = await api("PUT", `/Memory/${encodeURIComponent(memId)}`, body, { agentId, agentIdSource: source });
     if (out?.error) {
       console.error(`Error writing task summary: ${out.error}`);
       process.exit(1);
@@ -17245,7 +17253,7 @@ memory.command("search [query]")
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--port <port>", "Harper HTTP port")
   .action(async (queryArg, opts) => {
-    const agentId = resolveSigningAgentId(opts, "memory search");
+    const { agentId, source } = resolveSigningAgentId(opts, "memory search");
     if (!agentId) {
       console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
       process.exit(2);
@@ -17256,7 +17264,7 @@ memory.command("search [query]")
     if (opts.tag) body.tag = opts.tag;
     if (opts.includeArchived) body.includeArchived = true;
     const baseUrl = resolveBaseUrl(opts);
-    const res = await api("POST", "/SemanticSearch", body, { baseUrl, agentId });
+    const res = await api("POST", "/SemanticSearch", body, { baseUrl, agentId, agentIdSource: source });
     console.log(JSON.stringify(res, null, 2));
   });
 // ─── flair memory basement / restore ────────────────────────────────────────
@@ -17273,13 +17281,13 @@ memory.command("basement <id>")
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--port <port>", "Harper HTTP port")
   .action(async (id, opts) => {
-    const agentId = resolveSigningAgentId(opts, "memory basement");
+    const { agentId, source } = resolveSigningAgentId(opts, "memory basement");
     if (!agentId) {
       console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
       process.exit(2);
     }
     const baseUrl = resolveBaseUrl(opts);
-    const res = await api("POST", "/MemoryArchive", { id, action: "basement" }, { baseUrl, agentId });
+    const res = await api("POST", "/MemoryArchive", { id, action: "basement" }, { baseUrl, agentId, agentIdSource: source });
     console.log(JSON.stringify(res, null, 2));
   });
 memory.command("restore <id>")
@@ -17289,13 +17297,13 @@ memory.command("restore <id>")
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--port <port>", "Harper HTTP port")
   .action(async (id, opts) => {
-    const agentId = resolveSigningAgentId(opts, "memory restore");
+    const { agentId, source } = resolveSigningAgentId(opts, "memory restore");
     if (!agentId) {
       console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
       process.exit(2);
     }
     const baseUrl = resolveBaseUrl(opts);
-    const res = await api("POST", "/MemoryArchive", { id, action: "restore" }, { baseUrl, agentId });
+    const res = await api("POST", "/MemoryArchive", { id, action: "restore" }, { baseUrl, agentId, agentIdSource: source });
     console.log(JSON.stringify(res, null, 2));
   });
 memory.command("list")
@@ -17306,13 +17314,13 @@ memory.command("list")
   .option("--limit <n>", "Max rows when using --hash-fallback", "50")
   .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
   .action(async (opts) => {
-    const agentId = resolveSigningAgentId(opts, "memory list");
+    const { agentId, source } = resolveSigningAgentId(opts, "memory list");
     if (!agentId) {
       console.error(`${render.icons.error} --agent <id> required (or set FLAIR_AGENT_ID)`);
       process.exit(2);
     }
     const q = new URLSearchParams({ agentId, ...(opts.tag ? { tag: opts.tag } : {}) }).toString();
-    const raw = await api("GET", `/Memory?${q}`, undefined, { agentId });
+    const raw = await api("GET", `/Memory?${q}`, undefined, { agentId, agentIdSource: source });
     const mode = render.resolveOutputMode(opts);
 
     // hashFallback flag changes the lens: instead of all memories, show
@@ -17702,7 +17710,7 @@ program
   .option("--json", "Output raw JSON array")
   .action(async (query, opts) => {
     try {
-      const agentId = resolveSigningAgentId(opts, "search");
+      const { agentId } = resolveSigningAgentId(opts, "search");
       if (!agentId) {
         console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
         process.exit(2);
@@ -17853,7 +17861,7 @@ program
   .option("--key <path>", "Ed25519 private key path")
   .option("--json", "Emit JSON {context, tokenEstimate, memoriesIncluded, ...} (also: pipe + FLAIR_OUTPUT=json)")
   .action(async (opts) => {
-    const agentId = resolveSigningAgentId(opts, "bootstrap");
+    const { agentId, source } = resolveSigningAgentId(opts, "bootstrap");
     if (!agentId) {
       console.error(`${render.icons.error} --agent <id> required (or set FLAIR_AGENT_ID)`);
       process.exit(2);
@@ -17870,7 +17878,7 @@ program
       // was found, relying on Harper's local passthrough.
       const result = (await authedRequest("POST", "/BootstrapMemories",
         { agentId, maxTokens: parseInt(opts.maxTokens, 10) },
-        { baseUrl, agentId, explicitKeyPath: opts.key },
+        { baseUrl, agentId, agentIdSource: source, explicitKeyPath: opts.key },
       )) as any;
 
       if (mode === "json") {
@@ -17957,7 +17965,7 @@ relationship.command("add")
   .option("--valid-to <iso>", "ISO timestamp this relationship ended (leave unset for an active relationship)")
   .option("--source <text>", "Where this was learned from (a memory ID, conversation, etc.)")
   .action(async (opts) => {
-    const agentId = resolveSigningAgentId(opts, "relationship add") ?? opts.agent;
+    const { agentId, source } = resolveSigningAgentId(opts, "relationship add");
     const id = canonicalRelationshipId(opts.agent, opts.subject, opts.predicate, opts.object);
     const body: Record<string, unknown> = {
       id,
@@ -17970,7 +17978,7 @@ relationship.command("add")
     if (opts.validFrom) body.validFrom = opts.validFrom;
     if (opts.validTo) body.validTo = opts.validTo;
     if (opts.source) body.source = opts.source;
-    const out = await api("PUT", `/Relationship/${id}`, body, { agentId });
+    const out = await api("PUT", `/Relationship/${id}`, body, { agentId, agentIdSource: source });
     console.log(JSON.stringify(out, null, 2));
   });
 
@@ -17992,7 +18000,7 @@ soul.command("set")
     // precedence — but before this, api() re-derived the signer as
     // FLAIR_AGENT_ID-first, so `soul set --agent X` with FLAIR_AGENT_ID=Y set
     // wrote a record owned by X while signing as Y (the soul family's stale rung).
-    const agentId = resolveSigningAgentId(opts, "soul set") ?? opts.agent;
+    const { agentId, source } = resolveSigningAgentId(opts, "soul set");
     const id = `${opts.agent}:${opts.key}`;
     const out = await api("PUT", `/Soul/${encodeURIComponent(id)}`, {
       id,
@@ -18001,7 +18009,7 @@ soul.command("set")
       value: opts.value,
       durability: opts.durability,
       createdAt: new Date().toISOString(),
-    }, { agentId });
+    }, { agentId, agentIdSource: source });
     const mode = render.resolveOutputMode(opts);
     if (mode === "json") {
       console.log(render.asJSON(out));
@@ -18023,8 +18031,8 @@ soul.command("get")
     // flair#1183: /Soul reads are verified (any registered agent). Resolve the
     // signer through the canonical seam so soul get honors the SAME precedence
     // as every other family; a null result lets api() fall to admin-pass/floor.
-    const agentId = resolveSigningAgentId(opts, "soul get");
-    const out = await api("GET", `/Soul/${id}`, undefined, { agentId });
+    const { agentId, source } = resolveSigningAgentId(opts, "soul get");
+    const out = await api("GET", `/Soul/${id}`, undefined, { agentId, agentIdSource: source });
     const mode = render.resolveOutputMode(opts);
     if (mode === "json") {
       console.log(render.asJSON(out));
@@ -18051,12 +18059,12 @@ soul.command("list")
   .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
   .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
   .action(async (opts) => {
-    const agentId = resolveSigningAgentId(opts, "soul list");
+    const { agentId, source } = resolveSigningAgentId(opts, "soul list");
     if (!agentId) {
       console.error(`${render.icons.error} --agent <id> required (or set FLAIR_AGENT_ID)`);
       process.exit(2);
     }
-    const out = await api("GET", `/Soul?agentId=${encodeURIComponent(agentId)}`, undefined, { agentId });
+    const out = await api("GET", `/Soul?agentId=${encodeURIComponent(agentId)}`, undefined, { agentId, agentIdSource: source });
     const mode = render.resolveOutputMode(opts);
     if (mode === "json") {
       console.log(render.asJSON(out));
@@ -19490,7 +19498,7 @@ presence
   .option("--port <port>", "Harper HTTP port")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
   .action(async (opts) => {
-    const agentId = resolveSigningAgentId(opts, "presence set");
+    const { agentId } = resolveSigningAgentId(opts, "presence set");
     if (!agentId) {
       console.error("Error: agent ID required. Pass --agent <id> or set FLAIR_AGENT_ID environment variable.");
       process.exit(1);
@@ -19586,7 +19594,7 @@ workspace
   .option("--port <port>", "Harper HTTP port")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
   .action(async (opts) => {
-    const agentId = resolveSigningAgentId(opts, "workspace set");
+    const { agentId } = resolveSigningAgentId(opts, "workspace set");
     if (!agentId) {
       console.error("Error: agent ID required. Pass --agent <id> or set FLAIR_AGENT_ID environment variable.");
       process.exit(1);
@@ -19771,7 +19779,7 @@ program
   .option("--port <port>", "Harper HTTP port")
   .option("--target-url <url>", "Remote Flair URL (env: FLAIR_TARGET)")
   .action(async (opts) => {
-    const agentId = resolveSigningAgentId(opts, "orgevent");
+    const { agentId } = resolveSigningAgentId(opts, "orgevent");
     if (!agentId) {
       console.error("Error: agent ID required. Pass --agent <id> or set FLAIR_AGENT_ID environment variable.");
       process.exit(1);
@@ -19849,7 +19857,7 @@ program
   .option("--json", "Output raw JSON")
   .action(async (entity, opts) => {
     try {
-      const agentId = resolveSigningAgentId(opts, "attention");
+      const { agentId } = resolveSigningAgentId(opts, "attention");
       if (!agentId) {
         console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
         process.exit(2);
