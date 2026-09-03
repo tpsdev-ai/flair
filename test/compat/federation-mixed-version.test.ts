@@ -382,6 +382,37 @@ async function fetchAgentMemories(inst: Instance, agentId: string): Promise<any[
   return await res.json() as any[];
 }
 
+/**
+ * Read back an instance's federation SyncLog rows via the Harper OPERATIONS
+ * API (raw `search_by_value`, Basic admin auth) — the same version-stable
+ * read path as fetchAgentMemories. The receiver of a push writes one SyncLog
+ * row per sync (direction "pull") with recordCount/skippedCount and a JSON
+ * skippedReasons breakdown, so this is how the A→B gate asserts "skipped as
+ * principal_mismatch, not merged" without depending on either side's CLI
+ * stdout format (the baseline's `federation sync` may not print the
+ * "Synced N records (M skipped)" line parseHeadSyncCounts relies on).
+ */
+async function fetchSyncLogRows(inst: Instance): Promise<any[]> {
+  const auth = "Basic " + Buffer.from(`admin:${inst.adminPass}`).toString("base64");
+  const res = await fetch(`${inst.harper.opsURL}/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: auth },
+    body: JSON.stringify({
+      operation: "search_by_value",
+      schema: "flair",
+      table: "SyncLog",
+      search_attribute: "direction",
+      search_value: "pull",
+      get_attributes: ["*"],
+    }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) {
+    throw new Error(`ops search_by_value(SyncLog, direction=pull) on ${inst.label} failed: ${res.status} ${await res.text().catch(() => "")}`);
+  }
+  return await res.json() as any[];
+}
+
 describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#638]", () => {
   let baselineDir: string;
   let a: Instance;
@@ -556,11 +587,35 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
     await addMemory(a, `mixed-version federation compat marker: ${marker}`);
     await runSync(a); // A pushes to its hub, B (paired in round 2 above)
 
-    const rows = await retryUntil(
-      () => fetchAgentMemories(b, a.agentId),
-      (rows) => rows.some((r) => String(r.content ?? "").includes(marker)),
-    );
-    expect(rows.some((r) => String(r.content ?? "").includes(marker))).toBe(true);
+    if (baselineSubstitutesAdmin) {
+      // A (pre-#1504 baseline) signed the write as admin, so B (HEAD) skips it
+      // as principal_mismatch — the same degradation the B→A gate documents.
+      // Assert the skip via B's SyncLog (version-stable) rather than A's sync
+      // stdout (the baseline may not print the merged/skipped counts line).
+      const logRows = await retryUntil(
+        () => fetchSyncLogRows(b),
+        (rows) => rows.some((r) => {
+          const reasons = JSON.parse(r.skippedReasons ?? "{}");
+          return (reasons.principal_mismatch ?? 0) > 0;
+        }),
+      );
+      // One log line: exactly one sync was recorded, and it is the skip.
+      expect(logRows.length).toBe(1);
+      const skipRow = logRows[0];
+      expect(skipRow.recordCount).toBe(0); // merged === 0
+      const reasons = JSON.parse(skipRow.skippedReasons ?? "{}");
+      expect(reasons.principal_mismatch).toBeGreaterThan(0);
+      // The marker must NOT have landed on B.
+      const rows = await fetchAgentMemories(b, a.agentId);
+      expect(rows.some((r) => String(r.content ?? "").includes(marker))).toBe(false);
+    } else {
+      // Baseline carries #1504: A signs as itself, B merges.
+      const rows = await retryUntil(
+        () => fetchAgentMemories(b, a.agentId),
+        (rows) => rows.some((r) => String(r.content ?? "").includes(marker)),
+      );
+      expect(rows.some((r) => String(r.content ?? "").includes(marker))).toBe(true);
+    }
   }, CLI_TIMEOUT_MS * 6);
 
   test("memory written on B (HEAD) vs A (baseline) — skip only while baseline hardcodes v:1", async () => {
