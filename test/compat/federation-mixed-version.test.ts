@@ -599,9 +599,16 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
           return (reasons.principal_mismatch ?? 0) > 0;
         }),
       );
-      // One log line: exactly one sync was recorded, and it is the skip.
-      expect(logRows.length).toBe(1);
-      const skipRow = logRows[0];
+      // One log line: exactly one sync recorded the principal_mismatch skip.
+      // (The Agent row from beforeAll also merges in a separate batch, so
+      // there may be a second SyncLog row with recordCount>0 — that is not
+      // the skip.)
+      const skipRows = logRows.filter((r) => {
+        const reasons = JSON.parse(r.skippedReasons ?? "{}");
+        return (reasons.principal_mismatch ?? 0) > 0;
+      });
+      expect(skipRows.length).toBe(1);
+      const skipRow = skipRows[0];
       expect(skipRow.recordCount).toBe(0); // merged === 0
       const reasons = JSON.parse(skipRow.skippedReasons ?? "{}");
       expect(reasons.principal_mismatch).toBeGreaterThan(0);
@@ -673,15 +680,12 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
     expect(statusA.peers.length).toBeGreaterThan(0);
     expect(statusB.peers.length).toBeGreaterThan(0);
 
-    // B (HEAD) received A's Memory — lastMergeAt is set only when B merged it.
+    // B (HEAD) received A's Memory — but the Agent row (not principal-owning)
+    // also merges, so lastMergeAt is set either way. The principal_mismatch
+    // skip only affects the Memory row, not the Agent row.
     const hubOnB = statusB.peers.find((p: any) => p.role === "hub");
     expect(hubOnB).toBeDefined();
-    if (baselineSubstitutesAdmin) {
-      // A signed as admin → B skipped as principal_mismatch → no merge.
-      expect(hubOnB.lastMergeAt == null || hubOnB.lastMergeAt === "").toBe(true);
-    } else {
-      expect(hubOnB.lastMergeAt).toBeTruthy();
-    }
+    expect(hubOnB.lastMergeAt).toBeTruthy();
 
     const hubOnA = statusA.peers.find((p: any) => p.role === "hub");
     expect(hubOnA).toBeDefined();
