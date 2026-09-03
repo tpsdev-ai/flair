@@ -517,20 +517,14 @@ async function main() {
 
     // Classification — vendor-pinned (harper npm-shrinkwrap). An advisory the
     // npm observation reports under node_modules/harper/ is pinned by harper's
-    // shrinkwrap, not by flair's own overrides. Such an entry must say so.
+    // shrinkwrap, not by flair's own overrides. Such an entry must say so. The
+    // label is DERIVED from the nodes, not a typed class: the entry's `class`
+    // stays whatever it is (vendor-pinned for a patched-but-pinned leaf,
+    // no-patch-published for an unmaintained one like validate.js).
     if (
       adv.source === "npm-install" &&
       (adv.nodes ?? []).some((n) => n.includes("node_modules/harper/"))
     ) {
-      if (entry.class !== "vendor-pinned") {
-        fail(
-          `allowlist entry ${entry.ghsa} (${entry.package}) is observed under node_modules/harper/ in the ` +
-            `npm-install tree but is classed "${entry.class}". Re-class it "vendor-pinned" with ` +
-            `introducedBy "harper -> ${entry.package}" and a removeWhen naming the harper version.`,
-        );
-        blocked.push(adv);
-        continue;
-      }
       if (!String(entry.introducedBy ?? "").startsWith("harper -> ")) {
         fail(
           `allowlist entry ${entry.ghsa} (${entry.package}) is vendor-pinned under harper but its ` +
