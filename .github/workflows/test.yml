@@ -1410,13 +1410,19 @@ jobs:
     # ran 33+ min with nothing to cancel it, indefinitely blocking merge on a
     # required check. A job timeout makes a hung sfw install fail-fast and
     # re-runnable instead of hanging. `sfw bun install --frozen-lockfile` with
-    # no dep changes is normally seconds; 10 min is generous headroom.
-    timeout-minutes: 10
+    # no dep changes is normally seconds; the build + pack + npm-install
+    # observation (flair#1498) adds a few minutes, so 15 min is the headroom.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
         with:
           bun-version: "1.3.10"
+      # npm is needed for the flair#1498 npm-install observation (npm pack +
+      # npm install of the tarball). This job previously had no setup-node step.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
       - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
         with:
           mode: firewall-free
@@ -1465,11 +1471,23 @@ jobs:
       # narrow and documented in scripts/audit-gate.mjs: if the npm registry is
       # unreachable the upstream-fixability re-check warns instead of failing,
       # while the enumerated/expiry/staleness checks still gate the build.
-      # Run under bun, not ambient node: this job already pins bun to an exact
-      # version via setup-bun above and has no setup-node step, so bun is the
-      # deterministic choice here. The script runs identically under both.
+      # Run the gate under bun (pinned via setup-bun above), not ambient node.
+      # npm (setup-node above) is used only for the flair#1498 pack + install of
+      # the tarball that the npm-install observation audits.
       - name: Dependency audit gate (blocking — allowlist in .github/audit-allowlist.json)
-        run: bun scripts/audit-gate.mjs --explain
+        run: |
+          set -euo pipefail
+          # flair#1498 — the gate requires the npm-install observation, so it
+          # builds, packs and installs the tarball here (the job that gates) and
+          # audits the installed tree, not just the bun lockfile.
+          bun run build
+          bun run build:cli
+          TGZ=$(npm pack --silent)
+          PREFIX=$(mktemp -d)
+          cd "$PREFIX"
+          npm init -y > /dev/null
+          npm install --ignore-scripts --omit=dev "$GITHUB_WORKSPACE/$TGZ"
+          bun "$GITHUB_WORKSPACE/scripts/audit-gate.mjs" --explain --npm-install-prefix "$PREFIX"
 
   sast-semgrep:
     name: Semgrep SAST
