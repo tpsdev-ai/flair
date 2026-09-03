@@ -324,6 +324,40 @@ function baselineReceiverHardcodesV1(pkgDir: string): boolean {
   return true;
 }
 
+/**
+ * True when the installed npm baseline predates flair#1504 — the window
+ * where `flair memory add --agent X` with FLAIR_ADMIN_PASS in the env signs
+ * the write as ADMIN (the ambient credential wins over the flag), so the row
+ * carries verified.agentId = "admin" and a HEAD receiver correctly skips it
+ * as principal_mismatch. False once `@latest` includes the tier-1.5
+ * flag-pinned step (`agentIdSource === "flag"`), after which A signs as
+ * itself and A→B must merge again.
+ *
+ * Coupled to the tier-1.5 step in src/lib/auth-resolve.ts (flair#1500/#1504):
+ * the probe keys on the `agentIdSource` field that step introduced, so it
+ * flips back to "must merge" automatically once a fixed baseline ships — no
+ * one has to remember to revert it (same shape as baselineReceiverHardcodesV1).
+ */
+function baselineSenderSubstitutesAdmin(pkgDir: string): boolean {
+  const candidates = [
+    join(pkgDir, "dist", "lib", "auth-resolve.js"),
+    join(pkgDir, "lib", "auth-resolve.js"),
+    join(pkgDir, "lib", "auth-resolve.ts"),
+  ];
+  for (const p of candidates) {
+    if (!existsSync(p)) continue;
+    const src = readFileSync(p, "utf8");
+    // Any #1504+ copy has the tier-1.5 flag-pinned step: it threads
+    // `agentIdSource` AND hard-errors with "has no signing key". Both strings
+    // are required so a refactor that keeps the field but drops the refusal
+    // does not read as "fixed". Coupled to auth-resolve.ts being its own
+    // compilation unit; if a bundler inlines it, update the candidates above
+    // (a miss fails closed to "substitutes admin", the safe direction).
+    if (src.includes("agentIdSource") && src.includes("has no signing key")) return false;
+  }
+  return true;
+}
+
 function parseHeadSyncCounts(stdout: string): { merged: number; skipped: number } {
   const m = stdout.match(/Synced (\d+) records \((\d+) skipped\)/);
   if (!m) {
@@ -353,6 +387,37 @@ async function fetchAgentMemories(inst: Instance, agentId: string): Promise<any[
   return await res.json() as any[];
 }
 
+/**
+ * Read back an instance's federation SyncLog rows via the Harper OPERATIONS
+ * API (raw `search_by_value`, Basic admin auth) — the same version-stable
+ * read path as fetchAgentMemories. The receiver of a push writes one SyncLog
+ * row per sync (direction "pull") with recordCount/skippedCount and a JSON
+ * skippedReasons breakdown, so this is how the A→B gate asserts "skipped as
+ * principal_mismatch, not merged" without depending on either side's CLI
+ * stdout format (the baseline's `federation sync` may not print the
+ * "Synced N records (M skipped)" line parseHeadSyncCounts relies on).
+ */
+async function fetchSyncLogRows(inst: Instance): Promise<any[]> {
+  const auth = "Basic " + Buffer.from(`admin:${inst.adminPass}`).toString("base64");
+  const res = await fetch(`${inst.harper.opsURL}/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: auth },
+    body: JSON.stringify({
+      operation: "search_by_value",
+      schema: "flair",
+      table: "SyncLog",
+      search_attribute: "direction",
+      search_value: "pull",
+      get_attributes: ["*"],
+    }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) {
+    throw new Error(`ops search_by_value(SyncLog, direction=pull) on ${inst.label} failed: ${res.status} ${await res.text().catch(() => "")}`);
+  }
+  return await res.json() as any[];
+}
+
 describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#638]", () => {
   let baselineDir: string;
   let a: Instance;
@@ -360,6 +425,10 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
   let tokenDir: string;
   /** Set in beforeAll from the installed npm package, not assumed. */
   let baselineIsPreV2Receiver = true;
+  /** Set in beforeAll from the installed npm package, not assumed. */
+  let baselineSubstitutesAdmin = true;
+  /** The installed baseline's version, for the skew gate's log line. */
+  let baselineVersionA = "unknown";
 
   beforeAll(async () => {
     // ── 1. Install the previous published baseline from npm ──────────────
@@ -400,6 +469,8 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
 
     const pkgDirA = join(baselineDir, "node_modules", "@tpsdev-ai", "flair");
     baselineIsPreV2Receiver = baselineReceiverHardcodesV1(pkgDirA);
+    baselineSubstitutesAdmin = baselineSenderSubstitutesAdmin(pkgDirA);
+    try { baselineVersionA = JSON.parse(readFileSync(join(pkgDirA, "package.json"), "utf8")).version ?? "unknown"; } catch { /* log line only */ }
 
     // ── 2. Start both Harper instances ────────────────────────────────────
     // A: baseline component + baseline's own bundled harper.
@@ -524,11 +595,48 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
     await addMemory(a, `mixed-version federation compat marker: ${marker}`);
     await runSync(a); // A pushes to its hub, B (paired in round 2 above)
 
-    const rows = await retryUntil(
-      () => fetchAgentMemories(b, a.agentId),
-      (rows) => rows.some((r) => String(r.content ?? "").includes(marker)),
-    );
-    expect(rows.some((r) => String(r.content ?? "").includes(marker))).toBe(true);
+    if (baselineSubstitutesAdmin) {
+      // A (pre-#1504 baseline) signed the write as admin, so B (HEAD) skips it
+      // as principal_mismatch — the same degradation the B→A gate documents.
+      // Assert the skip via B's SyncLog (version-stable) rather than A's sync
+      // stdout (the baseline may not print the merged/skipped counts line).
+      const logRows = await retryUntil(
+        () => fetchSyncLogRows(b),
+        (rows) => rows.some((r) => {
+          const reasons = JSON.parse(r.skippedReasons ?? "{}");
+          return (reasons.principal_mismatch ?? 0) > 0;
+        }),
+      );
+      // One log line: exactly one sync recorded the principal_mismatch skip.
+      // (The Agent row from beforeAll also merges in a separate batch, so
+      // there may be a second SyncLog row with recordCount>0 — that is not
+      // the skip.)
+      const skipRows = logRows.filter((r) => {
+        const reasons = JSON.parse(r.skippedReasons ?? "{}");
+        return (reasons.principal_mismatch ?? 0) > 0;
+      });
+      expect(skipRows.length).toBe(1);
+      const skipRow = skipRows[0];
+      console.log(
+        `[compat] sender skew gate: baseline ${baselineVersionA} predates flair#1504 — ` +
+        `A's Memory write was admin-signed; B skipped it as principal_mismatch ` +
+        `(SyncLog recordCount=${skipRow.recordCount}, skippedReasons=${skipRow.skippedReasons}). ` +
+        `Flips to "must merge" once @latest carries the flag-pinned step.`,
+      );
+      expect(skipRow.recordCount).toBe(0); // merged === 0
+      const reasons = JSON.parse(skipRow.skippedReasons ?? "{}");
+      expect(reasons.principal_mismatch).toBeGreaterThan(0);
+      // The marker must NOT have landed on B.
+      const rows = await fetchAgentMemories(b, a.agentId);
+      expect(rows.some((r) => String(r.content ?? "").includes(marker))).toBe(false);
+    } else {
+      // Baseline carries #1504: A signs as itself, B merges.
+      const rows = await retryUntil(
+        () => fetchAgentMemories(b, a.agentId),
+        (rows) => rows.some((r) => String(r.content ?? "").includes(marker)),
+      );
+      expect(rows.some((r) => String(r.content ?? "").includes(marker))).toBe(true);
+    }
   }, CLI_TIMEOUT_MS * 6);
 
   test("memory written on B (HEAD) vs A (baseline) — skip only while baseline hardcodes v:1", async () => {
@@ -568,7 +676,7 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
     }
   }, CLI_TIMEOUT_MS * 6);
 
-  test("federation status lastMergeAt follows the same skew gate as B→A", async () => {
+  test("federation status lastMergeAt on B is set by the Agent-row merge regardless of the Memory-row skew skip", async () => {
     async function statusOf(inst: Instance): Promise<any> {
       const { stdout } = await runFlairCli(
         inst.cliPath,
@@ -586,7 +694,9 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
     expect(statusA.peers.length).toBeGreaterThan(0);
     expect(statusB.peers.length).toBeGreaterThan(0);
 
-    // B (HEAD) received A's v:1 Memory — lastMergeAt must be set either way.
+    // B (HEAD) received A's Memory — but the Agent row (not principal-owning)
+    // also merges, so lastMergeAt is set either way. The principal_mismatch
+    // skip only affects the Memory row, not the Agent row.
     const hubOnB = statusB.peers.find((p: any) => p.role === "hub");
     expect(hubOnB).toBeDefined();
     expect(hubOnB.lastMergeAt).toBeTruthy();
