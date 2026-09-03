@@ -277,6 +277,40 @@ export function promote(version, { date, changelogPath = CHANGELOG_PATH, dir = F
   return { version, date: day, entries, removed: fragments.map((f) => f.name) };
 }
 
+// ─── Fixed-fragment guard (flair#1498) ───────────────────────────────────────
+
+// A changelog fragment must not claim a GHSA the audit gate flags
+// FIXED-FOR-BUN-ONLY: those advisories are fixed for bun installs only and still
+// reach npm installs via harper's npm-shrinkwrap. Claiming them "fixed" in the
+// changelog would overstate the fix. The pinned set is the allowlist entries
+// whose `sources` include "npm-install" but not "bun".
+export function fixedForBunOnlyGhsas(allowlist) {
+  return new Set(
+    (allowlist?.entries ?? [])
+      .filter(
+        (e) => Array.isArray(e?.sources) && e.sources.includes("npm-install") && !e.sources.includes("bun"),
+      )
+      .map((e) => String(e.ghsa).toUpperCase()),
+  );
+}
+
+// Fragments whose body uses the word "fixed" for a pinned GHSA. The word check is
+// case-insensitive and word-bounded so "fixed" in prose still counts, but
+// "FIXED-FOR-BUN-ONLY" (the gate's own label) does not.
+export function fixedFragmentsClaimingPinned(fragments, pinnedGhsas) {
+  const offenders = [];
+  for (const f of fragments) {
+    const body = f.body.toUpperCase();
+    if (!/\bFIXED\b/.test(body)) continue;
+    for (const ghsa of pinnedGhsas) {
+      if (body.includes(ghsa)) {
+        offenders.push({ name: f.name, ghsa });
+      }
+    }
+  }
+  return offenders;
+}
+
 // ─── CLI ──────────────────────────────────────────────────────────────────────
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
@@ -326,6 +360,20 @@ if (isMain) {
         );
       }
       process.stdout.write(`✓ ${fragments.length} fragment(s), ${entries} entr(ies), no stray [Unreleased] entries.\n`);
+    } else if (cmd === "check-fixed") {
+      const allowlistPath = join(ROOT, ".github", "audit-allowlist.json");
+      const allowlist = JSON.parse(readFileSync(allowlistPath, "utf8"));
+      const pinned = fixedForBunOnlyGhsas(allowlist);
+      const offenders = fixedFragmentsClaimingPinned(readFragments(), pinned);
+      if (offenders.length > 0) {
+        throw new FragmentError(
+          `"fixed" fragments claim a GHSA that is FIXED-FOR-BUN-ONLY (harper-pinned): ` +
+            offenders.map((o) => `${o.name} (${o.ghsa})`).join(", ") +
+            `. npm installs still carry these via harper's shrinkwrap — re-word the fragment ` +
+            `(e.g. "fixed for bun installs") or drop the claim.`,
+        );
+      }
+      process.stdout.write(`✓ no "fixed" fragment claims a FIXED-FOR-BUN-ONLY GHSA.\n`);
     } else if (cmd === "promote") {
       const version = process.argv[3];
       const dateArg = process.argv.find((a) => a.startsWith("--date="));

@@ -331,6 +331,12 @@ git -C "$ROOT" checkout -b "$RELEASE_BRANCH"
 # (an empty release section) or when someone hand-wrote an entry into
 # `## [Unreleased]` that this step would otherwise overwrite.
 echo "📰 Assembling changelog fragments..."
+# 1a-pre. Refuse to cut if a changelog fragment claims a GHSA the audit gate
+# flags FIXED-FOR-BUN-ONLY (harper-pinned: fixed for bun installs only, still
+# present under npm installs). flair#1498.
+(cd "$ROOT" && node scripts/changelog-fragments.mjs check-fixed) || {
+  echo "❌ A 'fixed' fragment overstates a harper-pinned advisory — fix it before releasing."; exit 1;
+}
 (cd "$ROOT" && node scripts/changelog-fragments.mjs promote "$VERSION") || {
   echo "❌ Changelog assembly failed — fix the fragments before releasing."; exit 1;
 }
