@@ -18,6 +18,62 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.51.2] - 2026-09-03
+
+### Changed
+
+- **harper pinned at 5.2.8 (was 5.2.7).** Latest stable on npm as of 2026-09-02; Flair stays
+  on Harper's latest stable so we are never working around something already shipped
+  upstream (keep-current policy, 0-day cooldown for harper). The lockfile moves only harper
+  and its own dependencies (12 lines). Nothing changes for operators: the 5.2.x store format
+  is unchanged and the one documented patch-level break inside 5.2 (5.2.7-written LZ4 stores
+  are forward-only against 5.2.0, see docs/upgrade.md) is unaffected. The five vendor-pinned
+  audit allowlist entries (@fastify/static, lodash) stay: 5.2.8 still ships @fastify/static
+  9.3.0 and lodash 4.17.21.
+
+### Security
+
+- **mariadb overridden to ~3.4.7 (GHSA-cqhc-2h57-wpxf high; GHSA-g5xc-5w98-jfvm, GHSA-42r5-vhpq-m858 moderate).** The
+  three advisories were parked in the audit allowlist on the premise that no fixed 3.4.x
+  existed; mariadb 3.4.7 shipped on 2026-09-01 with the fixes. mariadb reaches the shipped
+  `@tpsdev-ai/adk-flair` tree only through `@google/adk → @mikro-orm/mariadb` (pinned
+  3.4.5) and Flair never opens a MariaDB connection. The root `overrides` entry moves it
+  to 3.4.7 on the same minor line and the three allowlist entries are removed. Nothing
+  to do on upgrade.
+
+- **mysql2 overridden to ^3.22.0 (GHSA-3f6p-5ww8-9rcr, high).** A rogue or MITM MySQL
+  server could make mysql2 < 3.22.0 send credentials in plaintext via an auth-plugin
+  downgrade. mysql2 reaches the shipped `@tpsdev-ai/adk-flair` tree only through
+  `@google/adk → @mikro-orm/mysql`, which pinned it at 3.20.0; Flair never opens a MySQL
+  connection, so no Flair code path was exposed. The root `overrides` entry moves the
+  resolution to 3.24.3 so the tree is not vulnerable at all. Nothing to do on upgrade.
+
+- **qs overridden to ^6.16.0, fast-uri to ^4.1.3, fastify to ^5.12.1 (eight advisories published 2026-09-02).**
+  qs GHSA-4mjr-xmp4-gh2g / GHSA-x5fp-wj9c-mxmx (moderate: DoS via attacker-controlled
+  isBuffer, array-limit bypass) reach the tree through express and body-parser; fast-uri
+  GHSA-5jgf-p345-68v8 / GHSA-f65p-4m7j-42xc / GHSA-fph4-wmhf-6fwf / GHSA-jqff-g426-hqxp
+  (high: host confusion and SSRF via IDN, IPv6 and percent-encoded scheme handling) and
+  fastify GHSA-3m5p-2c4r-xxw2 / GHSA-w2qp-rph6-63g4 (moderate: X-Forwarded-* spoofing
+  under trustProxy hop count, schema-validation bypass via root primitive coercion) reach
+  it through harper's pinned server. All three fixes are published and inside the ranges
+  the dependants declare (harper 5.2.7 declares fastify ^5.8.2), so the root `overrides`
+  entries move them to the fixed lines with no allowlist entry. Nothing to do on upgrade.
+
+- **release.sh no longer embeds the GitHub token in the push URL (flair#955).** The
+  release push authenticated with `https://x-access-token:<token>@github.com/...`, which
+  places a live credential in argv — visible to `ps`, `set -x` traces, CI step logs and
+  any transcript that captured the command. The push now supplies the token through a
+  per-invocation git credential helper that reads it from the environment at call time,
+  exported inside an untraced subshell. Proof in the PR: under `set -x` the trace
+  contains zero occurrences of the token value; a `--dry-run` push against the real
+  remote authenticates. Operator-facing behaviour is unchanged.
+
+- **Socket.dev repo config added (`socket.yml`).** The Socket GitHub App's pull-request
+  alerts, project reports and dependency overview are now enabled from the repository,
+  ignore paths are explicit, and no user is exempt. Alert *actions* (block/warn) are
+  not expressible in this file; they live in the org Security Policy and are enforced
+  by the `main` ruleset requiring the "Socket Security: Pull Request Alerts" check.
+
 ## [0.51.1] - 2026-09-01
 
 ### Added
