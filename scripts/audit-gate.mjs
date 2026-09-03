@@ -73,7 +73,14 @@ const REQUIRED_ENTRY_FIELDS = [
   "added",
   "expires",
   "removeWhen",
+  "sources",
 ];
+
+// The two observations the gate can run. `bun` is the lockfile observation
+// (`bun audit`); `npm-install` is the installed-tree observation (`npm audit
+// --omit=dev --json` on the packed-and-installed prefix). An allowlist entry
+// declares which of these it expects to see its advisory in.
+const VALID_SOURCES = new Set(["bun", "npm-install"]);
 
 const VALID_CLASSES = new Set([
   // No patched version exists anywhere yet. Nothing to do but wait upstream.
@@ -197,6 +204,84 @@ export function flattenAdvisories(auditJson) {
         severity: (a?.severity ?? "unknown").toLowerCase(),
         vulnerableVersions: a?.vulnerable_versions ?? "",
         url: a?.url ?? "",
+        source: "bun",
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * `npm audit --omit=dev --json` on the packed-and-installed prefix the
+ * Install-from-tarball lane produces. This is the installed-tree observation:
+ * it reports the advisories a real `npm install -g @tpsdev-ai/flair` would see,
+ * which the lockfile observation (`bun audit`) cannot — harper's
+ * npm-shrinkwrap pins versions the root overrides never reach under npm.
+ *
+ * Like `runBunAudit`, a non-zero exit is expected when advisories exist and is
+ * NOT itself the failure signal — unparseable stdout is.
+ */
+export function runNpmAudit(prefix) {
+  const res = spawnSync("npm", ["audit", "--omit=dev", "--json"], {
+    cwd: prefix,
+    encoding: "utf8",
+    maxBuffer: 32 * 1024 * 1024,
+  });
+
+  if (res.error) {
+    throw new Error(`could not execute \`npm audit\` in ${prefix}: ${res.error.message}`);
+  }
+
+  const stdout = (res.stdout || "").trim();
+  if (!stdout) {
+    throw new Error(
+      `\`npm audit --omit=dev --json\` in ${prefix} produced no output on stdout (exit ${res.status}). ` +
+        `stderr: ${(res.stderr || "").trim().slice(0, 500) || "<empty>"}`,
+    );
+  }
+
+  try {
+    return JSON.parse(stdout);
+  } catch (e) {
+    throw new Error(
+      `\`npm audit --omit=dev --json\` in ${prefix} stdout was not valid JSON (exit ${res.status}): ${e.message}. ` +
+        `First 300 chars: ${stdout.slice(0, 300)}`,
+    );
+  }
+}
+
+/**
+ * Flatten npm's v2 audit report (`{ vulnerabilities: { <pkg>: { nodes, via, ... } } }`)
+ * into the same flat advisory shape as `flattenAdvisories`, plus the dependency
+ * `nodes` (paths relative to the install root) and `source: "npm-install"`.
+ *
+ * `via` carries the advisory metadata (one entry per advisory, with the GHSA in
+ * its `url`); `nodes` is per-package, so every advisory for a package shares the
+ * same paths. A package may appear both hoisted (`node_modules/<pkg>`) and under
+ * harper (`node_modules/harper/node_modules/<pkg>`); the harper classification
+ * keys off the substring `node_modules/harper/` in ANY node.
+ */
+export function flattenNpmAdvisories(npmJson) {
+  const out = [];
+  const vulns = npmJson?.vulnerabilities ?? {};
+  for (const [pkg, v] of Object.entries(vulns)) {
+    if (!v || typeof v !== "object") continue;
+    const nodes = Array.isArray(v.nodes) ? v.nodes : [];
+    const via = Array.isArray(v.via) ? v.via : [];
+    for (const item of via) {
+      if (!item || typeof item !== "object") continue;
+      const ghsa = /(GHSA-[a-z0-9-]+)/i.exec(item.url ?? "")?.[1] ?? null;
+      if (!ghsa) continue;
+      out.push({
+        package: pkg,
+        ghsa,
+        id: item.id ?? null,
+        title: item.title ?? "",
+        severity: (item.severity ?? v.severity ?? "unknown").toLowerCase(),
+        vulnerableVersions: item.range ?? "",
+        url: item.url ?? "",
+        nodes,
+        source: "npm-install",
       });
     }
   }
@@ -257,6 +342,15 @@ export function validateAllowlist(allowlist, today) {
       problems.push(
         `${where}: unknown class "${entry.class}" (expected one of ${[...VALID_CLASSES].join(", ")})`,
       );
+    }
+    if (!Array.isArray(entry.sources) || entry.sources.length === 0) {
+      problems.push(`${where}: "sources" must be a non-empty array of "bun" and/or "npm-install"`);
+    } else {
+      for (const s of entry.sources) {
+        if (!VALID_SOURCES.has(s)) {
+          problems.push(`${where}: unknown source "${s}" (expected one of ${[...VALID_SOURCES].join(", ")})`);
+        }
+      }
     }
     if (!isIsoDate(entry.added)) problems.push(`${where}: "added" must be YYYY-MM-DD`);
     if (!isIsoDate(entry.expires)) problems.push(`${where}: "expires" must be YYYY-MM-DD`);
@@ -325,11 +419,26 @@ async function main() {
   }
   const todayStr = today.toISOString().slice(0, 10);
 
+  // --npm-install-prefix <dir>: run a second observation — `npm audit
+  // --omit=dev --json` on the packed-and-installed tree the Install-from-tarball
+  // lane produces. When given, the npm observation is MANDATORY: if it cannot
+  // produce parseable output the gate FAILS, exactly as it does for `bun audit`.
+  // It never degrades to bun-only.
+  const npmPrefixIdx = process.argv.indexOf("--npm-install-prefix");
+  const npmPrefix = npmPrefixIdx !== -1 ? process.argv[npmPrefixIdx + 1] : null;
+  if (npmPrefixIdx !== -1 && !npmPrefix) {
+    console.error("--npm-install-prefix requires a directory argument");
+    process.exit(2);
+  }
+
   let allowlist;
   let advisories;
   try {
     allowlist = loadAllowlist();
     advisories = flattenAdvisories(runBunAudit());
+    if (npmPrefix) {
+      advisories = advisories.concat(flattenNpmAdvisories(runNpmAudit(npmPrefix)));
+    }
   } catch (e) {
     console.error(`\n  DEPENDENCY AUDIT GATE: FAILED TO RUN\n\n  ${e.message}\n`);
     console.error("  The gate fails closed: an audit that cannot run is not an audit that passed.\n");
@@ -348,7 +457,7 @@ async function main() {
   const byGhsa = new Map();
   for (const e of allowlist.entries) if (e?.ghsa) byGhsa.set(e.ghsa.toUpperCase(), e);
 
-  const matchedGhsa = new Set();
+  const matchedBySource = new Map();
   const allowed = [];
   const blocked = [];
 
@@ -371,7 +480,10 @@ async function main() {
       );
       continue;
     }
-    matchedGhsa.add(adv.ghsa.toUpperCase());
+    if (!matchedBySource.has(adv.ghsa.toUpperCase())) {
+      matchedBySource.set(adv.ghsa.toUpperCase(), new Set());
+    }
+    matchedBySource.get(adv.ghsa.toUpperCase()).add(adv.source);
 
     if (entry.package !== adv.package) {
       fail(
@@ -409,15 +521,28 @@ async function main() {
     }
   }
 
-  // Check 6 — staleness.
+  // Check 6 — staleness + sources mismatch.
+  const matchedGhsa = new Set(matchedBySource.keys());
   for (const entry of allowlist.entries) {
     if (!entry?.ghsa) continue;
-    if (!matchedGhsa.has(entry.ghsa.toUpperCase())) {
+    const g = entry.ghsa.toUpperCase();
+    const observed = matchedBySource.get(g) ?? new Set();
+    const declared = new Set(entry.sources ?? []);
+    if (observed.size === 0) {
       fail(
         `allowlist entry ${entry.ghsa} (${entry.package}) is STALE — that advisory no longer appears ` +
-          `in \`bun audit\` output. Delete the entry. An allowlist that only ever grows is the same ` +
-          `failure with more ceremony.`,
+          `in any declared source (${[...declared].join(", ") || "none"}). Delete the entry. An ` +
+          `allowlist that only ever grows is the same failure with more ceremony.`,
       );
+    } else {
+      for (const s of observed) {
+        if (!declared.has(s)) {
+          fail(
+            `allowlist entry ${entry.ghsa} (${entry.package}) declares sources [${[...declared].join(", ")}] ` +
+              `but the advisory was observed in [${s}]. SOURCES MISMATCH — fix the entry's sources.`,
+          );
+        }
+      }
     }
   }
 
