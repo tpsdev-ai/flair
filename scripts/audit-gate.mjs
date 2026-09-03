@@ -669,7 +669,7 @@ async function main() {
 
   for (const { entry } of fixedForBunOnly) {
     console.log(
-      `  FIXED-FOR-BUN-ONLY: ${entry.ghsa} ${entry.package} — npm installs carry harper's pin until harper ${entry.removeWhen}`,
+      `  FIXED-FOR-BUN-ONLY: ${entry.ghsa} ${entry.package} — npm installs carry harper's pin until ${entry.removeWhen}`,
     );
   }
   if (fixedForBunOnly.length) console.log("");
@@ -692,7 +692,7 @@ async function main() {
   }
 
   notes.unshift(
-    "the Fabric hub runs harper-pro, a tree this gate cannot install; ops-p8ls carries a standing step to audit the hub's installed tree before each deploy.",
+    "the Fabric hub runs harper-pro, a tree this gate cannot install; ops-h351 carries a standing step to audit the hub's installed tree before each deploy.",
   );
   for (const n of notes) console.log(`  note: ${n}`);
   if (notes.length) console.log("");
