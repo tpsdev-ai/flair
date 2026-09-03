@@ -19,6 +19,8 @@ import {
   CATEGORIES,
   assemble,
   countEntries,
+  fixedForBunOnlyGhsas,
+  fixedFragmentsClaimingPinned,
   locateUnreleased,
   promote,
   readFragments,
@@ -358,5 +360,64 @@ describe("validateFragmentBody — one entry per fragment", () => {
   test("still rejects empty and non-'- ' bodies", () => {
     expect(() => validateFragmentBody("f.md", "   ")).toThrow(/empty/);
     expect(() => validateFragmentBody("f.md", "no marker")).toThrow(/must start with/);
+  });
+});
+
+// ─── Fixed-fragment guard (flair#1498) ───────────────────────────────────────
+//
+// A changelog fragment must not claim a GHSA the audit gate flags
+// FIXED-FOR-BUN-ONLY: those advisories are fixed for bun installs only and still
+// reach npm installs via harper's npm-shrinkwrap. Claiming them "fixed" in the
+// changelog would overstate the fix.
+
+describe("fixedForBunOnlyGhsas", () => {
+  test("returns the GHSAs whose only declared source is npm-install", () => {
+    const allowlist = {
+      entries: [
+        { ghsa: "GHSA-w2qp-rph6-63g4", sources: ["npm-install"] },
+        { ghsa: "GHSA-3m5p-2c4r-xxw2", sources: ["npm-install"] },
+        { ghsa: "GHSA-r5fr-rjxr-66jc", sources: ["bun"] },
+        { ghsa: "GHSA-83w8-p2f5-377r", sources: ["bun", "npm-install"] },
+      ],
+    };
+    const pinned = fixedForBunOnlyGhsas(allowlist);
+    expect(pinned.has("GHSA-W2QP-RPH6-63G4")).toBe(true);
+    expect(pinned.has("GHSA-3M5P-2C4R-XXW2")).toBe(true);
+    expect(pinned.has("GHSA-R5FR-RJXR-66JC")).toBe(false);
+    expect(pinned.has("GHSA-83W8-P2F5-377R")).toBe(false);
+  });
+
+  test("returns an empty set when no entry is npm-install-only", () => {
+    expect(fixedForBunOnlyGhsas({ entries: [{ ghsa: "GHSA-x", sources: ["bun"] }] }).size).toBe(0);
+  });
+});
+
+describe("fixedFragmentsClaimingPinned", () => {
+  const pinned = new Set(["GHSA-W2QP-RPH6-63G4"]);
+
+  test("flags a fragment that says 'fixed' for a pinned GHSA", () => {
+    const offenders = fixedFragmentsClaimingPinned(
+      [{ name: "fixed-fastify.md", body: "- **Fixed** GHSA-w2qp-rph6-63g4 in fastify.\n" }],
+      pinned,
+    );
+    expect(offenders).toEqual([{ name: "fixed-fastify.md", ghsa: "GHSA-W2QP-RPH6-63G4" }]);
+  });
+
+  test("ignores the gate's own FIXED-FOR-BUN-ONLY label", () => {
+    // Quoting the gate's label is the gate saying the advisory is NOT fixed for
+    // npm installs — it is not a claim, so it must not be flagged.
+    const offenders = fixedFragmentsClaimingPinned(
+      [{ name: "changed-audit.md", body: "- **Changed.** The gate now prints FIXED-FOR-BUN-ONLY: GHSA-w2qp-rph6-63g4.\n" }],
+      pinned,
+    );
+    expect(offenders).toEqual([]);
+  });
+
+  test("ignores a fragment that never mentions a pinned GHSA", () => {
+    const offenders = fixedFragmentsClaimingPinned(
+      [{ name: "fixed-other.md", body: "- **Fixed** an unrelated thing.\n" }],
+      pinned,
+    );
+    expect(offenders).toEqual([]);
   });
 });

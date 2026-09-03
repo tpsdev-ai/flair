@@ -6,6 +6,8 @@ import {
   isVulnerable,
   validateAllowlist,
   flattenAdvisories,
+  flattenNpmAdvisories,
+  parseNpmAuditOutput,
   registryUrlFor,
 } from "../../scripts/audit-gate.mjs";
 
@@ -130,6 +132,28 @@ describe("the committed allowlist", () => {
     bad.entries[0].class = "because-i-said-so";
     expect(validateAllowlist(bad, new Date("2026-07-27")).join("\n")).toContain("unknown class");
   });
+
+  it("marks harper-pinned npm advisories as npm-install-only (FIXED-FOR-BUN-ONLY)", () => {
+    // These are the advisories the npm-install observation surfaces that `bun
+    // audit` never sees — harper's npm-shrinkwrap pins them. They must declare
+    // sources ["npm-install"] so the gate knows they are fixed for bun only.
+    const npmOnly = ALLOWLIST.entries.filter((e) => e.package === "fastify");
+    expect(npmOnly.length).toBeGreaterThan(0);
+    for (const e of npmOnly) {
+      expect(e.sources).toEqual(["npm-install"]);
+      expect(e.introducedBy).toMatch(/^harper -> /);
+    }
+  });
+
+  it("keeps bun-only advisories (lodash) out of the npm-install source", () => {
+    // lodash is reported by `bun audit` only; declaring it npm-install would
+    // make the gate expect an npm observation that never arrives.
+    const lodash = ALLOWLIST.entries.filter((e) => e.package === "lodash");
+    expect(lodash.length).toBeGreaterThan(0);
+    for (const e of lodash) {
+      expect(e.sources).toEqual(["bun"]);
+    }
+  });
 });
 
 // ─── Advisory parsing ────────────────────────────────────────────────────────
@@ -161,6 +185,65 @@ describe("flattenAdvisories", () => {
 
   it("handles an empty audit result", () => {
     expect(flattenAdvisories({})).toEqual([]);
+  });
+});
+
+// ─── npm-install observation (flair#1498) ────────────────────────────────────
+
+describe("flattenNpmAdvisories", () => {
+  it("extracts GHSA + nodes from npm's v2 report", () => {
+    const flat = flattenNpmAdvisories({
+      vulnerabilities: {
+        fastify: {
+          severity: "moderate",
+          nodes: ["node_modules/harper/node_modules/fastify"],
+          via: [
+            {
+              id: 1,
+              url: "https://github.com/advisories/GHSA-w2qp-rph6-63g4",
+              title: "t",
+              severity: "moderate",
+              range: "<5.12.1",
+            },
+          ],
+        },
+      },
+    });
+    expect(flat).toHaveLength(1);
+    expect(flat[0].ghsa).toBe("GHSA-w2qp-rph6-63g4");
+    expect(flat[0].package).toBe("fastify");
+    expect(flat[0].source).toBe("npm-install");
+    expect(flat[0].nodes).toContain("node_modules/harper/node_modules/fastify");
+  });
+
+  it("returns [] for a clean tree", () => {
+    expect(flattenNpmAdvisories({ vulnerabilities: {} })).toEqual([]);
+  });
+
+  it("skips transitive container vulnerabilities whose via is a bare name", () => {
+    // npm reports a package that is only a container (harper, @tpsdev-ai/flair)
+    // with `via` as an array of dependency-name strings, not advisory objects.
+    // Those carry no GHSA of their own and must not become allowlist entries.
+    const flat = flattenNpmAdvisories({
+      vulnerabilities: {
+        harper: { severity: "moderate", nodes: ["node_modules/harper"], via: ["@fastify/static"] },
+      },
+    });
+    expect(flat).toEqual([]);
+  });
+});
+
+describe("parseNpmAuditOutput", () => {
+  it("throws when npm output is not valid JSON (never degrades to bun-only)", () => {
+    expect(() => parseNpmAuditOutput("this is not json", "/tmp", 1)).toThrow(/not valid JSON/);
+  });
+
+  it("throws when npm produces no stdout", () => {
+    expect(() => parseNpmAuditOutput("", "/tmp", 0)).toThrow(/produced no output/);
+  });
+
+  it("parses a valid JSON report", () => {
+    expect(parseNpmAuditOutput('{"vulnerabilities":{}}', "/tmp", 0)).toEqual({ vulnerabilities: {} });
   });
 });
 
