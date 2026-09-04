@@ -2892,11 +2892,18 @@ const FLAIR_AGENT_PERMISSION = {
       // Flair Relay S1 (flair#1521). Harper authorizes BEFORE the resource
       // methods run, so a de-elevated flair_agent needs the table grant OR it
       // 403s on POST /Message before relaySend is reached (Kern P0-2). read =
-      // the party-scoped collection (Message.search); insert = send via post();
-      // update covers ack's write (routed through MessageAck → static put) and
-      // lets a direct PUT reach Message.put(), which then 403s a non-admin with
-      // a clear message. delete = false: direct deletes are admin/internal only.
-      Message:         grant(true,  true,  true,  false),
+      // the party-scoped collection (Message.search); insert = send via post().
+      // update = FALSE (least privilege, Kern P0 blocker): the ack's write goes
+      // through the IN-PROCESS static accessor (relayConsume → deps.messages.put),
+      // which bypasses role gates entirely — the same raw-put seam Federation.ts
+      // relies on — so update:true is NOT needed for any legitimate path. Leaving
+      // it granted let PATCH /Message/<id> reach Table's update verb, whose
+      // authorize step consults update:true and PASSES for any de-elevated agent,
+      // bypassing Message.put()'s FORBIDDEN guard AND relayConsume's recipient-only
+      // check (Message has no patch() at the platform level → TableResource.patch
+      // runs update()+save() directly). delete = false: direct deletes are
+      // admin/internal only. Message.patch() also guards the verb in-resource.
+      Message:         grant(true,  true,  false, false),
       Integration:     grant(true,  true,  true,  true),
       Credential:      grant(true,  true,  true,  true),
       Presence:        grant(true,  true,  true,  false),

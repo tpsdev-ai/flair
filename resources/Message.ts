@@ -125,6 +125,22 @@ export class Message extends (databases as any).flair.Message {
     return super.put(content, context);
   }
 
+  /** PATCH is a distinct Harper verb (Resource.patch → type:update → TableResource.patch
+   *  runs update()+save(), NEVER Message.put()), so without this override a de-elevated
+   *  agent with an `update` grant could mutate ANY message — set state, rewrite
+   *  body/from/to on a row it is not a party to — bypassing put()'s guard and
+   *  relayConsume's recipient-only check (Kern P0). The `update:false` grant now closes
+   *  this at the platform gate; this mirrors put()'s guard as defense-in-depth for the
+   *  verb surface (admin/internal only). Agents ack via MessageAck, never a direct PATCH. */
+  async patch(content: any, context?: any) {
+    const auth = await resolveAgentAuth(ctxOf(this));
+    if (auth.kind === "anonymous") return UNAUTH();
+    if (auth.kind === "agent" && !auth.isAdmin) {
+      return FORBIDDEN("forbidden: ack via MessageAck; direct writes are not permitted");
+    }
+    return super.patch(content, context);
+  }
+
   async delete(id: any, context?: any) {
     const auth = await resolveAgentAuth(ctxOf(this));
     if (auth.kind === "anonymous") return UNAUTH();

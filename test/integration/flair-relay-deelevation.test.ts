@@ -56,6 +56,17 @@ async function adminOp(harper: HarperInstance, op: Record<string, any>): Promise
   });
 }
 
+/** Read a Message row by id as the super_user admin (bypasses the party scope),
+ *  so a test can assert a foreign row's state is UNCHANGED after a rejected
+ *  agent mutation — the ground-truth invariant, independent of the HTTP code. */
+async function readRowAsAdmin(id: string): Promise<any | null> {
+  const res = await fetch(`${harper.httpURL}/Message/${encodeURIComponent(id)}`, {
+    headers: { Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`) },
+  });
+  if (!res.ok) return null;
+  return res.json().catch(() => null);
+}
+
 let harper: HarperInstance;
 let orgScope = "local";
 const agent = mkAgent("relay-agent");
@@ -191,5 +202,68 @@ describe("Flair Relay S1 — de-elevated flair_agent can send/ack, and reads are
         `leaked a row agent is not a party to: from=${r.from} to=${r.to}`,
       ).toBe(true);
     }
+  }, 60_000);
+
+  // Kern P0 (the remaining blocker): PATCH is a DISTINCT Harper verb. Resource.patch
+  // is type:update, whose authorize step consults the role's `update` grant — with
+  // `update:true` it PASSED for any de-elevated agent and TableResource.patch ran
+  // update()+save() directly, NEVER calling Message.put() (so put()'s FORBIDDEN
+  // guard AND relayConsume's recipient-only check were both bypassed). Any verified
+  // agent could set state / rewrite body/from/to on ANYONE's message. The fix is
+  // `update:false` in the grant (closes it at the platform gate) + a Message.patch()
+  // override (defense-in-depth). This asserts a de-elevated agent CANNOT mutate a
+  // FOREIGN row via PATCH — nor DELETE/COPY/MOVE. The ground-truth invariant is the
+  // row-unchanged check via admin read, which holds regardless of the exact HTTP code.
+  test("Kern P0: de-elevated agent cannot mutate a foreign row via PATCH/DELETE/COPY/MOVE", async () => {
+    // A row `agent` is NOT a party to (from=other, to=third).
+    const foreign = await sendAs(other.id, third.id, 5, { threadId: "other:third:tamper", body: "original" });
+    expect(foreign.status, `foreign send ${foreign.status}: ${foreign.text.slice(0, 300)}`).toBeLessThan(300);
+    const before = await readRowAsAdmin(foreign.id);
+    expect(before, "admin must be able to read the seeded foreign row").not.toBeNull();
+    expect(before.body, "seeded foreign row body").toBe("original");
+    expect(before.state, "seeded foreign row starts unconsumed").not.toBe("consumed");
+
+    const path = `/Message/${foreign.id}`;
+
+    // PATCH — the attack Kern identified: tamper body + force state.
+    const patchRes = await fetch(`${harper.httpURL}${path}`, {
+      method: "PATCH",
+      headers: { Authorization: ed25519Header(agent, "PATCH", path), "Content-Type": "application/json" },
+      body: JSON.stringify({ body: "tampered", state: "consumed" }),
+    });
+    const patchText = await patchRes.text();
+    expect(patchRes.status, `PATCH must be a success? got ${patchRes.status}: ${patchText.slice(0, 200)}`).toBeGreaterThanOrEqual(400);
+    expect([401, 403, 405], `PATCH /Message/<foreign> returned ${patchRes.status}: ${patchText.slice(0, 200)}`).toContain(patchRes.status);
+
+    // DELETE — already double-guarded (grant delete:false + delete() override); assert it.
+    const delRes = await fetch(`${harper.httpURL}${path}`, {
+      method: "DELETE",
+      headers: { Authorization: ed25519Header(agent, "DELETE", path) },
+    });
+    const delText = await delRes.text();
+    expect(delRes.status, `DELETE must not succeed; got ${delRes.status}: ${delText.slice(0, 200)}`).toBeGreaterThanOrEqual(400);
+    expect([401, 403, 405], `DELETE /Message/<foreign> returned ${delRes.status}: ${delText.slice(0, 200)}`).toContain(delRes.status);
+
+    // COPY / MOVE — enumerate the rest of the mutation verb surface.
+    for (const verb of ["COPY", "MOVE"]) {
+      const res = await fetch(`${harper.httpURL}${path}`, {
+        method: verb,
+        headers: {
+          Authorization: ed25519Header(agent, verb, path),
+          Destination: `/Message/${agent.id}-stolen-${verb.toLowerCase()}`,
+        },
+      });
+      const text = await res.text();
+      expect(res.status, `${verb} must not succeed; got ${res.status}: ${text.slice(0, 200)}`).toBeGreaterThanOrEqual(400);
+    }
+
+    // Ground truth: after all four rejected verbs, the foreign row is BYTE-FOR-BYTE
+    // unchanged and still present — no tamper, no state flip, no delete/move.
+    const after = await readRowAsAdmin(foreign.id);
+    expect(after, "foreign row must still exist (no DELETE/MOVE succeeded)").not.toBeNull();
+    expect(after.body, "foreign row body must be untampered").toBe("original");
+    expect(after.state, "foreign row state must not have been flipped to consumed").not.toBe("consumed");
+    expect(after.from, "foreign row `from` must be unchanged").toBe(other.id);
+    expect(after.to, "foreign row `to` must be unchanged").toBe(third.id);
   }, 60_000);
 });

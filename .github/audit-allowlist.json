@@ -420,6 +420,8 @@
       "class": "vendor-pinned",
       "introducedBy": "harper -> stream-json",
       "reason": "O(depth-squared) event-loop DoS in stream-json's pick/ignore/filter/replace filters on crafted nested JSON. stream-json@1.9.1 is a transitive pin of harper (@harperfast/harper; harper 5.2.x); it cannot be overridden from this repo (harper ships an npm-shrinkwrap and the override is bun-only, flair#1498/#1510). flair does not import stream-json directly - reachability is only via harper's internal streaming parser, not flair code.",
+      "sources": ["bun", "npm-install"],
+      "approvedBy": "tps-flint",
       "added": "2026-09-04",
       "expires": "2026-12-03",
       "removeWhen": "harper ships a build resolving stream-json > 3.4.0 (the patched line), or flair stops depending on harper."
