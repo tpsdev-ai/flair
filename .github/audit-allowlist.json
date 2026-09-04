@@ -40,7 +40,10 @@
       "package": "@fastify/static",
       "severity": "high",
       "class": "vendor-pinned",
-      "sources": ["bun", "npm-install"],
+      "sources": [
+        "bun",
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> @fastify/static",
       "reason": "Resolved inside harper's pinned unreleased v5 build. @fastify/static 10.1.2 fixes it upstream, but the resolution belongs to harper's HTTP layer and overriding it globally would change the static-file server harper itself mounts. flair does not serve user-supplied paths through it.",
@@ -53,7 +56,10 @@
       "package": "@fastify/static",
       "severity": "moderate",
       "class": "vendor-pinned",
-      "sources": ["bun", "npm-install"],
+      "sources": [
+        "bun",
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> @fastify/static",
       "reason": "Same vendored edge and same upstream fix as GHSA-83w8-p2f5-377r; both clear when harper's pinned build moves to @fastify/static 10.1.2.",
@@ -66,7 +72,9 @@
       "package": "lodash",
       "severity": "high",
       "class": "vendor-pinned",
-      "sources": ["bun"],
+      "sources": [
+        "bun"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> lodash, and workspace @tpsdev-ai/n8n-nodes-flair -> n8n-workflow -> lodash",
       "reason": "Two independent edges resolve the same vulnerable lodash, one of them inside harper's pinned build. lodash 4.18.1 fixes it, but a bun override is global \u2014 it would move harper's copy too, and lodash 4.18 is a minor bump across a package harper uses pervasively. The vulnerable API (_.template with attacker-controlled imports keys) is not reachable from flair's own code.",
@@ -79,7 +87,9 @@
       "package": "lodash",
       "severity": "moderate",
       "class": "vendor-pinned",
-      "sources": ["bun"],
+      "sources": [
+        "bun"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> lodash, and workspace @tpsdev-ai/n8n-nodes-flair -> n8n-workflow -> lodash",
       "reason": "Same two vendored edges as GHSA-r5fr-rjxr-66jc; prototype pollution in _.unset/_.omit, neither of which flair calls with attacker-controlled paths.",
@@ -92,7 +102,9 @@
       "package": "lodash",
       "severity": "moderate",
       "class": "vendor-pinned",
-      "sources": ["bun"],
+      "sources": [
+        "bun"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> lodash, and workspace @tpsdev-ai/n8n-nodes-flair -> n8n-workflow -> lodash",
       "reason": "Same two vendored edges as GHSA-r5fr-rjxr-66jc; array-path bypass variant of the _.unset/_.omit prototype pollution.",
@@ -105,7 +117,10 @@
       "package": "validate.js",
       "severity": "moderate",
       "class": "no-patch-published",
-      "sources": ["bun", "npm-install"],
+      "sources": [
+        "bun",
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> validate.js",
       "reason": "No fixed release exists \u2014 the latest published validate.js is itself inside the vulnerable range, and the package is effectively unmaintained. It is also resolved inside harper's pinned build, so even a future fix arrives via harper rather than directly. ReDoS in a validator flair does not invoke.",
@@ -118,7 +133,9 @@
       "package": "fastify",
       "severity": "moderate",
       "class": "vendor-pinned",
-      "sources": ["npm-install"],
+      "sources": [
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fastify",
       "reason": "Resolved inside harper's pinned npm-shrinkwrap (fastify 5.11.3), which npm honours over root overrides. The bun override (fastify ^5.12.1) fixes it in bun.lock, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving fastify >=5.12.1.",
@@ -131,7 +148,9 @@
       "package": "fastify",
       "severity": "moderate",
       "class": "vendor-pinned",
-      "sources": ["npm-install"],
+      "sources": [
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fastify",
       "reason": "Resolved inside harper's pinned npm-shrinkwrap (fastify 5.11.3), which npm honours over root overrides. The bun override (fastify ^5.12.1) fixes it in bun.lock, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving fastify >=5.12.1.",
@@ -144,7 +163,9 @@
       "package": "fast-uri",
       "severity": "high",
       "class": "vendor-pinned",
-      "sources": ["npm-install"],
+      "sources": [
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
       "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.3) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
@@ -157,7 +178,9 @@
       "package": "fast-uri",
       "severity": "high",
       "class": "vendor-pinned",
-      "sources": ["npm-install"],
+      "sources": [
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
       "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.3) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
@@ -170,7 +193,9 @@
       "package": "fast-uri",
       "severity": "high",
       "class": "vendor-pinned",
-      "sources": ["npm-install"],
+      "sources": [
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
       "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.3) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
@@ -183,7 +208,9 @@
       "package": "fast-uri",
       "severity": "high",
       "class": "vendor-pinned",
-      "sources": ["npm-install"],
+      "sources": [
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
       "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.3) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
@@ -196,7 +223,9 @@
       "package": "fast-uri",
       "severity": "high",
       "class": "vendor-pinned",
-      "sources": ["npm-install"],
+      "sources": [
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
       "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.3) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
@@ -209,7 +238,9 @@
       "package": "fast-uri",
       "severity": "high",
       "class": "vendor-pinned",
-      "sources": ["npm-install"],
+      "sources": [
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
       "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.3) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
@@ -222,7 +253,9 @@
       "package": "fast-uri",
       "severity": "high",
       "class": "vendor-pinned",
-      "sources": ["npm-install"],
+      "sources": [
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
       "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.3) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
@@ -235,7 +268,9 @@
       "package": "fast-uri",
       "severity": "high",
       "class": "vendor-pinned",
-      "sources": ["npm-install"],
+      "sources": [
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
       "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.3) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
@@ -248,7 +283,9 @@
       "package": "fast-uri",
       "severity": "high",
       "class": "vendor-pinned",
-      "sources": ["npm-install"],
+      "sources": [
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
       "reason": "Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.3) fixes it in bun.lock, but npm installs carry harper's pins. Retired when harper ships a shrinkwrap resolving fast-uri >=4.1.3.",
@@ -261,7 +298,9 @@
       "package": "brace-expansion",
       "severity": "moderate",
       "class": "vendor-pinned",
-      "sources": ["npm-install"],
+      "sources": [
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> brace-expansion",
       "reason": "Resolved inside harper's pinned npm-shrinkwrap, which npm honours over root overrides. The bun override (brace-expansion ^5.0.9) fixes it in bun.lock, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving brace-expansion >=5.0.9.",
@@ -274,7 +313,9 @@
       "package": "brace-expansion",
       "severity": "moderate",
       "class": "vendor-pinned",
-      "sources": ["npm-install"],
+      "sources": [
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> brace-expansion",
       "reason": "Resolved inside harper's pinned npm-shrinkwrap, which npm honours over root overrides. The bun override (brace-expansion ^5.0.9) fixes it in bun.lock, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving brace-expansion >=5.0.9.",
@@ -287,7 +328,9 @@
       "package": "brace-expansion",
       "severity": "high",
       "class": "vendor-pinned",
-      "sources": ["npm-install"],
+      "sources": [
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> brace-expansion",
       "reason": "Resolved inside harper's pinned npm-shrinkwrap, which npm honours over root overrides. The bun override (brace-expansion ^5.0.9) fixes it in bun.lock, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving brace-expansion >=5.0.9.",
@@ -300,7 +343,9 @@
       "package": "brace-expansion",
       "severity": "high",
       "class": "vendor-pinned",
-      "sources": ["npm-install"],
+      "sources": [
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> brace-expansion",
       "reason": "Resolved inside harper's pinned npm-shrinkwrap, which npm honours over root overrides. The bun override (brace-expansion ^5.0.9) fixes it in bun.lock, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving brace-expansion >=5.0.9.",
@@ -313,7 +358,9 @@
       "package": "brace-expansion",
       "severity": "high",
       "class": "vendor-pinned",
-      "sources": ["npm-install"],
+      "sources": [
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> brace-expansion",
       "reason": "Resolved inside harper's pinned npm-shrinkwrap, which npm honours over root overrides. The bun override (brace-expansion ^5.0.9) fixes it in bun.lock, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving brace-expansion >=5.0.9.",
@@ -326,7 +373,9 @@
       "package": "find-my-way",
       "severity": "high",
       "class": "vendor-pinned",
-      "sources": ["npm-install"],
+      "sources": [
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> find-my-way",
       "reason": "Resolved inside harper's pinned npm-shrinkwrap (find-my-way <=9.6.0), which npm honours over root overrides. bun.lock resolves a fixed version, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving find-my-way >=9.6.1.",
@@ -339,7 +388,9 @@
       "package": "picomatch",
       "severity": "moderate",
       "class": "vendor-pinned",
-      "sources": ["npm-install"],
+      "sources": [
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> picomatch",
       "reason": "Resolved inside harper's pinned npm-shrinkwrap (picomatch <2.3.2), which npm honours over root overrides. bun.lock resolves a fixed version, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving picomatch >=2.3.2.",
@@ -352,13 +403,26 @@
       "package": "picomatch",
       "severity": "high",
       "class": "vendor-pinned",
-      "sources": ["npm-install"],
+      "sources": [
+        "npm-install"
+      ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> picomatch",
       "reason": "Resolved inside harper's pinned npm-shrinkwrap (picomatch <2.3.2), which npm honours over root overrides. bun.lock resolves a fixed version, but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving picomatch >=2.3.2.",
       "added": "2026-09-03",
       "expires": "2026-11-02",
       "removeWhen": "harper ships a shrinkwrap resolving picomatch >=2.3.2"
+    },
+    {
+      "ghsa": "GHSA-528h-pc64-c93x",
+      "package": "stream-json",
+      "severity": "moderate",
+      "class": "vendor-pinned",
+      "introducedBy": "harper -> stream-json",
+      "reason": "O(depth-squared) event-loop DoS in stream-json's pick/ignore/filter/replace filters on crafted nested JSON. stream-json@1.9.1 is a transitive pin of harper (@harperfast/harper; harper 5.2.x); it cannot be overridden from this repo (harper ships an npm-shrinkwrap and the override is bun-only, flair#1498/#1510). flair does not import stream-json directly - reachability is only via harper's internal streaming parser, not flair code.",
+      "added": "2026-09-04",
+      "expires": "2026-12-03",
+      "removeWhen": "harper ships a build resolving stream-json > 3.4.0 (the patched line), or flair stops depending on harper."
     }
   ]
 }
