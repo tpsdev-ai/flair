@@ -32,6 +32,14 @@ type Message @table(database: "flair") @export {
   # Opaque to Flair.
   body: String
 
+  # Reply linkage (design §4.2). Lands in S1 so S2/S3 are not a schema
+  # migration, though "understood" reply semantics are S3. Both are CONTENT —
+  # covered by contentHash AND the signature (relay-lib SIGNED_BODY_FIELDS) —
+  # never trusted unsigned. `inReplyTo` is the parent message id; the redundant
+  # `parentContentHash` binds the reply to the parent's exact content.
+  inReplyTo: String
+  parentContentHash: String
+
   createdAt: String @indexed
   # Sender-set fail-by. When it passes on an UNCONSUMED message the row goes to
   # a VISIBLE `failed` state (reason "deadline") — the inverse of a silent drop.
@@ -55,7 +63,12 @@ type Message @table(database: "flair") @export {
   senderProvider: String
   senderRunId: String
 
-  # Ed25519 over the FULL canonical body (every field above except the mutable
-  # lifecycle fields and this signature). See resources/relay-lib.ts.
+  # Ed25519 over the canonical SIGNED body — the single source of truth is
+  # resources/relay-lib.ts SIGNED_BODY_FIELDS; keep this list in sync with it.
+  # It COVERS: the content (from, to, threadId, seq, kind, body, orgScope,
+  # deadline, inReplyTo, parentContentHash, senderModel/Provider/RunId) PLUS
+  # id, createdAt and contentHash. It EXCLUDES the mutable server/lifecycle
+  # fields (state, deliveredAt, consumedAt, failureReason) and this `signature`
+  # field itself. (Not "every field above" — the lifecycle fields are NOT signed.)
   signature: String
 }

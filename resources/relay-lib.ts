@@ -78,6 +78,11 @@ export const LOCAL_ORG_SENTINEL = "local";
 //   fields (`state`, `deliveredAt`, `consumedAt`, `failureReason`) and the
 //   `signature` itself.
 
+// `inReplyTo`/`parentContentHash` are the reply-linkage of the envelope
+// (design §4.2). They land in S1 (though "understood" reply semantics are S3)
+// and are CONTENT — two messages that differ only in what they reply to are
+// distinct, so they belong in the contentHash (dedup key) AND under the
+// signature (SIGNED_BODY_FIELDS), never trusted unsigned.
 export const CONTENT_HASH_FIELDS = [
   "from",
   "to",
@@ -87,6 +92,8 @@ export const CONTENT_HASH_FIELDS = [
   "body",
   "orgScope",
   "deadline",
+  "inReplyTo",
+  "parentContentHash",
   "senderModel",
   "senderProvider",
   "senderRunId",
@@ -102,6 +109,8 @@ export const SIGNED_BODY_FIELDS = [
   "body",
   "orgScope",
   "deadline",
+  "inReplyTo",
+  "parentContentHash",
   "createdAt",
   "contentHash",
   "senderModel",
@@ -120,6 +129,8 @@ export interface MessageEnvelope {
   body?: string;
   createdAt?: string;
   deadline?: string;
+  inReplyTo?: string;
+  parentContentHash?: string;
   state?: MessageState;
   deliveredAt?: string;
   consumedAt?: string;

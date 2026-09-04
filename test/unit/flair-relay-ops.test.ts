@@ -287,11 +287,93 @@ describe("seq read-ordering (createdAt collides at ms)", () => {
   it("inbox is sorted by seq regardless of arrival/createdAt order", async () => {
     const d = deps();
     const sameMs = "2026-09-04T00:00:00.000Z";
-    await relaySend(d, agentAuth("alice"), send("alice", "bob", 3, { createdAt: sameMs }));
-    await relaySend(d, agentAuth("alice"), send("alice", "bob", 1, { createdAt: sameMs }));
-    await relaySend(d, agentAuth("alice"), send("alice", "bob", 2, { createdAt: sameMs }));
+    // seq is monotonic PER (from, threadId), so out-of-order arrival within one
+    // thread is now rejected — spread across threads to keep arrival order (3,1,2
+    // by seq) different from the seq-sorted output while each thread stays
+    // monotonic. The sort is over the whole inbox, so it still proves seq-sort.
+    await relaySend(d, agentAuth("alice"), send("alice", "bob", 3, { createdAt: sameMs, threadId: "alice:t1" }));
+    await relaySend(d, agentAuth("alice"), send("alice", "bob", 1, { createdAt: sameMs, threadId: "alice:t2" }));
+    await relaySend(d, agentAuth("alice"), send("alice", "bob", 2, { createdAt: sameMs, threadId: "alice:t3" }));
     const inbox = (await relayInbox(d, agentAuth("bob"))) as MessageEnvelope[];
     expect(inbox.map((m) => m.seq)).toEqual([1, 2, 3]);
+  });
+});
+
+// ─── seq monotonicity per (from, threadId) (Sherlock P1) ────────────────────
+
+describe("seq monotonicity per (from, threadId)", () => {
+  it("rejects a seq that is not strictly ahead of the thread's last seq", async () => {
+    const d = deps();
+    expect(isResponse(await relaySend(d, agentAuth("alice"), send("alice", "bob", 5)))).toBe(false);
+    // same (from, threadId), seq 5 again → conflict (not > prev max)
+    const equal = (await relaySend(d, agentAuth("alice"), send("alice", "bob", 5, { id: "dup-seq", body: "different" }))) as Response;
+    expect(equal.status).toBe(409);
+    expect((await equal.json()).reason).toBe("seq_conflict");
+    // a lower seq is also rejected
+    const lower = (await relaySend(d, agentAuth("alice"), send("alice", "bob", 3, { body: "different-2" }))) as Response;
+    expect(lower.status).toBe(409);
+    // a strictly higher seq is accepted
+    expect(isResponse(await relaySend(d, agentAuth("alice"), send("alice", "bob", 6)))).toBe(false);
+  });
+
+  it("an identical retry (same content) is deduped, never a seq conflict", async () => {
+    const d = deps();
+    const msg = send("alice", "bob", 2);
+    expect(isResponse(await relaySend(d, agentAuth("alice"), { ...msg }))).toBe(false);
+    // resend the SAME content (same seq) — dedup wins before the monotonicity check
+    const retry = await relaySend(d, agentAuth("alice"), { ...msg });
+    expect(isResponse(retry)).toBe(false);
+    expect(d.msgs.store.size).toBe(1);
+  });
+
+  it("monotonicity is per-thread — a fresh threadId starts clean", async () => {
+    const d = deps();
+    await relaySend(d, agentAuth("alice"), send("alice", "bob", 9, { threadId: "alice:tA" }));
+    // seq 1 in a DIFFERENT thread is fine even though thread A is at 9
+    expect(isResponse(await relaySend(d, agentAuth("alice"), send("alice", "bob", 1, { threadId: "alice:tB" })))).toBe(false);
+  });
+});
+
+// ─── send-time field validation (Kern nits + Sherlock P1) ───────────────────
+
+describe("send-time validation", () => {
+  it("rejects a missing `from` (required, signed — never server-defaulted)", async () => {
+    const d = deps();
+    const msg = send("alice", "bob", 1);
+    delete (msg as any).from;
+    const res = (await relaySend(d, agentAuth("alice"), msg)) as Response;
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("from");
+  });
+
+  it("rejects a negative seq (seq >= 0)", async () => {
+    const d = deps();
+    const res = (await relaySend(d, agentAuth("alice"), send("alice", "bob", -1))) as Response;
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("non-negative");
+  });
+
+  it("rejects a garbage deadline (would otherwise sweep to failed immediately)", async () => {
+    const d = deps();
+    const res = (await relaySend(d, agentAuth("alice"), send("alice", "bob", 1, { deadline: "not-a-date" }))) as Response;
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("deadline");
+    expect(d.msgs.store.size).toBe(0);
+  });
+
+  it("strips client-supplied lifecycle fields from the stored row", async () => {
+    const d = deps();
+    const msg = send("alice", "bob", 1);
+    // lifecycle fields are NOT under the signature — a client could smuggle them
+    (msg as any).consumedAt = "2020-01-01T00:00:00.000Z";
+    (msg as any).failureReason = "inbox_full";
+    (msg as any).state = "consumed";
+    const accepted = (await relaySend(d, agentAuth("alice"), msg)) as MessageEnvelope;
+    expect(isResponse(accepted)).toBe(false);
+    const stored = d.msgs.store.get("alice-bob-1");
+    expect(stored.state).toBe("delivered"); // server-set, not the smuggled "consumed"
+    expect(stored.consumedAt).toBeUndefined();
+    expect(stored.failureReason).toBeUndefined();
   });
 });
 

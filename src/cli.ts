@@ -233,6 +233,16 @@ function signBody(body: Record<string, any>, secretKey: Uint8Array): string {
 // it against data.agentId for Memory (PRINCIPAL_OWNING_TABLES); it is
 // no longer informational-only. Credential.principalId is an unrelated
 // owner field — do not grep that path when changing this one.
+//
+// S2 COMMENT-PIN (Kern P2-5, flair#1521): Message is principal-owning by `from`
+// (PRINCIPAL_OWNER_FIELD in federation-classify.ts) but its rows carry NO
+// `provenance` stamp, so principalIdFromRow returns undefined for them → a v:2
+// Message push would omit `principalId` → the receiver's v≥2
+// checkPrincipalEntitlement skips EVERY Message as `principal_mismatch` (a
+// 100%-skip sync, not a migration). S1 does not push Message (receive-only —
+// the spoke push list below is a separate hardcoded set), so this is inert
+// today; the S2 pusher MUST stamp `principalId = row.from` for Message here
+// (a per-table owner-aware derivation, not `provenance.verified.agentId`).
 function principalIdFromRow(row: any): string | undefined {
   if (typeof row?.provenance !== "string" || row.provenance.length === 0) return undefined;
   try {
@@ -2879,6 +2889,14 @@ const FLAIR_AGENT_PERMISSION = {
       OrgEvent:        grant(true,  true,  true,  true),
       WorkspaceState:  grant(true,  true,  true,  true),
       Relationship:    grant(true,  true,  true,  true),
+      // Flair Relay S1 (flair#1521). Harper authorizes BEFORE the resource
+      // methods run, so a de-elevated flair_agent needs the table grant OR it
+      // 403s on POST /Message before relaySend is reached (Kern P0-2). read =
+      // the party-scoped collection (Message.search); insert = send via post();
+      // update covers ack's write (routed through MessageAck → static put) and
+      // lets a direct PUT reach Message.put(), which then 403s a non-admin with
+      // a clear message. delete = false: direct deletes are admin/internal only.
+      Message:         grant(true,  true,  true,  false),
       Integration:     grant(true,  true,  true,  true),
       Credential:      grant(true,  true,  true,  true),
       Presence:        grant(true,  true,  true,  false),
