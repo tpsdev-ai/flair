@@ -206,6 +206,11 @@ export function isForbiddenOwnerFieldChange(
   record: Record<string, unknown> | null | undefined,
   requested: Record<string, unknown> | null | undefined,
   ownerField: string,
+  // Deliberately caller-agnostic: the rule is "does this write CHANGE the owner
+  // field", which is decided purely by requested-vs-stored and never depends on
+  // WHO is asking (the caller's authority is decided one layer up, in
+  // owner-field-guard.ts). The parameter is kept only for signature symmetry
+  // with isForbiddenOwnerMutation; it is intentionally unused.
   _callerAgentId: string | null | undefined,
 ): boolean {
   if (!record) return false;

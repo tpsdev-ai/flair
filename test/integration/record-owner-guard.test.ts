@@ -305,6 +305,32 @@ describe("shared record-ownership guard", () => {
     }, 30_000);
   });
 
+  // ── Presence owner-field tripwire (primaryKey semantics) ────────────────────
+  //
+  // Presence is exempt from the owner-field matrix because its owner column
+  // (agentId) IS its primary key: the URL binds a row to its owner, so a body
+  // agentId cannot re-point it. That exemption is only safe while that remains
+  // true. This tripwire asserts it directly on a real Harper — an owner writing
+  // a DIFFERENT agentId in the body leaves the stored row's owner unchanged, on
+  // both PATCH and PUT. If a future Harper change made the primary key
+  // re-pointable by a body value, this fires and Presence must join the matrix.
+  describe("Presence: the primary-key owner field cannot be re-pointed by a body value", () => {
+    for (const verb of ["PATCH", "PUT"] as const) {
+      test(`${verb} /Presence/<own-id> with a foreign agentId in the body leaves the owner unchanged`, async () => {
+        const path = `/Presence/${owner.id}`;
+        const body: any = verb === "PUT"
+          ? { agentId: other.id, lastHeartbeatAt: Date.now(), activity: "tripwire" }
+          : { agentId: other.id, activity: "tripwire" };
+        await reqAs(harper, owner, verb, path, body);
+        const after = await rawRec(harper, "Presence", owner.id, ["agentId", "activity"]);
+        expect(after?.agentId, `${verb} re-pointed Presence.agentId — primaryKey semantics changed; add Presence to the owner-field matrix`).toBe(owner.id);
+        // And no foreign-owned row was conjured at the other agent's id.
+        const conjured = await rawRec(harper, "Presence", other.id, ["agentId"]);
+        expect(conjured == null || conjured.agentId === other.id, `${verb} created an owner-mismatched Presence row`).toBe(true);
+      }, 30_000);
+    }
+  });
+
   // ── COPY / MOVE are not a side door ─────────────────────────────────────────
   //
   // The ownership guard's mutating-verb set is POST/PUT/PATCH/DELETE. COPY and
