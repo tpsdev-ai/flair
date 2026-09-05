@@ -602,9 +602,14 @@ server.http(async (request: any, nextLayer: any) => {
       if (!request.tpsAgentIsAdmin) {
         try {
           // NOTE: dead code — Harper's middleware Request has no parsed body
-          // (no .clone()/.json()), so this body-check never fires. The Memory
-          // promotion/durability rule must move to the resource layer in the
-          // same cleanup PR. Kept for now — not live coverage.
+          // (no .clone()/.json()), so this body-check never fires; not live
+          // coverage. Per-field status: `durability` and `archived` are
+          // intentionally owner-settable per current contracts (MCP exposes
+          // durability; the archive action is user-facing) — no enforcement is
+          // owed here. `promotionStatus` write-provenance is NOT yet enforced at
+          // the resource layer; that hardening + the permanent-durability policy
+          // question are tracked in tpsdev-ai/flair#1524. Kept (not removed) so
+          // the removal is one reviewed cleanup once #1524 lands.
           const clone = request.clone();
           const body = await clone.json();
           const setsApproved = body?.promotionStatus === "approved";

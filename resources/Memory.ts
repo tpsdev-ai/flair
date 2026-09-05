@@ -1109,8 +1109,10 @@ export class Memory extends (databases as any).flair.Memory {
     }
 
     // Upgrade to permanent when approved — the LEGACY in-place approval flow
-    // (an admin marks an EXISTING row approved without naming a tier; the
-    // auth-middleware admin-gates setting promotionStatus over HTTP). An
+    // (an admin marks an EXISTING row approved without naming a tier). NOTE:
+    // the auth-middleware promotionStatus admin-gate this once relied on is
+    // INERT (Harper's middleware Request has no parsed body); promotionStatus
+    // write-provenance is not yet enforced — tracked in flair#1524. An
     // explicit durability on the SAME write now wins (flair#1257 slice 3):
     // the candidate-promotion paths (#1205b-2 /AutoPromoteCandidates and the
     // human `flair rem promote`) write NEW rows carrying promotionStatus:
