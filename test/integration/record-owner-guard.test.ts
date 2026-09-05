@@ -22,6 +22,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
 import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { OWNER_FIELDS } from "../../resources/record-owner-guard.js";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -63,6 +64,21 @@ async function patchAs(h: HarperInstance, agent: TestAgent, path: string, body: 
     body: JSON.stringify(body),
   });
 }
+
+/** Any verb, signed as `agent`. Used for the owner-field, alias and COPY/MOVE cases. */
+async function reqAs(h: HarperInstance, agent: TestAgent, method: string, path: string, body?: unknown): Promise<Response> {
+  return fetch(`${h.httpURL}${path}`, {
+    method,
+    headers: { "Content-Type": "application/json", Authorization: ed25519Header(agent, method, path) },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+}
+
+// The tables whose write rule is plain owner-field immutability and are reachable
+// over REST — everything in CASES except Presence, whose owner column is its
+// primary key (the URL binds the row to its owner, so the field cannot be
+// re-pointed by a body value). Matches the unit gate's IMMUTABILITY_EXEMPT.
+const OWNER_FLIP_EXEMPT = new Set(["Presence"]);
 
 let harper: HarperInstance;
 const owner = mkAgent("rog-owner");
@@ -253,5 +269,121 @@ describe("shared record-ownership guard", () => {
       expect(res.status, `MemoryUsage cross-agent PATCH returned ${res.status}, expected 403`).toBe(403);
       expect((await rawRec(harper, "MemoryUsage", id, ["id", "attribution"]))?.attribution).toBe("orig");
     }, 30_000);
+  });
+
+  // ── OWNER-FIELD IMMUTABILITY ────────────────────────────────────────────────
+  //
+  // Owning a row is permission to write its ordinary fields, not to rewrite the
+  // field that decides who owns it. A write that re-points the owner field at
+  // another principal must be refused and the stored owner left byte-unchanged —
+  // for every guarded, REST-reachable table, on the verb Harper routes past
+  // put(). The owner field per table is read from the SAME production map the
+  // guards use, so a table added to the guard is attacked here automatically.
+  describe("the owner field of a record is immutable to a non-admin", () => {
+    for (const c of CASES) {
+      if (OWNER_FLIP_EXEMPT.has(c.table)) continue;
+      test(`${c.name}: an owner cannot re-point the ${OWNER_FIELDS[c.table]} field to another principal`, async () => {
+        const ownerField = OWNER_FIELDS[c.table];
+        const before = await rawRec(harper, c.table, c.id, [ownerField]);
+        expect(before?.[ownerField], `${c.name} fixture must be owned by the owner`).toBe(owner.id);
+        const res = await patchAs(harper, owner, c.path, { [ownerField]: other.id });
+        expect(res.status, `${c.name} owner-field change returned ${res.status}, expected 403`).toBe(403);
+        const after = await rawRec(harper, c.table, c.id, [ownerField]);
+        expect(after?.[ownerField], `${c.name} owner field was reassigned despite the refusal`).toBe(owner.id);
+      }, 30_000);
+    }
+
+    // Positive control: the refusal is specific to the owner field. An owner's
+    // ordinary self-update — a field that is NOT the owner field — still works.
+    // Without this, the block above would pass just as happily if the guard had
+    // broken owner writes wholesale (the over-restriction failure mode).
+    test("an owner's ordinary (non-owner-field) self-update still succeeds", async () => {
+      const c = CASES.find((x) => x.name === "Relationship")!;
+      const res = await patchAs(harper, owner, c.path, { [c.field]: "still-writable" });
+      expect(res.status, `owner self-update returned ${res.status}: ${await res.text()}`).toBeLessThan(300);
+      expect((await rawRec(harper, c.table, c.id, [c.field]))?.[c.field]).toBe("still-writable");
+    }, 30_000);
+  });
+
+  // ── Presence owner-field tripwire (primaryKey semantics) ────────────────────
+  //
+  // Presence is exempt from the owner-field matrix because its owner column
+  // (agentId) IS its primary key: the URL binds a row to its owner, so a body
+  // agentId cannot re-point it. That exemption is only safe while that remains
+  // true. This tripwire asserts it directly on a real Harper — an owner writing
+  // a DIFFERENT agentId in the body leaves the stored row's owner unchanged, on
+  // both PATCH and PUT. If a future Harper change made the primary key
+  // re-pointable by a body value, this fires and Presence must join the matrix.
+  describe("Presence: the primary-key owner field cannot be re-pointed by a body value", () => {
+    for (const verb of ["PATCH", "PUT"] as const) {
+      test(`${verb} /Presence/<own-id> with a foreign agentId in the body leaves the owner unchanged`, async () => {
+        const path = `/Presence/${owner.id}`;
+        const body: any = verb === "PUT"
+          ? { agentId: other.id, lastHeartbeatAt: Date.now(), activity: "tripwire" }
+          : { agentId: other.id, activity: "tripwire" };
+        await reqAs(harper, owner, verb, path, body);
+        const after = await rawRec(harper, "Presence", owner.id, ["agentId", "activity"]);
+        expect(after?.agentId, `${verb} re-pointed Presence.agentId — primaryKey semantics changed; add Presence to the owner-field matrix`).toBe(owner.id);
+        // And no foreign-owned row was conjured at the other agent's id.
+        const conjured = await rawRec(harper, "Presence", other.id, ["agentId"]);
+        expect(conjured == null || conjured.agentId === other.id, `${verb} created an owner-mismatched Presence row`).toBe(true);
+      }, 30_000);
+    }
+  });
+
+  // ── COPY / MOVE are not a side door ─────────────────────────────────────────
+  //
+  // The ownership guard's mutating-verb set is POST/PUT/PATCH/DELETE. COPY and
+  // MOVE sit outside it, which is safe only because Harper implements neither on
+  // these table resources and returns 405. If a future Harper adds them, this
+  // fires and the verb set has to grow with it.
+  describe("COPY and MOVE are unimplemented on guarded resources", () => {
+    for (const verb of ["COPY", "MOVE"]) {
+      test(`${verb} on a guarded row is refused (405) and copies nothing`, async () => {
+        const c = CASES.find((x) => x.name === "Memory")!;
+        const stolenId = `rog-${verb.toLowerCase()}-stolen`;
+        const res = await reqAs(harper, other, verb, c.path, { destination: `/Memory/${stolenId}` });
+        expect(res.status, `${verb} returned ${res.status}, expected 405`).toBe(405);
+        expect(await rawRec(harper, "Memory", stolenId, ["id"]), `${verb} created a row`).toBeFalsy();
+      }, 30_000);
+    }
+  });
+
+  // ── The lowercase single-record alias is not a bypass ───────────────────────
+  //
+  // The guard matches the table segment exactly, so `/memory/<id>` (lowercase)
+  // is not one of its routes. That is only safe if the lowercase single-record
+  // route does not resolve to the table at all — assert it, so a future routing
+  // change that makes it resolve trips this instead of opening a quiet hole.
+  test("a non-owner PATCH to the lowercase /memory/<id> route does not resolve and mutates nothing", async () => {
+    const c = CASES.find((x) => x.name === "Memory")!;
+    const before = await rawRec(harper, "Memory", c.id, ["content"]);
+    const res = await reqAs(harper, other, "PATCH", `/memory/${c.id}`, { content: "via-lowercase" });
+    expect(res.status, `lowercase /memory PATCH returned ${res.status}, expected 404 (no such route)`).toBe(404);
+    const after = await rawRec(harper, "Memory", c.id, ["content"]);
+    expect(after?.content, "the lowercase route reached the Memory row").toBe(before?.content);
+  }, 30_000);
+
+  // ── Coverage self-check ─────────────────────────────────────────────────────
+  //
+  // The owner-field-immutability matrix is driven off CASES. This asserts CASES
+  // covers every guarded table that is reachable over REST (minus the flip-exempt
+  // set and the two whose rule is not plain ownership), so a table added to
+  // OWNER_FIELDS cannot slip in without an attack above. Mirrors the unit gate.
+  test("the owner-field matrix covers every REST-reachable guarded table", async () => {
+    const { existsSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const RES = join(import.meta.dir, "..", "..", "resources");
+    const EXEMPT = new Set([
+      ...OWNER_FLIP_EXEMPT,
+      "MemoryUsage", // append-only ledger — covered by its own stricter tests
+      "Message",     // no non-admin direct writes — covered by unit tests
+    ]);
+    const required = Object.keys(OWNER_FIELDS)
+      .filter((t) => existsSync(join(RES, `${t}.ts`))) // has a resource class → REST-reachable
+      .filter((t) => !EXEMPT.has(t));
+    const covered = new Set(CASES.filter((c) => !OWNER_FLIP_EXEMPT.has(c.table)).map((c) => c.table));
+    const missing = required.filter((t) => !covered.has(t));
+    expect(missing, `guarded, REST-reachable tables missing an owner-field-immutability case: ${missing.join(", ")}`).toEqual([]);
   });
 });

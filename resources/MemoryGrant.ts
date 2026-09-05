@@ -1,5 +1,6 @@
 import { databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
+import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 
 const FORBIDDEN = (msg: string) =>
   new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
@@ -103,7 +104,19 @@ export class MemoryGrant extends (databases as any).flair.MemoryGrant {
     return super.post(content, context);
   }
 
+  // PATCH routes past put(), so ownerId immutability is enforced on both verbs
+  // via the one shared delegate. Only the owner may modify a grant, and not even
+  // the owner may re-point ownerId at another principal (a grantee never could —
+  // the middleware ownership guard refuses a non-owner mutation first).
+  async patch(content: any, query?: any) {
+    const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "ownerId");
+    if (denial) return denial;
+    return super.patch(content, query);
+  }
+
   async put(content: any, context?: any) {
+    const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "ownerId");
+    if (denial) return denial;
     const denied = await this._enforceOwnerWrite(content);
     if (denied) return denied;
     return super.put(content, context);

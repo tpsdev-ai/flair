@@ -1,5 +1,6 @@
 import { databases } from "harper";
 import { resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
+import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { localInstanceId } from "./instance-identity.js";
 import { makeAuthGate, stampAttribution, UNAUTH } from "./record-type-kit.js";
 import { RECORD_TYPES } from "./record-types.js";
@@ -59,9 +60,19 @@ export class Soul extends (databases as any).flair.Soul {
     return super.post(content, context);
   }
 
+  // PATCH routes past put() (enforceWriteAuth covers post()/put() only), so
+  // agentId immutability is enforced on both verbs via the one shared delegate.
+  async patch(content: any, query?: any) {
+    const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
+    if (denial) return denial;
+    return super.patch(content, query);
+  }
+
   async put(content: any, context?: any) {
     const denied = await enforceWriteAuth(this, content);
     if (denied) return denied;
+    const ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
+    if (ownerDenial) return ownerDenial;
     content.updatedAt = new Date().toISOString();
     // Write-time originatorInstanceId stamp — see post() above / Memory.ts's
     // stampOriginatorInstanceId doc. No-op if already set.

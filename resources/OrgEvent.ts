@@ -13,6 +13,7 @@
 
 import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
+import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { invalidEntitiesResponse } from "./entity-vocab.js";
 import {
   makeAuthGate,
@@ -68,7 +69,17 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     return (databases as any).flair.OrgEvent.put(content);
   }
 
+  // PATCH routes past put(), so authorId immutability is enforced on both verbs
+  // via the one shared delegate.
+  async patch(content: any, query?: any) {
+    const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "authorId");
+    if (denial) return denial;
+    return super.patch(content, query);
+  }
+
   async put(content: any) {
+    const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "authorId");
+    if (__ownerDenial) return __ownerDenial;
     const auth = await this._auth();
     if (auth.kind === "anonymous") return UNAUTH();
     // No-forge attribution — mode/field drawn from RECORD_TYPES.OrgEvent.

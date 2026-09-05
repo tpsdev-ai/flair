@@ -1,5 +1,6 @@
 import { databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
+import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 
 const FORBIDDEN = (msg: string) =>
   new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
@@ -99,7 +100,17 @@ export class Integration extends (databases as any).flair.Integration {
     return super.post(content, context);
   }
 
+  // PATCH routes past put(), so agentId immutability is enforced on both verbs
+  // via the one shared delegate.
+  async patch(content: any, query?: any) {
+    const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
+    if (denial) return denial;
+    return super.patch(content, query);
+  }
+
   async put(content: any, context?: any) {
+    const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
+    if (__ownerDenial) return __ownerDenial;
     const auth = await this._auth();
     if (auth.kind === "anonymous") return UNAUTH();
     if (auth.kind === "agent" && !auth.isAdmin && content?.agentId && content.agentId !== auth.agentId) {

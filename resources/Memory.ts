@@ -1,6 +1,7 @@
 import { databases } from "harper";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
+import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { localInstanceId } from "./instance-identity.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { scanFields, isStrictMode } from "./content-safety.js";
@@ -860,7 +861,18 @@ export class Memory extends (databases as any).flair.Memory {
     return buildWriteResponse(content, result, dedupMatch);
   }
 
+  // PATCH routes past put(), so agentId immutability is enforced on both verbs
+  // via the one shared delegate. (Admin/internal — including the _reindex
+  // path in put() — pass through the delegate untouched.)
+  async patch(content: any, query?: any) {
+    const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
+    if (denial) return denial;
+    return super.patch(content, query);
+  }
+
   async put(content: any) {
+    const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
+    if (__ownerDenial) return __ownerDenial;
     // Reindex migration bypass: admin-only escape hatch used by the
     // MemoryReindex admin endpoint to re-PUT each existing record byte-for-byte
     // (no updatedAt bump, no embedding regen, no safety rescan) so Harper
@@ -1097,8 +1109,10 @@ export class Memory extends (databases as any).flair.Memory {
     }
 
     // Upgrade to permanent when approved — the LEGACY in-place approval flow
-    // (an admin marks an EXISTING row approved without naming a tier; the
-    // auth-middleware admin-gates setting promotionStatus over HTTP). An
+    // (an admin marks an EXISTING row approved without naming a tier). NOTE:
+    // the auth-middleware promotionStatus admin-gate this once relied on is
+    // INERT (Harper's middleware Request has no parsed body); promotionStatus
+    // write-provenance is not yet enforced — tracked in flair#1524. An
     // explicit durability on the SAME write now wins (flair#1257 slice 3):
     // the candidate-promotion paths (#1205b-2 /AutoPromoteCandidates and the
     // human `flair rem promote`) write NEW rows carrying promotionStatus:

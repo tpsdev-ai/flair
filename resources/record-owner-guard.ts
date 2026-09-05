@@ -51,6 +51,21 @@
  * resources — they answer a different question, "may you attribute a NEW record
  * to someone else", which this guard does not address.
  *
+ * ─── The owner field is immutable to a non-admin ─────────────────────────────
+ *
+ * Owning a row grants writing its ordinary fields, not rewriting the field that
+ * decides who owns it. Left alone, a caller that legitimately owns a row could
+ * use a later write to re-point that field at another principal — handing the
+ * row away, or attributing its content to someone else after the fact, past the
+ * create-time no-forge check each resource applies only on creation. So
+ * `isForbiddenOwnerFieldChange` refuses any non-admin write whose owner value
+ * differs from the stored one, comparing against STORED STATE exactly as above.
+ * It cannot run in the middleware — Harper's middleware Request has no parsed
+ * body — so it is enforced at the resource layer via a single shared delegate
+ * (resources/owner-field-guard.ts) called by each principal-owning resource's
+ * put() and patch(), the same shape resources/Agent.ts uses for the principal
+ * table's admin-status field.
+ *
  * ─── Keeping this honest as the codebase grows ───────────────────────────────
  *
  * OWNER_FIELDS below is static and PR-reviewed, matching the posture of
@@ -76,6 +91,11 @@ export const OWNER_FIELDS: Readonly<Record<string, string>> = Object.freeze({
   MemoryCandidate: "agentId",
   MemoryGrant: "ownerId",
   MemoryUsage: "agentId",
+  // The Message envelope's owning principal is the SENDER (`from`), not
+  // `agentId` — the per-table owner field, matching federation-classify's
+  // PRINCIPAL_OWNER_FIELD. `from` is not one of OWNER_COLUMN_NAMES, so the
+  // coverage test verifies it against the schema block directly.
+  Message: "from",
   OAuthAuthCode: "principalId",
   OAuthToken: "principalId",
   OrgEvent: "authorId",
@@ -136,10 +156,16 @@ export function resolveGuardedRecord(pathname: string): { table: string; ownerFi
  * Decide whether a caller may mutate an already-stored record.
  *
  * Pure, so the decision is testable without a Harper instance — the middleware
- * supplies the record it loaded. A record that does not exist, or that carries
- * no owner value, is NOT refused here: the first is a create (or a 404 the
- * resource will produce), and the second is a row with nothing to own, neither
- * of which this rule is about.
+ * supplies the record it loaded. A record that does not EXIST is not refused:
+ * that is a create (or a 404 the resource will produce), which this rule leaves
+ * to each resource's own attribution check.
+ *
+ * A record that exists but carries NO owner value is refused for a non-admin.
+ * Nobody owns such a row, so no non-admin agent id can match it, and the safe
+ * reading of "no owner" is "not yours" rather than "everyone's" — the guard
+ * fails closed. For the tables whose owner column is required by schema this is
+ * unreachable in practice, but a table with a nullable owner column (or a row
+ * that predates one becoming required) must not become a shared write surface.
  */
 export function isForbiddenOwnerMutation(
   record: Record<string, unknown> | null | undefined,
@@ -148,6 +174,47 @@ export function isForbiddenOwnerMutation(
 ): boolean {
   if (!record) return false;
   const owner = record[ownerField];
-  if (owner == null || owner === "") return false;
+  if (owner == null || owner === "") return true;
   return owner !== callerAgentId;
+}
+
+/**
+ * Decide whether a caller may CHANGE the owner field of an already-stored record.
+ *
+ * The ownership rule above answers "may you write this row"; it does not answer
+ * "may you rewrite the field that decides who owns it". Those are different
+ * questions, and a caller that legitimately owns a row today can still use a
+ * write to re-point that row at another principal — handing the row away, or
+ * attributing its content to someone else after the fact, past the create-time
+ * no-forge attribution each resource enforces only on creation.
+ *
+ * So the owner field is immutable to a non-admin: any write whose owner value
+ * differs from the stored one is refused. This mirrors resources/Agent.ts's
+ * shared write-authorization helper, which compares the RESULTING value against
+ * the stored one across both put() and patch() — a merged-vs-stored comparison,
+ * so a partial write that never names the field, or a no-op restatement of the
+ * current owner, is not a spurious denial.
+ *
+ * Pure and body-aware: `requested` is the request content (the caller's claim),
+ * `record` is the stored row (the ground truth). A create (`record` absent) is
+ * not this rule's business — attribution on creation belongs to the resource.
+ * Enforced at the RESOURCE layer (see resources/owner-field-guard.ts), because
+ * Harper's middleware Request exposes no parsed body — the same reason Agent.ts
+ * enforces its analogous rule in the resource rather than the middleware.
+ */
+export function isForbiddenOwnerFieldChange(
+  record: Record<string, unknown> | null | undefined,
+  requested: Record<string, unknown> | null | undefined,
+  ownerField: string,
+  // Deliberately caller-agnostic: the rule is "does this write CHANGE the owner
+  // field", which is decided purely by requested-vs-stored and never depends on
+  // WHO is asking (the caller's authority is decided one layer up, in
+  // owner-field-guard.ts). The parameter is kept only for signature symmetry
+  // with isForbiddenOwnerMutation; it is intentionally unused.
+  _callerAgentId: string | null | undefined,
+): boolean {
+  if (!record) return false;
+  if (requested == null || typeof requested !== "object") return false;
+  if (!Object.prototype.hasOwnProperty.call(requested, ownerField)) return false;
+  return requested[ownerField] !== record[ownerField];
 }
