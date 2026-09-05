@@ -50,7 +50,8 @@
     "build": "tsc -p tsconfig.json --noCheck && node scripts/write-build-info.mjs",
     "build:cli": "tsc -p tsconfig.cli.json --noCheck && node scripts/write-build-info.mjs",
     "prepublishOnly": "npm run build && npm run build:cli",
-    "test": "bun test",
+    "test": "bun run test:unit",
+    "test:unit": "bun scripts/test-unit.ts",
     "test:e2e": "playwright test",
     "release": "./scripts/release.sh",
     "postinstall": "node -e \"try{require('./dist/postinstall.cjs')}catch(e){}\""

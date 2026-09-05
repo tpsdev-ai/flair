@@ -43,6 +43,23 @@ function createMockApi(config: Record<string, unknown> = {}) {
 }
 
 describe("memory-flair plugin", () => {
+  let savedAgentId: string | undefined;
+  let savedFetch: typeof globalThis.fetch;
+  let unexpectedFetch: ReturnType<typeof mock>;
+  beforeEach(() => {
+    savedAgentId = process.env.FLAIR_AGENT_ID;
+    delete process.env.FLAIR_AGENT_ID;
+    savedFetch = globalThis.fetch;
+    unexpectedFetch = mock(() => { throw new Error("Unexpected network call in plugin registration test"); });
+    globalThis.fetch = unexpectedFetch as unknown as typeof fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = savedFetch;
+    if (savedAgentId === undefined) delete process.env.FLAIR_AGENT_ID;
+    else process.env.FLAIR_AGENT_ID = savedAgentId;
+    expect(unexpectedFetch).not.toHaveBeenCalled();
+  });
+
   test("registers all three tools", async () => {
     // Import triggers registration
     const plugin = (await import("../index.ts")).default;

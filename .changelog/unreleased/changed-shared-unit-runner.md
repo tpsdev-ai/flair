@@ -1,0 +1,1 @@
+- Contributor, CI and release unit tests use the same `bun run test:unit` command, including isolated files and TypeScript package tests. `bun run test:unit --list` shows the test inventory without executing it; bare `bun test` remains a focused-test command rather than the full validation lane.
