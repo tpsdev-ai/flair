@@ -44,7 +44,10 @@ Step 5 finds the memory you never keyword-matched:
   ( 2026-07-28 · standard · 100% )
 ```
 
-That trailing figure is a rank score, normalized so the top hit is always near 100% — ordering, not confidence.
+By default, that percentage displays semantic similarity with a small keyword-match
+boost. Hybrid search combines semantic and lexical ranks to order results, so the
+first result need not have the highest percentage or be near 100%. The percentage
+is not a probability that the memory answers your question correctly.
 
 `flair init` installs and starts Harper, creates the agent's Ed25519 keypair, verifies semantic search actually works, wires every MCP client it detects (Claude Code, Cursor, Codex CLI, Gemini CLI), and runs a smoke test. Restart your MCP client afterwards, then ask the agent *"what do you remember about me?"*
 

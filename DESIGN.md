@@ -9,9 +9,11 @@ wondering why it works a certain way, this is the page that answers "why," not "
 
 Flair is built on exactly three primitives: **identity**, **memory**, **soul**.
 
-- **Identity** — an Ed25519 key pair per agent. Every request is signed; there are no
-  passwords, no API keys, no shared secrets to leak. Identity is the root of everything
-  else: it's what makes a memory *attributable* and what makes provenance possible at all.
+- **Identity** — an Ed25519 key pair per agent. Signed agent requests bind an identity
+  to an operation without sharing the agent's private key. OAuth, administrator
+  credentials and deliberate in-process calls are additional authentication paths
+  (see [auth](docs/auth.md)). Identity is the root of everything else: it's what makes
+  a memory *attributable* and what makes provenance possible at all.
 - **Memory** — durable, semantically searchable knowledge, tiered by durability
   (`permanent` / `persistent` / `standard` / `ephemeral`), decay- and relevance-aware on
   retrieval. Memory is what turns a stateless completion into an agent that persists
