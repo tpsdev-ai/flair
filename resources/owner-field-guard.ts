@@ -50,6 +50,20 @@ export async function guardOwnerFieldImmutable(
   const auth = await resolveAgentAuth((self as any).getContext?.());
   if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) return null;
 
+  // Any caller that is not a resolved agent (anonymous, or an identity that did
+  // not resolve) has no owner identity to match against, so it may not proceed
+  // on an owner-bearing write path — fail closed. The denial is 401, not 403:
+  // an unresolved caller is unauthenticated, which is the same contract every
+  // principal-owning resource already returns for anonymous writes, and the
+  // owner-field rule only applies to a caller that HAS an owner identity. This
+  // also narrows `auth` to the agent variant, so `auth.agentId` below is typed.
+  if (auth.kind !== "agent") {
+    return new Response(
+      JSON.stringify({ error: "authentication required" }),
+      { status: 401, headers: { "content-type": "application/json" } },
+    );
+  }
+
   const existing = (await Promise.resolve(getExisting()).catch(() => null)) as
     | Record<string, unknown>
     | null;
