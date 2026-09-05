@@ -1,5 +1,6 @@
 import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
+import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { localInstanceId } from "./instance-identity.js";
 import {
@@ -134,7 +135,17 @@ export class Relationship extends (databases as any).flair.Relationship {
    *   HTTP caller and a true internal call, so an internal caller would have
    *   been wrongly 401'd too. resolveAgentAuth distinguishes the two.
    */
+  // PATCH routes past put(), so agentId immutability is enforced on both verbs
+  // via the one shared delegate.
+  async patch(content: any, query?: any) {
+    const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
+    if (denial) return denial;
+    return super.patch(content, query);
+  }
+
   async put(content: any) {
+    const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
+    if (__ownerDenial) return __ownerDenial;
     const ctx = (this as any).getContext?.();
     const auth = await resolveAgentAuth(ctx);
 

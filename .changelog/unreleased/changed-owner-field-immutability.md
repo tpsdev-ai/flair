@@ -1,0 +1,1 @@
+- Harden owner-field immutability on principal-owning resources: the column that identifies a record's owning principal is now immutable to non-admin callers on both PUT and PATCH, enforced by a single shared resource-layer guard.

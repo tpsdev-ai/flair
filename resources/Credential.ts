@@ -1,5 +1,6 @@
 import { databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
+import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { stampAttribution, UNAUTH } from "./record-type-kit.js";
 
@@ -130,7 +131,19 @@ export class Credential extends (databases as any).flair.Credential {
     return safe;
   }
 
+  // PATCH routes past put(), so the owner-field rule below is enforced on both
+  // verbs via the one shared delegate. principalId owns a credential; a non-admin
+  // may rotate a token on its OWN credential but never re-point it at another
+  // principal. (Self-update stays legitimate — update:true is retained.)
+  async patch(content: any, query?: any) {
+    const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "principalId");
+    if (denial) return denial;
+    return super.patch(content, query);
+  }
+
   async put(content: any) {
+    const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "principalId");
+    if (__ownerDenial) return __ownerDenial;
     const auth = await resolveAgentAuth((this as any).getContext?.());
 
     if (auth.kind === "anonymous") {

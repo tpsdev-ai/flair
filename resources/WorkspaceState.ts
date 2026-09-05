@@ -10,6 +10,7 @@
 
 import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
+import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { invalidEntitiesResponse } from "./entity-vocab.js";
 import {
   makeAuthGate,
@@ -133,7 +134,17 @@ export class WorkspaceState extends (databases as any).flair.WorkspaceState {
     return super.post(content);
   }
 
+  // PATCH routes past put(), so agentId immutability is enforced on both verbs
+  // via the one shared delegate.
+  async patch(content: any, query?: any) {
+    const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
+    if (denial) return denial;
+    return super.patch(content, query);
+  }
+
   async put(content: any) {
+    const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
+    if (__ownerDenial) return __ownerDenial;
     const auth = await this._auth();
     if (auth.kind === "anonymous") return UNAUTH();
     // No-forge attribution — mode/field drawn from RECORD_TYPES.WorkspaceState.

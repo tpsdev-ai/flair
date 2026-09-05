@@ -1,5 +1,6 @@
 import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
+import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import {
   makeAuthGate,
   makeReadScope,
@@ -148,7 +149,17 @@ export class MemoryCandidate extends (databases as any).flair.MemoryCandidate {
    * agent's candidate) but never stamps one in — the promote/reject flow
    * always carries the original agentId forward untouched.
    */
+  // PATCH routes past put(), so agentId immutability is enforced on both verbs
+  // via the one shared delegate.
+  async patch(content: any, query?: any) {
+    const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
+    if (denial) return denial;
+    return super.patch(content, query);
+  }
+
   async put(content: any) {
+    const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
+    if (__ownerDenial) return __ownerDenial;
     const ctx = (this as any).getContext?.();
     const auth = await resolveAgentAuth(ctx);
     if (auth.kind === "anonymous") return UNAUTH();

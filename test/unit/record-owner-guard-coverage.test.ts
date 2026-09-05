@@ -15,16 +15,18 @@
 // the value is not in checking today's list, it is in the list checking itself
 // from now on.
 import { describe, it, expect } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   OWNER_FIELDS,
   OWNER_GUARD_EXEMPT,
   MUTATING_METHODS,
   isForbiddenOwnerMutation,
+  isForbiddenOwnerFieldChange,
   isMutatingMethod,
   resolveGuardedRecord,
 } from "../../resources/record-owner-guard.js";
+import { PRINCIPAL_OWNING_TABLES, PRINCIPAL_OWNER_FIELD } from "../../resources/federation-classify.js";
 
 const SCHEMA_DIR = join(import.meta.dir, "..", "..", "schemas");
 const RESOURCES_DIR = join(import.meta.dir, "..", "..", "resources");
@@ -35,6 +37,22 @@ const RESOURCES_DIR = join(import.meta.dir, "..", "..", "resources");
  * caught without anyone updating this file.
  */
 const OWNER_COLUMN_NAMES = ["agentId", "authorId", "ownerId", "principalId"];
+
+/**
+ * Does `table`'s schema block declare a column named `col`? Unlike
+ * tablesWithOwnerColumn (which only recognises the conventional owner names),
+ * this checks the block for any named column, so an owner field spelled
+ * differently — Message owns by `from` — is still validated against the schema.
+ */
+function tableDeclaresColumn(table: string, col: string): boolean {
+  for (const file of readdirSync(SCHEMA_DIR).filter((f) => f.endsWith(".graphql"))) {
+    const src = readFileSync(join(SCHEMA_DIR, file), "utf8");
+    for (const [, t, body] of src.matchAll(/type\s+(\w+)\s+@table\b[^{]*\{([\s\S]*?)\n\}/g)) {
+      if (t === table) return new RegExp(`^\\s*${col}\\s*:`, "m").test(body);
+    }
+  }
+  return false;
+}
 
 /** Parse `type X @table(...) { ... }` blocks out of the GraphQL schemas. */
 function tablesWithOwnerColumn(): Map<string, string[]> {
@@ -79,13 +97,14 @@ describe("every owner-scoped table is covered by the shared guard", () => {
 
   it("every guarded table names a column the schema actually declares", () => {
     // The other direction: a typo'd owner field silently guards nothing, because
-    // `record[ownerField]` would be undefined and the check would pass.
-    const tables = tablesWithOwnerColumn();
+    // `record[ownerField]` would be undefined and the check would pass. Checked
+    // against the schema block directly so a non-conventional owner name (e.g.
+    // Message's `from`) is validated too.
     for (const [table, ownerField] of Object.entries(OWNER_FIELDS)) {
-      const declared = tables.get(table);
-      expect(declared, `OWNER_FIELDS names table ${table}, which declares no owner column`).toBeDefined();
-      expect(declared, `OWNER_FIELDS maps ${table} to "${ownerField}", not declared in the schema`)
-        .toContain(ownerField);
+      expect(
+        tableDeclaresColumn(table, ownerField),
+        `OWNER_FIELDS maps ${table} to "${ownerField}", which its schema block does not declare`,
+      ).toBe(true);
     }
   });
 
@@ -99,6 +118,73 @@ describe("every owner-scoped table is covered by the shared guard", () => {
   it("a table is never both guarded and exempt", () => {
     const both = Object.keys(OWNER_FIELDS).filter((t) => t in OWNER_GUARD_EXEMPT);
     expect(both, `listed in both OWNER_FIELDS and OWNER_GUARD_EXEMPT: ${both.join(", ")}`).toEqual([]);
+  });
+
+  it("every principal-owning table (federation policy) is middleware-guarded", () => {
+    // principalOwning:true is the trigger: a table the federation layer treats as
+    // owned by a principal must be one the record-ownership guard enforces, or it
+    // can be mutated cross-principal on the verbs its resource does not override.
+    const unguarded = [...PRINCIPAL_OWNING_TABLES].filter(
+      (t) => !(t in OWNER_FIELDS) && !(t in OWNER_GUARD_EXEMPT),
+    );
+    expect(
+      unguarded,
+      `principalOwning tables absent from OWNER_FIELDS/OWNER_GUARD_EXEMPT: ${unguarded.join(", ")}`,
+    ).toEqual([]);
+  });
+
+  it("a principal-owning table's guard field matches its federation owner field", () => {
+    // The two maps must agree on WHICH column owns a row, or the guard checks a
+    // different field than federation attributes ownership to.
+    for (const t of PRINCIPAL_OWNING_TABLES) {
+      if (!(t in OWNER_FIELDS)) continue; // absence already asserted above
+      expect(
+        OWNER_FIELDS[t],
+        `${t}: OWNER_FIELDS and PRINCIPAL_OWNER_FIELD disagree on the owner column`,
+      ).toBe(PRINCIPAL_OWNER_FIELD[t] ?? "agentId");
+    }
+  });
+
+  // ── The owner-field-immutability coverage gate ──────────────────────────────
+  //
+  // Owner-field immutability is enforced at the RESOURCE layer (the middleware
+  // Request has no parsed body — see owner-field-guard.ts), so this gate asserts
+  // each guarded, REST-reachable resource actually carries the override: a
+  // patch() method AND a delegation to the one shared helper. A table added to
+  // OWNER_FIELDS without wiring the override up trips this — the class cannot
+  // silently regress.
+  //
+  // The exemptions are the tables whose write rule is NOT plain owner-field
+  // immutability, each with a stated reason.
+  const IMMUTABILITY_EXEMPT: Record<string, string> = {
+    MemoryUsage: "append-only ledger — the owner may not write it at all; covered by its own patch() and the stricter-than-ownership tests below",
+    Message: "no non-admin direct writes (resources/Message.ts forbids agent PUT/PATCH/DELETE); owner-field change is unreachable over REST and covered by the isForbiddenOwnerFieldChange unit tests",
+    Presence: "the owner column agentId IS the primary key, so the URL binds a row to its owner and the field cannot be re-pointed by a body value (verified empirically)",
+  };
+
+  it("every guarded, REST-reachable resource enforces owner-field immutability via the shared helper", () => {
+    const missing: string[] = [];
+    for (const table of Object.keys(OWNER_FIELDS)) {
+      if (table in IMMUTABILITY_EXEMPT) continue;
+      const file = join(RESOURCES_DIR, `${table}.ts`);
+      if (!existsSync(file)) continue; // no resource class → not reachable over REST
+      const src = readFileSync(file, "utf8");
+      const hasPatch = /\basync\s+patch\s*\(/.test(src);
+      const delegates = src.includes("guardOwnerFieldImmutable");
+      if (!hasPatch || !delegates) missing.push(`${table}(patch:${hasPatch},delegate:${delegates})`);
+    }
+    expect(
+      missing,
+      `guarded, REST-reachable resources missing the owner-field-immutability override (async patch delegating to guardOwnerFieldImmutable): ${missing.join(", ")}. ` +
+      `Add both to resources/<Table>.ts, or add the table to IMMUTABILITY_EXEMPT with a reason.`,
+    ).toEqual([]);
+  });
+
+  it("every immutability exemption carries a real reason", () => {
+    for (const [table, reason] of Object.entries(IMMUTABILITY_EXEMPT)) {
+      expect(typeof reason === "string" && reason.trim().length > 20,
+        `IMMUTABILITY_EXEMPT for ${table} needs a stated reason`).toBe(true);
+    }
   });
 });
 
@@ -170,10 +256,13 @@ describe("isForbiddenOwnerMutation", () => {
     expect(isForbiddenOwnerMutation(undefined, "agentId", "bob")).toBe(false);
   });
 
-  it("permits a row with no owner value — there is nothing to own", () => {
-    expect(isForbiddenOwnerMutation({}, "agentId", "bob")).toBe(false);
-    expect(isForbiddenOwnerMutation({ agentId: null }, "agentId", "bob")).toBe(false);
-    expect(isForbiddenOwnerMutation({ agentId: "" }, "agentId", "bob")).toBe(false);
+  it("refuses a non-admin against an existing row with no owner value — fails closed", () => {
+    // An ownerless stored row is not a shared write surface: no non-admin id can
+    // match a missing owner, so the safe reading is "not yours". (A row that does
+    // not EXIST is a create and handled by the previous case.)
+    expect(isForbiddenOwnerMutation({}, "agentId", "bob")).toBe(true);
+    expect(isForbiddenOwnerMutation({ agentId: null }, "agentId", "bob")).toBe(true);
+    expect(isForbiddenOwnerMutation({ agentId: "" }, "agentId", "bob")).toBe(true);
   });
 
   it("refuses an unidentified caller against an owned row", () => {
@@ -185,6 +274,40 @@ describe("isForbiddenOwnerMutation", () => {
   it("reads the field it was told to, not a hardcoded one", () => {
     expect(isForbiddenOwnerMutation({ ownerId: "alice", agentId: "bob" }, "ownerId", "bob")).toBe(true);
     expect(isForbiddenOwnerMutation({ ownerId: "alice", agentId: "bob" }, "ownerId", "alice")).toBe(false);
+  });
+});
+
+describe("isForbiddenOwnerFieldChange", () => {
+  it("permits a write that does not name the owner field", () => {
+    expect(isForbiddenOwnerFieldChange({ agentId: "alice" }, { content: "x" }, "agentId", "alice")).toBe(false);
+  });
+
+  it("permits a no-op restatement of the current owner", () => {
+    expect(isForbiddenOwnerFieldChange({ agentId: "alice" }, { agentId: "alice" }, "agentId", "alice")).toBe(false);
+  });
+
+  it("refuses re-pointing the owner field at another principal", () => {
+    expect(isForbiddenOwnerFieldChange({ agentId: "alice" }, { agentId: "bob" }, "agentId", "alice")).toBe(true);
+  });
+
+  it("refuses clearing the owner field", () => {
+    expect(isForbiddenOwnerFieldChange({ agentId: "alice" }, { agentId: null }, "agentId", "alice")).toBe(true);
+    expect(isForbiddenOwnerFieldChange({ agentId: "alice" }, { agentId: "" }, "agentId", "alice")).toBe(true);
+  });
+
+  it("permits when there is no stored record — creation attribution belongs to the resource", () => {
+    expect(isForbiddenOwnerFieldChange(null, { agentId: "bob" }, "agentId", "alice")).toBe(false);
+    expect(isForbiddenOwnerFieldChange(undefined, { agentId: "bob" }, "agentId", "alice")).toBe(false);
+  });
+
+  it("reads the field it was told to, including a non-conventional owner name", () => {
+    expect(isForbiddenOwnerFieldChange({ ownerId: "alice" }, { ownerId: "bob" }, "ownerId", "alice")).toBe(true);
+    expect(isForbiddenOwnerFieldChange({ from: "alice" }, { from: "bob" }, "from", "alice")).toBe(true);
+  });
+
+  it("ignores a body that is not an object", () => {
+    expect(isForbiddenOwnerFieldChange({ agentId: "alice" }, null, "agentId", "alice")).toBe(false);
+    expect(isForbiddenOwnerFieldChange({ agentId: "alice" }, undefined, "agentId", "alice")).toBe(false);
   });
 });
 

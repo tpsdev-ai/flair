@@ -462,6 +462,11 @@ server.http(async (request: any, nextLayer: any) => {
         (method === "POST" || method === "PUT" || method === "PATCH")) {
       if (!request.tpsAgentIsAdmin) {
         try {
+          // NOTE: dead code — Harper's middleware Request has no parsed body
+          // (no .clone()/.json()), so this body-check never fires. Owner/
+          // attribution enforcement lives in the resource layer (record-owner-
+          // guard + owner-field-guard). Kept for a separate cleanup PR — not
+          // live coverage.
           const clone = request.clone();
           const body = await clone.json();
           if (body?.authorId && body.authorId !== agentId) {
@@ -496,6 +501,11 @@ server.http(async (request: any, nextLayer: any) => {
         (method === "POST" || method === "PUT" || method === "PATCH")) {
       if (!request.tpsAgentIsAdmin) {
         try {
+          // NOTE: dead code — Harper's middleware Request has no parsed body
+          // (no .clone()/.json()), so this body-check never fires. Owner/
+          // attribution enforcement lives in the resource layer (record-owner-
+          // guard + owner-field-guard). Kept for a separate cleanup PR — not
+          // live coverage.
           const clone = request.clone();
           const body = await clone.json();
           if (body?.agentId && body.agentId !== agentId) {
@@ -564,6 +574,11 @@ server.http(async (request: any, nextLayer: any) => {
         if (method !== "DELETE") {
           let bodyAgentId: string | null = null;
           try {
+            // NOTE: dead code — Harper's middleware Request has no parsed body
+            // (no .clone()/.json()), so this body-check never fires. Owner/
+            // attribution enforcement lives in the resource layer (record-owner-
+            // guard + owner-field-guard). Kept for a separate cleanup PR — not
+            // live coverage.
             const clone = request.clone();
             const body = await clone.json();
             bodyAgentId = body?.agentId ?? null;
@@ -586,6 +601,10 @@ server.http(async (request: any, nextLayer: any) => {
         (method === "PUT" || method === "POST" || method === "PATCH")) {
       if (!request.tpsAgentIsAdmin) {
         try {
+          // NOTE: dead code — Harper's middleware Request has no parsed body
+          // (no .clone()/.json()), so this body-check never fires. The Memory
+          // promotion/durability rule must move to the resource layer in the
+          // same cleanup PR. Kept for now — not live coverage.
           const clone = request.clone();
           const body = await clone.json();
           const setsApproved = body?.promotionStatus === "approved";
