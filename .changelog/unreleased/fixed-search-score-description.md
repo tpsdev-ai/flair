@@ -1,0 +1,1 @@
+- Clarify that default search percentages report similarity with a keyword-match boost, not normalized ranks or answer probabilities.
