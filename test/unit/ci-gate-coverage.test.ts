@@ -23,6 +23,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, relative } from "node:path";
+import { unitPlan } from "../../scripts/test-unit.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const WORKFLOW_DIR = join(REPO_ROOT, ".github", "workflows");
@@ -66,6 +67,13 @@ function ciTestTargets(): { dirs: string[]; rootGlob: boolean } {
   return ciTestTargetsFromText(workflowText());
 }
 
+function sharedUnitFiles(text: string): Set<string> {
+  if (!/^\s*run: bun run test:unit\s*$/m.test(text)) return new Set();
+  const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
+  if (pkg.scripts["test:unit"] !== "bun scripts/test-unit.ts") return new Set();
+  return new Set(unitPlan(REPO_ROOT).flatMap(step => step.files.map(file => relative(REPO_ROOT, file))));
+}
+
 /**
  * Detect file-by-file shell loops that run test files in isolated directories.
  *
@@ -101,6 +109,7 @@ function loopRunDirs(): string[] {
 describe("every test file is reachable from a CI command", () => {
   const files = allTestFiles();
   const { dirs, rootGlob } = ciTestTargets();
+  const sharedFiles = sharedUnitFiles(workflowText());
 
   test("the enumeration itself found tests (positive control)", () => {
     // A zero-length list would make every assertion below vacuously true — the
@@ -113,7 +122,7 @@ describe("every test file is reachable from a CI command", () => {
     // test/foo.test.ts, and nothing else targeted them.
     const rootLevel = files.filter((f) => f.split("/").length === 2);
     if (rootLevel.length > 0) {
-      expect(rootGlob).toBe(true);
+      expect(rootGlob || rootLevel.every(file => sharedFiles.has(file))).toBe(true);
     }
   });
 
@@ -124,11 +133,17 @@ describe("every test file is reachable from a CI command", () => {
     // (flair#1063).
     const loopDirs = loopRunDirs();
     const covered = (f: string) =>
+      sharedFiles.has(f) ||
       (f.split("/").length === 2 && rootGlob) ||
       [...dirs, ...loopDirs].some((d) => f.startsWith(`${d}/`));
 
     const orphans = files.filter((f) => !covered(f));
     expect(orphans).toEqual([]);
+  });
+
+  test("removing the shared runner invocation removes its coverage", () => {
+    expect(sharedUnitFiles("      run: bun run test:unit").size).toBeGreaterThan(100);
+    expect(sharedUnitFiles("      run: echo unit tests").size).toBe(0);
   });
 
   test("loop directory parser detects file-by-file loops from workflow + release.sh", () => {

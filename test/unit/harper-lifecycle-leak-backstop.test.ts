@@ -246,6 +246,9 @@ describe("startHarper failure does not leak a scratch dir (flair#1032)", () => {
     // before it deleted someone else's tree.
     const target = mkdtempSync(join(tmpdir(), "flair-1032-rmsync-target-"));
     writeFileSync(join(target, "keep-me"), "safe");
+    // The sweep compares integer Date.now() with fractional filesystem mtimes.
+    // Make this a stale target explicitly, independent of clock resolution.
+    utimesSync(target, new Date(0), new Date(0));
     const link = join(tmpdir(), `flair-test-symlink-${Date.now()}`);
     symlinkSync(target, link);
     try {

@@ -14,7 +14,7 @@ Thanks for your interest. Flair is open-source under Apache 2.0; contributions a
 
 ## Local setup
 
-Flair is a Node.js monorepo with a single Harper v5 runtime and three published packages.
+Flair is a Node.js monorepo with a single Harper v5 runtime and workspace packages under `packages/`.
 
 ```bash
 git clone https://github.com/tpsdev-ai/flair.git
@@ -23,15 +23,38 @@ npm install
 npm run build && npm run build:cli
 ```
 
-Run the test suite:
+Run the shared unit lane before pushing:
 
 ```bash
-bun test                  # unit + integration; no external services needed
-bun test test/unit        # faster — unit only
-bun test test/integration # slower — exercises Harper lifecycle
+bun install --frozen-lockfile
+bun run test:unit          # root, isolated and TypeScript package unit tests
+bun run test:unit --list   # show discovery and process boundaries without running
 ```
 
-Playwright e2e tests live under `test/e2e/` and run separately (`npm run test:e2e`). They're not required for most PRs; the `bun test` suite covers the main paths.
+`bun run test` and `npm test` use this same runner. CI and the release script
+also call it. It builds `flair-client` before package consumers and runs each
+`test/unit-isolated/` file in a fresh process. The runner stops on failure and
+prints the failed step; Bun reports pass/skip counts for each test process.
+Node.js must be on PATH for builds and subprocess tests. Use the Bun version
+in `packageManager` for CI parity.
+
+Child processes start without ambient `FLAIR_*`, `HARPER_*`, `HDB_*` or
+`FABRIC_*` deployment settings; tests set their own fixture configuration.
+This is not a network sandbox: tests must still mock external calls explicitly.
+
+Do not use bare `bun test` as the repository-wide validation command: it bypasses
+the runner and mixes suites with incompatible global mocks and prerequisites.
+For a focused change, `bun test test/unit/example.test.ts` still works, but does
+not replace the shared lane. Known local ordering/pollution failures are tracked
+in #1493; this runner standardizes invocation rather than suppressing failures.
+
+Integration tests start real Harper processes and require built server/CLI
+artifacts; model-dependent suites also require the embedding model. Run them on
+an isolated development host using the setup in `.github/workflows/test.yml`.
+`test/integration-isolated/` needs one process per file, and
+`test/integration-heavy/` is a separate lane. Python package tests and Playwright
+(`npm run test:e2e`) also run separately. The unit command does not claim those
+checks passed.
 
 Run the CLI against a local Flair instance:
 

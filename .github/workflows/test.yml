@@ -111,91 +111,11 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node-version }}
-      # test/*.test.ts — 12 files, 250 cases — were run by NO CI command
-      # (flair#953). Every `bun test` invocation in every workflow targets a
-      # subdirectory, and a subdirectory filter does not pick up root-level test
-      # files. They pass locally under a bare `bun test`, which is what
-      # CONTRIBUTING.md tells contributors to run, so they looked covered from
-      # both ends while being enforced from neither. They are pure-logic suites
-      # (auth scoping, data scoping, REM runner/scheduler/snapshot, content
-      # safety, key rotation) with no live-service reason to be excluded.
-      - run: bun test test/unit/ test/*.test.ts
-      # flair#1012: darwin-gated tests (`test.skipIf(!isDarwin)`) cover the
-      # launchd branch that unloads production services. They do not execute
-      # on this Linux runner. The suite above reports them as skips, but a
-      # skip buried in thousands of passes is how the original failures sat
-      # on main. This step inventories them, refuses `test.if` (omit), and
-      # fails if the skip count is 0 — "0 darwin tests ran on this platform"
-      # is information; nothing at all is what let #1012 sit. The macOS job
-      # `test-darwin-gated` is the lane that actually runs them.
+      - name: Shared unit lane (root, isolated and workspace tests)
+        run: bun run test:unit
+      # Keep the platform execution/skip check visible independently of the unit lane.
       - name: "Darwin-gated unit tests: report skip count (flair#1012)"
         run: bun scripts/check-darwin-gated-tests.mjs
-      # test/unit-isolated/ holds files that `mock.module` a process-global
-      # shared module (embeddings-provider). `mock.module` is first-wins and
-      # unrestored, so these files poison not only the real-importer files in
-      # test/unit/ above but EACH OTHER — one file per `bun test` process is
-      # the only fully-robust isolation (independent of any stub's export
-      # completeness). The mock-isolation tripwire test (in test/unit/) fails
-      # if a new mocker lands back in test/unit/. See flair#691.
-      - name: "Isolated module-mocking unit files (one process each)"
-        run: |
-          for f in test/unit-isolated/*.test.ts; do
-            echo "::group::$f"
-            bun test "$f" || exit 1
-            echo "::endgroup::"
-          done
-      # packages/flair-mcp/test/*.test.ts (mcp.test.ts, mcp-node-preflight.test.ts,
-      # session-start-hook.test.ts) weren't gated by CI — `bun test test/unit/`
-      # above only covers the repo root (closes #491, follow-up to #490 per Kern's
-      # review). All three files are hermetic: pure-logic assertions, an injected
-      # mock bootstrap client, and a local `node` spawn against the built shim —
-      # no live Flair daemon or network I/O, so they belong in this job rather
-      # than test-integration.
-      - name: "Build flair-client (workspace dep flair-mcp imports by its built dist/)"
-        run: cd packages/flair-client && bun run build
-      - name: "flair-mcp package tests"
-        run: cd packages/flair-mcp && bun test
-      # The other 5 packages (flair-client, langgraph-flair, n8n-nodes-flair,
-      # openclaw-flair, pi-flair) also have real test suites CI only typechecked
-      # (#619, generalizing #605/#491's fix for flair-mcp). flair-client's own
-      # tests import its source directly, so the build above isn't required for
-      # it — but langgraph-flair, n8n-nodes-flair, openclaw-flair, and pi-flair
-      # all depend on the WORKSPACE package @tpsdev-ai/flair-client, which
-      # resolves via its package.json main → dist/index.js (bun workspace
-      # symlinks point at source, not emitted JS): confirmed by temporarily
-      # unbuilding flair-client, which broke openclaw-flair's test with
-      # "Cannot find module '@tpsdev-ai/flair-client'". The build step above
-      # already covers all four. All five suites are hermetic (pure-logic
-      # assertions / mocked fetch, no live Flair daemon or network I/O) and
-      # were verified green on main before wiring here.
-      - name: "flair-client package tests"
-        run: cd packages/flair-client && bun test
-      - name: "Remaining workspace package tests (flair-client dep already built above)"
-        # flair-bench has no @tpsdev-ai/flair-client dependency (it's a standalone
-        # embedding-benchmark CLI/library, node-llama-cpp is its only prod dep) —
-        # riding this same loop anyway since its `bun test` is equally hermetic
-        # (pure-logic scorer/prefix/recommend-heuristic/share-schema assertions +
-        # two source-text sync-checks against test/bench/recall-harness/, no live
-        # model load or network I/O) and it doesn't need its own dedicated step.
-        #
-        # adk-flair-js runs only its unit tests here. Its integration tests
-        # (explain_plan, portability, quickstart_parity) boot an ephemeral Harper
-        # instance and require a built Flair application — they run in the
-        # Integration Tests lane instead (see test-integration below).
-        run: |
-          FAIL=0
-          for pkg in langgraph-flair n8n-nodes-flair openclaw-flair pi-flair flair-bench; do
-            echo "::group::test $pkg"
-            (cd "packages/$pkg" && bun test) || FAIL=1
-            echo "::endgroup::"
-          done
-          echo "::group::test adk-flair-js (unit only)"
-          (cd packages/adk-flair-js && bun test test/unit/) || FAIL=1
-          echo "::endgroup::"
-          if [ "$FAIL" -ne 0 ]; then
-            echo "::error::One or more workspace packages have failing tests"
-            exit 1
-          fi
 
   # Required-status-check adapter (#672): branch protection's
   # required_status_checks pins the exact context "Unit Tests", which a

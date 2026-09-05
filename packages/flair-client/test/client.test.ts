@@ -3,10 +3,24 @@ import { describe, test, expect, mock, beforeEach, afterEach, spyOn } from "bun:
 // Mock fetch globally
 const originalFetch = globalThis.fetch;
 let mockFetch: ReturnType<typeof mock>;
+const CLIENT_ENV = ["FLAIR_URL", "FLAIR_AGENT_ID", "FLAIR_CLIENT", "FLAIR_ADMIN_USER", "FLAIR_ADMIN_PASSWORD"];
+const savedClientEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
+  for (const key of CLIENT_ENV) {
+    savedClientEnv[key] = process.env[key];
+    delete process.env[key];
+  }
   mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
   globalThis.fetch = mockFetch as any;
+});
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+  for (const key of CLIENT_ENV) {
+    if (savedClientEnv[key] === undefined) delete process.env[key];
+    else process.env[key] = savedClientEnv[key];
+  }
 });
 
 // Import after mock setup

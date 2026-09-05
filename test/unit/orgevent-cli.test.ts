@@ -70,7 +70,8 @@ function runCli(args: string[], env: Record<string, string> = {}): Promise<{ std
   const cliPath = join(import.meta.dirname ?? __dirname, "..", "..", "dist", "cli.js");
   return new Promise((resolve) => {
     const child = spawn("bun", [cliPath, ...args], {
-      env: { ...process.env, ...env },
+      // Each case supplies its own identity; a developer's agent must not fill it in.
+      env: { ...process.env, FLAIR_AGENT_ID: "", ...env },
       stdio: ["inherit", "pipe", "pipe"],
     });
     let stdout = "";

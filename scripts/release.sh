@@ -359,11 +359,9 @@ done
 # packages/flair-bench/src/version.ts holds TOOL_VERSION as a plain constant
 # (a runtime JSON import of package.json trips NodeNext import-attribute edges
 # in the published dist/), and a flair-bench package test asserts the two are
-# equal. Step 5 below runs only test/unit, test/integration and
-# test/unit-isolated — the flair-bench package tests are a separate CI job — so
-# skipping this bumped cleanly, tested green locally, and went red in CI every
-# single release. The rewrite lives in check-version-sync.mjs alongside the
-# pattern that verifies it, so the two cannot drift.
+# equal. The shared unit runner in step 5 also checks that package. The rewrite
+# lives in check-version-sync.mjs alongside the pattern that verifies it, so the
+# two cannot drift.
 echo "📌 Bumping source version declarations..."
 (cd "$ROOT" && node scripts/check-version-sync.mjs --write "$VERSION") || {
   echo "❌ Source version bump failed"; exit 1;
@@ -436,32 +434,8 @@ echo "  ✓ All packages built"
 # e2e specs live under test/e2e/ and fail to load under bun — they're run via
 # `bunx playwright test` against a live server in CI, not locally here.
 echo "🧪 Running tests..."
-# UNIT AND INTEGRATION RUN IN SEPARATE PROCESSES, because that is what CI does
-# and the comment above only claimed to match it.
-#
-# This line used to be a single `bun test test/unit/ <integration files>`. CI
-# runs them as two independent JOBS (test.yml's unit lane and its
-# `bun test $(find test/integration ...)` lane), so nothing anywhere had ever
-# executed the two suites in one bun process — except this script, once per
-# release.
-#
-# Measured cutting 0.37.0, on the same commit CI had just passed 26/26:
-#   unit alone                3912 pass  0 fail
-#   integration alone          438 pass  0 fail
-#   unit + integration        4350 pass  1 fail   <- only this shape
-# The casualty was mcp-client-credentials-e2e, from the same family that already
-# needed test/integration-isolated/ for exactly this reason (flair#691).
-#
-# So the release gate was failing for a reason unrelated to the release, on a
-# combination no other lane runs. A gate that fails for the wrong reason is worse
-# than a missing one: it trains everyone to re-run it until it passes.
-# `test/*.test.ts` — the 12 root-level files — are in CI's unit lane
-# (`bun test test/unit/ test/*.test.ts`) and were NOT in this script's. So the
-# release gate ran LESS than CI while its comment claimed to match it, and the
-# gap included auth-scoping, data-scoping, backup-restore and content-safety.
-# 252 tests that no release has ever executed. They pass on macOS in under a
-# second; there was no reason for the omission beyond nobody comparing the two
-# invocations.
+# Use the same unit runner as local development and CI. Integration suites
+# stay in separate processes because their global mocks cannot share the unit lane.
 # flair#1012: darwin-gated launchd tests are skipped on Linux CI and used
 # to surface only here, on macOS, as a bare "Tests failed" after the full
 # suite. Run the inventory/execution gate first so a darwin-only failure
@@ -477,7 +451,7 @@ if ! (cd "$ROOT" && node scripts/check-darwin-gated-tests.mjs); then
   fi
   exit 1
 fi
-if ! (cd "$ROOT" && bun test test/unit/ test/*.test.ts); then
+if ! (cd "$ROOT" && bun run test:unit); then
   echo "❌ Tests failed (unit)"
   if [[ "$(uname -s)" == Darwin ]]; then
     echo "   This host is macOS. The unit suite includes darwin-gated launchd tests that Linux CI skips (flair#1012)."
@@ -486,12 +460,6 @@ if ! (cd "$ROOT" && bun test test/unit/ test/*.test.ts); then
   exit 1
 fi
 (cd "$ROOT" && bun test $(find test/integration -name '*.test.ts' | sort)) || { echo "❌ Tests failed (integration)"; exit 1; }
-# test/unit-isolated/ files mock.module a process-global shared module; each
-# MUST run in its own `bun test` process — they poison the real-importer
-# files AND each other otherwise (flair#691).
-for f in "$ROOT"/test/unit-isolated/*.test.ts; do
-  (cd "$ROOT" && bun test "$f") || { echo "❌ Tests failed ($f)"; exit 1; }
-done
 # test/integration-isolated/: structurally excluded from the `find test/integration`
 # glob above; each file runs in its own process to prevent env cross-contamination
 # (flair#691, flair#1061).

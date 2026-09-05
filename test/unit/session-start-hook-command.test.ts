@@ -52,7 +52,8 @@ function runCommand(command: string, shell: string, path: string): Run {
     input: "",
     encoding: "utf-8",
     timeout: 20_000,
-    env: { PATH: path, HOME: process.env.HOME ?? "/tmp" },
+    // A user's shell startup files can replace the fixture PATH and run real npx.
+    env: { PATH: path, HOME: fixtureDir, XDG_CONFIG_HOME: join(fixtureDir, ".config") },
   });
   return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
