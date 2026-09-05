@@ -67,9 +67,32 @@ export const FEDERATION_TABLE_POLICY = {
   Soul: { principalOwning: false },
   Agent: { principalOwning: false },
   Relationship: { principalOwning: false },
+  // Flair Relay S1 (flair#1521): the Message envelope's owning principal is the
+  // SENDER (`from`), not `agentId` — see PRINCIPAL_OWNER_FIELD below. S1 does
+  // not sync Message cross-host (the spoke push list in src/cli.ts is a separate
+  // hardcoded set), but the policy + owner-field land now so S2 is not a schema
+  // or policy migration (the design's ship-order, flair#1521 §12).
+  Message: { principalOwning: true },
 } as const;
 
 export type FederationSyncTable = keyof typeof FEDERATION_TABLE_POLICY;
+
+/**
+ * Per-table owning-principal field. `checkPrincipalEntitlement` used to hardcode
+ * the owner as `data.agentId` (correct for Memory, the only principal-owning
+ * table then). Message owns by `from`, so the owner field is now a per-table
+ * map rather than a literal. Tables absent here fall back to `agentId` — only
+ * principal-owning tables ever reach the check, and Memory keeps its field.
+ */
+export const PRINCIPAL_OWNER_FIELD: Record<string, string> = {
+  Memory: "agentId",
+  Message: "from",
+};
+
+/** The owning-principal field for a table (default `agentId`). */
+export function principalOwnerField(table: string): string {
+  return PRINCIPAL_OWNER_FIELD[table] ?? "agentId";
+}
 
 export const FEDERATION_SYNC_TABLES = Object.keys(
   FEDERATION_TABLE_POLICY,
@@ -142,12 +165,13 @@ export function checkPrincipalEntitlement(
   if (!PRINCIPAL_OWNING_TABLES.has(record.table)) {
     return null;
   }
+  const ownerField = principalOwnerField(record.table);
   const v = recordSignatureVersion(record);
   if (v >= 2) {
     if (
       typeof record.principalId !== "string" ||
       record.principalId.length === 0 ||
-      record.principalId !== record.data?.agentId
+      record.principalId !== record.data?.[ownerField]
     ) {
       return "principal_mismatch";
     }

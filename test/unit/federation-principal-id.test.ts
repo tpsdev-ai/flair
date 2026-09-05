@@ -374,13 +374,16 @@ describe("flair#1416 — Phase 1 receiver verifies v:1 and v:2 in the same batch
 });
 
 describe("flair#1416 — principal entitlement is table-scoped, never field-presence", () => {
-  it("PRINCIPAL_OWNING_TABLES is exactly Memory — Soul/Agent/Relationship are not in the set", () => {
-    expect([...PRINCIPAL_OWNING_TABLES].sort()).toEqual(["Memory"]);
+  it("PRINCIPAL_OWNING_TABLES is Memory + Message — Soul/Agent/Relationship are not in the set", () => {
+    // Message joined the principal-owning set in Flair Relay S1 (flair#1521),
+    // owning by `from` rather than `agentId` (see PRINCIPAL_OWNER_FIELD).
+    expect([...PRINCIPAL_OWNING_TABLES].sort()).toEqual(["Memory", "Message"]);
     expect(FEDERATION_TABLE_POLICY.Memory.principalOwning).toBe(true);
+    expect(FEDERATION_TABLE_POLICY.Message.principalOwning).toBe(true);
     expect(FEDERATION_TABLE_POLICY.Soul.principalOwning).toBe(false);
     expect(FEDERATION_TABLE_POLICY.Agent.principalOwning).toBe(false);
     expect(FEDERATION_TABLE_POLICY.Relationship.principalOwning).toBe(false);
-    expect(FEDERATION_SYNC_TABLES.sort()).toEqual(["Agent", "Memory", "Relationship", "Soul"]);
+    expect(FEDERATION_SYNC_TABLES.sort()).toEqual(["Agent", "Memory", "Message", "Relationship", "Soul"]);
   });
 
   it("SkipReason union includes principal_mismatch (closed vocabulary)", () => {
@@ -563,7 +566,14 @@ describe("flair#1416 — no Agent.get on the apply path", () => {
     expect(src).toContain("checkPrincipalEntitlement(");
   });
 
-  it("cli.ts push table list matches FEDERATION_SYNC_TABLES — no silent extra table", () => {
+  it("cli.ts push table list matches FEDERATION_SYNC_TABLES minus the S1 receive-only tables", () => {
+    // Message is REGISTERED in the policy (so the owner-field + entitlement land
+    // now and S2 is not a migration — the design's ship-order, flair#1521) but is
+    // deliberately NOT pushed by a spoke in S1: cross-host Message delivery is
+    // S2. The push list is therefore the sync policy MINUS the receive-only set.
+    // This still guards the original invariant — an ACCIDENTAL drift on any of
+    // the four synced tables fails — while documenting the one deliberate gap.
+    const S1_RECEIVE_ONLY = ["Message"];
     const src = readFileSync(join(import.meta.dir, "../../src/cli.ts"), "utf8");
     const match = src.match(/const tables = \[([^\]]+)\]/);
     expect(match).toBeTruthy();
@@ -571,6 +581,7 @@ describe("flair#1416 — no Agent.get on the apply path", () => {
       .split(",")
       .map((s) => s.replace(/["'\s]/g, ""))
       .filter(Boolean);
-    expect(listed.sort()).toEqual([...FEDERATION_SYNC_TABLES].sort());
+    const expected = [...FEDERATION_SYNC_TABLES].filter((t) => !S1_RECEIVE_ONLY.includes(t));
+    expect(listed.sort()).toEqual(expected.sort());
   });
 });

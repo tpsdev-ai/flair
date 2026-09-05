@@ -10,6 +10,7 @@ import {
   verifyBodySignatureFresh,
   generateNonce,
 } from "./federation-crypto.js";
+import { reconcileState } from "./relay-lib.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
 import { createPersistentNonceStore, initNonceStoreCleanup } from "./federation-nonce-store.js";
 import {
@@ -483,6 +484,21 @@ export class FederationSync extends Resource {
       Soul: (databases as any).flair.Soul,
       Agent: (databases as any).flair.Agent,
       Relationship: (databases as any).flair.Relationship,
+      // Flair Relay (flair#1521). Registered so the policy + owner-field land now
+      // (the design's ship-order). No spoke pushes Message records in S1 — this is the
+      // RECEIVE side only; the absorbing-state guard below keeps an incoming
+      // Message merge from ever regressing a locally-consumed row (§12 P0-3).
+      //
+      // S2 COMMENT-PIN (Kern P1-4, flair#1521): the receive-only carve-out means
+      // an incoming Message record is verified only at the RECORD level (batch
+      // signature, per-record originator signature, principalId == `from`) — the
+      // ENVELOPE's own signature + contentHash (relay-lib.ts verifyMessageSignature)
+      // NEVER runs on this merge path. Correct for S1 (nothing pushes Message).
+      // But the FIRST hub that pushes Message would merge unverified envelope
+      // content silently: S2 MUST add envelope verification here (or an explicit
+      // trust delegation to the originator's send-time check) alongside adding
+      // Message to the push list — do not inherit this as a silent gap.
+      Message: (databases as any).flair.Message,
     };
     const knownTables = new Set(Object.keys(tableMap));
 
@@ -574,6 +590,32 @@ export class FederationSync extends Resource {
         }
 
         const mergedData = mergeRecord(local, record);
+
+        // Absorbing-state guard for the Message table (flair#1521 §12 P0-3).
+        // Generic newer-wins LWW would let a deadline-sweep `failed` (or any
+        // other state) written on a peer overwrite a locally-CONSUMED message,
+        // telling the sender "failed" about a message the recipient actually
+        // consumed — the exact inversion Relay exists to kill. `consumed` is
+        // absorbing: reconcileState pins it regardless of updatedAt. The guard
+        // lives HERE, in the raw-put apply path, because sync-in bypasses the
+        // Message resource's methods (Federation.ts uses table.put directly).
+        if (record.table === "Message") {
+          const reconciled = reconcileState(local?.state, mergedData.state);
+          mergedData.state = reconciled;
+          // P1-3 (flair#1521): reconcile the SATELLITE lifecycle fields too, not
+          // just `state`. Generic LWW keeps the incoming (newer) record's
+          // failureReason/consumedAt, so a locally-CONSUMED row could end up
+          // `consumed` while carrying a remote `failureReason: "deadline"` — the
+          // sender-visible "failed" about a message the recipient actually
+          // consumed, the exact inversion the absorbing rule exists to kill. A
+          // consumed row NEVER has a failureReason; keep the consumed row's own
+          // consumedAt (local's when local was the consumer).
+          if (reconciled === "consumed") {
+            mergedData.failureReason = null;
+            mergedData.consumedAt = local?.consumedAt ?? mergedData.consumedAt ?? null;
+          }
+        }
+
         mergedData._originatorInstanceId = decision.originator;
         mergedData._syncedFrom = instanceId;
         mergedData._syncedAt = new Date().toISOString();

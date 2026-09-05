@@ -233,6 +233,16 @@ function signBody(body: Record<string, any>, secretKey: Uint8Array): string {
 // it against data.agentId for Memory (PRINCIPAL_OWNING_TABLES); it is
 // no longer informational-only. Credential.principalId is an unrelated
 // owner field — do not grep that path when changing this one.
+//
+// S2 COMMENT-PIN (Kern P2-5, flair#1521): Message is principal-owning by `from`
+// (PRINCIPAL_OWNER_FIELD in federation-classify.ts) but its rows carry NO
+// `provenance` stamp, so principalIdFromRow returns undefined for them → a v:2
+// Message push would omit `principalId` → the receiver's v≥2
+// checkPrincipalEntitlement skips EVERY Message as `principal_mismatch` (a
+// 100%-skip sync, not a migration). S1 does not push Message (receive-only —
+// the spoke push list below is a separate hardcoded set), so this is inert
+// today; the S2 pusher MUST stamp `principalId = row.from` for Message here
+// (a per-table owner-aware derivation, not `provenance.verified.agentId`).
 function principalIdFromRow(row: any): string | undefined {
   if (typeof row?.provenance !== "string" || row.provenance.length === 0) return undefined;
   try {
@@ -2879,6 +2889,21 @@ const FLAIR_AGENT_PERMISSION = {
       OrgEvent:        grant(true,  true,  true,  true),
       WorkspaceState:  grant(true,  true,  true,  true),
       Relationship:    grant(true,  true,  true,  true),
+      // Flair Relay S1 (flair#1521). Harper authorizes BEFORE the resource
+      // methods run, so a de-elevated flair_agent needs the table grant OR it
+      // 403s on POST /Message before relaySend is reached (Kern P0-2). read =
+      // the party-scoped collection (Message.search); insert = send via post().
+      // update = FALSE (least privilege, Kern P0 blocker): the ack's write goes
+      // through the IN-PROCESS static accessor (relayConsume → deps.messages.put),
+      // which bypasses role gates entirely — the same raw-put seam Federation.ts
+      // relies on — so update:true is NOT needed for any legitimate path. Leaving
+      // it granted let PATCH /Message/<id> reach Table's update verb, whose
+      // authorize step consults update:true and PASSES for any de-elevated agent,
+      // bypassing Message.put()'s FORBIDDEN guard AND relayConsume's recipient-only
+      // check (Message has no patch() at the platform level → TableResource.patch
+      // runs update()+save() directly). delete = false: direct deletes are
+      // admin/internal only. Message.patch() also guards the verb in-resource.
+      Message:         grant(true,  true,  false, false),
       Integration:     grant(true,  true,  true,  true),
       Credential:      grant(true,  true,  true,  true),
       Presence:        grant(true,  true,  true,  false),

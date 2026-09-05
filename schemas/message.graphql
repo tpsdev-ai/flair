@@ -1,0 +1,74 @@
+# Message table — Flair Relay S1 (point-to-point signed messaging).
+#
+# A message is a DIFFERENT primitive from memory and from OrgEvent: it is
+# addressed to a recipient PRINCIPAL, ordered per-sender, durably queued, and
+# explicitly acked, with a VISIBLE dead-letter the sender can see. OrgEvent's
+# `expiresAt` is a silent dead-letter; Message never drops silently.
+#
+# The FULL envelope lands in S1 (not just the fields S1 exercises) so that S2
+# (cross-host) is not a schema migration — `orgScope`, `seq` and `contentHash`
+# are covered by the signature and S2's cross-host correctness needs them.
+# See the Flair Relay S1 design (flair#1521) §4.2 and §12.
+type Message @table(database: "flair") @export {
+  id: ID @primaryKey
+
+  # Server-resolved from the auth/pairing context, never trusted from the body
+  # (single host: the instance IS the org). Inside the signed canonical body.
+  orgScope: String @indexed
+
+  # Owning principal = the SENDER. Stamped from the authenticated identity
+  # (no-forge), and the per-table federation owner field (federation-classify).
+  from: String @indexed
+  to: String @indexed
+
+  # Sender-minted, principal-prefixed, globally unique (↔ A2A contextId later).
+  threadId: String @indexed
+  # Per (from, threadId), monotonic, SIGNED. The recipient sorts by seq at read
+  # (createdAt collides at ms resolution). See §12 P1-5.
+  seq: Int
+
+  # "message" for S1 (the degenerate one-shot). "task"/"task-update" are S3.
+  kind: String
+  # Opaque to Flair.
+  body: String
+
+  # Reply linkage (design §4.2). Lands in S1 so S2/S3 are not a schema
+  # migration, though "understood" reply semantics are S3. Both are CONTENT —
+  # covered by contentHash AND the signature (relay-lib SIGNED_BODY_FIELDS) —
+  # never trusted unsigned. `inReplyTo` is the parent message id; the redundant
+  # `parentContentHash` binds the reply to the parent's exact content.
+  inReplyTo: String
+  parentContentHash: String
+
+  createdAt: String @indexed
+  # Sender-set fail-by. When it passes on an UNCONSUMED message the row goes to
+  # a VISIBLE `failed` state (reason "deadline") — the inverse of a silent drop.
+  deadline: String
+
+  # submitted -> delivered -> consumed | failed. `consumed` is ABSORBING —
+  # no later write (including a deadline sweep) regresses it (§12 P0-3).
+  state: String @indexed
+  deliveredAt: String
+  consumedAt: String @indexed
+  # Dead-letter reason on a `failed` row ("deadline" | "inbox_full" | ...),
+  # queryable by the sender.
+  failureReason: String
+
+  # Over the signed canonical CONTENT — retry-send dedup + a second integrity
+  # check under the signature (§12 P0-4).
+  contentHash: String
+
+  # Provenance (shared with flair#1520) — "which model sent this".
+  senderModel: String
+  senderProvider: String
+  senderRunId: String
+
+  # Ed25519 over the canonical SIGNED body — the single source of truth is
+  # resources/relay-lib.ts SIGNED_BODY_FIELDS; keep this list in sync with it.
+  # It COVERS: the content (from, to, threadId, seq, kind, body, orgScope,
+  # deadline, inReplyTo, parentContentHash, senderModel/Provider/RunId) PLUS
+  # id, createdAt and contentHash. It EXCLUDES the mutable server/lifecycle
+  # fields (state, deliveredAt, consumedAt, failureReason) and this `signature`
+  # field itself. (Not "every field above" — the lifecycle fields are NOT signed.)
+  signature: String
+}
