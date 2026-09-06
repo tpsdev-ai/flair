@@ -12,7 +12,7 @@ export interface SoulAdkLookup {
 }
 
 export function tagLooksAdk(tag: unknown): boolean {
-  return typeof tag === "string" && tag.startsWith(ADK_SCOPE_TAG_PREFIX);
+  return typeof tag === "string" && tag.toLowerCase().startsWith(ADK_SCOPE_TAG_PREFIX);
 }
 
 /** Request body carries an ADK scope tag (promotion leftover or forged). */

@@ -12,6 +12,8 @@ describe("ADK→Soul refusal", () => {
   test("a body with an adk scope tag or tag list is ADK-sourced", () => {
     expect(bodyCarriesAdkScope({ scopeTag: "adk:app:user" })).toBe(true);
     expect(bodyCarriesAdkScope({ tags: ["nightly-rem-promoted", "adk:app:user"] })).toBe(true);
+    expect(bodyCarriesAdkScope({ scopeTag: "ADK:app:user" })).toBe(true);
+    expect(bodyCarriesAdkScope({ tags: ["Adk:app:user"] })).toBe(true);
     expect(bodyCarriesAdkScope({ tags: ["nightly-rem-promoted"], value: "plain" })).toBe(false);
   });
 

@@ -48,7 +48,7 @@ export class Soul extends (databases as any).flair.Soul {
     const denied = await enforceWriteAuth(this, content);
     if (denied) return denied;
     // ADK-sourced claims are per-user; Soul is agentId-scoped. Refuse here
-    // so a scripted PUT/POST cannot bypass the CLI promote check.
+    // so a scripted PUT/POST/PATCH cannot bypass the CLI promote check.
     const adkDenied = await refuseAdkSourcedSoulWrite(content);
     if (adkDenied) return adkDenied;
     content.durability ||= "permanent";
@@ -67,9 +67,17 @@ export class Soul extends (databases as any).flair.Soul {
 
   // PATCH routes past put() (enforceWriteAuth covers post()/put() only), so
   // agentId immutability is enforced on both verbs via the one shared delegate.
+  // ADK refusal must see the merged row: a typical PATCH omits agentId/tags,
+  // which would skip the value-match backstop if we checked the body alone.
   async patch(content: any, query?: any) {
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
+    const existing = await Promise.resolve(super.get()).catch(() => null);
+    const stored = existing && typeof existing === "object" && !(existing instanceof Response)
+      ? existing
+      : {};
+    const adkDenied = await refuseAdkSourcedSoulWrite({ ...stored, ...content });
+    if (adkDenied) return adkDenied;
     return super.patch(content, query);
   }
 

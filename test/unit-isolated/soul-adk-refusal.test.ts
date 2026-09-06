@@ -20,8 +20,14 @@ class BaseSoul {
     soulStore.set(content.id, { ...content });
     return content;
   }
+  async patch(content: any) {
+    const id = (this as any).id;
+    const rec = { ...(soulStore.get(id) ?? {}), ...content };
+    soulStore.set(id, rec);
+    return rec;
+  }
   async get(target?: any) {
-    const id = typeof target === "string" ? target : target?.id;
+    const id = typeof target === "string" ? target : target?.id ?? (this as any).id;
     return soulStore.get(id) ?? null;
   }
 }
@@ -50,8 +56,9 @@ mock.module("harper", () => ({
 const { Soul } = await import("../../resources/Soul.ts");
 const { ADK_SOUL_REFUSAL } = await import("../../resources/soul-adk-guard.ts");
 
-function makeSoul() {
+function makeSoul(id?: string) {
   const r: any = new (Soul as any)();
+  if (id) r.id = id;
   r.getContext = () => ({ request: { tpsAgent: "shared-app", tpsAgentIsAdmin: false } });
   return r;
 }
@@ -84,6 +91,35 @@ describe("Soul.put refuses ADK-sourced claims", () => {
       key: "role",
       value: "Be the team's memory.",
     });
+    expect(res).not.toBeInstanceOf(Response);
+    expect(soulStore.get("shared-app-role").value).toBe("Be the team's memory.");
+  });
+});
+
+describe("Soul.patch refuses ADK-sourced claims", () => {
+  test("PATCH of an ADK candidate claim is 403 and writes nothing", async () => {
+    soulStore.set("shared-app-pref", {
+      id: "shared-app-pref",
+      agentId: "shared-app",
+      key: "pref",
+      value: "Be concise.",
+    });
+    candidateStore.push({ agentId: "shared-app", claim: "alice likes tea", scopeTag: "adk:app:alice" });
+    const res = await makeSoul("shared-app-pref").patch({ value: "alice likes tea" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(403);
+    expect(await (res as Response).json()).toEqual({ error: ADK_SOUL_REFUSAL });
+    expect(soulStore.get("shared-app-pref").value).toBe("Be concise.");
+  });
+
+  test("PATCH of an ordinary Soul value still lands", async () => {
+    soulStore.set("shared-app-role", {
+      id: "shared-app-role",
+      agentId: "shared-app",
+      key: "role",
+      value: "old",
+    });
+    const res: any = await makeSoul("shared-app-role").patch({ value: "Be the team's memory." });
     expect(res).not.toBeInstanceOf(Response);
     expect(soulStore.get("shared-app-role").value).toBe("Be the team's memory.");
   });
