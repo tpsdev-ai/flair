@@ -52,7 +52,7 @@ Selects which `models.generative.<logicalName>` entry a REM call uses. Unset →
 
 `flair rem nightly enable` installs a platform-native timer (launchd / systemd) **on the host it runs on**. In a multi-node or Fabric deploy, enabling it on every node would run the cycle N times and scatter N sets of pre-cycle snapshots. The v1 rule: **exactly one node gets the timer** — pick it deliberately, the same way you'd pick a cron owner for any single-writer job. This is a v1 constraint, not a permanent one; see #709 for the roadmap toward a coordinated multi-node story.
 
-Snapshot locality follows from this: a nightly cycle's pre-run snapshot (`~/.flair/snapshots/<agent>/`) lands on **the node that ran that cycle** — `flair rem restore <date>` and `flair rem snapshot list` only see local snapshots. If you move which node owns the timer, snapshot history doesn't move with it.
+Snapshot locality follows from this: a nightly cycle's pre-run snapshot (`~/.flair/snapshots/<agent>/`) lands on **the node that ran that cycle** — `flair rem restore <date>` and `flair rem snapshot list` only see local snapshots. If you move which node owns the timer, snapshot history doesn't move with it. Live replay (`flair rem restore <date> --apply`) rewrites Soul with operator credentials (`--admin-pass` / `--admin-pass-file`); an agent key is refused. Leftover MemoryCandidate rows for that agent are deleted first so their claim text cannot block Soul restore.
 
 ## Interactive vs nightly
 
@@ -73,7 +73,7 @@ A candidate distilled under a tag records that tag in its `scopeTag` field. `fla
 
 For ADK agents, the nightly cycle **auto-promotes** these `scopeTag`-bearing candidates to the user's own persistent memory immediately after distillation — the one place REM does not wait for a human `rem promote`. The safety argument is blast-radius, not identity: the claim is distilled from a user's own sessions into that same user's own tag scope, so no cross-agent or Soul trust boundary is crossed. The promotion is enforced entirely server-side (`POST /AutoPromoteCandidates`), never by a CLI flag a compromised agent key could flip, and holds four invariants:
 
-- **Memory only, never Soul.** The target is hard-locked to `memory`; there is no Soul code path (Soul is agentId-scoped and cannot carry a per-user tag, so an ADK-sourced Soul promotion would be cross-user by construction). `Soul.post` / `Soul.put` refuse the same class of write, so a scripted `PUT /Soul` with an ADK-sourced claim cannot bypass `flair rem promote`.
+- **Memory only, never Soul.** The target is hard-locked to `memory`; there is no Soul code path (Soul is agentId-scoped and cannot carry a per-user tag, so an ADK-sourced Soul promotion would be cross-user by construction). Soul mutations require operator credentials and refuse values matching any stored Memory or MemoryCandidate. This also prevents scripted promotion of learned claims, regardless of connector. See [Soul authorship](auth.md#soul-authorship).
 - **Fail-closed tag lineage.** A candidate is promoted only if it carries an authoritative `adk:<app>:<user>` scope tag, which the promoted memory then carries. The promoted memory is written `visibility:"private"` (owner-only) — not the org-open `shared` default a `persistent` write would otherwise get — so it is reachable only through the app agent's own tag-filtered search (which re-verifies the tag), invisible both to another user's tag filter and to every other agent on the instance. A candidate whose scope tag is absent or blank is left pending, never promoted tagless into the shared agentId namespace.
 - **Content-safety, strict.** The claim is scanned for prompt injection and refused on a flag regardless of `FLAIR_CONTENT_SAFETY` — an unattended write does not fall back to warn-and-tag.
 - **Non-impersonating reviewer.** The promoted memory and its candidate record `machine:adk-auto-promote`, never a value mistakable for a human or agent reviewer.
@@ -83,3 +83,5 @@ Anything ineligible (no scope tag, flagged content, already decided) is left pen
 ## Memory retention and deletion
 
 Durability is owner-controlled, including `permanent`: owners may create, change, archive and delete their own memories at every tier. Administrators may delete any owner’s memory. The permanent tier controls retention and bootstrap priority; it does not prevent an explicit owner deletion.
+
+Soul is operator-authored identity, not a promotion target for learned candidates. `flair rem promote --to soul` is refused for stored candidate text even with operator credentials; promote learned claims to Memory instead.

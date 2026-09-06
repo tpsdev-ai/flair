@@ -146,10 +146,9 @@ describe("Soul write gates — unaffected by the read-gate fix", () => {
     expect((res as Response).status).toBe(403);
   });
 
-  it("an owner can still write its own soul", async () => {
-    const s = makeSoul(agentCtx("agent-1"));
-    const res: any = await s.post({ agentId: "agent-1", identity: "my identity" });
-    expect(res.identity).toBe("my identity");
+  it("an agent runtime cannot write even its own soul", async () => {
+    const res = await makeSoul(agentCtx("agent-1")).post({ agentId: "agent-1", value: "my identity" });
+    expect(res.status).toBe(403);
   });
 });
 
@@ -160,21 +159,21 @@ describe("Soul write gates — unaffected by the read-gate fix", () => {
 describe("federation-edge-hardening slice 1 — Soul.post()/put() write-time originatorInstanceId stamp", () => {
   it("post() stamps the local instance id on a fresh local write", async () => {
     instanceRow = { id: "flair_local_test" };
-    const s = makeSoul(agentCtx("agent-1"));
+    const s = makeSoul({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
     const res: any = await s.post({ agentId: "agent-1", key: "identity", value: "my soul" });
     expect(res.originatorInstanceId).toBe("flair_local_test");
   });
 
   it("stamps null when this instance has no Instance row yet — never invents one", async () => {
     instanceRow = null;
-    const s = makeSoul(agentCtx("agent-1"));
+    const s = makeSoul({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
     const res: any = await s.post({ agentId: "agent-1", key: "identity", value: "my soul" });
     expect(res.originatorInstanceId).toBeNull();
   });
 
   it("THE KEY TEST — a soul record already carrying another instance's originatorInstanceId is NEVER clobbered with the local id", async () => {
     instanceRow = { id: "flair_local_test" };
-    const s = makeSoul(agentCtx("agent-1"));
+    const s = makeSoul({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
     const res: any = await s.post({
       agentId: "agent-1",
       key: "identity",
@@ -187,11 +186,11 @@ describe("federation-edge-hardening slice 1 — Soul.post()/put() write-time ori
 
   it("put() also stamps the local instance id, and also never clobbers an already-set origin", async () => {
     instanceRow = { id: "flair_local_test" };
-    const s1 = makeSoul(agentCtx("agent-1"));
+    const s1 = makeSoul({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
     const fresh: any = await s1.put({ id: "soul-1", agentId: "agent-1", key: "identity", value: "fresh put" });
     expect(fresh.originatorInstanceId).toBe("flair_local_test");
 
-    const s2 = makeSoul(agentCtx("agent-1"));
+    const s2 = makeSoul({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
     const synced: any = await s2.put({ id: "soul-2", agentId: "agent-1", key: "identity", value: "synced put", originatorInstanceId: "instance-B" });
     expect(synced.originatorInstanceId).toBe("instance-B");
   });

@@ -1347,7 +1347,7 @@ export const TOOLS: Record<string, ToolEntry> = {
   soul_set: {
     def: {
       name: "soul_set",
-      description: "Set a personality or project context entry. Included in every bootstrap.",
+      description: "Soul changes require operator credentials through the REST API or CLI; runtime tool calls are refused.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1359,8 +1359,9 @@ export const TOOLS: Record<string, ToolEntry> = {
     },
     impl: soulSet,
     contract: {
-      summary: "Writes a soul entry keyed `${agentId}:${key}`, attributed to the caller. Correctness is proven by the soul_get round-trip — this is the write flair#1181 broke on the connector path.",
+      summary: "Refuses runtime Soul writes, including admin-agent delegation, with { error, status:403 }. Operators use the authenticated REST or CLI path.",
       invariants: { fullyResolved: true },
+      errorShape: { trigger: "a runtime attempts to write Soul", fields: ["error", "status"] },
     },
   },
   soul_get: {

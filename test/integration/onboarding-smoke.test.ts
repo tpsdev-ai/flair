@@ -117,6 +117,7 @@ describe("first-run onboarding (real CLI, isolated temp Harper + home)", () => {
       "--agent", AGENT_ID,
       "--key", "role",
       "--value", "onboarding smoke",
+      "--admin-pass", ADMIN_PASS,
     ], { FLAIR_AGENT_ID: AGENT_ID });
     if (r.code !== 0) console.error(`soul set failed:\n${r.stdout}\n${r.stderr}`);
     expect(r.code).toBe(0);

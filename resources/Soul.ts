@@ -1,27 +1,21 @@
 import { databases } from "harper";
-import { resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { localInstanceId } from "./instance-identity.js";
-import { makeAuthGate, stampAttribution, UNAUTH } from "./record-type-kit.js";
+import { makeAuthGate, stampAttribution } from "./record-type-kit.js";
 import { RECORD_TYPES } from "./record-types.js";
-import { refuseAdkSourcedSoulWrite } from "./soul-adk-guard.js";
+import { authorizeSoulWrite, refuseLearnedSoulWrite, soulProvenance } from "./soul-write-policy.js";
 
-/**
- * Deny anonymous; enforce per-agent write ownership for non-admin agents.
- * The previous header-based check only fired when an agent WAS present (it read
- * x-tps-agent), so an anonymous request — which carries no x-tps-agent — slipped
- * through. With the non-rejecting gate, each write path self-enforces (resolveAgentAuth
- * distinguishes internal/agent/anonymous). Mirrors the WorkspaceState pattern.
- *
- * No-forge attribution — mode/field drawn from RECORD_TYPES.Soul (record-
- * types slice 2, flair#520) rather than hand-typed literals. "validate-
- * truthy" (see record-type-kit.ts's stampAttribution doc) — rejects a
- * PRESENT, mismatched agentId; passes through untouched when absent. Same
- * idiom as Memory.post()/put().
- */
+// Source authorization is independent of principal ownership: an admin runtime
+// may manage records elsewhere, but it cannot author identity-defining Soul.
 async function enforceWriteAuth(self: any, data: any): Promise<Response | null> {
-  const auth: AgentAuthVerdict = await resolveAgentAuth((self as any).getContext?.());
-  if (auth.kind === "anonymous") return UNAUTH();
+  const { auth, source, denied } = await authorizeSoulWrite(self.getContext?.());
+  if (denied) return denied;
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return new Response(JSON.stringify({ error: "soul_write_requires_one_record" }), {
+      status: 400, headers: { "Content-Type": "application/json" },
+    });
+  }
+  data.provenance = soulProvenance(auth, source!, new Date().toISOString());
   const attr = stampAttribution(auth, data, RECORD_TYPES.Soul.ownerField, RECORD_TYPES.Soul.attribution.post, "forbidden: agentId must match authenticated agent");
   return attr.denied ?? null;
 }
@@ -47,10 +41,9 @@ export class Soul extends (databases as any).flair.Soul {
   async post(content: any, context?: any) {
     const denied = await enforceWriteAuth(this, content);
     if (denied) return denied;
-    // ADK-sourced claims are per-user; Soul is agentId-scoped. Refuse here
-    // so a scripted PUT/POST/PATCH cannot bypass the CLI promote check.
-    const adkDenied = await refuseAdkSourcedSoulWrite(content);
-    if (adkDenied) return adkDenied;
+    // Learned artifacts cannot gain identity authority through an operator write.
+    const learnedDenied = await refuseLearnedSoulWrite(content);
+    if (learnedDenied) return learnedDenied;
     content.durability ||= "permanent";
     content.createdAt = new Date().toISOString();
     content.updatedAt = content.createdAt;
@@ -65,11 +58,11 @@ export class Soul extends (databases as any).flair.Soul {
     return super.post(content, context);
   }
 
-  // PATCH routes past put() (enforceWriteAuth covers post()/put() only), so
-  // agentId immutability is enforced on both verbs via the one shared delegate.
-  // ADK refusal must see the merged row: a typical PATCH omits agentId/tags,
-  // which would skip the value-match backstop if we checked the body alone.
+  // PATCH must validate the merged value and retained legacy tags, rather
+  // than treating an omitted field as proof that no learned content exists.
   async patch(content: any, query?: any) {
+    const denied = await enforceWriteAuth(this, content);
+    if (denied) return denied;
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
     // Fail-closed, same as Memory's stored-state read: a throw aborts the
@@ -82,16 +75,16 @@ export class Soul extends (databases as any).flair.Soul {
         headers: { "Content-Type": "application/json" },
       });
     }
-    const adkDenied = await refuseAdkSourcedSoulWrite({ ...existing, ...content });
-    if (adkDenied) return adkDenied;
+    const learnedDenied = await refuseLearnedSoulWrite({ ...existing, ...content });
+    if (learnedDenied) return learnedDenied;
     return super.patch(content, query);
   }
 
   async put(content: any, context?: any) {
     const denied = await enforceWriteAuth(this, content);
     if (denied) return denied;
-    const adkDenied = await refuseAdkSourcedSoulWrite(content);
-    if (adkDenied) return adkDenied;
+    const learnedDenied = await refuseLearnedSoulWrite(content);
+    if (learnedDenied) return learnedDenied;
     const ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (ownerDenial) return ownerDenial;
     content.updatedAt = new Date().toISOString();
@@ -102,4 +95,11 @@ export class Soul extends (databases as any).flair.Soul {
     }
     return super.put(content, context);
   }
+
+  async delete(id: any) {
+    const { denied } = await authorizeSoulWrite((this as any).getContext?.());
+    if (denied) return denied;
+    return super.delete(id);
+  }
+
 }

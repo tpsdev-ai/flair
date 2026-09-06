@@ -60,6 +60,7 @@ function recordingApi(handlers: Record<string, (path: string, body?: unknown) =>
     // Default fall-throughs for the read endpoints when not stubbed
     if (method === "GET" && path.startsWith("/Memory?")) return [];
     if (method === "GET" && path.startsWith("/Soul?")) return [];
+    if (method === "POST" && path === "/MemoryCandidate/search_by_conditions") return [];
     if (method === "DELETE" || method === "PUT") return { ok: true };
     throw new Error(`unexpected api: ${method}:${path}`);
   };
@@ -76,26 +77,32 @@ function recordingApi(handlers: Record<string, (path: string, body?: unknown) =>
  * and read that state. `corruptOnPut` lets tests simulate Harper silently
  * dropping rows (returns ok but skips the state write).
  */
-function statefulApi(seed: { memories?: any[]; souls?: any[] } = {}, corruptOnPut?: (path: string) => boolean): {
+function statefulApi(seed: { memories?: any[]; souls?: any[]; candidates?: any[] } = {}, corruptOnPut?: (path: string) => boolean): {
   api: ApiCall;
   calls: Array<{ method: string; path: string; body?: unknown }>;
-  state: { memories: Map<string, any>; souls: Map<string, any> };
+  state: { memories: Map<string, any>; souls: Map<string, any>; candidates: Map<string, any> };
 } {
   const calls: Array<{ method: string; path: string; body?: unknown }> = [];
   const state = {
     memories: new Map<string, any>((seed.memories ?? []).map((m) => [String(m.id), m])),
     souls: new Map<string, any>((seed.souls ?? []).map((s) => [String(s.id), s])),
+    candidates: new Map<string, any>((seed.candidates ?? []).map((c) => [String(c.id), c])),
   };
   const api: ApiCall = async (method, path, body) => {
     calls.push({ method, path, body });
     if (method === "GET" && path.startsWith("/Memory?")) return Array.from(state.memories.values());
     if (method === "GET" && path.startsWith("/Soul?")) return Array.from(state.souls.values());
+    if (method === "POST" && path === "/MemoryCandidate/search_by_conditions") return Array.from(state.candidates.values());
     if (method === "DELETE" && path.startsWith("/Memory/")) {
       state.memories.delete(decodeURIComponent(path.split("/")[2]));
       return { ok: true };
     }
     if (method === "DELETE" && path.startsWith("/Soul/")) {
       state.souls.delete(decodeURIComponent(path.split("/")[2]));
+      return { ok: true };
+    }
+    if (method === "DELETE" && path.startsWith("/MemoryCandidate/")) {
+      state.candidates.delete(decodeURIComponent(path.split("/")[2]));
       return { ok: true };
     }
     if (method === "PUT" && path.startsWith("/Memory/")) {
@@ -122,6 +129,10 @@ describe("applySnapshot — dry-run", () => {
     const { api, calls } = recordingApi({
       "GET:/Memory": () => current,
       "GET:/Soul": () => [{ id: "current-soul", agentId: "test-agent" }],
+      "POST:/MemoryCandidate": () => [
+        { id: "cand-1", agentId: "test-agent", claim: "leftover claim" },
+        { id: "cand-2", agentId: "test-agent", claim: "another claim" },
+      ],
     });
     const r = await applySnapshot({
       agentId: "test-agent",
@@ -135,12 +146,13 @@ describe("applySnapshot — dry-run", () => {
     expect(r.status).toBe("dry-run");
     expect(r.deleted.memories).toBe(2);
     expect(r.deleted.souls).toBe(1);
+    expect(r.deleted.candidates).toBe(2);
     expect(r.restored.memories).toBe(2);
     expect(r.restored.souls).toBe(1);
     expect(r.preRestoreSnapshotPath).toBeUndefined();
     expect(r.errors).toEqual([]);
 
-    // Only GETs happened.
+    expect(calls.some((c) => c.method === "POST" && c.path === "/MemoryCandidate/search_by_conditions")).toBe(true);
     const writes = calls.filter((c) => c.method === "DELETE" || c.method === "PUT");
     expect(writes).toEqual([]);
   });
@@ -234,6 +246,7 @@ describe("applySnapshot — real restore", () => {
     expect(r.errors).toEqual([]);
     expect(r.deleted.memories).toBe(2);
     expect(r.deleted.souls).toBe(1);
+    expect(r.deleted.candidates).toBe(0);
     expect(r.restored.memories).toBe(2);
     expect(r.restored.souls).toBe(1);
     expect(r.preRestoreSnapshotPath).toBeDefined();
@@ -246,11 +259,76 @@ describe("applySnapshot — real restore", () => {
     expect(r.verified!.extraMemoryIds).toEqual([]);
     expect(r.verified!.extraSoulIds).toEqual([]);
 
-    // Call ordering: pre-restore GETs, DELETEs (2 mem + 1 soul), PUTs (2 mem + 1 soul), post-restore verify GETs.
+    // Call ordering: pre-restore GETs, DELETEs (2 mem + 1 soul), PUTs (1 soul then 2 mem), post-restore verify GETs.
     const writes = calls.filter((c) => c.method === "DELETE" || c.method === "PUT");
     expect(writes.length).toBe(6);
     expect(writes.slice(0, 3).every((c) => c.method === "DELETE")).toBe(true);
     expect(writes.slice(3).every((c) => c.method === "PUT")).toBe(true);
+    const puts = writes.filter((c) => c.method === "PUT");
+    expect(puts[0].path.startsWith("/Soul/")).toBe(true);
+    expect(puts.slice(1).every((c) => c.path.startsWith("/Memory/"))).toBe(true);
+  });
+
+  it("routes Soul DELETE/PUT through soulApiCall, not the agent-signed apiCall", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const { api } = statefulApi({
+      memories: [{ id: "old-1", agentId: "test-agent" }],
+      souls: [{ id: "current-soul", agentId: "test-agent" }],
+    });
+    const soulCalls: Array<{ method: string; path: string }> = [];
+    const agentWrites: Array<{ method: string; path: string }> = [];
+    const soulApi: ApiCall = async (method, path, body) => {
+      soulCalls.push({ method, path });
+      return api(method, path, body);
+    };
+    const agentApi: ApiCall = async (method, path, body) => {
+      if (method === "DELETE" || method === "PUT") agentWrites.push({ method, path });
+      return api(method, path, body);
+    };
+
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: agentApi,
+      soulApiCall: soulApi,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+
+    expect(r.status).toBe("completed");
+    expect(soulCalls.some((c) => c.method === "DELETE" && c.path.startsWith("/Soul/"))).toBe(true);
+    expect(soulCalls.some((c) => c.method === "PUT" && c.path.startsWith("/Soul/"))).toBe(true);
+    expect(soulCalls.every((c) => c.path.startsWith("/Soul/"))).toBe(true);
+    expect(agentWrites.every((c) => !c.path.startsWith("/Soul/"))).toBe(true);
+  });
+
+  it("deletes leftover MemoryCandidates before Soul PUT so claim text cannot 403 restore", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const leftover = { id: "cand-leftover", agentId: "test-agent", claim: "be helpful", status: "pending" };
+    const { api, calls, state } = statefulApi({
+      memories: [],
+      souls: [],
+      candidates: [leftover],
+    });
+
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+
+    expect(r.status).toBe("completed");
+    expect(r.deleted.candidates).toBe(1);
+    expect(state.candidates.size).toBe(0);
+    const writes = calls.filter((c) => c.method === "DELETE" || c.method === "PUT");
+    const candDeleteAt = writes.findIndex((c) => c.method === "DELETE" && c.path === "/MemoryCandidate/cand-leftover");
+    const soulPutAt = writes.findIndex((c) => c.method === "PUT" && c.path.startsWith("/Soul/"));
+    expect(candDeleteAt).toBeGreaterThanOrEqual(0);
+    expect(soulPutAt).toBeGreaterThan(candDeleteAt);
   });
 
   it("preRestoreSnapshotPath contains current state for rollback", async () => {

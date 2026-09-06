@@ -107,12 +107,10 @@
  * The stamped attribute name is always `ownerField` above — no type uses a
  * different field for attribution vs. ownership scoping.
  *
- * `provenance` — true only for Memory and Relationship (the two tables that
+ * `provenance` — true for Memory, Relationship and Soul (the tables that
  * call `buildProvenance()` today and carry a nullable `provenance: String`
- * schema field). WorkspaceState/OrgEvent/Soul are `false`: not an oversight
- * — nobody wired it, and none of the three declare the schema field, so
- * flipping this to `true` without a schema migration would be a lie the
- * registry tells about what actually gets stamped.
+ * schema field). Soul additionally stamps its authenticated source class.
+ * WorkspaceState and OrgEvent do not declare or stamp provenance.
  *
  * `embedding` — set only for Memory (`content` is the embedded field; the
  * type has its own exposed semantic-search tool today — `memory_search` /
@@ -422,7 +420,7 @@ export const RECORD_TYPES = {
     // intentionally readable by any verified agent. See header doc.
     readScope: "none",
     attribution: { post: "validate-truthy", put: "validate-truthy" },
-    provenance: false,
+    provenance: true,
     remEligible: false,
     federation: "included",
     mcp: { toolPrefix: "soul", readVerbs: ["get"], writeVerbs: ["store"] },
