@@ -18,7 +18,7 @@ describe("ADK→Soul refusal", () => {
   test("stored rows are ADK-sourced only with an adk: tag", () => {
     expect(rowLooksAdkSourced({ scopeTag: "adk:continuity:s1" })).toBe(true);
     expect(rowLooksAdkSourced({ tags: ["adk:app:user"] })).toBe(true);
-    expect(rowLooksAdkSourced({ tags: ["nightly-rem-promoted"], claim: "x" })).toBe(false);
+    expect(rowLooksAdkSourced({ tags: ["nightly-rem-promoted"] })).toBe(false);
   });
 
   test("scripted PUT /Soul with an ADK candidate claim is 403", async () => {
