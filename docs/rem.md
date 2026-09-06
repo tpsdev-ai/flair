@@ -79,3 +79,7 @@ For ADK agents, the nightly cycle **auto-promotes** these `scopeTag`-bearing can
 - **Non-impersonating reviewer.** The promoted memory and its candidate record `machine:adk-auto-promote`, never a value mistakable for a human or agent reviewer.
 
 Anything ineligible (no scope tag, flagged content, already decided) is left pending for the human `rem promote` path. The step is bounded per cycle and non-fatal; `flair rem nightly run-once` reports the count auto-promoted. **Non-ADK candidates never auto-promote** — the human review gate below is unchanged for them.
+
+## Memory retention and deletion
+
+Durability is owner-controlled, including `permanent`: owners may create, change, archive and delete their own memories at every tier. Administrators may delete any owner’s memory. The permanent tier controls retention and bootstrap priority; it does not prevent an explicit owner deletion.

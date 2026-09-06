@@ -1334,7 +1334,7 @@ describe("within-org-read-open — resolveReadScope() condition shape + injectio
   });
 });
 
-describe("Memory.delete() — durability/ownership check uses the raw record (super.get), not the new scoped get()", () => {
+describe("Memory.delete() — ownership check uses the raw record (super.get), not the new scoped get()", () => {
   it("owner can still delete its own non-permanent memory", async () => {
     memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", durability: "standard" });
     const m = makeMemory(agentCtx("agent-owner"));
@@ -1342,7 +1342,7 @@ describe("Memory.delete() — durability/ownership check uses the raw record (su
     expect(await BaseMemory.get("mem-1")).toBeNull();
   });
 
-  it("a non-admin cannot delete ANOTHER agent's PERMANENT memory (durability check still fires — not bypassed by the new get() override)", async () => {
+  it("a non-admin cannot delete another agent's permanent memory through the read-scoped get override", async () => {
     memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", durability: "permanent" });
     const m = makeMemory(agentCtx("agent-attacker"));
     const res = await (m as any).delete("mem-1");
@@ -1351,17 +1351,12 @@ describe("Memory.delete() — durability/ownership check uses the raw record (su
     expect(await BaseMemory.get("mem-1")).not.toBeNull(); // untouched
   });
 
-  it("the owner of a PERMANENT memory still cannot delete it (admin-only purge)", async () => {
-    memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", durability: "permanent" });
-    const owner = makeMemory(agentCtx("agent-owner"));
-    const denied = await (owner as any).delete("mem-1");
-    expect(denied instanceof Response).toBe(true);
-    expect((denied as Response).status).toBe(403);
-    expect(await (denied as Response).json()).toEqual({ error: "permanent_memory_cannot_be_deleted_by_non_admin" });
-    expect(await BaseMemory.get("mem-1")).not.toBeNull();
-    const admin = makeMemory(agentCtx("agent-admin", true));
-    await (admin as any).delete("mem-1");
-    expect(await BaseMemory.get("mem-1")).toBeNull();
+  it("owners and admins can explicitly delete permanent memories", async () => {
+    for (const actor of [agentCtx("agent-owner"), agentCtx("agent-admin", true)]) {
+      memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", durability: "permanent" });
+      await (makeMemory(actor) as any).delete("mem-1");
+      expect(await BaseMemory.get("mem-1")).toBeNull();
+    }
   });
 });
 
