@@ -362,6 +362,26 @@ export interface RecordTypePolicy {
 // unions, not the wide ones) with no runtime cast or non-null assertion.
 
 export const RECORD_TYPES = {
+  // Asset — binary blobs (images/screenshots) owned by an agent, linked to a
+  // Memory. images-in-Flair slice 1 (storage): owner-only read scope (standard
+  // review bar — an agent's assets are private to it, like Relationship/
+  // WorkspaceState), no embedding (binary, no recall surface), no `mcp`
+  // (absent = no MCP exposure; serving assets over /mcp is a later reviewed
+  // slice). `federation: "excluded"` is MANDATORY for any new type per this
+  // file's header (Sherlock DESIGN REVIEW Q6): Federation.ts's push table
+  // list is unchanged, so Asset blobs never leave the instance — a Memory that
+  // does federate carries only the assetId reference, not the bytes.
+  Asset: {
+    table: "Asset",
+    ownerField: "agentId",
+    identity: "gated",
+    readScope: "owner-only",
+    attribution: { post: "stamp-default", put: "validate-strict" },
+    provenance: false,
+    remEligible: false,
+    federation: "excluded",
+  },
+
   Memory: {
     table: "Memory",
     ownerField: "agentId",

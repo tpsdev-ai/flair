@@ -69,9 +69,9 @@ const VALID_MCP_WRITE_VERBS = ["store", "delete", "update"];
 describe("RECORD_TYPES — shape and exhaustiveness", () => {
   const entries = Object.entries(RECORD_TYPES) as Array<[string, RecordTypePolicy]>;
 
-  it("registers exactly the five core tables plus MemoryCandidate (flair#849 — no more, no fewer)", () => {
+  it("registers exactly the five core tables plus MemoryCandidate and Asset (no more, no fewer)", () => {
     expect(Object.keys(RECORD_TYPES).sort()).toEqual(
-      ["Memory", "MemoryCandidate", "OrgEvent", "Relationship", "Soul", "WorkspaceState"].sort(),
+      ["Asset", "Memory", "MemoryCandidate", "OrgEvent", "Relationship", "Soul", "WorkspaceState"].sort(),
     );
   });
 
