@@ -14,7 +14,9 @@
  * Response:
  *   { agent, soulEntries, memories }
  *
- * Auth: admin only.
+ * Auth: operator (verified Harper administrator Basic) or deliberate
+ * `internalContext()`. Admin-agent Ed25519 keys are refused — role is not
+ * source. Intended: provisioning a principal and its Soul is a trust-root act.
  */
 
 import { Resource, databases } from "harper";

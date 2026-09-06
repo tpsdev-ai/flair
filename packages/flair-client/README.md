@@ -55,16 +55,19 @@ await flair.memory.delete('my-agent-1234567890')
 
 ## Soul API
 
+Soul writes require operator credentials. `flair.soul.set(...)` signs with
+Ed25519 and now returns 403, including for admin-agent keys. Read is unchanged.
+
 ```ts
-// Set personality/values
-await flair.soul.set('role', 'Security reviewer, meticulous and skeptical')
-await flair.soul.set('tone', 'Direct, technical, no fluff')
-
-// Read
 const role = await flair.soul.get('role')
-
-// List all
 const entries = await flair.soul.list()
+```
+
+Write Soul with the CLI (`--admin-pass` / `--admin-pass-file`) or operator REST
+(Harper administrator Basic):
+
+```bash
+flair soul set --agent my-agent --key role --value "Security reviewer" --admin-pass-file ~/.flair/admin-pass
 ```
 
 ## Auth

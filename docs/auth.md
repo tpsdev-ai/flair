@@ -320,7 +320,15 @@ flair soul set --agent mybot --key role --value "Security reviewer" --admin-pass
 `--admin-user` selects a non-default Harper administrator. The server overwrites
 Soul's `provenance` with the authenticated author, timestamp, and verified
 `sourceClass` (`operator` or `internal`); body fields cannot choose that class.
-Operator-authenticated provisioning through `AgentSeed` uses the same rules.
+
+`AgentSeed` uses the same operator/internal gate on purpose: minting a principal
+and its identity is a trust-root act, so an admin-agent key cannot provision.
+This is an intended provisioning change, not only a Soul-write restriction.
+`flair agent add` and the setup wizard already seed through administrator Basic
+credentials (ops API); they do not call `AgentSeed` with an Ed25519 agent key.
+Deliberate `internalContext()` provisioning still passes. Do not widen the gate
+to admin-agent keys.
+
 Federation remains an authenticated instance-to-instance replication path and
 preserves the originating record; it does not reclassify a runtime request as
 an operator edit. Raw Harper OPS access remains administrator infrastructure.

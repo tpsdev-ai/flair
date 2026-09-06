@@ -62,6 +62,11 @@ async function rawAgent(harper: HarperInstance, id: string): Promise<any> {
   return Array.isArray(rows) ? rows[0] : null;
 }
 
+/** Operator REST: verified Harper administrator Basic, not an Ed25519 agent key. */
+function operatorAuth(instance: HarperInstance): string {
+  return "Basic " + btoa(`${instance.admin.username}:${instance.admin.password}`);
+}
+
 /** ADMIN-ONLY probe: FederationInstance.allowRead() is allowAdmin(). */
 const ADMIN_ONLY_PATH = "/FederationInstance";
 
@@ -122,7 +127,8 @@ describe("flair#941 — one meaning, one answer, on every surface", () => {
     // it writes the raw table, so the Agent resource's reconciliation does not
     // cover it. Seeding an admin here used to produce exactly the record this
     // issue is about: an administrator that every reporter displays as an
-    // ordinary agent.
+    // ordinary agent. Seed with operator Basic — an admin-agent Ed25519 key
+    // is correctly 403 now; this case cares about the STORED role/admin pair.
     test("seeding an admin principal writes BOTH fields — the record cannot lie to either reader", async () => {
       const id = `aft-seed-admin-${randomUUID().slice(0, 8)}`;
       const path = "/AgentSeed";
@@ -130,11 +136,11 @@ describe("flair#941 — one meaning, one answer, on every surface", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: ed25519Header(roleAdmin, "POST", path),
+          Authorization: operatorAuth(harper),
         },
         body: JSON.stringify({ agentId: id, role: "admin" }),
       });
-      expect(res.status, `admin POST /AgentSeed returned ${res.status}: ${await res.text()}`).toBeLessThan(300);
+      expect(res.status, `operator POST /AgentSeed returned ${res.status}: ${await res.text()}`).toBeLessThan(300);
 
       const rec = await rawAgent(harper, id);
       expect(rec, `no Agent record written for ${id}`).toBeTruthy();
@@ -150,11 +156,11 @@ describe("flair#941 — one meaning, one answer, on every surface", () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: ed25519Header(roleAdmin, "POST", path),
+          Authorization: operatorAuth(harper),
         },
         body: JSON.stringify({ agentId: id, role: "researcher" }),
       });
-      expect(res.status, `admin POST /AgentSeed returned ${res.status}`).toBeLessThan(300);
+      expect(res.status, `operator POST /AgentSeed returned ${res.status}`).toBeLessThan(300);
 
       const rec = await rawAgent(harper, id);
       expect(rec.admin).toBe(false);
