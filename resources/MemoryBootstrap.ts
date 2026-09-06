@@ -86,7 +86,7 @@ import { estimateTokens } from "./token-estimate.js";
  *     memoriesTruncated, teammateFindingsIncluded, teammateFindingsTruncated,
  *     teammateFindingsMatched, agentId, scope, soul, memories, predicted,
  *     teammateFindings, events, soulTokens, memoryTokens, trustTokens,
- *     eventsTokens, scaffoldTokens[, currentTaskHint][, predictedHint] }
+ *     eventsTokens, scaffoldTokens[, currentTaskHint][, taskRetrievalHint][, predictedHint] }
  *
  *   TOKEN LEDGER (flair#1270): the counters decompose `tokenEstimate` from the
  *   payload alone —
@@ -303,7 +303,7 @@ export class BootstrapMemories extends Resource {
   async post(data: any, _context?: any) {
     const {
       agentId: bodyAgentId,
-      currentTask,
+      currentTask: rawCurrentTask,
       maxTokens = 4000,
       includeSoul = true,
       since,
@@ -333,6 +333,8 @@ export class BootstrapMemories extends Resource {
       // bodies), so nothing crosses the wire twice on that path.
       includeContext = true,
     } = data || {};
+
+    const currentTask = typeof rawCurrentTask === "string" ? rawCurrentTask.trim() : "";
 
     // Authenticated identity lives on getContext().request — `this.request` is
     // NOT populated on Harper v5 Resources. Reading it returned undefined and
@@ -724,7 +726,15 @@ export class BootstrapMemories extends Resource {
     // null when there's no currentTask / no embedding ⇒ never abstains.
     let taskBestSimilarity: number | null = null;
 
-    // --- 2. Permanent memories (always included, highest priority) ---
+    // Protect task recall from pinned/recent admission. Soul keeps its existing
+    // priority; unused task space is returned to permanent memories below.
+    const taskReserve = currentTask
+      ? Math.max(0, Math.min(tokenBudget, Math.floor(maxTokens * 0.3)))
+      : 0;
+    tokenBudget -= taskReserve;
+    let taskRetrievalHint: string | undefined;
+
+    // --- 2. Permanent memories ---
     // Own-scoped pushdown: `agentId==self` + `durability==permanent`, both
     // @indexed (a seek, not a scan) — strictly narrower than the prior
     // load-then-filter (own records are always visible to their own agent
@@ -765,7 +775,7 @@ export class BootstrapMemories extends Resource {
     const permanentSupersededIds = new Set<string>();
     for (const m of permanentRows) if (m.supersedes) permanentSupersededIds.add(m.supersedes);
     const permanent = permanentRows.filter((m) => !permanentSupersededIds.has(m.id));
-    for (const m of permanent) {
+    const admitPermanent = (m: any) => {
       const line = formatMemory(m, agentId);
       const struct = leanMemory(m, "permanent");
       // #1199 (0.44.11) — charge what SHIPS (structured on the /mcp path, prose
@@ -786,7 +796,8 @@ export class BootstrapMemories extends Resource {
       } else {
         truncatedOwnIds.add(m.id); // #1207 — budget-skip, deduped against inclusions at the end
       }
-    }
+    };
+    for (const m of permanent) admitPermanent(m);
 
     // --- 3. Recent memories (adaptive window) ---
     // Own-scoped, non-permanent, bounded + createdAt-desc pushdown (agentId
@@ -957,7 +968,9 @@ export class BootstrapMemories extends Resource {
     const semanticTeammateMatches: SemanticMatchInput[] = [];
 
     // --- 4. Task-relevant memories (semantic search) ---
-    if (currentTask && tokenBudget > 200) {
+    tokenBudget += taskReserve;
+    if (currentTask && tokenBudget <= 0) taskRetrievalHint = "Task retrieval skipped: no content budget remains.";
+    if (currentTask && tokenBudget > 0) {
       let queryEmbedding: number[] | null = null;
       try {
         // flair#504 Phase 2: 'query' — currentTask is the bootstrap's
@@ -965,6 +978,7 @@ export class BootstrapMemories extends Resource {
         queryEmbedding = await getEmbedding(currentTask, "query");
       } catch {}
 
+      if (!queryEmbedding) taskRetrievalHint = "Task retrieval skipped: query embedding unavailable.";
       if (queryEmbedding) {
         // flair#1207 — exclude own memories ALREADY placed via the authoritative
         // set (permanent + recent + predicted actually admitted). The old set was
@@ -1071,6 +1085,7 @@ export class BootstrapMemories extends Resource {
         // (+ legacy keyword bump) per #985/#1267 — for display/reporting;
         // ORDER and score can legitimately disagree (a BM25 rank-1 rescue
         // outranks higher-cosine bland hits, which is the recall win).
+        if (candidates.length === 0) taskRetrievalHint = "Task retrieval found no visible active candidates.";
         const scored = candidates
           .filter((m: any) => !includedIds.has(m.id))
           .map((m: any) => ({ memory: m, score: m._score }));
@@ -1162,6 +1177,15 @@ export class BootstrapMemories extends Resource {
             includedOwnIds.add(m.id); // #1207 — count by unique own-memory id
           }
         }
+      }
+    }
+
+    if (currentTask) {
+      if (!taskRetrievalHint && sections.relevant.length + sections.teammate.length === 0) {
+        taskRetrievalHint = "Task candidates were already included or did not fit the remaining content budget.";
+      }
+      for (const m of permanent) {
+        if (!includedOwnIds.has(m.id)) admitPermanent(m);
       }
     }
 
@@ -1653,6 +1677,7 @@ export class BootstrapMemories extends Resource {
       // own soul/memories/predicted as structured containers (empty `{}`/`[]`,
       // never absent, so "empty" is distinguishable from "unsupported").
       agentId,
+      ...(taskRetrievalHint ? { taskRetrievalHint } : {}),
       scope: scopeInfo,
       soul: soulMap,
       memories: includedOwnMemories,

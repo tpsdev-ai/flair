@@ -45,11 +45,12 @@ const FAKE_EMBEDDING = [1, ...Array(127).fill(0)];
 // receives, so a dedicated test can pin that MemoryBootstrap.ts's
 // task-relevance query embed passes 'query' (currentTask is a search query
 // against stored memories, never stored content itself).
+let taskEmbedding: ((text: string) => number[]) | undefined;
 let embedInputTypeCalls: (string | undefined)[] = [];
 mock.module("../../resources/embeddings-provider.ts", () => ({
   getEmbedding: async (_text: string, inputType?: string) => {
     embedInputTypeCalls.push(inputType);
-    return FAKE_EMBEDDING;
+    return taskEmbedding ? taskEmbedding(_text) : FAKE_EMBEDDING;
   },
   getModelId: () => "mock-embedding-model",
   getMode: () => "local",
@@ -142,6 +143,7 @@ function reset() {
   memoryGrants = [];
   soulStore = new Map();
   embedInputTypeCalls = [];
+  taskEmbedding = undefined;
 }
 
 // formatMemory() (resources/MemoryBootstrap.ts) renders each memory's content
@@ -648,5 +650,95 @@ describe("MemoryBootstrap.post() — soul admission vs shipped map (flair#1371)"
       `${tight.sections.soul} soul entries`,
     );
     expect(tight.soulTokens, "dropped entry must not be charged").toBeLessThan(wide.soulTokens);
+  });
+});
+
+
+describe("task recall under pinned-context pressure (#1431)", () => {
+  for (const includeContext of [false, true]) {
+    for (const includeTrust of [false, true]) {
+      it(`selects different facts for different tasks (prose=${includeContext}, trust=${includeTrust})`, async () => {
+        reset();
+        const agentId = "task-budget";
+        soulStore.set("identity", { agentId, key: "identity", value: "Release engineer" });
+        soulStore.set("workspace", { agentId, key: "workspace-rules", value: "Boilerplate. ".repeat(1000) });
+        for (let i = 0; i < 40; i++) memoryStore.set(`pin-${i}`, {
+          id: `pin-${i}`, agentId, content: "Standing principle. ".repeat(20),
+          durability: "permanent", createdAt: OLD_DATE,
+        });
+        const otherVector = [0, 1, ...Array(126).fill(0)];
+        taskEmbedding = (text) => text === "release" ? FAKE_EMBEDDING : otherVector;
+        for (const [id, embedding] of [["release", FAKE_EMBEDDING], ["backup", otherVector]] as const) {
+          memoryStore.set(id, { id, agentId, content: `${id} essential fact. `.repeat(28),
+            durability: "standard", createdAt: OLD_DATE, embedding });
+        }
+        const b = makeBootstrap(agentCtx(agentId));
+        const args = { agentId, maxTokens: 1500, includeContext, includeTrust };
+        const release = await b.post({ ...args, currentTask: "release" });
+        const backup = await b.post({ ...args, currentTask: "backup" });
+        expect(release.memories.some((m: any) => m.id === "release")).toBe(true);
+        expect(backup.memories.some((m: any) => m.id === "backup")).toBe(true);
+        expect(release.memories.map((m: any) => m.id)).not.toEqual(backup.memories.map((m: any) => m.id));
+        for (const result of [release, backup]) {
+          expect(result.soul).toEqual({ identity: "Release engineer" });
+          expect(result.sections.permanent).toBeGreaterThan(0);
+          expect(result.memoriesIncluded + result.memoriesTruncated).toBeLessThanOrEqual(result.memoriesAvailable);
+          expect(new Set(result.memories.map((m: any) => m.id)).size).toBe(result.memories.length);
+        }
+        const noTask = await b.post(args);
+        expect(noTask.sections.relevant).toBe(0);
+        expect(noTask.sections.permanent).toBeGreaterThan(release.sections.permanent);
+      });
+    }
+  }
+});
+
+
+describe("task allowance fallback (#1431)", () => {
+  it("returns unused space to pinned memories when embeddings fail", async () => {
+    reset();
+    const agentId = "no-embed";
+    for (let i = 0; i < 20; i++) memoryStore.set(`pin-${i}`, {
+      id: `pin-${i}`, agentId, content: "Standing principle. ".repeat(20),
+      durability: "permanent", createdAt: OLD_DATE,
+    });
+    taskEmbedding = () => { throw new Error("model unavailable"); };
+    const b = makeBootstrap(agentCtx(agentId));
+    const args = { agentId, maxTokens: 1500, includeSoul: false, includeContext: false };
+    const baseline = await b.post(args);
+    const failed = await b.post({ ...args, currentTask: "release" });
+    expect(failed.memories).toEqual(baseline.memories);
+    expect(failed.taskRetrievalHint).toContain("embedding unavailable");
+    const blank = await b.post({ ...args, currentTask: "   " });
+    expect(blank.memories).toEqual(baseline.memories);
+    expect(blank.taskRetrievalHint).toBeUndefined();
+    expect(blank.currentTaskHint).toBeDefined();
+  });
+
+  it("explains zero budget and an empty candidate pool", async () => {
+    reset();
+    const b = makeBootstrap(agentCtx("empty"));
+    const zero = await b.post({ agentId: "empty", currentTask: "release", maxTokens: 0 });
+    expect(zero.taskRetrievalHint).toContain("no content budget");
+    expect(embedInputTypeCalls).toHaveLength(0);
+    const empty = await b.post({ agentId: "empty", currentTask: "release", maxTokens: 1500 });
+    expect(empty.taskRetrievalHint).toContain("no visible active candidates");
+  });
+});
+
+
+describe("small task budgets (#1431)", () => {
+  it("retrieves below the former 200-token gate and reports records that cannot fit", async () => {
+    reset();
+    memoryStore.set("small", { id: "small", agentId: "small-budget", content: "Check the CI date.",
+      durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING });
+    const b = makeBootstrap(agentCtx("small-budget"));
+    const small = await b.post({ agentId: "small-budget", currentTask: "CI date", maxTokens: 180, includeSoul: false });
+    expect(small.memories.map((m: any) => m.id)).toContain("small");
+    memoryStore.get("small").content = "Large fact. ".repeat(500);
+    const large = await b.post({ agentId: "small-budget", currentTask: "CI date", maxTokens: 180, includeSoul: false });
+    expect(large.memories).toHaveLength(0);
+    expect(large.memoriesTruncated).toBe(1);
+    expect(large.taskRetrievalHint).toContain("did not fit");
   });
 });

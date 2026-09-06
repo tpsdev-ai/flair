@@ -1,0 +1,1 @@
+- Bootstrap reserves 30% of its content budget for task-relevant recall when `currentTask` is supplied, so pinned memories cannot consume every recall slot. Unused space returns to pinned memories; calls without a task retain their existing admission policy. `taskRetrievalHint` explains skipped or empty task retrieval.

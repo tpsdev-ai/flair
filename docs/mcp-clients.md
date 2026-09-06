@@ -355,3 +355,18 @@ Future MCP-capable agent CLIs (and there are more landing every month) will work
 **Tool calls succeed but the agent doesn't see results in subsequent turns.** Check that the CLI is actually invoking `bootstrap` at session start — most CLIs need an explicit prompt nudge ("call the bootstrap tool now") on first use. Subsequent turns should pick up automatically once the CLI sees the schema.
 
 For deeper issues see [`troubleshooting.md`](troubleshooting.md) and the [`@tpsdev-ai/flair-mcp` repo](https://github.com/tpsdev-ai/flair/tree/main/packages/flair-mcp).
+
+
+### Task-aware bootstrap budgets
+
+Pass `currentTask` when the session's task is known. Bootstrap reserves 30% of
+`maxTokens` for task-relevant memories after Soul admission, protecting recall
+from large pinned sets. Task retrieval can also spend any other remaining space;
+unused space returns to pinned memories. This changes admission priority, not
+retrieval ranking or visibility. Individual records still must fit, including
+trust metadata when requested. A record larger than the available allowance
+can still be omitted.
+
+Without a task (including blank text), bootstrap retains its existing admission
+policy. `taskRetrievalHint`, when present, explains unavailable embeddings, an
+empty candidate pool, exhausted budget, or candidates already included/too large.
