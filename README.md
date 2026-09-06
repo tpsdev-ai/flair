@@ -169,7 +169,7 @@ See **[DESIGN.md](DESIGN.md)** for the invariants behind the three primitives â€
 | Feature | What it does |
 |---|---|
 | **Semantic memory** | Auto-embedded on write. Search by meaning, not keywords. |
-| **Tiered durability** | `permanent` (delete rejected) / `persistent` / `standard` (default) / `ephemeral` (24h TTL). |
+| **Tiered durability** | `permanent` (retained until explicitly deleted by its owner or an admin) / `persistent` / `standard` (default) / `ephemeral` (24h TTL). |
 | **Temporal validity** | `validFrom` / `validTo` bounds. Expired memories drop out of search and bootstrap automatically. |
 | **Trust-graded recall** | Opt-in per-result evidence: provenance, usage signal, freshness, supersession. Confidence bands (`strong`/`moderate`/`breadcrumb`) and first-class **abstention** when nothing clears the floor. |
 | **Relationship graph** | Entity-to-entity triples with temporal bounds, queryable alongside semantic memory. |

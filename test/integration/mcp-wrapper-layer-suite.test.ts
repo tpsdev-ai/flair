@@ -280,39 +280,26 @@ describe("/mcp TOOLS wrapper layer — every tool driven through its real .impl"
   }, 120_000);
 
   // ── memory_delete (delete + guard) ──
-  test("memory_delete: deletes a standard memory, and the permanent-memory guard still fires for a non-admin", async () => {
-    // (a) a normal delete removes the row.
-    const doomed = await tool("memory_store", { content: `mcp wrapper-layer delete-me ${sfx} ${randomUUID()}`, durability: "standard" });
-    const id = doomed?.id;
-    expect(id, "seed store for delete must return an id").toBeTruthy();
-    await tool("memory_delete", { id });
-    const gone = await tool("memory_get", { id });
-    // After delete the record must not be readable — makeByIdReadGate 404s
-    // (unwrap → {status:404}) or the row is simply absent.
-    const isGone = gone == null || gone.status === 404 || gone.error != null || gone.content !== doomed.content;
-    expect(isGone, `deleted memory must be gone, got: ${JSON.stringify(gone).slice(0, 200)}`).toBe(true);
+  test("memory_delete: owners can delete every tier; non-owners cannot; admins can", async () => {
+    for (const durability of ["standard", "persistent", "ephemeral", "permanent"]) {
+      const id = `${AGENT}-${durability}-${randomUUID()}`;
+      await seedInsert("Memory", { id, agentId: AGENT, content: `owner deletion ${durability}`, durability, visibility: "private", createdAt: new Date().toISOString() });
+      const deleted = await tool("memory_delete", { id });
+      expect(deleted?.error).toBeUndefined();
+      const gone = await tool("memory_get", { id });
+      expect(gone == null || gone.status === 404 || gone.error != null).toBe(true);
 
-    // (b) the permanent-memory admin guard: a non-admin delete of a PERMANENT
-    // memory must be refused with 403.
-    // unloaded-instance (#1181): the pre-fix instance read let super.get() return
-    // undefined, so `record.durability === "permanent"` was SILENTLY SKIPPED and
-    // the guarded delete fell through to an unguarded one. Asserting the 403
-    // proves the guard's record load (the static form) still sees the real row.
-    const permId = `${AGENT}-${randomUUID()}`;
-    await seedInsert("Memory", {
-      id: permId,
-      agentId: AGENT,
-      content: `mcp wrapper-layer permanent — never delete without a go ${sfx}`,
-      durability: "permanent",
-      visibility: "private",
-      createdAt: new Date().toISOString(),
-      validFrom: new Date().toISOString(),
-    });
-    const denied = await tool("memory_delete", { id: permId });
-    expect(denied?.status, `permanent delete by non-admin must 403, got: ${JSON.stringify(denied).slice(0, 200)}`).toBe(403);
-    // Still present after the refused delete.
-    const still = await tool("memory_get", { id: permId });
-    expect(still?.id, "the permanent memory must survive the refused delete").toBe(permId);
+      const foreignId = `${id}-foreign`;
+      await seedInsert("Memory", { id: foreignId, agentId: "other-owner", content: "foreign memory", durability, visibility: "shared", createdAt: new Date().toISOString() });
+      const denied = await tool("memory_delete", { id: foreignId });
+      expect(denied.status).toBe(403);
+      const still = await tool("memory_get", { id: foreignId });
+      expect(still.id).toBe(foreignId);
+      const adminDeleted = await tool("memory_delete", { id: foreignId }, true);
+      expect(adminDeleted?.error).toBeUndefined();
+      const removed = await tool("memory_get", { id: foreignId });
+      expect(removed == null || removed.status === 404 || removed.error != null).toBe(true);
+    }
   }, 120_000);
 
   // ── soul_get (read/payload) ──

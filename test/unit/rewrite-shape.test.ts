@@ -17,9 +17,9 @@ describe("harper-native rewrite shape", () => {
     expect(src).toContain("TPS-Ed25519");
   });
 
-  test("memory durability delete guard exists", () => {
+  test("memory deletion checks stored ownership", () => {
     const src = readFileSync("resources/Memory.ts", "utf-8");
-    expect(src).toContain("permanent_memory_cannot_be_deleted");
+    expect(src).toContain("isForbiddenOwnerMutation");
     expect(src).toContain("ephemeral");
   });
 });
