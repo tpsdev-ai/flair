@@ -264,6 +264,21 @@ describe("/mcp TOOLS wrapper layer — every tool driven through its real .impl"
     expect(after?.content, "the update must be persisted").toBe(updated);
   }, 120_000);
 
+  test("versioning a promoted memory keeps its predecessor's verdict without approving new content", async () => {
+    const id = `${AGENT}-promoted-version`;
+    await seedInsert("Memory", { id, agentId: AGENT, content: "Reviewed predecessor for authority versioning.", durability: "persistent", createdAt: new Date().toISOString(), promotionStatus: "approved", promotedBy: "reviewer", promotedAt: new Date().toISOString() });
+    const successor = await tool("memory_update", { id, content: "New unreviewed successor for authority versioning.", preserveHistory: true });
+    expect(successor.error).toBeUndefined();
+    expect(successor.id).toBeDefined();
+    expect(successor.id).not.toBe(id);
+    const updated = await tool("memory_get", { id: successor.id });
+    expect(updated.supersedes).toBe(id);
+    for (const field of ["promotionStatus", "promotedAt", "promotedBy"]) expect(updated[field] ?? null).toBeNull();
+    const predecessor = await tool("memory_get", { id });
+    expect(predecessor.promotionStatus).toBe("approved");
+    expect(predecessor.promotedBy).toBe("reviewer");
+  }, 120_000);
+
   // ── memory_delete (delete + guard) ──
   test("memory_delete: deletes a standard memory, and the permanent-memory guard still fires for a non-admin", async () => {
     // (a) a normal delete removes the row.

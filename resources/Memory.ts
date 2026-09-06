@@ -1,6 +1,7 @@
 import { databases } from "harper";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
+import { guardAuthorityFields } from "./authority-field-guard.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { localInstanceId } from "./instance-identity.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
@@ -607,6 +608,8 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   async post(content: any, context?: any) {
+    const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
+    if (authorityDenial) return authorityDenial;
     // Rate limiting — use authenticated agent ID, not client-supplied body field
     const ctx = (this as any).getContext?.();
     const authenticatedAgent: string | undefined = ctx?.request?.tpsAgent;
@@ -865,12 +868,16 @@ export class Memory extends (databases as any).flair.Memory {
   // via the one shared delegate. (Admin/internal — including the _reindex
   // path in put() — pass through the delegate untouched.)
   async patch(content: any, query?: any) {
+    const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
+    if (authorityDenial) return authorityDenial;
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
     return super.patch(content, query);
   }
 
   async put(content: any) {
+    const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
+    if (authorityDenial) return authorityDenial;
     const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (__ownerDenial) return __ownerDenial;
     // Reindex migration bypass: admin-only escape hatch used by the
@@ -1101,28 +1108,6 @@ export class Memory extends (databases as any).flair.Memory {
     if (content.archived === true && !content.archivedAt) {
       content.archivedAt = now;
       // archivedBy should be set by the caller (CLI stamps req.tpsAgent via query param)
-    }
-
-    // If approving promotion, record timestamp
-    if (content.promotionStatus === "approved" && !content.promotedAt) {
-      content.promotedAt = now;
-    }
-
-    // Upgrade to permanent when approved — the LEGACY in-place approval flow
-    // (an admin marks an EXISTING row approved without naming a tier). NOTE:
-    // the auth-middleware promotionStatus admin-gate this once relied on is
-    // INERT (Harper's middleware Request has no parsed body); promotionStatus
-    // write-provenance is not yet enforced — tracked in flair#1524. An
-    // explicit durability on the SAME write now wins (flair#1257 slice 3):
-    // the candidate-promotion paths (#1205b-2 /AutoPromoteCandidates and the
-    // human `flair rem promote`) write NEW rows carrying promotionStatus:
-    // "approved" purely as an audit stamp ALONGSIDE an explicit durability:
-    // "persistent" — the unconditional coercion here silently lifted every
-    // promoted claim into the never-reaped permanent tier while every audit
-    // surface (CLI output, specs, review rulings) said persistent. A write
-    // that names its tier keeps it; only a tier-less approval still upgrades.
-    if (content.promotionStatus === "approved" && (content.durability === undefined || content.durability === null)) {
-      content.durability = "permanent";
     }
 
     // Write-time provenance stamp (memory-provenance slice 1) — see

@@ -52,6 +52,7 @@
  *
  * Prod: first tool call loads the real classes against a fully-real Harper.
  */
+import { AUTHORITY_FIELDS } from "./authority-field-guard.js";
 import type { RecordTypeName } from "./record-types.js";
 import { resolveVersion } from "./version.js";
 import { agentContext, adminContext, collectionResource } from "./in-process.js";
@@ -356,6 +357,9 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
     delete record.validFrom;
     delete record.validTo;
     delete record.archivedAt;
+    // A successor contains new, unreviewed content; keep the verdict on its
+    // predecessor instead of claiming that the new version was approved.
+    for (const field of AUTHORITY_FIELDS.Memory) delete record[field];
     // flair#1189 — retrievalCount and lastRetrieved are RECORD-scoped, not
     // lineage-scoped: a brand-new successor record has no retrieval history of
     // its OWN, so it must start with none. Inheriting them from the superseded

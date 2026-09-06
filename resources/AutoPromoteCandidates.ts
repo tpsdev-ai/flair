@@ -1,3 +1,4 @@
+import { stampMemoryPromotion } from "./promotion-stamp.js";
 /**
  * POST /AutoPromoteCandidates  (#1205b-2 — the UNATTENDED promotion path)
  *
@@ -171,10 +172,6 @@ export class AutoPromoteCandidates extends Resource {
         // scopeTag FIRST — the per-user access-control boundary (Req 2).
         tags: buildAutoPromotedTags(c.id, decision.scopeTag),
         derivedFrom: Array.isArray(c.sourceMemoryIds) ? c.sourceMemoryIds : [],
-        promotionStatus: "approved",
-        promotedAt: decidedAt,
-        // Req 4 — non-impersonating machine reviewerId.
-        promotedBy: decision.reviewerId,
         createdAt: decidedAt,
       };
 
@@ -198,6 +195,8 @@ export class AutoPromoteCandidates extends Resource {
         skipped.push({ id: c.id, reason: `memory_write_rejected:${writeRes.status}` });
         continue;
       }
+
+      await stampMemoryPromotion(memId, decision.reviewerId, decidedAt, ctx);
 
       // ── Mark the candidate promoted (commit point) ─────────────────────────
       // Ordered AFTER the Memory write, matching the human promote path: the
