@@ -12,12 +12,25 @@ describe("workflow authority guard", () => {
       }
     }
   });
-  test("full-row echoes are unchanged; omitted stamps survive replacement writes", async () => {
-    const stored = { promotionStatus: "approved", promotedAt: "2026-09-01", promotedBy: "reviewer" };
-    const edit: Record<string, unknown> = { content: "edited", durability: "standard", archived: true };
+  test("metadata-only edits and same-content echoes keep the verdict", async () => {
+    const stored = { content: "reviewed", promotionStatus: "approved", promotedAt: "2026-09-01", promotedBy: "reviewer" };
+    const edit: Record<string, unknown> = { durability: "standard", archived: true };
     expect(await guardAuthorityFields(() => stored, edit, "Memory")).toBeNull();
-    expect(edit).toMatchObject(stored);
-    expect(await guardAuthorityFields(() => stored, { ...stored }, "Memory")).toBeNull();
+    expect(edit).toMatchObject({ promotionStatus: "approved", promotedAt: "2026-09-01", promotedBy: "reviewer" });
+    const echo = { ...stored };
+    expect(await guardAuthorityFields(() => stored, echo, "Memory")).toBeNull();
+    expect(echo.promotionStatus).toBe("approved");
+  });
+  test("a content change cannot keep an echoed or restored verdict", async () => {
+    const stored = { content: "reviewed", promotionStatus: "approved", promotedAt: "2026-09-01", promotedBy: "reviewer" };
+    const echoed: Record<string, unknown> = { content: "unreviewed claim", promotionStatus: "approved", promotedAt: "2026-09-01", promotedBy: "reviewer" };
+    expect(await guardAuthorityFields(() => stored, echoed, "Memory")).toBeNull();
+    expect(echoed.promotionStatus).toBeNull();
+    expect(echoed.promotedAt).toBeNull();
+    expect(echoed.promotedBy).toBeNull();
+    const omitted: Record<string, unknown> = { content: "also unreviewed" };
+    expect(await guardAuthorityFields(() => stored, omitted, "Memory")).toBeNull();
+    expect(omitted.promotionStatus).toBeNull();
   });
   test("a failed stored-state read cannot authorize a write", async () => {
     await expect(guardAuthorityFields(() => { throw new Error("unavailable"); }, {}, "Memory")).rejects.toThrow("unavailable");

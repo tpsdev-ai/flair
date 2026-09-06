@@ -1,6 +1,7 @@
 /** Workflow verdicts can only be stamped by their trusted raw-table paths.
  * Keep unchanged echoes compatible with full-row clients, and preserve omitted
- * stamps on PUT; omission must not erase a verdict. No admin/body bypass. */
+ * stamps on PUT; omission must not erase a verdict. A content change drops the
+ * stamp: the verdict is bound to the reviewed text. No admin/body bypass. */
 export const AUTHORITY_FIELDS = {
   Memory: ["promotionStatus", "promotedAt", "promotedBy"],
 } as const;
@@ -17,6 +18,13 @@ export async function guardAuthorityFields(
         status: 403, headers: { "content-type": "application/json" },
       });
     }
+  }
+  // The stamp means this specific content was reviewed. Echo-tolerance and
+  // omitted-field restore apply only when the body does not change `content`.
+  // Null the columns (do not merely delete) so PATCH and PUT both drop them.
+  if (existing && Object.hasOwn(content, "content") && content.content !== existing.content) {
+    for (const field of AUTHORITY_FIELDS[table]) content[field] = null;
+    return null;
   }
   for (const field of AUTHORITY_FIELDS[table]) {
     if (existing && Object.hasOwn(existing, field)) content[field] = existing[field];

@@ -62,15 +62,34 @@ describe("Memory authority fields over HTTP", () => {
       expect(response.status).toBe(403);
     }
   });
-  test("ordinary edits and owner preferences preserve existing authority stamps", async () => {
+  test("ordinary metadata edits preserve existing authority stamps", async () => {
     const existing = await read("stamped");
     const patch = await request(owner, "PATCH", "/Memory/stamped", { durability: "standard", archived: true });
     expect(patch.status).toBe(204);
-    const put = await request(owner, "PUT", "/Memory/stamped", { id: "stamped", agentId: owner.id, content: "edited authority fixture", durability: "persistent" });
-    expect(put.status).toBe(200);
     const updated = await read("stamped");
     for (const field of ["promotionStatus", "promotedAt", "promotedBy"]) expect(updated[field]).toBe(existing[field]);
-    expect((await request(owner, "PUT", "/Memory/stamped", updated)).status).toBe(200);
+    expect(updated.content).toBe("original");
+    expect((await request(owner, "PUT", "/Memory/stamped", { ...updated, durability: "persistent" })).status).toBe(200);
+    const afterPut = await read("stamped");
+    for (const field of ["promotionStatus", "promotedAt", "promotedBy"]) expect(afterPut[field]).toBe(existing[field]);
+  }, 120_000);
+  test("a content-changing write cannot keep an echoed approved verdict", async () => {
+    const existing = await read("stamped");
+    const put = await request(owner, "PUT", "/Memory/stamped", {
+      id: "stamped", agentId: owner.id, content: "unreviewed claim under an echoed stamp",
+      durability: "persistent", promotionStatus: existing.promotionStatus, promotedAt: existing.promotedAt, promotedBy: existing.promotedBy,
+    });
+    expect(put.status, await put.clone().text()).toBe(200);
+    const afterPut = await read("stamped");
+    expect(afterPut.content).toBe("unreviewed claim under an echoed stamp");
+    expect(afterPut.promotionStatus).toBeFalsy();
+    expect(afterPut.promotedBy).toBeFalsy();
+    await seed("Memory", [{ id: "stamped-patch", agentId: owner.id, content: "original", durability: "persistent", createdAt: now, promotionStatus: "approved", promotedAt: now, promotedBy: "trusted-reviewer" }]);
+    const patch = await request(owner, "PATCH", "/Memory/stamped-patch", { content: "patched unreviewed claim" });
+    expect(patch.status, await patch.clone().text()).toBe(204);
+    const afterPatch = await read("stamped-patch");
+    expect(afterPatch.content).toBe("patched unreviewed claim");
+    expect(afterPatch.promotionStatus).toBeFalsy();
   }, 120_000);
   test("POST /FeedMemories cannot land a forged promotion verdict", async () => {
     const id = "feed-forged-verdict";
