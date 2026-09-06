@@ -77,6 +77,7 @@ const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kin
   { file: "resources/MemoryReflect.ts", via: "patchRecord", needle: "lastReflected", kind: "single-field" },
   { file: "resources/migrations/visibility-backfill.ts", via: "alias-source", needle: "visibility: derived", kind: "echo" },
   { file: "resources/migrations/synthetic-test-migration.ts", via: "alias-source", needle: "SYNTHETIC_TARGET_MARKER", kind: "echo" },
+  { file: "resources/MemoryReindex.ts", via: "alias-source", needle: "_reindex: true", kind: "echo" },
 ];
 
 function walkTs(dir: string): string[] {
@@ -95,27 +96,48 @@ function stripComments(text: string): string {
   return out.replace(/\/\/[^\n]*/g, (m) => " ".repeat(m.length));
 }
 
-function collectMemoryAliases(stripped: string): Set<string> {
-  const aliases = new Set<string>();
-  for (const m of stripped.matchAll(/(?:const|let)\s+(\w+)\s*=\s*[^;\n]*\.flair\.Memory\b/g)) aliases.add(m[1]);
-  for (const m of stripped.matchAll(/function\s+(\w+)\s*\([^)]*\)[\s\S]{0,240}?return\s+[^;\n]*\.flair\.Memory\b/g)) aliases.add(m[1]);
-  for (const m of stripped.matchAll(/(?:const|let)\s+(\w+)\s*=\s*\{[\s\S]{0,1200}?Memory\s*:\s*[^,\n]*\.flair\.Memory\b/g)) aliases.add(m[1]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const alias of [...aliases]) {
-      for (const m of stripped.matchAll(new RegExp(`\\b(\\w+)\\s*:\\s*\\(\\)\\s*=>\\s*\\w+\\s*=\\s*${alias}\\b`, "g"))) {
-        if (!aliases.has(m[1])) { aliases.add(m[1]); changed = true; }
-      }
-      for (const m of stripped.matchAll(new RegExp(`(?:const|let)\\s+(\\w+)\\s*=\\s*${alias}\\s*\\(`, "g"))) {
-        if (!aliases.has(m[1])) { aliases.add(m[1]); changed = true; }
-      }
-      for (const m of stripped.matchAll(new RegExp(`(?:const|let)\\s+(\\w+)\\s*=[\\s\\S]{0,160}?\\b${alias}\\s*[\\[\\(]`, "g"))) {
-        if (!aliases.has(m[1])) { aliases.add(m[1]); changed = true; }
-      }
-    }
+function memoryGetterNames(stripped: string): Set<string> {
+  const names = new Set<string>();
+  for (const m of stripped.matchAll(/function\s+(\w+)\s*\([^)]*\)[\s\S]{0,240}?return\s+[^;\n]*\.flair\.Memory\b/g)) {
+    names.add(m[1]);
   }
-  return aliases;
+  for (const m of stripped.matchAll(/(\w+)\s*:\s*\(\)\s*=>\s*\w+\s*=\s*(\w+)/g)) {
+    if (names.has(m[2])) names.add(m[1]);
+  }
+  return names;
+}
+
+function lastScopeStart(lines: string[], writeIdx: number): number {
+  for (let i = writeIdx; i >= 0; i--) {
+    if (/^\s*(export\s+)?(async\s+)?function\b/.test(lines[i])) return i;
+    if (/^\s*(async\s+)?(?!if\b|for\b|while\b|switch\b|catch\b|else\b|do\b)[A-Za-z_]\w*\s*\([^;]*\)\s*(?::\s*[^{=]+)?\{/.test(lines[i])) return i;
+  }
+  return 0;
+}
+
+function continued(lines: string[], start: number, extra = 4): string {
+  return lines.slice(start, start + extra + 1).join("\n");
+}
+
+function rhsBindsMemory(rhs: string, getters: Set<string>, scope: string): boolean {
+  if (/\.flair\.Memory\b/.test(rhs)) return true;
+  for (const getter of getters) {
+    if (new RegExp(`\\b${getter}\\s*\\(`).test(rhs)) return true;
+  }
+  if (/\btableMap\b/.test(rhs) && /Memory\s*:\s*[^,\n]*\.flair\.Memory\b/.test(scope)) return true;
+  return false;
+}
+
+function aliasBindsMemory(name: string, lines: string[], writeIdx: number, getters: Set<string>): boolean {
+  const start = lastScopeStart(lines, writeIdx);
+  const scope = lines.slice(start, writeIdx + 1).join("\n");
+  for (let i = writeIdx; i >= start; i--) {
+    const assign = lines[i].match(new RegExp(`(?:const|let)\\s+${name}\\s*(?::[^=]+)?=\\s*(.+)`));
+    if (assign) return rhsBindsMemory(continued(lines, i), getters, scope);
+  }
+  const header = continued(lines, start, 6);
+  if (new RegExp(`\\b${name}\\s*(?::|,|\\))`).test(header) && rhsBindsMemory(header, getters, scope)) return true;
+  return false;
 }
 
 function enumerateRawMemoryWriters(): RawMemoryWriter[] {
@@ -133,26 +155,25 @@ function enumerateRawMemoryWriters(): RawMemoryWriter[] {
     const stripped = stripComments(raw);
     const rawLines = raw.split("\n");
     const lines = stripped.split("\n");
+    const getters = memoryGetterNames(stripped);
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      const excerpt = rawLines[i]?.trim() ?? "";
-      if (/\.flair\.Memory\.put\s*\(/.test(line)) add({ file, line: i + 1, via: "direct-put", excerpt });
-      if (/\.flair\.Memory\.update\s*\(/.test(line)) add({ file, line: i + 1, via: "direct-update", excerpt });
-      if (/patchRecord(?:Silent)?\s*\(/.test(line) && /flair\.Memory/.test(line)) {
-        add({ file, line: i + 1, via: "patchRecord", excerpt });
+      if (/\.flair\.Memory\.put\s*\(/.test(line)) {
+        add({ file, line: i + 1, via: "direct-put", excerpt: rawLines[i]?.trim() ?? "" });
       }
-    }
-    const aliases = collectMemoryAliases(stripped);
-    for (const alias of aliases) {
-      const write = new RegExp(`\\b${alias}\\.(put|update)\\s*\\(`);
-      for (let i = 0; i < lines.length; i++) {
-        if (write.test(lines[i])) {
-          add({
-            file, line: i + 1,
-            via: "alias-source",
-            excerpt: rawLines[i]?.trim() ?? "",
-          });
+      if (/\.flair\.Memory\.update\s*\(/.test(line)) {
+        add({ file, line: i + 1, via: "direct-update", excerpt: rawLines[i]?.trim() ?? "" });
+      }
+      if (/patchRecord(?:Silent)?\s*\(/.test(line)) {
+        const window = continued(lines, i, 5);
+        if (/\.flair\.Memory\b/.test(window)) {
+          add({ file, line: i + 1, via: "patchRecord", excerpt: rawLines.slice(i, i + 6).map((l) => l.trim()).join(" ") });
         }
+      }
+      for (const m of line.matchAll(/\b([A-Za-z_]\w*)\.(put|update)\s*\(/g)) {
+        if (m[1] === "flair" || /\.flair\.Memory\./.test(line)) continue;
+        if (!aliasBindsMemory(m[1], lines, i, getters)) continue;
+        add({ file, line: i + 1, via: "alias-source", excerpt: rawLines[i]?.trim() ?? "" });
       }
     }
   }
