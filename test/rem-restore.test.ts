@@ -60,6 +60,7 @@ function recordingApi(handlers: Record<string, (path: string, body?: unknown) =>
     // Default fall-throughs for the read endpoints when not stubbed
     if (method === "GET" && path.startsWith("/Memory?")) return [];
     if (method === "GET" && path.startsWith("/Soul?")) return [];
+    if (method === "POST" && path === "/MemoryCandidate/search_by_conditions") return [];
     if (method === "DELETE" || method === "PUT") return { ok: true };
     throw new Error(`unexpected api: ${method}:${path}`);
   };
@@ -76,26 +77,32 @@ function recordingApi(handlers: Record<string, (path: string, body?: unknown) =>
  * and read that state. `corruptOnPut` lets tests simulate Harper silently
  * dropping rows (returns ok but skips the state write).
  */
-function statefulApi(seed: { memories?: any[]; souls?: any[] } = {}, corruptOnPut?: (path: string) => boolean): {
+function statefulApi(seed: { memories?: any[]; souls?: any[]; candidates?: any[] } = {}, corruptOnPut?: (path: string) => boolean): {
   api: ApiCall;
   calls: Array<{ method: string; path: string; body?: unknown }>;
-  state: { memories: Map<string, any>; souls: Map<string, any> };
+  state: { memories: Map<string, any>; souls: Map<string, any>; candidates: Map<string, any> };
 } {
   const calls: Array<{ method: string; path: string; body?: unknown }> = [];
   const state = {
     memories: new Map<string, any>((seed.memories ?? []).map((m) => [String(m.id), m])),
     souls: new Map<string, any>((seed.souls ?? []).map((s) => [String(s.id), s])),
+    candidates: new Map<string, any>((seed.candidates ?? []).map((c) => [String(c.id), c])),
   };
   const api: ApiCall = async (method, path, body) => {
     calls.push({ method, path, body });
     if (method === "GET" && path.startsWith("/Memory?")) return Array.from(state.memories.values());
     if (method === "GET" && path.startsWith("/Soul?")) return Array.from(state.souls.values());
+    if (method === "POST" && path === "/MemoryCandidate/search_by_conditions") return Array.from(state.candidates.values());
     if (method === "DELETE" && path.startsWith("/Memory/")) {
       state.memories.delete(decodeURIComponent(path.split("/")[2]));
       return { ok: true };
     }
     if (method === "DELETE" && path.startsWith("/Soul/")) {
       state.souls.delete(decodeURIComponent(path.split("/")[2]));
+      return { ok: true };
+    }
+    if (method === "DELETE" && path.startsWith("/MemoryCandidate/")) {
+      state.candidates.delete(decodeURIComponent(path.split("/")[2]));
       return { ok: true };
     }
     if (method === "PUT" && path.startsWith("/Memory/")) {
@@ -234,6 +241,7 @@ describe("applySnapshot — real restore", () => {
     expect(r.errors).toEqual([]);
     expect(r.deleted.memories).toBe(2);
     expect(r.deleted.souls).toBe(1);
+    expect(r.deleted.candidates).toBe(0);
     expect(r.restored.memories).toBe(2);
     expect(r.restored.souls).toBe(1);
     expect(r.preRestoreSnapshotPath).toBeDefined();
@@ -288,6 +296,34 @@ describe("applySnapshot — real restore", () => {
     expect(soulCalls.some((c) => c.method === "PUT" && c.path.startsWith("/Soul/"))).toBe(true);
     expect(soulCalls.every((c) => c.path.startsWith("/Soul/"))).toBe(true);
     expect(agentWrites.every((c) => !c.path.startsWith("/Soul/"))).toBe(true);
+  });
+
+  it("deletes leftover MemoryCandidates before Soul PUT so claim text cannot 403 restore", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const leftover = { id: "cand-leftover", agentId: "test-agent", claim: "be helpful", status: "pending" };
+    const { api, calls, state } = statefulApi({
+      memories: [],
+      souls: [],
+      candidates: [leftover],
+    });
+
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+
+    expect(r.status).toBe("completed");
+    expect(r.deleted.candidates).toBe(1);
+    expect(state.candidates.size).toBe(0);
+    const writes = calls.filter((c) => c.method === "DELETE" || c.method === "PUT");
+    const candDeleteAt = writes.findIndex((c) => c.method === "DELETE" && c.path === "/MemoryCandidate/cand-leftover");
+    const soulPutAt = writes.findIndex((c) => c.method === "PUT" && c.path.startsWith("/Soul/"));
+    expect(candDeleteAt).toBeGreaterThanOrEqual(0);
+    expect(soulPutAt).toBeGreaterThan(candDeleteAt);
   });
 
   it("preRestoreSnapshotPath contains current state for rollback", async () => {

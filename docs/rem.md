@@ -52,7 +52,7 @@ Selects which `models.generative.<logicalName>` entry a REM call uses. Unset →
 
 `flair rem nightly enable` installs a platform-native timer (launchd / systemd) **on the host it runs on**. In a multi-node or Fabric deploy, enabling it on every node would run the cycle N times and scatter N sets of pre-cycle snapshots. The v1 rule: **exactly one node gets the timer** — pick it deliberately, the same way you'd pick a cron owner for any single-writer job. This is a v1 constraint, not a permanent one; see #709 for the roadmap toward a coordinated multi-node story.
 
-Snapshot locality follows from this: a nightly cycle's pre-run snapshot (`~/.flair/snapshots/<agent>/`) lands on **the node that ran that cycle** — `flair rem restore <date>` and `flair rem snapshot list` only see local snapshots. If you move which node owns the timer, snapshot history doesn't move with it. Live replay (`flair rem restore <date> --apply`) rewrites Soul with operator credentials (`--admin-pass` / `--admin-pass-file`); an agent key is refused.
+Snapshot locality follows from this: a nightly cycle's pre-run snapshot (`~/.flair/snapshots/<agent>/`) lands on **the node that ran that cycle** — `flair rem restore <date>` and `flair rem snapshot list` only see local snapshots. If you move which node owns the timer, snapshot history doesn't move with it. Live replay (`flair rem restore <date> --apply`) rewrites Soul with operator credentials (`--admin-pass` / `--admin-pass-file`); an agent key is refused. Leftover MemoryCandidate rows for that agent are deleted first so their claim text cannot block Soul restore.
 
 ## Interactive vs nightly
 

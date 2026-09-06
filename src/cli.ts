@@ -9443,7 +9443,7 @@ addSharedCredentialOptions(rem.command("restore <date>"))
           console.log(`  Pre-restore:  ${result.preRestoreSnapshotPath}`);
           console.log(`                (rollback: flair rem restore <pre-restore-date> --agent ${agentId} --apply)`);
         }
-        console.log(`  Deleted:      ${result.deleted.memories} memories, ${result.deleted.souls} souls`);
+        console.log(`  Deleted:      ${result.deleted.memories} memories, ${result.deleted.souls} souls, ${result.deleted.candidates} candidates`);
         console.log(`  Restored:     ${result.restored.memories} memories, ${result.restored.souls} souls`);
         if (result.errors.length > 0) {
           console.log(`  Errors:`);

@@ -9,7 +9,8 @@
  * `/Soul` endpoints (DELETE current rows for the agent, PUT snapshot rows).
  * Soul DELETE/PUT must use `soulApiCall` (operator Basic / deliberate
  * internal). Snapshot souls carry `agentId`, so a bare `apiCall` signs as
- * that agent and the source gate 403s. Souls are PUT before memories so
+ * that agent and the source gate 403s. Souls are PUT before memories, and
+ * leftover MemoryCandidate rows for the agent are deleted first, so
  * restored identity is not refused as learned content.
  *
  * Reversibility-of-restore guarantee: before any destructive op, this
@@ -65,6 +66,7 @@ export interface RestoreResult {
   deleted: {
     memories: number;
     souls: number;
+    candidates: number;
   };
   restored: {
     memories: number;
@@ -121,7 +123,7 @@ function parseJsonlSafe(text: string): any[] {
  *   3. Verify metadata.agentId matches opts.agentId (prevents accidental
  *      cross-agent restore — the file might have been hand-copied).
  *   4. Create a pre-restore snapshot of current state (skip in dry-run).
- *   5. Fetch + delete current memories/souls for the agent (skip in dry-run).
+ *   5. Fetch + delete current memories/souls/candidates for the agent (skip in dry-run).
  *   6. PUT snapshot souls, then memories (skip in dry-run).
  *   7. Return counts.
  *
@@ -134,7 +136,7 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
     status: "completed",
     agentId: opts.agentId,
     snapshotPath: opts.snapshotPath,
-    deleted: { memories: 0, souls: 0 },
+    deleted: { memories: 0, souls: 0, candidates: 0 },
     restored: { memories: 0, souls: 0 },
     errors,
   };
@@ -241,7 +243,21 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
     return result;
   }
 
-  // 5. Delete current memories + souls (sequential to keep error semantics).
+  // 5. Delete current memories, souls, and leftover candidates. Candidates
+  // are not in the snapshot, but refuseLearnedSoulWrite matches claim text,
+  // so a leftover row 403s Soul PUT after operator auth succeeds.
+  let currentCandidates: any[] = [];
+  try {
+    currentCandidates = asArray(await opts.apiCall("POST", "/MemoryCandidate/search_by_conditions", {
+      operator: "and",
+      conditions: [
+        { search_attribute: "agentId", search_type: "equals", search_value: opts.agentId },
+      ],
+      get_attributes: ["id", "claim"],
+    }));
+  } catch (err: any) {
+    errors.push(`fetch-candidates: ${err?.message ?? String(err)}`);
+  }
   for (const m of currentMem) {
     if (!m?.id) continue;
     try {
@@ -258,6 +274,15 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
       result.deleted.souls++;
     } catch (err: any) {
       errors.push(`delete-soul ${s.id}: ${err?.message ?? String(err)}`);
+    }
+  }
+  for (const c of currentCandidates) {
+    if (!c?.id) continue;
+    try {
+      await opts.apiCall("DELETE", `/MemoryCandidate/${encodeURIComponent(String(c.id))}`);
+      result.deleted.candidates++;
+    } catch (err: any) {
+      errors.push(`delete-candidate ${c.id}: ${err?.message ?? String(err)}`);
     }
   }
 
