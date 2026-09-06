@@ -55,6 +55,12 @@ async function adminOp(harper: HarperInstance, op: Record<string, any>): Promise
   });
 }
 
+async function operatorWrite(harper: HarperInstance, method: string, path: string, body: unknown) {
+  return fetch(harper.httpURL + path, { method, headers: {
+    "Content-Type": "application/json", Authorization: `Basic ${btoa(`${harper.admin.username}:${harper.admin.password}`)}`,
+  }, body: JSON.stringify(body) });
+}
+
 /** Read a soul entry straight out of the table, bypassing every resource gate. */
 async function rawSoul(harper: HarperInstance, id: string): Promise<any> {
   const res = await adminOp(harper, {
@@ -111,11 +117,11 @@ describe("Soul writes are owner-scoped on every mutating verb", () => {
   // ── POSITIVE CONTROL ──────────────────────────────────────────────────────
   // Without these, every "denied" assertion below would pass just as happily if
   // the fix had simply broken Soul writes outright.
-  describe("positive control — an agent can still write its OWN soul", () => {
+  describe("positive control — operator credentials can still write Soul", () => {
     test("PUT to its own soul entry succeeds and persists", async () => {
       const key = `own-put-${randomUUID().slice(0, 6)}`;
       const id = `${victim.id}:${key}`;
-      const res = await write(harper, victim, "PUT", `/Soul/${encodeURIComponent(id)}`, {
+      const res = await operatorWrite(harper, "PUT", `/Soul/${encodeURIComponent(id)}`, {
         id, agentId: victim.id, key, value: "self-authored", durability: "permanent",
         createdAt: new Date().toISOString(),
       });
@@ -125,7 +131,7 @@ describe("Soul writes are owner-scoped on every mutating verb", () => {
 
     test("PATCH to its own soul entry succeeds and persists", async () => {
       const id = await seedSoul(harper, victim.id, `own-patch-${randomUUID().slice(0, 6)}`, "before");
-      const res = await write(harper, victim, "PATCH", `/Soul/${encodeURIComponent(id)}`, { value: "after" });
+      const res = await operatorWrite(harper, "PATCH", `/Soul/${encodeURIComponent(id)}`, { value: "after" });
       expect(res.status, `own PATCH returned ${res.status}: ${await res.text()}`).toBeLessThan(300);
       expect((await rawSoul(harper, id))?.value).toBe("after");
     }, 30_000);

@@ -217,14 +217,14 @@ describe("RECORD_TYPES — golden values (must match each table's current shippe
     });
   });
 
-  it("Soul: unscoped reads, validate-truthy on post+put (shared enforceWriteAuth), no provenance, federated", () => {
+  it("Soul: unscoped reads, validate-truthy on post+put (shared enforceWriteAuth), source provenance, federated", () => {
     expect(RECORD_TYPES.Soul).toEqual({
       table: "Soul",
       ownerField: "agentId",
       identity: "gated",
       readScope: "none",
       attribution: { post: "validate-truthy", put: "validate-truthy" },
-      provenance: false,
+      provenance: true,
       remEligible: false,
       federation: "included",
       mcp: { toolPrefix: "soul", readVerbs: ["get"], writeVerbs: ["store"] },

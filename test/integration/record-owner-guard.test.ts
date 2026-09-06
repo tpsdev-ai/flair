@@ -180,7 +180,13 @@ describe("shared record-ownership guard", () => {
   describe("the owner can still write its own record", () => {
     for (const c of CASES) {
       test(`${c.name}: the owner's own PATCH succeeds and persists`, async () => {
+        const before = await rawRec(harper, c.table, c.id, c.attrs);
         const res = await patchAs(harper, owner, c.path, c.patch);
+        if (c.table === "Soul") {
+          expect(res.status).toBe(403);
+          expect((await rawRec(harper, c.table, c.id, c.attrs))?.[c.field]).toBe(before?.[c.field]);
+          return;
+        }
         expect(res.status, `${c.name} owner PATCH returned ${res.status}: ${await res.text()}`).toBeLessThan(300);
         const after = await rawRec(harper, c.table, c.id, c.attrs);
         expect(after?.[c.field], `${c.name} owner's write did not persist`).toBe(c.patch[c.field]);
@@ -209,14 +215,14 @@ describe("shared record-ownership guard", () => {
     test("an agent can create a NEW record at an id that does not exist yet", async () => {
       const key = `rog-new-${randomUUID().slice(0, 8)}`;
       const id = `${owner.id}:${key}`;
-      const path = `/Soul/${encodeURIComponent(id)}`;
+      const path = `/Memory/${encodeURIComponent(id)}`;
       const res = await fetch(`${harper.httpURL}${path}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json", Authorization: ed25519Header(owner, "PUT", path) },
-        body: JSON.stringify({ id, agentId: owner.id, key, value: "created", durability: "permanent", createdAt: NOW }),
+        body: JSON.stringify({ id, agentId: owner.id, content: "created", durability: "standard", createdAt: NOW }),
       });
       expect(res.status, `create-by-PUT returned ${res.status}: ${await res.text()}`).toBeLessThan(300);
-      expect((await rawRec(harper, "Soul", id, ["id", "agentId", "value"]))?.value).toBe("created");
+      expect((await rawRec(harper, "Memory", id, ["id", "agentId", "content"]))?.content).toBe("created");
     }, 30_000);
   });
 

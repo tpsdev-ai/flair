@@ -313,28 +313,16 @@ describe("/mcp TOOLS wrapper layer — every tool driven through its real .impl"
     expect(res.value, "soul entry value round-trips").toBe(SOUL_ROLE);
   }, 120_000);
 
-  // ── soul_set (write) — DEFECT FOUND BY THIS SUITE, FIXED IN THIS PR ──────────
-  //
-  // The soul_set wrapper used to do `new Cls(undefined, ctx).put({ id, ... })` —
-  // a PUT on an UNLOADED instance — which threw `Invalid primary key type:
-  // undefined` against a real Soul + real store: the EXACT #1181 class the
-  // sibling read wrappers (memoryGet/update/delete/soulGet) and write wrappers
-  // (memoryStore/workspaceSet/orgEvent) were already migrated off of. soul_set's
-  // only prior test (test/unit/mcp-handler.test.ts) drove a MOCKED handler, so
-  // the real instance-put never ran and the defect shipped on the connector path.
-  // This suite caught it; the fix (mcp-tools.ts's soulSet, now a collection-bound
-  // `collectionResource(Cls, ctx).post()` so Soul.post stamps the required
-  // createdAt) lands in the same PR. This test asserts the intended behavior —
-  // a green here proves the write both lands and reads back through the wrapper.
-  test("soul_set: writes an entry the wrapper can read back", async () => {
-    const key = `project-${sfx}`;
-    const value = `mcp wrapper-layer soul_set value ${randomUUID()}`;
-    // unloaded-instance (#1181): pre-fix this THREW "Invalid primary key type:
-    // undefined"; the collection-bound post persists and echoes without error.
-    const res = await tool("soul_set", { key, value });
-    expect(res?.error, `soul_set must not return an error, got: ${JSON.stringify(res).slice(0, 200)}`).toBeUndefined();
-    const back = await tool("soul_get", { key });
-    expect(back?.value, "soul_set must persist the value readable via soul_get").toBe(value);
+  // Runtime Soul writes are denied at the delegated resource boundary.
+  test("soul_set: runtime writes are denied without changing stored Soul", async () => {
+    for (const admin of [false, true]) {
+      const key = `denied-${randomUUID()}`;
+      const result = await tool("soul_set", { key, value: "runtime-authored" }, admin);
+      expect(result.status).toBe(403);
+      expect(result.error).toContain("soul_write_requires_operator");
+      const back = await tool("soul_get", { key });
+      expect(back?.value).toBeUndefined();
+    }
   }, 120_000);
 
   // ── flair_workspace_set (write) ──

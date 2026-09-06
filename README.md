@@ -256,7 +256,7 @@ Any agent that can run a shell command can use Flair directly.
 ```bash
 flair memory add --agent mybot "learned something important"
 flair search --agent mybot "that important thing"
-flair soul set --agent mybot --key role --value "Security reviewer"
+flair soul set --agent mybot --key role --value "Security reviewer" --admin-pass-file ~/.flair/admin-pass
 flair bootstrap --agent mybot --max-tokens 4000        # cold-start: soul + relevant memories
 flair backup --admin-pass-file ~/.flair/admin-pass     # logical JSON export
 flair restore ./backup.json --admin-pass-file ~/.flair/admin-pass
@@ -282,7 +282,7 @@ const flair = new FlairClient({
 await flair.memory.write('Harper v5 sandbox blocks bare imports')
 const results = await flair.memory.search('native module loading')
 const ctx = await flair.bootstrap({ maxTokens: 4000 })
-await flair.soul.set('role', 'Security reviewer')
+await flair.soul.get('role')
 ```
 
 No Harper, no embeddings — just HTTP and auth. Full API in the [client README](packages/flair-client/README.md).

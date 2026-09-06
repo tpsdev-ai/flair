@@ -284,7 +284,7 @@ Twelve tools, kept deliberately small:
 | `memory_delete` | Remove a memory |
 | `relationship_store` | Record a subject-predicate-object relationship triple (e.g. "nathan manages flair") |
 | `bootstrap` | Get session-start context: soul + recent memories + predicted-relevant context |
-| `soul_set` | Set a personality/project/standards entry — included in every bootstrap |
+| `soul_set` | Runtime writes are refused; use operator credentials through `flair soul set` |
 | `soul_get` | Get a soul entry |
 | `flair_workspace_set` | Set your agent's current workspace state (ref/branch, phase, task) in the Office Space |
 | `flair_orgevent` | Publish an org-wide coordination event (claim/release/status) to the Office Space |

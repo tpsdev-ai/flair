@@ -560,13 +560,13 @@ describe("/mcp connector conformance — each tool honors its declared contract"
     expect(res.value, "soul value round-trips").toBe(SOUL_ROLE);
   }, 120_000);
 
-  test("soul_set: writes an entry that round-trips via soul_get (the #1181 connector-path write)", async () => {
-    const key = `project-${sfx}`;
-    const value = `mcp conformance soul_set ${randomUUID()}`;
-    const res = await tool("soul_set", { key, value });
-    conform("soul_set", res, C("soul_set"));
+  test("soul_set: runtime writes are denied without changing stored Soul", async () => {
+    const key = `denied-${randomUUID()}`;
+    const result = await tool("soul_set", { key, value: "runtime-authored" });
+    expect(result.status).toBe(403);
+    expect(result.error).toContain("soul_write_requires_operator");
     const back = await tool("soul_get", { key });
-    expect(back?.value, "soul_set → soul_get round-trip").toBe(value);
+    expect(back?.value).toBeUndefined();
   }, 120_000);
 
   test("flair_workspace_set: drives without error; persists a record attributed to the caller", async () => {

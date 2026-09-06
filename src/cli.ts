@@ -4230,8 +4230,9 @@ program
           console.log("");
           for (const [key, value] of soulEntries) {
             try {
-              await authFetch(httpUrl, agentId, privPath, "PUT", `/Soul/${agentId}:${key}`,
-                { id: `${agentId}:${key}`, agentId, key, value, createdAt: new Date().toISOString() });
+              await api("PUT", `/Soul/${agentId}:${key}`,
+                { id: `${agentId}:${key}`, agentId, key, value, createdAt: new Date().toISOString() },
+                { baseUrl: httpUrl, explicitAdminPass: adminPass, adminUser });
               console.log(`   ✓ soul:${key} set`);
             } catch (err: unknown) {
               const message = err instanceof Error ? err.message : String(err);
@@ -17756,7 +17757,7 @@ relationship.command("add")
   });
 
 const soul = program.command("soul").description("Manage agent soul entries");
-soul.command("set")
+addSharedCredentialOptions(soul.command("set"))
   .description("Set (upsert) a soul entry for an agent by key")
   .requiredOption("--agent <id>")
   .requiredOption("--key <key>")
@@ -17764,6 +17765,7 @@ soul.command("set")
   .option("--durability <d>", "permanent|persistent|standard|ephemeral (default permanent — soul entries are identity, not working memory)")
   .option("--json", "Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)")
   .action(async (opts) => {
+    applyAdminPassFile(opts);
     // PUT /Soul/{agentId:key} (upsert by id), matching flair-client's soul.set().
     // The Soul table resource has no POST handler, so a collection POST /Soul
     // 405s; the record must be written by its primary key. (#498)
@@ -17782,7 +17784,7 @@ soul.command("set")
       value: opts.value,
       durability: opts.durability,
       createdAt: new Date().toISOString(),
-    }, { agentId, agentIdSource: source });
+    }, { agentId, agentIdSource: source, explicitAdminPass: opts.adminPass, adminUser: opts.adminUser });
     const mode = render.resolveOutputMode(opts);
     if (mode === "json") {
       console.log(render.asJSON(out));

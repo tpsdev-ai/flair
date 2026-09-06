@@ -10,9 +10,11 @@ delete (process.env as any).FLAIR_PUBLIC;
 let soulStore: Map<string, any>;
 let candidateStore: any[];
 let memoryStore: any[];
+let lookupFails = false;
 let getBehavior: "ok" | "throw" | "empty" = "ok";
 
 class BaseSoul {
+  async delete(id: string) { soulStore.delete(id); }
   async post(content: any) {
     soulStore.set(content.id ?? "soul", { ...content });
     return content;
@@ -38,6 +40,7 @@ class BaseSoul {
 function search(rows: any[]) {
   return {
     async *[Symbol.asyncIterator]() {
+      if (lookupFails) throw new Error("provenance unavailable");
       for (const row of rows) yield row;
     },
   };
@@ -57,12 +60,12 @@ mock.module("harper", () => ({
 }));
 
 const { Soul } = await import("../../resources/Soul.ts");
-const { ADK_SOUL_REFUSAL } = await import("../../resources/soul-adk-guard.ts");
+const ADK_SOUL_REFUSAL = "soul_value_is_learned_content";
 
 function makeSoul(id?: string) {
   const r: any = new (Soul as any)();
   if (id) r.id = id;
-  r.getContext = () => ({ request: { tpsAgent: "shared-app", tpsAgentIsAdmin: false } });
+  r.getContext = () => ({ request: { tpsAgent: "shared-app", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified-by-middleware" }) } });
   return r;
 }
 
@@ -71,6 +74,7 @@ beforeEach(() => {
   candidateStore = [];
   memoryStore = [];
   getBehavior = "ok";
+  lookupFails = false;
 });
 
 describe("Soul.put refuses ADK-sourced claims", () => {
@@ -155,4 +159,81 @@ describe("Soul.patch refuses ADK-sourced claims", () => {
     expect(await (res as Response).json()).toEqual({ error: "soul_stored_state_unavailable" });
     expect(soulStore.get("shared-app-pref").value).toBe("Be concise.");
   });
+});
+
+
+describe("Soul source allowlist", () => {
+  test("every mutation denies agent, admin-agent, delegated, unknown and anonymous contexts", async () => {
+    const contexts = [
+      { request: { tpsAgent: "shared-app", tpsAgentIsAdmin: false } },
+      { request: { tpsAgent: "shared-app", tpsAgentIsAdmin: true } },
+      { request: { tpsAgent: "shared-app", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Bearer delegated" }) } },
+      { request: { tpsAgent: "shared-app", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "TPS-Ed25519 agent-key" }) } },
+      { request: { tpsAgent: "shared-app", sourceClass: "operator", __flairInternal: true } },
+      {},
+      { request: { tpsAnonymous: true } },
+    ];
+    for (const context of contexts) {
+      for (const method of ["post", "put", "patch", "delete"]) {
+        const original = { id: "soul", agentId: "shared-app", value: "original" };
+        soulStore.set("soul", original);
+        const soul = makeSoul("soul");
+        soul.getContext = () => context;
+        const result = await soul[method](method === "delete" ? "soul" : {
+          id: "soul", agentId: "shared-app", value: "forged", sourceClass: "operator", __flairInternal: true,
+          provenance: JSON.stringify({ verified: { sourceClass: "operator" } }),
+        });
+        expect([401, 403]).toContain(result.status);
+        expect(soulStore.get("soul")).toEqual(original);
+      }
+    }
+  });
+
+  test("operator and deliberate internal writes stamp their actual source, including PATCH", async () => {
+    for (const source of ["operator", "internal"]) {
+      for (const method of ["post", "put", "patch"]) {
+        soulStore.set("soul", { id: "soul", agentId: "shared-app", value: "old" });
+        const soul = makeSoul("soul");
+        if (source === "internal") soul.getContext = () => ({ request: {}, __flairInternal: true });
+        const result = await soul[method]({ id: "soul", agentId: "shared-app", value: "authored", provenance: "forged" });
+        expect(result).not.toBeInstanceOf(Response);
+        const stamp = JSON.parse(soulStore.get("soul").provenance);
+        expect(stamp.verified.sourceClass).toBe(source);
+        expect(stamp.verified.agentId).toBe(source === "operator" ? "shared-app" : null);
+        await soul.delete("soul");
+        expect(soulStore.has("soul")).toBe(false);
+      }
+    }
+  });
+
+  test("untagged learned content for the target owner is refused even with claimed operator provenance", async () => {
+    for (const rows of [candidateStore, memoryStore]) {
+      rows.push({ agentId: "shared-app", claim: "learned", content: "learned", provenance: '{"verified":{"sourceClass":"operator"}}' });
+      for (const method of ["post", "put", "patch"]) {
+        soulStore.set("soul", { id: "soul", agentId: "shared-app", value: "original" });
+        const result = await makeSoul("soul")[method]({ id: "soul", agentId: "shared-app", value: "learned" });
+        expect(result.status).toBe(403);
+        expect(soulStore.get("soul").value).toBe("original");
+      }
+      rows.length = 0;
+    }
+  });
+});
+
+
+test("failed learned-content lookup aborts all content writes", async () => {
+  lookupFails = true;
+  for (const method of ["post", "put", "patch"]) {
+    soulStore.set("soul", { id: "soul", agentId: "shared-app", value: "original" });
+    await expect(makeSoul("soul")[method]({ id: "soul", agentId: "shared-app", value: "replacement" })).rejects.toThrow("provenance unavailable");
+    expect(soulStore.get("soul").value).toBe("original");
+  }
+});
+
+
+test("another agent cannot poison an operator edit by copying its text", async () => {
+  memoryStore.push({ agentId: "other-agent", content: "Operator-authored role" });
+  const result = await makeSoul().put({ id: "soul", agentId: "shared-app", value: "Operator-authored role" });
+  expect(result).not.toBeInstanceOf(Response);
+  expect(soulStore.get("soul").value).toBe("Operator-authored role");
 });

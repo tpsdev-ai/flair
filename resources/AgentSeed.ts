@@ -18,7 +18,8 @@
  */
 
 import { Resource, databases } from "harper";
-import { isAdmin, allowAdmin, invalidateAdminCache } from "./agent-auth.js";
+import { allowAdmin, invalidateAdminCache } from "./agent-auth.js";
+import { authorizeSoulWrite, refuseLearnedSoulWrite, soulProvenance } from "./soul-write-policy.js";
 import { reconcileAdminFields } from "./agent-admin.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
 
@@ -52,11 +53,8 @@ export class AgentSeed extends Resource {
     // undefined and this belt-and-suspenders check fail-closed every request,
     // even from a real admin already verified by allowCreate()).
     const ctx = (this as any).getContext?.();
-    const request = ctx?.request ?? ctx;
-    const actorId = request?.tpsAgent;
-    if (!actorId || !(await isAdmin(actorId))) {
-      return new Response(JSON.stringify({ error: "forbidden: admin only" }), { status: 403 });
-    }
+    const { auth, source, denied } = await authorizeSoulWrite(ctx);
+    if (denied) return denied;
 
     const { agentId, displayName, role = "agent", soulTemplate, starterMemories } = data || {};
     if (!agentId) return new Response(JSON.stringify({ error: "agentId required" }), { status: 400 });
@@ -66,6 +64,14 @@ export class AgentSeed extends Resource {
 
     const now = new Date().toISOString();
     const name = displayName || agentId;
+
+    // Validate the entire caller-controlled template before creating any rows.
+    const defaults = DEFAULT_SOUL_KEYS(agentId, name, role, now);
+    const merged = { ...defaults, ...(soulTemplate || {}) };
+    for (const value of Object.values(merged)) {
+      const refusal = await refuseLearnedSoulWrite({ agentId, value: String(value) });
+      if (refusal) return refusal;
+    }
 
     // ── Agent record ──────────────────────────────────────────────────────────
     const existingAgent = await (databases as any).flair.Agent.get(agentId).catch(() => null);
@@ -83,8 +89,6 @@ export class AgentSeed extends Resource {
     }
 
     // ── Soul entries ──────────────────────────────────────────────────────────
-    const defaults = DEFAULT_SOUL_KEYS(agentId, name, role, now);
-    const merged = { ...defaults, ...(soulTemplate || {}) };
     const soulEntries: any[] = [];
 
     for (const [key, value] of Object.entries(merged)) {
@@ -94,7 +98,7 @@ export class AgentSeed extends Resource {
         soulEntries.push(existing); // skip — don't overwrite existing soul entries
         continue;
       }
-      const entry = { id, agentId, key, value: String(value), durability: "permanent", createdAt: now, updatedAt: now };
+      const entry = { id, agentId, key, value: String(value), provenance: soulProvenance(auth, source!, now), durability: "permanent", createdAt: now, updatedAt: now };
       await (databases as any).flair.Soul.put(entry);
       soulEntries.push(entry);
     }

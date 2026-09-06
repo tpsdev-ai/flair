@@ -298,3 +298,41 @@ The web admin at `/AdminDashboard` provides a UI for managing:
 - **Instance:** federation status, peer connections
 
 Access requires admin-level authentication (Basic auth with the Harper admin password).
+
+## Soul authorship
+
+Soul mutations require verified Harper administrator Basic credentials on the
+REST API, or a deliberate `internalContext()` call inside the server. Agent
+Ed25519 keys, including admin-agent keys, and MCP/OAuth delegation cannot create,
+update, patch or delete Soul. A missing context does not grant Soul authority.
+This distinguishes credential classes; an administrator password is still a
+privileged secret, not proof that a human typed the request. Keep it out of
+agent-runtime environments. The n8n adapter currently uses admin Basic credentials
+and therefore retains operator-level access; it needs separate runtime credentials
+to receive the runtime restriction. Existing verified Soul reads are unchanged.
+
+For an explicit operator edit:
+
+```sh
+flair soul set --agent mybot --key role --value "Security reviewer" --admin-pass-file ~/.flair/admin-pass
+```
+
+`--admin-user` selects a non-default Harper administrator. The server overwrites
+Soul's `provenance` with the authenticated author, timestamp, and verified
+`sourceClass` (`operator` or `internal`); body fields cannot choose that class.
+Operator-authenticated provisioning through `AgentSeed` uses the same rules.
+Federation remains an authenticated instance-to-instance replication path and
+preserves the originating record; it does not reclassify a runtime request as
+an operator edit. Raw Harper OPS access remains administrator infrastructure.
+
+An operator write is refused if its value exactly matches stored Memory or
+MemoryCandidate text for the target agent, including legacy or untagged records.
+The owner-scoped lookup prevents another agent from blocking edits by copying
+known Soul text into its own memories. Learned artifacts are not an operator-authored Soul source;
+claimed or missing provenance does not exempt them. Lookup failure aborts the
+write. This is an exact-match backstop, not semantic detection of paraphrases.
+Existing Soul records remain readable without a migration.
+
+The legacy `adk:` body-tag refusal remains a compatibility backstop. It can be
+removed after all deployed writers enforce this source policy and old instances
+have been upgraded; runtime denial itself never depends on connector names.

@@ -149,6 +149,7 @@ type Soul @table(database: "flair") {
   value: String!
   priority: String              # critical | high | standard | low (skill governance)
   metadata: String              # JSON blob (skill governance: source, version, hash, etc.)
+  provenance: String            # Server-derived operator/internal source class and authenticated author.
   durability: String @indexed
   createdAt: String!
   updatedAt: String
