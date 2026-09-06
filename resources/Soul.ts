@@ -72,11 +72,17 @@ export class Soul extends (databases as any).flair.Soul {
   async patch(content: any, query?: any) {
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
-    const existing = await Promise.resolve(super.get()).catch(() => null);
-    const stored = existing && typeof existing === "object" && !(existing instanceof Response)
-      ? existing
-      : {};
-    const adkDenied = await refuseAdkSourcedSoulWrite({ ...stored, ...content });
+    // Fail-closed, same as Memory's stored-state read: a throw aborts the
+    // write; missing/unreadable stored state cannot authorize a PATCH that
+    // typically omits agentId (that used to skip the ADK value-match).
+    const existing = await super.get();
+    if (!existing || typeof existing !== "object" || existing instanceof Response) {
+      return new Response(JSON.stringify({ error: "soul_stored_state_unavailable" }), {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    const adkDenied = await refuseAdkSourcedSoulWrite({ ...existing, ...content });
     if (adkDenied) return adkDenied;
     return super.patch(content, query);
   }

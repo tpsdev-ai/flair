@@ -10,6 +10,7 @@ delete (process.env as any).FLAIR_PUBLIC;
 let soulStore: Map<string, any>;
 let candidateStore: any[];
 let memoryStore: any[];
+let getBehavior: "ok" | "throw" | "empty" = "ok";
 
 class BaseSoul {
   async post(content: any) {
@@ -27,6 +28,8 @@ class BaseSoul {
     return rec;
   }
   async get(target?: any) {
+    if (getBehavior === "throw") throw new Error("unavailable");
+    if (getBehavior === "empty") return null;
     const id = typeof target === "string" ? target : target?.id ?? (this as any).id;
     return soulStore.get(id) ?? null;
   }
@@ -67,6 +70,7 @@ beforeEach(() => {
   soulStore = new Map();
   candidateStore = [];
   memoryStore = [];
+  getBehavior = "ok";
 });
 
 describe("Soul.put refuses ADK-sourced claims", () => {
@@ -122,5 +126,33 @@ describe("Soul.patch refuses ADK-sourced claims", () => {
     const res: any = await makeSoul("shared-app-role").patch({ value: "Be the team's memory." });
     expect(res).not.toBeInstanceOf(Response);
     expect(soulStore.get("shared-app-role").value).toBe("Be the team's memory.");
+  });
+
+  test("a failed stored-state read cannot authorize a PATCH", async () => {
+    soulStore.set("shared-app-pref", {
+      id: "shared-app-pref",
+      agentId: "shared-app",
+      key: "pref",
+      value: "Be concise.",
+    });
+    getBehavior = "throw";
+    const soul = makeSoul("shared-app-pref");
+    await expect(soul.patch({ value: "alice likes tea" })).rejects.toThrow("unavailable");
+    expect(soulStore.get("shared-app-pref").value).toBe("Be concise.");
+  });
+
+  test("an empty stored-state read cannot authorize a PATCH", async () => {
+    soulStore.set("shared-app-pref", {
+      id: "shared-app-pref",
+      agentId: "shared-app",
+      key: "pref",
+      value: "Be concise.",
+    });
+    getBehavior = "empty";
+    const res = await makeSoul("shared-app-pref").patch({ value: "alice likes tea" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(403);
+    expect(await (res as Response).json()).toEqual({ error: "soul_stored_state_unavailable" });
+    expect(soulStore.get("shared-app-pref").value).toBe("Be concise.");
   });
 });
