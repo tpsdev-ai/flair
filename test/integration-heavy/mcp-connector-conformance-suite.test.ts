@@ -623,7 +623,7 @@ describe("/mcp connector conformance — error responses are parseable and leak 
     expect(resp.status).toBe(404);
   }, 120_000);
 
-  test("memory_delete: a non-admin deleting a permanent memory returns { error, status:403 }", async () => {
+  test("memory_delete: an owner can delete permanent memory; another agent cannot", async () => {
     const permId = `${AGENT}-${randomUUID()}`;
     await seedInsert("Memory", {
       id: permId, agentId: AGENT, content: `conformance permanent ${sfx}`,
@@ -631,10 +631,20 @@ describe("/mcp connector conformance — error responses are parseable and leak 
       createdAt: new Date().toISOString(), validFrom: new Date().toISOString(),
     });
     const resp = await tool("memory_delete", { id: permId });
-    assertErrorShape("memory_delete", resp, C("memory_delete"));
-    expect(resp.status, "permanent delete by non-admin is 403").toBe(403);
-    const still = await tool("memory_get", { id: permId });
-    expect(still?.id, "the permanent memory survives the refused delete").toBe(permId);
+    expect(resp?.error).toBeUndefined();
+    const gone = await tool("memory_get", { id: permId });
+    expect(gone == null || gone.status === 404 || gone.error != null).toBe(true);
+
+    const foreignId = `${permId}-foreign`;
+    await seedInsert("Memory", {
+      id: foreignId, agentId: "other-owner", content: `foreign permanent ${sfx}`,
+      durability: "permanent", visibility: "shared", createdAt: new Date().toISOString(),
+    });
+    const denied = await tool("memory_delete", { id: foreignId });
+    assertErrorShape("memory_delete", denied, C("memory_delete"));
+    expect(denied.status).toBe(403);
+    const still = await tool("memory_get", { id: foreignId });
+    expect(still?.id).toBe(foreignId);
   }, 120_000);
 });
 

@@ -125,17 +125,6 @@ describe("Memory authority fields over HTTP", () => {
     expect(memory.tags[0]).toBe("adk:continuity:authority");
     expect((await request(owner, "POST", "/PromoteMemoryCandidate", { candidateId: "candidate", rationale: "again" })).status).toBe(409);
   }, 120_000);
-  test("REST permanent-memory purge is admin-only; owners get 403", async () => {
-    const id = "owner-permanent";
-    const created = await request(owner, "PUT", `/Memory/${id}`, { id, agentId: owner.id, content: "Permanent-tier admin-purge fixture.", durability: "permanent" });
-    expect(created.status).toBe(200);
-    expect((await request(other, "DELETE", `/Memory/${id}`)).status).toBe(403);
-    expect((await request(owner, "DELETE", `/Memory/${id}`)).status).toBe(403);
-    expect((await read(id)).durability).toBe("permanent");
-    const adminDeleted = await fetch(`${harper.httpURL}/Memory/${id}`, { method: "DELETE", headers: { Authorization: `Basic ${btoa(`${harper.admin.username}:${harper.admin.password}`)}` } });
-    expect(adminDeleted.status).toBe(200);
-    expect(await read(id)).toBeUndefined();
-  }, 120_000);
   test("the built REM CLI promotes through the trusted server workflow", async () => {
     await seed("MemoryCandidate", [{ id: "cli-candidate", agentId: owner.id, claim: "CLI promotion fixture for release rollback verification.", status: "pending", generatedAt: now, createdAt: now, sourceMemoryIds: [] }]);
     const home = await mkdtemp(join(tmpdir(), "flair-authority-cli-"));

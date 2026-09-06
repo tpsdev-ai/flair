@@ -598,28 +598,7 @@ server.http(async (request: any, nextLayer: any) => {
 
     // Memory workflow-field provenance is enforced on parsed resource writes.
 
-    // Memory DELETE: permanent memories are admin-only to purge.
-    //
-    // The OWNERSHIP half of this guard lives in the shared record-ownership
-    // rule above. What remains here is durability: an agent owning a
-    // permanent memory still may not purge it. #1524 does not change that.
-    if (((url.pathname === "/Memory" || url.pathname.startsWith("/Memory/") || url.pathname === "/memory" || url.pathname.startsWith("/memory/"))) &&
-        method === "DELETE") {
-      if (!request.tpsAgentIsAdmin) {
-        try {
-          const pathParts = url.pathname.split("/").filter(Boolean);
-          const memId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
-          if (memId) {
-            const record = await (databases as any).flair.Memory.get(memId);
-            if (record?.durability === "permanent") {
-              return new Response(JSON.stringify({
-                error: "forbidden: only admins can purge permanent memories"
-              }), { status: 403 });
-            }
-          }
-        } catch {}
-      }
-    }
+    // Memory deletion uses the shared stored-owner rule for every tier.
   }
 
   // ── WorkspaceState read guard: agent-scoped reads ───────────────────────────
