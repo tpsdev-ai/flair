@@ -35,6 +35,11 @@ mock.module("harper", () => ({
   server: { http: () => {}, getUser: async () => null },
 }));
 
+mock.module("../../resources/agent-auth.ts", () => ({
+  allowVerified: async () => true,
+  resolveAgentAuth: async () => ({ kind: "agent", agentId: "alice", isAdmin: false }),
+}));
+
 const { FeedMemories } = await import("../../resources/MemoryFeed.ts");
 
 function feed() {
