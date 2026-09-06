@@ -125,15 +125,13 @@ describe("Memory authority fields over HTTP", () => {
     expect(memory.tags[0]).toBe("adk:continuity:authority");
     expect((await request(owner, "POST", "/PromoteMemoryCandidate", { candidateId: "candidate", rationale: "again" })).status).toBe(409);
   }, 120_000);
-  test("REST permanent-memory lifecycle is owner-controlled, with admin override", async () => {
+  test("REST permanent-memory purge is admin-only; owners get 403", async () => {
     const id = "owner-permanent";
-    const created = await request(owner, "PUT", `/Memory/${id}`, { id, agentId: owner.id, content: "Owner-controlled permanent lifecycle fixture.", durability: "permanent" });
+    const created = await request(owner, "PUT", `/Memory/${id}`, { id, agentId: owner.id, content: "Permanent-tier admin-purge fixture.", durability: "permanent" });
     expect(created.status).toBe(200);
     expect((await request(other, "DELETE", `/Memory/${id}`)).status).toBe(403);
+    expect((await request(owner, "DELETE", `/Memory/${id}`)).status).toBe(403);
     expect((await read(id)).durability).toBe("permanent");
-    expect((await request(owner, "DELETE", `/Memory/${id}`)).status).toBe(200);
-    expect(await read(id)).toBeUndefined();
-    await seed("Memory", [{ id, agentId: owner.id, content: "Administrator deletion fixture.", durability: "permanent", createdAt: now }]);
     const adminDeleted = await fetch(`${harper.httpURL}/Memory/${id}`, { method: "DELETE", headers: { Authorization: `Basic ${btoa(`${harper.admin.username}:${harper.admin.password}`)}` } });
     expect(adminDeleted.status).toBe(200);
     expect(await read(id)).toBeUndefined();

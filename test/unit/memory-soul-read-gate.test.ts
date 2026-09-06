@@ -64,6 +64,8 @@ class BaseSoul {
 const databasesMock = {
   flair: {
     Soul: BaseSoul,
+    MemoryCandidate: { search: () => (async function* () {})() },
+    Memory: { search: () => (async function* () {})() },
     Instance: {
       search: () => {
         async function* gen() {

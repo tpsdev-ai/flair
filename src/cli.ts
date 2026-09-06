@@ -9056,9 +9056,8 @@ rem
       }
       // Soul entries are agentId-scoped and cannot carry a per-user scope tag,
       // so an ADK-sourced candidate promoted to Soul is a cross-user leak by
-      // construction — fail closed. (Server-side trust-tier enforcement that
-      // hard-locks the target is the engine slice #1205b; this is the CLI-side
-      // foundation.)
+      // construction — fail closed here and again on Soul.post/put so a
+      // scripted PUT /Soul cannot bypass the CLI.
       if (opts.to === "soul" && (tagDecision as { adkSourced?: boolean }).adkSourced) {
         console.error(
           `Error: candidate ${candidateId} is ADK-sourced (scope tag ${tagDecision.tags[0]}); Soul is agentId-scoped and cannot carry a per-user scope tag — refusing to promote to Soul (would leak across users). Promote ADK-sourced candidates to memory.`,

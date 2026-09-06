@@ -523,7 +523,7 @@ export class Memory extends (databases as any).flair.Memory {
    * allowCreate/allowUpdate/allowDelete are deliberately NOT added here:
    * post()/put()/delete() already self-enforce per-agent ownership inline
    * (resolveAgentAuth + explicit agentId checks in post()/put(), and the
-   * stored-owner check in delete()). Adding allow* on top of that,
+   * stored-owner plus permanent-durability checks in delete()). Adding allow* on top of that,
    * unverified, risks regressing owner writes/deletes on a P0 security fix
    * that is scoped to the read leak — left as-is on purpose.
    */
@@ -1155,14 +1155,28 @@ export class Memory extends (databases as any).flair.Memory {
   async delete(id: any) {
     const auth = await resolveAgentAuth((this as any).getContext?.());
     if (auth.kind === "anonymous") return UNAUTH();
-    // Read stored ownership, not the read-scoped get() response. Enforce here
-    // as well as middleware so MCP/in-process callers have the same policy.
+    // Use super.get(id), NOT this.get(id): the scoped get() 404s for a
+    // non-owner/non-granted id, which would skip durability/ownership checks.
+    // Enforce here as well as middleware so MCP/in-process callers match REST.
     const record = await super.get(id);
+    if (!record) {
+      const gone = await super.delete(id);
+      noteMemoryDelete(id);
+      return gone;
+    }
     if (auth.kind === "agent" && !auth.isAdmin &&
         isForbiddenOwnerMutation(record, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
       return FORBIDDEN("forbidden: cannot delete memory owned by another agent");
     }
-    // Durability controls retention, not the owner's authority to delete.
+    // Permanent-tier purge is admin/internal only. Owners may not delete their
+    // own permanent memories — #1524 left that lifecycle decision open.
+    const privileged = auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin);
+    if (record.durability === "permanent" && !privileged) {
+      return new Response(JSON.stringify({ error: "permanent_memory_cannot_be_deleted_by_non_admin" }), {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
     const deleted = await super.delete(id);
     noteMemoryDelete(id);
     return deleted;

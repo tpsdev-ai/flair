@@ -67,7 +67,7 @@ const RESOURCES_DIR = join(import.meta.dir, "..", "..", "resources");
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 
 type WriterVia = "direct-put" | "direct-update" | "patchRecord" | "alias-source";
-type WriterKind = "strip" | "federation-merge" | "trusted-stamp" | "echo" | "seed" | "single-field";
+type WriterKind = "strip" | "federation-merge" | "trusted-stamp" | "echo" | "seed" | "single-field" | "admin-restate";
 
 interface RawMemoryWriter {
   file: string;
@@ -90,7 +90,7 @@ const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kin
   { file: "resources/MemoryReflect.ts", via: "patchRecord", needle: "lastReflected", kind: "single-field" },
   { file: "resources/migrations/visibility-backfill.ts", via: "alias-source", needle: "visibility: derived", kind: "echo" },
   { file: "resources/migrations/synthetic-test-migration.ts", via: "alias-source", needle: "SYNTHETIC_TARGET_MARKER", kind: "echo" },
-  { file: "resources/MemoryReindex.ts", via: "alias-source", needle: "_reindex: true", kind: "echo" },
+  { file: "resources/MemoryReindex.ts", via: "alias-source", needle: "_reindex: true", kind: "admin-restate" },
 ];
 
 function walkTs(dir: string): string[] {
@@ -148,8 +148,15 @@ function aliasBindsMemory(name: string, lines: string[], writeIdx: number, gette
     const assign = lines[i].match(new RegExp(`(?:const|let)\\s+${name}\\s*(?::[^=]+)?=\\s*(.+)`));
     if (assign) return rhsBindsMemory(continued(lines, i), getters, scope);
   }
+  // Parameter binding: only the parameter's own type/default, never the
+  // whole header/scope. An OrgEvent `table.put` next to a Memory getter
+  // in the same file must not count as a Memory writer.
   const header = continued(lines, start, 6);
-  if (new RegExp(`\\b${name}\\s*(?::|,|\\))`).test(header) && rhsBindsMemory(header, getters, scope)) return true;
+  const param = header.match(new RegExp(`\\b${name}\\s*(?::\\s*([^=),]+))?(?:\\s*=\\s*([^),]+))?`));
+  if (param) {
+    const binding = `${param[1] ?? ""} ${param[2] ?? ""}`;
+    if (rhsBindsMemory(binding, getters, binding)) return true;
+  }
   return false;
 }
 
@@ -244,5 +251,21 @@ describe("raw flair.Memory handle coverage", () => {
     const fed = CLASSIFICATIONS.find((c) => c.file === "resources/Federation.ts");
     expect(feed?.kind).toBe("strip");
     expect(fed?.kind).toBe("federation-merge");
+  });
+
+  test("SemanticSearch hit-tracking needle is lastRetrieved, not lastReflected", () => {
+    const semantic = CLASSIFICATIONS.find((c) => c.file === "resources/SemanticSearch.ts");
+    expect(semantic?.needle).toBe("lastRetrieved");
+    expect(semantic?.via).toBe("patchRecord");
+  });
+
+  test("MemoryReindex raw re-PUT is admin-restate", () => {
+    const reindex = CLASSIFICATIONS.find((c) => c.file === "resources/MemoryReindex.ts");
+    expect(reindex?.kind).toBe("admin-restate");
+    expect(reindex?.needle).toBe("_reindex: true");
+  });
+
+  test("graph-heal OrgEvent ledger put is not a Memory writer", () => {
+    expect(writers.some((w) => w.file.includes("migrations/graph-heal"))).toBe(false);
   });
 });

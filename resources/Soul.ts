@@ -4,6 +4,7 @@ import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { localInstanceId } from "./instance-identity.js";
 import { makeAuthGate, stampAttribution, UNAUTH } from "./record-type-kit.js";
 import { RECORD_TYPES } from "./record-types.js";
+import { refuseAdkSourcedSoulWrite } from "./soul-adk-guard.js";
 
 /**
  * Deny anonymous; enforce per-agent write ownership for non-admin agents.
@@ -46,6 +47,10 @@ export class Soul extends (databases as any).flair.Soul {
   async post(content: any, context?: any) {
     const denied = await enforceWriteAuth(this, content);
     if (denied) return denied;
+    // ADK-sourced claims are per-user; Soul is agentId-scoped. Refuse here
+    // so a scripted PUT/POST cannot bypass the CLI promote check.
+    const adkDenied = await refuseAdkSourcedSoulWrite(content);
+    if (adkDenied) return adkDenied;
     content.durability ||= "permanent";
     content.createdAt = new Date().toISOString();
     content.updatedAt = content.createdAt;
@@ -71,6 +76,8 @@ export class Soul extends (databases as any).flair.Soul {
   async put(content: any, context?: any) {
     const denied = await enforceWriteAuth(this, content);
     if (denied) return denied;
+    const adkDenied = await refuseAdkSourcedSoulWrite(content);
+    if (adkDenied) return adkDenied;
     const ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (ownerDenial) return ownerDenial;
     content.updatedAt = new Date().toISOString();
