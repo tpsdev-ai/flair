@@ -15,3 +15,17 @@ export async function stampMemoryPromotion(id: string, reviewerId: string, decid
   await withDetachedTxn(enumerationContext, () => table.put(row));
   noteMemoryUpsert(row);
 }
+
+/** Stamp after a successful Memory write. Failures must not abort a sweep or
+ * leave a candidate pending (that re-writes the same claim next cycle). */
+export async function stampMemoryPromotionIsolated(
+  id: string, reviewerId: string, decidedAt: string, enumerationContext?: any,
+): Promise<boolean> {
+  try {
+    await stampMemoryPromotion(id, reviewerId, decidedAt, enumerationContext);
+    return true;
+  } catch (err: any) {
+    console.warn(`stampMemoryPromotion failed for ${id}: ${err?.message ?? err}`);
+    return false;
+  }
+}

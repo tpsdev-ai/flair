@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { Memory } from "./Memory.js";
 import { MemoryCandidate } from "./MemoryCandidate.js";
-import { stampMemoryPromotion } from "./promotion-stamp.js";
+import { stampMemoryPromotionIsolated } from "./promotion-stamp.js";
 import { derivePromotedTags, derivePromotedVisibility, validateHumanReviewerId, type SourceMemoryFetch } from "../src/rem/promote-policy.js";
 
 const error = (status: number, message: string) => new Response(JSON.stringify({ error: message }), {
@@ -56,7 +56,7 @@ export class PromoteMemoryCandidate extends Resource {
       derivedFrom: candidate.sourceMemoryIds ?? [], createdAt: decidedAt,
     }, ctx);
     if (written instanceof Response && !written.ok) return written;
-    await stampMemoryPromotion(memoryId, reviewerId, decidedAt);
+    await stampMemoryPromotionIsolated(memoryId, reviewerId, decidedAt);
     await (databases as any).flair.MemoryCandidate.put({
       ...candidate, status: "promoted", target: "memory", reviewerId,
       reviewRationale: data.rationale, decidedAt,

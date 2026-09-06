@@ -1,4 +1,4 @@
-import { stampMemoryPromotion } from "./promotion-stamp.js";
+import { stampMemoryPromotionIsolated } from "./promotion-stamp.js";
 /**
  * POST /AutoPromoteCandidates  (#1205b-2 — the UNATTENDED promotion path)
  *
@@ -196,7 +196,7 @@ export class AutoPromoteCandidates extends Resource {
         continue;
       }
 
-      await stampMemoryPromotion(memId, decision.reviewerId, decidedAt, ctx);
+      await stampMemoryPromotionIsolated(memId, decision.reviewerId, decidedAt, ctx);
 
       // ── Mark the candidate promoted (commit point) ─────────────────────────
       // Ordered AFTER the Memory write, matching the human promote path: the
