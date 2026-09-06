@@ -1,1 +1,1 @@
-- Memory promotion verdicts and reviewer metadata are protected on direct writes. Manual REM memory promotion now uses a server workflow; automatic promotion retains its safety and lineage checks. Update the server before using the new CLI promotion path.
+- Memory promotion verdicts and reviewer metadata are protected on direct writes, including POST /FeedMemories (the raw-table ingest path). Manual REM memory promotion now uses a server workflow; automatic promotion retains its safety and lineage checks. Update the server before using the new CLI promotion path.

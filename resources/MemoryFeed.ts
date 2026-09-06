@@ -2,6 +2,7 @@ import { Resource, databases } from "harper";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 import { computeContentHash, findExistingMemoryByContentHash } from "./memory-feed-lib.js";
 import { FORBIDDEN, UNAUTH, stampAttribution } from "./record-type-kit.js";
+import { guardAuthorityFields, stripAuthorityFields } from "./authority-field-guard.js";
 import { assertValidVisibility, assertVisibilityAllowedForDurability, PRIVATE_VISIBILITY } from "./memory-visibility.js";
 import { assertValidDurability } from "./memory-durability.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
@@ -103,6 +104,23 @@ export class FeedMemories extends Resource {
       }
     }
 
+    // ── Authority-field guard (#1524 leftover) ────────────────────────────
+    // Same raw-table bypass as the durability/visibility block above:
+    // guardAuthorityFields sits on Memory.put/patch/post, not the raw
+    // handle. A verified agent could POST {promotionStatus:"approved"}
+    // here and land a forged verdict. Refuse a body that sets or changes
+    // a stamp, then unconditionally strip before the raw put so even
+    // stamps the guard would restore onto an omitted-field update cannot
+    // ride a feed write (feed ingest is not a promotion-stamp path).
+    {
+      const authorityDenial = await guardAuthorityFields(
+        () => content?.id ? (databases as any).flair.Memory.get(content.id) : undefined,
+        content,
+        "Memory",
+      );
+      if (authorityDenial) return authorityDenial;
+    }
+
     const now = new Date().toISOString();
     const contentHash = computeContentHash(agentId, body);
 
@@ -135,6 +153,7 @@ export class FeedMemories extends Resource {
       record.visibility = PRIVATE_VISIBILITY;
     }
 
+    stripAuthorityFields(record, "Memory");
     await (databases as any).flair.Memory.put(record);
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).
     noteMemoryUpsert(record);

@@ -23,3 +23,13 @@ export async function guardAuthorityFields(
   }
   return null;
 }
+
+/** Drop workflow stamps from a request-origin raw write. Unconditional: even
+ * stamps the guard would restore onto an omitted-field update must not land
+ * through ingest paths that are not a promotion-stamp site. */
+export function stripAuthorityFields(
+  record: Record<string, unknown>,
+  table: keyof typeof AUTHORITY_FIELDS,
+): void {
+  for (const field of AUTHORITY_FIELDS[table]) delete record[field];
+}

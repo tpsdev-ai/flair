@@ -72,6 +72,22 @@ describe("Memory authority fields over HTTP", () => {
     for (const field of ["promotionStatus", "promotedAt", "promotedBy"]) expect(updated[field]).toBe(existing[field]);
     expect((await request(owner, "PUT", "/Memory/stamped", updated)).status).toBe(200);
   }, 120_000);
+  test("POST /FeedMemories cannot land a forged promotion verdict", async () => {
+    const id = "feed-forged-verdict";
+    const response = await request(owner, "POST", "/FeedMemories", {
+      id, agentId: owner.id, content: "feed authority forge fixture",
+      promotionStatus: "approved", promotedAt: now, promotedBy: "forged-reviewer",
+    });
+    expect(response.status).toBe(403);
+    expect(await read(id)).toBeUndefined();
+    const ok = await request(owner, "POST", "/FeedMemories", {
+      id: "feed-clean", agentId: owner.id, content: "ordinary feed write without a verdict",
+    });
+    expect(ok.status, await ok.clone().text()).toBe(200);
+    const stored = await read("feed-clean");
+    expect(stored.content).toBe("ordinary feed write without a verdict");
+    for (const field of ["promotionStatus", "promotedAt", "promotedBy"]) expect(stored[field]).toBeUndefined();
+  }, 120_000);
   test("the review workflow owns content, reviewer identity and verdict", async () => {
     await seed("MemoryCandidate", [{ id: "candidate", agentId: owner.id, claim: "Promotion workflow fixture about release verification.", status: "pending", generatedAt: now, createdAt: now, sourceMemoryIds: [], scopeTag: "adk:continuity:authority", visibilityRuling: "private" }]);
     expect((await request(other, "POST", "/PromoteMemoryCandidate", { candidateId: "candidate", rationale: "reviewed" })).status).toBe(404);
