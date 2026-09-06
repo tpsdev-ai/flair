@@ -1193,20 +1193,28 @@ export class BootstrapMemories extends Resource {
         : [];
 
       if (callerEntities.length === 0) {
-        const ownRows = withDetachedTxn(ctx, () => (databases as any).flair.WorkspaceState.search({
-          conditions: [{ attribute: "agentId", comparator: "equals", value: agentId }],
-          select: ["entities", "timestamp"],
-        }));
-        let latestEntities: string[] = [];
-        let latestTs = "";
-        for await (const row of ownRows as AsyncIterable<any>) {
-          if (!Array.isArray(row.entities) || row.entities.length === 0) continue;
-          if ((row.timestamp || "") > latestTs) {
-            latestTs = row.timestamp || "";
-            latestEntities = row.entities;
+        // Try the indexed collision window before older workspace history;
+        // empty rows must not hide an older entity-bearing row.
+        // Only fall back to older history when the recent window has none.
+        const workspaceSince = new Date(Date.now() - COLLISION_WINDOW_DAYS * 24 * 3600_000).toISOString();
+        for (const comparator of ["greater_than_equal", "less_than"]) {
+          const ownRows = withDetachedTxn(ctx, () => (databases as any).flair.WorkspaceState.search({
+            conditions: [
+              { attribute: "agentId", comparator: "equals", value: agentId },
+              { attribute: "timestamp", comparator, value: workspaceSince },
+            ],
+            select: ["entities", "timestamp"],
+          }));
+          let latestTs = "";
+          for await (const row of ownRows as AsyncIterable<any>) {
+            if (!Array.isArray(row.entities) || row.entities.length === 0) continue;
+            if ((row.timestamp || "") > latestTs) {
+              latestTs = row.timestamp || "";
+              callerEntities = row.entities;
+            }
           }
+          if (callerEntities.length > 0) break;
         }
-        callerEntities = latestEntities;
       }
 
       const entityMatches: EntityMatchInput[] = [];
