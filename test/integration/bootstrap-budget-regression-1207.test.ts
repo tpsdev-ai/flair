@@ -202,3 +202,48 @@ describe("flair#1207 — content-selection budget must not drop the large on-tas
     expect(typeof body.teammateFindingsTruncated, "teammateFindingsTruncated is always present").toBe("number");
   }, 120_000);
 });
+
+
+describe("#1431 — task recall survives oversized pinned context", () => {
+  let instance: HarperInstance;
+  const reader = mkAgent(`t1431-${randomUUID()}`);
+  const tasks = [
+    "Before merging an old pull request, verify the date of its green CI check and rerun against the current base.",
+    "Before restoring a database backup, verify its checksum and practice recovery to an isolated server.",
+  ];
+  beforeAll(async () => {
+    instance = await startHarper();
+    await registerAgent(instance, reader);
+    // Raw fixture pins avoid embedding duplicate boilerplate forty times.
+    const pins = Array.from({ length: 40 }, (_, i) => ({
+      id: `${reader.id}-pin-${i}`, agentId: reader.id,
+      content: "Keep project notes organized and review standing procedures. ".repeat(8),
+      durability: "permanent", createdAt: BACKDATED,
+    }));
+    expect((await adminOp(instance, { operation: "insert", database: "flair", table: "Memory", records: pins })).status).toBe(200);
+    for (let i = 0; i < tasks.length; i++) await putMemory(instance, reader, `${reader.id}-task-${i}`, {
+      agentId: reader.id, content: tasks[i].repeat(5), durability: "standard", createdAt: BACKDATED,
+    });
+  }, 300_000);
+  afterAll(async () => { if (instance) await stopHarper(instance); });
+
+  test("different tasks select different memories within the same tight budget", async () => {
+    for (const includeContext of [false, true]) {
+      const args = { agentId: reader.id, maxTokens: 1500, includeSoul: false, includeContext, includeTrust: true };
+      const baseline = await bootstrap(instance, reader, args);
+      const selections: string[][] = [];
+      for (let i = 0; i < tasks.length; i++) {
+        const result = await bootstrap(instance, reader, { ...args, currentTask: tasks[i] });
+        const ids = result.memories.map((m: any) => m.id);
+        expect(ids).toContain(`${reader.id}-task-${i}`);
+        expect(result.sections.permanent).toBeGreaterThan(0);
+        expect(result.sections.permanent).toBeLessThan(baseline.sections.permanent);
+        expect(result.memoriesIncluded + result.memoriesTruncated).toBeLessThanOrEqual(result.memoriesAvailable);
+        expect(result.memoryTokens + result.trustTokens).toBeLessThanOrEqual(args.maxTokens);
+        selections.push(ids);
+      }
+      expect(selections[0]).not.toEqual(selections[1]);
+      expect(baseline.sections.relevant).toBe(0);
+    }
+  }, 120_000);
+});
