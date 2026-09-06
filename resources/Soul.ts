@@ -4,6 +4,7 @@ import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { localInstanceId } from "./instance-identity.js";
 import { makeAuthGate, stampAttribution, UNAUTH } from "./record-type-kit.js";
 import { RECORD_TYPES } from "./record-types.js";
+import { refuseAdkSourcedSoulWrite } from "./soul-adk-guard.js";
 
 /**
  * Deny anonymous; enforce per-agent write ownership for non-admin agents.
@@ -46,6 +47,10 @@ export class Soul extends (databases as any).flair.Soul {
   async post(content: any, context?: any) {
     const denied = await enforceWriteAuth(this, content);
     if (denied) return denied;
+    // ADK-sourced claims are per-user; Soul is agentId-scoped. Refuse here
+    // so a scripted PUT/POST/PATCH cannot bypass the CLI promote check.
+    const adkDenied = await refuseAdkSourcedSoulWrite(content);
+    if (adkDenied) return adkDenied;
     content.durability ||= "permanent";
     content.createdAt = new Date().toISOString();
     content.updatedAt = content.createdAt;
@@ -62,15 +67,31 @@ export class Soul extends (databases as any).flair.Soul {
 
   // PATCH routes past put() (enforceWriteAuth covers post()/put() only), so
   // agentId immutability is enforced on both verbs via the one shared delegate.
+  // ADK refusal must see the merged row: a typical PATCH omits agentId/tags,
+  // which would skip the value-match backstop if we checked the body alone.
   async patch(content: any, query?: any) {
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
+    // Fail-closed, same as Memory's stored-state read: a throw aborts the
+    // write; missing/unreadable stored state cannot authorize a PATCH that
+    // typically omits agentId (that used to skip the ADK value-match).
+    const existing = await super.get();
+    if (!existing || typeof existing !== "object" || existing instanceof Response) {
+      return new Response(JSON.stringify({ error: "soul_stored_state_unavailable" }), {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    const adkDenied = await refuseAdkSourcedSoulWrite({ ...existing, ...content });
+    if (adkDenied) return adkDenied;
     return super.patch(content, query);
   }
 
   async put(content: any, context?: any) {
     const denied = await enforceWriteAuth(this, content);
     if (denied) return denied;
+    const adkDenied = await refuseAdkSourcedSoulWrite(content);
+    if (adkDenied) return adkDenied;
     const ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (ownerDenial) return ownerDenial;
     content.updatedAt = new Date().toISOString();

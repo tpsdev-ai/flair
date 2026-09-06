@@ -1,6 +1,8 @@
 import { databases } from "harper";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
+import { guardAuthorityFields } from "./authority-field-guard.js";
+import { isForbiddenOwnerMutation } from "./record-owner-guard.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { localInstanceId } from "./instance-identity.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
@@ -521,7 +523,7 @@ export class Memory extends (databases as any).flair.Memory {
    * allowCreate/allowUpdate/allowDelete are deliberately NOT added here:
    * post()/put()/delete() already self-enforce per-agent ownership inline
    * (resolveAgentAuth + explicit agentId checks in post()/put(), and the
-   * isAdmin durability check in delete()). Adding allow* on top of that,
+   * stored-owner plus permanent-durability checks in delete()). Adding allow* on top of that,
    * unverified, risks regressing owner writes/deletes on a P0 security fix
    * that is scoped to the read leak — left as-is on purpose.
    */
@@ -607,6 +609,8 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   async post(content: any, context?: any) {
+    const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
+    if (authorityDenial) return authorityDenial;
     // Rate limiting — use authenticated agent ID, not client-supplied body field
     const ctx = (this as any).getContext?.();
     const authenticatedAgent: string | undefined = ctx?.request?.tpsAgent;
@@ -865,12 +869,16 @@ export class Memory extends (databases as any).flair.Memory {
   // via the one shared delegate. (Admin/internal — including the _reindex
   // path in put() — pass through the delegate untouched.)
   async patch(content: any, query?: any) {
+    const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
+    if (authorityDenial) return authorityDenial;
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
     return super.patch(content, query);
   }
 
   async put(content: any) {
+    const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
+    if (authorityDenial) return authorityDenial;
     const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (__ownerDenial) return __ownerDenial;
     // Reindex migration bypass: admin-only escape hatch used by the
@@ -1103,28 +1111,6 @@ export class Memory extends (databases as any).flair.Memory {
       // archivedBy should be set by the caller (CLI stamps req.tpsAgent via query param)
     }
 
-    // If approving promotion, record timestamp
-    if (content.promotionStatus === "approved" && !content.promotedAt) {
-      content.promotedAt = now;
-    }
-
-    // Upgrade to permanent when approved — the LEGACY in-place approval flow
-    // (an admin marks an EXISTING row approved without naming a tier). NOTE:
-    // the auth-middleware promotionStatus admin-gate this once relied on is
-    // INERT (Harper's middleware Request has no parsed body); promotionStatus
-    // write-provenance is not yet enforced — tracked in flair#1524. An
-    // explicit durability on the SAME write now wins (flair#1257 slice 3):
-    // the candidate-promotion paths (#1205b-2 /AutoPromoteCandidates and the
-    // human `flair rem promote`) write NEW rows carrying promotionStatus:
-    // "approved" purely as an audit stamp ALONGSIDE an explicit durability:
-    // "persistent" — the unconditional coercion here silently lifted every
-    // promoted claim into the never-reaped permanent tier while every audit
-    // surface (CLI output, specs, review rulings) said persistent. A write
-    // that names its tier keeps it; only a tier-less approval still upgrades.
-    if (content.promotionStatus === "approved" && (content.durability === undefined || content.durability === null)) {
-      content.durability = "permanent";
-    }
-
     // Write-time provenance stamp (memory-provenance slice 1) — see
     // buildProvenance's doc above post(). Applies to every put() (fresh
     // create AND update/patch) — never gated on preExisting, so an update
@@ -1167,34 +1153,30 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   async delete(id: any) {
-    // Use super.get(id), NOT this.get(id): the new get() override above 404s
-    // (a truthy Response) for a non-owner/non-granted id, which would
-    // otherwise short-circuit the `record.durability === "permanent"` check
-    // below (a Response has no .durability) and silently bypass the
-    // admin-only permanent-delete guard for cross-agent deletes. This keeps
-    // delete()'s own pre-existing ownership/admin logic exactly as it was
-    // before the read-gate fix — the read-scoping override must not leak
-    // into delete()'s internal record lookup.
+    const auth = await resolveAgentAuth((this as any).getContext?.());
+    if (auth.kind === "anonymous") return UNAUTH();
+    // Use super.get(id), NOT this.get(id): the scoped get() 404s for a
+    // non-owner/non-granted id, which would skip durability/ownership checks.
+    // Enforce here as well as middleware so MCP/in-process callers match REST.
     const record = await super.get(id);
     if (!record) {
       const gone = await super.delete(id);
       noteMemoryDelete(id);
       return gone;
     }
-
-    if (record.durability === "permanent") {
-      // Middleware already guards this for non-admins, but belt-and-suspenders
-      const ctx = (this as any).getContext?.();
-      const request = ctx?.request ?? ctx;
-      const actorId = request?.tpsAgent;
-      if (actorId && !(await isAdmin(actorId))) {
-        return new Response(JSON.stringify({ error: "permanent_memory_cannot_be_deleted_by_non_admin" }), {
-          status: 403,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
+    if (auth.kind === "agent" && !auth.isAdmin &&
+        isForbiddenOwnerMutation(record, RECORD_TYPES.Memory.ownerField, auth.agentId)) {
+      return FORBIDDEN("forbidden: cannot delete memory owned by another agent");
     }
-
+    // Permanent-tier purge is admin/internal only. Owners may not delete their
+    // own permanent memories — #1524 left that lifecycle decision open.
+    const privileged = auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin);
+    if (record.durability === "permanent" && !privileged) {
+      return new Response(JSON.stringify({ error: "permanent_memory_cannot_be_deleted_by_non_admin" }), {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
     const deleted = await super.delete(id);
     noteMemoryDelete(id);
     return deleted;

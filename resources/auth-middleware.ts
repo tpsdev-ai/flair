@@ -596,41 +596,13 @@ server.http(async (request: any, nextLayer: any) => {
       }
     }
 
-    // Memory promotion guard: only admin can approve or set durability=permanent
-    if (((url.pathname === "/Memory" || url.pathname.startsWith("/Memory/") || url.pathname === "/memory" || url.pathname.startsWith("/memory/"))) &&
-        (method === "PUT" || method === "POST" || method === "PATCH")) {
-      if (!request.tpsAgentIsAdmin) {
-        try {
-          // NOTE: dead code — Harper's middleware Request has no parsed body
-          // (no .clone()/.json()), so this body-check never fires; not live
-          // coverage. Per-field status: `durability` and `archived` are
-          // intentionally owner-settable per current contracts (MCP exposes
-          // durability; the archive action is user-facing) — no enforcement is
-          // owed here. `promotionStatus` write-provenance is NOT yet enforced at
-          // the resource layer; that hardening + the permanent-durability policy
-          // question are tracked in tpsdev-ai/flair#1524. Kept (not removed) so
-          // the removal is one reviewed cleanup once #1524 lands.
-          const clone = request.clone();
-          const body = await clone.json();
-          const setsApproved = body?.promotionStatus === "approved";
-          const setsPermanent = body?.durability === "permanent";
-          const setsArchived = body?.archived === true;
-          if (setsApproved || setsPermanent || setsArchived) {
-            return new Response(JSON.stringify({
-              error: "forbidden: only admins can approve promotions, set permanent durability, or archive memories"
-            }), { status: 403 });
-          }
-        } catch {}
-      }
-    }
+    // Memory workflow-field provenance is enforced on parsed resource writes.
 
     // Memory DELETE: permanent memories are admin-only to purge.
     //
-    // The OWNERSHIP half of this guard — which was the model the shared
-    // record-ownership rule above was built from, and the only one in this file
-    // that already covered PATCH — now lives there and covers every table. What
-    // remains here is the part that is NOT about ownership: durability. An agent
-    // owning a permanent memory still may not purge it.
+    // The OWNERSHIP half of this guard lives in the shared record-ownership
+    // rule above. What remains here is durability: an agent owning a
+    // permanent memory still may not purge it. #1524 does not change that.
     if (((url.pathname === "/Memory" || url.pathname.startsWith("/Memory/") || url.pathname === "/memory" || url.pathname.startsWith("/memory/"))) &&
         method === "DELETE") {
       if (!request.tpsAgentIsAdmin) {
