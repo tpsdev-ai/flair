@@ -1300,7 +1300,14 @@ export class BootstrapMemories extends Resource {
       const eventSinceStr = eventSince.toISOString();
       const eventResults: any[] = [];
 
-      for await (const event of (databases as any).flair.OrgEvent.search()) {
+      // Seek the indexed lookback window before materializing events. Keep detail
+      // for no-op suppression/dedup even when the response omits it. No limit here:
+      // expiry, targeting, dedup and budget admission must run before the cap.
+      const recentEvents = withDetachedTxn(ctx, () => (databases as any).flair.OrgEvent.search({
+        conditions: [{ attribute: "createdAt", comparator: "greater_than_equal", value: eventSinceStr }],
+        select: ["id", "kind", "summary", "detail", "targetIds", "createdAt", "expiresAt", "scope"],
+      }));
+      for await (const event of recentEvents as AsyncIterable<any>) {
         if (!event.createdAt || event.createdAt < eventSinceStr) continue;
         if (event.expiresAt && new Date(event.expiresAt) < new Date()) continue;
         const targets = event.targetIds;
