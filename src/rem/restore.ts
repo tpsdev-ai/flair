@@ -7,8 +7,10 @@
  *
  * Approach: client-side. The CLI sequentially calls existing `/Memory` and
  * `/Soul` endpoints (DELETE current rows for the agent, PUT snapshot rows).
- * No new server endpoint — keeps the auth surface unchanged and avoids the
- * Harper body-size limit on uploading large memory exports inline.
+ * Soul DELETE/PUT must use `soulApiCall` (operator Basic / deliberate
+ * internal). Snapshot souls carry `agentId`, so a bare `apiCall` signs as
+ * that agent and the source gate 403s. Souls are PUT before memories so
+ * restored identity is not refused as learned content.
  *
  * Reversibility-of-restore guarantee: before any destructive op, this
  * module creates a pre-restore snapshot of the CURRENT state. If something
@@ -31,6 +33,12 @@ export interface RestoreOpts {
   snapshotPath: string;
   flairVersion: string;
   apiCall: ApiCall;
+  /**
+   * Operator/internal caller for Soul DELETE/PUT. Required in production:
+   * `apiCall` extracts `agentId` from snapshot rows and signs as that agent.
+   * Tests may omit it and reuse `apiCall`.
+   */
+  soulApiCall?: ApiCall;
   /** Override snapshot root used for the pre-restore snapshot. */
   preRestoreSnapshotRoot?: string;
   /** When true, plan and report what would happen — no API mutations. */
@@ -92,6 +100,10 @@ function asArray(raw: unknown): any[] {
   return [];
 }
 
+function soulWrite(opts: RestoreOpts): ApiCall {
+  return opts.soulApiCall ?? opts.apiCall;
+}
+
 function parseJsonlSafe(text: string): any[] {
   if (!text.trim()) return [];
   return text
@@ -110,7 +122,7 @@ function parseJsonlSafe(text: string): any[] {
  *      cross-agent restore — the file might have been hand-copied).
  *   4. Create a pre-restore snapshot of current state (skip in dry-run).
  *   5. Fetch + delete current memories/souls for the agent (skip in dry-run).
- *   6. PUT snapshot memories/souls back into Harper (skip in dry-run).
+ *   6. PUT snapshot souls, then memories (skip in dry-run).
  *   7. Return counts.
  *
  * On any error after step 4: the result reports `status: "failed"` with
@@ -242,14 +254,25 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   for (const s of currentSouls) {
     if (!s?.id) continue;
     try {
-      await opts.apiCall("DELETE", `/Soul/${encodeURIComponent(String(s.id))}`);
+      await soulWrite(opts)("DELETE", `/Soul/${encodeURIComponent(String(s.id))}`);
       result.deleted.souls++;
     } catch (err: any) {
       errors.push(`delete-soul ${s.id}: ${err?.message ?? String(err)}`);
     }
   }
 
-  // 6. PUT snapshot rows.
+  // 6. PUT snapshot rows. Souls first: refuseLearnedSoulWrite matches the
+  // target agent's Memory text, so memories-then-souls 403s a previously
+  // valid snapshot even with operator credentials.
+  for (const s of souls) {
+    if (!s?.id) continue;
+    try {
+      await soulWrite(opts)("PUT", `/Soul/${encodeURIComponent(String(s.id))}`, s);
+      result.restored.souls++;
+    } catch (err: any) {
+      errors.push(`put-soul ${s.id}: ${err?.message ?? String(err)}`);
+    }
+  }
   for (const m of memories) {
     if (!m?.id) continue;
     try {
@@ -257,15 +280,6 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
       result.restored.memories++;
     } catch (err: any) {
       errors.push(`put-memory ${m.id}: ${err?.message ?? String(err)}`);
-    }
-  }
-  for (const s of souls) {
-    if (!s?.id) continue;
-    try {
-      await opts.apiCall("PUT", `/Soul/${encodeURIComponent(String(s.id))}`, s);
-      result.restored.souls++;
-    } catch (err: any) {
-      errors.push(`put-soul ${s.id}: ${err?.message ?? String(err)}`);
     }
   }
 

@@ -128,6 +128,19 @@ describe("Soul source authorization over HTTP", () => {
     expect((await read("replica")).provenance).toBe(authored.provenance);
   }, 120_000);
 
+  test("operator restore must write souls before memories when identity text matches", async () => {
+    const value = "Restored identity that also exists as a memory";
+    const soulId = "restore-order-soul";
+    expect((await operator("PUT", `/Soul/${soulId}`, entry(soulId, value))).status).toBeLessThan(300);
+    await seed("Memory", [{ id: "restore-order-mem", agentId: owner.id, content: value, createdAt: now }]);
+    expect((await read(soulId)).value).toBe(value);
+    expect((await operator("DELETE", `/Soul/${soulId}`)).status).toBeLessThan(300);
+    expect((await operator("PUT", `/Soul/${soulId}`, entry(soulId, value))).status).toBe(403);
+    await op({ operation: "delete", database: "flair", table: "Memory", ids: ["restore-order-mem"] });
+    expect((await operator("PUT", `/Soul/${soulId}`, entry(soulId, value))).status).toBeLessThan(300);
+    expect((await read(soulId)).value).toBe(value);
+  });
+
   test("array bodies cannot bypass the learned-content check", async () => {
     await seed("Memory", [{ id: "array-source", agentId: owner.id, content: "Array laundering probe", createdAt: now }]);
     const response = await operator("POST", "/Soul/", [entry("array-target", "Array laundering probe")]);

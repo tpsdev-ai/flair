@@ -9375,8 +9375,7 @@ remSnapshot
 // The <date> argument is an ISO-timestamp prefix or date-only prefix; the
 // command picks the latest snapshot matching that prefix.
 
-rem
-  .command("restore <date>")
+addSharedCredentialOptions(rem.command("restore <date>"))
   .description("Restore from a REM snapshot (inspect by default; --apply rewinds Harper state)")
   .option("--agent <id>", "Agent id (or FLAIR_AGENT_ID env)")
   .option("--target <dir>", "Directory to extract into (default: <snapshot>.restored, only used without --apply)")
@@ -9413,12 +9412,27 @@ rem
     // --apply path: live replay via src/rem/restore.ts
     if (opts.apply) {
       const { applySnapshot } = await import("./rem/restore.js");
+      applyAdminPassFile(opts);
+      const restoreBase = process.env.FLAIR_URL || `http://127.0.0.1:${resolveHttpPort({})}`;
+      const adminPass = opts.dryRun ? undefined : resolveLocalAdminPass(opts.adminPass, !isLocalBase(restoreBase));
+      if (!opts.dryRun && !adminPass) {
+        console.error(
+          "Error: --admin-pass, --admin-pass-file, or FLAIR_ADMIN_PASS required for rem restore --apply " +
+            "(Soul rewrite is operator-only; an agent key is refused).",
+        );
+        process.exit(1);
+      }
+      const soulApiCall = adminPass
+        ? (method: string, path: string, body?: unknown) =>
+            api(method, path, body, { explicitAdminPass: adminPass, adminUser: opts.adminUser, agentId: null })
+        : undefined;
       try {
         const result = await applySnapshot({
           agentId,
           snapshotPath: match.path,
           flairVersion: __pkgVersion,
           apiCall: api,
+          soulApiCall,
           dryRun: !!opts.dryRun,
         });
         const verb = opts.dryRun ? "(dry-run) would" : "";
@@ -18699,19 +18713,7 @@ program
       }
     }
 
-    // Restore memories
-    console.log("Restoring memories...");
-    let memoryCount = 0;
-    for (const memory of memories) {
-      try {
-        await adminPut(`/Memory/${memory.id}`, memory);
-        memoryCount++;
-      } catch (err: any) {
-        console.warn(`  warn: memory ${memory.id}: ${err.message}`);
-      }
-    }
-
-    // Restore souls
+    // Restore souls before memories: refuseLearnedSoulWrite matches Memory text.
     console.log("Restoring souls...");
     let soulCount = 0;
     for (const soul of souls) {
@@ -18720,6 +18722,17 @@ program
         soulCount++;
       } catch (err: any) {
         console.warn(`  warn: soul ${soul.id}: ${err.message}`);
+      }
+    }
+
+    console.log("Restoring memories...");
+    let memoryCount = 0;
+    for (const memory of memories) {
+      try {
+        await adminPut(`/Memory/${memory.id}`, memory);
+        memoryCount++;
+      } catch (err: any) {
+        console.warn(`  warn: memory ${memory.id}: ${err.message}`);
       }
     }
 
@@ -18898,21 +18911,8 @@ program
         : `  Agent registered`,
     );
 
-    // Restore memories
+    // Restore souls before memories: refuseLearnedSoulWrite matches Memory text.
     const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
-    let memCount = 0;
-    for (const mem of data.memories ?? []) {
-      try {
-        await fetch(`${baseUrl}/Memory/${mem.id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", Authorization: auth },
-          body: JSON.stringify(mem),
-        });
-        memCount++;
-      } catch { /* skip failures */ }
-    }
-
-    // Restore souls
     let soulCount = 0;
     for (const soul of data.souls ?? []) {
       try {
@@ -18922,6 +18922,18 @@ program
           body: JSON.stringify(soul),
         });
         soulCount++;
+      } catch { /* skip failures */ }
+    }
+
+    let memCount = 0;
+    for (const mem of data.memories ?? []) {
+      try {
+        await fetch(`${baseUrl}/Memory/${mem.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: JSON.stringify(mem),
+        });
+        memCount++;
       } catch { /* skip failures */ }
     }
 

@@ -315,6 +315,7 @@ For an explicit operator edit:
 
 ```sh
 flair soul set --agent mybot --key role --value "Security reviewer" --admin-pass-file ~/.flair/admin-pass
+flair rem restore <date> --agent mybot --apply --admin-pass-file ~/.flair/admin-pass
 ```
 
 `--admin-user` selects a non-default Harper administrator. The server overwrites

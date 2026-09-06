@@ -246,11 +246,48 @@ describe("applySnapshot — real restore", () => {
     expect(r.verified!.extraMemoryIds).toEqual([]);
     expect(r.verified!.extraSoulIds).toEqual([]);
 
-    // Call ordering: pre-restore GETs, DELETEs (2 mem + 1 soul), PUTs (2 mem + 1 soul), post-restore verify GETs.
+    // Call ordering: pre-restore GETs, DELETEs (2 mem + 1 soul), PUTs (1 soul then 2 mem), post-restore verify GETs.
     const writes = calls.filter((c) => c.method === "DELETE" || c.method === "PUT");
     expect(writes.length).toBe(6);
     expect(writes.slice(0, 3).every((c) => c.method === "DELETE")).toBe(true);
     expect(writes.slice(3).every((c) => c.method === "PUT")).toBe(true);
+    const puts = writes.filter((c) => c.method === "PUT");
+    expect(puts[0].path.startsWith("/Soul/")).toBe(true);
+    expect(puts.slice(1).every((c) => c.path.startsWith("/Memory/"))).toBe(true);
+  });
+
+  it("routes Soul DELETE/PUT through soulApiCall, not the agent-signed apiCall", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const { api } = statefulApi({
+      memories: [{ id: "old-1", agentId: "test-agent" }],
+      souls: [{ id: "current-soul", agentId: "test-agent" }],
+    });
+    const soulCalls: Array<{ method: string; path: string }> = [];
+    const agentWrites: Array<{ method: string; path: string }> = [];
+    const soulApi: ApiCall = async (method, path, body) => {
+      soulCalls.push({ method, path });
+      return api(method, path, body);
+    };
+    const agentApi: ApiCall = async (method, path, body) => {
+      if (method === "DELETE" || method === "PUT") agentWrites.push({ method, path });
+      return api(method, path, body);
+    };
+
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: agentApi,
+      soulApiCall: soulApi,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+
+    expect(r.status).toBe("completed");
+    expect(soulCalls.some((c) => c.method === "DELETE" && c.path.startsWith("/Soul/"))).toBe(true);
+    expect(soulCalls.some((c) => c.method === "PUT" && c.path.startsWith("/Soul/"))).toBe(true);
+    expect(soulCalls.every((c) => c.path.startsWith("/Soul/"))).toBe(true);
+    expect(agentWrites.every((c) => !c.path.startsWith("/Soul/"))).toBe(true);
   });
 
   it("preRestoreSnapshotPath contains current state for rollback", async () => {
