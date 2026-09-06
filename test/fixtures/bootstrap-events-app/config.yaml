@@ -1,0 +1,6 @@
+name: bootstrap-events-app
+rest: true
+'@tpsdev-ai/flair':
+  package: '@tpsdev-ai/flair'
+jsResource:
+  files: resources/*.js
