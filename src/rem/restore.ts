@@ -106,6 +106,16 @@ function soulWrite(opts: RestoreOpts): ApiCall {
   return opts.soulApiCall ?? opts.apiCall;
 }
 
+async function listAgentCandidates(apiCall: ApiCall, agentId: string): Promise<any[]> {
+  return asArray(await apiCall("POST", "/MemoryCandidate/search_by_conditions", {
+    operator: "and",
+    conditions: [
+      { search_attribute: "agentId", search_type: "equals", search_value: agentId },
+    ],
+    get_attributes: ["id", "claim"],
+  }));
+}
+
 function parseJsonlSafe(text: string): any[] {
   if (!text.trim()) return [];
   return text
@@ -201,12 +211,15 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
 
   if (opts.dryRun) {
     // In dry-run, report planned counts. Still fetch current state for
-    // accurate deleted-counts reporting.
+    // accurate deleted-counts reporting, including leftover candidates
+    // that --apply will wipe before Soul PUT.
     try {
       const currentMem = asArray(await opts.apiCall("GET", `/Memory?agentId=${encodeURIComponent(opts.agentId)}`));
       const currentSouls = asArray(await opts.apiCall("GET", `/Soul?agentId=${encodeURIComponent(opts.agentId)}`));
+      const currentCandidates = await listAgentCandidates(opts.apiCall, opts.agentId);
       result.deleted.memories = currentMem.length;
       result.deleted.souls = currentSouls.length;
+      result.deleted.candidates = currentCandidates.length;
       result.restored.memories = memories.length;
       result.restored.souls = souls.length;
       result.status = "dry-run";
@@ -248,13 +261,7 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   // so a leftover row 403s Soul PUT after operator auth succeeds.
   let currentCandidates: any[] = [];
   try {
-    currentCandidates = asArray(await opts.apiCall("POST", "/MemoryCandidate/search_by_conditions", {
-      operator: "and",
-      conditions: [
-        { search_attribute: "agentId", search_type: "equals", search_value: opts.agentId },
-      ],
-      get_attributes: ["id", "claim"],
-    }));
+    currentCandidates = await listAgentCandidates(opts.apiCall, opts.agentId);
   } catch (err: any) {
     errors.push(`fetch-candidates: ${err?.message ?? String(err)}`);
   }

@@ -129,6 +129,10 @@ describe("applySnapshot — dry-run", () => {
     const { api, calls } = recordingApi({
       "GET:/Memory": () => current,
       "GET:/Soul": () => [{ id: "current-soul", agentId: "test-agent" }],
+      "POST:/MemoryCandidate": () => [
+        { id: "cand-1", agentId: "test-agent", claim: "leftover claim" },
+        { id: "cand-2", agentId: "test-agent", claim: "another claim" },
+      ],
     });
     const r = await applySnapshot({
       agentId: "test-agent",
@@ -142,12 +146,13 @@ describe("applySnapshot — dry-run", () => {
     expect(r.status).toBe("dry-run");
     expect(r.deleted.memories).toBe(2);
     expect(r.deleted.souls).toBe(1);
+    expect(r.deleted.candidates).toBe(2);
     expect(r.restored.memories).toBe(2);
     expect(r.restored.souls).toBe(1);
     expect(r.preRestoreSnapshotPath).toBeUndefined();
     expect(r.errors).toEqual([]);
 
-    // Only GETs happened.
+    expect(calls.some((c) => c.method === "POST" && c.path === "/MemoryCandidate/search_by_conditions")).toBe(true);
     const writes = calls.filter((c) => c.method === "DELETE" || c.method === "PUT");
     expect(writes).toEqual([]);
   });
