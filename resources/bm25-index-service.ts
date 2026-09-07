@@ -128,7 +128,7 @@ function record(ev: PendingEvent): void {
 
 /** Read-your-write hook: call immediately after a committed Memory write that
  *  changed content or any scope/temporal attribute. Safe to call for writes
- *  that changed neither (it is an idempotent re-index of one row). */
+ *  that changed neither (an unchanged indexed projection is ignored). */
 export function noteMemoryUpsert(row: any): void {
   const r = project(row);
   if (r) record({ kind: "upsert", record: r });

@@ -100,6 +100,13 @@ export const TEMPORAL_ATTRS = ["createdAt", "expiresAt", "validFrom", "validTo"]
 /** The `select` a corpus scan needs in order to feed this index. */
 export const INDEX_SELECT: string[] = ["id", "content", ...SUPPORTED_SCOPE_ATTRS, ...TEMPORAL_ATTRS];
 
+// Bound exact-body retention independently of corpus size. Oversized bodies
+// and evicted entries use the existing re-tokenization path, never a hash.
+const MAX_CACHED_BODIES = 1024;
+const MAX_CACHED_BODY_CHARS = 512 * 1024;
+
+const INDEX_META_ATTRS = [...SUPPORTED_SCOPE_ATTRS, ...TEMPORAL_ATTRS];
+
 const SUPPORTED_ATTR_SET: ReadonlySet<string> = new Set<string>(SUPPORTED_SCOPE_ATTRS);
 
 /** A record as handed to the index — a projected Memory row. */
@@ -107,6 +114,17 @@ export interface IndexRecord {
   id: string;
   content?: string;
   [attr: string]: any;
+}
+
+// Indexed metadata consists of scalars and arrays of scalars. Unknown object
+// shapes never qualify for the fast path. Arrays are copied on admission so a
+// caller reusing and mutating its record cannot change the comparison snapshot.
+function sameIndexValue(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((v, i) =>
+      (v === null || typeof v !== "object") && v === b[i]);
+  }
+  return (a === null || typeof a !== "object") && a === b;
 }
 
 // ─── Per-document slot ──────────────────────────────────────────────────────
@@ -267,6 +285,26 @@ export class Bm25Index {
   /** Slots retired by the sweep — removed from the aggregates. */
   private retired = new Set<number>();
 
+  private cachedBodies = new Map<string, string>();
+  private cachedBodyChars = 0;
+
+  private forgetBody(id: string): void {
+    const content = this.cachedBodies.get(id);
+    if (content === undefined) return;
+    this.cachedBodyChars -= content.length;
+    this.cachedBodies.delete(id);
+  }
+
+  private rememberBody(id: string, content: string): void {
+    this.forgetBody(id);
+    if (content.length > MAX_CACHED_BODY_CHARS) return;
+    while (this.cachedBodies.size >= MAX_CACHED_BODIES || this.cachedBodyChars + content.length > MAX_CACHED_BODY_CHARS) {
+      this.forgetBody(this.cachedBodies.keys().next().value!);
+    }
+    this.cachedBodies.set(id, content);
+    this.cachedBodyChars += content.length;
+  }
+
   get size(): number { return this.slotOf.size; }
   /** Live postings, for the memory-footprint assertions in the tests. */
   get postingCount(): number { return this.totalPostings - this.deadPostings; }
@@ -275,6 +313,8 @@ export class Bm25Index {
   has(id: string): boolean { return this.slotOf.has(id); }
 
   clear(): void {
+    this.cachedBodies.clear();
+    this.cachedBodyChars = 0;
     this.slots = [];
     this.slotOf.clear();
     this.freeSlots = [];
@@ -291,26 +331,29 @@ export class Bm25Index {
 
   // ─── Maintenance ──────────────────────────────────────────────────────────
 
-  /**
-   * Add or replace a document. Deliberately NOT "diff the content and patch
-   * the postings": an upsert always tombstones the old slot and appends a new
-   * one. Detecting an unchanged body would need a content fingerprint, and a
-   * fingerprint collision is a silently-wrong lexical index — the one failure
-   * mode this index may not have. The cost is a dead posting run per update,
-   * reclaimed by `compact()` below at O(1) amortized.
-   */
+  /** Ignore writes whose complete indexed projection is unchanged. Relevant
+   *  changes still replace the slot, preserving aggregate and expiry handling. */
   upsert(record: IndexRecord): void {
     const id = record?.id;
     if (typeof id !== "string" || id.length === 0) return;
+    const content = record.content || "";
+    const previousSlot = this.slotOf.get(id);
+    const previous = previousSlot === undefined ? null : this.slots[previousSlot];
+    if (previous && this.cachedBodies.get(id) === content &&
+        INDEX_META_ATTRS.every((attr) =>
+          (attr in previous.meta) === (attr in record) && sameIndexValue(previous.meta[attr], record[attr]))) {
+      this.rememberBody(id, content);
+      return;
+    }
     this.remove(id);
 
-    const tokens = tokenize(record.content || "");
+    const tokens = tokenize(content);
     const tf = new Map<string, number>();
     for (const t of tokens) tf.set(t, (tf.get(t) || 0) + 1);
 
     const meta: IndexRecord = { id };
-    for (const attr of SUPPORTED_SCOPE_ATTRS) if (attr in record) meta[attr] = record[attr];
-    for (const attr of TEMPORAL_ATTRS) if (attr in record) meta[attr] = record[attr];
+    for (const attr of SUPPORTED_SCOPE_ATTRS) if (attr in record) meta[attr] = Array.isArray(record[attr]) ? record[attr].slice() : record[attr];
+    for (const attr of TEMPORAL_ATTRS) if (attr in record) meta[attr] = Array.isArray(record[attr]) ? record[attr].slice() : record[attr];
 
     const slot = this.freeSlots.length > 0 ? this.freeSlots.pop()! : this.slots.length;
     const entry: Slot = {
@@ -323,6 +366,7 @@ export class Bm25Index {
     };
     this.slots[slot] = entry;
     this.slotOf.set(id, slot);
+    this.rememberBody(id, content);
 
     for (const [term, count] of tf) {
       let p = this.postings.get(term);
@@ -346,6 +390,7 @@ export class Bm25Index {
     if (slot === undefined) return;
     const entry = this.slots[slot];
     this.slotOf.delete(id);
+    this.forgetBody(id);
     this.slots[slot] = null;
     if (entry) {
       if (!this.retired.delete(slot)) this.removeFromAggregates(entry);
