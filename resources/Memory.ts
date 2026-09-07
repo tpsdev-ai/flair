@@ -12,7 +12,7 @@ import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveAllowedOwners } from "./memory-read-scope.js";
 import { assertValidVisibility, assertVisibilityAllowedForDurability } from "./memory-visibility.js";
 import { assertValidDurability } from "./memory-durability.js";
-import { enforceSkillDurability, skillEmbedText, skillScanGate } from "./skill-write.js";
+import { enforceSkillDurability, rejectSkillWritePath, skillEmbedText, skillScanGate } from "./skill-write.js";
 import {
   DEDUP_COSINE_THRESHOLD_DEFAULT,
   DEDUP_LEXICAL_THRESHOLD_DEFAULT,
@@ -903,6 +903,13 @@ export class Memory extends (databases as any).flair.Memory {
     if (authorityDenial) return authorityDenial;
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
+    // ── flair#1542: reject skill-tagged patches ──
+    // patch() routes past put() (and thus past the SkillScan gate + forced
+    // durability), so a skill-tagged patch would land unscanned. Skills are
+    // written via skill_store (→ Memory.post) or Memory.put — reject here
+    // (no memory_patch tool exists, so nothing breaks).
+    const skillDenial = rejectSkillWritePath(content);
+    if (skillDenial) return skillDenial;
     return super.patch(content, query);
   }
 

@@ -5,6 +5,7 @@ import { FORBIDDEN, UNAUTH, stampAttribution } from "./record-type-kit.js";
 import { guardAuthorityFields, stripAuthorityFields } from "./authority-field-guard.js";
 import { assertValidVisibility, assertVisibilityAllowedForDurability, PRIVATE_VISIBILITY } from "./memory-visibility.js";
 import { assertValidDurability } from "./memory-durability.js";
+import { enforceSkillDurability, skillScanGate } from "./skill-write.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
 
 export class FeedMemories extends Resource {
@@ -61,6 +62,19 @@ export class FeedMemories extends Resource {
         status: 400,
         headers: { "Content-Type": "application/json" },
       });
+    }
+
+    // ── flair#1542: skill-tagged writes are gated (SkillScan + forced durability) ──
+    // This endpoint writes via the RAW table object below — NOT Memory.post()/
+    // put() — so a caller could spread tags:["skill"] + trigger into the raw
+    // put and land an unscanned, 30-day-reapable (durability=standard) skill.
+    // Run the SAME gate Memory.post() runs, BEFORE the durability default is
+    // computed so a forced "persistent" flows into the tier rule below.
+    {
+      const skillScanDenial = skillScanGate(content);
+      if (skillScanDenial) return skillScanDenial;
+      const skillDurabilityDenial = enforceSkillDurability(content);
+      if (skillDurabilityDenial) return skillDurabilityDenial;
     }
 
     // ── Write-side durability/visibility validation (#1009/#1238/#1257) ─────

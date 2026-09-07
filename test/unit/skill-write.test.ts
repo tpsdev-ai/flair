@@ -4,6 +4,7 @@ import {
   isSkillWrite,
   skillEmbedText,
   enforceSkillDurability,
+  rejectSkillWritePath,
   skillScanGate,
 } from "../../resources/skill-write.ts";
 
@@ -69,6 +70,20 @@ describe("enforceSkillDurability", () => {
       const body = await res!.json();
       expect(body.error).toBe("skill_durability");
     }
+  });
+});
+
+describe("rejectSkillWritePath", () => {
+  test("non-skill rows are a no-op (null)", () => {
+    expect(rejectSkillWritePath({ content: "hello" })).toBeNull();
+    expect(rejectSkillWritePath({ tags: ["lesson"], content: "hello" })).toBeNull();
+  });
+  test("skill-tagged rows are rejected (400 skill_write_path)", async () => {
+    const res = rejectSkillWritePath({ tags: ["skill"], trigger: "when to use", content: "procedure" });
+    expect(res).not.toBeNull();
+    expect(res!.status).toBe(400);
+    const body = await res!.json();
+    expect(body.error).toBe("skill_write_path");
   });
 });
 

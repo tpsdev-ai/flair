@@ -19,9 +19,10 @@ import { rawTableWriteSites } from "../helpers/raw-table-writers";
  * Same discipline as test/unit/soul-writer-coverage.test.ts: enumerate EVERY
  * raw Memory write site (put/update/patch/patchRecord/patchRecordSilent, plus
  * every table alias) via rawTableWriteSites, and require an explicit
- * classification for each. The classification is the policy: the ONLY sinks
- * permitted to write skill-tagged content are the three gated paths
- * (super.post, super.put ×2); every other sink is declared non-skill (writes
+ * classification for each. The classification is the policy — every sink that
+ * can carry a skill-tagged row is declared GATED (SkillScan + forced
+ * durability), REJECTING (400 skill_write_path), or SKIPPING
+ * (skill_not_federated); every other sink is declared non-skill (writes
  * non-skill rows, a different table, or is a read-only alias). A new
  * unclassified writer fails the build — the "unscanned skill-writer" tripwire.
  */
@@ -31,25 +32,35 @@ const add = (file: string, sites: string[], reason: string) => {
   for (const site of sites) classified.set(`resources/${file}.ts:${site}`, reason);
 };
 
-// ── The gated skill-writer sinks (the ONLY paths that may write a skill) ──
-add("Memory", ["writer:super.post#1", "writer:super.put#1", "writer:super.put#2"],
+// ── GATED skill-writer sinks (run SkillScan + forced durability) ──
+add("Memory", ["writer:super.post#1", "writer:super.put#2"],
   "Skill-writer: routes through the SkillScan gate + forced durability in Memory.post()/put() (flair#1542).");
+add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"],
+  "Skill-writer: runs the SkillScan gate + forced durability in FeedMemories.post() before the raw put (flair#1542).");
+
+// ── REJECTING skill-writer sinks (400 skill_write_path) ──
+add("Memory", ["writer:super.patch#1"],
+  "Skill-writer: REJECTS skill-tagged patches (400 skill_write_path) — patch() routes past put()'s gate (flair#1542).");
+add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"],
+  "Skill-writer: REJECTS skill-tagged starter memories (400 skill_write_path) — admin-only seed bypasses the gate (flair#1542).");
+
+// ── SKIPPING skill-writer sinks (skill_not_federated) ──
+add("Federation", ["writer:table.put#1"],
+  "Skill-writer: SKIPS skill-tagged rows (skill_not_federated) — skills are local, never synced (flair#1542).");
 
 // ── Non-skill writers inside Memory.ts ──
+add("Memory", ["writer:super.put#1"],
+  "Admin-only _reindex re-PUT (reindex_admin_only gate) — re-embeds an existing record byte-for-byte, preserves existing content/tags, not a new skill write.");
 add("Memory", ["writer:(databases as any).flair.Memory.put#1"],
   "closeSupersededRecord: read-modify-write close of an existing record (stamps validTo), preserves existing content/tags — not a new skill write.");
 add("Memory", ["writer:patchRecord#1"],
   "derivedFrom/lastReflected bookkeeping patch — never writes skill content.");
-add("Memory", ["writer:super.patch#1"],
-  "Memory.patch(): partial field update, not a skill-content write.");
 add("Memory", ["writer:super.delete#1"],
   "Memory.delete(): removal, not a write.");
 add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2"],
   "Read-only table alias (get/search) — no write through this handle.");
 
 // ── Non-skill writers in other modules ──
-add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"],
-  "Feed write (non-skill).");
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.delete#1", "writer:(databases as any).flair.Memory.update#1"],
   "Maintenance (archive/expiry) — non-skill.");
 add("MemoryReflect", ["writer:patchRecordSilent#1"],
@@ -64,16 +75,12 @@ add("usage-recording", ["writer:(databases as any).flair.Memory.put#1"],
   "usageCount increment (targeted get-then-put) — non-skill.");
 add("promotion-stamp", ["writer:table.put#1"],
   "Promotion status stamp — non-skill.");
-add("Federation", ["writer:table.put#1"],
-  "Federation merge (preserves provenance) — non-skill.");
 add("migrations/graph-heal", ["writer:table.put#1"],
   "Migration backfill — non-skill.");
 add("migrations/synthetic-test-migration", ["writer:table.put#1"],
   "Migration backfill — non-skill.");
 add("migrations/visibility-backfill", ["writer:table.put#1"],
   "Migration backfill — non-skill.");
-add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"],
-  "Provisioning seed — non-skill.");
 
 // ── Other tables (conservative sink enumeration false-positives) ──
 add("AgentSeed", ["writer:(databases as any).flair.Agent.put#1", "writer:(databases as any).flair.Soul.put#1"],

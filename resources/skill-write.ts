@@ -76,6 +76,26 @@ export function enforceSkillDurability(content: any): Response | null {
 }
 
 /**
+ * Reject a skill-tagged write on a path that does NOT run the SkillScan gate
+ * or forced durability (patch, seed, etc.). Skills are written ONLY via
+ * skill_store (→ Memory.post) or Memory.put — every other verb rejects a
+ * skill-tagged write rather than land it unscanned (the #1537 raw-writer
+ * lesson: gate EVERY verb, not just post/put).
+ *
+ * Returns a 400 Response to short-circuit the write, or null to proceed.
+ */
+export function rejectSkillWritePath(content: any): Response | null {
+  if (!isSkillWrite(content)) return null;
+  return new Response(
+    JSON.stringify({
+      error: "skill_write_path",
+      message: "skill memories must be written via skill_store (or Memory post/put); this path does not gate skill writes",
+    }),
+    { status: 400, headers: { "content-type": "application/json" } },
+  );
+}
+
+/**
  * SkillScan gate — run BEFORE the embedding is computed. Scans the combined
  * `trigger` + `content` text (a dangerous shell/network payload in EITHER is
  * a rejection). Fail-closed on high/critical risk; allow-with-flag on medium

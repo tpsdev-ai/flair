@@ -24,6 +24,7 @@ import { allowAdmin, invalidateAdminCache } from "./agent-auth.js";
 import { authorizeSoulWrite, refuseLearnedSoulWrite, soulProvenance } from "./soul-write-policy.js";
 import { reconcileAdminFields } from "./agent-admin.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
+import { rejectSkillWritePath } from "./skill-write.js";
 
 const DEFAULT_SOUL_KEYS = (agentId: string, displayName: string, role: string, now: string) => ({
   name: displayName,
@@ -126,6 +127,13 @@ export class AgentSeed extends Resource {
     } else {
       for (let i = 0; i < memDefs.length; i++) {
         const def = memDefs[i];
+        // ── flair#1542: reject skill-tagged starter memories ──
+        // This admin-only seed writes via the RAW table object, bypassing
+        // Memory.post()/put()'s SkillScan gate + forced durability. A
+        // skill-tagged starter memory would land unscanned — reject it (skills
+        // are written via skill_store, not seeded as onboarding memories).
+        const skillDenial = rejectSkillWritePath(def);
+        if (skillDenial) return skillDenial;
         const id = `seed-${agentId}-${i}-${Date.now()}`;
         const record = {
           id,
