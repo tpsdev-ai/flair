@@ -51,7 +51,7 @@ describe("enforceSkillDurability", () => {
     expect(content.durability).toBe("persistent");
   });
   test("skill rows with no durability are forced to persistent", () => {
-    const content = { tags: ["skill"] };
+    const content: Record<string, any> = { tags: ["skill"] };
     expect(enforceSkillDurability(content)).toBeNull();
     expect(content.durability).toBe("persistent");
   });
@@ -102,7 +102,7 @@ describe("skillScanGate", () => {
     expect(body.error).toBe("skill_scan_rejected");
   });
   test("a medium-risk skill is allow-with-flag (null, _safetyFlags appended)", () => {
-    const content = { tags: ["skill"], trigger: "see https://example.com for docs", content: "a safe procedure" };
+    const content: Record<string, any> = { tags: ["skill"], trigger: "see https://example.com for docs", content: "a safe procedure" };
     const res = skillScanGate(content);
     expect(res).toBeNull();
     expect(Array.isArray(content._safetyFlags)).toBe(true);
