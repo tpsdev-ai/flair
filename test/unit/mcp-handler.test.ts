@@ -210,8 +210,8 @@ afterAll(() => {
 });
 
 // ─── tools/list ──────────────────────────────────────────────────────────────
-describe("tools/list — exactly the 14 curated tools", () => {
-  it("returns exactly 14, matching the flair-mcp surface plus attention (flair#677) + record_usage (flair#683) + memory_basement/memory_restore (flair#1472), no raw CRUD mutators", async () => {
+describe("tools/list — exactly the 15 curated tools", () => {
+  it("returns exactly 15, matching the flair-mcp surface plus attention (flair#677) + record_usage (flair#683) + memory_basement/memory_restore (flair#1472) + skill_store (flair#1542), no raw CRUD mutators", async () => {
     const res = await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { sub: "s" }));
     const body = await parse(res);
     const names = body.result.tools.map((t: any) => t.name).sort();
@@ -228,6 +228,7 @@ describe("tools/list — exactly the 14 curated tools", () => {
       "memory_store",
       "memory_update",
       "record_usage",
+      "skill_store",
       "soul_get",
       "soul_set",
     ]);

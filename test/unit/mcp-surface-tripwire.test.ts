@@ -114,7 +114,7 @@ describe("MCP surface tripwire — RECORD_TYPES.mcp + COMPOSITE_MCP_TOOLS vs. re
     });
   });
 
-  describe("golden value: the complete 14-tool tools/list surface is pinned", () => {
+  describe("golden value: the complete 15-tool tools/list surface is pinned", () => {
     it("sorted TOOLS keys deep-equal the pinned list (tools/list byte-identical)", () => {
       expect(SHIPPED_TOOL_NAMES).toEqual([
         "attention",
@@ -129,13 +129,14 @@ describe("MCP surface tripwire — RECORD_TYPES.mcp + COMPOSITE_MCP_TOOLS vs. re
         "memory_store",
         "memory_update",
         "record_usage",
+        "skill_store",
         "soul_get",
         "soul_set",
       ]);
     });
 
-    it("the declared surface (registry verbs ∪ composites) also totals exactly 14 unique names", () => {
-      expect(declaredToolNames().size).toBe(14);
+    it("the declared surface (registry verbs ∪ composites) also totals exactly 15 unique names", () => {
+      expect(declaredToolNames().size).toBe(15);
     });
   });
 

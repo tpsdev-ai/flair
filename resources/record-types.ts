@@ -477,8 +477,9 @@ export type RecordTypeName = keyof typeof RECORD_TYPES;
 //   record_usage — usage-signal resource (RecordUsage.ts), not a table verb
 //   memory_basement — archive action (flair#1472), not a table verb
 //   memory_restore  — un-archive action (flair#1472), not a table verb
+//   skill_store     — skill-tagged Memory write (flair#1542), not a table verb
 //
-export const COMPOSITE_MCP_TOOLS = ["bootstrap", "attention", "record_usage", "memory_basement", "memory_restore"] as const;
+export const COMPOSITE_MCP_TOOLS = ["bootstrap", "attention", "record_usage", "memory_basement", "memory_restore", "skill_store"] as const;
 
 export type CompositeMcpTool = (typeof COMPOSITE_MCP_TOOLS)[number];
 

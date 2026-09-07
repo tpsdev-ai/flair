@@ -13,7 +13,7 @@
  * via one of these 14 semantic tools.
  *
  *   memory_search · memory_store · memory_update · memory_get · memory_delete ·
- *   memory_basement · memory_restore ·
+ *   memory_basement · memory_restore · skill_store ·
  *   bootstrap · soul_set · soul_get · flair_workspace_set · flair_orgevent ·
  *   attention · record_usage
  *
@@ -294,6 +294,48 @@ async function memoryStore(agent: ResolvedAgent, args: any) {
   // flair#1188 — memory_store's response goes through the same buildWriteResponse
   // echo as memory_update; strip the server-regenerated embedding so no write
   // tool ever inlines the vector. No-op when the response carries none.
+  return stripInternalFields(await unwrap(await h.post(body)));
+}
+
+/**
+ * skill_store — write a skill-tagged Memory (flair#1542 component 2).
+ *
+ * A skill is a Memory tagged "skill" (reuse the substrate — no new table).
+ * This tool is a thin wrapper over the SAME Memory.post() write path as
+ * memory_store — it re-implements NO business logic. The three skill-specific
+ * rules (embed from `trigger`, SkillScan gate before the embed, forced
+ * durability=persistent) are enforced SERVER-SIDE in resources/Memory.ts /
+ * resources/skill-write.ts, so this wrapper only shapes the body:
+ *
+ *   - `trigger` → Memory.trigger (the "when to use" text — the recall signal)
+ *   - `content` → Memory.content (the full procedure)
+ *   - `tags`    → Memory.tags (with "skill" prepended)
+ *   - `name`/`description` → folded into Memory.metadata (opaque JSON blob,
+ *     store-and-return, never parsed server-side) so the later skill recall
+ *     tools can surface them.
+ *
+ * durability is NOT set here — the server forces it to "persistent" for any
+ * skill-tagged write (and rejects an explicit ephemeral/session), so a caller
+ * cannot accidentally write a reaped skill.
+ */
+async function skillStore(agent: ResolvedAgent, args: any) {
+  const Cls = await handler("Memory");
+  const h: any = await collectionResource(Cls, delegationContext(agent));
+  const body: Record<string, unknown> = {
+    agentId: agent.agentId,
+    content: args?.content,
+    trigger: args?.trigger,
+    tags: ["skill", ...(Array.isArray(args?.tags) ? args.tags : [])],
+  };
+  // flair#718 authorship-provenance — same claimedClient passthrough as
+  // memory_store (never a tool argument; sourced from the resolved token).
+  if (agent.clientId) body.claimedClient = agent.clientId;
+  // name/description are SKILL.md frontmatter fields with no dedicated Memory
+  // column; fold them into the opaque metadata blob.
+  const meta: Record<string, unknown> = {};
+  if (typeof args?.name === "string" && args.name.length > 0) meta.name = args.name;
+  if (typeof args?.description === "string" && args.description.length > 0) meta.description = args.description;
+  if (Object.keys(meta).length > 0) body.metadata = JSON.stringify(meta);
   return stripInternalFields(await unwrap(await h.post(body)));
 }
 
@@ -1080,6 +1122,36 @@ export const TOOLS: Record<string, ToolEntry> = {
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
       invariants: { fullyResolved: true },
       errorShape: { trigger: "an unrecognized visibility value (e.g. \"prvate\")", fields: ["error", "status"], mustNotLeak: INTERNAL_MEMORY_FIELDS },
+    },
+  },
+  skill_store: {
+    def: {
+      name: "skill_store",
+      description:
+        "Write a skill (a reusable capability/procedure) as a skill-tagged memory. " +
+        "The `trigger` text is what the skill embeds from (the recall signal — 'when to use this'), " +
+        "and `content` is the full procedure. Skills are forced durability=persistent and are " +
+        "SkillScan-gated before the embed (a dangerous shell/network payload is rejected).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          content: { type: "string", description: "The full procedure (markdown body of the SKILL.md)" },
+          trigger: { type: "string", description: "The 'when to use' text — the recall signal the skill embeds from" },
+          name: { type: "string", description: "Skill name (SKILL.md frontmatter; stored in metadata)" },
+          description: { type: "string", description: "Skill description (SKILL.md frontmatter; stored in metadata)" },
+          tags: { type: "array", items: { type: "string" }, description: "Additional tags (the 'skill' tag is added automatically)" },
+        },
+        required: ["content"],
+      },
+    },
+    impl: skillStore,
+    contract: {
+      summary: "Write echo { id, written:true, deduplicated } for the skill-tagged memory. No internal embedding fields; round-trips via memory_get.",
+      requiredFields: ["id", "written"],
+      fieldTypes: { id: "string", written: "boolean", deduplicated: "boolean" },
+      forbiddenFields: INTERNAL_MEMORY_FIELDS,
+      invariants: { fullyResolved: true },
+      errorShape: { trigger: "a skill whose trigger/content fails SkillScan (high/critical risk)", fields: ["error", "status"], mustNotLeak: INTERNAL_MEMORY_FIELDS },
     },
   },
   memory_update: {
