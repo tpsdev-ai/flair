@@ -3,6 +3,12 @@ type Memory @table(database: "flair") {
   agentId: String! @indexed
   content: String!
   contentHash: String @indexed
+  trigger: String @indexed   # flair#1542: the "when to use" text for a skill-tagged row. Skill-tagged
+                               # rows embed from `trigger` (the recall signal), NOT from `content` (the full
+                               # procedure) — see resources/skill-write.ts's skillEmbedText. Nullable/additive:
+                               # non-skill rows carry no trigger and embed from `content` exactly as before
+                               # (clean-upgrade-path gate). @indexed so the later skill recall tools can filter
+                               # by trigger without a full-corpus scan.
   visibility: String
   embedding: [Float] @indexed(type: "HNSW", M: 16)   # M:16 is Harper's own HNSW default
                                # (HierarchicalNavigableSmallWorld M default) — declaring it explicitly is a

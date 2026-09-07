@@ -11,6 +11,7 @@ import {
   generateNonce,
 } from "./federation-crypto.js";
 import { reconcileState } from "./relay-lib.js";
+import { isSkillWrite } from "./skill-write.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
 import { createPersistentNonceStore, initNonceStoreCleanup } from "./federation-nonce-store.js";
 import {
@@ -590,6 +591,16 @@ export class FederationSync extends Resource {
         }
 
         const mergedData = mergeRecord(local, record);
+
+        // ── flair#1542: skills are not federated ──
+        // A skill-tagged Memory is a local, gated artifact (SkillScan + forced
+        // durability on the write path). Merging a pushed skill-tagged row RAW
+        // would land an unscanned, possibly non-persistent skill — bypassing the
+        // gate. Skip it: skills are written locally via skill_store, never synced.
+        if (record.table === "Memory" && isSkillWrite(mergedData)) {
+          recordSkip("skill_not_federated");
+          continue;
+        }
 
         // Absorbing-state guard for the Message table (flair#1521 §12 P0-3).
         // Generic newer-wins LWW would let a deadline-sweep `failed` (or any

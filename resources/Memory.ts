@@ -12,6 +12,7 @@ import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveAllowedOwners } from "./memory-read-scope.js";
 import { assertValidVisibility, assertVisibilityAllowedForDurability } from "./memory-visibility.js";
 import { assertValidDurability } from "./memory-durability.js";
+import { enforceSkillDurability, rejectSkillWritePath, skillEmbedText, skillScanGate } from "./skill-write.js";
 import {
   DEDUP_COSINE_THRESHOLD_DEFAULT,
   DEDUP_LEXICAL_THRESHOLD_DEFAULT,
@@ -249,7 +250,13 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
   delete content.dedupThreshold;
   delete content.lexicalThreshold;
 
-  if (typeof content.content !== "string" || content.content.length < DEDUP_MIN_CONTENT_LENGTH) {
+  // flair#1542: skill-tagged rows embed from `trigger`, not `content` — the
+  // dedup gate must compare the SAME text the stored vector represents, or a
+  // skill's dedup cosine would cross the trigger-space vector against
+  // content-space candidates. Non-skill rows are byte-identical (skillEmbedText
+  // returns `content`).
+  const embedText = skillEmbedText(content);
+  if (typeof embedText !== "string" || embedText.length < DEDUP_MIN_CONTENT_LENGTH) {
     return null;
   }
 
@@ -275,7 +282,7 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
   let embedding: number[] | null = Array.isArray(content.embedding) ? content.embedding : null;
   if (!embedding) {
     try {
-      embedding = await getEmbedding(content.content, "document");
+      embedding = await getEmbedding(embedText, "document");
     } catch {
       embedding = null;
     }
@@ -286,7 +293,7 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
   }
   if (!embedding) return null;
 
-  return findConservativeDedupMatch(ctx, content.agentId, content.content, embedding, cosineThreshold, lexicalThreshold);
+  return findConservativeDedupMatch(ctx, content.agentId, embedText, embedding, cosineThreshold, lexicalThreshold);
 }
 
 /** Build the final write response: always `written: true`, always includes
@@ -669,6 +676,17 @@ export class Memory extends (databases as any).flair.Memory {
     }
 
     content.durability ||= "standard";
+    // ── flair#1542: skills are forced durability=persistent ──
+    // A skill-tagged write must never be reaped by the 30-day reaper (the
+    // "standard" default) nor expire (ephemeral/session). enforceSkillDurability
+    // rejects ephemeral/session outright and forces every other value to
+    // "persistent" — placed AFTER the default so it sees the effective tier,
+    // and BEFORE the visibility default below so a skill lands on the
+    // persistent→shared branch, not the standard→private one.
+    {
+      const skillDurabilityDenial = enforceSkillDurability(content);
+      if (skillDurabilityDenial) return skillDurabilityDenial;
+    }
     // ── flair#1336: honor a caller-supplied createdAt (parity with put()) ──
     // put() — the other HTTP-reachable create path — has always preserved the
     // caller's createdAt (`content.createdAt ?? now`), and adk-flair's
@@ -793,6 +811,16 @@ export class Memory extends (databases as any).flair.Memory {
       }
     }
 
+    // ── flair#1542: SkillScan gate BEFORE the embed ──
+    // Every skill-tagged write is statically scanned (shell/network/fs/env/
+    // encoding/unicode) BEFORE any embedding is computed, so a rejected write
+    // pays no embed. Fail-closed on high/critical; allow-with-flag on medium.
+    // Non-skill writes are a no-op (skillScanGate returns null).
+    {
+      const skillScanDenial = skillScanGate(content);
+      if (skillScanDenial) return skillScanDenial;
+    }
+
     // Server-side conservative-duplicate gate (memory-integrity fix). A
     // supersede write is an intentional version-link, not an ambiguous "is
     // this a duplicate of something else" situation — bypass the gate for it
@@ -810,9 +838,11 @@ export class Memory extends (databases as any).flair.Memory {
     // Generate embedding from content text (no-op if the dedup gate above
     // already computed one for this content). flair#504 Phase 2: 'document'
     // — see runDedupGate's comment above for why all three Memory doc sites
-    // must move together.
-    if (content.content && !content.embedding) {
-      const vec = await getEmbedding(content.content, "document");
+    // must move together. flair#1542: skill-tagged rows embed from `trigger`
+    // (skillEmbedText), not `content`.
+    const embedText = skillEmbedText(content);
+    if (embedText && !content.embedding) {
+      const vec = await getEmbedding(embedText, "document");
       if (vec) { content.embedding = vec; content.embeddingModel = getModelId(); }
     }
 
@@ -873,6 +903,13 @@ export class Memory extends (databases as any).flair.Memory {
     if (authorityDenial) return authorityDenial;
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
+    // ── flair#1542: reject skill-tagged patches ──
+    // patch() routes past put() (and thus past the SkillScan gate + forced
+    // durability), so a skill-tagged patch would land unscanned. Skills are
+    // written via skill_store (→ Memory.post) or Memory.put — reject here
+    // (no memory_patch tool exists, so nothing breaks).
+    const skillDenial = rejectSkillWritePath(content);
+    if (skillDenial) return skillDenial;
     return super.patch(content, query);
   }
 
@@ -942,6 +979,16 @@ export class Memory extends (databases as any).flair.Memory {
           { status: 400, headers: { "content-type": "application/json" } },
         );
       }
+    }
+
+    // ── flair#1542: skills are forced durability=persistent (mirrors post()) ──
+    // put() stamps no durability default (updates carry the pre-existing tier),
+    // so this runs on the raw write value: a skill-tagged write with an explicit
+    // ephemeral/session tier is rejected, and every other value (including an
+    // absent one) is forced to "persistent" so the reaper never archives a skill.
+    {
+      const skillDurabilityDenial = enforceSkillDurability(content);
+      if (skillDurabilityDenial) return skillDurabilityDenial;
     }
 
     const now = new Date().toISOString();
@@ -1070,6 +1117,15 @@ export class Memory extends (databases as any).flair.Memory {
       }
     }
 
+    // ── flair#1542: SkillScan gate BEFORE the embed (mirrors post()) ──
+    // Every skill-tagged write is statically scanned before any embedding is
+    // computed, so a rejected write pays no embed. Fail-closed on high/critical;
+    // allow-with-flag on medium. Non-skill writes are a no-op.
+    {
+      const skillScanDenial = skillScanGate(content);
+      if (skillScanDenial) return skillScanDenial;
+    }
+
     // Server-side conservative-duplicate gate (memory-integrity fix). PUT is
     // an upsert: only run the gate for a FRESH create (target id does not yet
     // exist) that is NOT a supersede-link write. An update of an EXISTING id
@@ -1099,9 +1155,11 @@ export class Memory extends (databases as any).flair.Memory {
     // already computed one for this content). flair#504 Phase 2: 'document'
     // — this is also the regen branch `flair reembed` triggers (clears
     // embedding/embeddingModel then hits this put()), so it's what actually
-    // re-embeds a stale row WITH the prefix once stage 2 runs.
-    if (content.content && !content.embedding) {
-      const vec = await getEmbedding(content.content, "document");
+    // re-embeds a stale row WITH the prefix once stage 2 runs. flair#1542:
+    // skill-tagged rows embed from `trigger` (skillEmbedText), not `content`.
+    const embedText = skillEmbedText(content);
+    if (embedText && !content.embedding) {
+      const vec = await getEmbedding(embedText, "document");
       if (vec) { content.embedding = vec; content.embeddingModel = getModelId(); }
     }
 
