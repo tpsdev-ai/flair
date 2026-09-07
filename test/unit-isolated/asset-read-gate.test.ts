@@ -1,11 +1,13 @@
 /**
  * asset-read-gate.test.ts — behavior guard for resources/Asset.ts
- * (images-in-Flair slice 1). Same harper-mock technique as
- * memory-candidate-read-gate.test.ts: mock harper so the resource loads
- * outside a real Harper runtime, then drive allowRead()/get()/search()/
- * post()/put()/delete() against an in-memory store. Also covers the base64→
- * Blob coercion via a mocked createBlob. No other test/unit/ file imports
- * resources/Asset.ts, so this file owns that mock+import with no collision.
+ * (images-in-Flair slice 1). Isolated so the harper mock (including
+ * createBlob) does not collide with the shared test/unit/ process, where
+ * another file's mock.module("harper") wins and `import { createBlob }`
+ * fails. Same harper-mock technique as memory-candidate-read-gate.test.ts:
+ * mock harper so the resource loads outside a real Harper runtime, then
+ * drive allowRead()/get()/search()/post()/put()/delete() against an
+ * in-memory store. Also covers the base64→Blob coercion via a mocked
+ * createBlob.
  */
 import { describe, it, expect, beforeEach, mock } from "bun:test";
 
@@ -36,6 +38,12 @@ class BaseAsset {
   async put(content: any) {
     assetStore.set(content.id, { ...content });
     return { ...content };
+  }
+  async patch(content: any) {
+    const existing = assetStore.get(content.id) ?? {};
+    const next = { ...existing, ...content };
+    assetStore.set(content.id, next);
+    return { ...next };
   }
   async delete(id: any) {
     assetStore.delete(id);
@@ -68,7 +76,7 @@ mock.module("harper", () => ({
   createBlob: createBlobMock,
 }));
 
-const { Asset } = await import("../../resources/Asset.ts");
+const { Asset, MAX_ASSET_DECODED_BYTES } = await import("../../resources/Asset.ts");
 
 function makeAsset(ctxRequest: any) {
   const r: any = new (Asset as any)();
@@ -122,6 +130,67 @@ describe("Asset.post — attribution + blob coercion", () => {
     expect(stored.data.__blob).toBe(true);
     expect(stored.data.type).toBe("image/jpeg");
     expect(typeof stored.createdAt).toBe("string");
+  });
+});
+
+describe("Asset.post — write-time size cap + contentType allowlist", () => {
+  it("rejects a non-allowlisted contentType (400) and stores nothing", async () => {
+    const res: any = await (makeAsset(agentCtx("agent-owner")) as any).post({
+      contentType: "text/html",
+      data: Buffer.from("hello").toString("base64"),
+    });
+    expect(res.status).toBe(400);
+    expect(assetStore.size).toBe(0);
+  });
+
+  it("rejects application/octet-stream (no implicit fallback)", async () => {
+    const res: any = await (makeAsset(agentCtx("agent-owner")) as any).post({
+      contentType: "application/octet-stream",
+      data: Buffer.from("hello").toString("base64"),
+    });
+    expect(res.status).toBe(400);
+    expect(assetStore.size).toBe(0);
+  });
+
+  it("rejects image/svg+xml (XSS-capable image type)", async () => {
+    const res: any = await (makeAsset(agentCtx("agent-owner")) as any).post({
+      contentType: "image/svg+xml",
+      data: Buffer.from("<svg/>").toString("base64"),
+    });
+    expect(res.status).toBe(400);
+    expect(assetStore.size).toBe(0);
+  });
+
+  it("rejects a missing contentType when data is present", async () => {
+    const res: any = await (makeAsset(agentCtx("agent-owner")) as any).post({
+      data: Buffer.from("hello").toString("base64"),
+    });
+    expect(res.status).toBe(400);
+    expect(assetStore.size).toBe(0);
+  });
+
+  it("rejects a decoded payload over the size cap before createBlob", async () => {
+    const tooBig = Buffer.alloc(MAX_ASSET_DECODED_BYTES + 1);
+    const res: any = await (makeAsset(agentCtx("agent-owner")) as any).post({
+      contentType: "image/png",
+      data: tooBig.toString("base64"),
+    });
+    expect(res.status).toBe(400);
+    expect(assetStore.size).toBe(0);
+  });
+
+  it("rejects a contentType-only write that would persist a dangerous MIME", async () => {
+    await (makeAsset(agentCtx("agent-owner")) as any).post({
+      id: "asset-mime",
+      contentType: "image/png",
+      data: "AA==",
+    });
+    const res: any = await (makeAsset(agentCtx("agent-owner")) as any).patch({
+      id: "asset-mime",
+      contentType: "application/javascript",
+    });
+    expect(res.status).toBe(400);
+    expect(assetStore.get("asset-mime")?.contentType).toBe("image/png");
   });
 });
 

@@ -151,6 +151,11 @@ const CASES: Array<{
     seed: { id: "rog-mem", agentId: owner.id, content: "orig", durability: "persistent", createdAt: NOW, updatedAt: NOW },
     patch: { content: "changed" }, field: "content", attrs: ["id", "agentId", "content"],
   },
+  {
+    name: "Asset", table: "Asset", id: "rog-asset", path: "/Asset/rog-asset",
+    seed: { id: "rog-asset", agentId: owner.id, memoryId: "rog-mem", contentType: "image/png", createdAt: NOW },
+    patch: { memoryId: "rog-mem-changed" }, field: "memoryId", attrs: ["id", "agentId", "memoryId"],
+  },
 ];
 
 describe("shared record-ownership guard", () => {
