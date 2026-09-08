@@ -54,7 +54,7 @@ function assertNoEmbeddings(path: string): void {
 describe("flair#1360 — quality Memory listing is projected and bounded", () => {
   test("QUALITY_MEMORY_LIST_SELECT is exactly the fields the planner/snapshot read — never embeddings", () => {
     expect([...QUALITY_MEMORY_LIST_SELECT].sort()).toEqual(
-      ["content", "createdAt", "id", "subject"],
+      ["archived", "content", "createdAt", "id", "subject"],
     );
     expect(QUALITY_MEMORY_LIST_SELECT).not.toContain("embedding");
     expect(QUALITY_MEMORY_LIST_SELECT).not.toContain("embeddingModel");
