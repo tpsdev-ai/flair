@@ -82,5 +82,5 @@ config.yaml    Flair server configuration (port via CLI or HTTP_PORT env).
 | What are the design rules? | `DESIGN.md` |
 | How do I contribute? | `CONTRIBUTING.md` |
 | How do I use Flair? | `README.md` → `docs/quickstart.md` (laptop) · `docs/quickstart-fabric.md` (reachable URL) |
-| What does the data model look like? | `schemas/` |
+| What does the data model look like? | `schemas/` · catalog in [`docs/api-reference.md`](docs/api-reference.md) |
 | Where is planned/proposed work? | GitHub issues — not in this repo. Nothing in the tree is a proposal |

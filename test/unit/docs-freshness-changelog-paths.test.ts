@@ -99,6 +99,9 @@ function makePathAwareRepo(opts: {
 
   writeFileSync(join(dir, "README.md"), "# Fixture\n\nNothing stale in here.\n");
   mkdirSync(join(dir, "docs"), { recursive: true });
+  mkdirSync(join(dir, "schemas"), { recursive: true });
+  writeFileSync(join(dir, "schemas", "memory.graphql"), "type Memory @table(database: \"flair\") {\n  id: ID @primaryKey\n}\n");
+  writeFileSync(join(dir, "docs", "api-reference.md"), "# API\n\nMemory is the agent memory table.\n");
   writeFileSync(join(dir, "docs", "quickstart.md"), "# Quickstart\n\nInstall vX.Y.Z and go.\n");
   writeFileSync(
     join(dir, "CHANGELOG.md"),

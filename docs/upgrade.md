@@ -564,3 +564,5 @@ you haven't personally tested.
   shows up when it does.
 - [`docs/deployment.md`](deployment.md) — initial install / deployment, as opposed to
   upgrading an existing one.
+- [`docs/api-reference.md`](api-reference.md) — HTTP endpoints, auth per resource, and
+  the Presence / Memory / Soul / Agent / Federation schemas.

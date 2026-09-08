@@ -1,6 +1,7 @@
 # Authentication & Authorization
 
 Flair supports three authentication methods, from simplest to most enterprise-ready.
+HTTP paths and per-resource auth are catalogued in **[docs/api-reference.md](api-reference.md)**.
 
 ## Auth across surfaces (read this first)
 

@@ -301,7 +301,7 @@ curl -H "Authorization: TPS-Ed25519 mybot:$TS:$NONCE:$SIG" \
   -d '{"id": "mybot-123", "agentId": "mybot", "content": "...", "durability": "standard"}'
 ```
 
-Sign `agentId:timestamp:nonce:METHOD:/path` with the agent's private key. Protocol in [SECURITY.md](SECURITY.md).
+Sign `agentId:timestamp:nonce:METHOD:/path` with the agent's private key. Protocol in [SECURITY.md](SECURITY.md). Consolidated endpoint, auth-per-resource, and schema catalog: **[docs/api-reference.md](docs/api-reference.md)**.
 
 ### Embedded in a Harper app (in-process)
 
