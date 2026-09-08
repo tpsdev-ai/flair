@@ -1,5 +1,7 @@
 /** Types for scripts/ci/check-mcp-client-wiring.mjs (flair#908). */
 
+import type { ClientId } from "../../src/install/clients.ts";
+
 export const EXIT_OK: 0;
 export const EXIT_FAIL: 1;
 export const EXIT_DID_NOT_RUN: 2;
@@ -11,7 +13,7 @@ export const CLOBBER_MARKER_SERVER: "preexisting-other";
 export type PinKind = "mcp-json" | "mcp-toml" | "pi-packages";
 
 export interface SupportedClient {
-  id: string;
+  id: ClientId;
   label: string;
   bin: string;
   relativeConfig: string;
