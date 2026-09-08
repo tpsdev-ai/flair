@@ -30,6 +30,7 @@ import {
   CATEGORIES,
   FRAGMENT_DIR_REL,
   locateUnreleased,
+  ledeLengthViolation,
   readFragments,
   strayUnreleasedEntries,
 } from "./changelog-fragments.mjs";
@@ -172,6 +173,7 @@ const EXPECTED_CHECKS = [
   "cli-command-descriptions",
   "broken-backup-restore-docs",
   "api-reference-schema-coverage",
+  "changelog-lede-length",
 ];
 
 // ── Check 1: stale install pin of the root package ──────────────────────────────
@@ -612,6 +614,40 @@ defineCheck("api-reference-schema-coverage", "schema table", () => {
     }
   }
   return { failures, scanned: tables.length };
+});
+
+// ── Check 9: changelog fragment ledes are short enough to summarise (flair#1392)
+// FAILS when a fragment's bold run is > 25 words or more than one sentence.
+// The GitHub release renderer keeps that lede and drops the body, so a long
+// lede IS the dump this rule exists to stop. Historical CHANGELOG.md is not
+// scanned — only `.changelog/unreleased/` fragments. Empty directory is a
+// pass (nothing to violate), not a skip: scanned === 0 would otherwise
+// promote to "DID NOT RUN" and fail every release-PR fixture.
+defineCheck("changelog-lede-length", "changelog fragment", () => {
+  const dir = join(ROOT, FRAGMENT_DIR_REL);
+  if (!existsSync(dir)) {
+    return { failures: [], scanned: null, skips: [skip(
+      `${FRAGMENT_DIR_REL}/ does not exist, so no fragment lede was checked.`,
+      `restore ${FRAGMENT_DIR_REL}/`,
+    )] };
+  }
+  let fragments;
+  try {
+    fragments = readFragments();
+  } catch (err) {
+    return [{ file: `${FRAGMENT_DIR_REL}/`, line: 1, msg: `${err?.message ?? err}` }];
+  }
+  if (fragments.length === 0) {
+    return { failures: [], scanned: null };
+  }
+  const failures = [];
+  for (const f of fragments) {
+    const msg = ledeLengthViolation(`${FRAGMENT_DIR_REL}/${f.name}`, f.body);
+    if (msg) {
+      failures.push({ file: `${FRAGMENT_DIR_REL}/${f.name}`, line: 1, msg });
+    }
+  }
+  return { failures, scanned: fragments.length };
 });
 
 // ─── Run ────────────────────────────────────────────────────────────────────────

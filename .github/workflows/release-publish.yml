@@ -7,8 +7,9 @@ name: Release — stage-publish (OIDC) + GitHub release
 # to go live — that approval is the release gate (see docs/releasing.md).
 #
 # A separate, INDEPENDENT job (github-release) cuts a GitHub release for the tag
-# from the matching CHANGELOG.md section. It does NOT depend on the npm staging
-# approval — the GitHub release documents the tagged commit immediately on push.
+# from a lede+links rendering of the matching CHANGELOG.md section (flair#1392).
+# It does NOT depend on the npm staging approval — the GitHub release documents
+# the tagged commit immediately on push. The deep record stays in CHANGELOG.md.
 #
 # Cut a release: after the `release: vX.Y.Z` PR merges to main, push the tag:
 #   git tag v0.11.0 && git push origin v0.11.0
@@ -257,7 +258,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   github-release:
-    name: Cut GitHub release from CHANGELOG
+    name: Cut GitHub release from CHANGELOG lede
     runs-on: ubuntu-latest
     # Independent of stage-publish on purpose: the GitHub release documents the
     # tagged commit and can be cut immediately on tag push. It does NOT wait on
@@ -284,18 +285,19 @@ jobs:
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
-      - name: Extract CHANGELOG section
-        # The node script reads CHANGELOG.md and writes the matching section body
-        # to a file. Version flows through env, never ${{ }} interpolation in the
-        # script body, and the body is captured to a file (never re-emitted into a
-        # shell string) so neither the tag nor the CHANGELOG text can be parsed as
-        # shell. Fails loudly (non-zero) if the section is missing or empty.
+      - name: Render release notes from CHANGELOG
+        # The renderer keeps each entry's bold lede, up to three issue links, and
+        # any `> **Heads-up:**` operator lines — not the full CHANGELOG body.
+        # Version flows through env, never ${{ }} interpolation in the script
+        # body, and the notes are captured to a file (never re-emitted into a
+        # shell string) so neither the tag nor the CHANGELOG text can be parsed
+        # as shell. Fails loudly (non-zero) if the section is missing or empty.
         env:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          node scripts/changelog-extract.mjs "$VERSION" CHANGELOG.md > release-notes.md
-          echo "Extracted $(wc -l < release-notes.md) lines for v$VERSION"
+          node scripts/changelog-release-notes.mjs "$VERSION" CHANGELOG.md > release-notes.md
+          echo "Rendered $(wc -l < release-notes.md) lines / $(wc -w < release-notes.md) words for v$VERSION"
 
       - name: Create or update GitHub release
         # Idempotent: if a release for the tag already exists (re-run, or the

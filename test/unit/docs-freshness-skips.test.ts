@@ -125,8 +125,8 @@ describe("docs-freshness gate, everything present", () => {
   });
 
   test("reports every check as passed", () => {
-    expect(res.out).toContain("8/8 checks passed");
-    expect(res.out).toContain("All 8 docs-freshness checks ran and passed.");
+    expect(res.out).toContain("9/9 checks passed");
+    expect(res.out).toContain("All 9 docs-freshness checks ran and passed.");
   });
 
   test("reports nothing as skipped", () => {
@@ -168,12 +168,12 @@ describe("cli-command-descriptions with dist/cli.js absent", () => {
   });
 
   test("never claims all checks passed", () => {
-    expect(res.out).not.toContain("All 8 docs-freshness checks ran and passed.");
-    expect(res.out).not.toMatch(/8\/8 checks passed/);
+    expect(res.out).not.toContain("All 9 docs-freshness checks ran and passed.");
+    expect(res.out).not.toMatch(/9\/9 checks passed/);
   });
 
   test("the tally excludes it from the pass count and names it separately", () => {
-    expect(res.out).toContain("7/8 checks passed");
+    expect(res.out).toContain("8/9 checks passed");
     expect(res.out).toContain("1 DID NOT RUN");
   });
 });
@@ -271,6 +271,41 @@ describe("the check manifest", () => {
       expect(res.out).toContain("gate is incomplete");
       expect(res.out).toContain("port-drift");
     });
+  });
+});
+
+describe("changelog-lede-length (flair#1392)", () => {
+  function nWords(n: string, count: number): string {
+    return Array.from({ length: count }, (_, i) => `${n}${i + 1}`).join(" ") + ".";
+  }
+
+  test("a 40-word lede FAILS the real gate, naming the fragment, count, and rule", () => {
+    const dir = fixture({ distCli: fakeCli(3) });
+    writeFileSync(
+      join(dir, ".changelog", "unreleased", "fixed-long-lede.md"),
+      `- **${nWords("long", 40)}** Move this detail into the body.\n`,
+    );
+    const res = runGate(dir);
+    expect(res.status).toBe(1);
+    expect(res.out).toContain("changelog-lede-length");
+    expect(res.out).toContain("fixed-long-lede.md");
+    expect(res.out).toContain("40 words");
+    expect(res.out).toContain("25 words");
+    expect(res.out).toContain("one sentence");
+  });
+
+  test("a 20-word lede PASSES the real gate", () => {
+    const dir = fixture({ distCli: fakeCli(3) });
+    writeFileSync(
+      join(dir, ".changelog", "unreleased", "fixed-short-lede.md"),
+      `- **${nWords("ok", 20)}** Body detail is unrestricted.\n`,
+    );
+    const res = runGate(dir);
+    expect(res.status).toBe(0);
+    expect(res.out).toContain("changelog-lede-length");
+    expect(res.out).toMatch(/changelog-lede-length[\s\S]*?✓ pass/);
+    expect(res.out).not.toContain("fixed-short-lede.md");
+    expect(res.out).toContain("9/9 checks passed");
   });
 });
 

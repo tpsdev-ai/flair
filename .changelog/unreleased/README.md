@@ -28,7 +28,16 @@ including the leading `- ` and a 2-space indent on continuation lines:
   and what they have to do about it (usually nothing).
 
   A second paragraph, indented two spaces so it stays inside the list item.
+
+  > **Heads-up:** what an operator must know or do. Reproduced verbatim on the
+  > GitHub release page (flair#1392). Use this for the sentences that must
+  > survive summarising.
 ```
+
+**The bold lede is ≤ 25 words and one sentence.** The GitHub release renderer
+keeps that lede, up to three issue links, and any Heads-up lines — nothing else.
+A long lede *is* the dump; move detail into the body. The docs-freshness gate
+fails naming the fragment, its word count, and this rule.
 
 Assembly is a pure join — no reflow, no re-indent, no rewrapping — so tables and
 nested code blocks survive verbatim. The flip side is that a fragment which is

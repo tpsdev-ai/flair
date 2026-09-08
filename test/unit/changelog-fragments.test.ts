@@ -26,7 +26,10 @@ import {
   readFragments,
   strayUnreleasedEntries,
   UNRELEASED_NOTE,
+  LEDE_WORD_LIMIT,
+  ledeLengthViolation,
   validateFragmentBody,
+  validateLedeLength,
 } from "../../scripts/changelog-fragments.mjs";
 
 function tmp(): string {
@@ -419,5 +422,46 @@ describe("fixedFragmentsClaimingPinned", () => {
       pinned,
     );
     expect(offenders).toEqual([]);
+  });
+});
+
+// ─── Lede length (flair#1392) ────────────────────────────────────────────────
+//
+// Both directions: a rule that only ever passes is not a rule. 40-word lede
+// must FAIL; 20-word lede must PASS. The message names the fragment, the
+// count, and the ≤25-word / one-sentence rule.
+
+function nWords(n: string, count: number, end = "."): string {
+  return Array.from({ length: count }, (_, i) => `${n}${i + 1}`).join(" ") + end;
+}
+
+describe("lede length — 25 words, one sentence (flair#1392)", () => {
+  test("a 20-word lede PASSES", () => {
+    const body = `- **${nWords("ok", 20)}** Body detail stays here.\n`;
+    expect(ledeLengthViolation("fixed-short.md", body)).toBeNull();
+    expect(() => validateLedeLength("fixed-short.md", body)).not.toThrow();
+    expect(() => validateFragmentBody("fixed-short.md", body)).not.toThrow();
+  });
+
+  test("a 40-word lede FAILS, naming the fragment, count, and rule", () => {
+    const body = `- **${nWords("long", 40)}** Body.\n`;
+    const msg = ledeLengthViolation("fixed-long-lede.md", body);
+    expect(msg).not.toBeNull();
+    expect(msg).toContain("fixed-long-lede.md");
+    expect(msg).toContain("40 words");
+    expect(msg).toContain(`${LEDE_WORD_LIMIT} words`);
+    expect(msg).toContain("one sentence");
+    expect(() => validateLedeLength("fixed-long-lede.md", body)).toThrow(/40 words/);
+  });
+
+  test("two sentences in the bold run FAIL even when under 25 words", () => {
+    const body = "- **First sentence here. Second sentence also here.** Body.\n";
+    const msg = ledeLengthViolation("fixed-two-sentences.md", body);
+    expect(msg).toMatch(/2 sentences/);
+    expect(msg).toContain("one sentence");
+  });
+
+  test("a fragment with no bold run is not this rule's business", () => {
+    expect(ledeLengthViolation("fixed-plain.md", "- A plain entry with no bold lede at all.\n")).toBeNull();
   });
 });
