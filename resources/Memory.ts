@@ -6,6 +6,7 @@ import { isForbiddenOwnerMutation } from "./record-owner-guard.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { localInstanceId } from "./instance-identity.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
+import { isEmbeddingSpaceUniform, noteWriteStamp } from "./embedding-space-guard.js";
 import { scanFields, isStrictMode } from "./content-safety.js";
 import { invalidEntitiesResponse } from "./entity-vocab.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
@@ -143,6 +144,15 @@ async function findConservativeDedupMatch(
   lexicalThreshold: number,
 ): Promise<DedupMatch | null> {
   if (!agentId || !embedding || embedding.length === 0) return null;
+  // ── Vector-space uniformity guard (embedding-space-guard slice 1) ──────────
+  // When the corpus is not uniform in the current embedding space, the cosine
+  // compare below would cross vector spaces (Harper zero-pads / returns a
+  // garbage score). No-op the dedup cosine leg — treat as no-match — through
+  // the SAME single chokepoint the recall leg (SemanticSearch) consults.
+  // ADVISORY ONLY: the write always proceeds (runDedupGate already computed and
+  // stamped a fresh CURRENT-space embedding); this only skips a comparison that
+  // can't be trusted while spaces are mixed. Never suppresses a write.
+  if (!(await isEmbeddingSpaceUniform())) return null;
   try {
     const query: any = {
       sort: { attribute: "embedding", target: embedding, distance: "cosine" },
@@ -881,6 +891,11 @@ export class Memory extends (databases as any).flair.Memory {
     // synchronous hook is what makes a store immediately searchable rather
     // than searchable-after-the-feed-turns.
     noteMemoryUpsert(content);
+    // embedding-space-guard slice 1: keep the write-maintained latch current —
+    // a persisted FOREIGN stamp (federation / replication / an explicit-stamp
+    // write) trips the gate; a normal local write stamps the current id and
+    // never does.
+    noteWriteStamp(content?.embeddingModel as string | null | undefined);
 
     // ── THEN close the superseded record ────────────────────────────────────
     // Write-new-BEFORE-close-old: the previous order (close-old via a fire-
@@ -959,6 +974,7 @@ export class Memory extends (databases as any).flair.Memory {
       delete content._reindex;
       const reindexed = await super.put(content);
       noteMemoryUpsert(content);
+      noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
       return reindexed;
     }
 
@@ -1215,6 +1231,7 @@ export class Memory extends (databases as any).flair.Memory {
     const result = await super.put(content);
     // flair#1357 — read-your-write for the lexical leg (see post()).
     noteMemoryUpsert(content);
+    noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
 
     // ── THEN close the superseded record (see post()) ───────────────────────
     await closeSupersededIfNeeded(ctx, content, "put");

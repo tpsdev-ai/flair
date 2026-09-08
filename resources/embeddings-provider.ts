@@ -411,13 +411,31 @@ export function getMode(): Mode {
 const EMBEDDING_VARIANT = "searchprefix";
 
 /**
+ * The embedding ENGINE identity carried by every model-id stamp
+ * (embedding-provider-seam design, slice 1). `gguf` is the only engine today
+ * (harper-fabric-embeddings' GGUF backend); the seam that SELECTS an
+ * alternative engine is slice 2 — this slice only QUALIFIES the stamp so the
+ * vector-space guard can tell two engines apart even when they share a model
+ * name/dims (dims-only would silently pass a mixed comparison — Sherlock
+ * binding req #3). Kept next to getModelId() so the stamp and
+ * resources/embedding-space-guard.ts's one-time bare-name → `gguf:`
+ * equivalence read the SAME constant and cannot drift.
+ */
+export const EMBEDDING_ENGINE = "gguf";
+
+/**
  * Get the current embedding model identifier.
  * Used for stamping memories and detecting stale embeddings. Reads the SAME
  * `prefixesEnabled()` chokepoint `buildEmbedOptions()` does (see THE GATE's
- * doc above `EMBEDDING_PREFIXES_ENABLED`) — gate on (default): bumps to
- * `<base>+searchprefix` (see `EMBEDDING_VARIANT` above). Gate off (only
- * reachable now via the bench-only override, see `harnessPrefixOverride()`):
- * bare base id, no suffix. A prefixed vector and an unprefixed vector of the
+ * doc above `EMBEDDING_PREFIXES_ENABLED`) — gate on (default): returns the
+ * engine-qualified `<engine>:<base>+searchprefix` (see `EMBEDDING_ENGINE` /
+ * `EMBEDDING_VARIANT` above). Gate off (only reachable now via the bench-only
+ * override, see `harnessPrefixOverride()`): `<engine>:<base>`, no suffix. The
+ * `<engine>:` prefix is new in embedding-space-guard slice 1; a legacy BARE
+ * stamp (no prefix) denotes the SAME gguf space and is reconciled by
+ * resources/embedding-space-guard.ts's normalizeStamp() and the migration/CLI
+ * stale comparators, so today's corpus is NOT read as stale. A prefixed vector
+ * and an unprefixed vector of the
  * SAME text are genuinely different vectors (dedup must not short-circuit
  * across them), and `--stale-only` needs a distinct string to target the
  * rows that still need re-embedding. `+` is URL-safe and doesn't collide
@@ -427,7 +445,19 @@ const EMBEDDING_VARIANT = "searchprefix";
  */
 export function getModelId(): string {
   const base = process.env.FLAIR_EMBEDDING_MODEL ?? "nomic-embed-text-v1.5-Q4_K_M";
-  return prefixesEnabled() ? `${base}+${EMBEDDING_VARIANT}` : base;
+  // The bare-name override must not collide with the `<engine>:<model>` stamp
+  // format — a ':' in the base makes the qualified stamp ambiguous
+  // (`gguf:a:b`) and would break the guard's engine/model split. Fail loudly at
+  // the stamp site rather than silently writing an un-parseable id (a shipped
+  // config default is a trust anchor: derive or fail, never fail-open).
+  if (base.includes(":")) {
+    throw new Error(
+      `[embeddings] FLAIR_EMBEDDING_MODEL must not contain ':' — it is reserved for the ` +
+        `<engine>:<model> embedding stamp (embedding-space-guard slice 1); got ${JSON.stringify(base)}`,
+    );
+  }
+  const suffix = prefixesEnabled() ? `+${EMBEDDING_VARIANT}` : "";
+  return `${EMBEDDING_ENGINE}:${base}${suffix}`;
 }
 
 /**

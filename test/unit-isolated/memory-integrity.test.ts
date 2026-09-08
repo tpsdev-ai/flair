@@ -46,6 +46,10 @@ mock.module("../../resources/embeddings-provider.ts", () => ({
     return FAKE_EMBEDDING;
   },
   getModelId: () => "mock-embedding-model",
+  // embedding-space-guard slice 1: the guard (imported transitively via
+  // Memory.ts) imports EMBEDDING_ENGINE — keep this mock a superset of every
+  // consumer's named imports (see this mock's getMode note).
+  EMBEDDING_ENGINE: "gguf",
   // getMode is unused by this file's own tests, but MUST still be exported —
   // `bun test test/unit` runs every file in one process, and another file's
   // dynamic import of a module that (transitively) imports embeddings-

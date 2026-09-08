@@ -127,6 +127,7 @@
  */
 import { databases } from "harper";
 import { getModelId } from "../embeddings-provider.js";
+import { currentSpaceRawForms, isCurrentSpaceStamp } from "../embedding-space-guard.js";
 import type { Migration, RunBatchResult } from "./types.js";
 
 export interface MemoryTableLike {
@@ -211,11 +212,28 @@ export function createEmbeddingStampMigration(
     // reads the live record directly. Reverting this to "not_equal" would
     // reopen #807 on any store where the embeddingModel index lags the
     // on-disk value.
+    // embedding-space-guard slice 1: getModelId() now stamps the
+    // ENGINE-QUALIFIED id (`gguf:<base>[+searchprefix]`). Today's corpus is
+    // stamped with the BARE name, which denotes the SAME space — so a row is
+    // current-space iff its stamp is EITHER the qualified id OR its bare
+    // equivalent. `currentSpaceRawForms()` returns both; stale = matches
+    // NEITHER (an AND of `not_equals`), so a legacy bare row is NOT re-embedded
+    // (which would loop forever — Memory.put re-stamps it qualified, still
+    // "!= bare" under a single-value check). Each leg stays the `not_equals`
+    // PREFIX form (flair#807: resolves to a negated-equals leaf that bypasses a
+    // possibly-stale secondary index and reads the live record).
+    const forms = currentSpaceRawForms(getCurrentModelId());
+    const notCurrentSpace = forms.length === 1
+      ? { attribute: "embeddingModel", comparator: "not_equals", value: forms[0] }
+      : {
+          operator: "and",
+          conditions: forms.map((f) => ({ attribute: "embeddingModel", comparator: "not_equals", value: f })),
+        };
     return [
       {
         operator: "or",
         conditions: [
-          { attribute: "embeddingModel", comparator: "not_equals", value: getCurrentModelId() },
+          notCurrentSpace,
           { attribute: "embeddingModel", comparator: "equals", value: null },
         ],
       },
@@ -257,7 +275,7 @@ export function createEmbeddingStampMigration(
         if (!id) continue;
         const existing = await table.get(id);
         if (!existing) continue; // deleted since the search above — nothing to fix
-        if (existing.embeddingModel === current) continue; // already stamped by a concurrent runner — idempotent skip
+        if (isCurrentSpaceStamp(existing.embeddingModel as string | null | undefined, current)) continue; // already current-space (incl. bare equivalent) — idempotent skip
 
         const ok = await regen(id, existing);
         if (ok) touchedIds.push(id);
@@ -297,7 +315,7 @@ export function createEmbeddingStampMigration(
         // A row that vanished since the search, OR whose live embeddingModel
         // still doesn't match current, is a GENUINE pending row (or a
         // concurrent delete) — never counted as a false positive.
-        if (existing && existing.embeddingModel === current) falsePositives++;
+        if (existing && isCurrentSpaceStamp(existing.embeddingModel as string | null | undefined, current)) falsePositives++;
       }
 
       return { sampled: ids.length, falsePositives };

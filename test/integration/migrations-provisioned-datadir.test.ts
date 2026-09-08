@@ -44,9 +44,12 @@ import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-
 
 const RESERVED_TEST_AGENT_ID = "__flair_migration_datadir_test_agent__";
 const SEED_IDS = Array.from({ length: 4 }, (_, i) => `datadir-seed-${i}`);
-// Matches resources/embeddings-provider.ts's getModelId() with the prefix
-// gate on, so embedding-stamp sees nothing pending and this test stays
-// independent of the local embeddings model.
+// The legacy BARE-name stamp (pre embedding-space-guard slice 1). getModelId()
+// now returns the ENGINE-QUALIFIED `gguf:<base>+searchprefix`, but a bare stamp
+// denotes the SAME space, so embedding-stamp's staleCondition (via
+// currentSpaceRawForms) treats a bare row as current and sees nothing pending —
+// this seed doubles as the real-Harper proof that today's bare-name corpus is
+// NOT re-embedded. Keeps the test independent of the local embeddings model.
 const CURRENT_MODEL_ID = "nomic-embed-text-v1.5-Q4_K_M+searchprefix";
 
 let harper: HarperInstance;

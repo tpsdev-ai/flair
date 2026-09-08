@@ -54,6 +54,7 @@ mock.module("../../resources/embeddings-provider.ts", () => ({
   },
   getModelId: () => "mock-embedding-model",
   getMode: () => "local",
+  EMBEDDING_ENGINE: "gguf", // embedding-space-guard slice 1 — keep mock a superset of consumers' named imports
 }));
 
 function matchesCondition(record: any, cond: any): boolean {

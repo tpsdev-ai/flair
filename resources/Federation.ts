@@ -12,6 +12,7 @@ import {
 } from "./federation-crypto.js";
 import { reconcileState } from "./relay-lib.js";
 import { isSkillWrite } from "./skill-write.js";
+import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
 import { createPersistentNonceStore, initNonceStoreCleanup } from "./federation-nonce-store.js";
 import {
@@ -142,6 +143,34 @@ function mergeRecord(local: Record<string, any> | null, remote: SyncRecord): Rec
   }
 
   return merged;
+}
+
+/**
+ * embedding-space-guard slice 1 (the raw-writer-coverage hole K&S found in
+ * review #1554): the sync-in merge persists Memory rows via the RAW table
+ * handle, bypassing Memory.post()/put(). An LWW remote-win copies the REMOTE
+ * `embeddingModel` into `mergedData`, so a memory synced from a spoke on a
+ * different engine/model lands a FOREIGN-space vector. Without tripping the
+ * vector-space guard's latch, the next recall's O(1) "uniform" consult would
+ * cosine that foreign vector = mixed-space garbage — exactly the failure the
+ * guard exists to kill. Trip the latch here.
+ *
+ * `noteWriteStamp` no-ops for a current/bare stamp (a self-originated or
+ * same-space sync) and for a non-Memory table (no `embeddingModel`), so only a
+ * genuinely foreign Memory sync trips it. Kept as a note-ONLY helper — the raw
+ * `table.put(mergedData)` stays INLINE at the call site so the raw-writer
+ * coverage gates (authority-field-guard.test.ts / memory-embedding-writer-
+ * coverage.test.ts) still enumerate the Memory writer — while the trip decision
+ * itself is unit-testable without standing up the full signed sync-in path (see
+ * test/unit-isolated/embedding-space-guard-federation.test.ts).
+ */
+export function noteFederationMergedMemory(
+  recordTable: string,
+  mergedData: { embeddingModel?: unknown },
+): void {
+  if (recordTable === "Memory") {
+    noteWriteStamp(mergedData.embeddingModel as string | null | undefined);
+  }
 }
 
 // ─── Instance identity ───────────────────────────────────────────────────────
@@ -632,6 +661,11 @@ export class FederationSync extends Resource {
         mergedData._syncedAt = new Date().toISOString();
 
         await table.put(mergedData);
+        // embedding-space-guard slice 1: a federation-merged Memory can carry a
+        // FOREIGN embeddingModel (LWW remote-win) — trip the guard's latch so
+        // recall/dedup degrade instead of cosining a foreign vector. See
+        // noteFederationMergedMemory's doc.
+        noteFederationMergedMemory(record.table, mergedData);
         merged++;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

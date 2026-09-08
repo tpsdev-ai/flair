@@ -12,6 +12,7 @@ mock.module("../../resources/embeddings-provider.ts", () => ({
   getEmbedding: async () => [1, 0, 0, 0],
   getModelId: () => "mock-embedding-model",
   getMode: () => "local",
+  EMBEDDING_ENGINE: "gguf", // embedding-space-guard slice 1 — guard imports this transitively via Memory.ts
 }));
 
 let memoryStore: Map<string, any>;
