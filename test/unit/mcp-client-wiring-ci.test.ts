@@ -9,13 +9,15 @@
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { ALL_CLIENTS } from "../../src/install/clients.ts";
 import {
   CLOBBER_MARKER_SERVER,
   EXIT_DID_NOT_RUN,
+  EXIT_FAIL,
   EXIT_OK,
   FLAIR_MCP_PACKAGE,
   PI_FLAIR_PACKAGE,
@@ -24,6 +26,7 @@ import {
   clobberClaudeFixture,
   clobberSurvived,
   parseArgs,
+  main,
   parseWiringSummary,
   pinCheck,
   readJsonMcpPin,
@@ -297,5 +300,111 @@ describe("the CI job must remain able to fail", () => {
   test("isolates HOME (the new-user state #908 asked for)", () => {
     expect(readFileSync(SCRIPT, "utf8")).toContain("HOME: home");
     expect(readFileSync(SCRIPT, "utf8")).toContain('USERPROFILE: home');
+  });
+});
+
+describe("main() against a stub CLI — the three #908 passes", () => {
+  const VERSION = "0.51.2";
+
+  function writeStub(dir: string, mode: "honest" | "silent" | "unpinned") {
+    const path = join(dir, "cli.js");
+    writeFileSync(
+      path,
+      `#!/usr/bin/env node
+const { existsSync, mkdirSync, readFileSync, writeFileSync } = require("node:fs");
+const { dirname, join } = require("node:path");
+const home = process.env.HOME;
+const argv = process.argv.slice(2);
+if (argv[0] === "stop") process.exit(0);
+const clientFlag = argv[argv.indexOf("--client") + 1];
+const version = ${JSON.stringify(VERSION)};
+const spec = ${JSON.stringify(mode === "unpinned" ? FLAIR_MCP_PACKAGE : `${FLAIR_MCP_PACKAGE}@${VERSION}`)};
+const piSpec = ${JSON.stringify(mode === "unpinned" ? `npm:${PI_FLAIR_PACKAGE}` : `npm:${PI_FLAIR_PACKAGE}@${VERSION}`)};
+const mode = ${JSON.stringify(mode)};
+
+function binOnPath(bin) {
+  return (process.env.PATH || "").split(":").some((d) => d && existsSync(join(d, bin)));
+}
+function writeJson(rel, obj) {
+  const p = join(home, rel);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify(obj, null, 2) + "\\n");
+}
+function mcpEntry() {
+  return { command: "npx", args: ["-y", spec], env: { FLAIR_AGENT_ID: "wiretest", FLAIR_URL: "http://127.0.0.1:19997" } };
+}
+
+if (mode === "silent") {
+  console.log("Harper already running\\n✅ Flair initialized successfully");
+  process.exit(0);
+}
+
+if (clientFlag === "all" && !binOnPath("claude")) {
+  console.log("MCP clients");
+  console.log("   • Not installed, skipped: Claude Code, Codex, Gemini, Cursor, Antigravity, pi");
+  console.log("   ⚠ No MCP client was wired. Install a client, then re-run: flair init --agent wiretest --client all");
+  process.exit(0);
+}
+
+if (clientFlag === "all") {
+  writeJson(".claude.json", { mcpServers: { flair: mcpEntry() } });
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  writeFileSync(join(home, ".codex", "config.toml"), "[mcp_servers.flair]\\ncommand = \\"npx\\"\\nargs = [\\"-y\\", \\"" + spec + "\\"]\\n");
+  writeJson(".gemini/settings.json", { mcpServers: { flair: mcpEntry() } });
+  writeJson(".cursor/mcp.json", { mcpServers: { flair: mcpEntry() } });
+  writeJson(".gemini/config/mcp_config.json", { mcpServers: { flair: mcpEntry() } });
+  writeJson(".pi/agent/settings.json", { packages: [piSpec] });
+  console.log("MCP clients");
+  console.log("   ✓ Wired: Claude Code, Codex, Gemini, Cursor, Antigravity, pi");
+  process.exit(0);
+}
+
+if (clientFlag === "claude-code") {
+  const p = join(home, ".claude.json");
+  const cfg = JSON.parse(readFileSync(p, "utf8"));
+  cfg.mcpServers = cfg.mcpServers || {};
+  cfg.mcpServers.flair = mcpEntry();
+  writeFileSync(p, JSON.stringify(cfg, null, 2) + "\\n");
+  console.log("MCP clients");
+  console.log("   ✓ Wired: Claude Code");
+  process.exit(0);
+}
+
+console.error("stub: unexpected argv " + argv.join(" "));
+process.exit(1);
+`,
+    );
+    return path;
+  }
+
+  test("honest stub: empty HOME skips, fake bins write pinned configs, clobber survives", () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-wiring-stub-"));
+    try {
+      const flair = writeStub(dir, "honest");
+      const status = main(["--flair", flair, "--version", VERSION, "--port", "19997"]);
+      expect(status).toBe(EXIT_OK);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("silent stub fails — the #908 defect", () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-wiring-silent-"));
+    try {
+      const flair = writeStub(dir, "silent");
+      expect(main(["--flair", flair, "--version", VERSION])).toBe(EXIT_FAIL);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("unpinned stub fails — the #907 defect", () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-wiring-unpinned-"));
+    try {
+      const flair = writeStub(dir, "unpinned");
+      expect(main(["--flair", flair, "--version", VERSION])).toBe(EXIT_FAIL);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

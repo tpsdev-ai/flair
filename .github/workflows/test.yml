@@ -874,20 +874,20 @@ jobs:
             exit 1
           fi
 
-  # flair#908 — MCP client wiring had zero CI coverage. Every other init in
-  # this file (pack-smoke, upgrade-smoke) runs `flair init` without `--client`
-  # and never reads a client config back. That is the class that let #906
-  # (silent Claude Code skip) and #907 (unpinned / `unknown` spec) ship for
-  # three releases. This job packs the tarball (the install a new user gets),
-  # runs `flair init --agent --client all` against a fake HOME, and asserts
-  # every supported client was either written or explicitly reported.
-  # Silence is a failure. A client this gate cannot exercise must be named.
-  #
-  # BLOCKING. Do not add `continue-on-error`, `|| true` or `|| echo` here —
-  # an advisory check that nobody reads is how wiring bugs survive. If the
-  # script cannot run (no tarball, no CLI, unresolved --version) it exits 2
-  # (DID NOT RUN), not 0. Required-check name: "MCP client wiring".
   mcp-client-wiring:
+    # flair#908 — MCP client wiring had zero CI coverage. Every other init in
+    # this file (pack-smoke, upgrade-smoke) runs `flair init` without `--client`
+    # and never reads a client config back. That is the class that let #906
+    # (silent Claude Code skip) and #907 (unpinned / `unknown` spec) ship for
+    # three releases. This job packs the tarball (the install a new user gets),
+    # runs `flair init --agent --client all` against a fake HOME, and asserts
+    # every supported client was either written or explicitly reported.
+    # Silence is a failure. A client this gate cannot exercise must be named.
+    #
+    # BLOCKING. Do not add `continue-on-error`, `|| true` or `|| echo` here —
+    # an advisory check that nobody reads is how wiring bugs survive. If the
+    # script cannot run (no tarball, no CLI, unresolved --version) it exits 2
+    # (DID NOT RUN), not 0. Required-check name: "MCP client wiring".
     name: MCP client wiring
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -932,7 +932,10 @@ jobs:
           npm install "${{ steps.pack.outputs.TGZ_PATH }}"
           npm install --no-save @node-llama-cpp/linux-x64@3
 
-          FLAIR="$(pwd)/node_modules/@tpsdev-ai/flair/dist/cli.js"
+          # cli-shim.cjs is package.json's `bin.flair` — the entry a new user
+          # actually runs. dist/cli.js only auto-starts on import.meta.main;
+          # the shim always calls runCli() after the Node-version preflight.
+          FLAIR="$(pwd)/node_modules/@tpsdev-ai/flair/dist/cli-shim.cjs"
           VERSION=$(node -p "require('@tpsdev-ai/flair/package.json').version")
           [ -n "$VERSION" ] && [ "$VERSION" != "unknown" ] || {
             echo "DID NOT RUN: installed package.json version is '${VERSION}'"
