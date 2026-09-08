@@ -200,6 +200,7 @@ import {
 // functions — this pulls in nothing but node builtins.
 import { DEFAULT_INTERVAL_SECONDS as FEDERATION_SYNC_DEFAULT_INTERVAL } from "./federation/scheduler.js";
 import { applyUpgradeMigrations, type UpgradeMigrationContext } from "./lib/upgrade-migrations.js";
+import { collectUpgradeExecPathWarning } from "./lib/upgrade-exec-path.js";
 
 // Federation crypto helpers — inlined to avoid cross-boundary imports from
 // src/ into resources/, which don't survive npm packaging (see also
@@ -11214,6 +11215,22 @@ program
     const showAll = opts.all ?? false;
 
     console.log("Checking for updates...\n");
+
+    // flair#1109 (b): if the running instance (or this CLI) is not the
+    // npm-global install, say so before the listing reports the global
+    // package as "the" install. Detection is best-effort and never fails
+    // the command. Does not add a plain-tree upgrade lane.
+    try {
+      const execPathWarning = collectUpgradeExecPathWarning({
+        servingPid: resolveInstanceServingPid(defaultDataDir(), resolveHttpPort({})),
+        cliPackageDir: flairPackageDir(),
+        npmGlobalPrefix: await resolveNpmGlobalPrefix(),
+      });
+      if (execPathWarning) {
+        console.log(execPathWarning);
+        console.log("");
+      }
+    } catch { /* never fail upgrade over a path probe */ }
 
     // Per-package install probes. `npm list -g` assumed the default global
     // prefix and silently mis-reported "not installed" for anyone using

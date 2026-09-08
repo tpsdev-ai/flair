@@ -43,6 +43,13 @@ transitive dependency). **Other integrations upgrade in their own ecosystem, not
 `flair upgrade`:** `pi-flair` (pi's plugin manager), `langgraph-flair` / `hermes-flair`
 (pip / your Python package manager), `n8n-nodes-flair` (n8n's Community Nodes UI).
 
+If the running instance's exec path is not that npm-global install — a plain
+extracted tree under systemd, a leftover global relic next to the tree that is
+actually serving — `flair upgrade` says so before listing versions. The listing
+is still the npm-global surface; the warning names both paths so the relic is
+not reported as "the" install. There is no in-place tarball-swap lane for a
+plain-tree install.
+
 ### Upgrade is a transaction
 
 As of flair#635, `flair upgrade` is install → restart → verify →
