@@ -26,14 +26,26 @@ The Harper fixture is the same 1,000-row / 64 five-hit search harness as
 [bm25-metadata.md](bm25-metadata.md). The probe now also instruments
 `MemoryHitStat.put` and reads counters from that table.
 
-## Expected contract
+## Recorded sample
 
-| Measurement | Before (#1545 head) | This slice |
+Real Harper 5.2.8, Node 22.22.2, Bun 1.3.10, 1,000 synthetic rows, 64 five-hit
+searches per arm, both arm orders, concurrency 1 and 8. Probe wraps Memory.put
+and MemoryHitStat.put and reads counters from MemoryHitStat.
+
+| Measurement | Sequential (c=1) | Concurrent (c=8) |
 |---|---:|---:|
-| Memory puts / 64 five-hit searches | 320 | 0 |
-| BM25 feed updates from those searches | 0 warm / 320 forced-legacy | 0 |
-| Counter increase (seq and concurrency 8) | 310–320 | 320 |
-| MemoryHitStat puts | — | \> 0 and ≤ 320 (coalesced under concurrency) |
+| Memory puts | 0 | 0 |
+| BM25 feed updates / replacements | 0 | 0 |
+| MemoryHitStat successful puts | 320 | 315–320 |
+| Counter increase | 320 | 320 |
+| Request p95 | 5.13–6.68 ms | 28.77–34.41 ms |
+| Request p99 | 5.54–9.93 ms | 30.07–36.11 ms |
+| Event-loop p99 | 4.46–6.86 ms | 6.62–8.48 ms |
+
+Every arm — including concurrency 8 — advanced counters by exactly 320. One
+concurrent arm coalesced to 315 stat puts while still accounting 320 increments.
+#1545 recorded a 310/320 counter miss on a concurrent arm; that miss is gone
+without rewriting Memory.
 
 Request p95/p99 and event-loop delay remain observational; this slice claims
 write-amp and counter-accounting, not an end-to-end latency win.
