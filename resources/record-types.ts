@@ -371,6 +371,9 @@ export const RECORD_TYPES = {
   // file's header (Sherlock DESIGN REVIEW Q6): Federation.ts's push table
   // list is unchanged, so Asset blobs never leave the instance — a Memory that
   // does federate carries only the assetId reference, not the bytes.
+  // Lifecycle: orphans retained until the owner deletes the Asset row; no
+  // Memory-delete GC this slice. Slice 2 serving 404s dangling refs; GC
+  // sweep + memoryId exist-and-owned validation deferred to slice 2.
   Asset: {
     table: "Asset",
     ownerField: "agentId",

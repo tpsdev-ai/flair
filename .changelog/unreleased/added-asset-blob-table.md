@@ -5,5 +5,7 @@
   this slice.
 
   Orphan blobs are retained until the owning agent deletes the Asset row;
-  deleting the parent Memory does not sweep them. `updatedAt` is stamped so a
-  later maintenance sweep can key on recency.
+  deleting the parent Memory does not sweep them. Slice 2's serving tool
+  returns 404 for dangling memoryIds; the GC sweep lands with that slice.
+  `updatedAt` is stamped so that sweep can key on recency. `memoryId`
+  exist-and-owned validation is deferred (unvalidated string this slice).

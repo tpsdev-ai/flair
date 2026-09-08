@@ -41,10 +41,17 @@ const assetAuthGate = makeAuthGate();
  * unbounded blob cannot land. Non-string `data` without a readable size is
  * rejected (400) rather than persisted unbounded.
  *
- * Lifecycle: an Asset is retained until its owner deletes the row. Deleting
- * the parent Memory does not sweep linked blobs (no GC in this slice);
- * `updatedAt` is stamped on every write so a later maintenance sweep can
- * key on recency. Harper unlinks blob files when the Asset row is deleted.
+ * Lifecycle (Kern P1, this slice): an Asset is retained until its owner
+ * deletes the row. Deleting or superseding the parent Memory does not sweep
+ * linked blobs — no GC here. Slice 2's serving tool must 404 a dangling
+ * memoryId/assetId; the GC sweep lands with that slice. `updatedAt` is
+ * stamped on every write so that sweep can key on recency without a second
+ * schema change. Harper unlinks blob files when the Asset row is deleted.
+ *
+ * `memoryId` is an unvalidated, mutable string this slice (exist-and-owned
+ * check deferred). Harmless for owner-only reads; slice 2's OAuth-scoped
+ * asset URL in memory_search must not assume the parent Memory still exists
+ * or is owned by the writer.
  */
 export class Asset extends (databases as any).flair.Asset {
   allowRead() { return assetAuthGate.call(this); }

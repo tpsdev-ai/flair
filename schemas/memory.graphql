@@ -252,8 +252,9 @@ type MemoryCandidate @table(database: "flair") @export {
 # resources/record-types.ts (RECORD_TYPES.Asset) — a new type must not enter
 # federation sync (Federation.ts's table list is unchanged).
 # Lifecycle: retained until the owner deletes the Asset row. Deleting the
-# parent Memory does not sweep linked blobs (no GC this slice). updatedAt is
-# nullable/additive so a later maintenance sweep can key on recency.
+# parent Memory does not sweep linked blobs (no GC this slice). Slice 2
+# serving 404s dangling refs; GC + memoryId exist-and-owned check deferred.
+# updatedAt is nullable/additive so a later sweep can key on recency.
 type Asset @table(database: "flair") @export {
   id: ID @primaryKey
   agentId: String! @indexed        # owner (no-forge attribution / read scope)

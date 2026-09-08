@@ -1,9 +1,11 @@
 /**
  * asset-read-gate.test.ts — behavior guard for resources/Asset.ts
- * (images-in-Flair slice 1). Isolated so the harper mock (including
- * createBlob) does not collide with the shared test/unit/ process, where
- * another file's mock.module("harper") wins and `import { createBlob }`
- * fails. Same harper-mock technique as memory-candidate-read-gate.test.ts:
+ * (images-in-Flair slice 1). MUST stay in test/unit-isolated/: bun's ESM
+ * named import of createBlob from harper's CJS index is only populated
+ * after runtime assignment, so a shared test/unit/ process whose
+ * mock.module("harper") won without createBlob throws
+ * `Export named 'createBlob' not found`. Do not tidy this file back into
+ * test/unit/. Same harper-mock technique as memory-candidate-read-gate:
  * mock harper so the resource loads outside a real Harper runtime, then
  * drive allowRead()/get()/search()/post()/put()/delete() against an
  * in-memory store. Also covers the base64→Blob coercion via a mocked
