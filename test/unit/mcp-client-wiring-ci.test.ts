@@ -411,23 +411,33 @@ if (mode === "silent") {
   process.exit(0);
 }
 
-if (clientFlag === "all" && !binOnPath("claude")) {
-  console.log("MCP clients");
-  console.log("   • Not installed, skipped: Claude Code, Codex, Gemini, Cursor, Antigravity, pi");
-  console.log("   ⚠ No MCP client was wired. Install a client, then re-run: flair init --agent wiretest --client all");
-  process.exit(0);
-}
-
 if (clientFlag === "all") {
-  writeJson(".claude.json", { mcpServers: { flair: mcpEntry() } });
-  mkdirSync(join(home, ".codex"), { recursive: true });
-  writeFileSync(join(home, ".codex", "config.toml"), "[mcp_servers.flair]\\ncommand = \\"npx\\"\\nargs = [\\"-y\\", \\"" + spec + "\\"]\\n");
-  writeJson(".gemini/settings.json", { mcpServers: { flair: mcpEntry() } });
-  writeJson(".cursor/mcp.json", { mcpServers: { flair: mcpEntry() } });
-  writeJson(".gemini/config/mcp_config.json", { mcpServers: { flair: mcpEntry() } });
-  writeJson(".pi/agent/settings.json", { packages: [piSpec] });
+  // Per-client detect, same as detectClients(): each client's own bin.
+  // A single binOnPath("claude") then write-all is the flair-dev red —
+  // host claude made Pass 1 "wire" cursor/agy which have no bin.
+  const inventory = [
+    { label: "Claude Code", bin: "claude", write: function () { writeJson(".claude.json", { mcpServers: { flair: mcpEntry() } }); } },
+    { label: "Codex", bin: "codex", write: function () {
+      mkdirSync(join(home, ".codex"), { recursive: true });
+      writeFileSync(join(home, ".codex", "config.toml"), "[mcp_servers.flair]\\ncommand = \\"npx\\"\\nargs = [\\"-y\\", \\"" + spec + "\\"]\\n");
+    } },
+    { label: "Gemini", bin: "gemini", write: function () { writeJson(".gemini/settings.json", { mcpServers: { flair: mcpEntry() } }); } },
+    { label: "Cursor", bin: "cursor", write: function () { writeJson(".cursor/mcp.json", { mcpServers: { flair: mcpEntry() } }); } },
+    { label: "Antigravity", bin: "agy", write: function () { writeJson(".gemini/config/mcp_config.json", { mcpServers: { flair: mcpEntry() } }); } },
+    { label: "pi", bin: "pi", write: function () { writeJson(".pi/agent/settings.json", { packages: [piSpec] }); } },
+  ];
+  const wired = [];
+  const skipped = [];
+  for (const c of inventory) {
+    if (binOnPath(c.bin)) { c.write(); wired.push(c.label); }
+    else skipped.push(c.label);
+  }
   console.log("MCP clients");
-  console.log("   ✓ Wired: Claude Code, Codex, Gemini, Cursor, Antigravity, pi");
+  if (wired.length) console.log("   ✓ Wired: " + wired.join(", "));
+  if (skipped.length) console.log("   • Not installed, skipped: " + skipped.join(", "));
+  if (!wired.length) {
+    console.log("   ⚠ No MCP client was wired. Install a client, then re-run: flair init --agent wiretest --client all");
+  }
   process.exit(0);
 }
 
@@ -457,6 +467,26 @@ process.exit(1);
       expect(status).toBe(EXIT_OK);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("honest stub stays green when a host client bin is already on PATH", () => {
+    // Kern: write-all after binOnPath("claude") wired cursor/agy on a
+    // flair-dev PATH (41/42 locally, CI-green). Isolated PATH inherits
+    // process.env.PATH, so a host claude must not imply the other five.
+    const dir = mkdtempSync(join(tmpdir(), "flair-wiring-hostbin-"));
+    const hostBin = mkdtempSync(join(tmpdir(), "flair-host-claude-"));
+    const prevPath = process.env.PATH;
+    try {
+      writeFileSync(join(hostBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      process.env.PATH = `${hostBin}${prevPath ? `:${prevPath}` : ""}`;
+      const flair = writeStub(dir, "honest");
+      expect(main(["--flair", flair, "--version", VERSION, "--port", "19997"])).toBe(EXIT_OK);
+    } finally {
+      if (prevPath === undefined) delete process.env.PATH;
+      else process.env.PATH = prevPath;
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(hostBin, { recursive: true, force: true });
     }
   });
 
