@@ -5077,8 +5077,9 @@ export interface KeysPruneResult {
 /** Best-effort seed-validity check for a `.key` file: does it parse via any
  *  of the formats loadEd25519PrivateKeyFromFile (src/mcp-client-assertion.ts
  *  — the same loader `flair mcp token` uses) accepts? Never throws — used
- *  only to decide "invalid" vs. "worth a registration check", not to
- *  actually sign anything. */
+ *  only to decide "unidentified" vs. "worth a registration check", not to
+ *  actually sign anything. An unparseable file is not junk: the keys dir is
+ *  also where FileKeyStore writes AES-256-GCM blobs (flair#1026). */
 function isValidPrivateKeySeedFile(keyPath: string): boolean {
   try {
     loadEd25519PrivateKeyFromFile(keyPath);
@@ -5093,10 +5094,11 @@ function isValidPrivateKeySeedFile(keyPath: string): boolean {
  * never writes or moves anything; see applyKeyPrune below for the actual
  * move. Directories (including keysDir's own `.pruned` archive, PRUNED_DIR_NAME)
  * and files not ending in `.key` are "ignored" without any network call.
- * `.key` files with an unparseable seed are "invalid" without a network call
- * either — only a `.key` file that DOES parse triggers a signed
- * `GET /Agent/:id` against `baseUrl` (checkAgentRegistered above, the exact
- * same check doctor's registration gate uses).
+ * `.key` files with an unparseable seed are "unidentified" without a network
+ * call either — reported, never pruned (flair#1026). Only a `.key` file that
+ * DOES parse triggers a signed `GET /Agent/:id` against `baseUrl`
+ * (checkAgentRegistered above, the exact same check doctor's registration
+ * gate uses).
  *
  * If that check EVER reports "unreachable" — the instance couldn't be
  * confirmed up for that key — the WHOLE run aborts immediately
@@ -5151,7 +5153,7 @@ export async function classifyKeysDir(keysDir: string, baseUrl: string): Promise
     // flair#1023 added "key-unreadable". It cannot occur here — this key's
     // seed already parsed via isValidPrivateKeySeedFile above — but is
     // handled explicitly rather than folded into the else: a key that will
-    // not load means exactly what prune already calls "invalid".
+    // not load is "unidentified", not prunable "invalid" (flair#1026).
     const decision = reg.state === "key-unreadable"
       ? classifyKeyFile(c.agentId, false, null, baseUrl)
       : classifyKeyFile(c.agentId, true, { state: reg.state, detail: reg.detail }, baseUrl);
@@ -5223,11 +5225,12 @@ keys
 
     const stale = result.entries.filter((e) => e.class === "stale");
     const invalid = result.entries.filter((e) => e.class === "invalid");
+    const unidentified = result.entries.filter((e) => e.class === "unidentified");
     const kept = result.entries.filter((e) => e.class === "keep");
     const ignored = result.entries.filter((e) => e.class === "ignored");
     const prunable = [...stale, ...invalid];
 
-    if (stale.length + invalid.length + kept.length === 0) {
+    if (stale.length + invalid.length + unidentified.length + kept.length === 0) {
       console.log(`  ${render.icons.ok} No key files found in ${render.wrap(render.c.dim, keysDir)} — nothing to prune.`);
       console.log("");
       return;
@@ -5237,6 +5240,9 @@ keys
       const icon = e.class === "invalid" ? render.icons.error : render.icons.warn;
       console.log(`  ${icon} ${render.wrap(render.c.bold, e.name)} — ${e.class}: ${e.reason}`);
     }
+    for (const e of unidentified) {
+      console.log(`  ${render.icons.warn} ${render.wrap(render.c.bold, e.name)} — unidentified: ${e.reason}`);
+    }
     for (const e of kept) {
       console.log(`  ${render.icons.ok} ${e.name} — registered, keeping`);
     }
@@ -5244,7 +5250,7 @@ keys
     if (!apply) {
       console.log("");
       console.log(
-        `  ${render.wrap(render.c.dim, `${prunable.length} prunable (${stale.length} stale, ${invalid.length} invalid), ${kept.length} kept, ${ignored.length} ignored`)}`,
+        `  ${render.wrap(render.c.dim, `${prunable.length} prunable (${stale.length} stale, ${invalid.length} invalid), ${kept.length} kept, ${unidentified.length} unidentified (left in place), ${ignored.length} ignored`)}`,
       );
       if (prunable.length > 0) {
         console.log(`  ${render.wrap(render.c.dim, "Run with --apply to move prunable keys to")} ${join(keysDir, PRUNED_DIR_NAME, pruneDateStamp())}`);
@@ -5258,7 +5264,7 @@ keys
     for (const m of moved) {
       console.log(`  ${render.icons.ok} moved ${m.name} -> ${m.movedTo}`);
     }
-    console.log(`\n  ${render.wrap(render.c.bold, String(moved.length))} moved, ${kept.length} kept, ${ignored.length} ignored\n`);
+    console.log(`\n  ${render.wrap(render.c.bold, String(moved.length))} moved, ${kept.length} kept, ${unidentified.length} unidentified (left in place), ${ignored.length} ignored\n`);
   });
 
 // ─── flair hook ──────────────────────────────────────────────────────────────
