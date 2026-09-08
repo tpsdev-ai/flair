@@ -98,6 +98,18 @@ describe("flair#857 — archived memories never enter the recall spot-check samp
     const plan = planRecallSpotCheck(memories);
     expect(plan.health.healthy).toBe(true);
     expect(plan.sampled).toHaveLength(QUALITY_RECALL_SAMPLE_SIZE);
+    expect(plan.excludedArchivedRows).toBe(0);
+  });
+
+  test("excludedArchivedRows counts basemented rows dropped before the recency window", () => {
+    const memories = [
+      ...Array.from({ length: 9 }, (_, i) => row(`archived-${i}`, { archived: true, offsetSec: 100 + i })),
+      row("live-only", { archived: false, offsetSec: 0 }),
+    ];
+    const plan = planRecallSpotCheck(memories);
+    expect(plan.excludedArchivedRows).toBe(9);
+    expect(plan.excludedSnapshotRows).toBe(0);
+    expect(plan.sampled).toHaveLength(1);
   });
 });
 
@@ -125,5 +137,43 @@ describe("flair#857 — fetchRecallSpotCheckData does not search archived sample
     expect(result.sampledIds).toHaveLength(QUALITY_RECALL_SAMPLE_SIZE);
     expect(searchedIds).not.toContain("archived-top");
     expect(searchedIds).toHaveLength(QUALITY_RECALL_SAMPLE_SIZE);
+  });
+
+  test("a short window after a basement sweep names the archived count and restore remedy", async () => {
+    const request: QualityApi = async (method) => {
+      if (method === "GET") {
+        return [
+          ...Array.from({ length: 9 }, (_, i) => row(`archived-${i}`, { archived: true, offsetSec: 100 + i })),
+          row("live-only", { archived: false, offsetSec: 0 }),
+        ];
+      }
+      throw new Error("search should not run — short window");
+    };
+    const result = await fetchRecallSpotCheckData("flint", "http://127.0.0.1:9926", { request });
+    expect(result.ok).toBe(false);
+    expect(result.skipReason).toMatch(/has 1 scorable memories, fewer than the 10 needed/);
+    expect(result.skipReason).toMatch(/9 archived row\(s\) excluded/);
+    expect(result.skipReason).toMatch(/basemented/);
+    expect(result.skipReason).toMatch(/flair memory restore/);
+    expect(result.skipReason).not.toMatch(/quality-snapshot/);
+  });
+
+  test("short-window skip names both archived and quality-snapshot exclusions when both applied", async () => {
+    const request: QualityApi = async (method) => {
+      if (method === "GET") {
+        return [
+          row("archived-1", { archived: true, offsetSec: 3 }),
+          row("snap-1", { archived: false, offsetSec: 2, subject: "quality-snapshot/127.0.0.1:9926" }),
+          row("live-1", { archived: false, offsetSec: 1 }),
+          row("live-2", { archived: false, offsetSec: 0 }),
+        ];
+      }
+      throw new Error("search should not run — short window");
+    };
+    const result = await fetchRecallSpotCheckData("flint", "http://127.0.0.1:9926", { request });
+    expect(result.ok).toBe(false);
+    expect(result.skipReason).toMatch(/1 archived row\(s\) excluded/);
+    expect(result.skipReason).toMatch(/1 quality-snapshot row\(s\) excluded/);
+    expect(result.skipReason).toMatch(/flair memory restore/);
   });
 });

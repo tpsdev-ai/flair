@@ -15623,6 +15623,9 @@ export interface RecallSpotCheckPlan {
    *  scored: its subject is a hostname slug and its content is boilerplate
    *  JSON, so it is a guaranteed miss and a permanent constant penalty). */
   excludedSnapshotRows: number;
+  /** How many archived (basemented) rows were dropped before sampling
+   *  (flair#857 — SemanticSearch excludes them, so they cannot be scored). */
+  excludedArchivedRows: number;
 }
 
 /** Rows the spot-check writes itself, and therefore must never grade itself
@@ -15659,6 +15662,7 @@ export function planRecallSpotCheck(
   // false stay in the live pool; only an explicit basement is dropped.
   const live = rows.filter((m) => m?.archived !== true);
   const scorable = live.filter((m) => !isQualitySnapshotRow(m ?? {}));
+  const excludedArchivedRows = rows.length - live.length;
   const excludedSnapshotRows = live.length - scorable.length;
 
   const sorted = scorable.slice().sort((a: any, b: any) => {
@@ -15680,7 +15684,7 @@ export function planRecallSpotCheck(
   const duplicateCues = [...counts.entries()].filter(([, n]) => n > 1).map(([cue]) => cue);
 
   if (duplicateCues.length === 0 && emptyCueCount === 0) {
-    return { sampled, health: { healthy: true }, excludedSnapshotRows };
+    return { sampled, health: { healthy: true }, excludedSnapshotRows, excludedArchivedRows };
   }
 
   const parts: string[] = [];
@@ -15703,6 +15707,7 @@ export function planRecallSpotCheck(
       emptyCueCount,
     },
     excludedSnapshotRows,
+    excludedArchivedRows,
   };
 }
 
@@ -16066,7 +16071,18 @@ export async function fetchRecallSpotCheckData(
   // reason, not score a short window.
   const plan = planRecallSpotCheck(all, { sampleSize });
   if (plan.sampled.length < sampleSize) {
-    const excluded = plan.excludedSnapshotRows > 0 ? ` (${plan.excludedSnapshotRows} quality-snapshot row(s) excluded — the spot-check never grades its own bookkeeping)` : "";
+    const exclusionParts: string[] = [];
+    if (plan.excludedArchivedRows > 0) {
+      exclusionParts.push(
+        `${plan.excludedArchivedRows} archived row(s) excluded — SemanticSearch cannot return basemented memories; restore with \`flair memory restore <id>\` if they should be live`,
+      );
+    }
+    if (plan.excludedSnapshotRows > 0) {
+      exclusionParts.push(
+        `${plan.excludedSnapshotRows} quality-snapshot row(s) excluded — the spot-check never grades its own bookkeeping`,
+      );
+    }
+    const excluded = exclusionParts.length > 0 ? ` (${exclusionParts.join("; ")})` : "";
     return {
       ok: false,
       agentId,
