@@ -171,6 +171,7 @@ const EXPECTED_CHECKS = [
   "changelog-unreleased",
   "cli-command-descriptions",
   "broken-backup-restore-docs",
+  "api-reference-schema-coverage",
 ];
 
 // ── Check 1: stale install pin of the root package ──────────────────────────────
@@ -558,6 +559,59 @@ defineCheck("broken-backup-restore-docs", "prose doc", () => {
     });
   }
   return { failures, scanned: PROSE_DOCS.length };
+});
+
+// ── Check 8: API/schema reference covers every GraphQL @table (flair#652) ──────
+// FAILS when docs/api-reference.md is missing, or when a `type X @table` in
+// schemas/*.graphql is not named in that catalog. Pairs with #618 so a new
+// table cannot land without an adopter-facing mention. Word-boundary match on
+// the type name (same discipline as other corpus checks: scanned === 0 is a
+// skip, not a pass).
+defineCheck("api-reference-schema-coverage", "schema table", () => {
+  const schemasDir = join(ROOT, "schemas");
+  if (!existsSync(schemasDir)) {
+    return { failures: [], scanned: null, skips: [skip(
+      "schemas/ is missing, so GraphQL @table types could not be enumerated — the API/schema reference was not checked.",
+      "restore schemas/*.graphql",
+    )] };
+  }
+
+  const tables = [];
+  for (const name of readdirSync(schemasDir)) {
+    if (!name.endsWith(".graphql")) continue;
+    const rel = join("schemas", name);
+    const text = readFileSync(join(ROOT, rel), "utf8");
+    const re = /type\s+(\w+)\s+@table\b/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      tables.push({ type: m[1], file: rel });
+    }
+  }
+
+  const refRel = join("docs", "api-reference.md");
+  const refPath = join(ROOT, refRel);
+  if (!existsSync(refPath)) {
+    return {
+      failures: [{
+        file: refRel, line: 1,
+        msg: `API/schema reference is missing. Add ${refRel} listing every GraphQL @table type (flair#652).`,
+      }],
+      scanned: tables.length,
+    };
+  }
+
+  const refBody = readFileSync(refPath, "utf8");
+  const failures = [];
+  for (const { type, file } of tables) {
+    const named = new RegExp(`\\b${type}\\b`).test(refBody);
+    if (!named) {
+      failures.push({
+        file: refRel, line: 1,
+        msg: `schema table '${type}' (${file}) is not mentioned in the API/schema reference. Add it so the catalog cannot rot (flair#652 / #618).`,
+      });
+    }
+  }
+  return { failures, scanned: tables.length };
 });
 
 // ─── Run ────────────────────────────────────────────────────────────────────────

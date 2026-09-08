@@ -51,6 +51,9 @@ function makeFixture(opts: {
   writeFileSync(join(dir, "README.md"), "# Fixture\n\nNothing stale in here.\n");
 
   mkdirSync(join(dir, "docs"), { recursive: true });
+  mkdirSync(join(dir, "schemas"), { recursive: true });
+  writeFileSync(join(dir, "schemas", "memory.graphql"), "type Memory @table(database: \"flair\") {\n  id: ID @primaryKey\n}\n");
+  writeFileSync(join(dir, "docs", "api-reference.md"), "# API\n\nMemory is the agent memory table.\n");
   if (quickstart) {
     writeFileSync(join(dir, "docs", "quickstart.md"), "# Quickstart\n\nInstall vX.Y.Z and go.\n");
   } else {
@@ -122,8 +125,8 @@ describe("docs-freshness gate, everything present", () => {
   });
 
   test("reports every check as passed", () => {
-    expect(res.out).toContain("7/7 checks passed");
-    expect(res.out).toContain("All 7 docs-freshness checks ran and passed.");
+    expect(res.out).toContain("8/8 checks passed");
+    expect(res.out).toContain("All 8 docs-freshness checks ran and passed.");
   });
 
   test("reports nothing as skipped", () => {
@@ -165,12 +168,12 @@ describe("cli-command-descriptions with dist/cli.js absent", () => {
   });
 
   test("never claims all checks passed", () => {
-    expect(res.out).not.toContain("All 7 docs-freshness checks ran and passed.");
-    expect(res.out).not.toMatch(/7\/7 checks passed/);
+    expect(res.out).not.toContain("All 8 docs-freshness checks ran and passed.");
+    expect(res.out).not.toMatch(/8\/8 checks passed/);
   });
 
   test("the tally excludes it from the pass count and names it separately", () => {
-    expect(res.out).toContain("6/7 checks passed");
+    expect(res.out).toContain("7/8 checks passed");
     expect(res.out).toContain("1 DID NOT RUN");
   });
 });
@@ -268,6 +271,29 @@ describe("the check manifest", () => {
       expect(res.out).toContain("gate is incomplete");
       expect(res.out).toContain("port-drift");
     });
+  });
+});
+
+describe("api-reference-schema-coverage", () => {
+  test("fails when a GraphQL @table type is missing from the catalog", () => {
+    const dir = fixture({ distCli: fakeCli(3) });
+    writeFileSync(
+      join(dir, "schemas", "federation.graphql"),
+      "type Peer @table(database: \"flair\") {\n  id: ID @primaryKey\n}\n",
+    );
+    const res = runGate(dir);
+    expect(res.status).toBe(1);
+    expect(res.out).toContain("api-reference-schema-coverage");
+    expect(res.out).toContain("Peer");
+    expect(res.out).toMatch(/schema table 'Peer'/);
+  });
+
+  test("fails when the reference file itself is missing", () => {
+    const dir = fixture({ distCli: fakeCli(3) });
+    rmSync(join(dir, "docs", "api-reference.md"));
+    const res = runGate(dir);
+    expect(res.status).toBe(1);
+    expect(res.out).toContain("API/schema reference is missing");
   });
 });
 
