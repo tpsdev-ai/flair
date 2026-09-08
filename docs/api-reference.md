@@ -63,9 +63,15 @@ From `RECORD_TYPES` in `resources/record-types.ts`:
 | **open-within-org** | Own rows (any visibility) plus every other agent's non-private rows | Memory |
 | **owner-only** | Only the owning agent (plus admin / internal) | Relationship, WorkspaceState, Asset, MemoryCandidate |
 | **none** | Any verified agent reads every row; no visibility field | Soul, OrgEvent |
-| **party** | Sender or recipient only | Message |
-| **own-ledger** | Only the contributing agent's rows | MemoryUsage |
-| **owner-or-grantee** | Either party on the grant | MemoryGrant |
+
+These three scopes are **not** in `RECORD_TYPES`. Each is hand-implemented on its
+own resource:
+
+| Scope | Meaning | Table | Enforced in |
+|-------|---------|-------|-------------|
+| **party** | Sender or recipient only | Message | `resources/Message.ts` |
+| **own-ledger** | Only the contributing agent's rows | MemoryUsage | `resources/MemoryUsage.ts` |
+| **owner-or-grantee** | Either party on the grant | MemoryGrant | `resources/MemoryGrant.ts` |
 
 Writes stamp `agentId` (or `authorId` / `from`) from the authenticated
 principal. A body that names a different owner is rejected or overwritten
@@ -134,7 +140,7 @@ the same identity plane.
 | POST | `/MemoryReindex` | Admin / verified per handler | Embedding / HNSW rebuild. |
 | POST | `/MemoryConsolidate` | Ed25519 | Dedup / consolidate. |
 | POST | `/MemoryReflect` | Ed25519 | REM distill → MemoryCandidate. |
-| POST | `/MemoryDedupStats` | Ed25519 | Dedup diagnostics. |
+| POST | `/MemoryDedupStats` | Admin Basic | Dedup diagnostics. Fleet-wide sweep; `allowCreate` is `allowAdmin`. |
 | POST | `/SkillScan` | Ed25519 | Skill-tag scan on Memory writes. |
 
 Skill-tagged Memory rows embed from `trigger` (the recall signal), not
