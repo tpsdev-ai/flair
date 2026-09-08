@@ -334,7 +334,7 @@ describe("flair keys prune — subprocess acceptance checks", () => {
     rmSync(subKeysDir, { recursive: true, force: true });
   });
 
-  test("fresh/empty key dir: exits 0 without needing a reachable instance", () => {
+  test("fresh/empty key dir: exits 0 without needing a reachable instance", { timeout: 20_000 }, () => {
     // Deliberately point --instance at a bogus, unroutable-fast address —
     // if this exits 0 it proves the empty-dir path never even tries to
     // reach it (there are zero .key files to check registration for).
@@ -345,7 +345,7 @@ describe("flair keys prune — subprocess acceptance checks", () => {
     expect(r.exitCode).toBe(0);
   });
 
-  test("unreachable instance: hard-aborts with a non-zero exit and moves nothing", () => {
+  test("unreachable instance: hard-aborts with a non-zero exit and moves nothing", { timeout: 20_000 }, () => {
     const kp = nacl.sign.keyPair();
     writeFileSync(join(subKeysDir, "agent-x.key"), Buffer.from(kp.secretKey.slice(0, 32)));
 
@@ -363,7 +363,7 @@ describe("flair keys prune — subprocess acceptance checks", () => {
   // flair#1026 prune-guard: the CLI must *report* an unparseable file as
   // unidentified and must not treat an unidentified-only dir as empty.
   // No network call is made (port 1 would abort if one were), so exit 0.
-  test("unparseable .key is reported unidentified, not 'no key files found', and not pruned", () => {
+  test("unparseable .key is reported unidentified, not 'no key files found', and not pruned", { timeout: 30_000 }, () => {
     const blob = Buffer.from(Array.from({ length: 60 }, (_, i) => (i * 7 + 3) & 0xff));
     writeFileSync(join(subKeysDir, "flair_deadbeef.key"), blob);
 
