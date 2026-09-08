@@ -29,9 +29,11 @@ test("nightly dedup includes live rows and serves reads during its vector sweep"
       expect(res.status, await res.clone().text()).toBe(200);
       return res.json();
     };
+    // Sweep completion depends on runner CPU; concurrent reads retain their
+    // separate two-second responsiveness deadline below.
     const request = async (method: string, path: string, body?: unknown) => {
       const res = await fetch(`${harper!.httpURL}${path}`, { method, headers,
-        body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(60000) });
+        body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(180000) });
       const value = await res.json();
       if (!res.ok) throw new Error(`${path}: ${res.status} ${JSON.stringify(value)}`);
       return value;
@@ -117,4 +119,4 @@ test("nightly dedup includes live rows and serves reads during its vector sweep"
     ollama.stop(true);
     rmSync(scratch, { recursive: true, force: true });
   }
-}, 180000);
+}, 240000);
