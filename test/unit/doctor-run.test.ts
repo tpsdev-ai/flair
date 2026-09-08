@@ -437,3 +437,66 @@ describe("flair#1439 — Bugbot: healthy-unverified must not claim authenticated
     expect(text).toContain("healthy");
   });
 });
+
+describe("flair#989 — detection is not opt-in: a detected-but-unwired client is not a failure", () => {
+  // The canary shape: `flair init --client claude-code` (only). Claude Code is
+  // wired (MCP block + hook + CLAUDE.md); Codex is merely DETECTED (its binary
+  // is on PATH, so detectClients() lists it) but was never wired. On main the
+  // catalog failed mcp-block AND session-start-hook for the un-wired Codex,
+  // inflating doctor's "✗ N issues found" with clients the user never chose.
+  function wireClaudeCodeFully(home: string, cwd: string, agentId = "local"): void {
+    write0490ClaudeCodeMcp(home, agentId);
+    const res = installHook({ homeDir: home, harness: "claude-code", agentId, flairUrl: "http://127.0.0.1:9926", dryRun: false });
+    expect(res.ok).toBe(true);
+    mkdirSync(cwd, { recursive: true });
+    writeFileSync(join(cwd, "CLAUDE.md"), "At the start of every session, run mcp__flair__bootstrap before responding.\n");
+  }
+
+  test("REPRO: claude-code wired, Codex detected-but-unwired → no false failures, run is healthy", () => {
+    wireClaudeCodeFully(isoHome, isoCwd);
+    // Codex is DETECTED (on PATH) but has NO Flair MCP block and NO hook.
+    const run = runOn(isoHome, ["claude-code", "codex"]);
+
+    const mcp = run.results.find((r) => r.id === "mcp-block");
+    const hook = run.results.find((r) => r.id === "session-start-hook");
+    const claudeMd = run.results.find((r) => r.id === "claude-md");
+
+    // The opted-in client passes; the un-opted Codex never turns either check red.
+    expect(mcp?.status).toBe("pass");
+    expect(mcp?.detail).toContain("claude-code");
+    expect(mcp?.detail ?? "").not.toContain("codex");
+    expect(hook?.status).toBe("pass");
+    expect(claudeMd?.status).toBe("pass");
+
+    // No catalog member fails, so the run is verified-healthy.
+    expect(run.results.some((r) => r.status === "fail")).toBe(false);
+    expect(run.healthy).toBe(true);
+    expect(sessionStartHookMissing(run)).toBe(false);
+  });
+
+  test("BOUNDARY (not vacuous): a WIRED Codex missing its hook still fails — the opt-in filter did not disable the check", () => {
+    wireClaudeCodeFully(isoHome, isoCwd);
+    write0490CodexHome(isoHome, "local"); // Codex now OPTED IN (MCP block present) but no hooks.json
+    const run = runOn(isoHome, ["claude-code", "codex"]);
+    const hook = run.results.find((r) => r.id === "session-start-hook");
+    expect(hook?.status).toBe("fail");
+    expect(hook?.missingHarnesses).toEqual(["codex"]);
+    expect(run.healthy).toBe(false);
+  });
+
+  test("Claude Code detected-but-unwired → claude-md is skip, not fail", () => {
+    // Nothing wired at all; Claude Code merely detected.
+    const run = runOn(isoHome, ["claude-code"]);
+    const claudeMd = run.results.find((r) => r.id === "claude-md");
+    expect(claudeMd?.status).toBe("skip");
+    expect(run.results.some((r) => r.status === "fail")).toBe(false);
+  });
+
+  test("detected clients but Flair wired to none → mcp-block + session-start-hook skip, run healthy", () => {
+    const run = runOn(isoHome, ["claude-code", "codex"]);
+    expect(run.results.find((r) => r.id === "mcp-block")?.status).toBe("skip");
+    expect(run.results.find((r) => r.id === "session-start-hook")?.status).toBe("skip");
+    expect(run.results.some((r) => r.status === "fail")).toBe(false);
+    expect(run.healthy).toBe(true);
+  });
+});

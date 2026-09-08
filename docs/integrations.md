@@ -90,13 +90,13 @@ n8n still uses Harper admin Basic auth — it is not this path. See [n8n.md](n8n
 
 No install step needed — every snippet below uses `npx -y @tpsdev-ai/flair-mcp`, which fetches and runs the server on demand (zero-install). The fastest path is `flair init`, which detects and wires these clients for you. To wire by hand, drop the relevant snippet into each tool's MCP config:
 
-**Claude Code** (`~/.config/claude-code/config.toml` or per-project `.claude/config.toml`):
-```toml
-[mcp.servers.flair]
-command = "npx"
-args = ["-y", "@tpsdev-ai/flair-mcp"]
-env = { FLAIR_AGENT_ID = "claude-code" }
+**Claude Code** (user scope lives in `~/.claude.json` — the file `claude mcp add`, `flair init`, and `flair doctor` all read and write):
+```bash
+claude mcp add flair --scope user \
+  -e FLAIR_AGENT_ID=claude-code \
+  -- npx -y @tpsdev-ai/flair-mcp
 ```
+Or, for a project-scoped server checked into the repo, add the same `mcpServers.flair` block (Cursor's shape below) to `.mcp.json`.
 
 **Cursor** (`~/.cursor/mcp.json`):
 ```json

@@ -70,6 +70,7 @@ import {
   type ContinuityHookEvent,
   type ContinuityMutationAction,
 } from "./doctor-client.js";
+import { mcpServerSpec } from "./lib/mcp-spec.js";
 
 // ── harness registry ────────────────────────────────────────────────────────
 
@@ -458,6 +459,92 @@ export function installHook(opts: InstallHookOptions): HookMutationResult {
     ok: true, path, harness, dryRun,
     message: `${action === "add" ? "added" : "updated"} the SessionStart hook in ${path}`,
     backupPath, delta,
+  };
+}
+
+export interface HookRepinResult {
+  ok: boolean;
+  path: string;
+  harness: Harness;
+  /** "update" = re-pinned to the current spec; "noop" = already current;
+   *  "skip" = nothing Flair may re-pin here (no hook, or a hand-edited /
+   *  legacy command left untouched). `ok:false` is a fail-closed parse or
+   *  backup error, never a silent pass. */
+  action: "update" | "noop" | "skip";
+  message: string;
+  backupPath: string | null;
+}
+
+/**
+ * Re-pin an ALREADY-WIRED Flair SessionStart hook to the current
+ * mcpServerSpec(), preserving the agent id and Flair URL the entry already
+ * carries.
+ *
+ * This is `flair upgrade`'s hook counterpart to refreshing the MCP client
+ * pins (flair#1516). `flair upgrade` re-pins every wired client's MCP block
+ * to the new @version but used to leave the SessionStart hook command on the
+ * OLD one — so a user who upgraded by the documented path kept launching the
+ * previous adapter on every session, silently, while `flair doctor` reported
+ * the hook "still runs" without noticing the skew.
+ *
+ * NEVER adds a hook — a home with no Flair hook is a clean `skip`, not an
+ * `add`: wiring a hook is `flair init` / `flair hook install`, an opt-in the
+ * upgrade path must not make on the user's behalf. Only rewrites the exact
+ * canonical `npx -y -p …` invocation Flair itself writes (pinned or the
+ * pre-#1143 unpinned form); a hand-edited command is the user's and is left
+ * untouched. Fail-closed on a malformed settings file and backs up before any
+ * real write — the same Sherlock conditions installHook implements. Idempotent:
+ * a second call is a `noop`.
+ */
+export function repinSessionStartHook(homeDir: string, harness: Harness): HookRepinResult {
+  const path = hookSettingsPath(homeDir, harness);
+  const skip = (ok: boolean, message: string): HookRepinResult => ({ ok, path, harness, action: "skip", message, backupPath: null });
+
+  const read = readSettingsFile(path);
+  if (read.parseError) {
+    return skip(false, `${read.parseError} — refusing to re-pin a file we can't safely parse; left untouched`);
+  }
+  const config = read.parsed ?? {};
+  const existing = findHookEntry(config);
+  if (!existing) {
+    return skip(true, `no Flair SessionStart hook in ${path} — nothing to re-pin`);
+  }
+  const current: string = config.hooks.SessionStart[existing.groupIndex].hooks[existing.hookIndex]?.command ?? "";
+  // Only re-pin the canonical invocation Flair writes. A legacy (pre-#1143,
+  // no `-p`) or hand-edited command is NOT version-bumped here — `flair
+  // doctor`/`flair hook install` own the legacy → current rewrite, with their
+  // own consent.
+  if (!isSessionStartHookInvocation(current)) {
+    return skip(true, `SessionStart hook in ${path} is not the canonical form Flair writes — left untouched`);
+  }
+  const env = parseHookCommandEnv(current);
+  if (!env.agentId) {
+    return skip(true, `could not read the agent id from the SessionStart hook in ${path} — left untouched`);
+  }
+  let next: string;
+  try {
+    next = buildSessionStartHookCommand(env.agentId, env.flairUrl);
+  } catch (err: unknown) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return skip(false, `could not rebuild the SessionStart hook command for ${path}: ${reason}`);
+  }
+  if (next === current) {
+    return { ok: true, path, harness, action: "noop", message: `SessionStart hook in ${path} already pinned to ${mcpServerSpec()}`, backupPath: null };
+  }
+  let backupPath: string | null = null;
+  try {
+    backupPath = takeBackup(path);
+  } catch (err: unknown) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return skip(false, `could not back up ${path} before re-pinning it: ${reason} — refusing to touch it`);
+  }
+  const newConfig = deepClone(config);
+  newConfig.hooks.SessionStart[existing.groupIndex].hooks[existing.hookIndex] = { type: "command", command: next };
+  writeFileSync(path, JSON.stringify(newConfig, null, 2) + "\n");
+  return {
+    ok: true, path, harness, action: "update",
+    message: `re-pinned the SessionStart hook in ${path} to ${mcpServerSpec()}`,
+    backupPath,
   };
 }
 

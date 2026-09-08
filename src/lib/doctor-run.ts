@@ -126,18 +126,24 @@ function runMcpBlock(ctx: DoctorRunContext): DoctorCheckResult {
   if (mcp.length === 0) {
     return result(id, label, "skip", { detail: "no MCP client detected" });
   }
-  const missing: string[] = [];
-  for (const clientId of mcp) {
-    const block = readClientMcpBlock(clientId, ctx.homeDir);
-    if (!block.present) missing.push(`${clientId} (${block.configPath})`);
-  }
-  if (missing.length > 0) {
-    return result(id, label, "fail", {
-      detail: `no Flair MCP server configured: ${missing.join(", ")}`,
-      remedy: "flair doctor --fix",
+  // flair#989: DETECTION is not OPT-IN. A client whose binary or config merely
+  // exists on the box — e.g. Codex is installed but the user ran `flair init
+  // --client claude-code` — is not an install FAILURE for lacking a Flair
+  // block; it was never opted into. The MCP block IS the opt-in signal, so the
+  // install-health subject is the WIRED clients only. An un-wired but detected
+  // client is surfaced as info by `flair doctor`, never counted as a failure
+  // here (which used to inflate the ✗ count with clients the user never chose).
+  const wired = mcp.filter((clientId) => readClientMcpBlock(clientId, ctx.homeDir).present);
+  if (wired.length === 0) {
+    // Detected clients exist, but Flair is wired to none of them. Not a
+    // per-client failure (nothing was opted in) — a skip that names the
+    // detected clients, so a zero-wiring run neither invents a failure the
+    // user didn't cause nor masquerades as a verified-healthy wiring.
+    return result(id, label, "skip", {
+      detail: `no Flair MCP server wired into any detected client (${mcp.join(", ")}) — wire one with: flair init --client <id>`,
     });
   }
-  return result(id, label, "pass", { detail: `configured for ${mcp.join(", ")}` });
+  return result(id, label, "pass", { detail: `configured for ${wired.join(", ")}` });
 }
 
 function runFlairUrl(ctx: DoctorRunContext): DoctorCheckResult {
@@ -167,8 +173,11 @@ function runFlairUrl(ctx: DoctorRunContext): DoctorCheckResult {
 function runClaudeMd(ctx: DoctorRunContext): DoctorCheckResult {
   const id = "claude-md";
   const label = "CLAUDE.md bootstrap";
-  if (!ctx.detectedClientIds.includes("claude-code")) {
-    return result(id, label, "skip", { detail: "Claude Code not detected" });
+  // flair#989: only relevant once Claude Code is actually WIRED. A Claude Code
+  // binary merely present on the box (never `flair init`-ed) does not owe a
+  // CLAUDE.md bootstrap line — same opt-in rule as runMcpBlock/runSessionStartHook.
+  if (!ctx.detectedClientIds.includes("claude-code") || !readClientMcpBlock("claude-code", ctx.homeDir).present) {
+    return result(id, label, "skip", { detail: "Claude Code not wired" });
   }
   const check = checkClaudeMdBootstrap(ctx.cwd, ctx.homeDir);
   if (!check.present) {
@@ -183,9 +192,16 @@ function runClaudeMd(ctx: DoctorRunContext): DoctorCheckResult {
 function runSessionStartHook(ctx: DoctorRunContext): DoctorCheckResult {
   const id = "session-start-hook";
   const label = "SessionStart hook";
-  const harnesses = SUPPORTED_HARNESSES.filter((h) => ctx.detectedClientIds.includes(h));
+  // flair#989: only a harness the user actually WIRED (its MCP block is
+  // present) owes a SessionStart hook. A merely-detected harness — Codex on
+  // PATH that was never `flair init`-ed — is not an install failure for
+  // lacking a hook it was never asked to have. This mirrors runMcpBlock's
+  // opt-in rule so a detected-but-unwired client can't fail either check.
+  const harnesses = SUPPORTED_HARNESSES.filter(
+    (h) => ctx.detectedClientIds.includes(h) && readClientMcpBlock(h, ctx.homeDir).present,
+  );
   if (harnesses.length === 0) {
-    return result(id, label, "skip", { detail: "no hook-capable client detected" });
+    return result(id, label, "skip", { detail: "no wired hook-capable client detected" });
   }
   const missing: Harness[] = [];
   const loud: Harness[] = [];
