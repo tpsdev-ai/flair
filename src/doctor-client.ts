@@ -1029,6 +1029,56 @@ export function detectWiredFlairMcp(homeDir: string): FlairMcpWiring {
   return { wired, pinnedVersion };
 }
 
+/** The `@tpsdev-ai/flair-mcp` version pinned in a client's MCP config, or null
+ *  when the client is unwired or wired unpinned. */
+export function readClientMcpPin(clientId: ClientId, homeDir: string): string | null {
+  const configPath = withHome(homeDir, () => clientConfigPath(clientId));
+  return extractFlairMcpPin(readTextFile(configPath) ?? "");
+}
+
+export interface SessionStartHookPinSkew {
+  /** A Flair SessionStart hook is present for this harness. */
+  hookWired: boolean;
+  /** Version pinned in the hook command (null if unpinned / absent). */
+  hookPin: string | null;
+  /** Version pinned in this harness's own MCP client block (null if unwired
+   *  / unpinned). */
+  clientPin: string | null;
+  /** Both pins are concrete AND differ — the hook launches a different
+   *  flair-mcp than the MCP client does (flair#1516). */
+  skewed: boolean;
+}
+
+/**
+ * Compare a harness's SessionStart hook pin against its MCP client pin.
+ *
+ * `flair init`/`flair upgrade`/`flair hook install` keep both on the same
+ * @version. A skew means an upgrade moved the client block forward but left
+ * the hook behind (flair#1516) — so every session silently launches the OLD
+ * adapter while the client block advertises the new one. `flair doctor` used
+ * to report such a hook as wired "and still runs" without ever comparing the
+ * two pins.
+ *
+ * Only a concrete-vs-concrete difference is a skew: an unpinned hook (pre-
+ * #1143) or a missing pin on either side is "nothing to compare", never a
+ * false skew.
+ */
+export function checkSessionStartHookPinSkew(homeDir: string, harness: "claude-code" | "codex"): SessionStartHookPinSkew {
+  const hookPath = harness === "codex"
+    ? join(homeDir, ".codex", "hooks.json")
+    : join(homeDir, ".claude", "settings.json");
+  const hook = checkSessionStartHook(homeDir, hookPath);
+  const hookWired = hook.present && isFlairHookCommand(hook.command ?? "");
+  const hookPin = hookWired ? extractFlairMcpPin(hook.command ?? "") : null;
+  const clientPin = readClientMcpPin(harness, homeDir);
+  return {
+    hookWired,
+    hookPin,
+    clientPin,
+    skewed: !!hookPin && !!clientPin && hookPin !== clientPin,
+  };
+}
+
 /**
  * Merge-safe insert of a Flair SessionStart hook group into the harness
  * settings file (default ~/.claude/settings.json) — creates the file/array

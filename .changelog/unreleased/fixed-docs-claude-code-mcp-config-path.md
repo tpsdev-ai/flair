@@ -1,0 +1,1 @@
+- **Docs now name the correct Claude Code MCP config path everywhere.** `docs/integrations.md` claimed Claude Code's MCP server lived at `~/.config/claude-code/config.toml` in TOML form; it actually lives in `~/.claude.json` — the file `claude mcp add`, `flair init`, and `flair doctor` all read and write. Aligned the doc to that one truth (flair#1117, re-find of flair#828).

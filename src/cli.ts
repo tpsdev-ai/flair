@@ -61,7 +61,7 @@ import {
   type FleetSweepResult,
 } from "./fleet-verify.js";
 import { markStale, sortOldestVersionFirst, type FleetPresenceRow } from "./fleet-presence.js";
-import { detectClients, renderWiringSummary, wireClaudeCode, wireCodex, wireGemini, wireCursor, wireAntigravity, wirePi, piFlairSpec, PI_FLAIR_PACKAGE, PI_FLAIR_DEFAULT_URL, clientConfigPath, codexConfigHasFlairSection, type ClientId } from "./install/clients.js";
+import { detectClients, renderWiringSummary, wireClaudeCode, wireCodex, wireGemini, wireCursor, wireAntigravity, wirePi, clientConfigPath, codexConfigHasFlairSection, type ClientId } from "./install/clients.js";
 import { flairCliVersion, clearFlairCliVersionCache, mcpServerSpec, unpinnedSpecWarning, FLAIR_MCP_PACKAGE } from "./lib/mcp-spec.js";
 import {
   resolveAgentKeyPath,
@@ -88,11 +88,11 @@ import {
 import {
   readClientMcpBlock,
   effectiveFlairUrl,
-  checkPiFlairWiring,
   checkClaudeMdBootstrap,
   detectWiredFlairMcp,
   inspectSessionStartHook,
   upgradeSessionStartHookCommand,
+  checkSessionStartHookPinSkew,
   fixClaudeMdBootstrap,
   fixSessionStartHook,
   applyOrReportClaudeMdBootstrap,
@@ -123,6 +123,7 @@ import {
 import {
   installHook,
   uninstallHook,
+  repinSessionStartHook,
   hookStatus,
   hookStatusIdentityLines,
   HOOK_STATUS_UNPARSED,
@@ -11413,6 +11414,19 @@ program
         const result = client.wire(env);
         console.log(`   ${result.ok ? "✓" : "•"} ${result.message}`);
       }
+      // flair#1516: the SessionStart hook command carries the SAME
+      // @tpsdev-ai/flair-mcp@<version> pin as the client MCP block, but only
+      // the client block was refreshed above — so an upgraded user kept
+      // launching the PREVIOUS adapter on every session, silently, while
+      // `flair doctor` reported the hook "still runs". Re-pin every ALREADY-
+      // wired hook to the current spec too (never adds one — that stays an
+      // opt-in). Best-effort, same as the client refresh.
+      for (const harness of SUPPORTED_HARNESSES) {
+        const repin = repinSessionStartHook(homedir(), harness);
+        if (repin.action === "update") {
+          console.log(`   ${repin.ok ? "✓" : "•"} ${repin.message}`);
+        }
+      }
     }
 
     // Nothing to install via npm/openclaw. What is left is advisory (packages
@@ -14485,162 +14499,12 @@ program
       }
 
       for (const client of detectedClients) {
-        // ── pi (flair#1342): NATIVE EXTENSION, not an MCP client ───────────
-        // There is no mcpServers block to read — pi loads @tpsdev-ai/pi-flair
-        // through its own settings.json (`packages`). Every check below is a
-        // filesystem fact except agent registration, which is only checkable
-        // when this shell exposes the env pi would launch with — and the
-        // output says which of the two it verified.
-        if (client.kind === "native-extension") {
-          let pi = checkPiFlairWiring(homedir(), process.cwd());
-
-          // --fix for pi needs no agent id (pi settings carry no env block);
-          // a resolvable id only improves the export hint in the message.
-          const wirePiFix = async (prompt: string): Promise<void> => {
-            if (dryRun) {
-              console.log(`     ${render.wrap(render.c.dim, "Would update")} ${pi.settingsPath}`);
-              return;
-            }
-            const proceed = await confirmFix(prompt);
-            if (!proceed) {
-              console.log(`     Skipped.`);
-              return;
-            }
-            const hintAgentId = resolveFixAgentId({
-              optsAgent: opts.agent,
-              envAgentId: process.env.FLAIR_AGENT_ID,
-              anyKnownAgentId,
-              keyAgentIds,
-              keysDir: defaultKeysDir(),
-            }) ?? "<your-agent-id>";
-            const wireResult = wirePi({ FLAIR_AGENT_ID: hintAgentId, FLAIR_URL: baseUrl });
-            console.log(`     ${wireResult.ok ? render.icons.ok : render.icons.warn} ${wireResult.message}`);
-            if (wireResult.ok) fixed++;
-          };
-
-          // (a) The flair#1346 trap FIRST, and by NAME: an npm: spec under
-          // "extensions" is silently ignored by pi — the user believes they
-          // are wired while pi registers zero tools. This is the documented
-          // field failure mode and must never fold into a generic "not
-          // wired": the fix is a MOVE to "packages", not an add.
-          const userTraps = pi.misconfigured.filter((m) => m.path === pi.settingsPath);
-          const projectTraps = pi.misconfigured.filter((m) => m.path !== pi.settingsPath);
-          for (const bad of pi.misconfigured) {
-            console.log(`  ${render.icons.error} pi: ${PI_FLAIR_PACKAGE} is listed under "extensions" as an npm: spec (${bad.entry}) in ${render.wrap(render.c.dim, bad.path)}`);
-            console.log(`     pi silently ignores npm: specs under "extensions", so the Flair tools never register (flair#1346). Package sources belong under "packages".`);
-            issues++;
-          }
-          if (userTraps.length > 0) {
-            if (autoFix) {
-              await wirePiFix(`  Move the npm: spec to "packages" in ${pi.settingsPath} now? [y/N] `);
-              // Re-derive the wiring from disk so the sections below reason
-              // about the POST-fix state — otherwise a move that just
-              // succeeded would still read as "not wired" and prompt again.
-              pi = checkPiFlairWiring(homedir(), process.cwd());
-            } else {
-              console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, `(moves it to "packages")`)}`);
-            }
-          }
-          if (projectTraps.length > 0) {
-            // wirePi edits the USER-scope settings only — a project-scope
-            // trap gets the exact manual fix, never a --fix that claims a
-            // file it does not touch.
-            console.log(`     ${render.wrap(render.c.dim, "Fix:")} move the entry from "extensions" to "packages" in ${projectTraps[0]!.path}`);
-          }
-
-          if (!pi.wired) {
-            console.log(`  ${render.icons.error} pi: ${PI_FLAIR_PACKAGE} not wired in ${render.wrap(render.c.dim, pi.settingsPath)}`);
-            if (autoFix) {
-              await wirePiFix(`  Wire pi now (adds ${piFlairSpec()} to "packages" in ${pi.settingsPath})? [y/N] `);
-            } else {
-              console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, `(adds ${piFlairSpec()} to "packages")`)} — or: pi install npm:${PI_FLAIR_PACKAGE}`);
-            }
-            issues++;
-            continue;
-          }
-
-          if (pi.wiredVia === "packages") {
-            console.log(`  ${render.icons.ok} pi: ${PI_FLAIR_PACKAGE} wired via "packages" (${pi.spec}) in ${render.wrap(render.c.dim, pi.wiredIn!)}`);
-            if (!pi.pinnedVersion) {
-              console.log(`     ${render.icons.info} unpinned — pi re-resolves latest on (re)install; pin with ${piFlairSpec()}`);
-            }
-          } else {
-            // extension-path: the documented pre-0.49 workaround (a local
-            // path to the installed dist/index.js). Works, but the canonical
-            // form is a "packages" entry — and a DANGLING path is a broken
-            // wiring pi skips silently, so check the one thing checkable.
-            if (pi.extensionPathExists) {
-              console.log(`  ${render.icons.ok} pi: ${PI_FLAIR_PACKAGE} wired via a file-path "extensions" entry (${pi.spec}) in ${render.wrap(render.c.dim, pi.wiredIn!)}`);
-              console.log(`     ${render.wrap(render.c.dim, `pre-0.49 workaround — the canonical form is a "packages" entry: ${piFlairSpec()}`)}`);
-            } else {
-              console.log(`  ${render.icons.error} pi: the "extensions" entry ${pi.spec} in ${render.wrap(render.c.dim, pi.wiredIn!)} points at a file that does not exist — pi silently skips missing extension paths`);
-              if (autoFix) {
-                await wirePiFix(`  Wire pi via "packages" instead (adds ${piFlairSpec()})? [y/N] `);
-              } else {
-                console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, `(adds ${piFlairSpec()} to "packages"; remove the dangling entry yourself)`)}`);
-              }
-              issues++;
-              continue;
-            }
-          }
-
-          // Env sanity (flair#1342 scope 3). pi settings carry no env block:
-          // pi-flair reads FLAIR_* from the environment of whatever shell/IDE
-          // launches pi. Doctor can only see ITS OWN environment — these
-          // lines verify this shell, and say so, rather than pretending to
-          // verify every pi launch. None of them counts as an issue: a clean
-          // pi launched elsewhere can be fine while this shell is bare, and
-          // vice versa.
-          console.log(`     ${render.wrap(render.c.dim, "pi-flair reads FLAIR_AGENT_ID / FLAIR_URL / FLAIR_KEY_PATH from the shell that launches pi — doctor sees only its own environment (this shell):")}`);
-          const piEnvAgent = process.env.FLAIR_AGENT_ID;
-          const piEnvUrl = process.env.FLAIR_URL;
-          const piEnvKey = process.env.FLAIR_KEY_PATH;
-          if (piEnvAgent) {
-            console.log(`     ${render.icons.ok} FLAIR_AGENT_ID set ('${piEnvAgent}')`);
-          } else {
-            console.log(`     ${render.icons.warn} FLAIR_AGENT_ID not set in this shell — pi-flair falls back to the cwd directory name as its agent id (identity varies by project); export FLAIR_AGENT_ID=<id> where pi is launched`);
-          }
-          if (piEnvUrl) {
-            console.log(`     ${render.icons.ok} FLAIR_URL set (${piEnvUrl})`);
-          } else {
-            console.log(`     ${render.icons.info} FLAIR_URL not set — pi-flair defaults to ${render.wrap(render.c.dim, PI_FLAIR_DEFAULT_URL)}`);
-          }
-          if (piEnvKey) {
-            if (existsSync(piEnvKey)) {
-              console.log(`     ${render.icons.ok} FLAIR_KEY_PATH set (${piEnvKey})`);
-            } else {
-              console.log(`     ${render.icons.warn} FLAIR_KEY_PATH points at a missing file (${piEnvKey})`);
-            }
-          } else {
-            console.log(`     ${render.icons.info} FLAIR_KEY_PATH not set — auto-resolved from ~/.flair/keys`);
-          }
-
-          // Agent registration — checkable only when this shell exposes an
-          // agent id at all; otherwise say what was NOT verified instead of
-          // skipping silently.
-          if (piEnvAgent) {
-            const piUrl = piEnvUrl || PI_FLAIR_DEFAULT_URL;
-            const piReachable = await probeFlairReachable(piUrl);
-            if (!piReachable) {
-              console.log(`     ${render.icons.warn} FLAIR_URL ${render.wrap(render.c.dim, piUrl)} not reachable — cannot verify agent registration`);
-            } else {
-              const piReg = await checkAgentRegistered(piUrl, piEnvAgent, defaultKeysDir());
-              if (piReg.state === "registered") {
-                console.log(`     ${render.icons.ok} agent '${piEnvAgent}' registered`);
-              } else if (piReg.state === "not-registered") {
-                console.log(`     ${render.icons.error} agent '${piEnvAgent}' is NOT registered on this Flair instance`);
-                console.log(`        ${render.wrap(render.c.dim, "Fix:")} flair agent add ${piEnvAgent}`);
-                issues++;
-              } else {
-                const piFinding = describeAgentGateFinding(piEnvAgent, piReg.state, piReg.detail, { instanceReachable: piReachable });
-                console.log(`     ${render.icons.warn} ${piFinding?.message ?? `could not verify agent registration (${piReg.detail})`}`);
-              }
-            }
-          } else {
-            console.log(`     ${render.wrap(render.c.dim, "agent registration not verified — no FLAIR_AGENT_ID visible to doctor")}`);
-          }
-          continue;
-        }
+        // flair#989 — pi is a dead namespace: the pi (kind:
+        // "native-extension") check is removed from doctor entirely. pi was
+        // the last non-MCP client here, and a detected-but-unwired pi was
+        // counted as an install failure for a namespace nobody opts into any
+        // more. Doctor now diagnoses only MCP clients the user wired (below).
+        if (client.kind !== "mcp") continue;
 
         const block = readClientMcpBlock(client.id, homedir());
         if (client.id === "claude-code" && block.agentId) claudeCodeAgentId = block.agentId;
@@ -14648,7 +14512,12 @@ program
         if (block.agentId) anyKnownAgentId = anyKnownAgentId ?? block.agentId;
 
         if (!block.present) {
-          console.log(`  ${render.icons.error} ${client.label}: no Flair MCP server configured in ${render.wrap(render.c.dim, block.configPath)}`);
+          // flair#989: this client is DETECTED (binary/config on the box) but
+          // was never wired to Flair — the user did not opt into it. That is
+          // not an install FAILURE, so it renders as info, never a ✗, and is
+          // not counted (the catalog's opt-in mcp-block check owns the count).
+          // `--fix` still offers to wire it, on the user's y/N consent.
+          console.log(`  ${render.icons.info} ${client.label}: detected but not wired to Flair — optional (no Flair MCP server in ${render.wrap(render.c.dim, block.configPath)})`);
           if (autoFix) {
             if (dryRun) {
               console.log(`     ${render.wrap(render.c.dim, "Would wire")} ${client.label} (writes ${block.configPath})`);
@@ -14703,7 +14572,7 @@ program
             // `--fix` already works, so don't clutter the suggestion.
             const knownAgentId = opts.agent || process.env.FLAIR_AGENT_ID || anyKnownAgentId;
             const agentHint = knownAgentId ? "" : fixCommandAgentHint(keyAgentIds);
-            console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix${agentHint} ${render.wrap(render.c.dim, `(wires ${client.label} automatically)`)}`);
+            console.log(`     ${render.wrap(render.c.dim, "To wire it (optional):")} flair doctor --fix${agentHint} ${render.wrap(render.c.dim, `(wires ${client.label})`)}`);
           }
           continue;
         }
@@ -14743,10 +14612,28 @@ program
         }
       }
 
+      // flair#989: the harness-specific checks below (CLAUDE.md, SessionStart
+      // hook, continuity, Codex hook) run only for a harness the user actually
+      // WIRED — its MCP block is present. A harness merely DETECTED on the box
+      // but never opted into owes none of these; flagging them was the false-
+      // positive this fix removes. Read the block fresh so a `--fix` that just
+      // wired the client during the loop above is reflected here.
+      const claudeCodeDetected = detectedClients.some((c) => c.id === "claude-code");
+      const claudeCodeConfigured =
+        claudeCodeDetected && readClientMcpBlock("claude-code", homedir()).present;
+      const codexConfigured =
+        detectedClients.some((c) => c.id === "codex") && readClientMcpBlock("codex", homedir()).present;
+
       // Claude-Code-specific: CLAUDE.md + SessionStart hook + continuity.
       // Codex has a SessionStart hook too (checked below); CLAUDE.md and
       // continuity stay Claude Code only.
-      if (detectedClients.some((c) => c.id === "claude-code")) {
+      //
+      // flair#989: CLAUDE.md and the SessionStart hook are wiring-dependent —
+      // they apply, and can only fail, once Claude Code is WIRED — so they are
+      // gated on `claudeCodeConfigured`. Continuity (below) is a separate
+      // opt-in that renders "not enabled" as info and never a failure, so it
+      // stays gated on mere detection (flair#1324/#1257).
+      if (claudeCodeConfigured) {
         const claudeMd = checkClaudeMdBootstrap(process.cwd(), homedir());
         if (claudeMd.present) {
           console.log(`  ${render.icons.ok} CLAUDE.md: bootstrap instruction present (${render.wrap(render.c.dim, claudeMd.path!)})`);
@@ -14814,6 +14701,28 @@ program
             console.log(`  ${render.icons.ok} SessionStart hook: flair-session-start wired in ${render.wrap(render.c.dim, hook.path)} ${render.wrap(render.c.dim, "and still runs")}`);
           }
 
+          // flair#1516: a hook can be wired AND still run yet be pinned to a
+          // DIFFERENT @tpsdev-ai/flair-mcp version than the Claude Code MCP
+          // client — an upgrade refreshed the client block but (pre-#1516)
+          // left the hook behind, so every session silently launched the OLD
+          // adapter. "and still runs" never caught this; compare the two pins.
+          const claudeHookSkew = checkSessionStartHookPinSkew(homedir(), "claude-code");
+          if (claudeHookSkew.skewed) {
+            console.log(`  ${render.icons.warn} SessionStart hook: pinned to flair-mcp@${claudeHookSkew.hookPin} but the Claude Code MCP client is pinned to @${claudeHookSkew.clientPin} — the hook still launches the OLD adapter on every session`);
+            if (autoFix) {
+              if (dryRun) {
+                console.log(`     ${render.wrap(render.c.dim, "Would re-pin the SessionStart hook in")} ${hook.path}`);
+              } else {
+                const repin = repinSessionStartHook(homedir(), "claude-code");
+                console.log(`     ${repin.ok ? render.icons.ok : render.icons.warn} ${repin.message}`);
+                if (repin.ok && repin.action === "update") fixed++;
+              }
+            } else {
+              console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair hook install ${render.wrap(render.c.dim, "(re-pins the hook to the current version)")}`);
+            }
+            issues++;
+          }
+
           // Independent of whether it runs today: would it stay quiet if it
           // stopped? Only offered as a repair when the command is the exact
           // string Flair itself wrote — a hand-edited or pinned hook is the
@@ -14859,7 +14768,11 @@ program
             console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(adds the flair-session-start SessionStart hook)")}`);
           }
         }
+      } // end CLAUDE.md + SessionStart hook (claudeCodeConfigured)
 
+      // Continuity capture is a standalone Claude Code opt-in — shown whenever
+      // Claude Code is DETECTED, independent of MCP wiring (flair#1324/#1257).
+      if (claudeCodeDetected) {
         // flair#1257 slice 2 — continuity capture pair (the check-5 twin of
         // the SessionStart check above: installed / absent / stale-form).
         // Continuity is OPT-IN — installing the PostToolUse+Stop pair IS the
@@ -14912,7 +14825,7 @@ program
       // command Claude Code uses, written to ~/.codex/hooks.json. Continuity
       // and CLAUDE.md stay Claude-Code-only; Codex's session-start mechanism
       // is the hook file.
-      if (detectedClients.some((c) => c.id === "codex")) {
+      if (codexConfigured) {
         const hook = inspectSessionStartHook(homedir(), { settingsPath: hookSettingsPath(homedir(), "codex") });
         if (hook.present) {
           if (hook.execution === "broken") {
@@ -14933,6 +14846,26 @@ program
             console.log(`  ${render.icons.ok} SessionStart hook (codex): wired in ${render.wrap(render.c.dim, hook.path)} ${render.wrap(render.c.dim, "(custom command — not verified, not modified)")}`);
           } else {
             console.log(`  ${render.icons.ok} SessionStart hook (codex): flair-session-start wired in ${render.wrap(render.c.dim, hook.path)} ${render.wrap(render.c.dim, "and still runs")}`);
+          }
+
+          // flair#1516: same version-skew check as Claude Code — a Codex hook
+          // left behind by an upgrade keeps launching the OLD adapter while
+          // the Codex MCP block advertises the new pin.
+          const codexHookSkew = checkSessionStartHookPinSkew(homedir(), "codex");
+          if (codexHookSkew.skewed) {
+            console.log(`  ${render.icons.warn} SessionStart hook (codex): pinned to flair-mcp@${codexHookSkew.hookPin} but the Codex MCP client is pinned to @${codexHookSkew.clientPin} — the hook still launches the OLD adapter on every session`);
+            if (autoFix) {
+              if (dryRun) {
+                console.log(`     ${render.wrap(render.c.dim, "Would re-pin the SessionStart hook in")} ${hook.path}`);
+              } else {
+                const repin = repinSessionStartHook(homedir(), "codex");
+                console.log(`     ${repin.ok ? render.icons.ok : render.icons.warn} ${repin.message}`);
+                if (repin.ok && repin.action === "update") fixed++;
+              }
+            } else {
+              console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair hook install --harness codex ${render.wrap(render.c.dim, "(re-pins the hook to the current version)")}`);
+            }
+            issues++;
           }
 
           if (!hook.silenced && hook.ours) {
