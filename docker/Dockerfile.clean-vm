@@ -80,15 +80,32 @@ RUN npm install -g /flair-head.tgz && \
     echo "Installed flair globally (root-owned):" && \
     ls -ld "$(dirname "$(readlink -f "$(command -v flair)")")/.."
 
-# Native embedding binary: flair declares mac-arm64 as the optional dep present
-# on dev machines; on linux x64 we ensure the matching native variant is
-# resolvable next to the globally-installed package so Harper's embeddings
-# component can load it. (Same need as the existing tarball smoke test.)
+# Native embedding binary. flair now declares the seven @node-llama-cpp/*
+# platform binaries as its OWN optionalDependencies (flair#1549), so the plain
+# `npm install -g @tpsdev-ai/flair` above already places the host-matching one
+# (here: linux-x64) under the package — exactly what a real `sudo npm i -g` user
+# gets. We must NOT `cd` into the global package and `npm install` there: now
+# that flair declares these deps, that reconciles flair's whole dependency tree
+# in place ("removed N packages") and, on linux, drops the libc-gated linux-x64
+# optional binary the reconcile re-evaluates — leaving semantic search DEGRADED
+# (that reconcile is what this gate caught on flair#1549). Instead: log what the
+# global install placed, and ONLY if the binary is genuinely absent, install it
+# as a standalone GLOBAL package — a sibling in the same global node_modules,
+# which findAddonBinary's ancestor walk reaches, with no flair-tree reconcile.
 RUN GLOBAL_FLAIR_DIR="$(dirname "$(dirname "$(readlink -f "$(command -v flair)")")")" && \
+    GLOBAL_NM="$(dirname "$(dirname "$GLOBAL_FLAIR_DIR")")" && \
     echo "Global flair package dir: $GLOBAL_FLAIR_DIR" && \
-    cd "$GLOBAL_FLAIR_DIR" && \
-    npm install --no-save @node-llama-cpp/linux-x64@3 && \
-    echo "Installed linux-x64 native addon into the global package."
+    echo "Global node_modules:      $GLOBAL_NM" && \
+    echo "llama-addon.node placed by the global install:" && \
+    (find "$GLOBAL_NM" -name llama-addon.node 2>/dev/null | sed 's/^/  /' || true) && \
+    if find "$GLOBAL_NM" -name llama-addon.node 2>/dev/null | grep -q .; then \
+      echo "Native addon already present from the global install — no extra step needed."; \
+    else \
+      echo "Native addon absent; installing @node-llama-cpp/linux-x64 as a standalone global package (no flair-tree reconcile)." && \
+      npm install -g @node-llama-cpp/linux-x64@3 && \
+      echo "Installed linux-x64 native addon globally." && \
+      find "$GLOBAL_NM" -name llama-addon.node 2>/dev/null | sed 's/^/  /'; \
+    fi
 
 # Pre-stage the model in flairuser's home at the #538 default path, owned by
 # flairuser, with NO FLAIR_MODELS_DIR set anywhere.

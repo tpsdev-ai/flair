@@ -907,10 +907,26 @@ function ancestorNodeModules(startDir: string): string[] {
 }
 
 /**
+ * The addon binary a `@node-llama-cpp/<platform>` package ships lives in one of
+ * its `bins/<variant>/` subdirs. Return the first `llama-addon.node` found under
+ * `binsDir`, or null. Shared by the standard-layout and bun-store scans below.
+ */
+function addonInBinsDir(binsDir: string): string | null {
+	if (!existsSync(binsDir)) return null;
+	for (const entry of readdirSync(binsDir)) {
+		const addonPath = path.join(binsDir, entry, 'llama-addon.node');
+		if (existsSync(addonPath)) return addonPath;
+	}
+	return null;
+}
+
+/**
  * Find the llama-addon.node binary from installed platform packages.
  *
- * Scans node_modules on the filesystem rather than using require.resolve,
- * since Harper's sandbox blocks node:module.
+ * Scans node_modules on the filesystem rather than using require.resolve —
+ * Harper's sandbox blocks node:module, and the platform packages are
+ * binary-only (no entry point for require.resolve / import.meta.resolve to hit
+ * anyway), so filesystem scanning is the only resolution mechanism available.
  */
 function findAddonBinary(): string {
 	const candidates = ADDON_PLATFORM_PACKAGES;
@@ -933,22 +949,43 @@ function findAddonBinary(): string {
 	);
 
 	for (const nmDir of searchRoots) {
-		if (!existsSync(nmDir)) {
-			console.log(`[harper-fabric-embeddings] findAddonBinary: skip ${nmDir} (not found)`);
-			continue;
-		}
-		for (const pkg of candidates) {
-			const binsDir = path.join(nmDir, pkg, 'bins');
-			if (!existsSync(binsDir)) {
-				console.log(`[harper-fabric-embeddings] findAddonBinary: skip ${binsDir} (not found)`);
-				continue;
-			}
+		if (!existsSync(nmDir)) continue;
 
-			for (const entry of readdirSync(binsDir)) {
-				const addonPath = path.join(binsDir, entry, 'llama-addon.node');
-				if (existsSync(addonPath)) {
-					console.log(`[harper-fabric-embeddings] findAddonBinary: found ${addonPath}`);
-					return addonPath;
+		// Standard layout: <nmDir>/@node-llama-cpp/<platform>/bins/<variant>/llama-addon.node.
+		// Covers npm (hoisted or nested under the package) and bun installs that
+		// DID materialize a top-level `@node-llama-cpp/<platform>` symlink.
+		for (const pkg of candidates) {
+			const addonPath = addonInBinsDir(path.join(nmDir, pkg, 'bins'));
+			if (addonPath) {
+				console.log(`[harper-fabric-embeddings] findAddonBinary: found ${addonPath}`);
+				return addonPath;
+			}
+		}
+
+		// bun isolated store:
+		//   <nmDir>/.bun/@node-llama-cpp+<platform>@<ver>/node_modules/@node-llama-cpp/<platform>/bins/...
+		// bun's default (isolated) linker extracts every package into this
+		// content-addressed store and only symlinks a package top-level when it
+		// resolves as a dependency of the current install context. A platform
+		// package gated by os/cpu/libc (e.g. @node-llama-cpp/linux-x64, which
+		// declares libc:"glibc") can land in the store WITHOUT that top-level
+		// symlink — the standard scan above then sees no
+		// `<nmDir>/@node-llama-cpp/<platform>` and misses it, degrading semantic
+		// search to keyword-only. Scan the store directly so the addon resolves
+		// under bun regardless of whether the symlink was created (flair#1549
+		// CI: clean-VM + integration-heavy).
+		const bunStore = path.join(nmDir, '.bun');
+		if (existsSync(bunStore)) {
+			for (const storeEntry of readdirSync(bunStore)) {
+				if (!storeEntry.startsWith('@node-llama-cpp+')) continue;
+				const scopeDir = path.join(bunStore, storeEntry, 'node_modules', '@node-llama-cpp');
+				if (!existsSync(scopeDir)) continue;
+				for (const platform of readdirSync(scopeDir)) {
+					const addonPath = addonInBinsDir(path.join(scopeDir, platform, 'bins'));
+					if (addonPath) {
+						console.log(`[harper-fabric-embeddings] findAddonBinary: found ${addonPath} (bun store)`);
+						return addonPath;
+					}
 				}
 			}
 		}
