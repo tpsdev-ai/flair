@@ -24,6 +24,13 @@ import {
   memoryMatchesReflectScope,
   buildStagedCandidateRow,
   normalizeClaim,
+  considerForOldestUnreflectedCap,
+  compareOldestCreatedAtFirst,
+  isUnreflectedMemory,
+  isRemAbortRequested,
+  resolveMaxMemoriesPerRun,
+  DEFAULT_MAX_MEMORIES_PER_RUN,
+  ABSOLUTE_MAX_MEMORIES_PER_RUN,
   type GenerateFn,
   type RawCandidate,
 } from "../../resources/memory-reflect-lib.ts";
@@ -50,6 +57,15 @@ describe("caps", () => {
   test("defaults match spec (10 candidates, 500 char claims)", () => {
     expect(MAX_CANDIDATES_PER_RUN).toBe(10);
     expect(MAX_CLAIM_LENGTH).toBe(500);
+  });
+
+  test("per-run gather cap defaults to 50 and hard-clamps at 200 (#1515)", () => {
+    expect(DEFAULT_MAX_MEMORIES_PER_RUN).toBe(50);
+    expect(ABSOLUTE_MAX_MEMORIES_PER_RUN).toBe(200);
+    expect(resolveMaxMemoriesPerRun(undefined, {})).toBe(50);
+    expect(resolveMaxMemoriesPerRun(undefined, { FLAIR_REM_MAX_MEMORIES: "30" })).toBe(30);
+    expect(resolveMaxMemoriesPerRun(8, { FLAIR_REM_MAX_MEMORIES: "30" })).toBe(8);
+    expect(resolveMaxMemoriesPerRun(3000, {})).toBe(200);
   });
 });
 
@@ -474,5 +490,42 @@ describe("buildStagedCandidateRow — scopeTag stamping (#1205b-1)", () => {
   test("scope:tagged with an empty/absent tag does NOT stamp (fail-safe)", () => {
     expect("scopeTag" in buildStagedCandidateRow({ ...base, scope: "tagged", tag: "" })).toBe(false);
     expect("scopeTag" in buildStagedCandidateRow({ ...base, scope: "tagged" })).toBe(false);
+  });
+});
+
+describe("oldest-unreflected gather cap (#1515)", () => {
+  test("isUnreflectedMemory is true only when lastReflected is missing or blank", () => {
+    expect(isUnreflectedMemory({})).toBe(true);
+    expect(isUnreflectedMemory({ lastReflected: null })).toBe(true);
+    expect(isUnreflectedMemory({ lastReflected: "" })).toBe(true);
+    expect(isUnreflectedMemory({ lastReflected: "2026-09-01T00:00:00.000Z" })).toBe(false);
+  });
+
+  test("compareOldestCreatedAtFirst orders by createdAt; missing timestamps sort last", () => {
+    const a = { createdAt: "2026-01-01T00:00:00.000Z" };
+    const b = { createdAt: "2026-06-01T00:00:00.000Z" };
+    expect(compareOldestCreatedAtFirst(a, b)).toBeLessThan(0);
+    expect(compareOldestCreatedAtFirst(b, a)).toBeGreaterThan(0);
+    expect(compareOldestCreatedAtFirst({ createdAt: "" }, a)).toBeGreaterThan(0);
+  });
+
+  test("keeps the N oldest unreflected rows and ignores already-reflected ones", () => {
+    const pool: Array<{ id: string; createdAt: string; lastReflected?: string }> = [];
+    const rows = [
+      { id: "new", createdAt: "2026-08-01T00:00:00.000Z" },
+      { id: "old", createdAt: "2026-01-01T00:00:00.000Z" },
+      { id: "mid", createdAt: "2026-04-01T00:00:00.000Z" },
+      { id: "already", createdAt: "2020-01-01T00:00:00.000Z", lastReflected: "2026-09-01T00:00:00.000Z" },
+      { id: "older-than-cap", createdAt: "2025-12-01T00:00:00.000Z" },
+    ];
+    for (const row of rows) considerForOldestUnreflectedCap(pool, row, 2);
+    expect(pool.map((r) => r.id)).toEqual(["old", "mid"]);
+  });
+
+  test("isRemAbortRequested honors FLAIR_REM_PAUSE and the pause sentinel", () => {
+    expect(isRemAbortRequested({}, () => false, "/tmp/nope")).toBe(false);
+    expect(isRemAbortRequested({ FLAIR_REM_PAUSE: "1" })).toBe(true);
+    expect(isRemAbortRequested({}, () => true, "/tmp/paused")).toBe(true);
+    expect(isRemAbortRequested({}, () => { throw new Error("enoent"); }, "/tmp/paused")).toBe(false);
   });
 });

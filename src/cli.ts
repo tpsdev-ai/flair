@@ -9327,12 +9327,25 @@ remNightly
         }
       : undefined;
     try {
+      const healthBase = (process.env.FLAIR_URL || `http://127.0.0.1:${resolveHttpPort({})}`).replace(/\/+$/, "");
       const result = await runNightlyCycle({
         agentId,
         flairVersion: __pkgVersion,
         apiCall: api,
         opsSearch,
         dryRun: !!opts.dryRun,
+        healthProbe: async (timeoutMs) => {
+          const t = Date.now();
+          try {
+            const res = await fetch(`${healthBase}/Health`, { signal: AbortSignal.timeout(timeoutMs) });
+            if (!res.ok) {
+              return { ok: false, elapsedMs: Date.now() - t, error: `GET /Health returned HTTP ${res.status}` };
+            }
+            return { ok: true, elapsedMs: Date.now() - t };
+          } catch (err: any) {
+            return { ok: false, elapsedMs: Date.now() - t, error: err?.message ?? String(err) };
+          }
+        },
       });
       const row = result.logRow;
       console.log(`-- rem nightly run-once${opts.dryRun ? " (dry-run)" : ""} --`);
@@ -9353,6 +9366,11 @@ remNightly
       if (row.candidates) {
         console.log(`Staged:     ${row.candidates.length} candidate${row.candidates.length === 1 ? "" : "s"}`);
       }
+      if (row.distill) {
+        const remaining = Math.max(0, row.distill.unreflected - row.distill.gathered);
+        console.log(`Distilled:  ${row.distill.gathered} memor${row.distill.gathered === 1 ? "y" : "ies"} (cap ${row.distill.maxMemories}; ${remaining} unreflected remaining)`);
+        if (row.distill.aborted) console.log(`Aborted:    yes — in-flight distillation stopped (flair rem pause)`);
+      }
       // row.autoPromoted populates when step 5b (#1205b-2 ADK auto-promote) ran
       // this cycle — i.e. a non-dry-run cycle for an ADK agentId.
       if (row.autoPromoted) {
@@ -9365,6 +9383,10 @@ remNightly
         console.log(`Dedup:      ${row.dedup.clusterCount} cluster${row.dedup.clusterCount === 1 ? "" : "s"} (${row.dedup.totalMemoriesInClusters} memories, largest ${row.dedup.largestClusterSize})`);
       }
       console.log(`Duration:   ${row.durationMs}ms`);
+      if (result.status === "refused") {
+        console.log(`\nNote: REM refused to start because /Health could not be served.`);
+        console.log(`Restore /Health before retrying, or \`flair rem pause\` to stop the scheduler.`);
+      }
       if (row.errors.length > 0) {
         console.log(`Errors:`);
         for (const e of row.errors) console.log(`  - ${e}`);
@@ -9546,17 +9568,35 @@ addSharedCredentialOptions(rem.command("restore <date>"))
 // Slice 1 of FLAIR-NIGHTLY-REM § 9. The pause sentinel is checked by the
 // nightly runner before any side effects. Env-var FLAIR_REM_PAUSE=1 is also
 // honored — lets ops pause fleet-wide without writing a file.
+// #1515: the same sentinel aborts an in-flight /ReflectMemories gather on
+// the Harper host (checked between yield points) so an operator can stop a
+// runaway run without restarting Harper.
 
 const REM_PAUSE_FLAG = resolve(homedir(), ".flair", "rem.paused");
 
+function writeRemPauseSentinel(): void {
+  const dir = dirname(REM_PAUSE_FLAG);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  writeFileSync(REM_PAUSE_FLAG, new Date().toISOString() + "\n", { mode: 0o600 });
+}
+
 rem
   .command("pause")
-  .description("Pause nightly REM runs — writes ~/.flair/rem.paused sentinel")
+  .description("Pause nightly REM runs and abort an in-flight distillation gather")
   .action(() => {
-    const dir = dirname(REM_PAUSE_FLAG);
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
-    writeFileSync(REM_PAUSE_FLAG, new Date().toISOString() + "\n", { mode: 0o600 });
+    writeRemPauseSentinel();
     console.log(`✅ REM nightly runs paused (sentinel: ${REM_PAUSE_FLAG})`);
+    console.log(`   In-flight distillation will abort at the next yield.`);
+    console.log(`   Resume with: flair rem resume`);
+  });
+
+rem
+  .command("abort")
+  .description("Abort an in-flight REM distillation (same sentinel as pause)")
+  .action(() => {
+    writeRemPauseSentinel();
+    console.log(`✅ REM abort requested (sentinel: ${REM_PAUSE_FLAG})`);
+    console.log(`   In-flight distillation will stop at the next yield; the scheduler stays paused.`);
     console.log(`   Resume with: flair rem resume`);
   });
 

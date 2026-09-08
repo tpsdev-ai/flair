@@ -2,7 +2,9 @@
  * REM nightly runner — orchestrates the cycle.
  *
  * Per FLAIR-NIGHTLY-REM § 4, in order:
- *   1. Pre-flight: check pause sentinel / FLAIR_REM_PAUSE env. Exit clean if paused.
+ *   1. Pre-flight: check pause sentinel / FLAIR_REM_PAUSE env. Exit clean if
+ *      paused. Then GET /Health within 2s (#1515); refuse to start if it
+ *      cannot be served.
  *   2. Snapshot agent state (memory + soul) to ~/.flair/snapshots/<agent>/.
  *   3. Maintenance — delegate to /MemoryMaintenance (same code path `flair rem light` uses).
  *   4. Trust-tier filter on input memories — permanently deferred (see below).
@@ -55,6 +57,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { homedir } from "node:os";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { createSnapshot } from "./snapshot.js";
 
 export const REM_PAUSE_FLAG = resolve(homedir(), ".flair", "rem.paused");
@@ -141,6 +144,84 @@ export const DEFAULT_MAX_TAGS_PER_CYCLE = 200;
  */
 export const DEFAULT_MAX_AUTO_PROMOTE_PER_CYCLE = 200;
 
+/**
+ * Per-run distillation gather cap (#1515). Tens, not thousands — a 3k
+ * backlog drains across nights. Mirror of resources/memory-reflect-lib.ts
+ * (src/ cannot import resources/).
+ */
+export const DEFAULT_MAX_MEMORIES_PER_RUN = 50;
+
+/** Hard ceiling on FLAIR_REM_MAX_MEMORIES. Mirror of the resource-side cap. */
+export const ABSOLUTE_MAX_MEMORIES_PER_RUN = 200;
+
+/** Refuse to start if GET /Health cannot be served within this budget. */
+export const DEFAULT_HEALTH_PREFLIGHT_MS = 2000;
+
+/**
+ * Resolve the per-run gather cap: explicit override > FLAIR_REM_MAX_MEMORIES
+ * > DEFAULT_MAX_MEMORIES_PER_RUN, clamped to ABSOLUTE_MAX_MEMORIES_PER_RUN.
+ */
+export function resolveMaxMemoriesPerRun(
+  override?: number,
+  env: Record<string, string | undefined> = process.env,
+): number {
+  let resolved = DEFAULT_MAX_MEMORIES_PER_RUN;
+  if (typeof override === "number" && Number.isFinite(override) && override > 0) {
+    resolved = Math.floor(override);
+  } else {
+    const fromEnv = Number(env.FLAIR_REM_MAX_MEMORIES);
+    if (Number.isFinite(fromEnv) && fromEnv > 0) resolved = Math.floor(fromEnv);
+  }
+  return Math.min(resolved, ABSOLUTE_MAX_MEMORIES_PER_RUN);
+}
+
+export interface HealthPreflightResult {
+  ok: boolean;
+  elapsedMs: number;
+  error?: string;
+}
+
+export type HealthProbe = (timeoutMs: number) => Promise<HealthPreflightResult>;
+
+/**
+ * Self-check that /Health can be served before snapshot/distillation.
+ * Injected `healthProbe` is preferred (CLI uses fetch + AbortSignal). When
+ * omitted, races `GET /Health` through apiCall against the same budget.
+ */
+export async function runHealthPreflight(
+  apiCall: ApiCall,
+  opts: { probe?: HealthProbe; timeoutMs?: number } = {},
+): Promise<HealthPreflightResult> {
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_HEALTH_PREFLIGHT_MS;
+  const started = Date.now();
+  if (opts.probe) return opts.probe(timeoutMs);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      apiCall("GET", "/Health").then((body) => {
+        if (body && typeof body === "object" && (body as Record<string, unknown>).ok === false) {
+          throw new Error("GET /Health returned {ok:false}");
+        }
+      }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`GET /Health did not respond within ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+    return { ok: true, elapsedMs: Date.now() - started };
+  } catch (err: any) {
+    return { ok: false, elapsedMs: Date.now() - started, error: err?.message ?? String(err) };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+export function formatHealthRefuseMessage(result: HealthPreflightResult, timeoutMs = DEFAULT_HEALTH_PREFLIGHT_MS): string {
+  return `GET /Health could not be served within ${timeoutMs}ms (${result.error ?? "unknown error"}). Refusing to start REM so this run cannot take the instance down. Restore /Health, or \`flair rem pause\` to keep the scheduler from retrying.`;
+}
+
 export type ApiCall = (method: string, path: string, body?: unknown) => Promise<any>;
 
 /**
@@ -197,9 +278,22 @@ export interface RunnerOpts {
    * Override in tests.
    */
   settleMs?: number;
+  /**
+   * #1515: per-run gather cap passed to /ReflectMemories as maxMemories
+   * (default DEFAULT_MAX_MEMORIES_PER_RUN / FLAIR_REM_MAX_MEMORIES).
+   */
+  maxMemoriesPerRun?: number;
+  /**
+   * #1515: health self-check before snapshot/distillation. CLI injects a
+   * timed GET /Health. Tests inject a stub. When omitted, GET /Health goes
+   * through apiCall with DEFAULT_HEALTH_PREFLIGHT_MS.
+   */
+  healthProbe?: HealthProbe;
+  /** Override the health-preflight budget (testing). */
+  healthTimeoutMs?: number;
 }
 
-export type RunnerStatus = "paused" | "completed" | "dry-run" | "failed";
+export type RunnerStatus = "paused" | "completed" | "dry-run" | "failed" | "refused";
 
 /**
  * Audit-row `slice` field. Tracks which phase of FLAIR-NIGHTLY-REM
@@ -268,6 +362,16 @@ export interface RunnerLogRow {
     largestClusterSize: number;
     totalMemoriesInClusters: number;
     computedAt: string;
+  };
+  /**
+   * #1515: per-run distillation bound actually applied this cycle. Absent
+   * on pause / health-refuse / dry-run (no distill attempted).
+   */
+  distill?: {
+    gathered: number;
+    unreflected: number;
+    maxMemories: number;
+    aborted?: boolean;
   };
 }
 
@@ -493,6 +597,21 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
   }
 
   const errors: string[] = [];
+  const healthTimeoutMs = opts.healthTimeoutMs ?? DEFAULT_HEALTH_PREFLIGHT_MS;
+  const health = await runHealthPreflight(opts.apiCall, {
+    probe: opts.healthProbe,
+    timeoutMs: healthTimeoutMs,
+  });
+  if (!health.ok) {
+    const row: RunnerLogRow = {
+      ...baseRow,
+      status: "refused",
+      durationMs: Date.now() - startedMs,
+      errors: [formatHealthRefuseMessage(health, healthTimeoutMs)],
+    };
+    appendLogRow(logPath, row);
+    return { status: "refused", logRow: row };
+  }
 
   // Step 2: snapshot
   let snapshotPath: string | undefined;
@@ -609,17 +728,35 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
   let autoPromoted: RunnerLogRow["autoPromoted"];
   // flair#1257 slice 3: settled continuity sessions distilled this cycle.
   let continuitySessions: RunnerLogRow["continuitySessions"];
+  // #1515: aggregate gather stats from every /ReflectMemories call this cycle.
+  let distill: RunnerLogRow["distill"];
+  let distillAborted = false;
 
   const collectStagedIds = (obj: Record<string, unknown>): string[] =>
     asArray(obj.candidates)
       .map((c) => (c && typeof c === "object" ? (c as Record<string, unknown>).id : c))
       .filter((id): id is string => typeof id === "string");
 
+  const noteGather = (obj: Record<string, unknown>, maxMemories: number): void => {
+    const gathered = typeof obj.gathered === "number" ? obj.gathered : 0;
+    const unreflected = typeof obj.unreflected === "number" ? obj.unreflected : 0;
+    if (!distill) {
+      distill = { gathered, unreflected, maxMemories };
+      return;
+    }
+    distill.gathered += gathered;
+    distill.unreflected += unreflected;
+  };
+
+  const cycleIsAborted = (): boolean =>
+    process.env.FLAIR_REM_PAUSE === "1" || (existsSync(pauseFlagPath) && readPauseSentinel(pauseFlagPath));
+
   if (!opts.dryRun) {
     sliceLabel = "2";
 
     const distillSince = opts.distillSince ?? new Date(startedMs - DEFAULT_DISTILL_LOOKBACK_MS);
     const maxTags = opts.maxTagsPerCycle ?? DEFAULT_MAX_TAGS_PER_CYCLE;
+    const maxMemories = resolveMaxMemoriesPerRun(opts.maxMemoriesPerRun);
     // Derive active adk: tags from the memories already fetched in step 2 — no
     // extra query/scan. See deriveActiveAdkTags for why a separate bounded DB
     // query isn't available (Memory has no REST search handler; ops-API needs
@@ -640,18 +777,26 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
         );
       }
       for (const tag of tagsToRun) {
+        if (cycleIsAborted()) {
+          distillAborted = true;
+          errors.push("distillation: aborted by operator (flair rem pause or FLAIR_REM_PAUSE=1)");
+          break;
+        }
+        await yieldToEventLoop();
         try {
           const reflectRaw = await opts.apiCall("POST", "/ReflectMemories", {
             agentId: opts.agentId,
             execute: true,
             scope: "tagged",
             tag,
+            maxMemories,
           });
           const obj = (reflectRaw && typeof reflectRaw === "object") ? (reflectRaw as Record<string, unknown>) : {};
           if (obj.error) {
             errors.push(`distillation[${tag}]: ${describeApiError(obj.error)}`);
           } else {
             staged.push(...collectStagedIds(obj));
+            noteGather(obj, maxMemories);
           }
         } catch (err: any) {
           errors.push(`distillation[${tag}]: ${describeApiError(err?.message ?? err)}`);
@@ -661,11 +806,16 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
       // ATTEMPTED this cycle — same contract as the agentId-only path.
       candidates = staged;
     } else {
-      // AgentId-only path (non-ADK, unchanged pre-#1205b behavior).
+      // AgentId-only path (non-ADK). scope:"all" + oldest-unreflected cap so
+      // a multi-thousand backlog drains across nights (#1515) instead of
+      // only the default 24h recent window.
       try {
+        await yieldToEventLoop();
         const reflectRaw = await opts.apiCall("POST", "/ReflectMemories", {
           agentId: opts.agentId,
           execute: true,
+          scope: "all",
+          maxMemories,
         });
         const obj = (reflectRaw && typeof reflectRaw === "object") ? (reflectRaw as Record<string, unknown>) : {};
         if (obj.error) {
@@ -675,6 +825,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
           errors.push(`distillation: ${describeApiError(obj.error)}`);
         } else {
           candidates = collectStagedIds(obj);
+          noteGather(obj, maxMemories);
         }
       } catch (err: any) {
         // Distillation failure is recorded, not fatal — maintenance already
@@ -718,6 +869,12 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
       candidates = candidates ?? [];
       let distilled = 0;
       for (const tag of continuityToRun) {
+        if (cycleIsAborted()) {
+          distillAborted = true;
+          errors.push("distillation: aborted by operator (flair rem pause or FLAIR_REM_PAUSE=1)");
+          break;
+        }
+        await yieldToEventLoop();
         try {
           const reflectRaw = await opts.apiCall("POST", "/ReflectMemories", {
             agentId: opts.agentId,
@@ -725,12 +882,14 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
             scope: "tagged",
             tag,
             focus: "continuity",
+            maxMemories,
           });
           const obj = (reflectRaw && typeof reflectRaw === "object") ? (reflectRaw as Record<string, unknown>) : {};
           if (obj.error) {
             errors.push(`distillation[${tag}]: ${describeApiError(obj.error)}`);
           } else {
             candidates.push(...collectStagedIds(obj));
+            noteGather(obj, maxMemories);
             distilled++;
           }
         } catch (err: any) {
@@ -754,7 +913,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
     // distillation: a failure is recorded and the candidates stay pending
     // (re-swept next cycle, or promotable by the human `rem promote` path).
     // Bounded by the per-cycle cap.
-    if (activeAdkTags.length > 0 || continuityToRun.length > 0) {
+    if (!distillAborted && (activeAdkTags.length > 0 || continuityToRun.length > 0)) {
       try {
         const apRaw = await opts.apiCall("POST", "/AutoPromoteCandidates", {
           agentId: opts.agentId,
@@ -792,7 +951,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
   // work), not incorrect.
   let dedup: RunnerLogRow["dedup"];
 
-  if (!opts.dryRun) {
+  if (!opts.dryRun && !distillAborted) {
     try {
       const dedupRaw = await opts.apiCall("POST", "/MemoryDedupStats", {});
       const obj = (dedupRaw && typeof dedupRaw === "object") ? (dedupRaw as Record<string, unknown>) : {};
@@ -819,6 +978,14 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
   }
 
   // Step 7: log
+  if (distillAborted) {
+    distill = {
+      gathered: distill?.gathered ?? 0,
+      unreflected: distill?.unreflected ?? 0,
+      maxMemories: distill?.maxMemories ?? resolveMaxMemoriesPerRun(opts.maxMemoriesPerRun),
+      aborted: true,
+    };
+  }
   const row: RunnerLogRow = {
     ...baseRow,
     slice: sliceLabel,
@@ -833,6 +1000,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
     candidates,
     autoPromoted,
     continuitySessions,
+    distill,
     dedup,
     durationMs: Date.now() - startedMs,
     errors,

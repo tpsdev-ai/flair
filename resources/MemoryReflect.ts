@@ -11,7 +11,8 @@
  *   agentId      string   — which agent to reflect on
  *   scope        string   — "recent" | "tagged" | "all" (default: "recent")
  *   since        string?  — ISO timestamp lower bound (default: 24h ago)
- *   maxMemories  number?  — cap (default: 50)
+ *   maxMemories  number?  — cap (default: 50, env FLAIR_REM_MAX_MEMORIES,
+ *                            hard ceiling 200). Oldest-unreflected first.
  *   focus        string?  — "lessons_learned" | "patterns" | "decisions" | "errors" | "continuity"
  *                            (default: "lessons_learned"; a continuity-tag run — scope="tagged" with an
  *                            adk:continuity:* tag — always uses "continuity", flair#1257 slice 3)
@@ -43,6 +44,10 @@
 
 import { Resource, databases, models, logger } from "harper";
 import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { setImmediate as yieldToRequests } from "node:timers/promises";
 import { isAdmin, allowVerified } from "./agent-auth.js";
 import { patchRecordSilent } from "./table-helpers.js";
 import {
@@ -56,9 +61,21 @@ import {
   isContinuityScopeTag,
   filterStaleSessionIntentCandidates,
   resolveCandidateVisibilityRuling,
+  considerForOldestUnreflectedCap,
+  isRemAbortRequested,
+  resolveMaxMemoriesPerRun,
   DEFAULT_STALE_INTENT_HORIZON_MS,
+  REM_GATHER_YIELD_BUDGET_MS,
   type ReflectMemoryInput,
 } from "./memory-reflect-lib.js";
+
+/** Same path `flair rem pause` writes. Duplicated across the src/ boundary. */
+const REM_PAUSE_FLAG = resolve(homedir(), ".flair", "rem.paused");
+
+const GATHER_SELECT = [
+  "id", "agentId", "archived", "durability", "expiresAt", "tags",
+  "createdAt", "lastReflected", "content",
+];
 
 export class ReflectMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (auth reshape removes the gate's
@@ -99,9 +116,29 @@ export class ReflectMemories extends Resource {
 
     const sinceDate = since ? new Date(since) : new Date(Date.now() - 24 * 3600_000);
     const gatherNow = new Date();
+    const maxN = resolveMaxMemoriesPerRun(typeof maxMemories === "number" ? maxMemories : undefined);
+    // #1515: do not take the first N search hits. Scan eligible rows (yielding
+    // so /Health keeps serving), keep only oldest-unreflected up to maxN, and
+    // abort if the operator paused mid-run. Embeddings are excluded from the
+    // select — loading 3k vectors just to strip them pegs the main thread.
     const memories: any[] = [];
+    let unreflectedSeen = 0;
+    let yieldAt = performance.now() + REM_GATHER_YIELD_BUDGET_MS;
 
-    for await (const record of (databases as any).flair.Memory.search()) {
+    for await (const record of (databases as any).flair.Memory.search({ select: GATHER_SELECT })) {
+      if (performance.now() >= yieldAt) {
+        if (isRemAbortRequested(process.env, existsSync, REM_PAUSE_FLAG)) {
+          return new Response(
+            JSON.stringify({
+              error: "rem_aborted",
+              detail: "REM distillation aborted (pause sentinel or FLAIR_REM_PAUSE=1). Resume with: flair rem resume",
+            }),
+            { status: 503 },
+          );
+        }
+        await yieldToRequests();
+        yieldAt = performance.now() + REM_GATHER_YIELD_BUDGET_MS;
+      }
       if (record.agentId !== agentId) continue;
       if (record.archived) continue;
       if (record.durability === "permanent") continue; // permanent memories don't need reflection
@@ -119,12 +156,20 @@ export class ReflectMemories extends Resource {
       // never cite another user's memory.
       if (!memoryMatchesReflectScope(record, { scope, tag, sinceDate })) continue;
 
-      const { embedding, ...rest } = record;
-      memories.push(rest);
-      if (memories.length >= maxMemories) break;
+      if (record.lastReflected == null || record.lastReflected === "") unreflectedSeen++;
+      const { embedding: _embedding, ...rest } = record;
+      considerForOldestUnreflectedCap(memories, rest, maxN);
     }
 
-    memories.sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? ""));
+    if (isRemAbortRequested(process.env, existsSync, REM_PAUSE_FLAG)) {
+      return new Response(
+        JSON.stringify({
+          error: "rem_aborted",
+          detail: "REM distillation aborted (pause sentinel or FLAIR_REM_PAUSE=1). Resume with: flair rem resume",
+        }),
+        { status: 503 },
+      );
+    }
 
     // Collect tags present in source memories
     const tagSet = new Set<string>();
@@ -140,7 +185,13 @@ export class ReflectMemories extends Resource {
       patchRecordSilent((databases as any).flair.Memory, m.id, { lastReflected: nowISO });
     }
 
-    const promptInputs: ReflectMemoryInput[] = memories.map((m) => ({ id: m.id, createdAt: m.createdAt, content: m.content }));
+    const promptInputs: ReflectMemoryInput[] = memories.map((m) => ({
+      id: m.id,
+      createdAt: m.createdAt,
+      content: typeof m.content === "string" ? m.content : "",
+    }));
+
+    const gatherMeta = { gathered: memories.length, unreflected: unreflectedSeen, maxMemories: maxN };
 
     if (!execute) {
       const prompt = buildReflectionPrompt({ agentId, focus, scope, sinceISO: sinceDate.toISOString(), memories: promptInputs });
@@ -149,6 +200,18 @@ export class ReflectMemories extends Resource {
         prompt,
         suggestedTags: [...tagSet].slice(0, 20),
         count: memories.length,
+        ...gatherMeta,
+      };
+    }
+
+    // #1515: empty gather → no generate() call. A fully-reflected (or empty)
+    // set must not spend a model turn or hold the main thread.
+    if (promptInputs.length === 0) {
+      return {
+        candidates: [],
+        count: 0,
+        model: process.env.FLAIR_REM_MODEL || "default",
+        ...gatherMeta,
       };
     }
 
@@ -227,7 +290,12 @@ export class ReflectMemories extends Resource {
 
     // Dedup against this agent's existing pending candidates (spec §3A item 4).
     const existingPendingClaims: string[] = [];
+    yieldAt = performance.now() + REM_GATHER_YIELD_BUDGET_MS;
     for await (const c of (databases as any).flair.MemoryCandidate.search({})) {
+      if (performance.now() >= yieldAt) {
+        await yieldToRequests();
+        yieldAt = performance.now() + REM_GATHER_YIELD_BUDGET_MS;
+      }
       if (c.agentId !== agentId) continue;
       if (c.status !== "pending") continue;
       existingPendingClaims.push(c.claim);
@@ -278,6 +346,7 @@ export class ReflectMemories extends Resource {
       candidates: responseCandidates,
       count: responseCandidates.length,
       model: resolvedModel,
+      ...gatherMeta,
       // flair#1257 slice 3: continuity-run observability — how many candidates
       // the stale-intent post-filter dropped (0 for non-continuity runs).
       ...(isContinuityRun ? { droppedStaleIntent: staleIntentResult.droppedStaleIntent.length } : {}),

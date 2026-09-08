@@ -23,6 +23,27 @@
 export const MAX_CANDIDATES_PER_RUN = 10;
 
 /**
+ * Per-run gather cap for distillation input (#1515). Tens, not thousands —
+ * a 3k backlog must drain across nights instead of one blocking run.
+ * Duplicated by value in src/rem/runner.ts (npm-packaging boundary).
+ */
+export const DEFAULT_MAX_MEMORIES_PER_RUN = 50;
+
+/**
+ * Hard ceiling on FLAIR_REM_MAX_MEMORIES / request maxMemories. An operator
+ * who sets 3000 would recreate the outage this cap exists to prevent.
+ * Duplicated by value in src/rem/runner.ts.
+ */
+export const ABSOLUTE_MAX_MEMORIES_PER_RUN = 200;
+
+/**
+ * Event-loop yield budget (ms) during the gather scan. Same convention as
+ * MemoryDedupStats: after this much synchronous work, await setImmediate
+ * so /Health and reads can run. Not a throughput claim.
+ */
+export const REM_GATHER_YIELD_BUDGET_MS = 10;
+
+/**
  * Max characters per candidate claim. Candidates are meant to be atomic,
  * single-insight lessons (matches the "Keep each memory atomic" instruction
  * FOCUS_PROMPTS already gives prompt-mode readers) — 500 chars is generous
@@ -713,4 +734,97 @@ export function buildStagedCandidateRow(params: {
     row.visibilityRationale = params.visibilityRuling.rationale;
   }
   return row;
+}
+
+// ─── Per-run cap + oldest-unreflected selection (#1515) ──────────────────────
+//
+// A first nightly run over a 3k backlog used to take whatever Memory.search()
+// yielded first, up to maxMemories, then stamp lastReflected on that batch.
+// That neither drains oldest work nor skips already-reflected rows, and the
+// scan itself did not yield. These helpers are the gather policy: only
+// unreflected rows (empty/missing lastReflected), oldest createdAt first,
+// hard-capped so one cycle cannot assemble a thousands-row prompt.
+
+export interface ReflectGatherMemory {
+  createdAt?: string | null;
+  lastReflected?: string | null;
+}
+
+/** A memory is unreflected when lastReflected is missing or blank. */
+export function isUnreflectedMemory(record: ReflectGatherMemory): boolean {
+  return record.lastReflected == null || record.lastReflected === "";
+}
+
+/**
+ * Resolve the per-run gather cap: explicit override > FLAIR_REM_MAX_MEMORIES
+ * (positive, finite) > DEFAULT_MAX_MEMORIES_PER_RUN, then clamp to
+ * ABSOLUTE_MAX_MEMORIES_PER_RUN. Exported for tests and the nightly runner's
+ * duplicated resolver (kept in sync by value).
+ */
+export function resolveMaxMemoriesPerRun(
+  override?: number,
+  env: Record<string, string | undefined> = process.env,
+): number {
+  let resolved = DEFAULT_MAX_MEMORIES_PER_RUN;
+  if (typeof override === "number" && Number.isFinite(override) && override > 0) {
+    resolved = Math.floor(override);
+  } else {
+    const fromEnv = Number(env.FLAIR_REM_MAX_MEMORIES);
+    if (Number.isFinite(fromEnv) && fromEnv > 0) resolved = Math.floor(fromEnv);
+  }
+  return Math.min(resolved, ABSOLUTE_MAX_MEMORIES_PER_RUN);
+}
+
+/** Oldest createdAt first. Missing timestamps sort last (never "oldest"). */
+export function compareOldestCreatedAtFirst(a: ReflectGatherMemory, b: ReflectGatherMemory): number {
+  const ac = a.createdAt ?? "";
+  const bc = b.createdAt ?? "";
+  if (!ac && !bc) return 0;
+  if (!ac) return 1;
+  if (!bc) return -1;
+  return ac.localeCompare(bc);
+}
+
+/**
+ * Keep at most `maxN` oldest-unreflected records. Already-reflected rows are
+ * ignored so a backlog drains instead of being re-distilled. Mutates `pool`
+ * and returns it (bounded insert, O(N) with N ≤ 200).
+ */
+export function considerForOldestUnreflectedCap<T extends ReflectGatherMemory>(
+  pool: T[],
+  record: T,
+  maxN: number,
+): T[] {
+  if (maxN <= 0 || !isUnreflectedMemory(record)) return pool;
+  if (pool.length < maxN) {
+    pool.push(record);
+    pool.sort(compareOldestCreatedAtFirst);
+    return pool;
+  }
+  const newestKept = pool[pool.length - 1];
+  if (compareOldestCreatedAtFirst(record, newestKept) < 0) {
+    pool[pool.length - 1] = record;
+    pool.sort(compareOldestCreatedAtFirst);
+  }
+  return pool;
+}
+
+/**
+ * True when an operator asked REM to stop: FLAIR_REM_PAUSE=1 or the pause
+ * sentinel exists. MemoryReflect checks this between gather yields so
+ * `flair rem pause` aborts an in-flight scan without restarting Harper.
+ * `existsSync` is injected so unit tests do not touch the real home directory.
+ */
+export function isRemAbortRequested(
+  env: Record<string, string | undefined> = process.env,
+  existsSyncImpl?: (path: string) => boolean,
+  pauseFlagPath?: string,
+): boolean {
+  if (env.FLAIR_REM_PAUSE === "1") return true;
+  if (!existsSyncImpl || !pauseFlagPath) return false;
+  try {
+    return existsSyncImpl(pauseFlagPath);
+  } catch {
+    return false;
+  }
 }
