@@ -38,6 +38,7 @@ import { RECORD_TYPES } from "./record-types.js";
 import { attachTrust } from "./trust-block.js";
 import { recordCitations } from "./usage-recording.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
+import { applyHitStats, clearHitStats, overlayHitStatsResult } from "./hit-tracking.js";
 
 /**
  * flair#744 slice 1 — read the opt-in `includeTrust` flag for a by-id get.
@@ -594,7 +595,9 @@ export class Memory extends (databases as any).flair.Memory {
     // returned untouched (attachTrust returns the same reference) ⇒
     // byte-identical to pre-slice-1.
     if (result && typeof result === "object" && !(result instanceof Response) && typeof (result as any).agentId === "string") {
-      return attachTrust(result as any, wantsTrust(target, opts));
+      const ctx = (this as any).getContext?.();
+      const withHits = await applyHitStats(result, ctx);
+      return attachTrust(withHits as any, wantsTrust(target, opts));
     }
     return result;
   }
@@ -621,7 +624,7 @@ export class Memory extends (databases as any).flair.Memory {
     // Relationship.ts/WorkspaceState.ts's search() use.
     const gate = await resolveAuthGate(ctx, UNAUTH());
     if (gate.kind === "denied") return gate.response;
-    if (gate.kind === "unfiltered") return super.search(query);
+    if (gate.kind === "unfiltered") return overlayHitStatsResult(super.search(query), ctx);
 
     // Non-admin agent: scope to own (any visibility) + granted owners' SHARED
     // memories only (Layer 1 private-exclusion). Centralized in
@@ -634,7 +637,10 @@ export class Memory extends (databases as any).flair.Memory {
     // makeScopedSearch (record-type-kit.ts) — same correct composition
     // MemoryCandidate.search() already applies — so a caller-supplied
     // `operator: "or"` cannot boolean-inject past the owner scope.
-    return memoryScopedSearch(gate.agentId, query, (q) => withDetachedTxn(ctx, () => super.search(q)));
+    return overlayHitStatsResult(
+      memoryScopedSearch(gate.agentId, query, (q) => withDetachedTxn(ctx, () => super.search(q))),
+      ctx,
+    );
   }
 
   async post(content: any, context?: any) {
@@ -728,8 +734,8 @@ export class Memory extends (databases as any).flair.Memory {
     content.archived = content.archived ?? false;
 
     // ─── Default visibility (durability-keyed) — Layer 1, part A ────────────
-    // post() only ever creates a NEW record — patchRecord/supersede-close/
-    // retrievalCount bumps all route through put() instead (see put()'s
+    // post() only ever creates a NEW record — patchRecord/supersede-close
+    // route through put() instead (see put()'s
     // pre-existing-record guard below), so there is no "don't overwrite an
     // existing record's visibility" concern here. Explicit visibility on the
     // write ALWAYS overrides; only stamp the default when the caller left it
@@ -1041,7 +1047,7 @@ export class Memory extends (databases as any).flair.Memory {
     // untouched). See the dedup-gate block further down for why an existing
     // id skips the gate; the SAME "does a record already exist" check gates
     // the visibility default (Layer 1 part A): patchRecord/supersede-
-    // close/retrievalCount bumps all route through put() with a MERGED
+    // close all route through put() with a MERGED
     // `{...existing, ...patch}` payload, and must never have their stored
     // visibility overwritten by a default recomputed from that merged content
     // — only a genuinely NEW id gets the default stamped.
@@ -1262,6 +1268,10 @@ export class Memory extends (databases as any).flair.Memory {
     // Durability controls retention, not the owner's authority to delete.
     const deleted = await super.delete(id);
     noteMemoryDelete(id);
+    const deletedId = typeof id === "string" ? id : record?.id;
+    if (typeof deletedId === "string" && deletedId.length > 0) {
+      await clearHitStats(deletedId, (this as any).getContext?.()).catch(() => {});
+    }
     return deleted;
   }
 }

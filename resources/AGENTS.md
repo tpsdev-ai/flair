@@ -22,7 +22,7 @@ Preserve these boundaries:
 - Compose caller filters inside the authoritative read scope; preserve the row re-check after retrieval.
 - Audit each exposed mutation verb. A `put()` guard does not automatically cover `patch()` or `post()`.
 - Raw table access bypasses custom Resource rules. Use it only with an explicit internal authorization contract.
-- Harper `put()` replaces a row. Use the established full-row merge helpers for partial updates; they do not promise atomic counters.
+- Harper `put()` replaces a row. Use the established full-row merge helpers for partial updates; they do not promise atomic counters. Search hit-tracking is the exception: `resources/hit-tracking.ts` increments `MemoryHitStat` with per-id coalescing and overlays `retrievalCount` / `lastRetrieved` on read.
 - Bootstrap calls the retrieval core without search hit-tracking side effects. Keep raw similarity separate from fused ordering.
 
 Use [`test/AGENTS.md`](../test/AGENTS.md) for validation. Resource integration tests

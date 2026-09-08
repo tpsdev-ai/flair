@@ -120,7 +120,7 @@ describe("ensureFlairAgentRole — security invariants of the grant spec", () =>
     expect(tables.OrgEvent.insert).toBe(true);
     expect(tables.WorkspaceState.update).toBe(true);
     // System/admin-only tables: no access at all.
-    for (const t of ["Peer", "PairingToken", "SyncLog", "OAuthClient", "OAuthToken", "IdpConfig", "IdJagReplay"]) {
+    for (const t of ["Peer", "PairingToken", "SyncLog", "OAuthClient", "OAuthToken", "IdpConfig", "IdJagReplay", "MemoryHitStat"]) {
       expect(tables[t]).toEqual({ read: false, insert: false, update: false, delete: false, attribute_permissions: [] });
     }
   });

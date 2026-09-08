@@ -67,8 +67,15 @@ add("MemoryReflect", ["writer:patchRecordSilent#1"],
   "lastReflected stamp — non-skill.");
 add("MemoryReindex", ["writer:Memory.put#1"],
   "Admin-only re-embed re-PUT (reindex_admin_only gate) — preserves existing content, not a new skill write.");
-add("SemanticSearch", ["writer:patchRecord#1"],
-  "retrievalCount bump — non-skill.");
+add("hit-tracking", [
+  "writer:this.pending.delete#1",
+  "writer:this.cache.delete#1",
+  "writer:this.tails.delete#1",
+  "writer:this.pending.delete#2",
+  "writer:this.tables.stats.put#1",
+  "writer:(databases as any).flair.MemoryHitStat.put#1",
+  "writer:(databases as any).flair.MemoryHitStat.delete#1",
+], "MemoryHitStat ledger and in-memory maps — not a Memory/skill writer.");
 add("auth-middleware", ["writer:patchRecord#1"],
   "Auth bookkeeping — non-skill.");
 add("usage-recording", ["writer:(databases as any).flair.Memory.put#1"],
@@ -101,8 +108,6 @@ add("MemoryReflect", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only alias (reflect reads source memories).");
 add("MemoryReindex", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only alias (reindex reads rows to re-embed).");
-add("SemanticSearch", ["alias-source:(databases as any).flair.Memory#1"],
-  "Read-only alias (search reads rows).");
 add("auth-middleware", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only alias (auth reads rows).");
 add("promotion-stamp", ["alias-source:(databases as any).flair.Memory#1"],

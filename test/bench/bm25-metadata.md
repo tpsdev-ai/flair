@@ -42,8 +42,9 @@ Index-update work falls clearly; this small fixture does **not** establish an
 end-to-end latency improvement. In concurrent arms, 320 successful put calls
 produced 124–134 observed feed updates. One arm advanced the counters by 310;
 the others advanced them by 320. These observations do not establish atomicity,
-one event per call, or a fix for counter loss. Storage writes and counters are
-unchanged by this optimization and remain work for #1528.
+one event per call, or a fix for counter loss. Storage writes and counters were
+left to #1528 and are addressed in [hit-tracking.md](hit-tracking.md) without
+changing this lexical-skip path.
 
 ## Retention cost
 

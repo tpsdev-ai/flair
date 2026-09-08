@@ -83,7 +83,15 @@ add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.update#1", "wr
 add("Memory", ["writer:patchRecord#1", "writer:super.patch#1", "writer:super.delete#1"], "NON_EMBED",
   "derivedFrom/lastReflected patch, patch(), delete() — never write embeddingModel.");
 add("MemoryReflect", ["writer:patchRecordSilent#1"], "NON_EMBED", "lastReflected stamp — partial, non-embedding.");
-add("SemanticSearch", ["writer:patchRecord#1"], "NON_EMBED", "retrievalCount bump — partial, non-embedding.");
+add("hit-tracking", [
+  "writer:this.pending.delete#1",
+  "writer:this.cache.delete#1",
+  "writer:this.tails.delete#1",
+  "writer:this.pending.delete#2",
+  "writer:this.tables.stats.put#1",
+  "writer:(databases as any).flair.MemoryHitStat.put#1",
+  "writer:(databases as any).flair.MemoryHitStat.delete#1",
+], "OTHER_TABLE", "MemoryHitStat ledger and in-memory maps — not a Memory writer.");
 add("auth-middleware", ["writer:patchRecord#1"], "NON_EMBED", "Auth bookkeeping patch — non-embedding.");
 
 // ── OTHER_TABLE: conservative sink-enumeration false-positives ──
