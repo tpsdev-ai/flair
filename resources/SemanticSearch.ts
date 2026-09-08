@@ -66,7 +66,7 @@ export class SemanticSearch extends Resource {
     // recall-harness (test/bench/recall-harness/run.ts) and `recall-eval.mjs`
     // before reconsidering this default if the compositeScore formula or
     // corpus changes.
-    const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "raw", minScore = 0, since, asOf, includeTrust = false, includeMetadata = false, abstain = false, explain = false, includeLegs = false, includeArchived = false } = data || {};
+    const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "raw", minScore = 0, since, asOf, includeTrust = false, includeMetadata = false, includeTrigger = false, abstain = false, explain = false, includeLegs = false, includeArchived = false } = data || {};
 
     // Authenticated identity lives on the Harper Resource context (getContext().request).
     // `this.request` is NOT populated on Harper v5 Resources — prior reads here
@@ -266,10 +266,17 @@ export class SemanticSearch extends Resource {
       // with `includeMetadata: true`. `subject` needs no widening — it is
       // already in DEFAULT_SELECT. Neither flag ⇒ select stays undefined ⇒
       // response bytes unchanged.
-      select: (includeTrust || includeMetadata)
+      // flair#1546: `includeTrigger` opts the skill recall signal into the
+      // projection. DEFAULT_SELECT deliberately omits `trigger` (a skill-only
+      // column — the shared retrieval core must not grow it for every consumer,
+      // same K&S projection ruling as `metadata`), so skill_search opts it in
+      // per-request to return the trigger in its lightweight catalog. Neither
+      // flag ⇒ select stays undefined ⇒ response bytes unchanged.
+      select: (includeTrust || includeMetadata || includeTrigger)
         ? [...DEFAULT_SELECT,
            ...(includeTrust ? ["provenance"] : []),
-           ...(includeMetadata ? ["metadata"] : [])]
+           ...(includeMetadata ? ["metadata"] : []),
+           ...(includeTrigger ? ["trigger"] : [])]
         : undefined,
       // flair#744 slice 2 + confidence-band refinement: attach the absolute
       // per-result cosine confidence when the caller opts into abstention OR
