@@ -2885,6 +2885,11 @@ const FLAIR_AGENT_PERMISSION = {
       Memory:          grant(true,  true,  true,  true),
       MemoryCandidate: grant(true,  true,  true,  true),
       MemoryGrant:     grant(true,  true,  true,  true),
+      // Asset (images-in-Flair slice 1). Harper authorizes BEFORE Asset.post
+      // runs, so a de-elevated flair_agent needs the table grant or signed
+      // POST /Asset 403s as AccessViolation (Kern P0). CRUD envelope;
+      // owner-only + write-time size/MIME gates live in resources/Asset.ts.
+      Asset:           grant(true,  true,  true,  true),
       Soul:            grant(true,  true,  true,  false),
       OrgEvent:        grant(true,  true,  true,  true),
       WorkspaceState:  grant(true,  true,  true,  true),

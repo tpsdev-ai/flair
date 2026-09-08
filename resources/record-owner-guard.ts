@@ -85,6 +85,7 @@
  * being absent on the day someone adds one.
  */
 export const OWNER_FIELDS: Readonly<Record<string, string>> = Object.freeze({
+  Asset: "agentId",
   Credential: "principalId",
   Integration: "agentId",
   Memory: "agentId",

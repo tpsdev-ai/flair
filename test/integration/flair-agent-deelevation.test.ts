@@ -135,6 +135,34 @@ describe("flair_agent de-elevation (verified agents act as flair-agent, not admi
     expect(res.status, `GET /Memory returned ${res.status}: ${text.slice(0, 300)}`).toBe(200);
   }, 30_000);
 
+  test("SUFFICIENCY: agent POST/GET/DELETE /Asset works under flair_agent (Asset table grant)", async () => {
+    const id = `${agent.id}-asset-${randomUUID().slice(0, 8)}`;
+    const postPath = "/Asset";
+    const post = await fetch(`${harper.httpURL}${postPath}`, {
+      method: "POST",
+      headers: { Authorization: ed25519Header(agent, "POST", postPath), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id,
+        memoryId: `${agent.id}-0`,
+        contentType: "image/png",
+        data: Buffer.from("hello").toString("base64"),
+      }),
+    });
+    expect([200, 201, 204], `POST /Asset returned ${post.status}: ${(await post.text()).slice(0, 300)}`).toContain(post.status);
+
+    const getPath = `/Asset/${id}`;
+    const got = await fetch(`${harper.httpURL}${getPath}`, {
+      headers: { Authorization: ed25519Header(agent, "GET", getPath) },
+    });
+    expect([200, 204], `GET /Asset/${id} returned ${got.status}: ${(await got.text()).slice(0, 300)}`).toContain(got.status);
+
+    const del = await fetch(`${harper.httpURL}${getPath}`, {
+      method: "DELETE",
+      headers: { Authorization: ed25519Header(agent, "DELETE", getPath) },
+    });
+    expect([200, 204], `DELETE /Asset/${id} returned ${del.status}: ${(await del.text()).slice(0, 300)}`).toContain(del.status);
+  }, 30_000);
+
   test("SUFFICIENCY: agent PUT own Memory works under flair_agent (insert/update grant)", async () => {
     const id = `${agent.id}-put-check`;
     const path = `/Memory/${id}`;
@@ -317,6 +345,7 @@ describe("flair_agent de-elevation (verified agents act as flair-agent, not admi
     // agent-writable (owner-scoped), it belongs in this same anonymous-write
     // sweep like every other agent-facing table.
     { name: "MemoryCandidate", body: (id) => ({ id, agentId: agent.id, claim: "anon candidate", generatedAt: new Date().toISOString(), status: "pending" }) },
+    { name: "Asset",           body: (id) => ({ id, agentId: agent.id, contentType: "image/png", data: "AA==", createdAt: new Date().toISOString() }) },
     // admin / system / federation tables (no agent grant → must deny anon)
     { name: "Instance",        body: (id) => ({ id, name: "anon" }) },
     { name: "Peer",            body: (id) => ({ id, url: "http://x" }) },

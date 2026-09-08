@@ -103,7 +103,7 @@ describe("ensureFlairAgentRole — security invariants of the grant spec", () =>
     const perm = await captureSpec();
     const tables = perm.flair.tables;
     // Real names present...
-    for (const t of ["Memory", "OrgEvent", "WorkspaceState", "OAuthClient", "Soul"]) {
+    for (const t of ["Memory", "Asset", "OrgEvent", "WorkspaceState", "OAuthClient", "Soul"]) {
       expect(tables[t]).toBeDefined();
     }
     // ...and the misleading shorthand the all-false pair role used is absent.
@@ -116,6 +116,7 @@ describe("ensureFlairAgentRole — security invariants of the grant spec", () =>
     const tables = (await captureSpec()).flair.tables;
     // Agent-owned data: writable (row-ownership is enforced in allow*, not here).
     expect(tables.Memory).toEqual({ read: true, insert: true, update: true, delete: true, attribute_permissions: [] });
+    expect(tables.Asset).toEqual({ read: true, insert: true, update: true, delete: true, attribute_permissions: [] });
     expect(tables.OrgEvent.insert).toBe(true);
     expect(tables.WorkspaceState.update).toBe(true);
     // System/admin-only tables: no access at all.

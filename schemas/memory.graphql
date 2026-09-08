@@ -252,3 +252,22 @@ type MemoryCandidate @table(database: "flair") @export {
                                    # visibilityRuling — the auditable "why shared" recorded on the candidate.
                                    # Nullable/additive, same clean-upgrade contract as scopeTag above.
 }
+
+# Asset — binary blobs (screenshots, images) stored out-of-record via Harper's
+# Blob type, referenced from a Memory by `memoryId`. Slice 1: storage only
+# (no MCP exposure). owner-only + identity-gated + federation "excluded" per
+# resources/record-types.ts (RECORD_TYPES.Asset) — a new type must not enter
+# federation sync (Federation.ts's table list is unchanged).
+# Lifecycle: retained until the owner deletes the Asset row. Deleting the
+# parent Memory does not sweep linked blobs (no GC this slice). Slice 2
+# serving 404s dangling refs; GC + memoryId exist-and-owned check deferred.
+# updatedAt is nullable/additive so a later sweep can key on recency.
+type Asset @table(database: "flair") @export {
+  id: ID @primaryKey
+  agentId: String! @indexed        # owner (no-forge attribution / read scope)
+  memoryId: String @indexed        # the Memory record this asset belongs to
+  contentType: String              # MIME type, e.g. image/jpeg
+  data: Blob                       # binary content, stored out-of-record
+  createdAt: String! @indexed
+  updatedAt: String                # stamped on write; later sweep key (nullable/additive)
+}

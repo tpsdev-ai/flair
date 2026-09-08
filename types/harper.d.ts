@@ -52,4 +52,13 @@ declare module "harper" {
     delete?(): any;
     static connect?(): AsyncIterable<any>;
   }
+  /**
+   * Wrap bytes as a Harper Blob for out-of-record storage.
+   * Consumed by resources/Asset.ts (images-in-Flair slice 1).
+   * Mirrors harper's createBlob(source, { type }) — only the shapes Flair uses.
+   */
+  export function createBlob(
+    source: Uint8Array | string,
+    options?: { type?: string },
+  ): Blob;
 }
