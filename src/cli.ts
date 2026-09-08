@@ -13300,8 +13300,22 @@ program
     // is actually stamping new writes with.
     const EMBEDDING_PREFIXES_ENABLED = true; // MUST mirror resources/embeddings-provider.ts's gate
     const EMBEDDING_VARIANT = "searchprefix";
+    // embedding-space-guard slice 1: getModelId() now stamps the ENGINE-QUALIFIED
+    // id `<engine>:<base>[+searchprefix]`. Duplicated as a literal here (separate
+    // build target — see above). A row is CURRENT-SPACE iff its stamp is the
+    // qualified id OR its one-time bare-name equivalent (today's corpus, stamped
+    // before the qualifier). Treat BOTH as current so `--stale-only` never
+    // re-embeds an already-correct bare-stamped row — that would loop forever
+    // (Memory.put re-stamps it QUALIFIED, still "!= bare" under a single-value
+    // check). Keep in lockstep with resources/embeddings-provider.ts's
+    // getModelId()/EMBEDDING_ENGINE and resources/embedding-space-guard.ts's
+    // normalizeStamp().
+    const EMBEDDING_ENGINE = "gguf";
     const baseModel = process.env.FLAIR_EMBEDDING_MODEL ?? "nomic-embed-text-v1.5-Q4_K_M";
-    const currentModel = EMBEDDING_PREFIXES_ENABLED ? `${baseModel}+${EMBEDDING_VARIANT}` : baseModel;
+    const bareCurrentModel = EMBEDDING_PREFIXES_ENABLED ? `${baseModel}+${EMBEDDING_VARIANT}` : baseModel;
+    const currentModel = `${EMBEDDING_ENGINE}:${bareCurrentModel}`;
+    const isCurrentSpace = (stamp: string | undefined | null): boolean =>
+      stamp === currentModel || stamp === bareCurrentModel;
 
     if (agentId) {
       console.log(`Re-embedding memories for agent: ${agentId}`);
@@ -13360,7 +13374,7 @@ program
       const byAgent = new Map<string, any[]>();
       for (const m of allMemories) {
         if (!m.content) continue;
-        if (staleOnly && m.embeddingModel === currentModel) continue;
+        if (staleOnly && isCurrentSpace(m.embeddingModel)) continue;
         const agent = m.agentId || "unknown";
         if (!byAgent.has(agent)) byAgent.set(agent, []);
         byAgent.get(agent)!.push(m);
@@ -13462,7 +13476,7 @@ program
 
     const candidates = allMemories.filter((m: any) => {
       if (!m.content) return false;
-      if (staleOnly) return !m.embeddingModel || m.embeddingModel !== currentModel;
+      if (staleOnly) return !m.embeddingModel || !isCurrentSpace(m.embeddingModel);
       return true;
     });
 

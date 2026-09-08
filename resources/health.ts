@@ -10,6 +10,7 @@ import { resolveMigrationDataDirForRead } from "./migrations/data-dir.js";
 import { REM_DEDUP_STATS_PATH } from "./dedup-cluster.js";
 import { hybridEnabled } from "./bm25.js";
 import { bm25IndexEnabled, bm25IndexStatus } from "./bm25-index-service.js";
+import { normalizeStamp } from "./embedding-space-guard.js";
 import { buildPublicHealthBody, resolveSearchReadiness, type ResourceRegistry, type SearchReadiness } from "./search-readiness.js";
 
 const db = databases as any;
@@ -247,8 +248,18 @@ export class HealthDetail extends Resource {
           });
         }
       }
-      // Mixed embedding models — searches across vector spaces return garbage.
-      if (realModels.length > 1) {
+      // Mixed embedding SPACES — searches across vector spaces return garbage.
+      // Count distinct SPACES, not raw stamps: after the engine-qualified stamp
+      // (embedding-space-guard slice 1) a healthy corpus can carry BOTH the
+      // qualified id (`gguf:…`) and its bare-name equivalent (today's rows) for
+      // the SAME space — normalize so that pairing is one space, not a false
+      // "mixed" warning. A genuine multi-space corpus (a real mid-flight
+      // re-embed) still trips it, and that is exactly when the query-time guard
+      // degrades recall to keyword-only.
+      const distinctSpaces = new Set(
+        realModels.map((k) => normalizeStamp(k)).filter((s): s is string => s !== null),
+      );
+      if (distinctSpaces.size > 1) {
         const list = realModels.map((k) => `${k}:${modelCounts[k]}`).join(", ");
         warnings.push({
           level: "warn",

@@ -49,6 +49,10 @@ mock.module("../../resources/embeddings-provider.ts", () => ({
     return null;
   },
   getMode: () => "none",
+  // embedding-space-guard slice 1: SemanticSearch imports the guard, which
+  // imports getModelId + EMBEDDING_ENGINE — keep this mock a superset.
+  getModelId: () => "mock-embedding-model",
+  EMBEDDING_ENGINE: "gguf",
 }));
 
 // ─── In-memory Harper Memory / MemoryGrant mock (search-only; SemanticSearch

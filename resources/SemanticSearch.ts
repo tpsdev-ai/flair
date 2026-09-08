@@ -1,6 +1,7 @@
 import { Resource, databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { getEmbedding, getMode } from "./embeddings-provider.js";
+import { isEmbeddingSpaceUniform, spaceGuardDiagnostics } from "./embedding-space-guard.js";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveReadScope } from "./memory-read-scope.js";
@@ -130,6 +131,25 @@ export class SemanticSearch extends Resource {
       // Don't gate on getMode() which may return "none" before init completes in worker threads.
       // flair#504 Phase 2: 'query' — this is a search query, not stored content.
       try { qEmb = await getEmbedding(String(q).slice(0, 8000), "query"); } catch {}
+    }
+
+    // ─── Vector-space uniformity guard (embedding-space-guard slice 1) ────────
+    // If the store is NOT uniform in the current embedding space (a mixed-space
+    // corpus during a re-embed / model change), cosining the query against
+    // stored vectors returns garbage — Harper zero-pads a mismatched-dimension
+    // vector and returns a bogus score instead of throwing; same-dims /
+    // different-space is silent garbage too. REFUSE the embedding leg and
+    // degrade to keyword-only LOUDLY: drop qEmb so retrieveCandidates takes the
+    // keyword-only branch (reusing the existing mode:'none' graceful-degrade
+    // contract), and surface a structured warning naming both spaces + the
+    // `flair reembed` remedy below. Never serve mixed-space vectors, never
+    // merely log. Consulted through the SAME single chokepoint the write-time
+    // dedup leg uses (resources/embedding-space-guard.ts) — O(1) on the uniform
+    // happy path.
+    let spaceGuardDegraded = false;
+    if (qEmb && !(await isEmbeddingSpaceUniform())) {
+      qEmb = undefined;
+      spaceGuardDegraded = true;
     }
 
     // ─── Temporal intent detection ────────────────────────────────────────────
@@ -362,7 +382,13 @@ export class SemanticSearch extends Resource {
       response.bestScore = abstention.bestScore;
       response.threshold = abstention.threshold;
     }
-    if (!qEmb && q && getMode() === "none") {
+    if (spaceGuardDegraded) {
+      const diag = spaceGuardDiagnostics();
+      response._warning =
+        `semantic search unavailable — the store has mixed embedding spaces ` +
+        `(current: ${diag.current}; found: ${diag.found.join(", ")}); results are keyword-only. ` +
+        `Reconcile to one space with: flair reembed --stale-only`;
+    } else if (!qEmb && q && getMode() === "none") {
       response._warning = "semantic search unavailable — results are keyword-only";
     }
     // flair#1358: opt-in per-leg candidate ids for the bench instrument.

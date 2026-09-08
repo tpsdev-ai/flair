@@ -73,7 +73,20 @@ describe("buildEmbedOptions / getModelId (flair#504 Phase 2 — nomic search pre
     });
 
     it("getModelId() carries the +searchprefix suffix", () => {
-      expect(getModelId()).toBe("nomic-embed-text-v1.5-Q4_K_M+searchprefix");
+      expect(getModelId()).toBe("gguf:nomic-embed-text-v1.5-Q4_K_M+searchprefix");
+    });
+
+    it("getModelId() is ENGINE-qualified (embedding-space-guard slice 1) — `<engine>:<model>`, engine `gguf`", () => {
+      expect(getModelId().startsWith("gguf:")).toBe(true);
+    });
+
+    it("getModelId() rejects a FLAIR_EMBEDDING_MODEL override containing ':' (would make the <engine>:<model> stamp ambiguous)", () => {
+      process.env.FLAIR_EMBEDDING_MODEL = "milton:some-model";
+      try {
+        expect(() => getModelId()).toThrow(/must not contain ':'/);
+      } finally {
+        delete process.env.FLAIR_EMBEDDING_MODEL;
+      }
     });
 
     it("rejects 'search_document' as a VALUE — the exact bug flair#504 Phase 2 flags: truthy but not 'document', would invert the prefix asymmetry", () => {
@@ -103,8 +116,8 @@ describe("buildEmbedOptions / getModelId (flair#504 Phase 2 — nomic search pre
       expect(buildEmbedOptions()).toEqual({ model: "default" });
     });
 
-    it("getModelId() has no suffix — base id only (no stale-read false-positive on a no-op re-embed)", () => {
-      expect(getModelId()).toBe("nomic-embed-text-v1.5-Q4_K_M");
+    it("getModelId() has no suffix — engine-qualified base id only (no stale-read false-positive on a no-op re-embed)", () => {
+      expect(getModelId()).toBe("gguf:nomic-embed-text-v1.5-Q4_K_M");
       expect(getModelId()).not.toContain("+searchprefix");
     });
   });
@@ -123,7 +136,7 @@ describe("buildEmbedOptions / getModelId (flair#504 Phase 2 — nomic search pre
     });
 
     it("getModelId() carries the +searchprefix suffix", () => {
-      expect(getModelId()).toBe("nomic-embed-text-v1.5-Q4_K_M+searchprefix");
+      expect(getModelId()).toBe("gguf:nomic-embed-text-v1.5-Q4_K_M+searchprefix");
     });
   });
 
