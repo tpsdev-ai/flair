@@ -8878,6 +8878,9 @@ rem
   .command("candidates")
   .description("List staged memory candidates from the FLAIR-NIGHTLY-REM cycle (pending review)")
   .option("--port <port>", "Harper HTTP port")
+  .option("--ops-port <port>", "Harper operations API port")
+  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--agent <id>", "Agent ID (or FLAIR_AGENT_ID env)")
   .option("--status <s>", "Filter by status: pending | promoted | rejected (default: pending)")
   .option("--json", "Output as JSON for scripting")
@@ -8895,15 +8898,36 @@ rem
       process.exit(1);
     }
 
+    const opsPort = resolveOpsPort(opts);
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    if (!adminPass) {
+      console.error(`${render.icons.error} --admin-pass or FLAIR_ADMIN_PASS required`);
+      process.exit(1);
+    }
+    const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
+
     try {
-      const result = await api("POST", "/MemoryCandidate/search_by_conditions", {
-        operator: "and",
-        conditions: [
-          { search_attribute: "agentId", search_type: "equals", search_value: agentId },
-          { search_attribute: "status", search_type: "equals", search_value: status },
-        ],
-        get_attributes: ["id", "claim", "generatedBy", "generatedAt", "status", "target", "reviewerId", "decidedAt", "supersedes"],
+      const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: auth },
+        body: JSON.stringify({
+          operation: "search_by_conditions",
+          schema: "flair",
+          table: "MemoryCandidate",
+          operator: "and",
+          conditions: [
+            { search_attribute: "agentId", search_type: "equals", search_value: agentId },
+            { search_attribute: "status", search_type: "equals", search_value: status },
+          ],
+          get_attributes: ["id", "claim", "generatedBy", "generatedAt", "status", "target", "reviewerId", "decidedAt", "supersedes"],
+        }),
       });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        console.error(`${render.icons.error} ${res.status} ${text}`);
+        process.exit(1);
+      }
+      const result = await res.json() as any[];
 
       const candidates: any[] = Array.isArray(result) ? result : (result?.results ?? []);
       const mode = render.resolveOutputMode(opts);
@@ -9267,6 +9291,9 @@ remNightly
   .command("run-once")
   .description("Run one nightly cycle now (snapshot + log). Same code path the scheduler will use.")
   .option("--agent <id>", "Agent id (or FLAIR_AGENT_ID env)")
+  .option("--ops-port <port>", "Harper operations API port")
+  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--dry-run", "Log the row but skip the snapshot write")
   .action(async (opts) => {
     const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
@@ -9275,11 +9302,31 @@ remNightly
       process.exit(1);
     }
     const { runNightlyCycle } = await import("./rem/runner.js");
+    // The runner is agent-authed and cannot reach the ops port itself. When
+    // admin credentials are available, inject an ops-API `search_by_conditions`
+    // helper so the pending-candidate count can be sampled; otherwise the count
+    // is best-effort 0 (the cycle still runs).
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    const opsSearch = adminPass
+      ? async (table: string, conditions: any[], getAttributes: string[]) => {
+          const opsPort = resolveOpsPort(opts);
+          const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
+          const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: auth },
+            body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table, operator: "and", conditions, get_attributes: getAttributes }),
+          });
+          if (!res.ok) throw new Error(`ops API failed (${res.status})`);
+          const raw = await res.json() as unknown;
+          return Array.isArray(raw) ? raw : ((raw as { results?: any[] })?.results ?? []);
+        }
+      : undefined;
     try {
       const result = await runNightlyCycle({
         agentId,
         flairVersion: __pkgVersion,
         apiCall: api,
+        opsSearch,
         dryRun: !!opts.dryRun,
       });
       const row = result.logRow;

@@ -143,10 +143,24 @@ export const DEFAULT_MAX_AUTO_PROMOTE_PER_CYCLE = 200;
 
 export type ApiCall = (method: string, path: string, body?: unknown) => Promise<any>;
 
+/**
+ * Ops-API `search_by_conditions` helper (admin-authed). The runner is
+ * agent-authed and cannot reach the ops port itself, so the CLI injects this
+ * when admin credentials are available. When absent, `fetchPendingCandidateCount`
+ * returns 0 (best-effort count).
+ */
+export type OpsSearch = (table: string, conditions: any[], getAttributes: string[]) => Promise<any[]>;
+
 export interface RunnerOpts {
   agentId: string;
   flairVersion: string;
   apiCall: ApiCall;
+  /**
+   * Ops-API `search_by_conditions` helper (admin-authed). Injected by the CLI;
+   * the runner is agent-authed and cannot reach the ops port itself. When
+   * absent, `fetchPendingCandidateCount` returns 0 (best-effort count).
+   */
+  opsSearch?: OpsSearch;
   /** Override snapshot root (testing). */
   snapshotRoot?: string;
   /** Override audit log path (testing). */
@@ -320,21 +334,19 @@ function describeApiError(err: unknown): string {
 /**
  * Counts pending memory candidates for the agent.
  *
- * Falls back to a `search_by_conditions` POST that mirrors the pattern
- * `flair rem candidates` uses. Returns 0 on any error — the runner should
- * not fail the cycle just because the candidate count couldn't be sampled.
+ * Uses the ops-API `search_by_conditions` convention (admin-authed) via the
+ * injected `opsSearch` helper — the same shape `flair rem candidates` uses.
+ * Returns 0 when no `opsSearch` is available (the agent-authed runner carries
+ * no admin creds) or on any error — the runner should not fail the cycle just
+ * because the candidate count couldn't be sampled.
  */
-async function fetchPendingCandidateCount(api: ApiCall, agentId: string): Promise<number> {
+async function fetchPendingCandidateCount(opsSearch: OpsSearch | undefined, agentId: string): Promise<number> {
+  if (!opsSearch) return 0;
   try {
-    const result = await api("POST", "/MemoryCandidate/search_by_conditions", {
-      operator: "and",
-      conditions: [
-        { search_attribute: "agentId", search_type: "equals", search_value: agentId },
-        { search_attribute: "status", search_type: "equals", search_value: "pending" },
-      ],
-      get_attributes: ["id"],
-    });
-    const rows = asArray(result);
+    const rows = await opsSearch("MemoryCandidate", [
+      { search_attribute: "agentId", search_type: "equals", search_value: agentId },
+      { search_attribute: "status", search_type: "equals", search_value: "pending" },
+    ], ["id"]);
     return rows.length;
   } catch {
     return 0;
@@ -505,7 +517,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
     // are multiple souls (different keys), or unwrap a single-row response.
     const soulForSnapshot = souls.length === 1 ? souls[0] : souls.length > 1 ? souls : null;
 
-    pendingCandidates = await fetchPendingCandidateCount(opts.apiCall, opts.agentId);
+    pendingCandidates = await fetchPendingCandidateCount(opts.opsSearch, opts.agentId);
 
     if (!opts.dryRun) {
       const created = await createSnapshot({
