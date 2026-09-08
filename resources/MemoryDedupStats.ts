@@ -55,6 +55,7 @@
 
 import { Resource, databases } from "harper";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { setImmediate as yieldToRequests } from "node:timers/promises";
 import { dirname } from "node:path";
 import { allowAdmin } from "./agent-auth.js";
 import { retrieveCandidates } from "./semantic-retrieval-core.js";
@@ -100,11 +101,18 @@ async function computeAndPersist(ctx: any, opts?: { annK?: number; maxMemories?:
   // exactly what this stat is for). Bounded to the most-recently-created
   // maxMemories when the instance exceeds the safety cap (see
   // dedup-cluster.ts's doc on why this is a defensive bound, not sampling).
+  let yieldAt = performance.now() + 10;
   const all: Array<{ id: string; embedding: number[]; createdAt?: string }> = [];
   for await (const record of (databases as any).flair.Memory.search({
-    conditions: NOT_ARCHIVED,
-    select: ["id", "embedding", "createdAt"],
+    // Harper 5.2.8 starts a standalone not_equal index scan at true,
+    // skipping false/missing archive keys. Filter the primary scan instead.
+    select: ["id", "embedding", "createdAt", "archived"],
   })) {
+    if (performance.now() >= yieldAt) {
+      await yieldToRequests();
+      yieldAt = performance.now() + 10;
+    }
+    if (record.archived === true) continue;
     if (!record?.id || !Array.isArray(record.embedding) || record.embedding.length === 0) continue;
     all.push({ id: record.id, embedding: record.embedding, createdAt: record.createdAt });
   }
@@ -129,6 +137,12 @@ async function computeAndPersist(ctx: any, opts?: { annK?: number; maxMemories?:
   // at the documented annK, rather than silently examining annK-1.
   const edges: DedupEdge[] = [];
   for (const memory of sweepSet) {
+    // Awaiting cached table reads can keep draining microtasks indefinitely.
+    // Give the HTTP event loop a turn between bounded chunks of ANN work.
+    if (performance.now() >= yieldAt) {
+      await yieldToRequests();
+      yieldAt = performance.now() + 10;
+    }
     let neighbors: any[];
     try {
       neighbors = await retrieveCandidates({
