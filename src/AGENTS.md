@@ -9,7 +9,7 @@ there, then follow its imports before adding another helper.
 | Credential and agent selection | `lib/auth-resolve.ts`, `lib/signing-identity.ts`, `keystore.ts` |
 | Client wiring and package pins | `install/clients.ts`, `lib/mcp-spec.ts`, `hook-install.ts` |
 | Daemon state and platform lifecycle | `lib/daemon-liveness.ts`, `lib/launchd-management.ts` |
-| Doctor / upgrade | `lib/doctor-run.ts`, `doctor-client.ts`, `lib/upgrade-migrations.ts` |
+| Doctor / upgrade | `lib/doctor-run.ts`, `doctor-client.ts`, `lib/upgrade-migrations.ts`, `lib/upgrade-exec-path.ts` |
 | Deployment / fleet | `deploy.ts`, `fabric-upgrade.ts`, `fleet-verify.ts` |
 | REM scheduling and orchestration | `rem/runner.ts`, `rem/scheduler.ts`, `rem/snapshot.ts` |
 

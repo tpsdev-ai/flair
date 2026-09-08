@@ -27,6 +27,7 @@ import {
   cliBootPathWarning,
   postinstallWarning,
   prefixFromPackageDir,
+  npmGlobalFlairPackageDir,
 } from "../../src/install/global-bin-path.js";
 
 const BIN = "/Users/casey/.npm-global/bin";
@@ -304,6 +305,28 @@ describe("prefixFromPackageDir", () => {
     expect(
       prefixFromPackageDir("C:\\Users\\casey\\npm\\node_modules\\@tpsdev-ai\\flair", "win32"),
     ).toBe("C:\\Users\\casey\\npm");
+  });
+});
+
+describe("npmGlobalFlairPackageDir", () => {
+  test("posix: inverse of prefixFromPackageDir", () => {
+    const prefix = "/Users/casey/.npm-global";
+    const dir = npmGlobalFlairPackageDir(prefix, "darwin");
+    expect(dir).toBe("/Users/casey/.npm-global/lib/node_modules/@tpsdev-ai/flair");
+    expect(prefixFromPackageDir(dir, "darwin")).toBe(prefix);
+  });
+
+  test("win32: inverse of prefixFromPackageDir", () => {
+    const prefix = "C:\\Users\\casey\\npm";
+    const dir = npmGlobalFlairPackageDir(prefix, "win32");
+    expect(dir).toBe("C:\\Users\\casey\\npm\\node_modules\\@tpsdev-ai\\flair");
+    expect(prefixFromPackageDir(dir, "win32")).toBe(prefix);
+  });
+
+  test("posix: trailing slash on the prefix is stripped first", () => {
+    expect(npmGlobalFlairPackageDir("/Users/casey/.npm-global/", "linux")).toBe(
+      "/Users/casey/.npm-global/lib/node_modules/@tpsdev-ai/flair",
+    );
   });
 });
 

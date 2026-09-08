@@ -204,6 +204,21 @@ export function prefixFromPackageDir(packageDir: string, platform: NodeJS.Platfo
   return kept.join(win32 ? "\\" : "/") || (win32 ? packageDir : "/");
 }
 
+/**
+ * Inverse of {@link prefixFromPackageDir}: where a global
+ * `@tpsdev-ai/flair` install lives under `prefix`.
+ *
+ * String-based (not path.join) so the win32 shape stays faithful even in
+ * tests running on posix hosts.
+ */
+export function npmGlobalFlairPackageDir(prefix: string, platform: NodeJS.Platform = process.platform): string {
+  const win32 = platform === "win32";
+  const clean = stripTrailingSeps(prefix.trim(), win32);
+  return win32
+    ? [clean, "node_modules", "@tpsdev-ai", "flair"].join("\\")
+    : [clean, "lib", "node_modules", "@tpsdev-ai", "flair"].join("/");
+}
+
 function defaultBinDirHasFlair(binDir: string, platform: NodeJS.Platform): boolean {
   const names = platform === "win32" ? ["flair.cmd", "flair"] : ["flair"];
   return names.some((n) => existsSync(join(binDir, n)));
