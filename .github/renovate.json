@@ -36,8 +36,13 @@
     },
     {
       "description": "Keep-current allow-list — mirrors scripts/check-dep-ages.mjs DEFAULT_KEEP_CURRENT. These are tightly coupled to Flair runtime correctness (Harper / embedding fixes); we accept the bake-time risk and pull them eagerly, so Renovate skips the cooldown for them too. Keep this list in lockstep with the script and docs/supply-chain-policy.md.",
-      "matchPackageNames": ["harper", "harper-fabric-embeddings", "@harperfast/oauth"],
+      "matchPackageNames": ["harper", "@harperfast/oauth"],
       "minimumReleaseAge": "0 days"
+    },
+    {
+      "description": "The @node-llama-cpp/* platform binaries ship the embedding native addon (optionalDependencies, exact-pinned). All seven are the same upstream release and MUST move in lockstep, so group them into one PR — a bump is a single reviewable, lockstep change. rangeStrategy:pin keeps them exact. Not keep-current: they carry the native inference binary, so they take the normal supply-chain cooldown.",
+      "matchPackageNames": ["@node-llama-cpp/**"],
+      "groupName": "node-llama-cpp platform binaries"
     }
   ],
   "lockFileMaintenance": {

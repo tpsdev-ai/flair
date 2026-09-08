@@ -78,7 +78,6 @@ const DEFAULT_KEEP_CURRENT = new Set([
   // source. flair aligned to the bare name in flair#870 so a stock install
   // stops materialising both copies.
   "harper",
-  "harper-fabric-embeddings",
   // @harperfast/oauth: same high-trust upstream owner as `harper`
   // (already exempt). Used ONLY by the default-OFF native-MCP OAuth surface
   // (FLAIR_MCP_OAUTH), which dynamically imports it only when the flag is on — so

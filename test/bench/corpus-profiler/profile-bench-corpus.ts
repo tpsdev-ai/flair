@@ -60,7 +60,7 @@ const seed = flag("seed") ? Number(flag("seed")) : 20260728;
 const sampleSize = flag("sample-size") ? Number(flag("sample-size")) : corpus.length;
 const selected = deterministicSubsample(corpus, sampleSize, seed);
 
-const { EmbeddingEngine } = await import("harper-fabric-embeddings");
+const { EmbeddingEngine } = await import("../../../resources/embeddings/engine.ts");
 const engine = new EmbeddingEngine({
   // Mirrors resources/embeddings-boot.ts: same registry name, same pooling.
   modelName: "nomic-embed-text",

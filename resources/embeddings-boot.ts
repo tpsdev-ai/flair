@@ -47,11 +47,13 @@
  * are state too").
  *
  * ─── The fix ────────────────────────────────────────────────────────────
- * Skip Harper's config-file-driven bootstrap path ENTIRELY. Call
- * harper-fabric-embeddings' own `register({logicalName, kind, config})`
- * factory DIRECTLY — the same factory Harper's `bootstrapModels()` would
- * have invoked, and (per that package's own source) the "public path for
- * components and apps to add in-process ... backends":
+ * Skip Harper's config-file-driven bootstrap path ENTIRELY. Call the in-repo
+ * `register({logicalName, kind, config})` factory DIRECTLY (folded into the
+ * bottom of this file from the former harper-fabric-embeddings package as part
+ * of #1549 — the embedding engine now lives in flair's own tree at
+ * `resources/embeddings/{engine,gguf}.ts`). It is the same factory Harper's
+ * `bootstrapModels()` would have invoked, and the "public path for components
+ * and apps to add in-process ... backends":
  * `models.registerBackend(kind, id, backend)` on Harper's process-wide
  * `models` singleton. This is genuinely reassert-only: every boot calls this
  * function again (module-scope side effect, same convention as
@@ -64,13 +66,12 @@
  * (`resolveEmbeddingBackendModule`'s `require.resolve` + `pathToFileURL`
  * dance) that HARPER_CONFIG's `backend:` needed because
  * `resolveBackendSpecifier` resolves a bare package name from the Harper
- * INSTANCE ROOT's `node_modules`, not flair's own package dir. Importing
- * harper-fabric-embeddings directly from flair's own code needs no such
- * workaround — plain Node module resolution from flair's own `node_modules`
- * always finds it, uniformly across a local install, Docker, AND a Fabric
- * deploy (where flair runs as a non-root cluster component and
- * `bootstrapModels()` — gated on `isRoot` — was never reachable at all; see
- * the removed comment this replaces in `config.yaml`).
+ * INSTANCE ROOT's `node_modules`, not flair's own package dir. The engine is
+ * now flair's own in-tree code (`./embeddings/engine.js`), imported by a plain
+ * relative import that needs no such workaround — it resolves uniformly across
+ * a local install, Docker, AND a Fabric deploy (where flair runs as a non-root
+ * cluster component and `bootstrapModels()` — gated on `isRoot` — was never
+ * reachable at all; see the removed comment this replaces in `config.yaml`).
  *
  * ─── Loading mechanism ──────────────────────────────────────────────────
  * Plain (non-Resource) module — same shape as `migration-boot.ts` /
@@ -79,13 +80,15 @@
  * every other flat file under `resources/`, running its top-level side
  * effect exactly once per process. No config.yaml wiring needed.
  *
- * Graceful degrade preserved: if harper-fabric-embeddings isn't installed,
- * or `globalThis.models` isn't available (this module loaded outside a real
- * Harper boot), registration is skipped and logged — Harper falls back to
- * keyword-only search, matching the pre-existing degrade contract.
+ * Graceful degrade preserved: if the engine fails to construct (e.g. no
+ * native addon for this platform), or `globalThis.models` isn't available
+ * (this module loaded outside a real Harper boot), registration is skipped and
+ * logged — Harper falls back to keyword-only search, matching the pre-existing
+ * degrade contract.
  */
 import { availableParallelism } from "node:os";
 import { resolveModelsDir } from "./embeddings-provider.js";
+import { EmbeddingEngine, type EngineOptions } from "./embeddings/engine.js";
 
 const LOGICAL_NAME = "default";
 const MODEL_NAME = "nomic-embed-text";
@@ -97,8 +100,8 @@ const MODEL_NAME = "nomic-embed-text";
  * own `<arch>.pooling_type` metadata says. Declaring the expectation makes
  * HFE assert it at init and fail loudly on absent/mismatched metadata,
  * instead of a metadata-less or mismatched conversion silently pooling the
- * wrong way (see node_modules/harper-fabric-embeddings/README.md's `init()`
- * table for the exact contract this PR bumps to).
+ * wrong way (see `resources/embeddings/engine.ts`'s `EngineOptions.pooling`
+ * contract and `resources/embeddings/gguf.ts`'s `assertDeclaredPooling`).
  *
  * "mean" is nomic-embed-text-v1.5's actual pooling type — NOT assumed from
  * the model's reputation, directly confirmed against the shipped GGUF by
@@ -135,14 +138,14 @@ const EMBEDDING_POOLING = "mean";
  * `MODEL_NAME`/`resolveModelsDir()` call every time a bakeoff needs a
  * different GGUF (e.g. a Q8_0 quant of the same base model).
  *
- * This is not a new capability grafted on — `harper-fabric-embeddings`'
- * `register()` factory already accepts `config.modelPath` as an alternative
- * to `modelName`+`modelsDir` (see `engineOptionsFromConfig()` in
- * `harper-fabric-embeddings`' `dist/index.js`): an absolute path bypasses its
- * built-in model registry and HuggingFace-download resolution entirely. This
- * hatch is the one line that lets a caller reach that existing parameter.
- * `EmbeddingEngine`'s `modelIdentity` (used for nomic-prefix detection, see
- * `engine.js`'s `#applyPrefix`) becomes the file's basename in this path, so
+ * This is not a new capability grafted on — the in-repo `register()` factory
+ * (folded into this file) already accepts `config.modelPath` as an alternative
+ * to `modelName`+`modelsDir` (see `engineOptionsFromConfig()` below): an
+ * absolute path bypasses the built-in model registry and HuggingFace-download
+ * resolution entirely. This hatch is the one line that lets a caller reach that
+ * existing parameter. `EmbeddingEngine`'s `modelIdentity` (used for nomic-prefix
+ * detection, see `resources/embeddings/engine.ts`'s `#applyTemplate`) becomes
+ * the file's basename in this path, so
  * prefix behavior is unaffected as long as the GGUF's filename still
  * contains "nomic-embed-text".
  *
@@ -156,8 +159,8 @@ function benchModelPathOverride(): string | undefined {
 /**
  * llama.cpp CPU thread count passed to HFE `register({config:{threads}})`.
  *
- * HFE's own default is a fixed 6 (see harper-fabric-embeddings' `init()`
- * table). flair never used to pass `threads`, so every host inherited that
+ * The engine's own default is a fixed 6 (see `resources/embeddings/engine.ts`'s
+ * `#doInit` `threads = 6`). flair never used to pass `threads`, so every host inherited that
  * 6: an 8-vCPU ingest box left cores idle (flair#1330), a 4-core laptop
  * oversubscribed. We always pass an explicit value.
  *
@@ -202,7 +205,6 @@ export async function registerEmbeddingsBackend(): Promise<void> {
   if (registered) return;
   registered = true;
   try {
-    const { register } = await import("harper-fabric-embeddings");
     const modelPath = benchModelPathOverride();
     const threads = resolveEmbedThreads();
     await register({
@@ -216,14 +218,155 @@ export async function registerEmbeddingsBackend(): Promise<void> {
       },
     });
   } catch (err) {
-    // Not installed, or globalThis.models isn't ready (module loaded outside
-    // a real Harper boot, e.g. some future non-Harper import path) — degrade
-    // to Harper's keyword-only fallback, the same contract the old
-    // HARPER_CONFIG-omitted path preserved.
+    // The engine failed to construct, or globalThis.models isn't ready (module
+    // loaded outside a real Harper boot, e.g. some future non-Harper import
+    // path) — degrade to Harper's keyword-only fallback, the same contract the
+    // old HARPER_CONFIG-omitted path preserved.
     console.error(
       `[embeddings] backend registration skipped: ${(err as Error)?.message ?? String(err)}`
     );
   }
+}
+
+// ─── Harper models-backend factory (folded in from harper-fabric-embeddings) ──
+//
+// This is the SAME `register` factory the harper-fabric-embeddings package
+// exported and that `registerEmbeddingsBackend()` above used to reach via
+// `await import("harper-fabric-embeddings")`. It is folded in here — the file
+// that was already the sole caller — as part of absorbing the embedding engine
+// into flair's own tree (#1549). Behaviour is unchanged: it constructs a
+// per-entry `EmbeddingEngine`, kicks off model load in the background, and wires
+// the engine into Harper's process-wide `models` singleton via
+// `registerBackend`/`defineBackend`. It touches ONLY `globalThis.models` — never
+// harper-config.yaml — so the flair#694 downgrade-brick class stays impossible
+// by construction (see this file's header).
+
+/** Registration args Harper's models bootstrap passes to a backend module factory. */
+interface RegisterArgs {
+  /** Logical name of the config entry (`models.embedding.<name>`); callers select it via `opts.model`. */
+  logicalName: string;
+  /** `'embedding'` is the only kind this factory supports. */
+  kind: string;
+  /** The env-expanded config entry. */
+  config: Record<string, unknown>;
+}
+
+/**
+ * Per-call options Harper's models facade hands the backend (the subset we use).
+ * `task` rides through because the facade spreads caller opts into BackendOpts
+ * (only `model` is stripped — it's routing-only).
+ */
+interface BackendEmbedOpts {
+  inputType?: "document" | "query";
+  task?: string;
+  signal?: AbortSignal;
+}
+
+interface EmbedUsage {
+  embeddingTokens: number;
+  latencyMs: number;
+}
+
+type EmbedCallResult = { status: "completed"; output: Float32Array[]; usage: EmbedUsage };
+
+/** The slice of Harper's global `models` API this factory needs. */
+interface ModelsApi {
+  registerBackend(kind: "embedding" | "generative", id: string, backend: unknown): void;
+  defineBackend(spec: {
+    name: string;
+    embed: (input: string | string[], opts: BackendEmbedOpts) => Promise<EmbedCallResult>;
+  }): unknown;
+}
+
+/**
+ * Construct the engine for a config entry and register it as a Harper embedding
+ * backend. `modelsDir` (or `modelPath`) is required. Registration is fast-boot:
+ * model resolution/download/load kicks off in the background and the FIRST embed
+ * call awaits it (a failed attempt retries on the next call). Misconfiguration
+ * (wrong kind, missing model source, unknown model name) throws synchronously so
+ * the caller logs and degrades at boot instead of surfacing at first use.
+ *
+ * Returns the engine so tests and advanced callers can dispose it.
+ */
+async function register({ logicalName, kind, config }: RegisterArgs): Promise<EmbeddingEngine> {
+  if (kind !== "embedding") {
+    throw new Error(`embeddings-boot is an embedding backend; cannot register models.${kind}.${logicalName}`);
+  }
+  const models = (globalThis as { models?: ModelsApi }).models;
+  if (typeof models?.registerBackend !== "function" || typeof models?.defineBackend !== "function") {
+    throw new Error(
+      "global `models` API not available — the embedding backend requires a Harper version with model-backend support"
+    );
+  }
+
+  const engine = new EmbeddingEngine(engineOptionsFromConfig(config));
+
+  // Fast boot: start the model load/download now, but don't block Harper boot
+  // on it — the first embed call awaits readiness instead.
+  engine.ensureReady().catch((err: Error) => {
+    console.error(
+      `[embeddings] models.embedding.${logicalName}: model init failed (will retry on first embed): ${err.message}`
+    );
+  });
+
+  models.registerBackend(
+    "embedding",
+    logicalName,
+    models.defineBackend({
+      name: `fabric-embeddings:${engine.modelIdentity}`,
+      embed: async (input, opts) => {
+        const texts = Array.isArray(input) ? input : [input];
+        const started = performance.now();
+        const { vectors, tokens } = await engine.embedMany(texts, {
+          inputType: opts?.inputType,
+          task: opts?.task,
+          signal: opts?.signal,
+        });
+        return {
+          status: "completed",
+          output: vectors,
+          usage: { embeddingTokens: tokens, latencyMs: Math.round(performance.now() - started) },
+        };
+      },
+    })
+  );
+
+  return engine;
+}
+
+function engineOptionsFromConfig(config: Record<string, unknown>): EngineOptions {
+  const c = config ?? {};
+  return {
+    modelPath: c.modelPath as string | undefined,
+    modelsDir: c.modelsDir as string | undefined,
+    // `model` is the conventional per-entry field on Harper's built-in
+    // backends; `modelName` is this engine's native option. Either works.
+    modelName: (c.modelName as string | undefined) ?? (c.model as string | undefined),
+    contextSize: toFiniteNumber(c.contextSize, "contextSize"),
+    batchSize: toFiniteNumber(c.batchSize, "batchSize"),
+    threads: toFiniteNumber(c.threads, "threads"),
+    gpuLayers: toFiniteNumber(c.gpuLayers, "gpuLayers"),
+    addonPath: c.addonPath as string | undefined,
+    // Shape-validated by the engine constructor, so a bad block fails at
+    // registration (this file's caller logs + degrades at boot).
+    templates: c.templates as EngineOptions["templates"],
+    pooling: c.pooling as EngineOptions["pooling"],
+  };
+}
+
+/**
+ * Coerce a numeric config value. YAML env-var expansion (`threads: ${THREADS}`)
+ * and quoted values (`"2048"`) deliver strings; these fields feed native
+ * constructors and the truncation math, so a non-finite value must fail at
+ * registration, not inside the addon.
+ */
+function toFiniteNumber(value: unknown, field: string): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    throw new Error(`${field} must be a finite number, got '${String(value)}'`);
+  }
+  return n;
 }
 
 /** Test-only reset — never used in production (a real process boots once). */
