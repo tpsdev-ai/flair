@@ -200,7 +200,25 @@ import {
 // functions — this pulls in nothing but node builtins.
 import { DEFAULT_INTERVAL_SECONDS as FEDERATION_SYNC_DEFAULT_INTERVAL } from "./federation/scheduler.js";
 import { applyUpgradeMigrations, type UpgradeMigrationContext } from "./lib/upgrade-migrations.js";
-import { collectUpgradeExecPathWarning } from "./lib/upgrade-exec-path.js";
+import {
+  collectUpgradeExecPathWarning,
+  findFlairPackageDir,
+  resolveNpmGlobalFlairPackage,
+  resolveServingFlairPackage,
+} from "./lib/upgrade-exec-path.js";
+import {
+  applyPlainTreeUpgrade,
+  discardPlainTreePrevious,
+  findSystemdUnitsForTree,
+  formatPlainTreeBanner,
+  formatPlainTreePlan,
+  formatPlainTreeScopeFooter,
+  planPlainTreeUpgrade,
+  resolvePlainTreeTarget,
+  restartSystemdUnits,
+  restorePlainTreePrevious,
+  type PlainTreeUpgradePlan,
+} from "./lib/upgrade-plain-tree.js";
 
 // Federation crypto helpers — inlined to avoid cross-boundary imports from
 // src/ into resources/, which don't survive npm packaging (see also
@@ -11218,6 +11236,7 @@ program
   .command("upgrade")
   .description("Upgrade Flair — local packages by default, or a deployed Fabric with --target")
   .option("--check", "Only check for updates / show the plan, don't install or deploy")
+  .option("--tree <dir>", "Upgrade this extracted package tree in place (npm pack / plain-tree lane). Default: the serving instance's packed tree when that is not the npm-global install")
   .option("--restart", "[deprecated] no-op — restart now happens automatically after upgrade; use --no-restart to opt out")
   .option("--no-restart", "Skip the restart after upgrade (stage new packages now, restart later)")
   .option("--no-verify", "Skip post-restart health/version/auth verification (default: verify — so a broken upgrade can't report success; see flair#635)")
@@ -11239,7 +11258,7 @@ program
   // A colliding name is normally recoverable via optsWithGlobals(); this one is
   // not, because commander's version listener exits the process. The name had
   // to change. `--harper-version` below is the symmetry this follows.
-  .option("--flair-version <semver>", "Flair version to deploy with --target (default: latest published @tpsdev-ai/flair)")
+  .option("--flair-version <semver>", "Flair version to deploy with --target, or to pin the plain-tree tarball swap (default: latest published @tpsdev-ai/flair)")
   .option("--harper-version <semver>", "Pin harper to this version for --target (default: registry latest, floored at the flair#513 fix)")
   .option("--project <name>", "Fabric component name for --target", "flair")
   .option("--no-replicated", "Disable cluster-wide replication for --target (default: replicated=true)")
@@ -11267,21 +11286,48 @@ program
 
     console.log("Checking for updates...\n");
 
-    // flair#1109 (b): if the running instance (or this CLI) is not the
-    // npm-global install, say so before the listing reports the global
-    // package as "the" install. Detection is best-effort and never fails
-    // the command. Does not add a plain-tree upgrade lane.
+    // flair#1109 (a): if the serving tree (or --tree) is a packed extract,
+    // take the in-place tarball lane instead of upgrading a leftover
+    // npm-global relic. (b) still probes — and still prints — when we are
+    // not taking that lane (git checkout, unknown path). Detection is
+    // best-effort and never fails the command except an explicit --tree
+    // that does not name a packed install (refuse, don't silently fall through).
+    const upgradeServingPid = resolveInstanceServingPid(defaultDataDir(), resolveHttpPort({}));
+    const upgradeNpmPrefix = await resolveNpmGlobalPrefix();
+    let treeDecision: ReturnType<typeof resolvePlainTreeTarget> = { kind: "skip" };
+    try {
+      treeDecision = resolvePlainTreeTarget({
+        treeFlag: typeof opts.tree === "string" && opts.tree.trim() !== "" ? opts.tree.trim() : null,
+        serving: upgradeServingPid != null ? resolveServingFlairPackage(upgradeServingPid) : null,
+        cli: findFlairPackageDir(flairPackageDir()),
+        global: resolveNpmGlobalFlairPackage(upgradeNpmPrefix, process.platform),
+      });
+    } catch { /* treat as skip — never fail the probe */ }
+    if (treeDecision.kind === "refuse") {
+      console.error(`❌ ${treeDecision.message}`);
+      process.exit(1);
+    }
+    const treeLane = treeDecision.kind === "use" ? treeDecision.inspection : null;
+
+    // flair#1109 (b): print the mismatch warning only when this run will
+    // still treat npm-global as the install. Collect always, so the (b)
+    // wiring test keeps seeing the call.
     try {
       const execPathWarning = collectUpgradeExecPathWarning({
-        servingPid: resolveInstanceServingPid(defaultDataDir(), resolveHttpPort({})),
+        servingPid: upgradeServingPid,
         cliPackageDir: flairPackageDir(),
-        npmGlobalPrefix: await resolveNpmGlobalPrefix(),
+        npmGlobalPrefix: upgradeNpmPrefix,
       });
-      if (execPathWarning) {
+      if (execPathWarning && !treeLane) {
         console.log(execPathWarning);
         console.log("");
       }
     } catch { /* never fail upgrade over a path probe */ }
+
+    if (treeLane) {
+      console.log(formatPlainTreeBanner(treeLane));
+      console.log("");
+    }
 
     // Per-package install probes. `npm list -g` assumed the default global
     // prefix and silently mis-reported "not installed" for anyone using
@@ -11360,7 +11406,13 @@ program
         const res = await fetch(`https://registry.npmjs.org/${name}/latest`, { signal: AbortSignal.timeout(5000) });
         if (!res.ok) continue;
         const data = await res.json() as { version?: string };
-        const latest = data.version ?? "unknown";
+        let latest = data.version ?? "unknown";
+        // Plain-tree lane: --flair-version pins the tarball we swap, the same
+        // way it pins a Fabric --target deploy. The npm-global listing is
+        // unchanged when we are not on that lane.
+        if (treeLane && name === FLAIR_PKG_NAME && typeof opts.flairVersion === "string" && opts.flairVersion.trim() !== "") {
+          latest = opts.flairVersion.trim();
+        }
         if (name === FLAIR_PKG_NAME && latest !== "unknown") {
           try { primeVersionCheckCache(latest); } catch { /* best-effort */ }
         }
@@ -11368,7 +11420,14 @@ program
         const globalProbe = probe();
         let installed: string | null;
         let status: Status;
-        if (name === FLAIR_MCP_PACKAGE) {
+        if (treeLane && name === FLAIR_PKG_NAME) {
+          // The serving/CLI packed tree is the install. A PATH or
+          // require.resolve probe would report the npm-global relic.
+          installed = treeLane.version;
+          if (installed === null) status = "missing";
+          else if (installed === latest) status = "current";
+          else status = "outdated";
+        } else if (name === FLAIR_MCP_PACKAGE) {
           // flair-mcp is zero-install via npx (#1168) — a null global probe is
           // the NORMAL state, not "missing". Resolve it from its actual wiring
           // (the pin in a client MCP config / the SessionStart hook) so the
@@ -11408,7 +11467,11 @@ program
 
     // Scope footer: make explicit what `flair upgrade` does and
     // doesn't cover, so "were the others checked?" has a one-line answer.
-    console.log("\nScope: npm-global packages (flair, flair-mcp) + openclaw plugins. Other integrations (pi-flair, langgraph-flair, n8n-nodes-flair, hermes-flair) upgrade in their own ecosystems (pi / pip / n8n).");
+    if (treeLane) {
+      console.log(`\n${formatPlainTreeScopeFooter(treeLane)}`);
+    } else {
+      console.log("\nScope: npm-global packages (flair, flair-mcp) + openclaw plugins. Other integrations (pi-flair, langgraph-flair, n8n-nodes-flair, hermes-flair) upgrade in their own ecosystems (pi / pip / n8n).");
+    }
 
     const outdated = findings.filter((f) => f.status === "outdated");
     const missing = findings.filter((f) => f.status === "missing");
@@ -11430,6 +11493,21 @@ program
       .filter((f) => f.kind === "openclaw-plugin")
       .map(({ name, installed, latest }) => ({ pkg: name, installed: installed ?? "unknown", latest }));
     const totalUpgrades = npmUpgrades.length + openclawUpgrades.length;
+
+    let treePlan: PlainTreeUpgradePlan | null = null;
+    if (treeLane) {
+      const flairFindingForPlan = findings.find((f) => f.name === FLAIR_PKG_NAME);
+      treePlan = planPlainTreeUpgrade({
+        treeDir: treeLane.dir,
+        fromVersion: treeLane.version,
+        toVersion: flairFindingForPlan?.latest ?? treeLane.version ?? "unknown",
+        systemdUnits: findSystemdUnitsForTree(treeLane.dir),
+      });
+      if (flairFindingForPlan?.status === "outdated") {
+        console.log("");
+        console.log(formatPlainTreePlan(treePlan));
+      }
+    }
 
     if (outdated.length === 0 && missing.length === 0) {
       console.log("\n✅ Everything is up to date.");
@@ -11529,7 +11607,10 @@ program
     }
 
     if (checkOnly) {
-      console.log(`\n${outdated.length} update${outdated.length > 1 ? "s" : ""} available. Run: flair upgrade`);
+      const treeHint = typeof opts.tree === "string" && opts.tree.trim() !== ""
+        ? ` --tree ${opts.tree.trim()}`
+        : treeLane ? ` --tree ${treeLane.dir}` : "";
+      console.log(`\n${outdated.length} update${outdated.length > 1 ? "s" : ""} available. Run: flair upgrade${treeHint}`);
       if (missing.length > 0) {
         console.log(`${missing.length} package${missing.length > 1 ? "s" : ""} not detected${missing.length > 0 ? ": " + missing.map((f) => f.name).join(", ") : ""}.`);
       }
@@ -11648,7 +11729,7 @@ program
     let currentEngineVersion: string | null = null;
     let targetEngineVersion: string | null = null;
     if (flairIsUpgrading && hasDataDir) {
-      currentEngineVersion = readInstalledHarperVersion(flairPackageDir());
+      currentEngineVersion = readInstalledHarperVersion(treeLane?.dir ?? flairPackageDir());
       const targetFlairVersion = flairFinding?.latest;
       if (targetFlairVersion && currentEngineVersion) {
         targetEngineVersion = await fetchDeclaredHarperVersion(targetFlairVersion);
@@ -11712,6 +11793,12 @@ program
     let flairInstallFailed = false;
     for (const { pkg, latest } of npmUpgrades) {
       try {
+        if (treePlan && pkg === FLAIR_PKG_NAME) {
+          console.log(`  Fetching ${pkg}@${latest} (npm pack) and swapping ${treePlan.treeDir}...`);
+          await applyPlainTreeUpgrade(treePlan);
+          console.log(`  ✅ ${pkg}@${latest} installed (plain-tree swap; previous tree at ${treePlan.previousDir})`);
+          continue;
+        }
         console.log(`  Installing ${pkg}@${latest}...`);
         execFileSync("npm", ["install", "-g", `${pkg}@${latest}`], { stdio: "pipe" });
         console.log(`  ✅ ${pkg}@${latest} installed`);
@@ -11776,6 +11863,9 @@ program
 
     if (!shouldRestart) {
       console.log("\nRun: flair restart to use the new version");
+      if (treePlan) {
+        console.log(`Previous tree kept at ${treePlan.previousDir} until you restart and verify.`);
+      }
       return;
     }
 
@@ -11798,11 +11888,20 @@ program
     const rollbackTo = async (toVersion: string, reason: string): Promise<never> => {
       console.log(`\nRolling back @tpsdev-ai/flair to ${toVersion}...`);
       try {
-        execFileSync("npm", ["install", "-g", `@tpsdev-ai/flair@${toVersion}`], { stdio: "pipe" });
+        if (treePlan) {
+          if (!restorePlainTreePrevious(treePlan)) {
+            throw new Error(`no previous tree at ${treePlan.previousDir} to restore`);
+          }
+          console.log(`  ✅ restored previous tree from ${treePlan.previousDir}`);
+        } else {
+          execFileSync("npm", ["install", "-g", `@tpsdev-ai/flair@${toVersion}`], { stdio: "pipe" });
+        }
       } catch (err: any) {
         console.error(`❌ rollback install failed: ${err.message}`);
         console.error(`   Flair is currently on the FAILED version (${expectedFlairVersion ?? "unknown"}) and is NOT running.`);
-        console.error(`   Recover by hand: npm install -g @tpsdev-ai/flair@${toVersion} && flair start`);
+        console.error(treePlan
+          ? `   Recover by hand: restore ${treePlan.previousDir} to ${treePlan.treeDir} && flair start`
+          : `   Recover by hand: npm install -g @tpsdev-ai/flair@${toVersion} && flair start`);
         process.exit(1);
       }
 
@@ -11850,9 +11949,15 @@ program
 
       // Same post-swap rule as the upgrade restart above: the rolled-back
       // version's own CLI is the thing that knows how to start it.
-      const rolledBackCli = resolveInstalledFlairCli(flairPackageDir(), toVersion);
+      const rolledBackRoot = treePlan?.treeDir ?? flairPackageDir();
+      const rolledBackCli = resolveInstalledFlairCli(rolledBackRoot, toVersion);
       try {
-        await restartAfterUpgrade(port, upgradeDataDir, rolledBackCli.ok ? rolledBackCli : null);
+        if (treePlan && treePlan.systemdUnits.length > 0) {
+          console.log(`  (restarting systemd unit: ${treePlan.systemdUnits.map((u) => u.name).join(", ")})`);
+          restartSystemdUnits(treePlan.systemdUnits);
+        } else {
+          await restartAfterUpgrade(port, upgradeDataDir, rolledBackCli.ok ? rolledBackCli : null);
+        }
       } catch (err: any) {
         console.error(`❌ rollback restart failed: ${err.message}`);
         console.error(`   @tpsdev-ai/flair@${toVersion} is installed but NOT running. Start it with: flair start`);
@@ -11905,9 +12010,10 @@ program
     // from disk AFTER the swap. `null` (flair itself wasn't swapped, or the new
     // tree can't be verified) falls back to an in-process restart, announced.
     const flairWasSwapped = flairIsUpgrading && !flairInstallFailed;
+    const swappedPackageRoot = treePlan?.treeDir ?? flairPackageDir();
     let newCli: { cliPath: string; version: string } | null = null;
     if (flairWasSwapped) {
-      const resolved = resolveInstalledFlairCli(flairPackageDir(), expectedFlairVersion);
+      const resolved = resolveInstalledFlairCli(swappedPackageRoot, expectedFlairVersion);
       if (resolved.ok === false) {
         console.error(`warning: could not verify the newly installed CLI (${resolved.reason}) — restarting with this process's own code instead.`);
       } else {
@@ -11917,7 +12023,14 @@ program
 
     let restartWasDelegated = false;
     try {
-      restartWasDelegated = await restartAfterUpgrade(port, upgradeDataDir, newCli);
+      if (treePlan && treePlan.systemdUnits.length > 0) {
+        console.log(`  (restarting systemd unit: ${treePlan.systemdUnits.map((u) => u.name).join(", ")})`);
+        restartSystemdUnits(treePlan.systemdUnits);
+        restartWasDelegated = true;
+        console.log("✅ Flair restarted (systemd unit)");
+      } else {
+        restartWasDelegated = await restartAfterUpgrade(port, upgradeDataDir, newCli);
+      }
     } catch (err: any) {
       console.error(`❌ restart failed: ${err.message}`);
       console.error("   Flair is NOT running. Your data in ~/.flair was not touched by this upgrade.");
@@ -11954,6 +12067,9 @@ program
 
     if (!shouldVerify) {
       console.log("  (--no-verify: skipping post-restart verification)");
+      if (treePlan) {
+        console.log(`  Previous tree kept at ${treePlan.previousDir} (rollback source; not discarded without verify).`);
+      }
       if (detached) {
         for (const line of renderDetachedWarning(management, "Flair is running, but NOT under launchd.")) {
           console.error(line);
@@ -11990,6 +12106,7 @@ program
         toVersion: expectedFlairVersion,
       });
       printVerifiedSummary(renderVerifiedSummary(verify.version, run));
+      if (treePlan) discardPlainTreePrevious(treePlan.previousDir);
       return;
     }
 
@@ -12020,6 +12137,7 @@ program
       console.log(`   The version could not be verified — the checker couldn't authenticate to /HealthDetail (${verdict.reason}).`);
       console.log("   The server is confirmed running (public /Health passed); this is a verification gap, not an upgrade failure — nothing was rolled back.");
       console.log("   To enable full post-upgrade verification: set FLAIR_ADMIN_PASS, or run `flair init` to provision ~/.flair/admin-pass or an agent key.");
+      if (treePlan) discardPlainTreePrevious(treePlan.previousDir);
       return;
     }
 

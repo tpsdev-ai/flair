@@ -8,8 +8,9 @@ target version before upgrading anything you depend on in production.
 
 There are two things you might be upgrading:
 
-1. **A local npm install** — the common case: `flair` running on your own machine or a
-   VPS, installed via `npm install -g @tpsdev-ai/flair`.
+1. **A local install** — the common case: `flair` on your own machine or a VPS,
+   either via `npm install -g @tpsdev-ai/flair` or a plain extracted tree
+   (`npm pack` + `npm install --omit=dev` under systemd).
 2. **A Flair component deployed to a Harper Fabric cluster** — a different mechanism
    (`flair deploy` / `flair upgrade --target`), covered separately below.
 
@@ -43,12 +44,47 @@ transitive dependency). **Other integrations upgrade in their own ecosystem, not
 `flair upgrade`:** `pi-flair` (pi's plugin manager), `langgraph-flair` / `hermes-flair`
 (pip / your Python package manager), `n8n-nodes-flair` (n8n's Community Nodes UI).
 
-If the running instance's exec path is not that npm-global install — a plain
-extracted tree under systemd, a leftover global relic next to the tree that is
-actually serving — `flair upgrade` says so before listing versions. The listing
-is still the npm-global surface; the warning names both paths so the relic is
-not reported as "the" install. There is no in-place tarball-swap lane for a
-plain-tree install.
+If the running instance's exec path is a **plain extracted tree** (npm pack +
+`npm install --omit=dev`, typically under systemd — no git checkout, not the
+npm-global prefix), `flair upgrade` takes that lane: it fetches the published
+tarball, swaps the tree in place, keeps operator launchers that are not in the
+pack, and restarts the systemd unit that points at the tree (or `flair restart`
+when no unit is found). Pass `--tree <dir>` to select the tree explicitly;
+`--flair-version <semver>` pins the tarball.
+
+A leftover npm-global relic next to a tree that is **not** a packed install
+still gets the mismatch warning: the listing is the npm-global surface and the
+warning names both paths so the relic is not reported as "the" install. Git
+checkouts and source trees are never tarball-swapped.
+
+### Plain-tree / npm-pack install
+
+Spokes that extract the published tarball and run `npm install --omit=dev`
+under a systemd unit — no git checkout, no `npm install -g` — use the same
+command. `flair upgrade` detects the serving tree (or takes `--tree <dir>`)
+and:
+
+1. Fetches `@tpsdev-ai/flair@<version>` with `npm pack`
+2. Extracts it next to the live tree and runs `npm install --omit=dev`
+3. Copies operator files at the tree root that are **not** in the published
+   pack (a `flair` wrapper, `.env`, anything else you added)
+4. Renames the live tree to `<tree>.upgrade-prev` and the staging dir into
+   place
+5. Restarts the systemd unit whose `WorkingDirectory` / `ExecStart` names the
+   tree (`FLAIR_SYSTEMD_UNIT=flair.service` adds an explicit unit). If no unit
+   is found, it falls back to `flair restart`
+6. Verifies, then removes `.upgrade-prev`. On a failed restart or verify the
+   previous tree is swapped back
+
+```bash
+flair upgrade --check --tree /opt/flair
+flair upgrade --tree /opt/flair
+flair upgrade --tree /opt/flair --flair-version 0.50.0
+```
+
+`--check` prints the plan (versions, preserved names, which unit will restart)
+without touching the tree. A git checkout or a path that *is* the npm-global
+install is refused rather than overwritten.
 
 ### Upgrade is a transaction
 

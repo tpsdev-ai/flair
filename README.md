@@ -107,6 +107,8 @@ flair upgrade --check   # show the plan across flair, flair-mcp and the openclaw
 flair upgrade           # apply it; the instance restarts automatically
 ```
 
+A plain extracted tree (`npm pack` + systemd, not `npm install -g`)? `flair upgrade` detects it, or pass `--tree <dir>`. See [docs/upgrade.md](docs/upgrade.md#plain-tree--npm-pack-install).
+
 Deployed to a Harper Fabric cluster instead of running locally? Use `flair upgrade --target <fabric-url>`.
 
 ## What it looks like
