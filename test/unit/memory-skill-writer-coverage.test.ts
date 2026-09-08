@@ -73,8 +73,8 @@ add("hit-tracking", [
   "writer:this.tails.delete#1",
   "writer:this.pending.delete#2",
   "writer:this.tables.stats.put#1",
-  "writer:(databases as any).flair.MemoryHitStat.put#1",
-  "writer:(databases as any).flair.MemoryHitStat.delete#1",
+  "writer:table.put#1",
+  "writer:table.delete#1",
 ], "MemoryHitStat ledger and in-memory maps — not a Memory/skill writer.");
 add("auth-middleware", ["writer:patchRecord#1"],
   "Auth bookkeeping — non-skill.");
@@ -112,6 +112,8 @@ add("auth-middleware", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only alias (auth reads rows).");
 add("promotion-stamp", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only alias (promotion reads the row to stamp).");
+add("hit-tracking", ["alias-source:(databases as any).flair?.Memory#1"],
+  "Read-only seed of Memory.retrievalCount on first HitStat write.");
 add("health", ["alias-source:db.flair?.Memory#1"],
   "Read-only alias (health check).");
 add("migration-boot", ["alias-source:flair?.Memory#1"],

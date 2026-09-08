@@ -89,8 +89,8 @@ add("hit-tracking", [
   "writer:this.tails.delete#1",
   "writer:this.pending.delete#2",
   "writer:this.tables.stats.put#1",
-  "writer:(databases as any).flair.MemoryHitStat.put#1",
-  "writer:(databases as any).flair.MemoryHitStat.delete#1",
+  "writer:table.put#1",
+  "writer:table.delete#1",
 ], "OTHER_TABLE", "MemoryHitStat ledger and in-memory maps — not a Memory writer.");
 add("auth-middleware", ["writer:patchRecord#1"], "NON_EMBED", "Auth bookkeeping patch — non-embedding.");
 

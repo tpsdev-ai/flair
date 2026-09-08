@@ -177,14 +177,32 @@ export class HitTracker {
 }
 
 function liveTables(): HitStatTables {
+  const statsTable = () => (databases as any).flair?.MemoryHitStat;
+  const memoryTable = () => (databases as any).flair?.Memory;
   return {
     stats: {
-      get: (id) => (databases as any).flair.MemoryHitStat.get(id),
-      put: (row) => (databases as any).flair.MemoryHitStat.put(row),
-      delete: (id) => (databases as any).flair.MemoryHitStat.delete(id),
+      get: async (id) => {
+        const table = statsTable();
+        if (!table?.get) return null;
+        return table.get(id);
+      },
+      put: async (row) => {
+        const table = statsTable();
+        if (!table?.put) return;
+        return table.put(row);
+      },
+      delete: async (id) => {
+        const table = statsTable();
+        if (!table?.delete) return;
+        return table.delete(id);
+      },
     },
     memory: {
-      get: (id) => (databases as any).flair.Memory.get(id),
+      get: async (id) => {
+        const table = memoryTable();
+        if (!table?.get) return null;
+        return table.get(id);
+      },
     },
   };
 }
