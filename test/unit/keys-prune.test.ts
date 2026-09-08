@@ -164,6 +164,24 @@ describe("classifyKeysDir — unidentifiable files classified distinctly from un
     expect(byClass["garbage.key"]).toBe("unidentified");
     expect(byClass["agent-stale.key"]).toBe("stale");
   });
+
+  // flair#1026 — the live collision: FileKeyStore writes a 60-byte AES-256-GCM
+  // blob (12-byte IV + 16-byte tag + 32-byte ciphertext) to the same
+  // `<id>.key` path. That length is what makes the plaintext loader fall
+  // through. It must classify as unidentified, never invalid / prunable.
+  it("a 60-byte keystore-shaped blob → unidentified, never a network call", async () => {
+    const blob = Buffer.from(Array.from({ length: 60 }, (_, i) => (i * 7 + 3) & 0xff));
+    writeFileSync(join(keysDir, "flair_deadbeef.key"), blob);
+    let called = false;
+    globalThis.fetch = (async () => { called = true; return new Response("{}", { status: 200 }); }) as typeof fetch;
+
+    const res = await classifyKeysDir(keysDir, BASE_URL);
+    expect(res.aborted).toBe(false);
+    expect(res.entries).toHaveLength(1);
+    expect(res.entries[0].class).toBe("unidentified");
+    expect(res.entries[0].class).not.toBe("invalid");
+    expect(called).toBe(false);
+  });
 });
 
 describe("classifyKeysDir — unreachable instance aborts the whole run", () => {
@@ -218,6 +236,16 @@ describe("applyKeyPrune — --apply moves prunable keys, leaves registered ones 
     // The registered agent's key is untouched, at its original path.
     expect(existsSync(join(keysDir, "agent-registered.key"))).toBe(true);
     expect(existsSync(join(archiveDir, "agent-registered.key"))).toBe(false);
+  });
+
+  it("a 60-byte keystore-shaped blob is never moved by --apply", async () => {
+    const blob = Buffer.from(Array.from({ length: 60 }, (_, i) => (i * 7 + 3) & 0xff));
+    writeFileSync(join(keysDir, "flair_deadbeef.key"), blob);
+    const classified = await classifyKeysDir(keysDir, BASE_URL);
+    const moved = applyKeyPrune(keysDir, classified.entries, "2026-07-18");
+    expect(moved).toEqual([]);
+    expect(existsSync(join(keysDir, "flair_deadbeef.key"))).toBe(true);
+    expect(existsSync(join(keysDir, PRUNED_DIR_NAME))).toBe(false);
   });
 
   it("moving nothing (all keys registered) is a no-op — returns an empty list, no .pruned dir created", async () => {
@@ -329,6 +357,35 @@ describe("flair keys prune — subprocess acceptance checks", () => {
     );
     expect(r.exitCode).not.toBe(0);
     expect(existsSync(join(subKeysDir, "agent-x.key"))).toBe(true);
+    expect(existsSync(join(subKeysDir, PRUNED_DIR_NAME))).toBe(false);
+  });
+
+  // flair#1026 prune-guard: the CLI must *report* an unparseable file as
+  // unidentified and must not treat an unidentified-only dir as empty.
+  // No network call is made (port 1 would abort if one were), so exit 0.
+  test("unparseable .key is reported unidentified, not 'no key files found', and not pruned", () => {
+    const blob = Buffer.from(Array.from({ length: 60 }, (_, i) => (i * 7 + 3) & 0xff));
+    writeFileSync(join(subKeysDir, "flair_deadbeef.key"), blob);
+
+    const dry = runCLI(
+      ["keys", "prune", "--keys-dir", subKeysDir, "--instance", "http://127.0.0.1:1"],
+      { HOME: isoHome },
+    );
+    expect(dry.exitCode).toBe(0);
+    expect(dry.stdout).toContain("unidentified");
+    expect(dry.stdout).toContain("left in place");
+    expect(dry.stdout).not.toContain("No key files found");
+    expect(dry.stdout).not.toMatch(/flair_deadbeef\.key — invalid/);
+    expect(existsSync(join(subKeysDir, "flair_deadbeef.key"))).toBe(true);
+
+    const applied = runCLI(
+      ["keys", "prune", "--apply", "--keys-dir", subKeysDir, "--instance", "http://127.0.0.1:1"],
+      { HOME: isoHome },
+    );
+    expect(applied.exitCode).toBe(0);
+    expect(applied.stdout).toContain("unidentified");
+    expect(applied.stdout).toContain("left in place");
+    expect(existsSync(join(subKeysDir, "flair_deadbeef.key"))).toBe(true);
     expect(existsSync(join(subKeysDir, PRUNED_DIR_NAME))).toBe(false);
   });
 });
