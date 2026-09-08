@@ -74,7 +74,6 @@ function baseOpts(overrides: Partial<RunnerOpts> = {}): RunnerOpts {
     apiCall: makeApi({
       "GET:/Memory": () => [{ id: "m1" }, { id: "m2" }],
       "GET:/Soul": () => [{ id: "soul-test-agent", agentId: "test-agent" }],
-      "POST:/MemoryCandidate/search_by_conditions": () => [],
       // #1205b-1: default test-agent is a non-ADK agent — enumeration returns
       // no adk: tags, so the cycle takes the unchanged agentId-only path.
       "POST:/Memory/search_by_conditions": () => [],
@@ -137,16 +136,7 @@ describe("happy path", () => {
 
   it("reports pendingCandidates from the candidate search", async () => {
     const r = await runNightlyCycle(baseOpts({
-      apiCall: makeApi({
-        "GET:/Memory": () => [{ id: "m1" }],
-        "GET:/Soul": () => [],
-        "POST:/MemoryCandidate/search_by_conditions": () => [
-          { id: "c1" }, { id: "c2" }, { id: "c3" },
-        ],
-        "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
-        "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
-        "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
-      }),
+      opsSearch: async () => [{ id: "c1" }, { id: "c2" }, { id: "c3" }],
     }));
     expect(r.logRow.pendingCandidates).toBe(3);
   });
@@ -156,8 +146,7 @@ describe("happy path", () => {
       apiCall: makeApi({
         "GET:/Memory": () => ({ results: [{ id: "m1" }, { id: "m2" }, { id: "m3" }] }),
         "GET:/Soul": () => ({ items: [{ id: "s1" }] }),
-        "POST:/MemoryCandidate/search_by_conditions": () => [],
-        "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+          "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
         "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
         "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
       }),
@@ -172,8 +161,7 @@ describe("happy path", () => {
       apiCall: makeApi({
         "GET:/Memory": () => sampleMemories,
         "GET:/Soul": () => [sampleSoul],
-        "POST:/MemoryCandidate/search_by_conditions": () => [],
-        "POST:/MemoryMaintenance": () => ({ expired: 5, archived: 12, total: 200, errors: 0 }),
+          "POST:/MemoryMaintenance": () => ({ expired: 5, archived: 12, total: 200, errors: 0 }),
         "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
         "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
       }),
@@ -196,7 +184,6 @@ describe("happy path", () => {
         }
         if (method === "GET" && path.startsWith("/Memory?")) return sampleMemories;
         if (method === "GET" && path.startsWith("/Soul?")) return [sampleSoul];
-        if (method === "POST" && path === "/MemoryCandidate/search_by_conditions") return [];
         throw new Error(`unexpected api: ${method}:${path}`);
       },
     }));
@@ -213,8 +200,7 @@ describe("step 5: distillation", () => {
       apiCall: makeApi({
         "GET:/Memory": () => sampleMemories,
         "GET:/Soul": () => [sampleSoul],
-        "POST:/MemoryCandidate/search_by_conditions": () => [],
-        "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+          "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
         "POST:/ReflectMemories": () => ({
           candidates: [
             { id: "cand_aaa", claim: "first insight" },
@@ -237,8 +223,7 @@ describe("step 5: distillation", () => {
       apiCall: makeApi({
         "GET:/Memory": () => sampleMemories,
         "GET:/Soul": () => [sampleSoul],
-        "POST:/MemoryCandidate/search_by_conditions": () => [],
-        "POST:/MemoryMaintenance": () => ({ expired: 5, archived: 12, total: 200, errors: 0 }),
+          "POST:/MemoryMaintenance": () => ({ expired: 5, archived: 12, total: 200, errors: 0 }),
         "POST:/ReflectMemories": () => { throw new Error("fetch failed: connection reset"); },
         "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
       }),
@@ -259,8 +244,7 @@ describe("step 5: distillation", () => {
       apiCall: makeApi({
         "GET:/Memory": () => sampleMemories,
         "GET:/Soul": () => [sampleSoul],
-        "POST:/MemoryCandidate/search_by_conditions": () => [],
-        "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+          "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
         // Mirrors api()'s throw shape (src/cli.ts) for a 503 response body.
         "POST:/ReflectMemories": () => {
           throw new Error(JSON.stringify({ error: "No generative backend configured. See the models configuration docs." }));
@@ -278,8 +262,7 @@ describe("step 5: distillation", () => {
       apiCall: makeApi({
         "GET:/Memory": () => sampleMemories,
         "GET:/Soul": () => [sampleSoul],
-        "POST:/MemoryCandidate/search_by_conditions": () => [],
-        "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+          "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
         // Mirrors api()'s throw shape (src/cli.ts) for a 502 response body.
         "POST:/ReflectMemories": () => {
           throw new Error(JSON.stringify({ error: "distillation_failed", detail: "model output did not validate after one retry" }));
@@ -299,8 +282,7 @@ describe("step 6: instance-wide dedup-cluster stat (flair-quality Slice 1c)", ()
       apiCall: makeApi({
         "GET:/Memory": () => sampleMemories,
         "GET:/Soul": () => [sampleSoul],
-        "POST:/MemoryCandidate/search_by_conditions": () => [],
-        "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+          "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
         "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
         "POST:/MemoryDedupStats": () => ({
           clusterCount: 3,
@@ -325,8 +307,7 @@ describe("step 6: instance-wide dedup-cluster stat (flair-quality Slice 1c)", ()
       apiCall: makeApi({
         "GET:/Memory": () => sampleMemories,
         "GET:/Soul": () => [sampleSoul],
-        "POST:/MemoryCandidate/search_by_conditions": () => [],
-        "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+          "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
         "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
         "POST:/MemoryDedupStats": () => { throw new Error(JSON.stringify({ error: "forbidden: admin required" })); },
       }),
@@ -343,8 +324,7 @@ describe("step 6: instance-wide dedup-cluster stat (flair-quality Slice 1c)", ()
       apiCall: makeApi({
         "GET:/Memory": () => sampleMemories,
         "GET:/Soul": () => [sampleSoul],
-        "POST:/MemoryCandidate/search_by_conditions": () => [],
-        "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+          "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
         "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
         "POST:/MemoryDedupStats": () => ({ ok: true }), // missing the expected fields
       }),
@@ -363,7 +343,6 @@ describe("step 6: instance-wide dedup-cluster stat (flair-quality Slice 1c)", ()
         if (method === "POST" && path === "/MemoryMaintenance") return { expired: 0, archived: 0, total: 0, errors: 0 };
         if (method === "GET" && path.startsWith("/Memory?")) return sampleMemories;
         if (method === "GET" && path.startsWith("/Soul?")) return [sampleSoul];
-        if (method === "POST" && path === "/MemoryCandidate/search_by_conditions") return [];
         if (method === "POST" && path === "/MemoryDedupStats") {
           throw new Error("must not be called in dry-run mode");
         }
@@ -402,7 +381,6 @@ describe("dry-run", () => {
         }
         if (method === "GET" && path.startsWith("/Memory?")) return sampleMemories;
         if (method === "GET" && path.startsWith("/Soul?")) return [sampleSoul];
-        if (method === "POST" && path === "/MemoryCandidate/search_by_conditions") return [];
         if (method === "POST" && path === "/ReflectMemories") {
           throw new Error("must not be called in dry-run mode");
         }
@@ -450,14 +428,7 @@ describe("failure modes", () => {
 
   it("does not fail on candidate-count errors — degrades gracefully to 0", async () => {
     const r = await runNightlyCycle(baseOpts({
-      apiCall: makeApi({
-        "GET:/Memory": () => [{ id: "m1" }],
-        "GET:/Soul": () => [],
-        "POST:/MemoryCandidate/search_by_conditions": () => { throw new Error("candidate table missing"); },
-        "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
-        "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
-        "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
-      }),
+      opsSearch: async () => { throw new Error("candidate table missing"); },
     }));
     // Candidate count is a non-fatal signal — the cycle still completes.
     expect(r.status).toBe("completed");
@@ -469,8 +440,7 @@ describe("failure modes", () => {
       apiCall: makeApi({
         "GET:/Memory": () => [{ id: "m1" }],
         "GET:/Soul": () => [],
-        "POST:/MemoryCandidate/search_by_conditions": () => [],
-        "POST:/MemoryMaintenance": () => { throw new Error("maintenance worker offline"); },
+          "POST:/MemoryMaintenance": () => { throw new Error("maintenance worker offline"); },
       }),
     }));
     expect(r.status).toBe("failed");
@@ -487,8 +457,7 @@ describe("failure modes", () => {
       apiCall: makeApi({
         "GET:/Memory": () => [{ id: "m1" }],
         "GET:/Soul": () => [],
-        "POST:/MemoryCandidate/search_by_conditions": () => [],
-        "POST:/MemoryMaintenance": () => ({ error: "agentId required" }),
+          "POST:/MemoryMaintenance": () => ({ error: "agentId required" }),
       }),
     }));
     expect(r.status).toBe("failed");
@@ -612,7 +581,6 @@ function makeTagAwareApi(opts: {
     const key = `${method}:${path.split("?")[0]}`;
     if (method === "GET" && path.startsWith("/Memory?")) return memories;
     if (method === "GET" && path.startsWith("/Soul?")) return [sampleSoul];
-    if (key === "POST:/MemoryCandidate/search_by_conditions") return [];
     if (key === "POST:/MemoryMaintenance") return { expired: 0, archived: 0, total: 0, errors: 0 };
     if (key === "POST:/ReflectMemories") {
       reflectCalls.push(body);
@@ -716,8 +684,7 @@ describe("tag-aware distillation cycle (#1205b-1)", () => {
       const key = `${method}:${path.split("?")[0]}`;
       if (method === "GET" && path.startsWith("/Memory?")) return memories;
       if (method === "GET" && path.startsWith("/Soul?")) return [sampleSoul];
-      if (key === "POST:/MemoryCandidate/search_by_conditions") return [];
-      if (key === "POST:/MemoryMaintenance") return { expired: 0, archived: 0 };
+        if (key === "POST:/MemoryMaintenance") return { expired: 0, archived: 0 };
       if (key === "POST:/ReflectMemories") { reflectCalls.push(body); return { candidates: [], count: 0, model: "default" }; }
       if (key === "POST:/AutoPromoteCandidates") return { agentId: "test-agent", promoted: [], skipped: [], count: 0, considered: 0 };
       if (key === "POST:/MemoryDedupStats") return { clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "x" };
