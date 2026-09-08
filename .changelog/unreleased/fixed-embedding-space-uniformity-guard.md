@@ -8,4 +8,6 @@
   reembed` remedy; the write-time dedup leg no-ops (never suppressing a write).
   Embedding stamps are now engine-qualified (`gguf:<model>`); today's bare-name
   corpus is treated as the same space, so no re-embed is triggered and the
-  default path is unchanged.
+  default path is unchanged. A memory synced in from a federation peer on a
+  different engine/model also trips the guard, so a mixed-space sync degrades
+  recall to keyword-only rather than serving garbage.
