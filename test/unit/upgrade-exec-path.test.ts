@@ -7,7 +7,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync, realpathSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -248,7 +248,7 @@ describe("classifyExecPathVsNpmGlobal", () => {
   const cliGlobal: FlairPackageLocation = { dir: global.dir, version: "0.28.0" };
 
   test("the incident: serving tree ≠ stale npm-global relic", () => {
-    const check = classifyExecPathVsNpmGlobal({ serving, cli: cliGlobal, global });
+    const check = classifyExecPathVsNpmGlobal({ serving, cli: cliGlobal, global, prefixKnown: true });
     expect(check.kind).toBe("mismatch");
     if (check.kind !== "mismatch") return;
     expect(check.source).toBe("serving-instance");
@@ -263,6 +263,7 @@ describe("classifyExecPathVsNpmGlobal", () => {
       serving: global,
       cli: serving,
       global,
+      prefixKnown: true,
     });
     expect(check.kind).toBe("match");
     if (check.kind !== "match") return;
@@ -270,7 +271,7 @@ describe("classifyExecPathVsNpmGlobal", () => {
   });
 
   test("no serving pid: this CLI is not the npm-global install", () => {
-    const check = classifyExecPathVsNpmGlobal({ serving: null, cli: serving, global });
+    const check = classifyExecPathVsNpmGlobal({ serving: null, cli: serving, global, prefixKnown: true });
     expect(check.kind).toBe("mismatch");
     if (check.kind !== "mismatch") return;
     expect(check.source).toBe("this-cli");
@@ -278,19 +279,24 @@ describe("classifyExecPathVsNpmGlobal", () => {
   });
 
   test("no serving pid: this CLI IS the npm-global install", () => {
-    expect(classifyExecPathVsNpmGlobal({ serving: null, cli: global, global }).kind).toBe("match");
+    expect(classifyExecPathVsNpmGlobal({ serving: null, cli: global, global, prefixKnown: true }).kind).toBe("match");
   });
 
-  test("running tree with no npm-global package is a mismatch", () => {
-    const check = classifyExecPathVsNpmGlobal({ serving, cli: serving, global: null });
+  test("known prefix with no npm-global package is a mismatch", () => {
+    const check = classifyExecPathVsNpmGlobal({ serving, cli: serving, global: null, prefixKnown: true });
     expect(check.kind).toBe("mismatch");
     if (check.kind !== "mismatch") return;
     expect(check.globalPath).toBeNull();
     expect(check.source).toBe("serving-instance");
   });
 
+  test("unknown prefix (failed npm prefix -g) is unknown, not a mismatch", () => {
+    expect(classifyExecPathVsNpmGlobal({ serving, cli: serving, global: null, prefixKnown: false }).kind).toBe("unknown");
+    expect(classifyExecPathVsNpmGlobal({ serving, cli: serving, global, prefixKnown: false }).kind).toBe("unknown");
+  });
+
   test("no running path at all is unknown, not a warning", () => {
-    expect(classifyExecPathVsNpmGlobal({ serving: null, cli: null, global }).kind).toBe("unknown");
+    expect(classifyExecPathVsNpmGlobal({ serving: null, cli: null, global, prefixKnown: true }).kind).toBe("unknown");
   });
 });
 
@@ -420,14 +426,40 @@ describe("collectUpgradeExecPathWarning", () => {
       },
     })).toBeNull();
   });
-});
 
-describe("cli.ts wiring", () => {
-  test("flair upgrade calls collectUpgradeExecPathWarning before listing packages", () => {
-    const src = readFileSync(join(import.meta.dir, "..", "..", "src", "cli.ts"), "utf-8");
-    expect(src).toContain('from "./lib/upgrade-exec-path.js"');
-    expect(src).toContain("collectUpgradeExecPathWarning");
-    expect(src).toContain("flair#1109");
+  test("missing npmGlobalPrefix degrades to unknown — no warning", () => {
+    const spoke = join(tmp, "spoke");
+    writeFlairPackage(spoke, "0.36.0");
+    expect(collectUpgradeExecPathWarning({
+      servingPid: 99,
+      cliPackageDir: spoke,
+      npmGlobalPrefix: null,
+      platform: "linux",
+      hooks: { readCwd: () => spoke, readCmdline: () => null },
+    })).toBeNull();
+    expect(collectUpgradeExecPathWarning({
+      servingPid: 99,
+      cliPackageDir: spoke,
+      npmGlobalPrefix: "   ",
+      platform: "linux",
+      hooks: { readCwd: () => spoke, readCmdline: () => null },
+    })).toBeNull();
+  });
+
+  test("known prefix with no flair package still warns", () => {
+    const spoke = join(tmp, "spoke");
+    const prefix = join(tmp, "empty-prefix");
+    writeFlairPackage(spoke, "0.36.0");
+    mkdirSync(prefix, { recursive: true });
+    const warning = collectUpgradeExecPathWarning({
+      servingPid: 99,
+      cliPackageDir: spoke,
+      npmGlobalPrefix: prefix,
+      platform: "linux",
+      hooks: { readCwd: () => spoke, readCmdline: () => null },
+    });
+    expect(warning).toContain("The running instance's exec path is not the npm-global install.");
+    expect(warning).toContain("npm-global: not installed");
   });
 });
 

@@ -205,13 +205,21 @@ export function resolveNpmGlobalFlairPackage(
   return readFlairPackageAt(npmGlobalFlairPackageDir(prefix, platform));
 }
 
+/**
+ * `prefixKnown` is true only when `npm prefix -g` actually returned a
+ * prefix. A failed/absent probe is not "the global package is missing" —
+ * that is `unknown` (no warning). A known prefix with no `@tpsdev-ai/flair`
+ * under it is a real mismatch.
+ */
 export function classifyExecPathVsNpmGlobal(input: {
   serving: FlairPackageLocation | null;
   cli: FlairPackageLocation | null;
   global: FlairPackageLocation | null;
+  prefixKnown: boolean;
 }): ExecPathCheck {
   const running = input.serving ?? input.cli;
   if (!running) return { kind: "unknown" };
+  if (!input.prefixKnown) return { kind: "unknown" };
   const source: ExecPathSource = input.serving ? "serving-instance" : "this-cli";
   if (input.global && sameInstallPath(running.dir, input.global.dir)) {
     return { kind: "match", runningPath: running.dir, globalPath: input.global.dir, source };
@@ -269,15 +277,20 @@ export function collectUpgradeExecPathWarning(input: {
   hooks?: ProcessPathHooks;
 }): string | null {
   try {
+    const prefixKnown = typeof input.npmGlobalPrefix === "string" && input.npmGlobalPrefix.trim() !== "";
     const serving = input.servingPid != null
       ? resolveServingFlairPackage(input.servingPid, input.hooks)
       : null;
     const cli = findFlairPackageDir(input.cliPackageDir);
-    const global = resolveNpmGlobalFlairPackage(
-      input.npmGlobalPrefix,
-      input.platform ?? process.platform,
-    );
-    return formatExecPathMismatchWarning(classifyExecPathVsNpmGlobal({ serving, cli, global }));
+    const global = prefixKnown
+      ? resolveNpmGlobalFlairPackage(input.npmGlobalPrefix, input.platform ?? process.platform)
+      : null;
+    return formatExecPathMismatchWarning(classifyExecPathVsNpmGlobal({
+      serving,
+      cli,
+      global,
+      prefixKnown,
+    }));
   } catch {
     return null;
   }
