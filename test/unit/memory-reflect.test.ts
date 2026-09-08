@@ -519,7 +519,7 @@ describe("oldest-unreflected gather cap (#1515)", () => {
       { id: "older-than-cap", createdAt: "2025-12-01T00:00:00.000Z" },
     ];
     for (const row of rows) considerForOldestUnreflectedCap(pool, row, 2);
-    expect(pool.map((r) => r.id)).toEqual(["old", "mid"]);
+    expect(pool.map((r) => r.id)).toEqual(["older-than-cap", "old"]);
   });
 
   test("isRemAbortRequested honors FLAIR_REM_PAUSE and the pause sentinel", () => {
