@@ -58,9 +58,12 @@ test("nightly dedup includes live rows and serves reads during its vector sweep"
     expect(small).toMatchObject({ clusterCount: 1, largestClusterSize: 3, totalMemoriesInClusters: 3 });
 
     // Precomputed vectors avoid measuring background embedding generation.
-    for (let offset = 0; offset < 3062; offset += 100) {
+    // 400 extras (403 live total) still force a real ANN sweep and event-loop
+    // yields; the local 3,065-row repro timed out at 60s on CI.
+    const extraSweep = 400;
+    for (let offset = 0; offset < extraSweep; offset += 100) {
       await op({ operation: "insert", database: "flair", table: "Memory", records:
-        Array.from({ length: Math.min(100, 3062 - offset) }, (_, i) => memory(`rem-${offset + i}`, {
+        Array.from({ length: Math.min(100, extraSweep - offset) }, (_, i) => memory(`rem-${offset + i}`, {
           archived: (offset + i) % 2 ? false : undefined,
           embedding: Array.from({ length: 768 }, (_, j) => Math.sin((offset + i + 1) * (j + 1))),
         })) });

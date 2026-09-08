@@ -18,8 +18,10 @@ bun test test/integration-heavy/rem-responsiveness-1515.test.ts
 
 A four-row control asserts one cluster of three live, identical vectors across
 two owners, excluding an archived copy. Live rows cover both missing and false
-archive flags. The fixture then grows to 3,065 live memories plus the archived
-control, using synthetic 768-dimensional vectors with the installed embedding
+archive flags. The CI fixture then grows to 403 live memories plus the archived
+control (400 extra unique vectors). That is enough ANN work to exercise
+yielding without the 3,065-row local repro, which exceeded CI's 60 s client
+deadline. Synthetic 768-dimensional vectors use the installed embedding
 model ID stamped to avoid background embedding generation. The runner snapshots
 its own agent's rows and runs maintenance, generation, and instance-wide dedup.
 The fake model delays two seconds and returns one candidate citing an actual
