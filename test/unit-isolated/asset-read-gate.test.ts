@@ -130,6 +130,7 @@ describe("Asset.post — attribution + blob coercion", () => {
     expect(stored.data.__blob).toBe(true);
     expect(stored.data.type).toBe("image/jpeg");
     expect(typeof stored.createdAt).toBe("string");
+    expect(typeof stored.updatedAt).toBe("string");
   });
 });
 
@@ -174,6 +175,15 @@ describe("Asset.post — write-time size cap + contentType allowlist", () => {
     const res: any = await (makeAsset(agentCtx("agent-owner")) as any).post({
       contentType: "image/png",
       data: tooBig.toString("base64"),
+    });
+    expect(res.status).toBe(400);
+    expect(assetStore.size).toBe(0);
+  });
+
+  it("rejects a non-string payload without a readable size (no fail-open)", async () => {
+    const res: any = await (makeAsset(agentCtx("agent-owner")) as any).post({
+      contentType: "image/png",
+      data: { stream: true },
     });
     expect(res.status).toBe(400);
     expect(assetStore.size).toBe(0);

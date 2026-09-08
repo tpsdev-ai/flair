@@ -38,7 +38,13 @@ const assetAuthGate = makeAuthGate();
  * otherwise persist. Write-time gates (Sherlock STOP, this slice): decoded
  * size is capped at MAX_ASSET_DECODED_BYTES, and `contentType` must be an
  * allowlisted `image/*` (XML/SVG subtypes rejected) so a mistyped or
- * unbounded blob cannot land.
+ * unbounded blob cannot land. Non-string `data` without a readable size is
+ * rejected (400) rather than persisted unbounded.
+ *
+ * Lifecycle: an Asset is retained until its owner deletes the row. Deleting
+ * the parent Memory does not sweep linked blobs (no GC in this slice);
+ * `updatedAt` is stamped on every write so a later maintenance sweep can
+ * key on recency. Harper unlinks blob files when the Asset row is deleted.
  */
 export class Asset extends (databases as any).flair.Asset {
   allowRead() { return assetAuthGate.call(this); }
@@ -79,6 +85,7 @@ export class Asset extends (databases as any).flair.Asset {
     const blobDenial = _coerceBlob(content);
     if (blobDenial) return blobDenial;
     content.createdAt ||= new Date().toISOString();
+    content.updatedAt = new Date().toISOString();
     return super.post(content);
   }
 
@@ -87,6 +94,7 @@ export class Asset extends (databases as any).flair.Asset {
     if (denial) return denial;
     const blobDenial = _coerceBlob(content);
     if (blobDenial) return blobDenial;
+    content.updatedAt = new Date().toISOString();
     return super.patch(content, query);
   }
 
@@ -102,6 +110,7 @@ export class Asset extends (databases as any).flair.Asset {
 
     const blobDenial = _coerceBlob(content);
     if (blobDenial) return blobDenial;
+    content.updatedAt = new Date().toISOString();
     return super.put(content);
   }
 
@@ -187,7 +196,10 @@ function _coerceBlob(content: any): Response | undefined {
   }
 
   const size = decodedSizeOf(content.data);
-  if (typeof size === "number" && size > MAX_ASSET_DECODED_BYTES) {
+  if (typeof size !== "number") {
+    return BAD_REQUEST("asset data must be a base64 string or a sized binary payload");
+  }
+  if (size > MAX_ASSET_DECODED_BYTES) {
     return BAD_REQUEST(`asset exceeds ${MAX_ASSET_DECODED_BYTES} byte decoded size cap`);
   }
 }

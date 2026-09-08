@@ -152,6 +152,9 @@ const CASES: Array<{
     patch: { content: "changed" }, field: "content", attrs: ["id", "agentId", "content"],
   },
   {
+    // This suite does not provision flair_agent — signed agents fall back to
+    // admin — so this CASE pins the shared owner-guard, not the de-elevated
+    // RBAC grant (see flair-agent-deelevation.test.ts for that sufficiency).
     name: "Asset", table: "Asset", id: "rog-asset", path: "/Asset/rog-asset",
     seed: { id: "rog-asset", agentId: owner.id, memoryId: "rog-mem", contentType: "image/png", createdAt: NOW },
     patch: { memoryId: "rog-mem-changed" }, field: "memoryId", attrs: ["id", "agentId", "memoryId"],
