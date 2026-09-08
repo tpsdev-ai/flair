@@ -33,7 +33,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const EXIT_OK = 0;
@@ -286,6 +286,27 @@ export function binOnPath(bin, pathEnv) {
 }
 
 /**
+ * npm prefix that owns `--flair` (the directory whose `node_modules/harper`
+ * is the hoisted binary `flair init` looks up via `process.cwd()`).
+ *
+ * Harper is resolved from `[flairPackageDir(), process.cwd()]`. After
+ * `npm install <tarball>` the binary lives at `<prefix>/node_modules/harper`,
+ * not next to `@tpsdev-ai/flair`. A scratch cwd (the 30d1711 gate) makes
+ * init throw "Harper CLI not found" before any MCP summary is printed.
+ *
+ * Paths with no `node_modules` segment (unit-test stubs) fall back to the
+ * file's directory.
+ */
+export function installPrefixFromFlair(flairPath) {
+  const abs = String(flairPath);
+  const marker = `${sep}node_modules${sep}`;
+  const idx = abs.lastIndexOf(marker);
+  if (idx > 0) return abs.slice(0, idx);
+  if (idx === 0) return sep;
+  return dirname(abs);
+}
+
+/**
  * @param {{
  *   flair: string,
  *   args: string[],
@@ -412,11 +433,13 @@ export function main(argv = process.argv.slice(2)) {
 
   const work = mkdtempSync(join(tmpdir(), "flair-mcp-wiring-"));
   const home = join(work, "home");
-  const cwd = join(work, "cwd");
   const fakeBin = join(work, "fake-bin");
   mkdirSync(home, { recursive: true });
-  mkdirSync(cwd, { recursive: true });
   mkdirSync(fakeBin, { recursive: true });
+  // Must be the tarball install prefix so hoisted `node_modules/harper` is
+  // visible. A throwaway cwd is what made the published job exit 1 in ~1s.
+  const cwd = installPrefixFromFlair(args.flair);
+  console.log(`install prefix (cwd): ${cwd}`);
 
   const adminPass = "mcp-wiring-ci-admin";
   const port = args.port;

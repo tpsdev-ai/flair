@@ -9,7 +9,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -25,6 +25,7 @@ import {
   classifyClientReport,
   clobberClaudeFixture,
   clobberSurvived,
+  installPrefixFromFlair,
   parseArgs,
   main,
   parseWiringSummary,
@@ -43,12 +44,25 @@ function runGate(args: string[]) {
   return { status: r.status, out: `${r.stdout}${r.stderr}` };
 }
 
-function jobBlock(): string {
-  const start = TEST_YML.indexOf("\n  mcp-client-wiring:");
-  expect(start).toBeGreaterThan(-1);
-  const rest = TEST_YML.slice(start + 1);
+function jobBlock(yml: string = TEST_YML): string {
+  const key = "\n  mcp-client-wiring:";
+  const keyAt = yml.indexOf(key);
+  expect(keyAt).toBeGreaterThan(-1);
+  // Walk back through immediately-preceding comment lines so a `# BLOCKING`
+  // parked above the job key (the 30d1711 self-break) is still in `job`.
+  let start = keyAt;
+  while (start > 0) {
+    const prevNl = yml.lastIndexOf("\n", start - 1);
+    const line = yml.slice(prevNl + 1, start);
+    if (!/^\s*#/.test(line)) break;
+    start = prevNl === -1 ? 0 : prevNl;
+  }
+  const from = yml[start] === "\n" ? start + 1 : start;
+  const afterKey = keyAt + key.length;
+  const rest = yml.slice(afterKey);
   const next = rest.search(/\n  [a-z0-9-]+:/);
-  return next === -1 ? rest : rest.slice(0, next);
+  const end = next === -1 ? yml.length : afterKey + next;
+  return yml.slice(from, end);
 }
 
 describe("SUPPORTED_CLIENTS stays locked to ALL_CLIENTS", () => {
@@ -265,12 +279,65 @@ describe("CLI refuses to pass when it cannot run", () => {
   });
 });
 
+describe("installPrefixFromFlair — Harper is hoisted to the npm prefix", () => {
+  test("strips node_modules/@tpsdev-ai/flair/dist/... to the install prefix", () => {
+    expect(
+      installPrefixFromFlair("/tmp/pack/node_modules/@tpsdev-ai/flair/dist/cli-shim.cjs"),
+    ).toBe("/tmp/pack");
+    expect(
+      installPrefixFromFlair("/tmp/pack/node_modules/@tpsdev-ai/flair/dist/cli.js"),
+    ).toBe("/tmp/pack");
+  });
+
+  test("falls back to dirname when there is no node_modules segment (stubs)", () => {
+    expect(installPrefixFromFlair("/tmp/stub/cli.js")).toBe("/tmp/stub");
+  });
+
+  test("the derived prefix is the directory npm hoists harper into", () => {
+    const prefix = mkdtempSync(join(tmpdir(), "flair-prefix-"));
+    try {
+      const harper = join(prefix, "node_modules", "harper", "dist", "bin", "harper.js");
+      mkdirSync(join(prefix, "node_modules", "harper", "dist", "bin"), { recursive: true });
+      writeFileSync(harper, "");
+      const flair = join(prefix, "node_modules", "@tpsdev-ai", "flair", "dist", "cli-shim.cjs");
+      expect(installPrefixFromFlair(flair)).toBe(prefix);
+      expect(existsSync(join(installPrefixFromFlair(flair), "node_modules", "harper", "dist", "bin", "harper.js"))).toBe(
+        true,
+      );
+    } finally {
+      rmSync(prefix, { recursive: true, force: true });
+    }
+  });
+
+  test("main() uses that prefix as cwd — a scratch cwd is the 30d1711 red", () => {
+    const src = readFileSync(SCRIPT, "utf8");
+    expect(src).toContain("const cwd = installPrefixFromFlair(args.flair)");
+    expect(src).not.toMatch(/join\(work,\s*"cwd"\)/);
+  });
+});
+
 describe("the CI job must remain able to fail", () => {
   const job = jobBlock();
   const directives = job
     .split("\n")
     .filter((l) => !/^\s*#/.test(l))
     .join("\n");
+
+  test("jobBlock includes BLOCKING when the comment sits above the job key", () => {
+    const yml = [
+      "jobs:",
+      "    # BLOCKING. parked above the key on purpose",
+      "  mcp-client-wiring:",
+      "    name: MCP client wiring",
+      "    run: node scripts/ci/check-mcp-client-wiring.mjs",
+      "  other-job:",
+      "    name: x",
+    ].join("\n");
+    const sliced = jobBlock(yml);
+    expect(sliced).toContain("BLOCKING");
+    expect(sliced).toContain("check-mcp-client-wiring.mjs");
+    expect(sliced).not.toContain("other-job");
+  });
 
   test("invokes the gate script against a packed tarball install", () => {
     expect(directives).toContain("scripts/ci/check-mcp-client-wiring.mjs");
@@ -299,7 +366,12 @@ describe("the CI job must remain able to fail", () => {
 
   test("isolates HOME (the new-user state #908 asked for)", () => {
     expect(readFileSync(SCRIPT, "utf8")).toContain("HOME: home");
-    expect(readFileSync(SCRIPT, "utf8")).toContain('USERPROFILE: home');
+    expect(readFileSync(SCRIPT, "utf8")).toContain("USERPROFILE: home");
+  });
+
+  test("invokes the package bin shim, not dist/cli.js", () => {
+    expect(directives).toContain("dist/cli-shim.cjs");
+    expect(directives).not.toMatch(/dist\/cli\.js/);
   });
 });
 
