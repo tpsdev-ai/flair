@@ -12,7 +12,7 @@ import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveAllowedOwners } from "./memory-read-scope.js";
 import { assertValidVisibility, assertVisibilityAllowedForDurability } from "./memory-visibility.js";
 import { assertValidDurability } from "./memory-durability.js";
-import { enforceSkillDurability, rejectSkillWritePath, skillEmbedText, skillScanGate } from "./skill-write.js";
+import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, skillEmbedText, skillScanGate } from "./skill-write.js";
 import {
   DEDUP_COSINE_THRESHOLD_DEFAULT,
   DEDUP_LEXICAL_THRESHOLD_DEFAULT,
@@ -150,7 +150,11 @@ async function findConservativeDedupMatch(
         { attribute: "agentId", comparator: "equals", value: agentId },
         { attribute: "archived", comparator: "not_equal", value: true },
       ],
-      select: ["id", "content", "$distance"],
+      // flair#1546 dedup footnote: `trigger`/`tags` widen the candidate
+      // projection so the LEXICAL leg can compare trigger-vs-trigger for skill
+      // rows (see the computeMatchConfidence call below). Non-skill candidates
+      // are unaffected — skillEmbedText falls back to `content`.
+      select: ["id", "content", "trigger", "tags", "$distance"],
       limit: 1,
     };
     let top: any = null;
@@ -221,7 +225,15 @@ async function findConservativeDedupMatch(
       const candidateEmbedding = Array.isArray(fullCandidate?.embedding) ? fullCandidate.embedding : [];
       cosine = cosineSimilarity(embedding, candidateEmbedding);
     }
-    const confidence = computeMatchConfidence(contentText, top.content, cosine);
+    // flair#1546 dedup footnote (Kern, non-blocking): the lexical leg must
+    // compare the SAME text the vector represents on BOTH sides. `contentText`
+    // is already skillEmbedText(new) (the trigger for a skill write); the
+    // candidate side must match — skillEmbedText(top) returns the candidate's
+    // `trigger` when it is a skill row, its `content` otherwise. Pre-fix this
+    // crossed the new row's trigger against the candidate's stored `content`
+    // (trigger-vs-content), under-flagging near-duplicate skill triggers.
+    const candidateLexText = skillEmbedText(top);
+    const confidence = computeMatchConfidence(contentText, candidateLexText, cosine);
     if (!isConservativeMatch(confidence.cosine, confidence.lexical, cosineThreshold, lexicalThreshold)) {
       return null;
     }
@@ -903,12 +915,22 @@ export class Memory extends (databases as any).flair.Memory {
     if (authorityDenial) return authorityDenial;
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
-    // ── flair#1542: reject skill-tagged patches ──
+    // ── flair#1542 + residual (Kern #1543 review 5135715289): reject skill patches ──
     // patch() routes past put() (and thus past the SkillScan gate + forced
-    // durability), so a skill-tagged patch would land unscanned. Skills are
-    // written via skill_store (→ Memory.post) or Memory.put — reject here
-    // (no memory_patch tool exists, so nothing breaks).
-    const skillDenial = rejectSkillWritePath(content);
+    // durability), so a skill write on this verb would land unscanned. There are
+    // TWO ways a patch is a skill write, and the mint-time check saw only the first:
+    //   1. the PATCH BODY carries the skill tag — rejectSkillWritePath(content).
+    //   2. the STORED record is ALREADY a skill, and the body mutates `content`
+    //      (or anything else) WITHOUT re-declaring the tag. isSkillWrite(body) is
+    //      then false, so the pre-residual check let the edit land — a skill's
+    //      procedure could be rewritten with NO SkillScan (the residual). Fold
+    //      the existing record into the check: a patch to a row whose STORED tags
+    //      include `skill` is rejected the same as a mint-time skill write.
+    // Skills are written via skill_store (→ Memory.post) or Memory.put; no
+    // memory_patch tool exists and no internal path patches a skill row (hit-
+    // tracking goes through table.put, not this override), so rejecting is safe.
+    const existingForSkill = (await Promise.resolve(super.get()).catch(() => null)) as any;
+    const skillDenial = rejectSkillWritePath(content) ?? rejectSkillWritePath(existingForSkill);
     if (skillDenial) return skillDenial;
     return super.patch(content, query);
   }

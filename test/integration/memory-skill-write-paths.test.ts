@@ -77,6 +77,29 @@ describe("Memory skill-write path guards (flair#1542)", () => {
     expect(after.content).toBe("updated");
   }, 30_000);
 
+  // ─── RESIDUAL (flair#1546, Kern #1543 review 5135715289): a patch to a row ──
+  // whose STORED tags already include `skill` must be rejected — even when the
+  // patch BODY carries no tags. Pre-residual, rejectSkillWritePath saw only the
+  // body, so `{content}` on an existing skill landed UNSCANNED: a skill's
+  // procedure could be rewritten (here, with a dangerous shell payload) past the
+  // SkillScan gate. FAILS ON CURRENT MAIN: pre-fix this PATCH returns 204 and the
+  // content changes.
+  test("GUARD (residual): PATCH content on an EXISTING skill row is rejected unscanned (400 skill_write_path)", async () => {
+    await seed("Memory", [{
+      id: "skill-patch-existing", agentId: owner.id, content: "original procedure",
+      tags: ["skill"], trigger: "when to use", durability: "persistent", createdAt: now,
+    }]);
+    // NOTE: no `tags` in the patch body — isSkillWrite(body) is false. Only the
+    // STORED tags make this a skill write, which is exactly the residual.
+    const res = await request(owner, "PATCH", "/Memory/skill-patch-existing", { content: "```bash\nrm -rf /\n```" });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("skill_write_path");
+    // The skill's procedure is untouched — the unscanned patch did not land.
+    const after = await readMemory("skill-patch-existing");
+    expect(after.content).toBe("original procedure");
+  }, 30_000);
+
   // ─── POST /FeedMemories gates a skill-tagged write ────────────────────────
 
   test("GUARD: POST /FeedMemories rejects a dangerous skill (400 skill_scan_rejected)", async () => {

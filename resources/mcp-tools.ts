@@ -13,7 +13,7 @@
  * via one of these 14 semantic tools.
  *
  *   memory_search · memory_store · memory_update · memory_get · memory_delete ·
- *   memory_basement · memory_restore · skill_store ·
+ *   memory_basement · memory_restore · skill_store · skill_search · skill_get ·
  *   bootstrap · soul_set · soul_get · flair_workspace_set · flair_orgevent ·
  *   attention · record_usage
  *
@@ -57,6 +57,7 @@ import type { RecordTypeName } from "./record-types.js";
 import { resolveVersion } from "./version.js";
 import { agentContext, adminContext, collectionResource } from "./in-process.js";
 import { RECORD_USAGE_ID_MERGE_CONTRACT, unionUsageMemoryIds } from "./usage-ids.js";
+import { SKILL_TAG, isSkillWrite } from "./skill-write.js";
 
 type HandlerKey = "SemanticSearch" | "Memory" | "BootstrapMemories" | "Soul" | "WorkspaceState" | "OrgEvent" | "AttentionQuery" | "RecordUsage";
 const H: Partial<Record<HandlerKey, any>> = {};
@@ -337,6 +338,109 @@ async function skillStore(agent: ResolvedAgent, args: any) {
   if (typeof args?.description === "string" && args.description.length > 0) meta.description = args.description;
   if (Object.keys(meta).length > 0) body.metadata = JSON.stringify(meta);
   return stripInternalFields(await unwrap(await h.post(body)));
+}
+
+/**
+ * flair#1546 — the lightweight skill CATALOG card. skill_search is progressive
+ * disclosure: it returns "which skill applies", never the full procedure. A card
+ * carries ONLY id/name/trigger/description/tags/agentId — enough to choose a
+ * skill — and the caller then skill_get's the chosen id for the procedure.
+ *
+ * `name`/`description` are SKILL.md frontmatter with no dedicated Memory column;
+ * skill_store folds them into the opaque `metadata` JSON blob, so this parses
+ * them back out defensively (a corrupt/absent blob simply yields no name/desc).
+ * `content` (the procedure) and the raw embedding are DELIBERATELY absent — the
+ * skill_search contract forbids them on each card.
+ */
+function projectSkillCard(r: any): Record<string, unknown> {
+  let name: string | undefined;
+  let description: string | undefined;
+  if (typeof r?.metadata === "string" && r.metadata.length > 0) {
+    try {
+      const m = JSON.parse(r.metadata);
+      if (m && typeof m === "object") {
+        if (typeof m.name === "string") name = m.name;
+        if (typeof m.description === "string") description = m.description;
+      }
+    } catch { /* opaque/corrupt metadata → no name/description on the card */ }
+  }
+  return {
+    id: r?.id,
+    name,
+    trigger: r?.trigger,
+    description,
+    tags: r?.tags,
+    agentId: r?.agentId,
+  };
+}
+
+/**
+ * skill_search — recall skill-tagged Memories for a task (flair#1546 component 1).
+ *
+ * The core recall tool, and a THIN wrapper over the SAME SemanticSearch handler
+ * as memory_search — it re-implements NO retrieval or scoping logic. It rides:
+ *   - a tags-equals seek for the "skill" tag (only skill rows are candidates);
+ *   - the HNSW leg over the stored embedding — which for a skill row IS the
+ *     `trigger` embedding (#1543), so the task is ranked against "when to use";
+ *   - the 'query' inputType SemanticSearch already applies to the task string;
+ *   - resolveReadScope (own any-visibility + every non-private row) — NEVER
+ *     another agent's private skill.
+ * Identity is the RESOLVED agent; no body agentId is forwarded, so a caller can
+ * never widen scope past its own read-scope (the SemanticSearch cross-agent
+ * guard would 403 a mismatch anyway).
+ *
+ * The drawer / working-set scope named in the spec is Deliverable B and does
+ * NOT exist yet (see resources/MemoryArchive.ts / memory_restore's doc) — there
+ * is no working-set layer to compose with, so scope today is exactly
+ * resolveReadScope's open-within-org read. When drawers land, this rides
+ * whatever scope SemanticSearch resolves, for free.
+ */
+async function skillSearch(agent: ResolvedAgent, args: any) {
+  const Cls = await handler("SemanticSearch");
+  const h = new Cls(undefined, delegationContext(agent));
+  const res = await unwrap(await h.post({
+    q: args?.task,
+    tag: SKILL_TAG,
+    limit: args?.limit ?? 5,
+    // name/description live in the metadata blob; trigger is not in
+    // DEFAULT_SELECT — opt both into the projection so the card can carry them.
+    includeMetadata: true,
+    includeTrigger: true,
+  }));
+  // A guard/error Response unwraps to `{ error, status }` (no `results`) — pass
+  // it through untouched so the caller sees the structured refusal.
+  if (!res || typeof res !== "object" || !Array.isArray((res as any).results)) return res;
+  // Progressive disclosure: return the CATALOG (lightweight cards), never the
+  // full procedure. `_warning` / any other top-level keys pass through.
+  return { ...res, results: (res as any).results.map(projectSkillCard) };
+}
+
+/**
+ * skill_get — the full skill by id (flair#1546 component 2).
+ *
+ * A thin wrapper over Memory.get() — the SAME by-id read as memory_get, under
+ * the SAME read-scope gate (makeByIdReadGate → resolveReadScope): a non-owner
+ * cannot read another agent's PRIVATE skill (it 404s), exactly as a private
+ * memory does. skill_get is the disclosure step after skill_search's catalog:
+ * it returns the full procedure (`content`) + trigger + metadata.
+ *
+ * It is a SKILL tool, not a general reader: a readable id that is NOT a skill
+ * returns the same 404 as an unreadable id. Returning it would (a) make
+ * skill_get an alias for memory_get, and (b) reveal a readable non-skill
+ * memory's existence through a skill-shaped call; a uniform 404 does neither.
+ * The embedding fields are stripped by default, same as memory_get.
+ */
+async function skillGet(agent: ResolvedAgent, args: any) {
+  const Cls = await handler("Memory");
+  // flair#1181 — by-id reads use the STATIC `Cls.get(id, context)` form (see
+  // memoryGet for the full rationale). Read-scope is enforced inside Memory.get.
+  const result = await unwrap(await Cls.get(args?.id, delegationContext(agent)));
+  // A NOT_FOUND / unreadable id unwraps to `{ error, status }` — pass it through.
+  if (!result || typeof result !== "object" || (result as any).error != null) return result;
+  // Skill-only: a readable non-skill row is reported as not found rather than
+  // returned (see the doc above).
+  if (!isSkillWrite(result)) return { error: "skill not found", status: 404 };
+  return args?.includeEmbedding === true ? result : stripInternalFields(result);
 }
 
 /**
@@ -1152,6 +1256,72 @@ export const TOOLS: Record<string, ToolEntry> = {
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
       invariants: { fullyResolved: true },
       errorShape: { trigger: "a skill whose trigger/content fails SkillScan (high/critical risk)", fields: ["error", "status"], mustNotLeak: INTERNAL_MEMORY_FIELDS },
+    },
+  },
+  skill_search: {
+    def: {
+      name: "skill_search",
+      description:
+        "Find skills (reusable capabilities/procedures) that apply to a task. " +
+        "Ranks skill-tagged memories by their `trigger` ('when to use') against your task text. " +
+        "Returns a lightweight CATALOG — id, name, trigger, description, tags, agentId — NOT the full " +
+        "procedure (fetch that with skill_get). Scoped to your own + shared skills; another agent's " +
+        "private skill is never returned.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        type: "object",
+        properties: {
+          task: { type: "string", description: "The task/context to match skills against — natural language; ranked against each skill's trigger" },
+          limit: { type: "number", description: "Max skills to return (default 5)" },
+        },
+        required: ["task"],
+      },
+    },
+    impl: skillSearch,
+    contract: {
+      summary:
+        "{ results: SkillCard[] } — the skill catalog (lightweight id/name/trigger/description/tags/agentId, " +
+        "ranked by trigger match); the full procedure and the raw embedding are never on a card. Scoped to the " +
+        "caller's own + non-private skills; another agent's private skill is never returned.",
+      requiredFields: ["results"],
+      fieldTypes: { results: "array" },
+      invariants: {
+        selfDescribingEmpty: [{ path: "results", type: "array" }],
+        // Each card carries id, and NEVER the full procedure (`content`) or the
+        // raw embedding — the progressive-disclosure guarantee.
+        containerRules: [{ container: "results", requiredFields: ["id"], forbiddenFields: [...INTERNAL_MEMORY_FIELDS, "content"] }],
+        fullyResolved: true,
+      },
+    },
+  },
+  skill_get: {
+    def: {
+      name: "skill_get",
+      description:
+        "Retrieve a full skill by ID — the complete procedure (`content`) plus trigger and metadata. " +
+        "The disclosure step after skill_search's catalog. Read-scoped: you can only get your own or a " +
+        "shared skill, never another agent's private skill. A non-skill id returns not-found.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Skill (memory) ID" },
+          includeEmbedding: { type: "boolean", description: "Include the raw embedding vector (large, rarely useful). Default false." },
+        },
+        required: ["id"],
+      },
+    },
+    impl: skillGet,
+    contract: {
+      summary:
+        "The full skill record { id, agentId, content, trigger, tags, durability, metadata, createdAt, ... } for a " +
+        "skill readable under the caller's read-scope — embedding + embeddingModel stripped by default. A non-owner " +
+        "cannot read another agent's private skill, and a readable non-skill id is not found (both 404).",
+      requiredFields: ["id", "agentId", "content", "createdAt"],
+      fieldTypes: { id: "string", agentId: "string", content: "string" },
+      forbiddenFields: INTERNAL_MEMORY_FIELDS,
+      invariants: { fullyResolved: true },
+      errorShape: { trigger: "get a non-skill / unreadable / another agent's private id (404)", fields: ["error", "status"] },
     },
   },
   memory_update: {
