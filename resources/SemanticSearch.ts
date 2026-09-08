@@ -340,7 +340,6 @@ export class SemanticSearch extends Resource {
     // Overlay committed hit stats BEFORE noting this search's increment so
     // the response still shows the pre-hit count (same contract as the old
     // fire-and-forget Memory patch, which ran after the slice).
-    const ctx = (this as any).getContext?.();
     const topResults = await Promise.all(
       filteredResults.slice(0, limit).map((r: any) => applyHitStats(r, ctx)),
     );
