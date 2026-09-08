@@ -32,7 +32,7 @@ describe("flair upgrade wiring", () => {
     const origFetch = globalThis.fetch;
     globalThis.fetch = (async () =>
       new Response(JSON.stringify({ version: "0.99.0" }), { status: 200 })
-    ) as typeof fetch;
+    ) as unknown as typeof fetch;
 
     try {
       await program.parseAsync(["node", "flair", "upgrade", "--check"]);
