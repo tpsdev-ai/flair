@@ -8927,9 +8927,7 @@ rem
         console.error(`${render.icons.error} ${res.status} ${text}`);
         process.exit(1);
       }
-      const result = await res.json() as any[];
-
-      const candidates: any[] = Array.isArray(result) ? result : (result?.results ?? []);
+      const candidates = await res.json() as any[];
       const mode = render.resolveOutputMode(opts);
 
       if (mode === "json") {
