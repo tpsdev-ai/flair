@@ -15393,11 +15393,13 @@ export const QUALITY_RECALL_K = 5;
  * pulls embedding vectors inline — the defect in flair#1360 was an
  * unfiltered `GET /Memory?agentId=…` that returned every row's 768-d
  * vector (~66 MB × 2 per `--emit` run on a 3k-row store) just to sample
- * 10 memories. `type` is intentionally omitted: it is not a declared
- * Memory column (see schemas/memory.graphql); snapshot exclusion keys
- * off `subject` (`quality-snapshot/…`).
+ * 10 memories. `archived` is projected so the planner can drop basemented
+ * rows before sampling (flair#857 — SemanticSearch excludes them, so an
+ * archived row in the sample is a guaranteed miss). `type` is intentionally
+ * omitted: it is not a declared Memory column (see schemas/memory.graphql);
+ * snapshot exclusion keys off `subject` (`quality-snapshot/…`).
  */
-export const QUALITY_MEMORY_LIST_SELECT = ["id", "subject", "content", "createdAt"] as const;
+export const QUALITY_MEMORY_LIST_SELECT = ["id", "subject", "content", "createdAt", "archived"] as const;
 
 /**
  * Extra most-recent rows fetched beyond `sampleSize` so
@@ -15636,23 +15638,28 @@ function isQualitySnapshotRow(m: { subject?: string | null; type?: string | null
  * fail-closed health rules are testable without any I/O (flair#967).
  *
  * Order of operations, and why:
- *  1. drop the tool's own quality-snapshot rows (never grade your own
+ *  1. drop archived rows (SemanticSearch excludes them — flair#857 — so a
+ *     basemented row in the sample is a guaranteed miss, not a recall signal);
+ *  2. drop the tool's own quality-snapshot rows (never grade your own
  *     bookkeeping);
- *  2. take the `sampleSize` most-recently-written remaining rows (unchanged —
+ *  3. take the `sampleSize` most-recently-written remaining rows (unchanged —
  *     recency is still the sampling frame; see the issue's direction 3 for the
  *     stratified-sampling follow-up this deliberately does NOT take on);
- *  3. derive each cue via deriveRecallCue;
- *  4. judge the window: any duplicate cue, or any empty cue, makes it
+ *  4. derive each cue via deriveRecallCue;
+ *  5. judge the window: any duplicate cue, or any empty cue, makes it
  *     UNSCORABLE — reported as unhealthy, never silently scored.
  */
 export function planRecallSpotCheck(
-  memories: Array<{ id?: unknown; subject?: string | null; content?: string | null; createdAt?: string | null; type?: string | null }>,
+  memories: Array<{ id?: unknown; subject?: string | null; content?: string | null; createdAt?: string | null; type?: string | null; archived?: boolean | null }>,
   opts: { sampleSize?: number } = {},
 ): RecallSpotCheckPlan {
   const sampleSize = opts.sampleSize ?? QUALITY_RECALL_SAMPLE_SIZE;
   const rows = Array.isArray(memories) ? memories : [];
-  const scorable = rows.filter((m) => !isQualitySnapshotRow(m ?? {}));
-  const excludedSnapshotRows = rows.length - scorable.length;
+  // `archived !== true` matches SemanticSearch / AdminMemory: unset and
+  // false stay in the live pool; only an explicit basement is dropped.
+  const live = rows.filter((m) => m?.archived !== true);
+  const scorable = live.filter((m) => !isQualitySnapshotRow(m ?? {}));
+  const excludedSnapshotRows = live.length - scorable.length;
 
   const sorted = scorable.slice().sort((a: any, b: any) => {
     const ta = a?.createdAt ? new Date(a.createdAt).getTime() : 0;
@@ -16052,10 +16059,11 @@ export async function fetchRecallSpotCheckData(
   }
 
   // Deterministic sample + cue derivation + fail-closed health judgment, all
-  // pure (planRecallSpotCheck above). Snapshot rows are excluded there, so the
-  // "enough memories" check has to run on the PLANNED window, not on the raw
-  // row count — an instance whose recent writes are mostly the sweep's own
-  // bookkeeping should skip with a reason, not score a short window.
+  // pure (planRecallSpotCheck above). Archived rows (flair#857) and snapshot
+  // rows are excluded there, so the "enough memories" check has to run on the
+  // PLANNED window, not on the raw row count — an instance whose recent writes
+  // are mostly basemented or the sweep's own bookkeeping should skip with a
+  // reason, not score a short window.
   const plan = planRecallSpotCheck(all, { sampleSize });
   if (plan.sampled.length < sampleSize) {
     const excluded = plan.excludedSnapshotRows > 0 ? ` (${plan.excludedSnapshotRows} quality-snapshot row(s) excluded — the spot-check never grades its own bookkeeping)` : "";
