@@ -7,7 +7,7 @@ whether it is loaded. Check the loader configuration when extracting code.
 
 | Change | Start here | Shared contract |
 |---|---|---|
-| Soul authorship | `Soul.ts`, `soul-write-policy.ts` | Operator/internal source allowlist; learned-content backstop; raw writer inventory in `test/unit/soul-writer-coverage.test.ts` |
+| Soul authorship | `Soul.ts`, `soul-write-policy.ts` | Operator/internal source allowlist; generic learned-content backstop; dated `adk:` bridge in `soul-adk-guard.ts`; raw writer inventory in `test/unit/soul-writer-coverage.test.ts` |
 | Memory writes/lifecycle | `Memory.ts` | `memory-durability.ts`, `memory-visibility.ts`, `provenance.ts` |
 | Read access | `memory-read-scope.ts` | `resolveReadScope()` supplies both query condition and row predicate |
 | Authentication/ownership | `agent-auth.ts`, `auth-middleware.ts` | `record-owner-guard.ts`, `owner-field-guard.ts`, `record-types.ts` |

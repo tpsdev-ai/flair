@@ -343,6 +343,10 @@ claimed or missing provenance does not exempt them. Lookup failure aborts the
 write. This is an exact-match backstop, not semantic detection of paraphrases.
 Existing Soul records remain readable without a migration.
 
-The legacy `adk:` body-tag refusal remains a compatibility backstop. It can be
-removed after all deployed writers enforce this source policy and old instances
-have been upgraded; runtime denial itself never depends on connector names.
+The legacy `adk:` body-tag and stored-tag refusal remains a compatibility
+bridge until **2026-10-31** (`ADK_SOUL_REFUSE_KILL_DATE` in
+`resources/soul-adk-guard.ts`). Runtime denial itself never depends on
+connector names — Soul writes are deny-by-default, and Flair stamps
+`sourceClass` from the authenticated credential, not from a body field.
+Removal of the vendor-string bridge is #1540; do not grow a per-connector
+blacklist in Soul.
