@@ -3,6 +3,13 @@ import { cp, mkdtemp, rm, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import {
+  bm25LegServesTracked,
+  hnswLegServesTracked,
+  lexicalIndexServesCorpus,
+  trackedHitStatsCommitted,
+  trackedResultSet,
+} from "../helpers/search-index-ready";
 
 let harper: HarperInstance;
 let appDir: string;
@@ -23,7 +30,14 @@ beforeAll(async () => {
   const records = Array.from({ length: 1000 }, (_, i) => ({
     id: `metadata-${String(i).padStart(4, "0")}`, agentId: "metadata-reader",
     content: `${i < 5 ? "quokka" : "wombat"} checklist ${i} ` + "release rollback procedure deployment verification ".repeat(20),
-    embedding: [1, ...Array(767).fill(0)], embeddingModel: "nomic-embed-text-v1.5-Q4_K_M+searchprefix",
+    // Only the five lexical rows carry a vector. 1000 identical embeddings
+    // make HNSW a tie lottery; 995 wombat vectors in another direction trap
+    // ANN in that cluster so fused top-5 stays mixed after BM25 is ready
+    // (0000-0002 + 0311/0109/0684). BM25 still indexes all 1000 bodies.
+    ...(i < 5 ? {
+      embedding: [1, ...Array(767).fill(0)],
+      embeddingModel: "nomic-embed-text-v1.5-Q4_K_M+searchprefix",
+    } : {}),
     durability: "standard", visibility: "private", createdAt: "2026-01-01T00:00:00Z",
   }));
   const res = await fetch(harper.opsURL, { method: "POST", headers: { "Content-Type": "application/json", Authorization: auth() },
@@ -41,36 +55,84 @@ async function post(endpoint: string, body: unknown): Promise<any> {
   expect(response.status, `${endpoint}: ${await response.clone().text()}`).toBe(200);
   return response.json();
 }
-const search = () => post("SemanticSearch", { agentId: "metadata-reader", q: "quokka",
-  queryEmbedding: [1, ...Array(767).fill(0)], limit: 5 });
+const CORPUS = 1000;
+const TRACKED = Array.from({ length: 5 }, (_, i) => `metadata-${String(i).padStart(4, "0")}`);
+const QUERY_EMBEDDING = [1, ...Array(767).fill(0)];
+const search = (includeLegs = false) => post("SemanticSearch", { agentId: "metadata-reader", q: "quokka",
+  queryEmbedding: QUERY_EMBEDDING, limit: 5, ...(includeLegs ? { includeLegs: true } : {}) });
 const percentile = (values: number[], p: number) => values.slice().sort((a, b) => a - b)[Math.ceil(values.length * p) - 1];
+
+async function pollUntil(label: string, ready: () => Promise<boolean>): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (await ready()) return;
+    await Bun.sleep(20);
+  }
+  throw new Error(`${label} did not become ready`);
+}
+
+// #1565's warmup (`index.state === "ready" && counterTotal >= 5`) still
+// flaked: ready can land on a partial scan, the summed counter can come
+// from one id, and a shared leftover deadline can expire while hybrid
+// recall is still a partial set. Poll each readiness condition on its
+// own. Do not start measured arms on a partial set.
+async function waitUntilIndexServesWrittenRows() {
+  let last: any = {};
+  await pollUntil("Memory table corpus", async () => {
+    last = await post("Bm25MetadataProbe", { action: "tableCount" });
+    return (last.tableSize ?? 0) >= CORPUS;
+  });
+
+  await pollUntil(`BM25 index ready with size>=${CORPUS}`, async () => {
+    last = await post("Bm25MetadataProbe", {});
+    if (lexicalIndexServesCorpus(last.index, CORPUS)) return true;
+    if (last.index?.state === "ready" && (last.index.size ?? 0) < CORPUS) {
+      await post("Bm25MetadataProbe", { action: "rebuild", reason: "index smaller than written corpus" });
+    }
+    await search();
+    return false;
+  });
+
+  let served: string[] = [];
+  let legs: { bm25?: string[]; hnsw?: string[] } | undefined;
+  try {
+    await pollUntil("BM25 and HNSW legs serve the tracked quokka ids", async () => {
+      const result = await search(true);
+      served = (result.results ?? []).map((row: any) => row.id);
+      legs = result.legs;
+      last = await post("Bm25MetadataProbe", {});
+      return bm25LegServesTracked(legs, TRACKED)
+        && hnswLegServesTracked(legs, TRACKED)
+        && trackedResultSet(served, TRACKED);
+    });
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.message : error}: served=${JSON.stringify(served)} legs=${JSON.stringify(legs)} index=${JSON.stringify(last.index)}`);
+  }
+
+  last = await post("Bm25MetadataProbe", { action: "idle" });
+  if (!trackedHitStatsCommitted(last.trackedCounts, TRACKED.length)) {
+    await pollUntil("MemoryHitStat committed for every tracked id", async () => {
+      last = await post("Bm25MetadataProbe", { action: "idle" });
+      return trackedHitStatsCommitted(last.trackedCounts, TRACKED.length);
+    });
+  }
+  expect(bm25LegServesTracked(legs, TRACKED),
+    `BM25 leg must serve tracked ids, got ${JSON.stringify(legs)}`).toBe(true);
+  expect(served.slice().sort(), "warmup search must return the five tracked quokka ids").toEqual([...TRACKED]);
+  expect(trackedHitStatsCommitted(last.trackedCounts, TRACKED.length),
+    `warmup must commit hit stats for every tracked id, got ${JSON.stringify(last.trackedCounts)}`).toBe(true);
+  return last;
+}
 
 test("real search hit tracking preserves results while avoiding lexical replacements", async () => {
   const observations = [];
-  // CI saw counterTotal=3 after one search + 2s: hybrid recall is not yet
-  // the five quokka rows while BM25 is still building, so the probe's
-  // metadata-0000..0004 ledger only records a partial hit set. Wait until
-  // the index is ready, keep searching the tracked ids, and let the
-  // fire-and-forget MemoryHitStat puts commit. Do not start measured arms
-  // on a partial result set — that is the "preserves results" contract.
-  {
-    const deadline = Date.now() + 30_000;
-    let warmed = 0;
-    while (Date.now() < deadline) {
-      const status = await post("Bm25MetadataProbe", {});
-      warmed = status.counterTotal ?? 0;
-      if (status.index?.state === "ready" && warmed >= 5) break;
-      await search();
-      await Bun.sleep(50);
-    }
-    expect(warmed, "warmup search must commit hit stats before measured arms").toBeGreaterThanOrEqual(5);
-  }
+  await waitUntilIndexServesWrittenRows();
   for (const concurrency of [1, 8]) {
     for (const order of [[true, false], [false, true]]) {
       const arms = [];
       for (const legacy of order) {
         const started = await post("Bm25MetadataProbe", { action: "start", legacy });
-        expect(started.index.state).toBe("ready");
+        expect(lexicalIndexServesCorpus(started.index, CORPUS)).toBe(true);
         const latencies: number[] = [], selections: string[][] = [];
         try {
           for (let n = 0; n < 64; n += concurrency) {
@@ -81,18 +143,7 @@ test("real search hit tracking preserves results while avoiding lexical replacem
               selections.push(result.results.map((row: any) => row.id).sort());
             }));
           }
-          const deadline = Date.now() + 30_000;
-          let metrics = await post("Bm25MetadataProbe", {});
-          let stable = 0;
-          while (stable < 5 && Date.now() < deadline) {
-            await Bun.sleep(10);
-            const next = await post("Bm25MetadataProbe", {});
-            const countersDone = next.counterTotal - started.counterTotal === 320;
-            const statsQuiet = next.hitStatSuccessfulPuts === metrics.hitStatSuccessfulPuts;
-            stable = countersDone && statsQuiet ? stable + 1 : 0;
-            metrics = next;
-          }
-          expect(stable).toBe(5);
+          const metrics = await post("Bm25MetadataProbe", { action: "idle" });
           console.log("probe metrics", JSON.stringify(metrics));
           expect(metrics.writes).toBe(0);
           expect(metrics.successfulPuts + metrics.failedPuts).toBe(0);
