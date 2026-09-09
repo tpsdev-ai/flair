@@ -30,6 +30,33 @@ if [ ! -f "$ADMIN_PASS_FILE" ]; then
   exit 1
 fi
 
+if [ ! -r "$ADMIN_PASS_FILE" ]; then
+  echo "start-flair-with-admin-pass: admin-pass file not readable: $ADMIN_PASS_FILE" >&2
+  exit 1
+fi
+
+# Re-verify owner-only (0600) at READ time, not just at `flair init` write
+# time. A file that drifted to 0644 after init (umask change, backup tool,
+# tar restore) would leak the secret to any reader on the host. Mirrors
+# readSecretFileSecure (src/lib/auth-resolve.ts), which refuses any group/other
+# permission bit. `stat -f %Lp` is macOS (the launchd host); `stat -c %a` is
+# Linux (the unit-test host). The two syntaxes are mutually exclusive, so
+# branch on the OS rather than chaining with `||` — on Linux `stat -f %Lp`
+# prints filesystem info to stdout *and* exits non-zero, which would pollute
+# the captured mode. Fail CLOSED: an unreadable mode (empty) refuses rather
+# than proceeding on a guess.
+case "$(uname -s)" in
+  Darwin) MODE="$(stat -f %Lp "$ADMIN_PASS_FILE" 2>/dev/null)" ;;
+  *)      MODE="$(stat -c %a "$ADMIN_PASS_FILE" 2>/dev/null)" ;;
+esac
+case "$MODE" in
+  *00) : ;;
+  *)
+    echo "start-flair-with-admin-pass: admin-pass file permissions '${MODE:-unknown}' are too open (expected 600): $ADMIN_PASS_FILE" >&2
+    exit 1
+    ;;
+esac
+
 # Read the secret. Command substitution strips a trailing newline, which is
 # what `flair init` writes (base64url + "\n"); the value itself is preserved
 # verbatim by the double quotes.

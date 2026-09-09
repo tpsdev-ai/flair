@@ -221,4 +221,43 @@ describe("launcher script — non-interactive start", () => {
       execFileSync("sh", [LAUNCHER, empty, fakeNode, "/opt/flair/harper.js"], { stdio: "pipe" }),
     ).toThrow();
   });
+
+  test("refuses a 0644 admin-pass file (mode drift — the fail-open gap)", () => {
+    // The launcher must re-verify 0600 at READ time, not trust the init-time
+    // mode. A file that drifted to 0644 leaks the secret to any reader on the
+    // host; the launcher must refuse it rather than read it.
+    const fakeNode = join(tmp, "fake-node");
+    writeFileSync(fakeNode, "#!/bin/sh\nexit 0\n");
+    chmodSync(fakeNode, 0o755);
+    const drifted = join(tmp, "drifted");
+    writeFileSync(drifted, "PLACEHOLDER-password\n");
+    chmodSync(drifted, 0o644);
+    expect(() =>
+      execFileSync("sh", [LAUNCHER, drifted, fakeNode, "/opt/flair/harper.js"], { stdio: "pipe" }),
+    ).toThrow();
+  });
+
+  test("refuses a 0660 admin-pass file (group-readable)", () => {
+    const fakeNode = join(tmp, "fake-node");
+    writeFileSync(fakeNode, "#!/bin/sh\nexit 0\n");
+    chmodSync(fakeNode, 0o755);
+    const groupReadable = join(tmp, "group-readable");
+    writeFileSync(groupReadable, "PLACEHOLDER-password\n");
+    chmodSync(groupReadable, 0o660);
+    expect(() =>
+      execFileSync("sh", [LAUNCHER, groupReadable, fakeNode, "/opt/flair/harper.js"], { stdio: "pipe" }),
+    ).toThrow();
+  });
+
+  test("refuses a non-readable admin-pass file", () => {
+    const fakeNode = join(tmp, "fake-node");
+    writeFileSync(fakeNode, "#!/bin/sh\nexit 0\n");
+    chmodSync(fakeNode, 0o755);
+    const unreadable = join(tmp, "unreadable");
+    writeFileSync(unreadable, "PLACEHOLDER-password\n");
+    chmodSync(unreadable, 0o000);
+    expect(() =>
+      execFileSync("sh", [LAUNCHER, unreadable, fakeNode, "/opt/flair/harper.js"], { stdio: "pipe" }),
+    ).toThrow();
+  });
 });
