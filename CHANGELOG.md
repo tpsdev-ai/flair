@@ -18,6 +18,165 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.52.0] - 2026-09-09
+
+### Added
+
+- **API/schema reference.** New [`docs/api-reference.md`](docs/api-reference.md)
+  catalogs HTTP endpoints, auth per resource, and the Presence / Memory / Soul /
+  Agent / Federation schemas (plus the other `@table` types). The docs-freshness
+  gate now fails if a GraphQL table is missing from that catalog, so it cannot
+  rot the way #617 found.
+
+- **Asset blob table.** Agents can store owner-scoped image bytes (screenshots)
+  on the hub as Harper Blobs, linked to a Memory. Writes reject decoded
+  payloads over 10 MiB, non-image MIME types (XML/SVG subtypes included), and
+  unsized non-string `data` (no fail-open). No MCP or federation surface in
+  this slice.
+
+  Orphan blobs are retained until the owning agent deletes the Asset row;
+  deleting the parent Memory does not sweep them. Slice 2's serving tool
+  returns 404 for dangling memoryIds; the GC sweep lands with that slice.
+  `updatedAt` is stamped so that sweep can key on recency. `memoryId`
+  exist-and-owned validation is deferred (unvalidated string this slice).
+
+- Flair Relay S1: a signed, principal-addressed `Message` primitive beside memory — a durable per-recipient inbox, explicit consume/ack, a **visible** dead-letter (the sender sees its failures, unlike a silent expiry), synchronous over-cap rejection with per-sender sub-caps, per-sender `seq` ordering (monotonic per `(from, threadId)`, enforced on send), ed25519 envelope signatures with a `contentHash` retry-dedup, reply linkage (`inReplyTo`/`parentContentHash`, signed), and server-resolved `orgScope`. Collection reads are party-scoped (`from`/`to` === caller) — no verified agent can read another principal's messages — and a de-elevated `flair_agent` can send and ack without admin rights; the cap-counter and inbox/dead-letter/sweep use indexed queries, not full-table scans. Point-to-point, single host; cross-host delivery and the A2A task lifecycle are later slices.
+
+- **`flair memory search --admin-pass <pass>`** — search another agent's memories as admin
+  while `--agent` names whose memories to read. Callers that used to rely on the
+  ambient `FLAIR_ADMIN_PASS` substituting for a keyless `--agent` now say so
+  explicitly (`memory add` already had the flag).
+
+- **Skills recall slice (flair#1546, follow-up to the #1542 write half)** — the read half of skills-as-memory. Two new MCP tools: `skill_search` takes a task string and returns a lightweight CATALOG of matching `skill`-tagged memories (id/name/trigger/description/tags/agentId — never the full procedure), riding the existing SemanticSearch (a `skill` tag-seek + HNSW over the trigger embedding + the `query` inputType) under the normal read-scope (own + non-private; another agent's private skill is never returned); `skill_get` returns the full skill by id under the same read-scope (a non-owner cannot read another agent's private skill, and a non-skill id is reported not found). Also folds two #1543 review follow-ups into the write path: a `PATCH /Memory` on a row whose STORED tags already include `skill` is now reject-or-gated (previously the patch check saw only the request body, so a skill's procedure could be rewritten unscanned), and the skill-vs-skill lexical dedup leg now compares trigger-vs-trigger instead of trigger-vs-content.
+
+- **Skills write slice (flair#1542, components 1–3)** — a skill is a Memory tagged `skill` (reuse the substrate, no new table). This slice ships the write half: an additive nullable `trigger` column on Memory (skill-tagged rows embed from `trigger` — the "when to use" recall signal — not `content`; non-skill rows are byte-identical to before), a `skill_store` MCP tool that writes a `skill`-tagged Memory (mapping `trigger`→column, `content`→procedure, `name`/`description`→metadata), and a SkillScan gate on **every** skill-tagged write **before** the embed (fail-closed on high/critical risk, allow-with-flag on medium, reusing the existing `resources/SkillScan.ts` scanner). Skills are forced `durability=persistent` (an explicit `ephemeral`/`session` is rejected). A coverage-gate test (`memory-skill-writer-coverage.test.ts`) enumerates every raw Memory write site and fails the build on any unclassified skill-writer. Skill recall (`skill_search`/`skill_get`) is a follow-up slice.
+
+- **`flair upgrade` can upgrade a plain extracted package tree in place.** Hosts
+  that run `npm pack` + `npm install --omit=dev` under systemd (no git checkout,
+  no npm-global install) now have a lane: fetch the published tarball, swap the
+  tree, keep operator launchers that are not in the pack, and restart the
+  systemd unit that points at the tree. `flair upgrade --tree <dir>` selects
+  the tree explicitly; `--flair-version` pins the tarball. The npm-global and
+  Fabric `--target` lanes are unchanged. (flair#1109)
+
+### Changed
+
+- Search hit-tracking updates no longer rebuild lexical postings when the exact memory body and all indexed scope/temporal fields are unchanged. Relevant edits still rebuild the index entry. A bounded cache retains exact bodies for comparison (up to 1,024 records and 512 Ki UTF-16 code units); misses use the existing rebuild path. Storage writes and retrieval-counter behavior are unchanged.
+
+- Bootstrap uses the indexed event lookback window and a field projection, avoiding reads of older event history while preserving event targeting, deduplication and token-budget admission.
+
+- Bootstrap first checks recent workspace history for caller entities, falling back to older history when needed to preserve collision context.
+
+- **`--agent <id>` now signs as that agent before `FLAIR_ADMIN_PASS`.** A
+  flag-pinned agent authenticates with its own Ed25519 key instead of falling
+  back to the environment admin credential. A flag-pinned agent with no key on
+  disk is now a hard error naming the agent and the expected key path — the CLI
+  no longer silently signs as the admin. Env-pinned agents (`FLAIR_AGENT_ID`)
+  are unchanged and still use `FLAIR_ADMIN_PASS` when it is set.
+
+- **Search hit-tracking no longer rewrites Memory rows.** Each returned hit
+  increments a dedicated `MemoryHitStat` row instead of `patchRecord`-ing the
+  full memory (embeddings included). Concurrent searches coalesce per id so
+  overlapping hits add instead of losing increments. `GET /Memory/{id}` and
+  Memory search still return `retrievalCount` and `lastRetrieved`.
+
+- Memory promotion verdicts and reviewer metadata are protected on direct writes, including POST /FeedMemories (the raw-table ingest path). A content-changing PUT or PATCH cannot keep an echoed or omitted approval stamp — the verdict is bound to the reviewed text. Manual REM memory promotion now uses a server workflow; automatic promotion retains its safety and lineage checks. Update the server before using the new CLI promotion path.
+
+- Harden owner-field immutability on principal-owning resources: the column that identifies a record's owning principal is now immutable to non-admin callers on both PUT and PATCH, enforced by a single shared resource-layer guard.
+
+- Owners can explicitly delete their own permanent memories, matching their control over durability. Cross-owner deletion remains restricted to administrators across REST and MCP.
+
+- **GitHub release notes now render a lede and links, not the full CHANGELOG.**
+  The auto-cut GitHub release keeps each entry's bold lede, up to three issue
+  links, and any `> **Heads-up:**` operator lines, then links the deep
+  `CHANGELOG.md` at the tag. The record itself is unchanged in depth.
+
+  > **Heads-up:** operator-critical detail that lives only in an entry body will
+  > not appear on the release page. Put it in a `> **Heads-up:**` line. The
+  > v0.49.0 credential note — *before this fix, `revoked` was not terminal* —
+  > is why the convention exists (flair#1392).
+
+- Contributor, CI and release unit tests use the same `bun run test:unit` command, including isolated files and TypeScript package tests. `bun run test:unit --list` shows the test inventory without executing it; bare `bun test` remains a focused-test command rather than the full validation lane.
+
+### Fixed
+
+- Bootstrap reserves 30% of its content budget for task-relevant recall when `currentTask` is supplied, so pinned memories cannot consume every recall slot. Unused space returns to pinned memories; calls without a task retain their existing admission policy. `taskRetrievalHint` explains skipped or empty task retrieval.
+
+- **cursor-flair install docs no longer send readers to the Cursor Marketplace.** The plugin is not listed there. Public install is [cursor.directory/plugins/flair](https://cursor.directory/plugins/flair); local/dev is `cp -R packages/cursor-flair ~/.cursor/plugins/local/flair` (flair#1421).
+
+- **Docs now name the correct Claude Code MCP config path everywhere.** `docs/integrations.md` claimed Claude Code's MCP server lived at `~/.config/claude-code/config.toml` in TOML form; it actually lives in `~/.claude.json` — the file `claude mcp add`, `flair init`, and `flair doctor` all read and write. Aligned the doc to that one truth (flair#1117, re-find of flair#828).
+
+- **`flair doctor` no longer counts un-opted-in clients as install failures.** A client merely detected on the machine (e.g. Codex on PATH after `flair init --client claude-code`) was reported as `✗` and inflated the "issues found" count for MCP-block and SessionStart-hook checks it was never wired for. Doctor now penalizes only clients the user actually wired; a detected-but-unwired optional client is reported as info. The dead `pi` namespace is removed from doctor's checks entirely (flair#989).
+
+- **Query-time vector-space uniformity guard.** Recall and write-time dedup now
+  refuse to cosine a query against stored vectors when the corpus is not uniform
+  in the current embedding space (a mixed-space corpus during any re-embed or
+  model change). Previously such a corpus served silently-wrong results — Harper
+  zero-pads a mismatched-dimension vector and returns a garbage score instead of
+  throwing, and health only warned. The recall embedding leg now degrades to
+  keyword-only with a structured warning naming both spaces and the `flair
+  reembed` remedy; the write-time dedup leg no-ops (never suppressing a write).
+  Embedding stamps are now engine-qualified (`gguf:<model>`); today's bare-name
+  corpus is treated as the same space, so no re-embed is triggered and the
+  default path is unchanged. A memory synced in from a federation peer on a
+  different engine/model also trips the guard, so a mixed-space sync degrades
+  recall to keyword-only rather than serving garbage.
+
+- **`flair keys prune` reports an unparseable `.key` as `unidentified` and leaves it alone.**
+  Classification already refused to archive a file it cannot parse (a keystore blob in
+  `~/.flair/keys/` is a live federation key, not junk — flair#1026). The command output
+  still treated an unidentified-only directory as empty ("No key files found") and never
+  printed the file. Unparseable keys are now listed as `unidentified`, counted separately
+  from prunable `stale`/`invalid`, and stay on disk under `--apply`.
+
+- **`flair quality` recall spot-check no longer samples archived memories.** SemanticSearch already excludes basemented rows, so an archived row in the recency sample was a guaranteed miss and reported a false recall collapse after any archival sweep (flair#857). A short window after a basement sweep now names the archived exclusion count and the restore remedy instead of looking like a tiny live corpus.
+
+- `flair rem candidates` now lists staged candidates through the ops-API `search_by_conditions` convention (admin-authed POST to the ops port) instead of the app-REST `/MemoryCandidate/search_by_conditions` path Harper routes to `post()` — which returned a live 405. The nightly runner's pending-candidate count uses the same ops-API shape when admin credentials are available, and degrades to 0 otherwise.
+
+- Nightly dedup statistics now include live memories with false or unset archive flags, and yield between chunks of vector searches so other HTTP requests can run during the sweep.
+
+- **Nightly REM distillation no longer processes an unbounded backlog in one run.** `flair rem nightly run-once` (and the scheduler) refuse to start if `GET /Health` cannot be served within 2s, distill at most 50 memories per cycle oldest-unreflected first (`FLAIR_REM_MAX_MEMORIES`, hard cap 200), and yield during the gather so `/Health` and reads keep serving. Already-reflected rows fill leftover slots only when fewer than N unreflected matches remain. `flair rem pause` / `flair rem abort` stop an in-flight gather on the same host without restarting Harper. Idle ADK agents skip the agentId-wide `scope:"all"` fallback (no cross-user bleed). `lastReflected` is stamped only after a successful execute generate. An abort 503 stops the rest of that cycle (no dedup / auto-promote). A multi-thousand-memory backlog drains across nights instead of pegging the Harper main thread (#1515).
+
+- Clarify that default search percentages report similarity with a keyword-match boost, not normalized ranks or answer probabilities.
+
+- **`flair upgrade` now re-pins the SessionStart hook alongside the MCP client configs.** It refreshed each wired client's `@tpsdev-ai/flair-mcp@<version>` pin but left the SessionStart hook command on the old one, so an upgraded user kept launching the previous adapter on every session. `flair doctor` now also flags a hook whose pin differs from its MCP client pin (previously it reported the hook "still runs" without noticing the skew) and `flair doctor --fix` re-pins it (flair#1516).
+
+- **`flair upgrade` warns when the running exec path is not the npm-global install.** A leftover `npm install -g` used to be listed as "the" install while a plain extracted tree (npm pack + systemd) kept serving traffic with no upgrade lane. The listing still covers npm-global packages only; the warning now names both paths (and versions when readable) so that mismatch is explicit. A failed `npm prefix -g` stays silent (unknown), rather than claiming the global package is missing (flair#1109).
+
+### Security
+
+- **Soul writes refuse ADK-sourced claims.** `PUT`/`POST`/`PATCH` `/Soul` returns 403 when the body carries an `adk:` scope tag (case-insensitive) or the value matches a stored MemoryCandidate/Memory already tagged `adk:`. Soul is agentId-scoped and cannot carry a per-user tag — promoting an ADK user's claim there would leak across users. `flair rem promote --to soul` still refuses ADK-sourced candidates in the CLI; the server is now the lock.
+
+- **The audit gate now audits the npm-installed tarball, not just the bun lockfile.**
+  `bun audit` only sees the lockfile, so advisories harper's `npm-shrinkwrap`
+  pins (fastify, fast-uri, brace-expansion, find-my-way, picomatch) were
+  invisible to the gate. The required Dependency Audit job now packs and npm-installs the
+  build into a temporary prefix and runs a second
+  `npm audit --omit=dev` observation, and the gate reports those advisories as
+  `FIXED-FOR-BUN-ONLY` — fixed for bun installs, still present under npm until
+  harper ships a shrinkwrap resolving them. The allowlist now records which
+  source each advisory is observed in, and `release.sh` refuses to cut when a
+  changelog fragment claims one of these as fully "fixed".
+
+- **Dependency security bumps.** `js-yaml` is bumped to 4.3.2, closing a HIGH
+  advisory (GHSA-2883-xcg3-v3hh — `maxTotalMergeKeys` did not count empty merge
+  sources, so a crafted YAML document could burn CPU past the configured limit).
+  `hono` is bumped to 4.13.5+ (resolving 4.13.7), closing three MODERATE
+  advisories: an incomplete `toSSG()` path-traversal fix, unbounded dot-notation
+  nesting in `parseBody()`, and query-parameter parsing after the URL fragment.
+  Both are forced via package.json overrides so bun and npm installs resolve the
+  patched versions.
+
+- **Soul `adk:` refuse is a dated bridge, not the authorization rule.** Soul
+  writes stay deny-by-default (operator Basic or deliberate internal calls);
+  Flair derives `sourceClass` from the credential. The vendor-tag guard remains
+  through **2026-10-31** and is scheduled for removal in #1540 once classified
+  writers are deployed. New connectors need no Soul-side branch.
+
+- Soul mutations now require operator credentials or deliberate internal calls; agent keys and MCP/OAuth runtimes are denied, including admin agents. Operator edits and provisioning reject text matching stored memories or candidates and stamp their authenticated source. Use `flair soul set --admin-pass-file` for operator edits. `flair rem restore --apply` rewrites Soul through operator Basic (`--admin-pass` / `--admin-pass-file`), deletes leftover MemoryCandidate rows for the agent, and PUTs souls before memories so snapshot identity is not refused as learned content. Dry-run reports the candidate deletions the apply path will perform.
+
+  **Client-library break:** `@tpsdev-ai/flair-client` `soul.set()` still signs with Ed25519 and now receives 403. Write Soul through the CLI (`--admin-pass` / `--admin-pass-file`) or operator REST (Harper administrator Basic).
+
 ## [0.51.2] - 2026-09-03
 
 ### Changed

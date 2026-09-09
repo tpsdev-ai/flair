@@ -1,1 +1,0 @@
-- **cursor-flair install docs no longer send readers to the Cursor Marketplace.** The plugin is not listed there. Public install is [cursor.directory/plugins/flair](https://cursor.directory/plugins/flair); local/dev is `cp -R packages/cursor-flair ~/.cursor/plugins/local/flair` (flair#1421).
