@@ -3,6 +3,11 @@ import { cp, mkdtemp, rm, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import {
+  lexicalIndexServesCorpus,
+  trackedHitStatsCommitted,
+  trackedResultSet,
+} from "../helpers/search-index-ready";
 
 let harper: HarperInstance;
 let appDir: string;
@@ -41,36 +46,66 @@ async function post(endpoint: string, body: unknown): Promise<any> {
   expect(response.status, `${endpoint}: ${await response.clone().text()}`).toBe(200);
   return response.json();
 }
+const CORPUS = 1000;
+const TRACKED = Array.from({ length: 5 }, (_, i) => `metadata-${String(i).padStart(4, "0")}`);
 const search = () => post("SemanticSearch", { agentId: "metadata-reader", q: "quokka",
   queryEmbedding: [1, ...Array(767).fill(0)], limit: 5 });
 const percentile = (values: number[], p: number) => values.slice().sort((a, b) => a - b)[Math.ceil(values.length * p) - 1];
 
+// #1565's warmup (`index.state === "ready" && counterTotal >= 5`) still
+// flaked: ready can land on a partial scan, and the summed counter can
+// come from one id. Wait until the index actually holds the written
+// corpus, hybrid recall is the five quokka rows, and MemoryHitStat has
+// committed those ids. Do not start measured arms on a partial set.
+async function waitUntilIndexServesWrittenRows() {
+  const deadline = Date.now() + 30_000;
+  let last: any = {};
+  while (Date.now() < deadline) {
+    last = await post("Bm25MetadataProbe", { action: "tableCount" });
+    if ((last.tableSize ?? 0) >= CORPUS) break;
+    await Bun.sleep(20);
+  }
+  expect(last.tableSize, "Memory table must expose the written corpus before index build")
+    .toBeGreaterThanOrEqual(CORPUS);
+
+  while (Date.now() < deadline) {
+    last = await post("Bm25MetadataProbe", {});
+    if (lexicalIndexServesCorpus(last.index, CORPUS)) break;
+    if (last.index?.state === "ready" && (last.index.size ?? 0) < CORPUS) {
+      await post("Bm25MetadataProbe", { action: "rebuild", reason: "index smaller than written corpus" });
+    }
+    await search();
+    await Bun.sleep(20);
+  }
+  expect(lexicalIndexServesCorpus(last.index, CORPUS),
+    `index must be ready with size>=${CORPUS}, got ${JSON.stringify(last.index)}`).toBe(true);
+
+  let served: string[] = [];
+  while (Date.now() < deadline) {
+    const result = await search();
+    served = (result.results ?? []).map((row: any) => row.id);
+    if (!trackedResultSet(served, TRACKED)) {
+      await Bun.sleep(20);
+      continue;
+    }
+    last = await post("Bm25MetadataProbe", { action: "idle" });
+    if (trackedHitStatsCommitted(last.trackedCounts, TRACKED.length)) return last;
+  }
+  expect(served.slice().sort(), "warmup search must return the five tracked quokka ids").toEqual([...TRACKED]);
+  expect(trackedHitStatsCommitted(last.trackedCounts, TRACKED.length),
+    `warmup must commit hit stats for every tracked id, got ${JSON.stringify(last.trackedCounts)}`).toBe(true);
+  return last;
+}
+
 test("real search hit tracking preserves results while avoiding lexical replacements", async () => {
   const observations = [];
-  // CI saw counterTotal=3 after one search + 2s: hybrid recall is not yet
-  // the five quokka rows while BM25 is still building, so the probe's
-  // metadata-0000..0004 ledger only records a partial hit set. Wait until
-  // the index is ready, keep searching the tracked ids, and let the
-  // fire-and-forget MemoryHitStat puts commit. Do not start measured arms
-  // on a partial result set — that is the "preserves results" contract.
-  {
-    const deadline = Date.now() + 30_000;
-    let warmed = 0;
-    while (Date.now() < deadline) {
-      const status = await post("Bm25MetadataProbe", {});
-      warmed = status.counterTotal ?? 0;
-      if (status.index?.state === "ready" && warmed >= 5) break;
-      await search();
-      await Bun.sleep(50);
-    }
-    expect(warmed, "warmup search must commit hit stats before measured arms").toBeGreaterThanOrEqual(5);
-  }
+  await waitUntilIndexServesWrittenRows();
   for (const concurrency of [1, 8]) {
     for (const order of [[true, false], [false, true]]) {
       const arms = [];
       for (const legacy of order) {
         const started = await post("Bm25MetadataProbe", { action: "start", legacy });
-        expect(started.index.state).toBe("ready");
+        expect(lexicalIndexServesCorpus(started.index, CORPUS)).toBe(true);
         const latencies: number[] = [], selections: string[][] = [];
         try {
           for (let n = 0; n < 64; n += concurrency) {
@@ -81,18 +116,7 @@ test("real search hit tracking preserves results while avoiding lexical replacem
               selections.push(result.results.map((row: any) => row.id).sort());
             }));
           }
-          const deadline = Date.now() + 30_000;
-          let metrics = await post("Bm25MetadataProbe", {});
-          let stable = 0;
-          while (stable < 5 && Date.now() < deadline) {
-            await Bun.sleep(10);
-            const next = await post("Bm25MetadataProbe", {});
-            const countersDone = next.counterTotal - started.counterTotal === 320;
-            const statsQuiet = next.hitStatSuccessfulPuts === metrics.hitStatSuccessfulPuts;
-            stable = countersDone && statsQuiet ? stable + 1 : 0;
-            metrics = next;
-          }
-          expect(stable).toBe(5);
+          const metrics = await post("Bm25MetadataProbe", { action: "idle" });
           console.log("probe metrics", JSON.stringify(metrics));
           expect(metrics.writes).toBe(0);
           expect(metrics.successfulPuts + metrics.failedPuts).toBe(0);

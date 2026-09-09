@@ -2,11 +2,26 @@
 import { Resource, databases } from "harper";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { Bm25Index } from "./bm25-index.js";
-import { bm25IndexStatus } from "./bm25-index-service.js";
+import { bm25IndexStatus, markBm25IndexStale } from "./bm25-index-service.js";
+import { liveHitTracker } from "./hit-tracking.js";
 let active;
+const TRACKED = 5;
+async function trackedLedger() {
+  const trackedCounts = [];
+  let counterTotal = 0;
+  for (let i = 0; i < TRACKED; i++) {
+    const id = `metadata-${String(i).padStart(4, "0")}`;
+    const stat = await databases.flair.MemoryHitStat.get(id).catch(() => null);
+    const row = await databases.flair.Memory.get(id);
+    const count = stat?.retrievalCount ?? row?.retrievalCount ?? 0;
+    trackedCounts.push(count);
+    counterTotal += count;
+  }
+  return { trackedCounts, counterTotal };
+}
 export class Bm25MetadataProbe extends Resource {
   allowCreate() { return true; }
-  async post({ action = "status", legacy = false }) {
+  async post({ action = "status", legacy = false, reason = "test rebuild" }) {
     if (action === "start") {
       if (active) throw new Error("probe already active");
       const table = databases.flair.Memory;
@@ -51,14 +66,16 @@ export class Bm25MetadataProbe extends Resource {
         Bm25Index.prototype.remove = originalRemove;
       } };
     }
-    let counterTotal = 0;
-    for (let i = 0; i < 5; i++) {
-      const id = `metadata-${String(i).padStart(4, "0")}`;
-      const stat = await databases.flair.MemoryHitStat.get(id).catch(() => null);
-      const row = await databases.flair.Memory.get(id);
-      counterTotal += stat?.retrievalCount ?? row?.retrievalCount ?? 0;
+    if (action === "idle") await liveHitTracker().whenIdle();
+    if (action === "rebuild") markBm25IndexStale(reason);
+    let tableSize;
+    if (action === "tableCount") {
+      tableSize = 0;
+      for await (const _ of databases.flair.Memory.search({ select: ["id"] })) tableSize++;
     }
-    const result = { ...active?.metrics, counterTotal, eventLoopP99Ms: active ? active.delay.percentile(99) / 1e6 : null,
+    const ledger = await trackedLedger();
+    const result = { ...active?.metrics, ...ledger, ...(tableSize != null ? { tableSize } : {}),
+      eventLoopP99Ms: active ? active.delay.percentile(99) / 1e6 : null,
       index: bm25IndexStatus() };
     if (action === "stop" && active) { active.restore(); active = null; }
     return result;
