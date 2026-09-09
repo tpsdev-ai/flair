@@ -65,6 +65,11 @@ function asRow(value: HitStatRow | null | undefined, id: string): HitStatRow | n
   };
 }
 
+type StatRead =
+  | { kind: "hit"; row: HitStatRow }
+  | { kind: "miss" }
+  | { kind: "error" };
+
 export class HitTracker {
   private readonly pending = new Map<string, Pending>();
   private readonly tails = new Map<string, Promise<void>>();
@@ -107,9 +112,10 @@ export class HitTracker {
   async statFor(id: string, ctx?: unknown): Promise<HitStatRow | null> {
     const cached = this.cache.get(id);
     if (cached) return cached;
-    const row = asRow(await this.readStat(id, ctx), id);
-    if (row) this.cache.set(id, row);
-    return row;
+    const read = await this.readStat(id, ctx);
+    if (read.kind !== "hit") return null;
+    this.cache.set(id, read.row);
+    return read.row;
   }
 
   async whenIdle(): Promise<void> {
@@ -143,8 +149,15 @@ export class HitTracker {
     if (!taken || taken.delta <= 0) return;
     this.pending.delete(id);
 
-    const existing = asRow(await this.readStat(id, ctx), id);
-    let base = existing?.retrievalCount;
+    const read = await this.readStat(id, ctx);
+    // A get error is not a miss. Memory.retrievalCount is frozen once
+    // increments moved off the Memory row — seeding from it and putting
+    // would overwrite the unread committed HitStat count (Bugbot on #1565).
+    if (read.kind === "error") {
+      this.requeue(id, taken);
+      return;
+    }
+    let base = read.kind === "hit" ? read.row.retrievalCount : null;
     if (base == null) {
       const memory = await withDetachedTxn(ctx, () => this.tables.memory.get(id)).catch(() => null);
       base = memory?.retrievalCount ?? 0;
@@ -161,18 +174,28 @@ export class HitTracker {
       this.cache.set(id, row);
     } catch {
       this.metricsState.failedPuts += 1;
-      const again = this.pending.get(id);
-      if (again) {
-        again.delta += taken.delta;
-        if (taken.lastRetrieved > (again.lastRetrieved ?? "")) again.lastRetrieved = taken.lastRetrieved;
-      } else {
-        this.pending.set(id, taken);
-      }
+      this.requeue(id, taken);
     }
   }
 
-  private readStat(id: string, ctx?: unknown): Promise<HitStatRow | null | undefined> {
-    return withDetachedTxn(ctx, () => this.tables.stats.get(id)).catch(() => null);
+  private requeue(id: string, taken: Pending): void {
+    const again = this.pending.get(id);
+    if (again) {
+      again.delta += taken.delta;
+      if (taken.lastRetrieved > (again.lastRetrieved ?? "")) again.lastRetrieved = taken.lastRetrieved;
+    } else {
+      this.pending.set(id, taken);
+    }
+  }
+
+  private async readStat(id: string, ctx?: unknown): Promise<StatRead> {
+    try {
+      const raw = await withDetachedTxn(ctx, () => this.tables.stats.get(id));
+      const row = asRow(raw, id);
+      return row ? { kind: "hit", row } : { kind: "miss" };
+    } catch {
+      return { kind: "error" };
+    }
   }
 }
 

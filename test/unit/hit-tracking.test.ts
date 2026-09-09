@@ -142,6 +142,60 @@ describe("HitTracker — coalesced counters", () => {
     expect(await tracker.apply({ id: "m1", retrievalCount: 0 })).toEqual({ id: "m1", retrievalCount: 0 });
   });
 
+  test("a failed HitStat get does not seed from frozen Memory or overwrite the committed count", async () => {
+    const stats = new Map<string, HitStatRow>([
+      ["m1", { id: "m1", retrievalCount: 50, lastRetrieved: "2026-09-01T00:00:00.000Z" }],
+    ]);
+    let failGet = true;
+    let puts = 0;
+    const tracker = new HitTracker({
+      stats: {
+        get: async (id) => {
+          if (failGet) { failGet = false; throw new Error("unavailable"); }
+          return stats.get(id) ?? null;
+        },
+        put: async (row) => { puts += 1; stats.set(row.id, { ...row }); },
+      },
+      memory: { get: async () => ({ retrievalCount: 0 }) },
+    });
+    tracker.noteHits(["m1"], "2026-09-08T00:00:00.000Z");
+    await tracker.whenIdle();
+    expect(stats.get("m1")?.retrievalCount).toBe(51);
+    expect(puts).toBe(1);
+  });
+
+  test("a HitStat get that keeps failing never puts a Memory-seeded count over the committed row", async () => {
+    const stats = new Map<string, HitStatRow>([
+      ["m1", { id: "m1", retrievalCount: 50, lastRetrieved: "2026-09-01T00:00:00.000Z" }],
+    ]);
+    let puts = 0;
+    const tracker = new HitTracker({
+      stats: {
+        get: async () => { throw new Error("unavailable"); },
+        put: async (row) => { puts += 1; stats.set(row.id, { ...row }); },
+      },
+      memory: { get: async () => ({ retrievalCount: 0 }) },
+    });
+    tracker.noteHits(["m1"], "2026-09-08T00:00:00.000Z");
+    await tracker.whenIdle();
+    expect(stats.get("m1")?.retrievalCount).toBe(50);
+    expect(puts).toBe(0);
+    expect(tracker.metrics.successfulPuts).toBe(0);
+    expect(tracker.metrics.writes).toBe(0);
+  });
+
+  test("apply does not treat a HitStat get error as a miss overlay", async () => {
+    const tracker = new HitTracker({
+      stats: { get: async () => { throw new Error("unavailable"); }, put: async () => {} },
+      memory: { get: async () => ({ retrievalCount: 0 }) },
+    });
+    expect(await tracker.apply({ id: "m1", retrievalCount: 7, lastRetrieved: "keep" })).toEqual({
+      id: "m1",
+      retrievalCount: 7,
+      lastRetrieved: "keep",
+    });
+  });
+
   test("empty ids are ignored", async () => {
     const store = maps();
     const tracker = new HitTracker(store.tables);
