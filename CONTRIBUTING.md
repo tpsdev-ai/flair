@@ -82,7 +82,10 @@ Before opening a PR:
   `### Category` heading. One file per change means two PRs never conflict on the changelog —
   `scripts/release.sh` assembles them into `CHANGELOG.md` at the version cut. Conventions and
   a preview command: [`.changelog/unreleased/README.md`](.changelog/unreleased/README.md).
-  Don't edit `## [Unreleased]` in `CHANGELOG.md` by hand; the release step overwrites it.
+  The bold lede is ≤ 25 words and one sentence (the GitHub release page keeps that
+  lede, not the body). Put operator-critical detail in a `> **Heads-up:**` line so
+  it survives summarising. Don't edit `## [Unreleased]` in `CHANGELOG.md` by hand;
+  the release step overwrites it.
 - Reference a bead or issue in the PR body when one exists.
 
 ## What to avoid

@@ -154,6 +154,57 @@ export function validateFragmentBody(relPath, body) {
   }
 }
 
+// ─── Lede length (flair#1392) ────────────────────────────────────────────────
+//
+// GitHub release notes keep only the bold lede + issue links + Heads-up lines.
+// A 105-word lede is not a lede — it IS the entry. The renderer will not invent
+// a summary, so the source must be short: ≤ 25 words, one sentence. Detail
+// belongs in the body (and operator-critical detail in a `> **Heads-up:**`
+// line). Historical CHANGELOG.md is not rewritten; this rule is fragments only.
+
+export const LEDE_WORD_LIMIT = 25;
+
+/** First `**...**` after the list marker. Null when the fragment has no bold run. */
+export function extractFragmentLede(body) {
+  const m = String(body).match(/^- \*\*([\s\S]*?)\*\*/);
+  if (!m) return null;
+  return m[1].replace(/\s+/g, " ").trim();
+}
+
+export function countLedeWords(lede) {
+  return lede.split(/\s+/).filter(Boolean).length;
+}
+
+export function countLedeSentences(lede) {
+  const t = lede.trim();
+  if (t.length === 0) return 0;
+  const parts = t.split(/(?<=[.!?])\s+/).filter((p) => p.length > 0);
+  return Math.max(parts.length, 1);
+}
+
+/**
+ * Null when the lede is within budget (or there is no bold run).
+ * Otherwise a message naming the fragment, the word count, and the rule.
+ */
+export function ledeLengthViolation(relPath, body) {
+  const lede = extractFragmentLede(body);
+  if (lede == null) return null;
+  const words = countLedeWords(lede);
+  const sentences = countLedeSentences(lede);
+  if (words <= LEDE_WORD_LIMIT && sentences <= 1) return null;
+  const extra = sentences > 1 ? ` in ${sentences} sentences` : "";
+  return (
+    `${relPath}: bold lede is ${words} words${extra}; the release-notes renderer ` +
+    `keeps only that lede, so it must be ≤ ${LEDE_WORD_LIMIT} words and one sentence ` +
+    `(flair#1392). Move detail below the bold run.`
+  );
+}
+
+export function validateLedeLength(relPath, body) {
+  const msg = ledeLengthViolation(relPath, body);
+  if (msg) throw new FragmentError(msg);
+}
+
 // Read every fragment in `dir`. Dotfiles are ignored (.DS_Store, .gitkeep);
 // README.md documents the convention and is not a fragment. EVERYTHING else is
 // parsed, and a file that will not parse throws — a fragment directory that
@@ -359,6 +410,12 @@ if (isMain) {
           `CHANGELOG.md '## [Unreleased]' has ${stray.length} hand-written entr${stray.length === 1 ? "y" : "ies"}; ` +
             `move ${stray.length === 1 ? "it" : "them"} into ${FRAGMENT_DIR_REL}/.`,
         );
+      }
+      const ledeOffenders = fragments
+        .map((f) => ledeLengthViolation(`${FRAGMENT_DIR_REL}/${f.name}`, f.body))
+        .filter(Boolean);
+      if (ledeOffenders.length > 0) {
+        throw new FragmentError(ledeOffenders.join("\n"));
       }
       process.stdout.write(`✓ ${fragments.length} fragment(s), ${entries} entr(ies), no stray [Unreleased] entries.\n`);
     } else if (cmd === "check-fixed") {

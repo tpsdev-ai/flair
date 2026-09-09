@@ -87,14 +87,17 @@ tag you pushed is the trigger). Watch the run; when it's green, the packages are
 but **not yet live**.
 
 In parallel — and **independent of the npm staging approval** — a `github-release` job
-auto-cuts a [GitHub release](https://github.com/tpsdev-ai/flair/releases) for the tag,
-using the matching `## [X.Y.Z]` section of `CHANGELOG.md` as the release notes (extracted
-by `scripts/changelog-extract.mjs`). It is idempotent: re-running the workflow or
-re-pushing the tag updates the existing release rather than failing. The GitHub release
-documents the tagged commit immediately; it does not wait on the npm 2FA gate. If the
-CHANGELOG has no section for the version, this job fails loudly rather than cutting an
-empty release — which is why phase 1's fragment assembly refuses to produce an empty
-section rather than letting the failure surface here, after the tag is already pushed.
+auto-cuts a [GitHub release](https://github.com/tpsdev-ai/flair/releases) for the tag.
+Release notes are a **lede + links** rendering of the matching `## [X.Y.Z]` section
+(`scripts/changelog-release-notes.mjs`): each entry keeps its bold lede, up to three
+issue links, and any `> **Heads-up:**` operator lines. The deep record stays in
+`CHANGELOG.md` and is linked from the footer at that tag. It is idempotent: re-running
+the workflow or re-pushing the tag updates the existing release rather than failing.
+The GitHub release documents the tagged commit immediately; it does not wait on the
+npm 2FA gate. If the CHANGELOG has no section for the version, this job fails loudly
+rather than cutting an empty release — which is why phase 1's fragment assembly
+refuses to produce an empty section rather than letting the failure surface here,
+after the tag is already pushed.
 
 > `workflow_dispatch` with a `version` input remains as a manual fallback (needs
 > `Actions: write`), but the tag push is the normal path.
