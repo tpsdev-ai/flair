@@ -8,11 +8,16 @@
  */
 
 import { describe, test, expect, mock, spyOn } from "bun:test";
+import * as execPath from "../../src/lib/upgrade-exec-path.js";
 
 const SENTINEL = "SENTINEL-1109b-exec-path-warning";
 const collectCalls: unknown[] = [];
 
+// Keep the rest of the module (plain-tree lane reads findFlairPackageDir /
+// resolveServingFlairPackage / readFlairPackageAt). Only the warning
+// collector is replaced — this is still the (b) wiring proof.
 mock.module("../../src/lib/upgrade-exec-path.js", () => ({
+  ...execPath,
   collectUpgradeExecPathWarning: (input: unknown) => {
     collectCalls.push(input);
     return SENTINEL;
