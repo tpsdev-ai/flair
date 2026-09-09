@@ -79,10 +79,10 @@ export const MAX_USAGE_IDS_PER_CALL = 20;
  * patchRecord() helper, which would combine both into one un-safe wrap.
  *
  * The final get-then-put for the increment is a best-effort (non-atomic)
- * read-modify-write, same class of race already accepted elsewhere in
- * this codebase for count fields (e.g. retrievalCount's bump in
- * SemanticSearch.ts) — a concurrent contribution from a DIFFERENT agent
+ * read-modify-write — a concurrent contribution from a DIFFERENT agent
  * landing between this call's read and write could lose one increment.
+ * Search hit-tracking is no longer this class of race (flair#1528;
+ * resources/hit-tracking.ts coalesces MemoryHitStat increments).
  * Re-fetching immediately before the write (rather than reusing the
  * earlier existence-check read) narrows, without eliminating, that
  * window. Not solved here: bounded, low-severity (an undercount, never an

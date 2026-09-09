@@ -21,7 +21,7 @@
 
 import { Resource, databases } from "harper";
 import { allowAdmin, invalidateAdminCache } from "./agent-auth.js";
-import { authorizeSoulWrite, refuseLearnedSoulWrite, soulProvenance } from "./soul-write-policy.js";
+import { authorizeSoulWrite, refuseSoulWriteContent, soulProvenance } from "./soul-write-policy.js";
 import { reconcileAdminFields } from "./agent-admin.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
 import { rejectSkillWritePath } from "./skill-write.js";
@@ -72,7 +72,7 @@ export class AgentSeed extends Resource {
     const defaults = DEFAULT_SOUL_KEYS(agentId, name, role, now);
     const merged = { ...defaults, ...(soulTemplate || {}) };
     for (const value of Object.values(merged)) {
-      const refusal = await refuseLearnedSoulWrite({ agentId, value: String(value) });
+      const refusal = await refuseSoulWriteContent({ agentId, value: String(value) });
       if (refusal) return refusal;
     }
 

@@ -3,8 +3,16 @@ import { ADK_SCOPE_TAG_PREFIX } from "../src/rem/promote-policy.js";
 /** Soul is agentId-scoped and cannot carry a per-user `adk:` tag. Writing an
  *  ADK-sourced claim there leaks that user's distilled text to every other
  *  user of the shared agentId. CLI refusal is not enough — a scripted
- *  PUT /Soul must hit the same door. */
+ *  PUT /Soul must hit the same door.
+ *
+ *  This vendor-string match is a dated rollout bridge only. Soul authorization
+ *  is the deny-by-default operator/internal allowlist in soul-write-policy.ts;
+ *  runtime denial does not depend on `adk:`. Remove this module after
+ *  ADK_SOUL_REFUSE_KILL_DATE once classified writers are deployed (#1540). */
 export const ADK_SOUL_REFUSAL = "adk_sourced_claim_cannot_be_written_to_soul";
+
+/** Calendar date (UTC) after which this `adk:` bridge must be removed. */
+export const ADK_SOUL_REFUSE_KILL_DATE = "2026-10-31";
 
 export interface SoulAdkLookup {
   searchCandidates?: (agentId: string) => AsyncIterable<{ claim?: unknown; scopeTag?: unknown; tags?: unknown }>;

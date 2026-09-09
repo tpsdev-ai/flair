@@ -25,11 +25,18 @@ flair status               # default HTTP origin: http://127.0.0.1:19926
 
 ## Install
 
-**Plugin directory.** Flair is listed at **[cursor.directory/plugins/flair](https://cursor.directory/plugins/flair)** — install it from there, then open **Plugins → Configure** in Cursor and set the variables below.
+**Plugin directory.** Install from **[cursor.directory/plugins/flair](https://cursor.directory/plugins/flair)** — that is the public listing. Then open **Plugins → Configure** in Cursor and set the variables below.
 
-**From this repository.** Copy or symlink `packages/cursor-flair` to `~/.cursor/plugins/local/flair`, then Configure the same variables. This is also the route for local development.
+**From this repository** (local development too):
 
-> Flair is **not** currently in Cursor's built-in Marketplace, so searching there will not find it. Use one of the two paths above.
+```bash
+mkdir -p ~/.cursor/plugins/local
+cp -R packages/cursor-flair ~/.cursor/plugins/local/flair
+```
+
+Then **Plugins → Configure** the same variables. Restart Cursor or run **Developer: Reload Window** so it picks up the folder. For iteration you can symlink instead of copy: `ln -sfn "$(pwd)/packages/cursor-flair" ~/.cursor/plugins/local/flair`.
+
+> Flair is **not** in Cursor's built-in Marketplace. Searching there will not find it. Use one of the two paths above.
 
 ## Configure
 

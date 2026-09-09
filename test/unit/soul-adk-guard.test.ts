@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   ADK_SOUL_REFUSAL,
+  ADK_SOUL_REFUSE_KILL_DATE,
   bodyCarriesAdkScope,
   refuseAdkSourcedSoulWrite,
   rowLooksAdkSourced,
@@ -64,5 +65,10 @@ describe("ADK→Soul refusal", () => {
       { searchCandidates: () => empty, searchMemories: () => empty },
     );
     expect(allowed).toBeNull();
+  });
+
+  test("the adk: Soul refuse bridge has a future kill date", () => {
+    expect(ADK_SOUL_REFUSE_KILL_DATE).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(Date.parse(`${ADK_SOUL_REFUSE_KILL_DATE}T23:59:59.000Z`)).toBeGreaterThan(Date.now());
   });
 });

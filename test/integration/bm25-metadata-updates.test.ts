@@ -47,8 +47,24 @@ const percentile = (values: number[], p: number) => values.slice().sort((a, b) =
 
 test("real search hit tracking preserves results while avoiding lexical replacements", async () => {
   const observations = [];
-  await search();
-  await Bun.sleep(100);
+  // CI saw counterTotal=3 after one search + 2s: hybrid recall is not yet
+  // the five quokka rows while BM25 is still building, so the probe's
+  // metadata-0000..0004 ledger only records a partial hit set. Wait until
+  // the index is ready, keep searching the tracked ids, and let the
+  // fire-and-forget MemoryHitStat puts commit. Do not start measured arms
+  // on a partial result set — that is the "preserves results" contract.
+  {
+    const deadline = Date.now() + 30_000;
+    let warmed = 0;
+    while (Date.now() < deadline) {
+      const status = await post("Bm25MetadataProbe", {});
+      warmed = status.counterTotal ?? 0;
+      if (status.index?.state === "ready" && warmed >= 5) break;
+      await search();
+      await Bun.sleep(50);
+    }
+    expect(warmed, "warmup search must commit hit stats before measured arms").toBeGreaterThanOrEqual(5);
+  }
   for (const concurrency of [1, 8]) {
     for (const order of [[true, false], [false, true]]) {
       const arms = [];
@@ -65,26 +81,30 @@ test("real search hit tracking preserves results while avoiding lexical replacem
               selections.push(result.results.map((row: any) => row.id).sort());
             }));
           }
-          const deadline = Date.now() + 5000;
+          const deadline = Date.now() + 30_000;
           let metrics = await post("Bm25MetadataProbe", {});
           let stable = 0;
           while (stable < 5 && Date.now() < deadline) {
             await Bun.sleep(10);
             const next = await post("Bm25MetadataProbe", {});
-            stable = next.updates === metrics.updates && next.successfulPuts + next.failedPuts === 320 ? stable + 1 : 0;
+            const countersDone = next.counterTotal - started.counterTotal === 320;
+            const statsQuiet = next.hitStatSuccessfulPuts === metrics.hitStatSuccessfulPuts;
+            stable = countersDone && statsQuiet ? stable + 1 : 0;
             metrics = next;
           }
           expect(stable).toBe(5);
           console.log("probe metrics", JSON.stringify(metrics));
-          expect(metrics.writes).toBe(320);
-          expect(metrics.successfulPuts + metrics.failedPuts).toBe(320);
-          expect(metrics.updates).toBeGreaterThan(0);
-          expect(metrics.updates).toBeLessThanOrEqual(320);
-          if (concurrency === 1) expect(metrics.updates).toBe(320);
-          expect(metrics.replacements).toBe(legacy ? metrics.updates : 0);
+          expect(metrics.writes).toBe(0);
+          expect(metrics.successfulPuts + metrics.failedPuts).toBe(0);
+          expect(metrics.updates).toBe(0);
+          expect(metrics.replacements).toBe(0);
+          expect(metrics.hitStatSuccessfulPuts).toBeGreaterThan(0);
+          expect(metrics.hitStatSuccessfulPuts).toBeLessThanOrEqual(320);
           expect(selections.every(ids => ids.length === 5)).toBe(true);
           arms.push(selections);
-          observations.push({ legacy, concurrency, queries: 64, ...metrics, counterIncrease: metrics.counterTotal - started.counterTotal,
+          const counterIncrease = metrics.counterTotal - started.counterTotal;
+          expect(counterIncrease).toBe(320);
+          observations.push({ legacy, concurrency, queries: 64, ...metrics, counterIncrease,
             p95Ms: percentile(latencies, .95), p99Ms: percentile(latencies, .99) });
         } finally { await post("Bm25MetadataProbe", { action: "stop" }); }
       }

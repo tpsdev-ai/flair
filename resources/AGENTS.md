@@ -7,7 +7,7 @@ whether it is loaded. Check the loader configuration when extracting code.
 
 | Change | Start here | Shared contract |
 |---|---|---|
-| Soul authorship | `Soul.ts`, `soul-write-policy.ts` | Operator/internal source allowlist; learned-content backstop; raw writer inventory in `test/unit/soul-writer-coverage.test.ts` |
+| Soul authorship | `Soul.ts`, `soul-write-policy.ts` | Operator/internal source allowlist; generic learned-content backstop; dated `adk:` bridge in `soul-adk-guard.ts`; raw writer inventory in `test/unit/soul-writer-coverage.test.ts` |
 | Memory writes/lifecycle | `Memory.ts` | `memory-durability.ts`, `memory-visibility.ts`, `provenance.ts` |
 | Read access | `memory-read-scope.ts` | `resolveReadScope()` supplies both query condition and row predicate |
 | Authentication/ownership | `agent-auth.ts`, `auth-middleware.ts` | `record-owner-guard.ts`, `owner-field-guard.ts`, `record-types.ts` |
@@ -22,7 +22,7 @@ Preserve these boundaries:
 - Compose caller filters inside the authoritative read scope; preserve the row re-check after retrieval.
 - Audit each exposed mutation verb. A `put()` guard does not automatically cover `patch()` or `post()`.
 - Raw table access bypasses custom Resource rules. Use it only with an explicit internal authorization contract.
-- Harper `put()` replaces a row. Use the established full-row merge helpers for partial updates; they do not promise atomic counters.
+- Harper `put()` replaces a row. Use the established full-row merge helpers for partial updates; they do not promise atomic counters. Search hit-tracking is the exception: `resources/hit-tracking.ts` increments `MemoryHitStat` with per-id coalescing and overlays `retrievalCount` / `lastRetrieved` on read.
 - Bootstrap calls the retrieval core without search hit-tracking side effects. Keep raw similarity separate from fused ordering.
 
 Use [`test/AGENTS.md`](../test/AGENTS.md) for validation. Resource integration tests

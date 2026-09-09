@@ -1,6 +1,7 @@
 import { Resource, databases } from "harper";
 import { layout, htmlResponse, esc } from "./admin-layout.js";
 import { allowAdmin } from "./agent-auth.js";
+import { applyHitStats } from "./hit-tracking.js";
 
 /**
  * GET /AdminMemory                browse + search memories (list view)
@@ -158,7 +159,7 @@ export class AdminMemory extends Resource {
 
     let memory: any = null;
     try {
-      memory = await memDb.get(id);
+      memory = await applyHitStats(await memDb.get(id), (this as any).getContext?.());
     } catch { /* table missing or other error */ }
 
     if (!memory) {

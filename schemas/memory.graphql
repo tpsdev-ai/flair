@@ -45,8 +45,11 @@ type Memory @table(database: "flair") {
   createdAt: String! @indexed
   updatedAt: String
   expiresAt: String @indexed
-  retrievalCount: Int
-  lastRetrieved: String
+  retrievalCount: Int          # Observable search-hit counter. Authoritative increments live on
+                               # MemoryHitStat (resources/hit-tracking.ts, flair#1528); GET/search
+                               # overlay that row so this field still reads as it always has.
+                               # The Memory row itself is no longer rewritten per hit.
+  lastRetrieved: String        # Overlay companion to retrievalCount — see MemoryHitStat.
   usageCount: Int              # flair#683: verified-USE signal, distinct from retrievalCount (a
                                # search HIT). Additive/nullable — absent reads as 0, existing rows
                                # unaffected. NEVER auto-incremented on search/retrieval; the ONLY
@@ -196,6 +199,26 @@ type MemoryUsage @table(database: "flair") {
   memoryId: String! @indexed   # the memory this contribution counted toward
   attribution: String          # opaque/sanitized free-text hint (optional)
   createdAt: String!
+}
+
+# MemoryHitStat — search hit-tracking ledger (flair#1528 remaining slice).
+# SemanticSearch used to patchRecord the full Memory row per returned hit so
+# retrievalCount/lastRetrieved stayed on the memory itself. That is a full-row
+# Harper put (embeddings included), feeds BM25/HNSW, and loses increments when
+# concurrent searches read-modify-write the same five hits (Dex: 310 vs 320).
+#
+# This table is the increment target: one small row per memory id, coalesced
+# per-id so concurrent hits add rather than race. No @export — no REST surface.
+# resources/hit-tracking.ts is the only writer. Readers that expose the
+# historical Memory.retrievalCount / lastRetrieved contract overlay this row
+# (Memory.get/search, AdminMemory detail, MemoryConsolidate). Existing Memory
+# field values seed the first increment so a store that already had counts
+# does not reset. Agents have no role grant; internal raw-table writes bypass
+# the flair_agent role the same way usage-recording writes MemoryUsage.
+type MemoryHitStat @table(database: "flair") {
+  id: ID @primaryKey           # Memory.id
+  retrievalCount: Int
+  lastRetrieved: String
 }
 
 # MemoryCandidate — staged distillations from the FLAIR-NIGHTLY-REM cycle.
