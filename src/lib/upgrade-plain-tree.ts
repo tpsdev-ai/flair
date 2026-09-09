@@ -311,16 +311,46 @@ function formatUnitRef(u: SystemdUnitRef): string {
   return `${u.name} (${u.scope}: ${u.path})`;
 }
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 /**
  * After a directory path, the next character must not continue the last
  * path segment. `/opt/flair` matches `WorkingDirectory=/opt/flair`,
  * `/opt/flair/`, and `/opt/flair/dist/cli.js` — not `/opt/flair-spoke`.
+ *
+ * String scan, not `new RegExp(variable)` — Semgrep
+ * `detect-non-literal-regexp` (same reason `readHarperConfig` parses YAML
+ * instead of interpolating a key into a regex).
  */
-const AFTER_DIR_PATH = String.raw`(?:/|[\s"'=:]|\\|$)`;
+function isDirPathBoundary(next: string | undefined): boolean {
+  if (next === undefined) return true;
+  switch (next) {
+    case "/":
+    case "\\":
+    case "\"":
+    case "'":
+    case "=":
+    case ":":
+    case " ":
+    case "\t":
+    case "\n":
+    case "\r":
+    case "\f":
+    case "\v":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function textMentionsDir(text: string, dir: string): boolean {
+  let from = 0;
+  while (from <= text.length) {
+    const i = text.indexOf(dir, from);
+    if (i < 0) return false;
+    if (isDirPathBoundary(text[i + dir.length])) return true;
+    from = i + 1;
+  }
+  return false;
+}
 
 export function unitTextMentionsTree(unitText: string, treeDir: string): boolean {
   const variants = new Set<string>();
@@ -332,7 +362,7 @@ export function unitTextMentionsTree(unitText: string, treeDir: string): boolean
   try {
     add(canonicalPath(treeDir));
   } catch { /* lexical variants are enough */ }
-  return [...variants].some((v) => new RegExp(`${escapeRegExp(v)}${AFTER_DIR_PATH}`).test(unitText));
+  return [...variants].some((v) => textMentionsDir(unitText, v));
 }
 
 const SYSTEM_UNIT_DIRS = ["/etc/systemd/system"];
