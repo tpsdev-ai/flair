@@ -425,6 +425,32 @@
       "added": "2026-09-04",
       "expires": "2026-12-03",
       "removeWhen": "harper ships a build resolving stream-json > 3.4.0 (the patched line), or flair stops depending on harper."
+    },
+    {
+      "ghsa": "GHSA-gg4h-3hg2-grpc",
+      "package": "joi",
+      "severity": "low",
+      "class": "vendor-pinned",
+      "sources": ["bun", "npm-install"],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> joi",
+      "reason": "Transitive via harper@5.2.8 shrinkwrap (joi pinned 17.13.4); cannot be overridden from this repo (the bun-only override does not reach npm installs, flair#1498/#1510). Flair authors no joi schemas (no joi in package.json, no .rename( anywhere in the repo); the vuln requires object().rename(regex, Joi.x(), {multiple:true}) which Flair does not use - not reachable in Flair code. Residual is harper's internal joi usage, which is un-audited (bundled dep). Security sign-off: tps-sherlock 2026-09-09.",
+      "added": "2026-09-09",
+      "expires": "2027-02-06",
+      "removeWhen": "harper ships a build resolving joi >=17.13.5 (out of the vulnerable range), or flair stops depending on harper. Re-evaluate on ANY harper version bump; if harper ships a release note touching joi rename/validation, re-check before the next merge."
+    },
+    {
+      "ghsa": "GHSA-6w3j-5fw6-r9vr",
+      "package": "joi",
+      "severity": "low",
+      "class": "vendor-pinned",
+      "sources": ["bun", "npm-install"],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> joi",
+      "reason": "Transitive via harper@5.2.8 shrinkwrap (joi pinned 17.13.4); cannot be overridden from this repo (bun-only override does not reach npm installs). Prototype pollution via a __proto__ language key in joi's custom message config (messages/message/prefs({messages})/Joi.extend/rule({message})); trigger is attacker-controlled data passed into joi message config. Flair authors zero joi schemas AND zero joi message config (no joi import, no Joi.extend, no prefs/messages usage in the repo) - not reachable in Flair code. Residual is harper's internal joi usage, un-audited (bundled dep); message config is almost always static developer strings, not runtime data. Security sign-off: tps-sherlock 2026-09-09.",
+      "added": "2026-09-09",
+      "expires": "2027-02-06",
+      "removeWhen": "harper ships a build resolving joi >=17.13.6 (out of the vulnerable range), or flair stops depending on harper. Re-evaluate on ANY harper version bump; if harper ships a release note touching joi validation, re-check before the next merge."
     }
   ]
 }
