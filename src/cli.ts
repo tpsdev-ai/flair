@@ -174,8 +174,15 @@ import {
   type LaunchdManagement,
 } from "./lib/launchd-management.js";
 import {
+  classifyPlist,
+  planLaunchdRepair,
+  type LaunchdRepairResult,
+  type RepairPlan,
+} from "./lib/launchd-repair.js";
+import {
   applyUpgradeHookConsent,
   catalogIssueDelta,
+  DOCTOR_CHECK_IDS,
   renderCatalogDoctorLines,
   renderVerifiedSummary,
   runDoctorChecks,
@@ -13023,6 +13030,161 @@ function observeLaunchdManagement(dataDir: string, port: number): LaunchdManagem
 }
 
 /**
+ * Build the launchd plist for a `doctor --fix` repair (flair#1573 slice b).
+ *
+ * Deliberately DIVERGES from the `flair init` plist in one way that matters:
+ * it always uses the pass-file (secret-free) mode, so the regenerated plist
+ * never embeds HDB_ADMIN_PASSWORD inline — the exact regression this issue
+ * exists to prevent. The ports and ROOTPATH come from the instance's own
+ * harper-config.yaml (config authority, flair#914), never ~/.flair/config.yaml
+ * or defaults, so the repair cannot re-bootstrap Harper against a different
+ * directory or port.
+ *
+ * `config` is the parsed harper-config.yaml, already gated readable by the
+ * caller. Throws when the Harper binary cannot be resolved — a plist pointing
+ * at a missing binary is the stale-plist failure this repair must not write.
+ */
+function buildRepairPlist(dataDir: string, config: Record<string, any>): string {
+  const httpPort = harperPortValue(config?.http?.port) ?? DEFAULT_PORT;
+  const opsPortRaw = config?.operationsApi?.network?.port;
+  const opsPort = harperPortValue(opsPortRaw) ?? (httpPort - 1);
+  const opsBind = detectOpsApiAllInterfacesBind(opsPortRaw);
+  const opsBindHost = opsBind.boundHost ?? "127.0.0.1";
+  const opsSocket = join(dataDir, "operations-server");
+  // Preserve the config's exact ops-port form (host-qualified or bare) so the
+  // regenerated plist neither re-narrows nor re-widens the bind — the
+  // no-re-bootstrap guarantee is mechanical, not best-effort.
+  const opsNetworkPort = typeof opsPortRaw === "string" && opsPortRaw.trim() !== ""
+    ? opsPortRaw.trim()
+    : opsNetworkPortValue(opsBindHost, opsPort);
+  const setConfig = JSON.stringify({
+    rootPath: dataDir,
+    http: { port: httpPort, cors: true, corsAccessList: [`http://127.0.0.1:${httpPort}`, `http://localhost:${httpPort}`] },
+    operationsApi: { network: { port: opsNetworkPort, cors: true, domainSocket: opsSocket } },
+    mqtt: { network: { port: null }, webSocket: false },
+    localStudio: { enabled: false },
+    authentication: { authorizeLocal: false, enableSessions: true },
+  });
+  const harperBinPath = harperBin();
+  if (!harperBinPath) throw new Error(harperBinNotFoundMessage(harperSearchRoots()));
+  const label = launchdLabel(dataDir);
+  const modelsDir = process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models");
+  return buildLaunchdPlist({
+    label,
+    execPath: process.execPath,
+    harperBinPath,
+    workingDirectory: flairPackageDir(),
+    dataDir,
+    modelsDir,
+    setConfig,
+    adminUser: DEFAULT_ADMIN_USER,
+    adminPass: "", // ignored in pass-file mode
+    httpPort,
+    opsNetworkPort,
+    passFile: {
+      launcher: launchdLauncherPath(),
+      adminPassFile: defaultAdminPassPath(),
+      home: homedir(),
+      path: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
+    },
+  });
+}
+
+/**
+ * Compute the launchd repair plan for `dataDir` (flair#1573 slice b1) WITHOUT
+ * executing it — the detect + classify + decide half. The doctor command uses
+ * this for dry-run / non-`--fix` reporting; `repairLaunchdManagement` (below)
+ * reuses it and then executes a `regenerate` plan.
+ */
+function planLaunchdRepairFor(dataDir: string, port: number): {
+  plan: RepairPlan;
+  plistPath: string;
+  isLegacy: boolean;
+  config: Record<string, any> | null;
+} {
+  // Config authority gate (flair#914): the whole fix is gated on the
+  // instance's own harper-config.yaml being readable.
+  const config = harperConfigPath(dataDir) ? readHarperConfig(dataDir) : null;
+  const configReadable = config !== null;
+
+  // Observe the current state.
+  const observation = observeLaunchdManagement(dataDir, port);
+
+  // Classify the plist disposition (ownership guard's first question).
+  const { plistPath, isLegacy } = resolveLaunchdLabel(dataDir);
+  const disposition = classifyPlist(plistPath, dataDir, {
+    exists: existsSync,
+    read: (p) => { try { return readFileSync(p, "utf-8"); } catch { return null; } },
+    readRootPath: readPlistRootPath,
+  });
+
+  // Is a direct (non-launchd) process serving this instance right now?
+  const instancePid = resolveInstanceServingPid(dataDir, port);
+  const directProcessRunning = instancePid !== null && observation.state !== "managed";
+
+  const plan = planLaunchdRepair({ observation, disposition, plistPath, directProcessRunning, configReadable });
+  return { plan, plistPath, isLegacy, config };
+}
+
+/**
+ * Repair launchd management for `dataDir` (flair#1573 slice b1) — the
+ * `doctor --fix` launchd repair for a MISSING or CORRUPT plist.
+ *
+ * detect -> regenerate (pass-file mode) -> load -> verify. The DECISION (state
+ * matrix + ownership guard + config authority) lives in planLaunchdRepair
+ * (src/lib/launchd-repair.ts); this is the EXECUTION, and it is the only place
+ * that touches the real filesystem and launchctl.
+ *
+ * Reuses the existing primitives rather than re-inventing them:
+ *   - observeLaunchdManagement / assessLaunchdManagement is the fail-loud
+ *     verifier (launchctl PID AND that PID is the serving process).
+ *   - ensureLaunchdServiceLoaded is the unload -> load -> start.
+ *
+ * The adopt path (a direct-spawned running instance) is OUT OF SCOPE for b1:
+ * planLaunchdRepair refuses it ("detached, needs adopt (b2)"), so this executor
+ * never bounces a live instance.
+ *
+ * Never reports success on a direct-start fallback: the final verify is
+ * assessLaunchdManagement, and anything short of `managed` is a `failed` result
+ * with the detached detail + remedy, never a silent pass.
+ */
+async function repairLaunchdManagement(dataDir: string, port: number): Promise<LaunchdRepairResult> {
+  const { plan, plistPath, isLegacy, config } = planLaunchdRepairFor(dataDir, port);
+
+  switch (plan.kind) {
+    case "no-op":
+      return { kind: "no-op", reason: plan.reason, detail: plan.detail };
+    case "refuse":
+      return { kind: "refused", reason: plan.reason, detail: plan.detail, plistPath: plan.plistPath };
+    case "regenerate": {
+      const { execSync } = await import("node:child_process");
+      // Regenerate the plist (pass-file mode) and write it atomically.
+      // No secret is embedded, so 0644 is correct here.
+      const plist = buildRepairPlist(dataDir, config!);
+      const newPlistPath = launchdPlistPath(launchdLabel(dataDir));
+      writeFileAtomic(newPlistPath, plist, 0o644);
+      // If the resolved plist was a pre-flair#693 legacy label, unload and
+      // remove it so it is not orphaned beside the regenerated one.
+      if (isLegacy && plistPath !== newPlistPath) {
+        try { execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe" }); } catch { /* best effort */ }
+        try { unlinkSync(plistPath); } catch { /* best effort */ }
+      }
+      // Load (unload -> load -> start). Guard first: the repair is a boot
+      // path, and an older engine opening a newer store fails at the storage
+      // layer minutes later (flair#1093) — same refusal as startFlairProcess.
+      guardEngineNotBackwards(dataDir);
+      ensureLaunchdServiceLoaded(dataDir, (cmd) => execSync(cmd, { stdio: "pipe" }));
+      // Verify (fail-loud).
+      const after = observeLaunchdManagement(dataDir, port);
+      if (after.state !== "managed") {
+        return { kind: "failed", detail: after.detail, remedy: after.remedy };
+      }
+      return { kind: "repaired", detail: after.detail };
+    }
+  }
+}
+
+/**
  * Stop the local Flair (Harper) process — launchd `stop` on darwin when a
  * plist is present (falling back on failure), otherwise a manual SIGTERM by
  * port. Split out of the old monolithic `restartFlair` (flair#637) so the
@@ -14820,16 +14982,22 @@ program
     // catalog upgrade asserts. Adding a check to DOCTOR_CHECK_IDS widens
     // both. Extra doctor UX (pi, --fix, execution probe, continuity,
     // agent registration) stays below and does not redefine those checks.
+    //
+    // flair#1573 slice b1 — launchd management is diagnosed + repaired by its
+    // own section below (planLaunchdRepairFor / repairLaunchdManagement), not
+    // by the install-health catalog. The catalog's launchd check stays for
+    // `upgrade` (flair#1022), but doctor would otherwise double-count the same
+    // drift (catalog "detached" fail + repair "regenerate"/"refuse").
+    const doctorCatalogIds = DOCTOR_CHECK_IDS.filter((id) => id !== "launchd-management");
     const doctorCtx = {
       homeDir: homedir(),
       cwd: process.cwd(),
       detectedClientIds: detectedClients.map((c) => c.id),
-      launchd: observeLaunchdManagement(defaultDataDir(), effectivePort),
       keysDir,
       keyAgentIds,
       agentFlag: typeof opts.agent === "string" ? opts.agent : undefined,
     };
-    const catalogBefore = runDoctorChecks(doctorCtx);
+    const catalogBefore = runDoctorChecks(doctorCtx, { catalogIds: doctorCatalogIds });
     if (detectedClients.length === 0) {
       console.log(`  ${render.icons.info} No MCP client detected — skipping client-integration checks`);
     } else {
@@ -15264,7 +15432,7 @@ program
     // Catalog is the install-health verdict — count fail/unrun here, not
     // via a second issues++ on MCP / CLAUDE.md / SessionStart hook above.
     // --fix that cleared a catalog member shows up in the found→fixed delta.
-    const catalogAfter = autoFix ? runDoctorChecks(doctorCtx) : catalogBefore;
+    const catalogAfter = autoFix ? runDoctorChecks(doctorCtx, { catalogIds: doctorCatalogIds }) : catalogBefore;
     const catalogDelta = catalogIssueDelta(catalogBefore, catalogAfter);
     issues += catalogDelta.found;
     if (autoFix) fixed += catalogDelta.fixed;
@@ -15272,6 +15440,62 @@ program
     console.log(`\n  ${render.wrap(render.c.bold, "Install health")}`);
     for (const row of renderCatalogDoctorLines(catalogAfter)) {
       console.log(`  ${render.icons[row.icon]} ${row.line}`);
+    }
+
+    // 7b. Launchd management repair (flair#1573 slice b1) — `doctor --fix`
+    //     repairs a MISSING or CORRUPT launchd plist. This is a distinct
+    //     concern from the install-health catalog above (which `upgrade` also
+    //     asserts), so it owns its own reporting + counting rather than
+    //     double-counting the catalog's launchd check. The DECISION is pure
+    //     (planLaunchdRepairFor -> planLaunchdRepair); the EXECUTION
+    //     (regenerate pass-file plist -> load -> verify) is
+    //     repairLaunchdManagement, which is the only place that touches the
+    //     real filesystem and launchctl.
+    console.log(`\n  ${render.wrap(render.c.bold, "Launchd management")}`);
+    if (autoFix && !dryRun) {
+      // Execute the repair directly; it re-derives the plan internally and
+      // verifies via assessLaunchdManagement (fail-loud, never a silent pass).
+      const repairResult = await repairLaunchdManagement(defaultDataDir(), effectivePort);
+      switch (repairResult.kind) {
+        case "no-op":
+          console.log(`  ${render.icons.ok} ${repairResult.detail}`);
+          break;
+        case "refused":
+          issues++;
+          console.log(`  ${render.icons.error} ${repairResult.detail}`);
+          break;
+        case "repaired":
+          fixed++;
+          console.log(`  ${render.icons.ok} ${repairResult.detail}`);
+          break;
+        case "failed":
+          issues++;
+          console.log(`  ${render.icons.error} ${repairResult.detail}`);
+          if (repairResult.remedy) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${repairResult.remedy.join(" && ")}`);
+          break;
+      }
+    } else {
+      // Report only (no --fix, or --fix --dry-run): compute the plan, touch
+      // nothing. A regenerate plan is drift; a refuse plan is a named refusal.
+      const repairPlan = planLaunchdRepairFor(defaultDataDir(), effectivePort);
+      switch (repairPlan.plan.kind) {
+        case "no-op":
+          console.log(`  ${render.icons.ok} ${repairPlan.plan.detail}`);
+          break;
+        case "refuse":
+          issues++;
+          console.log(`  ${render.icons.error} ${repairPlan.plan.detail}`);
+          break;
+        case "regenerate":
+          issues++;
+          console.log(`  ${render.icons.error} ${repairPlan.plan.detail}`);
+          if (dryRun) {
+            console.log(`     ${render.wrap(render.c.dim, "Would regenerate")} the launchd plist (pass-file mode) and load it`);
+          } else {
+            console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(regenerates the plist in pass-file mode, loads it, and verifies)")}`);
+          }
+          break;
+      }
     }
 
     // 7a. Resolve which agent identities the two verified-read sections below

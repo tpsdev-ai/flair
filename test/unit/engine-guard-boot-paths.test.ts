@@ -95,9 +95,21 @@ describe("every boot path runs the guard", () => {
     // The guard sits at the top of startFlairProcess. If a future path calls
     // ensureLaunchdServiceLoaded itself instead of going through
     // startFlairProcess, it boots unguarded — the exact shape of this bug.
-    // `start` is the one legitimate direct caller and guards itself, so the
-    // budget is 1 (plus the definition).
+    // `start` and the doctor --fix launchd repair (flair#1573 b1) are the two
+    // legitimate direct callers and both guard themselves, so the budget is 2
+    // (plus the definition).
     const direct = [...src.matchAll(/ensureLaunchdServiceLoaded\s*\(/g)].length;
-    expect(direct).toBeLessThanOrEqual(3);
+    expect(direct).toBeLessThanOrEqual(4);
+  });
+
+  test("the doctor --fix launchd repair guards before it loads", () => {
+    // The repair (flair#1573 b1) regenerates the plist then loads it — a boot
+    // path. It must run the same backwards-engine guard as startFlairProcess,
+    // and it must do so BEFORE ensureLaunchdServiceLoaded, not after.
+    const body = functionBody(src, "repairLaunchdManagement");
+    const guardAt = body.indexOf("guardEngineNotBackwards(");
+    expect(guardAt).toBeGreaterThan(-1);
+    const loadAt = body.indexOf("ensureLaunchdServiceLoaded(");
+    expect(loadAt).toBeGreaterThan(guardAt);
   });
 });

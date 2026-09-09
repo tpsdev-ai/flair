@@ -1,0 +1,162 @@
+/**
+ * launchd-repair.test.ts — the DECISION half of the `doctor --fix` launchd
+ * repair (flair#1573 slice b1).
+ *
+ * planLaunchdRepair / classifyPlist are pure: no filesystem, no launchctl.
+ * This file pins the state matrix the adjudication made hard requirements:
+ *
+ *   - missing plist        -> regenerate (pass-file mode)
+ *   - corrupt plist        -> regenerate
+ *   - foreign ROOTPATH     -> refuse (ownership guard, flair#966 mirror)
+ *   - unattributable       -> refuse (no ROOTPATH to prove ownership)
+ *   - already-managed      -> no-op ("already managed")
+ *   - detached-and-running -> refuse ("detached, needs adopt (b2)")
+ *   - config unreadable    -> refuse (config authority, flair#914)
+ *   - not-applicable       -> no-op (not macOS)
+ *
+ * The EXECUTION (regenerate -> load -> verify) lives in src/cli.ts and is NOT
+ * exercised here — that is the real-launchd integration test, a later slice.
+ */
+
+import { describe, test, expect } from "bun:test";
+import {
+  classifyPlist,
+  planLaunchdRepair,
+  type PlistDisposition,
+} from "../../src/lib/launchd-repair.ts";
+import type { LaunchdManagement } from "../../src/lib/launchd-management.ts";
+
+const DATA_DIR = "/Users/example/.flair/data";
+const PLIST_PATH = "/Users/example/Library/LaunchAgents/ai.tpsdev.flair.deadbeef.plist";
+
+/** A minimal valid Flair plist (dict root, ROOTPATH present). */
+function plistXml(rootPath: string): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>ai.tpsdev.flair.deadbeef</string>
+  <key>ProgramArguments</key>
+  <array><string>/usr/local/bin/node</string><string>/opt/flair/harper.js</string></array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ROOTPATH</key><string>${rootPath}</string>
+  </dict>
+</dict>
+</plist>`;
+}
+
+function observation(state: LaunchdManagement["state"], detail = "detail"): LaunchdManagement {
+  return { state, detail };
+}
+
+// ─── classifyPlist: the ownership guard's first question ──────────────────
+
+describe("classifyPlist", () => {
+  const deps = (raw: string | null, rootPath: string | null) => ({
+    exists: () => raw !== null,
+    read: () => raw,
+    readRootPath: () => rootPath,
+  });
+
+  test("absent: no plist file at the resolved path", () => {
+    expect(classifyPlist(PLIST_PATH, DATA_DIR, deps(null, null))).toBe("absent");
+  });
+
+  test("corrupt: a file that is not XML (the reported bare JSON array)", () => {
+    expect(classifyPlist(PLIST_PATH, DATA_DIR, deps("[1,2,3]", null))).toBe("corrupt");
+  });
+
+  test("corrupt: XML but no <dict> root", () => {
+    expect(classifyPlist(PLIST_PATH, DATA_DIR, deps("<plist><array/></plist>", null))).toBe("corrupt");
+  });
+
+  test("ours: a valid plist whose ROOTPATH resolves to this data dir", () => {
+    expect(classifyPlist(PLIST_PATH, DATA_DIR, deps(plistXml(DATA_DIR), DATA_DIR))).toBe("ours");
+  });
+
+  test("foreign: a valid plist whose ROOTPATH names a different data dir", () => {
+    expect(classifyPlist(PLIST_PATH, DATA_DIR, deps(plistXml("/Users/other/.flair/data"), "/Users/other/.flair/data"))).toBe("foreign");
+  });
+
+  test("unattributable: a valid plist with no ROOTPATH at all", () => {
+    const noRoot = plistXml(DATA_DIR).replace(/<key>ROOTPATH<\/key><string>[^<]*<\/string>/, "");
+    expect(classifyPlist(PLIST_PATH, DATA_DIR, deps(noRoot, null))).toBe("unattributable");
+  });
+});
+
+// ─── planLaunchdRepair: the decision matrix ───────────────────────────────
+
+describe("planLaunchdRepair", () => {
+  const input = (over: Partial<Parameters<typeof planLaunchdRepair>[0]> = {}) => ({
+    observation: observation("detached"),
+    disposition: "absent" as PlistDisposition,
+    plistPath: PLIST_PATH,
+    directProcessRunning: false,
+    configReadable: true,
+    ...over,
+  });
+
+  test("not-applicable (not macOS) -> no-op", () => {
+    const plan = planLaunchdRepair(input({ observation: observation("not-applicable", "linux does not use launchd") }));
+    expect(plan.kind).toBe("no-op");
+    if (plan.kind === "no-op") expect(plan.reason).toBe("not-applicable");
+  });
+
+  test("already-managed -> no-op (idempotent second --fix)", () => {
+    const plan = planLaunchdRepair(input({ observation: observation("managed", "launchd job is running") }));
+    expect(plan.kind).toBe("no-op");
+    if (plan.kind === "no-op") expect(plan.reason).toBe("already-managed");
+  });
+
+  test("missing plist -> regenerate", () => {
+    const plan = planLaunchdRepair(input({ disposition: "absent" }));
+    expect(plan.kind).toBe("regenerate");
+  });
+
+  test("corrupt plist -> regenerate", () => {
+    const plan = planLaunchdRepair(input({ disposition: "corrupt" }));
+    expect(plan.kind).toBe("regenerate");
+  });
+
+  test("ours (valid, unloaded) -> regenerate", () => {
+    const plan = planLaunchdRepair(input({ disposition: "ours" }));
+    expect(plan.kind).toBe("regenerate");
+  });
+
+  test("foreign ROOTPATH -> refuse (ownership guard, names the file)", () => {
+    const plan = planLaunchdRepair(input({ disposition: "foreign" }));
+    expect(plan.kind).toBe("refuse");
+    if (plan.kind === "refuse") {
+      expect(plan.reason).toBe("foreign");
+      expect(plan.plistPath).toBe(PLIST_PATH);
+      expect(plan.detail).toContain(PLIST_PATH);
+    }
+  });
+
+  test("unattributable (no ROOTPATH) -> refuse", () => {
+    const plan = planLaunchdRepair(input({ disposition: "unattributable" }));
+    expect(plan.kind).toBe("refuse");
+    if (plan.kind === "refuse") expect(plan.reason).toBe("unattributable");
+  });
+
+  test("config unreadable -> refuse (config authority, flair#914)", () => {
+    const plan = planLaunchdRepair(input({ configReadable: false }));
+    expect(plan.kind).toBe("refuse");
+    if (plan.kind === "refuse") expect(plan.reason).toBe("config-unreadable");
+  });
+
+  test("detached-and-running -> refuse (needs adopt, b2)", () => {
+    const plan = planLaunchdRepair(input({ directProcessRunning: true }));
+    expect(plan.kind).toBe("refuse");
+    if (plan.kind === "refuse") expect(plan.reason).toBe("detached");
+  });
+
+  test("config authority is checked BEFORE the ownership guard", () => {
+    // A foreign plist with an unreadable config must refuse on config, not
+    // on ownership — the config gate is the outermost safety rail.
+    const plan = planLaunchdRepair(input({ disposition: "foreign", configReadable: false }));
+    expect(plan.kind).toBe("refuse");
+    if (plan.kind === "refuse") expect(plan.reason).toBe("config-unreadable");
+  });
+});
