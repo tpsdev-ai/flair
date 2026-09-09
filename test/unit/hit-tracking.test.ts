@@ -99,7 +99,8 @@ describe("HitTracker — coalesced counters", () => {
     const tracker = new HitTracker(store.tables);
     tracker.noteHits(["m1"], "2026-09-08T01:00:00.000Z");
     await tracker.whenIdle();
-    const overlay = await tracker.apply({ id: "m1", content: "keep", retrievalCount: 0 });
+    const source: HitStatRow & { content: string } = { id: "m1", content: "keep", retrievalCount: 0 };
+    const overlay = await tracker.apply(source);
     expect(overlay).toEqual({
       id: "m1",
       content: "keep",

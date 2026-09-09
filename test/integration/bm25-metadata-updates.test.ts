@@ -47,15 +47,21 @@ const percentile = (values: number[], p: number) => values.slice().sort((a, b) =
 
 test("real search hit tracking preserves results while avoiding lexical replacements", async () => {
   const observations = [];
-  await search();
+  // CI saw counterTotal=3 after one search + 2s: hybrid recall is not yet
+  // the five quokka rows while BM25 is still building, so the probe's
+  // metadata-0000..0004 ledger only records a partial hit set. Wait until
+  // the index is ready, keep searching the tracked ids, and let the
+  // fire-and-forget MemoryHitStat puts commit. Do not start measured arms
+  // on a partial result set — that is the "preserves results" contract.
   {
-    const deadline = Date.now() + 2000;
+    const deadline = Date.now() + 30_000;
     let warmed = 0;
     while (Date.now() < deadline) {
       const status = await post("Bm25MetadataProbe", {});
       warmed = status.counterTotal ?? 0;
-      if (warmed >= 5) break;
-      await Bun.sleep(20);
+      if (status.index?.state === "ready" && warmed >= 5) break;
+      await search();
+      await Bun.sleep(50);
     }
     expect(warmed, "warmup search must commit hit stats before measured arms").toBeGreaterThanOrEqual(5);
   }
@@ -75,7 +81,7 @@ test("real search hit tracking preserves results while avoiding lexical replacem
               selections.push(result.results.map((row: any) => row.id).sort());
             }));
           }
-          const deadline = Date.now() + 5000;
+          const deadline = Date.now() + 30_000;
           let metrics = await post("Bm25MetadataProbe", {});
           let stable = 0;
           while (stable < 5 && Date.now() < deadline) {
