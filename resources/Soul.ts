@@ -3,7 +3,7 @@ import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { localInstanceId } from "./instance-identity.js";
 import { makeAuthGate, stampAttribution } from "./record-type-kit.js";
 import { RECORD_TYPES } from "./record-types.js";
-import { authorizeSoulWrite, refuseLearnedSoulWrite, soulProvenance } from "./soul-write-policy.js";
+import { authorizeSoulWrite, refuseSoulWriteContent, soulProvenance } from "./soul-write-policy.js";
 
 // Source authorization is independent of principal ownership: an admin runtime
 // may manage records elsewhere, but it cannot author identity-defining Soul.
@@ -42,7 +42,7 @@ export class Soul extends (databases as any).flair.Soul {
     const denied = await enforceWriteAuth(this, content);
     if (denied) return denied;
     // Learned artifacts cannot gain identity authority through an operator write.
-    const learnedDenied = await refuseLearnedSoulWrite(content);
+    const learnedDenied = await refuseSoulWriteContent(content);
     if (learnedDenied) return learnedDenied;
     content.durability ||= "permanent";
     content.createdAt = new Date().toISOString();
@@ -67,7 +67,7 @@ export class Soul extends (databases as any).flair.Soul {
     if (denial) return denial;
     // Fail-closed, same as Memory's stored-state read: a throw aborts the
     // write; missing/unreadable stored state cannot authorize a PATCH that
-    // typically omits agentId (that used to skip the ADK value-match).
+    // typically omits agentId (that used to skip the content-provenance match).
     const existing = await super.get();
     if (!existing || typeof existing !== "object" || existing instanceof Response) {
       return new Response(JSON.stringify({ error: "soul_stored_state_unavailable" }), {
@@ -75,7 +75,7 @@ export class Soul extends (databases as any).flair.Soul {
         headers: { "Content-Type": "application/json" },
       });
     }
-    const learnedDenied = await refuseLearnedSoulWrite({ ...existing, ...content });
+    const learnedDenied = await refuseSoulWriteContent({ ...existing, ...content });
     if (learnedDenied) return learnedDenied;
     return super.patch(content, query);
   }
@@ -83,7 +83,7 @@ export class Soul extends (databases as any).flair.Soul {
   async put(content: any, context?: any) {
     const denied = await enforceWriteAuth(this, content);
     if (denied) return denied;
-    const learnedDenied = await refuseLearnedSoulWrite(content);
+    const learnedDenied = await refuseSoulWriteContent(content);
     if (learnedDenied) return learnedDenied;
     const ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (ownerDenial) return ownerDenial;

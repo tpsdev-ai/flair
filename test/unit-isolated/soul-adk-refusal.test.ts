@@ -60,7 +60,9 @@ mock.module("harper", () => ({
 }));
 
 const { Soul } = await import("../../resources/Soul.ts");
-const ADK_SOUL_REFUSAL = "soul_value_is_learned_content";
+const { soulWriteSource } = await import("../../resources/soul-write-policy.ts");
+const ADK_SOUL_REFUSAL = "adk_sourced_claim_cannot_be_written_to_soul";
+const LEARNED_SOUL_REFUSAL = "soul_value_is_learned_content";
 
 function makeSoul(id?: string) {
   const r: any = new (Soul as any)();
@@ -85,6 +87,20 @@ describe("Soul.put refuses ADK-sourced claims", () => {
       agentId: "shared-app",
       key: "pref",
       value: "alice likes tea",
+    });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(403);
+    expect(await (res as Response).json()).toEqual({ error: ADK_SOUL_REFUSAL });
+    expect(soulStore.size).toBe(0);
+  });
+
+  test("PUT of a body that only carries an adk: tag is 403", async () => {
+    const res = await makeSoul().put({
+      id: "shared-app-pref",
+      agentId: "shared-app",
+      key: "pref",
+      value: "brand new operator-looking text",
+      tags: ["ADK:app:alice"],
     });
     expect(res instanceof Response).toBe(true);
     expect((res as Response).status).toBe(403);
@@ -162,6 +178,23 @@ describe("Soul.patch refuses ADK-sourced claims", () => {
 });
 
 
+describe("soulWriteSource is Flair-derived from the credential", () => {
+  const adminAgent = { kind: "agent" as const, agentId: "admin", isAdmin: true };
+  const runtimeAgent = { kind: "agent" as const, agentId: "bot", isAdmin: false };
+  const headers = (authorization: string) => new Headers({ authorization });
+
+  test("verified Harper administrator Basic is operator; everything else is refused", () => {
+    expect(soulWriteSource({ request: { headers: headers("Basic abc") } }, adminAgent)).toBe("operator");
+    expect(soulWriteSource({ __flairInternal: true }, { kind: "internal" })).toBe("internal");
+    expect(soulWriteSource({ request: { headers: headers("TPS-Ed25519 key") } }, adminAgent)).toBeNull();
+    expect(soulWriteSource({ request: { headers: headers("Bearer token") } }, adminAgent)).toBeNull();
+    expect(soulWriteSource({ request: { headers: headers("Basic abc") } }, runtimeAgent)).toBeNull();
+    expect(soulWriteSource({ request: { headers: headers("Basic abc"), sourceClass: "operator" } }, runtimeAgent)).toBeNull();
+    expect(soulWriteSource({}, { kind: "internal" })).toBeNull();
+    expect(soulWriteSource({ request: { tpsAnonymous: true } }, { kind: "anonymous" })).toBeNull();
+  });
+});
+
 describe("Soul source allowlist", () => {
   test("every mutation denies agent, admin-agent, delegated, unknown and anonymous contexts", async () => {
     const contexts = [
@@ -213,6 +246,7 @@ describe("Soul source allowlist", () => {
         soulStore.set("soul", { id: "soul", agentId: "shared-app", value: "original" });
         const result = await makeSoul("soul")[method]({ id: "soul", agentId: "shared-app", value: "learned" });
         expect(result.status).toBe(403);
+        expect(await result.json()).toEqual({ error: LEARNED_SOUL_REFUSAL });
         expect(soulStore.get("soul").value).toBe("original");
       }
       rows.length = 0;

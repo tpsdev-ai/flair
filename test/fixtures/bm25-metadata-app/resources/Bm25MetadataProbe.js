@@ -10,15 +10,25 @@ export class Bm25MetadataProbe extends Resource {
     if (action === "start") {
       if (active) throw new Error("probe already active");
       const table = databases.flair.Memory;
+      const stats = databases.flair.MemoryHitStat;
       const originalPut = table.put;
+      const originalStatPut = stats.put;
       const originalUpsert = Bm25Index.prototype.upsert;
       const originalRemove = Bm25Index.prototype.remove;
-      const metrics = { writes: 0, successfulPuts: 0, failedPuts: 0, updates: 0, replacements: 0, updateMs: 0 };
+      const metrics = {
+        writes: 0, successfulPuts: 0, failedPuts: 0, updates: 0, replacements: 0, updateMs: 0,
+        hitStatWrites: 0, hitStatSuccessfulPuts: 0, hitStatFailedPuts: 0,
+      };
       const delay = monitorEventLoopDelay({ resolution: 1 });
       table.put = async function (...args) {
         metrics.writes++;
         try { const result = await originalPut.apply(this, args); metrics.successfulPuts++; return result; }
         catch (error) { metrics.failedPuts++; throw error; }
+      };
+      stats.put = async function (...args) {
+        metrics.hitStatWrites++;
+        try { const result = await originalStatPut.apply(this, args); metrics.hitStatSuccessfulPuts++; return result; }
+        catch (error) { metrics.hitStatFailedPuts++; throw error; }
       };
       Bm25Index.prototype.remove = function (id) {
         if (this.has(id)) metrics.replacements++;
@@ -36,14 +46,17 @@ export class Bm25MetadataProbe extends Resource {
       active = { metrics, delay, restore() {
         delay.disable();
         table.put = originalPut;
+        stats.put = originalStatPut;
         Bm25Index.prototype.upsert = originalUpsert;
         Bm25Index.prototype.remove = originalRemove;
       } };
     }
     let counterTotal = 0;
     for (let i = 0; i < 5; i++) {
-      const row = await databases.flair.Memory.get(`metadata-${String(i).padStart(4, "0")}`);
-      counterTotal += row?.retrievalCount ?? 0;
+      const id = `metadata-${String(i).padStart(4, "0")}`;
+      const stat = await databases.flair.MemoryHitStat.get(id).catch(() => null);
+      const row = await databases.flair.Memory.get(id);
+      counterTotal += stat?.retrievalCount ?? row?.retrievalCount ?? 0;
     }
     const result = { ...active?.metrics, counterTotal, eventLoopP99Ms: active ? active.delay.percentile(99) / 1e6 : null,
       index: bm25IndexStatus() };

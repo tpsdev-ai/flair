@@ -514,8 +514,9 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
     // existed"), silently corrupting any recency/usage-based ranking that reads
     // these fields. Reset both here, at succession construction — NOT server-
     // side, because `supersedes` is a PERMANENT property of every successor and
-    // legitimate later retrievalCount bumps route through put() on a record that
-    // still carries it. Usage/citation-ledger counters (usageCount, the #1147
+    // legitimate later retrievalCount bumps route through MemoryHitStat
+    // (resources/hit-tracking.ts) on the successor's own id. Usage/citation-
+    // ledger counters (usageCount, the #1147
     // citation ledger) are a SEPARATE, arguably lineage-scoped question and are
     // deliberately left untouched here (#1147's usage loop is currently inert).
     record.retrievalCount = 0;

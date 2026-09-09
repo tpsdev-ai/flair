@@ -19,6 +19,7 @@
 import { Resource, databases } from "harper";
 import { isAdmin, allowVerified } from "./agent-auth.js";
 import { evaluate, parseDuration, type Suggestion, type Candidate } from "./memory-consolidate-lib.js";
+import { applyHitStats } from "./hit-tracking.js";
 
 export class ConsolidateMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (auth reshape removes the gate's
@@ -60,7 +61,7 @@ export class ConsolidateMemories extends Resource {
       if (scope === "persistent" && record.durability !== "persistent") continue;
       if (scope === "standard" && record.durability !== "standard") continue;
 
-      const candidate = evaluate(record, now, olderThanMs);
+      const candidate = evaluate(await applyHitStats(record, ctx), now, olderThanMs);
       candidates.push(candidate);
       if (candidates.length >= limit * 3) break; // over-fetch to sort
     }
