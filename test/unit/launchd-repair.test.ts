@@ -230,6 +230,18 @@ describe("decideAdoptStop", () => {
     }
   });
 
+  test("RUNNING + port unreachable -> failed (NOT proceed — a wedged daemon may still hold the port)", () => {
+    // "unreachable" is the probe's "cannot tell": a wedged daemon that ignored
+    // SIGTERM but stays BOUND to the port while no longer serving /Health
+    // would EADDRINUSE on load. It must NOT fall through to proceed.
+    const result = decideAdoptStop({ state: "RUNNING", pid: 42 }, { kind: "unreachable" });
+    expect(result).not.toBe("proceed");
+    if (result !== "proceed") {
+      expect(result.kind).toBe("failed");
+      expect(result.detail).toContain("not confirmed free");
+    }
+  });
+
   test("DISAGREEMENT -> failed (never stop a foreign/unattributable process)", () => {
     const result = decideAdoptStop({ state: "DISAGREEMENT", detail: "identity unverified" }, refused);
     expect(result).not.toBe("proceed");

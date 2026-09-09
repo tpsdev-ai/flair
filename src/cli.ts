@@ -13172,6 +13172,14 @@ async function repairLaunchdManagement(dataDir: string, port: number): Promise<L
     case "adopt":
     case "regenerate": {
       try {
+        // Guard FIRST (flair#1093): the repair is a boot path, and an older
+        // engine opening a newer store fails at the storage layer minutes
+        // later — same refusal as startFlairProcess. On the adopt arm this
+        // must run BEFORE the stop: it is a pure read whose inputs don't
+        // change during the repair, so guard-first refuses WITHOUT bouncing
+        // the live instance (guard-after-stop would SIGTERM the instance and
+        // then refuse, leaving it down with nothing to restart it).
+        guardEngineNotBackwards(dataDir);
         // Adopt (flair#1573 slice b2): clean-stop the direct process first, so
         // the regenerate + load below does not collide on the port.
         if (plan.kind === "adopt") {
@@ -13190,10 +13198,7 @@ async function repairLaunchdManagement(dataDir: string, port: number): Promise<L
           try { execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe" }); } catch { /* best effort */ }
           try { unlinkSync(plistPath); } catch { /* best effort */ }
         }
-        // Load (unload -> load -> start). Guard first: the repair is a boot
-        // path, and an older engine opening a newer store fails at the storage
-        // layer minutes later (flair#1093) — same refusal as startFlairProcess.
-        guardEngineNotBackwards(dataDir);
+        // Load (unload -> load -> start).
         ensureLaunchdServiceLoaded(dataDir, (cmd) => execSync(cmd, { stdio: "pipe" }));
         // Verify (fail-loud).
         const after = observeLaunchdManagement(dataDir, port);
@@ -13234,7 +13239,22 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
   }
   const postStopHealth = await probeHealth(port);
   const decision = decideAdoptStop(state, postStopHealth);
-  return decision === "proceed" ? null : decision;
+  if (decision !== "proceed") return decision;
+  // Belt-and-suspenders: lsof confirms no TCP listener remains before the
+  // caller loads the plist. probeHealth "refused" (ECONNREFUSED) already means
+  // nothing is listening, but a port that is BOUND yet refuses connections
+  // (backlog-full, or a non-HTTP listener) would still EADDRINUSE on load —
+  // this catches that rare case the HTTP probe cannot see.
+  const { execSync } = await import("node:child_process");
+  const listeners = listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
+  if (listeners.length > 0) {
+    return {
+      kind: "failed",
+      detail: `port still occupied after stopping the direct process (listener pid ${listeners.join(", ")})`,
+      remedy: ["flair stop", "flair doctor --fix"],
+    };
+  }
+  return null;
 }
 
 /**

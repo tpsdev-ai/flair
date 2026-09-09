@@ -203,6 +203,11 @@ export type LaunchdRepairResult =
  * becomes a `failed` result, except an engine-backwards refusal (flair#1093),
  * which is a refusal by nature and is surfaced as `refused` so the operator
  * sees the actor/state/remedy rather than a generic failure.
+ *
+ * NOTE: the engine-backwards `refused` intentionally carries its remedy in the
+ * detail prose (the actor/state/remedy sentence buildRecoveryLines renders),
+ * NOT in a structured `remedy` field — a refusal is a verdict, not a failure,
+ * and the prose is what the operator reads.
  */
 export function mapRepairThrow(err: unknown): LaunchdRepairResult {
   const e = err as { engineBackwards?: boolean; message?: string } | null;
@@ -226,7 +231,12 @@ export function mapRepairThrow(err: unknown): LaunchdRepairResult {
  *     process — the liveness machine refused to verify identity).
  *   - post-stop health "ok"  -> failed ("port still occupied" — the old
  *     process did not fully exit, so loading the new plist would collide).
- *   - otherwise              -> proceed.
+ *   - post-stop health "unreachable" -> failed ("port not confirmed free" — a
+ *     wedged daemon that ignored SIGTERM but stays BOUND to the port while no
+ *     longer serving /Health would EADDRINUSE on load; "unreachable" is the
+ *     probe's "cannot tell", so it must NOT proceed).
+ *   - post-stop health "refused" -> proceed (ECONNREFUSED — nothing is
+ *     listening, the port is provably free).
  */
 export function decideAdoptStop(
   state: DaemonState,
@@ -245,10 +255,16 @@ export function decideAdoptStop(
         remedy: ["flair stop", "flair doctor --fix"],
       };
   }
-  if (postStopHealth.kind === "ok") {
+  // Proceed ONLY when the port is provably free (ECONNREFUSED). "ok" means
+  // something is still serving; "unreachable" means a wedged daemon may still
+  // be BOUND to the port (ignored SIGTERM) — both would EADDRINUSE on load.
+  if (postStopHealth.kind !== "refused") {
     return {
       kind: "failed",
-      detail: "port still occupied after stopping the direct process",
+      detail:
+        postStopHealth.kind === "ok"
+          ? "port still occupied after stopping the direct process"
+          : "port not confirmed free after stopping the direct process (a wedged process may still hold it)",
       remedy: ["flair stop", "flair doctor --fix"],
     };
   }
