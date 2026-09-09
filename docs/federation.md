@@ -239,6 +239,10 @@ flair federation status
 flair federation unpin <instanceId>
 ```
 
+HTTP paths (`/FederationPair`, `/FederationSync`, `/FederationInstance`,
+`/FederationPeers`) and the Instance / Peer / PairingToken / Nonce / SyncLog
+schemas: **[docs/api-reference.md](api-reference.md#federation)**.
+
 ## Limitations (1.0)
 
 - **HTTP push only** — no persistent WebSocket connections or real-time sync

@@ -874,6 +874,82 @@ jobs:
             exit 1
           fi
 
+  mcp-client-wiring:
+    # flair#908 — MCP client wiring had zero CI coverage. Every other init in
+    # this file (pack-smoke, upgrade-smoke) runs `flair init` without `--client`
+    # and never reads a client config back. That is the class that let #906
+    # (silent Claude Code skip) and #907 (unpinned / `unknown` spec) ship for
+    # three releases. This job packs the tarball (the install a new user gets),
+    # runs `flair init --agent --client all` against a fake HOME, and asserts
+    # every supported client was either written or explicitly reported.
+    # Silence is a failure. A client this gate cannot exercise must be named.
+    #
+    # BLOCKING. Do not add `continue-on-error`, `|| true` or `|| echo` here —
+    # an advisory check that nobody reads is how wiring bugs survive. If the
+    # script cannot run (no tarball, no CLI, unresolved --version) it exits 2
+    # (DID NOT RUN), not 0. Required-check name: "MCP client wiring".
+    name: MCP client wiring
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
+        with:
+          bun-version: "1.3.10"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+      - name: Cache bun install
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-cache-${{ runner.os }}-
+      - run: sfw bun install --frozen-lockfile
+      - run: bun run build && bun run build:cli
+      - name: Pack
+        id: pack
+        run: |
+          npm pack
+          echo "TGZ_PATH=$(pwd)/$(ls tpsdev-ai-flair-*.tgz)" >> $GITHUB_OUTPUT
+      - name: Pre-download embedding model
+        # Same cache → first-party release mirror → HuggingFace resolution
+        # as pack-smoke / test-integration (sha256-verified — flair#715).
+        # Init still boots Harper; this keeps that boot off a live HF fetch.
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
+      - name: Install-from-tarball and assert MCP client wiring
+        env:
+          FLAIR_MODELS_DIR: ${{ github.workspace }}/models
+        run: |
+          set -euo pipefail
+          TMPDIR=$(mktemp -d)
+          cd "$TMPDIR"
+          npm init -y > /dev/null
+          npm install "${{ steps.pack.outputs.TGZ_PATH }}"
+          npm install --no-save @node-llama-cpp/linux-x64@3
+
+          # cli-shim.cjs is package.json's `bin.flair` — the entry a new user
+          # actually runs. dist/cli.js only auto-starts on import.meta.main;
+          # the shim always calls runCli() after the Node-version preflight.
+          FLAIR="$(pwd)/node_modules/@tpsdev-ai/flair/dist/cli-shim.cjs"
+          VERSION=$(node -p "require('@tpsdev-ai/flair/package.json').version")
+          [ -n "$VERSION" ] && [ "$VERSION" != "unknown" ] || {
+            echo "DID NOT RUN: installed package.json version is '${VERSION}'"
+            exit 2
+          }
+          [ -f "$FLAIR" ] || {
+            echo "DID NOT RUN: packed CLI not found at $FLAIR"
+            exit 2
+          }
+
+          node "$GITHUB_WORKSPACE/scripts/ci/check-mcp-client-wiring.mjs" \
+            --flair "$FLAIR" \
+            --version "$VERSION"
+
   install-weight:
     # flair#1004 — bound the installed tree of a global install.
     #
