@@ -16,6 +16,9 @@
  *   - flair_workspace_set — write own WorkspaceState (Office Space coordination)
  *   - flair_orgevent      — publish an OrgEvent attributed to self (no forging)
  *   - record_usage        — report that recalled memories were actually used (flair#1147)
+ *   - skill_store         — write a skill-tagged memory (trigger + procedure)
+ *   - skill_search        — catalog skills that apply to a task (not the procedure)
+ *   - skill_get           — retrieve the full skill by id (disclosure after search)
  *
  * Auto-presence (flair#598): every tool call above triggers a fire-and-forget,
  * rate-limited `POST /Presence` heartbeat for the calling agent (see
@@ -56,6 +59,14 @@ import {
 import { readEnvOrUnset, stripInterpolationLiteralsFromEnv } from "./env-guard.js";
 import { buildRecordUsageBody, citationIds, withCiteNudge, RECORD_USAGE_ID_MERGE_CONTRACT } from "./usage.js";
 import { serverInfo } from "./version.js";
+import {
+  buildSkillSearchBody,
+  buildSkillStoreBody,
+  formatSkillCatalog,
+  isSkillRecord,
+  projectSkillSearchResponse,
+  stripInternalMemoryFields,
+} from "./skills.js";
 
 // ─── Error helpers ──────────────────────────────────────────────────────────
 
@@ -631,6 +642,126 @@ server.tool(
       return {
         content: [{ type: "text", text }],
         structuredContent: { recorded: result?.recorded === true },
+      };
+    } catch (err) {
+      return errorResult(err, flair.url);
+    }
+  },
+);
+
+// ─── Skills as memory (flair#1575 / #1542 / #1546) ──────────────────────────
+//
+// Native `/mcp` already ships skill_store / skill_search / skill_get in the
+// TOOLS registry. This stdio adapter is the surface Claude Code and Cursor
+// actually use, and it never wired them — 0.52.0's headline was unreachable.
+// Same pattern as the other tools: shape the HTTP call via FlairClient,
+// heartbeat, format the result. Write/recall/scope policy stays server-side.
+
+server.tool(
+  "skill_store",
+  "Write a skill (a reusable capability/procedure) as a skill-tagged memory. " +
+    "The `trigger` text is what the skill embeds from (the recall signal — 'when to use this'), " +
+    "and `content` is the full procedure. Skills are forced durability=persistent and are " +
+    "SkillScan-gated before the embed (a dangerous shell/network payload is rejected).",
+  {
+    content: z.string().describe("The full procedure (markdown body of the SKILL.md)"),
+    trigger: z.string().optional().describe("The 'when to use' text — the recall signal the skill embeds from"),
+    name: z.string().optional().describe("Skill name (SKILL.md frontmatter; stored in metadata)"),
+    description: z.string().optional().describe("Skill description (SKILL.md frontmatter; stored in metadata)"),
+    tags: z.array(z.string()).optional().describe("Additional tags (the 'skill' tag is added automatically)"),
+  },
+  async ({ content, trigger, name, description, tags }) => {
+    heartbeat();
+    try {
+      const { id, body } = buildSkillStoreBody({
+        agentId: flair.agentId,
+        content,
+        trigger,
+        name,
+        description,
+        tags,
+        claimedClient: flair.claimedClient,
+      });
+      const result = await flair.request<Record<string, unknown>>("PUT", `/Memory/${id}`, body);
+      const writtenId = typeof result?.id === "string" && result.id.length > 0 ? result.id : id;
+      const preview = content.length > 120 ? content.slice(0, 120) + "..." : content;
+      const lines = [
+        `Skill stored (id: ${writtenId})`,
+        `Preview: ${preview}`,
+        name ? `Name: ${name}` : undefined,
+        trigger ? `Trigger: ${trigger}` : undefined,
+      ].filter((line): line is string => line != null);
+      return {
+        content: [{ type: "text", text: lines.join("\n") }],
+        structuredContent: { id: writtenId, written: true },
+      };
+    } catch (err) {
+      return errorResult(err, flair.url);
+    }
+  },
+);
+
+server.tool(
+  "skill_search",
+  "Find skills (reusable capabilities/procedures) that apply to a task. " +
+    "Ranks skill-tagged memories by their `trigger` ('when to use') against your task text. " +
+    "Returns a lightweight CATALOG — id, name, trigger, description, tags, agentId — NOT the full " +
+    "procedure (fetch that with skill_get). Scoped to your own + shared skills; another agent's " +
+    "private skill is never returned.",
+  {
+    task: z.string().describe("The task/context to match skills against — natural language; ranked against each skill's trigger"),
+    limit: z.coerce.number().optional().default(5).describe("Max skills to return (default 5)"),
+  },
+  async ({ task, limit }) => {
+    heartbeat();
+    try {
+      const raw = await flair.request("POST", "/SemanticSearch", buildSkillSearchBody({ task, limit }));
+      const projected = projectSkillSearchResponse(raw);
+      if (!projected || typeof projected !== "object" || !Array.isArray((projected as { results?: unknown }).results)) {
+        return { content: [{ type: "text", text: "No matching skills found." }] };
+      }
+      const results = (projected as { results: Array<Record<string, unknown>> }).results;
+      return {
+        content: [{ type: "text", text: formatSkillCatalog(results) }],
+        structuredContent: { results },
+      };
+    } catch (err) {
+      return errorResult(err, flair.url);
+    }
+  },
+);
+
+server.tool(
+  "skill_get",
+  "Retrieve a full skill by ID — the complete procedure (`content`) plus trigger and metadata. " +
+    "The disclosure step after skill_search's catalog. Read-scoped: you can only get your own or a " +
+    "shared skill, never another agent's private skill. A non-skill id returns not-found.",
+  {
+    id: z.string().describe("Skill (memory) ID"),
+    includeEmbedding: z.coerce.boolean().optional().default(false)
+      .describe("Include the raw embedding vector (large, rarely useful). Default false."),
+  },
+  async ({ id, includeEmbedding }) => {
+    heartbeat();
+    try {
+      const mem = await flair.memory.get(id);
+      if (!mem || !isSkillRecord(mem)) {
+        return { content: [{ type: "text", text: `Skill ${id} not found.` }] };
+      }
+      const record = includeEmbedding
+        ? (mem as unknown as Record<string, unknown>)
+        : stripInternalMemoryFields(mem as unknown as Record<string, unknown>);
+      const trigger = typeof record.trigger === "string" && record.trigger.length > 0
+        ? record.trigger
+        : "";
+      const text = [
+        record.content,
+        "",
+        `(id: ${record.id}${trigger ? `, trigger: ${trigger}` : ""}, tags: ${Array.isArray(record.tags) ? record.tags.join(", ") : "skill"}, created: ${record.createdAt ?? ""})`,
+      ].join("\n");
+      return {
+        content: [{ type: "text", text }],
+        structuredContent: record,
       };
     } catch (err) {
       return errorResult(err, flair.url);

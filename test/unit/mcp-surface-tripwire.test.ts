@@ -2,7 +2,9 @@
  * mcp-surface-tripwire.test.ts — bidirectional enforcement that the MCP
  * surface declared in resources/record-types.ts (`RECORD_TYPES.<Table>.mcp`
  * + `COMPOSITE_MCP_TOOLS`) and resources/mcp-tools.ts's `TOOLS` dispatch
- * table never drift (record-types slice 3, flair#520).
+ * table never drift (record-types slice 3, flair#520), plus the stdio
+ * adapter ↔ TOOLS seam (flair#1575) so a shipped registry tool cannot
+ * stay unreachable on the surface Claude Code / Cursor actually use.
  *
  * Design record: https://github.com/tpsdev-ai/flair/issues/520 — Flint's
  * slice-3 design comment, Kern's DESIGN REVIEW (APPROVE all four asks),
@@ -38,8 +40,15 @@
  * `new RegExp(...)` built from a runtime string.
  */
 import { describe, it, expect } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { RECORD_TYPES, COMPOSITE_MCP_TOOLS, type RecordTypeName } from "../../resources/record-types.ts";
 import { TOOLS, TOOL_NAME_OVERRIDES, mcpToolName } from "../../resources/mcp-tools.ts";
+import {
+  ADAPTER_TOOL_NAMES,
+  adapterRegistryParity,
+  parseAdapterToolNames,
+} from "../../packages/flair-mcp/src/adapter-surface.ts";
 
 const TABLE_NAMES = Object.keys(RECORD_TYPES) as RecordTypeName[];
 const SHIPPED_TOOL_NAMES = Object.keys(TOOLS).sort();
@@ -152,5 +161,58 @@ describe("MCP surface tripwire — RECORD_TYPES.mcp + COMPOSITE_MCP_TOOLS vs. re
         }
       }
     });
+  });
+});
+
+/**
+ * flair#1575 — adapter ↔ registry seam. The record-types ↔ TOOLS checks
+ * above never touch packages/flair-mcp, so skill_* shipped on native /mcp
+ * and stayed unreachable on the stdio surface agents actually use.
+ *
+ * Detection (this file): the adapter's exposed tool set must equal TOOLS
+ * after applying the reviewed exemption list in adapter-surface.ts.
+ * A registry tool the adapter doesn't expose (and didn't exempt) is a
+ * CI failure — the control that would have caught the skill_* miss.
+ */
+describe("MCP surface tripwire — stdio adapter vs. resources/mcp-tools.ts TOOLS", () => {
+  const adapterSrc = readFileSync(join(import.meta.dir, "../../packages/flair-mcp/src/index.ts"), "utf-8");
+  const registered = parseAdapterToolNames(adapterSrc).sort();
+  const declared = [...ADAPTER_TOOL_NAMES].sort();
+
+  it("ADAPTER_TOOL_NAMES matches the server.tool(...) registrations in index.ts", () => {
+    expect(registered).toEqual(declared);
+  });
+
+  it("stdio adapter tool set equals TOOLS after reviewed exemptions (no silent drift)", () => {
+    const parity = adapterRegistryParity(SHIPPED_TOOL_NAMES, ADAPTER_TOOL_NAMES);
+    expect(
+      parity.missingFromAdapter,
+      `TOOLS names missing from the stdio adapter (not in ADAPTER_TOOL_NAMES, not exempted). ` +
+        `Wire them in packages/flair-mcp/src/index.ts or add a reviewed entry to ` +
+        `STDIO_ADAPTER_EXEMPTIONS.registryOnly in packages/flair-mcp/src/adapter-surface.ts. ` +
+        `Missing: ${parity.missingFromAdapter.join(", ") || "(none)"}`,
+    ).toEqual([]);
+    expect(
+      parity.extraOnAdapter,
+      `stdio adapter names that are neither in TOOLS nor STDIO_ADAPTER_EXEMPTIONS.adapterOnly. ` +
+        `Add the tool to resources/mcp-tools.ts TOOLS, or add a reviewed exemption. ` +
+        `Extra: ${parity.extraOnAdapter.join(", ") || "(none)"}`,
+    ).toEqual([]);
+    expect(
+      parity.staleExemptions,
+      `STDIO_ADAPTER_EXEMPTIONS entries that no longer describe a one-sided difference ` +
+        `(the name is on both surfaces, or on neither). Remove the stale exemption. ` +
+        `Stale: ${parity.staleExemptions.join(", ") || "(none)"}`,
+    ).toEqual([]);
+  });
+
+  it("skill_store / skill_search / skill_get are on the stdio adapter (flair#1575)", () => {
+    for (const name of ["skill_store", "skill_search", "skill_get"]) {
+      expect(declared, `stdio adapter must expose ${name}`).toContain(name);
+      expect(
+        Object.prototype.hasOwnProperty.call(TOOLS, name),
+        `TOOLS must still ship ${name} — do not "fix" adapter drift by deleting the registry tool`,
+      ).toBe(true);
+    }
   });
 });
