@@ -1,1 +1,0 @@
-- Owners can explicitly delete their own permanent memories, matching their control over durability. Cross-owner deletion remains restricted to administrators across REST and MCP.

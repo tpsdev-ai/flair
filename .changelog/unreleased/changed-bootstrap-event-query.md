@@ -1,1 +1,0 @@
-- Bootstrap uses the indexed event lookback window and a field projection, avoiding reads of older event history while preserving event targeting, deduplication and token-budget admission.

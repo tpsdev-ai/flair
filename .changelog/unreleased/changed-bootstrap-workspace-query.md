@@ -1,1 +1,0 @@
-- Bootstrap first checks recent workspace history for caller entities, falling back to older history when needed to preserve collision context.
