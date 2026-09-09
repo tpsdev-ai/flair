@@ -26,7 +26,11 @@ import { extractChangelogSection, ExtractError, SEMVER_RE } from "./changelog-ex
 export const DEFAULT_REPO_URL = "https://github.com/tpsdev-ai/flair";
 export const MAX_ISSUE_LINKS = 3;
 
-const ISSUE_REF_RE = /(?:flair)?#(\d+)/g;
+// Bare `#N` and in-repo aliases (`flair#N`, `tpsdev-ai/flair#N`) become Flair
+// issue links. `owner/repo#N` for any other repo (HarperFast/harper#2316, …)
+// must not — those numbers are not Flair issues (flair#1392 / Bugbot).
+const IN_REPO_CROSS_REFS = new Set(["tpsdev-ai/flair"]);
+const ISSUE_REF_RE = /(?:([\w.-]+\/[\w.-]+)|flair)?#(\d+)/g;
 const ISSUE_CITE_RE = / \((?:flair)?#\d+/;
 const HEADS_UP_RE = /^\s*>\s*\*\*Heads-up:\*\*/i;
 
@@ -75,9 +79,12 @@ export function extractIssueRefs(entryText, limit = MAX_ISSUE_LINKS) {
   const out = [];
   ISSUE_REF_RE.lastIndex = 0;
   for (const m of String(entryText).matchAll(ISSUE_REF_RE)) {
-    if (seen.has(m[1])) continue;
-    seen.add(m[1]);
-    out.push(m[1]);
+    const crossRepo = m[1];
+    if (crossRepo && !IN_REPO_CROSS_REFS.has(crossRepo.toLowerCase())) continue;
+    const n = m[2];
+    if (seen.has(n)) continue;
+    seen.add(n);
+    out.push(n);
     if (out.length >= limit) break;
   }
   return out;

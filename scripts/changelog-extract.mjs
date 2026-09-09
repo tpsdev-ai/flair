@@ -50,15 +50,15 @@ export function extractChangelogSection(version, path = "CHANGELOG.md") {
 
   const lines = text.split("\n");
   // Match the header for THIS version literally: "## [<version>]" optionally
-  // followed by " - <date>" or other trailing text. version is validated above,
-  // but escape it anyway so it is matched as data, not pattern.
-  const esc = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const headerRe = new RegExp(`^## \\[${esc}\\]`);
+  // followed by " - <date>" or other trailing text. version is already validated
+  // as semver — startsWith keeps it as data, not a RegExp (semgrep
+  // detect-non-literal-regexp).
+  const headerPrefix = `## [${version}]`;
   const anyHeaderRe = /^## \[/;
 
   let start = -1;
   for (let i = 0; i < lines.length; i++) {
-    if (headerRe.test(lines[i])) {
+    if (lines[i].startsWith(headerPrefix)) {
       start = i;
       break;
     }

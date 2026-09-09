@@ -166,6 +166,30 @@ describe("Heads-up convention", () => {
   });
 });
 
+describe("issue refs — in-repo only (Bugbot / flair#1392)", () => {
+  test("owner/repo#N is not rewritten as a Flair issue URL; bare #N still is", () => {
+    const entry = "- **A thing.** Mentions HarperFast/harper#2316 and also #1392.";
+    expect(extractIssueRefs(entry)).toEqual(["1392"]);
+
+    const notes = renderReleaseNotes(`### Fixed\n\n${entry}\n`, { version: "0.49.0" });
+    expect(notes).toContain(`${DEFAULT_REPO_URL}/issues/1392`);
+    expect(notes).not.toContain(`${DEFAULT_REPO_URL}/issues/2316`);
+    expect(notes).not.toMatch(/tpsdev-ai\/flair\/issues\/2316/);
+  });
+
+  test("flair#N and tpsdev-ai/flair#N stay in-repo; other owner/repo#N does not", () => {
+    expect(extractIssueRefs("- **x** (flair#42)")).toEqual(["42"]);
+    expect(extractIssueRefs("- **x** tpsdev-ai/flair#42")).toEqual(["42"]);
+    expect(extractIssueRefs("- **x** other/repo#42")).toEqual([]);
+    expect(extractIssueRefs("- **x** HarperFast/harper#42 and flair#7")).toEqual(["7"]);
+  });
+
+  test("a cross-repo ref does not consume a slot in the ≤3 cap", () => {
+    const entry = "- **x** HarperFast/harper#1 #10 #11 #12 #13";
+    expect(extractIssueRefs(entry)).toEqual(["10", "11", "12"]);
+  });
+});
+
 describe("parse / lede helpers", () => {
   test("extractBoldLede spans wrapped bold runs", () => {
     const entry = "- **A wrapped\n  lede here** (flair#1). Body that is not the lede.";
