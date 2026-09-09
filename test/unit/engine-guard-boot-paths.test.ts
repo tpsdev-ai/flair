@@ -112,4 +112,18 @@ describe("every boot path runs the guard", () => {
     const loadAt = body.indexOf("ensureLaunchdServiceLoaded(");
     expect(loadAt).toBeGreaterThan(guardAt);
   });
+
+  test("the doctor --fix launchd repair guards before it stops (adopt arm)", () => {
+    // The adopt arm (flair#1573 b2) clean-stops the direct process before
+    // regenerating + loading. The guard must run BEFORE that stop: it is a
+    // pure read whose inputs don't change during the repair, so guard-first
+    // refuses WITHOUT bouncing the live instance (guard-after-stop would
+    // SIGTERM the instance and then refuse, leaving it down with nothing to
+    // restart it).
+    const body = functionBody(src, "repairLaunchdManagement");
+    const guardAt = body.indexOf("guardEngineNotBackwards(");
+    expect(guardAt).toBeGreaterThan(-1);
+    const stopAt = body.indexOf("stopDirectProcessForAdopt(");
+    expect(stopAt).toBeGreaterThan(guardAt);
+  });
 });

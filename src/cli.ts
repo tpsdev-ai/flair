@@ -176,6 +176,8 @@ import {
 import {
   classifyPlist,
   planLaunchdRepair,
+  mapRepairThrow,
+  decideAdoptStop,
   type LaunchdRepairResult,
   type RepairPlan,
 } from "./lib/launchd-repair.js";
@@ -13045,6 +13047,9 @@ function observeLaunchdManagement(dataDir: string, port: number): LaunchdManagem
  * at a missing binary is the stale-plist failure this repair must not write.
  */
 function buildRepairPlist(dataDir: string, config: Record<string, any>): string {
+  // The DEFAULT_PORT / httpPort-1 fallbacks below are practically unreachable:
+  // Harper writes harper-config.yaml ports on every boot (flair#914), so a
+  // readable config always carries them. They exist only as a last resort.
   const httpPort = harperPortValue(config?.http?.port) ?? DEFAULT_PORT;
   const opsPortRaw = config?.operationsApi?.network?.port;
   const opsPort = harperPortValue(opsPortRaw) ?? (httpPort - 1);
@@ -13091,10 +13096,10 @@ function buildRepairPlist(dataDir: string, config: Record<string, any>): string 
 }
 
 /**
- * Compute the launchd repair plan for `dataDir` (flair#1573 slice b1) WITHOUT
+ * Compute the launchd repair plan for `dataDir` (flair#1573 slice b) WITHOUT
  * executing it — the detect + classify + decide half. The doctor command uses
  * this for dry-run / non-`--fix` reporting; `repairLaunchdManagement` (below)
- * reuses it and then executes a `regenerate` plan.
+ * reuses it and then executes a `regenerate` or `adopt` plan.
  */
 function planLaunchdRepairFor(dataDir: string, port: number): {
   plan: RepairPlan;
@@ -13127,26 +13132,34 @@ function planLaunchdRepairFor(dataDir: string, port: number): {
 }
 
 /**
- * Repair launchd management for `dataDir` (flair#1573 slice b1) — the
- * `doctor --fix` launchd repair for a MISSING or CORRUPT plist.
+ * Repair launchd management for `dataDir` (flair#1573 slice b) — the
+ * `doctor --fix` launchd repair for a MISSING, CORRUPT, or DETACHED plist.
  *
- * detect -> regenerate (pass-file mode) -> load -> verify. The DECISION (state
- * matrix + ownership guard + config authority) lives in planLaunchdRepair
- * (src/lib/launchd-repair.ts); this is the EXECUTION, and it is the only place
- * that touches the real filesystem and launchctl.
+ * detect -> (adopt: clean-stop the direct process) -> regenerate (pass-file
+ * mode) -> load -> verify. The DECISION (state matrix + ownership guard +
+ * config authority) lives in planLaunchdRepair (src/lib/launchd-repair.ts);
+ * this is the EXECUTION, and it is the only place that touches the real
+ * filesystem and launchctl.
  *
  * Reuses the existing primitives rather than re-inventing them:
  *   - observeLaunchdManagement / assessLaunchdManagement is the fail-loud
  *     verifier (launchctl PID AND that PID is the serving process).
  *   - ensureLaunchdServiceLoaded is the unload -> load -> start.
+ *   - the five-state liveness machine (gatherDaemonEvidence +
+ *     classifyDaemonState, flair#1454) attributes and clean-stops the direct
+ *     process on the adopt path — never a foreign/recycled pid, never kill -9.
  *
- * The adopt path (a direct-spawned running instance) is OUT OF SCOPE for b1:
- * planLaunchdRepair refuses it ("detached, needs adopt (b2)"), so this executor
- * never bounces a live instance.
+ * The adopt path (flair#1573 slice b2) BOUNCES the live instance: it
+ * clean-stops the direct-spawned process (SIGTERM + wait for exit), confirms
+ * the port is free, then regenerates + loads. A foreign/unattributable direct
+ * process is refused by the liveness machine (DISAGREEMENT/UNKNOWN), never
+ * signalled.
  *
  * Never reports success on a direct-start fallback: the final verify is
  * assessLaunchdManagement, and anything short of `managed` is a `failed` result
- * with the detached detail + remedy, never a silent pass.
+ * with the detached detail + remedy, never a silent pass. The whole executor
+ * arm is wrapped in try/catch (Kern's b1 defect): a throw becomes a named
+ * `failed` result (or an engine-backwards `refused`), never a crash mid-report.
  */
 async function repairLaunchdManagement(dataDir: string, port: number): Promise<LaunchdRepairResult> {
   const { plan, plistPath, isLegacy, config } = planLaunchdRepairFor(dataDir, port);
@@ -13156,32 +13169,92 @@ async function repairLaunchdManagement(dataDir: string, port: number): Promise<L
       return { kind: "no-op", reason: plan.reason, detail: plan.detail };
     case "refuse":
       return { kind: "refused", reason: plan.reason, detail: plan.detail, plistPath: plan.plistPath };
+    case "adopt":
     case "regenerate": {
-      const { execSync } = await import("node:child_process");
-      // Regenerate the plist (pass-file mode) and write it atomically.
-      // No secret is embedded, so 0644 is correct here.
-      const plist = buildRepairPlist(dataDir, config!);
-      const newPlistPath = launchdPlistPath(launchdLabel(dataDir));
-      writeFileAtomic(newPlistPath, plist, 0o644);
-      // If the resolved plist was a pre-flair#693 legacy label, unload and
-      // remove it so it is not orphaned beside the regenerated one.
-      if (isLegacy && plistPath !== newPlistPath) {
-        try { execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe" }); } catch { /* best effort */ }
-        try { unlinkSync(plistPath); } catch { /* best effort */ }
+      try {
+        // Guard FIRST (flair#1093): the repair is a boot path, and an older
+        // engine opening a newer store fails at the storage layer minutes
+        // later — same refusal as startFlairProcess. On the adopt arm this
+        // must run BEFORE the stop: it is a pure read whose inputs don't
+        // change during the repair, so guard-first refuses WITHOUT bouncing
+        // the live instance (guard-after-stop would SIGTERM the instance and
+        // then refuse, leaving it down with nothing to restart it).
+        guardEngineNotBackwards(dataDir);
+        // Adopt (flair#1573 slice b2): clean-stop the direct process first, so
+        // the regenerate + load below does not collide on the port.
+        if (plan.kind === "adopt") {
+          const stop = await stopDirectProcessForAdopt(port, dataDir);
+          if (stop) return stop; // a named failed result
+        }
+        const { execSync } = await import("node:child_process");
+        // Regenerate the plist (pass-file mode) and write it atomically.
+        // No secret is embedded, so 0644 is correct here.
+        const plist = buildRepairPlist(dataDir, config!);
+        const newPlistPath = launchdPlistPath(launchdLabel(dataDir));
+        writeFileAtomic(newPlistPath, plist, 0o644);
+        // If the resolved plist was a pre-flair#693 legacy label, unload and
+        // remove it so it is not orphaned beside the regenerated one.
+        if (isLegacy && plistPath !== newPlistPath) {
+          try { execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe" }); } catch { /* best effort */ }
+          try { unlinkSync(plistPath); } catch { /* best effort */ }
+        }
+        // Load (unload -> load -> start).
+        ensureLaunchdServiceLoaded(dataDir, (cmd) => execSync(cmd, { stdio: "pipe" }));
+        // Verify (fail-loud).
+        const after = observeLaunchdManagement(dataDir, port);
+        if (after.state !== "managed") {
+          return { kind: "failed", detail: after.detail, remedy: after.remedy };
+        }
+        const detail = plan.kind === "adopt"
+          ? `adopted the direct-spawned instance into launchd (bounced the live instance): ${after.detail}`
+          : after.detail;
+        return { kind: "repaired", detail };
+      } catch (err) {
+        return mapRepairThrow(err);
       }
-      // Load (unload -> load -> start). Guard first: the repair is a boot
-      // path, and an older engine opening a newer store fails at the storage
-      // layer minutes later (flair#1093) — same refusal as startFlairProcess.
-      guardEngineNotBackwards(dataDir);
-      ensureLaunchdServiceLoaded(dataDir, (cmd) => execSync(cmd, { stdio: "pipe" }));
-      // Verify (fail-loud).
-      const after = observeLaunchdManagement(dataDir, port);
-      if (after.state !== "managed") {
-        return { kind: "failed", detail: after.detail, remedy: after.remedy };
-      }
-      return { kind: "repaired", detail: after.detail };
     }
   }
+}
+
+/**
+ * Clean-stop the direct (non-launchd) process serving `dataDir`+`port` for the
+ * adopt path (flair#1573 slice b2). Returns a `failed` result when the process
+ * cannot be attributed (never stop a foreign process) or the port is still
+ * occupied after the stop; returns null when the port is free and the caller
+ * should proceed to regenerate + load.
+ *
+ * Reuses the five-state liveness machine (flair#1454): identity is verified
+ * (pidfile + sidecar + start time) before any signal, so a DISAGREEMENT/UNKNOWN
+ * verdict refuses rather than gambling on a recycled pid. The stop is SIGTERM +
+ * wait for exit — never kill -9.
+ */
+async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise<LaunchdRepairResult | null> {
+  const evidence = await gatherDaemonEvidence(port, dataDir);
+  const state = classifyDaemonState(evidence, { port, dataDir });
+  // SIGTERM + wait for exit for a verified live pid (RUNNING or WEDGED — a
+  // wedged daemon is recovery, not a recycled-pid gamble).
+  if (state.state === "RUNNING" || state.state === "WEDGED") {
+    try { process.kill(state.pid, "SIGTERM"); } catch { /* already gone */ }
+    try { await waitForProcessExit(state.pid, STARTUP_TIMEOUT_MS); } catch { /* best-effort — the port check below surfaces the real problem */ }
+  }
+  const postStopHealth = await probeHealth(port);
+  const decision = decideAdoptStop(state, postStopHealth);
+  if (decision !== "proceed") return decision;
+  // Belt-and-suspenders: lsof confirms no TCP listener remains before the
+  // caller loads the plist. probeHealth "refused" (ECONNREFUSED) already means
+  // nothing is listening, but a port that is BOUND yet refuses connections
+  // (backlog-full, or a non-HTTP listener) would still EADDRINUSE on load —
+  // this catches that rare case the HTTP probe cannot see.
+  const { execSync } = await import("node:child_process");
+  const listeners = listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
+  if (listeners.length > 0) {
+    return {
+      kind: "failed",
+      detail: `port still occupied after stopping the direct process (listener pid ${listeners.join(", ")})`,
+      remedy: ["flair stop", "flair doctor --fix"],
+    };
+  }
+  return null;
 }
 
 /**
@@ -14983,11 +15056,11 @@ program
     // both. Extra doctor UX (pi, --fix, execution probe, continuity,
     // agent registration) stays below and does not redefine those checks.
     //
-    // flair#1573 slice b1 — launchd management is diagnosed + repaired by its
+    // flair#1573 slice b — launchd management is diagnosed + repaired by its
     // own section below (planLaunchdRepairFor / repairLaunchdManagement), not
     // by the install-health catalog. The catalog's launchd check stays for
     // `upgrade` (flair#1022), but doctor would otherwise double-count the same
-    // drift (catalog "detached" fail + repair "regenerate"/"refuse").
+    // drift (catalog "detached" fail + repair "regenerate"/"adopt"/"refuse").
     const doctorCatalogIds = DOCTOR_CHECK_IDS.filter((id) => id !== "launchd-management");
     const doctorCtx = {
       homeDir: homedir(),
@@ -15442,15 +15515,15 @@ program
       console.log(`  ${render.icons[row.icon]} ${row.line}`);
     }
 
-    // 7b. Launchd management repair (flair#1573 slice b1) — `doctor --fix`
-    //     repairs a MISSING or CORRUPT launchd plist. This is a distinct
-    //     concern from the install-health catalog above (which `upgrade` also
-    //     asserts), so it owns its own reporting + counting rather than
-    //     double-counting the catalog's launchd check. The DECISION is pure
-    //     (planLaunchdRepairFor -> planLaunchdRepair); the EXECUTION
-    //     (regenerate pass-file plist -> load -> verify) is
-    //     repairLaunchdManagement, which is the only place that touches the
-    //     real filesystem and launchctl.
+    // 7b. Launchd management repair (flair#1573 slice b) — `doctor --fix`
+    //     repairs a MISSING, CORRUPT, or DETACHED launchd plist. This is a
+    //     distinct concern from the install-health catalog above (which
+    //     `upgrade` also asserts), so it owns its own reporting + counting
+    //     rather than double-counting the catalog's launchd check. The
+    //     DECISION is pure (planLaunchdRepairFor -> planLaunchdRepair); the
+    //     EXECUTION (adopt: clean-stop -> regenerate pass-file plist -> load ->
+    //     verify) is repairLaunchdManagement, which is the only place that
+    //     touches the real filesystem and launchctl.
     console.log(`\n  ${render.wrap(render.c.bold, "Launchd management")}`);
     if (autoFix && !dryRun) {
       // Execute the repair directly; it re-derives the plan internally and
@@ -15493,6 +15566,15 @@ program
             console.log(`     ${render.wrap(render.c.dim, "Would regenerate")} the launchd plist (pass-file mode) and load it`);
           } else {
             console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(regenerates the plist in pass-file mode, loads it, and verifies)")}`);
+          }
+          break;
+        case "adopt":
+          issues++;
+          console.log(`  ${render.icons.error} ${repairPlan.plan.detail}`);
+          if (dryRun) {
+            console.log(`     ${render.wrap(render.c.dim, "Would adopt")} the direct-spawned instance into launchd (clean-stop, regenerate, load — bounces the live instance)`);
+          } else {
+            console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(clean-stops the direct process, regenerates the plist, loads it, and verifies — bounces the live instance)")}`);
           }
           break;
       }

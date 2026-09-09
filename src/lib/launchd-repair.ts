@@ -25,21 +25,23 @@
  *      absent. A valid plist whose ROOTPATH names a DIFFERENT directory is a
  *      different instance and is refused. A valid plist with NO ROOTPATH at all
  *      cannot be attributed, so it is refused and the file is named — the
- *      operator decides (a TTY may confirm-adopt; a non-TTY never does).
+ *      operator decides. (No TTY confirm-adopt escape hatch exists; a
+ *      confirm-adopt for the unattributable case is slice b3, if ever.)
  *
- * The state matrix the plan collapses to (slice b1 — the adopt path for a
- * detached-and-running instance is slice b2 and is deliberately NOT here):
+ * The state matrix the plan collapses to:
  *
  *   - not-applicable (not macOS)  -> no-op.
  *   - managed                     -> no-op ("already managed").
  *   - absent / corrupt / ours     -> regenerate (pass-file mode).
  *   - foreign / unattributable    -> refuse.
  *   - config unreadable           -> refuse.
- *   - detached-and-running        -> refuse ("detached, needs adopt (b2)").
+ *   - detached-and-running (ours) -> adopt (clean-stop -> regenerate -> load).
+ *   - detached-and-running (foreign) -> refuse (ownership guard).
  */
 
 import { resolve } from "node:path";
 import type { LaunchdManagement } from "./launchd-management.js";
+import type { DaemonState, HealthResult } from "./daemon-liveness.js";
 
 // ─── plist disposition (the ownership guard's first question) ─────────────
 
@@ -93,11 +95,12 @@ export type RepairPlan =
   | { kind: "no-op"; reason: "already-managed" | "not-applicable"; detail: string }
   | {
       kind: "refuse";
-      reason: "foreign" | "unattributable" | "config-unreadable" | "detached";
+      reason: "foreign" | "unattributable" | "config-unreadable";
       detail: string;
       plistPath?: string;
     }
-  | { kind: "regenerate"; detail: string };
+  | { kind: "regenerate"; detail: string }
+  | { kind: "adopt"; detail: string };
 
 export interface PlanLaunchdRepairInput {
   observation: LaunchdManagement;
@@ -113,9 +116,9 @@ export interface PlanLaunchdRepairInput {
  * Decide what `doctor --fix` may do about launchd management.
  *
  * Pure: no filesystem, no launchctl. The executor in cli.ts turns a
- * `regenerate` plan into a plist write + load + verify, and a `refuse` plan
- * into a named refusal (with a TTY confirm-adopt escape hatch for the
- * `unattributable` case, which the executor owns because it needs stdin).
+ * `regenerate` plan into a plist write + load + verify, an `adopt` plan into
+ * a clean-stop + regenerate + load + verify, and a `refuse` plan into a named
+ * refusal.
  */
 export function planLaunchdRepair(input: PlanLaunchdRepairInput): RepairPlan {
   const { observation, disposition, plistPath, directProcessRunning, configReadable } = input;
@@ -161,17 +164,19 @@ export function planLaunchdRepair(input: PlanLaunchdRepairInput): RepairPlan {
     };
   }
 
-  // Detached-and-running is OUT OF SCOPE for b1 (flair#1573 slice b1): a
-  // direct (non-launchd) process is serving this instance, so regenerating +
-  // loading the plist would collide on the port. b2 adds the adopt path that
-  // clean-stops the direct process first; b1 refuses rather than mis-repair.
+  // Detached-and-running (flair#1573 slice b2): a direct (non-launchd) process
+  // is serving this instance. The plist is ours/absent/corrupt (the foreign and
+  // unattributable cases were refused above), so the direct process is THIS
+  // instance's and the adopt path clean-stops it before regenerating + loading.
+  // The plan states the bounce explicitly: adopt is the one repair that takes
+  // the live instance down and back up.
   if (directProcessRunning) {
     return {
-      kind: "refuse",
-      reason: "detached",
+      kind: "adopt",
       detail:
-        "the instance is running but not under launchd (direct-spawned) — detached, needs adopt (b2). " +
-        "Refusing to repair: regenerating the plist now would collide with the running process on its port.",
+        "the instance is running but not under launchd (direct-spawned) — adopting it into launchd " +
+        "will clean-stop the live process (SIGTERM, wait for exit), regenerate the plist, and reload it. " +
+        "This bounces the live instance.",
     };
   }
 
@@ -186,6 +191,82 @@ export function planLaunchdRepair(input: PlanLaunchdRepairInput): RepairPlan {
 
 export type LaunchdRepairResult =
   | { kind: "no-op"; reason: "already-managed" | "not-applicable"; detail: string }
-  | { kind: "refused"; reason: "foreign" | "unattributable" | "config-unreadable" | "detached"; detail: string; plistPath?: string }
+  | { kind: "refused"; reason: "foreign" | "unattributable" | "config-unreadable" | "engine-backwards"; detail: string; plistPath?: string }
   | { kind: "repaired"; detail: string }
   | { kind: "failed"; detail: string; remedy?: string[] };
+
+// ─── the executor's pure helpers (slice b2) ───────────────────────────────
+
+/**
+ * Map a throw from the executor arm to a named result (flair#1573 slice b2,
+ * Kern's b1 defect). `doctor --fix` must never crash mid-report: every throw
+ * becomes a `failed` result, except an engine-backwards refusal (flair#1093),
+ * which is a refusal by nature and is surfaced as `refused` so the operator
+ * sees the actor/state/remedy rather than a generic failure.
+ *
+ * NOTE: the engine-backwards `refused` intentionally carries its remedy in the
+ * detail prose (the actor/state/remedy sentence buildRecoveryLines renders),
+ * NOT in a structured `remedy` field — a refusal is a verdict, not a failure,
+ * and the prose is what the operator reads.
+ */
+export function mapRepairThrow(err: unknown): LaunchdRepairResult {
+  const e = err as { engineBackwards?: boolean; message?: string } | null;
+  if (e?.engineBackwards) {
+    return { kind: "refused", reason: "engine-backwards", detail: e.message ?? "engine is backwards" };
+  }
+  return {
+    kind: "failed",
+    detail: e?.message ?? String(err),
+    remedy: ["flair doctor --fix"],
+  };
+}
+
+/**
+ * Decide whether the adopt path may proceed to regenerate + load, given the
+ * liveness classification of the direct process and the post-stop health probe
+ * (flair#1573 slice b2). Pure — the SIGTERM + wait and the probe happen in the
+ * executor; this only maps their results to a verdict.
+ *
+ *   - DISAGREEMENT / UNKNOWN -> failed (never stop a foreign/unattributable
+ *     process — the liveness machine refused to verify identity).
+ *   - post-stop health "ok"  -> failed ("port still occupied" — the old
+ *     process did not fully exit, so loading the new plist would collide).
+ *   - post-stop health "unreachable" -> failed ("port not confirmed free" — a
+ *     wedged daemon that ignored SIGTERM but stays BOUND to the port while no
+ *     longer serving /Health would EADDRINUSE on load; "unreachable" is the
+ *     probe's "cannot tell", so it must NOT proceed).
+ *   - post-stop health "refused" -> proceed (ECONNREFUSED — nothing is
+ *     listening, the port is provably free).
+ */
+export function decideAdoptStop(
+  state: DaemonState,
+  postStopHealth: HealthResult,
+): "proceed" | LaunchdRepairResult {
+  switch (state.state) {
+    case "RUNNING":
+    case "WEDGED":
+    case "NOT_RUNNING":
+      break;
+    case "DISAGREEMENT":
+    case "UNKNOWN":
+      return {
+        kind: "failed",
+        detail: `refusing to adopt: ${state.detail}`,
+        remedy: ["flair stop", "flair doctor --fix"],
+      };
+  }
+  // Proceed ONLY when the port is provably free (ECONNREFUSED). "ok" means
+  // something is still serving; "unreachable" means a wedged daemon may still
+  // be BOUND to the port (ignored SIGTERM) — both would EADDRINUSE on load.
+  if (postStopHealth.kind !== "refused") {
+    return {
+      kind: "failed",
+      detail:
+        postStopHealth.kind === "ok"
+          ? "port still occupied after stopping the direct process"
+          : "port not confirmed free after stopping the direct process (a wedged process may still hold it)",
+      remedy: ["flair stop", "flair doctor --fix"],
+    };
+  }
+  return "proceed";
+}
