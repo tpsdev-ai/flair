@@ -281,7 +281,7 @@ client-writable even if a client sends them. Full comments live in
 | `source` | String | |
 | `createdAt` / `updatedAt` | String | |
 | `expiresAt` | String | Ephemeral TTL |
-| `retrievalCount` / `lastRetrieved` | | Search-hit counters (weak signal) |
+| `retrievalCount` / `lastRetrieved` | | Search-hit counters (weak signal). Incremented on `MemoryHitStat` and overlaid on Memory reads — search no longer rewrites the Memory row. |
 | `usageCount` | Int | Verified-use signal; only `RecordUsage` / citations increment |
 | `promotionStatus` / `promotedAt` / `promotedBy` | | REM promotion |
 | `archived` / `archivedAt` / `archivedBy` | | Basement |
@@ -350,6 +350,7 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **Relationship** | memory.graphql | yes | `subject` / `predicate` / `object` + temporal bounds + provenance |
 | **MemoryGrant** | memory.graphql | yes | `ownerId`, `granteeId`, `scope`, `filter` |
 | **MemoryUsage** | memory.graphql | yes | Dedup ledger; PK `${agentId}:${memoryId}` |
+| **MemoryHitStat** | memory.graphql | no | Search-hit ledger (`retrievalCount`, `lastRetrieved`); overlaid onto Memory reads |
 | **MemoryCandidate** | memory.graphql | yes | REM draft (`claim`, `status`, `scopeTag`, visibility ruling) |
 | **Asset** | memory.graphql | yes | Blob (`contentType`, `data`) owned by `agentId`, linked by `memoryId` |
 | **WorkspaceState** | workspace.graphql | yes | Current work (`ref`, `provider`, `phase`, `entities`) |

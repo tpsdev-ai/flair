@@ -2944,6 +2944,9 @@ const FLAIR_AGENT_PERMISSION = {
       // (create → count → delete → count again → repeat), defeating the cap
       // entirely. See resources/MemoryUsage.ts's module doc.
       MemoryUsage:     grant(true,  true,  false, false),
+      // MemoryHitStat (flair#1528): internal search-hit ledger. No agent REST
+      // surface (@table without @export). Counts overlay onto Memory reads.
+      MemoryHitStat:   grant(false, false, false, false),
       // Agent: read for discovery, update own card; creation/removal is admin.
       Agent:           grant(true,  false, true,  false),
       // Read-only reference data.

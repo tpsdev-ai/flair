@@ -4,7 +4,7 @@
  * A generic "record that a memory was actually used" surface: an agent that
  * grounded an answer or decision on a recalled memory reports it here.
  * Distinct from — and NEVER wired to — retrieval: `Memory.retrievalCount`
- * (bumped on every SemanticSearch hit, resources/SemanticSearch.ts:~551) is
+ * (bumped on every SemanticSearch hit, resources/hit-tracking.ts) is
  * the WEAK, self-reinforcing signal root-caused in flair#623 ("a search hit
  * counted as usage"); `Memory.usageCount` (this endpoint's only writer) is
  * the STRONG signal driving `usageBoost` in resources/scoring.ts, which

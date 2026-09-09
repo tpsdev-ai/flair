@@ -85,7 +85,6 @@ const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kin
   { file: "resources/MemoryMaintenance.ts", via: "direct-update", needle: "update(record.id, archivedRow)", kind: "echo" },
   { file: "resources/usage-recording.ts", via: "direct-put", needle: "usageCount", kind: "echo" },
   { file: "resources/AgentSeed.ts", via: "direct-put", needle: "put(record)", kind: "seed" },
-  { file: "resources/SemanticSearch.ts", via: "patchRecord", needle: "lastRetrieved", kind: "single-field" },
   { file: "resources/auth-middleware.ts", via: "patchRecord", needle: "embedding", kind: "single-field" },
   { file: "resources/MemoryReflect.ts", via: "patchRecord", needle: "lastReflected", kind: "single-field" },
   { file: "resources/migrations/visibility-backfill.ts", via: "alias-source", needle: "visibility: derived", kind: "echo" },
@@ -253,10 +252,13 @@ describe("raw flair.Memory handle coverage", () => {
     expect(fed?.kind).toBe("federation-merge");
   });
 
-  test("SemanticSearch hit-tracking needle is lastRetrieved, not lastReflected", () => {
-    const semantic = CLASSIFICATIONS.find((c) => c.file === "resources/SemanticSearch.ts");
-    expect(semantic?.needle).toBe("lastRetrieved");
-    expect(semantic?.via).toBe("patchRecord");
+  test("hit-tracking writes lastRetrieved on MemoryHitStat, not Memory.patchRecord", () => {
+    const src = readFileSync(join(REPO_ROOT, "resources/hit-tracking.ts"), "utf8");
+    expect(src).toContain("lastRetrieved");
+    expect(src).toContain("MemoryHitStat");
+    expect(src).not.toMatch(/patchRecord\s*\(/);
+    expect(writers.some((w) => w.file === "resources/hit-tracking.ts")).toBe(false);
+    expect(writers.some((w) => w.file === "resources/SemanticSearch.ts")).toBe(false);
   });
 
   test("MemoryReindex raw re-PUT is admin-restate", () => {

@@ -4,6 +4,8 @@
  * Harper's `put()` is FULL RECORD REPLACEMENT. If you pass a partial
  * object, all missing fields (including embeddings!) are permanently
  * deleted. This helper ensures you always read the full record first.
+ * It does not promise atomic counters — search hit-tracking uses
+ * `resources/hit-tracking.ts` (MemoryHitStat) instead of this helper.
  *
  * Usage:
  *   import { patchRecord } from "./table-helpers.js";

@@ -2,7 +2,8 @@ import { Resource, databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { getEmbedding, getMode } from "./embeddings-provider.js";
 import { isEmbeddingSpaceUniform, spaceGuardDiagnostics } from "./embedding-space-guard.js";
-import { patchRecord, withDetachedTxn } from "./table-helpers.js";
+import { withDetachedTxn } from "./table-helpers.js";
+import { applyHitStats, noteSearchHits } from "./hit-tracking.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 
@@ -336,16 +337,16 @@ export class SemanticSearch extends Resource {
     // the final slice needs no additional sort. A cross-encoder rerank stage
     // used to sit here and reorder the pool before this slice; it was removed
     // in flair#893 after measuring Δp@3 = 0.000 at 4.1× query latency.
-    const topResults = filteredResults.slice(0, limit);
+    // Overlay committed hit stats BEFORE noting this search's increment so
+    // the response still shows the pre-hit count (same contract as the old
+    // fire-and-forget Memory patch, which ran after the slice).
+    const topResults = await Promise.all(
+      filteredResults.slice(0, limit).map((r: any) => applyHitStats(r, ctx)),
+    );
 
-    // Async hit tracking — don't block the response
+    // Async hit tracking — MemoryHitStat only, never a Memory rewrite.
     const now = new Date().toISOString();
-    for (const r of topResults) {
-      patchRecord((databases as any).flair.Memory, r.id, {
-        retrievalCount: (r.retrievalCount || 0) + 1,
-        lastRetrieved: now,
-      }).catch(() => {});
-    }
+    noteSearchHits(topResults.map((r: any) => r.id), now, ctx);
 
     // flair#744 slice 1 — opt-in inline trust-evidence block. Assembled HERE,
     // in the response tail, strictly AFTER read-scope resolution
