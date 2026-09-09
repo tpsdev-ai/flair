@@ -44,6 +44,9 @@ Once configured, Claude Code (or any MCP client) gets these tools:
 | `memory_store` | Save a memory with type (lesson/decision/fact) and durability. Optional `usedMemoryIds` cites memories that informed the write. |
 | `memory_get` | Retrieve a specific memory by ID. |
 | `memory_delete` | Delete a memory. |
+| `skill_store` | Write a skill (trigger + procedure) as a skill-tagged memory. |
+| `skill_search` | Find skills that apply to a task. Returns a catalog, not the procedure. |
+| `skill_get` | Retrieve the full skill by ID (disclosure after `skill_search`). |
 | `bootstrap` | Cold-start context — soul + recent memories in one call. |
 | `soul_set` | Set personality or project context (included in every bootstrap). |
 | `soul_get` | Get a personality or project context entry. |
