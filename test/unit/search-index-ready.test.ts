@@ -10,6 +10,7 @@ import {
   trackedHitStatsCommitted,
   trackedResultSet,
   bm25LegServesTracked,
+  hnswLegServesTracked,
 } from "../helpers/search-index-ready.ts";
 
 describe("lexicalIndexServesCorpus", () => {
@@ -70,5 +71,17 @@ describe("bm25LegServesTracked", () => {
     }, expected)).toBe(false);
     expect(bm25LegServesTracked(undefined, expected)).toBe(false);
     expect(bm25LegServesTracked({ bm25: [] }, expected)).toBe(false);
+  });
+});
+
+describe("hnswLegServesTracked", () => {
+  const expected = ["metadata-0000", "metadata-0001", "metadata-0002", "metadata-0003", "metadata-0004"];
+
+  test("a sequential HNSW page is not the tracked lexical set", () => {
+    expect(hnswLegServesTracked({ hnsw: expected }, expected)).toBe(true);
+    expect(hnswLegServesTracked({
+      hnsw: ["metadata-0005", "metadata-0006", "metadata-0007", "metadata-0008", "metadata-0009"],
+    }, expected)).toBe(false);
+    expect(hnswLegServesTracked({ hnsw: ["metadata-0000", "metadata-0001", "metadata-0002"] }, expected)).toBe(false);
   });
 });

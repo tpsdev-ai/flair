@@ -41,3 +41,12 @@ export function bm25LegServesTracked(
   const bm25 = legs?.bm25 ?? [];
   return expectedIds.every((id) => bm25.includes(id));
 }
+
+/** True when the HNSW leg has indexed every tracked id. */
+export function hnswLegServesTracked(
+  legs: { hnsw?: string[] } | null | undefined,
+  expectedIds: readonly string[],
+): boolean {
+  const hnsw = legs?.hnsw ?? [];
+  return expectedIds.every((id) => hnsw.includes(id));
+}

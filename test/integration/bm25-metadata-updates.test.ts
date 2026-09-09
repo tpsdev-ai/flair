@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import {
   bm25LegServesTracked,
+  hnswLegServesTracked,
   lexicalIndexServesCorpus,
   trackedHitStatsCommitted,
   trackedResultSet,
@@ -29,12 +30,14 @@ beforeAll(async () => {
   const records = Array.from({ length: 1000 }, (_, i) => ({
     id: `metadata-${String(i).padStart(4, "0")}`, agentId: "metadata-reader",
     content: `${i < 5 ? "quokka" : "wombat"} checklist ${i} ` + "release rollback procedure deployment verification ".repeat(20),
-    // Identical embeddings make HNSW a 1000-way tie: RRF can keep wombats in
-    // fused top-5 even after BM25 is ready (CI: 0000-0002 + 0311-0312). A
-    // second-axis bump makes the lexical rows the semantic nearest neighbors
-    // too, so index-ready actually means those rows are served.
-    embedding: i < 5 ? [1, 1, ...Array(766).fill(0)] : [1, 0, ...Array(766).fill(0)],
-    embeddingModel: "nomic-embed-text-v1.5-Q4_K_M+searchprefix",
+    // Only the five lexical rows carry a vector. 1000 identical embeddings
+    // make HNSW a tie lottery; 995 wombat vectors in another direction trap
+    // ANN in that cluster so fused top-5 stays mixed after BM25 is ready
+    // (0000-0002 + 0311/0109/0684). BM25 still indexes all 1000 bodies.
+    ...(i < 5 ? {
+      embedding: [1, ...Array(767).fill(0)],
+      embeddingModel: "nomic-embed-text-v1.5-Q4_K_M+searchprefix",
+    } : {}),
     durability: "standard", visibility: "private", createdAt: "2026-01-01T00:00:00Z",
   }));
   const res = await fetch(harper.opsURL, { method: "POST", headers: { "Content-Type": "application/json", Authorization: auth() },
@@ -54,7 +57,7 @@ async function post(endpoint: string, body: unknown): Promise<any> {
 }
 const CORPUS = 1000;
 const TRACKED = Array.from({ length: 5 }, (_, i) => `metadata-${String(i).padStart(4, "0")}`);
-const QUERY_EMBEDDING = [1, 1, ...Array(766).fill(0)];
+const QUERY_EMBEDDING = [1, ...Array(767).fill(0)];
 const search = (includeLegs = false) => post("SemanticSearch", { agentId: "metadata-reader", q: "quokka",
   queryEmbedding: QUERY_EMBEDDING, limit: 5, ...(includeLegs ? { includeLegs: true } : {}) });
 const percentile = (values: number[], p: number) => values.slice().sort((a, b) => a - b)[Math.ceil(values.length * p) - 1];
@@ -91,14 +94,16 @@ async function waitUntilIndexServesWrittenRows() {
   });
 
   let served: string[] = [];
-  let legs: { bm25?: string[] } | undefined;
+  let legs: { bm25?: string[]; hnsw?: string[] } | undefined;
   try {
-    await pollUntil("BM25 leg and fused top-5 serve the tracked quokka ids", async () => {
+    await pollUntil("BM25 and HNSW legs serve the tracked quokka ids", async () => {
       const result = await search(true);
       served = (result.results ?? []).map((row: any) => row.id);
       legs = result.legs;
       last = await post("Bm25MetadataProbe", {});
-      return bm25LegServesTracked(legs, TRACKED) && trackedResultSet(served, TRACKED);
+      return bm25LegServesTracked(legs, TRACKED)
+        && hnswLegServesTracked(legs, TRACKED)
+        && trackedResultSet(served, TRACKED);
     });
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.message : error}: served=${JSON.stringify(served)} legs=${JSON.stringify(legs)} index=${JSON.stringify(last.index)}`);
