@@ -18,15 +18,27 @@ import { tmpdir } from "node:os";
 import {
   runNightlyCycle,
   deriveActiveAdkTags,
+  hasAdkUserTags,
+  isRemAbortedFailure,
   deriveSettledContinuityTags,
   resolveSettleMs,
+  resolveMaxMemoriesPerRun,
+  runHealthPreflight,
+  formatHealthRefuseMessage,
   ADK_TAG_PREFIX,
   CONTINUITY_TAG_PREFIX,
   DEFAULT_MAX_TAGS_PER_CYCLE,
   DEFAULT_REM_SETTLE_MS,
+  DEFAULT_MAX_MEMORIES_PER_RUN,
+  ABSOLUTE_MAX_MEMORIES_PER_RUN,
+  DEFAULT_HEALTH_PREFLIGHT_MS,
   type ApiCall,
   type RunnerOpts,
 } from "../src/rem/runner.ts";
+import {
+  DEFAULT_MAX_MEMORIES_PER_RUN as LIB_DEFAULT_MAX_MEMORIES_PER_RUN,
+  ABSOLUTE_MAX_MEMORIES_PER_RUN as LIB_ABSOLUTE_MAX_MEMORIES_PER_RUN,
+} from "../resources/memory-reflect-lib.ts";
 
 const sampleMemories = [
   { id: "m1", agentId: "test-agent", content: "first memory", durability: "persistent" },
@@ -85,6 +97,8 @@ function baseOpts(overrides: Partial<RunnerOpts> = {}): RunnerOpts {
     logPath,
     pauseFlagPath,
     envPaused: false,
+    // #1515: unit tests stub the health self-check so they do not need GET /Health.
+    healthProbe: async () => ({ ok: true, elapsedMs: 1 }),
     ...overrides,
   };
 }
@@ -548,6 +562,21 @@ describe("deriveActiveAdkTags (#1205b-1)", () => {
     expect(deriveActiveAdkTags([], since, AGENT)).toEqual([]);
   });
 
+  it("hasAdkUserTags is recency-independent and ignores continuity / other agents", () => {
+    expect(hasAdkUserTags([{ agentId: AGENT, tags: ["adk:app:alice"], createdAt: old }], AGENT)).toBe(true);
+    expect(hasAdkUserTags([{ agentId: AGENT, tags: ["adk:continuity:sess"], createdAt: recent }], AGENT)).toBe(false);
+    expect(hasAdkUserTags([{ agentId: "other", tags: ["adk:app:eve"], createdAt: recent }], AGENT)).toBe(false);
+    expect(hasAdkUserTags([], AGENT)).toBe(false);
+  });
+
+  it("isRemAbortedFailure matches rem_aborted JSON and abort text, not ordinary distill errors", () => {
+    expect(isRemAbortedFailure(JSON.stringify({ error: "rem_aborted", detail: "pause" }))).toBe(true);
+    expect(isRemAbortedFailure("REM distillation aborted (pause sentinel)")).toBe(true);
+    expect(isRemAbortedFailure(new Error(JSON.stringify({ error: "rem_aborted" })))).toBe(true);
+    expect(isRemAbortedFailure(JSON.stringify({ error: "distillation_failed" }))).toBe(false);
+    expect(isRemAbortedFailure("fetch failed: connection reset")).toBe(false);
+  });
+
   it("selects tags by ADK_TAG_PREFIX", () => {
     expect(ADK_TAG_PREFIX).toBe("adk:");
     expect(deriveActiveAdkTags([{ agentId: AGENT, tags: ["adk:app:z"], createdAt: recent }], since, AGENT)).toEqual(["adk:app:z"]);
@@ -637,9 +666,36 @@ describe("tag-aware distillation cycle (#1205b-1)", () => {
 
     expect(r.status).toBe("completed");
     expect(reflectCalls.length).toBe(1);
-    // agentId-only: no scope, no tag — exactly the old call shape.
-    expect(reflectCalls[0]).toEqual({ agentId: "test-agent", execute: true });
+    // agentId-only: scope:"all" + maxMemories so a backlog drains (#1515).
+    expect(reflectCalls[0]).toEqual({
+      agentId: "test-agent",
+      execute: true,
+      scope: "all",
+      maxMemories: 50,
+    });
     expect(r.logRow.candidates).toEqual(["cand_recent"]);
+  });
+
+  it("IDLE ADK: old adk tags do not fall through to scope:all (no cross-user bleed)", async () => {
+    const { api, reflectCalls, autoPromoteCalls } = makeTagAwareApi({
+      activeTags: [],
+      memories: [{
+        id: "m-old",
+        agentId: "test-agent",
+        content: "old session",
+        tags: ["adk:app:alice"],
+        durability: "standard",
+        createdAt: "2020-01-01T00:00:00.000Z",
+      }],
+      reflect: () => ({ candidates: [{ id: "should-not-run" }], count: 1, model: "default" }),
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api }));
+
+    expect(r.status).toBe("completed");
+    expect(reflectCalls).toEqual([]);
+    expect(reflectCalls.some((c) => c.scope === "all")).toBe(false);
+    expect(autoPromoteCalls).toEqual([]);
+    expect(r.logRow.errors.some((e) => e.includes("cross-user bleed"))).toBe(true);
   });
 
   it("a per-tag failure is NON-FATAL: other tags still distill, cycle completes, error recorded", async () => {
@@ -907,9 +963,9 @@ describe("continuity distillation cycle wiring (flair#1257 slice 3)", () => {
     // tagged distill for the settled session — and NONE for the live one.
     const tagged = reflectCalls.filter((c) => c.scope === "tagged");
     expect(tagged.length).toBe(1);
-    expect(tagged[0]).toEqual({ agentId: "test-agent", execute: true, scope: "tagged", tag: T("settled"), focus: "continuity" });
+    expect(tagged[0]).toEqual({ agentId: "test-agent", execute: true, scope: "tagged", tag: T("settled"), focus: "continuity", maxMemories: 50 });
     expect(reflectCalls.some((c) => c.tag === T("livesess"))).toBe(false);
-    expect(reflectCalls.filter((c) => c.scope === undefined).length).toBe(1); // agentId-only path intact
+    expect(reflectCalls.filter((c) => c.scope === "all").length).toBe(1); // agentId-only path intact
     // Candidates aggregated; auto-promote sweep triggered by continuity alone.
     expect(r.logRow.candidates).toContain("cand_cont");
     expect(autoPromoteCalls.length).toBe(1);
@@ -982,5 +1038,135 @@ describe("continuity distillation cycle wiring (flair#1257 slice 3)", () => {
     expect(r.status).toBe("dry-run");
     expect(reflectCalls.length).toBe(0);
     expect(r.logRow.continuitySessions).toBeUndefined();
+  });
+});
+
+describe("per-run distill cap + health refuse (#1515)", () => {
+  it("keeps the runner and resource gather caps in sync", () => {
+    expect(DEFAULT_MAX_MEMORIES_PER_RUN).toBe(LIB_DEFAULT_MAX_MEMORIES_PER_RUN);
+    expect(ABSOLUTE_MAX_MEMORIES_PER_RUN).toBe(LIB_ABSOLUTE_MAX_MEMORIES_PER_RUN);
+    expect(DEFAULT_MAX_MEMORIES_PER_RUN).toBe(50);
+    expect(ABSOLUTE_MAX_MEMORIES_PER_RUN).toBe(200);
+    expect(DEFAULT_HEALTH_PREFLIGHT_MS).toBe(2000);
+  });
+
+  it("resolveMaxMemoriesPerRun: override > env > default, then hard-clamped", () => {
+    expect(resolveMaxMemoriesPerRun(undefined, {})).toBe(50);
+    expect(resolveMaxMemoriesPerRun(undefined, { FLAIR_REM_MAX_MEMORIES: "25" })).toBe(25);
+    expect(resolveMaxMemoriesPerRun(10, { FLAIR_REM_MAX_MEMORIES: "25" })).toBe(10);
+    expect(resolveMaxMemoriesPerRun(5000, {})).toBe(200);
+    expect(resolveMaxMemoriesPerRun(undefined, { FLAIR_REM_MAX_MEMORIES: "9999" })).toBe(200);
+    expect(resolveMaxMemoriesPerRun(0, {})).toBe(50);
+    expect(resolveMaxMemoriesPerRun(-3, { FLAIR_REM_MAX_MEMORIES: "nope" })).toBe(50);
+  });
+
+  it("refuses to start when /Health cannot be served — no snapshot, no distill", async () => {
+    const calls: string[] = [];
+    const r = await runNightlyCycle(baseOpts({
+      healthProbe: async () => ({ ok: false, elapsedMs: 2001, error: "GET /Health did not respond within 2000ms" }),
+      apiCall: async (method, path) => {
+        calls.push(`${method}:${path.split("?")[0]}`);
+        throw new Error("must not be called after a health refuse");
+      },
+    }));
+    expect(r.status).toBe("refused");
+    expect(r.snapshotPath).toBeUndefined();
+    expect(r.logRow.candidates).toBeUndefined();
+    expect(r.logRow.errors[0]).toContain("GET /Health could not be served");
+    expect(r.logRow.errors[0]).toContain("Refusing to start REM");
+    expect(calls).toEqual([]);
+    expect(readLogRows()[0].status).toBe("refused");
+  });
+
+  it("runHealthPreflight treats ok:false and timeouts as not-ok", async () => {
+    const refused = await runHealthPreflight(async () => ({ ok: false }), { timeoutMs: 50 });
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain("ok:false");
+
+    const hung = await runHealthPreflight(
+      () => new Promise(() => { /* never settles */ }),
+      { timeoutMs: 20 },
+    );
+    expect(hung.ok).toBe(false);
+    expect(hung.error).toContain("did not respond within 20ms");
+
+    const ok = await runHealthPreflight(async () => ({ ok: true }), { timeoutMs: 50 });
+    expect(ok.ok).toBe(true);
+    expect(formatHealthRefuseMessage(hung, 20)).toContain("20ms");
+  });
+
+  it("passes maxMemories on every /ReflectMemories call, including tagged", async () => {
+    const { api, reflectCalls } = makeTagAwareApi({
+      activeTags: ["adk:app:alice"],
+      reflect: () => ({ candidates: [], count: 0, model: "default", gathered: 4, unreflected: 12 }),
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api, maxMemoriesPerRun: 12 }));
+    expect(r.status).toBe("completed");
+    expect(reflectCalls.every((c) => c.maxMemories === 12)).toBe(true);
+    expect(r.logRow.distill).toEqual({ gathered: 4, unreflected: 12, maxMemories: 12 });
+  });
+
+  it("aborts remaining tags when the pause sentinel appears mid-cycle", async () => {
+    const { api, reflectCalls } = makeTagAwareApi({
+      activeTags: ["adk:app:alice", "adk:app:bob"],
+      reflect: (body) => {
+        if (body.tag === "adk:app:alice") writeFileSync(pauseFlagPath, "now\n");
+        return { candidates: [{ id: `cand_${(body.tag as string).split(":").pop()}` }], count: 1, model: "default" };
+      },
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api }));
+    expect(r.status).toBe("completed");
+    expect(reflectCalls.map((c) => c.tag)).toEqual(["adk:app:alice"]);
+    expect(r.logRow.candidates).toEqual(["cand_alice"]);
+    expect(r.logRow.errors.some((e) => e.includes("aborted by operator"))).toBe(true);
+    expect(r.logRow.distill?.aborted).toBe(true);
+    expect(r.logRow.dedup).toBeUndefined();
+  });
+
+  it("503 rem_aborted on a tagged distill stops the cycle — no remaining tags, no autopromote, no dedup", async () => {
+    let dedupCalls = 0;
+    const { api, reflectCalls, autoPromoteCalls } = makeTagAwareApi({
+      activeTags: ["adk:app:alice", "adk:app:bob"],
+      reflect: () => {
+        throw new Error(JSON.stringify({
+          error: "rem_aborted",
+          detail: "REM distillation aborted (pause sentinel or FLAIR_REM_PAUSE=1). Resume with: flair rem resume",
+        }));
+      },
+    });
+    const wrapped: ApiCall = async (method, path, body) => {
+      if (method === "POST" && path.split("?")[0] === "/MemoryDedupStats") dedupCalls++;
+      return api(method, path, body);
+    };
+    const r = await runNightlyCycle(baseOpts({ apiCall: wrapped }));
+    expect(r.status).toBe("completed");
+    expect(reflectCalls.map((c) => c.tag)).toEqual(["adk:app:alice"]);
+    expect(autoPromoteCalls).toEqual([]);
+    expect(dedupCalls).toBe(0);
+    expect(r.logRow.distill?.aborted).toBe(true);
+    expect(r.logRow.dedup).toBeUndefined();
+    expect(r.logRow.errors.some((e) => e.includes("rem_aborted"))).toBe(true);
+  });
+
+  it("503 rem_aborted on a non-ADK distill skips MemoryDedupStats", async () => {
+    let dedupCalls = 0;
+    const { api, reflectCalls, autoPromoteCalls } = makeTagAwareApi({
+      activeTags: [],
+      reflect: () => {
+        throw new Error(JSON.stringify({ error: "rem_aborted", detail: "paused" }));
+      },
+    });
+    const wrapped: ApiCall = async (method, path, body) => {
+      if (method === "POST" && path.split("?")[0] === "/MemoryDedupStats") dedupCalls++;
+      return api(method, path, body);
+    };
+    const r = await runNightlyCycle(baseOpts({ apiCall: wrapped }));
+    expect(r.status).toBe("completed");
+    expect(reflectCalls).toHaveLength(1);
+    expect(reflectCalls[0].scope).toBe("all");
+    expect(autoPromoteCalls).toEqual([]);
+    expect(dedupCalls).toBe(0);
+    expect(r.logRow.distill?.aborted).toBe(true);
+    expect(r.logRow.dedup).toBeUndefined();
   });
 });
