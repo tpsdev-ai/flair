@@ -32,3 +32,12 @@ export function trackedHitStatsCommitted(
 export function trackedResultSet(ids: readonly string[], expectedIds: readonly string[]): boolean {
   return ids.length === expectedIds.length && expectedIds.every((id) => ids.includes(id));
 }
+
+/** True when the BM25 leg (not fused top-k) already contains every tracked id. */
+export function bm25LegServesTracked(
+  legs: { bm25?: string[] } | null | undefined,
+  expectedIds: readonly string[],
+): boolean {
+  const bm25 = legs?.bm25 ?? [];
+  return expectedIds.every((id) => bm25.includes(id));
+}

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import {
+  bm25LegServesTracked,
   lexicalIndexServesCorpus,
   trackedHitStatsCommitted,
   trackedResultSet,
@@ -28,7 +29,12 @@ beforeAll(async () => {
   const records = Array.from({ length: 1000 }, (_, i) => ({
     id: `metadata-${String(i).padStart(4, "0")}`, agentId: "metadata-reader",
     content: `${i < 5 ? "quokka" : "wombat"} checklist ${i} ` + "release rollback procedure deployment verification ".repeat(20),
-    embedding: [1, ...Array(767).fill(0)], embeddingModel: "nomic-embed-text-v1.5-Q4_K_M+searchprefix",
+    // Identical embeddings make HNSW a 1000-way tie: RRF can keep wombats in
+    // fused top-5 even after BM25 is ready (CI: 0000-0002 + 0311-0312). A
+    // second-axis bump makes the lexical rows the semantic nearest neighbors
+    // too, so index-ready actually means those rows are served.
+    embedding: i < 5 ? [1, 1, ...Array(766).fill(0)] : [1, 0, ...Array(766).fill(0)],
+    embeddingModel: "nomic-embed-text-v1.5-Q4_K_M+searchprefix",
     durability: "standard", visibility: "private", createdAt: "2026-01-01T00:00:00Z",
   }));
   const res = await fetch(harper.opsURL, { method: "POST", headers: { "Content-Type": "application/json", Authorization: auth() },
@@ -48,49 +54,65 @@ async function post(endpoint: string, body: unknown): Promise<any> {
 }
 const CORPUS = 1000;
 const TRACKED = Array.from({ length: 5 }, (_, i) => `metadata-${String(i).padStart(4, "0")}`);
-const search = () => post("SemanticSearch", { agentId: "metadata-reader", q: "quokka",
-  queryEmbedding: [1, ...Array(767).fill(0)], limit: 5 });
+const QUERY_EMBEDDING = [1, 1, ...Array(766).fill(0)];
+const search = (includeLegs = false) => post("SemanticSearch", { agentId: "metadata-reader", q: "quokka",
+  queryEmbedding: QUERY_EMBEDDING, limit: 5, ...(includeLegs ? { includeLegs: true } : {}) });
 const percentile = (values: number[], p: number) => values.slice().sort((a, b) => a - b)[Math.ceil(values.length * p) - 1];
 
-// #1565's warmup (`index.state === "ready" && counterTotal >= 5`) still
-// flaked: ready can land on a partial scan, and the summed counter can
-// come from one id. Wait until the index actually holds the written
-// corpus, hybrid recall is the five quokka rows, and MemoryHitStat has
-// committed those ids. Do not start measured arms on a partial set.
-async function waitUntilIndexServesWrittenRows() {
+async function pollUntil(label: string, ready: () => Promise<boolean>): Promise<void> {
   const deadline = Date.now() + 30_000;
-  let last: any = {};
   while (Date.now() < deadline) {
-    last = await post("Bm25MetadataProbe", { action: "tableCount" });
-    if ((last.tableSize ?? 0) >= CORPUS) break;
+    if (await ready()) return;
     await Bun.sleep(20);
   }
-  expect(last.tableSize, "Memory table must expose the written corpus before index build")
-    .toBeGreaterThanOrEqual(CORPUS);
+  throw new Error(`${label} did not become ready`);
+}
 
-  while (Date.now() < deadline) {
+// #1565's warmup (`index.state === "ready" && counterTotal >= 5`) still
+// flaked: ready can land on a partial scan, the summed counter can come
+// from one id, and a shared leftover deadline can expire while hybrid
+// recall is still a partial set. Poll each readiness condition on its
+// own. Do not start measured arms on a partial set.
+async function waitUntilIndexServesWrittenRows() {
+  let last: any = {};
+  await pollUntil("Memory table corpus", async () => {
+    last = await post("Bm25MetadataProbe", { action: "tableCount" });
+    return (last.tableSize ?? 0) >= CORPUS;
+  });
+
+  await pollUntil(`BM25 index ready with size>=${CORPUS}`, async () => {
     last = await post("Bm25MetadataProbe", {});
-    if (lexicalIndexServesCorpus(last.index, CORPUS)) break;
+    if (lexicalIndexServesCorpus(last.index, CORPUS)) return true;
     if (last.index?.state === "ready" && (last.index.size ?? 0) < CORPUS) {
       await post("Bm25MetadataProbe", { action: "rebuild", reason: "index smaller than written corpus" });
     }
     await search();
-    await Bun.sleep(20);
-  }
-  expect(lexicalIndexServesCorpus(last.index, CORPUS),
-    `index must be ready with size>=${CORPUS}, got ${JSON.stringify(last.index)}`).toBe(true);
+    return false;
+  });
 
   let served: string[] = [];
-  while (Date.now() < deadline) {
-    const result = await search();
-    served = (result.results ?? []).map((row: any) => row.id);
-    if (!trackedResultSet(served, TRACKED)) {
-      await Bun.sleep(20);
-      continue;
-    }
-    last = await post("Bm25MetadataProbe", { action: "idle" });
-    if (trackedHitStatsCommitted(last.trackedCounts, TRACKED.length)) return last;
+  let legs: { bm25?: string[] } | undefined;
+  try {
+    await pollUntil("BM25 leg and fused top-5 serve the tracked quokka ids", async () => {
+      const result = await search(true);
+      served = (result.results ?? []).map((row: any) => row.id);
+      legs = result.legs;
+      last = await post("Bm25MetadataProbe", {});
+      return bm25LegServesTracked(legs, TRACKED) && trackedResultSet(served, TRACKED);
+    });
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.message : error}: served=${JSON.stringify(served)} legs=${JSON.stringify(legs)} index=${JSON.stringify(last.index)}`);
   }
+
+  last = await post("Bm25MetadataProbe", { action: "idle" });
+  if (!trackedHitStatsCommitted(last.trackedCounts, TRACKED.length)) {
+    await pollUntil("MemoryHitStat committed for every tracked id", async () => {
+      last = await post("Bm25MetadataProbe", { action: "idle" });
+      return trackedHitStatsCommitted(last.trackedCounts, TRACKED.length);
+    });
+  }
+  expect(bm25LegServesTracked(legs, TRACKED),
+    `BM25 leg must serve tracked ids, got ${JSON.stringify(legs)}`).toBe(true);
   expect(served.slice().sort(), "warmup search must return the five tracked quokka ids").toEqual([...TRACKED]);
   expect(trackedHitStatsCommitted(last.trackedCounts, TRACKED.length),
     `warmup must commit hit stats for every tracked id, got ${JSON.stringify(last.trackedCounts)}`).toBe(true);

@@ -9,6 +9,7 @@ import {
   lexicalIndexServesCorpus,
   trackedHitStatsCommitted,
   trackedResultSet,
+  bm25LegServesTracked,
 } from "../helpers/search-index-ready.ts";
 
 describe("lexicalIndexServesCorpus", () => {
@@ -53,5 +54,21 @@ describe("trackedResultSet", () => {
     expect(trackedResultSet(["metadata-0000", "metadata-0001", "metadata-0002"], expected)).toBe(false);
     expect(trackedResultSet([...expected, "metadata-0005"], expected)).toBe(false);
     expect(trackedResultSet(["metadata-0005", "metadata-0006", "metadata-0007", "metadata-0008", "metadata-0009"], expected)).toBe(false);
+  });
+});
+
+describe("bm25LegServesTracked", () => {
+  const expected = ["metadata-0000", "metadata-0001", "metadata-0002", "metadata-0003", "metadata-0004"];
+
+  test("fused top-k can miss ids that the BM25 leg already serves", () => {
+    expect(bm25LegServesTracked({ bm25: expected }, expected)).toBe(true);
+    expect(bm25LegServesTracked({
+      bm25: expected,
+    }, expected)).toBe(true);
+    expect(bm25LegServesTracked({
+      bm25: ["metadata-0000", "metadata-0001", "metadata-0002", "metadata-0311", "metadata-0312"],
+    }, expected)).toBe(false);
+    expect(bm25LegServesTracked(undefined, expected)).toBe(false);
+    expect(bm25LegServesTracked({ bm25: [] }, expected)).toBe(false);
   });
 });
