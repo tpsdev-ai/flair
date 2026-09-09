@@ -26,6 +26,7 @@ import {
   normalizeClaim,
   considerForOldestUnreflectedCap,
   compareOldestCreatedAtFirst,
+  compareOldestUnreflectedFirst,
   isUnreflectedMemory,
   isRemAbortRequested,
   resolveMaxMemoriesPerRun,
@@ -509,7 +510,7 @@ describe("oldest-unreflected gather cap (#1515)", () => {
     expect(compareOldestCreatedAtFirst({ createdAt: "" }, a)).toBeGreaterThan(0);
   });
 
-  test("keeps the N oldest unreflected rows and ignores already-reflected ones", () => {
+  test("keeps the N oldest unreflected rows ahead of already-reflected ones", () => {
     const pool: Array<{ id: string; createdAt: string; lastReflected?: string }> = [];
     const rows = [
       { id: "new", createdAt: "2026-08-01T00:00:00.000Z" },
@@ -520,6 +521,29 @@ describe("oldest-unreflected gather cap (#1515)", () => {
     ];
     for (const row of rows) considerForOldestUnreflectedCap(pool, row, 2);
     expect(pool.map((r) => r.id)).toEqual(["older-than-cap", "old"]);
+  });
+
+  test("fills leftover cap slots with oldest already-reflected when unreflected are fewer than N", () => {
+    const pool: Array<{ id: string; createdAt: string; lastReflected?: string }> = [];
+    const rows = [
+      { id: "unreflected", createdAt: "2026-06-01T00:00:00.000Z" },
+      { id: "reflected-old", createdAt: "2020-01-01T00:00:00.000Z", lastReflected: "2026-09-01T00:00:00.000Z" },
+      { id: "reflected-new", createdAt: "2026-08-01T00:00:00.000Z", lastReflected: "2026-09-02T00:00:00.000Z" },
+    ];
+    for (const row of rows) considerForOldestUnreflectedCap(pool, row, 3);
+    expect(pool.map((r) => r.id)).toEqual(["unreflected", "reflected-old", "reflected-new"]);
+    expect(compareOldestUnreflectedFirst(rows[0], rows[1])).toBeLessThan(0);
+  });
+
+  test("an all-reflected matching set still gathers (tagged/recent after a prior reflect)", () => {
+    const pool: Array<{ id: string; createdAt: string; lastReflected: string }> = [];
+    const rows = [
+      { id: "b", createdAt: "2026-02-01T00:00:00.000Z", lastReflected: "2026-09-01T00:00:00.000Z" },
+      { id: "a", createdAt: "2026-01-01T00:00:00.000Z", lastReflected: "2026-09-01T00:00:00.000Z" },
+      { id: "c", createdAt: "2026-03-01T00:00:00.000Z", lastReflected: "2026-09-01T00:00:00.000Z" },
+    ];
+    for (const row of rows) considerForOldestUnreflectedCap(pool, row, 50);
+    expect(pool.map((r) => r.id)).toEqual(["a", "b", "c"]);
   });
 
   test("isRemAbortRequested honors FLAIR_REM_PAUSE and the pause sentinel", () => {

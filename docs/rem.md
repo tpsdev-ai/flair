@@ -64,7 +64,7 @@ Snapshot locality follows from this: a nightly cycle's pre-run snapshot (`~/.fla
 A first run over thousands of unreflected memories used to hold the Harper main thread long enough that `/Health` and search timed out. Nightly distillation is now bounded:
 
 - **Refuse to start** when `GET /Health` cannot be served within 2 seconds. The cycle logs `status: "refused"` and prints the reason; the scheduler will try again next night. Restore `/Health` before retrying, or `flair rem pause` to stop the timer.
-- **Per-run cap** — at most 50 oldest-unreflected memories per `/ReflectMemories` call (`FLAIR_REM_MAX_MEMORIES`, hard ceiling 200). Already-reflected rows are skipped so a 3k backlog drains across nights instead of one blocking run. Nightly uses `scope: "all"` for ordinary (non-ADK) agents so the cap sees the whole backlog, not only the last 24 hours.
+- **Per-run cap** — at most 50 memories per `/ReflectMemories` call (`FLAIR_REM_MAX_MEMORIES`, hard ceiling 200), oldest-unreflected first so a 3k backlog drains across nights instead of one blocking run. Already-reflected rows fill leftover slots only when fewer than N unreflected matches remain. Nightly uses `scope: "all"` for ordinary (non-ADK) agents so the cap sees the whole backlog, not only the last 24 hours.
 - **Yield + abort** — the gather scan yields so `/Health` and reads keep serving. `flair rem pause` (or `flair rem abort`) writes `~/.flair/rem.paused`; an in-flight gather on the same host stops at the next yield without restarting Harper.
 
 `flair rem rapid` uses the same gather cap, oldest-unreflected selection, yield, and abort checks. It still defaults to `scope: "recent"` (last 24 hours) unless you pass `--since` / a wider scope.

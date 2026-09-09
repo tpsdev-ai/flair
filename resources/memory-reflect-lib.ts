@@ -740,10 +740,12 @@ export function buildStagedCandidateRow(params: {
 //
 // A first nightly run over a 3k backlog used to take whatever Memory.search()
 // yielded first, up to maxMemories, then stamp lastReflected on that batch.
-// That neither drains oldest work nor skips already-reflected rows, and the
-// scan itself did not yield. These helpers are the gather policy: only
-// unreflected rows (empty/missing lastReflected), oldest createdAt first,
-// hard-capped so one cycle cannot assemble a thousands-row prompt.
+// That neither drains oldest work nor prefers unreflected rows, and the
+// scan itself did not yield. These helpers are the gather policy:
+// unreflected first, oldest createdAt first, hard-capped so one cycle cannot
+// assemble a thousands-row prompt. Already-reflected rows still fill leftover
+// slots so a tagged/recent gather after a prior reflect (isolation checks,
+// rem rapid) is not emptied.
 
 export interface ReflectGatherMemory {
   createdAt?: string | null;
@@ -786,25 +788,38 @@ export function compareOldestCreatedAtFirst(a: ReflectGatherMemory, b: ReflectGa
 }
 
 /**
- * Keep at most `maxN` oldest-unreflected records. Already-reflected rows are
- * ignored so a backlog drains instead of being re-distilled. Mutates `pool`
- * and returns it (bounded insert, O(N) with N ≤ 200).
+ * Unreflected first, then oldest createdAt. Nightly uses this so a backlog
+ * of never-reflected rows drains before anything is re-distilled.
+ */
+export function compareOldestUnreflectedFirst(a: ReflectGatherMemory, b: ReflectGatherMemory): number {
+  const aU = isUnreflectedMemory(a) ? 0 : 1;
+  const bU = isUnreflectedMemory(b) ? 0 : 1;
+  if (aU !== bU) return aU - bU;
+  return compareOldestCreatedAtFirst(a, b);
+}
+
+/**
+ * Keep at most `maxN` records, oldest-unreflected first. Already-reflected
+ * rows lose to any unreflected row (so a 3k backlog drains) but still fill
+ * leftover slots when fewer than `maxN` unreflected matches exist — a
+ * tagged/recent gather after a prior reflect must not go empty.
+ * Mutates `pool` and returns it (bounded insert, O(N) with N ≤ 200).
  */
 export function considerForOldestUnreflectedCap<T extends ReflectGatherMemory>(
   pool: T[],
   record: T,
   maxN: number,
 ): T[] {
-  if (maxN <= 0 || !isUnreflectedMemory(record)) return pool;
+  if (maxN <= 0) return pool;
   if (pool.length < maxN) {
     pool.push(record);
-    pool.sort(compareOldestCreatedAtFirst);
+    pool.sort(compareOldestUnreflectedFirst);
     return pool;
   }
-  const newestKept = pool[pool.length - 1];
-  if (compareOldestCreatedAtFirst(record, newestKept) < 0) {
+  const worstKept = pool[pool.length - 1];
+  if (compareOldestUnreflectedFirst(record, worstKept) < 0) {
     pool[pool.length - 1] = record;
-    pool.sort(compareOldestCreatedAtFirst);
+    pool.sort(compareOldestUnreflectedFirst);
   }
   return pool;
 }

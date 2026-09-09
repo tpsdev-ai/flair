@@ -118,9 +118,10 @@ export class ReflectMemories extends Resource {
     const gatherNow = new Date();
     const maxN = resolveMaxMemoriesPerRun(typeof maxMemories === "number" ? maxMemories : undefined);
     // #1515: do not take the first N search hits. Scan eligible rows (yielding
-    // so /Health keeps serving), keep only oldest-unreflected up to maxN, and
-    // abort if the operator paused mid-run. Embeddings are excluded from the
-    // select — loading 3k vectors just to strip them pegs the main thread.
+    // so /Health keeps serving), keep oldest-unreflected first up to maxN
+    // (already-reflected fill leftover slots), and abort if the operator
+    // paused mid-run. Embeddings are excluded from the select — loading 3k
+    // vectors just to strip them pegs the main thread.
     const memories: any[] = [];
     let unreflectedSeen = 0;
     let yieldAt = performance.now() + REM_GATHER_YIELD_BUDGET_MS;
