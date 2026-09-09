@@ -36,6 +36,8 @@ import {
   applyPlainTreeUpgrade,
   restorePlainTreePrevious,
   discardPlainTreePrevious,
+  resolvePlainTreeListingTarget,
+  decidePlainTreeRollback,
   treeSibling,
   PACKED_ROOT_NAMES,
   UPGRADE_NEXT_SUFFIX,
@@ -357,6 +359,45 @@ describe("systemd unit discovery", () => {
     expect(unitTextMentionsTree(unit, "/opt/other")).toBe(false);
   });
 
+  test("unitTextMentionsTree does not match an unanchored prefix sibling", () => {
+    const spoke = [
+      "[Service]",
+      "WorkingDirectory=/opt/flair-spoke",
+      "ExecStart=/opt/flair-spoke/flair start",
+    ].join("\n");
+    expect(unitTextMentionsTree(spoke, "/opt/flair")).toBe(false);
+    expect(unitTextMentionsTree(spoke, "/opt/flair-spoke")).toBe(true);
+
+    const exact = "[Service]\nWorkingDirectory=/opt/flair\nExecStart=/opt/flair/flair start\n";
+    expect(unitTextMentionsTree(exact, "/opt/flair")).toBe(true);
+    expect(unitTextMentionsTree(exact, "/opt/flair-spoke")).toBe(false);
+  });
+
+  test("findSystemdUnitsForTree does not select a sibling whose path only shares a prefix", () => {
+    const systemDir = join(tmp, "system-prefix");
+    mkdirSync(systemDir, { recursive: true });
+    writeFileSync(
+      join(systemDir, "flair.service"),
+      "[Service]\nWorkingDirectory=/opt/flair\nExecStart=/opt/flair/flair start\n",
+    );
+    writeFileSync(
+      join(systemDir, "spoke.service"),
+      "[Service]\nWorkingDirectory=/opt/flair-spoke\nExecStart=/opt/flair-spoke/flair start\n",
+    );
+    const forShort = findSystemdUnitsForTree("/opt/flair", {
+      systemDirs: [systemDir],
+      userDir: join(tmp, "user-empty"),
+      envUnit: "",
+    });
+    expect(forShort.map((u) => u.name)).toEqual(["flair.service"]);
+    const forSpoke = findSystemdUnitsForTree("/opt/flair-spoke", {
+      systemDirs: [systemDir],
+      userDir: join(tmp, "user-empty"),
+      envUnit: "",
+    });
+    expect(forSpoke.map((u) => u.name)).toEqual(["spoke.service"]);
+  });
+
   test("finds a system unit that names the tree and ignores one that does not", () => {
     const systemDir = join(tmp, "system");
     const userDir = join(tmp, "user");
@@ -522,5 +563,42 @@ describe("isNpmGlobalTree", () => {
     expect(isNpmGlobalTree(global.dir, global)).toBe(true);
     expect(isNpmGlobalTree("/opt/flair-spoke", global)).toBe(false);
     expect(isNpmGlobalTree("/opt/flair-spoke", null)).toBe(false);
+  });
+});
+
+describe("resolvePlainTreeListingTarget", () => {
+  test("pin wins after consulting registry latest", () => {
+    expect(resolvePlainTreeListingTarget({ registryLatest: "0.51.2", pin: "0.40.0" }))
+      .toEqual({ version: "0.40.0", pinned: true });
+  });
+
+  test("pin still applies when registry latest is unavailable", () => {
+    expect(resolvePlainTreeListingTarget({ registryLatest: null, pin: "0.40.0" }))
+      .toEqual({ version: "0.40.0", pinned: true });
+    expect(resolvePlainTreeListingTarget({ registryLatest: "unknown", pin: " 0.40.0 " }))
+      .toEqual({ version: "0.40.0", pinned: true });
+  });
+
+  test("without a pin, uses registry latest", () => {
+    expect(resolvePlainTreeListingTarget({ registryLatest: "0.51.2", pin: null }))
+      .toEqual({ version: "0.51.2", pinned: false });
+  });
+
+  test("without a pin and no latest, cannot list", () => {
+    expect(resolvePlainTreeListingTarget({ registryLatest: null, pin: null })).toBeNull();
+    expect(resolvePlainTreeListingTarget({ registryLatest: "", pin: "  " })).toBeNull();
+  });
+});
+
+describe("decidePlainTreeRollback", () => {
+  test("restores when a previous tree exists", () => {
+    expect(decidePlainTreeRollback(true)).toEqual({ kind: "restore" });
+  });
+
+  test("skips without crashing when no previous tree exists", () => {
+    const decision = decidePlainTreeRollback(false);
+    expect(decision.kind).toBe("skip");
+    if (decision.kind !== "skip") return;
+    expect(decision.reason).toContain("not swapped");
   });
 });

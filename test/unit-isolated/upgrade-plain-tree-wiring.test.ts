@@ -24,7 +24,10 @@ function writePackedTree(dir: string, version: string): void {
   writeFileSync(join(dir, "flair"), "#!/bin/sh\nexec node dist/cli.js \"$@\"\n");
 }
 
-async function runUpgradeCheck(argv: string[]): Promise<{ logs: string[]; errs: string[]; exitCode: number | null }> {
+async function runUpgradeCheck(
+  argv: string[],
+  fetchImpl?: typeof fetch,
+): Promise<{ logs: string[]; errs: string[]; exitCode: number | null }> {
   const logs: string[] = [];
   const errs: string[] = [];
   const logSpy = spyOn(console, "log").mockImplementation((...args: unknown[]) => {
@@ -34,9 +37,9 @@ async function runUpgradeCheck(argv: string[]): Promise<{ logs: string[]; errs: 
     errs.push(args.map((a) => String(a)).join(" "));
   });
   const origFetch = globalThis.fetch;
-  globalThis.fetch = (async () =>
+  globalThis.fetch = (fetchImpl ?? (async () =>
     new Response(JSON.stringify({ version: "0.99.0" }), { status: 200 })
-  ) as unknown as typeof fetch;
+  )) as unknown as typeof fetch;
   let exitCode: number | null = null;
   const exitSpy = spyOn(process, "exit").mockImplementation(((code?: number) => {
     exitCode = code ?? 0;
@@ -86,5 +89,35 @@ describe("flair upgrade plain-tree wiring", () => {
     expect(exitCode).toBe(1);
     expect(errs.join("\n")).toContain("git checkout");
     expect(errs.join("\n")).toContain("tarball-swap lane would overwrite it");
+  });
+
+  test("upgrade --check --tree --flair-version pins against registry latest", async () => {
+    const tree = realpathSync(mkdtempSync(join(tmpdir(), "flair-plain-tree-pin-")));
+    fixtures.push(tree);
+    writePackedTree(tree, "0.36.0");
+
+    const { logs, exitCode } = await runUpgradeCheck(
+      ["upgrade", "--check", "--tree", tree, "--flair-version", "0.40.0"],
+    );
+    expect(exitCode).toBeNull();
+    const text = logs.join("\n");
+    expect(text).toContain("@tpsdev-ai/flair: 0.36.0 → 0.40.0");
+    expect(text).toContain("in-place tarball swap");
+    expect(text).not.toContain("0.36.0 → 0.99.0");
+  });
+
+  test("upgrade --check --tree --flair-version still pins when /latest fails", async () => {
+    const tree = realpathSync(mkdtempSync(join(tmpdir(), "flair-plain-tree-pin-fail-")));
+    fixtures.push(tree);
+    writePackedTree(tree, "0.36.0");
+
+    const { logs, exitCode } = await runUpgradeCheck(
+      ["upgrade", "--check", "--tree", tree, "--flair-version", "0.40.0"],
+      (async () => new Response("nope", { status: 503 })) as unknown as typeof fetch,
+    );
+    expect(exitCode).toBeNull();
+    const text = logs.join("\n");
+    expect(text).toContain("@tpsdev-ai/flair: 0.36.0 → 0.40.0");
+    expect(text).toContain("in-place tarball swap");
   });
 });

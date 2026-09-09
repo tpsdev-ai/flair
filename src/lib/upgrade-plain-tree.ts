@@ -311,18 +311,28 @@ function formatUnitRef(u: SystemdUnitRef): string {
   return `${u.name} (${u.scope}: ${u.path})`;
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * After a directory path, the next character must not continue the last
+ * path segment. `/opt/flair` matches `WorkingDirectory=/opt/flair`,
+ * `/opt/flair/`, and `/opt/flair/dist/cli.js` — not `/opt/flair-spoke`.
+ */
+const AFTER_DIR_PATH = String.raw`(?:/|[\s"'=:]|\\|$)`;
+
 export function unitTextMentionsTree(unitText: string, treeDir: string): boolean {
   const variants = new Set<string>();
-  const trimmed = treeDir.replace(/\/+$/, "");
-  variants.add(treeDir);
-  variants.add(trimmed);
-  variants.add(`${trimmed}/`);
+  const add = (p: string): void => {
+    const trimmed = p.replace(/\/+$/, "");
+    if (trimmed.length > 1) variants.add(trimmed);
+  };
+  add(treeDir);
   try {
-    const canon = canonicalPath(treeDir);
-    variants.add(canon);
-    variants.add(canon.replace(/\/+$/, ""));
+    add(canonicalPath(treeDir));
   } catch { /* lexical variants are enough */ }
-  return [...variants].some((v) => v.length > 1 && unitText.includes(v));
+  return [...variants].some((v) => new RegExp(`${escapeRegExp(v)}${AFTER_DIR_PATH}`).test(unitText));
 }
 
 const SYSTEM_UNIT_DIRS = ["/etc/systemd/system"];
@@ -594,4 +604,44 @@ export function isSymlink(p: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The "→ version" for `@tpsdev-ai/flair` on the plain-tree lane.
+ *
+ * Always consulted against registry `/latest` when that fetch succeeded.
+ * `--flair-version` is the swap target (an operator pin), and it still
+ * applies when `/latest` timed out or was non-OK — otherwise a requested
+ * tarball swap is silently skipped. No pin and no latest → cannot list.
+ */
+export function resolvePlainTreeListingTarget(input: {
+  registryLatest: string | null | undefined;
+  pin: string | null | undefined;
+}): { version: string; pinned: boolean } | null {
+  const pin = typeof input.pin === "string" && input.pin.trim() !== "" ? input.pin.trim() : null;
+  const latest = typeof input.registryLatest === "string"
+    && input.registryLatest.trim() !== ""
+    && input.registryLatest !== "unknown"
+    ? input.registryLatest.trim()
+    : null;
+  if (pin) return { version: pin, pinned: true };
+  if (latest) return { version: latest, pinned: false };
+  return null;
+}
+
+export type PlainTreeRollbackDecision =
+  | { kind: "restore" }
+  | { kind: "skip"; reason: string };
+
+/**
+ * Rollback must not assume `.upgrade-prev` exists. A plain-tree run that
+ * did not swap @tpsdev-ai/flair (already current; openclaw-only) has no
+ * previous tree — skip restore rather than aborting as a hard failure.
+ */
+export function decidePlainTreeRollback(previousDirExists: boolean): PlainTreeRollbackDecision {
+  if (previousDirExists) return { kind: "restore" };
+  return {
+    kind: "skip",
+    reason: "no previous tree to restore (the live tree was not swapped)",
+  };
 }

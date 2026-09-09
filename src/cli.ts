@@ -208,12 +208,14 @@ import {
 } from "./lib/upgrade-exec-path.js";
 import {
   applyPlainTreeUpgrade,
+  decidePlainTreeRollback,
   discardPlainTreePrevious,
   findSystemdUnitsForTree,
   formatPlainTreeBanner,
   formatPlainTreePlan,
   formatPlainTreeScopeFooter,
   planPlainTreeUpgrade,
+  resolvePlainTreeListingTarget,
   resolvePlainTreeTarget,
   restartSystemdUnits,
   restorePlainTreePrevious,
@@ -11403,15 +11405,29 @@ program
     for (const { name, probe, kind, transitive } of packages) {
       if (transitive && !showAll) continue;
       try {
-        const res = await fetch(`https://registry.npmjs.org/${name}/latest`, { signal: AbortSignal.timeout(5000) });
-        if (!res.ok) continue;
-        const data = await res.json() as { version?: string };
-        let latest = data.version ?? "unknown";
-        // Plain-tree lane: --flair-version pins the tarball we swap, the same
-        // way it pins a Fabric --target deploy. The npm-global listing is
-        // unchanged when we are not on that lane.
-        if (treeLane && name === FLAIR_PKG_NAME && typeof opts.flairVersion === "string" && opts.flairVersion.trim() !== "") {
-          latest = opts.flairVersion.trim();
+        let registryLatest: string | null = null;
+        try {
+          const res = await fetch(`https://registry.npmjs.org/${name}/latest`, { signal: AbortSignal.timeout(5000) });
+          if (res.ok) {
+            const data = await res.json() as { version?: string };
+            registryLatest = typeof data.version === "string" && data.version ? data.version : null;
+          }
+        } catch { /* /latest timed out or failed — pin path must still work */ }
+
+        let latest: string;
+        if (treeLane && name === FLAIR_PKG_NAME) {
+          // Consult registry latest, then apply --flair-version as the swap
+          // target. A pin still applies when /latest is unavailable; without
+          // that, a requested tarball swap reports up to date and does nothing.
+          const listing = resolvePlainTreeListingTarget({
+            registryLatest,
+            pin: typeof opts.flairVersion === "string" ? opts.flairVersion : null,
+          });
+          if (!listing) continue;
+          latest = listing.version;
+        } else {
+          if (!registryLatest) continue;
+          latest = registryLatest;
         }
         if (name === FLAIR_PKG_NAME && latest !== "unknown") {
           try { primeVersionCheckCache(latest); } catch { /* best-effort */ }
@@ -11889,18 +11905,26 @@ program
       console.log(`\nRolling back @tpsdev-ai/flair to ${toVersion}...`);
       try {
         if (treePlan) {
-          if (!restorePlainTreePrevious(treePlan)) {
-            throw new Error(`no previous tree at ${treePlan.previousDir} to restore`);
+          const rollbackDecision = decidePlainTreeRollback(existsSync(treePlan.previousDir));
+          if (rollbackDecision.kind === "restore") {
+            if (!restorePlainTreePrevious(treePlan)) {
+              throw new Error(`no previous tree at ${treePlan.previousDir} to restore`);
+            }
+            console.log(`  ✅ restored previous tree from ${treePlan.previousDir}`);
+          } else {
+            console.log(`   (${rollbackDecision.reason})`);
           }
-          console.log(`  ✅ restored previous tree from ${treePlan.previousDir}`);
         } else {
           execFileSync("npm", ["install", "-g", `@tpsdev-ai/flair@${toVersion}`], { stdio: "pipe" });
         }
       } catch (err: any) {
         console.error(`❌ rollback install failed: ${err.message}`);
         console.error(`   Flair is currently on the FAILED version (${expectedFlairVersion ?? "unknown"}) and is NOT running.`);
+        const prevExists = !!(treePlan && existsSync(treePlan.previousDir));
         console.error(treePlan
-          ? `   Recover by hand: restore ${treePlan.previousDir} to ${treePlan.treeDir} && flair start`
+          ? (prevExists
+            ? `   Recover by hand: restore ${treePlan.previousDir} to ${treePlan.treeDir} && flair start`
+            : `   The live tree at ${treePlan.treeDir} was not swapped; there is no .upgrade-prev to restore. Start it with: flair start`)
           : `   Recover by hand: npm install -g @tpsdev-ai/flair@${toVersion} && flair start`);
         process.exit(1);
       }
