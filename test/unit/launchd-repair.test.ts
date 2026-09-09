@@ -10,21 +10,27 @@
  *   - foreign ROOTPATH     -> refuse (ownership guard, flair#966 mirror)
  *   - unattributable       -> refuse (no ROOTPATH to prove ownership)
  *   - already-managed      -> no-op ("already managed")
- *   - detached-and-running -> refuse ("detached, needs adopt (b2)")
+ *   - detached-and-running (ours) -> adopt (clean-stop -> regenerate -> load)
+ *   - detached-and-running (foreign) -> refuse (ownership guard)
  *   - config unreadable    -> refuse (config authority, flair#914)
  *   - not-applicable       -> no-op (not macOS)
  *
- * The EXECUTION (regenerate -> load -> verify) lives in src/cli.ts and is NOT
- * exercised here — that is the real-launchd integration test, a later slice.
+ * The EXECUTION (adopt: clean-stop -> regenerate -> load -> verify) lives in
+ * src/cli.ts and is NOT exercised here — that is the real-launchd integration
+ * test, a later slice. The executor's PURE helpers (mapRepairThrow for the
+ * try/catch, decideAdoptStop for the post-stop port check) ARE pinned here.
  */
 
 import { describe, test, expect } from "bun:test";
 import {
   classifyPlist,
   planLaunchdRepair,
+  mapRepairThrow,
+  decideAdoptStop,
   type PlistDisposition,
 } from "../../src/lib/launchd-repair.ts";
 import type { LaunchdManagement } from "../../src/lib/launchd-management.ts";
+import type { DaemonState, HealthResult } from "../../src/lib/daemon-liveness.ts";
 
 const DATA_DIR = "/Users/example/.flair/data";
 const PLIST_PATH = "/Users/example/Library/LaunchAgents/ai.tpsdev.flair.deadbeef.plist";
@@ -146,10 +152,16 @@ describe("planLaunchdRepair", () => {
     if (plan.kind === "refuse") expect(plan.reason).toBe("config-unreadable");
   });
 
-  test("detached-and-running -> refuse (needs adopt, b2)", () => {
+  test("detached-and-running (ours) -> adopt (bounces the live instance)", () => {
     const plan = planLaunchdRepair(input({ directProcessRunning: true }));
+    expect(plan.kind).toBe("adopt");
+    if (plan.kind === "adopt") expect(plan.detail).toContain("bounces");
+  });
+
+  test("detached-and-running (foreign) -> refuse (ownership guard)", () => {
+    const plan = planLaunchdRepair(input({ disposition: "foreign", directProcessRunning: true }));
     expect(plan.kind).toBe("refuse");
-    if (plan.kind === "refuse") expect(plan.reason).toBe("detached");
+    if (plan.kind === "refuse") expect(plan.reason).toBe("foreign");
   });
 
   test("config authority is checked BEFORE the ownership guard", () => {
@@ -158,5 +170,78 @@ describe("planLaunchdRepair", () => {
     const plan = planLaunchdRepair(input({ disposition: "foreign", configReadable: false }));
     expect(plan.kind).toBe("refuse");
     if (plan.kind === "refuse") expect(plan.reason).toBe("config-unreadable");
+  });
+});
+
+// ─── mapRepairThrow: the executor's try/catch (Kern's b1 defect) ──────────
+
+describe("mapRepairThrow", () => {
+  test("a plain throw -> failed result (doctor does NOT crash)", () => {
+    const result = mapRepairThrow(new Error("boom"));
+    expect(result.kind).toBe("failed");
+    if (result.kind === "failed") {
+      expect(result.detail).toBe("boom");
+      expect(result.remedy).toEqual(["flair doctor --fix"]);
+    }
+  });
+
+  test("an engine-backwards throw -> refused (a refusal by nature)", () => {
+    const err: any = new Error("engine is backwards");
+    err.engineBackwards = true;
+    const result = mapRepairThrow(err);
+    expect(result.kind).toBe("refused");
+    if (result.kind === "refused") {
+      expect(result.reason).toBe("engine-backwards");
+      expect(result.detail).toBe("engine is backwards");
+    }
+  });
+
+  test("a non-Error throw -> failed with a string detail", () => {
+    const result = mapRepairThrow("something broke");
+    expect(result.kind).toBe("failed");
+    if (result.kind === "failed") expect(result.detail).toBe("something broke");
+  });
+});
+
+// ─── decideAdoptStop: the post-stop port check (flair#1573 slice b2) ──────
+
+describe("decideAdoptStop", () => {
+  const refused: HealthResult = { kind: "refused" };
+  const ok: HealthResult = { kind: "ok" };
+
+  test("RUNNING + port free -> proceed", () => {
+    expect(decideAdoptStop({ state: "RUNNING", pid: 42 }, refused)).toBe("proceed");
+  });
+
+  test("WEDGED + port free -> proceed (recovery, not a recycled-pid gamble)", () => {
+    expect(decideAdoptStop({ state: "WEDGED", pid: 42 }, refused)).toBe("proceed");
+  });
+
+  test("NOT_RUNNING + port free -> proceed", () => {
+    expect(decideAdoptStop({ state: "NOT_RUNNING" }, refused)).toBe("proceed");
+  });
+
+  test("RUNNING + port still occupied -> failed (port still occupied)", () => {
+    const result = decideAdoptStop({ state: "RUNNING", pid: 42 }, ok);
+    expect(result).not.toBe("proceed");
+    if (result !== "proceed") {
+      expect(result.kind).toBe("failed");
+      expect(result.detail).toContain("port still occupied");
+    }
+  });
+
+  test("DISAGREEMENT -> failed (never stop a foreign/unattributable process)", () => {
+    const result = decideAdoptStop({ state: "DISAGREEMENT", detail: "identity unverified" }, refused);
+    expect(result).not.toBe("proceed");
+    if (result !== "proceed") {
+      expect(result.kind).toBe("failed");
+      expect(result.detail).toContain("refusing to adopt");
+    }
+  });
+
+  test("UNKNOWN -> failed (never stop an unattributable process)", () => {
+    const result = decideAdoptStop({ state: "UNKNOWN", detail: "cannot tell" }, refused);
+    expect(result).not.toBe("proceed");
+    if (result !== "proceed") expect(result.kind).toBe("failed");
   });
 });
