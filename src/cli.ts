@@ -24,7 +24,7 @@ import {
   constants as fsConstants,
 } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
-import { join, resolve, sep, dirname } from "node:path";
+import { join, resolve, sep, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, execFileSync, spawnSync, execSync } from "node:child_process";
 import { createRequire } from "node:module";
@@ -413,10 +413,33 @@ export interface LaunchdPlistOptions {
   /** HARPER_SET_CONFIG payload; already JSON-stringified by the caller. */
   setConfig: string;
   adminUser: string;
+  /**
+   * HDB_ADMIN_PASSWORD value for inline mode. IGNORED in pass-file mode (the
+   * password is read from `passFile.adminPassFile` at start time) — pass an
+   * empty string there.
+   */
   adminPass: string;
   httpPort: number | string;
   /** OPERATIONSAPI_NETWORK_PORT value from opsNetworkPortValue(). */
   opsNetworkPort: string;
+  /**
+   * Opt-in secret-free mode (flair#1573 slice a). When present, the plist does
+   * NOT embed HDB_ADMIN_PASSWORD inline: ProgramArguments point at `launcher`,
+   * which reads the password from `adminPassFile` (a 0600 file) at start time.
+   * `home` and `path` are the HOME/PATH the launcher needs under launchd's
+   * minimal environment to start Harper non-interactively. Absent => the
+   * existing inline behavior (unchanged for current `flair init` callers).
+   */
+  passFile?: {
+    /** Absolute path to the product launcher script. */
+    launcher: string;
+    /** Absolute path to the 0600 admin-pass file. */
+    adminPassFile: string;
+    /** HOME value for the launchd environment. */
+    home: string;
+    /** PATH value for the launchd environment. */
+    path: string;
+  };
 }
 
 /**
@@ -434,21 +457,44 @@ export interface LaunchdPlistOptions {
  */
 export function buildLaunchdPlist(opts: LaunchdPlistOptions): string {
   const e = escapeXml;
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>${e(opts.label)}</string>
-  <key>ProgramArguments</key>
-  <array>
+  const passFile = opts.passFile;
+
+  // ProgramArguments: inline mode execs node directly; pass-file mode execs
+  // the launcher, which reads the secret from a 0600 file and then execs node
+  // itself (so launchd still tracks Harper as the job).
+  const programArguments = passFile
+    ? `<array>
+    <string>${e(passFile.launcher)}</string>
+    <string>${e(passFile.adminPassFile)}</string>
+    <string>${e(opts.execPath)}</string>
+    <string>${e(opts.harperBinPath)}</string>
+  </array>`
+    : `<array>
     <string>${e(opts.execPath)}</string>
     <string>${e(opts.harperBinPath)}</string>
     <string>run</string>
     <string>.</string>
-  </array>
-  <key>WorkingDirectory</key><string>${e(opts.workingDirectory)}</string>
-  <key>EnvironmentVariables</key>
-  <dict>
+  </array>`;
+
+  // EnvironmentVariables: pass-file mode drops HDB_ADMIN_PASSWORD (the secret
+  // is read from the file by the launcher) and adds HOME + PATH, which the
+  // launcher needs under launchd's minimal env to start Harper non-interactively.
+  const environmentVariables = passFile
+    ? `<dict>
+    <key>ROOTPATH</key><string>${e(opts.dataDir)}</string>
+    <key>FLAIR_MODELS_DIR</key><string>${e(opts.modelsDir)}</string>
+    <key>HARPER_SET_CONFIG</key><string>${e(opts.setConfig)}</string>
+    <key>DEFAULTS_MODE</key><string>dev</string>
+    <key>HDB_ADMIN_USERNAME</key><string>${e(opts.adminUser)}</string>
+    <key>THREADS_COUNT</key><string>1</string>
+    <key>NODE_HOSTNAME</key><string>localhost</string>
+    <key>HTTP_PORT</key><string>${e(String(opts.httpPort))}</string>
+    <key>OPERATIONSAPI_NETWORK_PORT</key><string>${e(opts.opsNetworkPort)}</string>
+    <key>LOCAL_STUDIO</key><string>false</string>
+    <key>HOME</key><string>${e(passFile.home)}</string>
+    <key>PATH</key><string>${e(passFile.path)}</string>
+  </dict>`
+    : `<dict>
     <key>ROOTPATH</key><string>${e(opts.dataDir)}</string>
     <key>FLAIR_MODELS_DIR</key><string>${e(opts.modelsDir)}</string>
     <key>HARPER_SET_CONFIG</key><string>${e(opts.setConfig)}</string>
@@ -460,13 +506,63 @@ export function buildLaunchdPlist(opts: LaunchdPlistOptions): string {
     <key>HTTP_PORT</key><string>${e(String(opts.httpPort))}</string>
     <key>OPERATIONSAPI_NETWORK_PORT</key><string>${e(opts.opsNetworkPort)}</string>
     <key>LOCAL_STUDIO</key><string>false</string>
-  </dict>
+  </dict>`;
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${e(opts.label)}</string>
+  <key>ProgramArguments</key>
+  ${programArguments}
+  <key>WorkingDirectory</key><string>${e(opts.workingDirectory)}</string>
+  <key>EnvironmentVariables</key>
+  ${environmentVariables}
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>${e(join(opts.dataDir, "log", "launchd-stdout.log"))}</string>
   <key>StandardErrorPath</key><string>${e(join(opts.dataDir, "log", "launchd-stderr.log"))}</string>
 </dict>
 </plist>`;
+}
+
+/**
+ * Absolute path to the product-owned launchd launcher (flair#1573 slice a).
+ * Shipped in the package under templates/launchd/; the plist's
+ * ProgramArguments point at it in pass-file mode. `packageRoot` is injectable
+ * so tests can point this at a fixture tree instead of the real package dir.
+ */
+export function launchdLauncherPath(packageRoot: string = flairPackageDir()): string {
+  return join(packageRoot, "templates", "launchd", "start-flair-with-admin-pass.sh");
+}
+
+/**
+ * Write `content` to `path` atomically: write to a temp file in the SAME
+ * directory, then rename over the target. Same-fs rename is atomic on POSIX,
+ * so a reader never observes a half-written file. `mode` is applied to the
+ * temp file from creation — pass 0o600 when `content` holds a secret, so the
+ * secret is never briefly world-readable on disk (flair#1573 slice a).
+ */
+export function writeFileAtomic(path: string, content: string, mode: number): void {
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true });
+  const tmpPath = join(dir, `.${basename(path)}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`);
+  try {
+    writeFileSync(tmpPath, content, { mode });
+    renameSync(tmpPath, path);
+  } catch (err) {
+    try { unlinkSync(tmpPath); } catch { /* best effort */ }
+    throw err;
+  }
+}
+
+/**
+ * Write the admin password to `path` with mode 0600 from creation (flair#1573
+ * slice a). The secret is written to a temp file in the same dir (0600) and
+ * renamed into place, so it is never briefly world-readable.
+ */
+export function writeAdminPassFile(path: string, content: string): void {
+  writeFileAtomic(path, content, 0o600);
 }
 
 /**
