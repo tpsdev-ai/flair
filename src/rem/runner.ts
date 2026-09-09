@@ -435,6 +435,33 @@ function describeApiError(err: unknown): string {
   return message;
 }
 
+/** True when /ReflectMemories (or the pause check) refused because the operator aborted. */
+export function isRemAbortedFailure(err: unknown): boolean {
+  const text = describeApiError(err);
+  return text.includes("rem_aborted") || text.includes("REM distillation aborted");
+}
+
+/**
+ * True when this agent owns any `adk:<app>:<user>` tag, regardless of
+ * recency. Continuity session tags are excluded (they are not per-user).
+ * Used so an idle ADK agent (no tag activity inside the 48h window) is
+ * never treated as non-ADK and distilled with scope:"all" (#1515 / #1205b).
+ */
+export function hasAdkUserTags(memories: any[], agentId: string): boolean {
+  for (const m of memories) {
+    if (!m || typeof m !== "object") continue;
+    if (m.agentId !== agentId) continue;
+    const mt = m.tags;
+    if (!Array.isArray(mt)) continue;
+    for (const t of mt) {
+      if (typeof t !== "string") continue;
+      if (t.startsWith(CONTINUITY_TAG_PREFIX)) continue;
+      if (t.startsWith(ADK_TAG_PREFIX)) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Counts pending memory candidates for the agent.
  *
@@ -762,6 +789,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
     // query isn't available (Memory has no REST search handler; ops-API needs
     // admin the runner lacks).
     const activeAdkTags = deriveActiveAdkTags(fetchedMemories, distillSince, opts.agentId);
+    const adkShaped = hasAdkUserTags(fetchedMemories, opts.agentId);
 
     if (activeAdkTags.length > 0) {
       // Per-tag distillation path (ADK). One scope:"tagged" call per active
@@ -794,17 +822,32 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
           const obj = (reflectRaw && typeof reflectRaw === "object") ? (reflectRaw as Record<string, unknown>) : {};
           if (obj.error) {
             errors.push(`distillation[${tag}]: ${describeApiError(obj.error)}`);
+            if (isRemAbortedFailure(obj.error)) {
+              distillAborted = true;
+              break;
+            }
           } else {
             staged.push(...collectStagedIds(obj));
             noteGather(obj, maxMemories);
           }
         } catch (err: any) {
           errors.push(`distillation[${tag}]: ${describeApiError(err?.message ?? err)}`);
+          if (isRemAbortedFailure(err?.message ?? err)) {
+            distillAborted = true;
+            break;
+          }
         }
       }
       // `candidates` is defined (even if empty) whenever distillation was
       // ATTEMPTED this cycle — same contract as the agentId-only path.
       candidates = staged;
+    } else if (adkShaped) {
+      // ADK agentId whose users are all idle this window. Do NOT fall through
+      // to scope:"all" — that mixes every user's backlog (#1205b bleed).
+      // Active tags will be re-selected next cycle when they have recent rows.
+      errors.push(
+        "distillation: ADK agent has no active adk tags this cycle; skipped agentId-wide distill to avoid cross-user bleed",
+      );
     } else {
       // AgentId-only path (non-ADK). scope:"all" + oldest-unreflected cap so
       // a multi-thousand backlog drains across nights (#1515) instead of
@@ -823,6 +866,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
           // MemoryReflect signals failure via HTTP status (503/502) — apiCall
           // implementations throw for those. Handled the same way regardless.
           errors.push(`distillation: ${describeApiError(obj.error)}`);
+          if (isRemAbortedFailure(obj.error)) distillAborted = true;
         } else {
           candidates = collectStagedIds(obj);
           noteGather(obj, maxMemories);
@@ -831,8 +875,10 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
         // Distillation failure is recorded, not fatal — maintenance already
         // succeeded and the cycle's guaranteed steps are done (spec § 3B item
         // 3). Zero partial candidates is guaranteed server-side (all-or-
-        // nothing staging in /ReflectMemories).
+        // nothing staging in /ReflectMemories). rem_aborted IS fatal to the
+        // rest of this cycle (no auto-promote / dedup).
         errors.push(`distillation: ${describeApiError(err?.message ?? err)}`);
+        if (isRemAbortedFailure(err?.message ?? err)) distillAborted = true;
       }
     }
 
@@ -863,13 +909,13 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
         `distillation: ${settledContinuityTags.length - continuityToRun.length} settled continuity session(s) deferred by the per-cycle tag cap (${maxTags}); re-selected next cycle while un-expired`,
       );
     }
-    if (continuityToRun.length > 0) {
+    if (!distillAborted && continuityToRun.length > 0) {
       // `candidates` is defined whenever distillation was ATTEMPTED (same
       // contract as both paths above).
       candidates = candidates ?? [];
       let distilled = 0;
       for (const tag of continuityToRun) {
-        if (cycleIsAborted()) {
+        if (distillAborted || cycleIsAborted()) {
           distillAborted = true;
           errors.push("distillation: aborted by operator (flair rem pause or FLAIR_REM_PAUSE=1)");
           break;
@@ -887,6 +933,10 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
           const obj = (reflectRaw && typeof reflectRaw === "object") ? (reflectRaw as Record<string, unknown>) : {};
           if (obj.error) {
             errors.push(`distillation[${tag}]: ${describeApiError(obj.error)}`);
+            if (isRemAbortedFailure(obj.error)) {
+              distillAborted = true;
+              break;
+            }
           } else {
             candidates.push(...collectStagedIds(obj));
             noteGather(obj, maxMemories);
@@ -894,6 +944,10 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
           }
         } catch (err: any) {
           errors.push(`distillation[${tag}]: ${describeApiError(err?.message ?? err)}`);
+          if (isRemAbortedFailure(err?.message ?? err)) {
+            distillAborted = true;
+            break;
+          }
         }
       }
       continuitySessions = distilled;

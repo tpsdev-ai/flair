@@ -64,6 +64,7 @@ import {
   considerForOldestUnreflectedCap,
   isRemAbortRequested,
   resolveMaxMemoriesPerRun,
+  shouldStampLastReflected,
   DEFAULT_STALE_INTENT_HORIZON_MS,
   REM_GATHER_YIELD_BUDGET_MS,
   type ReflectMemoryInput,
@@ -90,7 +91,7 @@ export class ReflectMemories extends Resource {
       agentId: bodyAgentId,
       scope = "recent",
       since,
-      maxMemories = 50,
+      maxMemories,
       focus = "lessons_learned",
       tag,
       execute = false,
@@ -176,14 +177,6 @@ export class ReflectMemories extends Resource {
     const tagSet = new Set<string>();
     for (const m of memories) {
       for (const t of m.tags ?? []) tagSet.add(t);
-    }
-
-    // Update lastReflected on source memories (read-modify-write to preserve
-    // embeddings). Unconditional for both modes — calling /ReflectMemories at
-    // all means these memories were considered, regardless of what happens next.
-    const nowISO = new Date().toISOString();
-    for (const m of memories) {
-      patchRecordSilent((databases as any).flair.Memory, m.id, { lastReflected: nowISO });
     }
 
     const promptInputs: ReflectMemoryInput[] = memories.map((m) => ({
@@ -335,6 +328,16 @@ export class ReflectMemories extends Resource {
       });
       await (databases as any).flair.MemoryCandidate.put(row);
       staged.push(row);
+    }
+
+    // Stamp after a successful generate on execute runs only. Prompt-only
+    // and 502/503/abort leave lastReflected unset so the next night retries
+    // the same sources instead of permanently skipping them (#1515 Bugbot).
+    if (shouldStampLastReflected({ execute, generateSucceeded: true })) {
+      const now = new Date().toISOString();
+      for (const memory of memories) {
+        patchRecordSilent((databases as any).flair.Memory, memory.id, { lastReflected: now });
+      }
     }
 
     // Response omits rationalePrompt (spec §3A item 5: "no prompt field") —

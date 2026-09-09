@@ -777,6 +777,18 @@ export function resolveMaxMemoriesPerRun(
   return Math.min(resolved, ABSOLUTE_MAX_MEMORIES_PER_RUN);
 }
 
+/**
+ * Stamp `lastReflected` only after generateCandidates succeeds on an
+ * execute run. Prompt-only (`execute: false`) and failed generate/abort
+ * must leave the pointer unset so the next night can retry (#1515 Bugbot).
+ */
+export function shouldStampLastReflected(opts: {
+  execute: boolean;
+  generateSucceeded: boolean;
+}): boolean {
+  return opts.execute === true && opts.generateSucceeded === true;
+}
+
 /** Oldest createdAt first. Missing timestamps sort last (never "oldest"). */
 export function compareOldestCreatedAtFirst(a: ReflectGatherMemory, b: ReflectGatherMemory): number {
   const ac = a.createdAt ?? "";

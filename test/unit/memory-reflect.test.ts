@@ -30,6 +30,7 @@ import {
   isUnreflectedMemory,
   isRemAbortRequested,
   resolveMaxMemoriesPerRun,
+  shouldStampLastReflected,
   DEFAULT_MAX_MEMORIES_PER_RUN,
   ABSOLUTE_MAX_MEMORIES_PER_RUN,
   type GenerateFn,
@@ -67,6 +68,13 @@ describe("caps", () => {
     expect(resolveMaxMemoriesPerRun(undefined, { FLAIR_REM_MAX_MEMORIES: "30" })).toBe(30);
     expect(resolveMaxMemoriesPerRun(8, { FLAIR_REM_MAX_MEMORIES: "30" })).toBe(8);
     expect(resolveMaxMemoriesPerRun(3000, {})).toBe(200);
+  });
+
+  test("shouldStampLastReflected only after a successful execute generate", () => {
+    expect(shouldStampLastReflected({ execute: true, generateSucceeded: true })).toBe(true);
+    expect(shouldStampLastReflected({ execute: false, generateSucceeded: true })).toBe(false);
+    expect(shouldStampLastReflected({ execute: true, generateSucceeded: false })).toBe(false);
+    expect(shouldStampLastReflected({ execute: false, generateSucceeded: false })).toBe(false);
   });
 });
 
