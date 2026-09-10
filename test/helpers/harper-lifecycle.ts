@@ -580,6 +580,14 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
     HDB_ADMIN_PASSWORD: "test123",
     THREADS_COUNT: "1",
     NODE_HOSTNAME: "127.0.0.1",     // IPv4 only — avoids bun uv_ip6_addr panic
+    // flair#1586: fully disable the MQTT broker (Flair does not use it). "null"
+    // casts to a null port (Harper's castConfigValue), which passes config
+    // validation (portConstraints `.empty(null)`) and is falsy, so Harper binds
+    // neither the TCP (1883) nor TLS (8883) listener; MQTT_WEBSOCKET=false turns
+    // off the WebSocket upgrade path.
+    MQTT_NETWORK_PORT: "null",
+    MQTT_NETWORK_SECUREPORT: "null",
+    MQTT_WEBSOCKET: "false",
   };
   // flair#1450: the child must exit when this process dies. The exit hook
   // above cannot cover SIGKILL of the harness (and we cannot install signal
