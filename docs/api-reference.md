@@ -154,7 +154,8 @@ Skill-tagged Memory rows embed from `trigger` (the recall signal), not
 | GET / POST / PUT | `/WorkspaceState` | Ed25519 | Owner-only. POST stamps `agentId`; PUT rejects a mismatch. |
 | GET | `/WorkspaceLatest` | Ed25519 | Latest workspace row for the caller. |
 | GET / POST / PUT | `/OrgEvent` | Ed25519 | Any verified agent reads every event. Writes stamp `authorId`. |
-| GET | `/OrgEventCatchup` | Ed25519 | Catch-up feed for the caller. |
+| GET / POST | `/OrgEventCatchup` | Ed25519 | Catch-up feed for the caller. `since` is optional (defaults to the per-agent watermark). GET pages; POST acks `{ position }` (advance-on-ack). |
+| GET / POST | `/AgentReadPosition` | Ed25519 | Owner-only watermark (`stream`, default `org-event`). Foundation for light-comms catch-up. |
 | POST | `/OrgEventMaintenance` | Ed25519 / admin | Expire / sweep org events. |
 | POST | `/AttentionQuery` | Ed25519 | Cross-table “what touches entity E”. Entity strings: [docs/entity-vocabulary.md](entity-vocabulary.md). |
 
@@ -355,6 +356,7 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **Asset** | memory.graphql | yes | Blob (`contentType`, `data`) owned by `agentId`, linked by `memoryId` |
 | **WorkspaceState** | workspace.graphql | yes | Current work (`ref`, `provider`, `phase`, `entities`) |
 | **OrgEvent** | event.graphql | yes | Org-visible event (`authorId`, `kind`, `summary`, `entities`) |
+| **AgentReadPosition** | agent.graphql | no | Per-agent watermark (`agentId`, `stream`, `position`). HTTP via `/AgentReadPosition`, not raw-table REST. |
 | **Message** | message.graphql | yes | Signed envelope (`from`, `to`, `threadId`, `seq`, `state`, `signature`) |
 | **OAuthClient** | oauth.graphql | yes | Registered OAuth clients |
 | **OAuthAuthCode** | oauth.graphql | no | Single-use codes + PKCE |

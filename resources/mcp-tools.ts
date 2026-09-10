@@ -1470,7 +1470,7 @@ export const TOOLS: Record<string, ToolEntry> = {
           includeTrust: { type: "boolean", description: "Also return a `trust` array with a per-included-memory trust-evidence block (provenance, author, usage, freshness, supersession). Default false." },
           abstain: { type: "boolean", description: "Opt into a task-relevance abstention verdict: also return an `abstention` object ({ abstained, bestScore, threshold }) reporting whether any memory covered `currentTask` above a global confidence threshold. Default false." },
           includeContext: { type: "boolean", description: "Also return the prose `context` string — a human-readable mirror of the structured soul/memories/predicted/teammateFindings containers (which are the canonical payload). Default false here: the structured fields already carry everything, so shipping the prose too would double the payload." },
-          maxEvents: { type: "number", description: "Cap on how many recent org events to return (default 10). Events are counted against maxTokens like every other content section." },
+          maxEvents: { type: "number", description: "Display cap on how many org events to return (default 10). Not a silent drop: leftover events set eventsHasMore/eventsRemaining so the caller can page GET /OrgEventCatchup. Counted against maxTokens like every other content section." },
           includeEventDetail: { type: "boolean", description: "Also include each org event's verbose `detail` JSON (migration internals, etc.). Default false: bootstrap ships lean events (id/kind/summary/createdAt/targetIds/scope); `detail` mostly restates the summary and is pure bloat for a connector." },
         },
       },
@@ -1485,6 +1485,7 @@ export const TOOLS: Record<string, ToolEntry> = {
         "sections", "tokenEstimate", "maxTokens", "memoriesIncluded", "memoriesAvailable",
         "memoriesTruncated", "teammateFindingsIncluded", "teammateFindingsTruncated",
         "teammateFindingsMatched", "context", "flairVersion",
+        "eventWatermark", "eventsHasMore", "eventsRemaining",
         // flair#1270 — the payload token LEDGER: every token-charged content
         // class has a counter, so tokenEstimate ≈ scaffoldTokens + soulTokens +
         // memoryTokens + trustTokens + eventsTokens decomposes from the payload
@@ -1500,6 +1501,7 @@ export const TOOLS: Record<string, ToolEntry> = {
         teammateFindingsMatched: "number", context: "string", flairVersion: "string",
         soulTokens: "number", memoryTokens: "number", trustTokens: "number",
         eventsTokens: "number", scaffoldTokens: "number",
+        eventsHasMore: "boolean", eventsRemaining: "number",
       },
       invariants: {
         // count == delivered — the historical count/charge/deliver drift.

@@ -19,6 +19,7 @@ const ADMIN_ONLY = ["AgentSeed.ts", "MemoryReindex.ts", "OrgEventMaintenance.ts"
 const AGENT_FACING = [
   "MemoryBootstrap.ts", "MemoryFeed.ts", "MemoryReflect.ts", "MemoryConsolidate.ts",
   "SoulFeed.ts", "OrgEventCatchup.ts", "SemanticSearch.ts", "WorkspaceLatest.ts",
+  "AgentReadPosition.ts",
 ];
 
 describe("admin-only resources gate on allowAdmin (never allowVerified)", () => {
