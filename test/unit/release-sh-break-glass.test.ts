@@ -15,12 +15,18 @@ import { join } from "node:path";
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "release.sh");
 const SRC = readFileSync(SCRIPT, "utf8");
+// flair#1513: bun's default 5s test budget races the first bash + gh-auth
+// cold start of release.sh on a loaded CI runner (node 26, #1587). spawnSync
+// already allows 20s; the harness must too, or bun kills the case with
+// Received: "" before the banner lands. Both first cases timed out at the
+// same 5005ms — they run concurrently, so every spawn case needs the budget.
+const SPAWN_TEST_TIMEOUT_MS = 20_000;
 
 function runPublish(args: string[], stdin?: string, env: NodeJS.ProcessEnv = process.env) {
   return spawnSync("bash", [SCRIPT, ...args], {
     encoding: "utf8",
     input: stdin,
-    timeout: 20_000,
+    timeout: SPAWN_TEST_TIMEOUT_MS,
     cwd: REPO_ROOT,
     env,
   });
@@ -52,7 +58,7 @@ describe("release.sh --publish is the break-glass path", () => {
     expect(out).toContain("docs/releasing.md");
     expect(out).not.toContain("Publishing to npm");
     expect(r.status).not.toBe(0);
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("declining the prompt aborts without publishing", () => {
     const r = runPublish(["9.9.9", "--publish"], "nope\n");
@@ -61,7 +67,7 @@ describe("release.sh --publish is the break-glass path", () => {
     expect(out).toContain("Aborted. Nothing was published.");
     expect(out).not.toContain("Publishing to npm");
     expect(out).not.toContain("npm login");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("non-interactive --publish without acknowledgement refuses", () => {
     const r = runPublish(["9.9.9", "--publish"]);
@@ -70,7 +76,7 @@ describe("release.sh --publish is the break-glass path", () => {
     expect(out).toContain("BREAK-GLASS");
     expect(out).toContain("--break-glass");
     expect(out).not.toContain("Publishing to npm");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("--break-glass acknowledges, then fails closed before npm publish", () => {
     const r = runPublish(["9.9.9", "--publish", "--break-glass"]);
@@ -81,7 +87,7 @@ describe("release.sh --publish is the break-glass path", () => {
     expect(out).not.toContain("Publishing to npm");
     // Either our auth message or a later safety check — never npm's ENEEDAUTH.
     expect(out).not.toMatch(/need auth You need to authorize this machine using `npm login`/);
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("unauthenticated --break-glass names the tag path, not npm login as the fix", () => {
     const r = runPublishUnauth(["9.9.9", "--publish", "--break-glass"]);
@@ -92,7 +98,7 @@ describe("release.sh --publish is the break-glass path", () => {
     expect(out).toMatch(/Do not run `npm login` unless CI staging is actually unavailable/);
     expect(out).not.toContain("Publishing to npm");
     expect(out).not.toMatch(/need auth You need to authorize this machine using `npm login`/);
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("--break-glass without --publish fails closed instead of entering Phase 1", () => {
     const r = runPublish(["9.9.9", "--break-glass"]);
@@ -101,7 +107,7 @@ describe("release.sh --publish is the break-glass path", () => {
     expect(out).toContain("--break-glass is an acknowledgement for --publish");
     expect(out).not.toContain("PR PREP");
     expect(out).not.toContain("Publishing to npm");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 
   test("--break-glass --publish is accepted as publish + acknowledgement", () => {
     const r = runPublishUnauth(["9.9.9", "--break-glass", "--publish"]);
@@ -112,7 +118,7 @@ describe("release.sh --publish is the break-glass path", () => {
     expect(r.status).toBe(1);
     expect(out).not.toContain("PR PREP");
     expect(out).not.toContain("Publishing to npm");
-  });
+  }, SPAWN_TEST_TIMEOUT_MS);
 });
 
 describe("release.sh phase-1 wording does not recruit --publish", () => {
