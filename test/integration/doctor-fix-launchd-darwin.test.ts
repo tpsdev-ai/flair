@@ -468,6 +468,7 @@ async function teardown(sb: Sandbox): Promise<void> {
       /* best effort */
     }
   }
+  // launchd is already unloaded above, so KeepAlive cannot resurrect this pidfile kill.
   const pid = readPidFile(sb.dataDir);
   if (pid && isAlive(pid)) {
     try {
@@ -503,6 +504,8 @@ function assertNoPrompt(log: string, cliOut: string): void {
 function assertSecretFreePlist(plistPath: string): void {
   const raw = readFileSync(plistPath, "utf-8");
   expect(raw.includes("HDB_ADMIN_PASSWORD"), "regenerated plist must not embed the admin password").toBe(false);
+  // Value, not just the key name — a leak under a different key must still fail.
+  expect(raw.includes(ADMIN_PASS), "regenerated plist must not embed the admin password value").toBe(false);
   expect(raw).toContain("<plist");
   expect(raw).toContain("<dict>");
 }

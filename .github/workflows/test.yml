@@ -130,6 +130,12 @@ jobs:
   # merge proceeds until `release.sh` on macOS — the gap this issue
   # exists to close. A new required-check name would need a protection
   # settings change; folding into "Unit Tests" does not.
+  #
+  # flair#1585: the check name "Darwin-gated unit tests" is not itself in
+  # the branch-protection required-status-checks list. Current PRs still
+  # require it green via this adapter, but if that ruleset is revisited,
+  # add "Darwin-gated unit tests" so a future workflow rename cannot
+  # bypass the real-launchd acceptance.
   test-unit-gate:
     name: Unit Tests
     needs: [test-unit, test-darwin-gated]
