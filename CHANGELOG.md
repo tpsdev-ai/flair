@@ -18,6 +18,59 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.53.0] - 2026-09-10
+
+### Added
+
+- **`flair doctor --fix` now adopts a detached (direct-spawned) instance into
+  launchd.** When the instance is running outside launchd, the repair
+  clean-stops the live process (SIGTERM, wait for exit), confirms the port is
+  free, regenerates the plist, loads it, and verifies launchd is managing it —
+  refusing to signal a process it cannot attribute to this instance.
+
+- **`flair doctor --fix` now repairs a missing or corrupt launchd plist.** It
+  regenerates the plist in the secret-free pass-file mode, loads it, and
+  verifies launchd is managing the instance — refusing to touch a plist that
+  belongs to another data directory.
+
+  The regenerated plist's root path and ports come from the instance's own
+  `harper-config.yaml`, never defaults or `~/.flair/config.yaml`. A valid plist
+  whose root path names a different data directory is left untouched and named
+  in the refusal.
+
+- **Add an opt-in secret-free launchd plist mode.** `buildLaunchdPlist` can now
+  emit a plist whose `ProgramArguments` point at a product launcher that reads
+  the admin password from a 0600 file at start time, instead of embedding
+  `HDB_ADMIN_PASSWORD` inline.
+
+  This is the product prerequisite for the `flair doctor --fix` launchd repair
+  (flair#1573). The existing inline behavior is unchanged for current `flair
+  init` callers.
+
+- **Expose skill_store, skill_search, and skill_get on the flair-mcp stdio adapter.** Claude Code and Cursor can now reach 0.52.0 skills-as-memory through the MCP surface they actually use (flair#1575).
+
+### Fixed
+
+- **Flair now fully disables Harper's MQTT broker.** The previous config nulled
+  only `mqtt.network.port`, leaving the TLS listener on `mqtt.network.securePort`
+  (8883) still bound — and the direct-spawn path (`flair restart` / `flair
+  upgrade`) re-enabled MQTT entirely. Flair does not use MQTT, so both the TCP
+  (1883) and TLS (8883) listeners are now turned off on every spawn path,
+  including test-spawned Harpers. `doctor --fix` keeps `harper-config.yaml`
+  byte-identical when adopting a direct-spawned instance that re-asserts the
+  same MQTT_* disable.
+
+### Security
+
+- **The launchd launcher now re-verifies the admin-pass file is owner-only
+  (0600) at read time.** It refuses to read a file that drifted to a group- or
+  world-readable mode after `flair init` (umask change, backup tool, tar
+  restore), instead of trusting the init-time mode and leaking the secret.
+
+  The launcher also checks the file is readable (`-r`) before reading it, and
+  fails closed with a clear error on a non-0600 or unreadable file — mirroring
+  `readSecretFileSecure`'s refusal of any group/other permission bit.
+
 ## [0.52.0] - 2026-09-09
 
 ### Added

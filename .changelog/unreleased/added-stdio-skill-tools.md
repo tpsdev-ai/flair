@@ -1,1 +1,0 @@
-- **Expose skill_store, skill_search, and skill_get on the flair-mcp stdio adapter.** Claude Code and Cursor can now reach 0.52.0 skills-as-memory through the MCP surface they actually use (flair#1575).
