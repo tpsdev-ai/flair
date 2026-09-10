@@ -6,13 +6,11 @@
  * test/unit/cross-agent-isolation.test.ts.
  */
 import { mock, describe, it, expect, beforeEach } from "bun:test";
-import { recordPosition } from "../../resources/agent-read-position-lib.ts";
-import {
-  advanceReadPosition,
-  ensureReadPosition,
-  getReadPosition,
-  type ReadPositionTable,
-} from "../../resources/agent-read-position.ts";
+
+type ReadPositionTable = {
+  get: (id: string) => Promise<any>;
+  put: (row: any) => Promise<unknown>;
+};
 
 let orgEventRecords: any[] = [];
 const positionStore = new Map<string, any>();
@@ -65,6 +63,12 @@ mock.module("harper", () => ({
   Resource: MockResourceBase,
 }));
 
+const { recordPosition } = await import("../../resources/agent-read-position-lib.ts");
+const {
+  advanceReadPosition,
+  ensureReadPosition,
+  getReadPosition,
+} = await import("../../resources/agent-read-position.ts");
 const { OrgEventCatchup } = await import("../../resources/OrgEventCatchup.ts");
 const { AgentReadPosition } = await import("../../resources/AgentReadPosition.ts");
 
