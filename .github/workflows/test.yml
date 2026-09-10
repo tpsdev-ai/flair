@@ -156,15 +156,25 @@ jobs:
   # stopped production instance. Kept to the inventoried darwin-gated files
   # rather than the whole unit suite so the macOS minutes buy the coverage
   # that Linux cannot, not a duplicate of test-unit.
+  #
+  # flair#1581: a dedicated step runs the real-launchd `doctor --fix`
+  # integration test (test/integration/doctor-fix-launchd-darwin.test.ts).
+  # It is not in the #1012 inventory — that inventory re-executes every
+  # file, including from a 60s visibility runGate. Needs Node (Harper NAPI
+  # + the CLI's process.execPath in the regenerated plist) and dist/cli.js.
+  # Timeout is headroom for two real Harper boots per repair shape.
   test-darwin-gated:
     name: Darwin-gated unit tests
     runs-on: macos-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
         with:
           bun-version: "1.3.10"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
       - name: Cache bun install
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -173,8 +183,12 @@ jobs:
           restore-keys: |
             bun-cache-${{ runner.os }}-
       - run: bun install --frozen-lockfile
+      - name: Build Flair resources and CLI
+        run: bun run build && bun run build:cli
       - name: Run darwin-gated unit tests (must execute, not skip)
         run: bun scripts/check-darwin-gated-tests.mjs
+      - name: Real-launchd doctor --fix integration (flair#1581)
+        run: bun test test/integration/doctor-fix-launchd-darwin.test.ts
 
   test-integration:
     name: Integration Tests

@@ -10,8 +10,11 @@
  *
  * This script is the Linux-visible half of the fix:
  *
- *   1. Inventory every darwin-gated test under test/. An empty inventory is
- *      a failure (the scan found nothing, so nothing was verified).
+ *   1. Inventory every darwin-gated test under test/unit (and other
+ *      non-service trees). test/integration* is excluded — those files can
+ *      be darwin-gated too (flair#1581) but a real Harper/launchd boot must
+ *      not be re-executed by this inventory. An empty inventory is a
+ *      failure (the scan found nothing, so nothing was verified).
  *   2. Refuse `test.if(<darwin cond>)` / `it.if(...)`. Bun 1.3 reports those
  *      as skips today, but `if` means "do not define this test" — the form
  *      that went silent once already. `skipIf` is the form that cannot
@@ -73,6 +76,16 @@ function walkTestFiles(dir, out = []) {
   }
   for (const ent of entries) {
     if (ent.name === "node_modules" || ent.name === "dist") continue;
+    // flair#1581: real-Harper darwin integration (test/integration*) is a
+    // dedicated macOS step. The #1012 inventory re-runs every inventoried
+    // file — including from darwin-gated-visibility's 60s runGate — so a
+    // multi-minute launchd boot must not live here.
+    if (
+      ent.isDirectory() &&
+      /^(integration|integration-isolated|integration-heavy|e2e|bench|compat|helpers|fixtures)/.test(ent.name)
+    ) {
+      continue;
+    }
     const p = join(dir, ent.name);
     if (ent.isDirectory()) walkTestFiles(p, out);
     else if (ent.name.endsWith(".test.ts") || ent.name.endsWith(".test.js")) out.push(p);

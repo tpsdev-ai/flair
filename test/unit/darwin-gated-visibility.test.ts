@@ -153,6 +153,9 @@ describe("check-darwin-gated-tests.mjs inventory (real repo)", () => {
     expect(files.has("test/unit/snapshot-datadir-instance-targeting.test.ts")).toBe(true);
     expect(files.has("test/unit/launchd-management-reporting.test.ts")).toBe(true);
     expect(files.has("test/unit/harper-config-port.test.ts")).toBe(true);
+    // flair#1581: real-Harper launchd boots are a dedicated macOS step, not
+    // inventory members — runGate would otherwise re-exec them.
+    expect(files.has("test/integration/doctor-fix-launchd-darwin.test.ts")).toBe(false);
   });
 });
 
