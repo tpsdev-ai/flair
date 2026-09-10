@@ -16,9 +16,10 @@
  *   - not-applicable       -> no-op (not macOS)
  *
  * The EXECUTION (adopt: clean-stop -> regenerate -> load -> verify) lives in
- * src/cli.ts and is NOT exercised here — that is the real-launchd integration
- * test, a later slice. The executor's PURE helpers (mapRepairThrow for the
- * try/catch, decideAdoptStop for the post-stop port check) ARE pinned here.
+ * src/cli.ts and is exercised by the real-launchd Darwin sandbox
+ * (test/integration/doctor-fix-launchd-darwin.test.ts, flair#1581). The
+ * executor's PURE helpers (mapRepairThrow for the try/catch, decideAdoptStop
+ * for the post-stop port check) ARE pinned here.
  */
 
 import { describe, test, expect } from "bun:test";

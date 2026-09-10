@@ -157,11 +157,12 @@ jobs:
   # rather than the whole unit suite so the macOS minutes buy the coverage
   # that Linux cannot, not a duplicate of test-unit.
   #
-  # flair#1581: the inventory now also includes the real-launchd
-  # `doctor --fix` integration test (test/integration/doctor-fix-launchd-darwin.test.ts).
-  # That case needs Node (Harper NAPI + the CLI's process.execPath in the
-  # regenerated plist) and a built dist/cli.js. Timeout is headroom for two
-  # real Harper boots per repair shape, not a duplicate of test-integration.
+  # flair#1581: a dedicated step runs the real-launchd `doctor --fix`
+  # integration test (test/integration/doctor-fix-launchd-darwin.test.ts).
+  # It is not in the #1012 inventory — that inventory re-executes every
+  # file, including from a 60s visibility runGate. Needs Node (Harper NAPI
+  # + the CLI's process.execPath in the regenerated plist) and dist/cli.js.
+  # Timeout is headroom for two real Harper boots per repair shape.
   test-darwin-gated:
     name: Darwin-gated unit tests
     runs-on: macos-latest

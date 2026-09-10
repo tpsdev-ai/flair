@@ -643,12 +643,12 @@ test.skipIf(!isDarwin)(
     expect(isAlive(detachedPid), `adopt must clean-stop the direct-spawned pid ${detachedPid}`).toBe(false);
     expect(managed.pid, "adopt must bounce the live instance exactly once (new launchd PID)").not.toBe(detachedPid);
     expect(isAlive(managed.pid)).toBe(true);
-    // A second KeepAlive restart would reprint the startup banner. One bounce
-    // leaves a single launchd boot in the freshly cleared StandardErrorPath.
     const errLog = launchdLog(sb.dataDir, "stderr");
     assertNoPrompt(errLog, `${result.stdout}\n${result.stderr}`);
-    const startups = errLog.match(/successfully started|listening on/gi) ?? [];
-    expect(startups.length, `launchd stderr should record exactly one boot, got ${startups.length}:\n${errLog}`).toBe(1);
+    // Cleared StandardErrorPath must show a launchd boot (not a silent hang).
+    // "successfully started" and "listening on" can both appear in ONE boot,
+    // so bounce-once is the PID change + the 2s stability check below.
+    expect(errLog, `launchd stderr after adopt:\n${errLog}`).toMatch(STARTUP_RE);
     assertSecretFreePlist(sb.plistPath);
     await assertNoRebootstrap(sb, before);
     expect(result.stdout + result.stderr).toMatch(/adopt|bounc/i);
