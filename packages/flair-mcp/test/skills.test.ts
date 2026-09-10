@@ -127,4 +127,18 @@ describe("skill_get guards", () => {
     expect("embedding" in stripped).toBe(false);
     expect("embeddingModel" in stripped).toBe(false);
   });
+
+  test("skill_get has no includeEmbedding bypass — the strip is unconditional (flair#1579)", () => {
+    // The adapter used to honor includeEmbedding:true by returning the raw
+    // Memory row. That path is gone: the same strip always runs.
+    const raw = {
+      id: "sk-1",
+      content: "the full procedure",
+      embedding: [0.1, 0.2],
+      embeddingModel: "m",
+      tags: ["skill"],
+    };
+    expect("embedding" in stripInternalMemoryFields(raw)).toBe(false);
+    expect("embeddingModel" in stripInternalMemoryFields(raw)).toBe(false);
+  });
 });

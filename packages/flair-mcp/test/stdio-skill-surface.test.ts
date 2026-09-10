@@ -17,7 +17,8 @@ import { ADAPTER_TOOL_NAMES } from "../src/adapter-surface.ts";
  * A tiny HTTP stand-in plays the Flair daemon so the calls exercise the
  * adapter's FlairClient forwards (not a live Harper). Progressive disclosure
  * is asserted here: skill_search must not leak `content` even when the
- * stand-in returns a full memory row.
+ * stand-in returns a full memory row. skill_get must not leak the
+ * embedding vector even when GET /Memory returns one (flair#1579).
  */
 
 const PKG = join(import.meta.dir, "..");
@@ -67,7 +68,13 @@ beforeAll(async () => {
           json(res, 404, { error: "not found" });
           return;
         }
-        json(res, 200, record);
+        // Raw Memory GET includes the vector — skill_get must strip it
+        // (flair#1579). The store path does not write these fields.
+        json(res, 200, {
+          ...record,
+          embedding: [0.11, 0.22, 0.33],
+          embeddingModel: "mock-embed",
+        });
         return;
       }
       if (method === "POST" && url.pathname === "/SemanticSearch") {
@@ -134,6 +141,12 @@ describe("stdio adapter smoke — handshake + tools/list + skill_* callable (fla
     for (const name of ["skill_store", "skill_search", "skill_get"]) {
       expect(names, `tools/list must include ${name} — this is the probe that caught flair#1575`).toContain(name);
     }
+    const skillGet = listed.tools.find((t) => t.name === "skill_get");
+    const props = (skillGet?.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties ?? {};
+    expect(
+      props,
+      "skill_get must not advertise includeEmbedding — the vector is never returned (flair#1579)",
+    ).not.toHaveProperty("includeEmbedding");
   });
 
   test("skill_store / skill_search / skill_get are callable over stdio", async () => {
@@ -176,7 +189,30 @@ describe("stdio adapter smoke — handshake + tools/list + skill_* callable (fla
     expect(getText).toContain("1. Convert to sRGB");
     const got = getCall.structuredContent as Record<string, unknown> | undefined;
     expect(got?.content).toBe("1. Convert to sRGB.\n2. Resize to max 1600px.");
+    expect("embedding" in (got ?? {}), "skill_get strips embedding even when GET /Memory returns the vector").toBe(false);
+    expect("embeddingModel" in (got ?? {})).toBe(false);
+  });
+
+  test("skill_get never returns embedding even if includeEmbedding is passed (flair#1579)", async () => {
+    stored.set("sk-embed-footgun", {
+      id: "sk-embed-footgun",
+      agentId: AGENT,
+      content: "THE PROCEDURE — keep this, drop the vector",
+      tags: ["skill"],
+      trigger: "when testing the embedding strip",
+    });
+    const getCall = await client.callTool({
+      name: "skill_get",
+      arguments: { id: "sk-embed-footgun", includeEmbedding: true },
+    });
+    expect(getCall.isError).toBeFalsy();
+    const got = getCall.structuredContent as Record<string, unknown> | undefined;
+    expect(got?.content).toBe("THE PROCEDURE — keep this, drop the vector");
     expect("embedding" in (got ?? {})).toBe(false);
+    expect("embeddingModel" in (got ?? {})).toBe(false);
+    const text = (getCall.content as Array<{ text?: string }>)[0]?.text ?? "";
+    expect(text).toContain("THE PROCEDURE");
+    expect(text).not.toContain("0.11");
   });
 
   test("skill_get on a non-skill id is not-found (not an alias for memory_get)", async () => {

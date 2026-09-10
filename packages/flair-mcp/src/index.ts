@@ -735,22 +735,21 @@ server.tool(
   "skill_get",
   "Retrieve a full skill by ID — the complete procedure (`content`) plus trigger and metadata. " +
     "The disclosure step after skill_search's catalog. Read-scoped: you can only get your own or a " +
-    "shared skill, never another agent's private skill. A non-skill id returns not-found.",
+    "shared skill, never another agent's private skill. A non-skill id returns not-found. " +
+    "The raw embedding vector is never returned.",
   {
     id: z.string().describe("Skill (memory) ID"),
-    includeEmbedding: z.coerce.boolean().optional().default(false)
-      .describe("Include the raw embedding vector (large, rarely useful). Default false."),
   },
-  async ({ id, includeEmbedding }) => {
+  async ({ id }) => {
     heartbeat();
     try {
       const mem = await flair.memory.get(id);
       if (!mem || !isSkillRecord(mem)) {
         return { content: [{ type: "text", text: `Skill ${id} not found.` }] };
       }
-      const record = includeEmbedding
-        ? (mem as unknown as Record<string, unknown>)
-        : stripInternalMemoryFields(mem as unknown as Record<string, unknown>);
+      // flair#1579 — always strip. includeEmbedding used to bypass this and
+      // ride the raw vector; nothing in the skill_get contract needs it.
+      const record = stripInternalMemoryFields(mem as unknown as Record<string, unknown>);
       const trigger = typeof record.trigger === "string" && record.trigger.length > 0
         ? record.trigger
         : "";
