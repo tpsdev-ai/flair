@@ -1501,7 +1501,7 @@ export const TOOLS: Record<string, ToolEntry> = {
         teammateFindingsMatched: "number", context: "string", flairVersion: "string",
         soulTokens: "number", memoryTokens: "number", trustTokens: "number",
         eventsTokens: "number", scaffoldTokens: "number",
-        eventsHasMore: "boolean", eventsRemaining: "number",
+        eventWatermark: "string", eventsHasMore: "boolean", eventsRemaining: "number",
       },
       invariants: {
         // count == delivered — the historical count/charge/deliver drift.
