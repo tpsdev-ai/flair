@@ -1816,9 +1816,6 @@ export class BootstrapMemories extends Resource {
       predicted: [],
       teammateFindings: [],
       events: [],
-      eventWatermark: null,
-      eventsHasMore: false,
-      eventsRemaining: 0,
       ...(trust ? { trust: [] } : {}),
     };
     responseBody.scaffoldTokens = estimateTokens(JSON.stringify(scaffoldSkeleton));
