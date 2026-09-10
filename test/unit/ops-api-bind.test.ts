@@ -224,6 +224,11 @@ describe("buildDirectSpawnEnv (flair#863)", () => {
     expect(env.HTTP_PORT).toBe("19926");
     expect(env.HDB_ADMIN_USERNAME).toBe("admin");
     expect(env.LOCAL_STUDIO).toBe("false");
+    // flair#1586: direct-spawn re-asserts the mqtt disable so restart/upgrade
+    // cannot restore Harper's 1883/8883 defaults.
+    expect(env.MQTT_NETWORK_PORT).toBe("null");
+    expect(env.MQTT_NETWORK_SECUREPORT).toBe("null");
+    expect(env.MQTT_WEBSOCKET).toBe("false");
   });
 });
 

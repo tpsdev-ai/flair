@@ -71,7 +71,6 @@ const ADMIN_PASS = "test123";
 const SEED_IDS = ["b3b-mem-1", "b3b-mem-2", "b3b-mem-3"] as const;
 const PROMPT_RE =
   /Please enter a password|readline was closed|ERR_USE_AFTER_CLOSE|Please enter a destination for Harper|\[hidden\]/i;
-const STARTUP_RE = /successfully started|listening on/i;
 const TEST_TIMEOUT_MS = 240_000;
 
 /** Jobs this file loaded. Unloaded on afterEach and on process exit. */
@@ -584,6 +583,9 @@ async function directSpawnDetached(sb: Sandbox): Promise<number> {
     HOME: sb.tmpHome,
     PATH: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
   };
+  // MQTT_* stay. buildDirectSpawnEnv is the production direct-spawn
+  // contract (flair#1586); doctor --fix must leave harper-config.yaml
+  // byte-identical even when this detach persists them (#1581).
   const proc = spawn(nodeBin(), [harper.path, "run", "."], {
     cwd: REPO_ROOT,
     env,
@@ -614,7 +616,9 @@ test.skipIf(!isDarwin)(
     assertSecretFreePlist(sb.plistPath);
     const errLog = launchdLog(sb.dataDir, "stderr");
     assertNoPrompt(errLog, `${result.stdout}\n${result.stderr}`);
-    expect(errLog).toMatch(STARTUP_RE);
+    // assertManaged already proves managed+serving (launchctl PID == serving
+    // PID + health). Do not require a Harper stderr banner — "listening on"
+    // was MQTT-tied and disappears once mqtt is fully off (flair#1586).
     await assertNoRebootstrap(sb, before);
     expect(result.stdout + result.stderr).toMatch(/launchd|regenerat|managed/i);
     expect(managed.pid).toBeGreaterThan(0);
@@ -645,10 +649,9 @@ test.skipIf(!isDarwin)(
     expect(isAlive(managed.pid)).toBe(true);
     const errLog = launchdLog(sb.dataDir, "stderr");
     assertNoPrompt(errLog, `${result.stdout}\n${result.stderr}`);
-    // Cleared StandardErrorPath must show a launchd boot (not a silent hang).
-    // "successfully started" and "listening on" can both appear in ONE boot,
-    // so bounce-once is the PID change + the 2s stability check below.
-    expect(errLog, `launchd stderr after adopt:\n${errLog}`).toMatch(STARTUP_RE);
+    // assertManaged already proves managed+serving. Bounce-once is the PID
+    // change + the 2s stability check below — not a component-tied stderr
+    // banner. "listening on" disappeared once mqtt was fully off (flair#1586).
     assertSecretFreePlist(sb.plistPath);
     await assertNoRebootstrap(sb, before);
     expect(result.stdout + result.stderr).toMatch(/adopt|bounc/i);

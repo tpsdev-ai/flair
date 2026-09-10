@@ -226,6 +226,26 @@ describe("buildLaunchdPlist — every other interpolated value", () => {
     expect(readEnvVar(buildLaunchdPlist(opts({ adminPass: placeholder })), "HDB_ADMIN_PASSWORD")).toBe(placeholder);
   });
 
+  test("re-asserts MQTT disable the same way buildDirectSpawnEnv does (flair#1586)", () => {
+    const plist = buildLaunchdPlist(opts());
+    expect(readEnvVar(plist, "MQTT_NETWORK_PORT")).toBe("null");
+    expect(readEnvVar(plist, "MQTT_NETWORK_SECUREPORT")).toBe("null");
+    expect(readEnvVar(plist, "MQTT_WEBSOCKET")).toBe("false");
+    const passFile = buildLaunchdPlist({
+      ...opts(),
+      adminPass: "",
+      passFile: {
+        launcher: "/opt/flair/templates/launchd/start-flair-with-admin-pass.sh",
+        adminPassFile: "/Users/example/.flair/admin-pass",
+        home: "/Users/example",
+        path: "/usr/bin:/bin",
+      },
+    });
+    expect(readEnvVar(passFile, "MQTT_NETWORK_PORT")).toBe("null");
+    expect(readEnvVar(passFile, "MQTT_NETWORK_SECUREPORT")).toBe("null");
+    expect(readEnvVar(passFile, "MQTT_WEBSOCKET")).toBe("false");
+  });
+
   test("the HARPER_SET_CONFIG JSON payload round-trips as exact JSON", () => {
     const setConfig = JSON.stringify({ rootPath: `/Users/example/R&D/data`, http: { port: 9926, cors: true } });
     const got = readEnvVar(buildLaunchdPlist(opts({ setConfig })), "HARPER_SET_CONFIG");
