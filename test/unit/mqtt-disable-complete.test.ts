@@ -50,6 +50,16 @@ describe("MQTT is fully disabled on every production spawn path (flair#1586)", (
     expect(env.MQTT_NETWORK_SECUREPORT).toBe("null");
     expect(env.MQTT_WEBSOCKET).toBe("false");
   });
+
+  test("launchd plist and flair init re-assert the same MQTT_* env vars", () => {
+    const plistKeys = [...cliSrc.matchAll(/<key>MQTT_NETWORK_PORT<\/key>/g)];
+    expect(plistKeys.length).toBe(2);
+    expect(cliSrc).toMatch(/<key>MQTT_NETWORK_SECUREPORT<\/key><string>null<\/string>/);
+    expect(cliSrc).toMatch(/<key>MQTT_WEBSOCKET<\/key><string>false<\/string>/);
+    expect(cliSrc).toMatch(/MQTT_NETWORK_PORT:\s*"null"/);
+    expect(cliSrc).toMatch(/MQTT_NETWORK_SECUREPORT:\s*"null"/);
+    expect(cliSrc).toMatch(/MQTT_WEBSOCKET:\s*"false"/);
+  });
 });
 
 describe("test-Harper port isolation (flair#1586)", () => {

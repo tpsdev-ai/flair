@@ -583,15 +583,9 @@ async function directSpawnDetached(sb: Sandbox): Promise<number> {
     HOME: sb.tmpHome,
     PATH: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
   };
-  // newSandbox's first doctor --fix already settled HARPER_SET_CONFIG
-  // (including MQTT_DISABLED_CONFIG) into harper-config.yaml. MQTT_* on
-  // this detach persist a different mqtt YAML than SET_CONFIG writes, and
-  // the adopt repair then re-canonicalizes the file — a byte change that
-  // is not a re-bootstrap but fails #1581's byte-identical check. Drop
-  // them here so detach does not mutate the settled file (flair#1586).
-  delete env.MQTT_NETWORK_PORT;
-  delete env.MQTT_NETWORK_SECUREPORT;
-  delete env.MQTT_WEBSOCKET;
+  // MQTT_* stay. buildDirectSpawnEnv is the production direct-spawn
+  // contract (flair#1586); doctor --fix must leave harper-config.yaml
+  // byte-identical even when this detach persists them (#1581).
   const proc = spawn(nodeBin(), [harper.path, "run", "."], {
     cwd: REPO_ROOT,
     env,

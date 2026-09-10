@@ -181,6 +181,7 @@ import {
   type LaunchdRepairResult,
   type RepairPlan,
 } from "./lib/launchd-repair.js";
+import { stabilizeMqttNetworkKeyOrder } from "./lib/stabilize-mqtt-network.js";
 import {
   applyUpgradeHookConsent,
   catalogIssueDelta,
@@ -500,6 +501,9 @@ export function buildLaunchdPlist(opts: LaunchdPlistOptions): string {
     <key>HTTP_PORT</key><string>${e(String(opts.httpPort))}</string>
     <key>OPERATIONSAPI_NETWORK_PORT</key><string>${e(opts.opsNetworkPort)}</string>
     <key>LOCAL_STUDIO</key><string>false</string>
+    <key>MQTT_NETWORK_PORT</key><string>null</string>
+    <key>MQTT_NETWORK_SECUREPORT</key><string>null</string>
+    <key>MQTT_WEBSOCKET</key><string>false</string>
     <key>HOME</key><string>${e(passFile.home)}</string>
     <key>PATH</key><string>${e(passFile.path)}</string>
   </dict>`
@@ -515,6 +519,9 @@ export function buildLaunchdPlist(opts: LaunchdPlistOptions): string {
     <key>HTTP_PORT</key><string>${e(String(opts.httpPort))}</string>
     <key>OPERATIONSAPI_NETWORK_PORT</key><string>${e(opts.opsNetworkPort)}</string>
     <key>LOCAL_STUDIO</key><string>false</string>
+    <key>MQTT_NETWORK_PORT</key><string>null</string>
+    <key>MQTT_NETWORK_SECUREPORT</key><string>null</string>
+    <key>MQTT_WEBSOCKET</key><string>false</string>
   </dict>`;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -4143,6 +4150,12 @@ program
           // all interfaces. See opsNetworkPortValue's doc comment.
           OPERATIONSAPI_NETWORK_PORT: opsNetworkPortValue(opsBindHost, opsPort),
           LOCAL_STUDIO: "false",
+          // flair#1586: same MQTT_* re-assert as buildDirectSpawnEnv / the
+          // launchd plist, so init cannot restore Harper's 1883/8883 defaults
+          // on a later boot that omits HARPER_SET_CONFIG.
+          MQTT_NETWORK_PORT: "null",
+          MQTT_NETWORK_SECUREPORT: "null",
+          MQTT_WEBSOCKET: "false",
         };
         // models (flair#504 Phase 1): the embedding backend registers itself
         // in-process at boot (resources/embeddings-boot.ts, loaded by
@@ -13230,6 +13243,19 @@ async function repairLaunchdManagement(dataDir: string, port: number): Promise<L
         const plist = buildRepairPlist(dataDir, config!);
         const newPlistPath = launchdPlistPath(launchdLabel(dataDir));
         writeFileAtomic(newPlistPath, plist, 0o644);
+        // flair#1586 / #1581: a SET_CONFIG-less detach (MQTT_* via
+        // buildDirectSpawnEnv) can persist mqtt.network as mtls, port,
+        // securePort when Harper stored no originals for already-null ports.
+        // Adopt SET_CONFIG updates those keys in place and would otherwise
+        // leave harper-config.yaml not byte-identical to the first-repair
+        // file (port, securePort, mtls). Reorder only those scalar lines
+        // before launchd loads so the next persist matches the settled file.
+        const cfgPath = harperConfigPath(dataDir);
+        if (cfgPath) {
+          const raw = readFileSync(cfgPath, "utf-8");
+          const { text, changed } = stabilizeMqttNetworkKeyOrder(raw);
+          if (changed) writeFileAtomic(cfgPath, text, 0o644);
+        }
         // If the resolved plist was a pre-flair#693 legacy label, unload and
         // remove it so it is not orphaned beside the regenerated one.
         if (isLegacy && plistPath !== newPlistPath) {
