@@ -462,7 +462,7 @@ function awaitStartup(proc: ChildProcess, getLog: () => string, getExited: () =>
 
 export interface StartHarperOptions {
   /**
-   * Directory `harper dev "."` treats as its component root (i.e. the spawn's
+   * Directory `harper run "."` treats as its component root (i.e. the spawn's
    * `cwd` — the "." argument resolves relative to it). Defaults to
    * `process.cwd()`, matching every existing call site (a bare Flair
    * checkout loading itself as the component).
@@ -484,7 +484,7 @@ export interface StartHarperOptions {
   harperBinDir?: string;
   /**
    * Raw YAML appended to the instance's `harperdb-config.yaml` AFTER `harper
-   * install` writes it and BEFORE `harper dev` boots (flair#1257 slice 3).
+   * install` writes it and BEFORE `harper run` boots (flair#1257 slice 3).
    * Lets a test declare TOP-LEVEL config blocks the installer doesn't write —
    * e.g. a `models.generative` entry pointing `backend:` at a stub module
    * (test/fixtures/stub-generative-backend.mjs) so execute-mode distillation
@@ -580,6 +580,28 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
     HDB_ADMIN_PASSWORD: "test123",
     THREADS_COUNT: "1",
     NODE_HOSTNAME: "127.0.0.1",     // IPv4 only — avoids bun uv_ip6_addr panic
+    // Port audit (flair#1586): every listener a test-Harper can bind.
+    //
+    // HTTP / ops: ephemeral via HTTP_PORT + OPERATIONSAPI_NETWORK_PORT
+    //   (allocated in the spawn loop below). DEFAULTS_MODE=dev already nulls
+    //   http.securePort (9926) and operationsApi.network.securePort (9925)
+    //   in applyInstallModeDefaults — those TLS listeners do not bind.
+    // MQTT 1883/8883: Flair does not use MQTT. Harper binds TCP on
+    //   mqtt.network.port AND TLS on mqtt.network.securePort whenever
+    //   EITHER is truthy (`if (port || securePort)`). Null both, and turn
+    //   off the WebSocket upgrade path.
+    // Inspector 9229: DEFAULTS_MODE=dev persist threads.debug:true, and
+    //   `harper dev` also sets DEV_MODE which opens the inspector on 9229
+    //   even when threads.debug is false (threadServer.js
+    //   `else if (process.env.DEV_MODE)`). Spawn `harper run` (no DEV_MODE)
+    //   and re-assert THREADS_DEBUG=false so neither path binds.
+    // Replication 9933: Harper only starts the replication listener when
+    //   REPLICATION_URL is set. Test-Harpers never set it, so 9933 is not
+    //   bound. No other defaultConfig.yaml port is a shared fixed listener.
+    MQTT_NETWORK_PORT: "null",
+    MQTT_NETWORK_SECUREPORT: "null",
+    MQTT_WEBSOCKET: "false",
+    THREADS_DEBUG: "false",
   };
   // flair#1450: the child must exit when this process dies. The exit hook
   // above cannot cover SIGKILL of the harness (and we cannot install signal
@@ -631,10 +653,12 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
     appendFileSync(configPath, `\n${opts.appendRootConfigYaml.trimEnd()}\n`);
   }
 
-  // Spawn `harper dev` with a fresh pair of OS-assigned free ports. A port can
-  // still collide between allocation and bind (TOCTOU, or a lingering instance),
-  // and Harper reports "successfully started" even when a bind failed — so we
-  // detect the bind error and retry the spawn with new ports.
+  // Spawn `harper run` (not `dev`) with a fresh pair of OS-assigned free ports.
+  // `harper dev` sets DEV_MODE and opens the Node inspector on 9229 even when
+  // threads.debug is false — a live Flair holds that port (flair#1586).
+  // A port can still collide between allocation and bind (TOCTOU, or a
+  // lingering instance), and Harper reports "successfully started" even when
+  // a bind failed — so we detect the bind error and retry with new ports.
   let lastErr: Error | undefined;
   for (let attempt = 1; attempt <= MAX_SPAWN_ATTEMPTS; attempt++) {
     const [httpPort, opsPort] = await getFreePorts(2);
@@ -646,7 +670,7 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
     const httpURL = `http://127.0.0.1:${httpPort}`;
     const opsURL = `http://127.0.0.1:${opsPort}`;
 
-    const proc = spawn(NODE_BIN, [HARPER_BIN, "dev", "."], { cwd, env });
+    const proc = spawn(NODE_BIN, [HARPER_BIN, "run", "."], { cwd, env });
 
     // Capture Harper's output for the WHOLE lifetime of the process — not just
     // until the startup banner — so a crash that happens after "listening on"

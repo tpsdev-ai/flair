@@ -1231,6 +1231,27 @@ export function buildOperationsApiConfig(
 }
 
 /**
+ * Harper config that fully disables the MQTT broker (flair#1586).
+ *
+ * Flair does not use MQTT. Harper's mqtt component (server/mqtt.ts
+ * `handleApplication`) binds a TCP listener on `mqtt.network.port` (1883) and
+ * a TLS listener on `mqtt.network.securePort` (8883) whenever EITHER is truthy
+ * (`if (port || securePort)`), plus a WebSocket upgrade path when
+ * `mqtt.webSocket` is true. Nulling only `network.port` leaves
+ * `network.securePort` at its 8883 default, so the TLS listener still binds.
+ * Fully disabling MQTT requires nulling BOTH ports and turning off the
+ * WebSocket path.
+ *
+ * Note: config-root.schema.json still documents a flat `mqtt.port` /
+ * `mqtt.securePort`, but the runtime reads the nested `mqtt.network.*` form
+ * (see static/defaultConfig.yaml) — the flat keys are stale.
+ */
+const MQTT_DISABLED_CONFIG = {
+  network: { port: null, securePort: null },
+  webSocket: false,
+};
+
+/**
  * Build the flair-owned environment overrides for a DIRECT (non-launchd)
  * Harper spawn (flair#863) — shared by `flair start`'s fallback path and
  * startFlairProcess() (which backs `flair restart` and `flair upgrade`).
@@ -1243,6 +1264,15 @@ export function buildOperationsApiConfig(
  * variable is absent — so the site that omitted the var silently re-widened
  * the ops API to all interfaces on every restart/upgrade, and persisted it.
  * One builder means the next spawn site cannot reintroduce that gap.
+ *
+ * MQTT (flair#1586): the direct-spawn path re-asserts the mqtt disable via the
+ * individual MQTT_* env vars (the same channel as OPERATIONSAPI_NETWORK_PORT /
+ * HTTP_PORT) rather than HARPER_SET_CONFIG, so it cannot reintroduce the
+ * SET_CONFIG drift/restore gap. "null" casts to a null port (Harper's
+ * castConfigValue), which passes config validation (portConstraints
+ * `.empty(null)`) and is falsy, so Harper's mqtt component (server/mqtt.ts
+ * `if (port || securePort)`) binds neither the TCP (1883) nor TLS (8883)
+ * listener, and MQTT_WEBSOCKET=false turns off the WebSocket upgrade path.
  *
  * Deliberately omits HDB_ADMIN_PASSWORD when no password is in hand: an empty
  * string would strip Harper's auth on an existing install.
@@ -1265,6 +1295,14 @@ export function buildDirectSpawnEnv(opts: {
     HDB_ADMIN_USERNAME: opts.adminUser,
     HTTP_PORT: String(opts.httpPort),
     OPERATIONSAPI_NETWORK_PORT: opsNetworkPortValue(opts.opsBindHost, opts.opsPort),
+    // flair#1586: fully disable the MQTT broker (Flair does not use it). "null"
+    // casts to a null port (Harper's castConfigValue), which passes config
+    // validation (portConstraints `.empty(null)`) and is falsy, so Harper binds
+    // neither the TCP (1883) nor TLS (8883) listener; MQTT_WEBSOCKET=false turns
+    // off the WebSocket upgrade path.
+    MQTT_NETWORK_PORT: "null",
+    MQTT_NETWORK_SECUREPORT: "null",
+    MQTT_WEBSOCKET: "false",
     LOCAL_STUDIO: "false",
     // flair#905 / lrf5: Harper's forceDowngradePrompt reads CONFIRM_DOWNGRADE
     // from the environment (via the `prompt` npm package's assignCmdEnvVariables
@@ -4082,7 +4120,7 @@ program
           rootPath: dataDir,
           http: { port: httpPort, cors: true, corsAccessList: [`http://127.0.0.1:${httpPort}`, `http://localhost:${httpPort}`] },
           operationsApi: buildOperationsApiConfig(opsPort, opsSocket, opsBindHost),
-          mqtt: { network: { port: null }, webSocket: false },
+          mqtt: MQTT_DISABLED_CONFIG,
           localStudio: { enabled: false },
           authentication: { authorizeLocal: false, enableSessions: true },
         });
@@ -4204,7 +4242,7 @@ program
             rootPath: dataDir,
             http: { port: httpPort, cors: true, corsAccessList: [`http://127.0.0.1:${httpPort}`, `http://localhost:${httpPort}`] },
             operationsApi: buildOperationsApiConfig(opsPort, opsSocket, opsBindHost),
-            mqtt: { network: { port: null }, webSocket: false },
+            mqtt: MQTT_DISABLED_CONFIG,
             localStudio: { enabled: false },
             authentication: { authorizeLocal: false, enableSessions: true },
           });
@@ -13066,7 +13104,7 @@ function buildRepairPlist(dataDir: string, config: Record<string, any>): string 
     rootPath: dataDir,
     http: { port: httpPort, cors: true, corsAccessList: [`http://127.0.0.1:${httpPort}`, `http://localhost:${httpPort}`] },
     operationsApi: { network: { port: opsNetworkPort, cors: true, domainSocket: opsSocket } },
-    mqtt: { network: { port: null }, webSocket: false },
+    mqtt: MQTT_DISABLED_CONFIG,
     localStudio: { enabled: false },
     authentication: { authorizeLocal: false, enableSessions: true },
   });
