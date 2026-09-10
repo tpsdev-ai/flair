@@ -27,6 +27,18 @@ async function seed(table: string, records: Record<string, unknown>[]) {
   return op({ operation: "upsert", database: "flair", table, records });
 }
 const read = async (id: string) => (await op({ operation: "search_by_id", database: "flair", table: "Memory", ids: [id], get_attributes: ["*"] }))[0];
+/** HTTP PUT/PATCH can 200 before ops search_by_id sees the commit (native-spawn
+ *  deferred-txn / ops-wumd class). Poll the same ops read the assertions use;
+ *  the expected content/stamps do not change. */
+async function readUntil(id: string, pred: (row: any) => boolean): Promise<any> {
+  const deadline = Date.now() + 5_000;
+  let row = await read(id);
+  while (!pred(row) && Date.now() < deadline) {
+    await Bun.sleep(25);
+    row = await read(id);
+  }
+  return row;
+}
 beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires isolated Harper; unset HARPER_HTTP_URL");
   harper = await startHarper();
@@ -74,20 +86,22 @@ describe("Memory authority fields over HTTP", () => {
     for (const field of ["promotionStatus", "promotedAt", "promotedBy"]) expect(afterPut[field]).toBe(existing[field]);
   }, 120_000);
   test("a content-changing write cannot keep an echoed approved verdict", async () => {
-    const existing = await read("stamped");
-    const put = await request(owner, "PUT", "/Memory/stamped", {
-      id: "stamped", agentId: owner.id, content: "unreviewed claim under an echoed stamp",
+    // Own row — do not reuse "stamped" after the prior test's ops-blob PUT.
+    await seed("Memory", [{ id: "stamped-echo", agentId: owner.id, content: "original", durability: "persistent", createdAt: now, promotionStatus: "approved", promotedAt: now, promotedBy: "trusted-reviewer" }]);
+    const existing = await read("stamped-echo");
+    const put = await request(owner, "PUT", "/Memory/stamped-echo", {
+      id: "stamped-echo", agentId: owner.id, content: "unreviewed claim under an echoed stamp",
       durability: "persistent", promotionStatus: existing.promotionStatus, promotedAt: existing.promotedAt, promotedBy: existing.promotedBy,
     });
     expect(put.status, await put.clone().text()).toBe(200);
-    const afterPut = await read("stamped");
+    const afterPut = await readUntil("stamped-echo", (row) => row?.content === "unreviewed claim under an echoed stamp");
     expect(afterPut.content).toBe("unreviewed claim under an echoed stamp");
     expect(afterPut.promotionStatus).toBeFalsy();
     expect(afterPut.promotedBy).toBeFalsy();
     await seed("Memory", [{ id: "stamped-patch", agentId: owner.id, content: "original", durability: "persistent", createdAt: now, promotionStatus: "approved", promotedAt: now, promotedBy: "trusted-reviewer" }]);
     const patch = await request(owner, "PATCH", "/Memory/stamped-patch", { content: "patched unreviewed claim" });
     expect(patch.status, await patch.clone().text()).toBe(204);
-    const afterPatch = await read("stamped-patch");
+    const afterPatch = await readUntil("stamped-patch", (row) => row?.content === "patched unreviewed claim");
     expect(afterPatch.content).toBe("patched unreviewed claim");
     expect(afterPatch.promotionStatus).toBeFalsy();
   }, 120_000);
