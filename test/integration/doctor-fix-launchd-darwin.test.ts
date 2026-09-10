@@ -583,6 +583,15 @@ async function directSpawnDetached(sb: Sandbox): Promise<number> {
     HOME: sb.tmpHome,
     PATH: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
   };
+  // newSandbox's first doctor --fix already settled HARPER_SET_CONFIG
+  // (including MQTT_DISABLED_CONFIG) into harper-config.yaml. MQTT_* on
+  // this detach persist a different mqtt YAML than SET_CONFIG writes, and
+  // the adopt repair then re-canonicalizes the file — a byte change that
+  // is not a re-bootstrap but fails #1581's byte-identical check. Drop
+  // them here so detach does not mutate the settled file (flair#1586).
+  delete env.MQTT_NETWORK_PORT;
+  delete env.MQTT_NETWORK_SECUREPORT;
+  delete env.MQTT_WEBSOCKET;
   const proc = spawn(nodeBin(), [harper.path, "run", "."], {
     cwd: REPO_ROOT,
     env,
@@ -637,10 +646,6 @@ test.skipIf(!isDarwin)(
     expect(detachedPid, "direct-spawned PID should differ from the previous launchd PID").not.toBe(managedPid);
     const pre = assessManaged(sb.dataDir, sb.httpPort, sb.launchAgentsDir);
     expect(pre.state, `pre-adopt state should not be managed: ${pre.detail}`).not.toBe("managed");
-    // Direct-spawn re-asserts MQTT_* via buildDirectSpawnEnv (flair#1586).
-    // Harper persists those into harper-config.yaml. Snapshot AFTER that
-    // write so assertNoRebootstrap measures doctor --fix, not the detach.
-    const beforeAdopt = { config: readConfigBytes(sb.dataDir), ids: before.ids };
     clearLaunchdLogs(sb.dataDir);
 
     const result = await doctorFixToManaged(sb);
@@ -654,7 +659,7 @@ test.skipIf(!isDarwin)(
     // change + the 2s stability check below — not a component-tied stderr
     // banner. "listening on" disappeared once mqtt was fully off (flair#1586).
     assertSecretFreePlist(sb.plistPath);
-    await assertNoRebootstrap(sb, beforeAdopt);
+    await assertNoRebootstrap(sb, before);
     expect(result.stdout + result.stderr).toMatch(/adopt|bounc/i);
     await new Promise((r) => setTimeout(r, 2_000));
     expect(instancePid(sb.dataDir, sb.httpPort), "PID must stay stable after adopt (no KeepAlive restart loop)").toBe(
