@@ -7,11 +7,12 @@
  * install-weight / upgrade-smoke / MCP-wiring failure on PR #1598).
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BUNDLED_NAME,
+  buildDescriptors,
   materializeBundledDescriptors,
 } from "../../scripts/materialize-bundled-descriptors.mjs";
 
@@ -31,6 +32,34 @@ describe("bundled flair-tool-descriptors (flair#1580 pack/install)", () => {
     expect(mcp.bundleDependencies).toEqual([BUNDLED_NAME]);
     expect(root.scripts.prepack).toBe("node scripts/materialize-bundled-descriptors.mjs");
     expect(mcp.scripts.prepack).toBe("node ../../scripts/materialize-bundled-descriptors.mjs");
+  });
+
+  test("every Dockerfile that npm pack COPYs the prepack script (flair#1580)", () => {
+    const dockerDir = join(REPO, "docker");
+    const packers = readdirSync(dockerDir)
+      .filter((name) => name.startsWith("Dockerfile"))
+      .filter((name) => readFileSync(join(dockerDir, name), "utf8").includes("npm pack"));
+    expect(packers.length, "expected at least the two pack-in-image Dockerfiles").toBeGreaterThanOrEqual(2);
+    for (const name of packers) {
+      const text = readFileSync(join(dockerDir, name), "utf8");
+      expect(
+        text,
+        `${name} must COPY materialize-bundled-descriptors.mjs — prepack MODULE_NOT_FOUND otherwise`,
+      ).toContain("materialize-bundled-descriptors.mjs");
+    }
+  });
+
+  test("buildDescriptors emits dist via tsc without bun or a workspace link", () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-bundle-build-"));
+    fixtures.push(dir);
+    const src = join(REPO, "packages/flair-tool-descriptors");
+    const pkg = join(dir, "pkg");
+    for (const entry of ["package.json", "tsconfig.json", "src", "LICENSE", "README.md"]) {
+      cpSync(join(src, entry), join(pkg, entry), { recursive: true });
+    }
+    expect(existsSync(join(pkg, "dist", "index.js"))).toBe(false);
+    buildDescriptors(pkg, REPO);
+    expect(existsSync(join(pkg, "dist", "index.js"))).toBe(true);
   });
 
   test("materialize writes publishable files into a real node_modules tree", () => {
