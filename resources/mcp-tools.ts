@@ -423,7 +423,8 @@ async function skillSearch(agent: ResolvedAgent, args: any) {
  * returns the same 404 as an unreadable id. Returning it would (a) make
  * skill_get an alias for memory_get, and (b) reveal a readable non-skill
  * memory's existence through a skill-shaped call; a uniform 404 does neither.
- * The embedding fields are stripped by default, same as memory_get.
+ * The embedding fields are always stripped (flair#1593) — there is no
+ * includeEmbedding opt-in. memory_get keeps that flag (flair#1188).
  */
 async function skillGet(agent: ResolvedAgent, args: any) {
   const Cls = await handler("Memory");
@@ -435,7 +436,9 @@ async function skillGet(agent: ResolvedAgent, args: any) {
   // Skill-only: a readable non-skill row is reported as not found rather than
   // returned (see the doc above).
   if (!isSkillWrite(result)) return { error: "skill not found", status: 404 };
-  return args?.includeEmbedding === true ? result : stripInternalFields(result);
+  // flair#1593 — always strip. includeEmbedding used to bypass this and
+  // ride the raw vector; nothing in the skill_get contract needs it.
+  return stripInternalFields(result);
 }
 
 /**
@@ -1244,7 +1247,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
     contract: {
       summary:
         "The full skill record { id, agentId, content, trigger, tags, durability, metadata, createdAt, ... } for a " +
-        "skill readable under the caller's read-scope — embedding + embeddingModel stripped by default. A non-owner " +
+        "skill readable under the caller's read-scope — embedding + embeddingModel always stripped. A non-owner " +
         "cannot read another agent's private skill, and a readable non-skill id is not found (both 404).",
       requiredFields: ["id", "agentId", "content", "createdAt"],
       fieldTypes: { id: "string", agentId: "string", content: "string" },

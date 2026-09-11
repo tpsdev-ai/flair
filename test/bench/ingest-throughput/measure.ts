@@ -1,15 +1,8 @@
 /**
- * measure.ts — the ingest-only throughput measurement itself.
- *
- * For one thread setting: spawn a fresh ephemeral Harper with
- * FLAIR_EMBED_THREADS set in the parent env (resolved at module-load by
- * `resolveEmbedThreads()` in resources/embeddings-boot.ts), warm up the
- * embedder (loads the model + creates the llama.cpp worker threads), observe
- * the ACTUAL thread count from /proc/<pid>/status (not just the requested
- * env-var value), ingest the slice, and count tokens from the embedder's own
- * analytics table (`hdb_model_calls.embedding_tokens`).
+ * measure.ts — one (threads × gpuLayers) cell of the ingest-only throughput
+ * bench (flair#1436). Fresh Harper per cell — do not pipeline the lifecycle
+ * across settings (threads and gpuLayers are resolved at module-load).
  */
-import { readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { availableParallelism, cpus } from "node:os";
 import { startHarper, stopHarper, type HarperInstance } from "../../helpers/harper-lifecycle";
@@ -19,55 +12,33 @@ import {
 } from "../../../packages/flair-bench/lib/index";
 import { entryToSessions, toSessionHistories, type LmeEntry } from "../longmemeval/dataset";
 import { FLUSH_WAIT_MS } from "./config";
+import { observedThreadDelta, readProcessStatus } from "./observe";
+import { decideMetalGate, decideObservedThreads, parseMetalEngaged } from "../../unit/ingest-throughput-control";
 
 export interface SettingMetrics {
-  /** The env-var value requested ("default" = unset). */
   requestedThreads: number | "default";
-  /** Threads actually created by the embedder, observed as the /proc Threads:
-   *  delta before/after warmup. This is the number the sweep is really about. */
+  requestedGpuLayers: number;
+  /** Embedder threads actually created (warmup delta). Refuse if unreadable. */
   observedThreads: number;
-  /** os.availableParallelism() in the bench process (cgroup-aware). */
   availableParallelism: number;
-  /** os.cpus().length (physical/hyperthread count). */
   hostCores: number;
-  /** Wall-clock for the full ingest pass (ms), model already warm. */
   wallClockMs: number;
-  /** Model-load + warmup wall-clock (ms) — reported separately, not in tok/s. */
   modelLoadMs: number;
-  /** Memory records written (one per event). */
   documents: number;
-  /** Tokens ingested, from the embedder's own count (hdb_model_calls). */
   tokensIngested: number;
-  /** Cross-check: chars/4 estimate (reader-free, deterministic). */
   estimateTokens: number;
-  /** tokensIngested / (wallClockMs/1000). */
   tokPerSec: number;
-  /** tokPerSec / observedThreads. */
   tokPerSecPerCore: number;
-  /** Peak RSS (VmHWM) of the Harper process, bytes. */
+  docsPerSec: number;
   peakRssBytes: number;
-}
-
-interface ProcStatus {
-  threads: number;
-  vmHWM: number; // bytes
-}
-
-function readProcStatus(pid: number): ProcStatus {
-  const raw = readFileSync(`/proc/${pid}/status`, "utf8");
-  const threads = Number(/^Threads:\s+(\d+)/m.exec(raw)?.[1] ?? 0);
-  const vmHWMkB = Number(/^VmHWM:\s+(\d+)/m.exec(raw)?.[1] ?? 0);
-  return { threads, vmHWM: vmHWMkB * 1024 };
+  metalEngaged: boolean;
+  metalEvidence: string[];
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Sum the embedder's reported token count from `system.hdb_model_calls`.
- *  The table is written via primaryStore.put (bypasses indices) and buffered
- *  (10s flush), so callers must wait FLUSH_WAIT_MS after ingest before
- *  querying. Returns 0 if the table is empty (e.g. no embeds yet). */
 async function queryEmbeddingTokens(harper: HarperInstance): Promise<number> {
   const res = await adminOp(harper, {
     operation: "sql",
@@ -77,12 +48,10 @@ async function queryEmbeddingTokens(harper: HarperInstance): Promise<number> {
     throw new Error(`queryEmbeddingTokens: HTTP ${res.status} ${await res.text().catch(() => "")}`);
   }
   const body: any = await res.json();
-  // evaluateSQL returns an array of rows; SUM(...) AS total lands in row[0].total.
   const total = Array.isArray(body) && body.length > 0 ? Number(body[0]?.total ?? 0) : 0;
   return Number.isFinite(total) ? total : 0;
 }
 
-/** Deterministic chars/4 token estimate over every event in the slice. */
 function estimateTokens(entries: LmeEntry[]): number {
   let sum = 0;
   for (const entry of entries) {
@@ -101,28 +70,53 @@ export interface MeasureOptions {
   log: (msg: string) => void;
 }
 
+export interface CellSpec {
+  threads: number | "default";
+  gpuLayers: number;
+}
+
+function applyCellEnv(cell: CellSpec): () => void {
+  const savedThreads = process.env.FLAIR_EMBED_THREADS;
+  const savedGpu = process.env.FLAIR_EMBED_GPU_LAYERS;
+  if (cell.threads === "default") delete process.env.FLAIR_EMBED_THREADS;
+  else process.env.FLAIR_EMBED_THREADS = String(cell.threads);
+  if (cell.gpuLayers === 0) {
+    // Unset = HFE default 0. The sweep's cpu cell measures the real default path.
+    delete process.env.FLAIR_EMBED_GPU_LAYERS;
+  } else {
+    process.env.FLAIR_EMBED_GPU_LAYERS = String(cell.gpuLayers);
+  }
+  return () => {
+    if (savedThreads === undefined) delete process.env.FLAIR_EMBED_THREADS;
+    else process.env.FLAIR_EMBED_THREADS = savedThreads;
+    if (savedGpu === undefined) delete process.env.FLAIR_EMBED_GPU_LAYERS;
+    else process.env.FLAIR_EMBED_GPU_LAYERS = savedGpu;
+  };
+}
+
 export async function measureSetting(
   entries: LmeEntry[],
-  threads: number | "default",
+  cell: CellSpec,
   opts: MeasureOptions,
 ): Promise<SettingMetrics> {
   const { repoRoot, concurrency, log } = opts;
-
-  // Set the env var in the PARENT before startHarper(); startHarper spreads
-  // parentEnv (a copy of process.env) into the child's baseEnv, and
-  // resolveEmbedThreads() reads it at module-load inside the Harper process.
-  if (threads === "default") delete process.env.FLAIR_EMBED_THREADS;
-  else process.env.FLAIR_EMBED_THREADS = String(threads);
+  const restoreEnv = applyCellEnv(cell);
 
   const harper = await startHarper({ cwd: repoRoot, harperBinDir: repoRoot });
   const pid = harper.process?.pid;
+  const extraLog: string[] = [];
+  const onChunk = (d: Buffer) => { extraLog.push(d.toString()); };
+  harper.process?.stdout?.on("data", onChunk);
+  harper.process?.stderr?.on("data", onChunk);
 
   try {
-    const baseline = pid ? readProcStatus(pid) : null;
+    if (!pid) {
+      throw new Error(
+        "observe: Harper pid is missing (external mode?) — cannot read observed threads, refusing",
+      );
+    }
+    const baseline = readProcessStatus(pid);
 
-    // Warmup: ingest a single synthetic event under a throwaway agent to load
-    // the model and create the llama.cpp worker threads. Its tokens are
-    // subtracted below, so it never pollutes the measured count.
     const warmupAgent = mkAgent("ingest-warmup");
     await registerAgent(harper, warmupAgent);
     const warmupSessions: SessionHistory[] = [{
@@ -133,15 +127,28 @@ export async function measureSetting(
     await ingestSessionHistory({ harper, agent: warmupAgent }, warmupSessions, { concurrency });
     const modelLoadMs = performance.now() - t0;
 
-    const postWarmup = pid ? readProcStatus(pid) : null;
-    const observedThreads = baseline && postWarmup ? postWarmup.threads - baseline.threads : 0;
-    log(`    observed threads: ${observedThreads} (baseline ${baseline?.threads ?? "?"} -> ${postWarmup?.threads ?? "?"})`);
+    const postWarmup = readProcessStatus(pid);
+    const observedThreads = observedThreadDelta(baseline.threads, postWarmup.threads);
+    const observedGate = decideObservedThreads(observedThreads);
+    if (observedGate.blocked) throw new Error(observedGate.reason);
+    log(
+      `    observed threads: ${observedThreads} ` +
+      `(baseline ${baseline.threads} → ${postWarmup.threads}, via ${postWarmup.source})`,
+    );
 
-    // Flush warmup tokens, then read the baseline count to subtract.
+    const capturedLog = `${harper.getLog?.() ?? ""}\n${extraLog.join("")}`;
+    const metalGate = decideMetalGate(cell.gpuLayers, capturedLog);
+    if (metalGate.blocked) {
+      throw new Error(metalGate.reason);
+    }
+    const metal = parseMetalEngaged(capturedLog);
+    if (cell.gpuLayers > 0) {
+      log(`    Metal engaged: ${metal.engaged} (init=${metal.hasInit} buffer=${metal.hasComputeBuffer})`);
+    }
+
     await sleep(FLUSH_WAIT_MS);
     const baselineTokens = await queryEmbeddingTokens(harper);
 
-    // Ingest the full slice under the main agent.
     const mainAgent = mkAgent("ingest-main");
     await registerAgent(harper, mainAgent);
     const sessions = entries.flatMap((e) => toSessionHistories(entryToSessions(e)));
@@ -149,19 +156,20 @@ export async function measureSetting(
     const ingest = await ingestSessionHistory({ harper, agent: mainAgent }, sessions, { concurrency });
     const wallClockMs = performance.now() - t1;
 
-    // Flush ingest tokens, then read the total and subtract the warmup.
     await sleep(FLUSH_WAIT_MS);
     const totalTokens = await queryEmbeddingTokens(harper);
     const tokensIngested = totalTokens - baselineTokens;
 
-    const final = pid ? readProcStatus(pid) : null;
-    const peakRssBytes = final?.vmHWM ?? 0;
+    const final = readProcessStatus(pid);
+    const peakRssBytes = Number.isFinite(final.rssBytes) ? final.rssBytes : 0;
 
     const tokPerSec = tokensIngested / (wallClockMs / 1000);
     const tokPerSecPerCore = observedThreads > 0 ? tokPerSec / observedThreads : 0;
+    const docsPerSec = ingest.written / (wallClockMs / 1000);
 
     return {
-      requestedThreads: threads,
+      requestedThreads: cell.threads,
+      requestedGpuLayers: cell.gpuLayers,
       observedThreads,
       availableParallelism: availableParallelism(),
       hostCores: cpus().length,
@@ -172,10 +180,15 @@ export async function measureSetting(
       estimateTokens: estimateTokens(entries),
       tokPerSec,
       tokPerSecPerCore,
+      docsPerSec,
       peakRssBytes,
+      metalEngaged: metal.engaged,
+      metalEvidence: metal.evidence,
     };
   } finally {
+    harper.process?.stdout?.off("data", onChunk);
+    harper.process?.stderr?.off("data", onChunk);
     await stopHarper(harper, { keepInstallDir: false });
-    delete process.env.FLAIR_EMBED_THREADS;
+    restoreEnv();
   }
 }

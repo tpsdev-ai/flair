@@ -261,30 +261,23 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
   },
   {
     "name": "skill_get",
-    "description": "Retrieve a full skill by ID — the complete procedure (`content`) plus trigger and metadata. The disclosure step after skill_search's catalog. Read-scoped: you can only get your own or a shared skill, never another agent's private skill. A non-skill id returns not-found.",
+    "description": "Retrieve a full skill by ID — the complete procedure (`content`) plus trigger and metadata. The disclosure step after skill_search's catalog. Read-scoped: you can only get your own or a shared skill, never another agent's private skill. A non-skill id returns not-found. The raw embedding vector is never returned.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "id": {
           "type": "string",
           "description": "Skill (memory) ID"
-        },
-        "includeEmbedding": {
-          "type": "boolean",
-          "description": "Include the raw embedding vector (large, rarely useful). Default false."
         }
       },
       "required": [
         "id"
       ]
     },
-    "outputShape": "The full skill record { id, agentId, content, trigger, tags, durability, metadata, createdAt, ... } for a skill readable under the caller's read-scope — embedding + embeddingModel stripped by default. A non-owner cannot read another agent's private skill, and a readable non-skill id is not found (both 404).",
+    "outputShape": "The full skill record { id, agentId, content, trigger, tags, durability, metadata, createdAt, ... } for a skill readable under the caller's read-scope — embedding + embeddingModel always stripped. A non-owner cannot read another agent's private skill, and a readable non-skill id is not found (both 404).",
     "annotations": {
       "readOnlyHint": true
-    },
-    "stdioOmitProperties": [
-      "includeEmbedding"
-    ]
+    }
   },
   {
     "name": "memory_update",

@@ -38,8 +38,10 @@
  * authenticated version check, same Fabric admin Basic-auth credentials as
  * the origin — a Fabric cluster shares one admin realm). A peer with no
  * usable endpoint is reported "unverifiable" — never silently dropped, never
- * printed green. See classifyNode()'s "method" field: "direct" (we actually
- * hit it) vs "none" (we could not attempt a check at all, and say why).
+ * printed green, and does not fail the run (flair#988). A reachable peer
+ * verified on the wrong version still fails as diverged. See classifyNode()'s
+ * "method" field: "direct" (we actually hit it) vs "none" (we could not
+ * attempt a check at all, and say why).
  */
 
 import { probeInstance, type ProbeResult, type ProbeInstanceOptions } from "./probe.js";
@@ -74,34 +76,158 @@ export interface FleetNodeResult {
 }
 
 // ─── Exit codes (documented in `flair fleet verify --help`) ─────────────────
+//
+// Three operator-facing states (flair#988). UNVERIFIABLE (couldn't check)
+// must never share an exit with DIVERGED (probed, verified wrong):
+//
+//   1. All probed nodes OK, none diverged → 0 "converged."
+//      Unverifiable peers are listed + warned; they do NOT fail the run.
+//   2. Any reachable node DIVERGED (wrong version) → non-zero
+//      "NOT converged — <node> diverged."
+//   3. Some peers UNVERIFIABLE, none diverged → 0 + WARNING
+//      (same exit as (1); a distinct warning exit would also be fine as
+//      long as it is not (2)'s code).
+//
+// Exit 3 remains for a reachable peer we *attempted* to probe (unreachable
+// / auth-failed). That is a failed check, not "no endpoint on file."
 
-/** All nodes verified: healthy, authenticated, and version-matched. */
+/** All probed nodes verified. Unverifiable peers warn but do not fail (flair#988). */
 export const FLEET_EXIT_OK = 0;
 /** Origin failed — unreachable, unauthenticated, or running the wrong version. Worst case: the cluster's entrypoint itself is broken. */
 export const FLEET_EXIT_ORIGIN_FAILED = 1;
-/** Origin is fine, but at least one reachable peer is running a DIFFERENT version — a mixed-version fleet (the #638 scenario). */
+/** Origin is fine, but at least one reachable peer is running a DIFFERENT version — a mixed-version fleet (the #638 scenario). This is DIVERGED. */
 export const FLEET_EXIT_PEER_SKEW = 2;
-/** Origin is fine, no version skew among reachable peers, but at least one peer could not be verified at all (unreachable, auth rejected, or no endpoint on file). */
+/** Origin is fine, no version skew among reachable peers, but a reachable peer we attempted to probe was unreachable or rejected auth. */
 export const FLEET_EXIT_PEER_UNREACHABLE = 3;
 
 export const FLEET_EXIT_DESCRIPTIONS: Record<number, string> = {
-  [FLEET_EXIT_OK]: "all nodes verified: healthy, authenticated, version-matched",
+  [FLEET_EXIT_OK]: "all probed nodes verified (unverifiable peers are listed as a warning and do not fail)",
   [FLEET_EXIT_ORIGIN_FAILED]: "origin failed (unreachable, unauthenticated, or wrong version)",
-  [FLEET_EXIT_PEER_SKEW]: "origin OK, but a reachable peer is running a DIFFERENT version (skew)",
-  [FLEET_EXIT_PEER_UNREACHABLE]: "origin OK, no skew among reachable peers, but a peer could not be verified at all (unreachable, auth rejected, or no endpoint on file)",
+  [FLEET_EXIT_PEER_SKEW]: "origin OK, but a reachable peer diverged (wrong version)",
+  [FLEET_EXIT_PEER_UNREACHABLE]: "origin OK, no skew among reachable peers, but a reachable peer was unreachable or rejected auth",
 };
 
+/** Operator-facing sweep classification (flair#988). */
+export type FleetVerdictKind = "converged" | "diverged" | "check-failed";
+
+export interface FleetSweepVerdict {
+  kind: FleetVerdictKind;
+  exitCode: number;
+  /** True when a reachable node was probed and verified wrong. */
+  diverged: boolean;
+  divergedNodeId: string | null;
+  unverifiableCount: number;
+  /** Nodes we actually probed and classified ok (not unverifiable, not failed). */
+  verifiableCount: number;
+  /**
+   * Primary sentence. "converged." or "NOT converged — <node> diverged."
+   * or a check-failed sentence. Never "NOT converged" for unverifiable-only.
+   */
+  summary: string;
+  /**
+   * Present when any peer is unverifiable. Warning, not a failure.
+   * Exact shape from flair#988: "N peer(s) unverifiable — could not check…"
+   */
+  warning: string | null;
+}
+
+function isDivergedStatus(status: FleetNodeStatus): boolean {
+  return status === "skew";
+}
+
+function isCheckFailedStatus(status: FleetNodeStatus): boolean {
+  return status === "unreachable" || status === "auth-failed";
+}
+
+function formatUnverifiableWarning(unverifiableCount: number, verifiableCount: number): string {
+  return (
+    `${unverifiableCount} peer(s) unverifiable — could not check (no endpoint); ` +
+    `converged among the ${verifiableCount} verifiable node(s).`
+  );
+}
+
 /**
- * Priority order when multiple problems exist at once: an origin failure
- * always wins (nothing downstream matters if the entrypoint is broken), then
- * skew (a real mixed-version fleet), then unreachable/unverifiable (we
- * genuinely don't know that node's state).
+ * Separate "couldn't check" from "verified wrong" (flair#988).
+ * Single source of truth for exit code + operator sentences. Unverifiable
+ * peers never fail the run; a reachable skew still does.
+ */
+export function describeFleetSweep(origin: FleetNodeResult, peers: FleetNodeResult[]): FleetSweepVerdict {
+  const unverifiable = peers.filter((p) => p.status === "unverifiable");
+  const verifiableOk = [origin, ...peers].filter((p) => p.status === "ok");
+  const divergedNodes = [origin, ...peers].filter((p) => isDivergedStatus(p.status));
+  const warning = unverifiable.length > 0
+    ? formatUnverifiableWarning(unverifiable.length, verifiableOk.length)
+    : null;
+
+  if (origin.status !== "ok" && !isDivergedStatus(origin.status)) {
+    return {
+      kind: "check-failed",
+      exitCode: FLEET_EXIT_ORIGIN_FAILED,
+      diverged: false,
+      divergedNodeId: null,
+      unverifiableCount: unverifiable.length,
+      verifiableCount: verifiableOk.length,
+      summary: `origin ${origin.status} — could not complete check.`,
+      warning,
+    };
+  }
+
+  if (divergedNodes.length > 0) {
+    const node = divergedNodes[0];
+    return {
+      kind: "diverged",
+      exitCode: origin.status !== "ok" ? FLEET_EXIT_ORIGIN_FAILED : FLEET_EXIT_PEER_SKEW,
+      diverged: true,
+      divergedNodeId: node.id,
+      unverifiableCount: unverifiable.length,
+      verifiableCount: verifiableOk.length,
+      summary: `NOT converged — ${node.id} diverged.`,
+      warning,
+    };
+  }
+
+  const checkFailedPeer = peers.find((p) => isCheckFailedStatus(p.status));
+  if (checkFailedPeer) {
+    return {
+      kind: "check-failed",
+      exitCode: FLEET_EXIT_PEER_UNREACHABLE,
+      diverged: false,
+      divergedNodeId: null,
+      unverifiableCount: unverifiable.length,
+      verifiableCount: verifiableOk.length,
+      summary: `peer ${checkFailedPeer.id} ${checkFailedPeer.status} — could not complete check.`,
+      warning,
+    };
+  }
+
+  return {
+    kind: "converged",
+    exitCode: FLEET_EXIT_OK,
+    diverged: false,
+    divergedNodeId: null,
+    unverifiableCount: unverifiable.length,
+    verifiableCount: verifiableOk.length,
+    summary: "converged.",
+    warning,
+  };
+}
+
+/**
+ * Priority: origin failure, then reachable skew (DIVERGED), then a reachable
+ * peer we attempted and could not complete (unreachable / auth-failed).
+ * Unverifiable peers (no endpoint, never paired) do not fail the run.
  */
 export function decideFleetExitCode(origin: FleetNodeResult, peers: FleetNodeResult[]): number {
-  if (origin.status !== "ok") return FLEET_EXIT_ORIGIN_FAILED;
-  if (peers.some((p) => p.status === "skew")) return FLEET_EXIT_PEER_SKEW;
-  if (peers.some((p) => p.status !== "ok")) return FLEET_EXIT_PEER_UNREACHABLE;
-  return FLEET_EXIT_OK;
+  return describeFleetSweep(origin, peers).exitCode;
+}
+
+/**
+ * Whether `flair deploy` / `flair upgrade --target` should abort after the
+ * sweep. Unverifiable-only is not a failure — that was the #988 bug: every
+ * non-OK used to print "deploy is NOT fully converged."
+ */
+export function fleetSweepShouldAbort(verdict: FleetSweepVerdict): boolean {
+  return verdict.exitCode !== FLEET_EXIT_OK;
 }
 
 // ─── Pure decision logic: ProbeResult → FleetNodeResult ─────────────────────
@@ -274,6 +400,8 @@ export interface FleetSweepResult {
   /** Set when GET /FederationPeers on the origin itself failed — peer coverage is unknown, not necessarily zero. */
   peerEnumerationError: string | null;
   exitCode: number;
+  /** Three-state verdict (converged / diverged / check-failed). Unverifiable is a warning on converged, not a fourth failure. */
+  verdict: FleetSweepVerdict;
 }
 
 // ─── Orchestrator ───────────────────────────────────────────────────────────
@@ -348,9 +476,18 @@ export async function sweepFleet(
     });
   }
 
-  const exitCode = decideFleetExitCode(origin, peers);
+  const verdict = describeFleetSweep(origin, peers);
 
-  return { target: opts.target, expectVersion, expectVersionSource, origin, peers, peerEnumerationError, exitCode };
+  return {
+    target: opts.target,
+    expectVersion,
+    expectVersionSource,
+    origin,
+    peers,
+    peerEnumerationError,
+    exitCode: verdict.exitCode,
+    verdict,
+  };
 }
 
 // ─── Rendering ───────────────────────────────────────────────────────────────
@@ -406,5 +543,31 @@ export function renderFleetSweepTable(result: FleetSweepResult): string {
   lines.push("");
   lines.push(render.wrap(render.c.dim, expectLine));
 
+  const verdictLines = renderFleetSweepVerdict(result.verdict);
+  if (verdictLines) {
+    lines.push("");
+    lines.push(verdictLines);
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Operator-facing verdict after the per-node table (flair#988).
+ * Unverifiable-only → warning, never "NOT converged."
+ * A reachable skew → "NOT converged — <node> diverged."
+ */
+export function renderFleetSweepVerdict(verdict: FleetSweepVerdict): string {
+  const lines: string[] = [];
+  if (verdict.warning) {
+    lines.push(`${render.icons.warn} ${render.wrap(render.c.yellow, `WARNING ${verdict.warning}`)}`);
+  }
+  if (verdict.kind === "diverged") {
+    lines.push(`${render.icons.error} ${render.wrap(render.c.red, verdict.summary)}`);
+  } else if (verdict.kind === "check-failed") {
+    lines.push(`${render.icons.error} ${render.wrap(render.c.red, verdict.summary)}`);
+  } else if (!verdict.warning) {
+    lines.push(`${render.icons.ok} ${render.wrap(render.c.green, verdict.summary)}`);
+  }
   return lines.join("\n");
 }

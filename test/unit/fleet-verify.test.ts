@@ -7,18 +7,23 @@ import { describe, test, expect } from "bun:test";
 import {
   classifyNode,
   decideFleetExitCode,
+  describeFleetSweep,
   validatePeerEndpoint,
   sweepFleet,
   buildFabricAuthedGet,
+  renderFleetSweepTable,
+  renderFleetSweepVerdict,
+  fleetSweepShouldAbort,
   FLEET_EXIT_OK,
   FLEET_EXIT_ORIGIN_FAILED,
   FLEET_EXIT_PEER_SKEW,
   FLEET_EXIT_PEER_UNREACHABLE,
   type FleetNodeResult,
   type FleetPeerRecord,
+  type FleetSweepResult,
 } from "../../src/fleet-verify";
 import type { ProbeResult } from "../../src/probe";
-import { shouldRunFleetVerify } from "../../src/cli";
+import { shouldRunFleetVerify, fleetSweepCallerExitMessage } from "../../src/cli";
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -153,10 +158,10 @@ describe("decideFleetExitCode", () => {
     expect(decideFleetExitCode(origin, peers)).toBe(FLEET_EXIT_PEER_UNREACHABLE);
   });
 
-  test("origin ok + one peer unverifiable → PEER_UNREACHABLE (unverifiable is never silently OK)", () => {
+  test("origin ok + one peer unverifiable → OK (couldn't-check does not fail the run, flair#988)", () => {
     const origin = makeNode({ role: "origin", id: "origin" });
     const peers = [makeNode({ id: "p1", status: "unverifiable" })];
-    expect(decideFleetExitCode(origin, peers)).toBe(FLEET_EXIT_PEER_UNREACHABLE);
+    expect(decideFleetExitCode(origin, peers)).toBe(FLEET_EXIT_OK);
   });
 
   test("origin ok + one peer auth-failed → PEER_UNREACHABLE", () => {
@@ -309,6 +314,27 @@ describe("sweepFleet", () => {
     expect(result.expectVersionSource).toBe("none");
   });
 
+  test("reachable peer skew + unverifiable peers → PEER_SKEW (do not hide divergence, flair#988)", async () => {
+    const peers: FleetPeerRecord[] = [
+      { id: "west", status: "paired", endpoint: "https://west.example" },
+      { id: "tunnel", status: "paired", endpoint: null },
+    ];
+    const result = await sweepFleet(
+      { target: "https://origin.example", fabricUser: "u", fabricPassword: "p" },
+      deps({
+        originProbe: okProbe("0.32.0", null),
+        peers,
+        peerProbes: { "https://west.example": mismatchProbe("0.31.0", "0.32.0") },
+      }),
+    );
+    expect(result.exitCode).toBe(FLEET_EXIT_PEER_SKEW);
+    expect(result.verdict.kind).toBe("diverged");
+    expect(result.verdict.summary).toBe("NOT converged — west diverged.");
+    expect(result.verdict.warning).toContain("1 peer(s) unverifiable");
+    expect(fleetSweepShouldAbort(result.verdict)).toBe(true);
+    expect(fleetSweepCallerExitMessage(result)).toContain("NOT converged — west diverged.");
+  });
+
   test("a reachable peer running a different version than the origin → PEER_SKEW", async () => {
     const peers: FleetPeerRecord[] = [{ id: "peer-a", status: "paired", endpoint: "https://peer-a.example" }];
     const result = await sweepFleet(
@@ -324,7 +350,7 @@ describe("sweepFleet", () => {
     expect(result.exitCode).toBe(FLEET_EXIT_PEER_SKEW);
   });
 
-  test("a peer with no endpoint on file → unverifiable, never probed, PEER_UNREACHABLE", async () => {
+  test("a peer with no endpoint on file → unverifiable, never probed, exit OK with warning (flair#988)", async () => {
     const peers: FleetPeerRecord[] = [{ id: "tunnel-peer", status: "paired", endpoint: null }];
     const result = await sweepFleet(
       { target: "https://origin.example", fabricUser: "u", fabricPassword: "p" },
@@ -334,7 +360,10 @@ describe("sweepFleet", () => {
     expect(result.peers[0].status).toBe("unverifiable");
     expect(result.peers[0].method).toBe("none");
     expect(result.peers[0].detail).toContain("no endpoint");
-    expect(result.exitCode).toBe(FLEET_EXIT_PEER_UNREACHABLE);
+    expect(result.exitCode).toBe(FLEET_EXIT_OK);
+    expect(result.verdict.kind).toBe("converged");
+    expect(result.verdict.warning).toContain("1 peer(s) unverifiable");
+    expect(result.verdict.summary).toBe("converged.");
   });
 
   test("a peer that never answers /Health → unreachable (distinct from unverifiable), PEER_UNREACHABLE", async () => {
@@ -371,7 +400,37 @@ describe("sweepFleet", () => {
     expect(result.peers).toHaveLength(1);
     expect(result.peers[0].status).toBe("unverifiable");
     expect(result.peers[0].detail).toContain("FederationPeers");
-    expect(result.exitCode).toBe(FLEET_EXIT_PEER_UNREACHABLE);
+    // Enumeration failure is "couldn't check," not "verified wrong" — listed
+    // as unverifiable with a warning, does not share the diverged exit.
+    expect(result.exitCode).toBe(FLEET_EXIT_OK);
+    expect(result.verdict.warning).toContain("unverifiable");
+    expect(result.verdict.kind).toBe("converged");
+  });
+
+  test("origin ok + reachable ok peer + unverifiable peers → exit 0, warning, not diverged (flair#988)", async () => {
+    const peers: FleetPeerRecord[] = [
+      { id: "paired", status: "paired", endpoint: "https://paired.example" },
+      { id: "flair_28b15b9a", status: "paired", endpoint: null },
+      { id: "flair_5ca1b7ab", status: "paired", endpoint: null },
+    ];
+    const result = await sweepFleet(
+      { target: "https://origin.example", fabricUser: "u", fabricPassword: "p" },
+      deps({
+        originProbe: okProbe("0.32.0", null),
+        peers,
+        peerProbes: { "https://paired.example": okProbe("0.32.0", true) },
+      }),
+    );
+    expect(result.origin.status).toBe("ok");
+    expect(result.peers.filter((p) => p.status === "ok")).toHaveLength(1);
+    expect(result.peers.filter((p) => p.status === "unverifiable")).toHaveLength(2);
+    expect(result.exitCode).toBe(FLEET_EXIT_OK);
+    expect(result.verdict.kind).toBe("converged");
+    expect(result.verdict.diverged).toBe(false);
+    expect(result.verdict.warning).toBe(
+      "2 peer(s) unverifiable — could not check (no endpoint); converged among the 2 verifiable node(s).",
+    );
+    expect(fleetSweepCallerExitMessage(result)).toBeNull();
   });
 
   test("multiple peers all ok, matching the origin's version → OK", async () => {
@@ -395,7 +454,141 @@ describe("sweepFleet", () => {
   });
 });
 
-// ─── shouldRunFleetVerify (--no-fleet-verify plumbing, src/cli.ts) ──────────
+// ─── describeFleetSweep / caller messages (flair#988 three-state verdict) ───
+
+function makeSweep(origin: FleetNodeResult, peers: FleetNodeResult[]): FleetSweepResult {
+  const verdict = describeFleetSweep(origin, peers);
+  return {
+    target: "https://origin.example",
+    expectVersion: "1.0.0",
+    expectVersionSource: "explicit",
+    origin,
+    peers,
+    peerEnumerationError: null,
+    exitCode: verdict.exitCode,
+    verdict,
+  };
+}
+
+describe("describeFleetSweep — three states (flair#988)", () => {
+  test("acceptance: origin OK + unverifiable peers only → exit 0, warning, never 'NOT converged'", () => {
+    const origin = makeNode({ role: "origin", id: "origin" });
+    const peers = [
+      makeNode({ id: "flair_28b15b9a", status: "unverifiable", method: "none", url: null }),
+      makeNode({ id: "flair_5ca1b7ab", status: "unverifiable", method: "none", url: null }),
+      makeNode({ id: "flair_61e4b66b", status: "unverifiable", method: "none", url: null }),
+    ];
+    const v = describeFleetSweep(origin, peers);
+    expect(v.exitCode).toBe(FLEET_EXIT_OK);
+    expect(v.kind).toBe("converged");
+    expect(v.diverged).toBe(false);
+    expect(v.summary).toBe("converged.");
+    expect(v.summary).not.toMatch(/NOT converged/i);
+    expect(v.warning).toBe(
+      "3 peer(s) unverifiable — could not check (no endpoint); converged among the 1 verifiable node(s).",
+    );
+    expect(fleetSweepShouldAbort(v)).toBe(false);
+
+    const rendered = renderFleetSweepVerdict(v);
+    expect(rendered).toContain("WARNING");
+    expect(rendered).toContain("3 peer(s) unverifiable");
+    expect(rendered).not.toMatch(/NOT converged/i);
+    expect(rendered).not.toMatch(/NOT fully converged/i);
+
+    const caller = fleetSweepCallerExitMessage(makeSweep(origin, peers));
+    expect(caller).toBeNull();
+  });
+
+  test("acceptance: reachable peer on the wrong version → non-zero, 'NOT converged — <node> diverged'", () => {
+    const origin = makeNode({ role: "origin", id: "origin" });
+    const peers = [
+      makeNode({ id: "ok-peer", status: "ok" }),
+      makeNode({ id: "west", status: "skew", version: "0.31.0", versionMatch: false }),
+    ];
+    const v = describeFleetSweep(origin, peers);
+    expect(v.exitCode).toBe(FLEET_EXIT_PEER_SKEW);
+    expect(v.exitCode).not.toBe(FLEET_EXIT_OK);
+    expect(v.kind).toBe("diverged");
+    expect(v.diverged).toBe(true);
+    expect(v.divergedNodeId).toBe("west");
+    expect(v.summary).toBe("NOT converged — west diverged.");
+    expect(fleetSweepShouldAbort(v)).toBe(true);
+
+    const caller = fleetSweepCallerExitMessage(makeSweep(origin, peers));
+    expect(caller).toContain("NOT converged — west diverged.");
+    expect(caller).not.toMatch(/NOT fully converged/i);
+    expect(caller).toContain(`exit ${FLEET_EXIT_PEER_SKEW}`);
+  });
+
+  test("acceptance: all probed OK, no unverifiable → exit 0 'converged.'", () => {
+    const origin = makeNode({ role: "origin", id: "origin" });
+    const peers = [makeNode({ id: "p1" }), makeNode({ id: "p2" })];
+    const v = describeFleetSweep(origin, peers);
+    expect(v.exitCode).toBe(FLEET_EXIT_OK);
+    expect(v.kind).toBe("converged");
+    expect(v.summary).toBe("converged.");
+    expect(v.warning).toBeNull();
+    expect(fleetSweepShouldAbort(v)).toBe(false);
+    expect(renderFleetSweepVerdict(v)).toContain("converged.");
+  });
+
+  test("hazard: unverifiable + diverged → diverged wins (must NOT always exit 0)", () => {
+    const origin = makeNode({ role: "origin", id: "origin" });
+    const peers = [
+      makeNode({ id: "tunnel", status: "unverifiable", method: "none" }),
+      makeNode({ id: "east", status: "skew" }),
+    ];
+    const v = describeFleetSweep(origin, peers);
+    expect(v.exitCode).toBe(FLEET_EXIT_PEER_SKEW);
+    expect(v.kind).toBe("diverged");
+    expect(v.summary).toBe("NOT converged — east diverged.");
+    expect(v.warning).toContain("1 peer(s) unverifiable");
+    expect(fleetSweepShouldAbort(v)).toBe(true);
+    expect(v.exitCode).not.toBe(FLEET_EXIT_OK);
+  });
+
+  test("reachable peer unreachable is check-failed (exit 3), not 'NOT fully converged', and not the unverifiable exit", () => {
+    const origin = makeNode({ role: "origin", id: "origin" });
+    const peers = [makeNode({ id: "down", status: "unreachable" })];
+    const v = describeFleetSweep(origin, peers);
+    expect(v.exitCode).toBe(FLEET_EXIT_PEER_UNREACHABLE);
+    expect(v.kind).toBe("check-failed");
+    expect(v.diverged).toBe(false);
+    expect(v.summary).toContain("down");
+    expect(v.summary).toContain("unreachable");
+    expect(v.summary).not.toMatch(/NOT converged/i);
+    expect(v.exitCode).not.toBe(FLEET_EXIT_PEER_SKEW);
+
+    const caller = fleetSweepCallerExitMessage(makeSweep(origin, peers));
+    expect(caller).not.toBeNull();
+    expect(caller).not.toMatch(/NOT fully converged/i);
+    expect(caller).not.toMatch(/NOT converged/i);
+  });
+
+  test("deploy/upgrade caller never prints 'NOT fully converged' for unverifiable-only", () => {
+    const origin = makeNode({ role: "origin", id: "origin" });
+    const peers = [makeNode({ id: "flair_28b15b9a", status: "unverifiable", method: "none" })];
+    const sweep = makeSweep(origin, peers);
+    const table = renderFleetSweepTable(sweep);
+    expect(table).not.toMatch(/NOT fully converged/i);
+    expect(table).not.toMatch(/NOT converged/i);
+    expect(table).toContain("WARNING");
+    expect(table).toContain("unverifiable");
+    expect(fleetSweepCallerExitMessage(sweep)).toBeNull();
+    expect(sweep.exitCode).toBe(0);
+  });
+
+  test("deploy/upgrade caller for a diverged peer names the node, not a blanket 'NOT fully converged'", () => {
+    const origin = makeNode({ role: "origin", id: "origin" });
+    const peers = [makeNode({ id: "west", status: "skew" })];
+    const sweep = makeSweep(origin, peers);
+    const table = renderFleetSweepTable(sweep);
+    expect(table).toContain("NOT converged — west diverged.");
+    expect(table).not.toMatch(/NOT fully converged/i);
+    const caller = fleetSweepCallerExitMessage(sweep);
+    expect(caller).toBe("fleet verify failed (exit 2) — NOT converged — west diverged.");
+  });
+});
 
 describe("shouldRunFleetVerify", () => {
   test("defaults to true when the flag is never passed (opts.fleetVerify undefined)", () => {

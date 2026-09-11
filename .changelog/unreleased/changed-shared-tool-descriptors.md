@@ -14,4 +14,5 @@
   Stdio `inputSchema` omits native-only params FlairClient never forwards
   (`includeTrust`, `abstain`, `includeArchived`, `includeEmbedding`, `entities`,
   `includeContext`, `maxEvents`, `includeEventDetail`) so advertised tools match
-  handler behavior.
+  handler behavior. `skill_get` has no `includeEmbedding` on either surface
+  (flair#1579 / flair#1593).

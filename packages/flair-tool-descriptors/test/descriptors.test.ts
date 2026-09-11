@@ -57,12 +57,12 @@ describe("tool descriptors — transport-agnostic source (flair#1580)", () => {
     expect(def.annotations).toEqual({ readOnlyHint: true });
   });
 
-  test("stdio skill_get omits includeEmbedding (flair#1579)", () => {
+  test("skill_get has no includeEmbedding on either surface (flair#1579 / flair#1593)", () => {
     const d = STDIO_TOOL_DESCRIPTORS.find((t) => t.name === "skill_get");
     expect(d).toBeDefined();
     const stdio = toStdioMcpToolDef(d!);
     const native = toMcpToolDef(d!);
-    expect((native.inputSchema as { properties: object }).properties).toHaveProperty("includeEmbedding");
+    expect((native.inputSchema as { properties: object }).properties).not.toHaveProperty("includeEmbedding");
     expect((stdio.inputSchema as { properties: object }).properties).not.toHaveProperty("includeEmbedding");
   });
 
@@ -70,7 +70,6 @@ describe("tool descriptors — transport-agnostic source (flair#1580)", () => {
     const cases: Array<{ name: string; omitted: readonly string[] }> = [
       { name: "memory_search", omitted: ["includeTrust", "abstain", "includeArchived"] },
       { name: "memory_get", omitted: ["includeTrust", "includeEmbedding"] },
-      { name: "skill_get", omitted: ["includeEmbedding"] },
       {
         name: "bootstrap",
         omitted: ["entities", "includeTrust", "abstain", "includeContext", "maxEvents", "includeEventDetail"],

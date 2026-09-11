@@ -39,6 +39,8 @@ import {
   type Harness,
   type HookMutationResult,
 } from "../hook-install.js";
+import { staleHookRemedy, staleMcpClientPins, staleSessionStartHookPins } from "./owned-pins.js";
+import { flairCliVersion, isResolvedVersion } from "./mcp-spec.js";
 import {
   isDetached,
   renderDetachedWarning,
@@ -143,6 +145,24 @@ function runMcpBlock(ctx: DoctorRunContext): DoctorCheckResult {
       detail: `no Flair MCP server wired into any detected client (${mcp.join(", ")}) — wire one with: flair init --client <id>`,
     });
   }
+  // flair#1485 / Bugbot: a failed MCP pin refresh used to print nothing and
+  // leave the old @tpsdev-ai/flair-mcp pin in place. Presence is not
+  // currency — the same catalogue upgrade refreshes must fail here too.
+  const expected = flairCliVersion();
+  if (isResolvedVersion(expected)) {
+    const stale = staleMcpClientPins(ctx.homeDir, expected)
+      .filter((r) => wired.includes(r.target.id as (typeof MCP_CLIENT_IDS)[number]));
+    if (stale.length > 0) {
+      const first = stale[0]!;
+      const detail = stale.length === 1
+        ? `MCP server (${first.target.id}): pinned to flair-mcp@${first.pin} (installed CLI is ${expected})`
+        : `MCP server: stale pins ${stale.map((s) => `${s.target.id}@${s.pin}`).join(", ")} (installed CLI is ${expected})`;
+      return result(id, label, "fail", {
+        detail,
+        remedy: "flair upgrade",
+      });
+    }
+  }
   return result(id, label, "pass", { detail: `configured for ${wired.join(", ")}` });
 }
 
@@ -234,6 +254,26 @@ function runSessionStartHook(ctx: DoctorRunContext): DoctorCheckResult {
       detail: `SessionStart hook (${harness}): a failure would print an error on every session`,
       remedy: hookInstallHint(harness),
     });
+  }
+  // flair#1485: "it runs" is not "it is current". A hook whose pin is not
+  // the installed CLI version still launches the old adapter on every
+  // session. Compare against flairCliVersion() — not the MCP client pin —
+  // so two equally-stale pins cannot hide each other. Same owned-pin
+  // catalogue `flair upgrade` refreshes.
+  const expected = flairCliVersion();
+  if (isResolvedVersion(expected)) {
+    const stale = staleSessionStartHookPins(ctx.homeDir, expected)
+      .filter((r) => harnesses.includes(r.target.id as Harness));
+    if (stale.length > 0) {
+      const first = stale[0]!;
+      const detail = stale.length === 1
+        ? `SessionStart hook (${first.target.id}): pinned to flair-mcp@${first.pin} (installed CLI is ${expected})`
+        : `SessionStart hook: stale pins ${stale.map((s) => `${s.target.id}@${s.pin}`).join(", ")} (installed CLI is ${expected})`;
+      return result(id, label, "fail", {
+        detail,
+        remedy: staleHookRemedy(stale),
+      });
+    }
   }
   return result(id, label, "pass", {
     detail: `wired for ${harnesses.join(", ")}`,

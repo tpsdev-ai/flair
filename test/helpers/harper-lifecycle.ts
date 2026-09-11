@@ -248,6 +248,13 @@ export interface HarperInstance {
   /** Internal: the leak-backstop registry entry, so stopHarper can deregister
    *  by identity. Absent for external instances, which own nothing. */
   __tracked?: { pid?: number; installDir?: string; owns: boolean };
+  /**
+   * Stdout+stderr captured for the process lifetime. Used by the ingest
+   * throughput bench to prove Metal engagement (`ggml_metal_init` /
+   * compute-buffer) rather than inferring it from throughput (flair#1436).
+   * Empty string for external instances (no captured child).
+   */
+  getLog?: () => string;
 }
 
 interface HarperExit { code: number | null; signal: NodeJS.Signals | null }
@@ -537,6 +544,7 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
       admin: { username: HARPER_ADMIN_USER, password: HARPER_ADMIN_PASS },
       external: true,
       ownsInstallDir: false,
+      getLog: () => "",
     };
   }
 
@@ -701,6 +709,7 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
         // Carried so stopHarper can deregister the exact entry rather than
         // searching by pid — a pid can be reused, an object identity cannot.
         __tracked: tracked,
+        getLog: () => log,
       } as HarperInstance;
     } catch (err) {
       await killProcess(proc);

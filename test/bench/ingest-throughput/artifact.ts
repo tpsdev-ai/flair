@@ -1,44 +1,45 @@
 /**
  * artifact.ts — content-addressed artifact for the ingest-only throughput
- * benchmark (flair#1436).
+ * benchmark (flair#1436). Schema v2 adds the gpuLayers axis, doc/s + spread,
+ * quiet-box, Metal readback, ranking, and the positive-control record.
  *
- * Same partition as longmemeval/artifact.ts: hashed CONTENT (schema, gitCommit,
- * configHash, config, runHashes, settings, negativeControl) vs unhashed
- * PROVENANCE (generatedAt, host, notice, artifactHash). `configHash` is the
- * anchor — a pure function of the pinned config, re-derivable by anyone with
- * the repo. `artifactHash` is a SEAL (tamper-evidence), not a reproducibility
- * proof: it covers wall-clock latency, which a faithful re-run does not
- * bitwise-reproduce.
+ * Same partition as longmemeval/artifact.ts: hashed CONTENT vs unhashed
+ * PROVENANCE. `configHash` is the anchor. `artifactHash` is a SEAL.
  */
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { canonicalJson, sha256hex } from "./config";
+import { ARTIFACT_SCHEMA, canonicalJson, sha256hex } from "./config";
 import { assertBenchGitCommit } from "../git-commit";
 import type { SettingMetrics } from "./measure";
+import type {
+  Interval, NegativeControlDecision, PositiveControlDecision, RankingResult,
+} from "../../unit/ingest-throughput-control";
+import type { QuietBoxSnapshot } from "./quiet-box";
 
 export interface SettingAggregate {
   requestedThreads: number | "default";
+  requestedGpuLayers: number;
   runs: SettingMetrics[];
   meanObservedThreads: number;
   meanWallClockMs: number;
+  meanDocuments: number;
   meanTokensIngested: number;
   meanTokPerSec: number;
   meanTokPerSecPerCore: number;
+  meanDocsPerSec: number;
+  docsPerSecSpread: Interval;
+  tokPerSecSpread: Interval;
   meanPeakRssBytes: number;
+  metalEngaged: boolean;
 }
 
-export interface NegativeControlResult {
+export interface NegativeControlResult extends NegativeControlDecision {
   low: number;
   high: number;
-  /** low.tokPerSec / high.tokPerSec (mean across runs). < 1 means low is slower. */
-  ratio: number;
-  /** True when low is materially slower than high (ratio below the threshold). */
-  passed: boolean;
-  threshold: number;
+  gpuLayers: number;
 }
 
 export interface Artifact {
-  // ── Hashed CONTENT ──
   schema: string;
   gitCommit: string | null;
   configHash: string;
@@ -46,11 +47,19 @@ export interface Artifact {
   runHashes: string[];
   settings: SettingAggregate[];
   negativeControl: NegativeControlResult;
+  positiveControl: PositiveControlDecision;
+  ranking: Record<string, RankingResult>;
+  gpuSweep: { sweep: number[]; skipped: boolean; reason: string };
 
-  // ── Unhashed PROVENANCE ──
   notice: string;
   generatedAt: string;
-  host: { benchHost: string };
+  host: {
+    benchHost: string;
+    platform: string;
+    arch: string;
+    metalCapable: boolean;
+    quietBox: QuietBoxSnapshot;
+  };
   artifactHash?: string;
 }
 
@@ -79,30 +88,42 @@ export interface BuildArtifactInput {
   runHashes: string[];
   settings: SettingAggregate[];
   negativeControl: NegativeControlResult;
-  /** The commit of the flair code measured — a 40-hex sha, NEVER null. Resolve
-   *  with resolveBenchGitCommit() (fail-closed); re-asserted in buildArtifact so
-   *  the seal can never content-address a null (flair#1432). */
+  positiveControl: PositiveControlDecision;
+  ranking: Record<string, RankingResult>;
+  gpuSweep: { sweep: number[]; skipped: boolean; reason: string };
   gitCommit: string;
   benchHost: string;
+  platform: string;
+  arch: string;
+  metalCapable: boolean;
+  quietBox: QuietBoxSnapshot;
 }
 
 export function buildArtifact(input: BuildArtifactInput): Artifact {
   const art: Artifact = {
-    schema: "ingest-throughput.artifact/1",
+    schema: ARTIFACT_SCHEMA,
     notice:
       "VALIDATION ARTIFACT — NOT FOR PUBLICATION. This harness produces numbers; it does not " +
       "publish them. Publishing any number requires a recorded human sign-off referencing this " +
-      "artifact's artifactHash.",
+      "artifact's artifactHash. Overlapping intervals are INCONCLUSIVE — this file must not be " +
+      "read as picking a winner when ranking.verdict is inconclusive or refused.",
     generatedAt: new Date().toISOString(),
-    // Defense-in-depth: refuse to seal an artifact that cannot name its code
-    // (flair#1432). Already fail-closed at resolution; re-asserted at the seal.
     gitCommit: assertBenchGitCommit(input.gitCommit, "ingest-throughput artifact"),
-    host: { benchHost: input.benchHost },
+    host: {
+      benchHost: input.benchHost,
+      platform: input.platform,
+      arch: input.arch,
+      metalCapable: input.metalCapable,
+      quietBox: input.quietBox,
+    },
     configHash: input.configHash,
     config: input.config,
     runHashes: input.runHashes,
     settings: input.settings,
     negativeControl: input.negativeControl,
+    positiveControl: input.positiveControl,
+    ranking: input.ranking,
+    gpuSweep: input.gpuSweep,
   };
   return stampArtifactHash(art);
 }
@@ -116,4 +137,31 @@ export function writeArtifact(art: Artifact, outDir: string): string {
   const path = join(outDir, `ingest-throughput-artifact-${art.artifactHash!.slice(0, 16)}.json`);
   writeFileSync(path, JSON.stringify(art, null, 2));
   return path;
+}
+
+export function aggregate(runs: SettingMetrics[]): SettingAggregate {
+  const mean = (f: (m: SettingMetrics) => number) => runs.reduce((s, m) => s + f(m), 0) / runs.length;
+  const docs = runs.map((m) => m.docsPerSec);
+  const toks = runs.map((m) => m.tokPerSec);
+  const minMax = (values: number[]): Interval => ({
+    min: Math.min(...values),
+    max: Math.max(...values),
+    mean: values.reduce((s, v) => s + v, 0) / values.length,
+  });
+  return {
+    requestedThreads: runs[0]!.requestedThreads,
+    requestedGpuLayers: runs[0]!.requestedGpuLayers,
+    runs,
+    meanObservedThreads: mean((m) => m.observedThreads),
+    meanWallClockMs: mean((m) => m.wallClockMs),
+    meanDocuments: mean((m) => m.documents),
+    meanTokensIngested: mean((m) => m.tokensIngested),
+    meanTokPerSec: mean((m) => m.tokPerSec),
+    meanTokPerSecPerCore: mean((m) => m.tokPerSecPerCore),
+    meanDocsPerSec: mean((m) => m.docsPerSec),
+    docsPerSecSpread: minMax(docs),
+    tokPerSecSpread: minMax(toks),
+    meanPeakRssBytes: mean((m) => m.peakRssBytes),
+    metalEngaged: runs[0]!.requestedGpuLayers > 0 && runs.every((m) => m.metalEngaged),
+  };
 }

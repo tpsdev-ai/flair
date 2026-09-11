@@ -182,12 +182,41 @@ export function resolveEmbedThreads(
   return Math.max(1, safeCores - 1);
 }
 
+/**
+ * llama.cpp GPU-layer offload passed to HFE `register({config:{gpuLayers}})`.
+ *
+ * DEFAULT IS UNCHANGED. Unset / empty / non-integer / negative → `undefined`,
+ * and the register() call OMITS the field so HFE keeps its own default of 0
+ * (CPU only). This is a measurement pin for the ingest-throughput bench
+ * (flair#1436 / #1437), not a product default change. #1437 is the decision
+ * about whether to detect-and-default gpuLayers; this function must not
+ * pre-empt it.
+ *
+ * Override: `FLAIR_EMBED_GPU_LAYERS` — a non-negative integer, env-only
+ * (same persist-path reason as `FLAIR_EMBED_THREADS`). 0 = CPU only; 99 =
+ * full offload (the Metal cell). Invalid values fall through to omit.
+ */
+export function resolveEmbedGpuLayers(
+  env: NodeJS.ProcessEnv = process.env,
+): number | undefined {
+  return parseNonNegativeInt(env.FLAIR_EMBED_GPU_LAYERS);
+}
+
 function parsePositiveInt(raw: string | undefined): number | undefined {
   if (raw == null) return undefined;
   const trimmed = raw.trim();
   if (trimmed === "") return undefined;
   const n = Number(trimmed);
   if (!Number.isInteger(n) || n < 1) return undefined;
+  return n;
+}
+
+function parseNonNegativeInt(raw: string | undefined): number | undefined {
+  if (raw == null) return undefined;
+  const trimmed = raw.trim();
+  if (trimmed === "") return undefined;
+  const n = Number(trimmed);
+  if (!Number.isInteger(n) || n < 0) return undefined;
   return n;
 }
 
@@ -205,6 +234,9 @@ export async function registerEmbeddingsBackend(): Promise<void> {
     const { register } = await import("harper-fabric-embeddings");
     const modelPath = benchModelPathOverride();
     const threads = resolveEmbedThreads();
+    // Omit when unset so HFE's default of 0 is unchanged (flair#1436 measurement
+    // pin; #1437 is the default-change decision). Never pass a synthesized default.
+    const gpuLayers = resolveEmbedGpuLayers();
     await register({
       logicalName: LOGICAL_NAME,
       kind: "embedding",
@@ -213,6 +245,7 @@ export async function registerEmbeddingsBackend(): Promise<void> {
           ? { modelPath, pooling: EMBEDDING_POOLING }
           : { modelName: MODEL_NAME, modelsDir: resolveModelsDir(), pooling: EMBEDDING_POOLING }),
         threads,
+        ...(gpuLayers !== undefined ? { gpuLayers } : {}),
       },
     });
   } catch (err) {
