@@ -39,7 +39,11 @@ flair doctor
 `flair upgrade` checks and upgrades the npm-global packages (`@tpsdev-ai/flair`,
 `@tpsdev-ai/flair-mcp`) and, if present, the `openclaw-flair` plugin (via
 `openclaw plugins install --force --pin`, not `npm install -g` — it needs OpenClaw's
-own plugin loader). Pass `--all` to also see `flair-client` (normally hidden as a
+own plugin loader). It also refreshes every `@tpsdev-ai/flair-mcp@<version>` pin
+it previously wrote — MCP server entries **and** SessionStart hook commands —
+for each already-wired client (`~/.claude.json`, `~/.claude/settings.json`,
+`~/.codex/config.toml`, `~/.codex/hooks.json`, and the other auto-wired clients).
+Pass `--all` to also see `flair-client` (normally hidden as a
 transitive dependency). **Other integrations upgrade in their own ecosystem, not via
 `flair upgrade`:** `pi-flair` (pi's plugin manager), `langgraph-flair` / `hermes-flair`
 (pip / your Python package manager), `n8n-nodes-flair` (n8n's Community Nodes UI).

@@ -1,0 +1,5 @@
+- **`flair upgrade` refreshes SessionStart hook pins, and `flair doctor` fails a pin that is not the installed CLI version.** MCP server entries and hook commands share one catalogue of files Flair pins; upgrade rewrites every already-wired `@tpsdev-ai/flair-mcp@<ver>` to the new CLI, and doctor reports a stale hook as ✗ with `flair hook install` — never ✓ (flair#1485).
+
+  #1516 compared the hook pin to the MCP client pin and printed a warning after ✓ "still runs", so two equally-stale pins (or a hook left behind when no agent id was known) still passed. Currency is now pin === installed CLI version. A failed MCP `client.wire` (`skip` + `ok: false`) is printed on upgrade instead of dropped, and `flair doctor` fails a leftover stale MCP pin with `flair upgrade`.
+
+  > **Heads-up:** after `flair upgrade`, SessionStart hooks move to the new `@tpsdev-ai/flair-mcp` pin with the MCP client configs. `flair doctor` fails a leftover stale hook; the remedy is `flair hook install`. A stale MCP client pin is ✗ with `flair upgrade`.

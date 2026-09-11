@@ -92,7 +92,6 @@ import {
   detectWiredFlairMcp,
   inspectSessionStartHook,
   upgradeSessionStartHookCommand,
-  checkSessionStartHookPinSkew,
   fixClaudeMdBootstrap,
   fixSessionStartHook,
   applyOrReportClaudeMdBootstrap,
@@ -191,6 +190,7 @@ import {
   runDoctorChecks,
   type DoctorRun,
 } from "./lib/doctor-run.js";
+import { ownedPinRefreshShouldReport, refreshOwnedPins, staleSessionStartHookPins } from "./lib/owned-pins.js";
 import {
   classifyDaemonState,
   verifyIdentity,
@@ -11747,46 +11747,24 @@ program
           return agentKeyFile ? agentKeyFile.replace(/\.key$/, "") : null;
         } catch { return null; }
       })();
+      // flair#1485: one catalogue (listOwnedPinTargets) for every file we
+      // pin — MCP client configs AND SessionStart hooks. A missing agent id
+      // skips MCP only; hook re-pin reads the agent from the existing command
+      // and must still run (the early return here used to leave hooks stale).
       if (!agentId) {
-        console.log("\n   (no agent id known — skip MCP client pin refresh; run `flair init` to refresh manually)");
-        return;
+        console.log("\n   (no agent id known — skip MCP client pin refresh; SessionStart hooks still re-pin)");
       }
-      const httpUrl = `http://127.0.0.1:${targetPort}`;
-      const mcpEnv = { FLAIR_AGENT_ID: agentId, FLAIR_URL: httpUrl };
-      const detected = detectClients().filter(c => c.detected);
-      if (detected.length === 0) return;
-      console.log("\n   Refreshing MCP client pins...");
-      for (const client of detected) {
-        const configPath = clientConfigPath(client.id);
-        if (!existsSync(configPath)) continue;
-        // Only refresh clients that are already wired — don't wire new ones.
-        let hasFlair = false;
-        try {
-          const raw = readFileSync(configPath, "utf-8");
-          if (client.id === "codex") {
-            hasFlair = codexConfigHasFlairSection(raw);
-          } else {
-            const cfg = JSON.parse(raw);
-            hasFlair = !!cfg.mcpServers?.flair;
-          }
-        } catch { /* unreadable/malformed — skip */ }
-        if (!hasFlair) continue;
-        const env = { ...mcpEnv, FLAIR_CLIENT: client.id } as { FLAIR_AGENT_ID: string; FLAIR_URL: string; FLAIR_CLIENT?: string };
-        const result = client.wire(env);
-        console.log(`   ${result.ok ? "✓" : "•"} ${result.message}`);
-      }
-      // flair#1516: the SessionStart hook command carries the SAME
-      // @tpsdev-ai/flair-mcp@<version> pin as the client MCP block, but only
-      // the client block was refreshed above — so an upgraded user kept
-      // launching the PREVIOUS adapter on every session, silently, while
-      // `flair doctor` reported the hook "still runs". Re-pin every ALREADY-
-      // wired hook to the current spec too (never adds one — that stays an
-      // opt-in). Best-effort, same as the client refresh.
-      for (const harness of SUPPORTED_HARNESSES) {
-        const repin = repinSessionStartHook(homedir(), harness);
-        if (repin.action === "update") {
-          console.log(`   ${repin.ok ? "✓" : "•"} ${repin.message}`);
-        }
+      const homeDir = process.env.HOME || process.env.USERPROFILE || homedir();
+      const results = refreshOwnedPins({
+        homeDir,
+        agentId: agentId ?? null,
+        flairUrl: `http://127.0.0.1:${targetPort}`,
+      });
+      const noteworthy = results.filter(ownedPinRefreshShouldReport);
+      if (noteworthy.length === 0) return;
+      console.log("\n   Refreshing MCP client and SessionStart hook pins...");
+      for (const r of noteworthy) {
+        console.log(`   ${r.ok ? "✓" : "•"} ${r.message}`);
       }
     }
 
@@ -15319,7 +15297,23 @@ program
         // diagnosed.
         const hook = inspectSessionStartHook(homedir());
         if (hook.present) {
-          if (hook.execution === "broken") {
+          // flair#1485: pin ≠ installed CLI version is a failure, never a
+          // ✓ "still runs". Check freshness first so a stale pin cannot
+          // hide behind the execution probe. Catalog owns the issue count.
+          const claudeStale = staleSessionStartHookPins(homedir()).find((r) => r.target.id === "claude-code");
+          if (claudeStale) {
+            console.log(`  ${render.icons.error} SessionStart hook: pinned to flair-mcp@${claudeStale.pin} (installed CLI is ${flairCliVersion()}) — the hook still launches the OLD adapter on every session`);
+            if (autoFix) {
+              if (dryRun) {
+                console.log(`     ${render.wrap(render.c.dim, "Would re-pin the SessionStart hook in")} ${hook.path}`);
+              } else {
+                const repin = repinSessionStartHook(homedir(), "claude-code");
+                console.log(`     ${repin.ok ? render.icons.ok : render.icons.warn} ${repin.message}`);
+              }
+            } else {
+              console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair hook install ${render.wrap(render.c.dim, "(re-pins the hook to the installed CLI version)")}`);
+            }
+          } else if (hook.execution === "broken") {
             // Two very different states that share one probe outcome:
             //
             // 1. Silenced (current) command that didn't run — the npx cache
@@ -15353,28 +15347,6 @@ program
             console.log(`  ${render.icons.ok} SessionStart hook: wired in ${render.wrap(render.c.dim, hook.path)} ${render.wrap(render.c.dim, "(custom command — not verified, not modified)")}`);
           } else {
             console.log(`  ${render.icons.ok} SessionStart hook: flair-session-start wired in ${render.wrap(render.c.dim, hook.path)} ${render.wrap(render.c.dim, "and still runs")}`);
-          }
-
-          // flair#1516: a hook can be wired AND still run yet be pinned to a
-          // DIFFERENT @tpsdev-ai/flair-mcp version than the Claude Code MCP
-          // client — an upgrade refreshed the client block but (pre-#1516)
-          // left the hook behind, so every session silently launched the OLD
-          // adapter. "and still runs" never caught this; compare the two pins.
-          const claudeHookSkew = checkSessionStartHookPinSkew(homedir(), "claude-code");
-          if (claudeHookSkew.skewed) {
-            console.log(`  ${render.icons.warn} SessionStart hook: pinned to flair-mcp@${claudeHookSkew.hookPin} but the Claude Code MCP client is pinned to @${claudeHookSkew.clientPin} — the hook still launches the OLD adapter on every session`);
-            if (autoFix) {
-              if (dryRun) {
-                console.log(`     ${render.wrap(render.c.dim, "Would re-pin the SessionStart hook in")} ${hook.path}`);
-              } else {
-                const repin = repinSessionStartHook(homedir(), "claude-code");
-                console.log(`     ${repin.ok ? render.icons.ok : render.icons.warn} ${repin.message}`);
-                if (repin.ok && repin.action === "update") fixed++;
-              }
-            } else {
-              console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair hook install ${render.wrap(render.c.dim, "(re-pins the hook to the current version)")}`);
-            }
-            issues++;
           }
 
           // Independent of whether it runs today: would it stay quiet if it
@@ -15482,7 +15454,20 @@ program
       if (codexConfigured) {
         const hook = inspectSessionStartHook(homedir(), { settingsPath: hookSettingsPath(homedir(), "codex") });
         if (hook.present) {
-          if (hook.execution === "broken") {
+          const codexStale = staleSessionStartHookPins(homedir()).find((r) => r.target.id === "codex");
+          if (codexStale) {
+            console.log(`  ${render.icons.error} SessionStart hook (codex): pinned to flair-mcp@${codexStale.pin} (installed CLI is ${flairCliVersion()}) — the hook still launches the OLD adapter on every session`);
+            if (autoFix) {
+              if (dryRun) {
+                console.log(`     ${render.wrap(render.c.dim, "Would re-pin the SessionStart hook in")} ${hook.path}`);
+              } else {
+                const repin = repinSessionStartHook(homedir(), "codex");
+                console.log(`     ${repin.ok ? render.icons.ok : render.icons.warn} ${repin.message}`);
+              }
+            } else {
+              console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair hook install --harness codex ${render.wrap(render.c.dim, "(re-pins the hook to the installed CLI version)")}`);
+            }
+          } else if (hook.execution === "broken") {
             if (hook.silenced) {
               console.log(`  ${render.icons.ok} SessionStart hook (codex): wired in ${render.wrap(render.c.dim, hook.path)} — not yet exercised`);
               console.log(`     ${render.wrap(render.c.dim, hook.detail ?? "")}`);
@@ -15500,26 +15485,6 @@ program
             console.log(`  ${render.icons.ok} SessionStart hook (codex): wired in ${render.wrap(render.c.dim, hook.path)} ${render.wrap(render.c.dim, "(custom command — not verified, not modified)")}`);
           } else {
             console.log(`  ${render.icons.ok} SessionStart hook (codex): flair-session-start wired in ${render.wrap(render.c.dim, hook.path)} ${render.wrap(render.c.dim, "and still runs")}`);
-          }
-
-          // flair#1516: same version-skew check as Claude Code — a Codex hook
-          // left behind by an upgrade keeps launching the OLD adapter while
-          // the Codex MCP block advertises the new pin.
-          const codexHookSkew = checkSessionStartHookPinSkew(homedir(), "codex");
-          if (codexHookSkew.skewed) {
-            console.log(`  ${render.icons.warn} SessionStart hook (codex): pinned to flair-mcp@${codexHookSkew.hookPin} but the Codex MCP client is pinned to @${codexHookSkew.clientPin} — the hook still launches the OLD adapter on every session`);
-            if (autoFix) {
-              if (dryRun) {
-                console.log(`     ${render.wrap(render.c.dim, "Would re-pin the SessionStart hook in")} ${hook.path}`);
-              } else {
-                const repin = repinSessionStartHook(homedir(), "codex");
-                console.log(`     ${repin.ok ? render.icons.ok : render.icons.warn} ${repin.message}`);
-                if (repin.ok && repin.action === "update") fixed++;
-              }
-            } else {
-              console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair hook install --harness codex ${render.wrap(render.c.dim, "(re-pins the hook to the current version)")}`);
-            }
-            issues++;
           }
 
           if (!hook.silenced && hook.ours) {
