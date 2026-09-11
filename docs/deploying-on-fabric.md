@@ -241,7 +241,7 @@ Provision once, from one place, before serving multi-region traffic: step 2's
 | `flair fleet verify --target <url>` | health, auth, version across origin + Flair peers |
 | `flair federation status\|verify\|reachability --target <url>` | peer table, sync recency, probes |
 
-`fleet verify` exit codes: 1 origin failed, 2 peer version skew, 3 peer unverifiable.
+`fleet verify` exit codes: 1 origin failed, 2 reachable peer diverged (wrong version), 3 reachable peer unreachable/auth-failed. Unverifiable peers (no endpoint on file) warn and exit 0.
 
 > **A credential mismatch renders as an empty section, not an error.** `flair status`
 > reads `/HealthDetail` with `FLAIR_ADMIN_PASS` / `HDB_ADMIN_PASSWORD` / a pinned agent
