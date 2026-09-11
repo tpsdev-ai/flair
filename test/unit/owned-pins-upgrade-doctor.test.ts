@@ -1,11 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   listOwnedPinTargets,
+  ownedPinRefreshShouldReport,
   refreshOwnedPins,
+  staleMcpClientPins,
   staleSessionStartHookPins,
   staleHookRemedy,
 } from "../../src/lib/owned-pins.ts";
@@ -179,6 +181,57 @@ describe("flair#1485 — one catalogue of files we own and pin", () => {
     const nextCommand = src.indexOf(".command(\"", upgradeIdx + ".command(\"upgrade\")".length);
     const upgradeBody = src.slice(upgradeIdx, nextCommand === -1 ? undefined : nextCommand);
     expect(upgradeBody).toContain("refreshOwnedPins(");
+    expect(upgradeBody).toContain("ownedPinRefreshShouldReport");
+  });
+});
+
+describe("flair#1485 — failed MCP pin refresh is not silent", () => {
+  it("ownedPinRefreshShouldReport is true for skip+ok:false (a failed client.wire)", () => {
+    const failed = {
+      target: {
+        kind: "mcp-client" as const,
+        id: "claude-code",
+        path: "/tmp/.claude.json",
+        displayPath: "~/.claude.json",
+      },
+      action: "skip" as const,
+      ok: false,
+      message: "Claude Code: manual wiring needed (could not write ~/.claude.json: EACCES)",
+    };
+    expect(ownedPinRefreshShouldReport(failed)).toBe(true);
+    expect(ownedPinRefreshShouldReport({ ...failed, ok: true, message: "not wired — skip" })).toBe(false);
+  });
+
+  it("a write failure from client.wire stays ok:false and is reportable", () => {
+    const path = writeClaudeMcp(isoHome, STALE_SPEC, "local");
+    chmodSync(path, 0o444);
+    const results = refreshOwnedPins({
+      homeDir: isoHome,
+      agentId: "local",
+      flairUrl: "http://127.0.0.1:9926",
+    });
+    chmodSync(path, 0o644);
+    const mcp = results.find((r) => r.target.kind === "mcp-client" && r.target.id === "claude-code");
+    expect(mcp?.ok).toBe(false);
+    expect(mcp?.action).toBe("skip");
+    expect(mcp && ownedPinRefreshShouldReport(mcp)).toBe(true);
+    expect(readFileSync(path, "utf-8")).toContain(STALE_SPEC);
+  });
+
+  it("doctor catalog fails a stale MCP pin (the leftover after a silent refresh miss)", () => {
+    writeClaudeMcp(isoHome, STALE_SPEC, "local");
+    writeHook(isoHome, "claude-code", hookCommand("local", INSTALLED));
+    const run = doctorOn(isoHome, ["claude-code"]);
+    const mcp = run.results.find((r) => r.id === "mcp-block");
+    expect(mcp?.status).toBe("fail");
+    expect(mcp?.detail ?? "").toContain(STALE_VER);
+    expect(mcp?.detail ?? "").toContain(INSTALLED);
+    expect(mcp?.remedy).toBe("flair upgrade");
+    expect(run.healthy).toBe(false);
+    expect(staleMcpClientPins(isoHome, INSTALLED).map((r) => r.pin)).toEqual([STALE_VER]);
+    const lines = renderCatalogDoctorLines(run);
+    const mcpLine = lines.find((row) => row.line.includes("MCP server"));
+    expect(mcpLine?.icon).toBe("error");
   });
 });
 

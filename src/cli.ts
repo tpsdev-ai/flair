@@ -190,7 +190,7 @@ import {
   runDoctorChecks,
   type DoctorRun,
 } from "./lib/doctor-run.js";
-import { refreshOwnedPins, staleSessionStartHookPins } from "./lib/owned-pins.js";
+import { ownedPinRefreshShouldReport, refreshOwnedPins, staleSessionStartHookPins } from "./lib/owned-pins.js";
 import {
   classifyDaemonState,
   verifyIdentity,
@@ -11760,11 +11760,7 @@ program
         agentId: agentId ?? null,
         flairUrl: `http://127.0.0.1:${targetPort}`,
       });
-      const noteworthy = results.filter((r) =>
-        r.target.kind === "mcp-client"
-          ? r.action !== "skip"
-          : r.action === "update" || !r.ok,
-      );
+      const noteworthy = results.filter(ownedPinRefreshShouldReport);
       if (noteworthy.length === 0) return;
       console.log("\n   Refreshing MCP client and SessionStart hook pins...");
       for (const r of noteworthy) {

@@ -39,7 +39,7 @@ import {
   type Harness,
   type HookMutationResult,
 } from "../hook-install.js";
-import { staleHookRemedy, staleSessionStartHookPins } from "./owned-pins.js";
+import { staleHookRemedy, staleMcpClientPins, staleSessionStartHookPins } from "./owned-pins.js";
 import { flairCliVersion, isResolvedVersion } from "./mcp-spec.js";
 import {
   isDetached,
@@ -144,6 +144,24 @@ function runMcpBlock(ctx: DoctorRunContext): DoctorCheckResult {
     return result(id, label, "skip", {
       detail: `no Flair MCP server wired into any detected client (${mcp.join(", ")}) — wire one with: flair init --client <id>`,
     });
+  }
+  // flair#1485 / Bugbot: a failed MCP pin refresh used to print nothing and
+  // leave the old @tpsdev-ai/flair-mcp pin in place. Presence is not
+  // currency — the same catalogue upgrade refreshes must fail here too.
+  const expected = flairCliVersion();
+  if (isResolvedVersion(expected)) {
+    const stale = staleMcpClientPins(ctx.homeDir, expected)
+      .filter((r) => wired.includes(r.target.id as (typeof MCP_CLIENT_IDS)[number]));
+    if (stale.length > 0) {
+      const first = stale[0]!;
+      const detail = stale.length === 1
+        ? `MCP server (${first.target.id}): pinned to flair-mcp@${first.pin} (installed CLI is ${expected})`
+        : `MCP server: stale pins ${stale.map((s) => `${s.target.id}@${s.pin}`).join(", ")} (installed CLI is ${expected})`;
+      return result(id, label, "fail", {
+        detail,
+        remedy: "flair upgrade",
+      });
+    }
   }
   return result(id, label, "pass", { detail: `configured for ${wired.join(", ")}` });
 }

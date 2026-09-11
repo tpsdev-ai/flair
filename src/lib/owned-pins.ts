@@ -166,6 +166,27 @@ export function staleSessionStartHookPins(
   return staleOwnedPins(homeDir, expectedVersion).filter((r) => r.target.kind === "session-start-hook");
 }
 
+export function staleMcpClientPins(
+  homeDir: string,
+  expectedVersion: string = flairCliVersion(),
+): OwnedPinReading[] {
+  return staleOwnedPins(homeDir, expectedVersion).filter((r) => r.target.kind === "mcp-client");
+}
+
+/**
+ * What `flair upgrade` prints from a refresh result.
+ *
+ * A failed `client.wire` is `action: "skip"` + `ok: false` (same shape as a
+ * fail-closed hook re-pin). Filtering on `action !== "skip"` alone dropped
+ * that failure, left the pin stale, and printed nothing (Bugbot on #1485).
+ * Failures always surface. MCP no-ops/updates still print; hook no-ops stay quiet.
+ */
+export function ownedPinRefreshShouldReport(r: OwnedPinRefreshResult): boolean {
+  if (!r.ok) return true;
+  if (r.target.kind === "mcp-client") return r.action !== "skip";
+  return r.action === "update";
+}
+
 export function staleHookRemedy(readings: readonly OwnedPinReading[]): string {
   const harnesses = readings
     .filter((r) => r.target.kind === "session-start-hook")
@@ -242,6 +263,9 @@ export function refreshOwnedPins(opts: RefreshOwnedPinsOptions): OwnedPinRefresh
       const before = extractFlairMcpPin(readFileText(target.path) ?? "");
       const wired = client.wire(env);
       const after = extractFlairMcpPin(readFileText(target.path) ?? "");
+      // Failed write stays skip+ok:false (fail-closed, like hook re-pin).
+      // ownedPinRefreshShouldReport treats !ok as printable — do not recode
+      // this as a quiet skip.
       const action =
         !wired.ok ? "skip"
           : before !== after ? "update"
