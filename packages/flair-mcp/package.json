@@ -17,6 +17,7 @@
   "scripts": {
     "build": "tsc --noCheck",
     "test": "bun test",
+    "prepack": "node ../../scripts/materialize-bundled-descriptors.mjs",
     "prepublishOnly": "npm run build",
     "postinstall": "node -e \"try{const{chmodSync,statSync}=require('fs');for(const p of ['dist/mcp-shim.cjs','dist/index.js','dist/session-start-hook.js','dist/continuity-capture-hook.js']){try{if(statSync(p).isFile()){chmodSync(p,0o755);console.error('@tpsdev-ai/flair-mcp: chmod +x ' + p + ' OK')}}catch(e){if(e.code!=='ENOENT')console.error('postinstall warn:',e.message)}}}catch(e){console.error('postinstall warn:',e.message)}\""
   },
@@ -32,6 +33,9 @@
     "@tpsdev-ai/flair-tool-descriptors": "0.53.0",
     "zod": "4.3.6"
   },
+  "bundleDependencies": [
+    "@tpsdev-ai/flair-tool-descriptors"
+  ],
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

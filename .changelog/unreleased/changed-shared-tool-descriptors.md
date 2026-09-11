@@ -7,4 +7,6 @@
 
   > **Heads-up:** `@tpsdev-ai/flair-tool-descriptors` is a new workspace package
   > and needs a one-time npm first-publish + Trusted Publisher registration
-  > before the next release can stage it (see `docs/releasing.md`).
+  > before the next release can stage it (see `docs/releasing.md`). Until then,
+  > `@tpsdev-ai/flair` and `@tpsdev-ai/flair-mcp` tarballs **bundle** it
+  > (`bundleDependencies`) so `npm install` of those tarballs does not 404.

@@ -154,7 +154,10 @@ Packages: `flair-client`, `flair-tool-descriptors`, `flair-mcp`, `flair`,
 > `@tpsdev-ai/flair-tool-descriptors` (flair#1580) is the next first-publish:
 > stage it with the dedicated continue-on-error step, then an npm org owner
 > publishes once and registers its Trusted Publisher (same playbook as
-> `flair-bench` below).
+> `flair-bench` below). Until that exists on the registry, `@tpsdev-ai/flair`
+> and `@tpsdev-ai/flair-mcp` tarballs bundle it (`bundleDependencies` +
+> `scripts/materialize-bundled-descriptors.mjs`) so `npm install` of those
+> tarballs does not 404.
 
 ### `flair-bench` bootstrap (one-time, done)
 
