@@ -34,7 +34,10 @@ describe("shared unit lane", () => {
 
   test("includes root tests and isolates every global mock file, with no integration tests", () => {
     const steps = unitPlan(root);
-    expect(steps[0].files.some(file => file.endsWith("/test/data-scoping.test.ts"))).toBe(true);
+    const rootUnit = steps.find(step => step.name === "root unit tests");
+    expect(rootUnit?.files.some(file => file.endsWith("/test/data-scoping.test.ts"))).toBe(true);
+    expect(steps.findIndex(step => step.name === "build flair-tool-descriptors")).toBeLessThan(steps.findIndex(step => step.name === "root unit tests"));
+    expect(steps.findIndex(step => step.name === "build flair-tool-descriptors")).toBeLessThan(steps.findIndex(step => step.name === "flair-mcp unit tests"));
     const isolated = steps.filter(step => step.files.some(file => file.includes("/unit-isolated/")));
     expect(isolated.length).toBeGreaterThan(0);
     for (const step of isolated) {

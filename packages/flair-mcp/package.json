@@ -29,6 +29,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.27.1",
     "@tpsdev-ai/flair-client": "0.53.0",
+    "@tpsdev-ai/flair-tool-descriptors": "0.53.0",
     "zod": "4.3.6"
   },
   "license": "Apache-2.0",

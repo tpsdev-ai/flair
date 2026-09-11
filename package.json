@@ -46,7 +46,7 @@
   ],
   "scripts": {
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
-    "prebuild": "npm run clean",
+    "prebuild": "npm run clean && npm run build --workspace=@tpsdev-ai/flair-tool-descriptors",
     "build": "tsc -p tsconfig.json --noCheck && node scripts/write-build-info.mjs",
     "build:cli": "tsc -p tsconfig.cli.json --noCheck && node scripts/write-build-info.mjs",
     "prepublishOnly": "npm run build && npm run build:cli",
@@ -71,7 +71,8 @@
     "jose": "6.2.2",
     "js-yaml": "^4.3.2",
     "tar": "^7.5.22",
-    "tweetnacl": "1.0.3"
+    "tweetnacl": "1.0.3",
+    "@tpsdev-ai/flair-tool-descriptors": "0.53.0"
   },
   "overrides": {
     "react-native-fs": "npm:empty-npm-package@1.0.0",

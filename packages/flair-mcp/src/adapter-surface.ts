@@ -1,82 +1,48 @@
 /**
- * adapter-surface.ts — the stdio adapter's declared tool set (flair#1575).
+ * adapter-surface.ts — the stdio adapter's derived tool set (flair#1580).
  *
- * `@tpsdev-ai/flair-mcp` hand-wires each tool via `server.tool(...)` in
- * index.ts. The native `/mcp` handler ships a separate `TOOLS` registry in
- * resources/mcp-tools.ts. Those two surfaces drifted: skill_* landed in
- * TOOLS for 0.52.0 and never reached this package — the surface Claude Code
- * and Cursor actually use.
+ * `@tpsdev-ai/flair-mcp` no longer hand-wires per-tool string literals in
+ * index.ts. The advertised set is STDIO_TOOL_DESCRIPTORS from the shared
+ * `@tpsdev-ai/flair-tool-descriptors` module — the same descriptors the
+ * server TOOLS registry binds to Harper impls. Drift is impossible by
+ * construction: a new both-surface descriptor appears here once a
+ * FlairClient handler is bound.
  *
- * This module is the reviewed chokepoint for that seam:
+ * This module remains the reviewed chokepoint for the stdio ↔ TOOLS seam:
  *
- *   1. `ADAPTER_TOOL_NAMES` is the adapter's declared tool set.
- *   2. `parseAdapterToolNames` reads the names actually passed to
- *      `server.tool(...)` in index.ts, so the declaration cannot outrun
- *      registration (or vice versa).
- *   3. `STDIO_ADAPTER_EXEMPTIONS` is the explicit, reviewed list of names
- *      that exist on one surface but not the other. A TOOLS name that is
- *      neither registered here nor exempted is a CI failure — silent drift
- *      of the class that hid skill_*.
- *
- * Deriving the adapter's handlers from TOOLS (so a new registry tool appears
- * here for free) is the durable structural fix; it does not fit this chip
- * because TOOLS is Harper-linked server code and this package talks HTTP via
- * FlairClient. Detection + exemption list ships now; derive is a follow-on.
+ *   1. `ADAPTER_TOOL_NAMES` is DERIVED from STDIO_TOOL_DESCRIPTORS.
+ *   2. `parseAdapterToolNames` still scans for leftover string-literal
+ *      tool names passed to the MCP SDK — hand-wiring is now a CI failure,
+ *      not the registration path.
+ *   3. `STDIO_ADAPTER_EXEMPTIONS` is DERIVED from descriptor surface flags
+ *      (the #1578 list, now structural rather than hand-synced).
  */
 
-/** Tools registered on the stdio adapter via `server.tool(...)` in index.ts. */
-export const ADAPTER_TOOL_NAMES = [
-  "bootstrap",
-  "flair_orgevent",
-  "flair_workspace_set",
-  "memory_delete",
-  "memory_get",
-  "memory_search",
-  "memory_store",
-  "memory_update",
-  "record_usage",
-  "relationship_store",
-  "skill_get",
-  "skill_search",
-  "skill_store",
-  "soul_get",
-  "soul_set",
-] as const;
+import {
+  STDIO_TOOL_DESCRIPTORS,
+  SURFACE_EXEMPTIONS,
+  descriptorNames,
+} from "@tpsdev-ai/flair-tool-descriptors";
+
+/** Tools registered on the stdio adapter — derived from the shared descriptor list. */
+export const ADAPTER_TOOL_NAMES = descriptorNames(STDIO_TOOL_DESCRIPTORS);
 
 export type AdapterToolName = (typeof ADAPTER_TOOL_NAMES)[number];
 
 /**
- * Reviewed exemptions at the stdio-adapter ↔ server TOOLS seam (flair#1575).
- *
- * A name here is a deliberate, reviewed difference — not silent drift.
- * Adding or removing a name is the control: CI fails if an exemption is
- * unused (the tool appeared on both sides, or vanished from the side it
- * was excused on) or if a non-exempt name exists on only one side.
+ * Reviewed one-sided tools at the stdio-adapter ↔ server TOOLS seam.
+ * Derived from descriptor `native` / `stdio` flags (flair#1580) — the same
+ * names #1578 listed by hand (attention, archive verbs, relationship_store).
  */
 export const STDIO_ADAPTER_EXEMPTIONS = {
-  /**
-   * Present in resources/mcp-tools.ts `TOOLS`, not wired on the stdio adapter.
-   *
-   * - attention: native /mcp only (flair#677). mcp-tools.ts's module doc
-   *   explicitly does not mirror it into this package.
-   * - memory_basement / memory_restore: archive verbs (flair#1472) landed
-   *   on native /mcp; not yet forwarded over FlairClient.
-   */
-  registryOnly: ["attention", "memory_basement", "memory_restore"],
-  /**
-   * Wired on the stdio adapter, absent from `TOOLS`.
-   *
-   * - relationship_store: the adapter predates the record-types mcp
-   *   declaration. Relationship has no `RECORD_TYPES.mcp` field, so TOOLS
-   *   ships zero relationship_* names. The adapter still exposes the triple
-   *   write (FlairClient.relationship.write).
-   */
-  adapterOnly: ["relationship_store"],
+  registryOnly: SURFACE_EXEMPTIONS.registryOnly,
+  adapterOnly: SURFACE_EXEMPTIONS.adapterOnly,
 } as const;
 
 /**
- * Collect `server.tool("name", ...)` registrations from adapter source.
- * Plain string scan — the first string literal argument is the tool name.
+ * Collect leftover string-literal tool registrations from adapter source.
+ * After #1580 the derived registrar uses `server.tool(d.name, ...)`, so this
+ * scan should return empty. A new literal is a CI failure.
  * Does not use `new RegExp` built from runtime input (CodeQL js/regex-injection).
  */
 export function parseAdapterToolNames(source: string): string[] {
@@ -99,6 +65,8 @@ export interface AdapterRegistryParity {
 /**
  * Compare the stdio adapter's tool set to the server TOOLS registry.
  * Equal after applying the reviewed exemption list — otherwise drift.
+ * Kept from #1578 as the migration tripwire; #1580 also asserts
+ * derived set == descriptor set structurally.
  */
 export function adapterRegistryParity(
   registryNames: readonly string[],
@@ -122,4 +90,19 @@ export function adapterRegistryParity(
   ].sort();
 
   return { missingFromAdapter, extraOnAdapter, staleExemptions };
+}
+
+/**
+ * Structural #1580 assert: the bound handler set equals the stdio descriptor set.
+ */
+export function derivedDescriptorParity(
+  handlerNames: readonly string[],
+  descriptorNamesList: readonly string[] = ADAPTER_TOOL_NAMES,
+): { missingHandlers: string[]; extraHandlers: string[] } {
+  const handlers = new Set(handlerNames);
+  const descriptors = new Set(descriptorNamesList);
+  return {
+    missingHandlers: [...descriptors].filter((n) => !handlers.has(n)).sort(),
+    extraHandlers: [...handlers].filter((n) => !descriptors.has(n)).sort(),
+  };
 }

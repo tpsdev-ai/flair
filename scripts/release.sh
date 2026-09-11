@@ -69,6 +69,7 @@ fi
 
 PACKAGES=(
   "$ROOT/packages/flair-client"
+  "$ROOT/packages/flair-tool-descriptors"
   "$ROOT/packages/flair-mcp"
   "$ROOT/packages/openclaw-flair"
   "$ROOT/packages/pi-flair"
@@ -81,6 +82,7 @@ PACKAGES=(
 
 PACKAGE_JSONS=(
   "$ROOT/packages/flair-client/package.json"
+  "$ROOT/packages/flair-tool-descriptors/package.json"
   "$ROOT/packages/flair-mcp/package.json"
   "$ROOT/packages/openclaw-flair/package.json"
   "$ROOT/packages/pi-flair/package.json"
@@ -215,12 +217,16 @@ if [[ "$MODE" == "--publish" ]]; then
   echo "🔨 Building from merged main..."
   (cd "$ROOT" && npm run build && npm run build:cli) || { echo "❌ Build failed"; exit 1; }
   (cd "$ROOT/packages/flair-client" && npm run build) || { echo "❌ flair-client build failed"; exit 1; }
+  (cd "$ROOT/packages/flair-tool-descriptors" && npm run build) || { echo "❌ flair-tool-descriptors build failed"; exit 1; }
   (cd "$ROOT/packages/flair-mcp" && npm run build) || { echo "❌ flair-mcp build failed"; exit 1; }
   (cd "$ROOT/packages/n8n-nodes-flair" && npm run build) || { echo "❌ n8n-nodes-flair build failed"; exit 1; }
 
   echo "🚀 Publishing to npm..."
   echo "  Publishing @tpsdev-ai/flair-client..."
   (cd "$ROOT/packages/flair-client" && npm publish) || { echo "❌ flair-client publish failed"; exit 1; }
+
+  echo "  Publishing @tpsdev-ai/flair-tool-descriptors..."
+  (cd "$ROOT/packages/flair-tool-descriptors" && npm publish) || { echo "❌ flair-tool-descriptors publish failed"; exit 1; }
 
   echo "  Publishing @tpsdev-ai/flair-mcp..."
   (cd "$ROOT/packages/flair-mcp" && npm publish) || { echo "❌ flair-mcp publish failed"; exit 1; }
@@ -276,7 +282,7 @@ if [[ "$MODE" == "--publish" ]]; then
   git_push_auth "v${VERSION}"
 
   echo ""
-  echo "✅ Flair v${VERSION} published and tagged (all 8 packages)."
+  echo "✅ Flair v${VERSION} published and tagged (all 9 packages)."
   exit 0
 fi
 
@@ -367,10 +373,11 @@ echo "📌 Bumping source version declarations..."
   echo "❌ Source version bump failed"; exit 1;
 }
 
-# 3. Update internal dependencies (flair-mcp + pi-flair + n8n-nodes-flair all
-#    depend on flair-client)
+# 3. Update internal dependencies (flair-mcp + leaf packages depend on
+#    flair-client; flair-mcp + root depend on flair-tool-descriptors)
 echo "🔗 Aligning internal dependencies..."
 for INTERNAL_DEPENDENT in \
+    "$ROOT/package.json" \
     "$ROOT/packages/flair-mcp/package.json" \
     "$ROOT/packages/pi-flair/package.json" \
     "$ROOT/packages/n8n-nodes-flair/package.json" \
@@ -380,11 +387,18 @@ for INTERNAL_DEPENDENT in \
     const fs = require('fs');
     const path = '$INTERNAL_DEPENDENT';
     const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
+    let changed = false;
     if (pkg.dependencies?.['@tpsdev-ai/flair-client']) {
       pkg.dependencies['@tpsdev-ai/flair-client'] = '$VERSION';
-      fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + '\n');
+      changed = true;
       console.log('  ✓ ' + pkg.name + ' → flair-client: $VERSION');
     }
+    if (pkg.dependencies?.['@tpsdev-ai/flair-tool-descriptors']) {
+      pkg.dependencies['@tpsdev-ai/flair-tool-descriptors'] = '$VERSION';
+      changed = true;
+      console.log('  ✓ ' + pkg.name + ' → flair-tool-descriptors: $VERSION');
+    }
+    if (changed) fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + '\\n');
   "
 done
 
@@ -416,7 +430,7 @@ echo "🔒 Refreshing bun.lock..."
 # HARD-VERIFY with --frozen-lockfile so a residual desync fails the release loud
 # instead of silently shipping a broken lockfile.
 echo "🔗 Aligning bun.lock internal-dep specifiers..."
-perl -i -pe 's{("\@tpsdev-ai/flair-client":\s*")\d+\.\d+\.\d+(")}{${1}'"$VERSION"'${2}}g' "$ROOT/bun.lock"
+perl -i -pe 's{("\@tpsdev-ai/flair-client":\s*")\d+\.\d+\.\d+(")}{${1}'"$VERSION"'${2}}g; s{("\@tpsdev-ai/flair-tool-descriptors":\s*")\d+\.\d+\.\d+(")}{${1}'"$VERSION"'${2}}g' "$ROOT/bun.lock"
 (cd "$ROOT" && bun install --frozen-lockfile) || {
   echo "❌ bun.lock still desynced after specifier alignment — investigate before releasing."; exit 1;
 }
@@ -425,6 +439,7 @@ perl -i -pe 's{("\@tpsdev-ai/flair-client":\s*")\d+\.\d+\.\d+(")}{${1}'"$VERSION
 echo "🔨 Building..."
 (cd "$ROOT" && npm run build && npm run build:cli) || { echo "❌ Build failed"; exit 1; }
 (cd "$ROOT/packages/flair-client" && npm run build) || { echo "❌ flair-client build failed"; exit 1; }
+(cd "$ROOT/packages/flair-tool-descriptors" && npm run build) || { echo "❌ flair-tool-descriptors build failed"; exit 1; }
 (cd "$ROOT/packages/flair-mcp" && npm run build) || { echo "❌ flair-mcp build failed"; exit 1; }
 (cd "$ROOT/packages/n8n-nodes-flair" && npm run build) || { echo "❌ n8n-nodes-flair build failed"; exit 1; }
 echo "  ✓ All packages built"
@@ -473,6 +488,7 @@ echo "📝 Committing version bump..."
 git -C "$ROOT" add \
   "$ROOT/package.json" \
   "$ROOT/packages/flair-client/package.json" \
+  "$ROOT/packages/flair-tool-descriptors/package.json" \
   "$ROOT/packages/flair-mcp/package.json" \
   "$ROOT/packages/openclaw-flair/package.json" \
   "$ROOT/packages/pi-flair/package.json" \

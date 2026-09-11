@@ -6,6 +6,7 @@
       "name": "@tpsdev-ai/flair",
       "dependencies": {
         "@harperfast/oauth": "2.5.0",
+        "@tpsdev-ai/flair-tool-descriptors": "0.53.0",
         "@types/js-yaml": "4.0.9",
         "commander": "14.0.3",
         "harper": "5.2.8",
@@ -76,10 +77,18 @@
       "dependencies": {
         "@modelcontextprotocol/sdk": "1.27.1",
         "@tpsdev-ai/flair-client": "0.53.0",
+        "@tpsdev-ai/flair-tool-descriptors": "0.53.0",
         "zod": "4.3.6",
       },
       "devDependencies": {
         "@types/node": "24.11.0",
+      },
+    },
+    "packages/flair-tool-descriptors": {
+      "name": "@tpsdev-ai/flair-tool-descriptors",
+      "version": "0.53.0",
+      "devDependencies": {
+        "typescript": "5.9.3",
       },
     },
     "packages/langgraph-flair": {
@@ -720,6 +729,8 @@
     "@tpsdev-ai/flair-client": ["@tpsdev-ai/flair-client@workspace:packages/flair-client"],
 
     "@tpsdev-ai/flair-mcp": ["@tpsdev-ai/flair-mcp@workspace:packages/flair-mcp"],
+
+    "@tpsdev-ai/flair-tool-descriptors": ["@tpsdev-ai/flair-tool-descriptors@workspace:packages/flair-tool-descriptors"],
 
     "@tpsdev-ai/langgraph-flair": ["@tpsdev-ai/langgraph-flair@workspace:packages/langgraph-flair"],
 

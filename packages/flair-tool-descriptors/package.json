@@ -1,0 +1,46 @@
+{
+  "name": "@tpsdev-ai/flair-tool-descriptors",
+  "version": "0.53.0",
+  "description": "Transport-agnostic MCP tool descriptors for Flair — name, description, inputSchema, output shape. No Harper, no FlairClient.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist/",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc --noCheck",
+    "test": "bun test",
+    "prepublishOnly": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tpsdev-ai/flair.git",
+    "directory": "packages/flair-tool-descriptors"
+  },
+  "homepage": "https://tps.dev/#flair",
+  "keywords": [
+    "flair",
+    "mcp",
+    "tools",
+    "descriptors"
+  ],
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

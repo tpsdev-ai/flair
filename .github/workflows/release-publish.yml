@@ -147,6 +147,7 @@ jobs:
           PKG_JSONS=(
             package.json
             packages/flair-client/package.json
+            packages/flair-tool-descriptors/package.json
             packages/flair-mcp/package.json
             packages/openclaw-flair/package.json
             packages/pi-flair/package.json
@@ -190,6 +191,7 @@ jobs:
           set -euo pipefail
           npm run build && npm run build:cli
           (cd packages/flair-client && npm run build)
+          (cd packages/flair-tool-descriptors && npm run build)
           (cd packages/flair-mcp && npm run build)
           (cd packages/n8n-nodes-flair && npm run build)
 
@@ -215,6 +217,20 @@ jobs:
             ( cd "$dir" && npm stage publish )
             echo "::endgroup::"
           done
+
+      - name: Stage-publish flair-tool-descriptors (first-publish bootstrap)
+        # New workspace package (flair#1580). `npm stage publish` requires the
+        # package to already exist on the registry, and a Trusted Publisher can
+        # only be registered for a package that already exists — same chicken-
+        # and-egg as flair-bench. continue-on-error until an npm org owner
+        # bootstraps @tpsdev-ai/flair-tool-descriptors (docs/releasing.md).
+        # Remove continue-on-error after the first successful stage.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          echo "::group::npm stage publish — @tpsdev-ai/flair-tool-descriptors (packages/flair-tool-descriptors)"
+          ( cd packages/flair-tool-descriptors && npm stage publish )
+          echo "::endgroup::"
 
       - name: Stage-publish flair-bench
         # Still its own step rather than an entry in the loop above, for the
