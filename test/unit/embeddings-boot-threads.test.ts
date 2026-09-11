@@ -3,7 +3,7 @@ import { availableParallelism } from "node:os";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { resolveEmbedThreads } from "../../resources/embeddings-boot.ts";
+import { resolveEmbedThreads, resolveEmbedGpuLayers } from "../../resources/embeddings-boot.ts";
 
 /**
  * resolveEmbedThreads() (flair#1330) — the value embeddings-boot passes to
@@ -96,5 +96,53 @@ describe("embeddings-boot register() plumbing (flair#1330)", () => {
     );
     expect(src).toContain("const threads = resolveEmbedThreads();");
     expect(src).toMatch(/register\(\{[\s\S]*threads,/);
+  });
+});
+
+describe("resolveEmbedGpuLayers (flair#1436 — measurement pin, default unchanged)", () => {
+  const SAVED = process.env.FLAIR_EMBED_GPU_LAYERS;
+
+  beforeEach(() => {
+    delete process.env.FLAIR_EMBED_GPU_LAYERS;
+  });
+
+  afterEach(() => {
+    if (SAVED === undefined) delete process.env.FLAIR_EMBED_GPU_LAYERS;
+    else process.env.FLAIR_EMBED_GPU_LAYERS = SAVED;
+  });
+
+  it("unset → undefined (omit the field; HFE default 0 is unchanged)", () => {
+    expect(resolveEmbedGpuLayers({})).toBeUndefined();
+    expect(resolveEmbedGpuLayers()).toBeUndefined();
+  });
+
+  it("honors 0 and 99", () => {
+    expect(resolveEmbedGpuLayers({ FLAIR_EMBED_GPU_LAYERS: "0" })).toBe(0);
+    expect(resolveEmbedGpuLayers({ FLAIR_EMBED_GPU_LAYERS: "99" })).toBe(99);
+  });
+
+  it("invalid values fall through to omit (same as unset)", () => {
+    for (const raw of ["", "   ", "abc", "-1", "1.5", "NaN", "99gpu"]) {
+      expect(resolveEmbedGpuLayers({ FLAIR_EMBED_GPU_LAYERS: raw })).toBeUndefined();
+    }
+  });
+
+  it("reads process.env when the env arg is omitted", () => {
+    process.env.FLAIR_EMBED_GPU_LAYERS = "99";
+    expect(resolveEmbedGpuLayers()).toBe(99);
+  });
+});
+
+describe("embeddings-boot register() gpuLayers plumbing (flair#1436)", () => {
+  it("omits gpuLayers unless resolveEmbedGpuLayers() returns a number — no synthesized default", () => {
+    const src = readFileSync(
+      join(import.meta.dir, "..", "..", "resources", "embeddings-boot.ts"),
+      "utf8",
+    );
+    expect(src).toContain("const gpuLayers = resolveEmbedGpuLayers();");
+    expect(src).toContain("...(gpuLayers !== undefined ? { gpuLayers } : {})");
+    // Must not hardcode a product default (that is #1437).
+    expect(src).not.toMatch(/gpuLayers:\s*99/);
+    expect(src).not.toMatch(/gpuLayers:\s*resolveEmbedGpuLayers\(\)\s*\?\?/);
   });
 });
