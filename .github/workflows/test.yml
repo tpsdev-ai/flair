@@ -1296,6 +1296,10 @@ jobs:
           restore-keys: |
             bun-cache-${{ runner.os }}-
       - run: sfw bun install --frozen-lockfile
+      # Workspace package exports point at dist/. Build before resources
+      # typecheck so `@tpsdev-ai/flair-tool-descriptors` resolves (flair#1580).
+      - name: Build flair-tool-descriptors
+        run: cd packages/flair-tool-descriptors && bun run build
       - run: bunx tsc --noEmit -p tsconfig.check.json
 
   # Required-status-check adapter — see test-unit-gate's comment above.
@@ -1332,6 +1336,10 @@ jobs:
           restore-keys: |
             bun-cache-${{ runner.os }}-
       - run: sfw bun install --frozen-lockfile
+      # Workspace package exports point at dist/. Build before resources
+      # typecheck so `@tpsdev-ai/flair-tool-descriptors` resolves (flair#1580).
+      - name: Build flair-tool-descriptors
+        run: cd packages/flair-tool-descriptors && bun run build
       # Root resources (tsconfig.check.json has harper paths override
       # so harper's raw .ts internals don't pollute the output)
       - name: Type check root (resources)
@@ -1566,7 +1574,7 @@ jobs:
       # release-time check (#528). Building here moves that catch to the PR.
       - name: Build publishable packages
         run: |
-          for pkg in flair-client flair-mcp langgraph-flair n8n-nodes-flair openclaw-flair pi-flair flair-bench; do
+          for pkg in flair-client flair-tool-descriptors flair-mcp langgraph-flair n8n-nodes-flair openclaw-flair pi-flair flair-bench; do
             echo "::group::build $pkg"
             (cd "packages/$pkg" && bun run build)
             echo "::endgroup::"

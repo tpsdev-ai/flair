@@ -24,13 +24,25 @@ COPY src/ ./src/
 COPY resources/ ./resources/
 COPY schemas/ ./schemas/
 COPY packages/ ./packages/
-COPY scripts/write-build-info.mjs ./scripts/
+COPY scripts/write-build-info.mjs scripts/materialize-bundled-descriptors.mjs ./scripts/
 
 # Install dependencies
 RUN bun install --frozen-lockfile
 
+# Linux x64 native binary for embeddings. Install HERE, while bun.lock and
+# packages/ are present. The test stage copies this node_modules and must not
+# run `npm install` against a bun tree — arborist crashes (`edgesOut` of null)
+# on that graph, especially with the unpublished workspace package materialized
+# into node_modules (flair#1580).
+RUN bun add @node-llama-cpp/linux-x64@3 --no-save
+
 # Build resources (tsc → dist/resources/*.js) and CLI (tsc → dist/cli.js)
 RUN bun run build && bun run build:cli
+
+# Root depends on unpublished @tpsdev-ai/flair-tool-descriptors. bun install
+# leaves a workspace symlink; the test stage copies node_modules but not
+# packages/. Replace the symlink with a real tree so the copied modules resolve.
+RUN node scripts/materialize-bundled-descriptors.mjs
 
 # ── Test stage ────────────────────────────────────────────────────────────────
 
@@ -52,13 +64,6 @@ COPY --from=base /app/package.json ./
 COPY --from=base /app/resources ./resources
 COPY --from=base /app/schemas ./schemas
 COPY --from=base /app/config.yaml ./config.yaml
-
-# Install the Linux x64 native binary for node-llama-cpp.
-# The package.json only has mac-arm64-metal as optional dep (dev machines).
-# Without this, Harper starts but embeddings fail with:
-#   "No llama-addon.node binary found. Install a @node-llama-cpp platform package"
-RUN bun add @node-llama-cpp/linux-x64@3 --no-save 2>/dev/null || \
-    npm install --no-save @node-llama-cpp/linux-x64@3
 
 # Pre-download embeddings model (~80MB). Docker layer cache (this workflow
 # builds with the GHA cache backend, cache-from/cache-to type=gha) ensures

@@ -36,6 +36,11 @@ export function unitPlan(root: string): UnitStep[] {
   const unitFiles = requiredFiles("test/unit");
   const isolatedFiles = requiredFiles("test/unit-isolated");
   const steps: UnitStep[] = [{
+    name: "build flair-tool-descriptors",
+    cwd: join(root, "packages/flair-tool-descriptors"),
+    args: ["run", "build"],
+    files: [],
+  }, {
     name: "root unit tests",
     cwd: root,
     // Preserve CI's existing grouping; mock.module isolation is per process.
@@ -46,7 +51,7 @@ export function unitPlan(root: string): UnitStep[] {
     steps.push({ name: relative(root, file), cwd: root, args: ["test", file], files: [file] });
   }
   steps.push({ name: "build flair-client", cwd: join(root, "packages/flair-client"), args: ["run", "build"], files: [] });
-  for (const pkg of ["flair-mcp", "flair-client", "langgraph-flair", "n8n-nodes-flair", "openclaw-flair", "pi-flair", "flair-bench", "adk-flair-js"]) {
+  for (const pkg of ["flair-tool-descriptors", "flair-mcp", "flair-client", "langgraph-flair", "n8n-nodes-flair", "openclaw-flair", "pi-flair", "flair-bench", "adk-flair-js"]) {
     const dir = pkg === "adk-flair-js" ? "test/unit" : "test";
     const cwd = join(root, "packages", pkg);
     steps.push({ name: `${pkg} unit tests`, cwd, args: ["test", `./${dir}/`], files: requiredFiles(`packages/${pkg}/${dir}`) });

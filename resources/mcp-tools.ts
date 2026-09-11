@@ -26,15 +26,12 @@
  * the resolved agent, never from the tool arguments — an agent can only act as
  * itself (no forging of agentId / authorId in the body).
  *
- * NOTE (flair#677 scope call): the legacy `@tpsdev-ai/flair-mcp` stdio proxy
- * (packages/flair-mcp) is a SEPARATE, independently-published package that
- * talks to flair over HTTP via `FlairClient` — it is not wired through this
- * registry at all (its own tool list is hardcoded in packages/flair-mcp/src/
- * index.ts). Per the zero-install north star (retiring flair-mcp in favor of
- * this native /mcp handler), `attention` is added HERE only, not mirrored into
- * the legacy stdio proxy — adding it there would mean a separate package
- * version bump + a new FlairClient method, out of scope for this query-only
- * slice.
+ * NOTE (flair#1580): MCP-facing metadata (name, description, inputSchema,
+ * output shape) lives in `@tpsdev-ai/flair-tool-descriptors`. This registry
+ * binds each *native* descriptor to its Harper impl. The stdio adapter binds
+ * the same list (stdio surface) to FlairClient HTTP — tool-set drift is
+ * impossible by construction. One-sided tools (`attention`, archive verbs,
+ * `relationship_store`) are flagged on the descriptor, not hand-exempted.
  */
 
 /**
@@ -56,8 +53,14 @@ import { AUTHORITY_FIELDS } from "./authority-field-guard.js";
 import type { RecordTypeName } from "./record-types.js";
 import { resolveVersion } from "./version.js";
 import { agentContext, adminContext, collectionResource } from "./in-process.js";
-import { RECORD_USAGE_ID_MERGE_CONTRACT, unionUsageMemoryIds } from "./usage-ids.js";
+import { unionUsageMemoryIds } from "./usage-ids.js";
 import { SKILL_TAG, isSkillWrite } from "./skill-write.js";
+import {
+  NATIVE_TOOL_DESCRIPTORS,
+  toMcpToolDef,
+  type McpToolDef,
+} from "@tpsdev-ai/flair-tool-descriptors";
+export type { McpToolDef };
 
 type HandlerKey = "SemanticSearch" | "Memory" | "BootstrapMemories" | "Soul" | "WorkspaceState" | "OrgEvent" | "AttentionQuery" | "RecordUsage";
 const H: Partial<Record<HandlerKey, any>> = {};
@@ -106,14 +109,6 @@ export interface ResolvedAgent {
    * grants ZERO authority, never read for access control/attribution/dedup.
    */
   clientId?: string;
-}
-
-/** MCP tool descriptor as returned by tools/list. */
-export interface McpToolDef {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-  annotations?: Record<string, unknown>;
 }
 
 /**
@@ -1164,26 +1159,38 @@ export function mcpToolName(table: RecordTypeName, toolPrefix: string, verb: str
   return override ?? `${toolPrefix}_${verb}`;
 }
 
-export const TOOLS: Record<string, ToolEntry> = {
+
+/**
+ * Bind native descriptors to Harper impls + conformance contracts.
+ * A descriptor without a binding (or a binding without a native descriptor)
+ * throws at module load — the tool set is derived, not hand-copied.
+ */
+function bindNativeTools(
+  bindings: Record<string, { impl: ToolImpl; contract: ToolContract }>,
+): Record<string, ToolEntry> {
+  const tools: Record<string, ToolEntry> = {};
+  const missing: string[] = [];
+  for (const d of NATIVE_TOOL_DESCRIPTORS) {
+    const b = bindings[d.name];
+    if (!b) {
+      missing.push(d.name);
+      continue;
+    }
+    tools[d.name] = { def: toMcpToolDef(d), impl: b.impl, contract: b.contract };
+  }
+  if (missing.length > 0) {
+    throw new Error(`TOOLS missing Harper bindings for native descriptors: ${missing.join(", ")}`);
+  }
+  const extra = Object.keys(bindings).filter((n) => !Object.prototype.hasOwnProperty.call(tools, n)).sort();
+  if (extra.length > 0) {
+    throw new Error(`TOOLS bindings have no native descriptor: ${extra.join(", ")}`);
+  }
+  return tools;
+}
+
+export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   memory_search: {
-    def: {
-      name: "memory_search",
-      description:
-        "Search memories by meaning. Understands temporal queries like 'what happened today'. Scoped to your agent's own + granted memories.",
-      annotations: { readOnlyHint: true },
-      inputSchema: {
-        type: "object",
-        properties: {
-          query: { type: "string", description: "Search query — natural language, semantic matching" },
-          limit: { type: "number", description: "Max results (default 5)" },
-          includeTrust: { type: "boolean", description: "Attach a per-result trust-evidence block (provenance, author, usage, freshness, supersession). Default false." },
-          abstain: { type: "boolean", description: "Opt into first-class abstention: when the best match is below a global confidence threshold, return { abstained: true, reason, bestScore } with no weak matches instead of the N weakest results. Default false." },
-          includeArchived: { type: "boolean", description: "Include basemented (archived) memories in results. Default false — archived memories are excluded from normal search. When true, archived memories are returned under the SAME read-scope gate as a normal search (never a wider scope)." },
-        },
-        required: ["query"],
-      },
-    },
-    impl: memorySearch,
+        impl: memorySearch,
     contract: {
       summary: "{ results: MemoryRecord[] } — semantic hits scoped to the caller's own + granted memories; each hit carries content, never the raw embedding.",
       requiredFields: ["results"],
@@ -1196,33 +1203,7 @@ export const TOOLS: Record<string, ToolEntry> = {
     },
   },
   memory_store: {
-    def: {
-      name: "memory_store",
-      description:
-        "Save information to persistent memory. Use for lessons, decisions, preferences, facts. Attributed to your authenticated agent.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          content: { type: "string", description: "What to remember" },
-          type: { type: "string", enum: ["session", "lesson", "decision", "preference", "fact", "goal"], description: "Memory type (default session)" },
-          durability: { type: "string", enum: ["permanent", "persistent", "standard", "ephemeral"], description: "permanent > persistent > standard > ephemeral (default standard)" },
-          tags: { type: "array", items: { type: "string" }, description: "Tag strings" },
-          visibility: {
-            type: "string",
-            enum: ["private", "shared"],
-            description:
-              "Writer-controlled sharing intent. Omit to use the server's durability-keyed default: " +
-              "permanent/persistent -> shared, standard/ephemeral -> private. " +
-              "private — owner-only, never visible to another agent, even one holding a memory grant. " +
-              "shared — visible to the owner and every other agent on this instance. " +
-              "The visibility the write actually landed on is returned in the result.",
-          },
-          usedMemoryIds: { type: "array", items: { type: "string" }, description: "IDs of memories that informed this write (citation-on-write). Credited via the same deduped usage ledger as record_usage. Optional." },
-        },
-        required: ["content"],
-      },
-    },
-    impl: memoryStore,
+        impl: memoryStore,
     contract: {
       summary: "Write echo { id, written:true, deduplicated } — the new id + confirmation. No internal embedding fields; round-trips via memory_get.",
       requiredFields: ["id", "written"],
@@ -1233,26 +1214,7 @@ export const TOOLS: Record<string, ToolEntry> = {
     },
   },
   skill_store: {
-    def: {
-      name: "skill_store",
-      description:
-        "Write a skill (a reusable capability/procedure) as a skill-tagged memory. " +
-        "The `trigger` text is what the skill embeds from (the recall signal — 'when to use this'), " +
-        "and `content` is the full procedure. Skills are forced durability=persistent and are " +
-        "SkillScan-gated before the embed (a dangerous shell/network payload is rejected).",
-      inputSchema: {
-        type: "object",
-        properties: {
-          content: { type: "string", description: "The full procedure (markdown body of the SKILL.md)" },
-          trigger: { type: "string", description: "The 'when to use' text — the recall signal the skill embeds from" },
-          name: { type: "string", description: "Skill name (SKILL.md frontmatter; stored in metadata)" },
-          description: { type: "string", description: "Skill description (SKILL.md frontmatter; stored in metadata)" },
-          tags: { type: "array", items: { type: "string" }, description: "Additional tags (the 'skill' tag is added automatically)" },
-        },
-        required: ["content"],
-      },
-    },
-    impl: skillStore,
+        impl: skillStore,
     contract: {
       summary: "Write echo { id, written:true, deduplicated } for the skill-tagged memory. No internal embedding fields; round-trips via memory_get.",
       requiredFields: ["id", "written"],
@@ -1263,25 +1225,7 @@ export const TOOLS: Record<string, ToolEntry> = {
     },
   },
   skill_search: {
-    def: {
-      name: "skill_search",
-      description:
-        "Find skills (reusable capabilities/procedures) that apply to a task. " +
-        "Ranks skill-tagged memories by their `trigger` ('when to use') against your task text. " +
-        "Returns a lightweight CATALOG — id, name, trigger, description, tags, agentId — NOT the full " +
-        "procedure (fetch that with skill_get). Scoped to your own + shared skills; another agent's " +
-        "private skill is never returned.",
-      annotations: { readOnlyHint: true },
-      inputSchema: {
-        type: "object",
-        properties: {
-          task: { type: "string", description: "The task/context to match skills against — natural language; ranked against each skill's trigger" },
-          limit: { type: "number", description: "Max skills to return (default 5)" },
-        },
-        required: ["task"],
-      },
-    },
-    impl: skillSearch,
+        impl: skillSearch,
     contract: {
       summary:
         "{ results: SkillCard[] } — the skill catalog (lightweight id/name/trigger/description/tags/agentId, " +
@@ -1299,23 +1243,7 @@ export const TOOLS: Record<string, ToolEntry> = {
     },
   },
   skill_get: {
-    def: {
-      name: "skill_get",
-      description:
-        "Retrieve a full skill by ID — the complete procedure (`content`) plus trigger and metadata. " +
-        "The disclosure step after skill_search's catalog. Read-scoped: you can only get your own or a " +
-        "shared skill, never another agent's private skill. A non-skill id returns not-found. " +
-        "The raw embedding vector is never returned.",
-      annotations: { readOnlyHint: true },
-      inputSchema: {
-        type: "object",
-        properties: {
-          id: { type: "string", description: "Skill (memory) ID" },
-        },
-        required: ["id"],
-      },
-    },
-    impl: skillGet,
+        impl: skillGet,
     contract: {
       summary:
         "The full skill record { id, agentId, content, trigger, tags, durability, metadata, createdAt, ... } for a " +
@@ -1329,23 +1257,7 @@ export const TOOLS: Record<string, ToolEntry> = {
     },
   },
   memory_update: {
-    def: {
-      name: "memory_update",
-      description:
-        "Update an existing memory by ID. Dedup-bypassed (this is an intentional overwrite, not a new write). " +
-        "Default: overwrites the same id in place. Pass preserveHistory=true to instead write a new version " +
-        "linked via `supersedes`, closing the old one's validity window.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          id: { type: "string", description: "ID of the memory to update" },
-          content: { type: "string", description: "New content" },
-          preserveHistory: { type: "boolean", description: "Write a new version (supersedes-linked) instead of overwriting in place (default false)" },
-        },
-        required: ["id", "content"],
-      },
-    },
-    impl: memoryUpdate,
+        impl: memoryUpdate,
     contract: {
       summary: "Write echo { id, written:true } for the in-place overwrite (or supersede). No internal embedding fields; the change round-trips via memory_get.",
       requiredFields: ["id", "written"],
@@ -1356,22 +1268,7 @@ export const TOOLS: Record<string, ToolEntry> = {
     },
   },
   memory_basement: {
-    def: {
-      name: "memory_basement",
-      description:
-        "Send a memory to the basement (archive it). Sets archived=true and stamps archivedAt. " +
-        "The memory is removed from bootstrap and default search but remains retrievable via " +
-        "memory_get and memory_search(includeArchived:true). Deliberate and GLOBAL — this is a " +
-        "visibility flag, not a deletion: provenance and history are untouched. Scoped to your own memories only.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          id: { type: "string", description: "ID of the memory to basement (archive)" },
-        },
-        required: ["id"],
-      },
-    },
-    impl: memoryBasement,
+        impl: memoryBasement,
     contract: {
       summary: "Write echo of the archived record { id, archived:true, archivedAt, ... }. No internal embedding fields; the flip round-trips via memory_get.",
       requiredFields: ["id", "archived"],
@@ -1382,21 +1279,7 @@ export const TOOLS: Record<string, ToolEntry> = {
     },
   },
   memory_restore: {
-    def: {
-      name: "memory_restore",
-      description:
-        "Restore a basemented (archived) memory. Clears archived and archivedAt. Deliberate and GLOBAL — " +
-        "this un-retires the memory for EVERY session, not a session-local view (per-session reuse is " +
-        "drawers, which do not exist yet). Scoped to your own memories only.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          id: { type: "string", description: "ID of the memory to restore (un-archive)" },
-        },
-        required: ["id"],
-      },
-    },
-    impl: memoryRestore,
+        impl: memoryRestore,
     contract: {
       summary: "Write echo of the restored record { id, archived:false, ... }. No internal embedding fields; the flip round-trips via memory_get.",
       requiredFields: ["id", "archived"],
@@ -1407,22 +1290,7 @@ export const TOOLS: Record<string, ToolEntry> = {
     },
   },
   memory_get: {
-    def: {
-      name: "memory_get",
-      description:
-        "Retrieve a specific memory by ID. The record's raw embedding vector is omitted by default (it is large and not useful to a caller); pass includeEmbedding=true to include it.",
-      annotations: { readOnlyHint: true },
-      inputSchema: {
-        type: "object",
-        properties: {
-          id: { type: "string", description: "Memory ID" },
-          includeTrust: { type: "boolean", description: "Attach a trust-evidence block (provenance, author, usage, freshness, supersession) to the record. Default false." },
-          includeEmbedding: { type: "boolean", description: "Include the raw embedding vector (hundreds of floats) in the returned record. Omitted by default because it is large and rarely useful to a caller. Default false." },
-        },
-        required: ["id"],
-      },
-    },
-    impl: memoryGet,
+        impl: memoryGet,
     contract: {
       summary: "The full memory record { id, agentId, content, durability, createdAt, ... } for the caller's own id — embedding + embeddingModel stripped by default.",
       requiredFields: ["id", "agentId", "content", "createdAt"],
@@ -1433,17 +1301,7 @@ export const TOOLS: Record<string, ToolEntry> = {
     },
   },
   memory_delete: {
-    def: {
-      name: "memory_delete",
-      description: "Delete a memory by ID. You can only delete your own memories.",
-      annotations: { destructiveHint: true },
-      inputSchema: {
-        type: "object",
-        properties: { id: { type: "string", description: "Memory ID to delete" } },
-        required: ["id"],
-      },
-    },
-    impl: memoryDelete,
+        impl: memoryDelete,
     contract: {
       summary: "Deletes the caller's own memory at any durability tier (success echo is thin). Cross-owner deletion returns { error, status:403 } for a non-admin; a deleted row round-trips as gone via memory_get.",
       invariants: { fullyResolved: true },
@@ -1451,34 +1309,7 @@ export const TOOLS: Record<string, ToolEntry> = {
     },
   },
   bootstrap: {
-    def: {
-      name: "bootstrap",
-      description:
-        "Get session context: soul + memories + predicted context. Run at session start. Pass subjects for predictive loading.",
-      annotations: { readOnlyHint: true },
-      inputSchema: {
-        type: "object",
-        properties: {
-          maxTokens: { type: "number", description: "Content-selection budget in tokens (default 4000): the hard cap on how much soul/memory/finding CONTENT is selected. The actual serialized response (reported by tokenEstimate) may exceed this by the structured-container JSON scaffolding — maxTokens bounds what is selected, not the raw output size. Raise it to include more content." },
-          currentTask: { type: "string", description: "Current task — enables semantic search for relevant memories" },
-          channel: { type: "string", description: "Channel name (discord, tps-mail, claude-code)" },
-          surface: { type: "string", description: "Surface name (tps-build, tps-review, cli-session)" },
-          subjects: { type: "array", items: { type: "string" }, description: "Entity names to preload context for" },
-          entities: {
-            type: "array",
-            items: { type: "string" },
-            description:
-              "Your declared attention-plane vocabulary strings (e.g. \"issue:owner/repo#123\") for collision surfacing's 'Others in the room' block — teammates with overlapping active work. Falls back to your own most-recent workspace-state entities when omitted.",
-          },
-          includeTrust: { type: "boolean", description: "Also return a `trust` array with a per-included-memory trust-evidence block (provenance, author, usage, freshness, supersession). Default false." },
-          abstain: { type: "boolean", description: "Opt into a task-relevance abstention verdict: also return an `abstention` object ({ abstained, bestScore, threshold }) reporting whether any memory covered `currentTask` above a global confidence threshold. Default false." },
-          includeContext: { type: "boolean", description: "Also return the prose `context` string — a human-readable mirror of the structured soul/memories/predicted/teammateFindings containers (which are the canonical payload). Default false here: the structured fields already carry everything, so shipping the prose too would double the payload." },
-          maxEvents: { type: "number", description: "Display cap on how many org events to return (default 10). Not a silent drop: leftover events set eventsHasMore/eventsRemaining so the caller can page GET /OrgEventCatchup. Counted against maxTokens like every other content section." },
-          includeEventDetail: { type: "boolean", description: "Also include each org event's verbose `detail` JSON (migration internals, etc.). Default false: bootstrap ships lean events (id/kind/summary/createdAt/targetIds/scope); `detail` mostly restates the summary and is pure bloat for a connector." },
-        },
-      },
-    },
-    impl: bootstrap,
+        impl: bootstrap,
     contract: {
       summary:
         "Session context: { agentId, soul, memories, predicted, teammateFindings, events, sections, tokenEstimate, memoriesIncluded, ..., context, flairVersion }. "
@@ -1593,19 +1424,7 @@ export const TOOLS: Record<string, ToolEntry> = {
     },
   },
   soul_set: {
-    def: {
-      name: "soul_set",
-      description: "Soul changes require operator credentials through the REST API or CLI; runtime tool calls are refused.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          key: { type: "string", description: "Entry key (e.g. 'role', 'standards', 'project')" },
-          value: { type: "string", description: "Entry value" },
-        },
-        required: ["key", "value"],
-      },
-    },
-    impl: soulSet,
+        impl: soulSet,
     contract: {
       summary: "Refuses runtime Soul writes, including admin-agent delegation, with { error, status:403 }. Operators use the authenticated REST or CLI path.",
       invariants: { fullyResolved: true },
@@ -1613,17 +1432,7 @@ export const TOOLS: Record<string, ToolEntry> = {
     },
   },
   soul_get: {
-    def: {
-      name: "soul_get",
-      description: "Get a personality or project context entry.",
-      annotations: { readOnlyHint: true },
-      inputSchema: {
-        type: "object",
-        properties: { key: { type: "string", description: "Entry key" } },
-        required: ["key"],
-      },
-    },
-    impl: soulGet,
+        impl: soulGet,
     contract: {
       summary: "The soul entry { id, agentId, key, value, createdAt } for the caller's own `${agentId}:${key}`.",
       requiredFields: ["id", "agentId", "key", "value", "createdAt"],
@@ -1632,70 +1441,21 @@ export const TOOLS: Record<string, ToolEntry> = {
     },
   },
   flair_workspace_set: {
-    def: {
-      name: "flair_workspace_set",
-      description:
-        "Set your agent's current workspace state in the Office Space coordination layer. Attributed to you — you can only write your own state.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          ref: { type: "string", description: "Workspace ref — branch, worktree, or task ref" },
-          label: { type: "string", description: "Human-readable label" },
-          provider: { type: "string", description: "Provider/runtime (default mcp)" },
-          task: { type: "string", description: "Task/issue id" },
-          phase: { type: "string", description: "Current phase (design, implement, review)" },
-          summary: { type: "string", description: "Short summary of current state" },
-        },
-        required: ["ref"],
-      },
-    },
-    impl: workspaceSet,
+        impl: workspaceSet,
     contract: {
       summary: "Writes the caller's workspace state keyed `${agentId}:${ref}`, attributed to the caller (never the body). The echo is thin; persistence is verified in storage.",
       invariants: { fullyResolved: true },
     },
   },
   flair_orgevent: {
-    def: {
-      name: "flair_orgevent",
-      description:
-        "Publish an org-wide coordination event (claim/release/status) to the Office Space. Attributed to you — you cannot publish as another agent.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          kind: { type: "string", description: "Event kind (coord.claim, coord.release, status)" },
-          summary: { type: "string", description: "Short summary of the event" },
-          detail: { type: "string", description: "Longer detail payload" },
-          scope: { type: "string", description: "Scope (an agent id, repo, or 'org')" },
-          targets: { type: "array", items: { type: "string" }, description: "Recipient agent ids" },
-        },
-        required: ["kind", "summary"],
-      },
-    },
-    impl: orgEvent,
+        impl: orgEvent,
     contract: {
       summary: "Publishes an org event attributed to the caller (authorId from identity, never the body). The echo is thin; persistence is verified in storage.",
       invariants: { fullyResolved: true },
     },
   },
   attention: {
-    def: {
-      name: "attention",
-      description:
-        "What's touching entity E in the last N days? A unified, grouped-by-source view across memories, " +
-        "relationships, active work (WorkspaceState), teammate presence, and org events. Entity must be a " +
-        "vocabulary string (e.g. 'repo:owner/name', 'issue:owner/repo#123', 'subsystem:embeddings').",
-      annotations: { readOnlyHint: true },
-      inputSchema: {
-        type: "object",
-        properties: {
-          entity: { type: "string", description: "Vocabulary string, exact match (type:value — e.g. 'repo:tpsdev-ai/flair')" },
-          days: { type: "number", description: "Window size in days (default 7)" },
-        },
-        required: ["entity"],
-      },
-    },
-    impl: attention,
+        impl: attention,
     contract: {
       summary: "Grouped-by-source view { entity, windowDays, since, groups:{memory,relationship,workspaceState,presence,orgEvent}, counts } for entity E over N days.",
       requiredFields: ["entity", "windowDays", "groups", "counts"],
@@ -1707,23 +1467,7 @@ export const TOOLS: Record<string, ToolEntry> = {
     },
   },
   record_usage: {
-    def: {
-      name: "record_usage",
-      description:
-        "Report that one or more memories were actually USED — cited or relied on to ground an answer or decision. " +
-        "Distinct from search (surfacing a memory is not usage). Drives the recall-quality usage signal; dedup'd " +
-        "(you can only count once per memory) and rate-limited. " +
-        RECORD_USAGE_ID_MERGE_CONTRACT,
-      inputSchema: {
-        type: "object",
-        properties: {
-          memoryIds: { type: "array", items: { type: "string" }, description: "IDs of the memories that were used (max 20 per call). Merged with memoryId when both are supplied." },
-          memoryId: { type: "string", description: "Convenience alias for a single memory id. Merged with memoryIds when both are supplied — not dropped." },
-          attribution: { type: "string", description: "Optional free-text note on what used it (opaque — stored for audit only, max 500 chars)" },
-        },
-      },
-    },
-    impl: recordUsage,
+        impl: recordUsage,
     contract: {
       summary: "Invariant acknowledgement { recorded:true } — byte-identical regardless of how many ids counted (no id enumeration, Sherlock).",
       requiredFields: ["recorded"],
@@ -1731,7 +1475,7 @@ export const TOOLS: Record<string, ToolEntry> = {
       invariants: { fullyResolved: true },
     },
   },
-};
+});
 
 /** The tool definitions for a tools/list response (exactly the 12 curated tools). */
 export function listToolDefs(): McpToolDef[] {

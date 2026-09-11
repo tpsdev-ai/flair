@@ -62,12 +62,13 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 // --- Inventory ---------------------------------------------------------------
 
-// The eight workspace package.json files release.sh bumps. Their `version`
+// The workspace package.json files release.sh bumps. Their `version`
 // field is read and written by release.sh itself; listed here so discovery
 // knows they are accounted for.
 const PACKAGE_JSONS = [
   "package.json",
   "packages/flair-client/package.json",
+  "packages/flair-tool-descriptors/package.json",
   "packages/flair-mcp/package.json",
   "packages/openclaw-flair/package.json",
   "packages/pi-flair/package.json",

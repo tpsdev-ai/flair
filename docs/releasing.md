@@ -1,13 +1,15 @@
 # Releasing Flair
 
-Flair publishes eight workspace packages to npm under `@tpsdev-ai/*`. Releases are
+Flair publishes nine workspace packages to npm under `@tpsdev-ai/*`. Releases are
 **tokenless** and **staged**: CI authenticates to npm with a short-lived OIDC token
 (no `NPM_TOKEN` lives anywhere) and submits each package to npm's **staging** area.
 A maintainer then approves the staged tarballs on npmjs.com with 2FA to make them live.
 
 > `flair-bench` is version-bumped and tagged in lockstep with the other 7, and stages in
 > its own step in CI for [historical reasons](#flair-bench-bootstrap-one-time-done). That
-> step is no longer allowed to fail: all eight packages must stage for a release to pass.
+> step is no longer allowed to fail: every already-published package must stage
+> for a release to pass. `@tpsdev-ai/flair-tool-descriptors` is the one
+> first-publish exception until an npm org owner bootstraps it.
 
 ```
  merge release PR ──▶ push tag v0.11.0 ──▶ CI stages all packages ──▶ npm staging
@@ -145,11 +147,17 @@ Leave `npm publish` **unchecked** under allowed actions. This structurally preve
 CI/OIDC identity from publishing anything live directly — the only path to live is the
 human 2FA approval of a staged package.
 
-Packages: `flair-client`, `flair-mcp`, `flair`, `openclaw-flair`, `pi-flair`,
-`n8n-nodes-flair`, `langgraph-flair`, `flair-bench`.
+Packages: `flair-client`, `flair-tool-descriptors`, `flair-mcp`, `flair`,
+`openclaw-flair`, `pi-flair`, `n8n-nodes-flair`, `langgraph-flair`, `flair-bench`.
 
-> A package must already exist on npm before a trusted publisher can be added — all
-> eight already do. This account-level config can only be done by an npm org owner.
+> A package must already exist on npm before a trusted publisher can be added.
+> `@tpsdev-ai/flair-tool-descriptors` (flair#1580) is the next first-publish:
+> stage it with the dedicated continue-on-error step, then an npm org owner
+> publishes once and registers its Trusted Publisher (same playbook as
+> `flair-bench` below). Until that exists on the registry, `@tpsdev-ai/flair`
+> and `@tpsdev-ai/flair-mcp` tarballs bundle it (`bundleDependencies` +
+> `scripts/materialize-bundled-descriptors.mjs`) so `npm install` of those
+> tarballs does not 404.
 
 ### `flair-bench` bootstrap (one-time, done)
 

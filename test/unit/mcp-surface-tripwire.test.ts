@@ -45,9 +45,17 @@ import { join } from "node:path";
 import { RECORD_TYPES, COMPOSITE_MCP_TOOLS, type RecordTypeName } from "../../resources/record-types.ts";
 import { TOOLS, TOOL_NAME_OVERRIDES, mcpToolName } from "../../resources/mcp-tools.ts";
 import {
+  NATIVE_TOOL_DESCRIPTORS,
+  STDIO_TOOL_DESCRIPTORS,
+  descriptorNames,
+  toMcpToolDef,
+} from "../../packages/flair-tool-descriptors/src/index.ts";
+import {
   ADAPTER_TOOL_NAMES,
   adapterRegistryParity,
+  derivedDescriptorParity,
   parseAdapterToolNames,
+  parseStdioHandlerNames,
 } from "../../packages/flair-mcp/src/adapter-surface.ts";
 
 const TABLE_NAMES = Object.keys(RECORD_TYPES) as RecordTypeName[];
@@ -176,11 +184,11 @@ describe("MCP surface tripwire — RECORD_TYPES.mcp + COMPOSITE_MCP_TOOLS vs. re
  */
 describe("MCP surface tripwire — stdio adapter vs. resources/mcp-tools.ts TOOLS", () => {
   const adapterSrc = readFileSync(join(import.meta.dir, "../../packages/flair-mcp/src/index.ts"), "utf-8");
-  const registered = parseAdapterToolNames(adapterSrc).sort();
+  const handWired = parseAdapterToolNames(adapterSrc).sort();
   const declared = [...ADAPTER_TOOL_NAMES].sort();
 
-  it("ADAPTER_TOOL_NAMES matches the server.tool(...) registrations in index.ts", () => {
-    expect(registered).toEqual(declared);
+  it("index.ts has no leftover server.tool(\"name\" hand-wires (set is derived)", () => {
+    expect(handWired).toEqual([]);
   });
 
   it("stdio adapter tool set equals TOOLS after reviewed exemptions (no silent drift)", () => {
@@ -188,8 +196,9 @@ describe("MCP surface tripwire — stdio adapter vs. resources/mcp-tools.ts TOOL
     expect(
       parity.missingFromAdapter,
       `TOOLS names missing from the stdio adapter (not in ADAPTER_TOOL_NAMES, not exempted). ` +
-        `Wire them in packages/flair-mcp/src/index.ts or add a reviewed entry to ` +
-        `STDIO_ADAPTER_EXEMPTIONS.registryOnly in packages/flair-mcp/src/adapter-surface.ts. ` +
+        `Add a both-surface descriptor in packages/flair-tool-descriptors and a FlairClient ` +
+        `binding in packages/flair-mcp/src/adapter-tools.ts (or keep a derived exemption via ` +
+        `stdio: false on the descriptor). ` +
         `Missing: ${parity.missingFromAdapter.join(", ") || "(none)"}`,
     ).toEqual([]);
     expect(
@@ -216,3 +225,36 @@ describe("MCP surface tripwire — stdio adapter vs. resources/mcp-tools.ts TOOL
     }
   });
 });
+
+/**
+ * flair#1580 — structural derivation. #1578's exemption-adjusted parity
+ * (above) stays during migration. These asserts pin that both shipped
+ * surfaces ARE the descriptor lists, not hand-copied cousins of them.
+ */
+describe("MCP surface tripwire — derived set == descriptor set (flair#1580)", () => {
+  it("TOOLS keys deep-equal native descriptor names", () => {
+    expect(SHIPPED_TOOL_NAMES).toEqual(descriptorNames(NATIVE_TOOL_DESCRIPTORS).sort());
+  });
+
+  it("each TOOLS.def is the shared descriptor (name/description/schema/annotations)", () => {
+    for (const d of NATIVE_TOOL_DESCRIPTORS) {
+      expect(TOOLS[d.name].def).toEqual(toMcpToolDef(d));
+      expect(TOOLS[d.name].contract.summary).toBe(d.outputShape);
+    }
+  });
+
+  it("stdio handler names deep-equal stdio descriptor names", () => {
+    const handlerSrc = readFileSync(join(import.meta.dir, "../../packages/flair-mcp/src/adapter-tools.ts"), "utf-8");
+    const parity = derivedDescriptorParity(
+      parseStdioHandlerNames(handlerSrc),
+      descriptorNames(STDIO_TOOL_DESCRIPTORS),
+    );
+    expect(parity.missingHandlers).toEqual([]);
+    expect(parity.extraHandlers).toEqual([]);
+  });
+
+  it("ADAPTER_TOOL_NAMES is the stdio descriptor list", () => {
+    expect([...ADAPTER_TOOL_NAMES].sort()).toEqual(descriptorNames(STDIO_TOOL_DESCRIPTORS).sort());
+  });
+});
+
