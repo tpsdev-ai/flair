@@ -451,19 +451,6 @@
       "added": "2026-09-09",
       "expires": "2027-02-06",
       "removeWhen": "harper ships a build resolving joi >=17.13.6 (out of the vulnerable range), or flair stops depending on harper. Re-evaluate on ANY harper version bump; if harper ships a release note touching joi validation, re-check before the next merge."
-    },
-    {
-      "ghsa": "GHSA-vwc7-r8mq-g2x9",
-      "package": "adm-zip",
-      "severity": "moderate",
-      "class": "no-patch-published",
-      "sources": ["bun"],
-      "approvedBy": "tps-flint",
-      "introducedBy": "@tpsdev-ai/adk-flair -> @google/adk -> adm-zip",
-      "reason": "No fixed release exists — the latest published adm-zip is 0.6.0, which is itself inside the vulnerable range (>=0.5.9 <=0.6.0). The advisory (CVE-2026-76845, symlink-following arbitrary file overwrite during extraction) has no first-patched version on the registry. Resolved via the workspace package @tpsdev-ai/adk-flair -> @google/adk -> adm-zip; flair does not call adm-zip's extraction API directly.",
-      "added": "2026-09-09",
-      "expires": "2026-12-08",
-      "removeWhen": "adm-zip publishes a fixed release (>=0.6.1) AND @google/adk picks it up, or the adk-flair workspace package is dropped."
     }
   ]
 }
