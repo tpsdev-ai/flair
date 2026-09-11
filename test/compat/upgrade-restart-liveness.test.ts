@@ -70,6 +70,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, write
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { PACK_STAGE_EXTRAS } from "../../scripts/materialize-bundled-descriptors.mjs";
 
 const NODE_BIN = process.env.NODE_BIN ?? "node";
 
@@ -352,7 +353,10 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
     localVersion = `${rootPkg.version}-upgrade-liveness.1`;
     const stage = join(sandbox, "stage");
     mkdirSync(stage, { recursive: true });
-    for (const entry of rootPkg.files) {
+    // files[] is the published payload. prepack also needs the materialize
+    // script and the unpublished descriptor package (same extras Docker pack
+    // images COPY). Without them `npm pack` → prepack MODULE_NOT_FOUND.
+    for (const entry of [...rootPkg.files, ...PACK_STAGE_EXTRAS]) {
       const src = join(repoRoot, entry.replace(/\/$/, ""));
       if (!existsSync(src)) continue;
       cpSync(src, join(stage, entry.replace(/\/$/, "")), { recursive: true });

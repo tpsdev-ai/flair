@@ -11,9 +11,17 @@
  * This script replaces that symlink with a real directory containing only the
  * publishable files (`package.json` + `files[]`). `npm pack` then embeds it.
  *
- * Docker pack images (Dockerfile.first-run-hostile, Dockerfile.clean-vm) copy
- * this file next to write-build-info.mjs. They do not COPY all of scripts/.
- * Leaving it out makes `npm pack` → prepack MODULE_NOT_FOUND (exit 1).
+ * Docker pack images (Dockerfile.first-run-hostile, Dockerfile.clean-vm,
+ * Dockerfile.test) copy this file next to write-build-info.mjs. They do not
+ * COPY all of scripts/. Leaving it out makes `npm pack` → prepack
+ * MODULE_NOT_FOUND (exit 1). A files[]-only pack stage (upgrade-liveness)
+ * must copy PACK_STAGE_EXTRAS for the same reason.
+ *
+ * Success logs go to stderr. `npm pack --silent` still runs prepack, and
+ * callers capture stdout as the tarball path (`TGZ=$(npm pack --silent)` in
+ * the audit gate; `npm pack --dry-run --json` in the health stamp IT). A
+ * stdout line here concatenates into that path (ENOENT) or precedes the
+ * JSON array so JSON.parse fails.
  *
  * Usage (cwd = the package being packed):
  *   node scripts/materialize-bundled-descriptors.mjs
@@ -30,6 +38,12 @@ import { spawnSync } from "node:child_process";
 
 export const BUNDLED_NAME = "@tpsdev-ai/flair-tool-descriptors";
 export const BUNDLED_REL = "packages/flair-tool-descriptors";
+
+/** Extra paths a files[]-only pack stage must copy so prepack can run. */
+export const PACK_STAGE_EXTRAS = [
+  "scripts/materialize-bundled-descriptors.mjs",
+  BUNDLED_REL,
+];
 
 /** Build the package without assuming bun, a workspace link, or `npm run`. */
 export function buildDescriptors(src, repoRoot) {
@@ -95,7 +109,7 @@ const invoked = process.argv[1] ? resolve(process.argv[1]) : "";
 if (invoked && thisFile === invoked) {
   try {
     const dest = materializeBundledDescriptors(process.cwd());
-    console.log(`materialized ${BUNDLED_NAME} → ${dest}`);
+    console.error(`materialized ${BUNDLED_NAME} → ${dest}`);
   } catch (err) {
     console.error(err instanceof Error ? err.message : err);
     process.exit(1);

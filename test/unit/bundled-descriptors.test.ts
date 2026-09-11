@@ -7,11 +7,14 @@
  * install-weight / upgrade-smoke / MCP-wiring failure on PR #1598).
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BUNDLED_NAME,
+  BUNDLED_REL,
+  PACK_STAGE_EXTRAS,
   buildDescriptors,
   materializeBundledDescriptors,
 } from "../../scripts/materialize-bundled-descriptors.mjs";
@@ -47,6 +50,33 @@ describe("bundled flair-tool-descriptors (flair#1580 pack/install)", () => {
         `${name} must COPY materialize-bundled-descriptors.mjs — prepack MODULE_NOT_FOUND otherwise`,
       ).toContain("materialize-bundled-descriptors.mjs");
     }
+  });
+
+  test("upgrade-liveness pack stage copies PACK_STAGE_EXTRAS (flair#1580)", () => {
+    const text = readFileSync(join(REPO, "test/compat/upgrade-restart-liveness.test.ts"), "utf8");
+    expect(text).toContain("PACK_STAGE_EXTRAS");
+    expect(PACK_STAGE_EXTRAS).toContain("scripts/materialize-bundled-descriptors.mjs");
+    expect(PACK_STAGE_EXTRAS).toContain(BUNDLED_REL);
+  });
+
+  test("Dockerfile.test materializes the bundled package so the llama-cpp install does not walk a dangling workspace symlink", () => {
+    const text = readFileSync(join(REPO, "docker/Dockerfile.test"), "utf8");
+    expect(text).toContain("materialize-bundled-descriptors.mjs");
+    expect(text).toMatch(/node scripts\/materialize-bundled-descriptors\.mjs/);
+  });
+
+  test("materialize CLI writes the success line to stderr, not stdout", () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-bundle-cli-"));
+    fixtures.push(dir);
+    mkdirSync(join(dir, "packages"), { recursive: true });
+    cpSync(join(REPO, BUNDLED_REL), join(dir, BUNDLED_REL), { recursive: true });
+    const result = spawnSync(process.execPath, [join(REPO, "scripts/materialize-bundled-descriptors.mjs")], {
+      cwd: dir,
+      encoding: "utf8",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain(`materialized ${BUNDLED_NAME}`);
   });
 
   test("buildDescriptors emits dist via tsc without bun or a workspace link", () => {

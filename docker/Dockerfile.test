@@ -24,13 +24,19 @@ COPY src/ ./src/
 COPY resources/ ./resources/
 COPY schemas/ ./schemas/
 COPY packages/ ./packages/
-COPY scripts/write-build-info.mjs ./scripts/
+COPY scripts/write-build-info.mjs scripts/materialize-bundled-descriptors.mjs ./scripts/
 
 # Install dependencies
 RUN bun install --frozen-lockfile
 
 # Build resources (tsc → dist/resources/*.js) and CLI (tsc → dist/cli.js)
 RUN bun run build && bun run build:cli
+
+# Root depends on unpublished @tpsdev-ai/flair-tool-descriptors. bun install
+# leaves a workspace symlink; the test stage copies node_modules but not
+# packages/, so that symlink dangles and `npm install --no-save
+# @node-llama-cpp/linux-x64@3` crashes arborist (`edgesOut` of null).
+RUN node scripts/materialize-bundled-descriptors.mjs
 
 # ── Test stage ────────────────────────────────────────────────────────────────
 
