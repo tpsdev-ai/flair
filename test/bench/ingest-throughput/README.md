@@ -32,9 +32,11 @@ module-load), warms the embedder, ingests a LongMemEval_s slice, and reports:
 2. **Negative control (runs first).** `FLAIR_EMBED_THREADS=1` must be
    **≥1.3× slower** than `8` (tok/s). If it is not, the env var is not
    reaching the embedder and ranking is refused.
-3. **Positive control.** On an **8-core** host the unset-default cell must
-   reproduce ~159 tok/s/core **inside the measured `[min, max]`**. Other
-   core counts skip this gate (they are not the published baseline).
+3. **Positive control.** On an **8-core Linux x86_64** host the unset-default
+   cell must reproduce ~159 tok/s/core **inside the measured `[min, max]`**.
+   Darwin, other arches, and other core counts skip — that number is the
+   published tps-bench baseline, not a Darwin figure. No Darwin number is
+   invented.
 4. **Metal-engaged.** Every `gpuLayers=99` cell must show `ggml_metal_init`
    **and** a `compute-buffer` / `compute buffer` line. No log → that cell
    refuses; no invented GPU numbers.

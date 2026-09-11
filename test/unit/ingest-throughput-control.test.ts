@@ -128,16 +128,20 @@ describe("rankCells — overlapping intervals are inconclusive", () => {
   });
 });
 
-describe("decidePositiveControl (~159 tok/s/core on 8-core)", () => {
-  test("non-8-core host → not applicable, not blocked", () => {
-    const d = decidePositiveControl({ hostCores: 4, tokPerSecPerCoreRuns: [80, 82, 79] });
+describe("decidePositiveControl (~159 tok/s/core on Linux x86_64 8-core)", () => {
+  const linux8 = { platform: "linux", arch: "x64", hostCores: 8 };
+
+  test("non-8-core Linux x64 → not applicable, not blocked", () => {
+    const d = decidePositiveControl({
+      ...linux8, hostCores: 4, tokPerSecPerCoreRuns: [80, 82, 79],
+    });
     expect(d.applicable).toBe(false);
     expect(d.blocked).toBe(false);
   });
 
-  test("8-core interval containing 159 → passed", () => {
+  test("Linux x64 8-core interval containing 159 → passed", () => {
     const d = decidePositiveControl({
-      hostCores: 8,
+      ...linux8,
       tokPerSecPerCoreRuns: [150, 165, 158],
     });
     expect(d.applicable).toBe(true);
@@ -146,16 +150,52 @@ describe("decidePositiveControl (~159 tok/s/core on 8-core)", () => {
     expect(d.expected).toBe(POSITIVE_CONTROL_TOK_PER_SEC_PER_CORE);
   });
 
-  test("8-core interval that misses 159 → blocked", () => {
+  test("Linux x64 8-core interval that misses 159 → blocked", () => {
     const d = decidePositiveControl({
-      hostCores: 8,
+      ...linux8,
       tokPerSecPerCoreRuns: [200, 201, 202],
     });
     expect(d.blocked).toBe(true);
   });
 
-  test("8-core unreadable runs → blocked", () => {
-    expect(decidePositiveControl({ hostCores: 8, tokPerSecPerCoreRuns: [] }).blocked).toBe(true);
+  test("Linux x64 8-core unreadable runs → blocked", () => {
+    expect(decidePositiveControl({ ...linux8, tokPerSecPerCoreRuns: [] }).blocked).toBe(true);
+  });
+
+  test("Darwin arm64 8-core that misses 159 → skip, not BLOCKED (Bugbot #1597)", () => {
+    const d = decidePositiveControl({
+      hostCores: 8,
+      platform: "darwin",
+      arch: "arm64",
+      tokPerSecPerCoreRuns: [200, 201, 202],
+    });
+    expect(d.applicable).toBe(false);
+    expect(d.blocked).toBe(false);
+    expect(d.passed).toBe(true);
+    expect(d.reason).toMatch(/linux\/x64/);
+    expect(d.reason).toMatch(/darwin\/arm64/);
+  });
+
+  test("Linux arm64 8-core → skip (no invented baseline)", () => {
+    const d = decidePositiveControl({
+      hostCores: 8,
+      platform: "linux",
+      arch: "arm64",
+      tokPerSecPerCoreRuns: [200, 201, 202],
+    });
+    expect(d.applicable).toBe(false);
+    expect(d.blocked).toBe(false);
+  });
+
+  test("x86_64 aliases x64", () => {
+    const d = decidePositiveControl({
+      hostCores: 8,
+      platform: "linux",
+      arch: "x86_64",
+      tokPerSecPerCoreRuns: [150, 165, 158],
+    });
+    expect(d.applicable).toBe(true);
+    expect(d.passed).toBe(true);
   });
 });
 

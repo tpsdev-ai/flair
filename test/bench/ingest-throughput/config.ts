@@ -14,7 +14,9 @@ import { createHash } from "node:crypto";
 import { DATASET } from "../longmemeval/config";
 import {
   NEGATIVE_CONTROL_MIN_SLOWDOWN,
+  POSITIVE_CONTROL_ARCH,
   POSITIVE_CONTROL_HOST_CORES,
+  POSITIVE_CONTROL_PLATFORM,
   POSITIVE_CONTROL_TOK_PER_SEC_PER_CORE,
 } from "../../unit/ingest-throughput-control";
 
@@ -43,6 +45,8 @@ export { NEGATIVE_CONTROL_MIN_SLOWDOWN };
 export const POSITIVE_CONTROL = {
   tokPerSecPerCore: POSITIVE_CONTROL_TOK_PER_SEC_PER_CORE,
   hostCores: POSITIVE_CONTROL_HOST_CORES,
+  platform: POSITIVE_CONTROL_PLATFORM,
+  arch: POSITIVE_CONTROL_ARCH,
 } as const;
 
 export const DEFAULT_RUNS = 3;

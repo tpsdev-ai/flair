@@ -250,11 +250,15 @@ async function run(): Promise<void> {
     }
   }
 
-  // ── POSITIVE CONTROL (8-core default cell only) ──────────────────────────
+  // ── POSITIVE CONTROL (Linux x86_64 8-core default cell only) ─────────────
+  // 159 tok/s/core is the tps-bench Linux x86_64 baseline. Darwin / other
+  // arches skip — do not invent a Darwin number, do not BLOCK a Metal run.
   const defaultCpu = settings.find((s) => s.requestedThreads === "default" && s.requestedGpuLayers === 0);
   const hostCores = defaultCpu?.runs[0]?.hostCores ?? availableParallelism();
   const positiveControl = decidePositiveControl({
     hostCores,
+    platform: process.platform,
+    arch: process.arch,
     tokPerSecPerCoreRuns: defaultCpu?.runs.map((r) => r.tokPerSecPerCore) ?? [],
   });
   log(`\nPOSITIVE CONTROL: ${positiveControl.reason}`);

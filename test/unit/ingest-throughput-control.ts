@@ -13,9 +13,20 @@
  *  must refuse to print a ranking. */
 export const NEGATIVE_CONTROL_MIN_SLOWDOWN = 1.3;
 
-/** Published 8-core CPU baseline from the v0.50.0 n=500 run (issue #1436). */
+/** Published 8-core CPU baseline from the v0.50.0 n=500 run (issue #1436).
+ *  That number is Linux x86_64 only (`tps-bench`). Darwin / other arches
+ *  have no published baseline — skip, do not invent one. */
 export const POSITIVE_CONTROL_TOK_PER_SEC_PER_CORE = 159;
 export const POSITIVE_CONTROL_HOST_CORES = 8;
+export const POSITIVE_CONTROL_PLATFORM = "linux";
+export const POSITIVE_CONTROL_ARCH = "x64";
+
+/** Node reports `x64`; some callers say `x86_64` / `amd64`. */
+export function normalizeCpuArch(arch: string): string {
+  const a = (arch ?? "").toLowerCase();
+  if (a === "x86_64" || a === "amd64") return "x64";
+  return a;
+}
 
 export interface NegativeControlDecision {
   /** low.tokPerSec / high.tokPerSec. < 1 means low is slower. */
@@ -188,26 +199,43 @@ export interface PositiveControlDecision {
 }
 
 /**
- * Positive control: on an 8-core host the unset-default cell must reproduce
- * ~159 tok/s/core within the measured run interval. Not applicable on any
- * other core count (skip, do not refuse). On 8-core, 159 must fall inside
- * [min, max] of the default cell or the run is BLOCKED.
+ * Positive control: on an 8-core **Linux x86_64** host the unset-default
+ * cell must reproduce ~159 tok/s/core within the measured run interval.
+ * That number is the published tps-bench baseline (issue #1436). Any other
+ * platform, arch, or core count skips — including Darwin 8-core Apple
+ * Silicon, which must not be treated as the published host (Bugbot on
+ * #1597). No Darwin baseline is invented. On a matching host, 159 must
+ * fall inside [min, max] of the default cell or the run is BLOCKED.
  */
 export function decidePositiveControl(opts: {
   hostCores: number;
   tokPerSecPerCoreRuns: number[];
+  platform?: string;
+  arch?: string;
   expected?: number;
   requiredCores?: number;
+  requiredPlatform?: string;
+  requiredArch?: string;
 }): PositiveControlDecision {
   const expected = opts.expected ?? POSITIVE_CONTROL_TOK_PER_SEC_PER_CORE;
   const requiredCores = opts.requiredCores ?? POSITIVE_CONTROL_HOST_CORES;
+  const requiredPlatform = opts.requiredPlatform ?? POSITIVE_CONTROL_PLATFORM;
+  const requiredArch = normalizeCpuArch(opts.requiredArch ?? POSITIVE_CONTROL_ARCH);
+  const platform = opts.platform ?? process.platform;
+  const arch = normalizeCpuArch(opts.arch ?? process.arch);
   const measured = intervalOf(opts.tokPerSecPerCoreRuns);
-  if (opts.hostCores !== requiredCores) {
+  if (
+    platform !== requiredPlatform ||
+    arch !== requiredArch ||
+    opts.hostCores !== requiredCores
+  ) {
     return {
       applicable: false,
       passed: true,
       blocked: false,
-      reason: `positive control is 8-core only (hostCores=${opts.hostCores})`,
+      reason:
+        `positive control is ${requiredPlatform}/${requiredArch} ${requiredCores}-core only ` +
+        `(host=${platform}/${arch} cores=${opts.hostCores})`,
       expected,
       measured,
     };
@@ -238,7 +266,7 @@ export function decidePositiveControl(opts: {
     passed: false,
     blocked: true,
     reason:
-      `positive control failed: expected ${expected} tok/s/core on ${requiredCores}-core, ` +
+      `positive control failed: expected ${expected} tok/s/core on ${requiredPlatform}/${requiredArch} ${requiredCores}-core, ` +
       `measured [${measured.min.toFixed(1)}, ${measured.max.toFixed(1)}] ` +
       `(mean ${measured.mean.toFixed(1)}) — not within variance`,
     expected,
