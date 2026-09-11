@@ -1,0 +1,3 @@
+- **Ingest-throughput bench sweeps threads × gpuLayers and refuses to rank on overlap.** The harness under `test/bench/ingest-throughput/` now measures the `FLAIR_EMBED_THREADS` × `gpuLayers` grid, reports doc/s + spread per cell, and refuses a winner when run intervals overlap, when observed threads are unreadable, when `FLAIR_EMBED_THREADS=1` is not ≥1.3× slower, when `gpuLayers=99` lacks a Metal `ggml_metal_init` / compute-buffer readback, or when the box is not quiet. `FLAIR_EMBED_GPU_LAYERS` is a measurement pin; unset still leaves HFE's default of 0. (#1436)
+
+  > **Heads-up:** this does not change the product default for `threads` or `gpuLayers`. #1437 is that decision. On non-Metal hosts `gpuLayers=99` is skipped — do not invent GPU numbers.

@@ -194,6 +194,7 @@ These are read by the Harper process at boot (same places as the table above: la
 | Variable | Default | What it does |
 |----------|---------|--------------|
 | `FLAIR_EMBED_THREADS` | `max(1, availableParallelism() − 1)` | CPU threads for in-process embedding (harper-fabric-embeddings / llama.cpp). Host-aware so a 4-core box does not inherit HFE's fixed 6, and an 8-vCPU ingest host is not stuck at 6 idle cores. One core is left for Harper's event loop and the OS. `availableParallelism()` respects a container CPU quota. Set a positive integer to pin. Invalid values fall back to the default. |
+| `FLAIR_EMBED_GPU_LAYERS` | unset (HFE default `0`, CPU only) | Layers to offload to the GPU. **Unset omits the field** so harper-fabric-embeddings keeps its own default of 0. This is a pin for measurement (the ingest-throughput bench, flair#1436), not a new product default — #1437 is the detect-and-default decision. `0` = CPU; `99` = full offload (Metal on mac-arm64). Invalid values fall through to omit. |
 | `FLAIR_HYBRID_RETRIEVAL` | `true` | Hybrid BM25 + vector retrieval. Set `false` / `0` / `off` to revert to the legacy HNSW + keyword-bump path. |
 | `FLAIR_MODELS_DIR` | `<data-dir>/models` | Directory the embedding GGUF is loaded from (and downloaded into on first boot). Point this at a pre-seeded directory to skip the HuggingFace download; see [troubleshooting.md](troubleshooting.md). |
 

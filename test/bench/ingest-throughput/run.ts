@@ -2,30 +2,35 @@
 /**
  * run.ts — ingest-only throughput benchmark CLI (flair#1436).
  *
- *   bun run test/bench/ingest-throughput/run.ts run --dataset <path> [--n 500] [--seed 0] [--runs 3] [--out <dir>]
+ *   bun run test/bench/ingest-throughput/run.ts run \
+ *     --dataset <path> [--n 500] [--seed 0] [--runs 3] [--out <dir>] \
+ *     [--gpu-layers auto|0|0,99] [--allow-noisy]
  *
- * Measures the FLAIR_EMBED_THREADS axis on the ingest path only. Runs the
- * NEGATIVE CONTROL first (FLAIR_EMBED_THREADS=1 vs 8): if 1 is not materially
- * slower than 8, the env var is not reaching the embedder and the run aborts
- * (BLOCKED) rather than emitting a misleading sweep. Only then does it sweep
- * {6, 7, 8} plus the default (unset) path.
+ * Ingest path only: no reader, no judge, no provider. Sweeps
+ * FLAIR_EMBED_THREADS {6,7,8} × gpuLayers {0,99} (99 only on Metal
+ * mac-arm64, or when forced). Refuses rather than ranks when a gate fails.
  *
- * Emits a content-addressed artifact (artifact.ts). Produces a number; NEVER
- * publishes one.
+ * Does NOT change any product default. #1437 is the default-change decision.
  */
 import { existsSync } from "node:fs";
+import { availableParallelism } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { resolveBenchGitCommit } from "../git-commit";
 import {
   DEFAULT_RUNS, DEFAULT_SLICE_N, DEFAULT_SEED, INGEST_CONCURRENCY,
-  NEGATIVE_CONTROL, THREAD_SWEEP, configManifest, hashConfig,
+  NEGATIVE_CONTROL, NEGATIVE_CONTROL_MIN_SLOWDOWN, THREAD_SWEEP,
+  configManifest, hashConfig,
 } from "./config";
 import { loadDataset, selectSlice } from "../longmemeval/dataset";
 import { measureSetting, type SettingMetrics } from "./measure";
-import { decideNegativeControl } from "../../unit/ingest-throughput-control";
 import {
-  buildArtifact, writeArtifact, verifyArtifactHash, hashRunResults,
+  cellKey, decideNegativeControl, decidePositiveControl, isMetalCapablePlatform,
+  rankCells, resolveGpuLayerSweep,
+} from "../../unit/ingest-throughput-control";
+import { inspectQuietBox } from "./quiet-box";
+import {
+  aggregate, buildArtifact, writeArtifact, verifyArtifactHash, hashRunResults,
   type SettingAggregate, type NegativeControlResult,
 } from "./artifact";
 
@@ -39,131 +44,242 @@ function arg(flag: string, dflt?: string): string | undefined {
 }
 const hasFlag = (f: string) => process.argv.includes(f);
 
-/** low is "materially slower" than high when its mean tok/s is below this
- *  fraction of high's. 0.75 ⇒ low must be ≥25% slower. On a real host the
- *  ratio is far lower (1 vs 8 threads ≈ 0.125); 0.75 is a conservative floor
- *  that still cleanly separates "env var reaches the embedder" from "ignored"
- *  (ignored ⇒ both settings use the default ⇒ ratio ≈ 1.0). */
-const NEGATIVE_CONTROL_THRESHOLD = 0.75;
-
-function aggregate(runs: SettingMetrics[]): SettingAggregate {
-  const mean = (f: (m: SettingMetrics) => number) => runs.reduce((s, m) => s + f(m), 0) / runs.length;
-  return {
-    requestedThreads: runs[0]!.requestedThreads,
-    runs,
-    meanObservedThreads: mean((m) => m.observedThreads),
-    meanWallClockMs: mean((m) => m.wallClockMs),
-    meanTokensIngested: mean((m) => m.tokensIngested),
-    meanTokPerSec: mean((m) => m.tokPerSec),
-    meanTokPerSecPerCore: mean((m) => m.tokPerSecPerCore),
-    meanPeakRssBytes: mean((m) => m.peakRssBytes),
-  };
-}
-
-function checkNegativeControl(low: SettingAggregate, high: SettingAggregate): NegativeControlResult {
-  const decision = decideNegativeControl(
-    low.meanTokPerSec,
-    high.meanTokPerSec,
-    NEGATIVE_CONTROL_THRESHOLD,
-  );
-  return {
-    low: NEGATIVE_CONTROL.low,
-    high: NEGATIVE_CONTROL.high,
-    ratio: decision.ratio,
-    passed: decision.passed,
-    threshold: NEGATIVE_CONTROL_THRESHOLD,
-  };
+function parseGpuLayersFlag(raw: string | undefined): number[] | "auto" {
+  if (!raw || raw === "auto") return "auto";
+  const parts = raw.split(",").map((s) => Number(s.trim()));
+  if (parts.some((n) => !Number.isInteger(n) || n < 0)) {
+    throw new Error(`--gpu-layers must be auto or a comma list of non-negative integers (got ${raw})`);
+  }
+  return parts;
 }
 
 async function measureWithRuns(
   entries: ReturnType<typeof selectSlice>,
   threads: number | "default",
+  gpuLayers: number,
   runs: number,
   log: (m: string) => void,
 ): Promise<SettingAggregate> {
   const metrics: SettingMetrics[] = [];
   for (let r = 0; r < runs; r++) {
-    log(`  [threads=${threads}] run ${r + 1}/${runs}...`);
-    metrics.push(await measureSetting(entries, threads, {
+    log(`  [${cellKey(threads, gpuLayers)}] run ${r + 1}/${runs}...`);
+    metrics.push(await measureSetting(entries, { threads, gpuLayers }, {
       repoRoot: REPO_ROOT, concurrency: INGEST_CONCURRENCY, log,
     }));
   }
   return aggregate(metrics);
 }
 
-async function run(): Promise<void> {
-  // The harness reads thread count and peak RSS from /proc/<pid>/status, which
-  // is Linux-only. Refuse at boot on any other platform rather than throwing
-  // ENOENT partway through a measurement someone is waiting on. Failing loudly
-  // at start is fine; failing obscurely at minute three is not.
-  if (process.platform !== "linux") {
-    console.error(
-      `BLOCKED: this harness requires Linux — it reads thread count and peak RSS ` +
-      `from /proc/<pid>/status, which does not exist on ${process.platform}. ` +
-      `Run it on a Linux x86_64 host (e.g. tps-bench).`,
+function printCellTable(settings: SettingAggregate[]): void {
+  const header = [
+    "threads".padEnd(8),
+    "gpu".padEnd(5),
+    "obs".padEnd(5),
+    "doc/s".padEnd(10),
+    "spread".padEnd(18),
+    "tok/s".padEnd(10),
+    "tok/s/core".padEnd(11),
+    "metal",
+  ].join(" ");
+  console.log(`\n${header}`);
+  console.log("-".repeat(header.length));
+  for (const s of settings) {
+    const spread = `${s.docsPerSecSpread.min.toFixed(2)}–${s.docsPerSecSpread.max.toFixed(2)}`;
+    console.log(
+      `${String(s.requestedThreads).padEnd(8)} ` +
+      `${String(s.requestedGpuLayers).padEnd(5)} ` +
+      `${s.meanObservedThreads.toFixed(0).padEnd(5)} ` +
+      `${s.meanDocsPerSec.toFixed(2).padEnd(10)} ` +
+      `${spread.padEnd(18)} ` +
+      `${s.meanTokPerSec.toFixed(1).padEnd(10)} ` +
+      `${s.meanTokPerSecPerCore.toFixed(1).padEnd(11)} ` +
+      `${s.requestedGpuLayers > 0 ? (s.metalEngaged ? "yes" : "NO") : "—"}`,
     );
-    process.exit(1);
   }
+}
 
+function buildRankings(settings: SettingAggregate[]): Record<string, ReturnType<typeof rankCells>> {
+  const ranking: Record<string, ReturnType<typeof rankCells>> = {};
+  const byGpu = new Map<number, SettingAggregate[]>();
+  for (const s of settings) {
+    const arr = byGpu.get(s.requestedGpuLayers) ?? [];
+    arr.push(s);
+    byGpu.set(s.requestedGpuLayers, arr);
+  }
+  for (const [gpu, cells] of byGpu) {
+    const sweepCells = cells.filter((c) => THREAD_SWEEP.includes(c.requestedThreads as 6 | 7 | 8));
+    if (sweepCells.length >= 2) {
+      ranking[`threads@gpu=${gpu}`] = rankCells(
+        sweepCells.map((c) => ({
+          id: cellKey(c.requestedThreads, c.requestedGpuLayers),
+          values: c.runs.map((r) => r.docsPerSec),
+        })),
+      );
+    }
+  }
+  const byThreads = new Map<string, SettingAggregate[]>();
+  for (const s of settings) {
+    const k = String(s.requestedThreads);
+    const arr = byThreads.get(k) ?? [];
+    arr.push(s);
+    byThreads.set(k, arr);
+  }
+  for (const [threads, cells] of byThreads) {
+    const gpuPair = cells.filter((c) => c.requestedGpuLayers === 0 || c.requestedGpuLayers === 99);
+    if (gpuPair.length >= 2) {
+      ranking[`gpu@threads=${threads}`] = rankCells(
+        gpuPair.map((c) => ({
+          id: cellKey(c.requestedThreads, c.requestedGpuLayers),
+          values: c.runs.map((r) => r.docsPerSec),
+        })),
+      );
+    }
+  }
+  return ranking;
+}
+
+async function run(): Promise<void> {
   const datasetPath = arg("--dataset");
   if (!datasetPath || !existsSync(datasetPath)) {
-    console.error("usage: run.ts run --dataset <path> [--n 500] [--seed 0] [--runs 3] [--out <dir>]");
+    console.error(
+      "usage: run.ts run --dataset <path> [--n 500] [--seed 0] [--runs 3] [--out <dir>] " +
+      "[--gpu-layers auto|0|0,99] [--allow-noisy]",
+    );
     console.error("  --dataset: path to the LongMemEval_s dataset file (pinned by sha256)");
     process.exit(2);
   }
+
   const n = Number(arg("--n", String(DEFAULT_SLICE_N)));
   const seed = Number(arg("--seed", String(DEFAULT_SEED)));
   const runs = Number(arg("--runs", String(DEFAULT_RUNS)));
   const outDir = arg("--out", path.join(REPO_ROOT, "test/bench/ingest-throughput/artifacts"));
-  const benchHost = process.env.INGEST_BENCH_HOST ?? "tps-bench";
-  // Fail CLOSED before the measurement: a run whose code cannot be named is not
-  // reproducible. Resolved from the flair code location (REPO_ROOT), checkout
-  // HEAD else its dist/build-info.json stamp; throws, never null (flair#1432).
+  const benchHost = process.env.INGEST_BENCH_HOST ?? "local";
+  const allowNoisy = hasFlag("--allow-noisy");
+  const gpuFlag = parseGpuLayersFlag(arg("--gpu-layers", "auto"));
+  const gpuSweep = resolveGpuLayerSweep({ requested: gpuFlag });
+  const metalCapable = isMetalCapablePlatform();
   const gitCommit = resolveBenchGitCommit(REPO_ROOT);
-
   const log = (m: string) => console.error(m);
+
+  // ── QUIET BOX FIRST (paired-bench discipline) ────────────────────────────
+  log("QUIET BOX: pgrep/CPU before any Harper spawn");
+  const quietBox = inspectQuietBox();
+  log(`  ${quietBox.reason}`);
+  if (quietBox.blocked && !allowNoisy) {
+    console.error(
+      `\nBLOCKED: box is not quiet. ${quietBox.reason}\n` +
+      `Re-run on a quiet host, or pass --allow-noisy to measure with ranking refused.`,
+    );
+    process.exit(1);
+  }
+  if (!quietBox.quiet) {
+    log("  CAVEAT: proceeding with --allow-noisy; ranking will be refused.");
+  }
 
   log(`loading dataset ${datasetPath}...`);
   const entries = selectSlice(loadDataset(datasetPath), n, seed);
   log(`slice: n=${n} seed=${seed} -> ${entries.length} entries`);
+  log(`gpu sweep: [${gpuSweep.sweep.join(", ")}] (${gpuSweep.reason})`);
+  log(`host: ${process.platform}/${process.arch} cores=${availableParallelism()} metalCapable=${metalCapable}`);
 
-  const manifest = configManifest({ n, seed, runs });
+  const manifest = configManifest({ n, seed, runs }, gpuSweep.sweep);
   const configHash = hashConfig(manifest);
   log(`configHash: ${configHash}`);
+  log(`gitCommit: ${gitCommit}`);
 
   const settings: SettingAggregate[] = [];
   const runHashes: string[] = [];
+  const seen = new Set<string>();
 
-  // ── NEGATIVE CONTROL FIRST ────────────────────────────────────────────────
-  log(`\nNEGATIVE CONTROL: FLAIR_EMBED_THREADS=${NEGATIVE_CONTROL.low} vs ${NEGATIVE_CONTROL.high}`);
-  const low = await measureWithRuns(entries, NEGATIVE_CONTROL.low, runs, log);
-  const high = await measureWithRuns(entries, NEGATIVE_CONTROL.high, runs, log);
-  const nc = checkNegativeControl(low, high);
-  log(`  low  tok/s = ${low.meanTokPerSec.toFixed(1)} (${low.meanObservedThreads} threads)`);
-  log(`  high tok/s = ${high.meanTokPerSec.toFixed(1)} (${high.meanObservedThreads} threads)`);
-  log(`  ratio = ${nc.ratio.toFixed(3)} (threshold ${nc.threshold})`);
+  const record = (agg: SettingAggregate) => {
+    const key = cellKey(agg.requestedThreads, agg.requestedGpuLayers);
+    if (seen.has(key)) return;
+    seen.add(key);
+    settings.push(agg);
+    for (const r of agg.runs) runHashes.push(hashRunResults(r));
+  };
+
+  // ── NEGATIVE CONTROL FIRST (gpu=0) ───────────────────────────────────────
+  log(`\nNEGATIVE CONTROL: FLAIR_EMBED_THREADS=${NEGATIVE_CONTROL.low} vs ${NEGATIVE_CONTROL.high} @ gpu=0`);
+  const low = await measureWithRuns(entries, NEGATIVE_CONTROL.low, 0, runs, log);
+  const high = await measureWithRuns(entries, NEGATIVE_CONTROL.high, 0, runs, log);
+  const ncDecision = decideNegativeControl(
+    low.meanTokPerSec,
+    high.meanTokPerSec,
+    NEGATIVE_CONTROL_MIN_SLOWDOWN,
+  );
+  const nc: NegativeControlResult = {
+    ...ncDecision,
+    low: NEGATIVE_CONTROL.low,
+    high: NEGATIVE_CONTROL.high,
+    gpuLayers: 0,
+  };
+  log(`  low  tok/s = ${low.meanTokPerSec.toFixed(1)} (observed ${low.meanObservedThreads})`);
+  log(`  high tok/s = ${high.meanTokPerSec.toFixed(1)} (observed ${high.meanObservedThreads})`);
+  log(`  slowdown = ${nc.slowdown.toFixed(3)}× (need ≥ ${nc.minSlowdown}×)`);
 
   if (!nc.passed) {
     console.error(
       `\nBLOCKED: negative control failed — FLAIR_EMBED_THREADS=${NEGATIVE_CONTROL.low} is NOT ` +
-      `materially slower than ${NEGATIVE_CONTROL.high} (ratio ${nc.ratio.toFixed(3)} >= ${nc.threshold}). ` +
-      `The env var is not reaching the embedder; the sweep would be untrustworthy.`,
+      `≥${nc.minSlowdown}× slower than ${NEGATIVE_CONTROL.high} (slowdown ${nc.slowdown.toFixed(3)}). ` +
+      `The env var is not reaching the embedder; refusing to print a ranking.`,
     );
     process.exit(1);
   }
-  log(`  negative control PASSED (${NEGATIVE_CONTROL.low} is materially slower than ${NEGATIVE_CONTROL.high})\n`);
+  log(`  negative control PASSED (${NEGATIVE_CONTROL.low} is ${nc.slowdown.toFixed(2)}× slower than ${NEGATIVE_CONTROL.high})\n`);
+  record(low);
+  record(high);
 
-  settings.push(low, high);
-  for (const m of [low, high]) for (const r of m.runs) runHashes.push(hashRunResults(r));
+  // ── SWEEP threads × gpuLayers ────────────────────────────────────────────
+  log(`SWEEP: threads {${THREAD_SWEEP.join(", ")}, default} × gpuLayers {${gpuSweep.sweep.join(", ")}}`);
+  for (const gpu of gpuSweep.sweep) {
+    for (const t of [...THREAD_SWEEP, "default"] as const) {
+      const key = cellKey(t, gpu);
+      if (seen.has(key)) {
+        log(`  ${key}: already measured`);
+        continue;
+      }
+      const agg = await measureWithRuns(entries, t, gpu, runs, log);
+      record(agg);
+      log(
+        `  ${key}: ${agg.meanDocsPerSec.toFixed(2)} doc/s ` +
+        `[${agg.docsPerSecSpread.min.toFixed(2)}–${agg.docsPerSecSpread.max.toFixed(2)}] ` +
+        `${agg.meanTokPerSec.toFixed(1)} tok/s ` +
+        `(observed ${agg.meanObservedThreads})`,
+      );
+    }
+  }
 
-  // ── SWEEP {6, 7, 8} + default ────────────────────────────────────────────
-  log(`SWEEP: FLAIR_EMBED_THREADS in {${THREAD_SWEEP.join(", ")}} + default`);
-  for (const t of [...THREAD_SWEEP, "default"] as const) {
-    if (t === NEGATIVE_CONTROL.high) continue; // already measured as the control's high
-    const agg = await measureWithRuns(entries, t, runs, log);
-    settings.push(agg);
-    for (const r of agg.runs) runHashes.push(hashRunResults(r));
-    log(`  threads=${t}: ${agg.meanTokPerSec.toFixed(1)} tok/s, ${agg.meanTokPerSecPerCore.toFixed(1)} tok/s/core (${agg.meanObservedThreads} threads)`);
+  // ── POSITIVE CONTROL (8-core default cell only) ──────────────────────────
+  const defaultCpu = settings.find((s) => s.requestedThreads === "default" && s.requestedGpuLayers === 0);
+  const hostCores = defaultCpu?.runs[0]?.hostCores ?? availableParallelism();
+  const positiveControl = decidePositiveControl({
+    hostCores,
+    tokPerSecPerCoreRuns: defaultCpu?.runs.map((r) => r.tokPerSecPerCore) ?? [],
+  });
+  log(`\nPOSITIVE CONTROL: ${positiveControl.reason}`);
+  if (positiveControl.blocked) {
+    console.error(`\nBLOCKED: ${positiveControl.reason}`);
+    process.exit(1);
+  }
+
+  // ── RANKING ──────────────────────────────────────────────────────────────
+  let ranking = buildRankings(settings);
+  if (!quietBox.quiet) {
+    const refused = Object.fromEntries(
+      Object.entries(ranking).map(([k, v]) => [k, {
+        ...v,
+        winner: null,
+        verdict: "refused" as const,
+        reason: `quiet-box caveat — ${quietBox.reason}`,
+      }]),
+    );
+    ranking = refused;
+    log("RANKING refused: box was not quiet.");
+  } else {
+    for (const [k, v] of Object.entries(ranking)) {
+      log(`RANKING ${k}: ${v.verdict}${v.winner ? ` → ${v.winner}` : ""} (${v.reason})`);
+    }
   }
 
   const art = buildArtifact({
@@ -172,8 +288,15 @@ async function run(): Promise<void> {
     runHashes,
     settings,
     negativeControl: nc,
+    positiveControl,
+    ranking,
+    gpuSweep,
     gitCommit,
     benchHost,
+    platform: process.platform,
+    arch: process.arch,
+    metalCapable,
+    quietBox,
   });
   const outPath = writeArtifact(art, outDir);
   if (!verifyArtifactHash(art)) {
@@ -182,14 +305,13 @@ async function run(): Promise<void> {
   }
   console.log(`\nartifact: ${outPath}`);
   console.log(`artifactHash: ${art.artifactHash}`);
-  console.log(`gitCommit: ${art.gitCommit ?? "null"}`);
-  console.log(`\nPer-setting summary (mean over ${runs} runs):`);
-  for (const s of settings) {
-    console.log(
-      `  threads=${String(s.requestedThreads).padEnd(7)} observed=${s.meanObservedThreads} ` +
-      `tok/s=${s.meanTokPerSec.toFixed(1)} tok/s/core=${s.meanTokPerSecPerCore.toFixed(1)} ` +
-      `wall=${s.meanWallClockMs.toFixed(0)}ms tokens=${s.meanTokensIngested.toFixed(0)} rss=${(s.meanPeakRssBytes / 1e6).toFixed(0)}MB`,
-    );
+  console.log(`gitCommit: ${art.gitCommit}`);
+  printCellTable(settings);
+  console.log(`\nnegativeControl: ${nc.slowdown.toFixed(2)}× (need ≥ ${nc.minSlowdown}×) ${nc.passed ? "PASS" : "FAIL"}`);
+  console.log(`positiveControl: ${positiveControl.reason}`);
+  console.log(`quietBox: ${quietBox.quiet ? "quiet" : "NOT QUIET"} — ${quietBox.reason}`);
+  for (const [k, v] of Object.entries(ranking)) {
+    console.log(`ranking ${k}: ${v.verdict}${v.winner ? ` ${v.winner}` : ""}`);
   }
 }
 
@@ -200,6 +322,9 @@ if (cmd === "run") {
     process.exit(1);
   });
 } else {
-  console.error("usage: run.ts run --dataset <path> [--n 500] [--seed 0] [--runs 3] [--out <dir>]");
+  console.error(
+    "usage: run.ts run --dataset <path> [--n 500] [--seed 0] [--runs 3] [--out <dir>] " +
+    "[--gpu-layers auto|0|0,99] [--allow-noisy]",
+  );
   process.exit(2);
 }
