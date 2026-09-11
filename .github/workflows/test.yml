@@ -1296,6 +1296,10 @@ jobs:
           restore-keys: |
             bun-cache-${{ runner.os }}-
       - run: sfw bun install --frozen-lockfile
+      # Workspace package exports point at dist/. Build before resources
+      # typecheck so `@tpsdev-ai/flair-tool-descriptors` resolves (flair#1580).
+      - name: Build flair-tool-descriptors
+        run: cd packages/flair-tool-descriptors && bun run build
       - run: bunx tsc --noEmit -p tsconfig.check.json
 
   # Required-status-check adapter — see test-unit-gate's comment above.
@@ -1332,6 +1336,10 @@ jobs:
           restore-keys: |
             bun-cache-${{ runner.os }}-
       - run: sfw bun install --frozen-lockfile
+      # Workspace package exports point at dist/. Build before resources
+      # typecheck so `@tpsdev-ai/flair-tool-descriptors` resolves (flair#1580).
+      - name: Build flair-tool-descriptors
+        run: cd packages/flair-tool-descriptors && bun run build
       # Root resources (tsconfig.check.json has harper paths override
       # so harper's raw .ts internals don't pollute the output)
       - name: Type check root (resources)
@@ -1366,8 +1374,6 @@ jobs:
       # Bun workspace symlinks point at source, not emitted .d.ts files.
       - name: Build flair-client
         run: cd packages/flair-client && bun run build
-      - name: Build flair-tool-descriptors
-        run: cd packages/flair-tool-descriptors && bun run build
       # Workspace packages: check every package that has a tsconfig.json.
       # Collect all failures so the full picture is visible, then hard-fail
       # if any package had type errors.

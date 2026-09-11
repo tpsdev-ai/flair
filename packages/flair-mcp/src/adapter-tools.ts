@@ -13,7 +13,6 @@ import type { FlairClient } from "@tpsdev-ai/flair-client";
 import {
   STDIO_TOOL_DESCRIPTORS,
   toStdioMcpToolDef,
-  type JsonSchemaObject,
 } from "@tpsdev-ai/flair-tool-descriptors";
 import { classifyError } from "./errors.js";
 import { jsonSchemaToZodShape } from "./json-schema-zod.js";
@@ -383,7 +382,7 @@ export function registerStdioTools(server: McpServer, ctx: AdapterContext): stri
       continue;
     }
     const def = toStdioMcpToolDef(d);
-    const shape = jsonSchemaToZodShape(def.inputSchema as JsonSchemaObject);
+    const shape = jsonSchemaToZodShape(def.inputSchema);
     const cb = async (args: Record<string, any>) => handler(args, ctx);
     if (d.annotations) {
       server.tool(d.name, def.description, shape, d.annotations as ToolAnnotations, cb);

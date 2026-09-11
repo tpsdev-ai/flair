@@ -55,8 +55,8 @@ import {
   adapterRegistryParity,
   derivedDescriptorParity,
   parseAdapterToolNames,
+  parseStdioHandlerNames,
 } from "../../packages/flair-mcp/src/adapter-surface.ts";
-import { stdioHandlerNames } from "../../packages/flair-mcp/src/adapter-tools.ts";
 
 const TABLE_NAMES = Object.keys(RECORD_TYPES) as RecordTypeName[];
 const SHIPPED_TOOL_NAMES = Object.keys(TOOLS).sort();
@@ -244,7 +244,11 @@ describe("MCP surface tripwire — derived set == descriptor set (flair#1580)", 
   });
 
   it("stdio handler names deep-equal stdio descriptor names", () => {
-    const parity = derivedDescriptorParity(stdioHandlerNames(), descriptorNames(STDIO_TOOL_DESCRIPTORS));
+    const handlerSrc = readFileSync(join(import.meta.dir, "../../packages/flair-mcp/src/adapter-tools.ts"), "utf-8");
+    const parity = derivedDescriptorParity(
+      parseStdioHandlerNames(handlerSrc),
+      descriptorNames(STDIO_TOOL_DESCRIPTORS),
+    );
     expect(parity.missingHandlers).toEqual([]);
     expect(parity.extraHandlers).toEqual([]);
   });

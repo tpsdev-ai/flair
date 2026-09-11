@@ -11,6 +11,7 @@ import {
   adapterRegistryParity,
   derivedDescriptorParity,
   parseAdapterToolNames,
+  parseStdioHandlerNames,
 } from "../src/adapter-surface.ts";
 import { stdioHandlerNames } from "../src/adapter-tools.ts";
 
@@ -26,6 +27,11 @@ describe("adapter-surface derivation (flair#1580)", () => {
     const parity = derivedDescriptorParity(stdioHandlerNames(), ADAPTER_TOOL_NAMES);
     expect(parity.missingHandlers).toEqual([]);
     expect(parity.extraHandlers).toEqual([]);
+  });
+
+  test("parseStdioHandlerNames reads the same keys as the live handler map", () => {
+    const parsed = parseStdioHandlerNames(readFileSync(ADAPTER_TOOLS, "utf-8"));
+    expect(parsed).toEqual(stdioHandlerNames());
   });
 
   test("index.ts has no leftover server.tool(\"name\" hand-wires", () => {

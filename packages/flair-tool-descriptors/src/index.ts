@@ -29,7 +29,7 @@ export interface JsonSchemaProperty {
 export interface McpToolDef {
   name: string;
   description: string;
-  inputSchema: Record<string, unknown>;
+  inputSchema: JsonSchemaObject;
   annotations?: Record<string, unknown>;
 }
 
@@ -69,7 +69,7 @@ export function toMcpToolDef(d: ToolDescriptor): McpToolDef {
   return {
     name: d.name,
     description: d.description,
-    inputSchema: d.inputSchema as Record<string, unknown>,
+    inputSchema: d.inputSchema,
     ...(d.annotations ? { annotations: d.annotations } : {}),
   };
 }

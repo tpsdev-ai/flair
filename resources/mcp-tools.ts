@@ -58,8 +58,9 @@ import { SKILL_TAG, isSkillWrite } from "./skill-write.js";
 import {
   NATIVE_TOOL_DESCRIPTORS,
   toMcpToolDef,
+  type McpToolDef,
 } from "@tpsdev-ai/flair-tool-descriptors";
-export type { McpToolDef } from "@tpsdev-ai/flair-tool-descriptors";
+export type { McpToolDef };
 
 type HandlerKey = "SemanticSearch" | "Memory" | "BootstrapMemories" | "Soul" | "WorkspaceState" | "OrgEvent" | "AttentionQuery" | "RecordUsage";
 const H: Partial<Record<HandlerKey, any>> = {};

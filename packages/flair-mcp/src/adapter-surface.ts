@@ -53,6 +53,39 @@ export function parseAdapterToolNames(source: string): string[] {
   return names;
 }
 
+/**
+ * Handler keys from `STDIO_TOOL_HANDLERS` in adapter-tools.ts source.
+ * Root unit tests must not import adapter-tools.ts — that module loads
+ * `@tpsdev-ai/flair-client` (built later in the unit lane).
+ */
+export function parseStdioHandlerNames(source: string): string[] {
+  const marker = "export const STDIO_TOOL_HANDLERS";
+  const start = source.indexOf(marker);
+  if (start < 0) return [];
+  const open = source.indexOf("{", start);
+  if (open < 0) return [];
+  let depth = 0;
+  let close = -1;
+  for (let i = open; i < source.length; i++) {
+    const c = source[i];
+    if (c === "{") depth++;
+    else if (c === "}") {
+      depth--;
+      if (depth === 0) {
+        close = i;
+        break;
+      }
+    }
+  }
+  if (close < 0) return [];
+  const names: string[] = [];
+  for (const line of source.slice(open + 1, close).split("\n")) {
+    const m = line.match(/^\s*([a-z][a-z0-9_]*)\s*,?\s*$/);
+    if (m) names.push(m[1]);
+  }
+  return names.sort();
+}
+
 export interface AdapterRegistryParity {
   /** TOOLS names the adapter neither registers nor exempts. */
   missingFromAdapter: string[];
