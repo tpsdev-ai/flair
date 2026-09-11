@@ -287,10 +287,10 @@ Exit codes:
 
 | Code | Meaning |
 |------|---------|
-| 0 | All nodes verified: healthy, authenticated, and version-matched |
+| 0 | All probed nodes verified. Unverifiable peers (no endpoint on file) are listed as a warning and do not fail |
 | 1 | Origin failed (unreachable, unauthenticated, or wrong version) |
-| 2 | Origin OK, but a reachable peer is running a different version (skew) |
-| 3 | Origin OK, no skew among reachable peers, but a peer couldn't be verified at all (unreachable, auth rejected, or no endpoint on file) |
+| 2 | A reachable node diverged (wrong version) — NOT converged |
+| 3 | A reachable peer was unreachable or rejected auth (not unverifiable) |
 
 **What "peer" means here — read before trusting a green sweep:** this checks
 *Flair's own* federation peer table, not Harper Fabric's own cluster-replication
@@ -300,8 +300,9 @@ in this cluster and are they in sync") is harper-pro-only and unavailable in the
 Fabric's own replication topology, on the origin or anywhere else. A Fabric replica
 that was never separately paired as a Flair federation peer (`flair federation pair`)
 is invisible to this sweep: `0 peers known` means "0 peers on file," never "0 peers
-exist." A peer with no usable endpoint is reported `unverifiable` — never silently
-dropped, never shown green. The sweep also needs Basic-auth credentials
+exist." A peer with no usable endpoint is reported `unverifiable` — listed and
+warned, never shown green, and does not fail the run (a reachable peer on the
+wrong version still does). The sweep also needs Basic-auth credentials
 (`FABRIC_USER`/`FABRIC_PASSWORD` env, or the discouraged inline
 `--fabric-user`/`--fabric-password`) to authenticate each peer probe; a token-only
 (`--fabric-token`) deploy skips it with a note instead of a silent no-op.

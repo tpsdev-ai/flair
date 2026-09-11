@@ -155,7 +155,7 @@ flair status --target https://<cluster>.<org>.harperfabric.com
 flair fleet verify --target https://<cluster>.<org>.harperfabric.com
 ```
 
-`fleet verify` checks health, auth, and version across the origin node plus every Flair federation peer on file. Exit codes: 0 = all verified, 1 = origin failed, 2 = peer version skew, 3 = peer unverifiable.
+`fleet verify` checks health, auth, and version across the origin node plus every Flair federation peer on file. Exit codes: 0 = all probed nodes verified (unverifiable peers warn, do not fail), 1 = origin failed, 2 = reachable peer diverged, 3 = reachable peer unreachable/auth-failed.
 
 > **A credential mismatch renders as an empty section.** `flair status` reads `/HealthDetail` with `FLAIR_ADMIN_PASS` / `HDB_ADMIN_PASSWORD` / a pinned agent key — **not** the `FABRIC_*` credentials. On failure it renders blank.
 

@@ -57,7 +57,7 @@ import { probeInstance, type ProbeResult } from "./probe.js";
 import {
   sweepFleet,
   renderFleetSweepTable,
-  FLEET_EXIT_OK,
+  fleetSweepShouldAbort,
   type FleetSweepResult,
 } from "./fleet-verify.js";
 import { markStale, sortOldestVersionFirst, type FleetPresenceRow } from "./fleet-presence.js";
@@ -3426,6 +3426,16 @@ export function resolveUpgradeRestartVerify(opts: { restart?: boolean; verify?: 
  */
 export function shouldRunFleetVerify(opts: { fleetVerify?: boolean }): boolean {
   return opts.fleetVerify !== false;
+}
+
+/**
+ * Post-sweep abort for `deploy` / `upgrade --target` (flair#988).
+ * Unverifiable peers do not abort. A reachable divergence does — and the
+ * sentence names that condition, never "NOT fully converged" for couldn't-check.
+ */
+export function fleetSweepCallerExitMessage(sweep: FleetSweepResult): string | null {
+  if (!fleetSweepShouldAbort(sweep.verdict)) return null;
+  return `fleet verify failed (exit ${sweep.exitCode}) — ${sweep.verdict.summary}`;
 }
 
 /**
@@ -10886,8 +10896,9 @@ async function runFabricUpgrade(opts: any): Promise<void> {
         expectVersion: result.plan.targetVersion,
       });
       console.log(renderFleetSweepTable(sweep));
-      if (sweep.exitCode !== FLEET_EXIT_OK) {
-        console.error(red(`\n✗ fleet verify failed (exit ${sweep.exitCode}) — upgrade is NOT fully converged.`));
+      const upgradeSweepFail = fleetSweepCallerExitMessage(sweep);
+      if (upgradeSweepFail) {
+        console.error(red(`\n✗ ${upgradeSweepFail}`));
         process.exit(sweep.exitCode);
       }
     }
@@ -14393,8 +14404,9 @@ program
           expectVersion: result.version,
         });
         console.log(renderFleetSweepTable(sweep));
-        if (sweep.exitCode !== FLEET_EXIT_OK) {
-          console.error(red(`\n✗ fleet verify failed (exit ${sweep.exitCode}) — deploy is NOT fully converged.`));
+        const deploySweepFail = fleetSweepCallerExitMessage(sweep);
+        if (deploySweepFail) {
+          console.error(red(`\n✗ ${deploySweepFail}`));
           process.exit(sweep.exitCode);
         }
       }
@@ -14445,11 +14457,11 @@ fleet
   .option("--json", "Emit JSON (also: pipe + FLAIR_OUTPUT=json)")
   .addHelpText("after", `
 Exit codes:
-  0  all nodes verified: healthy, authenticated, and version-matched
+  0  all probed nodes verified (unverifiable peers — no endpoint on file —
+     are listed as a warning and do not fail the run)
   1  origin failed (unreachable, unauthenticated, or wrong version)
-  2  origin OK, but a reachable peer is running a DIFFERENT version (skew)
-  3  origin OK, no skew among reachable peers, but a peer could not be
-     verified at all (unreachable, auth rejected, or no endpoint on file)
+  2  a reachable node diverged (wrong version) — NOT converged
+  3  a reachable peer was unreachable or rejected auth (not unverifiable)
 
 "peer" here means a Flair federation peer (GET /FederationPeers on the
 origin) — NOT Harper's own cluster-replication nodes, which the OSS
