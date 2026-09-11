@@ -39,6 +39,8 @@ import {
   type Harness,
   type HookMutationResult,
 } from "../hook-install.js";
+import { staleHookRemedy, staleSessionStartHookPins } from "./owned-pins.js";
+import { flairCliVersion, isResolvedVersion } from "./mcp-spec.js";
 import {
   isDetached,
   renderDetachedWarning,
@@ -234,6 +236,26 @@ function runSessionStartHook(ctx: DoctorRunContext): DoctorCheckResult {
       detail: `SessionStart hook (${harness}): a failure would print an error on every session`,
       remedy: hookInstallHint(harness),
     });
+  }
+  // flair#1485: "it runs" is not "it is current". A hook whose pin is not
+  // the installed CLI version still launches the old adapter on every
+  // session. Compare against flairCliVersion() — not the MCP client pin —
+  // so two equally-stale pins cannot hide each other. Same owned-pin
+  // catalogue `flair upgrade` refreshes.
+  const expected = flairCliVersion();
+  if (isResolvedVersion(expected)) {
+    const stale = staleSessionStartHookPins(ctx.homeDir, expected)
+      .filter((r) => harnesses.includes(r.target.id as Harness));
+    if (stale.length > 0) {
+      const first = stale[0]!;
+      const detail = stale.length === 1
+        ? `SessionStart hook (${first.target.id}): pinned to flair-mcp@${first.pin} (installed CLI is ${expected})`
+        : `SessionStart hook: stale pins ${stale.map((s) => `${s.target.id}@${s.pin}`).join(", ")} (installed CLI is ${expected})`;
+      return result(id, label, "fail", {
+        detail,
+        remedy: staleHookRemedy(stale),
+      });
+    }
   }
   return result(id, label, "pass", {
     detail: `wired for ${harnesses.join(", ")}`,

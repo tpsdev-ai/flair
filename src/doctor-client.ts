@@ -975,10 +975,10 @@ export function extractFlairMcpPin(text: string): string | null {
  * (a bare npx spec / a pre-#1143 SessionStart hook).
  *
  * Client MCP pins win over the SessionStart hook pin. `flair upgrade`
- * refreshes those client configs (#1135/#1324), not the hook; a stale hook
- * pin must not shadow a just-refreshed client pin and keep flair-mcp marked
- * outdated (flair#1143). The hook still establishes `wired` and contributes
- * a pin only when no client config carries one.
+ * refreshes both (flair#1485); a stale hook pin must still not shadow a
+ * just-refreshed client pin and keep flair-mcp marked outdated (flair#1143).
+ * The hook still establishes `wired` and contributes a pin only when no
+ * client config carries one.
  *
  * Iterates the SAME client registry (ALL_CLIENTS) and per-client config paths
  * (clientConfigPath) that wiring uses, so a client added to the registry is
