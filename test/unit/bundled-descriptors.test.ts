@@ -59,10 +59,14 @@ describe("bundled flair-tool-descriptors (flair#1580 pack/install)", () => {
     expect(PACK_STAGE_EXTRAS).toContain(BUNDLED_REL);
   });
 
-  test("Dockerfile.test materializes the bundled package so the llama-cpp install does not walk a dangling workspace symlink", () => {
+  test("Dockerfile.test materializes the bundled package and installs llama-cpp in the builder", () => {
     const text = readFileSync(join(REPO, "docker/Dockerfile.test"), "utf8");
     expect(text).toContain("materialize-bundled-descriptors.mjs");
     expect(text).toMatch(/node scripts\/materialize-bundled-descriptors\.mjs/);
+    const builder = text.slice(0, text.indexOf("FROM node:24-slim AS test"));
+    const testStage = text.slice(text.indexOf("FROM node:24-slim AS test"));
+    expect(builder).toContain("@node-llama-cpp/linux-x64@3");
+    expect(testStage).not.toContain("npm install --no-save @node-llama-cpp");
   });
 
   test("materialize CLI writes the success line to stderr, not stdout", () => {
