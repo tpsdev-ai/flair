@@ -10,3 +10,8 @@
   > before the next release can stage it (see `docs/releasing.md`). Until then,
   > `@tpsdev-ai/flair` and `@tpsdev-ai/flair-mcp` tarballs **bundle** it
   > (`bundleDependencies`) so `npm install` of those tarballs does not 404.
+
+  Stdio `inputSchema` omits native-only params FlairClient never forwards
+  (`includeTrust`, `abstain`, `includeArchived`, `includeEmbedding`, `entities`,
+  `includeContext`, `maxEvents`, `includeEventDetail`) so advertised tools match
+  handler behavior.

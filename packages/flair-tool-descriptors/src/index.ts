@@ -131,7 +131,12 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
     "outputShape": "{ results: MemoryRecord[] } — semantic hits scoped to the caller's own + granted memories; each hit carries content, never the raw embedding.",
     "annotations": {
       "readOnlyHint": true
-    }
+    },
+    "stdioOmitProperties": [
+      "includeTrust",
+      "abstain",
+      "includeArchived"
+    ]
   },
   {
     "name": "memory_store",
@@ -378,7 +383,11 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
     "outputShape": "The full memory record { id, agentId, content, durability, createdAt, ... } for the caller's own id — embedding + embeddingModel stripped by default.",
     "annotations": {
       "readOnlyHint": true
-    }
+    },
+    "stdioOmitProperties": [
+      "includeTrust",
+      "includeEmbedding"
+    ]
   },
   {
     "name": "memory_delete",
@@ -505,7 +514,15 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
     "outputShape": "Session context: { agentId, soul, memories, predicted, teammateFindings, events, sections, tokenEstimate, memoriesIncluded, ..., context, flairVersion }. Structured containers are canonical and always present; prose `context` is a pointer at the /mcp default (includeContext opt-in).",
     "annotations": {
       "readOnlyHint": true
-    }
+    },
+    "stdioOmitProperties": [
+      "entities",
+      "includeTrust",
+      "abstain",
+      "includeContext",
+      "maxEvents",
+      "includeEventDetail"
+    ]
   },
   {
     "name": "soul_set",

@@ -66,6 +66,28 @@ describe("tool descriptors — transport-agnostic source (flair#1580)", () => {
     expect((stdio.inputSchema as { properties: object }).properties).not.toHaveProperty("includeEmbedding");
   });
 
+  test("stdio omits native-only params FlairClient never forwards", () => {
+    const cases: Array<{ name: string; omitted: readonly string[] }> = [
+      { name: "memory_search", omitted: ["includeTrust", "abstain", "includeArchived"] },
+      { name: "memory_get", omitted: ["includeTrust", "includeEmbedding"] },
+      { name: "skill_get", omitted: ["includeEmbedding"] },
+      {
+        name: "bootstrap",
+        omitted: ["entities", "includeTrust", "abstain", "includeContext", "maxEvents", "includeEventDetail"],
+      },
+    ];
+    for (const { name, omitted } of cases) {
+      const d = STDIO_TOOL_DESCRIPTORS.find((t) => t.name === name);
+      expect(d, name).toBeDefined();
+      const stdioProps = (toStdioMcpToolDef(d!).inputSchema as { properties: object }).properties;
+      const nativeProps = (toMcpToolDef(d!).inputSchema as { properties: object }).properties;
+      for (const key of omitted) {
+        expect(nativeProps, `${name} native keeps ${key}`).toHaveProperty(key);
+        expect(stdioProps, `${name} stdio drops ${key}`).not.toHaveProperty(key);
+      }
+    }
+  });
+
   test("stdio memory_update keeps usedMemoryIds; native does not advertise it", () => {
     const d = STDIO_TOOL_DESCRIPTORS.find((t) => t.name === "memory_update");
     expect(d).toBeDefined();
