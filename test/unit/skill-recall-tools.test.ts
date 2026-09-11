@@ -138,10 +138,25 @@ describe("skill_get — read + skill guard", () => {
     expect("embeddingModel" in res).toBe(false);
   });
 
-  test("includeEmbedding:true returns the raw vector", async () => {
-    getResult = { id: "sk-1", agentId: "a", content: "c", tags: ["skill"], createdAt: "t", embedding: [0.1, 0.2] };
+  test("skill_get never returns embedding even if includeEmbedding is passed (flair#1593)", async () => {
+    getResult = {
+      id: "sk-1",
+      agentId: "a",
+      content: "c",
+      tags: ["skill"],
+      createdAt: "t",
+      embedding: [0.1, 0.2],
+      embeddingModel: "test-model",
+    };
     const res = await TOOLS.skill_get.impl(AGENT, { id: "sk-1", includeEmbedding: true });
-    expect(Array.isArray(res.embedding)).toBe(true);
+    expect(res.content).toBe("c");
+    expect("embedding" in res).toBe(false);
+    expect("embeddingModel" in res).toBe(false);
+  });
+
+  test("skill_get does not advertise includeEmbedding (flair#1593)", () => {
+    const props = (TOOLS.skill_get.def.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+    expect(props).not.toHaveProperty("includeEmbedding");
   });
 
   test("a readable NON-skill row is reported not found (skill_get returns only skills)", async () => {
