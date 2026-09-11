@@ -25,6 +25,9 @@ import { hybridEnabled } from "./bm25.js";
 import { buildTrustBlock } from "./trust-block.js";
 import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
 import { estimateTokens } from "./token-estimate.js";
+import { initialPosition, ORG_EVENT_STREAM } from "./agent-read-position-lib.js";
+import { defaultReadPositionTable, ensureReadPosition } from "./agent-read-position.js";
+import { catchupSeekTimestamp, isCatchupEligible } from "./org-event-catchup-lib.js";
 
 /**
  * POST /MemoryBootstrap
@@ -199,11 +202,11 @@ function buildTrustEntry(m: any, section: string): Record<string, unknown> {
   return { id: m.id, section, ...block, ...(matchQualityNote ? { matchQualityNote } : {}) };
 }
 
-// flair#1199/#1206 — the default cap on how many org events bootstrap ships.
-// Overridable per-request via `maxEvents`. Event slots are scarce AND (as of
-// #1199) token-charged, so this bounds both the count and the spend; the shared
-// tokenBudget is the harder ceiling (an event that doesn't fit is skipped even
-// under the cap).
+// flair#1199/#1206 — the default DISPLAY cap on how many org events bootstrap
+// ships. Overridable per-request via `maxEvents`. This is no longer a silent
+// drop (flair#931): leftover events set eventsHasMore / eventsRemaining so the
+// caller pages /OrgEventCatchup. Event slots are scarce AND (as of #1199)
+// token-charged; the shared tokenBudget is the harder ceiling.
 const MAX_ORG_EVENTS = 10;
 
 // ─── Bootstrap scale fix (flair-bootstrap-scale-fix) tunables ───────────────
@@ -475,6 +478,12 @@ export class BootstrapMemories extends Resource {
     // skipped events — never a gap derived from some larger tally, which
     // could imply the existence of rows the caller was not allowed to see.
     let eventsBudgetTruncated = 0;
+    // flair#931 — watermark path. Always present on the response so a
+    // display cap (maxEvents / budget) is never a silent drop: the agent
+    // pages /OrgEventCatchup until drained, then acks.
+    let eventWatermark: string | null = null;
+    let eventsHasMore = false;
+    let eventsRemaining = 0;
     const leanMemory = (m: any, section: string) => ({
       id: m.id,
       content: m.content,
@@ -1324,27 +1333,34 @@ export class BootstrapMemories extends Resource {
       // unavailable must not break bootstrap's core memory context.
     }
 
-    // --- 5. Recent OrgEvents for this agent ---
+    // --- 5. OrgEvents for this agent (per-agent watermark, flair#931) ---
     try {
-      const eventSince = data?.lastBootAt
-        ? new Date(data.lastBootAt)
-        : new Date(Date.now() - 24 * 3600_000);
-      const eventSinceStr = eventSince.toISOString();
+      // Optional lastBootAt remains a createdAt floor (legacy / probe), never
+      // the primary cursor. Default path is the durable watermark: "now" on
+      // first seen (or FLAIR_CATCHUP_BACKFILL_MS), then position > watermark.
+      // The old 24h window + silent slice(0, 10) is retired as the primary path.
+      const sinceFloor = data?.lastBootAt ? new Date(data.lastBootAt).toISOString() : null;
+      eventWatermark = await ensureReadPosition(
+        defaultReadPositionTable(),
+        agentId,
+        ORG_EVENT_STREAM,
+        initialPosition(),
+        ctx,
+      );
+      const seekTs = catchupSeekTimestamp(eventWatermark, sinceFloor);
       const eventResults: any[] = [];
 
-      // Seek the indexed lookback window before materializing events. Keep detail
+      // Seek the indexed floor before materializing events. Keep detail
       // for no-op suppression/dedup even when the response omits it. No limit here:
-      // expiry, targeting, dedup and budget admission must run before the cap.
+      // expiry, targeting, dedup and budget admission must run before the display cap.
       const recentEvents = withDetachedTxn(ctx, () => (databases as any).flair.OrgEvent.search({
-        conditions: [{ attribute: "createdAt", comparator: "greater_than_equal", value: eventSinceStr }],
+        ...(seekTs
+          ? { conditions: [{ attribute: "createdAt", comparator: "greater_than_equal", value: seekTs }] }
+          : {}),
         select: ["id", "kind", "summary", "detail", "targetIds", "createdAt", "expiresAt", "scope"],
       }));
       for await (const event of recentEvents as AsyncIterable<any>) {
-        if (!event.createdAt || event.createdAt < eventSinceStr) continue;
-        if (event.expiresAt && new Date(event.expiresAt) < new Date()) continue;
-        const targets = event.targetIds;
-        const isRelevant = !targets || targets.length === 0 || targets.includes(agentId);
-        if (!isRelevant) continue;
+        if (!isCatchupEligible(event, { participantId: agentId, after: eventWatermark, since: sinceFloor })) continue;
         // flair#1200 — suppress zero-row no-op auto-heal migration events at
         // render. On a healthy store every boot emits a "migration graph-heal
         // success (0 rows processed)" ledger event beside an "HNSW graph-heal:
@@ -1393,7 +1409,10 @@ export class BootstrapMemories extends Resource {
       const dedupedEvents = [...eventBySignature.values()]
         .sort((a: any, b: any) => (b.createdAt || "").localeCompare(a.createdAt || ""));
       for (const evt of dedupedEvents) {
-        if (sections.events.length >= eventCap) break;
+        if (sections.events.length >= eventCap) {
+          eventsRemaining++;
+          continue;
+        }
         // The structured object a connector actually reads (flair#1206). Lean by
         // default; `detail` (the verbose migration-internals/summary-restating
         // JSON) only when explicitly requested. Optional fields are omitted when
@@ -1414,7 +1433,7 @@ export class BootstrapMemories extends Resource {
         // flair#1298 — an event that reached admission but does not fit the
         // remaining budget is TRUNCATED, not irrelevant; count it so eventsHint
         // can say so instead of claiming "empty by design" (#1182 contract).
-        if (cost > tokenBudget) { eventsBudgetTruncated++; continue; }
+        if (cost > tokenBudget) { eventsBudgetTruncated++; eventsRemaining++; continue; }
         const elapsed = Date.now() - new Date(evt.createdAt).getTime();
         const mins = Math.floor(elapsed / 60_000);
         const relTime = mins < 60 ? `${mins}min ago` : `${Math.floor(mins / 60)}h ago`;
@@ -1424,8 +1443,9 @@ export class BootstrapMemories extends Resource {
         includedEvents.push(structured);
         tokenBudget -= cost;
       }
+      eventsHasMore = eventsRemaining > 0;
     } catch {
-      // non-fatal: OrgEvent table may not exist yet
+      // non-fatal: OrgEvent / AgentReadPosition table may not exist yet
     }
 
     // flair#1207 — derive the own-memory counters from the unique-id sets so the
@@ -1649,8 +1669,9 @@ export class BootstrapMemories extends Resource {
     const eventsHint = includedEvents.length === 0
       ? (eventsBudgetTruncated > 0
           ? `No org events fit the token budget: ${eventsBudgetTruncated} relevant event(s) cleared the `
-            + "lookback window but were budget-truncated. Raise maxTokens to include them."
-          : "No org events in the lookback window were relevant to you (org-wide, or targeted at you) "
+            + "watermark (or optional lastBootAt floor) but were budget-truncated. Raise maxTokens "
+            + "or GET /OrgEventCatchup to page the rest."
+          : "No org events after your watermark were relevant to you (org-wide, or targeted at you) "
             + "after zero-row no-op auto-heal filtering. This container is present-but-empty by design, not dropped.")
       : undefined;
 
@@ -1693,6 +1714,9 @@ export class BootstrapMemories extends Resource {
       // delivered. Deduped (#1200) and targetIds-scoped (same set as the prose
       // "## Recent Org Events" lines), so count/charge/delivery all agree.
       events: includedEvents,
+      eventWatermark,
+      eventsHasMore,
+      eventsRemaining,
       ...(currentTaskHint ? { currentTaskHint } : {}),
       ...(predictedHint ? { predictedHint } : {}),
       // flair#1182 (0.44.11) — empty-container hints, present only when the

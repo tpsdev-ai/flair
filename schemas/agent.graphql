@@ -76,3 +76,18 @@ type Integration @table(database: "flair") @export {
   createdAt: String!
   updatedAt: String
 }
+
+# Per-agent read-position (watermark) — durable catch-up cursor (flair#931).
+# A monotonic position per (agent, stream), not a wall-clock `since`. Reused
+# by OrgEventCatchup today and the light-comms board later (#1583); the stream
+# name is the only table-specific part. Not @export: agents use
+# /AgentReadPosition and /OrgEventCatchup, never raw-table REST. Owner-scoped
+# (each agent reads/advances only its own). Advance-on-ack, never silently
+# truncated. See resources/agent-read-position-lib.ts.
+type AgentReadPosition @table(database: "flair") {
+  id: ID @primaryKey          # `${agentId}:${stream}`
+  agentId: String! @indexed
+  stream: String! @indexed    # e.g. "org-event"
+  position: String!           # opaque total-order watermark; lexicographic compare
+  updatedAt: String!
+}

@@ -392,6 +392,7 @@ describe("shared record-ownership guard", () => {
       ...OWNER_FLIP_EXEMPT,
       "MemoryUsage", // append-only ledger — covered by its own stricter tests
       "Message",     // no non-admin direct writes — covered by unit tests
+      "AgentReadPosition", // not @export; GET/POST ack only — owner-scoped in the custom Resource
     ]);
     const required = Object.keys(OWNER_FIELDS)
       .filter((t) => existsSync(join(RES, `${t}.ts`))) // has a resource class → REST-reachable

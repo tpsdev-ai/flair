@@ -83,6 +83,7 @@ const databasesMock = {
     IdJagReplay: GenericTable,
     Credential: GenericTable,
     OAuthToken: GenericTable,
+    AgentReadPosition: GenericTable,
   },
 };
 
@@ -173,7 +174,7 @@ describe("OrgEventCatchup.get() — cross-agent isolation (fail-open cross-agent
     const oe = makeInstance<any>(OrgEventCatchup, agentCtx("agent-alpha"));
     const res = await oe.get(pathFor("agent-alpha"));
     expect(res).not.toBeInstanceOf(Response);
-    expect(Array.isArray(res)).toBe(true);
+    expect(Array.isArray((res as any).events)).toBe(true);
   });
 
   it("NECESSITY: agent requesting ANOTHER agent's id → 403 (MUST fail on unpatched main)", async () => {
@@ -187,14 +188,14 @@ describe("OrgEventCatchup.get() — cross-agent isolation (fail-open cross-agent
     const oe = makeInstance<any>(OrgEventCatchup, agentCtx("admin-1", true));
     const res = await oe.get(pathFor("agent-victim"));
     expect(res).not.toBeInstanceOf(Response);
-    expect(Array.isArray(res)).toBe(true);
+    expect(Array.isArray((res as any).events)).toBe(true);
   });
 
   it("internal call (no request context) → allowed", async () => {
     const oe = makeInstance<any>(OrgEventCatchup, undefined);
     const res = await oe.get(pathFor("agent-victim"));
     expect(res).not.toBeInstanceOf(Response);
-    expect(Array.isArray(res)).toBe(true);
+    expect(Array.isArray((res as any).events)).toBe(true);
   });
 
   it("anonymous → 403", async () => {

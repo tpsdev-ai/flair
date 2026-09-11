@@ -71,6 +71,8 @@ function matchesCondition(record: any, cond: any): boolean {
 let memoryStore: Map<string, any>;
 let memoryGrants: any[];
 let soulStore: Map<string, any> = new Map();
+let orgEventStore: any[] = [];
+const readPositionStore = new Map<string, any>();
 
 function memorySearchGen(query: any) {
   const conditions = Array.isArray(query) ? query : Array.isArray(query?.conditions) ? query.conditions : [];
@@ -122,7 +124,25 @@ const databasesMock = {
     },
     Agent: { search: () => emptyGen(), get: async () => null },
     Relationship: { search: () => emptyGen() },
-    OrgEvent: { search: () => emptyGen() },
+    OrgEvent: {
+      search: (query?: any) => {
+        const cond = query?.conditions?.find((c: any) => c.attribute === "createdAt");
+        async function* gen() {
+          for (const r of orgEventStore) {
+            if (cond?.comparator === "greater_than_equal" && r.createdAt < cond.value) continue;
+            yield r;
+          }
+        }
+        return gen();
+      },
+    },
+    AgentReadPosition: {
+      get: async (id: string) => readPositionStore.get(id) ?? null,
+      put: async (row: any) => {
+        readPositionStore.set(row.id, { ...row });
+        return row;
+      },
+    },
   },
 };
 
@@ -143,6 +163,8 @@ function reset() {
   memoryStore = new Map();
   memoryGrants = [];
   soulStore = new Map();
+  orgEventStore = [];
+  readPositionStore.clear();
   embedInputTypeCalls = [];
   taskEmbedding = undefined;
 }
@@ -741,5 +763,86 @@ describe("small task budgets (#1431)", () => {
     expect(large.memories).toHaveLength(0);
     expect(large.memoriesTruncated).toBe(1);
     expect(large.taskRetrievalHint).toContain("did not fit");
+  });
+});
+
+describe("MemoryBootstrap.post() — org-event watermark path (flair#931)", () => {
+  const nowIso = () => new Date().toISOString();
+  const hoursAgo = (h: number) => new Date(Date.now() - h * 3600_000).toISOString();
+
+  it("uses the watermark (not a silent cap of 10): leftover events set eventsHasMore", async () => {
+    reset();
+    for (let i = 0; i < 15; i++) {
+      orgEventStore.push({
+        id: `evt-${String(i).padStart(2, "0")}`,
+        authorId: "writer",
+        kind: "a2a.message",
+        summary: `handoff ${i}`,
+        createdAt: hoursAgo(15 - i),
+        targetIds: ["boot-agent"],
+      });
+    }
+    const b = makeBootstrap(agentCtx("boot-agent"));
+    const res: any = await b.post({ agentId: "boot-agent", includeSoul: false, includeContext: false });
+    expect(res.eventWatermark).toBeTruthy();
+    expect(res.events.length).toBe(10);
+    expect(res.eventsHasMore).toBe(true);
+    expect(res.eventsRemaining).toBe(5);
+    expect(readPositionStore.has("boot-agent:org-event")).toBe(true);
+  });
+
+  it("event older than the retired 24h window but newer than watermark is returned", async () => {
+    reset();
+    const { recordPosition } = await import("../../resources/agent-read-position-lib.ts");
+    const watermarkAt = hoursAgo(72);
+    readPositionStore.set("boot-agent:org-event", {
+      id: "boot-agent:org-event",
+      agentId: "boot-agent",
+      stream: "org-event",
+      position: recordPosition({ createdAt: watermarkAt, id: "wm" }),
+      updatedAt: nowIso(),
+    });
+    orgEventStore.push({
+      id: "old-handoff",
+      authorId: "writer",
+      kind: "a2a.message",
+      summary: "pick this up",
+      createdAt: hoursAgo(36),
+      targetIds: ["boot-agent"],
+    });
+    const b = makeBootstrap(agentCtx("boot-agent"));
+    const res: any = await b.post({ agentId: "boot-agent", includeSoul: false, includeContext: false });
+    expect(res.events.map((e: any) => e.id)).toContain("old-handoff");
+    expect(res.eventsHasMore).toBe(false);
+  });
+
+  it("optional lastBootAt still floors the indexed seek (legacy / probe)", async () => {
+    reset();
+    orgEventStore.push({
+      id: "before-boot",
+      authorId: "writer",
+      kind: "status",
+      summary: "too old",
+      createdAt: "2020-01-01T00:00:00.000Z",
+      targetIds: [],
+    });
+    orgEventStore.push({
+      id: "after-boot",
+      authorId: "writer",
+      kind: "status",
+      summary: "in window",
+      createdAt: hoursAgo(1),
+      targetIds: [],
+    });
+    const b = makeBootstrap(agentCtx("boot-agent"));
+    const res: any = await b.post({
+      agentId: "boot-agent",
+      includeSoul: false,
+      includeContext: false,
+      lastBootAt: hoursAgo(2),
+    });
+    const ids = res.events.map((e: any) => e.id);
+    expect(ids).toContain("after-boot");
+    expect(ids).not.toContain("before-boot");
   });
 });

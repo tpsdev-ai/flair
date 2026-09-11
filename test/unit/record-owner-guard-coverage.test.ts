@@ -160,6 +160,7 @@ describe("every owner-scoped table is covered by the shared guard", () => {
     MemoryUsage: "append-only ledger — the owner may not write it at all; covered by its own patch() and the stricter-than-ownership tests below",
     Message: "no non-admin direct writes (resources/Message.ts forbids agent PUT/PATCH/DELETE); owner-field change is unreachable over REST and covered by the isForbiddenOwnerFieldChange unit tests",
     Presence: "the owner column agentId IS the primary key, so the URL binds a row to its owner and the field cannot be re-pointed by a body value (verified empirically)",
+    AgentReadPosition: "table is not @export; custom Resource is GET/POST ack only and owner-scopes in get()/post(); owner-field change is unreachable over REST",
   };
 
   it("every guarded, REST-reachable resource enforces owner-field immutability via the shared helper", () => {
