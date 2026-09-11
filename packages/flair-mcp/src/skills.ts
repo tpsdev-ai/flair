@@ -10,7 +10,8 @@
  *
  * Progressive disclosure matches the native contract: skill_search returns
  * catalog cards (never `content` / embedding); skill_get is the disclosure
- * step for the full procedure.
+ * step for the full procedure. skill_get always strips embedding /
+ * embeddingModel (flair#1579) — there is no includeEmbedding opt-in.
  */
 
 /** The tag that marks a Memory as a skill (resources/skill-write.ts). */
