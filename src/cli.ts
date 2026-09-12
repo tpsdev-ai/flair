@@ -8022,7 +8022,16 @@ federation
 export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number; skipped: number; error?: Error }> {
   const target = resolveTarget(opts);
   const baseUrl = target ? target.replace(/\/$/, "") : undefined;
-  const apiOpts = baseUrl ? { baseUrl } : undefined;
+  // Same allowAdmin listing as federation verify — flag/file admin pass
+  // must reach GET /FederationPeers and /FederationInstance, not just the
+  // ops-API Basic header used later in this function.
+  const apiOpts = (baseUrl || opts.adminPass || opts.adminUser)
+    ? {
+      ...(baseUrl ? { baseUrl } : {}),
+      ...(opts.adminPass ? { explicitAdminPass: opts.adminPass as string } : {}),
+      ...(opts.adminUser ? { adminUser: opts.adminUser as string } : {}),
+    }
+    : undefined;
   let totalMerged = 0;
   let totalSkipped = 0;
   try {
@@ -8655,6 +8664,12 @@ addSharedCredentialOptions(
       peerId: opts.peer,
       baseUrl,
       syncOpts: opts,
+      // GET /FederationPeers is allowAdmin. applyAdminPassFile already
+      // folded --admin-pass-file into opts.adminPass; without this the
+      // injected api only sees { baseUrl } and flag-only creds never
+      // reach the listing (UNVERIFIABLE, check never runs).
+      explicitAdminPass: opts.adminPass,
+      adminUser: opts.adminUser,
     }, {
       api,
       syncOnce: runFederationSyncOnce,

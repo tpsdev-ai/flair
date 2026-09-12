@@ -244,8 +244,16 @@ export function renderFederationVerifyVerdict(verdict: FederationVerifyVerdict):
 
 // ─── Injectable seams ────────────────────────────────────────────────────────
 
+export interface FederationVerifyApiOpts {
+  baseUrl?: string;
+  /** Flag/file admin pass. GET /FederationPeers is allowAdmin — env/file
+   *  fallbacks are not enough when the operator passed --admin-pass. */
+  explicitAdminPass?: string;
+  adminUser?: string;
+}
+
 export interface FederationVerifyApi {
-  (method: string, path: string, body?: unknown, opts?: { baseUrl?: string }): Promise<unknown>;
+  (method: string, path: string, body?: unknown, opts?: FederationVerifyApiOpts): Promise<unknown>;
 }
 
 export interface FederationSyncOnceResult {
@@ -277,6 +285,9 @@ export interface FederationVerifyOptions {
   baseUrl?: string;
   /** Forwarded to runFederationSyncOnce (admin pass, ops port, target, …). */
   syncOpts: Record<string, unknown>;
+  /** Applied to every deps.api() call (Memory write + GET /FederationPeers). */
+  explicitAdminPass?: string;
+  adminUser?: string;
   freshnessMs?: number;
   probeTimeoutMs?: number;
   pollIntervalMs?: number;
@@ -305,6 +316,15 @@ function canaryContainsTag(data: unknown, tag: string): boolean {
   return results.some((r) => (r.content ?? "").includes(tag));
 }
 
+/** Credentials must travel even when there is no --target (local flag-only). */
+export function verifyApiOpts(opts: Pick<FederationVerifyOptions, "baseUrl" | "explicitAdminPass" | "adminUser">): FederationVerifyApiOpts | undefined {
+  const apiOpts: FederationVerifyApiOpts = {};
+  if (opts.baseUrl) apiOpts.baseUrl = opts.baseUrl;
+  if (opts.explicitAdminPass) apiOpts.explicitAdminPass = opts.explicitAdminPass;
+  if (opts.adminUser) apiOpts.adminUser = opts.adminUser;
+  return (apiOpts.baseUrl || apiOpts.explicitAdminPass || apiOpts.adminUser) ? apiOpts : undefined;
+}
+
 export async function runFederationVerify(
   opts: FederationVerifyOptions,
   deps: FederationVerifyDeps,
@@ -315,7 +335,7 @@ export async function runFederationVerify(
   const freshnessMs = opts.freshnessMs ?? defaultFreshnessMs();
   const probeTimeoutMs = opts.probeTimeoutMs ?? 5_000;
   const pollIntervalMs = opts.pollIntervalMs ?? 5_000;
-  const apiOpts = opts.baseUrl ? { baseUrl: opts.baseUrl } : undefined;
+  const apiOpts = verifyApiOpts(opts);
 
   log(`── flair federation verify — ${new Date(clock.now()).toISOString()} ──`);
   log(`Tag: ${opts.tag}, wait window: ${opts.waitSeconds}s`);

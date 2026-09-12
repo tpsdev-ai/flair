@@ -12,6 +12,7 @@ import {
   renderFederationVerifyVerdict,
   runFederationVerify,
   selectPeersToProbe,
+  verifyApiOpts,
   FED_VERIFY_EXIT_OK,
   FED_VERIFY_EXIT_DIVERGED,
   type FederationPeerRecord,
@@ -265,19 +266,27 @@ function makeDeps(overrides: {
   clock?: FederationVerifyClock;
   writes?: unknown[];
   deletes?: string[];
-} = {}): FederationVerifyDeps & { writes: unknown[]; deletes: string[] } {
+  apiCalls?: Array<{ method: string; path: string; opts?: unknown }>;
+} = {}): FederationVerifyDeps & {
+  writes: unknown[];
+  deletes: string[];
+  apiCalls: Array<{ method: string; path: string; opts?: unknown }>;
+} {
   const writes: unknown[] = overrides.writes ?? [];
   const deletes: string[] = overrides.deletes ?? [];
+  const apiCalls: Array<{ method: string; path: string; opts?: unknown }> = overrides.apiCalls ?? [];
   const clock = overrides.clock ?? advancingClock();
   return {
     writes,
     deletes,
+    apiCalls,
     clock,
     log: () => {},
     error: () => {},
     syncOnce: overrides.sync ?? (async () => ({ pushed: 1, skipped: 0 })),
     fetch: (overrides.fetchImpl ?? (async () => jsonRes(200, { results: [] }))) as typeof fetch,
-    api: async (method, path, body) => {
+    api: async (method, path, body, opts) => {
+      apiCalls.push({ method, path, opts });
       if (method === "PUT" && path.startsWith("/Memory/")) {
         if (overrides.writeError) throw overrides.writeError;
         writes.push(body);
@@ -296,6 +305,21 @@ function makeDeps(overrides: {
     },
   };
 }
+
+describe("verifyApiOpts", () => {
+  test("flag-only admin pass travels without --target (local listing is allowAdmin)", () => {
+    expect(verifyApiOpts({ explicitAdminPass: "from-flag" })).toEqual({
+      explicitAdminPass: "from-flag",
+    });
+  });
+
+  test("baseUrl-only still works; empty input is undefined", () => {
+    expect(verifyApiOpts({ baseUrl: "https://hub.example" })).toEqual({
+      baseUrl: "https://hub.example",
+    });
+    expect(verifyApiOpts({})).toBeUndefined();
+  });
+});
 
 describe("runFederationVerify", () => {
   test("canary is standard+shared (legal under #1257, federable, not ephemeral+shared)", async () => {
@@ -433,6 +457,32 @@ describe("runFederationVerify", () => {
     expect(r.verdict.kind).toBe("unverifiable-only");
     expect(r.peers[0]?.status).toBe("unverifiable");
     expect(r.verdict.summary).not.toContain("FAIL");
+  });
+
+  test("--admin-pass reaches GET /FederationPeers (allowAdmin; flag-only must not skip the check)", async () => {
+    const deps = makeDeps({
+      fetchImpl: async () => jsonRes(200, { results: [{ content: "fed-verify-test — ok" }] }),
+    });
+    const r = await runFederationVerify(baseOpts({
+      explicitAdminPass: "from-flag",
+      adminUser: "ops",
+    }), deps);
+    const listed = deps.apiCalls.find((c) => c.method === "GET" && c.path === "/FederationPeers");
+    expect(listed?.opts).toEqual({ explicitAdminPass: "from-flag", adminUser: "ops" });
+    const wrote = deps.apiCalls.find((c) => c.method === "PUT" && c.path.startsWith("/Memory/"));
+    expect(wrote?.opts).toEqual({ explicitAdminPass: "from-flag", adminUser: "ops" });
+    expect(r.exitCode).toBe(FED_VERIFY_EXIT_OK);
+    expect(r.verdict.kind).toBe("ok");
+  });
+
+  test("admin-pass on a reachable missing canary still FAILs (do not hide divergence)", async () => {
+    const deps = makeDeps({
+      fetchImpl: async () => jsonRes(200, { results: [{ content: "unrelated" }] }),
+    });
+    const r = await runFederationVerify(baseOpts({ explicitAdminPass: "from-flag" }), deps);
+    expect(r.exitCode).toBe(FED_VERIFY_EXIT_DIVERGED);
+    expect(r.verdict.kind).toBe("diverged");
+    expect(deps.apiCalls.some((c) => c.method === "GET" && c.path === "/FederationPeers")).toBe(true);
   });
 
   test("healthy sync: canary found → exit 0", async () => {
