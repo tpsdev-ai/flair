@@ -120,6 +120,24 @@ knob. The first sync runs immediately on enable.
 `flair federation watch` is unchanged and still the right tool for an
 interactive "watch it sync while I debug" session.
 
+### Did the canary actually land?
+
+`flair federation verify` writes a tagged memory, **pushes it** (so a
+freshly paired spoke with no sync daemon can still pass), then probes each
+peer. It uses the same couldn't-check-≠-failed split as `flair fleet verify`
+(flair#988 / #823):
+
+| What the probe saw | Verdict | Exit |
+|---|---|---|
+| Canary found | OK | 0 |
+| HTTP 401/403, unreachable, or no endpoint | UNVERIFIABLE (warning) | 0 |
+| Reachable peer answered 200 without the canary after a successful push | FAIL | 1 |
+| Revoked peer | skipped | — |
+
+A 401 is "could not authenticate to that peer," not "sync failed." Do not
+treat unverifiable as a pass that hides a reachable peer on the wrong side
+of the canary.
+
 **Credentials.** The scheduler never writes a password into a unit file. It
 stores the *path* given to `--admin-pass-file` (defaulting to
 `~/.flair/admin-pass` when that exists) and the CLI reads the file at run time,
@@ -197,6 +215,7 @@ Records with `updatedAt` more than 5 minutes in the future are rejected. This pr
 | `flair federation sync disable [--remove-shim]` | Remove the scheduled sync driver |
 | `flair federation sync status` | Show whether the driver is installed and genuinely active |
 | `flair federation watch [--interval <s>]` | Run sync in a foreground loop for an interactive session (default 30s) |
+| `flair federation verify [--wait <s>]` | Write a canary, push it, and check each peer. 401/403 and unreachable are UNVERIFIABLE (warning, exit 0); a reachable peer missing the canary still FAILs (exit 1). Revoked peers are skipped. |
 | `flair federation reachability` | Probe local instance + each paired peer (read-only) |
 | `flair federation token [--ttl <min>]` | Generate a one-time pairing token triple (hub only) |
 

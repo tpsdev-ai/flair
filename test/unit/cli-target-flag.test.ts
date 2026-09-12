@@ -289,6 +289,12 @@ describe("Commander program: --target option", () => {
     expect(hasOption(sync, "--target")).toBe(true);
   });
 
+  test("flair federation verify has --target option", () => {
+    const verify = findSubcommand("federation", "verify");
+    expect(verify).not.toBeNull();
+    expect(hasOption(verify, "--target")).toBe(true);
+  });
+
   test("flair init has --ops-target option", () => {
     const init = findCommand("init");
     expect(hasOption(init, "--ops-target")).toBe(true);
@@ -312,6 +318,11 @@ describe("Commander program: --target option", () => {
   test("flair federation sync has --ops-target option", () => {
     const sync = findSubcommand("federation", "sync");
     expect(hasOption(sync, "--ops-target")).toBe(true);
+  });
+
+  test("flair federation verify has --ops-target option", () => {
+    const verify = findSubcommand("federation", "verify");
+    expect(hasOption(verify, "--ops-target")).toBe(true);
   });
 
   test("flair status has --target option (alias for --url)", () => {

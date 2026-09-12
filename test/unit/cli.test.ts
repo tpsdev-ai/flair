@@ -727,7 +727,7 @@ describe("Commander program structure", () => {
   });
 
   // ── federation subcommands ──
-  test("federation has status, pair, sync, token subcommands", () => {
+  test("federation has status, pair, sync, token, verify subcommands", () => {
     const fedCmd = findCommand(program, ["federation"]);
     expect(fedCmd).not.toBeNull();
     const names = getCommandNames(fedCmd);
@@ -735,6 +735,17 @@ describe("Commander program structure", () => {
     expect(names).toContain("pair");
     expect(names).toContain("sync");
     expect(names).toContain("token");
+    expect(names).toContain("verify");
+  });
+
+  test("federation verify has --wait and shared credential flags", () => {
+    const verify = findCommand(program, ["federation", "verify"]);
+    expect(verify).not.toBeNull();
+    const optionNames = verify.options.map((o: any) => o.long);
+    expect(optionNames).toContain("--wait");
+    expect(optionNames).toContain("--admin-pass");
+    expect(optionNames).toContain("--admin-pass-file");
+    expect(optionNames).toContain("--target");
   });
 
   test("federation pair accepts --token option", () => {

@@ -11,6 +11,7 @@ there, then follow its imports before adding another helper.
 | Daemon state and platform lifecycle | `lib/daemon-liveness.ts`, `lib/launchd-management.ts` |
 | Doctor / upgrade | `lib/doctor-run.ts`, `doctor-client.ts`, `lib/upgrade-migrations.ts`, `lib/upgrade-exec-path.ts`, `lib/upgrade-plain-tree.ts` |
 | Deployment / fleet | `deploy.ts`, `fabric-upgrade.ts`, `fleet-verify.ts` |
+| Federation verify | `federation-verify.ts` (`flair federation verify`; #823 three-state) |
 | REM scheduling and orchestration | `rem/runner.ts`, `rem/scheduler.ts`, `rem/snapshot.ts` |
 
 Extract cohesive command logic into existing owners or a focused module. Root

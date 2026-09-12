@@ -60,6 +60,7 @@ import {
   fleetSweepShouldAbort,
   type FleetSweepResult,
 } from "./fleet-verify.js";
+import { runFederationVerify } from "./federation-verify.js";
 import { markStale, sortOldestVersionFirst, type FleetPresenceRow } from "./fleet-presence.js";
 import { detectClients, renderWiringSummary, wireClaudeCode, wireCodex, wireGemini, wireCursor, wireAntigravity, wirePi, clientConfigPath, codexConfigHasFlairSection, type ClientId } from "./install/clients.js";
 import { flairCliVersion, clearFlairCliVersionCache, mcpServerSpec, unpinnedSpecWarning, FLAIR_MCP_PACKAGE } from "./lib/mcp-spec.js";
@@ -8604,166 +8605,50 @@ federation
   });
 
 // `flair federation verify` — end-to-end roundtrip: write a tagged memory
-// locally, wait for federation push, probe peers for the tag. Productizes
-// flair#695 Cleans up the test memory at the end.
-federation
-  .command("verify")
-  .description("End-to-end check: write a tagged memory locally and verify it shows up on each peer")
-  .option("--peer <id>", "Verify only against this peer ID (default: all hubs + spokes)")
-  .option("--wait <seconds>", "How long to wait for federation push (default 60)", "60")
-  .option("--tag <prefix>", "Memory tag prefix (default: fed-verify)", "fed-verify")
-  .option("--port <port>", "Harper HTTP port")
-  .option("--target <url>", "Remote Flair URL")
-  .action(async (opts) => {
+// locally, push it (bring-up has no daemon yet), probe peers for the tag.
+// Same class as fleet-verify / flair#988: 401/403 and unreachable are
+// UNVERIFIABLE (warning), a reachable missing canary still FAILs (flair#823).
+addSharedCredentialOptions(
+  addSharedIdentityOption(
+    federation
+      .command("verify")
+      .description("End-to-end check: write a tagged memory, push it, and verify it shows up on each peer")
+      .option("--peer <id>", "Verify only against this peer ID (default: all hubs + spokes)")
+      .option("--wait <seconds>", "Post-push probe window in seconds (default 60)", "60")
+      .option("--tag <prefix>", "Memory tag prefix (default: fed-verify)", "fed-verify")
+      .option("--port <port>", "Harper HTTP port")
+      .option("--ops-port <port>", "Harper operations API port")
+      .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
+      .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)"),
+  ),
+).action(async (opts) => {
+    applyAdminPassFile(opts);
     const target = resolveTarget(opts);
     const baseUrl = target ? target.replace(/\/$/, "") : undefined;
-    const waitMs = (Number(opts.wait) || 60) * 1000;
+    const waitSeconds = Number(opts.wait) || 60;
     const tag = `${opts.tag}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-    console.log(`── flair federation verify — ${new Date().toISOString()} ──`);
-    console.log(`Tag: ${tag}, wait window: ${opts.wait}s`);
-
-    // Resolve agent ID for the local write.
-    const agentId = process.env.FLAIR_AGENT_ID;
+    const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
     if (!agentId) {
-      console.error("Error: FLAIR_AGENT_ID not set. Set it or use 'flair agent default <id>'.");
+      console.error("Error: FLAIR_AGENT_ID not set. Set it, pass --agent, or use 'flair agent default <id>'.");
       process.exit(1);
     }
 
-    // 1. Write tagged ephemeral memory locally (mirror `flair memory add`).
-    // The whole post-write block is wrapped in try/finally so cleanup runs on
-    // every exit path (Sherlock review on #314: previous early-exits leaked
-    // the probe memory).
-    const memId = `${agentId}-${Date.now()}-fed-verify`;
-    try {
-      await api("PUT", `/Memory/${encodeURIComponent(memId)}`, {
-        id: memId,
-        agentId,
-        content: `${tag} — federation verify probe written at ${new Date().toISOString()}`,
-        type: "memory",
-        durability: "ephemeral",
-        tags: ["federation-verify", tag],
-        createdAt: new Date().toISOString(),
-      }, baseUrl ? { baseUrl } : undefined);
-      console.log(`1. Wrote local memory: ${memId}`);
-    } catch (e: any) {
-      console.error(`1. Local write FAILED: ${e.message}`);
-      // No memory was written — nothing to clean up. Direct exit is safe.
-      process.exit(1);
-    }
-
-    // From here, memId is committed and MUST be cleaned up regardless of how
-    // we leave this block.
-    let exitCode = 0;
-    try {
-      // 2. List peers to probe.
-      let peers: any[] = [];
-      try {
-        const r = await api("GET", "/FederationPeers", undefined, baseUrl ? { baseUrl } : undefined);
-        peers = r.peers ?? [];
-        if (opts.peer) peers = peers.filter(p => p.id === opts.peer);
-      } catch (e: any) {
-        console.error(`Failed to list peers: ${e.message}`);
-      }
-      if (peers.length === 0) {
-        console.log("(no peers to probe)");
-        // Still falls through to finally for cleanup.
-      } else {
-        console.log(`2. Probing ${peers.length} peer(s) over ${opts.wait}s window…`);
-
-        // 3. Poll each peer until found OR window elapses.
-        const started = Date.now();
-        const found = new Set<string>();
-        const failed = new Set<string>();
-        while (Date.now() - started < waitMs && (found.size + failed.size) < peers.length) {
-          for (const p of peers) {
-            if (found.has(p.id) || failed.has(p.id)) continue;
-            const endpoint = p.endpoint;
-            if (!endpoint) {
-              // Tunnel-paired — no direct endpoint to probe. Mark as skipped.
-              failed.add(p.id);
-              console.log(`   ${p.id}  SKIP (no endpoint — tunnel-paired)`);
-              continue;
-            }
-            // Reject non-http(s) endpoints to keep the probe surface small.
-            // (Sherlock review on #314 — protocol allowlist.)
-            let probeUrl: URL;
-            try {
-              probeUrl = new URL("/SemanticSearch", endpoint);
-            } catch {
-              failed.add(p.id);
-              console.log(`   ${p.id}  FAIL (invalid endpoint URL: ${endpoint})`);
-              continue;
-            }
-            if (probeUrl.protocol !== "http:" && probeUrl.protocol !== "https:") {
-              failed.add(p.id);
-              console.log(`   ${p.id}  FAIL (unsupported endpoint protocol: ${probeUrl.protocol})`);
-              continue;
-            }
-            try {
-              const res = await fetch(probeUrl, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ q: tag, limit: 5 }),
-                signal: AbortSignal.timeout(5000),
-              });
-              if (res.status === 401) {
-                // Auth-gated — can't verify without admin creds for the peer.
-                // Fail the probe with diagnostic.
-                failed.add(p.id);
-                console.log(`   ${p.id}  FAIL (HTTP 401 — peer auth-gated; needs cross-instance admin auth)`);
-                continue;
-              }
-              if (!res.ok) {
-                failed.add(p.id);
-                console.log(`   ${p.id}  FAIL (HTTP ${res.status})`);
-                continue;
-              }
-              const data = await res.json().catch(() => ({}));
-              const results = (data as any).results ?? [];
-              if (results.some((r: any) => (r.content ?? "").includes(tag))) {
-                const elapsed = Math.floor((Date.now() - started) / 1000);
-                console.log(`   ${p.id}  OK (memory found after ${elapsed}s)`);
-                found.add(p.id);
-              }
-            } catch {
-              // Don't mark failed yet — peer might just be slow. Retry next iteration.
-            }
-          }
-          await new Promise(res => setTimeout(res, 5000));
-        }
-
-        // Anything still pending is a timeout failure.
-        for (const p of peers) {
-          if (!found.has(p.id) && !failed.has(p.id)) {
-            failed.add(p.id);
-            console.log(`   ${p.id}  FAIL (timeout — memory did not propagate within ${opts.wait}s)`);
-          }
-        }
-
-        // 5. Summary + diagnostics on failure.
-        if (failed.size > 0) {
-          console.log(`── FAIL: ${failed.size}/${peers.length} peer(s) did not see the memory ──`);
-          console.log(`Diagnostics to run next:`);
-          console.log(`  flair federation status     # confirm peers are paired + lastSyncAt is recent`);
-          console.log(`  flair federation reachability  # confirm peers are HTTP-reachable`);
-          console.log(`  launchctl list | grep fed-sync  # confirm federation-sync daemon is running (macOS)`);
-          console.log(`  curl <peer-endpoint>/Health  # raw probe`);
-          exitCode = 1;
-        } else {
-          console.log(`── PASS: memory propagated to all ${peers.length} peer(s) ──`);
-        }
-      }
-    } finally {
-      // 4. Cleanup: delete the local probe memory. Runs on EVERY exit path.
-      try {
-        await api("DELETE", `/Memory/${encodeURIComponent(memId)}`, undefined, baseUrl ? { baseUrl } : undefined);
-        console.log(`4. Cleanup: deleted local memory ${memId}`);
-      } catch {
-        console.log(`4. Cleanup: could NOT delete local memory ${memId} (manual cleanup needed)`);
-      }
-    }
-    if (exitCode !== 0) process.exit(exitCode);
+    const result = await runFederationVerify({
+      agentId,
+      waitMs: waitSeconds * 1000,
+      waitSeconds,
+      tag,
+      peerId: opts.peer,
+      baseUrl,
+      syncOpts: opts,
+    }, {
+      api,
+      syncOnce: runFederationSyncOnce,
+      fetch,
+      log: (msg) => console.log(msg),
+      error: (msg) => console.error(msg),
+    });
+    if (result.exitCode !== 0) process.exit(result.exitCode);
   });
 
 // ─── flair rem ───────────────────────────────────────────────────────────────
