@@ -24,7 +24,7 @@ COPY src/ ./src/
 COPY resources/ ./resources/
 COPY schemas/ ./schemas/
 COPY packages/ ./packages/
-COPY scripts/write-build-info.mjs scripts/materialize-bundled-descriptors.mjs ./scripts/
+COPY scripts/write-build-info.mjs scripts/materialize-bundled-descriptors.mjs scripts/materialize-patched-harper.mjs scripts/alasql-rn-peer.mjs ./scripts/
 
 # Install dependencies
 RUN bun install --frozen-lockfile

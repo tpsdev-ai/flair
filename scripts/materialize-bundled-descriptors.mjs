@@ -42,6 +42,8 @@ export const BUNDLED_REL = "packages/flair-tool-descriptors";
 /** Extra paths a files[]-only pack stage must copy so prepack can run. */
 export const PACK_STAGE_EXTRAS = [
   "scripts/materialize-bundled-descriptors.mjs",
+  "scripts/materialize-patched-harper.mjs",
+  "scripts/alasql-rn-peer.mjs",
   BUNDLED_REL,
 ];
 
