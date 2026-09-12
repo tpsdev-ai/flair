@@ -22,9 +22,23 @@ import { join } from "node:path";
 
 const REPO = join(import.meta.dir, "..", "..");
 
+type NpmManifest = {
+  optionalDependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+  peerDependenciesMeta?: Record<string, { optional?: boolean }>;
+  scripts?: Record<string, string>;
+  dependencies?: Record<string, string>;
+  files?: string[];
+  name?: string;
+  version?: string;
+  description?: string;
+  publishConfig?: { access?: string };
+  bundleDependencies?: string[];
+};
+
 describe("promoteReactNativeFsToOptionalPeer", () => {
   test("moves react-native-fs from optionalDependencies to an optional peer", () => {
-    const manifest = {
+    const manifest: NpmManifest = {
       optionalDependencies: { "react-native-fs": "^2.20.0", other: "1.0.0" },
     };
     expect(promoteReactNativeFsToOptionalPeer(manifest)).toBe(true);
@@ -34,13 +48,13 @@ describe("promoteReactNativeFsToOptionalPeer", () => {
   });
 
   test("drops optionalDependencies when react-native-fs was the only entry", () => {
-    const manifest = { optionalDependencies: { "react-native-fs": "^2.20.0" } };
+    const manifest: NpmManifest = { optionalDependencies: { "react-native-fs": "^2.20.0" } };
     expect(promoteReactNativeFsToOptionalPeer(manifest)).toBe(true);
     expect(manifest.optionalDependencies).toBeUndefined();
   });
 
   test("is a no-op when the field is already an optional peer", () => {
-    const manifest = {
+    const manifest: NpmManifest = {
       peerDependencies: { "react-native-fs": "^2.20.0" },
       peerDependenciesMeta: { "react-native-fs": { optional: true } },
     };
@@ -51,7 +65,7 @@ describe("promoteReactNativeFsToOptionalPeer", () => {
 
 describe("promoteReactNativeFsInLockfile", () => {
   test("patches every package entry that still auto-installs react-native-fs", () => {
-    const lock = {
+    const lock: { packages: Record<string, NpmManifest & { version?: string }> } = {
       packages: {
         "node_modules/alasql": { optionalDependencies: { "react-native-fs": "^2.20.0" } },
         "node_modules/left-pad": { version: "1.0.0" },
@@ -65,7 +79,7 @@ describe("promoteReactNativeFsInLockfile", () => {
 
 describe("stripPackLifecycleScripts", () => {
   test("removes husky-bearing pack scripts so a registry tarball can be re-packed", () => {
-    const manifest = { scripts: { prepack: "husky", test: "true" } };
+    const manifest: NpmManifest = { scripts: { prepack: "husky", test: "true" } };
     expect(stripPackLifecycleScripts(manifest)).toBe(true);
     expect(manifest.scripts).toEqual({ test: "true" });
   });
@@ -83,11 +97,11 @@ describe("the git manifest stays a registry pin", () => {
     expect(registryHarperSpec("5.2.8")).toBe("5.2.8");
     expect(registryHarperSpec("npm:@tpsdev-ai/harper@5.2.8")).toBe("5.2.8");
     expect(npmAliasHarperSpec("5.2.8")).toBe(`npm:${PATCHED_HARPER_NAME}@5.2.8`);
-    const rewritten = rewriteHarperDepForPublish(pkg, "5.2.8");
-    expect(rewritten.dependencies.harper).toBe("npm:@tpsdev-ai/harper@5.2.8");
+    const rewritten = rewriteHarperDepForPublish(pkg, "5.2.8") as NpmManifest;
+    expect(rewritten.dependencies?.harper).toBe("npm:@tpsdev-ai/harper@5.2.8");
     expect(rewritten.files || pkg.files).not.toContain("vendor/");
-    const restored = restoreHarperDep(rewritten, "5.2.8");
-    expect(restored.dependencies.harper).toBe("5.2.8");
+    const restored = restoreHarperDep(rewritten, "5.2.8") as NpmManifest;
+    expect(restored.dependencies?.harper).toBe("5.2.8");
   });
 
   test("does not add harper to bundleDependencies (that drops RocksDB)", () => {
@@ -95,10 +109,14 @@ describe("the git manifest stays a registry pin", () => {
   });
 
   test("the reprint is a scoped Harper, not a nested file: tarball", () => {
-    const stamped = stampPatchedHarperManifest({ name: "harper", version: "5.2.8", description: "upstream" });
+    const stamped = stampPatchedHarperManifest({
+      name: "harper",
+      version: "5.2.8",
+      description: "upstream",
+    }) as NpmManifest;
     expect(stamped.name).toBe(PATCHED_HARPER_NAME);
     expect(stamped.version).toBe("5.2.8");
-    expect(stamped.publishConfig.access).toBe("public");
+    expect(stamped.publishConfig?.access).toBe("public");
     expect(pkg.dependencies.harper).not.toMatch(/vendor|file:|npm:/);
   });
 });
