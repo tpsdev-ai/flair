@@ -187,7 +187,9 @@ export function noteFederationMergedMemory(
  * AdminInstance.ts/AdminDashboard.ts: this is an admin-view endpoint (peers
  * never call it during pairing — FederationPair.post() reads the Instance
  * table directly server-side to hand a peer our identity; this HTTP GET is
- * CLI tooling only).
+ * CLI tooling only). The spoke pair CLI must not GET this path to fill a
+ * missing pair publicKey (flair#822): allowRead is allowAdmin, and get()
+ * find-or-creates an Instance (that would invent a hub row; #839).
  */
 export class FederationInstance extends Resource {
   async allowRead(): Promise<boolean> {
@@ -424,7 +426,11 @@ export class FederationPair extends Resource {
       }
     }
 
-    // Return our own identity for the peer to record
+    // Return our own identity for the peer to record. Already
+    // `{ id, publicKey, role }` when an Instance row exists (flair#213).
+    // `instance: null` means the hub has no FederationInstance — that is
+    // #839, not a pair-response-shape bug. The spoke must ERROR, never
+    // store publicKey:"" (flair#822).
     let ourInstance: any = null;
     try {
       for await (const i of (databases as any).flair.Instance.search()) {

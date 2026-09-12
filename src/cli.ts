@@ -181,6 +181,7 @@ import {
   type RepairPlan,
 } from "./lib/launchd-repair.js";
 import { stabilizeMqttNetworkKeyOrder } from "./lib/stabilize-mqtt-network.js";
+import { resolveHubPeerIdentity } from "./lib/federation-pair-identity.js";
 import {
   applyUpgradeHookConsent,
   catalogIssueDelta,
@@ -7847,7 +7848,19 @@ federation
       }
 
       const result = await res.json() as any;
-      console.log(`✅ Paired with hub: ${result.instance?.id ?? hubUrl}`);
+
+      // flair#822: fail-closed. Pair already returns instance.{id,publicKey}
+      // when the hub has a FederationInstance row. A missing key means that
+      // row was absent (#839) — ERROR, never store "". Do not GET
+      // /FederationInstance: bootstrap Basic cannot read it (allowAdmin),
+      // and a successful GET find-or-creates a hub Instance. A spoke Peer
+      // write does not provision the hub row.
+      const resolvedHub = resolveHubPeerIdentity(result);
+      if (resolvedHub.ok === false) {
+        console.error(`Error: ${resolvedHub.error}`);
+        process.exit(1);
+      }
+      console.log(`✅ Paired with hub: ${resolvedHub.peer.id}`);
 
       // Record the hub as our local peer. This is REQUIRED, not optional:
       // `flair federation sync` reads the Peer table to find the hub, so
@@ -7872,8 +7885,8 @@ federation
         body: JSON.stringify({
           operation: "upsert", database: "flair", table: "Peer",
           records: [{
-            id: result.instance?.id ?? "hub",
-            publicKey: result.instance?.publicKey ?? "",
+            id: resolvedHub.peer.id,
+            publicKey: resolvedHub.peer.publicKey,
             role: "hub", endpoint: hubUrl, status: "paired",
             pairedAt: new Date().toISOString(),
             createdAt: new Date().toISOString(),
@@ -7891,7 +7904,7 @@ federation
         );
         process.exit(1);
       }
-      console.log(`✅ Recorded hub as local peer: ${result.instance?.id ?? "hub"} → ${hubUrl}`);
+      console.log(`✅ Recorded hub as local peer: ${resolvedHub.peer.id} → ${hubUrl}`);
     } catch (err: any) {
       console.error(`Error: ${err.message}`);
       process.exit(1);
