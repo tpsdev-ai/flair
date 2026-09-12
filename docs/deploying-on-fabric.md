@@ -301,17 +301,16 @@ without this re-flip will appear healthy (`/Health` green) while its MCP tools a
 dark to every connected client. If you rely on MCP, add the re-flip to your upgrade
 runbook.
 
-### Known hazard: unbounded npm cache
+### npm cache on the node
 
-**Open — [flair#886](https://github.com/tpsdev-ai/flair/issues/886).** Every deploy runs a
-server-side `npm install` using the node's default cache. npm never evicts it, so it
-grows until it fills the quota.
+`flair deploy` and `flair upgrade --target` pass Harper an `install_command` that runs
+`npm install --cache <tmp>` and deletes that directory when the install finishes. The
+node's `~/.npm/_cacache` is no longer the install cache, so repeated deploys do not
+accumulate tarballs ([flair#886](https://github.com/tpsdev-ai/flair/issues/886)).
 
-No in-product mitigation: no cache flag, no alternate location, no cleanup. One install
-per deploy bounds the *rate*, not the total. Harper consults `install_command` only when
-`node_modules` is absent and `deploy_component` has no force-reinstall option, so the
-obvious fix isn't available — and clearing the cache needs node access this shape
-doesn't give you.
+Harper still consults `install_command` only when `node_modules` is absent — that is
+exactly when a fresh extract runs the install, which is every deploy (Harper replaces
+the component directory). There is nothing for an operator to clean.
 
 ### Backup and rollback
 

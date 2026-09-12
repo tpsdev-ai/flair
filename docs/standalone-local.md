@@ -57,7 +57,8 @@ flair status        # check everything is working
 flair stop          # stop the service (keeps data)
 flair restart       # restart the service
 flair uninstall     # remove the service (keeps data + keys)
-flair uninstall --purge   # remove everything including data and keys
+flair uninstall --purge   # remove data, keys, secrets, schedulers, and client wiring
+                          # (the npm package is left; `npm uninstall -g @tpsdev-ai/flair`)
 ```
 
 On macOS the service is a launchd plist at `~/Library/LaunchAgents/ai.tpsdev.flair.plist`. On Linux it is a systemd unit at `~/.config/systemd/user/flair.service`. Both auto-start on login/boot and restart on crash.

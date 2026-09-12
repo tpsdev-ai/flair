@@ -217,6 +217,7 @@ Always backup before upgrades.
 ## Uninstall
 
 ```bash
-flair uninstall   # stops server, removes ~/.flair/, removes launchd/systemd service
+flair uninstall           # stop the server and remove the launchd/systemd service; keep data and keys
+flair uninstall --purge   # also remove ~/.flair (data, keys, secrets), schedulers, and client wiring
 npm uninstall -g @tpsdev-ai/flair
 ```

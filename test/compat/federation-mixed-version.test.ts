@@ -511,11 +511,10 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
     // row) on first call — but `POST /FederationPair`'s handler
     // (resources/Federation.ts) looks up the HUB's own Instance row via
     // `databases.flair.Instance.search()` and returns `instance: null` if
-    // none exists yet; it does NOT self-provision on the hub's behalf.
-    // Discovered empirically: pairing B against A (below) returned
-    // `instance: null` the first time, and the CLI's pairing client falls
-    // back to a literal `"hub"` string for the local Peer id when that
-    // happens — silently wrong, not a crash. A real deployment's
+    // none exists yet; it does NOT self-provision on the hub's behalf
+    // (that missing row is flair#839). After flair#822 the spoke CLI
+    // refuses to store `publicKey: ""` when pair omits the key. A real
+    // deployment's
     // `flair init --remote` triggers this provisioning as a side effect;
     // since this harness bypasses `flair init` (to avoid its darwin-only
     // launchd side effect — see the harness-wide note above), replicate the

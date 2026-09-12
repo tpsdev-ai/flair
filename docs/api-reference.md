@@ -164,7 +164,7 @@ Skill-tagged Memory rows embed from `trigger` (the recall signal), not
 | Method | Path | Auth | Notes |
 |--------|------|------|-------|
 | GET | `/FederationInstance` | Admin Basic | Local instance identity (CLI / admin). Peers do not call this during pair. |
-| POST | `/FederationPair` | Pairing token + body-sig | Public at the Harper role gate. Handler validates token, signature, anti-replay. Fabric uses the bootstrap-user triple from `flair federation token`. |
+| POST | `/FederationPair` | Pairing token + body-sig | Public at the Harper role gate. Handler validates token, signature, anti-replay. Response includes `instance {id, publicKey}` when this hub has an Instance row; `instance` is null if it does not (flair#839). The spoke CLI must not store an empty hub key (flair#822). Fabric uses the bootstrap-user triple from `flair federation token`. |
 | POST | `/FederationSync` | Peer body-sig | Public at the role gate. Merge Memory / Soul / Agent / Relationship (and classifier-ready Message). Originator + per-record signature checks. |
 | GET | `/FederationPeers` | Admin Basic | Known peers. |
 | GET / write | `/Instance` | Read: Ed25519. Write: admin | Instance row (`flair_…` id, role hub/spoke). |

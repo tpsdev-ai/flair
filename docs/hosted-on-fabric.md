@@ -241,9 +241,9 @@ Fabric gives you N regional nodes running one component — **not** N Flair inst
 
 `flair status` reports usage for two directories: no free space, no total, no quota. An instance can hit its quota with nothing saying so. The one indirect signal is a migration halting for space.
 
-### Unbounded npm cache
+### npm cache is ephemeral per deploy
 
-Every deploy runs a server-side `npm install` using the node's default cache. npm never evicts it, so it grows until it fills the quota. There is no cache flag, alternate location, or cleanup option. [flair#886](https://github.com/tpsdev-ai/flair/issues/886).
+`flair deploy` / `flair upgrade --target` run the node's `npm install` against a temporary cache and delete it afterwards, so hub quota no longer grows with every install ([flair#886](https://github.com/tpsdev-ai/flair/issues/886)).
 
 ---
 
