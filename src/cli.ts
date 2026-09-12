@@ -44,6 +44,7 @@ import {
   readEnvValue,
 } from "./component-env.js";
 import { fabricUpgrade } from "./fabric-upgrade.js";
+import { describeStampOutstanding, resolveCurrentModelId } from "../resources/migrations/stamp-outstanding.js";
 import { checkVersion, formatVersionNudge, primeVersionCheckCache, probeInstanceVersion, FLAIR_PKG_NAME } from "./version-check.js";
 import {
   readInstalledHarperVersion,
@@ -16569,13 +16570,16 @@ export function computeQualityReport(
       const hashFallback = memories.hashFallback ?? 0;
       const pct = Math.round((hashFallback / memories.total) * 100);
       const modelCounts = (memories.modelCounts ?? {}) as Record<string, number>;
-      const realModels = Object.keys(modelCounts).filter((k) => k !== "hash-512d" && modelCounts[k] > 0);
+      const stamp = describeStampOutstanding({
+        modelCounts,
+        currentModelId: resolveCurrentModelId(modelCounts),
+      });
       if (pct >= QUALITY_HASH_FALLBACK_DEGRADED_PCT) {
         embeddingsStatus = "degraded";
         embeddingsDetail = `${hashFallback}/${memories.total} (${pct}%) memories are hash-fallback`;
-      } else if (realModels.length > 1) {
+      } else if (stamp.outstanding) {
         embeddingsStatus = "degraded";
-        embeddingsDetail = `migration 'embedding-stamp' is outstanding (${realModels.join(", ")}) — cross-model search unreliable and duplicate detection is inactive`;
+        embeddingsDetail = stamp.warning;
       } else {
         embeddingsStatus = "ok";
         embeddingsDetail = `${memories.total - hashFallback}/${memories.total} memories have real embeddings`;

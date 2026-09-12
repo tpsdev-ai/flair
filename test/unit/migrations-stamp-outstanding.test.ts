@@ -7,6 +7,7 @@ import {
   EMBEDDING_STAMP_ID,
   countStampSpaces,
   describeStampOutstanding,
+  resolveCurrentModelId,
   stampMigrationConverged,
 } from "../../resources/migrations/stamp-outstanding.ts";
 
@@ -73,6 +74,19 @@ describe("describeStampOutstanding", () => {
     expect(r.warning).not.toContain("run: flair reembed");
   });
 
+  it("names embedding-stamp on a uniformly pre-flip corpus (one space, not current)", () => {
+    const r = describeStampOutstanding({
+      modelCounts: { "nomic-embed-text-v1.5-Q4_K_M": 554 },
+      currentModelId: CURRENT,
+      cyclePhase: "done",
+      migration: { id: EMBEDDING_STAMP_ID, state: "completed", rowsDone: 0, rowsRemaining: 0 },
+    });
+    expect(r.outstanding).toBe(true);
+    if (!r.outstanding) throw new Error("expected outstanding");
+    expect(r.staleCount).toBe(554);
+    expect(r.warning).toContain(`migration '${EMBEDDING_STAMP_ID}' is outstanding`);
+  });
+
   it("says the boot cycle never fired when cyclePhase is idle", () => {
     const r = describeStampOutstanding({
       modelCounts: { "nomic-embed-text-v1.5-Q4_K_M": 10, "nomic-embed-text-v1.5-Q4_K_M+searchprefix": 1 },
@@ -82,6 +96,26 @@ describe("describeStampOutstanding", () => {
     expect(r.outstanding).toBe(true);
     if (!r.outstanding) throw new Error("expected outstanding");
     expect(r.warning).toContain("boot cycle never fired");
+  });
+});
+
+describe("resolveCurrentModelId", () => {
+  it("prefers an existing +searchprefix stamp so same-space bare/gguf pairing stays current", () => {
+    expect(
+      resolveCurrentModelId({
+        "nomic-embed-text-v1.5-Q4_K_M+searchprefix": 40,
+        "gguf:nomic-embed-text-v1.5-Q4_K_M+searchprefix": 60,
+      }),
+    ).toBe("gguf:nomic-embed-text-v1.5-Q4_K_M+searchprefix");
+  });
+
+  it("treats a uniformly pre-flip corpus as stale against +searchprefix", () => {
+    expect(resolveCurrentModelId({ "nomic-embed-text-v1.5-Q4_K_M": 554 })).toBe(CURRENT);
+    const r = describeStampOutstanding({
+      modelCounts: { "nomic-embed-text-v1.5-Q4_K_M": 554 },
+      currentModelId: resolveCurrentModelId({ "nomic-embed-text-v1.5-Q4_K_M": 554 }),
+    });
+    expect(r.outstanding).toBe(true);
   });
 });
 

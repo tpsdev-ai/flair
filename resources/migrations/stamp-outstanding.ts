@@ -31,6 +31,34 @@ export function normalizeStampForOutstanding(stamp: string | null | undefined): 
   return s.includes(":") ? s : `${DEFAULT_ENGINE}:${s}`;
 }
 
+/**
+ * Current-space id for a client that only has `modelCounts` (no live
+ * `getModelId()`). Prefers an existing `+searchprefix` stamp so a healthy
+ * bare+`gguf:` pair of the SAME space does not invent a foreign current.
+ * A uniformly pre-flip corpus has no suffix — append `+searchprefix` so
+ * those rows read as stale (the HealthDetail / quality-report gap Bugbot
+ * flagged on flair#1606).
+ */
+export function resolveCurrentModelId(modelCounts: Record<string, number>, explicit?: string): string {
+  const trimmed = explicit?.trim();
+  if (trimmed) return trimmed;
+  let prefixed: string | undefined;
+  let anyReal: string | undefined;
+  for (const [stamp, n] of Object.entries(modelCounts)) {
+    if (NON_SPACE_STAMPS.has(stamp) || typeof n !== "number" || n <= 0) continue;
+    anyReal ??= stamp;
+    if (stamp.includes("+searchprefix")) {
+      if (!prefixed || stamp.includes(":")) prefixed = stamp;
+    }
+  }
+  if (prefixed) return prefixed;
+  if (anyReal) {
+    const bare = anyReal.includes(":") ? anyReal.slice(anyReal.indexOf(":") + 1) : anyReal;
+    return `${DEFAULT_ENGINE}:${bare}+searchprefix`;
+  }
+  return `${DEFAULT_ENGINE}:nomic-embed-text-v1.5-Q4_K_M+searchprefix`;
+}
+
 export interface StampMigrationProgress {
   id: string;
   state: string;

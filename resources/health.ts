@@ -165,7 +165,10 @@ export class HealthDetail extends Resource {
     // flair#1073: set while walking memories, consumed after the migrations
     // snapshot so the outstanding-migration warning can name runner state.
     // Never copied onto `stats` — it is not part of the /HealthDetail shape.
+    // `memoryScanOk` is the gate (not "mixed spaces"): a uniformly pre-flip
+    // corpus is one space and still outstanding against getModelId().
     let mixedEmbeddingSpaces = false;
+    let memoryScanOk = false;
     let memoryModelCounts: Record<string, number> = {};
 
     // flair#1326: same search-ready signal as public /Health. HealthDetail
@@ -266,14 +269,11 @@ export class HealthDetail extends Resource {
       const distinctSpaces = new Set(
         realModels.map((k) => normalizeStamp(k)).filter((s): s is string => s !== null),
       );
-      if (distinctSpaces.size > 1) {
-        // flair#1073: name the outstanding migration and the consequences
-        // (search + dedup), not just the mixed-model symptom with a manual
-        // remedy. The actual warning is emitted after the migrations
-        // snapshot is read so it can annotate runner state.
-        mixedEmbeddingSpaces = true;
-        memoryModelCounts = modelCounts;
-      }
+      // Always keep counts — a uniformly stale pre-flip corpus is one space
+      // and must still name embedding-stamp (Bugbot High on flair#1606).
+      memoryScanOk = true;
+      memoryModelCounts = modelCounts;
+      if (distinctSpaces.size > 1) mixedEmbeddingSpaces = true;
     } catch { stats.memories = null; }
 
     // ── Agent stats ──
@@ -621,7 +621,7 @@ export class HealthDetail extends Resource {
             "migration boot cycle never fired on this instance (cyclePhase=idle) — no migration will run until this is resolved; see `flair doctor`",
         });
       }
-      if (mixedEmbeddingSpaces) {
+      if (memoryScanOk) {
         const stamp = snapshot.migrations.find((m) => m.id === EMBEDDING_STAMP_ID);
         const outstanding = describeStampOutstanding({
           modelCounts: memoryModelCounts,
@@ -632,7 +632,7 @@ export class HealthDetail extends Resource {
         });
         if (outstanding.outstanding) {
           warnings.push({ level: "warn", message: outstanding.warning });
-        } else {
+        } else if (mixedEmbeddingSpaces) {
           const list = Object.entries(memoryModelCounts)
             .filter(([k, n]) => k !== "hash-512d" && n > 0)
             .map(([k, n]) => `${k}:${n}`)
@@ -645,17 +645,19 @@ export class HealthDetail extends Resource {
       }
     } catch {
       stats.migrations = null;
-      if (mixedEmbeddingSpaces) {
+      if (memoryScanOk) {
         const outstanding = describeStampOutstanding({
           modelCounts: memoryModelCounts,
           currentModelId: getModelId(),
         });
-        warnings.push({
-          level: "warn",
-          message: outstanding.outstanding
-            ? outstanding.warning
-            : `multiple embedding models in use — cross-model search unreliable; run: flair reembed against one model`,
-        });
+        if (outstanding.outstanding) {
+          warnings.push({ level: "warn", message: outstanding.warning });
+        } else if (mixedEmbeddingSpaces) {
+          warnings.push({
+            level: "warn",
+            message: `multiple embedding models in use — cross-model search unreliable; run: flair reembed against one model`,
+          });
+        }
       }
     }
 
