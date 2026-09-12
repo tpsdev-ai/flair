@@ -261,7 +261,7 @@ function makeDeps(overrides: {
   writeError?: Error;
   deleteError?: Error;
   sync?: FederationVerifyDeps["syncOnce"];
-  fetchImpl?: typeof fetch;
+  fetchImpl?: (url: unknown, init?: unknown) => Promise<Response>;
   clock?: FederationVerifyClock;
   writes?: unknown[];
   deletes?: string[];
@@ -276,7 +276,7 @@ function makeDeps(overrides: {
     log: () => {},
     error: () => {},
     syncOnce: overrides.sync ?? (async () => ({ pushed: 1, skipped: 0 })),
-    fetch: overrides.fetchImpl ?? (async () => jsonRes(200, { results: [] })),
+    fetch: (overrides.fetchImpl ?? (async () => jsonRes(200, { results: [] }))) as typeof fetch,
     api: async (method, path, body) => {
       if (method === "PUT" && path.startsWith("/Memory/")) {
         if (overrides.writeError) throw overrides.writeError;
