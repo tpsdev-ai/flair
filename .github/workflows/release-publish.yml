@@ -195,6 +195,25 @@ jobs:
           (cd packages/flair-mcp && npm run build)
           (cd packages/n8n-nodes-flair && npm run build)
 
+      - name: Stage-publish @tpsdev-ai/harper (first-publish bootstrap)
+        # flair#847 — published Flair pins harper via
+        # npm:@tpsdev-ai/harper@<harper-pin>. That reprint is not a lockstep
+        # workspace package. `npm stage publish` requires the package to
+        # already exist on the registry — same chicken-and-egg as
+        # flair-bench / flair-tool-descriptors. continue-on-error until an
+        # npm org owner bootstraps it (docs/releasing.md). The reprint must
+        # be *live* before a Flair release that uses the alias is approvable,
+        # or `npm i @tpsdev-ai/flair` 404s. Remove continue-on-error after
+        # the first successful stage.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          DEST="$(mktemp -d)"
+          node scripts/materialize-patched-harper.mjs --emit-dir "$DEST"
+          echo "::group::npm stage publish — @tpsdev-ai/harper"
+          ( cd "$DEST" && npm stage publish )
+          echo "::endgroup::"
+
       - name: Stage-publish all packages (dependency order)
         # flair-client first — the other packages depend on it. Staging does not
         # resolve dependencies (that happens at install, post-approval), but we

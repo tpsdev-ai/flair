@@ -34,6 +34,11 @@ describe("bundled flair-tool-descriptors (flair#1580 pack/install)", () => {
     expect(root.bundleDependencies).toEqual([BUNDLED_NAME]);
     expect(mcp.bundleDependencies).toEqual([BUNDLED_NAME]);
     expect(root.scripts.prepack).toBe("node scripts/materialize-bundled-descriptors.mjs");
+    expect(root.scripts.prepack).not.toContain("materialize-patched-harper");
+    expect(root.scripts.prepublishOnly).toContain("node scripts/materialize-patched-harper.mjs --rewrite-alias");
+    expect(root.scripts.postpack).toBe(
+      "test ! -f package.json.prepack-harper || node scripts/materialize-patched-harper.mjs --restore",
+    );
     expect(mcp.scripts.prepack).toBe("node ../../scripts/materialize-bundled-descriptors.mjs");
   });
 
@@ -49,13 +54,27 @@ describe("bundled flair-tool-descriptors (flair#1580 pack/install)", () => {
         text,
         `${name} must COPY materialize-bundled-descriptors.mjs — prepack MODULE_NOT_FOUND otherwise`,
       ).toContain("materialize-bundled-descriptors.mjs");
+      expect(
+        text,
+        `${name} must not COPY materialize-patched-harper.mjs — postpack is a no-op without the prepublish backup`,
+      ).not.toContain("materialize-patched-harper.mjs");
     }
+  });
+
+  test("postpack is a no-op when the prepublish backup is absent (pack-only images)", () => {
+    const root = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8"));
+    const dir = mkdtempSync(join(tmpdir(), "flair-847-postpack-"));
+    fixtures.push(dir);
+    const r = spawnSync("sh", ["-c", root.scripts.postpack], { cwd: dir, encoding: "utf8" });
+    expect(r.status, r.stderr || r.stdout).toBe(0);
+    expect(`${r.stdout}${r.stderr}`).not.toMatch(/Cannot find module|MODULE_NOT_FOUND|materialize-patched-harper/);
   });
 
   test("upgrade-liveness pack stage copies PACK_STAGE_EXTRAS (flair#1580)", () => {
     const text = readFileSync(join(REPO, "test/compat/upgrade-restart-liveness.test.ts"), "utf8");
     expect(text).toContain("PACK_STAGE_EXTRAS");
     expect(PACK_STAGE_EXTRAS).toContain("scripts/materialize-bundled-descriptors.mjs");
+    expect(PACK_STAGE_EXTRAS).not.toContain("scripts/materialize-patched-harper.mjs");
     expect(PACK_STAGE_EXTRAS).toContain(BUNDLED_REL);
   });
 

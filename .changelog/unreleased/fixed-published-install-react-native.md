@@ -1,0 +1,5 @@
+- **Published `npm i @tpsdev-ai/flair` no longer pulls React Native.** The published pin replaces Harper with `@tpsdev-ai/harper`, a reprint that bundles AlaSQL with `react-native-fs` as an optional peer (the only npm form that is not auto-installed). Harper still boots and the platform RocksDB binding still installs (flair#847).
+
+  Repo-root `overrides` only apply when Flair is the install root — this repo and `npm i -g` — so they never reached a clean-directory install. A nested `./vendor/harper-*.tgz` pin works for `npm i ./flair.tgz` and then ENOENT's when the same tarball is installed by package name from a registry. The CI gate publishes the reprint and Flair to a throwaway registry, then runs `npm i @tpsdev-ai/flair` in a clean directory under npm 12 (the resolver that still pulled the 160 MB / 136-package React Native subtree) and requires `node_modules/react-native` to be absent.
+
+  > **Heads-up:** do not install with `--omit=optional` to skip React Native. That flag also drops Harper's RocksDB platform bindings. The next release that ships this pin needs `@tpsdev-ai/harper` live on npm first — see `docs/releasing.md`.

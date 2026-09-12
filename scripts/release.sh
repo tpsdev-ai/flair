@@ -231,6 +231,20 @@ if [[ "$MODE" == "--publish" ]]; then
   echo "  Publishing @tpsdev-ai/flair-mcp..."
   (cd "$ROOT/packages/flair-mcp" && npm publish) || { echo "❌ flair-mcp publish failed"; exit 1; }
 
+  # flair#847 — published Flair pins harper via npm:@tpsdev-ai/harper@<pin>.
+  # That reprint must be on the registry before Flair, or consumers 404.
+  HARPER_PIN="$(node -p "require('$ROOT/package.json').dependencies.harper")"
+  echo "  Publishing @tpsdev-ai/harper@${HARPER_PIN} (reprint; flair#847)..."
+  if npm view "@tpsdev-ai/harper@${HARPER_PIN}" version >/dev/null 2>&1; then
+    echo "  @tpsdev-ai/harper@${HARPER_PIN} already on the registry — skip"
+  else
+    HARPER_DIR="$(mktemp -d)"
+    (cd "$ROOT" && node scripts/materialize-patched-harper.mjs --emit-dir "$HARPER_DIR") \
+      || { echo "❌ @tpsdev-ai/harper emit failed"; exit 1; }
+    (cd "$HARPER_DIR" && npm publish --access public) \
+      || { echo "❌ @tpsdev-ai/harper publish failed (first-publish bootstrap — docs/releasing.md)"; exit 1; }
+  fi
+
   echo "  Publishing @tpsdev-ai/flair..."
   (cd "$ROOT" && npm publish) || { echo "❌ flair publish failed"; exit 1; }
 

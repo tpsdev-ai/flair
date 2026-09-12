@@ -1017,6 +1017,51 @@ jobs:
       - name: Global-install the packed tarball and enforce the installed-tree budget
         run: node scripts/check-install-weight.mjs --tarball "${{ steps.pack.outputs.TGZ_PATH }}"
 
+  published-rn-tree:
+    # flair#847 — the react-native-fs override only applies at the install
+    # root. This repo and `npm i -g` of the tarball both make flair the root,
+    # so they cannot see the user's tree. A nested vendor tarball pin also
+    # passes `npm i ./flair.tgz` and then ENOENT's on
+    # `npm i @tpsdev-ai/flair` from a registry. npm 10 against Harper's
+    # shrinkwrap can also look clean.
+    #
+    # Cos's acceptance is a fresh `npm i @tpsdev-ai/flair` in a clean dir
+    # (not this repo) under npm 12 — the resolver that still pulled React
+    # Native. The gate publishes @tpsdev-ai/harper + @tpsdev-ai/flair to a
+    # throwaway registry, then runs that command.
+    #
+    # BLOCKING. Do not add `continue-on-error`, `|| true` or `|| echo` here,
+    # and do not switch this to `--global`, `--tarball`, or ambient npm 10 —
+    # those are the checks that already passed while users received
+    # react-native. If the check cannot run (npm 12 unavailable, registry or
+    # install failed) the script exits 2 (DID NOT RUN), not 0. Required-check
+    # name: "Published-tree React Native".
+    name: Published-tree React Native
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
+        with:
+          bun-version: "1.3.10"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+      - name: Cache bun install
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-cache-${{ runner.os }}-
+      - run: sfw bun install --frozen-lockfile
+      - run: bun run build && bun run build:cli
+      - name: npm i @tpsdev-ai/flair in a clean dir under npm 12 and forbid React Native
+        run: node scripts/check-published-rn-tree.mjs --from-workspace
+
   upgrade-smoke:
     name: Upgrade from npm-stable
     runs-on: ubuntu-latest

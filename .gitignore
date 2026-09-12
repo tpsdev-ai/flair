@@ -1,4 +1,7 @@
 node_modules/
+# Publish-time Harper reprint backup (flair#847). Not committed.
+package.json.prepack-harper
+vendor/*.tgz
 dist/
 .flair/
 .DS_Store
