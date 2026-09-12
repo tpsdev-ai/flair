@@ -26,6 +26,7 @@ import {
   registryAuthNpmrc,
   resolveNpm12,
   scopedRegistryNpmrc,
+  writeVerdaccioConfig,
 } from "../../scripts/check-published-rn-tree.mjs";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -177,6 +178,15 @@ describe("the process a human or CI step actually consumes", () => {
     expect(scopedRegistryNpmrc("http://127.0.0.1:4873")).toBe("@tpsdev-ai:registry=http://127.0.0.1:4873/\n");
     expect(FLAIR_PACKAGE).toBe("@tpsdev-ai/flair");
     expect(registryAuthNpmrc("http://127.0.0.1:4873")).toContain("//127.0.0.1:4873/:_authToken=");
+  });
+
+  test("the throwaway registry does not proxy @tpsdev-ai to npmjs (that 409s the published 0.53.0)", () => {
+    const dir = scratch("verdaccio-cfg-");
+    const cfg = readFileSync(writeVerdaccioConfig(dir, 4873), "utf8");
+    const scoped = cfg.split("'@tpsdev-ai/*':")[1]?.split("'**':")[0] ?? "";
+    expect(scoped).toMatch(/publish: \$all/);
+    expect(scoped).not.toMatch(/proxy:/);
+    expect(cfg).toContain("max_body_size: 100mb");
   });
 });
 

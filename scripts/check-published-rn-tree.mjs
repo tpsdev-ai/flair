@@ -254,7 +254,6 @@ export function writeVerdaccioConfig(dir, port) {
     "    access: $all",
     "    publish: $all",
     "    unpublish: $all",
-    "    proxy: npmjs",
     "  '**':",
     "    access: $all",
     "    publish: $all",
@@ -345,7 +344,7 @@ export function registryAuthNpmrc(registryUrl) {
 }
 
 export function publishToRegistry(packageDirOrTgz, registryUrl, cwd = process.cwd()) {
-  const userconfig = join(cwd, ".npmrc.flair-847-publish");
+  const userconfig = join(mkdtempSync(join(tmpdir(), "flair-847-npmrc-")), "npmrc");
   writeFileSync(userconfig, registryAuthNpmrc(registryUrl));
   const args = [
     "publish",
