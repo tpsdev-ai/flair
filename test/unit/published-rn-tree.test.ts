@@ -16,12 +16,15 @@ import {
   EXIT_DID_NOT_RUN,
   EXIT_FAIL,
   EXIT_OK,
+  FLAIR_PACKAGE,
   NPM12_SPEC,
   evaluatePublishedTree,
   expectedRocksdbBindingName,
   formatReport,
   npmMajor,
+  parseArgs,
   resolveNpm12,
+  scopedRegistryNpmrc,
 } from "../../scripts/check-published-rn-tree.mjs";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -120,6 +123,15 @@ describe("npm 12 is required so npm 10 cannot false-pass", () => {
   });
 });
 
+describe("parseArgs", () => {
+  test("from-workspace is the registry-shaped gate", () => {
+    const a = parseArgs(["--from-workspace", "--workspace", "/tmp/flair"]);
+    expect(a.fromWorkspace).toBe(true);
+    expect(a.workspace).toBe("/tmp/flair");
+    expect(a.tarball).toBeNull();
+  });
+});
+
 describe("the process a human or CI step actually consumes", () => {
   test("a missing tarball exits 2 (DID NOT RUN), never 0", () => {
     const res = runGate(["--tarball", join(scratch(), "no.tgz"), "--npm", process.execPath]);
@@ -159,6 +171,11 @@ describe("the process a human or CI step actually consumes", () => {
     expect(res.status).toBe(EXIT_DID_NOT_RUN);
     expect(res.out).toMatch(/Usage:/);
   });
+
+  test("scoped .npmrc only remaps @tpsdev-ai, so RocksDB still comes from npmjs", () => {
+    expect(scopedRegistryNpmrc("http://127.0.0.1:4873")).toBe("@tpsdev-ai:registry=http://127.0.0.1:4873/\n");
+    expect(FLAIR_PACKAGE).toBe("@tpsdev-ai/flair");
+  });
 });
 
 describe("the CI job must remain able to fail", () => {
@@ -172,9 +189,12 @@ describe("the CI job must remain able to fail", () => {
     .filter((l) => !/^\s*#/.test(l))
     .join("\n");
 
-  test("invokes the gate script against a packed tarball", () => {
+  test("invokes the gate as Cos's registry command, not a local tarball install", () => {
     expect(directives).toContain("scripts/check-published-rn-tree.mjs");
-    expect(directives).toMatch(/--tarball/);
+    expect(directives).toContain("--from-workspace");
+    expect(directives).not.toMatch(/--tarball/);
+    expect(job).toMatch(/npm i @tpsdev-ai\/flair|install @tpsdev-ai\/flair/);
+    expect(job).toMatch(/clean dir|empty project|not this repo/i);
   });
 
   test("installs as a dependency, not globally, and pins npm 12", () => {
@@ -193,6 +213,28 @@ describe("the CI job must remain able to fail", () => {
   test("is marked blocking, not advisory", () => {
     expect(job).toContain("BLOCKING");
     expect(job).not.toMatch(/PROMOTION CRITERION/);
+  });
+});
+
+describe("release publishes the Harper reprint before Flair", () => {
+  const releaseSh = readFileSync(join(REPO_ROOT, "scripts", "release.sh"), "utf8");
+  const releaseYml = readFileSync(join(REPO_ROOT, ".github", "workflows", "release-publish.yml"), "utf8");
+
+  test("break-glass publishes @tpsdev-ai/harper before @tpsdev-ai/flair", () => {
+    const harperAt = releaseSh.indexOf("Publishing @tpsdev-ai/harper");
+    const flairAt = releaseSh.indexOf('Publishing @tpsdev-ai/flair..."');
+    expect(harperAt).toBeGreaterThan(-1);
+    expect(flairAt).toBeGreaterThan(-1);
+    expect(harperAt).toBeLessThan(flairAt);
+  });
+
+  test("OIDC staging emits the reprint before the flair tarball", () => {
+    expect(releaseYml).toContain("materialize-patched-harper.mjs --emit-dir");
+    const harperAt = releaseYml.indexOf("Stage-publish @tpsdev-ai/harper");
+    const flairLoopAt = releaseYml.indexOf("Stage-publish all packages (dependency order)");
+    expect(harperAt).toBeGreaterThan(-1);
+    expect(flairLoopAt).toBeGreaterThan(-1);
+    expect(harperAt).toBeLessThan(flairLoopAt);
   });
 });
 

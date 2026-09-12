@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * materialize-patched-harper.mjs — flair#847 pack/install.
+ * materialize-patched-harper.mjs — flair#847 pack/publish.
  *
  * Repo-root `overrides` for react-native-fs apply only when this package is
  * the install root. A published `npm i @tpsdev-ai/flair` in a clean project
@@ -11,23 +11,31 @@
  * `bundleDependencies: ["harper"]` is the wrong tool: npm then treats the
  * bundled Harper as a complete tree and does not install RocksDB / fastify.
  * `--omit=optional` is also wrong: it strips `@harperfast/rocksdb-js-*`.
+ * A nested `./vendor/harper-*.tgz` pin works for `npm i ./flair.tgz` and
+ * fails for `npm i @tpsdev-ai/flair` from a registry (ENOENT on the nested
+ * tarball). That is Cos's acceptance command, so it is not a publish pin.
  *
- * What does work for a published consumer: depend on a packed Harper tarball
- * that *itself* bundles a patched alasql (optional peer, not optionalDep).
- * Installed as a normal dependency, Harper's shrinkwrap still expands, the
- * platform RocksDB binding still installs, and react-native does not.
+ * What reaches a registry consumer: replace Harper with a scoped reprint
+ * (`@tpsdev-ai/harper`) that *itself* bundles a patched alasql (optional
+ * peer, not optionalDep). Flair's published pin is
+ * `"harper": "npm:@tpsdev-ai/harper@<ver>"` so oauth's `harper` peer still
+ * hoists to `node_modules/harper`. Installed as a normal dependency,
+ * Harper's shrinkwrap still expands, the platform RocksDB binding still
+ * installs, and react-native does not.
  *
- * This script runs from `prepack`. It writes vendor/harper-<ver>.tgz and
- * rewrites package.json to `./vendor/harper-<ver>.tgz` (no `file:` prefix —
- * CI rejects `file:` in the git manifest). `postpack --restore` puts the
- * registry pin back so the working tree stays clean.
+ * The git manifest stays `harper: <registry version>` so `npm pack` /
+ * pack-smoke / this repo keep resolving upstream Harper. The alias rewrite
+ * is publish-time only (`prepublishOnly --rewrite-alias`). `postpack
+ * --restore` puts the registry pin back. `--emit-dir` writes the reprint
+ * so release / the verdaccio gate can publish it *before* Flair.
  *
  * Success logs go to stderr. `npm pack --silent` captures stdout as the
  * tarball path.
  *
  * Usage:
- *   node scripts/materialize-patched-harper.mjs           # prepack
- *   node scripts/materialize-patched-harper.mjs --restore # postpack
+ *   node scripts/materialize-patched-harper.mjs --rewrite-alias
+ *   node scripts/materialize-patched-harper.mjs --restore
+ *   node scripts/materialize-patched-harper.mjs --emit-dir <dir>
  */
 
 import { spawnSync } from "node:child_process";
@@ -49,40 +57,38 @@ import {
   stripPackLifecycleScripts,
 } from "./alasql-rn-peer.mjs";
 
-export const VENDOR_DIR = "vendor";
-export const HARPER_TGZ_PREFIX = "harper-";
+export const PATCHED_HARPER_NAME = "@tpsdev-ai/harper";
 export const PREPACK_BACKUP = "package.json.prepack-harper";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REACT_NATIVE_FS = "react-native-fs";
+
+export function npmAliasHarperSpec(version) {
+  return `npm:${PATCHED_HARPER_NAME}@${version}`;
+}
 
 export function registryHarperSpec(dep) {
   if (typeof dep !== "string" || !dep) return null;
   if (/^[~^]?[\d.]+[-+\w.]*$/.test(dep)) return dep.replace(/^[~^]/, "");
+  const fromAlias = dep.match(/^npm:@tpsdev-ai\/harper@(.+)$/);
+  if (fromAlias) return fromAlias[1];
   const fromVendor = dep.match(/^\.\/vendor\/harper-(.+)\.tgz$/);
   return fromVendor ? fromVendor[1] : null;
 }
 
-export function vendorHarperPath(version) {
-  return `${VENDOR_DIR}/${HARPER_TGZ_PREFIX}${version}.tgz`;
+export function rewriteHarperDepForPublish(pkg, version) {
+  const next = { ...pkg, dependencies: { ...pkg.dependencies } };
+  next.dependencies.harper = npmAliasHarperSpec(version);
+  return next;
 }
 
+/** @deprecated use rewriteHarperDepForPublish — kept so a stale import fails loudly on the new pin. */
 export function rewriteHarperDepForPack(pkg, version) {
-  const next = { ...pkg, dependencies: { ...pkg.dependencies } };
-  next.dependencies.harper = `./${vendorHarperPath(version)}`;
-  const files = Array.isArray(pkg.files) ? [...pkg.files] : [];
-  if (!files.some((f) => String(f).replace(/\/+$/, "") === VENDOR_DIR)) {
-    files.push(`${VENDOR_DIR}/`);
-  }
-  next.files = files;
-  return next;
+  return rewriteHarperDepForPublish(pkg, version);
 }
 
 export function restoreHarperDep(pkg, version) {
   const next = { ...pkg, dependencies: { ...pkg.dependencies } };
   next.dependencies.harper = version;
-  if (Array.isArray(pkg.files)) {
-    next.files = pkg.files.filter((f) => String(f).replace(/\/+$/, "") !== VENDOR_DIR);
-  }
   return next;
 }
 
@@ -127,15 +133,23 @@ function patchAlasqlPackageDir(alasqlDir) {
   const moved = promoteReactNativeFsToOptionalPeer(pkg);
   stripPackLifecycleScripts(pkg);
   writeJson(pkgPath, pkg);
-  if (!moved && !pkg.peerDependencies?.[REACT_NATIVE_FS_SAFE]) {
+  if (!moved && !pkg.peerDependencies?.[REACT_NATIVE_FS]) {
     throw new Error(`${pkgPath} has no react-native-fs optionalDependency to promote`);
   }
   return pkg;
 }
 
-const REACT_NATIVE_FS_SAFE = "react-native-fs";
+export function stampPatchedHarperManifest(harperPkg) {
+  const version = harperPkg.version;
+  harperPkg.name = PATCHED_HARPER_NAME;
+  harperPkg.description =
+    `Flair reprint of harper@${version} with alasql's react-native-fs moved to an ` +
+    `optional peer so npm i @tpsdev-ai/flair does not pull React Native (flair#847).`;
+  harperPkg.publishConfig = { ...(harperPkg.publishConfig || {}), access: "public" };
+  return harperPkg;
+}
 
-export function buildPatchedHarperTarball({ harperVersion, workDir, destTgz, npmPack = packRegistryPackage }) {
+export function buildPatchedHarperPackage({ harperVersion, workDir, destDir, npmPack = packRegistryPackage }) {
   const harperTgz = npmPack("harper", harperVersion, join(workDir, "harper-src"));
   const harperDir = extractTarball(harperTgz, join(workDir, "harper-extract"));
   const harperPkg = JSON.parse(readFileSync(join(harperDir, "package.json"), "utf8"));
@@ -156,9 +170,14 @@ export function buildPatchedHarperTarball({ harperVersion, workDir, destTgz, npm
   mkdirSync(dirname(bundledAlasql), { recursive: true });
   cpSync(alasqlDir, bundledAlasql, { recursive: true });
 
-  const bundle = new Set([...(harperPkg.bundleDependencies || []), ...(harperPkg.bundledDependencies || []), "alasql"]);
+  const bundle = new Set([
+    ...(harperPkg.bundleDependencies || []),
+    ...(harperPkg.bundledDependencies || []),
+    "alasql",
+  ]);
   harperPkg.bundleDependencies = [...bundle];
   delete harperPkg.bundledDependencies;
+  stampPatchedHarperManifest(harperPkg);
   writeJson(join(harperDir, "package.json"), harperPkg);
 
   const shrinkwrapPath = join(harperDir, "npm-shrinkwrap.json");
@@ -170,35 +189,57 @@ export function buildPatchedHarperTarball({ harperVersion, workDir, destTgz, npm
     writeJson(shrinkwrapPath, lock);
   }
 
-  mkdirSync(dirname(destTgz), { recursive: true });
-  const packedName = runNpm(["pack", "--ignore-scripts", "--silent"], harperDir);
-  const packedTgz = join(harperDir, packedName.split("\n").filter(Boolean).pop());
-  if (!existsSync(packedTgz)) throw new Error(`re-pack of patched harper did not write ${packedTgz}`);
-  cpSync(packedTgz, destTgz);
-  return destTgz;
+  writeFileSync(
+    join(harperDir, "FLAIR-REPRINT.md"),
+    [
+      `# ${PATCHED_HARPER_NAME}`,
+      "",
+      `Reprint of \`harper@${harperPkg.version}\` for @tpsdev-ai/flair (flair#847).`,
+      "AlaSQL's \`react-native-fs\` is an optional peer on the bundled copy.",
+      "Do not install this package with \`--omit=optional\`: that also strips RocksDB.",
+      "",
+    ].join("\n"),
+  );
+
+  rmSync(destDir, { recursive: true, force: true });
+  mkdirSync(dirname(destDir), { recursive: true });
+  cpSync(harperDir, destDir, { recursive: true });
+  if (!existsSync(join(destDir, "package.json"))) {
+    throw new Error(`emit left no ${join(destDir, "package.json")}`);
+  }
+  return destDir;
 }
 
-export function materializePatchedHarper(callerRoot = process.cwd()) {
+export function emitPatchedHarper(callerRoot = process.cwd(), destDir) {
+  if (!destDir) throw new Error("--emit-dir requires a destination directory");
+  const pkg = JSON.parse(readFileSync(join(callerRoot, "package.json"), "utf8"));
+  const version = registryHarperSpec(pkg.dependencies?.harper);
+  if (!version) {
+    throw new Error(
+      `package.json dependencies.harper must be a registry version or npm:${PATCHED_HARPER_NAME}@<ver> (got ${pkg.dependencies?.harper})`,
+    );
+  }
+  const workDir = mkdtempSync(join(tmpdir(), "flair-patched-harper-"));
+  try {
+    return buildPatchedHarperPackage({ harperVersion: version, workDir, destDir: resolve(destDir) });
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
+}
+
+export function rewriteHarperAlias(callerRoot = process.cwd()) {
   const pkgPath = join(callerRoot, "package.json");
   const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
   const version = registryHarperSpec(pkg.dependencies?.harper);
   if (!version) {
     throw new Error(
-      `package.json dependencies.harper must be a registry version or ./vendor/harper-<ver>.tgz (got ${pkg.dependencies?.harper})`,
+      `package.json dependencies.harper must be a registry version or npm:${PATCHED_HARPER_NAME}@<ver> (got ${pkg.dependencies?.harper})`,
     );
   }
-  const destTgz = join(callerRoot, vendorHarperPath(version));
-  const workDir = mkdtempSync(join(tmpdir(), "flair-patched-harper-"));
-  try {
-    buildPatchedHarperTarball({ harperVersion: version, workDir, destTgz });
-  } finally {
-    rmSync(workDir, { recursive: true, force: true });
-  }
   const backupPath = join(callerRoot, PREPACK_BACKUP);
-  writeFileSync(backupPath, readFileSync(pkgPath));
-  writeJson(pkgPath, rewriteHarperDepForPack(pkg, version));
-  if (!existsSync(destTgz)) throw new Error(`materialize left no ${destTgz}`);
-  return destTgz;
+  if (!existsSync(backupPath)) writeFileSync(backupPath, readFileSync(pkgPath));
+  writeJson(pkgPath, rewriteHarperDepForPublish(pkg, version));
+  return npmAliasHarperSpec(version);
 }
 
 export function restorePatchedHarper(callerRoot = process.cwd()) {
@@ -213,23 +254,42 @@ export function restorePatchedHarper(callerRoot = process.cwd()) {
   const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
   const version = registryHarperSpec(pkg.dependencies?.harper);
   if (!version) return null;
-  if (typeof pkg.dependencies?.harper === "string" && !pkg.dependencies.harper.startsWith("./")) {
+  if (typeof pkg.dependencies?.harper === "string" && !pkg.dependencies.harper.startsWith("npm:")) {
     return null;
   }
   writeJson(pkgPath, restoreHarperDep(pkg, version));
   return version;
 }
 
+function parseCli(argv) {
+  const out = { restore: false, rewriteAlias: false, emitDir: null };
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--restore") out.restore = true;
+    else if (argv[i] === "--rewrite-alias") out.rewriteAlias = true;
+    else if (argv[i] === "--emit-dir") out.emitDir = argv[++i];
+  }
+  return out;
+}
+
 const thisFile = fileURLToPath(import.meta.url);
 const invoked = process.argv[1] ? resolve(process.argv[1]) : "";
 if (invoked && thisFile === invoked) {
   try {
-    if (process.argv.includes("--restore")) {
+    const args = parseCli(process.argv.slice(2));
+    if (args.restore) {
       const version = restorePatchedHarper(process.cwd());
       if (version) console.error(`restored harper@${version} registry pin`);
+    } else if (args.emitDir) {
+      const dest = emitPatchedHarper(process.cwd(), args.emitDir);
+      console.error(`emitted ${PATCHED_HARPER_NAME} → ${dest}`);
+    } else if (args.rewriteAlias) {
+      const spec = rewriteHarperAlias(process.cwd());
+      console.error(`rewrote harper pin → ${spec}`);
     } else {
-      const dest = materializePatchedHarper(process.cwd());
-      console.error(`materialized patched harper → ${dest}`);
+      console.error(
+        "Usage: node scripts/materialize-patched-harper.mjs --rewrite-alias | --restore | --emit-dir <dir>",
+      );
+      process.exit(1);
     }
   } catch (err) {
     console.error(err instanceof Error ? err.message : err);

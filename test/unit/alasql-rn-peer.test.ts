@@ -9,7 +9,14 @@ import {
   promoteReactNativeFsToOptionalPeer,
   stripPackLifecycleScripts,
 } from "../../scripts/alasql-rn-peer.mjs";
-import { registryHarperSpec, restoreHarperDep, rewriteHarperDepForPack, vendorHarperPath } from "../../scripts/materialize-patched-harper.mjs";
+import {
+  PATCHED_HARPER_NAME,
+  npmAliasHarperSpec,
+  registryHarperSpec,
+  restoreHarperDep,
+  rewriteHarperDepForPublish,
+  stampPatchedHarperManifest,
+} from "../../scripts/materialize-patched-harper.mjs";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -72,19 +79,26 @@ describe("the git manifest stays a registry pin", () => {
     expect(pkg.dependencies.harper).not.toMatch(/vendor|file:/);
   });
 
-  test("rewrite/restore is a pack-time swap, not a committed override", () => {
+  test("rewrite/restore is a publish-time npm: alias, not a vendor tarball or override", () => {
     expect(registryHarperSpec("5.2.8")).toBe("5.2.8");
-    expect(registryHarperSpec("./vendor/harper-5.2.8.tgz")).toBe("5.2.8");
-    expect(vendorHarperPath("5.2.8")).toBe("vendor/harper-5.2.8.tgz");
-    const rewritten = rewriteHarperDepForPack(pkg, "5.2.8");
-    expect(rewritten.dependencies.harper).toBe("./vendor/harper-5.2.8.tgz");
-    expect(rewritten.files).toContain("vendor/");
+    expect(registryHarperSpec("npm:@tpsdev-ai/harper@5.2.8")).toBe("5.2.8");
+    expect(npmAliasHarperSpec("5.2.8")).toBe(`npm:${PATCHED_HARPER_NAME}@5.2.8`);
+    const rewritten = rewriteHarperDepForPublish(pkg, "5.2.8");
+    expect(rewritten.dependencies.harper).toBe("npm:@tpsdev-ai/harper@5.2.8");
+    expect(rewritten.files || pkg.files).not.toContain("vendor/");
     const restored = restoreHarperDep(rewritten, "5.2.8");
     expect(restored.dependencies.harper).toBe("5.2.8");
-    expect(restored.files).not.toContain("vendor/");
   });
 
   test("does not add harper to bundleDependencies (that drops RocksDB)", () => {
     expect(pkg.bundleDependencies || []).not.toContain("harper");
+  });
+
+  test("the reprint is a scoped Harper, not a nested file: tarball", () => {
+    const stamped = stampPatchedHarperManifest({ name: "harper", version: "5.2.8", description: "upstream" });
+    expect(stamped.name).toBe(PATCHED_HARPER_NAME);
+    expect(stamped.version).toBe("5.2.8");
+    expect(stamped.publishConfig.access).toBe("public");
+    expect(pkg.dependencies.harper).not.toMatch(/vendor|file:|npm:/);
   });
 });

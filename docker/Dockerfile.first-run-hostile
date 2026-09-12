@@ -36,7 +36,7 @@ COPY schemas/ ./schemas/
 COPY packages/ ./packages/
 # write-build-info: build stamp. materialize: npm pack prepack (flair#1580) —
 # without it, prepack MODULE_NOT_FOUND and the image never reaches install.
-COPY scripts/write-build-info.mjs scripts/materialize-bundled-descriptors.mjs scripts/materialize-patched-harper.mjs scripts/alasql-rn-peer.mjs ./scripts/
+COPY scripts/write-build-info.mjs scripts/materialize-bundled-descriptors.mjs ./scripts/
 
 RUN bun install --frozen-lockfile
 RUN bun run build && bun run build:cli

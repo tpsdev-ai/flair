@@ -33,8 +33,9 @@ describe("bundled flair-tool-descriptors (flair#1580 pack/install)", () => {
     expect(mcp.dependencies[BUNDLED_NAME]).toBe(mcp.version);
     expect(root.bundleDependencies).toEqual([BUNDLED_NAME]);
     expect(mcp.bundleDependencies).toEqual([BUNDLED_NAME]);
-    expect(root.scripts.prepack).toContain("node scripts/materialize-bundled-descriptors.mjs");
-    expect(root.scripts.prepack).toContain("node scripts/materialize-patched-harper.mjs");
+    expect(root.scripts.prepack).toBe("node scripts/materialize-bundled-descriptors.mjs");
+    expect(root.scripts.prepack).not.toContain("materialize-patched-harper");
+    expect(root.scripts.prepublishOnly).toContain("node scripts/materialize-patched-harper.mjs --rewrite-alias");
     expect(root.scripts.postpack).toBe("node scripts/materialize-patched-harper.mjs --restore");
     expect(mcp.scripts.prepack).toBe("node ../../scripts/materialize-bundled-descriptors.mjs");
   });
@@ -51,10 +52,10 @@ describe("bundled flair-tool-descriptors (flair#1580 pack/install)", () => {
         text,
         `${name} must COPY materialize-bundled-descriptors.mjs — prepack MODULE_NOT_FOUND otherwise`,
       ).toContain("materialize-bundled-descriptors.mjs");
-      expect(text, `${name} must COPY materialize-patched-harper.mjs (flair#847)`).toContain(
-        "materialize-patched-harper.mjs",
-      );
-      expect(text, `${name} must COPY alasql-rn-peer.mjs (flair#847)`).toContain("alasql-rn-peer.mjs");
+      expect(
+        text,
+        `${name} must not COPY materialize-patched-harper.mjs — npm pack does not rewrite Harper`,
+      ).not.toContain("materialize-patched-harper.mjs");
     }
   });
 
@@ -62,8 +63,7 @@ describe("bundled flair-tool-descriptors (flair#1580 pack/install)", () => {
     const text = readFileSync(join(REPO, "test/compat/upgrade-restart-liveness.test.ts"), "utf8");
     expect(text).toContain("PACK_STAGE_EXTRAS");
     expect(PACK_STAGE_EXTRAS).toContain("scripts/materialize-bundled-descriptors.mjs");
-    expect(PACK_STAGE_EXTRAS).toContain("scripts/materialize-patched-harper.mjs");
-    expect(PACK_STAGE_EXTRAS).toContain("scripts/alasql-rn-peer.mjs");
+    expect(PACK_STAGE_EXTRAS).not.toContain("scripts/materialize-patched-harper.mjs");
     expect(PACK_STAGE_EXTRAS).toContain(BUNDLED_REL);
   });
 

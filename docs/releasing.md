@@ -149,6 +149,7 @@ human 2FA approval of a staged package.
 
 Packages: `flair-client`, `flair-tool-descriptors`, `flair-mcp`, `flair`,
 `openclaw-flair`, `pi-flair`, `n8n-nodes-flair`, `langgraph-flair`, `flair-bench`.
+Also `@tpsdev-ai/harper` (not lockstep-versioned — see below).
 
 > A package must already exist on npm before a trusted publisher can be added.
 > `@tpsdev-ai/flair-tool-descriptors` (flair#1580) is the next first-publish:
@@ -158,6 +159,32 @@ Packages: `flair-client`, `flair-tool-descriptors`, `flair-mcp`, `flair`,
 > and `@tpsdev-ai/flair-mcp` tarballs bundle it (`bundleDependencies` +
 > `scripts/materialize-bundled-descriptors.mjs`) so `npm install` of those
 > tarballs does not 404.
+
+### `@tpsdev-ai/harper` reprint (flair#847)
+
+Published `@tpsdev-ai/flair` depends on Harper via
+`npm:@tpsdev-ai/harper@<harper-pin>`. That package is a reprint of the
+upstream Harper pin with AlaSQL's `react-native-fs` moved to an optional
+peer — the form npm does not auto-install. It is **not** a lockstep
+workspace package; its version is Harper's (`5.2.8` today).
+
+`scripts/materialize-patched-harper.mjs --emit-dir <dir>` builds it from
+`npm pack harper@<pin>`. The Flair tarball must **not** nest a
+`./vendor/harper-*.tgz` pin: that survives `npm i ./flair.tgz` and then
+ENOENT's on `npm i @tpsdev-ai/flair` from a registry.
+
+**The reprint must be live on npm before anyone can install a Flair
+release that uses the alias.** Bootstrap it once, then approve it before
+Flair on later staged releases if the Harper pin changed:
+
+1. `node scripts/materialize-patched-harper.mjs --emit-dir /tmp/tpsdev-harper`
+2. `(cd /tmp/tpsdev-harper && npm publish --access public)` from a machine
+   logged into npm with 2FA
+3. Add its Trusted Publisher using the same table as the other packages
+4. Verify: `npm view @tpsdev-ai/harper@<harper-pin> version`
+
+Do not install Flair with `--omit=optional` to skip React Native. That
+flag also drops Harper's RocksDB platform bindings.
 
 ### `flair-bench` bootstrap (one-time, done)
 
