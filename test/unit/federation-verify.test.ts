@@ -306,6 +306,7 @@ describe("runFederationVerify", () => {
     const body = deps.writes[0] as { visibility?: string; durability?: string };
     expect(body.visibility).toBe("shared");
     expect(body.durability).toBe("standard");
+    expect((body as { type?: string }).type).toBe("session");
     expect(assertVisibilityAllowedForDurability(body.durability, body.visibility)).toBeNull();
     expect(assertVisibilityAllowedForDurability("ephemeral", "shared")).not.toBeNull();
   });
@@ -320,9 +321,40 @@ describe("runFederationVerify", () => {
       fetchImpl: async () => jsonRes(200, { results: [{ content: "fed-verify-test — ok" }] }),
     });
     const r = await runFederationVerify(baseOpts(), deps);
-    expect(syncCalls).toBe(1);
+    // Inject + archive-push (DELETE does not federate).
+    expect(syncCalls).toBe(2);
     expect(r.pushed).toBe(true);
     expect(r.exitCode).toBe(FED_VERIFY_EXIT_OK);
+  });
+
+  test("successful push archives the canary and syncs that update before local delete", async () => {
+    const deps = makeDeps({
+      fetchImpl: async () => jsonRes(200, { results: [{ content: "fed-verify-test — ok" }] }),
+    });
+    await runFederationVerify(baseOpts(), deps);
+    const archive = deps.writes.find((w) => (w as { archived?: boolean }).archived === true) as
+      { archived?: boolean; type?: string } | undefined;
+    expect(archive?.archived).toBe(true);
+    expect(archive?.type).toBe("session");
+    expect(deps.deletes.length).toBe(1);
+  });
+
+  test("zero-record sync does not archive-push (canary never left this instance)", async () => {
+    let syncCalls = 0;
+    const now = Date.parse("2026-09-12T00:10:00.000Z");
+    const deps = makeDeps({
+      clock: advancingClock(now),
+      sync: async () => {
+        syncCalls += 1;
+        return { pushed: 0, skipped: 0 };
+      },
+      peers: [makeRecord({ lastSyncAt: "2026-09-12T00:09:00.000Z" })],
+      fetchImpl: async () => jsonRes(200, { results: [] }),
+    });
+    const r = await runFederationVerify(baseOpts(), deps);
+    expect(r.pushed).toBe(false);
+    expect(syncCalls).toBe(1);
+    expect(deps.writes.some((w) => (w as { archived?: boolean }).archived === true)).toBe(false);
   });
 
   test("HTTP 401 → UNVERIFIABLE, exit 0, never FAIL", async () => {

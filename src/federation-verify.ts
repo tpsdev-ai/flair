@@ -327,10 +327,12 @@ export async function runFederationVerify(
       id: memId,
       agentId: opts.agentId,
       content: `${opts.tag} — federation verify probe written at ${writtenAt}`,
-      type: "memory",
       // #1257: ephemeral is private-only. Private never federates. standard
-      // + shared is the legal pair that leaves this instance; we DELETE it
-      // in the finally block so it does not linger.
+      // + shared is the legal federable pair. type:session lets rem light
+      // archive leftovers after 30d if the post-probe archive push fails.
+      // Federation does not propagate DELETE, so cleanup archives + syncs
+      // before the local delete (SemanticSearch excludes archived:true).
+      type: "session",
       durability: "standard",
       visibility: "shared",
       tags: ["federation-verify", opts.tag],
@@ -568,6 +570,34 @@ export async function runFederationVerify(
     };
     return result;
   } finally {
+    // Federation merge is LWW put-by-id — local DELETE never reaches the
+    // hub. If we injected the canary, archive it and push that update so
+    // peer SemanticSearch (archived not_equal true) stops returning it.
+    if (pushed) {
+      try {
+        await deps.api("PUT", `/Memory/${encodeURIComponent(memId)}`, {
+          id: memId,
+          agentId: opts.agentId,
+          content: `${opts.tag} — federation verify probe written at ${writtenAt}`,
+          type: "session",
+          durability: "standard",
+          visibility: "shared",
+          tags: ["federation-verify", opts.tag],
+          createdAt: writtenAt,
+          archived: true,
+          archivedAt: new Date(clock.now()).toISOString(),
+        }, apiOpts);
+        const archiveSync = await deps.syncOnce(opts.syncOpts);
+        if (archiveSync.error) {
+          log(`4. Cleanup: archive push FAILED (${archiveSync.error.message}) — canary may linger on peers`);
+        } else {
+          log(`4. Cleanup: pushed archive of ${memId} (peers drop it from search)`);
+        }
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : String(e);
+        log(`4. Cleanup: could not archive canary for peer cleanup (${message})`);
+      }
+    }
     try {
       await deps.api("DELETE", `/Memory/${encodeURIComponent(memId)}`, undefined, apiOpts);
       cleanedUp = true;
