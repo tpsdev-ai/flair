@@ -1,0 +1,1 @@
+- **`flair uninstall --purge` no longer leaves SessionStart hook `.bak` files.** Hook uninstall writes a sibling backup even on a no-op; purge now deletes those copies so `~/.claude/settings.json.bak` and `~/.codex/hooks.json.bak` cannot survive a purge (flair#853).
