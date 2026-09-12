@@ -44,7 +44,11 @@ import {
   readEnvValue,
 } from "./component-env.js";
 import { fabricUpgrade } from "./fabric-upgrade.js";
-import { describeStampOutstanding, resolveCurrentModelId } from "../resources/migrations/stamp-outstanding.js";
+import {
+  describeStampOutstanding,
+  EMBEDDING_STAMP_ID,
+  resolveCurrentModelId,
+} from "../resources/migrations/stamp-outstanding.js";
 import { checkVersion, formatVersionNudge, primeVersionCheckCache, probeInstanceVersion, FLAIR_PKG_NAME } from "./version-check.js";
 import {
   readInstalledHarperVersion,
@@ -16567,9 +16571,30 @@ export function computeQualityReport(
       const hashFallback = memories.hashFallback ?? 0;
       const pct = Math.round((hashFallback / memories.total) * 100);
       const modelCounts = (memories.modelCounts ?? {}) as Record<string, number>;
+      const migBlock = healthData?.migrations;
+      const stampRow = Array.isArray(migBlock?.migrations)
+        ? migBlock.migrations.find((m: { id?: string }) => m?.id === EMBEDDING_STAMP_ID)
+        : undefined;
       const stamp = describeStampOutstanding({
         modelCounts,
         currentModelId: resolveCurrentModelId(modelCounts),
+        audience: "client",
+        cyclePhase: typeof migBlock?.cyclePhase === "string" ? migBlock.cyclePhase : undefined,
+        lastCycleError:
+          typeof migBlock?.lastCycleError === "string"
+            ? migBlock.lastCycleError
+            : migBlock?.lastCycleError === null
+              ? null
+              : undefined,
+        migration: stampRow && typeof stampRow.state === "string"
+          ? {
+              id: EMBEDDING_STAMP_ID,
+              state: stampRow.state,
+              rowsDone: stampRow.rowsDone,
+              rowsRemaining: stampRow.rowsRemaining,
+              reason: stampRow.reason,
+            }
+          : undefined,
       });
       if (pct >= QUALITY_HASH_FALLBACK_DEGRADED_PCT) {
         embeddingsStatus = "degraded";

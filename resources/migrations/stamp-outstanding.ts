@@ -73,6 +73,13 @@ export interface StampOutstandingInput {
   migration?: StampMigrationProgress;
   cyclePhase?: string;
   lastCycleError?: string | null;
+  /**
+   * Who is reading the warning. Default `process` is HealthDetail / the
+   * Harper boot runner ("this process's next migration cycle"). `client`
+   * is a CLI that is not that process (`flair quality`) — do not tell
+   * the operator the CLI will apply the migration (Bugbot Low on #1606).
+   */
+  audience?: "process" | "client";
 }
 
 export interface StampOutstanding {
@@ -138,6 +145,9 @@ function runnerAnnotation(input: StampOutstandingInput): string {
   }
   if (mig?.state === "completed" || phase === "done") {
     return " the last cycle marked it complete without converging; it will retry automatically";
+  }
+  if (input.audience === "client") {
+    return " the Harper process applies it on its next migration cycle — this CLI does not";
   }
   return " it will apply automatically on this process's next migration cycle";
 }

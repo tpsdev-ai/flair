@@ -97,6 +97,30 @@ describe("describeStampOutstanding", () => {
     if (!r.outstanding) throw new Error("expected outstanding");
     expect(r.warning).toContain("boot cycle never fired");
   });
+
+  it("names this Harper process when the in-process audience has no cycle state", () => {
+    const r = describeStampOutstanding({
+      modelCounts: { "nomic-embed-text-v1.5-Q4_K_M": 10 },
+      currentModelId: CURRENT,
+    });
+    expect(r.outstanding).toBe(true);
+    if (!r.outstanding) throw new Error("expected outstanding");
+    expect(r.warning).toContain("this process's next migration cycle");
+    expect(r.warning).not.toContain("this CLI does not");
+  });
+
+  it("names the Harper process, not the CLI, for a client audience with no cycle state", () => {
+    const r = describeStampOutstanding({
+      modelCounts: { "nomic-embed-text-v1.5-Q4_K_M": 10 },
+      currentModelId: CURRENT,
+      audience: "client",
+    });
+    expect(r.outstanding).toBe(true);
+    if (!r.outstanding) throw new Error("expected outstanding");
+    expect(r.warning).toContain("the Harper process applies it on its next migration cycle");
+    expect(r.warning).toContain("this CLI does not");
+    expect(r.warning).not.toContain("this process's next migration cycle");
+  });
 });
 
 describe("resolveCurrentModelId", () => {
