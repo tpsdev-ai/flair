@@ -21,6 +21,7 @@ import {
   type ConvergenceResult,
   type QuiescenceResult,
 } from "./replication-convergence.js";
+import { DEFAULT_STAMP_VERIFY_TIMEOUT_MS, verifyStampMigrationConverged } from "./stamp-migration-verify.js";
 
 export interface DeployOptions {
   fabricOrg?: string;
@@ -1238,6 +1239,24 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
       timeoutMs: opts.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
       onProgress: opts.onProgress,
     });
+
+    // flair#1073: route verify proves the component is serving. It does not
+    // prove embedding-stamp re-embedded pre-flip rows. `upgrade --target`
+    // was reporting success while a Fabric corpus stayed split for days.
+    // Same --no-verify escape hatch; needs Basic admin (token-only skips).
+    if (opts.fabricUser && opts.fabricPassword) {
+      await verifyStampMigrationConverged({
+        baseUrl: url,
+        fabricUser: opts.fabricUser,
+        fabricPassword: opts.fabricPassword,
+        timeoutMs: opts.verifyTimeoutMs ?? DEFAULT_STAMP_VERIFY_TIMEOUT_MS,
+        onProgress: opts.onProgress,
+      });
+    } else {
+      opts.onProgress?.(
+        "skipping embedding-stamp convergence check — needs --fabric-user/--fabric-password (token-only auth cannot read /HealthDetail)",
+      );
+    }
 
     // Only meaningful for a target that is not loopback: a local Harper SHOULD
     // advertise loopback, and asserting otherwise there would be wrong.

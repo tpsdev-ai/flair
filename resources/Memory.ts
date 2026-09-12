@@ -299,9 +299,10 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
   // miss a near-duplicate during that window. Bounded (the re-embed pass is
   // batched and finishes in minutes), self-healing once the pass completes,
   // and a missed dedup is a duplicate row, not data loss — quality, not
-  // correctness. Stage 1 (this PR) doesn't trigger this at all: no re-embed
-  // runs, so there's no mixed-space window until stage 2's separate,
-  // deliberate ops step.
+  // correctness. flair#1073: if that window lasts days (boot cycle marked
+  // embedding-stamp complete without converging), /HealthDetail names the
+  // outstanding migration and that duplicate detection is inactive — do
+  // not treat a long-lived split as this documented transient.
   let embedding: number[] | null = Array.isArray(content.embedding) ? content.embedding : null;
   if (!embedding) {
     try {

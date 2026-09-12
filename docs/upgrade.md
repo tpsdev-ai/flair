@@ -268,6 +268,20 @@ flair upgrade --target https://<fabric-node>/<instance-name> \
   --fabric-user <admin> --fabric-password <pass>
 ```
 
+### Post-deploy embedding-stamp verify
+
+As of flair#1073, both `flair deploy` and `flair upgrade --target` poll
+authenticated `/HealthDetail` after the served-API check until the
+`embedding-stamp` migration has converged — every real embedding is in the
+current `+searchprefix` space, and the migration is not halted or still
+running. Route verify only proves the component is serving; it does not
+prove the boot-keyed re-embed actually finished. A Fabric instance that
+stayed split for days after 0.30.0 was the incident this closes.
+
+`--no-verify` skips this check together with the served-API check.
+`--verify-timeout` covers both. Token-only auth skips the stamp check
+(it needs Basic admin to read `/HealthDetail`) and says so.
+
 ### Post-deploy fleet verify
 
 As of flair#636, both `flair deploy` and `flair upgrade --target` automatically run a

@@ -10062,8 +10062,9 @@ const statusCmd = program
               return false;
             }
           }
-          // Mixed-model warnings are fleet-wide; keep them
+          // Mixed-model / outstanding stamp-migration warnings are fleet-wide; keep them
           if (w.message.includes("multiple embedding models")) return true;
+          if (w.message.includes("embedding-stamp") || w.message.includes("duplicate detection is inactive")) return true;
           // Federation warnings are fleet-wide; keep them
           if (w.message.includes("federation")) return true;
           // REM warnings are fleet-wide; keep them
@@ -16574,7 +16575,7 @@ export function computeQualityReport(
         embeddingsDetail = `${hashFallback}/${memories.total} (${pct}%) memories are hash-fallback`;
       } else if (realModels.length > 1) {
         embeddingsStatus = "degraded";
-        embeddingsDetail = `multiple embedding models in use (${realModels.join(", ")}) — cross-model search unreliable`;
+        embeddingsDetail = `migration 'embedding-stamp' is outstanding (${realModels.join(", ")}) — cross-model search unreliable and duplicate detection is inactive`;
       } else {
         embeddingsStatus = "ok";
         embeddingsDetail = `${memories.total - hashFallback}/${memories.total} memories have real embeddings`;

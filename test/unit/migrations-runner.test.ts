@@ -956,6 +956,73 @@ describe("runMigrationCycle — detect() short-circuit across two cycles (the he
     });
     expect(detectCalls).toBe(2);
   });
+
+  it("alwaysDetect re-reads the corpus at the same version — a false complete cannot hide new stale rows (flair#1073)", async () => {
+    const memory = makeStore([{ id: "m1", content: "a", agentId: "a1", stale: true }]);
+    const relationship = makeStore([]);
+    let detectCalls = 0;
+    const base = makeDerivedOnlyMigration(memory, "always-detect");
+    const counted: Migration = {
+      ...base,
+      alwaysDetect: true,
+      async detect() {
+        detectCalls++;
+        return base.detect();
+      },
+    };
+    const registry = buildRegistryWith(counted);
+
+    const first = await runMigrationCycle({
+      registry,
+      getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+      dataDir,
+      runningVersion: "0.30.0",
+      sleep: fastSleep,
+    });
+    expect(first.ran).toBe(true);
+    expect(detectCalls).toBe(1);
+
+    // Simulate the Fabric failure mode: more pre-flip rows appear (or become
+    // visible) after a cycle that already recorded success at this version.
+    memory.map.set("m2", { id: "m2", content: "b", agentId: "a1", stale: true });
+
+    const second = await runMigrationCycle({
+      registry,
+      getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+      dataDir,
+      runningVersion: "0.30.0",
+      sleep: fastSleep,
+    });
+    expect(detectCalls).toBe(2);
+    expect(second.ran).toBe(true);
+    expect(memory.map.get("m2")?.stale).toBe(false);
+  });
+
+  it("derived-only run() has no silent batch cap — every pending row is processed (flair#1073)", async () => {
+    // derived-only batchSize is 50. A corpus larger than that must still
+    // finish in one cycle; a capped subset is the OrgEvent-cap failure mode.
+    const rows = Array.from({ length: 120 }, (_, i) => ({
+      id: `m${i}`,
+      content: `c${i}`,
+      agentId: "a1",
+      stale: true,
+    }));
+    const memory = makeStore(rows);
+    const relationship = makeStore([]);
+    const registry = buildRegistryWith(makeDerivedOnlyMigration(memory, "uncapped"));
+
+    const result = await runMigrationCycle({
+      registry,
+      getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+      dataDir,
+      runningVersion: "0.1.0",
+      sleep: fastSleep,
+    });
+    expect(result.ran).toBe(true);
+    const stillStale = [...memory.map.values()].filter((r) => r.stale === true);
+    expect(stillStale).toHaveLength(0);
+    expect(memory.map.size).toBe(120);
+  });
 });
 
 describe("runMigrationCycle — never throws (defense-in-depth)", () => {

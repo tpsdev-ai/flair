@@ -142,7 +142,8 @@ describe("computeQualityReport", () => {
       });
       const r = computeQualityReport(true, data, { now: NOW });
       expect(r.instance.embeddingsStatus).toBe("degraded");
-      expect(r.instance.embeddingsDetail).toContain("multiple embedding models");
+      expect(r.instance.embeddingsDetail).toContain("embedding-stamp");
+      expect(r.instance.embeddingsDetail).toContain("duplicate detection is inactive");
     });
 
     test("zero memories → embeddings status unknown, not a false 'ok'", () => {

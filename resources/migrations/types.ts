@@ -82,9 +82,22 @@ export interface Migration {
    * Cheap, read-only, bounded (limit=1-style) — answers "is there pending
    * work," never O(corpus). Never called at all once the on-disk state
    * marker says this migration already completed at the current running
-   * version (Kern's short-circuit).
+   * version (Kern's short-circuit) — unless `alwaysDetect` is set.
    */
   detect(): Promise<boolean>;
+  /**
+   * When true, the runner ALWAYS calls detect() even if the on-disk marker
+   * says this migration already completed at the current running version.
+   * Use for migrations whose pending work is a property of the corpus (a
+   * stamp, a missing field) rather than of the release — a version-keyed
+   * short-circuit can mark them "done" while the rows they exist to heal
+   * are still stale (flair#1073: embedding-stamp completed at 0.30.0 with
+   * 554 pre-flip rows still on the bare model id).
+   *
+   * detect() stays cheap (limit=1); this only skips the file-derived
+   * short-circuit, never a full corpus walk on the boot-readiness path.
+   */
+  alwaysDetect?: boolean;
   /**
    * Exact count of rows still pending. May be O(corpus) — only called
    * around the completion gate and for progress display, never on the
