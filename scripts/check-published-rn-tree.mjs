@@ -229,7 +229,13 @@ function libcInstallArgs() {
 
 export function scopedRegistryNpmrc(registryUrl) {
   const url = registryUrl.endsWith("/") ? registryUrl : `${registryUrl}/`;
-  return `@tpsdev-ai:registry=${url}\n`;
+  // The whole consumer registry must be the throwaway host. A scoped remap
+  // leaves the default registry at npmjs, so npm 12 classifies the
+  // `npm:@tpsdev-ai/harper` tarball (served from 127.0.0.1) as type=remote
+  // and throws EALLOWREMOTE. One registry origin matches Cos's
+  // `npm i @tpsdev-ai/flair` on npmjs after the reprint is live. RocksDB
+  // still arrives: verdaccio proxies `**` to npmjs.
+  return `registry=${url}\n`;
 }
 
 export function writeVerdaccioConfig(dir, port) {
