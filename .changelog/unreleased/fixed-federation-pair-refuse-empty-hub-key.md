@@ -1,4 +1,4 @@
-- **Spoke pair refuses an empty hub public key.** `flair federation pair` errors (or reads `/FederationInstance`) instead of storing `publicKey: ""` (flair#822).
+- **Spoke pair refuses an empty hub public key.** `flair federation pair` errors instead of storing `publicKey: ""` (flair#822).
 
   Pair already returns `instance.{id,publicKey}` when the hub has a FederationInstance row. An empty spoke hub-Peer key meant that row was missing at pair time (flair#839). This change is fail-closed on the spoke; it does not provision the hub Instance.
 

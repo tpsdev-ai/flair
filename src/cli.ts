@@ -7850,25 +7850,14 @@ federation
 
       // flair#822: fail-closed. Pair already returns instance.{id,publicKey}
       // when the hub has a FederationInstance row. A missing key means that
-      // row was absent (#839) — ERROR (or GET /FederationInstance), never
-      // store "". A spoke Peer write does not provision the hub row.
-      const hubBase = hubUrl.replace(/\/$/, "");
-      const resolvedHub = await resolveHubPeerIdentity(result, {
-        fetchInstance: async () => {
-          const instRes = await fetch(`${hubBase}/FederationInstance`, {
-            headers: authHeader ? { Authorization: authHeader } : {},
-            signal: AbortSignal.timeout(10_000),
-          });
-          if (!instRes.ok) return null;
-          return instRes.json();
-        },
-      });
+      // row was absent (#839) — ERROR, never store "". Do not GET
+      // /FederationInstance: bootstrap Basic cannot read it (allowAdmin),
+      // and a successful GET find-or-creates a hub Instance. A spoke Peer
+      // write does not provision the hub row.
+      const resolvedHub = resolveHubPeerIdentity(result);
       if (resolvedHub.ok === false) {
         console.error(`Error: ${resolvedHub.error}`);
         process.exit(1);
-      }
-      if (resolvedHub.source === "federation_instance") {
-        console.log("Pair omitted publicKey; using existing hub identity from GET /FederationInstance (does not provision a missing Instance row)");
       }
       console.log(`✅ Paired with hub: ${resolvedHub.peer.id}`);
 

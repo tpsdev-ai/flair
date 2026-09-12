@@ -4,9 +4,11 @@
  * Pair already returns `instance.{id,publicKey}` when the hub has a
  * FederationInstance row (flair#213). An empty spoke hub-Peer key means
  * that row was missing at pair time — a symptom of open #839, not a
- * pair-response-shape bug. Chip is fail-closed: ERROR or GET
- * `/FederationInstance`, never store `publicKey: ""`. A spoke Peer write
- * does not provision the missing hub row.
+ * pair-response-shape bug. Chip is fail-closed: ERROR, never store
+ * `publicKey: ""`. Do not GET `/FederationInstance` from the spoke —
+ * that path is admin-gated (bootstrap Basic cannot read it) and
+ * find-or-creates a new Instance on a miss, which would invent a hub
+ * row. A spoke Peer write does not provision the missing hub row.
  */
 
 export type HubPeerIdentity = {
@@ -47,30 +49,15 @@ export const EMPTY_HUB_PEER_KEY_ERROR =
   "The hub likely has no FederationInstance row (flair#839); a spoke Peer write does not create one.";
 
 export type ResolveHubPeerIdentityResult =
-  | { ok: true; peer: HubPeerIdentity; source: "pair" | "federation_instance" }
+  | { ok: true; peer: HubPeerIdentity; source: "pair" }
   | { ok: false; error: string };
 
 /**
- * Pair response first. If publicKey is missing, one GET `/FederationInstance`
- * read of an *existing* hub identity is allowed. Never returns an empty key.
- * Success via fetch is not a provision of the hub Instance row (#839).
+ * Fail-closed: pair `instance.publicKey` or ERROR. Never returns an empty key.
+ * Does not fetch `/FederationInstance` (admin-gated + find-or-create).
  */
-export async function resolveHubPeerIdentity(
-  pairResult: unknown,
-  opts?: { fetchInstance?: () => Promise<unknown> },
-): Promise<ResolveHubPeerIdentityResult> {
+export function resolveHubPeerIdentity(pairResult: unknown): ResolveHubPeerIdentityResult {
   const fromPair = hubPeerFromPairResult(pairResult);
   if (fromPair.ok) return { ...fromPair, source: "pair" };
-
-  if (opts?.fetchInstance) {
-    try {
-      const fetched = await opts.fetchInstance();
-      const recovered = hubPeerFromPairResult({ instance: fetched });
-      if (recovered.ok) return { ...recovered, source: "federation_instance" };
-    } catch {
-      // Fall through — fail closed, do not store "".
-    }
-  }
-
   return { ok: false, error: EMPTY_HUB_PEER_KEY_ERROR };
 }

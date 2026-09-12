@@ -4,8 +4,8 @@
  * Chip: fail-closed on the spoke. Pair already returns
  * `instance.{id,publicKey}` when the hub has a FederationInstance row
  * (flair#213). An empty spoke hub-Peer key means that row was missing
- * (#839). Never store `""`. A spoke Peer write does not provision the
- * hub row.
+ * (#839). Never store `""`. Do not GET `/FederationInstance` — that
+ * path is admin-gated and find-or-creates a hub row.
  */
 import { describe, it, expect } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -18,6 +18,15 @@ import {
 
 const HUB_ID = "flair_hubdeadbeef";
 const HUB_KEY = "dGVzdC1lZDI1NTE5LXB1YmtleS1iYXNlNjR1cmw";
+
+function pairActionSource(): string {
+  const src = readFileSync(join(import.meta.dir, "../../src/cli.ts"), "utf8");
+  const start = src.indexOf('.command("pair <hub-url>")');
+  const end = src.indexOf('federation\n  .command("token")', start);
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  return src.slice(start, end);
+}
 
 describe("pair response — instance.{id,publicKey} is accepted", () => {
   it("accepts the shape pair has returned since flair#213", () => {
@@ -54,36 +63,17 @@ describe("spoke refuse-empty — never store publicKey:\"\"", () => {
   });
 });
 
-describe("resolveHubPeerIdentity — ERROR or fetch, never \"\"", () => {
-  it("uses the pair response when instance.publicKey is present", async () => {
-    const resolved = await resolveHubPeerIdentity(
-      { instance: { id: HUB_ID, publicKey: HUB_KEY } },
-      { fetchInstance: async () => { throw new Error("must not fetch"); } },
-    );
-    expect(resolved).toEqual({
+describe("resolveHubPeerIdentity — ERROR, never \"\"", () => {
+  it("uses the pair response when instance.publicKey is present", () => {
+    expect(resolveHubPeerIdentity({ instance: { id: HUB_ID, publicKey: HUB_KEY } })).toEqual({
       ok: true,
       source: "pair",
       peer: { id: HUB_ID, publicKey: HUB_KEY },
     });
   });
 
-  it("may GET /FederationInstance for an existing hub identity when pair omitted the key", async () => {
-    const resolved = await resolveHubPeerIdentity(
-      { paired: true, instance: null },
-      { fetchInstance: async () => ({ id: HUB_ID, publicKey: HUB_KEY, role: "hub" }) },
-    );
-    expect(resolved).toEqual({
-      ok: true,
-      source: "federation_instance",
-      peer: { id: HUB_ID, publicKey: HUB_KEY },
-    });
-  });
-
-  it("errors when pair and /FederationInstance both lack publicKey — never fill \"\"", async () => {
-    const resolved = await resolveHubPeerIdentity(
-      { instance: { id: "hub", publicKey: "" } },
-      { fetchInstance: async () => ({ id: HUB_ID, publicKey: "" }) },
-    );
+  it("errors when pair lacks publicKey — never fill \"\"", () => {
+    const resolved = resolveHubPeerIdentity({ instance: { id: "hub", publicKey: "" } });
     expect(resolved.ok).toBe(false);
     if (resolved.ok) return;
     expect(resolved.error).toBe(EMPTY_HUB_PEER_KEY_ERROR);
@@ -91,23 +81,15 @@ describe("resolveHubPeerIdentity — ERROR or fetch, never \"\"", () => {
     expect(resolved.error).toContain("does not create one");
   });
 
-  it("errors when the fallback fetch throws or returns nothing", async () => {
-    const thrown = await resolveHubPeerIdentity(
-      { instance: null },
-      { fetchInstance: async () => { throw new Error("403"); } },
-    );
-    expect(thrown.ok).toBe(false);
-    if (thrown.ok) return;
-    expect(thrown.error).toBe(EMPTY_HUB_PEER_KEY_ERROR);
-
-    const missing = await resolveHubPeerIdentity({ instance: null });
-    expect(missing.ok).toBe(false);
-    if (missing.ok) return;
-    expect(missing.error).toBe(EMPTY_HUB_PEER_KEY_ERROR);
+  it("errors when instance is null", () => {
+    const resolved = resolveHubPeerIdentity({ paired: true, instance: null });
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    expect(resolved.error).toBe(EMPTY_HUB_PEER_KEY_ERROR);
   });
 });
 
-describe("wiring — spoke fail-closed; pair still returns instance when the row exists", () => {
+describe("wiring — spoke fail-closed; no FederationInstance fetch", () => {
   const root = join(import.meta.dir, "../..");
 
   it("FederationPair.post still returns instance.{id,publicKey} from the Instance row (flair#213)", () => {
@@ -119,11 +101,13 @@ describe("wiring — spoke fail-closed; pair still returns instance when the row
     expect(src).not.toContain("pairResponseInstance");
   });
 
-  it("spoke pair writes resolvedHub.peer.publicKey and never ?? \"\"", () => {
-    const src = readFileSync(join(root, "src/cli.ts"), "utf8");
-    expect(src).toContain("resolveHubPeerIdentity");
-    expect(src).toContain("resolvedHub.peer.publicKey");
-    expect(src).toContain("resolvedHub.peer.id");
-    expect(src).not.toMatch(/publicKey:\s*result\.instance\?\.publicKey\s*\?\?\s*""/);
+  it("spoke pair writes resolvedHub.peer.publicKey and never ?? \"\" or GET /FederationInstance", () => {
+    const pairSrc = pairActionSource();
+    expect(pairSrc).toContain("resolveHubPeerIdentity");
+    expect(pairSrc).toContain("resolvedHub.peer.publicKey");
+    expect(pairSrc).toContain("resolvedHub.peer.id");
+    expect(pairSrc).not.toMatch(/publicKey:\s*result\.instance\?\.publicKey\s*\?\?\s*""/);
+    expect(pairSrc).not.toContain("fetchInstance");
+    expect(pairSrc).not.toMatch(/fetch\(`\$\{hubBase\}\/FederationInstance`/);
   });
 });
