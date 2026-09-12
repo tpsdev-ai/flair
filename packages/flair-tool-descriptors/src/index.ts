@@ -635,6 +635,29 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
     "outputShape": "Publishes an org event attributed to the caller (authorId from identity, never the body). The echo is thin; persistence is verified in storage."
   },
   {
+    "name": "flair_catchup",
+    "description": "Drain YOUR OWN catch-up feed — org events directed to you (or broadcast) after your durable watermark. Returns a page plus a `nextAfter` cursor: page with `after`, then advance the watermark with `ack`. Owner-scoped: the participant is your signed identity, so you can only ever read your own feed — there is no agentId parameter and any other feed is refused (403). At-least-once: an event may arrive twice (re-delivery is safe), an acked event does not re-deliver, and an un-acked event survives a restart.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "after": {
+          "type": "string",
+          "description": "Exclusive position cursor to read from. Omit to start at your durable watermark. Pass a prior page's `nextAfter` to continue a drain WITHOUT advancing the watermark."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Max events per page (server default 50, max 500)."
+        },
+        "ack": {
+          "type": "string",
+          "description": "Position to acknowledge — advances your durable watermark, monotonically (never rewinds). Pass the last event position you processed, or `nextAfter` once a page is drained. Omit to read without advancing: events stay queued and survive a restart. Re-acking is safe."
+        }
+      }
+    },
+    "outputShape": "{ events: OrgEvent[], after, nextAfter, watermark, hasMore, pageSize, acked? } — the caller's own directed + broadcast events after its durable watermark, paged; `ack` advances the watermark monotonically (at-least-once — re-delivery is safe).",
+    "native": false
+  },
+  {
     "name": "attention",
     "description": "What's touching entity E in the last N days? A unified, grouped-by-source view across memories, relationships, active work (WorkspaceState), teammate presence, and org events. Entity must be a vocabulary string (e.g. 'repo:owner/name', 'issue:owner/repo#123', 'subsystem:embeddings').",
     "inputSchema": {

@@ -15,6 +15,7 @@
  *   - soul_get       — get a personality/context entry
  *   - flair_workspace_set — write own WorkspaceState (Office Space coordination)
  *   - flair_orgevent      — publish an OrgEvent attributed to self (no forging)
+ *   - flair_catchup       — drain + ack self's own OrgEventCatchup feed (owner-scoped)
  *   - record_usage        — report that recalled memories were actually used (flair#1147)
  *   - skill_store         — write a skill-tagged memory (trigger + procedure)
  *   - skill_search        — catalog skills that apply to a task (not the procedure)
