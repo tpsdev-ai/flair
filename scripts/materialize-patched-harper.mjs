@@ -25,9 +25,11 @@
  *
  * The git manifest stays `harper: <registry version>` so `npm pack` /
  * pack-smoke / this repo keep resolving upstream Harper. The alias rewrite
- * is publish-time only (`prepublishOnly --rewrite-alias`). `postpack
- * --restore` puts the registry pin back. `--emit-dir` writes the reprint
- * so release / the verdaccio gate can publish it *before* Flair.
+ * is publish-time only (`prepublishOnly --rewrite-alias`). `postpack`
+ * restores only when `package.json.prepack-harper` exists — `npm pack`
+ * does not run prepublishOnly, and pack-only Docker images do not COPY
+ * this script. `--emit-dir` writes the reprint so release / the verdaccio
+ * gate can publish it *before* Flair.
  *
  * Success logs go to stderr. `npm pack --silent` captures stdout as the
  * tarball path.

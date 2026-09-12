@@ -73,12 +73,14 @@ describe("evaluatePublishedTree", () => {
   });
 
   test("a clean consumer tree with harper and the platform binding passes", () => {
-    const binding = expectedRocksdbBindingName({ platform: "linux", arch: "x64", libc: "glibc" });
-    const tree = writeTree({
+    const binding = expectedRocksdbBindingName();
+    const spec: Record<string, true> = {
       harper: true,
       "@harperfast/rocksdb-js": true,
-      [`@harperfast/${binding}`]: true,
-    });
+    };
+    if (binding) spec[`@harperfast/${binding}`] = true;
+    else spec["@harperfast/rocksdb-js-linux-x64-glibc"] = true;
+    const tree = writeTree(spec);
     const m = evaluatePublishedTree(tree);
     expect(m.forbidden).toEqual([]);
     expect(m.harperPresent).toBe(true);
