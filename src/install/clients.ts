@@ -63,6 +63,21 @@ export interface Client {
    */
   detect?: () => boolean;
   wire: (env: WireEnv) => { ok: boolean; message: string };
+  /**
+   * Remove only Flair's entry from this client's config. A no-op when
+   * nothing is wired — never deletes the file, never touches sibling keys.
+   * Required on every registry entry so `uninstall --purge` cannot forget
+   * a client the way a second ad-hoc list would (flair#853).
+   */
+  unwire: () => UnwireResult;
+}
+
+/** Result of removing Flair's wiring from one client config. */
+export interface UnwireResult {
+  ok: boolean;
+  message: string;
+  /** True when a Flair entry was actually removed. */
+  removed: boolean;
 }
 
 // ---- Detection helpers ----------------------------------------------------------
@@ -216,6 +231,25 @@ export function codexConfigHasFlairSection(raw: string): boolean {
 export function appendCodexFlairBlock(raw: string, env: WireEnv): string {
   const separator = raw.length === 0 ? "" : raw.endsWith("\n\n") ? "" : raw.endsWith("\n") ? "\n" : "\n\n";
   return raw + separator + tomlSnippet(env) + "\n";
+}
+
+/**
+ * Inverse of appendCodexFlairBlock / replaceCodexFlairBlock: drop the
+ * `[mcp_servers.flair]` table and its `[mcp_servers.flair.*]` subtables,
+ * leaving every other table untouched. Pure — callers write the result.
+ */
+export function removeCodexFlairBlock(raw: string): string {
+  const header = "[mcp_servers.flair]";
+  const idx = raw.indexOf(header);
+  if (idx === -1) return raw;
+  const before = raw.slice(0, idx);
+  const after = raw.slice(idx);
+  const nextHeader = after.slice(header.length).search(/\n\[(?!mcp_servers\.flair\.)/);
+  const rest = nextHeader === -1 ? "" : after.slice(header.length + nextHeader);
+  const restBody = rest.replace(/^\n+/, "");
+  const joined = before.replace(/\s+$/, "") + (restBody ? "\n\n" + restBody : "");
+  if (joined.trim().length === 0) return "";
+  return joined.replace(/^\n+/, "").replace(/\s+$/, "\n");
 }
 
 /**
@@ -747,6 +781,130 @@ function _wireAntigravity(env: WireEnv): { ok: boolean; message: string } {
   );
 }
 
+function displayUnderHome(configPath: string): string {
+  const home = resolveHome();
+  return configPath.startsWith(home) ? "~" + configPath.slice(home.length) : configPath;
+}
+
+/**
+ * Remove `mcpServers.flair` from a JSON MCP config. Preserves sibling servers
+ * and every other top-level key. A no-op when the file or the flair entry is
+ * absent. Refuses to write when the file is not a JSON object.
+ */
+function unwireJsonMcp(configPath: string, label: string): UnwireResult {
+  const display = displayUnderHome(configPath);
+  if (!existsSync(configPath)) {
+    return { ok: true, removed: false, message: `${label}: no config at ${display}` };
+  }
+  try {
+    const raw = readFileSync(configPath, "utf-8").trim();
+    if (!raw) {
+      return { ok: true, removed: false, message: `${label}: no Flair MCP entry in ${display}` };
+    }
+    const config = JSON.parse(raw);
+    if (!config || typeof config !== "object" || Array.isArray(config)) {
+      return { ok: false, removed: false, message: `${label}: refusing to modify a non-object config at ${display}` };
+    }
+    const servers = (config as { mcpServers?: unknown }).mcpServers;
+    if (!servers || typeof servers !== "object" || Array.isArray(servers) || !("flair" in servers)) {
+      return { ok: true, removed: false, message: `${label}: no Flair MCP entry in ${display}` };
+    }
+    delete (servers as { flair?: unknown }).flair;
+    if (Object.keys(servers).length === 0) {
+      delete (config as { mcpServers?: unknown }).mcpServers;
+    }
+    writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
+    return { ok: true, removed: true, message: `${label}: unwired ${display}` };
+  } catch (err: unknown) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { ok: false, removed: false, message: `${label}: could not unwire ${display}: ${reason}` };
+  }
+}
+
+function _unwireClaudeCode(): UnwireResult {
+  return unwireJsonMcp(join(resolveHome(), ".claude.json"), "Claude Code");
+}
+
+function _unwireCodex(): UnwireResult {
+  const path = codexConfigPath();
+  const display = "~/.codex/config.toml";
+  if (!existsSync(path)) {
+    return { ok: true, removed: false, message: `Codex: no config at ${display}` };
+  }
+  try {
+    const raw = readFileSync(path, "utf-8");
+    if (!codexConfigHasFlairSection(raw)) {
+      return { ok: true, removed: false, message: `Codex: no Flair MCP entry in ${display}` };
+    }
+    writeFileSync(path, removeCodexFlairBlock(raw));
+    return { ok: true, removed: true, message: `Codex: unwired ${display}` };
+  } catch (err: unknown) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { ok: false, removed: false, message: `Codex: could not unwire ${display}: ${reason}` };
+  }
+}
+
+function _unwireGemini(): UnwireResult {
+  return unwireJsonMcp(geminiConfigPath(), "Gemini");
+}
+
+function _unwireCursor(): UnwireResult {
+  return unwireJsonMcp(cursorConfigPath(), "Cursor");
+}
+
+function _unwireAntigravity(): UnwireResult {
+  return unwireJsonMcp(antigravityConfigPath(), "Antigravity");
+}
+
+function _unwirePi(): UnwireResult {
+  const path = piSettingsPath();
+  const display = displayUnderHome(path);
+  if (!existsSync(path)) {
+    return { ok: true, removed: false, message: `pi: no config at ${display}` };
+  }
+  try {
+    const raw = readFileSync(path, "utf-8").trim();
+    if (!raw) {
+      return { ok: true, removed: false, message: `pi: no Flair extension in ${display}` };
+    }
+    const config = JSON.parse(raw);
+    if (!config || typeof config !== "object" || Array.isArray(config)) {
+      return { ok: false, removed: false, message: `pi: refusing to modify a non-object config at ${display}` };
+    }
+    let changed = false;
+    if (Array.isArray(config.packages)) {
+      const kept = config.packages.filter((entry: unknown) => {
+        const source = piPackageEntrySource(entry);
+        return !(source && isPiFlairNpmSource(source));
+      });
+      if (kept.length !== config.packages.length) {
+        config.packages = kept;
+        changed = true;
+      }
+    }
+    if (Array.isArray(config.extensions)) {
+      const kept = config.extensions.filter((entry: unknown) => {
+        if (typeof entry === "string" && (isPiFlairNpmSource(entry) || isPiFlairExtensionPath(entry))) {
+          return false;
+        }
+        return true;
+      });
+      if (kept.length !== config.extensions.length) {
+        config.extensions = kept;
+        changed = true;
+      }
+    }
+    if (!changed) {
+      return { ok: true, removed: false, message: `pi: no Flair extension in ${display}` };
+    }
+    writeFileSync(path, JSON.stringify(config, null, 2) + "\n");
+    return { ok: true, removed: true, message: `pi: unwired ${display}` };
+  } catch (err: unknown) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { ok: false, removed: false, message: `pi: could not unwire ${display}: ${reason}` };
+  }
+}
+
 // ---- Exported detection & wiring array ------------------------------------------
 
 export const ALL_CLIENTS: Omit<Client, "detected">[] = [
@@ -756,6 +914,7 @@ export const ALL_CLIENTS: Omit<Client, "detected">[] = [
     bin: "claude",
     kind: "mcp",
     wire: _wireClaudeCode,
+    unwire: _unwireClaudeCode,
   },
   {
     id: "codex",
@@ -763,6 +922,7 @@ export const ALL_CLIENTS: Omit<Client, "detected">[] = [
     bin: "codex",
     kind: "mcp",
     wire: _wireCodex,
+    unwire: _unwireCodex,
   },
   {
     id: "gemini",
@@ -770,6 +930,7 @@ export const ALL_CLIENTS: Omit<Client, "detected">[] = [
     bin: "gemini",
     kind: "mcp",
     wire: _wireGemini,
+    unwire: _unwireGemini,
   },
   {
     id: "cursor",
@@ -777,6 +938,7 @@ export const ALL_CLIENTS: Omit<Client, "detected">[] = [
     bin: "cursor",
     kind: "mcp",
     wire: _wireCursor,
+    unwire: _unwireCursor,
   },
   {
     id: "antigravity",
@@ -785,6 +947,7 @@ export const ALL_CLIENTS: Omit<Client, "detected">[] = [
     bin: "agy",
     kind: "mcp",
     wire: _wireAntigravity,
+    unwire: _unwireAntigravity,
   },
   {
     id: "pi",
@@ -799,6 +962,7 @@ export const ALL_CLIENTS: Omit<Client, "detected">[] = [
     // a pi whose wiring is worth checking/fixing. Pure fs check, both legs.
     detect: () => detectBin("pi") || existsSync(piSettingsPath()),
     wire: _wirePi,
+    unwire: _unwirePi,
   },
 ];
 
@@ -938,4 +1102,33 @@ export function wirePi(
   env: WireEnv
 ): { ok: boolean; message: string } {
   return _wirePi(env);
+}
+
+export function unwireClaudeCode(): UnwireResult {
+  return _unwireClaudeCode();
+}
+
+export function unwireCodex(): UnwireResult {
+  return _unwireCodex();
+}
+
+export function unwireGemini(): UnwireResult {
+  return _unwireGemini();
+}
+
+export function unwireCursor(): UnwireResult {
+  return _unwireCursor();
+}
+
+export function unwireAntigravity(): UnwireResult {
+  return _unwireAntigravity();
+}
+
+export function unwirePi(): UnwireResult {
+  return _unwirePi();
+}
+
+/** Unwire every registry client. A missing or already-clean config is a no-op. */
+export function unwireAllClients(): UnwireResult[] {
+  return ALL_CLIENTS.map((client) => client.unwire());
 }

@@ -12,6 +12,7 @@ there, then follow its imports before adding another helper.
 | Doctor / upgrade | `lib/doctor-run.ts`, `doctor-client.ts`, `lib/upgrade-migrations.ts`, `lib/upgrade-exec-path.ts`, `lib/upgrade-plain-tree.ts` |
 | Deployment / fleet | `deploy.ts`, `fabric-upgrade.ts`, `fleet-verify.ts` |
 | REM scheduling and orchestration | `rem/runner.ts`, `rem/scheduler.ts`, `rem/snapshot.ts` |
+| Uninstall `--purge` completeness | `lib/uninstall-purge.ts` (client unwire lives on `install/clients.ts`) |
 
 Extract cohesive command logic into existing owners or a focused module. Root
 `tsconfig.check.src.json` checks helpers strictly; `cli.ts` currently uses
