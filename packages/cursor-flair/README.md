@@ -75,7 +75,7 @@ Cursor ships a native **Memories** feature: persistent notes the agent saves as 
 | `soul` | Read/write role, standards, project — only on explicit request |
 | `relate` | Subject/predicate/object triples, not prose |
 | `health` | Tool failures; probe with `bootstrap` (there is no Health tool) |
-| `coordinate` | Multi-agent claim/release; skip for solo local memory |
+| `coordinate` | Multi-agent claim/release/dispatch; skip for solo local memory |
 
 ## Verify
 
@@ -84,6 +84,17 @@ Ask the agent:
 > Load my Flair bootstrap, then store a test memory
 
 You should see `bootstrap` return soul + memories, then `memory_store` confirm an id.
+
+## Wake-runner (crew dispatch)
+
+Flair cannot wake a dormant Cursor agent. The consume + launch half of crew dispatch lives in [`packages/cursor-wake-runner`](../cursor-wake-runner/README.md) (flair#1613): it drains **this** agent's `OrgEventCatchup` and starts one Cloud Agent per directed `coord.dispatch` / `a2a.message`. Launch is idempotent (`bc-<sha256 uuid>` of the OrgEvent id → Cursor `409` on replay).
+
+```bash
+FLAIR_AGENT_ID=<crew> CURSOR_API_KEY=… \
+  bun packages/cursor-wake-runner/src/cli.ts --once
+```
+
+Schedule that command. A running agent uses `flair_catchup` instead — see the `coordinate` skill. Do not point a Cursor Automation at "start a crew agent" without this CLI; that mint is not single-launch safe.
 
 ## Not this plugin
 
