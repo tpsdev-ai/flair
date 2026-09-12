@@ -14,7 +14,7 @@ import {
   EMBEDDING_STAMP_ID,
   stampMigrationConverged,
   type StampMigrationProgress,
-} from "../resources/migrations/stamp-outstanding.js";
+} from "./stamp-outstanding.js";
 
 export const DEFAULT_STAMP_VERIFY_TIMEOUT_MS = 600_000;
 export const STAMP_VERIFY_POLL_INTERVAL_MS = 2_000;

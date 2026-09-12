@@ -1,30 +1,21 @@
 /**
- * stamp-outstanding.ts — corpus-derived "is embedding-stamp still pending?"
- * (flair#1073). Harper-free, no embedding-space-guard import: that module
- * schedules a boot pre-warm at load. This file is the Harper/HealthDetail
- * canonical. The CLI ships a copy at src/stamp-outstanding.ts because
- * tsconfig.cli.json's rootDir is `src` and the published tree cannot
- * resolve `../resources/...` from dist/cli.js. Stay in sync via
- * test/unit/stamp-outstanding-cli-parity.test.ts.
+ * stamp-outstanding.ts — CLI-side copy of the corpus-derived
+ * "is embedding-stamp still pending?" helper (flair#1073).
  *
- * THE point of this module: runner bookkeeping (`state: completed`,
- * `rowsDone: 0`) is not the signal. A Fabric boot that detect()'d empty,
- * or a version-keyed short-circuit, can mark embedding-stamp done while
- * the corpus is still split. Outstanding is derived from modelCounts vs
- * the current space, then annotated with whatever the runner last said
- * so the warning can name the migration AND the consequences (search
- * unreliable, dedup inactive) instead of a generic mixed-models symptom
- * with a manual `flair reembed` remedy.
+ * INLINED, not imported from resources/: cross-boundary imports from src/
+ * into resources/ do not survive npm packaging. tsconfig.cli.json compiles
+ * with `rootDir: "src"`, so dist/cli.js has no resources/ module it can
+ * resolve at the same relative path. Same reason as entity-vocab-cli.ts
+ * and the getModelId() literals in src/cli.ts.
+ *
+ * Canonical module: resources/migrations/stamp-outstanding.ts (Harper
+ * HealthDetail / embedding-stamp). The two files MUST stay in sync —
+ * test/unit/stamp-outstanding-cli-parity.test.ts pins export names and a
+ * known-answer table. Drift fails CI rather than shipping.
  */
 
-/** Stable id — kept here so Harper resources can import this file without
- *  loading embedding-stamp.ts (which statically imports `harper`).
- *  Re-exported from embedding-stamp.ts so existing imports keep working.
- *  The CLI copy at src/stamp-outstanding.ts exports the same constant. */
 export const EMBEDDING_STAMP_ID = "embedding-stamp";
 
-/** Mirrors embedding-space-guard's normalizeStamp / NON_SPACE_STAMPS —
- *  inlined so this file never loads that module's boot side effect. */
 const NON_SPACE_STAMPS: ReadonlySet<string> = new Set(["hash-512d"]);
 const DEFAULT_ENGINE = "gguf";
 
@@ -40,8 +31,7 @@ export function normalizeStampForOutstanding(stamp: string | null | undefined): 
  * `getModelId()`). Prefers an existing `+searchprefix` stamp so a healthy
  * bare+`gguf:` pair of the SAME space does not invent a foreign current.
  * A uniformly pre-flip corpus has no suffix — append `+searchprefix` so
- * those rows read as stale (the HealthDetail / quality-report gap Bugbot
- * flagged on flair#1606).
+ * those rows read as stale.
  */
 export function resolveCurrentModelId(modelCounts: Record<string, number>, explicit?: string): string {
   const trimmed = explicit?.trim();
@@ -91,7 +81,6 @@ export interface StampOutstanding {
   migrationId: typeof EMBEDDING_STAMP_ID;
   staleCount: number;
   currentCount: number;
-  /** Distinct raw stamps that are not the current space (for the warning). */
   staleStamps: string[];
   warning: string;
 }
@@ -104,11 +93,6 @@ export interface StampConverged {
 
 export type StampOutstandingResult = StampOutstanding | StampConverged;
 
-/**
- * Split the corpus into current-space vs foreign-space counts. A bare
- * stamp and its `gguf:` equivalent are the SAME space; `+searchprefix`
- * vs bare-without-suffix are NOT (that split is this migration's payload).
- */
 export function countStampSpaces(
   modelCounts: Record<string, number>,
   currentModelId: string,
@@ -156,11 +140,6 @@ function runnerAnnotation(input: StampOutstandingInput): string {
   return " it will apply automatically on this process's next migration cycle";
 }
 
-/**
- * Corpus-derived outstanding check. Returns `outstanding: false` when every
- * real-space stamp matches the current space (or the store is empty of
- * real embeddings). Runner bookkeeping cannot override a split corpus.
- */
 export function describeStampOutstanding(input: StampOutstandingInput): StampOutstandingResult {
   const { currentCount, staleCount, staleStamps } = countStampSpaces(input.modelCounts, input.currentModelId);
   if (staleCount === 0) {
@@ -184,13 +163,6 @@ export function describeStampOutstanding(input: StampOutstandingInput): StampOut
   };
 }
 
-/**
- * Convergence predicate for `upgrade --target` / `deploy` post-verify
- * (flair#1073). A split corpus is not converged. A halted/failed
- * embedding-stamp is not converged. A still-running cycle is not
- * converged. Missing migration state on a split corpus is not converged.
- * An empty / already-current corpus is converged.
- */
 export function stampMigrationConverged(input: StampOutstandingInput): { converged: boolean; detail: string } {
   const described = describeStampOutstanding(input);
   if (described.outstanding) {

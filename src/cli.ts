@@ -48,7 +48,7 @@ import {
   describeStampOutstanding,
   EMBEDDING_STAMP_ID,
   resolveCurrentModelId,
-} from "../resources/migrations/stamp-outstanding.js";
+} from "./stamp-outstanding.js";
 import { checkVersion, formatVersionNudge, primeVersionCheckCache, probeInstanceVersion, FLAIR_PKG_NAME } from "./version-check.js";
 import {
   readInstalledHarperVersion,
