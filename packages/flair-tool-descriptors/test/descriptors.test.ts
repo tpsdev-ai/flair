@@ -44,7 +44,7 @@ describe("tool descriptors — transport-agnostic source (flair#1580)", () => {
 
   test("SURFACE_EXEMPTIONS is derived from one-sided flags", () => {
     expect(SURFACE_EXEMPTIONS.registryOnly).toEqual(["memory_basement", "memory_restore", "attention"]);
-    expect(SURFACE_EXEMPTIONS.adapterOnly).toEqual(["relationship_store"]);
+    expect(SURFACE_EXEMPTIONS.adapterOnly).toEqual(["relationship_store", "flair_catchup"]);
   });
 
   test("toMcpToolDef keeps name / description / inputSchema / annotations", () => {

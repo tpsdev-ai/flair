@@ -14,6 +14,7 @@ import {
   STDIO_TOOL_DESCRIPTORS,
   toStdioMcpToolDef,
 } from "@tpsdev-ai/flair-tool-descriptors";
+import { buildCatchupRequest, summarizeCatchup, type CatchupPage } from "./catchup.js";
 import { classifyError } from "./errors.js";
 import { jsonSchemaToZodShape } from "./json-schema-zod.js";
 import { deriveActivity, type PresenceActivity } from "./presence.js";
@@ -250,6 +251,29 @@ const flair_orgevent: StdioHandler = async (
   }
 };
 
+const flair_catchup: StdioHandler = async (args, { flair, agentId, heartbeat }) => {
+  heartbeat();
+  try {
+    // Owner-scope by construction: the request path is built from the CALLER's
+    // own agentId (identity), never a tool argument — `args` is consulted only
+    // for after/limit/ack. There is deliberately no agentId/participantId
+    // parameter, so a caller cannot name another feed (the server also refuses
+    // a cross-agent read with 403).
+    const request = buildCatchupRequest(agentId, args);
+    if (request.ackPosition) {
+      // Advance-on-ack (monotonic, re-ack safe) BEFORE the read, so a caller
+      // draining page N while acking page N-1 reads page N — and an ack never
+      // hides an event that was in the same response.
+      await flair.request("POST", request.ackPath, { position: request.ackPosition });
+    }
+    const page = await flair.request<CatchupPage>("GET", request.getPath);
+    const { text, structuredContent } = summarizeCatchup(page, request.ackPosition);
+    return { content: [{ type: "text", text }], structuredContent };
+  } catch (err) {
+    return errorResult(err, flair.url);
+  }
+};
+
 const record_usage: StdioHandler = async ({ memoryId, memoryIds, attribution }, { flair, heartbeat }) => {
   heartbeat();
   try {
@@ -358,6 +382,7 @@ export const STDIO_TOOL_HANDLERS: Record<string, StdioHandler> = {
   soul_get,
   flair_workspace_set,
   flair_orgevent,
+  flair_catchup,
   record_usage,
   skill_store,
   skill_search,
