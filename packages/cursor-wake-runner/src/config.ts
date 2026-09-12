@@ -4,6 +4,9 @@
  * signed FLAIR_AGENT_ID.
  */
 
+const CURSOR_ENV_TYPES = ["cloud", "pool", "machine"] as const;
+export type CursorEnvType = (typeof CURSOR_ENV_TYPES)[number];
+
 export interface WakeConfig {
   agentId: string;
   flairUrl?: string;
@@ -13,7 +16,7 @@ export interface WakeConfig {
   repoUrl?: string;
   startingRef?: string;
   envName?: string;
-  envType?: "cloud" | "pool" | "machine";
+  envType?: CursorEnvType;
   autoCreatePr: boolean;
   intervalSec: number | null;
   dryRun: boolean;
@@ -62,15 +65,21 @@ export function parseArgs(argv: string[]): CliFlags {
   return flags;
 }
 
+/** Unset → undefined (buildCreateBody defaults named envs to cloud). A typo throws. */
+export function parseCursorEnvType(raw: string | undefined): CursorEnvType | undefined {
+  if (raw === undefined) return undefined;
+  const normalized = raw.toLowerCase();
+  if ((CURSOR_ENV_TYPES as readonly string[]).includes(normalized)) return normalized as CursorEnvType;
+  throw new Error(`CURSOR_ENV_TYPE must be cloud, pool, or machine (got ${JSON.stringify(raw)})`);
+}
+
 export function loadConfig(flags: CliFlags): WakeConfig {
   const agentId = env("FLAIR_AGENT_ID");
   if (!agentId) throw new Error("FLAIR_AGENT_ID is required");
   const dryRun = flags.dryRun;
   const cursorApiKey = env("CURSOR_API_KEY") ?? "";
   if (!dryRun && !cursorApiKey) throw new Error("CURSOR_API_KEY is required (or pass --dry-run)");
-  const envTypeRaw = env("CURSOR_ENV_TYPE");
-  const envType =
-    envTypeRaw === "cloud" || envTypeRaw === "pool" || envTypeRaw === "machine" ? envTypeRaw : undefined;
+  const envType = parseCursorEnvType(env("CURSOR_ENV_TYPE"));
   return {
     agentId,
     flairUrl: env("FLAIR_URL"),
@@ -113,7 +122,7 @@ Cursor:
   CURSOR_AUTO_CREATE_PR  true to open a PR when the run completes
 
 Idempotency:
-  Each OrgEvent id maps to one Cursor agentId (bc-<uuid v5>). Re-POST is 409
+  Each OrgEvent id maps to one Cursor agentId (bc-<sha256 uuid>). Re-POST is 409
   and is treated as already-handed-off, then acked. Redelivery cannot start a
   second agent.
 `;

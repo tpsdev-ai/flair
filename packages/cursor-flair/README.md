@@ -87,7 +87,7 @@ You should see `bootstrap` return soul + memories, then `memory_store` confirm a
 
 ## Wake-runner (crew dispatch)
 
-Flair cannot wake a dormant Cursor agent. The consume + launch half of crew dispatch lives in [`packages/cursor-wake-runner`](../cursor-wake-runner/README.md) (flair#1613): it drains **this** agent's `OrgEventCatchup` and starts one Cloud Agent per directed `coord.dispatch` / `a2a.message`. Launch is idempotent (`bc-<uuid v5>` of the OrgEvent id → Cursor `409` on replay).
+Flair cannot wake a dormant Cursor agent. The consume + launch half of crew dispatch lives in [`packages/cursor-wake-runner`](../cursor-wake-runner/README.md) (flair#1613): it drains **this** agent's `OrgEventCatchup` and starts one Cloud Agent per directed `coord.dispatch` / `a2a.message`. Launch is idempotent (`bc-<sha256 uuid>` of the OrgEvent id → Cursor `409` on replay).
 
 ```bash
 FLAIR_AGENT_ID=<crew> CURSOR_API_KEY=… \

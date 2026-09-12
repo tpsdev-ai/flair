@@ -90,7 +90,7 @@ Schedule that command (cron / systemd / launchd) or `--interval 60`. A Cursor Au
 The runner:
 
 1. `GET /OrgEventCatchup/{self}` — owner-scoped
-2. For each directed `coord.dispatch` / `a2a.message`, `POST https://api.cursor.com/v1/agents` with `agentId` = `bc-<uuid v5 of the OrgEvent id>`
+2. For each directed `coord.dispatch` / `a2a.message`, `POST https://api.cursor.com/v1/agents` with `agentId` = `bc-<sha256 uuid of the OrgEvent id>`
 3. `POST /OrgEventCatchup/{self}` `{ position }` after handoff
 4. A `409 agent_id_conflict` is "already launched" — ack, do not create another
 

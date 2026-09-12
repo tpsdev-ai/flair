@@ -1,4 +1,4 @@
-export { DNS_NAMESPACE, uuidv5 } from "./uuid.js";
+export { DNS_NAMESPACE, uuidFromSha256 } from "./uuid.js";
 export { isWakeAgentId, WAKE_NAMESPACE, wakeAgentId } from "./agent-id.js";
 export {
   buildWakeName,
@@ -6,8 +6,10 @@ export {
   classifyDispatch,
   DISPATCH_KINDS,
   extractPointer,
+  firstHttpUrl,
   isDirectedAt,
   isDispatchKind,
+  parseGitHubRef,
   type DirectedDispatch,
   type OrgEventLike,
 } from "./dispatch.js";
@@ -32,4 +34,12 @@ export {
   type LaunchResult,
 } from "./cursor-api.js";
 export { runWakeCycle, type WakeDeps, type WakeItem, type WakeResult } from "./run.js";
-export { HELP, loadConfig, parseArgs, type CliFlags, type WakeConfig } from "./config.js";
+export {
+  HELP,
+  loadConfig,
+  parseArgs,
+  parseCursorEnvType,
+  type CliFlags,
+  type CursorEnvType,
+  type WakeConfig,
+} from "./config.js";

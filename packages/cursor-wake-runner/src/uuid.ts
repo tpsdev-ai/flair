@@ -1,7 +1,11 @@
 /**
- * RFC 4122 UUID v5 (SHA-1, name-based). No extra dependency — Node crypto only.
- * Used to derive a stable Cursor Cloud Agent id from an OrgEvent id so a
- * redelivered dispatch cannot create a second agent (flair#1613).
+ * Deterministic name-based UUID from SHA-256 (RFC 9562 version 8).
+ *
+ * Cursor Cloud Agents require a client-supplied `bc-<uuid>` for idempotent
+ * create. This must be a function of the OrgEvent id — `crypto.randomUUID()`
+ * would mint a new agent on every redelivery. SHA-1 UUID v5 is the RFC
+ * name-based form, but CodeQL flags SHA-1 as a weak primitive; SHA-256
+ * with version 8 is the same contract with a strong hash.
  */
 
 import { createHash } from "node:crypto";
@@ -22,10 +26,14 @@ function bytesToUuid(bytes: Uint8Array): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
-export function uuidv5(name: string, namespace: string): string {
-  const hash = createHash("sha1").update(uuidToBytes(namespace)).update(name, "utf8").digest();
+/**
+ * Name-based UUID: SHA-256(namespace bytes || name) → 16 bytes, version 8,
+ * RFC 4122 variant. Same name + namespace always yields the same id.
+ */
+export function uuidFromSha256(name: string, namespace: string): string {
+  const hash = createHash("sha256").update(uuidToBytes(namespace)).update(name, "utf8").digest();
   const bytes = Uint8Array.from(hash.subarray(0, 16));
-  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[6] = (bytes[6] & 0x0f) | 0x80;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
   return bytesToUuid(bytes);
 }

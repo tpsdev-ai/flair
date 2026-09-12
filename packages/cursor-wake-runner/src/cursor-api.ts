@@ -74,9 +74,10 @@ export function buildCreateBody(input: LaunchInput, config: CursorLaunchConfig):
 export function isAgentIdConflict(status: number, body: unknown): boolean {
   if (status !== 409) return false;
   const text = typeof body === "string" ? body : JSON.stringify(body ?? {});
-  // Only the idempotent-create conflict. Other 409s must not look like success
-  // or a redelivery would ack and drop work.
-  return /agent_id_conflict|already exists/i.test(text) || text === "{}" || text === "";
+  // Fail closed: only the documented idempotent-create conflict. An empty
+  // body, `{}`, or `{ error: {} }` is an unknown 409 — treating it as
+  // "already" would ack the watermark and drop the dispatch.
+  return /agent_id_conflict|already exists/i.test(text);
 }
 
 export function createCursorAgentClient(

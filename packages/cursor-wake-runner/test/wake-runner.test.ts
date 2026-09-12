@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
   buildCreateBody,
   buildWakeName,
@@ -10,6 +10,7 @@ import {
   createCursorAgentClient,
   DISPATCH_KINDS,
   extractPointer,
+  firstHttpUrl,
   HELP,
   isAgentIdConflict,
   isDirectedAt,
@@ -17,8 +18,10 @@ import {
   isWakeAgentId,
   loadConfig,
   parseArgs,
+  parseCursorEnvType,
+  parseGitHubRef,
   runWakeCycle,
-  uuidv5,
+  uuidFromSha256,
   DNS_NAMESPACE,
   wakeAgentId,
   type CatchupPage,
@@ -44,19 +47,23 @@ function dispatchEvent(overrides: Record<string, unknown> = {}): Record<string, 
   };
 }
 
-describe("uuid v5 (RFC 4122 vector)", () => {
-  test("DNS + www.example.com matches the published vector", () => {
-    expect(uuidv5("www.example.com", DNS_NAMESPACE)).toBe("2ed6657d-e927-568b-95e1-2665a8aea6a2");
+describe("uuidFromSha256 — deterministic name-based id", () => {
+  test("DNS + www.example.com is a stable version-8 uuid (not random, not SHA-1 v5)", () => {
+    const id = uuidFromSha256("www.example.com", DNS_NAMESPACE);
+    expect(id).toBe("5c146b14-3c52-8afd-938a-375d0df1fbf6");
+    expect(uuidFromSha256("www.example.com", DNS_NAMESPACE)).toBe(id);
+    expect(id).not.toBe("2ed6657d-e927-568b-95e1-2665a8aea6a2");
   });
 });
 
 describe("wakeAgentId — single-launch key", () => {
-  test("is a bc- UUID v5, stable for the same OrgEvent id, distinct across ids", () => {
+  test("is a bc- sha256 uuid, stable for the same OrgEvent id, distinct across ids", () => {
     const a = wakeAgentId("flint-2026-09-12T17:00:00.000Z");
     const b = wakeAgentId("flint-2026-09-12T17:00:00.000Z");
     const c = wakeAgentId("flint-2026-09-12T17:00:01.000Z");
     expect(a).toBe(b);
     expect(a).not.toBe(c);
+    expect(a).toBe("bc-4007d274-a83f-8977-8a8d-87ea871fc2e6");
     expect(isWakeAgentId(a)).toBe(true);
     expect(isWakeAgentId("bc-not-a-uuid")).toBe(false);
   });
@@ -93,6 +100,16 @@ describe("classifyDispatch — directed only, owner-scoped", () => {
     });
     expect(pr.prUrl).toBe("https://github.com/tpsdev-ai/flair/pull/1612");
     expect(extractPointer({ refId: "flair-abc" }).pointer).toBe("flair-abc");
+  });
+
+  test("pointer scan is linear — a long run of ')' does not hang and strips trailing punct", () => {
+    const hostile = `see https://example.com/x${")".repeat(8000)} trailing`;
+    const started = Date.now();
+    expect(firstHttpUrl(hostile)).toBe("https://example.com/x");
+    expect(Date.now() - started).toBeLessThan(50);
+    expect(parseGitHubRef("please look at github.com/tpsdev-ai/flair/issues/1613 now")?.pointer).toBe(
+      "https://github.com/tpsdev-ai/flair/issues/1613",
+    );
   });
 
   test("prompt stays light — pointer + one-line brief, no board rebuild", () => {
@@ -157,9 +174,13 @@ describe("Cursor create body + 409", () => {
     expect(body.repos).toBeUndefined();
   });
 
-  test("only agent_id_conflict 409 is idempotent success", () => {
+  test("only agent_id_conflict 409 is idempotent success — empty/{} fail closed", () => {
     expect(isAgentIdConflict(409, { error: "agent_id_conflict" })).toBe(true);
-    expect(isAgentIdConflict(409, "")).toBe(true);
+    expect(isAgentIdConflict(409, { error: { code: "agent_id_conflict" } })).toBe(true);
+    expect(isAgentIdConflict(409, "already exists")).toBe(true);
+    expect(isAgentIdConflict(409, "")).toBe(false);
+    expect(isAgentIdConflict(409, {})).toBe(false);
+    expect(isAgentIdConflict(409, { error: {} })).toBe(false);
     expect(isAgentIdConflict(409, { error: "another_run_active" })).toBe(false);
     expect(isAgentIdConflict(201, { error: "agent_id_conflict" })).toBe(false);
   });
@@ -191,6 +212,12 @@ describe("Cursor create body + 409", () => {
       (async () => new Response("nope", { status: 500 })) as typeof fetch,
     );
     await expect(boom.create(input)).rejects.toThrow("500");
+
+    const empty409 = createCursorAgentClient(
+      { apiBase: "https://api.cursor.com", apiKey: "k" },
+      (async () => new Response("", { status: 409 })) as typeof fetch,
+    );
+    await expect(empty409.create(input)).rejects.toThrow("409");
   });
 });
 
@@ -374,7 +401,16 @@ describe("cli flags + env", () => {
     expect(() => parseArgs(["--participant", OTHER])).toThrow("unknown flag");
     expect(() => parseArgs(["--agent", OTHER])).toThrow("unknown flag");
     expect(HELP).toContain("no --participant flag");
-    expect(HELP).toContain("bc-<uuid v5>");
+    expect(HELP).toContain("bc-<sha256 uuid>");
+  });
+
+  test("CURSOR_ENV_TYPE typos fail closed; Pool/Machine normalize; unset stays unset", () => {
+    expect(parseCursorEnvType(undefined)).toBeUndefined();
+    expect(parseCursorEnvType("pool")).toBe("pool");
+    expect(parseCursorEnvType("Pool")).toBe("pool");
+    expect(parseCursorEnvType("Machine")).toBe("machine");
+    expect(() => parseCursorEnvType("cloudd")).toThrow("CURSOR_ENV_TYPE");
+    expect(() => parseCursorEnvType("foo")).toThrow("CURSOR_ENV_TYPE");
   });
 
   test("loadConfig is owner-scoped and refuses a missing identity / key", () => {
@@ -393,6 +429,10 @@ describe("cli flags + env", () => {
       expect(() => loadConfig(parseArgs([]))).toThrow("CURSOR_API_KEY");
       expect(loadConfig(parseArgs(["--dry-run"])).agentId).toBe(CREW);
       expect(loadConfig(parseArgs(["--dry-run"]))).not.toHaveProperty("participant");
+      process.env.CURSOR_ENV_TYPE = "cloudd";
+      expect(() => loadConfig(parseArgs(["--dry-run"]))).toThrow("CURSOR_ENV_TYPE");
+      process.env.CURSOR_ENV_TYPE = "Pool";
+      expect(loadConfig(parseArgs(["--dry-run"])).envType).toBe("pool");
     } finally {
       restore();
     }

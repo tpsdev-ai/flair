@@ -3,7 +3,7 @@
   pages `GET /OrgEventCatchup/{self}` — owner-scoped, never another agent's
   feed — and for each directed `coord.dispatch` / `a2a.message` calls Cursor
   `POST /v1/agents` with a client-supplied `agentId` derived from the OrgEvent
-  id (`bc-<uuid v5>`). Re-POST is `409 agent_id_conflict` and is treated as
+  id (`bc-<sha256 uuid>`). Re-POST is `409 agent_id_conflict` and is treated as
   already-handed-off, then the watermark acks. Redelivery cannot start a second
   agent. A failed launch does not advance the cursor.
 

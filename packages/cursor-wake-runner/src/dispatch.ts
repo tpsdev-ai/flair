@@ -33,8 +33,8 @@ export interface DirectedDispatch {
 
 const KIND_SET = new Set<string>(DISPATCH_KINDS);
 
-const GITHUB_URL =
-  /(?:https?:\/\/)?github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(?:\/(issues|pull)\/(\d+))?/i;
+/** Bound OrgEvent-derived text before scanning so a hostile detail cannot hang. */
+const POINTER_SCAN_MAX = 2048;
 
 function asString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
@@ -60,6 +60,107 @@ export function isDirectedAt(event: OrgEventLike, agentId: string): boolean {
   return targets.includes(agentId);
 }
 
+function isOwnerChar(code: number): boolean {
+  return (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    code === 45 ||
+    code === 46 ||
+    code === 95
+  );
+}
+
+function isDigit(code: number): boolean {
+  return code >= 48 && code <= 57;
+}
+
+function isAlpha(code: number): boolean {
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function clip(text: string): string {
+  return text.length > POINTER_SCAN_MAX ? text.slice(0, POINTER_SCAN_MAX) : text;
+}
+
+function indexOfCi(hay: string, needle: string): number {
+  return hay.toLowerCase().indexOf(needle);
+}
+
+/**
+ * Linear GitHub URL / path scan — no backtracking regex on OrgEvent text.
+ * Accepts optional http(s):// and owner/repo[/issues|pull/N].
+ */
+export function parseGitHubRef(text: string): {
+  pointer: string;
+  repoUrl: string;
+  prUrl: string | null;
+} | null {
+  const hay = clip(text);
+  const at = indexOfCi(hay, "github.com/");
+  if (at < 0) return null;
+  let i = at + "github.com/".length;
+  const ownerStart = i;
+  while (i < hay.length && isOwnerChar(hay.charCodeAt(i))) i += 1;
+  if (i === ownerStart || hay[i] !== "/") return null;
+  const owner = hay.slice(ownerStart, i);
+  i += 1;
+  const repoStart = i;
+  while (i < hay.length && isOwnerChar(hay.charCodeAt(i))) i += 1;
+  if (i === repoStart) return null;
+  let repo = hay.slice(repoStart, i);
+  if (repo.toLowerCase().endsWith(".git")) repo = repo.slice(0, -4);
+  const repoUrl = `https://github.com/${owner}/${repo}`;
+  let pointer = repoUrl;
+  let prUrl: string | null = null;
+  if (hay[i] === "/") {
+    i += 1;
+    const kindStart = i;
+    while (i < hay.length && isAlpha(hay.charCodeAt(i))) i += 1;
+    const kind = hay.slice(kindStart, i).toLowerCase();
+    if ((kind === "issues" || kind === "pull") && hay[i] === "/") {
+      i += 1;
+      const numStart = i;
+      while (i < hay.length && isDigit(hay.charCodeAt(i))) i += 1;
+      if (i > numStart) {
+        const n = hay.slice(numStart, i);
+        pointer = `${repoUrl}/${kind === "pull" ? "pull" : "issues"}/${n}`;
+        if (kind === "pull") prUrl = pointer;
+      }
+    }
+  }
+  return { pointer, repoUrl, prUrl };
+}
+
+/**
+ * First http(s) URL in `text`, linear scan. Trailing `) , . ;` stripped with
+ * a while-loop — not a regex — so a long run of `)` cannot backtrack.
+ */
+export function firstHttpUrl(text: string): string | null {
+  const hay = clip(text);
+  const lower = hay.toLowerCase();
+  const httpsAt = lower.indexOf("https://");
+  const httpAt = lower.indexOf("http://");
+  let start = -1;
+  if (httpsAt >= 0 && httpAt >= 0) start = Math.min(httpsAt, httpAt);
+  else start = httpsAt >= 0 ? httpsAt : httpAt;
+  if (start < 0) return null;
+  let end = start;
+  while (end < hay.length && hay.charCodeAt(end) > 32) end += 1;
+  let url = hay.slice(start, end);
+  while (url.length > 0) {
+    const last = url.charCodeAt(url.length - 1);
+    if (last === 41 || last === 44 || last === 46 || last === 59) {
+      url = url.slice(0, -1);
+      continue;
+    }
+    break;
+  }
+  const scheme = url.slice(0, 8).toLowerCase();
+  if (scheme !== "https://" && url.slice(0, 7).toLowerCase() !== "http://") return null;
+  return url;
+}
+
 export function extractPointer(event: OrgEventLike): {
   pointer: string | null;
   repoUrl: string | null;
@@ -77,24 +178,19 @@ export function extractPointer(event: OrgEventLike): {
   let prUrl: string | null = null;
 
   for (const text of candidates) {
-    const match = text.match(GITHUB_URL);
-    if (!match) continue;
-    const owner = match[1];
-    const repo = match[2];
-    const kind = match[3]?.toLowerCase();
-    const number = match[4];
-    repoUrl = `https://github.com/${owner}/${repo}`;
-    const href = kind && number ? `${repoUrl}/${kind === "pull" ? "pull" : "issues"}/${number}` : repoUrl;
-    if (kind === "pull" && number) prUrl = href;
-    pointer = pointer ?? href;
+    const gh = parseGitHubRef(text);
+    if (!gh) continue;
+    repoUrl = gh.repoUrl;
+    prUrl = gh.prUrl;
+    pointer = pointer ?? gh.pointer;
     break;
   }
 
   if (!pointer) {
     for (const text of candidates) {
-      const url = text.match(/https?:\/\/\S+/);
+      const url = firstHttpUrl(text);
       if (url) {
-        pointer = url[0].replace(/[),.;]+$/, "");
+        pointer = url;
         break;
       }
     }
