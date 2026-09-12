@@ -19,6 +19,14 @@
  * migrations-embedding-stamp-e2e.test.ts`) before it ever had real work to
  * do was the point.
  *
+ * flair#1073: that self-heal sat idle for days on a Fabric instance. The
+ * runner is boot-keyed; a first detect() against a not-yet-visible corpus
+ * (or a version-keyed short-circuit after a no-op complete) marked this
+ * migration done while 554 pre-flip rows stayed stale. `alwaysDetect`
+ * plus delayed follow-up cycles close that; /HealthDetail names this
+ * migration when the corpus is still split. run() has no batch cap — the
+ * runner loops until processed=0 — and a re-run is idempotent.
+ *
  * Reuses Memory's OWN regen branch — never duplicates embedding logic —
  * via the SAME mechanism `flair reembed` (src/cli.ts) already uses in
  * production: a genuine `PUT /Memory/:id` HTTP request (admin-authenticated
@@ -129,6 +137,9 @@ import { databases } from "harper";
 import { getModelId } from "../embeddings-provider.js";
 import { currentSpaceRawForms, isCurrentSpaceStamp } from "../embedding-space-guard.js";
 import type { Migration, RunBatchResult } from "./types.js";
+import { EMBEDDING_STAMP_ID } from "./stamp-outstanding.js";
+
+export { EMBEDDING_STAMP_ID };
 
 export interface MemoryTableLike {
   search(query: unknown): AsyncIterable<Record<string, unknown>>;
@@ -138,8 +149,6 @@ export interface MemoryTableLike {
 function defaultMemoryTable(): MemoryTableLike {
   return (databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory;
 }
-
-export const EMBEDDING_STAMP_ID = "embedding-stamp";
 
 const REGEN_HTTP_TIMEOUT_MS = 20_000; // a real embedding compute can be slow on constrained hardware
 
@@ -244,6 +253,16 @@ export function createEmbeddingStampMigration(
     id: EMBEDDING_STAMP_ID,
     riskClass: "derived-only",
     affectsTables: ["Memory"],
+    // flair#1073: pending work is "does any row's stamp differ from
+    // getModelId()", not "did this version already record success." A
+    // Fabric boot that detect()'d empty (tables ready, corpus not yet
+    // visible) or a no-op complete at the searchprefix-flip version wrote
+    // success and then skipped every later boot at that version — 554
+    // pre-flip rows sat stale for days. alwaysDetect keeps the cheap
+    // limit=1 corpus read on every cycle so a false complete cannot hide
+    // remaining work. run() is idempotent; a re-run over already-current
+    // rows is a no-op.
+    alwaysDetect: true,
 
     async detect(): Promise<boolean> {
       const table = getTable();

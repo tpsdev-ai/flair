@@ -44,6 +44,11 @@ import {
   readEnvValue,
 } from "./component-env.js";
 import { fabricUpgrade } from "./fabric-upgrade.js";
+import {
+  describeStampOutstanding,
+  EMBEDDING_STAMP_ID,
+  resolveCurrentModelId,
+} from "./stamp-outstanding.js";
 import { checkVersion, formatVersionNudge, primeVersionCheckCache, probeInstanceVersion, FLAIR_PKG_NAME } from "./version-check.js";
 import {
   readInstalledHarperVersion,
@@ -9976,8 +9981,9 @@ const statusCmd = program
               return false;
             }
           }
-          // Mixed-model warnings are fleet-wide; keep them
+          // Mixed-model / outstanding stamp-migration warnings are fleet-wide; keep them
           if (w.message.includes("multiple embedding models")) return true;
+          if (w.message.includes("embedding-stamp") || w.message.includes("duplicate detection is inactive")) return true;
           // Federation warnings are fleet-wide; keep them
           if (w.message.includes("federation")) return true;
           // REM warnings are fleet-wide; keep them
@@ -16465,13 +16471,37 @@ export function computeQualityReport(
       const hashFallback = memories.hashFallback ?? 0;
       const pct = Math.round((hashFallback / memories.total) * 100);
       const modelCounts = (memories.modelCounts ?? {}) as Record<string, number>;
-      const realModels = Object.keys(modelCounts).filter((k) => k !== "hash-512d" && modelCounts[k] > 0);
+      const migBlock = healthData?.migrations;
+      const stampRow = Array.isArray(migBlock?.migrations)
+        ? migBlock.migrations.find((m: { id?: string }) => m?.id === EMBEDDING_STAMP_ID)
+        : undefined;
+      const stamp = describeStampOutstanding({
+        modelCounts,
+        currentModelId: resolveCurrentModelId(modelCounts),
+        audience: "client",
+        cyclePhase: typeof migBlock?.cyclePhase === "string" ? migBlock.cyclePhase : undefined,
+        lastCycleError:
+          typeof migBlock?.lastCycleError === "string"
+            ? migBlock.lastCycleError
+            : migBlock?.lastCycleError === null
+              ? null
+              : undefined,
+        migration: stampRow && typeof stampRow.state === "string"
+          ? {
+              id: EMBEDDING_STAMP_ID,
+              state: stampRow.state,
+              rowsDone: stampRow.rowsDone,
+              rowsRemaining: stampRow.rowsRemaining,
+              reason: stampRow.reason,
+            }
+          : undefined,
+      });
       if (pct >= QUALITY_HASH_FALLBACK_DEGRADED_PCT) {
         embeddingsStatus = "degraded";
         embeddingsDetail = `${hashFallback}/${memories.total} (${pct}%) memories are hash-fallback`;
-      } else if (realModels.length > 1) {
+      } else if (stamp.outstanding) {
         embeddingsStatus = "degraded";
-        embeddingsDetail = `multiple embedding models in use (${realModels.join(", ")}) — cross-model search unreliable`;
+        embeddingsDetail = stamp.warning;
       } else {
         embeddingsStatus = "ok";
         embeddingsDetail = `${memories.total - hashFallback}/${memories.total} memories have real embeddings`;

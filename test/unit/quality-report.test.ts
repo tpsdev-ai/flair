@@ -46,7 +46,7 @@ function fixture(overrides: Record<string, any> = {}) {
       total: 100,
       withEmbeddings: 95,
       hashFallback: 5,
-      modelCounts: { "nomic-embed-text": 95, "hash-512d": 5 },
+      modelCounts: { "nomic-embed-text+searchprefix": 95, "hash-512d": 5 },
       byDurability: { permanent: 5, persistent: 20, standard: 70, ephemeral: 5 },
       archived: 2,
       expired: 8,
@@ -136,13 +136,100 @@ describe("computeQualityReport", () => {
       expect(r.instance.embeddingsStatus).toBe("degraded");
     });
 
-    test("mixed real embedding models (multiple non-hash-fallback models) → degraded even under the % threshold", () => {
+    test("pre-flip vs +searchprefix split → degraded and names embedding-stamp", () => {
       const data = fixture({
-        memories: { total: 100, withEmbeddings: 98, hashFallback: 2, modelCounts: { "model-a": 60, "model-b": 38, "hash-512d": 2 }, expired: 0 },
+        memories: {
+          total: 100,
+          withEmbeddings: 98,
+          hashFallback: 2,
+          modelCounts: {
+            "nomic-embed-text-v1.5-Q4_K_M": 60,
+            "nomic-embed-text-v1.5-Q4_K_M+searchprefix": 38,
+            "hash-512d": 2,
+          },
+          expired: 0,
+        },
       });
       const r = computeQualityReport(true, data, { now: NOW });
       expect(r.instance.embeddingsStatus).toBe("degraded");
-      expect(r.instance.embeddingsDetail).toContain("multiple embedding models");
+      expect(r.instance.embeddingsDetail).toContain("embedding-stamp");
+      expect(r.instance.embeddingsDetail).toContain("duplicate detection is inactive");
+      // Default fixture cyclePhase is idle — name the instance, not this CLI.
+      expect(r.instance.embeddingsDetail).toContain("boot cycle never fired");
+      expect(r.instance.embeddingsDetail).not.toContain("this process's next migration cycle");
+    });
+
+    test("uniformly stale pre-flip corpus (one space, not current) → degraded and names embedding-stamp", () => {
+      const data = fixture({
+        memories: {
+          total: 554,
+          withEmbeddings: 554,
+          hashFallback: 0,
+          modelCounts: { "nomic-embed-text-v1.5-Q4_K_M": 554 },
+          expired: 0,
+        },
+      });
+      const r = computeQualityReport(true, data, { now: NOW });
+      expect(r.instance.embeddingsStatus).toBe("degraded");
+      expect(r.instance.embeddingsDetail).toContain("embedding-stamp");
+    });
+
+    test("bare + gguf: forms of the same +searchprefix space are not an outstanding migration", () => {
+      const data = fixture({
+        memories: {
+          total: 100,
+          withEmbeddings: 100,
+          hashFallback: 0,
+          modelCounts: {
+            "nomic-embed-text-v1.5-Q4_K_M+searchprefix": 40,
+            "gguf:nomic-embed-text-v1.5-Q4_K_M+searchprefix": 60,
+          },
+          expired: 0,
+        },
+      });
+      const r = computeQualityReport(true, data, { now: NOW });
+      expect(r.instance.embeddingsStatus).toBe("ok");
+      expect(r.instance.embeddingsDetail).not.toContain("embedding-stamp");
+    });
+
+    test("quality without a migrations block names the Harper process, not this CLI", () => {
+      const data = fixture({
+        memories: {
+          total: 554,
+          withEmbeddings: 554,
+          hashFallback: 0,
+          modelCounts: { "nomic-embed-text-v1.5-Q4_K_M": 554 },
+          expired: 0,
+        },
+      });
+      delete (data as any).migrations;
+      const r = computeQualityReport(true, data, { now: NOW });
+      expect(r.instance.embeddingsStatus).toBe("degraded");
+      expect(r.instance.embeddingsDetail).toContain("embedding-stamp");
+      expect(r.instance.embeddingsDetail).toContain("the Harper process applies it on its next migration cycle");
+      expect(r.instance.embeddingsDetail).toContain("this CLI does not");
+      expect(r.instance.embeddingsDetail).not.toContain("this process's next migration cycle");
+    });
+
+    test("quality uses the server's embedding-stamp row when the cycle marked complete", () => {
+      const data = fixture({
+        memories: {
+          total: 554,
+          withEmbeddings: 554,
+          hashFallback: 0,
+          modelCounts: { "nomic-embed-text-v1.5-Q4_K_M": 554 },
+          expired: 0,
+        },
+        migrations: {
+          cyclePhase: "done",
+          lastCycleError: null,
+          migrations: [{ id: "embedding-stamp", state: "completed", rowsDone: 0, rowsRemaining: 0 }],
+        },
+      });
+      const r = computeQualityReport(true, data, { now: NOW });
+      expect(r.instance.embeddingsStatus).toBe("degraded");
+      expect(r.instance.embeddingsDetail).toContain("marked it complete without converging");
+      expect(r.instance.embeddingsDetail).not.toContain("this process's next migration cycle");
     });
 
     test("zero memories → embeddings status unknown, not a false 'ok'", () => {

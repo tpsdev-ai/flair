@@ -187,7 +187,7 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
   const candidates: Migration[] = [];
 
   for (const migration of deps.registry.list()) {
-    if (isShortCircuited(state, migration.id, deps.runningVersion)) {
+    if (isShortCircuited(state, migration.id, deps.runningVersion) && !migration.alwaysDetect) {
       // flair#812: a short-circuit is an ASSERTION READ OFF A FILE, not an
       // observation of the corpus — and that file is hand-editable (the
       // documented remediation for a stuck migration is to correct it by
@@ -196,6 +196,11 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
       // The skip itself is unchanged (it is the documented cheap path); it
       // now just says what it is, so `flair doctor` never presents an
       // unverified claim as a verified one.
+      //
+      // flair#1073: `alwaysDetect` migrations skip this path — their
+      // pending work is a corpus property, so a version-keyed "already
+      // done" marker can lie (embedding-stamp completed at 0.30.0 while
+      // 554 pre-flip rows were still stale). detect() is still cheap.
       setMigrationProgress({
         id: migration.id,
         rowsDone: 0,

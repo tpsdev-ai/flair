@@ -64,6 +64,7 @@ import {
   describeUnresolvableDataDir,
   resolveWritableMigrationDataDir,
 } from "./migrations/data-dir.js";
+import { scheduleFollowUpCycles, type FollowUpScheduler } from "./migrations/recheck.js";
 import type { SourceTable } from "./migrations/types.js";
 import { getMode } from "./embeddings-provider.js";
 
@@ -154,6 +155,51 @@ function reportBootFailure(registry: MigrationRegistry, reason: string): void {
 }
 
 let scheduled = false;
+let followUp: FollowUpScheduler | null = null;
+
+/**
+ * Runs one cycle against an already-resolved writable data dir. Shared by
+ * the boot-keyed first pass and the flair#1073 follow-up rechecks. Never
+ * throws. Returns whether a follow-up series should be armed (true unless
+ * this invocation is itself a follow-up, or the cycle was a hard failure
+ * that needs an operator — those retry on the next restart).
+ */
+async function invokeCycle(
+  registry: MigrationRegistry,
+  dataDir: string,
+  opts: { followUp: boolean } = { followUp: false },
+): Promise<boolean> {
+  try {
+    const result = await runMigrationCycle({
+      registry,
+      getTable,
+      dataDir,
+      runningVersion: resolveRunningVersion(),
+    });
+    // `nothing pending` is the healthy no-op; `single-flight` is the
+    // lock guard working as designed on a multi-threaded boot. Anything
+    // else is a cycle that WANTED to run and couldn't, and must be loud.
+    if (!result.ran && result.reason && !isBenignSkip(result.reason)) {
+      if (!opts.followUp) {
+        reportBootFailure(registry, `migration cycle did not run: ${result.reason}`);
+      } else {
+        console.error(`[flair-migrations] follow-up cycle did not run: ${result.reason}`);
+      }
+      return false;
+    }
+    if (opts.followUp && result.ran) {
+      console.info("[flair-migrations] follow-up cycle ran — embedding-stamp (or another pending migration) had work the boot pass missed");
+    }
+    return true;
+  } catch (err) {
+    // Defense-in-depth only — runMigrationCycle is documented to never
+    // throw. A boot-path exception must never surface here regardless.
+    const reason = `unexpected error from runMigrationCycle: ${(err as Error)?.message ?? String(err)}`;
+    if (!opts.followUp) reportBootFailure(registry, reason);
+    else console.error(`[flair-migrations] ${reason}`);
+    return false;
+  }
+}
 
 export function scheduleMigrationBoot(): void {
   if (scheduled) return;
@@ -183,31 +229,23 @@ export function scheduleMigrationBoot(): void {
       // failure at that point is reported back rather than thrown, which is
       // precisely how flair#812 stayed invisible. See data-dir.ts.
       const resolved = resolveWritableMigrationDataDir();
-      if (!resolved.dataDir) {
+      const dataDir = resolved.dataDir;
+      if (!dataDir) {
         reportBootFailure(registry, describeUnresolvableDataDir(resolved.tried));
         return;
       }
 
-      try {
-        const result = await runMigrationCycle({
-          registry,
-          getTable,
-          dataDir: resolved.dataDir,
-          runningVersion: resolveRunningVersion(),
+      const ok = await invokeCycle(registry, dataDir, { followUp: false });
+      // flair#1073: even a clean "nothing pending" can be a Fabric race
+      // (tables ready, rows not yet visible). Arm delayed rechecks so a
+      // split corpus heals in-process instead of sitting until the next
+      // restart. A hard boot failure does not arm them — those need an
+      // operator or a restart (same as before).
+      if (ok) {
+        followUp?.cancel();
+        followUp = scheduleFollowUpCycles({
+          run: () => invokeCycle(registry, dataDir, { followUp: true }).then(() => undefined),
         });
-        // `nothing pending` is the healthy no-op; `single-flight` is the
-        // lock guard working as designed on a multi-threaded boot. Anything
-        // else is a cycle that WANTED to run and couldn't, and must be loud.
-        if (!result.ran && result.reason && !isBenignSkip(result.reason)) {
-          reportBootFailure(registry, `migration cycle did not run: ${result.reason}`);
-        }
-      } catch (err) {
-        // Defense-in-depth only — runMigrationCycle is documented to never
-        // throw. A boot-path exception must never surface here regardless.
-        reportBootFailure(
-          registry,
-          `unexpected error from runMigrationCycle: ${(err as Error)?.message ?? String(err)}`,
-        );
       }
     })();
   });
@@ -227,6 +265,8 @@ export function isBenignSkip(reason: string): boolean {
 // ever boots once).
 export function _resetMigrationBootForTests(): void {
   scheduled = false;
+  followUp?.cancel();
+  followUp = null;
 }
 
 scheduleMigrationBoot();

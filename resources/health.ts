@@ -11,6 +11,8 @@ import { REM_DEDUP_STATS_PATH } from "./dedup-cluster.js";
 import { hybridEnabled } from "./bm25.js";
 import { bm25IndexEnabled, bm25IndexStatus } from "./bm25-index-service.js";
 import { normalizeStamp } from "./embedding-space-guard.js";
+import { getModelId } from "./embeddings-provider.js";
+import { describeStampOutstanding, EMBEDDING_STAMP_ID } from "./migrations/stamp-outstanding.js";
 import { buildPublicHealthBody, resolveSearchReadiness, type ResourceRegistry, type SearchReadiness } from "./search-readiness.js";
 
 const db = databases as any;
@@ -160,6 +162,14 @@ export class HealthDetail extends Resource {
     const stats: Record<string, any> = { ok: true };
     const nowMs = Date.now();
     const warnings: Array<{ level: "warn" | "info"; message: string }> = [];
+    // flair#1073: set while walking memories, consumed after the migrations
+    // snapshot so the outstanding-migration warning can name runner state.
+    // Never copied onto `stats` — it is not part of the /HealthDetail shape.
+    // `memoryScanOk` is the gate (not "mixed spaces"): a uniformly pre-flip
+    // corpus is one space and still outstanding against getModelId().
+    let mixedEmbeddingSpaces = false;
+    let memoryScanOk = false;
+    let memoryModelCounts: Record<string, number> = {};
 
     // flair#1326: same search-ready signal as public /Health. HealthDetail
     // stays HTTP 200 (it is a stats dump, not a traffic gate); the field
@@ -259,13 +269,11 @@ export class HealthDetail extends Resource {
       const distinctSpaces = new Set(
         realModels.map((k) => normalizeStamp(k)).filter((s): s is string => s !== null),
       );
-      if (distinctSpaces.size > 1) {
-        const list = realModels.map((k) => `${k}:${modelCounts[k]}`).join(", ");
-        warnings.push({
-          level: "warn",
-          message: `multiple embedding models in use (${list}) — cross-model search unreliable; run: flair reembed against one model`,
-        });
-      }
+      // Always keep counts — a uniformly stale pre-flip corpus is one space
+      // and must still name embedding-stamp (Bugbot High on flair#1606).
+      memoryScanOk = true;
+      memoryModelCounts = modelCounts;
+      if (distinctSpaces.size > 1) mixedEmbeddingSpaces = true;
     } catch { stats.memories = null; }
 
     // ── Agent stats ──
@@ -613,7 +621,45 @@ export class HealthDetail extends Resource {
             "migration boot cycle never fired on this instance (cyclePhase=idle) — no migration will run until this is resolved; see `flair doctor`",
         });
       }
-    } catch { stats.migrations = null; }
+      if (memoryScanOk) {
+        const stamp = snapshot.migrations.find((m) => m.id === EMBEDDING_STAMP_ID);
+        const outstanding = describeStampOutstanding({
+          modelCounts: memoryModelCounts,
+          currentModelId: getModelId(),
+          migration: stamp,
+          cyclePhase: snapshot.cyclePhase,
+          lastCycleError: snapshot.lastCycleError,
+        });
+        if (outstanding.outstanding) {
+          warnings.push({ level: "warn", message: outstanding.warning });
+        } else if (mixedEmbeddingSpaces) {
+          const list = Object.entries(memoryModelCounts)
+            .filter(([k, n]) => k !== "hash-512d" && n > 0)
+            .map(([k, n]) => `${k}:${n}`)
+            .join(", ");
+          warnings.push({
+            level: "warn",
+            message: `multiple embedding models in use (${list}) — cross-model search unreliable; run: flair reembed against one model`,
+          });
+        }
+      }
+    } catch {
+      stats.migrations = null;
+      if (memoryScanOk) {
+        const outstanding = describeStampOutstanding({
+          modelCounts: memoryModelCounts,
+          currentModelId: getModelId(),
+        });
+        if (outstanding.outstanding) {
+          warnings.push({ level: "warn", message: outstanding.warning });
+        } else if (mixedEmbeddingSpaces) {
+          warnings.push({
+            level: "warn",
+            message: `multiple embedding models in use — cross-model search unreliable; run: flair reembed against one model`,
+          });
+        }
+      }
+    }
 
     // ── Disk ──
     // flair#812: same shared read-only resolution as the migrations section

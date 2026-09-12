@@ -104,6 +104,7 @@ describe("embedding-stamp migration — identity", () => {
     expect(m.id).toBe(EMBEDDING_STAMP_ID);
     expect(m.riskClass).toBe("derived-only");
     expect(m.affectsTables).toEqual(["Memory"]);
+    expect(m.alwaysDetect).toBe(true);
   });
 });
 
