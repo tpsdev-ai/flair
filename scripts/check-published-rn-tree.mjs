@@ -233,10 +233,12 @@ export function scopedRegistryNpmrc(registryUrl) {
 }
 
 export function writeVerdaccioConfig(dir, port) {
+  mkdirSync(dir, { recursive: true });
   const configPath = join(dir, "config.yaml");
   const yaml = [
     `storage: ${join(dir, "storage")}`,
     `listen: 127.0.0.1:${port}`,
+    "max_body_size: 100mb",
     "web:",
     "  enable: false",
     "auth:",
@@ -329,15 +331,40 @@ export function stopVerdaccio(pid) {
 function runNpm(args, cwd, extraEnv = {}) {
   const result = spawnSync("npm", args, { cwd, encoding: "utf8", env: { ...process.env, ...extraEnv } });
   if (result.status !== 0) {
-    const detail = (result.stderr || result.stdout || "").trim() || `exit ${result.status}`;
+    const raw = (result.stderr || result.stdout || "").trim() || `exit ${result.status}`;
+    const detail = raw.length > 4000 ? raw.slice(-4000) : raw;
     throw new Error(`npm ${args.join(" ")} failed: ${detail}`);
   }
   return (result.stdout || "").trim();
 }
 
+export function registryAuthNpmrc(registryUrl) {
+  const url = registryUrl.endsWith("/") ? registryUrl : `${registryUrl}/`;
+  const host = url.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  return [`registry=${url}`, `//${host}/:_authToken=flair-847-ci`, `//${host}/:always-auth=true`, ""].join("\n");
+}
+
 export function publishToRegistry(packageDirOrTgz, registryUrl, cwd = process.cwd()) {
-  const args = ["publish", packageDirOrTgz, "--registry", registryUrl, "--access", "public", "--ignore-scripts"];
-  return runNpm(args, cwd);
+  const userconfig = join(cwd, ".npmrc.flair-847-publish");
+  writeFileSync(userconfig, registryAuthNpmrc(registryUrl));
+  const args = [
+    "publish",
+    packageDirOrTgz,
+    "--registry",
+    registryUrl,
+    "--access",
+    "public",
+    "--ignore-scripts",
+    "--loglevel",
+    "error",
+    "--userconfig",
+    userconfig,
+  ];
+  try {
+    return runNpm(args, cwd);
+  } finally {
+    rmSync(userconfig, { force: true });
+  }
 }
 
 export function packFlairForRegistry(workspace, destDir = mkdtempSync(join(tmpdir(), "flair-847-pack-"))) {

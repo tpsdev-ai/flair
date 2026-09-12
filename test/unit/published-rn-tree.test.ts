@@ -23,6 +23,7 @@ import {
   formatReport,
   npmMajor,
   parseArgs,
+  registryAuthNpmrc,
   resolveNpm12,
   scopedRegistryNpmrc,
 } from "../../scripts/check-published-rn-tree.mjs";
@@ -175,6 +176,7 @@ describe("the process a human or CI step actually consumes", () => {
   test("scoped .npmrc only remaps @tpsdev-ai, so RocksDB still comes from npmjs", () => {
     expect(scopedRegistryNpmrc("http://127.0.0.1:4873")).toBe("@tpsdev-ai:registry=http://127.0.0.1:4873/\n");
     expect(FLAIR_PACKAGE).toBe("@tpsdev-ai/flair");
+    expect(registryAuthNpmrc("http://127.0.0.1:4873")).toContain("//127.0.0.1:4873/:_authToken=");
   });
 });
 

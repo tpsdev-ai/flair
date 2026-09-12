@@ -41,6 +41,7 @@ export function resolveNpm12(
   spawn?: typeof import("node:child_process").spawnSync,
 ): { ok: boolean; reason?: string; command?: string; args?: string[]; version?: string };
 export function scopedRegistryNpmrc(registryUrl: string): string;
+export function registryAuthNpmrc(registryUrl: string): string;
 export function writeVerdaccioConfig(dir: string, port: number): string;
 export function pickFreePort(): number;
 export function pingRegistry(url: string): boolean;
