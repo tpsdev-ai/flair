@@ -156,13 +156,18 @@ Syncing to hub: <hub-instance-id>...
 ✅ Synced 0 records (0 skipped) in 45ms
 ```
 
-Then verify reachability across the federation:
+Then verify the pairing. `federation verify` pushes the canary itself — you
+do not need the systemd timer from §7 first:
 
 ```bash
+flair federation verify --admin-pass "$FLAIR_ADMIN_PASS"
 flair federation reachability
 ```
 
-Both local and hub peer should report `OK`.
+`verify` writes a tagged memory, syncs it, and checks each peer. HTTP 401/403,
+an unreachable peer, or a revoked leftover row is UNVERIFIABLE (a warning),
+not FAIL. A reachable peer that is missing the canary still fails.
+`reachability` should report `OK` for local and the hub.
 
 ---
 
@@ -290,7 +295,7 @@ flair federation pair https://fabric-node.example.com:19926/<instance> \
 | Hub: mint token | `flair federation token --admin-pass <pass> > triple.json` |
 | Spoke: pair | `flair federation pair <hub-url> --token-from ./triple.json --admin-pass <pass>` |
 | Spoke: sync | `flair federation sync --admin-pass <pass>` |
-| Spoke: verify | `flair federation reachability` |
+| Spoke: verify | `flair federation verify --admin-pass <pass>` then `flair federation reachability` |
 | Watch loop | `flair federation watch --interval 30` |
 
 ---

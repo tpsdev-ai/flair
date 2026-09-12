@@ -243,6 +243,8 @@ Provision once, from one place, before serving multi-region traffic: step 2's
 
 `fleet verify` exit codes: 1 origin failed, 2 reachable peer diverged (wrong version), 3 reachable peer unreachable/auth-failed. Unverifiable peers (no endpoint on file) warn and exit 0.
 
+`federation verify` is a different question (did this canary land). Exit 0 includes unverifiable peers (401/403, unreachable); exit 1 is a reachable peer missing the canary. It pushes before probing so a spoke with no sync daemon can still check.
+
 > **A credential mismatch renders as an empty section, not an error.** `flair status`
 > reads `/HealthDetail` with `FLAIR_ADMIN_PASS` / `HDB_ADMIN_PASSWORD` / a pinned agent
 > key — **not** the `FABRIC_*` credentials `deploy` and `fleet verify` use. On failure it
