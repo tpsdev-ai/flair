@@ -29,6 +29,7 @@ import {
   summarizeHarperOutput,
   type DeployAttemptFailure,
 } from "../../src/deploy.js";
+import { FABRIC_NPM_INSTALL_COMMAND } from "../../src/fabric-npm-install.js";
 import type { ConvergenceDeps } from "../../src/replication-convergence.js";
 
 // ─── flair#878 helpers: a fake cluster for the convergence poll ─────────────
@@ -257,6 +258,7 @@ describe("flair deploy: buildHarperDeployArgs (timeout passthrough)", () => {
     );
     expect(args).toContain("deployment_timeout=600000");
     expect(args).toContain("install_timeout=600000");
+    expect(args).toContain(`install_command=${FABRIC_NPM_INSTALL_COMMAND}`);
   });
 
   test("threads deploymentTimeoutMs / installTimeoutMs overrides through", () => {
@@ -283,7 +285,22 @@ describe("flair deploy: buildHarperDeployArgs (timeout passthrough)", () => {
       "replicated=false",
       "deployment_timeout=600000",
       "install_timeout=600000",
+      `install_command=${FABRIC_NPM_INSTALL_COMMAND}`,
     ]);
+  });
+
+  test("install_command is Harper-split-safe and does not use the node's ~/.npm cache (flair#886)", () => {
+    const args = buildHarperDeployArgs(
+      { fabricOrg: "acme", fabricCluster: "prod", fabricUser: "a", fabricPassword: "b" },
+      "https://prod.acme.harperfabric.com",
+      "flair",
+    );
+    const flag = args.find((a) => a.startsWith("install_command="));
+    expect(flag).toBe(`install_command=${FABRIC_NPM_INSTALL_COMMAND}`);
+    // Harper Application.installApplication does `command.split(" ")` and
+    // spawns without a shell. More than two tokens, or a token with a space,
+    // would silently become extra argv / a broken -c script.
+    expect(FABRIC_NPM_INSTALL_COMMAND.split(" ")).toEqual(["node", "dist/fabric-npm-install.js"]);
   });
 });
 

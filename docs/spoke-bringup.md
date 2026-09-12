@@ -138,8 +138,8 @@ The `--admin-pass` is required so the CLI can write the hub as a local `Peer` re
 
 1. The spoke POSTs a signed pairing request to the hub's `/FederationPair` endpoint.
 2. The bootstrap user authenticates at the Harper platform layer (works on standalone and Fabric deployments alike).
-3. The hub validates the one-time token, verifies the Ed25519 signature, and creates a `Peer` record.
-4. The spoke writes a `Peer` record pointing to the hub so sync knows where to push.
+3. The hub validates the one-time token, verifies the Ed25519 signature, and creates a `Peer` record. The response includes the hub's `instance {id, publicKey}` when the hub has a FederationInstance row.
+4. The spoke writes a `Peer` record pointing to the hub so sync knows where to push. A missing hub `publicKey` is an error, never an empty string. That does not create the hub's Instance row.
 
 ---
 

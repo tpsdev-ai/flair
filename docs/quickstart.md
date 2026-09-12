@@ -202,7 +202,8 @@ Soul entries and relevant memories, in one block sized to a token budget. Paste 
 flair stop              # stop the service, keep data
 flair restart           # restart
 flair uninstall         # remove the service, keep data and keys
-flair uninstall --purge # remove everything, including data and keys
+flair uninstall --purge # remove data, keys, secrets, schedulers, and client wiring
+                        # (the npm package is left; `npm uninstall -g @tpsdev-ai/flair`)
 ```
 
 All reversible. Your memories aren't locked in.
