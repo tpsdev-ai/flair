@@ -43,13 +43,20 @@ function basicAuthHeader(user: string, password: string): string {
   return "Basic " + Buffer.from(`${user}:${password}`, "utf8").toString("base64");
 }
 
-function snapshotFromHealthDetail(body: unknown): StampVerifySnapshot {
+/**
+ * Parse /HealthDetail into a verify snapshot. `memories: null` (HealthDetail
+ * 200 after the Memory walk threw) and a missing `modelCounts` field stay
+ * `undefined` — that is unread, not an empty corpus. An explicit
+ * `modelCounts: {}` is the valid empty-store case (Bugbot Medium on #1606).
+ */
+export function snapshotFromHealthDetail(body: unknown): StampVerifySnapshot {
   const rec = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
-  const memories = rec.memories && typeof rec.memories === "object" ? (rec.memories as Record<string, unknown>) : {};
+  const memories =
+    rec.memories && typeof rec.memories === "object" ? (rec.memories as Record<string, unknown>) : null;
   const migrationsBlock =
     rec.migrations && typeof rec.migrations === "object" ? (rec.migrations as Record<string, unknown>) : {};
   const modelCounts =
-    memories.modelCounts && typeof memories.modelCounts === "object"
+    memories && memories.modelCounts && typeof memories.modelCounts === "object"
       ? (memories.modelCounts as Record<string, number>)
       : undefined;
   const rawList = Array.isArray(migrationsBlock.migrations) ? migrationsBlock.migrations : undefined;
@@ -94,13 +101,22 @@ export function inferCurrentModelId(snapshot: StampVerifySnapshot): string {
 }
 
 export function evaluateStampSnapshot(snapshot: StampVerifySnapshot): { converged: boolean; detail: string } {
+  // Unread corpus (HealthDetail omitted modelCounts, including memories: null)
+  // is not an empty store. Reject before stampMigrationConverged can treat
+  // `undefined` as `{}` and report success (Bugbot Medium on #1606).
+  if (snapshot.modelCounts === undefined) {
+    return {
+      converged: false,
+      detail: "HealthDetail did not include memories.modelCounts",
+    };
+  }
   const outstandingWarning = snapshot.warnings?.find(
     (w) => w.includes(`migration '${EMBEDDING_STAMP_ID}' is outstanding`) || w.includes("duplicate detection is inactive"),
   );
   if (outstandingWarning) {
     return { converged: false, detail: outstandingWarning };
   }
-  const counts = snapshot.modelCounts ?? {};
+  const counts = snapshot.modelCounts;
   const realStamps = Object.entries(counts).filter(([k, n]) => k !== "hash-512d" && typeof n === "number" && n > 0);
   // Production getModelId() stamps +searchprefix. A corpus that is entirely
   // on the pre-flip bare id is the #1073 failure mode — do not treat a

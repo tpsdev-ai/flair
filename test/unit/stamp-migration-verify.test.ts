@@ -6,6 +6,7 @@ import { describe, it, expect } from "bun:test";
 import {
   evaluateStampSnapshot,
   inferCurrentModelId,
+  snapshotFromHealthDetail,
   verifyStampMigrationConverged,
 } from "../../src/stamp-migration-verify.ts";
 
@@ -59,6 +60,29 @@ describe("evaluateStampSnapshot", () => {
   it("converges on an empty corpus", () => {
     const r = evaluateStampSnapshot({ modelCounts: {}, cyclePhase: "done" });
     expect(r.converged).toBe(true);
+  });
+
+  it("does not treat a missing modelCounts as an empty corpus", () => {
+    const r = evaluateStampSnapshot({ cyclePhase: "done" });
+    expect(r.converged).toBe(false);
+    expect(r.detail).toContain("did not include memories.modelCounts");
+  });
+
+  it("memories: null (HealthDetail 200 after Memory walk threw) is unread, not empty", () => {
+    const snap = snapshotFromHealthDetail({ ok: true, memories: null, migrations: { cyclePhase: "done" } });
+    expect(snap.modelCounts).toBeUndefined();
+    const r = evaluateStampSnapshot(snap);
+    expect(r.converged).toBe(false);
+    expect(r.detail).toContain("did not include memories.modelCounts");
+  });
+
+  it("explicit modelCounts: {} from a successful empty-store scan is the valid empty case", () => {
+    const snap = snapshotFromHealthDetail({
+      memories: { total: 0, modelCounts: {} },
+      migrations: { cyclePhase: "done" },
+    });
+    expect(snap.modelCounts).toEqual({});
+    expect(evaluateStampSnapshot(snap).converged).toBe(true);
   });
 });
 
@@ -140,5 +164,25 @@ describe("verifyStampMigrationConverged", () => {
         sleep: async () => undefined,
       }),
     ).rejects.toThrow(/embedding-stamp did not converge/);
+  });
+
+  it("does not print success when HealthDetail 200 carries memories: null", async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ ok: true, memories: null, migrations: { cyclePhase: "done" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch;
+
+    await expect(
+      verifyStampMigrationConverged({
+        baseUrl: "https://flair.kris-test.harperfabric.com",
+        fabricUser: "admin",
+        fabricPassword: "pw",
+        fetchImpl,
+        pollIntervalMs: 1,
+        timeoutMs: 20,
+        sleep: async () => undefined,
+      }),
+    ).rejects.toThrow(/did not include memories\.modelCounts/);
   });
 });
