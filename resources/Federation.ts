@@ -337,8 +337,8 @@ export class FederationPair extends Resource {
     }
 
     // flair#822: resolve OUR identity before consuming the token or writing
-    // a Peer. A successful pair that returns instance:null / empty publicKey
-    // is how spokes used to store publicKey:"" and treat pairing as complete.
+    // a Peer. A successful pair that omits instance.publicKey is how spokes
+    // used to store an empty hub key and treat pairing as complete.
     let ourInstance: any = null;
     try {
       for await (const i of (databases as any).flair.Instance.search()) {

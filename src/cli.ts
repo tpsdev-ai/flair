@@ -7861,7 +7861,7 @@ federation
           return instRes.json();
         },
       });
-      if (!resolvedHub.ok) {
+      if (resolvedHub.ok === false) {
         console.error(`Error: ${resolvedHub.error}`);
         process.exit(1);
       }

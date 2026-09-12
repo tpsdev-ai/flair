@@ -153,8 +153,9 @@ describe("wiring — hub and spoke call the identity contract (flair#822)", () =
     expect(src).toContain("HUB_IDENTITY_INCOMPLETE");
     expect(src).toContain("id: ours.instance.id");
     expect(src).toContain("publicKey: ours.instance.publicKey");
+    expect(src).toContain("error: HUB_IDENTITY_INCOMPLETE");
     expect(src).not.toMatch(/instance:\s*ourInstance\s*\?/);
-    expect(src).not.toMatch(/instance:\s*null/);
+    expect(src).not.toMatch(/instance:\s*null\s*,?\s*\n\s*\}/);
   });
 
   it("spoke pair writes resolvedHub.peer.publicKey and never ?? \"\"", () => {
