@@ -9748,6 +9748,28 @@ function relativeTime(iso: string | null | undefined): string {
 // registeredBy, createdAt, issuer). Inputs are coerced to scalar primitives
 // before formatting to keep the display values clearly separated from the
 // source record.
+/** Colored `N connected · N down · N revoked` (+ unknown when > 0). */
+function federationPeerCountParts(peers: {
+  connected?: number;
+  disconnected?: number;
+  revoked?: number;
+  unknown?: number;
+}): string[] {
+  const connected = Number(peers?.connected ?? 0);
+  const disconnected = Number(peers?.disconnected ?? 0);
+  const revoked = Number(peers?.revoked ?? 0);
+  const unknown = Number(peers?.unknown ?? 0);
+  const parts = [
+    render.wrap(connected > 0 ? render.c.green : render.c.dim, `${connected} connected`),
+    render.wrap(disconnected > 0 ? render.c.yellow : render.c.dim, `${disconnected} down`),
+    render.wrap(revoked > 0 ? render.c.red : render.c.dim, `${revoked} revoked`),
+  ];
+  if (unknown > 0) {
+    parts.push(render.wrap(render.c.dim, `${unknown} unknown`));
+  }
+  return parts;
+}
+
 function oauthSummaryLines(o: any): string[] {
   const clients = Number(o?.clients ?? 0);
   const idps = Number(o?.idpConfigs ?? 0);
@@ -10120,14 +10142,7 @@ const statusCmd = program
         console.log(render.kv("Instance", `${f.instance.id}  ${render.wrap(render.c.dim, "(")}${f.instance.role ?? "—"}${render.wrap(render.c.dim, ", ")}${render.wrap(statusColor, f.instance.status ?? "—")}${render.wrap(render.c.dim, ")")}`));
       }
       if (f.peers) {
-        const connColor = f.peers.connected > 0 ? render.c.green : render.c.dim;
-        const downColor = f.peers.disconnected > 0 ? render.c.yellow : render.c.dim;
-        const revColor = f.peers.revoked > 0 ? render.c.red : render.c.dim;
-        const parts = [
-          `${render.wrap(connColor, `${f.peers.connected} connected`)}`,
-          `${render.wrap(downColor, `${f.peers.disconnected} down`)}`,
-          `${render.wrap(revColor, `${f.peers.revoked} revoked`)}`,
-        ];
+        const parts = federationPeerCountParts(f.peers);
         console.log(render.kv("Peers", `${render.wrap(render.c.bold, String(f.peers.total))} ${render.wrap(render.c.dim, "—")} ${parts.join(render.wrap(render.c.dim, " · "))}`));
       }
       if (f.pendingTokens > 0) console.log(render.kv("Pairing", `${render.wrap(render.c.yellow, String(f.pendingTokens))} unconsumed token(s)`));
@@ -10240,14 +10255,7 @@ statusCmd
       console.log(render.kv("Instance", render.wrap(render.c.dim, "—")));
     }
     if (f.peers) {
-      const connColor = f.peers.connected > 0 ? render.c.green : render.c.dim;
-      const downColor = f.peers.disconnected > 0 ? render.c.yellow : render.c.dim;
-      const revColor = f.peers.revoked > 0 ? render.c.red : render.c.dim;
-      const parts = [
-        render.wrap(connColor, `${f.peers.connected} connected`),
-        render.wrap(downColor, `${f.peers.disconnected} down`),
-        render.wrap(revColor, `${f.peers.revoked} revoked`),
-      ];
+      const parts = federationPeerCountParts(f.peers);
       console.log(render.kv("Peers", `${render.wrap(render.c.bold, String(f.peers.total))} ${render.wrap(render.c.dim, "—")} ${parts.join(render.wrap(render.c.dim, " · "))}`));
     }
     if (typeof f.pendingTokens === "number" && f.pendingTokens > 0) {
@@ -10264,6 +10272,15 @@ statusCmd
           format: (v) => {
             const s = String(v ?? "—");
             const color = s === "paired" || s === "connected" ? render.c.green : s === "revoked" ? render.c.red : render.c.yellow;
+            return render.wrap(color, s);
+          },
+        },
+        {
+          label: "liveness",
+          key: "liveness",
+          format: (v) => {
+            const s = String(v ?? "—");
+            const color = s === "connected" ? render.c.green : s === "disconnected" ? render.c.yellow : s === "revoked" ? render.c.red : render.c.dim;
             return render.wrap(color, s);
           },
         },
@@ -10559,13 +10576,17 @@ statusCmd
       const f = healthData.federation;
       console.log("\n═══ Federation ═══════════════════════════════════");
       if (f.instance) console.log(`Instance:     ${f.instance.id} (${f.instance.role ?? "—"}, ${f.instance.status ?? "—"})`);
-      if (f.peers) console.log(`Peers:        ${f.peers.total} total (${f.peers.connected} connected, ${f.peers.disconnected} down, ${f.peers.revoked} revoked)`);
+      if (f.peers) {
+        const unknown = Number(f.peers.unknown ?? 0);
+        const unknownBit = unknown > 0 ? `, ${unknown} unknown` : "";
+        console.log(`Peers:        ${f.peers.total} total (${f.peers.connected} connected, ${f.peers.disconnected} down, ${f.peers.revoked} revoked${unknownBit})`);
+      }
       if (typeof f.pendingTokens === "number" && f.pendingTokens > 0) console.log(`Pairing:      ${f.pendingTokens} unconsumed token(s)`);
       if (Array.isArray(f.peerList) && f.peerList.length > 0) {
         const idW = Math.max(4, ...f.peerList.map((p: any) => (p.id ?? "").length));
-        console.log(`\n  ${"peer".padEnd(idW)}  ${"role".padEnd(5)}  ${"status".padEnd(13)}  last_sync`);
+        console.log(`\n  ${"peer".padEnd(idW)}  ${"role".padEnd(5)}  ${"status".padEnd(13)}  ${"liveness".padEnd(13)}  last_sync`);
         for (const p of f.peerList) {
-          console.log(`  ${(p.id ?? "").padEnd(idW)}  ${(p.role ?? "—").padEnd(5)}  ${(p.status ?? "—").padEnd(13)}  ${p.lastSyncAt ? `${relativeTime(p.lastSyncAt)} (${p.lastSyncAt})` : "never"}`);
+          console.log(`  ${(p.id ?? "").padEnd(idW)}  ${(p.role ?? "—").padEnd(5)}  ${(p.status ?? "—").padEnd(13)}  ${(p.liveness ?? "—").padEnd(13)}  ${p.lastSyncAt ? `${relativeTime(p.lastSyncAt)} (${p.lastSyncAt})` : "never"}`);
         }
       }
     } else {
