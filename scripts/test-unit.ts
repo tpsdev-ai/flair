@@ -51,7 +51,7 @@ export function unitPlan(root: string): UnitStep[] {
     steps.push({ name: relative(root, file), cwd: root, args: ["test", file], files: [file] });
   }
   steps.push({ name: "build flair-client", cwd: join(root, "packages/flair-client"), args: ["run", "build"], files: [] });
-  for (const pkg of ["flair-tool-descriptors", "flair-mcp", "flair-client", "langgraph-flair", "n8n-nodes-flair", "openclaw-flair", "pi-flair", "flair-bench", "adk-flair-js"]) {
+  for (const pkg of ["flair-tool-descriptors", "flair-mcp", "flair-client", "langgraph-flair", "n8n-nodes-flair", "openclaw-flair", "pi-flair", "flair-bench", "adk-flair-js", "cursor-wake-runner"]) {
     const dir = pkg === "adk-flair-js" ? "test/unit" : "test";
     const cwd = join(root, "packages", pkg);
     steps.push({ name: `${pkg} unit tests`, cwd, args: ["test", `./${dir}/`], files: requiredFiles(`packages/${pkg}/${dir}`) });

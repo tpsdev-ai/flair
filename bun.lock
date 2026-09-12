@@ -36,6 +36,19 @@
       "name": "@tpsdev-ai/cursor-flair",
       "version": "0.1.0",
     },
+    "packages/cursor-wake-runner": {
+      "name": "@tpsdev-ai/cursor-wake-runner",
+      "version": "0.1.0",
+      "bin": {
+        "cursor-flair-wake": "src/cli.ts",
+      },
+      "dependencies": {
+        "@tpsdev-ai/flair-client": "0.53.0",
+      },
+      "devDependencies": {
+        "@types/node": "24.11.0",
+      },
+    },
     "packages/flair-bench": {
       "name": "@tpsdev-ai/flair-bench",
       "version": "0.53.0",
@@ -723,6 +736,8 @@
     "@tpsdev-ai/adk-flair": ["@tpsdev-ai/adk-flair@workspace:packages/adk-flair-js"],
 
     "@tpsdev-ai/cursor-flair": ["@tpsdev-ai/cursor-flair@workspace:packages/cursor-flair"],
+
+    "@tpsdev-ai/cursor-wake-runner": ["@tpsdev-ai/cursor-wake-runner@workspace:packages/cursor-wake-runner"],
 
     "@tpsdev-ai/flair-bench": ["@tpsdev-ai/flair-bench@workspace:packages/flair-bench"],
 

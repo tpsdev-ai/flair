@@ -1,0 +1,32 @@
+{
+  "name": "@tpsdev-ai/cursor-wake-runner",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Cursor-side wake-runner: drain your own OrgEventCatchup feed and launch one Cloud Agent per directed dispatch (flair#1613).",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "cursor-flair-wake": "src/cli.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test ./test/",
+    "wake": "bun src/cli.ts"
+  },
+  "dependencies": {
+    "@tpsdev-ai/flair-client": "0.53.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.11.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tpsdev-ai/flair.git",
+    "directory": "packages/cursor-wake-runner"
+  }
+}
