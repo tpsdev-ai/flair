@@ -7,9 +7,12 @@ import {
   wireGemini,
   wireCursor,
   wireCodex,
+  unwireGemini,
+  unwireCodex,
   tomlSnippet,
   codexConfigHasFlairSection,
   appendCodexFlairBlock,
+  removeCodexFlairBlock,
 } from "../../src/install/clients.ts";
 import { resolveWireFlairUrl } from "../../src/doctor-client.ts";
 
@@ -272,5 +275,52 @@ describe("resolveWireFlairUrl (flair#727 — never propagate a malformed existin
 
   it("rejects a non-http(s) scheme", () => {
     expect(resolveWireFlairUrl("ftp://127.0.0.1:19926", "http://127.0.0.1:19926")).toBe("http://127.0.0.1:19926");
+  });
+});
+
+describe("client unwire (flair#853 — inverse of wire, siblings survive)", () => {
+  it("Gemini: removes only mcpServers.flair and leaves sibling servers", () => {
+    const cfgPath = join(isoHome, ".gemini", "settings.json");
+    mkdirSync(join(isoHome, ".gemini"), { recursive: true });
+    writeFileSync(cfgPath, JSON.stringify({
+      mcpServers: { flair: { command: "npx" }, other: { command: "x" } },
+      theme: "dark",
+    }));
+    const res = unwireGemini();
+    expect(res.ok).toBe(true);
+    expect(res.removed).toBe(true);
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
+    expect(cfg.mcpServers.flair).toBeUndefined();
+    expect(cfg.mcpServers.other).toEqual({ command: "x" });
+    expect(cfg.theme).toBe("dark");
+    expect(unwireGemini().removed).toBe(false);
+  });
+
+  it("Gemini: refuses to touch a malformed config", () => {
+    const cfgPath = join(isoHome, ".gemini", "settings.json");
+    mkdirSync(join(isoHome, ".gemini"), { recursive: true });
+    writeFileSync(cfgPath, "{not-json");
+    const res = unwireGemini();
+    expect(res.ok).toBe(false);
+    expect(res.removed).toBe(false);
+    expect(readFileSync(cfgPath, "utf-8")).toBe("{not-json");
+  });
+
+  it("Codex: removeCodexFlairBlock is the inverse of appendCodexFlairBlock", () => {
+    const wired = appendCodexFlairBlock("[model]\nid = \"gpt\"\n", ENV);
+    expect(codexConfigHasFlairSection(wired)).toBe(true);
+    const out = removeCodexFlairBlock(wired);
+    expect(codexConfigHasFlairSection(out)).toBe(false);
+    expect(out).toContain("[model]");
+    expect(out).toContain("id = \"gpt\"");
+  });
+
+  it("Codex: unwireCodex writes the stripped file", () => {
+    wireCodex(ENV);
+    const res = unwireCodex();
+    expect(res.ok).toBe(true);
+    expect(res.removed).toBe(true);
+    const toml = readFileSync(join(isoHome, ".codex", "config.toml"), "utf-8");
+    expect(codexConfigHasFlairSection(toml)).toBe(false);
   });
 });

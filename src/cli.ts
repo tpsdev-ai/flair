@@ -210,6 +210,7 @@ import {
 // functions — this pulls in nothing but node builtins.
 import { DEFAULT_INTERVAL_SECONDS as FEDERATION_SYNC_DEFAULT_INTERVAL } from "./federation/scheduler.js";
 import { applyUpgradeMigrations, type UpgradeMigrationContext } from "./lib/upgrade-migrations.js";
+import { formatPurgeReport, purgeFlairInstall, purgeHadFailures } from "./lib/uninstall-purge.js";
 import {
   collectUpgradeExecPathWarning,
   findFlairPackageDir,
@@ -13768,7 +13769,7 @@ program
 program
   .command("uninstall")
   .description("Stop Flair and remove the launchd/systemd service")
-  .option("--purge", "Also remove data and keys (destructive)")
+  .option("--purge", "Also remove data, keys, secrets, schedulers, and client wiring (destructive)")
   .action(async (opts) => {
     const platform = process.platform;
     // Use the unified resolver: Harper's config > per-user config > default.
@@ -13860,28 +13861,11 @@ program
         console.log("\n⚠️  Skipping purge: could not attribute the process on port — data preserved.");
         console.log("Stop the process manually, then re-run: flair uninstall --purge");
       } else {
-        const { rmSync } = await import("node:fs");
-        const dataDir = defaultDataDir();
-        const keysDir = defaultKeysDir();
-        const flairDir = join(homedir(), ".flair");
-
-        if (existsSync(dataDir)) {
-          rmSync(dataDir, { recursive: true, force: true });
-          console.log("✅ Data removed: " + dataDir);
-        }
-        if (existsSync(keysDir)) {
-          rmSync(keysDir, { recursive: true, force: true });
-          console.log("✅ Keys removed: " + keysDir);
-        }
-        // Remove .flair dir if empty
-        try {
-          const { readdirSync, rmdirSync } = await import("node:fs");
-          if (existsSync(flairDir) && readdirSync(flairDir).length === 0) {
-            rmdirSync(flairDir);
-          }
-        } catch { /* non-empty, that's fine */ }
-
-        console.log("\n🗑️  Flair fully purged");
+        const home = process.env.HOME ?? homedir();
+        const result = purgeFlairInstall({ homeDir: home });
+        const report = formatPurgeReport(result);
+        console.log(report.lines.join("\n"));
+        if (purgeHadFailures(result)) process.exit(1);
       }
     } else {
       console.log("\nData and keys preserved at ~/.flair/");

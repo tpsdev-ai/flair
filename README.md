@@ -91,7 +91,8 @@ flair doctor              # diagnose common problems and suggest fixes
 flair stop                # stop the instance
 flair restart             # restart it
 flair uninstall           # remove the service, keep data and keys
-flair uninstall --purge   # remove everything, including data and keys
+flair uninstall --purge   # remove data, keys, secrets, schedulers, and client wiring
+                          # (the npm package is left; `npm uninstall -g @tpsdev-ai/flair`)
 ```
 
 ### Upgrading
