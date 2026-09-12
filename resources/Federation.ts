@@ -21,6 +21,7 @@ import {
   checkPrincipalEntitlement,
   type FederationSyncTable,
 } from "./federation-classify.js";
+import { HUB_IDENTITY_INCOMPLETE, pairResponseInstance } from "../src/lib/federation-pair-identity.js";
 export {
   classifyRecord,
   reconstructRecordVerifyBody,
@@ -184,10 +185,11 @@ export function noteFederationMergedMemory(
  * NO allow* at all, so Harper's own default — `user?.role.permission.
  * super_user`, satisfiable only by a genuine admin OR authorizeLocal's forged
  * loopback super_user — was silently standing in). Same idiom as
- * AdminInstance.ts/AdminDashboard.ts: this is an admin-view endpoint (peers
- * never call it during pairing — FederationPair.post() reads the Instance
- * table directly server-side to hand a peer our identity; this HTTP GET is
- * CLI tooling only).
+ * AdminInstance.ts/AdminDashboard.ts: this is an admin-view endpoint.
+ * FederationPair.post() reads the Instance table server-side and returns
+ * `{ id, publicKey }` in the pair response (flair#822). The spoke CLI may
+ * GET this path as a fallback if an older hub omits `instance.publicKey`;
+ * that fallback is best-effort (this GET is still admin-gated).
  */
 export class FederationInstance extends Resource {
   async allowRead(): Promise<boolean> {
@@ -334,6 +336,24 @@ export class FederationPair extends Resource {
       });
     }
 
+    // flair#822: resolve OUR identity before consuming the token or writing
+    // a Peer. A successful pair that returns instance:null / empty publicKey
+    // is how spokes used to store publicKey:"" and treat pairing as complete.
+    let ourInstance: any = null;
+    try {
+      for await (const i of (databases as any).flair.Instance.search()) {
+        ourInstance = i;
+        break;
+      }
+    } catch { /* Instance table may not exist yet */ }
+    const ours = pairResponseInstance(ourInstance);
+    if (!ours.ok) {
+      return new Response(JSON.stringify({
+        error: HUB_IDENTITY_INCOMPLETE,
+        message: ours.error,
+      }), { status: 503, headers: { "content-type": "application/json" } });
+    }
+
     // Check if already paired (re-pairing doesn't need a token)
     const existing = await (databases as any).flair.Peer.get(instanceId);
     if (existing) {
@@ -424,22 +444,13 @@ export class FederationPair extends Resource {
       }
     }
 
-    // Return our own identity for the peer to record
-    let ourInstance: any = null;
-    try {
-      for await (const i of (databases as any).flair.Instance.search()) {
-        ourInstance = i;
-        break;
-      }
-    } catch {}
-
     return {
       paired: true,
-      instance: ourInstance ? {
-        id: ourInstance.id,
-        publicKey: ourInstance.publicKey,
-        role: ourInstance.role,
-      } : null,
+      instance: {
+        id: ours.instance.id,
+        publicKey: ours.instance.publicKey,
+        role: ours.instance.role,
+      },
     };
   }
 }

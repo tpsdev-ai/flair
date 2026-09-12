@@ -181,6 +181,7 @@ import {
   type RepairPlan,
 } from "./lib/launchd-repair.js";
 import { stabilizeMqttNetworkKeyOrder } from "./lib/stabilize-mqtt-network.js";
+import { resolveHubPeerIdentity } from "./lib/federation-pair-identity.js";
 import {
   applyUpgradeHookConsent,
   catalogIssueDelta,
@@ -7846,7 +7847,28 @@ federation
       }
 
       const result = await res.json() as any;
-      console.log(`✅ Paired with hub: ${result.instance?.id ?? hubUrl}`);
+
+      // flair#822: never store publicKey:"" — treat a missing hub key as
+      // an error, after one GET /FederationInstance recovery attempt.
+      const hubBase = hubUrl.replace(/\/$/, "");
+      const resolvedHub = await resolveHubPeerIdentity(result, {
+        fetchInstance: async () => {
+          const instRes = await fetch(`${hubBase}/FederationInstance`, {
+            headers: authHeader ? { Authorization: authHeader } : {},
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (!instRes.ok) return null;
+          return instRes.json();
+        },
+      });
+      if (!resolvedHub.ok) {
+        console.error(`Error: ${resolvedHub.error}`);
+        process.exit(1);
+      }
+      if (resolvedHub.source === "federation_instance") {
+        console.log("Hub pair response omitted publicKey; recovered identity from /FederationInstance");
+      }
+      console.log(`✅ Paired with hub: ${resolvedHub.peer.id}`);
 
       // Record the hub as our local peer. This is REQUIRED, not optional:
       // `flair federation sync` reads the Peer table to find the hub, so
@@ -7871,8 +7893,8 @@ federation
         body: JSON.stringify({
           operation: "upsert", database: "flair", table: "Peer",
           records: [{
-            id: result.instance?.id ?? "hub",
-            publicKey: result.instance?.publicKey ?? "",
+            id: resolvedHub.peer.id,
+            publicKey: resolvedHub.peer.publicKey,
             role: "hub", endpoint: hubUrl, status: "paired",
             pairedAt: new Date().toISOString(),
             createdAt: new Date().toISOString(),
@@ -7890,7 +7912,7 @@ federation
         );
         process.exit(1);
       }
-      console.log(`✅ Recorded hub as local peer: ${result.instance?.id ?? "hub"} → ${hubUrl}`);
+      console.log(`✅ Recorded hub as local peer: ${resolvedHub.peer.id} → ${hubUrl}`);
     } catch (err: any) {
       console.error(`Error: ${err.message}`);
       process.exit(1);
