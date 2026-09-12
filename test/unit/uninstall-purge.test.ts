@@ -22,7 +22,7 @@ import {
   appendCodexFlairBlock,
   codexConfigHasFlairSection,
 } from "../../src/install/clients.ts";
-import { installHook, installContinuityHooks, hookSettingsPath } from "../../src/hook-install.ts";
+import { installHook, installContinuityHooks, hookSettingsPath, hookBackupPath } from "../../src/hook-install.ts";
 import {
   purgeFlairInstall,
   formatPurgeReport,
@@ -66,6 +66,8 @@ function plantIssue853Leftovers(): {
   codexToml: string;
   dataMarker: string;
   keysMarker: string;
+  claudeHookBak: string;
+  codexHookBak: string;
 } {
   const flair = join(isoHome, ".flair");
   mkdirSync(join(flair, "data"), { recursive: true });
@@ -122,6 +124,15 @@ function plantIssue853Leftovers(): {
   expect(hook.ok).toBe(true);
   const continuity = installContinuityHooks({ homeDir: isoHome, harness: "claude-code", agentId: AGENT, flairUrl: URL });
   expect(continuity.ok).toBe(true);
+  const codexHook = installHook({ homeDir: isoHome, harness: "codex", agentId: AGENT, flairUrl: URL });
+  expect(codexHook.ok).toBe(true);
+
+  // Pre-existing sibling backups — uninstallHook overwrites these even on a
+  // later no-op; purge must delete them (flair#853 Bugbot).
+  const claudeHookBak = hookBackupPath(hookSettingsPath(isoHome, "claude-code"));
+  const codexHookBak = hookBackupPath(hookSettingsPath(isoHome, "codex"));
+  writeFileSync(claudeHookBak, "{\"preexisting\":\"claude-bak\"}\n");
+  writeFileSync(codexHookBak, "{\"preexisting\":\"codex-bak\"}\n");
 
   return {
     adminPass,
@@ -136,6 +147,8 @@ function plantIssue853Leftovers(): {
     codexToml: join(isoHome, ".codex", "config.toml"),
     dataMarker,
     keysMarker,
+    claudeHookBak,
+    codexHookBak,
   };
 }
 
@@ -198,6 +211,10 @@ describe("purgeFlairInstall completeness (flair#853)", () => {
     const hookPath = hookSettingsPath(isoHome, "claude-code");
     const hookRaw = readFileSync(hookPath, "utf-8");
     expect(hookRaw).not.toContain("flair-mcp");
+    expect(existsSync(planted.claudeHookBak)).toBe(false);
+    expect(existsSync(planted.codexHookBak)).toBe(false);
+    expect(existsSync(hookBackupPath(hookSettingsPath(isoHome, "claude-code")))).toBe(false);
+    expect(existsSync(hookBackupPath(hookSettingsPath(isoHome, "codex")))).toBe(false);
 
     const npmLeft = result.leftovers.find((l) => l.path === FLAIR_NPM_PACKAGE);
     expect(npmLeft).toBeDefined();
@@ -213,6 +230,30 @@ describe("purgeFlairInstall completeness (flair#853)", () => {
     expect(report.lines.join("\n")).not.toContain("Flair fully purged");
     expect(report.lines.join("\n")).toContain("Intentionally left:");
     expect(report.lines.join("\n")).toContain(FLAIR_NPM_PACKAGE);
+  });
+
+  test("does not leave hook .bak files after a no-op uninstall (flair#853 Bugbot)", () => {
+    const claudeSettings = hookSettingsPath(isoHome, "claude-code");
+    const codexSettings = hookSettingsPath(isoHome, "codex");
+    mkdirSync(join(isoHome, ".claude"), { recursive: true });
+    mkdirSync(join(isoHome, ".codex"), { recursive: true });
+    writeFileSync(claudeSettings, JSON.stringify({ theme: "dark" }, null, 2) + "\n");
+    writeFileSync(codexSettings, JSON.stringify({ model: "gpt" }, null, 2) + "\n");
+    const claudeBak = hookBackupPath(claudeSettings);
+    const codexBak = hookBackupPath(codexSettings);
+    writeFileSync(claudeBak, "{\"preexisting\":\"claude\"}\n");
+    writeFileSync(codexBak, "{\"preexisting\":\"codex\"}\n");
+
+    const result = purgeFlairInstall({
+      homeDir: isoHome,
+      skipSchedulerUnload: true,
+      omitNpmLeftover: true,
+    });
+    expect(purgeHadFailures(result)).toBe(false);
+    expect(existsSync(claudeBak)).toBe(false);
+    expect(existsSync(codexBak)).toBe(false);
+    expect(JSON.parse(readFileSync(claudeSettings, "utf-8")).theme).toBe("dark");
+    expect(JSON.parse(readFileSync(codexSettings, "utf-8")).model).toBe("gpt");
   });
 
   test("claims fully purged only when nothing remains", () => {
@@ -260,6 +301,8 @@ describe("flair uninstall --purge CLI (flair#853)", () => {
     expect(existsSync(planted.remTimer)).toBe(false);
     expect(existsSync(planted.remService)).toBe(false);
     expect(existsSync(join(isoHome, ".flair"))).toBe(false);
+    expect(existsSync(planted.claudeHookBak)).toBe(false);
+    expect(existsSync(planted.codexHookBak)).toBe(false);
     expect(codexConfigHasFlairSection(readFileSync(planted.codexToml, "utf-8"))).toBe(false);
     const claude = JSON.parse(readFileSync(planted.claudeJson, "utf-8"));
     expect(claude.mcpServers.flair).toBeUndefined();

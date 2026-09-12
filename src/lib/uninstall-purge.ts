@@ -23,6 +23,8 @@ import {
   uninstallContinuityHooks,
   uninstallHook,
   harnessSupportsContinuity,
+  hookBackupPath,
+  hookSettingsPath,
   SUPPORTED_HARNESSES,
 } from "../hook-install.js";
 import {
@@ -159,6 +161,28 @@ function disableAndSweepScheduler(
 }
 
 /**
+ * `uninstallHook` / `uninstallContinuityHooks` copy the settings file to a
+ * sibling `.bak` whenever it exists — including on a no-op. Purge must not
+ * leave that copy (or a pre-existing `.bak` it just overwrote). flair#853
+ * Bugbot: only deleting the bak after an actual remove left
+ * `~/.claude/settings.json.bak` / `~/.codex/hooks.json.bak` behind.
+ */
+function sweepHookBackup(
+  settingsPath: string,
+  reportedBackup: string | null,
+  homeDir: string,
+  removed: string[],
+  leftovers: PurgeLeftover[],
+): void {
+  const candidates = new Set<string>();
+  if (reportedBackup) candidates.add(reportedBackup);
+  candidates.add(hookBackupPath(settingsPath));
+  for (const bak of candidates) {
+    rmPath(bak, removed, leftovers, displayUnderHome(homeDir, bak));
+  }
+}
+
+/**
  * Remove Flair-owned state under `homeDir`: the `~/.flair` tree (data, keys,
  * admin-pass, backups, logs, snapshots, shims), REM + federation scheduler
  * units on both platforms, SessionStart/continuity hooks, and MCP/native
@@ -180,18 +204,21 @@ export function purgeFlairInstall(opts: PurgeOptions = {}): PurgeResult {
       leftovers.push({ path: hook.path, kind: "failed", reason: hook.message });
     } else if (hook.delta && hook.delta.action !== "noop") {
       removed.push(displayUnderHome(homeDir, hook.path) + " (SessionStart hook)");
-      if (hook.backupPath) rmPath(hook.backupPath, removed, leftovers, displayUnderHome(homeDir, hook.backupPath));
     }
+    sweepHookBackup(hook.path, hook.backupPath, homeDir, removed, leftovers);
     if (!harnessSupportsContinuity(harness)) continue;
     const continuity = uninstallContinuityHooks({ homeDir, harness });
     if (!continuity.ok) {
       leftovers.push({ path: continuity.path, kind: "failed", reason: continuity.message });
     } else if (continuity.actions && (continuity.actions.PostToolUse === "remove" || continuity.actions.Stop === "remove")) {
       removed.push(displayUnderHome(homeDir, continuity.path) + " (continuity hooks)");
-      if (continuity.backupPath) {
-        rmPath(continuity.backupPath, removed, leftovers, displayUnderHome(homeDir, continuity.backupPath));
-      }
     }
+    sweepHookBackup(continuity.path, continuity.backupPath, homeDir, removed, leftovers);
+  }
+
+  // Pre-existing sibling backups (or a harness we skipped) must not survive.
+  for (const harness of SUPPORTED_HARNESSES) {
+    sweepHookBackup(hookSettingsPath(homeDir, harness), null, homeDir, removed, leftovers);
   }
 
   const unwireResults = withHome(homeDir, () => ALL_CLIENTS.map((c) => c.unwire()));
