@@ -1,20 +1,13 @@
 /**
- * Federation pair identity contract (flair#822).
+ * Spoke pair identity (flair#822).
  *
- * Hub `/FederationPair` must return `instance { id, publicKey }`. A missing
- * or empty publicKey is identity-incomplete: the spoke must not store `""`
- * on its local hub-Peer row. Older hubs that omit `instance` can still be
- * recovered via GET `/FederationInstance`; if that also lacks a key, pair
- * fails closed.
+ * Pair already returns `instance.{id,publicKey}` when the hub has a
+ * FederationInstance row (flair#213). An empty spoke hub-Peer key means
+ * that row was missing at pair time — a symptom of open #839, not a
+ * pair-response-shape bug. Chip is fail-closed: ERROR or GET
+ * `/FederationInstance`, never store `publicKey: ""`. A spoke Peer write
+ * does not provision the missing hub row.
  */
-
-export const HUB_IDENTITY_INCOMPLETE = "hub_instance_identity_incomplete";
-
-export type PairInstanceIdentity = {
-  id: string;
-  publicKey: string;
-  role?: string;
-};
 
 export type HubPeerIdentity = {
   id: string;
@@ -25,41 +18,17 @@ function nonEmptyString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function instanceFields(value: unknown): { id: string; publicKey: string; role: string } {
+function instancePublicKey(value: unknown): { id: string; publicKey: string } {
   const row = value && typeof value === "object" ? (value as Record<string, unknown>) : null;
   return {
     id: nonEmptyString(row?.id),
     publicKey: nonEmptyString(row?.publicKey),
-    role: nonEmptyString(row?.role),
   };
 }
 
 /**
- * Hub: shape the `/FederationPair` `instance` object, or refuse.
- * Requires both `id` and `publicKey` — a pair response without them is
- * how spokes used to write `publicKey: ""` and `id: "hub"`.
- */
-export function pairResponseInstance(
-  ourInstance: unknown,
-): { ok: true; instance: PairInstanceIdentity } | { ok: false; error: string } {
-  const { id, publicKey, role } = instanceFields(ourInstance);
-  if (!id || !publicKey) {
-    return {
-      ok: false,
-      error:
-        "hub Instance row is missing id or publicKey — pair cannot complete the identity handshake",
-    };
-  }
-  return {
-    ok: true,
-    instance: role ? { id, publicKey, role } : { id, publicKey },
-  };
-}
-
-/**
- * Spoke: accept a pair JSON body only when `instance.publicKey` is present.
- * `id` may fall back to `"hub"` if the key is present but the id is not —
- * the defect is an empty key, not a missing id.
+ * Accept a pair JSON body only when `instance.publicKey` is non-empty.
+ * `id` may fall back to `"hub"` if the key is present but the id is not.
  */
 export function hubPeerFromPairResult(
   result: unknown,
@@ -68,18 +37,23 @@ export function hubPeerFromPairResult(
     result && typeof result === "object"
       ? (result as { instance?: unknown }).instance
       : undefined;
-  const { id, publicKey } = instanceFields(inst);
+  const { id, publicKey } = instancePublicKey(inst);
   if (!publicKey) return { ok: false, reason: "missing_public_key" };
   return { ok: true, peer: { id: id || "hub", publicKey } };
 }
+
+export const EMPTY_HUB_PEER_KEY_ERROR =
+  "hub pair response omitted instance.publicKey — refusing to store an empty hub Peer key. " +
+  "The hub likely has no FederationInstance row (flair#839); a spoke Peer write does not create one.";
 
 export type ResolveHubPeerIdentityResult =
   | { ok: true; peer: HubPeerIdentity; source: "pair" | "federation_instance" }
   | { ok: false; error: string };
 
 /**
- * Spoke resolver: pair response first, then optional GET `/FederationInstance`.
- * Never returns a peer with an empty publicKey.
+ * Pair response first. If publicKey is missing, one GET `/FederationInstance`
+ * read of an *existing* hub identity is allowed. Never returns an empty key.
+ * Success via fetch is not a provision of the hub Instance row (#839).
  */
 export async function resolveHubPeerIdentity(
   pairResult: unknown,
@@ -94,13 +68,9 @@ export async function resolveHubPeerIdentity(
       const recovered = hubPeerFromPairResult({ instance: fetched });
       if (recovered.ok) return { ...recovered, source: "federation_instance" };
     } catch {
-      // Fall through to the closed-fail error.
+      // Fall through — fail closed, do not store "".
     }
   }
 
-  return {
-    ok: false,
-    error:
-      "hub pair response omitted instance.publicKey and GET /FederationInstance did not supply one — refusing to store an empty hub Peer key",
-  };
+  return { ok: false, error: EMPTY_HUB_PEER_KEY_ERROR };
 }

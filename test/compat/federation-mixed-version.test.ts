@@ -510,10 +510,11 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
     // self-provisions (generates the Ed25519 instance keypair + `Instance`
     // row) on first call — but `POST /FederationPair`'s handler
     // (resources/Federation.ts) looks up the HUB's own Instance row via
-    // `databases.flair.Instance.search()` and does NOT self-provision.
-    // After flair#822 a missing/empty hub publicKey is 503
-    // `hub_instance_identity_incomplete` (the spoke also refuses to store
-    // `publicKey: ""`). A real deployment's
+    // `databases.flair.Instance.search()` and returns `instance: null` if
+    // none exists yet; it does NOT self-provision on the hub's behalf
+    // (that missing row is flair#839). After flair#822 the spoke CLI
+    // refuses to store `publicKey: ""` when pair omits the key. A real
+    // deployment's
     // `flair init --remote` triggers this provisioning as a side effect;
     // since this harness bypasses `flair init` (to avoid its darwin-only
     // launchd side effect — see the harness-wide note above), replicate the

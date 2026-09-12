@@ -1,12 +1,10 @@
 /**
  * federation-pair-response.test.ts — flair#822
  *
- * Drives the real FederationPair.post() against a mocked Harper so the
- * pair JSON includes `instance {id, publicKey}` when the hub has an
- * Instance row, and returns 503 (without consuming the token) when it
- * does not.
- *
- * Isolated: harper mock + Federation.ts module init must not leak.
+ * Flint: pair already returns `instance.{id,publicKey}` when the hub has
+ * an Instance row. `instance: null` means no FederationInstance (#839).
+ * This file guards that existing response shape so #822 stays a spoke
+ * fail-closed chip, not a hub-row provision.
  */
 import { describe, it, expect, mock, beforeEach } from "bun:test";
 import nacl from "tweetnacl";
@@ -72,7 +70,6 @@ mock.module("harper", () => ({
 }));
 
 const { FederationPair } = await import("../../resources/Federation.ts");
-const { HUB_IDENTITY_INCOMPLETE } = await import("../../src/lib/federation-pair-identity.ts");
 
 function spokeSignedBody(pairingToken: string) {
   const kp = nacl.sign.keyPair();
@@ -110,8 +107,8 @@ beforeEach(() => {
   tokens.clear();
 });
 
-describe("FederationPair.post — instance {id, publicKey} (flair#822)", () => {
-  it("successful pair includes instance {id, publicKey}", async () => {
+describe("FederationPair.post — existing instance.{id,publicKey} shape (flair#213 / #822)", () => {
+  it("includes instance {id, publicKey} when the hub has an Instance row", async () => {
     const token = "pair-token-complete-identity";
     tokens.set(token, {
       id: token,
@@ -128,10 +125,9 @@ describe("FederationPair.post — instance {id, publicKey} (flair#822)", () => {
       role: "hub",
     });
     expect(json.instance.publicKey).not.toBe("");
-    expect(peers.get(body.instanceId)?.publicKey).toBe(body.publicKey);
   });
 
-  it("missing hub Instance → 503 hub_instance_identity_incomplete; token not consumed", async () => {
+  it("returns instance:null when the hub has no FederationInstance — does not invent a key (#839)", async () => {
     instanceRow = null;
     const token = "pair-token-no-hub-instance";
     tokens.set(token, {
@@ -139,41 +135,9 @@ describe("FederationPair.post — instance {id, publicKey} (flair#822)", () => {
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
     const result = await makePair().post(spokeSignedBody(token));
-    expect(result).toBeInstanceOf(Response);
-    expect((result as Response).status).toBe(503);
-    const json = await readBody(result);
-    expect(json.error).toBe(HUB_IDENTITY_INCOMPLETE);
-    expect(tokens.get(token)?.consumedBy).toBeUndefined();
-    expect(peers.size).toBe(0);
-  });
-
-  it("hub Instance with empty publicKey → 503; does not write a peer", async () => {
-    instanceRow = { id: HUB_ID, publicKey: "", role: "hub" };
-    const token = "pair-token-empty-hub-key";
-    tokens.set(token, {
-      id: token,
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
-    const result = await makePair().post(spokeSignedBody(token));
-    expect(result).toBeInstanceOf(Response);
-    expect((result as Response).status).toBe(503);
-    const json = await readBody(result);
-    expect(json.error).toBe(HUB_IDENTITY_INCOMPLETE);
-    expect(peers.size).toBe(0);
-  });
-
-  it("re-pair of an existing peer still returns instance {id, publicKey}", async () => {
-    const body = spokeSignedBody("unused-on-repair");
-    peers.set(body.instanceId, {
-      id: body.instanceId,
-      publicKey: body.publicKey,
-      role: "spoke",
-      status: "paired",
-    });
-    const result = await makePair().post(body);
+    expect(result).not.toBeInstanceOf(Response);
     const json = await readBody(result);
     expect(json.paired).toBe(true);
-    expect(json.instance.id).toBe(HUB_ID);
-    expect(json.instance.publicKey).toBe(HUB_KEY);
+    expect(json.instance).toBeNull();
   });
 });

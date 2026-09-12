@@ -7848,8 +7848,10 @@ federation
 
       const result = await res.json() as any;
 
-      // flair#822: never store publicKey:"" — treat a missing hub key as
-      // an error, after one GET /FederationInstance recovery attempt.
+      // flair#822: fail-closed. Pair already returns instance.{id,publicKey}
+      // when the hub has a FederationInstance row. A missing key means that
+      // row was absent (#839) — ERROR (or GET /FederationInstance), never
+      // store "". A spoke Peer write does not provision the hub row.
       const hubBase = hubUrl.replace(/\/$/, "");
       const resolvedHub = await resolveHubPeerIdentity(result, {
         fetchInstance: async () => {
@@ -7866,7 +7868,7 @@ federation
         process.exit(1);
       }
       if (resolvedHub.source === "federation_instance") {
-        console.log("Hub pair response omitted publicKey; recovered identity from /FederationInstance");
+        console.log("Pair omitted publicKey; using existing hub identity from GET /FederationInstance (does not provision a missing Instance row)");
       }
       console.log(`✅ Paired with hub: ${resolvedHub.peer.id}`);
 

@@ -21,7 +21,6 @@ import {
   checkPrincipalEntitlement,
   type FederationSyncTable,
 } from "./federation-classify.js";
-import { HUB_IDENTITY_INCOMPLETE, pairResponseInstance } from "../src/lib/federation-pair-identity.js";
 export {
   classifyRecord,
   reconstructRecordVerifyBody,
@@ -185,11 +184,12 @@ export function noteFederationMergedMemory(
  * NO allow* at all, so Harper's own default — `user?.role.permission.
  * super_user`, satisfiable only by a genuine admin OR authorizeLocal's forged
  * loopback super_user — was silently standing in). Same idiom as
- * AdminInstance.ts/AdminDashboard.ts: this is an admin-view endpoint.
- * FederationPair.post() reads the Instance table server-side and returns
- * `{ id, publicKey }` in the pair response (flair#822). The spoke CLI may
- * GET this path as a fallback if an older hub omits `instance.publicKey`;
- * that fallback is best-effort (this GET is still admin-gated).
+ * AdminInstance.ts/AdminDashboard.ts: this is an admin-view endpoint (peers
+ * never call it during pairing — FederationPair.post() reads the Instance
+ * table directly server-side to hand a peer our identity; this HTTP GET is
+ * CLI tooling only). The spoke CLI may GET this path as a fail-closed
+ * fallback when pair omitted `instance.publicKey` (flair#822); that does
+ * not provision a missing hub Instance row (flair#839).
  */
 export class FederationInstance extends Resource {
   async allowRead(): Promise<boolean> {
@@ -336,24 +336,6 @@ export class FederationPair extends Resource {
       });
     }
 
-    // flair#822: resolve OUR identity before consuming the token or writing
-    // a Peer. A successful pair that omits instance.publicKey is how spokes
-    // used to store an empty hub key and treat pairing as complete.
-    let ourInstance: any = null;
-    try {
-      for await (const i of (databases as any).flair.Instance.search()) {
-        ourInstance = i;
-        break;
-      }
-    } catch { /* Instance table may not exist yet */ }
-    const ours = pairResponseInstance(ourInstance);
-    if (!ours.ok) {
-      return new Response(JSON.stringify({
-        error: HUB_IDENTITY_INCOMPLETE,
-        message: ours.error,
-      }), { status: 503, headers: { "content-type": "application/json" } });
-    }
-
     // Check if already paired (re-pairing doesn't need a token)
     const existing = await (databases as any).flair.Peer.get(instanceId);
     if (existing) {
@@ -444,13 +426,26 @@ export class FederationPair extends Resource {
       }
     }
 
+    // Return our own identity for the peer to record. Already
+    // `{ id, publicKey, role }` when an Instance row exists (flair#213).
+    // `instance: null` means the hub has no FederationInstance — that is
+    // #839, not a pair-response-shape bug. The spoke must ERROR (or GET
+    // /FederationInstance), never store publicKey:"" (flair#822).
+    let ourInstance: any = null;
+    try {
+      for await (const i of (databases as any).flair.Instance.search()) {
+        ourInstance = i;
+        break;
+      }
+    } catch {}
+
     return {
       paired: true,
-      instance: {
-        id: ours.instance.id,
-        publicKey: ours.instance.publicKey,
-        role: ours.instance.role,
-      },
+      instance: ourInstance ? {
+        id: ourInstance.id,
+        publicKey: ourInstance.publicKey,
+        role: ourInstance.role,
+      } : null,
     };
   }
 }

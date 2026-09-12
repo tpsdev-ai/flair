@@ -1,18 +1,17 @@
 /**
  * federation-pair-identity.test.ts — flair#822
  *
- * Hub `/FederationPair` must return `instance { id, publicKey }`. The spoke
- * must treat a missing publicKey as an error (or recover via
- * `/FederationInstance`), never store `""`.
- *
- * Pure helpers — no Harper. Handler wiring is asserted from source so a
- * revert of the call sites cannot silently restore `?? ""`.
+ * Chip: fail-closed on the spoke. Pair already returns
+ * `instance.{id,publicKey}` when the hub has a FederationInstance row
+ * (flair#213). An empty spoke hub-Peer key means that row was missing
+ * (#839). Never store `""`. A spoke Peer write does not provision the
+ * hub row.
  */
 import { describe, it, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  pairResponseInstance,
+  EMPTY_HUB_PEER_KEY_ERROR,
   hubPeerFromPairResult,
   resolveHubPeerIdentity,
 } from "../../src/lib/federation-pair-identity.ts";
@@ -20,59 +19,18 @@ import {
 const HUB_ID = "flair_hubdeadbeef";
 const HUB_KEY = "dGVzdC1lZDI1NTE5LXB1YmtleS1iYXNlNjR1cmw";
 
-describe("pairResponseInstance — hub /FederationPair body", () => {
-  it("includes instance {id, publicKey} (and role when present)", () => {
-    const result = pairResponseInstance({
-      id: HUB_ID,
-      publicKey: HUB_KEY,
-      role: "hub",
-      status: "active",
-    });
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.instance).toEqual({ id: HUB_ID, publicKey: HUB_KEY, role: "hub" });
-  });
-
-  it("refuses a missing Instance row (the instance:null path)", () => {
-    for (const row of [null, undefined, {}]) {
-      const result = pairResponseInstance(row);
-      expect(result.ok).toBe(false);
-      if (result.ok) continue;
-      expect(result.error).toContain("id or publicKey");
-    }
-  });
-
-  it("refuses an Instance row with empty or whitespace publicKey", () => {
-    for (const publicKey of ["", "   ", null, undefined, 0]) {
-      const result = pairResponseInstance({ id: HUB_ID, publicKey, role: "hub" });
-      expect(result.ok).toBe(false);
-    }
-  });
-
-  it("refuses an Instance row with empty id even when publicKey is present", () => {
-    const result = pairResponseInstance({ id: "", publicKey: HUB_KEY });
-    expect(result.ok).toBe(false);
-  });
-
-  it("trims id and publicKey", () => {
-    const result = pairResponseInstance({ id: ` ${HUB_ID} `, publicKey: ` ${HUB_KEY} ` });
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.instance.id).toBe(HUB_ID);
-    expect(result.instance.publicKey).toBe(HUB_KEY);
-  });
-});
-
-describe("hubPeerFromPairResult — spoke refuse-empty", () => {
-  it("accepts a complete pair response", () => {
+describe("pair response — instance.{id,publicKey} is accepted", () => {
+  it("accepts the shape pair has returned since flair#213", () => {
     const result = hubPeerFromPairResult({
       paired: true,
       instance: { id: HUB_ID, publicKey: HUB_KEY, role: "hub" },
     });
     expect(result).toEqual({ ok: true, peer: { id: HUB_ID, publicKey: HUB_KEY } });
   });
+});
 
-  it("refuses instance:null / omitted instance (never falls back to \"\")", () => {
+describe("spoke refuse-empty — never store publicKey:\"\"", () => {
+  it("refuses instance:null / omitted instance (the #839-at-pair-time path)", () => {
     for (const body of [{ paired: true, instance: null }, { paired: true }, null, undefined, {}]) {
       const result = hubPeerFromPairResult(body);
       expect(result.ok).toBe(false);
@@ -81,7 +39,7 @@ describe("hubPeerFromPairResult — spoke refuse-empty", () => {
     }
   });
 
-  it("refuses publicKey:\"\" and whitespace — the stored-empty-key defect", () => {
+  it("refuses publicKey:\"\" and whitespace — do not fill and call it done", () => {
     for (const publicKey of ["", "   "]) {
       const result = hubPeerFromPairResult({
         instance: { id: HUB_ID, publicKey },
@@ -96,7 +54,7 @@ describe("hubPeerFromPairResult — spoke refuse-empty", () => {
   });
 });
 
-describe("resolveHubPeerIdentity — pair first, then /FederationInstance", () => {
+describe("resolveHubPeerIdentity — ERROR or fetch, never \"\"", () => {
   it("uses the pair response when instance.publicKey is present", async () => {
     const resolved = await resolveHubPeerIdentity(
       { instance: { id: HUB_ID, publicKey: HUB_KEY } },
@@ -109,7 +67,7 @@ describe("resolveHubPeerIdentity — pair first, then /FederationInstance", () =
     });
   });
 
-  it("recovers via GET /FederationInstance when pair omitted the key", async () => {
+  it("may GET /FederationInstance for an existing hub identity when pair omitted the key", async () => {
     const resolved = await resolveHubPeerIdentity(
       { paired: true, instance: null },
       { fetchInstance: async () => ({ id: HUB_ID, publicKey: HUB_KEY, role: "hub" }) },
@@ -121,15 +79,16 @@ describe("resolveHubPeerIdentity — pair first, then /FederationInstance", () =
     });
   });
 
-  it("errors when pair and /FederationInstance both lack publicKey — never \"\"", async () => {
+  it("errors when pair and /FederationInstance both lack publicKey — never fill \"\"", async () => {
     const resolved = await resolveHubPeerIdentity(
       { instance: { id: "hub", publicKey: "" } },
       { fetchInstance: async () => ({ id: HUB_ID, publicKey: "" }) },
     );
     expect(resolved.ok).toBe(false);
     if (resolved.ok) return;
-    expect(resolved.error).toContain("refusing to store an empty hub Peer key");
-    expect(resolved.error).not.toContain('""');
+    expect(resolved.error).toBe(EMPTY_HUB_PEER_KEY_ERROR);
+    expect(resolved.error).toContain("flair#839");
+    expect(resolved.error).toContain("does not create one");
   });
 
   it("errors when the fallback fetch throws or returns nothing", async () => {
@@ -138,24 +97,26 @@ describe("resolveHubPeerIdentity — pair first, then /FederationInstance", () =
       { fetchInstance: async () => { throw new Error("403"); } },
     );
     expect(thrown.ok).toBe(false);
+    if (thrown.ok) return;
+    expect(thrown.error).toBe(EMPTY_HUB_PEER_KEY_ERROR);
 
     const missing = await resolveHubPeerIdentity({ instance: null });
     expect(missing.ok).toBe(false);
+    if (missing.ok) return;
+    expect(missing.error).toBe(EMPTY_HUB_PEER_KEY_ERROR);
   });
 });
 
-describe("wiring — hub and spoke call the identity contract (flair#822)", () => {
+describe("wiring — spoke fail-closed; pair still returns instance when the row exists", () => {
   const root = join(import.meta.dir, "../..");
 
-  it("FederationPair.post uses pairResponseInstance and never returns instance:null", () => {
+  it("FederationPair.post still returns instance.{id,publicKey} from the Instance row (flair#213)", () => {
     const src = readFileSync(join(root, "resources/Federation.ts"), "utf8");
-    expect(src).toContain("pairResponseInstance");
-    expect(src).toContain("HUB_IDENTITY_INCOMPLETE");
-    expect(src).toContain("id: ours.instance.id");
-    expect(src).toContain("publicKey: ours.instance.publicKey");
-    expect(src).toContain("error: HUB_IDENTITY_INCOMPLETE");
-    expect(src).not.toMatch(/instance:\s*ourInstance\s*\?/);
-    expect(src).not.toMatch(/instance:\s*null\s*,?\s*\n\s*\}/);
+    expect(src).toContain("id: ourInstance.id");
+    expect(src).toContain("publicKey: ourInstance.publicKey");
+    expect(src).toMatch(/instance:\s*ourInstance\s*\?/);
+    expect(src).not.toContain("HUB_IDENTITY_INCOMPLETE");
+    expect(src).not.toContain("pairResponseInstance");
   });
 
   it("spoke pair writes resolvedHub.peer.publicKey and never ?? \"\"", () => {
