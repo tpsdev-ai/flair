@@ -328,9 +328,10 @@ export async function runFederationVerify(
       agentId: opts.agentId,
       content: `${opts.tag} — federation verify probe written at ${writtenAt}`,
       type: "memory",
-      durability: "ephemeral",
-      // Ephemeral defaults to private; private never federates. Shared is
-      // required so the canary actually leaves this instance.
+      // #1257: ephemeral is private-only. Private never federates. standard
+      // + shared is the legal pair that leaves this instance; we DELETE it
+      // in the finally block so it does not linger.
+      durability: "standard",
       visibility: "shared",
       tags: ["federation-verify", opts.tag],
       createdAt: writtenAt,
@@ -377,9 +378,14 @@ export async function runFederationVerify(
     const syncResult = await deps.syncOnce(opts.syncOpts);
     if (syncResult.error) {
       log(`   Push: FAILED (${syncResult.error.message}) — probing with lastSyncAt freshness`);
-    } else {
+    } else if (syncResult.pushed > 0) {
+      // A no-change sync ({ pushed: 0 }) did not inject the canary — do not
+      // treat that as a successful push or a missing-canary probe becomes
+      // a false FAIL.
       pushed = true;
       log(`   Push: synced ${syncResult.pushed} record(s) (${syncResult.skipped} skipped)`);
+    } else {
+      log(`   Push: synced 0 records — canary was not injected; probing with lastSyncAt freshness`);
     }
 
     let listed: FederationPeerRecord[] = [];

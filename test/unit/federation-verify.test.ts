@@ -20,6 +20,7 @@ import {
   type FederationVerifyDeps,
   type FederationVerifyOptions,
 } from "../../src/federation-verify";
+import { assertVisibilityAllowedForDurability } from "../../resources/memory-visibility";
 
 function makePeer(overrides: Partial<FederationPeerResult> = {}): FederationPeerResult {
   return {
@@ -297,14 +298,16 @@ function makeDeps(overrides: {
 }
 
 describe("runFederationVerify", () => {
-  test("canary is written shared so federation sync will actually push it", async () => {
+  test("canary is standard+shared (legal under #1257, federable, not ephemeral+shared)", async () => {
     const deps = makeDeps({
       fetchImpl: async () => jsonRes(200, { results: [{ content: "fed-verify-test — ok" }] }),
     });
     await runFederationVerify(baseOpts(), deps);
     const body = deps.writes[0] as { visibility?: string; durability?: string };
     expect(body.visibility).toBe("shared");
-    expect(body.durability).toBe("ephemeral");
+    expect(body.durability).toBe("standard");
+    expect(assertVisibilityAllowedForDurability(body.durability, body.visibility)).toBeNull();
+    expect(assertVisibilityAllowedForDurability("ephemeral", "shared")).not.toBeNull();
   });
 
   test("verify pushes itself before probing (bring-up has no daemon)", async () => {
@@ -419,6 +422,21 @@ describe("runFederationVerify", () => {
     expect(r.exitCode).toBe(FED_VERIFY_EXIT_DIVERGED);
     expect(r.peers[0]?.status).toBe("fail");
     expect(r.verdict.kind).toBe("diverged");
+  });
+
+  test("zero-record sync is not a push — missing canary + fresh lastSyncAt → UNVERIFIABLE", async () => {
+    const now = Date.parse("2026-09-12T00:10:00.000Z");
+    const deps = makeDeps({
+      clock: advancingClock(now),
+      sync: async () => ({ pushed: 0, skipped: 0 }),
+      peers: [makeRecord({ lastSyncAt: "2026-09-12T00:09:00.000Z" })],
+      fetchImpl: async () => jsonRes(200, { results: [] }),
+    });
+    const r = await runFederationVerify(baseOpts(), deps);
+    expect(r.pushed).toBe(false);
+    expect(r.exitCode).toBe(FED_VERIFY_EXIT_OK);
+    expect(r.peers[0]?.status).toBe("unverifiable");
+    expect(r.peers[0]?.detail).toContain("could not push");
   });
 
   test("no push + fresh lastSyncAt + missing canary → UNVERIFIABLE, exit 0", async () => {
