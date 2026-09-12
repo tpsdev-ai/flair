@@ -14,6 +14,11 @@ import { normalizeStamp } from "./embedding-space-guard.js";
 import { getModelId } from "./embeddings-provider.js";
 import { describeStampOutstanding, EMBEDDING_STAMP_ID } from "./migrations/stamp-outstanding.js";
 import { buildPublicHealthBody, resolveSearchReadiness, type ResourceRegistry, type SearchReadiness } from "./search-readiness.js";
+import {
+  classifyPeerLiveness,
+  federationPeersAllDisconnectedWarning,
+  summarizePeerLiveness,
+} from "./federation-peer-liveness.js";
 
 const db = databases as any;
 
@@ -371,11 +376,16 @@ export class HealthDetail extends Resource {
         stats.federation = null;
       } else {
         const inst = instances[0];
+        // flair#1499: derive connected/down from lastSyncAt, not stored
+        // status. Pairing writes `paired`; a recent lastSyncAt is connected.
+        // Revoked rows are counted separately and never drive the >24h warning.
+        const liveness = summarizePeerLiveness(peers, nowMs);
         const peersBlock = {
-          total: peers.length,
-          connected: peers.filter((p: any) => p.status === "connected").length,
-          disconnected: peers.filter((p: any) => p.status === "disconnected").length,
-          revoked: peers.filter((p: any) => p.status === "revoked").length,
+          total: liveness.total,
+          connected: liveness.connected,
+          disconnected: liveness.disconnected,
+          revoked: liveness.revoked,
+          unknown: liveness.unknown,
         };
         const pendingTokens = tokens.filter(
           (t: any) => !t.consumedBy && t.expiresAt && new Date(t.expiresAt).getTime() > nowMs,
@@ -390,17 +400,12 @@ export class HealthDetail extends Resource {
                 role: p.role,
                 status: p.status,
                 lastSyncAt: p.lastSyncAt ?? null,
+                liveness: classifyPeerLiveness(p, nowMs),
               }))
             : undefined,
         };
-        if (peers.length > 0 && peersBlock.connected === 0) {
-          const oldest = peers
-            .map((p: any) => (p.lastSyncAt ? new Date(p.lastSyncAt).getTime() : 0))
-            .reduce((a: number, b: number) => (a === 0 ? b : b === 0 ? a : Math.min(a, b)), 0);
-          if (oldest > 0 && nowMs - oldest > 24 * 3600 * 1000) {
-            warnings.push({ level: "warn", message: "federation peers all disconnected >24h" });
-          }
-        }
+        const disconnectWarn = federationPeersAllDisconnectedWarning(liveness);
+        if (disconnectWarn) warnings.push(disconnectWarn);
         if (pendingTokens > 0) {
           warnings.push({ level: "info", message: `${pendingTokens} pairing token(s) unconsumed` });
         }
