@@ -132,7 +132,7 @@ peer. It uses the same couldn't-check-≠-failed split as `flair fleet verify`
 | Canary found | OK | 0 |
 | HTTP 401/403, unreachable, or no endpoint | UNVERIFIABLE (warning) | 0 |
 | Reachable peer answered 200 without the canary after a successful push | FAIL | 1 |
-| Revoked peer | skipped | — |
+| Revoked peer | UNVERIFIABLE (warning; not probed) | 0 |
 
 A 401 is "could not authenticate to that peer," not "sync failed." Do not
 treat unverifiable as a pass that hides a reachable peer on the wrong side
@@ -215,7 +215,7 @@ Records with `updatedAt` more than 5 minutes in the future are rejected. This pr
 | `flair federation sync disable [--remove-shim]` | Remove the scheduled sync driver |
 | `flair federation sync status` | Show whether the driver is installed and genuinely active |
 | `flair federation watch [--interval <s>]` | Run sync in a foreground loop for an interactive session (default 30s) |
-| `flair federation verify [--wait <s>]` | Write a canary, push it, and check each peer. 401/403 and unreachable are UNVERIFIABLE (warning, exit 0); a reachable peer missing the canary still FAILs (exit 1). Revoked peers are skipped. |
+| `flair federation verify [--wait <s>]` | Write a canary, push it, and check each peer. 401/403, unreachable, and revoked are UNVERIFIABLE (warning, exit 0); a reachable peer missing the canary still FAILs (exit 1). |
 | `flair federation reachability` | Probe local instance + each paired peer (read-only) |
 | `flair federation token [--ttl <min>]` | Generate a one-time pairing token triple (hub only) |
 

@@ -112,7 +112,7 @@ describe("classifyMissingAfterWindow", () => {
 // ─── selectPeersToProbe ──────────────────────────────────────────────────────
 
 describe("selectPeersToProbe", () => {
-  test("revoked peers are skipped entirely", () => {
+  test("revoked peers are not HTTP-probed (Cos: UNVERIFIABLE, not FAIL)", () => {
     const r = selectPeersToProbe([
       makeRecord({ id: "hub" }),
       makeRecord({ id: "old", status: "revoked" }),
@@ -121,13 +121,22 @@ describe("selectPeersToProbe", () => {
     expect(r.skippedRevoked.map((p) => p.id)).toEqual(["old"]);
   });
 
-  test("--peer still cannot select a revoked row", () => {
+  test("--peer on a revoked row still surfaces it as revoked, not as a probe target", () => {
     const r = selectPeersToProbe([
       makeRecord({ id: "hub" }),
       makeRecord({ id: "old", status: "revoked" }),
     ], "old");
     expect(r.probe).toEqual([]);
     expect(r.skippedRevoked.map((p) => p.id)).toEqual(["old"]);
+  });
+
+  test("--peer on a live row does not drag unrelated revoked peers into the set", () => {
+    const r = selectPeersToProbe([
+      makeRecord({ id: "hub" }),
+      makeRecord({ id: "old", status: "revoked" }),
+    ], "hub");
+    expect(r.probe.map((p) => p.id)).toEqual(["hub"]);
+    expect(r.skippedRevoked).toEqual([]);
   });
 });
 
@@ -355,7 +364,7 @@ describe("runFederationVerify", () => {
     expect(r.peers[0]?.detail.toLowerCase()).toContain("endpoint");
   });
 
-  test("revoked peer is not probed and does not fail the run", async () => {
+  test("revoked peer is UNVERIFIABLE (warn), never probed, never FAIL", async () => {
     let fetches = 0;
     const deps = makeDeps({
       peers: [
@@ -369,9 +378,26 @@ describe("runFederationVerify", () => {
     });
     const r = await runFederationVerify(baseOpts(), deps);
     expect(r.skippedRevoked.map((p) => p.id)).toEqual(["old"]);
-    expect(r.peers.map((p) => p.id)).toEqual(["hub"]);
+    expect(r.peers.find((p) => p.id === "old")?.status).toBe("unverifiable");
+    expect(r.peers.find((p) => p.id === "old")?.detail).toContain("revoked");
+    expect(r.peers.find((p) => p.id === "hub")?.status).toBe("ok");
     expect(fetches).toBe(1);
     expect(r.exitCode).toBe(FED_VERIFY_EXIT_OK);
+    expect(r.verdict.warning).toContain("unverifiable");
+  });
+
+  test("revoked-only set → UNVERIFIABLE warning, exit 0 (not FAIL)", async () => {
+    const deps = makeDeps({
+      peers: [makeRecord({ id: "old", status: "revoked", endpoint: "https://old.example" })],
+      fetchImpl: async () => {
+        throw new Error("revoked peer must not be fetched");
+      },
+    });
+    const r = await runFederationVerify(baseOpts(), deps);
+    expect(r.exitCode).toBe(FED_VERIFY_EXIT_OK);
+    expect(r.verdict.kind).toBe("unverifiable-only");
+    expect(r.peers[0]?.status).toBe("unverifiable");
+    expect(r.verdict.summary).not.toContain("FAIL");
   });
 
   test("healthy sync: canary found → exit 0", async () => {

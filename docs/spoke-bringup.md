@@ -164,10 +164,10 @@ flair federation verify --admin-pass "$FLAIR_ADMIN_PASS"
 flair federation reachability
 ```
 
-`verify` writes a tagged memory, syncs it, and checks each peer. HTTP 401/403
-or an unreachable peer is UNVERIFIABLE (a warning), not FAIL. A reachable
-peer that is missing the canary still fails. Revoked leftover rows are
-skipped. `reachability` should report `OK` for local and the hub.
+`verify` writes a tagged memory, syncs it, and checks each peer. HTTP 401/403,
+an unreachable peer, or a revoked leftover row is UNVERIFIABLE (a warning),
+not FAIL. A reachable peer that is missing the canary still fails.
+`reachability` should report `OK` for local and the hub.
 
 ---
 

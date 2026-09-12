@@ -5,14 +5,17 @@
  * no sync daemon yet), then probe each peer. Same class as fleet-verify /
  * flair#988: separate "couldn't check" from "verified wrong."
  *
- *   UNVERIFIABLE (warning, exit 0): HTTP 401/403, unreachable, no endpoint,
- *     or we could not inject the canary while lastSyncAt is still fresh.
+ *   UNVERIFIABLE (warning, exit 0): HTTP 401/403, unreachable, revoked,
+ *     no endpoint, or we could not inject the canary while lastSyncAt is
+ *     still fresh.
  *   FAIL (exit 1): a reachable, authenticated peer is missing the canary
  *     after a successful push — or lastSyncAt is stale when we could not
  *     inject and the peer answered 200 without the tag.
  *   OK (exit 0): the canary was found.
  *
- * Revoked peers are skipped (intentional absence, not a failure).
+ * Revoked peers are UNVERIFIABLE (listed, not probed, not FAIL) — Cos
+ * mid-flight: same couldn't-check bucket as 401 / unreachable. Authenticating
+ * the probe may later use #822's publicKey; this module does not wait on it.
  * Do NOT always exit 0 — a verified-wrong reachable peer still fails.
  */
 
@@ -126,23 +129,34 @@ export function authUnverifiableDetail(status: number): string {
 }
 
 /**
- * Revoked rows are decommissioned on purpose. Skip them entirely — a revoked
- * peer being gone is intentional, not a failure (flair#823).
+ * Revoked rows are decommissioned. Do not HTTP-probe them, and do not FAIL
+ * them — Cos / flair#823: revoked = UNVERIFIABLE (warn), same bucket as
+ * 401 / unreachable.
  */
 export function selectPeersToProbe(
   peers: FederationPeerRecord[],
   onlyId?: string,
 ): { probe: FederationPeerRecord[]; skippedRevoked: FederationPeerRecord[] } {
-  const skippedRevoked = peers.filter((p) => p.status === "revoked");
+  const skippedRevoked = peers.filter((p) => p.status === "revoked" && (!onlyId || p.id === onlyId));
   let probe = peers.filter((p) => p.status !== "revoked");
   if (onlyId) probe = probe.filter((p) => p.id === onlyId);
   return { probe, skippedRevoked };
 }
 
+export function revokedAsUnverifiable(p: FederationPeerRecord): FederationPeerResult {
+  return {
+    id: p.id,
+    status: "unverifiable",
+    detail: "revoked — could not check (intentional, not a sync failure)",
+    lastSyncAt: p.lastSyncAt ?? null,
+    authenticated: false,
+  };
+}
+
 function formatUnverifiableWarning(unverifiableCount: number, checkedOk: number): string {
   return (
     `${unverifiableCount} peer(s) unverifiable — could not check ` +
-    `(auth refused, unreachable, or no endpoint); ` +
+    `(auth refused, unreachable, revoked, or no endpoint); ` +
     `${checkedOk} checked peer(s) have the memory.`
   );
 }
@@ -400,20 +414,19 @@ export async function runFederationVerify(
     const selected = selectPeersToProbe(listed, opts.peerId);
     const skippedRevoked = selected.skippedRevoked;
     const toProbe = selected.probe;
-
-    if (skippedRevoked.length > 0) {
-      log(`   skipped ${skippedRevoked.length} revoked peer(s) (intentional, not a failure)`);
+    const revokedRows = skippedRevoked.map(revokedAsUnverifiable);
+    for (const row of revokedRows) {
+      log(`   ${row.id}  UNVERIFIABLE (${row.detail})`);
     }
 
     if (toProbe.length === 0) {
-      log(skippedRevoked.length > 0
-        ? `(no peers to probe — ${skippedRevoked.length} revoked skipped)`
-        : "(no peers to probe)");
-      const verdict = describeFederationVerify([]);
+      if (revokedRows.length === 0) log("(no peers to probe)");
+      const verdict = describeFederationVerify(revokedRows);
+      log(renderFederationVerifyVerdict(verdict));
       result = {
         exitCode: verdict.exitCode,
         verdict,
-        peers: [],
+        peers: revokedRows,
         skippedRevoked,
         memId,
         cleanedUp: false,
@@ -534,7 +547,7 @@ export async function runFederationVerify(
       }
     }
 
-    const peers = toProbe.map((p) => settled.get(p.id)!);
+    const peers = [...revokedRows, ...toProbe.map((p) => settled.get(p.id)!)];
     const verdict = describeFederationVerify(peers);
     log(renderFederationVerifyVerdict(verdict));
     result = {
