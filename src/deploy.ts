@@ -21,6 +21,7 @@ import {
   type ConvergenceResult,
   type QuiescenceResult,
 } from "./replication-convergence.js";
+import { FABRIC_NPM_INSTALL_COMMAND } from "./fabric-npm-install.js";
 
 export interface DeployOptions {
   fabricOrg?: string;
@@ -337,6 +338,12 @@ export function buildHarperDeployArgs(
     `replicated=${opts.replicated !== false}`,
     `deployment_timeout=${deploymentTimeoutMs}`,
     `install_timeout=${installTimeoutMs}`,
+    // flair#886: Harper's default `npm install` writes every tarball into
+    // the node's `~/.npm/_cacache` and never evicts it. This command runs
+    // the same install against a disposable cache and deletes it after
+    // (see src/fabric-npm-install.ts). One argv element so Harper's
+    // `key=value` parser keeps the spaces inside the value.
+    `install_command=${FABRIC_NPM_INSTALL_COMMAND}`,
   ];
   // --ignore-replication-errors escape hatch. Only appended when
   // set — omitted entirely otherwise, so this is a no-op for every existing
