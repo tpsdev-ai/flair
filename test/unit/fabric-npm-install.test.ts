@@ -8,7 +8,8 @@
  */
 
 import { describe, test, expect } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -110,6 +111,47 @@ describe("installWithEphemeralNpmCache", () => {
       expect(existsSync(seenCache!)).toBe(false);
     } finally {
       rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test("invoked as main runs npm with --cache and deletes it (Harper spawn path)", () => {
+    const fakebin = mkdtempSync(join(tmpdir(), "flair-886-fakebin-"));
+    const home = mkdtempSync(join(tmpdir(), "flair-886-home-"));
+    writeFileSync(
+      join(fakebin, "npm"),
+      `#!/bin/sh
+cache=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--cache" ]; then cache="$a"; break; fi
+  prev="$a"
+done
+printf '%s\\n' "$@" > "$(dirname "$0")/npm-args.txt"
+echo "$cache" > "$(dirname "$0")/cache-path.txt"
+mkdir -p "$cache"
+echo tarball > "$cache/dummy"
+exit 0
+`,
+      { mode: 0o755 },
+    );
+    const entry = join(import.meta.dir, "..", "..", "src", "fabric-npm-install.ts");
+    try {
+      const res = spawnSync(process.execPath, [entry], {
+        env: { ...process.env, PATH: `${fakebin}:${process.env.PATH ?? "/usr/bin:/bin"}`, HOME: home },
+        encoding: "utf-8",
+        timeout: 15_000,
+      });
+      expect(res.status).toBe(0);
+      expect(res.error).toBeUndefined();
+      const args = readFileSync(join(fakebin, "npm-args.txt"), "utf8").trim().split("\n");
+      expect(args.slice(0, 3)).toEqual(["install", "--force", "--ignore-scripts"]);
+      const cache = readFileSync(join(fakebin, "cache-path.txt"), "utf8").trim();
+      expect(cache.startsWith(join(tmpdir(), "flair-npm-")) || cache.includes("flair-npm-")).toBe(true);
+      expect(existsSync(cache)).toBe(false);
+      expect(existsSync(join(home, ".npm"))).toBe(false);
+    } finally {
+      rmSync(fakebin, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
     }
   });
 
