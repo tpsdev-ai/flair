@@ -566,7 +566,7 @@ describe("flair#1416 — no Agent.get on the apply path", () => {
     expect(src).toContain("checkPrincipalEntitlement(");
   });
 
-  it("cli.ts push table list matches FEDERATION_SYNC_TABLES minus the S1 receive-only tables", () => {
+  it("federation command push table list matches FEDERATION_SYNC_TABLES minus the S1 receive-only tables", () => {
     // Message is REGISTERED in the policy (so the owner-field + entitlement land
     // now and S2 is not a migration — the design's ship-order, flair#1521) but is
     // deliberately NOT pushed by a spoke in S1: cross-host Message delivery is
@@ -574,7 +574,7 @@ describe("flair#1416 — no Agent.get on the apply path", () => {
     // This still guards the original invariant — an ACCIDENTAL drift on any of
     // the four synced tables fails — while documenting the one deliberate gap.
     const S1_RECEIVE_ONLY = ["Message"];
-    const src = readFileSync(join(import.meta.dir, "../../src/cli.ts"), "utf8");
+    const src = readFileSync(join(import.meta.dir, "../../src/commands/federation.ts"), "utf8");
     const match = src.match(/const tables = \[([^\]]+)\]/);
     expect(match).toBeTruthy();
     const listed = match![1]

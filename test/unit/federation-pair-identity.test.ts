@@ -20,9 +20,9 @@ const HUB_ID = "flair_hubdeadbeef";
 const HUB_KEY = "dGVzdC1lZDI1NTE5LXB1YmtleS1iYXNlNjR1cmw";
 
 function pairActionSource(): string {
-  const src = readFileSync(join(import.meta.dir, "../../src/cli.ts"), "utf8");
+  const src = readFileSync(join(import.meta.dir, "../../src/commands/federation.ts"), "utf8");
   const start = src.indexOf('.command("pair <hub-url>")');
-  const end = src.indexOf('federation\n  .command("token")', start);
+  const end = src.indexOf('.command("token")', start);
   expect(start).toBeGreaterThan(-1);
   expect(end).toBeGreaterThan(start);
   return src.slice(start, end);

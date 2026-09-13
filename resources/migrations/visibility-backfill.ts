@@ -12,7 +12,7 @@
  * WHY THIS EXISTS: `resources/Memory.ts`'s `defaultVisibilityForDurability`
  * (flair#509) only stamps `visibility` on a WRITE — a row that has sat
  * untouched since before that slice shipped has no `visibility` field at
- * all. `src/cli.ts`'s federation push filter (`isFederationPrivateVisibility`)
+ * all. `src/commands/federation.ts`'s federation push filter (`isFederationPrivateVisibility`)
  * excludes only `visibility === "private"` — by design, per
  * `resources/memory-visibility.ts`'s migration invariant, an ABSENT
  * `visibility` field is NOT private and must keep syncing exactly as
@@ -38,7 +38,7 @@
  * EXTENDS that only resolves once a live Harper has already registered the
  * base `Memory` resource, which unit tests (no real Harper; see
  * `test/unit/migrations-visibility-backfill.test.ts`) cannot satisfy. Same
- * reasoning, same shape, as `src/cli.ts`'s `isFederationPrivateVisibility`
+ * reasoning, same shape, as `src/commands/federation.ts`'s `isFederationPrivateVisibility`
  * duplicating `resources/memory-visibility.ts`'s `isPrivateVisibility`
  * rather than importing it (see that file's comment) — both are one-line,
  * pure, and load-bearing enough that a comment pointing at the canonical
