@@ -14,6 +14,7 @@ there, then follow its imports before adding another helper.
 | Federation CLI | `commands/federation.ts` (`flair federation *`; #1620) |
 | Memory CLI | `commands/memory.ts` (`flair memory *`; #1621) |
 | Soul CLI | `commands/soul.ts` (`flair soul *`; #1622) |
+| REM CLI | `commands/rem.ts` (`flair rem *`; #1623) |
 | Federation verify | `federation-verify.ts` (`flair federation verify`; #823 three-state) |
 | REM scheduling and orchestration | `rem/runner.ts`, `rem/scheduler.ts`, `rem/snapshot.ts` |
 | Uninstall `--purge` completeness | `lib/uninstall-purge.ts` (client unwire lives on `install/clients.ts`) |
