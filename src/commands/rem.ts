@@ -17,6 +17,7 @@ import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import * as render from "../render.js";
 import { isLocalBase, resolveAdminUser, resolveLocalAdminPass } from "../lib/auth-resolve.js";
+import type { OpsSearch } from "../rem/restore.js";
 import {
   validatePromoteOpts,
   validateRejectOpts,
@@ -84,6 +85,32 @@ function humanBytes(n: number): string {
 }
 function relativeTime(iso: string | null | undefined): string {
   return cli.relativeTime(iso);
+}
+
+/**
+ * Build the admin-authed ops-API `search_by_conditions` helper shared by the
+ * rem commands. `search_by_conditions` is an ops-API operation, not a Harper
+ * REST route — Harper's REST dispatcher maps `POST /<table>` to
+ * `resource.post()` and never routes a URL suffix, so `/MemoryCandidate/
+ * search_by_conditions` 405s. Both the nightly pending-candidate count and
+ * the restore-time candidate cleanup must reach the ops port this way.
+ * `fetchImpl` is injectable for tests.
+ */
+export function buildOpsSearch(
+  opts: { opsPort: number; adminUser?: string; adminPass: string },
+  fetchImpl: typeof fetch = fetch,
+): OpsSearch {
+  const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${opts.adminPass}`).toString("base64")}`;
+  return async (table, conditions, getAttributes) => {
+    const res = await fetchImpl(`http://127.0.0.1:${opts.opsPort}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table, operator: "and", conditions, get_attributes: getAttributes }),
+    });
+    if (!res.ok) throw new Error(`ops API failed (${res.status})`);
+    const raw = await res.json() as unknown;
+    return Array.isArray(raw) ? raw : ((raw as { results?: any[] })?.results ?? []);
+  };
 }
 
 // ─── flair rem rapid — pure helpers ──────────────────────────────────────────
@@ -826,18 +853,7 @@ export function register(program: Command): void {
       // is best-effort 0 (the cycle still runs).
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       const opsSearch = adminPass
-        ? async (table: string, conditions: any[], getAttributes: string[]) => {
-            const opsPort = resolveOpsPort(opts);
-            const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
-            const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", Authorization: auth },
-              body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table, operator: "and", conditions, get_attributes: getAttributes }),
-            });
-            if (!res.ok) throw new Error(`ops API failed (${res.status})`);
-            const raw = await res.json() as unknown;
-            return Array.isArray(raw) ? raw : ((raw as { results?: any[] })?.results ?? []);
-          }
+        ? buildOpsSearch({ opsPort: resolveOpsPort(opts), adminUser: opts.adminUser, adminPass })
         : undefined;
       try {
         const healthBase = (process.env.FLAIR_URL || `http://127.0.0.1:${resolveHttpPort({})}`).replace(/\/+$/, "");
@@ -1007,7 +1023,18 @@ export function register(program: Command): void {
         const { applySnapshot } = await import("../rem/restore.js");
         applyAdminPassFile(opts);
         const restoreBase = process.env.FLAIR_URL || `http://127.0.0.1:${resolveHttpPort({})}`;
-        const adminPass = opts.dryRun ? undefined : resolveLocalAdminPass(opts.adminPass, !isLocalBase(restoreBase));
+        // Candidates are only reachable through the ops port (Harper has no
+        // REST search_by_conditions route), so the dry-run candidate count
+        // needs admin creds too. Dry-run treats credential resolution as
+        // best-effort — a plan-only command must not fail on a bad credential
+        // file — while --apply requires creds (Soul rewrite) and fails loudly.
+        let adminPass: string | undefined;
+        try {
+          adminPass = resolveLocalAdminPass(opts.adminPass, !isLocalBase(restoreBase));
+        } catch (err: any) {
+          if (!opts.dryRun) throw err;
+          adminPass = undefined;
+        }
         if (!opts.dryRun && !adminPass) {
           console.error(
             "Error: --admin-pass, --admin-pass-file, or FLAIR_ADMIN_PASS required for rem restore --apply " +
@@ -1015,6 +1042,9 @@ export function register(program: Command): void {
           );
           process.exit(1);
         }
+        const opsSearch = adminPass
+          ? buildOpsSearch({ opsPort: resolveOpsPort(opts), adminUser: opts.adminUser, adminPass })
+          : undefined;
         const soulApiCall = adminPass
           ? (method: string, path: string, body?: unknown) =>
               api(method, path, body, { explicitAdminPass: adminPass, adminUser: opts.adminUser, agentId: null })
@@ -1025,6 +1055,7 @@ export function register(program: Command): void {
             snapshotPath: match.path,
             flairVersion: __pkgVersion,
             apiCall: api,
+            opsSearch,
             soulApiCall,
             dryRun: !!opts.dryRun,
           });

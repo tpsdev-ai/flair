@@ -29,11 +29,27 @@ import { extractSnapshot, createSnapshot } from "./snapshot.js";
 
 export type ApiCall = (method: string, path: string, body?: unknown) => Promise<any>;
 
+/**
+ * Ops-API `search_by_conditions` helper (admin-authed). Harper's REST layer
+ * maps `POST /<table>` to `resource.post()` and has no URL-suffix routing, so
+ * candidate rows must be listed through the ops port with an
+ * `{operation:"search_by_conditions"}` body. The CLI injects this when admin
+ * credentials are available; when absent, candidate listing is best-effort
+ * empty (mirrors runner.ts).
+ */
+export type OpsSearch = (table: string, conditions: any[], getAttributes: string[]) => Promise<any[]>;
+
 export interface RestoreOpts {
   agentId: string;
   snapshotPath: string;
   flairVersion: string;
   apiCall: ApiCall;
+  /**
+   * Ops-API `search_by_conditions` helper (admin-authed). Injected by the CLI;
+   * candidates live on the ops port, which the agent-signed `apiCall` cannot
+   * reach. When absent, `listAgentCandidates` returns no rows.
+   */
+  opsSearch?: OpsSearch;
   /**
    * Operator/internal caller for Soul DELETE/PUT. Required in production:
    * `apiCall` extracts `agentId` from snapshot rows and signs as that agent.
@@ -106,14 +122,11 @@ function soulWrite(opts: RestoreOpts): ApiCall {
   return opts.soulApiCall ?? opts.apiCall;
 }
 
-async function listAgentCandidates(apiCall: ApiCall, agentId: string): Promise<any[]> {
-  return asArray(await apiCall("POST", "/MemoryCandidate/search_by_conditions", {
-    operator: "and",
-    conditions: [
-      { search_attribute: "agentId", search_type: "equals", search_value: agentId },
-    ],
-    get_attributes: ["id", "claim"],
-  }));
+async function listAgentCandidates(opsSearch: OpsSearch | undefined, agentId: string): Promise<any[]> {
+  if (!opsSearch) return [];
+  return asArray(await opsSearch("MemoryCandidate", [
+    { search_attribute: "agentId", search_type: "equals", search_value: agentId },
+  ], ["id", "claim"]));
 }
 
 function parseJsonlSafe(text: string): any[] {
@@ -216,7 +229,7 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
     try {
       const currentMem = asArray(await opts.apiCall("GET", `/Memory?agentId=${encodeURIComponent(opts.agentId)}`));
       const currentSouls = asArray(await opts.apiCall("GET", `/Soul?agentId=${encodeURIComponent(opts.agentId)}`));
-      const currentCandidates = await listAgentCandidates(opts.apiCall, opts.agentId);
+      const currentCandidates = await listAgentCandidates(opts.opsSearch, opts.agentId);
       result.deleted.memories = currentMem.length;
       result.deleted.souls = currentSouls.length;
       result.deleted.candidates = currentCandidates.length;
@@ -261,7 +274,7 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   // so a leftover row 403s Soul PUT after operator auth succeeds.
   let currentCandidates: any[] = [];
   try {
-    currentCandidates = await listAgentCandidates(opts.apiCall, opts.agentId);
+    currentCandidates = await listAgentCandidates(opts.opsSearch, opts.agentId);
   } catch (err: any) {
     errors.push(`fetch-candidates: ${err?.message ?? String(err)}`);
   }

@@ -13,7 +13,8 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { applySnapshot, type ApiCall } from "../src/rem/restore.ts";
+import { applySnapshot, type ApiCall, type OpsSearch } from "../src/rem/restore.ts";
+import { buildOpsSearch } from "../src/commands/rem.ts";
 import { createSnapshot } from "../src/rem/snapshot.ts";
 import { create as tarCreate, extract as tarExtract } from "tar";
 
@@ -60,7 +61,6 @@ function recordingApi(handlers: Record<string, (path: string, body?: unknown) =>
     // Default fall-throughs for the read endpoints when not stubbed
     if (method === "GET" && path.startsWith("/Memory?")) return [];
     if (method === "GET" && path.startsWith("/Soul?")) return [];
-    if (method === "POST" && path === "/MemoryCandidate/search_by_conditions") return [];
     if (method === "DELETE" || method === "PUT") return { ok: true };
     throw new Error(`unexpected api: ${method}:${path}`);
   };
@@ -92,7 +92,6 @@ function statefulApi(seed: { memories?: any[]; souls?: any[]; candidates?: any[]
     calls.push({ method, path, body });
     if (method === "GET" && path.startsWith("/Memory?")) return Array.from(state.memories.values());
     if (method === "GET" && path.startsWith("/Soul?")) return Array.from(state.souls.values());
-    if (method === "POST" && path === "/MemoryCandidate/search_by_conditions") return Array.from(state.candidates.values());
     if (method === "DELETE" && path.startsWith("/Memory/")) {
       state.memories.delete(decodeURIComponent(path.split("/")[2]));
       return { ok: true };
@@ -129,16 +128,23 @@ describe("applySnapshot — dry-run", () => {
     const { api, calls } = recordingApi({
       "GET:/Memory": () => current,
       "GET:/Soul": () => [{ id: "current-soul", agentId: "test-agent" }],
-      "POST:/MemoryCandidate": () => [
+    });
+    // Candidates are listed through the injected ops-API helper (admin-authed
+    // ops port), NOT `apiCall` with the REST URL suffix Harper 405s.
+    const opsSearchCalls: Array<{ table: string; conditions: any[]; getAttributes: string[] }> = [];
+    const opsSearch: OpsSearch = async (table, conditions, getAttributes) => {
+      opsSearchCalls.push({ table, conditions, getAttributes });
+      return [
         { id: "cand-1", agentId: "test-agent", claim: "leftover claim" },
         { id: "cand-2", agentId: "test-agent", claim: "another claim" },
-      ],
-    });
+      ];
+    };
     const r = await applySnapshot({
       agentId: "test-agent",
       snapshotPath,
       flairVersion: "0.0.0-test",
       apiCall: api,
+      opsSearch,
       preRestoreSnapshotRoot: snapshotRoot,
       tmpRootOverride: testRoot,
       dryRun: true,
@@ -152,7 +158,13 @@ describe("applySnapshot — dry-run", () => {
     expect(r.preRestoreSnapshotPath).toBeUndefined();
     expect(r.errors).toEqual([]);
 
-    expect(calls.some((c) => c.method === "POST" && c.path === "/MemoryCandidate/search_by_conditions")).toBe(true);
+    expect(calls.some((c) => c.method === "POST" && c.path === "/MemoryCandidate/search_by_conditions")).toBe(false);
+    expect(calls.some((c) => c.path.includes("search_by_conditions"))).toBe(false);
+    expect(opsSearchCalls.length).toBe(1);
+    expect(opsSearchCalls[0].table).toBe("MemoryCandidate");
+    expect(opsSearchCalls[0].conditions).toEqual([
+      { search_attribute: "agentId", search_type: "equals", search_value: "test-agent" },
+    ]);
     const writes = calls.filter((c) => c.method === "DELETE" || c.method === "PUT");
     expect(writes).toEqual([]);
   });
@@ -311,12 +323,14 @@ describe("applySnapshot — real restore", () => {
       souls: [],
       candidates: [leftover],
     });
+    const opsSearch: OpsSearch = async () => Array.from(state.candidates.values());
 
     const r = await applySnapshot({
       agentId: "test-agent",
       snapshotPath,
       flairVersion: "0.0.0-test",
       apiCall: api,
+      opsSearch,
       preRestoreSnapshotRoot: snapshotRoot,
       tmpRootOverride: testRoot,
     });
@@ -500,5 +514,45 @@ describe("applySnapshot — failure modes", () => {
     // Pre-restore snapshot was still created.
     expect(r.preRestoreSnapshotPath).toBeDefined();
     expect(existsSync(r.preRestoreSnapshotPath!)).toBe(true);
+  });
+});
+
+describe("buildOpsSearch — CLI-wired candidate list uses the ops root", () => {
+  it("POSTs the ops-root {search_by_conditions} body for MemoryCandidate, not a REST URL suffix", async () => {
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    const fakeFetch = (async (url: any, init: any) => {
+      requests.push({ url: String(url), init });
+      return new Response(JSON.stringify([{ id: "c1" }]), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const opsSearch = buildOpsSearch({ opsPort: 19926, adminUser: "admin", adminPass: "s3cret" }, fakeFetch);
+    const rows = await opsSearch(
+      "MemoryCandidate",
+      [{ search_attribute: "agentId", search_type: "equals", search_value: "test-agent" }],
+      ["id", "claim"],
+    );
+
+    expect(rows).toEqual([{ id: "c1" }]);
+    expect(requests.length).toBe(1);
+    // Ops port root — NOT /MemoryCandidate/search_by_conditions, which
+    // Harper's REST dispatcher cannot route and answers 405.
+    expect(requests[0].url).toBe("http://127.0.0.1:19926/");
+    expect(requests[0].url).not.toContain("search_by_conditions");
+    expect(JSON.parse(String(requests[0].init.body))).toEqual({
+      operation: "search_by_conditions",
+      schema: "flair",
+      table: "MemoryCandidate",
+      operator: "and",
+      conditions: [{ search_attribute: "agentId", search_type: "equals", search_value: "test-agent" }],
+      get_attributes: ["id", "claim"],
+    });
+    expect(String((requests[0].init.headers as Record<string, string>).Authorization)).toMatch(/^Basic /);
+  });
+
+  it("throws on a non-2xx ops response instead of silently returning zero rows", async () => {
+    const fakeFetch = (async () =>
+      new Response("does not have a post method implemented", { status: 405 })) as unknown as typeof fetch;
+    const opsSearch = buildOpsSearch({ opsPort: 19926, adminPass: "s3cret" }, fakeFetch);
+    await expect(opsSearch("MemoryCandidate", [], ["id"])).rejects.toThrow(/ops API failed \(405\)/);
   });
 });
