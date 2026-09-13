@@ -205,11 +205,19 @@ import {
   procStartTimeToEpochMs,
   parsePsLstart,
   parseSidecarJson,
+  classifyHealthProbe,
+  classifyPortOwner,
+  classifyInstanceMatch,
+  shouldAdoptMissingSidecar,
+  parseNullSeparatedEnviron,
+  extractRootPath,
   type DaemonEvidence,
   type PidLiveness,
   type HealthResult,
   type PidfileRead,
   type SidecarRead,
+  type PortOwnerResult,
+  type InstanceMatch,
 } from "./lib/daemon-liveness.js";
 // Value-only static import so `--interval`'s advertised default cannot drift
 // from the one the scheduler actually validates against. The module itself is
@@ -227,6 +235,8 @@ import { applyUpgradeMigrations, type UpgradeMigrationContext } from "./lib/upgr
 import { formatPurgeReport, purgeFlairInstall, purgeHadFailures } from "./lib/uninstall-purge.js";
 import {
   collectUpgradeExecPathWarning,
+  defaultReadProcessCmdline,
+  defaultReadProcessCwd,
   findFlairPackageDir,
   resolveNpmGlobalFlairPackage,
   resolveServingFlairPackage,
@@ -12317,7 +12327,10 @@ program
 // The pure classifier lives in src/lib/daemon-liveness.ts. These adapters are
 // the only places that touch the real filesystem, network, or a process, so
 // every classifier branch is unit-testable without a daemon. External tools
-// (lsof/ss/ps) may appear in diagnostic text only — none decides a verdict.
+// (lsof/ss/ps) never decide the five-state verdict: lsof absence is not
+// "not running". lsof MAY gate the #1454 sidecar self-heal when present —
+// a listener pid that is not the launched instance is NOT healed
+// (flair#1478). Absence of lsof skips that bind; it does not fail it.
 
 /** A pidfile/sidecar read that refuses to follow a symlink (O_NOFOLLOW). */
 type NoFollowRead =
@@ -12445,20 +12458,81 @@ function readProcessStartTimeMs(pid: number): number | null {
   return null;
 }
 
-/** The health probe, three-way: ok / refused (ECONNREFUSED) / unreachable. */
+/**
+ * The health probe (flair#1478): ok only when the response is 2xx AND the
+ * body is flair's /Health shape. A decoy that answers 200 is `foreign`,
+ * not healed.
+ */
 async function probeHealth(port: number): Promise<HealthResult> {
   try {
-    await fetch(`http://127.0.0.1:${port}/Health`, { signal: AbortSignal.timeout(2000) });
-    return { kind: "ok" };
+    const res = await fetch(`http://127.0.0.1:${port}/Health`, { signal: AbortSignal.timeout(2000) });
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      body = null;
+    }
+    return classifyHealthProbe({ kind: "response", status: res.status, body });
   } catch (err: any) {
     // Node's undici fetch reports ECONNREFUSED on `err.cause.code`; Bun reports
     // `ConnectionRefused` on `err.code`. Both mean "nothing is listening".
     const code = err?.cause?.code ?? err?.code;
-    if (code === "ECONNREFUSED" || code === "ConnectionRefused") {
-      return { kind: "refused" };
-    }
-    return { kind: "unreachable" };
+    return classifyHealthProbe({ kind: "network-error", code });
   }
+}
+
+/**
+ * PIDs LISTENING on `port` via `lsof -ti :<port> -sTCP:LISTEN`, or null
+ * when lsof is absent / unusable. Empty array means lsof ran and saw no
+ * listener — treated as unavailable by classifyPortOwner (do not
+ * false-red a real daemon because lsof missed). Non-empty without the
+ * launched pid is the stale/foreign holder #1478 refuses to heal.
+ */
+function resolveListenerPids(port: number): number[] | null {
+  try {
+    const out = execFileSync("lsof", ["-ti", `:${port}`, "-sTCP:LISTEN"], {
+      encoding: "utf-8",
+      timeout: 2000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return parseListeningPids(out, process.pid);
+  } catch (err: any) {
+    if (err?.code === "ENOENT") return null;
+    if (typeof err?.status === "number") return [];
+    return null;
+  }
+}
+
+function canonicalizeExistingPath(p: string): string {
+  try {
+    return realpathSync(resolve(p));
+  } catch {
+    return resolve(p);
+  }
+}
+
+/** Best-effort ROOTPATH from `/proc/<pid>/environ`. */
+function readProcessRootPath(pid: number): { rootPath: string | null; environReadable: boolean } {
+  if (process.platform === "linux") {
+    try {
+      const raw = readFileSync(`/proc/${pid}/environ`, "utf-8");
+      return { rootPath: extractRootPath(parseNullSeparatedEnviron(raw)), environReadable: true };
+    } catch {
+      return { rootPath: null, environReadable: false };
+    }
+  }
+  return { rootPath: null, environReadable: false };
+}
+
+/**
+ * Was this pid inspectable as a flair worktree? `null` when cwd and
+ * cmdline could not be read — do not treat that as "not flair".
+ */
+function inspectServingFlairPackage(pid: number): boolean | null {
+  const cwd = defaultReadProcessCwd(pid);
+  const cmdline = defaultReadProcessCmdline(pid);
+  if (cwd === null && cmdline === null) return null;
+  return resolveServingFlairPackage(pid) !== null;
 }
 
 /** Gather every piece of evidence the classifier needs, in one place. */
@@ -12477,40 +12551,55 @@ async function gatherDaemonEvidence(port: number, dataDir: string): Promise<Daem
   // Without this path, classifyDaemonState returns DISAGREEMENT and `flair stop`
   // refuses — breaking the upgrade flow for every existing user.
   //
-  // SECURITY: the real guard is /Health, NOT the ±2s start-time check.
-  // The ±2s check is circular in the self-heal path: we write the sidecar
-  // with the live process's OWN start time, then verifyIdentity reads the
-  // same process — it matches by construction for ANY live pid, including a
-  // recycled pid belonging to an unrelated process. Requiring /Health OK is
-  // the correct proof: only the flair daemon responds 200 at
-  // http://127.0.0.1:<port>/Health. An unrelated recycled pid does not.
-  //
-  // Therefore: self-heal is gated on health.kind === "ok". A live pid that
-  // does NOT serve /Health — a recycled pid, a wedged pre-#1454 daemon that
-  // can no longer respond — is left as DISAGREEMENT (refuse to signal).
-  // Never WEDGED, never SIGTERM, on an unverified pid.
+  // SECURITY (flair#1478): /Health "ok" is flair-identified 2xx, not a bare
+  // HTTP response. The ±2s start-time check is still circular here (we write
+  // the sidecar from the live process's own start time). Identity is:
+  //   1. res.ok + flair /Health body — a decoy 200 is `foreign`, not healed
+  //   2. the port's listener pid is the launched pid (lsof, best-effort)
+  //   3. that pid is the flair instance for this dataDir (worktree/ROOTPATH)
+  // A stale or foreign pid holding the port is NOT healed. False-green is
+  // worse than no self-heal.
   //
   // The write uses the same O_NOFOLLOW / 0600 / atomic-rename posture as every
   // other sidecar write. We skip self-heal when the dataDir is unsafe
   // (symlink / world-writable) — the check has already happened above.
+  let portOwner: PortOwnerResult = { kind: "unavailable" };
+  let instanceMatch: InstanceMatch = { kind: "unavailable" };
   if (
     sidecar.kind === "absent" &&
     dataDirUnsafe === null &&
     pidfile.kind === "present" &&
-    pidLiveness?.kind === "alive" &&
-    health.kind === "ok"              // ← the real proof: only flair serves this
+    pidLiveness?.kind === "alive"
   ) {
     const pid = pidfile.pid;
-    const startTimeMs = readProcessStartTimeMs(pid);
-    if (startTimeMs !== null) {
-      try {
-        writeDaemonSidecar(dataDir, pid, port, startTimeMs);
-        // Re-read: now that the sidecar exists, classify through the normal path.
-        sidecar = readSidecar(dataDir);
-      } catch {
-        // Self-heal is best-effort. If the write fails (e.g. read-only dataDir),
-        // we proceed with sidecar === absent and fall through to DISAGREEMENT
-        // — the same outcome as before the self-heal path, so no regression.
+    portOwner = classifyPortOwner({ launchedPid: pid, listenerPids: resolveListenerPids(port) });
+    const { rootPath, environReadable } = readProcessRootPath(pid);
+    instanceMatch = classifyInstanceMatch({
+      expectedDataDir: canonicalizeExistingPath(dataDir),
+      processRootPath: rootPath ? canonicalizeExistingPath(rootPath) : null,
+      environReadable,
+      servingFlairPackage: inspectServingFlairPackage(pid),
+    });
+    if (shouldAdoptMissingSidecar({
+      sidecarAbsent: true,
+      dataDirSafe: true,
+      pidfilePresent: true,
+      pidAlive: true,
+      health,
+      portOwner,
+      instanceMatch,
+    })) {
+      const startTimeMs = readProcessStartTimeMs(pid);
+      if (startTimeMs !== null) {
+        try {
+          writeDaemonSidecar(dataDir, pid, port, startTimeMs);
+          // Re-read: now that the sidecar exists, classify through the normal path.
+          sidecar = readSidecar(dataDir);
+        } catch {
+          // Self-heal is best-effort. If the write fails (e.g. read-only dataDir),
+          // we proceed with sidecar === absent and fall through to DISAGREEMENT
+          // — the same outcome as before the self-heal path, so no regression.
+        }
       }
     }
   }
@@ -12533,9 +12622,10 @@ async function gatherDaemonEvidence(port: number, dataDir: string): Promise<Daem
  * readProcessStartTimeMs) so the sidecar records an accurate epoch, not a
  * wall-clock approximation. Note: in the self-heal path the ±2s start-time
  * check in verifyIdentity is NOT what prevents recycled-pid adoption —
- * that guard is the /Health probe that the self-heal caller already required
- * before reaching this point. The start time is recorded faithfully for
- * forward compatibility and audit, not as a security gate here.
+ * that guard is the flair-identified /Health probe plus the pid→port bind
+ * (flair#1478) that the self-heal caller already required before reaching
+ * this point. The start time is recorded faithfully for forward
+ * compatibility and audit, not as a security gate here.
  */
 function writeDaemonSidecar(dataDir: string, pid: number, port: number, startTimeMs = Date.now()): void {
   const sidecar = { pid, startTimeMs, port, flairVersion: __pkgVersion };

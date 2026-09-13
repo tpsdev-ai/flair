@@ -632,11 +632,20 @@ describe("flair#1022 — `flair restart` reports the launchd outcome, not just l
       [
         `import { createServer } from "node:http";`,
         `import { writeFileSync } from "node:fs";`,
-        `const srv = createServer((_req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end('{"status":"ok"}'); });`,
+        // flair#1478: probeHealth requires Flair's public /Health shape, not a bare 200.
+        `const srv = createServer((_req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end('{"ok":true,"version":"0.53.0","buildCommit":null,"searchReady":true}'); });`,
         `srv.listen(0, "127.0.0.1", () => writeFileSync(process.argv[2], String(srv.address().port)));`,
       ].join("\n"),
     );
-    const proc = Bun.spawn(["bun", script, portFile], { stdout: "ignore", stderr: "ignore" });
+    // cwd + ROOTPATH so a pidfile-backed fallback stop can bind the stub as
+    // the launched instance (worktree/dataDir). Without this, #1478 refuses
+    // to adopt and the listener is left running (the #1012 red).
+    const proc = Bun.spawn(["bun", script, portFile], {
+      cwd: repoRoot,
+      env: { ...(process.env as Record<string, string>), ROOTPATH: dataDir },
+      stdout: "ignore",
+      stderr: "ignore",
+    });
     spawned.push(proc as any);
     for (let i = 0; i < 100 && !existsSync(portFile); i++) await new Promise((r) => setTimeout(r, 50));
     if (!existsSync(portFile)) throw new Error("health stub did not report a port");
