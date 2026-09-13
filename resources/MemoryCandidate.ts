@@ -95,12 +95,11 @@ export class MemoryCandidate extends (databases as any).flair.MemoryCandidate {
   }
 
   /**
-   * Scope collection reads to the caller's own candidates. This is the
-   * handler `flair rem candidates` reaches via `POST
-   * /MemoryCandidate/search_by_conditions` (src/cli.ts) — the agentId
-   * condition is wrapped as the OUTERMOST `and` block (Relationship.ts's
-   * same "Security Critical" discipline) so a caller-supplied `operator:
-   * "or"` in the request body cannot boolean-inject past the owner scope.
+   * Scope collection reads to the caller's own candidates. Agent-facing
+   * collection reads (`GET /MemoryCandidate`) reach this handler — the agentId
+   * condition is wrapped as the OUTERMOST `and` block (Relationship.ts's same
+   * "Security Critical" discipline) so a caller-supplied `operator: "or"` in
+   * the query cannot boolean-inject past the owner scope.
    */
   async search(query?: any) {
     const ctx = (this as any).getContext?.();

@@ -549,7 +549,19 @@ describe("MemoryApi", () => {
     });
   });
 
-  test("list POSTs conditions body with agentId scope", async () => {
+  /** Build a Memory row for list() tests; override any field. */
+  const memoryRow = (over: Record<string, unknown> = {}) => ({
+    id: "m",
+    agentId: "test",
+    content: "content",
+    type: "session",
+    durability: "standard",
+    tags: [],
+    createdAt: "2026-01-01T00:00:00Z",
+    ...over,
+  });
+
+  test("list GETs the supported Memory collection read with agentId scope", async () => {
     mockFetch = mock(() => Promise.resolve(new Response("[]", { status: 200 })));
     globalThis.fetch = mockFetch as any;
 
@@ -558,87 +570,100 @@ describe("MemoryApi", () => {
 
     expect(mockFetch).toHaveBeenCalled();
     const call = (mockFetch as any).mock.calls[0];
-    expect(call[0]).toBe("http://localhost:19926/Memory/search_by_conditions");
-    expect(call[1].method).toBe("POST");
-    const body = JSON.parse(call[1].body);
-    expect(body.operator).toBe("and");
-    expect(body.get_attributes).toEqual(["*"]);
-    expect(body.conditions).toEqual([
-      { search_attribute: "agentId", search_type: "equals", search_value: "testAgentId" },
-    ]);
+    // Harper's dispatcher maps every POST to resource.post() and has no
+    // URL-suffix routing, so /Memory/search_by_conditions answered 405.
+    // Collection reads use the supported collection GET — the same shape
+    // SoulApi.list() uses.
+    expect(call[0]).toBe("http://localhost:19926/Memory?agentId=testAgentId");
+    expect(call[1].method).toBe("GET");
+    expect(call[1].body).toBeUndefined();
   });
 
-  test("list with subject adds equals condition", async () => {
-    mockFetch = mock(() => Promise.resolve(new Response("[]", { status: 200 })));
+  test("list returns only memories owned by the calling agent", async () => {
+    const rows = [
+      memoryRow({ id: "mine", agentId: "test" }),
+      memoryRow({ id: "theirs", agentId: "someone-else" }),
+    ];
+    mockFetch = mock(() => Promise.resolve(new Response(JSON.stringify(rows), { status: 200 })));
     globalThis.fetch = mockFetch as any;
 
     const client = new FlairClient({ agentId: "test" });
-    await client.memory.list({ subject: "project-x" });
+    const result = await client.memory.list();
 
-    const body = JSON.parse((mockFetch as any).mock.calls[0][1].body);
-    expect(body.conditions).toEqual([
-      { search_attribute: "agentId", search_type: "equals", search_value: "test" },
-      { search_attribute: "subject", search_type: "equals", search_value: "project-x" },
-    ]);
+    expect(result.map((m) => m.id)).toEqual(["mine"]);
   });
 
-  test("list with tags creates separate contains condition per tag", async () => {
-    mockFetch = mock(() => Promise.resolve(new Response("[]", { status: 200 })));
+  test("list with subject filters the returned rows", async () => {
+    const rows = [
+      memoryRow({ id: "match", subject: "project-x" }),
+      memoryRow({ id: "other", subject: "project-y" }),
+    ];
+    mockFetch = mock(() => Promise.resolve(new Response(JSON.stringify(rows), { status: 200 })));
     globalThis.fetch = mockFetch as any;
 
     const client = new FlairClient({ agentId: "test" });
-    await client.memory.list({ tags: ["foo", "bar"] });
+    const result = await client.memory.list({ subject: "project-x" });
 
-    const body = JSON.parse((mockFetch as any).mock.calls[0][1].body);
-    expect(body.conditions).toEqual([
-      { search_attribute: "agentId", search_type: "equals", search_value: "test" },
-      { search_attribute: "tags", search_type: "contains", search_value: "foo" },
-      { search_attribute: "tags", search_type: "contains", search_value: "bar" },
-    ]);
+    expect(result.map((m) => m.id)).toEqual(["match"]);
   });
 
-  test("list with type adds equals condition", async () => {
-    mockFetch = mock(() => Promise.resolve(new Response("[]", { status: 200 })));
+  test("list with tags keeps only rows carrying every tag", async () => {
+    const rows = [
+      memoryRow({ id: "both", tags: ["foo", "bar"] }),
+      memoryRow({ id: "one", tags: ["foo"] }),
+      memoryRow({ id: "none", tags: [] }),
+    ];
+    mockFetch = mock(() => Promise.resolve(new Response(JSON.stringify(rows), { status: 200 })));
     globalThis.fetch = mockFetch as any;
 
     const client = new FlairClient({ agentId: "test" });
-    await client.memory.list({ type: "session" });
+    const result = await client.memory.list({ tags: ["foo", "bar"] });
 
-    const body = JSON.parse((mockFetch as any).mock.calls[0][1].body);
-    expect(body.conditions).toEqual([
-      { search_attribute: "agentId", search_type: "equals", search_value: "test" },
-      { search_attribute: "type", search_type: "equals", search_value: "session" },
-    ]);
+    expect(result.map((m) => m.id)).toEqual(["both"]);
   });
 
-  test("list with durability adds equals condition", async () => {
-    mockFetch = mock(() => Promise.resolve(new Response("[]", { status: 200 })));
+  test("list with type filters the returned rows", async () => {
+    const rows = [
+      memoryRow({ id: "lesson", type: "lesson" }),
+      memoryRow({ id: "session", type: "session" }),
+    ];
+    mockFetch = mock(() => Promise.resolve(new Response(JSON.stringify(rows), { status: 200 })));
     globalThis.fetch = mockFetch as any;
 
     const client = new FlairClient({ agentId: "test" });
-    await client.memory.list({ durability: "ephemeral" });
+    const result = await client.memory.list({ type: "lesson" });
 
-    const body = JSON.parse((mockFetch as any).mock.calls[0][1].body);
-    expect(body.conditions).toEqual([
-      { search_attribute: "agentId", search_type: "equals", search_value: "test" },
-      { search_attribute: "durability", search_type: "equals", search_value: "ephemeral" },
-    ]);
+    expect(result.map((m) => m.id)).toEqual(["lesson"]);
   });
 
-  test("list with limit puts it in body.limit field", async () => {
-    mockFetch = mock(() => Promise.resolve(new Response("[]", { status: 200 })));
+  test("list with durability filters the returned rows", async () => {
+    const rows = [
+      memoryRow({ id: "ephemeral", durability: "ephemeral" }),
+      memoryRow({ id: "standard", durability: "standard" }),
+    ];
+    mockFetch = mock(() => Promise.resolve(new Response(JSON.stringify(rows), { status: 200 })));
     globalThis.fetch = mockFetch as any;
 
     const client = new FlairClient({ agentId: "test" });
-    await client.memory.list({ limit: 10 });
+    const result = await client.memory.list({ durability: "ephemeral" });
 
-    const body = JSON.parse((mockFetch as any).mock.calls[0][1].body);
-    expect(body.limit).toBe(10);
-    // No limit in body when not specified
-    const client2 = new FlairClient({ agentId: "test2" });
-    await client2.memory.list();
-    const body2 = JSON.parse((mockFetch as any).mock.calls[1][1].body);
-    expect(body2.limit).toBeUndefined();
+    expect(result.map((m) => m.id)).toEqual(["ephemeral"]);
+  });
+
+  test("list applies limit after filtering", async () => {
+    const rows = [
+      memoryRow({ id: "a", type: "lesson" }),
+      memoryRow({ id: "b", type: "session" }),
+      memoryRow({ id: "c", type: "lesson" }),
+      memoryRow({ id: "d", type: "lesson" }),
+    ];
+    mockFetch = mock(() => Promise.resolve(new Response(JSON.stringify(rows), { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    const result = await client.memory.list({ type: "lesson", limit: 2 });
+
+    expect(result.map((m) => m.id)).toEqual(["a", "c"]);
   });
 
   test("list with order sorts client-side (asc)", async () => {
@@ -689,42 +714,39 @@ describe("MemoryApi", () => {
     expect(result[0].id).toBe("m1");
   });
 
-  test("list combines all filters in one conditions array", async () => {
-    mockFetch = mock(() => Promise.resolve(new Response("[]", { status: 200 })));
+  test("list combines all filters with AND", async () => {
+    const rows = [
+      memoryRow({ id: "hit", subject: "chat:abc", type: "lesson", durability: "persistent", tags: ["important", "urgent"] }),
+      memoryRow({ id: "wrong-subject", subject: "chat:xyz", type: "lesson", durability: "persistent", tags: ["important", "urgent"] }),
+      memoryRow({ id: "missing-tag", subject: "chat:abc", type: "lesson", durability: "persistent", tags: ["important"] }),
+      memoryRow({ id: "wrong-durability", subject: "chat:abc", type: "lesson", durability: "standard", tags: ["important", "urgent"] }),
+    ];
+    mockFetch = mock(() => Promise.resolve(new Response(JSON.stringify(rows), { status: 200 })));
     globalThis.fetch = mockFetch as any;
 
     const client = new FlairClient({ agentId: "test" });
-    await client.memory.list({
-      limit: 10,
+    const result = await client.memory.list({
       type: "lesson",
       durability: "persistent",
       subject: "chat:abc",
       tags: ["important", "urgent"],
     });
 
-    const body = JSON.parse((mockFetch as any).mock.calls[0][1].body);
-    expect(body.limit).toBe(10);
-    expect(body.conditions).toEqual([
-      { search_attribute: "agentId", search_type: "equals", search_value: "test" },
-      { search_attribute: "subject", search_type: "equals", search_value: "chat:abc" },
-      { search_attribute: "tags", search_type: "contains", search_value: "important" },
-      { search_attribute: "tags", search_type: "contains", search_value: "urgent" },
-      { search_attribute: "type", search_type: "equals", search_value: "lesson" },
-      { search_attribute: "durability", search_type: "equals", search_value: "persistent" },
-    ]);
+    expect(result.map((m) => m.id)).toEqual(["hit"]);
   });
 
-  test("list with empty tags array produces no tag conditions", async () => {
-    mockFetch = mock(() => Promise.resolve(new Response("[]", { status: 200 })));
+  test("list with an empty tags array filters nothing", async () => {
+    const rows = [
+      memoryRow({ id: "a", tags: [] }),
+      memoryRow({ id: "b", tags: ["x"] }),
+    ];
+    mockFetch = mock(() => Promise.resolve(new Response(JSON.stringify(rows), { status: 200 })));
     globalThis.fetch = mockFetch as any;
 
     const client = new FlairClient({ agentId: "test" });
-    await client.memory.list({ tags: [] });
+    const result = await client.memory.list({ tags: [] });
 
-    const body = JSON.parse((mockFetch as any).mock.calls[0][1].body);
-    expect(body.conditions).toEqual([
-      { search_attribute: "agentId", search_type: "equals", search_value: "test" },
-    ]);
+    expect(result.map((m) => m.id)).toEqual(["a", "b"]);
   });
 
 });

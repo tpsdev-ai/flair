@@ -366,58 +366,53 @@ class MemoryApi {
   /**
    * List recent memories. All filters combine with AND.
    *
-   * Uses Harper's `POST /Memory/search_by_conditions` endpoint with an
-   * explicit conditions array. The Memory.search() override injects the
-   * agentId scoping condition.
+   * Reads go through the supported Harper REST collection GET
+   * (`GET /Memory?agentId=…`) — the same shape `SoulApi.list()` and the CLI's
+   * `flair memory list` use. The previous `POST /Memory/search_by_conditions`
+   * shape was never a REST route: Harper's dispatcher maps every POST to
+   * `resource.post()` and has no URL-suffix routing, so it answered 405.
    *
-   * Note: `order` is applied client-side after retrieval. Harper's
-   * search_by_conditions does not accept a sort/order field in the body.
+   * The server applies the caller's read scope. The remaining filters
+   * (subject, tags, type, durability), `order`, and `limit` are applied
+   * client-side after retrieval. `type` has to be — it is an undeclared,
+   * non-queryable Memory column (see schemas/memory.graphql), so it can never
+   * be a server-side condition.
    */
   async list(opts: {
     tags?: string[];
     limit?: number;
     type?: MemoryType;
     durability?: Durability;
-    /** Filter by subject (entity the memory is about). Indexed; efficient. */
+    /** Filter by subject (entity the memory is about). */
     subject?: string;
-    /** Chronological ordering applied client-side after retrieval.
-     *  Server-side sort is not available via search_by_conditions. */
+    /** Chronological ordering applied client-side after retrieval. */
     order?: "createdAt-asc" | "createdAt-desc";
   } = {}): Promise<Memory[]> {
-    // Build conditions array — agentId is always scoped
-    const conditions: Array<{ search_attribute: string; search_type: string; search_value: unknown }> = [
-      { search_attribute: "agentId", search_type: "equals", search_value: this.client.agentId },
-    ];
+    const params = new URLSearchParams({ agentId: this.client.agentId });
+    const result = await this.client.request<unknown>("GET", `/Memory?${params}`);
+    // Harper returns a plain array; tolerate a { results: [...] } wrapper too.
+    const rows: Memory[] = Array.isArray(result) ? result : ((result as { results?: Memory[] })?.results ?? []);
 
-    if (opts.subject) {
-      conditions.push({ search_attribute: "subject", search_type: "equals", search_value: opts.subject });
-    }
-    for (const tag of opts.tags ?? []) {
-      conditions.push({ search_attribute: "tags", search_type: "contains", search_value: tag });
-    }
-    if (opts.type) {
-      conditions.push({ search_attribute: "type", search_type: "equals", search_value: opts.type });
-    }
-    if (opts.durability) {
-      conditions.push({ search_attribute: "durability", search_type: "equals", search_value: opts.durability });
-    }
+    const memories = rows.filter((memory) => {
+      // Keep the agent-scoped contract: the server's read scope also admits
+      // shared memories granted to this agent, but list() is an own-memory
+      // listing (the old explicit agentId condition had the same effect).
+      if (memory.agentId !== this.client.agentId) return false;
+      if (opts.subject !== undefined && memory.subject !== opts.subject) return false;
+      if (opts.type !== undefined && memory.type !== opts.type) return false;
+      if (opts.durability !== undefined && memory.durability !== opts.durability) return false;
+      for (const tag of opts.tags ?? []) {
+        if (!Array.isArray(memory.tags) || !memory.tags.includes(tag)) return false;
+      }
+      return true;
+    });
 
-    const body: Record<string, unknown> = {
-      operator: "and",
-      conditions,
-      get_attributes: ["*"],
-    };
-    if (opts.limit) body.limit = opts.limit;
-
-    const result = await this.client.request<unknown>("POST", "/Memory/search_by_conditions", body);
-    // search_by_conditions returns either an array or { results: [...] }
-    const memories: Memory[] = Array.isArray(result) ? result : ((result as { results?: Memory[] })?.results ?? []);
-
-    // Client-side sort (Harper's search_by_conditions does not accept sort in body)
     if (opts.order) {
       const dir = opts.order === "createdAt-desc" ? -1 : 1;
       memories.sort((a, b) => dir * (a.createdAt > b.createdAt ? 1 : a.createdAt < b.createdAt ? -1 : 0));
     }
+    // Applied after filtering/ordering so the window reflects the final set.
+    if (opts.limit && opts.limit > 0) memories.splice(opts.limit);
 
     return memories;
   }
