@@ -157,7 +157,17 @@ const cutoff = now - MIN_AGE_DAYS * 24 * 60 * 60 * 1000;
 const tooFresh = [];
 const fetchFails = [];
 
-async function getPublishTime(name, version) {
+/** Transient registry/network errors retry; missing data and 4xx do not. */
+function isRetryablePublishTimeError(err) {
+  const msg = String(err?.message ?? err);
+  if (msg.startsWith("no publish time")) return false;
+  if (/^HTTP 4\d\d/.test(msg) && !/^HTTP 408/.test(msg) && !/^HTTP 429/.test(msg)) {
+    return false;
+  }
+  return true;
+}
+
+async function getPublishTimeOnce(name, version) {
   // Registry endpoint: /<name> returns full document with a `time` map of
   // version → ISO timestamp. Cheap; ~1 request per package, parallel.
   // NB: the abbreviated `application/vnd.npm.install-v1+json` accept header
@@ -176,6 +186,24 @@ async function getPublishTime(name, version) {
     throw new Error(`no publish time for ${name}@${version}`);
   }
   return Date.parse(time);
+}
+
+async function getPublishTime(name, version) {
+  // One undici `fetch failed` on a single package used to fail the whole
+  // matrix leg (PR #1637 node-26: @types/js-yaml@4.0.9 in ~300ms, before
+  // bun install). Still fail-closed after retries — don't bypass.
+  const attempts = 3;
+  let lastErr;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await getPublishTimeOnce(name, version);
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryablePublishTimeError(err) || i === attempts) break;
+      await new Promise((r) => setTimeout(r, 200 * 2 ** (i - 1)));
+    }
+  }
+  throw lastErr;
 }
 
 // Parallelize but cap concurrency to be polite to the registry.
