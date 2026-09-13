@@ -216,6 +216,13 @@ import {
 // still loaded lazily at call time (the `await import()`s below) for the
 // functions — this pulls in nothing but node builtins.
 import { DEFAULT_INTERVAL_SECONDS as FEDERATION_SYNC_DEFAULT_INTERVAL } from "./federation/scheduler.js";
+import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "./lib/doctor-config-path.js";
+import {
+  collectFederationEnv,
+  describeFederationDriverFinding,
+  federationPeersConfigured,
+  loadYamlDoc,
+} from "./lib/doctor-federation-driver.js";
 import { applyUpgradeMigrations, type UpgradeMigrationContext } from "./lib/upgrade-migrations.js";
 import { formatPurgeReport, purgeFlairInstall, purgeHadFailures } from "./lib/uninstall-purge.js";
 import {
@@ -14468,6 +14475,7 @@ program
     let fixed = 0; // issues that --fix successfully resolved during this run (flair#721)
     let harperResponding = false;
     let keyAgentIds: string[] = []; // populated by step 2 (Keys directory) below; feeds the flair#722 per-agent iteration
+    let nodeKeyIds: string[] = []; // node-scoped federation keys; feeds the #1514 driver gate
 
     console.log(`\n${render.wrap(render.c.bold, "🩺 Flair Doctor")}\n`);
 
@@ -14729,17 +14737,18 @@ program
       // inferred as, an agent. Partition them out here so every downstream
       // consumer of keyAgentIds (registration checks, --fix inference,
       // fixCommandAgentHint) is node-free by construction.
-      const { agentKeyIds, nodeKeyIds } = partitionKeyIds(
+      const partitioned = partitionKeyIds(
         keyFiles.map((f: string) => f.replace(/\.key$/, "")),
         keysDir,
       );
-      keyAgentIds = agentKeyIds;
-      if (agentKeyIds.length > 0) {
-        console.log(`  ${render.icons.ok} Keys found: ${render.wrap(render.c.bold, String(agentKeyIds.length))} agent(s) in ${render.wrap(render.c.dim, keysDir)}`);
-        if (nodeKeyIds.length > 0) {
-          console.log(`     ${render.icons.info} ${render.wrap(render.c.dim, `${nodeKeyIds.length} node-scoped federation key(s) present — not agent signing keys; skipping`)}`);
+      keyAgentIds = partitioned.agentKeyIds;
+      nodeKeyIds = partitioned.nodeKeyIds;
+      if (keyAgentIds.length > 0) {
+        console.log(`  ${render.icons.ok} Keys found: ${render.wrap(render.c.bold, String(keyAgentIds.length))} agent(s) in ${render.wrap(render.c.dim, keysDir)}`);
+        if (partitioned.nodeKeyIds.length > 0) {
+          console.log(`     ${render.icons.info} ${render.wrap(render.c.dim, `${partitioned.nodeKeyIds.length} node-scoped federation key(s) present — not agent signing keys; skipping`)}`);
         }
-      } else if (nodeKeyIds.length > 0) {
+      } else if (partitioned.nodeKeyIds.length > 0) {
         // Node keys but no agent key: functionally there is no agent identity
         // here. Report it plainly (not the old DECODER false alarm) and point
         // at the real remedy. Kept a warn — not an issues++ — so a genuine
@@ -14757,13 +14766,25 @@ program
       issues++;
     }
 
-    // 3. Config file
-    const cfgPath = configPath();
-    if (existsSync(cfgPath)) {
-      const savedPort = readPortFromConfig();
+    // 3. Config file (flair#1514) — same resolution Harper uses: cwd, then
+    // the component/package dir, then ~/.flair. Looking only at
+    // ~/.flair/config.yaml printed "using defaults" on wrapper-launched
+    // component dirs whose real config is ~/agents/flair/config.yaml.
+    const configLookup = {
+      cwd: process.cwd(),
+      homeDir: homedir(),
+      componentDir: flairPackageDir(),
+    };
+    const cfgPath = resolveFlairConfigYaml(configLookup);
+    if (cfgPath) {
+      const savedPort = readPortFromYamlFile(cfgPath) ?? readPortFromConfig();
       console.log(`  ${render.icons.ok} Config: ${render.wrap(render.c.dim, cfgPath)} ${render.wrap(render.c.dim, `(port: ${savedPort ?? "default"})`)}`);
     } else {
-      console.log(`  ${render.icons.warn} No config file at ${render.wrap(render.c.dim, cfgPath)} — using defaults`);
+      const tried = flairConfigYamlCandidates(configLookup);
+      console.log(`  ${render.icons.warn} No config file at ${render.wrap(render.c.dim, tried[0] ?? configPath())} — using defaults`);
+      if (tried.length > 1) {
+        console.log(`     ${render.wrap(render.c.dim, `also tried: ${tried.slice(1).join(", ")}`)}`);
+      }
     }
 
     // 3b. Ops API bind (flair#670) — report-only finding, never auto-fixed.
@@ -15798,14 +15819,47 @@ program
     // without spawning launchctl/systemctl. Not-enabled renders as
     // informational: an unenabled scheduler is a choice — never the pass
     // marker, never the fail marker, never an issue.
+    //
+    // flair#1514: the federation driver is additionally gated on peers
+    // being configured. Zero peers → N/A (never ✗). Peers configured +
+    // driver missing/broken still ✗. Config.yaml is the component-dir
+    // file resolved above, not only ~/.flair/config.yaml.
     console.log(`\n  ${render.wrap(render.c.bold, "Scheduled drivers")}`);
     try {
       const { queryLastExitStatus, describeScheduledDriverFinding } = await import("./lib/scheduler-platform.js");
       const fedSched = await import("./federation/scheduler.js");
       const remSched = await import("./rem/scheduler.js");
       const guiDomain = `gui/${process.getuid?.() ?? ""}`;
+
+      let livePeerCount: number | null = null;
+      if (harperResponding) {
+        try {
+          const r = await api("GET", "/FederationPeers", undefined, { baseUrl }) as { peers?: Array<{ status?: string }> };
+          const peers = Array.isArray(r?.peers) ? r.peers : [];
+          livePeerCount = peers.filter((p) => p?.status !== "revoked").length;
+        } catch {
+          livePeerCount = null;
+        }
+      }
+      const configDoc = cfgPath ? loadYamlDoc(cfgPath) : null;
+      const fedEnv = collectFederationEnv({
+        processEnv: process.env,
+        envFilePaths: [
+          join(process.cwd(), COMPONENT_ENV_FILENAME),
+          join(flairPackageDir(), COMPONENT_ENV_FILENAME),
+          ...(cfgPath ? [join(dirname(cfgPath), COMPONENT_ENV_FILENAME)] : []),
+        ],
+      });
+      const peersConfigured = federationPeersConfigured({
+        livePeerCount,
+        configDoc,
+        env: fedEnv,
+        nodeKeyIds,
+      });
+
       const drivers = [
         {
+          kind: "federation" as const,
           status: fedSched.schedulerStatus(),
           label: "Federation sync driver",
           enableCommand: "flair federation sync enable",
@@ -15815,6 +15869,7 @@ program
           stderrLogPath: join(homedir(), ".flair", "logs", "federation-sync.stderr.log"),
         },
         {
+          kind: "rem" as const,
           status: remSched.schedulerStatus(),
           label: "REM nightly driver",
           enableCommand: "flair rem nightly enable",
@@ -15831,7 +15886,7 @@ program
         const lastExit = d.status.installed && d.status.active === true
           ? queryLastExitStatus({ plat: d.status.platform, darwinTarget: d.darwinTarget, linuxServiceUnit: d.linuxServiceUnit })
           : null;
-        const finding = describeScheduledDriverFinding({
+        const facts = {
           label: d.label,
           enableCommand: d.enableCommand,
           statusCommand: d.statusCommand,
@@ -15839,7 +15894,10 @@ program
           active: d.status.active,
           lastExit,
           stderrLogPath: d.stderrLogPath,
-        });
+        };
+        const finding = d.kind === "federation"
+          ? describeFederationDriverFinding({ peersConfigured, driver: facts })
+          : describeScheduledDriverFinding(facts);
         console.log(`  ${render.icons[finding.icon]} ${finding.message}`);
         finding.detail.forEach((line, i) => {
           // Embed-verify degraded style: the actor+state line loud (red),

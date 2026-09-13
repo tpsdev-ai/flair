@@ -1,0 +1,3 @@
+- **`flair doctor` no longer fails federation-driver on installs with no peers.** Zero peers is N/A (`not configured (driver installed, idle)`), not ✗. A peered install with a missing or unloaded driver still fails. Config.yaml is resolved from the component directory first — the same order Harper uses — so the gate reads the real config, not only `~/.flair/config.yaml` (flair#1514).
+
+  > **Heads-up:** a standalone install with leftover sync-driver unit files now reports informational N/A instead of a red issue. Pair a hub (or put peers in the component `config.yaml`) before the driver check can fail.
