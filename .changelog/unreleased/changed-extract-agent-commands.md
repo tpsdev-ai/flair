@@ -1,0 +1,3 @@
+- **The `flair agent` command group now lives in `src/commands/agent.ts`.** Part of the `src/cli.ts` modularization epic (flair#1630, epic flair#1618), matching the federation, memory, soul, rem, fleet, mcp, idp, hook, bridge, and keys splits: `src/cli.ts` binds shared helpers into the module and calls `register(program)`.
+
+  Pure extraction — no behavior change. `test/unit-isolated/cli-surface-snapshot.test.ts` stays byte-green, which proves every `agent` subcommand, flag, and `--help` rendering is identical. Agent registration, Ed25519 key generation, and key-permission logic are moved verbatim; no auth or identity behavior was altered.
