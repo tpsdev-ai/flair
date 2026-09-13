@@ -1657,3 +1657,43 @@ jobs:
       - name: Build CLI
         run: bun run build:cli
       - run: node scripts/docs-freshness-check.mjs
+
+  dist-esm-guard:
+    # flair#1657 — the flair#1653 class. A compiled dist/**/*.js ES module that
+    # calls require() while the build has top-level await makes Node throw
+    # ERR_AMBIGUOUS_MODULE_SYNTAX at runtime. The source suite runs under bun,
+    # which tolerates require in ESM, so #1653 shipped a broken `flair session
+    # snapshot list` while CI stayed green. This job builds the real output that
+    # ships and scans every emitted module, naming the file + line.
+    #
+    # BLOCKING. Do not add `continue-on-error`, `|| true` or `|| echo` here — a
+    # check that cannot go red is not a control. If dist/ is missing or empty
+    # the script exits non-zero rather than passing vacuously.
+    name: "Dist ESM: require() + top-level await guard"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
+        with:
+          bun-version: "1.3.10"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+      - name: Cache bun install
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-cache-${{ runner.os }}-
+      - run: sfw bun install --frozen-lockfile
+      # Build the exact output that ships: dist/resources/** via `build`, and
+      # dist/cli.js + dist/commands/** via `build:cli`.
+      - name: Build dist
+        run: bun run build && bun run build:cli
+      - name: Fail if any emitted ESM module uses require() with top-level await
+        run: node scripts/check-dist-esm-require.mjs dist
