@@ -56,6 +56,11 @@ describe("flair#1619 — CLI surface snapshot", () => {
     expect(actual).toContain("----- flair -----");
     expect(actual).toContain("----- flair memory add -----");
     expect(actual).toContain("Usage:");
+    // Runtime identity must not leak into the committed dump. CI runs this
+    // under bun on every Node matrix leg; a leaked process.version would
+    // false-fail one major.
+    expect(actual).not.toContain(process.version);
+    expect(actual).not.toMatch(/\bv(?:22|24|26)\.\d+\.\d+\b/);
   });
 
   test("a dropped or renamed flag fails the snapshot", () => {

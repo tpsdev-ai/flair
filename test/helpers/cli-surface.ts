@@ -58,12 +58,18 @@ export function countCliSurface(root: Command): CliSurfaceCounts {
 
 export function stabilizeCliSurfaceText(
   text: string,
-  opts: { home?: string; version?: string } = {},
+  opts: { home?: string; version?: string; nodeVersion?: string } = {},
 ): string {
   const home = opts.home ?? homedir();
+  const nodeVersion = opts.nodeVersion ?? process.version;
   let out = text;
   if (home) out = out.split(home).join("~");
   if (opts.version) out = out.split(opts.version).join("$FLAIR_VERSION");
+  // The committed dump is generated under bun; CI's Node 22/24/26 matrix
+  // only affects the pre-lane node scripts. Still strip the runtime version
+  // so a future help string that mentions process.version cannot false-fail
+  // one matrix leg (flair#1619 / PR #1637).
+  if (nodeVersion) out = out.split(nodeVersion).join("$NODE_VERSION");
   return out;
 }
 
@@ -191,7 +197,7 @@ export function renderCliSurfaceSnapshot(root: Command): string {
     "#",
     "# TREE is registration order: every command/subcommand + declared options/args.",
     "# HELP is each command's outputHelp() (--help, including addHelpText).",
-    "# Homedir and the CLI version are replaced so a bump/$HOME change is not a miss.",
+    "# Homedir, CLI version, and process.version are replaced so env/runtime is not a miss.",
     "",
     "========================================================================",
     "TREE",

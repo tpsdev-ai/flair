@@ -6,7 +6,7 @@
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
-# Homedir and the CLI version are replaced so a bump/$HOME change is not a miss.
+# Homedir, CLI version, and process.version are replaced so env/runtime is not a miss.
 
 ========================================================================
 TREE
