@@ -12,6 +12,7 @@ there, then follow its imports before adding another helper.
 | Doctor / upgrade | `lib/doctor-run.ts`, `doctor-client.ts`, `lib/upgrade-migrations.ts`, `lib/upgrade-exec-path.ts`, `lib/upgrade-plain-tree.ts` |
 | Deployment / fleet | `deploy.ts`, `fabric-upgrade.ts`, `fabric-npm-install.ts`, `fleet-verify.ts` |
 | Federation CLI | `commands/federation.ts` (`flair federation *`; #1620) |
+| Memory CLI | `commands/memory.ts` (`flair memory *`; #1621) |
 | Federation verify | `federation-verify.ts` (`flair federation verify`; #823 three-state) |
 | REM scheduling and orchestration | `rem/runner.ts`, `rem/scheduler.ts`, `rem/snapshot.ts` |
 | Uninstall `--purge` completeness | `lib/uninstall-purge.ts` (client unwire lives on `install/clients.ts`) |
