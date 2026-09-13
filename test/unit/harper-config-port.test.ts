@@ -749,3 +749,175 @@ describe("flair#1454 — self-heal requires /Health proof, not just a live pid",
     30_000,
   );
 });
+
+// ─── flair#1478 self-heal harden: flair identity + pid→port ────────────────
+//
+// #1454 gated sidecar adoption on "something answered HTTP". A decoy 200 on
+// the port, or a stale pid still holding it after a failed restart, must
+// NOT count as healed. False-green is worse than no self-heal.
+
+const FLAIR_HEALTH_JSON = JSON.stringify({
+  ok: true,
+  version: "0.53.0",
+  buildCommit: null,
+  searchReady: true,
+});
+
+describe("flair#1478 — self-heal requires flair /Health identity and pid→port bind", () => {
+  let tmpHome: string;
+  let dataDir: string;
+  const spawned: Array<{ kill: (sig?: NodeJS.Signals | number) => void }> = [];
+
+  beforeEach(() => {
+    tmpHome = mkdtempSync(join(tmpdir(), "flair1478-selfheal-"));
+    dataDir = join(tmpHome, ".flair", "data");
+    mkdirSync(dataDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    for (const proc of spawned.splice(0)) {
+      try { proc.kill(9); } catch { /* already gone */ }
+    }
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  async function runStop(port: number) {
+    const env: Record<string, string> = {
+      ...(process.env as Record<string, string>),
+      HOME: tmpHome,
+    };
+    delete (env as Record<string, string | undefined>)["FLAIR_URL"];
+    delete (env as Record<string, string | undefined>)["FLAIR_TARGET"];
+    const cliPath = join(import.meta.dirname, "..", "..", "src", "cli.ts");
+    const proc = Bun.spawn(["bun", cliPath, "stop", "--port", String(port)], {
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdout = await new Response(proc.stdout).text();
+    const stderr = await new Response(proc.stderr).text();
+    const exitCode = await proc.exited;
+    return { stdout, stderr, exitCode };
+  }
+
+  function pidAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function spawnHttpOnPort(
+    port: number,
+    body: string,
+    extra: { env?: Record<string, string>; cwd?: string } = {},
+  ): Promise<number> {
+    const script = join(tmpHome, `decoy-${port}.mjs`);
+    writeFileSync(
+      script,
+      [
+        `import { createServer } from "node:http";`,
+        `const body = ${JSON.stringify(body)};`,
+        `const srv = createServer((req, res) => {`,
+        `  res.writeHead(200, { "content-type": "application/json" });`,
+        `  res.end(body);`,
+        `});`,
+        `srv.listen(${port}, "127.0.0.1");`,
+      ].join("\n"),
+    );
+    const proc = Bun.spawn(["bun", script], {
+      cwd: extra.cwd ?? tmpHome,
+      env: { ...(process.env as Record<string, string>), ...(extra.env ?? {}) },
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    spawned.push(proc as unknown as { kill: (sig?: NodeJS.Signals | number) => void });
+    const pid = (proc as unknown as { pid: number }).pid;
+    for (let i = 0; i < 80; i++) {
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/Health`, { signal: AbortSignal.timeout(200) });
+        if (res.status === 200) return pid;
+      } catch { /* not up yet */ }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    throw new Error(`decoy on ${port} did not become ready`);
+  }
+
+  test(
+    "decoy: a foreign 200-responder on the port does NOT count as healed",
+    async () => {
+      // The decoy owns the port AND is the pidfile pid — body identity is
+      // the gate that must reject it. A pre-#1478 probeHealth would call
+      // this "ok" and adopt the sidecar, then `flair stop` would SIGTERM it.
+      const PORT = 59987;
+      const pid = await spawnHttpOnPort(PORT, JSON.stringify({ ok: true, status: "healthy" }));
+      writeFileSync(join(dataDir, "hdb.pid"), String(pid));
+
+      const { stdout, stderr, exitCode } = await runStop(PORT);
+
+      expect(exitCode).not.toBe(0);
+      expect(stdout + stderr).not.toMatch(/Flair stopped/i);
+      expect(stdout + stderr).toMatch(/refusing|disagreement|could not be verified/i);
+      expect(existsSync(join(dataDir, "flair-daemon.json"))).toBe(false);
+      expect(pidAlive(pid)).toBe(true);
+    },
+    30_000,
+  );
+
+  test(
+    "stale pid: a leftover listener after a failed restart is NOT healed",
+    async () => {
+      // The "launched" process is a sleeper in hdb.pid. A different process
+      // still holds the port and even answers with a flair-shaped /Health.
+      // That is the failed-restart shape: something answered 200, but it is
+      // not the instance we launched.
+      const PORT = 59986;
+      const sleeper = Bun.spawn(["bun", "-e", "await new Promise(()=>{})"], {
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      spawned.push(sleeper as unknown as { kill: (sig?: NodeJS.Signals | number) => void });
+      const launchedPid = (sleeper as unknown as { pid: number }).pid;
+      writeFileSync(join(dataDir, "hdb.pid"), String(launchedPid));
+
+      const listenerPid = await spawnHttpOnPort(PORT, FLAIR_HEALTH_JSON, {
+        cwd: join(import.meta.dirname, "..", ".."),
+        env: { ROOTPATH: dataDir },
+      });
+      expect(listenerPid).not.toBe(launchedPid);
+
+      const { stdout, stderr, exitCode } = await runStop(PORT);
+
+      expect(exitCode).not.toBe(0);
+      expect(stdout + stderr).not.toMatch(/Flair stopped/i);
+      expect(stdout + stderr).toMatch(/refusing|disagreement|could not be verified/i);
+      expect(existsSync(join(dataDir, "flair-daemon.json"))).toBe(false);
+      expect(pidAlive(launchedPid)).toBe(true);
+      expect(pidAlive(listenerPid)).toBe(true);
+    },
+    30_000,
+  );
+
+  test(
+    "positive control: flair-shaped /Health + launched pid on the port + worktree/dataDir heals",
+    async () => {
+      const PORT = 59985;
+      const repoRoot = join(import.meta.dirname, "..", "..");
+      const pid = await spawnHttpOnPort(PORT, FLAIR_HEALTH_JSON, {
+        cwd: repoRoot,
+        env: { ROOTPATH: dataDir },
+      });
+      writeFileSync(join(dataDir, "hdb.pid"), String(pid));
+
+      const { stdout, stderr, exitCode } = await runStop(PORT);
+
+      expect(exitCode).toBe(0);
+      expect(stdout + stderr).toMatch(/Flair stopped/i);
+      expect(existsSync(join(dataDir, "flair-daemon.json"))).toBe(true);
+      expect(pidAlive(pid)).toBe(false);
+    },
+    30_000,
+  );
+});

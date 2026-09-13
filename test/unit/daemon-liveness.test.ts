@@ -32,9 +32,20 @@ import {
   procStartTimeToEpochMs,
   parsePsLstart,
   parseSidecarJson,
+  isFlairHealthBody,
+  classifyHealthProbe,
+  classifyPortOwner,
+  classifyInstanceMatch,
+  shouldAdoptMissingSidecar,
+  parseNullSeparatedEnviron,
+  extractRootPath,
+  canonicalLexicalPath,
   type DaemonEvidence,
   type DaemonContext,
   type SidecarRead,
+  type HealthResult,
+  type PortOwnerResult,
+  type InstanceMatch,
 } from "../../src/lib/daemon-liveness.ts";
 
 const ctx: DaemonContext = { port: 19926, dataDir: "/home/u/.flair/data" };
@@ -115,6 +126,21 @@ describe("flair#1454 — classifyDaemonState", () => {
     const s = classifyDaemonState(ev({ health: { kind: "ok" } }), ctx);
     expect(s.state).toBe("DISAGREEMENT");
     expect((s as any).detail).toContain("19926");
+  });
+
+  test("DISAGREEMENT: no pidfile but a foreign HTTP responder is on the port", () => {
+    const s = classifyDaemonState(ev({ health: { kind: "foreign" } }), ctx);
+    expect(s.state).toBe("DISAGREEMENT");
+  });
+
+  test("WEDGED: verified identity, alive pid, foreign HTTP (not flair /Health)", () => {
+    const s = classifyDaemonState(ev({
+      pidfile: { kind: "present", pid: 4242 },
+      pidLiveness: { kind: "alive" },
+      identity: verified(4242),
+      health: { kind: "foreign" },
+    }), ctx);
+    expect(s).toEqual({ state: "WEDGED", pid: 4242 });
   });
 
   test("DISAGREEMENT: recorded pid is gone but something is serving the port", () => {
@@ -413,5 +439,184 @@ describe("flair#1454 — isStartTimeMatch", () => {
   });
   test("outside tolerance", () => {
     expect(isStartTimeMatch(1_000_000, 1_002_001, 2000)).toBe(false);
+  });
+});
+
+// ─── flair#1478: /Health identity + pid→port bind ───────────────────────────
+
+const FLAIR_HEALTH = {
+  ok: true,
+  version: "0.53.0",
+  buildCommit: null,
+  searchReady: true,
+};
+
+describe("flair#1478 — isFlairHealthBody", () => {
+  test("accepts the public /Health shape", () => {
+    expect(isFlairHealthBody(FLAIR_HEALTH)).toBe(true);
+    expect(isFlairHealthBody({ ...FLAIR_HEALTH, buildCommit: "abc", searchReady: false })).toBe(true);
+  });
+
+  test("rejects a bare 200 body a decoy would serve", () => {
+    expect(isFlairHealthBody({ ok: true })).toBe(false);
+    expect(isFlairHealthBody({ status: "ok" })).toBe(false);
+    expect(isFlairHealthBody("ok")).toBe(false);
+    expect(isFlairHealthBody(null)).toBe(false);
+    expect(isFlairHealthBody([])).toBe(false);
+  });
+
+  test("rejects a missing or empty version, missing searchReady, or missing buildCommit", () => {
+    expect(isFlairHealthBody({ ok: true, version: "", buildCommit: null, searchReady: true })).toBe(false);
+    expect(isFlairHealthBody({ ok: true, version: "0.53.0", buildCommit: null })).toBe(false);
+    expect(isFlairHealthBody({ ok: true, version: "0.53.0", searchReady: true })).toBe(false);
+  });
+});
+
+describe("flair#1478 — classifyHealthProbe", () => {
+  test("2xx + flair body is ok", () => {
+    expect(classifyHealthProbe({ kind: "response", status: 200, body: FLAIR_HEALTH })).toEqual({ kind: "ok" });
+  });
+
+  test("2xx + decoy body is foreign — not healed", () => {
+    expect(classifyHealthProbe({ kind: "response", status: 200, body: { ok: true } })).toEqual({ kind: "foreign" });
+    expect(classifyHealthProbe({ kind: "response", status: 200, body: "ok" })).toEqual({ kind: "foreign" });
+  });
+
+  test("non-2xx is foreign even with a flair-shaped body", () => {
+    expect(classifyHealthProbe({ kind: "response", status: 503, body: FLAIR_HEALTH })).toEqual({ kind: "foreign" });
+    expect(classifyHealthProbe({ kind: "response", status: 401, body: FLAIR_HEALTH })).toEqual({ kind: "foreign" });
+  });
+
+  test("ECONNREFUSED / ConnectionRefused is refused", () => {
+    expect(classifyHealthProbe({ kind: "network-error", code: "ECONNREFUSED" })).toEqual({ kind: "refused" });
+    expect(classifyHealthProbe({ kind: "network-error", code: "ConnectionRefused" })).toEqual({ kind: "refused" });
+  });
+
+  test("timeout / other network error is unreachable", () => {
+    expect(classifyHealthProbe({ kind: "network-error", code: "UND_ERR_CONNECT_TIMEOUT" })).toEqual({ kind: "unreachable" });
+    expect(classifyHealthProbe({ kind: "network-error" })).toEqual({ kind: "unreachable" });
+  });
+});
+
+describe("flair#1478 — classifyPortOwner", () => {
+  test("launched pid in the listener set is a match", () => {
+    expect(classifyPortOwner({ launchedPid: 42, listenerPids: [42] })).toEqual({ kind: "match" });
+    expect(classifyPortOwner({ launchedPid: 42, listenerPids: [9, 42, 7] })).toEqual({ kind: "match" });
+  });
+
+  test("a stale/foreign pid holding the port is a mismatch — not healed", () => {
+    expect(classifyPortOwner({ launchedPid: 42, listenerPids: [99] }))
+      .toEqual({ kind: "mismatch", listenerPids: [99] });
+  });
+
+  test("lsof absent or empty is unavailable — not a definite negative", () => {
+    expect(classifyPortOwner({ launchedPid: 42, listenerPids: null })).toEqual({ kind: "unavailable" });
+    expect(classifyPortOwner({ launchedPid: 42, listenerPids: [] })).toEqual({ kind: "unavailable" });
+  });
+});
+
+describe("flair#1478 — classifyInstanceMatch", () => {
+  test("matching ROOTPATH + flair worktree is a match", () => {
+    expect(classifyInstanceMatch({
+      expectedDataDir: "/home/u/.flair/data",
+      processRootPath: "/home/u/.flair/data/",
+      environReadable: true,
+      servingFlairPackage: true,
+    })).toEqual({ kind: "match" });
+  });
+
+  test("wrong ROOTPATH is a mismatch even when the worktree looks like flair", () => {
+    const r = classifyInstanceMatch({
+      expectedDataDir: "/home/u/.flair/data",
+      processRootPath: "/tmp/other",
+      environReadable: true,
+      servingFlairPackage: true,
+    });
+    expect(r.kind).toBe("mismatch");
+  });
+
+  test("readable environ with no ROOTPATH is a mismatch", () => {
+    const r = classifyInstanceMatch({
+      expectedDataDir: "/home/u/.flair/data",
+      processRootPath: null,
+      environReadable: true,
+      servingFlairPackage: true,
+    });
+    expect(r.kind).toBe("mismatch");
+  });
+
+  test("listener that is not a flair worktree is a mismatch", () => {
+    const r = classifyInstanceMatch({
+      expectedDataDir: "/home/u/.flair/data",
+      processRootPath: "/home/u/.flair/data",
+      environReadable: true,
+      servingFlairPackage: false,
+    });
+    expect(r.kind).toBe("mismatch");
+  });
+
+  test("both checks unread is unavailable", () => {
+    expect(classifyInstanceMatch({
+      expectedDataDir: "/home/u/.flair/data",
+      processRootPath: null,
+      environReadable: false,
+      servingFlairPackage: null,
+    })).toEqual({ kind: "unavailable" });
+  });
+});
+
+describe("flair#1478 — shouldAdoptMissingSidecar", () => {
+  const base = {
+    sidecarAbsent: true,
+    dataDirSafe: true,
+    pidfilePresent: true,
+    pidAlive: true,
+    health: { kind: "ok" } as HealthResult,
+    portOwner: { kind: "match" } as PortOwnerResult,
+    instanceMatch: { kind: "match" } as InstanceMatch,
+  };
+
+  test("healed only when /Health is flair-ok AND pid owns the port AND instance matches", () => {
+    expect(shouldAdoptMissingSidecar(base)).toBe(true);
+  });
+
+  test("best-effort skip (unavailable lsof / environ) still heals when health is flair-ok", () => {
+    expect(shouldAdoptMissingSidecar({
+      ...base,
+      portOwner: { kind: "unavailable" },
+      instanceMatch: { kind: "unavailable" },
+    })).toBe(true);
+  });
+
+  test("foreign 200-responder is NOT healed", () => {
+    expect(shouldAdoptMissingSidecar({ ...base, health: { kind: "foreign" } })).toBe(false);
+    expect(shouldAdoptMissingSidecar({ ...base, health: { kind: "refused" } })).toBe(false);
+  });
+
+  test("stale pid holding the port is NOT healed", () => {
+    expect(shouldAdoptMissingSidecar({
+      ...base,
+      portOwner: { kind: "mismatch", listenerPids: [99] },
+    })).toBe(false);
+  });
+
+  test("worktree/dataDir mismatch is NOT healed", () => {
+    expect(shouldAdoptMissingSidecar({
+      ...base,
+      instanceMatch: { kind: "mismatch", reason: "listener ROOTPATH is not dataDir" },
+    })).toBe(false);
+  });
+});
+
+describe("flair#1478 — environ helpers", () => {
+  test("parseNullSeparatedEnviron + extractRootPath", () => {
+    const env = parseNullSeparatedEnviron("PATH=/bin\0ROOTPATH=/home/u/.flair/data\0HOME=/home/u\0");
+    expect(extractRootPath(env)).toBe("/home/u/.flair/data");
+    expect(extractRootPath({})).toBeNull();
+  });
+
+  test("canonicalLexicalPath drops a trailing slash", () => {
+    expect(canonicalLexicalPath("/home/u/.flair/data/")).toBe("/home/u/.flair/data");
+    expect(canonicalLexicalPath("/")).toBe("/");
   });
 });

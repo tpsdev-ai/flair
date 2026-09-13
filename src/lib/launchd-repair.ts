@@ -255,14 +255,15 @@ export function decideAdoptStop(
         remedy: ["flair stop", "flair doctor --fix"],
       };
   }
-  // Proceed ONLY when the port is provably free (ECONNREFUSED). "ok" means
-  // something is still serving; "unreachable" means a wedged daemon may still
-  // be BOUND to the port (ignored SIGTERM) — both would EADDRINUSE on load.
+  // Proceed ONLY when the port is provably free (ECONNREFUSED). "ok" or
+  // "foreign" means something is still serving; "unreachable" means a wedged
+  // daemon may still be BOUND to the port (ignored SIGTERM) — both would
+  // EADDRINUSE on load.
   if (postStopHealth.kind !== "refused") {
     return {
       kind: "failed",
       detail:
-        postStopHealth.kind === "ok"
+        postStopHealth.kind === "ok" || postStopHealth.kind === "foreign"
           ? "port still occupied after stopping the direct process"
           : "port not confirmed free after stopping the direct process (a wedged process may still hold it)",
       remedy: ["flair stop", "flair doctor --fix"],

@@ -231,6 +231,15 @@ describe("decideAdoptStop", () => {
     }
   });
 
+  test("RUNNING + foreign HTTP still on the port -> failed (port still occupied)", () => {
+    const result = decideAdoptStop({ state: "RUNNING", pid: 42 }, { kind: "foreign" });
+    expect(result).not.toBe("proceed");
+    if (result !== "proceed") {
+      expect(result.kind).toBe("failed");
+      expect(result.detail).toContain("port still occupied");
+    }
+  });
+
   test("RUNNING + port unreachable -> failed (NOT proceed — a wedged daemon may still hold the port)", () => {
     // "unreachable" is the probe's "cannot tell": a wedged daemon that ignored
     // SIGTERM but stays BOUND to the port while no longer serving /Health
