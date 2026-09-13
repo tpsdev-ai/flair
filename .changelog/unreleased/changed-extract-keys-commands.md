@@ -1,0 +1,3 @@
+- **The `flair keys` command group now lives in `src/commands/keys.ts`.** Part of the `src/cli.ts` modularization epic (flair#1629, epic flair#1618), matching the federation, memory, soul, rem, fleet, mcp, idp, hook, and bridge splits: `src/cli.ts` binds shared helpers into the module and calls `register(program)`.
+
+  Pure extraction — no behavior change. `test/unit-isolated/cli-surface-snapshot.test.ts` stays byte-green, and the `classifyKeysDir` / `applyKeyPrune` decision logic is still exported (now re-exported from `src/commands/keys.ts`) so `test/unit/keys-prune.test.ts` is unchanged. Key generation, path resolution, and file-permission behavior are untouched.
