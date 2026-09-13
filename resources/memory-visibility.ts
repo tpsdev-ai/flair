@@ -6,7 +6,7 @@
  *   - resources/memory-read-scope.ts's resolveReadScope() — the cross-agent
  *     READ scope every read path (Memory.search/get, SemanticSearch,
  *     MemoryBootstrap, the by-id auth-middleware guard) resolves through.
- *   - src/cli.ts's runFederationSyncOnce() — the federation-sync PUSH filter
+ *   - src/commands/federation.ts's runFederationSyncOnce() — the federation-sync PUSH filter
  *     that must not replicate `private` memories to peer instances.
  *
  * Deliberately has ZERO imports — not even "harper". That is
@@ -16,8 +16,8 @@
  * imports `databases` from "harper", and that package's
  * top-level init eagerly resolves storage paths and THROWS when there is no
  * live Harper runtime backing it (confirmed empirically — it takes down
- * even `flair --help`). So src/cli.ts must never import
- * resources/memory-read-scope.ts (or anything else that drags that
+ * even `flair --help`). So the CLI (src/cli.ts / src/commands/federation.ts)
+ * must never import resources/memory-read-scope.ts (or anything else that drags that
  * side-effecting import in) directly. This module is the safe seam: a pure
  * function + constant that both sides can import without dragging in
  * "harper".

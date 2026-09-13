@@ -14,7 +14,7 @@ whether it is loaded. Check the loader configuration when extracting code.
 | Search | `SemanticSearch.ts` | `semantic-retrieval-core.ts`; lexical index in `bm25-index-service.ts` |
 | Session context | `MemoryBootstrap.ts` | shared retrieval core; budget/connector checks in `test/helpers/mcp-conformance.ts` |
 | MCP / embedded API | `mcp-tools.ts`, `mcp-handler.ts`, `in-process-api.ts` | compare the separately packaged stdio adapter and client too |
-| Federation | `Federation.ts` | `federation-classify.ts`, `federation-crypto.ts`, `federation-peer-liveness.ts`; sender orchestration in `src/cli.ts` |
+| Federation | `Federation.ts` | `federation-classify.ts`, `federation-crypto.ts`, `federation-peer-liveness.ts`; sender orchestration in `src/commands/federation.ts` |
 
 Preserve these boundaries:
 

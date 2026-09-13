@@ -5,9 +5,9 @@
  * INLINED, not imported: cross-boundary imports from src/ into resources/
  * don't survive npm packaging — tsconfig.cli.json compiles with
  * `rootDir: "src"`, so dist/cli.js has no resources/ module it can resolve
- * at the same relative path. This is the same reason src/cli.ts inlines the
- * federation crypto helpers (see the note beside `sortKeys()` there) and the
- * private-visibility filter. The two files MUST stay in sync:
+ * at the same relative path. This is the same reason src/commands/federation.ts
+ * inlines the federation crypto helpers (see the note beside `sortKeys()` there)
+ * and the private-visibility filter. The two files MUST stay in sync:
  * test/unit/cli-entities-option.test.ts imports BOTH and pins ENTITY_TYPES
  * equality, validator parity across a known-answer table, and the
  * entityFormatHint() string — drift fails CI rather than shipping.
