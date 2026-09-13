@@ -21,9 +21,13 @@
  *      resolved `--admin-pass` flag) or `explicitKeyPath` (e.g. `--key`,
  *      paired with `agentId`). Always wins; this is the operator saying
  *      "use exactly this."
+ *   1.5 A FLAG-PINNED agent (flair#1500) — `agentIdSource === "flag"`
+ *      (`--agent X`). Signs as X BEFORE the env tier, and hard-errors if X
+ *      has no key. An explicitly named identity is never quietly replaced.
  *   2. ENV — `FLAIR_TOKEN` (Bearer) or `FLAIR_ADMIN_PASS` / `HDB_ADMIN_
  *      PASSWORD` (Basic admin auth). Ambient but still an explicit
- *      operator/CI choice.
+ *      operator/CI choice. (An ENV-pinned identity — `FLAIR_AGENT_ID` — stays
+ *      BELOW this tier; see the never-silent notice below.)
  *   3. A PINNED agent identity — `agentId` was already known (an --agent
  *      flag, FLAIR_AGENT_ID env, or an id the caller extracted from its own
  *      request body/query string) — signed with THAT agent's key via the
@@ -49,6 +53,14 @@
  * more specific failure; guessing at unrelated keys on disk in that case
  * would obscure the real error instead of explaining it (the flair#741 fix
  * #3 lesson, applied here — see `sendJsonRequest`'s 403 branch).
+ *
+ * ── Named identity vs ambient credential: never a silent substitution ────
+ * Precedence above is deliberately unchanged (flair#1504/#1507), but a caller
+ * that NAMED an identity (`--agent` or `FLAIR_AGENT_ID`) and got a different,
+ * usually more-privileged, credential is always told so on stderr — see
+ * `describeIdentityOverride`/`emitIdentityOverrideNotice` below. A named
+ * identity is never quietly upgraded to admin, and a two-explicit-flags
+ * conflict (`--admin-pass` + `--agent`) is never quiet either.
  */
 
 import {
@@ -483,6 +495,102 @@ export async function tryAgentKeyFloor(
   return undefined;
 }
 
+// ─── Named identity vs ambient credential: never a silent substitution ───────
+//
+// flair#1500's core fix (tier 1.5, below) makes a *flag-pinned* `--agent X`
+// sign as X before any ambient admin credential, and hard-errors when X has no
+// key. That covers the explicit-flag case completely. Two substitutions in the
+// same class stayed silent after #1504:
+//
+//   • an ENV-pinned identity (`FLAIR_AGENT_ID`) is still outranked by an
+//     ambient/explicit admin credential — the reviewer-blessed precedence
+//     (#1504 kept it "as today"), but nothing told the operator their named
+//     identity was ignored;
+//   • an explicit `--admin-pass` alongside a flag-pinned `--agent X` is a
+//     genuine two-explicit-flags conflict (#1506) that resolved to admin
+//     silently.
+//
+// Precedence is a deliberate, reviewed design decision (#1504 whitelist;
+// #1507 item 5 explicitly leaves "should ambient admin outrank an env-pinned
+// agent?" to the maintainer). This module therefore does NOT flip it. It
+// removes the *silence*: whenever a caller named an identity and a different,
+// usually more-privileged, credential is what actually signs, the resolver
+// says so on stderr — naming the identity, the winning credential, and how to
+// get the behaviour the caller asked for. A named identity is never quietly
+// upgraded to admin, and a conflict is never quiet either.
+//
+// A hard error is deliberately NOT used for `--admin-pass` + `--agent`: that
+// pair is the documented "admin acts on behalf of a named row owner" path
+// (the keyed `flair soul set --agent X --admin-pass …` onboarding flow relies
+// on it), and the first `--agent`-only precedence already fails closed when no
+// key exists.
+
+/** Which tier actually supplied the Authorization header for a request. */
+export type ResolvedCredentialSource =
+  | "explicit-admin"
+  | "explicit-key"
+  | "flag-agent"
+  | "env-token"
+  | "env-admin"
+  | "pinned-agent"
+  | "local-admin-file";
+
+/** Inputs to {@link describeIdentityOverride} — all pure, no process state. */
+export interface IdentityOverrideInput {
+  /** The identity the caller named (`--agent` flag or `FLAIR_AGENT_ID` env). */
+  agentId: string;
+  /** How it was named: `flag` (`--agent`) or `env` (`FLAIR_AGENT_ID`). */
+  namedSource: "flag" | "env";
+  /** Which credential actually signed the request. */
+  credentialSource: ResolvedCredentialSource;
+  /** The env var that supplied the ambient admin password, when that signed. */
+  adminPassEnvVar?: string;
+}
+
+/**
+ * One actionable line for a named identity that was not the signer, or `null`
+ * when the named identity itself signed (the normal, expected case). Pure and
+ * exported so the matrix is unit-testable without spawning the CLI.
+ */
+export function describeIdentityOverride(input: IdentityOverrideInput): string | null {
+  const { agentId, namedSource, credentialSource, adminPassEnvVar } = input;
+  const named = namedSource === "flag" ? `--agent '${agentId}'` : `FLAIR_AGENT_ID='${agentId}'`;
+  switch (credentialSource) {
+    case "flag-agent":
+    case "pinned-agent":
+    case "explicit-key":
+      // The named identity signed — nothing was overridden.
+      return null;
+    case "explicit-admin":
+      return `Warning: ${named} names an identity, but --admin-pass was also given; signing as admin. Drop --admin-pass to sign as '${agentId}'.`;
+    case "env-token":
+      return `Warning: ${named} names an identity, but FLAIR_TOKEN is set; signing with that bearer token instead. Unset FLAIR_TOKEN to sign as '${agentId}'.`;
+    case "env-admin":
+      return `Warning: ${named} names an identity, but an ambient admin password (${adminPassEnvVar ?? "FLAIR_ADMIN_PASS"}) is set; signing as admin. Unset it to sign as '${agentId}'.`;
+    case "local-admin-file":
+      return `Warning: ${named} names an identity, but no key was found for it and the local ~/.flair/admin-pass file is present; signing as admin. Add a key for '${agentId}' to sign as it.`;
+  }
+}
+
+// De-duplicate in one process (a command may issue several requests) so an
+// operator sees the notice once, not once per call. Tests reset it explicitly.
+const emittedIdentityOverrides = new Set<string>();
+
+/** Write an override notice to stderr once per process. Injectable for tests. */
+export function emitIdentityOverrideNotice(
+  message: string,
+  write: (s: string) => void = (s) => { process.stderr.write(s); },
+): void {
+  if (emittedIdentityOverrides.has(message)) return;
+  emittedIdentityOverrides.add(message);
+  write(message + "\n");
+}
+
+/** Test hook: forget notices already emitted in this process. */
+export function resetIdentityOverrideNotices(): void {
+  emittedIdentityOverrides.clear();
+}
+
 // ─── The unified resolver ───────────────────────────────────────────────────
 
 export interface AuthedRequestOptions {
@@ -533,13 +641,18 @@ export async function authedRequest(
   // (flair#1345 — these three sites used to hardcode the literal `admin`).
   const adminUser = resolveAdminUser(opts.adminUser);
   let authHeader: string | undefined;
+  // Which tier supplied authHeader — drives the never-silent override notice
+  // below (see describeIdentityOverride).
+  let credSource: ResolvedCredentialSource | undefined;
 
   // Tier 1: explicit — caller-resolved flag material always wins.
   if (opts.explicitAdminPass) {
     authHeader = `Basic ${Buffer.from(`${adminUser}:${opts.explicitAdminPass}`).toString("base64")}`;
+    credSource = "explicit-admin";
   } else if (opts.explicitKeyPath && opts.agentId) {
     try {
       authHeader = buildEd25519Auth(opts.agentId, method, path, opts.explicitKeyPath);
+      credSource = "explicit-key";
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`Warning: Ed25519 auth failed for agent '${opts.agentId}': ${message}`);
@@ -562,15 +675,18 @@ export async function authedRequest(
       );
     }
     authHeader = buildEd25519Auth(opts.agentId, method, path, keyPath);
+    credSource = "flag-agent";
   }
 
   // Tier 2: env — FLAIR_TOKEN (Bearer), else FLAIR_ADMIN_PASS/HDB_ADMIN_PASSWORD (Basic).
   if (!authHeader) {
     if (process.env.FLAIR_TOKEN) {
       authHeader = `Bearer ${process.env.FLAIR_TOKEN}`;
+      credSource = "env-token";
     } else if (process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD) {
       const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD!;
       authHeader = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+      credSource = "env-admin";
     }
   }
 
@@ -582,6 +698,7 @@ export async function authedRequest(
     if (keyPath) {
       try {
         authHeader = buildEd25519Auth(opts.agentId, method, path, keyPath);
+        credSource = "pinned-agent";
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`Warning: Ed25519 auth failed for agent '${opts.agentId}': ${message}`);
@@ -595,6 +712,7 @@ export async function authedRequest(
       const filePass = resolveLocalAdminPass(undefined, !isLocal);
       if (filePass) {
         authHeader = `Basic ${Buffer.from(`${adminUser}:${filePass}`).toString("base64")}`;
+        credSource = "local-admin-file";
       }
     } catch (err: unknown) {
       // File exists but has unsafe permissions — warn (never the secret
@@ -602,6 +720,21 @@ export async function authedRequest(
       const message = err instanceof Error ? err.message : String(err);
       console.error(`Warning: ~/.flair/admin-pass unusable: ${message}`);
     }
+  }
+
+  // Never let a named identity (--agent flag or FLAIR_AGENT_ID env) be
+  // silently outranked by a different credential. Precedence is unchanged
+  // (see the section above describeIdentityOverride); only the silence is.
+  if (opts.agentId && (opts.agentIdSource === "flag" || opts.agentIdSource === "env") && credSource) {
+    const notice = describeIdentityOverride({
+      agentId: opts.agentId,
+      namedSource: opts.agentIdSource,
+      credentialSource: credSource,
+      adminPassEnvVar: process.env.FLAIR_ADMIN_PASS
+        ? "FLAIR_ADMIN_PASS"
+        : process.env.HDB_ADMIN_PASSWORD ? "HDB_ADMIN_PASSWORD" : undefined,
+    });
+    if (notice) emitIdentityOverrideNotice(notice);
   }
 
   try {
