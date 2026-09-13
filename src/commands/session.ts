@@ -127,7 +127,6 @@ export function register(program: Command): void {
         console.log("(no snapshots — ~/.flair/snapshots/ does not exist yet)");
         return;
       }
-      const { readdirSync } = require("node:fs") as typeof import("node:fs");
       type Row = { agent: string; file: string; path: string; size: number; mtime: string };
       const rows: Row[] = [];
       const agents = opts.agent ? [opts.agent] : readdirSync(SNAPSHOT_ROOT).filter((d) => {
