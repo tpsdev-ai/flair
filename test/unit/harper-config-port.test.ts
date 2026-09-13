@@ -180,7 +180,8 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
       [
         `import { createServer } from "node:http";`,
         `import { writeFileSync } from "node:fs";`,
-        `const srv = createServer((_req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end('{"status":"ok"}'); });`,
+        // flair#1478: probeHealth requires Flair's public /Health shape, not a bare 200.
+        `const srv = createServer((_req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end('{"ok":true,"version":"0.53.0","buildCommit":null,"searchReady":true}'); });`,
         `srv.listen(0, "127.0.0.1", () => writeFileSync(process.argv[2], String(srv.address().port)));`,
       ].join("\n"),
     );
