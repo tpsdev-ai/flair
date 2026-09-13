@@ -53,7 +53,7 @@ import {
 } from "../../../packages/flair-bench/lib/index";
 import {
   OLLAMA_HOST, JUDGE, READER, DATASET, RETRIEVAL, INGESTION,
-  assertCrossFamily, hashConfig,
+  assertCrossFamily, hashConfig, contentHash,
 } from "./config";
 import { assertModelPinned, pingOllama, generate, OllamaError } from "./ollama";
 import { buildJudgePrompt, parseVerdict, JudgeParseError, JUDGE_PROMPT_TEMPLATES } from "./judge";
@@ -484,7 +484,7 @@ function report(
     gitCommit: assertBenchGitCommit(gitCommit, "payload-ab.artifact"),
     configHash,
     config: manifest,
-    resultsHash: hashConfig(results),
+    resultsHash: contentHash(results),
     results,
     // ── provenance (excluded from the hash) ──
     notice:

@@ -183,7 +183,7 @@ export function assertCrossFamily(): void {
  *  exact prompt template strings so any edit to a grading/reader prompt changes
  *  the hash. */
 export function configManifest(slice: { n: number; seed: number; questionIds: string[]; runs: number }) {
-  return {
+  const manifest = {
     schema: "longmemeval-s.layer2.config/1",
     dataset: DATASET,
     judge: JUDGE,
@@ -211,6 +211,10 @@ export function configManifest(slice: { n: number; seed: number; questionIds: st
       questionIds: [...slice.questionIds].sort(),
     },
   };
+  // The manifest is guarded HERE, at construction, so a future pinned float
+  // fails at its source with the field named — before it can be hashed.
+  assertPortableConfig(manifest, "configManifest");
+  return manifest;
 }
 
 /** Canonical JSON: keys sorted recursively, so the hash is stable across
@@ -230,7 +234,12 @@ export function configManifest(slice: { n: number; seed: number; questionIds: st
  *  Number::toString or compare via a JS runtime — a mismatch there is a
  *  formatting artefact, NOT evidence of tampering. Left as-is deliberately:
  *  changing the number format now would invalidate every artifact already
- *  hashed. Document it, do not silently "fix" it. */
+ *  hashed. Document it, do not silently "fix" it.
+ *
+ *  SEALS are allowed to cover floats by design (accuracies, p-values, latency);
+ *  the CONFIG ANCHOR is not. For `configHash` specifically, the caveat can no
+ *  longer apply going forward: `assertPortableConfig()` rejects a non-integer
+ *  number at manifest construction (flair#1365). */
 export function canonicalJson(value: unknown): string {
   return JSON.stringify(sortDeep(value));
 }
@@ -244,11 +253,82 @@ function sortDeep(v: any): any {
   return v;
 }
 
+/**
+ * Enforce that every value in a config manifest is LANGUAGE-PORTABLE.
+ *
+ * `configHash` is THE ANCHOR: anyone with the repo is meant to re-derive it
+ * exactly, including outside JavaScript. `canonicalJson` inherits
+ * `JSON.stringify`'s number formatting (ECMAScript `Number::toString`), which
+ * does NOT agree with other languages for non-integer numbers — `2.98e-6`
+ * serialises here as `0.000002980232238769545` and in Python as
+ * `2.980232238769545e-06`. Same value, different bytes, different sha256. That
+ * mismatch reads as tampering, and it fires hardest on a strong result (a tiny
+ * p-value) — exactly when someone motivated goes to check.
+ *
+ * Strings, booleans, null and safe integers serialise identically everywhere;
+ * floats do not. Without this guard that portability is an ACCIDENT: a
+ * similarity threshold, an RRF weight or a temperature that stops being exactly
+ * `0` can enter the manifest and silently break cross-language re-derivation,
+ * while our own harness keeps hashing consistently and every test stays green.
+ * See flair#1365.
+ *
+ * Fail LOUD rather than normalise: silently transforming a pinned value is its
+ * own trust-anchor trap — it changes what a published config means without a
+ * decision. If a value genuinely must be pinned, pin it as a STRING ("0.95") or
+ * a SCALED INTEGER (95), so the canonical form is unambiguous across languages.
+ *
+ * `Number.isSafeInteger` (not `Number.isInteger`) is the portability predicate:
+ * `1e20` is an integer but is not safely representable and `Number::toString`
+ * may render it in exponential notation no other language reproduces. It also
+ * rejects `NaN`/`±Infinity` — which `JSON.stringify` would silently turn into
+ * `null`. `actor` names the call site that let the value in; `path` names the
+ * offending field so the failure is actionable instead of a test-delete.
+ */
+export function assertPortableConfig(value: unknown, actor: string): void {
+  const walk = (v: unknown, path: string): void => {
+    if (typeof v === "number") {
+      if (!Number.isSafeInteger(v)) {
+        throw new Error(
+          `${actor}: non-portable number ${String(v)} at ${path} — ` +
+          `the configHash anchor must be re-derivable outside JavaScript. ` +
+          `A float (or NaN/Infinity, or an integer past 2^53) serialises differently across ` +
+          `languages (ECMAScript Number::toString vs Python repr), so it silently breaks ` +
+          `independent verification. Pin it as a string (e.g. "0.95") or a scaled integer ` +
+          `(e.g. 95), never as a float. See flair#1365.`,
+        );
+      }
+      return;
+    }
+    if (Array.isArray(v)) {
+      v.forEach((item, i) => walk(item, `${path}[${i}]`));
+      return;
+    }
+    if (v && typeof v === "object") {
+      for (const k of Object.keys(v as Record<string, unknown>)) {
+        walk((v as Record<string, unknown>)[k], `${path}.${k}`);
+      }
+    }
+  };
+  walk(value, "$");
+}
+
 export function sha256hex(s: string): string {
   return createHash("sha256").update(s).digest("hex");
 }
 
-/** The content-address of a config manifest. */
+/** The content-address of ARBITRARY content — an artifact or results SEAL.
+ *  Carries no portability claim: seals legitimately cover floats (accuracies,
+ *  p-values, latencies) and are tamper-evidence, not re-derivable anchors. */
+export function contentHash(value: unknown): string {
+  return sha256hex(canonicalJson(value));
+}
+
+/** The content-address of a CONFIG MANIFEST — THE ANCHOR. Guarded, because the
+ *  anchor is only meaningful if an outside verifier can re-derive it: a float
+ *  here silently breaks cross-language re-derivation. Also guarded in
+ *  `configManifest()`, so a future pinned float fails at its source; this
+ *  catches a manifest assembled or mutated after construction. */
 export function hashConfig(manifest: unknown): string {
-  return sha256hex(canonicalJson(manifest));
+  assertPortableConfig(manifest, "hashConfig");
+  return contentHash(manifest);
 }
