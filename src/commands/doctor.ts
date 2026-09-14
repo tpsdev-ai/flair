@@ -632,6 +632,15 @@ program
           console.log(`     ${render.wrap(render.c.dim, "See:")} docs/troubleshooting.md ${render.wrap(render.c.dim, "→ \"Semantic search DEGRADED\"")}`);
           issues++;
           break;
+        case "failed":
+          // flair#1501: a rejected signature is LOUD. It is either a real auth
+          // defect (the key is unregistered or stale) or a doctor defect, and
+          // both need a person — never soften it to "not verified". The detail
+          // names the identity and key path the probe signed with.
+          console.log(`  ${render.icons.error} Embeddings: probe rejected ${render.wrap(render.c.dim, `— ${semanticStatus.detail}`)}`);
+          console.log(`     ${render.wrap(render.c.dim, "Fix: register this key on the instance (`flair agent add <id>`) or pass --agent <a registered agent id>.")}`);
+          issues++;
+          break;
         case "skipped": {
           // Could not run the round-trip. Don't claim all-clear — surface that
           // the check was skipped, but don't count it as a hard issue since
@@ -697,6 +706,12 @@ program
             console.log(`     ${render.wrap(render.c.dim, "On a node that joined or resynced via cluster base copy, audit history has a hard start boundary at copy time (harper#2212) — \"no history\" does not mean \"nothing happened\".")}`);
             console.log(`     ${render.wrap(render.c.dim, "Check logging.auditLog in the ROOT harperdb-config.yaml (not flair's component config.yaml), then restart Harper.")}`);
           }
+          issues++;
+          break;
+        case "failed":
+          // Same loud discipline as the embeddings probe above (flair#1501).
+          console.log(`  ${render.icons.error} Audit log: probe rejected ${render.wrap(render.c.dim, `— ${auditStatus.detail}`)}`);
+          console.log(`     ${render.wrap(render.c.dim, "Fix: register this key on the instance (`flair agent add <id>`) or pass --agent <a registered agent id>.")}`);
           issues++;
           break;
         case "skipped":

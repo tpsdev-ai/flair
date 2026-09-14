@@ -855,6 +855,12 @@ program
         console.log(`   ${render.wrap(render.c.dim, `(${embedCheck.detail})`)}`);
         console.log(`   ${render.wrap(render.c.dim, "Common cause: the embeddings component lacks write access (sudo/root global installs).")}`);
         console.log(`   ${render.wrap(render.c.dim, "Fix: install without sudo (see README Quick Start), then:")} flair restart && flair doctor`);
+      } else if (embedCheck.state === "failed") {
+        // flair#1501: the instance rejected the probe's signature. init just
+        // registered this agent, so this is a genuine auth defect, not a
+        // missing identity — surface it loudly with the signer named.
+        console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Semantic search probe rejected")} — ${embedCheck.detail}.`);
+        console.log(`   ${render.wrap(render.c.dim, "Fix: register this key on the instance (`flair agent add <id>`) or pass --agent <a registered agent id>.")}`);
       } else {
         console.log(`${render.icons.warn} Semantic search not verified ${render.wrap(render.c.dim, `(${embedCheck.detail})`)}`);
       }
@@ -879,6 +885,10 @@ program
           console.log(`   ${render.wrap(render.c.dim, "On a node that joined or resynced via cluster base copy, audit history has a hard start boundary at copy time (harper#2212) — \"no history\" does not mean \"nothing happened\".")}`);
           console.log(`   ${render.wrap(render.c.dim, "Check logging.auditLog in the ROOT harperdb-config.yaml (not flair's component config.yaml), then restart Harper.")}`);
         }
+      } else if (auditCheck.state === "failed") {
+        // Same loud discipline as the semantic-search probe above (flair#1501).
+        console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Audit log probe rejected")} — ${auditCheck.detail}.`);
+        console.log(`   ${render.wrap(render.c.dim, "Fix: register this key on the instance (`flair agent add <id>`) or pass --agent <a registered agent id>.")}`);
       } else {
         // An unrun check must not look like a pass.
         console.log(`${render.icons.warn} Audit log: UNVERIFIED (could not probe — ${auditCheck.detail})`);

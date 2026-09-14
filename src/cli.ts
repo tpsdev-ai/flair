@@ -2150,17 +2150,115 @@ async function waitForHealth(httpPort: number, adminUser: string, adminPass: str
  * Result of a real embed→search round-trip:
  *   - ok:       semantic recall verified (paraphrase, no keyword overlap, matched by meaning)
  *   - degraded: embeddings are NOT loaded — recall-by-meaning is dead (LOUD failure)
+ *   - failed:   the instance REJECTED the probe's signature (HTTP 401/403) — a
+ *               real auth defect (stale/unregistered key) or a doctor defect.
+ *               flair#1501: this must be loud (✗ + remedy), never a soft
+ *               "not verified".
  *   - skipped:  could not run the check (no agent / no key / write failed for unrelated reasons)
  */
 export type SemanticVerifyResult =
   | { state: "ok"; score: number }
   | { state: "degraded"; detail: string }
+  | { state: "failed"; detail: string }
   // flair#1023: `skipped` covers several unrelated situations, and the
   // renderer used to print ONE remedy ("pass --agent") for all of them —
   // advice that cannot fix a key that won't decode, or an HTTP 500 from the
   // probe. `reason` is what lets the caller pick a remedy that is actually
   // reachable from the failure, instead of a remedy-shaped sentence.
   | { state: "skipped"; reason: SemanticSkipReason; detail: string };
+
+/**
+ * A probe's signing identity, resolved the way a real CLI command resolves it
+ * (flair#1501).
+ *
+ * `source` records which tier won so the probe's warning line can name it:
+ *   - "flag" / "env"       — an explicit `--agent` / `FLAIR_AGENT_ID`. That
+ *                            identity is used VERBATIM, registered or not: a
+ *                            named identity is never silently substituted
+ *                            (flair#1500), and if the server rejects it the
+ *                            probe says so loudly rather than quietly trying
+ *                            a different key.
+ *   - "local-registered"   — nothing was named, so this is the first agent key
+ *                            under `keysDir` that the instance actually
+ *                            ACCEPTS (checkAgentRegistered). Before #1501 the
+ *                            probe signed with whatever `.key` sorted first,
+ *                            so a leftover/unregistered key turned a healthy
+ *                            instance into a spurious 401 invalid_signature.
+ *   - "none"               — no usable identity at all (`agentId: null`). The
+ *                            caller renders this as "not verified", never as
+ *                            a pass.
+ */
+export interface ProbeSigningIdentity {
+  agentId: string | null;
+  source: SigningIdentitySource | "local-registered";
+  /** The key file the identity will sign with (agent identities only). */
+  keyPath?: string;
+  /** Human-readable reason when `agentId` is null (or the candidate list a
+   *  caller wants in a warning). */
+  detail?: string;
+}
+
+/** `<keysDir>/<id>.key` — the fallback key location for tests and non-standard
+ *  key dirs; the standard `resolveKeyPath` lookup is always tried first. */
+function fallbackKeyPath(keysDir: string, agentId: string): string | null {
+  const candidate = join(keysDir, `${agentId}.key`);
+  return existsSync(candidate) ? candidate : null;
+}
+
+/**
+ * Resolve the identity a doctor/init probe signs with (flair#1501).
+ *
+ * Precedence is the SAME as every real command (`resolveSigningIdentity`:
+ * `--agent` flag > `FLAIR_AGENT_ID` env) so doctor and `flair memory add`
+ * cannot disagree about who is calling. The difference is what happens when
+ * NOTHING is named: the old probe blindly used the first `.key` in the
+ * directory — an assumption that a local key is a registered one. This instead
+ * picks the first agent key the instance ACCEPTS, which is the only assumption
+ * a healthy agent-keyed instance can satisfy. Node-scoped federation keys are
+ * skipped (they cannot sign — flair#1193).
+ *
+ * Deliberately NOT falling through to an admin credential when nothing is
+ * named: the embeddings/audit probes verify the agent-keyed write path, and a
+ * silent admin substitution would report a healthy instance even when the
+ * agent identity is broken — the exact class of false green this check exists
+ * to prevent. A genuinely broken named identity still reaches the network and
+ * is reported as `failed` (HTTP 401/403), not papered over.
+ */
+export async function resolveProbeSigningIdentity(
+  baseUrl: string,
+  agentIdOpt: string | undefined,
+  keysDir: string,
+): Promise<ProbeSigningIdentity> {
+  const named = resolveSigningIdentity({ agent: agentIdOpt });
+  if (named.agentId) {
+    const keyPath = resolveKeyPath(named.agentId) ?? fallbackKeyPath(keysDir, named.agentId);
+    return { agentId: named.agentId, source: named.source, keyPath: keyPath ?? undefined };
+  }
+  let keyFiles: string[] = [];
+  try {
+    keyFiles = readdirSync(keysDir).filter((f) => f.endsWith(".key")).sort();
+  } catch { /* keysDir missing */ }
+  const candidates = keyFiles
+    .map((f) => f.replace(/\.key$/, ""))
+    .filter((id) => !isNodeKeyId(id, keysDir));
+  if (candidates.length === 0) {
+    return { agentId: null, source: "none", detail: "no agent id or key found" };
+  }
+  const rejected: string[] = [];
+  for (const id of candidates) {
+    const reg = await checkAgentRegistered(baseUrl, id, keysDir);
+    if (reg.state === "registered") {
+      const keyPath = resolveKeyPath(id) ?? fallbackKeyPath(keysDir, id);
+      return { agentId: id, source: "local-registered", keyPath: keyPath ?? undefined };
+    }
+    rejected.push(`${id} (${reg.state}${reg.detail ? `: ${reg.detail}` : ""})`);
+  }
+  return {
+    agentId: null,
+    source: "none",
+    detail: `no local agent key is registered on this instance — tried: ${rejected.join(", ")}`,
+  };
+}
 
 /**
  * Verify that semantic search ACTUALLY works by storing a memory with a
@@ -2172,8 +2270,10 @@ export type SemanticVerifyResult =
  * the `_warning` keyword-fallback marker) → "degraded".
  *
  * The probe is authenticated as a real agent (Ed25519) because SemanticSearch
- * rejects anonymous callers (401) and per-agent scoping requires it. We pick the
- * given agentId, else FLAIR_AGENT_ID, else the first `.key` in keysDir.
+ * rejects anonymous callers (401) and per-agent scoping requires it. The
+ * identity is resolved the same way a real command resolves it (flair#1501):
+ * `--agent` flag > `FLAIR_AGENT_ID` env, else the first local agent key the
+ * instance ACCEPTS (never merely the first `.key` on disk).
  *
  * Exported so the init smoke test and unit tests can reuse the exact same gate.
  */
@@ -2182,32 +2282,20 @@ export async function verifySemanticSearch(
   agentIdOpt: string | undefined,
   keysDir: string,
 ): Promise<SemanticVerifyResult> {
-  // Resolve an agent + key to sign with.
-  let agentId = agentIdOpt || process.env.FLAIR_AGENT_ID || undefined;
+  // Resolve an agent + key to sign with (flair#1501 — see
+  // resolveProbeSigningIdentity for why the first `.key` is no longer trusted).
+  const identity = await resolveProbeSigningIdentity(baseUrl, agentIdOpt, keysDir);
+  const agentId = identity.agentId;
   if (!agentId) {
-    try {
-      const keyFiles = readdirSync(keysDir).filter((f) => f.endsWith(".key"));
-      // Skip node-scoped federation keys (flair#1193): they can't sign, so
-      // picking one here would fail the probe with a decode error that reads
-      // like a semantic-search regression rather than "no agent to sign as".
-      const agentKeyFile = keyFiles.find((f) => !isNodeKeyId(f.replace(/\.key$/, ""), keysDir));
-      if (agentKeyFile) agentId = agentKeyFile.replace(/\.key$/, "");
-    } catch { /* keysDir missing */ }
+    return { state: "skipped", reason: "no-agent", detail: identity.detail ?? "no agent id or key found" };
   }
-  if (!agentId) {
-    return { state: "skipped", reason: "no-agent", detail: "no agent id or key found" };
-  }
-  // Find the signing key. Prefer the standard locations (resolveKeyPath), but
-  // fall back to the keysDir we were handed — `flair init` keys live there and
-  // it may not be a standard location (e.g. --keys-dir, tests).
-  let keyPath = resolveKeyPath(agentId);
-  if (!keyPath) {
-    const candidate = join(keysDir, `${agentId}.key`);
-    if (existsSync(candidate)) keyPath = candidate;
-  }
+  const keyPath = identity.keyPath;
   if (!keyPath) {
     return { state: "skipped", reason: "no-key", detail: `no private key for agent '${agentId}'` };
   }
+  // Name the signer in every failure detail (flair#1501 ask 1): an operator
+  // reading `doctor`/`init` output must not have to hunt for who was signing.
+  const signerLabel = `signed as '${agentId}' (${identity.source}) with key ${keyPath}`;
 
   // Distinctive content vs. a PARAPHRASE query with deliberately ZERO shared
   // content words. If the search recovers the memory it can ONLY be by meaning.
@@ -2228,6 +2316,11 @@ export async function verifySemanticSearch(
     });
     if (!writeRes.ok && writeRes.status !== 204) {
       const text = await writeRes.text().catch(() => "");
+      // flair#1501: a rejected signature is either a real auth defect or a
+      // doctor defect — both need a person. Never downgrade it to "skipped".
+      if (writeRes.status === 401 || writeRes.status === 403) {
+        return { state: "failed", detail: `probe write rejected: HTTP ${writeRes.status} ${text.slice(0, 100)} — ${signerLabel}` };
+      }
       return { state: "skipped", reason: "probe-failed", detail: `could not write probe memory: HTTP ${writeRes.status} ${text.slice(0, 80)}` };
     }
     stored = true;
@@ -2243,6 +2336,9 @@ export async function verifySemanticSearch(
     });
     if (!searchRes.ok) {
       const text = await searchRes.text().catch(() => "");
+      if (searchRes.status === 401 || searchRes.status === 403) {
+        return { state: "failed", detail: `SemanticSearch rejected: HTTP ${searchRes.status} ${text.slice(0, 100)} — ${signerLabel}` };
+      }
       return { state: "skipped", reason: "probe-failed", detail: `SemanticSearch failed: HTTP ${searchRes.status} ${text.slice(0, 80)}` };
     }
     const data = await searchRes.json() as { results?: any[]; _warning?: string };
@@ -2303,14 +2399,19 @@ export async function verifySemanticSearch(
  *               recording: the exact silent state flair#970 observed);
  *               cause "disabled" — read_audit_log 400s because
  *               `logging.auditLog` is off in the ROOT harperdb-config.yaml.
+ *   - failed:   the instance REJECTED the probe's signature (HTTP 401/403 on a
+ *               write) — a real auth defect (stale/unregistered key) or a
+ *               doctor defect. flair#1501: loud (✗ + remedy), never a soft
+ *               "UNVERIFIED".
  *   - skipped:  could not run the check (no agent/key, no admin credentials
- *               for the ops API, ops API unreachable, probe write failed).
- *               Callers MUST render this as UNVERIFIED — an unrun check must
- *               not look like a pass.
+ *               for the ops API, ops API unreachable, probe write failed for
+ *               an unrelated reason). Callers MUST render this as UNVERIFIED —
+ *               an unrun check must not look like a pass.
  */
 export type AuditVerifyResult =
   | { state: "ok" }
   | { state: "degraded"; cause: "not-recording" | "disabled"; detail: string }
+  | { state: "failed"; detail: string }
   | { state: "skipped"; reason: AuditSkipReason; detail: string };
 
 export type AuditSkipReason =
@@ -2360,26 +2461,18 @@ export async function verifyAuditLog(
   adminPass: string | undefined,
 ): Promise<AuditVerifyResult> {
   // Resolve an agent + key to sign the probe writes with — identical
-  // resolution to verifySemanticSearch so the two probes agree on identity.
-  let agentId = agentIdOpt || process.env.FLAIR_AGENT_ID || undefined;
+  // resolution to verifySemanticSearch (flair#1501) so the two probes agree on
+  // identity, and neither signs with a stale first-`.key`-on-disk.
+  const identity = await resolveProbeSigningIdentity(baseUrl, agentIdOpt, keysDir);
+  const agentId = identity.agentId;
   if (!agentId) {
-    try {
-      const keyFiles = readdirSync(keysDir).filter((f) => f.endsWith(".key"));
-      const agentKeyFile = keyFiles.find((f) => !isNodeKeyId(f.replace(/\.key$/, ""), keysDir));
-      if (agentKeyFile) agentId = agentKeyFile.replace(/\.key$/, "");
-    } catch { /* keysDir missing */ }
+    return { state: "skipped", reason: "no-agent", detail: identity.detail ?? "no agent id or key found" };
   }
-  if (!agentId) {
-    return { state: "skipped", reason: "no-agent", detail: "no agent id or key found" };
-  }
-  let keyPath = resolveKeyPath(agentId);
-  if (!keyPath) {
-    const candidate = join(keysDir, `${agentId}.key`);
-    if (existsSync(candidate)) keyPath = candidate;
-  }
+  const keyPath = identity.keyPath;
   if (!keyPath) {
     return { state: "skipped", reason: "no-key", detail: `no private key for agent '${agentId}'` };
   }
+  const signerLabel = `signed as '${agentId}' (${identity.source}) with key ${keyPath}`;
   if (!adminUser || !adminPass) {
     return {
       state: "skipped",
@@ -2402,6 +2495,10 @@ export async function verifyAuditLog(
       createdAt: new Date().toISOString(),
     });
     if (!putRes.ok && putRes.status !== 204) {
+      const text = await putRes.text().catch(() => "");
+      if (putRes.status === 401 || putRes.status === 403) {
+        return { state: "failed", detail: `probe write rejected: HTTP ${putRes.status} ${text.slice(0, 100)} — ${signerLabel}` };
+      }
       return { state: "skipped", reason: "probe-failed", detail: `could not write probe row: HTTP ${putRes.status}` };
     }
     stored = true;
@@ -2412,6 +2509,10 @@ export async function verifyAuditLog(
       content: `flair doctor audit probe (inert marker, second write) [${id}]`,
     });
     if (!patchRes.ok && patchRes.status !== 204) {
+      const text = await patchRes.text().catch(() => "");
+      if (patchRes.status === 401 || patchRes.status === 403) {
+        return { state: "failed", detail: `probe write rejected: HTTP ${patchRes.status} ${text.slice(0, 100)} — ${signerLabel}` };
+      }
       return { state: "skipped", reason: "probe-failed", detail: `could not apply second probe write: HTTP ${patchRes.status}` };
     }
 

@@ -162,9 +162,17 @@ describe("verifySemanticSearch (FIX 1: doctor embed round-trip)", () => {
     }
   });
 
-  it("returns 'skipped' when SemanticSearch errors (e.g. 401 auth)", async () => {
+  it("returns 'failed' (loud, with the signer named) when SemanticSearch rejects the probe with 401", async () => {
+    // flair#1501: an auth rejection is either a real auth defect or a doctor
+    // defect — it must be a ✗ with a remedy, never a soft "not verified". The
+    // detail names which identity/key the probe signed with.
     mockServer({ error: "authentication required" }, 401);
     const result = await verifySemanticSearch(BASE_URL, AGENT_ID, keysDir);
-    expect(result.state).toBe("skipped");
+    expect(result.state).toBe("failed");
+    if (result.state === "failed") {
+      expect(result.detail).toContain(AGENT_ID);
+      expect(result.detail).toContain("401");
+      expect(result.detail).toContain(`${AGENT_ID}.key`);
+    }
   });
 });
