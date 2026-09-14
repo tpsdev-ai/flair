@@ -3346,10 +3346,8 @@ export function probeLibVersion(pkgName: string): string | null {
   // dep of flair itself, sibling global install, or linked workspace), this
   // finds it. If it's truly missing, require.resolve throws → null.
   try {
-    const { createRequire } = require("node:module") as typeof import("node:module");
     const req = createRequire(import.meta.url);
     const pkgJsonPath = req.resolve(`${pkgName}/package.json`);
-    const { readFileSync } = require("node:fs") as typeof import("node:fs");
     const pkg = JSON.parse(readFileSync(pkgJsonPath, "utf-8"));
     return typeof pkg.version === "string" ? pkg.version : null;
   } catch {
@@ -3370,9 +3368,6 @@ export function probeLibVersion(pkgName: string): string | null {
  */
 export function probeOpenclawPluginVersion(extensionName: string): string | null {
   try {
-    const { existsSync, readFileSync } = require("node:fs") as typeof import("node:fs");
-    const { homedir } = require("node:os") as typeof import("node:os");
-    const { resolve } = require("node:path") as typeof import("node:path");
     // process.env.HOME first so tests can override; homedir() as fallback —
     // homedir() doesn't honor runtime HOME changes (caches at module load).
     const home = process.env.HOME ?? homedir();
