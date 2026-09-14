@@ -45,6 +45,10 @@ beforeEach(() => {
     savedEnv[k] = process.env[k];
     delete process.env[k];
   }
+  // `resolveKeyPath` reads FLAIR_KEY_DIR before falling back to ~/.flair/keys.
+  // Point it at THIS test's isolated dir so identity resolution cannot pick up
+  // a real key installed on the host (true in CI, false on a release host).
+  process.env.FLAIR_KEY_DIR = keysDir;
 });
 
 afterEach(() => {
