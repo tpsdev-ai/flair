@@ -17,6 +17,7 @@ import { buildEd25519Auth, defaultKeysDir, resolveAdminUser, resolveKeyPath, res
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
 import { DOCTOR_CHECK_IDS, catalogIssueDelta, renderCatalogDoctorLines, runDoctorChecks } from "../lib/doctor-run.js";
+import { opsApiBindFinding } from "../lib/ops-api-bind.js";
 import { flairCliVersion, unpinnedSpecWarning } from "../lib/mcp-spec.js";
 import { staleSessionStartHookPins } from "../lib/owned-pins.js";
 import * as render from "../render.js";
@@ -32,7 +33,6 @@ export type DoctorCli = {
   classifyOpsSocketPosture: (...args: any[]) => any;
   configPath: (...args: any[]) => any;
   defaultDataDir: (...args: any[]) => any;
-  detectOpsApiAllInterfacesBind: (...args: any[]) => any;
   flairPackageDir: (...args: any[]) => any;
   listeningPidsOnPort: (...args: any[]) => any;
   persistDefaultInstallCoordinates: (...args: any[]) => any;
@@ -74,10 +74,6 @@ function configPath(...args: any[]): any {
 
 function defaultDataDir(...args: any[]): any {
   return cli.defaultDataDir(...args);
-}
-
-function detectOpsApiAllInterfacesBind(...args: any[]): any {
-  return cli.detectOpsApiAllInterfacesBind(...args);
 }
 
 function flairPackageDir(...args: any[]): any {
@@ -527,15 +523,11 @@ program
     // (see its doc comment) now reuses the existing password instead, so this
     // remedy is safe to follow on a working install.
     try {
-      const harperConfig = readHarperConfig(defaultDataDir());
-      if (harperConfig) {
-        const opsPortValue = harperConfig?.operationsApi?.network?.port;
-        const bind = detectOpsApiAllInterfacesBind(opsPortValue);
-        if (bind.allInterfaces) {
-          console.log(`  ${render.icons.error} Ops API bound to ${render.wrap(render.c.bold, "all interfaces")} (${render.wrap(render.c.dim, String(opsPortValue))})`);
-          console.log(`     ${render.wrap(render.c.dim, "Single-host installs don't need this reachable off-box. Fix:")} flair init && flair restart ${render.wrap(render.c.dim, "(rebinds to loopback + domain socket; re-init reuses your existing admin password, so this is safe on a running install — pass --ops-bind for deliberate remote admin)")}`);
-          issues++;
-        }
+      const finding = opsApiBindFinding(readHarperConfig(defaultDataDir()));
+      if (finding?.allInterfaces) {
+        console.log(`  ${render.icons.error} ${finding.message}`);
+        console.log(`     ${render.wrap(render.c.dim, finding.remedy)}`);
+        issues++;
       }
     } catch { /* best-effort — don't fail doctor over a malformed harper-config.yaml */ }
 

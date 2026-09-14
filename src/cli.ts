@@ -148,6 +148,7 @@ import {
   type RepairPlan,
 } from "./lib/launchd-repair.js";
 import { stabilizeMqttNetworkKeyOrder } from "./lib/stabilize-mqtt-network.js";
+import { detectOpsApiAllInterfacesBind } from "./lib/ops-api-bind.js";
 import {
   applyUpgradeHookConsent,
   catalogIssueDelta,
@@ -1407,30 +1408,9 @@ export function buildDirectSpawnEnv(opts: {
   return env;
 }
 
-/**
- * Decide whether a persisted `operationsApi.network.port` value (read back
- * from harper-config.yaml) indicates an all-interfaces ops-API bind
- * (flair#670 doctor finding — report-only, no --fix: rebinding a live
- * production instance is a restart-worthy change, not something `doctor`
- * should do silently on an unrelated command).
- *
- * A bare port number/numeric string is Harper's all-interfaces default (the
- * pre-#670 behavior, or an install that predates it and hasn't been
- * re-`init`ed). A "host:port" string means something upstream — a `flair
- * init` since #670, or manual config — already narrowed the bind.
- */
-export function detectOpsApiAllInterfacesBind(
-  portValue: unknown,
-): { allInterfaces: boolean; boundHost: string | null } {
-  if (portValue === undefined || portValue === null) return { allInterfaces: false, boundHost: null };
-  const str = String(portValue).trim();
-  if (str === "") return { allInterfaces: false, boundHost: null };
-  const lastColon = str.lastIndexOf(":");
-  if (lastColon > 0) {
-    return { allInterfaces: false, boundHost: str.slice(0, lastColon).replace(/[[\]]/g, "") };
-  }
-  return { allInterfaces: true, boundHost: null };
-}
+// detectOpsApiAllInterfacesBind now lives in src/lib/ops-api-bind.ts so
+// `flair doctor` and `flair status` share one decision (flair#852). Re-exported
+// at the bottom of this file to preserve the public CLI module surface.
 
 /**
  * Decide the source `flair init` should use for the admin password when no
@@ -4143,6 +4123,8 @@ bindStatusCli({
   relativeTime,
   resolveSigningAgentId,
   sortSoulKeyEntries,
+  defaultDataDir,
+  readHarperConfig,
   __pkgVersion,
 });
 registerStatus(program);
@@ -5571,7 +5553,6 @@ bindDoctorCli({
   classifyOpsSocketPosture,
   configPath,
   defaultDataDir,
-  detectOpsApiAllInterfacesBind,
   flairPackageDir,
   listeningPidsOnPort,
   persistDefaultInstallCoordinates,
@@ -5954,6 +5935,9 @@ export {
   observeLaunchdManagement,
   resolveInstanceServingPid,
 };
+
+// Shared with `flair status` via src/lib/ops-api-bind.ts (flair#852).
+export { detectOpsApiAllInterfacesBind };
 
 
 export { searchScoringFormula, buildSearchExplain, formatSearchExplain } from "./commands/search.js";
