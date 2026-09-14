@@ -155,6 +155,26 @@ jobs:
             exit 1
           fi
 
+  first-publish-preflight:
+    # flair#1674 — a release PR is where a new public package name under our
+    # org would first go out, and a published name is near-irreversible. The
+    # default is BLOCKED: a first-publish needs an explicit, recorded approval
+    # in .release/first-publish-approved.json (name + approver + date + reason).
+    # The script also fails closed if the registry cannot be reached — a
+    # network error is "cannot confirm live", never "assume it exists". Runs on
+    # release/v* PRs only; needs just node + npm, so no install step.
+    name: First-publish preflight
+    if: startsWith(github.head_ref, 'release/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - name: Reject unapproved first-publishes
+        run: node scripts/first-publish-check.mjs
+
   # flair#1012: the launchd branch these tests cover is gated on
   # `process.platform === "darwin"`. Linux CI skips them (and the unit-lane
   # step above reports that skip count). This job is the lane that executes

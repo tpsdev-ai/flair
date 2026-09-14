@@ -133,6 +133,23 @@ git_push_auth() {
   )
 }
 
+# flair#1674 — first-publish preflight.
+#
+# Publishing a NEW public package name under our npm org is a deliberate,
+# recorded act, not something that accretes through a technical change. The
+# default is BLOCKED: a first-publish must have a positive entry in
+# .release/first-publish-approved.json (name + approver + date + reason). The
+# check also fails closed when the registry cannot be reached — a network error
+# is "cannot confirm live", never "assume it exists". Called before anything is
+# written in both the release-PR and break-glass paths.
+first_publish_preflight() {
+  echo "🔎 Checking for unapproved first-publishes..."
+  if ! (cd "$ROOT" && node scripts/first-publish-check.mjs); then
+    echo "❌ First-publish preflight failed. Nothing was released."
+    return 1
+  fi
+}
+
 # -----------------------------------------------------------------------------
 # Break-glass: publish from this machine (CI staging unavailable)
 # -----------------------------------------------------------------------------
@@ -213,6 +230,11 @@ if [[ "$MODE" == "--publish" ]]; then
     echo "❌ Tag v${VERSION} already exists. Did you already publish?"
     exit 1
   fi
+
+  # flair#1674: hard-stop an unapproved first-publish before any tarball is
+  # written. Run after auth/version checks so the break-glass tests still reach
+  # their own gates first, but before the first `npm publish`.
+  first_publish_preflight || exit 1
 
   echo "🔨 Building from merged main..."
   (cd "$ROOT" && npm run build && npm run build:cli) || { echo "❌ Build failed"; exit 1; }
@@ -319,6 +341,11 @@ echo "🔍 Preflighting version declarations..."
 (cd "$ROOT" && node scripts/check-version-sync.mjs) || {
   echo "❌ Version declarations are out of sync on main — fix before releasing. Nothing was changed."; exit 1;
 }
+
+# 1c. Preflight the publish surface BEFORE the release branch exists or any
+# changelog fragment is consumed. A new public package name under our org is
+# near-irreversible and must be an explicit, recorded decision (flair#1674).
+first_publish_preflight || exit 1
 
 RELEASE_BRANCH="release/v${VERSION}"
 if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$RELEASE_BRANCH"; then

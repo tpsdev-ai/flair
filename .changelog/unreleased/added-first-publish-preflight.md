@@ -1,0 +1,1 @@
+- **Releases now stop before a brand-new package name goes public under our npm org without an explicit recorded approval.** A release that would first-publish a public package now fails up front unless a maintainer records the approval — name, approver, date, and reason — or removes the package from the release (Refs #1674).
