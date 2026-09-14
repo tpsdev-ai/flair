@@ -127,21 +127,79 @@ describe("detectOpsApiAllInterfacesBind", () => {
     expect(r.allInterfaces).toBe(true);
   });
 
-  test("a loopback host:port string is NOT flagged", () => {
+  // ── loopback narrows (safe) ──────────────────────────────────────────────
+
+  test("a loopback IPv4 host:port string is NOT flagged", () => {
     const r = detectOpsApiAllInterfacesBind("127.0.0.1:19925");
     expect(r.allInterfaces).toBe(false);
     expect(r.boundHost).toBe("127.0.0.1");
   });
 
-  test("an explicit 0.0.0.0:port (deliberate escape hatch) is NOT flagged as a problem — it's a documented opt-in, not an accident", () => {
-    const r = detectOpsApiAllInterfacesBind("0.0.0.0:19925");
+  test("localhost narrows the bind", () => {
+    const r = detectOpsApiAllInterfacesBind("localhost:19925");
     expect(r.allInterfaces).toBe(false);
-    expect(r.boundHost).toBe("0.0.0.0");
+    expect(r.boundHost).toBe("localhost");
   });
 
-  test("an IPv6 host:port with brackets strips the brackets", () => {
+  test("a bracketed IPv6 loopback strips the brackets and narrows the bind", () => {
     const r = detectOpsApiAllInterfacesBind("[::1]:19925");
+    expect(r.allInterfaces).toBe(false);
     expect(r.boundHost).toBe("::1");
+  });
+
+  test("a bare IPv6 loopback with a trailing port narrows the bind", () => {
+    const r = detectOpsApiAllInterfacesBind("::1:19925");
+    expect(r.allInterfaces).toBe(false);
+    expect(r.boundHost).toBe("::1");
+  });
+
+  // ── wildcard / unspecified hosts are all-interfaces (the flair#852 gap) ──
+  //
+  // These are the exact false-negatives: a wildcard host:port string used to
+  // be read as "narrowed" because the old predicate only checked for a colon.
+  // `flair init --ops-bind 0.0.0.0` writes `0.0.0.0:19925`, and both surfaces
+  // printed green while the ops API was reachable off-box.
+
+  test("an explicit 0.0.0.0:port is all-interfaces and IS flagged", () => {
+    const r = detectOpsApiAllInterfacesBind("0.0.0.0:19925");
+    expect(r.allInterfaces).toBe(true);
+    expect(r.boundHost).toBeNull();
+  });
+
+  test("a bracketed IPv6 wildcard [::]:port is all-interfaces and IS flagged", () => {
+    const r = detectOpsApiAllInterfacesBind("[::]:19925");
+    expect(r.allInterfaces).toBe(true);
+    expect(r.boundHost).toBeNull();
+  });
+
+  test("a bare :: wildcard is all-interfaces", () => {
+    expect(detectOpsApiAllInterfacesBind("::").allInterfaces).toBe(true);
+  });
+
+  test("a bare ::19925 form is all-interfaces (no malformed ':' host)", () => {
+    const r = detectOpsApiAllInterfacesBind("::19925");
+    expect(r.allInterfaces).toBe(true);
+    expect(r.boundHost).toBeNull();
+  });
+
+  test("an expanded IPv6 wildcard 0:0:0:0:0:0:0:0 is all-interfaces", () => {
+    expect(detectOpsApiAllInterfacesBind("0:0:0:0:0:0:0:0").allInterfaces).toBe(true);
+  });
+
+  test("an empty host (a leading colon) is all-interfaces, not a narrowed bind", () => {
+    const r = detectOpsApiAllInterfacesBind(":19925");
+    expect(r.allInterfaces).toBe(true);
+    expect(r.boundHost).toBeNull();
+  });
+
+  test("an unparseable bracketed host is all-interfaces (fail loud, not green)", () => {
+    expect(detectOpsApiAllInterfacesBind("[::1:19925").allInterfaces).toBe(true);
+  });
+
+  test("a routable non-loopback host is flagged (off-box reachable) per the loopback allow-list", () => {
+    const r = detectOpsApiAllInterfacesBind("10.0.0.5:19925");
+    expect(r.allInterfaces).toBe(true);
+    expect(r.boundHost).toBeNull();
   });
 
   test("missing/undefined port value is not a finding (nothing to report)", () => {
@@ -172,11 +230,12 @@ describe("opsNetworkPortValue (flair#863)", () => {
     expect(opsNetworkPortValue("127.0.0.1", 19925)).toBe("127.0.0.1:19925");
   });
 
-  test("what flair emits is never classified as all-interfaces by doctor's own detector", () => {
-    // Ties the writer and the reader together: if the host is ever dropped
-    // from the emitted value, doctor's finding fires on flair's own output.
+  test("what flair emits is never classified as all-interfaces when loopback, and a wildcard bind still is", () => {
+    // Ties the writer and the reader together: the loopback form flair emits
+    // must read safe, and a deliberately-wide `--ops-bind 0.0.0.0` must read
+    // exposed (it is reachable off-box) so the health surfaces flag it.
     expect(detectOpsApiAllInterfacesBind(opsNetworkPortValue("127.0.0.1", 19925)).allInterfaces).toBe(false);
-    expect(detectOpsApiAllInterfacesBind(opsNetworkPortValue("0.0.0.0", 19925)).boundHost).toBe("0.0.0.0");
+    expect(detectOpsApiAllInterfacesBind(opsNetworkPortValue("0.0.0.0", 19925)).allInterfaces).toBe(true);
   });
 
   test("HARPER_SET_CONFIG and the OPERATIONSAPI_NETWORK_PORT env var cannot disagree", () => {

@@ -103,9 +103,12 @@ describe("opsApiBindFinding — one decision for both health surfaces (flair#852
     expect(opsApiBindFinding({ operationsApi: { network: { port: "" } } })).toBeNull();
   });
 
-  test("the detector is unchanged: bare port flags, host:port does not", () => {
+  test("the detector narrows only on loopback: bare and wildcard hosts flag, loopback does not", () => {
     expect(detectOpsApiAllInterfacesBind(19925).allInterfaces).toBe(true);
+    expect(detectOpsApiAllInterfacesBind("0.0.0.0:19925").allInterfaces).toBe(true);
+    expect(detectOpsApiAllInterfacesBind("[::]:19925").allInterfaces).toBe(true);
     expect(detectOpsApiAllInterfacesBind("127.0.0.1:19925").allInterfaces).toBe(false);
+    expect(detectOpsApiAllInterfacesBind("localhost:19925").allInterfaces).toBe(false);
   });
 
   test("doctor still FAILS the same finding — the fix must not make doctor quieter", () => {
@@ -212,6 +215,25 @@ describe("flair status — ops-API bind agreement with doctor (flair#852)", () =
     const out = JSON.parse(stdout);
     expect(Array.isArray(out.warnings)).toBe(true);
     expect(out.warnings.some((w: any) => /Ops API bound to all interfaces/i.test(String(w.message)))).toBe(true);
+  });
+
+  test("wildcard host:port bind (--ops-bind 0.0.0.0): status does NOT report all-passing", async () => {
+    // The exact flair#852 false-negative: `flair init --ops-bind 0.0.0.0`
+    // persists `0.0.0.0:19925`. The old detector read any host:port as
+    // narrowed, so status printed green while the ops API was reachable
+    // off-box. It must now surface the finding like doctor.
+    const port = new URL(serverUrl).port;
+    writeHarperConfig(`0.0.0.0:${Number(port) - 1}`, Number(port));
+
+    const { stdout, exitCode } = await runCli(
+      ["status", "--target", serverUrl],
+      { HOME: tmpHome, ...CLEAR_ENV },
+    );
+
+    expect(stdout).not.toContain("all checks passing");
+    expect(stdout).toMatch(/Ops API bound to all interfaces/i);
+    expect(stdout).toMatch(/1 warning/);
+    expect(exitCode).toBe(0);
   });
 
   test("loopback-bound instance: status still reports a genuine green", async () => {

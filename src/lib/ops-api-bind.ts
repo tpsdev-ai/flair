@@ -8,9 +8,16 @@
  * (`--ops-bind` / `FLAIR_OPS_BIND`) for deployments that genuinely need remote
  * ops access (flair#670). That narrowing is only useful if every health surface
  * agrees on what the running install actually bound, and it is what doctor
- * reads out of Harper's own config: a bare numeric port is Harper's
- * all-interfaces default; a `host:port` string means something already narrowed
- * the bind.
+ * reads out of Harper's own config. The predicate is an allow-list: ONLY a
+ * loopback host narrows the bind. A bare numeric port, a wildcard host
+ * (`0.0.0.0:19925`, `[::]:19925`, …), an empty/unspecified host and an
+ * unparseable value are all reported as exposed — a `host:port` string is not
+ * evidence of narrowing unless the host is actually loopback.
+ *
+ * That allow-list is the flair#852 wildcard blind spot. The detector originally
+ * treated ANY `host:port` as narrowed, so `flair init --ops-bind 0.0.0.0`
+ * persisted `0.0.0.0:19925` and both `flair status` and `flair doctor` printed
+ * green while the ops API was reachable off-box.
  *
  * flair#852 was the two surfaces disagreeing. `flair doctor` flagged the bare
  * port while `flair status` printed "✓ all checks passing" — a security-relevant
@@ -24,21 +31,61 @@
  */
 
 export interface OpsApiAllInterfacesDetect {
-  /** True for a bare port (Harper's all-interfaces default). */
+  /** True unless the bind is narrowed to loopback. */
   allInterfaces: boolean;
-  /** The host half when the bind was narrowed, e.g. "127.0.0.1"; null otherwise. */
+  /** The loopback host the bind was narrowed to, e.g. "127.0.0.1"; null otherwise. */
   boundHost: string | null;
 }
 
 /**
+ * Hosts that genuinely narrow the ops-API bind to loopback. This is an
+ * allow-list on purpose: ANYTHING not in it — a wildcard (`0.0.0.0`, `::`,
+ * `[::]`, `0:0:0:0:0:0:0:0`), an explicit routable host, an empty/unspecified
+ * host, or a value we cannot parse — is reported as exposed. The cost of a
+ * missed exposure (a user ships an ops API reachable off-box) is worse than the
+ * cost of warning about a bind we did not recognise.
+ */
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+
+/**
+ * Best-effort host half of a persisted `operationsApi.network.port` value.
+ * Returns null when the value declares no host (a bare port) or the host is
+ * unparseable; the caller reports both as exposed.
+ *
+ * Handles the forms flair and Harper write:
+ *   - `127.0.0.1:19925`  → `127.0.0.1`
+ *   - `[::1]:19925`      → `::1`   (bracketed IPv6, port stripped)
+ *   - `[::]:19925`       → `::`
+ *   - `::1:19925`        → `::1`   (bare IPv6 with a trailing numeric port)
+ *   - `::`               → `::`    (bare wildcard, nothing to strip)
+ *   - `0:0:0:0:0:0:0:0`  → `0:0:0:0:0:0:0` (still not loopback — flagged)
+ *
+ * Splits on the LAST colon so an IPv6 literal keeps its port, matching
+ * `harperPortValue`. A trailing all-digit segment is treated as the port; a
+ * bare IPv6 like `::` has no trailing port, so the whole value is the host.
+ */
+function parseBindHost(str: string): string | null {
+  if (str.startsWith("[")) {
+    const close = str.indexOf("]");
+    if (close === -1) return null; // malformed bracket form — unparseable
+    return str.slice(1, close);
+  }
+  const lastColon = str.lastIndexOf(":");
+  if (lastColon === -1) return null; // bare port — no host to narrow on
+  const tail = str.slice(lastColon + 1);
+  return /^\d+$/.test(tail) ? str.slice(0, lastColon) : str;
+}
+
+/**
  * Decide whether a persisted `operationsApi.network.port` value (read back from
- * harper-config.yaml) indicates an all-interfaces ops-API bind.
+ * harper-config.yaml) indicates an ops-API bind reachable off-box.
  *
  * A bare port number/numeric string is Harper's all-interfaces default (the
  * pre-flair#670 behavior, or an install that predates the fix and has not been
- * re-`init`ed). A "host:port" string means something upstream — a `flair init`
- * since #670, or manual config — already narrowed the bind. Splits on the LAST
- * colon so an IPv6 literal (`[::1]:19925`) keeps its port.
+ * re-`init`ed). A `host:port` string narrows the bind ONLY when the host is
+ * loopback — a wildcard (`0.0.0.0:19925`, `[::]:19925`, `::19925`) is still
+ * all-interfaces, and is flagged (flair#852). Empty/unspecified and unparseable
+ * values are flagged too.
  */
 export function detectOpsApiAllInterfacesBind(
   portValue: unknown,
@@ -46,9 +93,9 @@ export function detectOpsApiAllInterfacesBind(
   if (portValue === undefined || portValue === null) return { allInterfaces: false, boundHost: null };
   const str = String(portValue).trim();
   if (str === "") return { allInterfaces: false, boundHost: null };
-  const lastColon = str.lastIndexOf(":");
-  if (lastColon > 0) {
-    return { allInterfaces: false, boundHost: str.slice(0, lastColon).replace(/[[\]]/g, "") };
+  const host = parseBindHost(str);
+  if (host !== null && LOOPBACK_HOSTS.has(host.toLowerCase())) {
+    return { allInterfaces: false, boundHost: host };
   }
   return { allInterfaces: true, boundHost: null };
 }
