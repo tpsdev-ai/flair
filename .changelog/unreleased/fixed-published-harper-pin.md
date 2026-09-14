@@ -1,1 +1,0 @@
-- **Published Flair now installs the upstream Harper release instead of a copy republished under our npm scope.** That copy could not be published, so the previous release was never installable; Flair now depends on upstream Harper directly (Refs #1672).

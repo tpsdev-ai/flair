@@ -18,6 +18,12 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.54.1] - 2026-09-14
+
+### Fixed
+
+- **Published Flair now installs the upstream Harper release instead of a copy republished under our npm scope.** That copy could not be published, so the previous release was never installable; Flair now depends on upstream Harper directly (Refs #1672).
+
 ## [0.54.0] - 2026-09-14
 
 ### Added

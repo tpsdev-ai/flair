@@ -1,6 +1,6 @@
 {
   "name": "@tpsdev-ai/flair",
-  "version": "0.54.0",
+  "version": "0.54.1",
   "packageManager": "bun@1.3.10",
   "description": "Identity, memory, and soul for AI agents. Cryptographic identity (Ed25519), semantic memory with local embeddings, and persistent personality — all in a single process.",
   "type": "module",
@@ -73,7 +73,7 @@
     "js-yaml": "^4.3.2",
     "tar": "^7.5.22",
     "tweetnacl": "1.0.3",
-    "@tpsdev-ai/flair-tool-descriptors": "0.54.0"
+    "@tpsdev-ai/flair-tool-descriptors": "0.54.1"
   },
   "bundleDependencies": [
     "@tpsdev-ai/flair-tool-descriptors"
