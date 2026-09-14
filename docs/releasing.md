@@ -196,6 +196,15 @@ review. Because the release is triggered by a tag push, its deployment policy mu
 **`v*` tags** (Settings → Environments → `release` → Deployment branches and tags →
 Selected branches and tags → add tag rule `v*`).
 
+### Required status checks (ruleset)
+
+Add **`First-publish preflight`** to the main branch ruleset's required status
+checks (repo settings → Rules → main). This is a repo-settings act, not a code
+change: until it is listed, the release-PR job is **advisory only** and a red
+first-publish preflight can be merged past. The tag-triggered
+`release-publish.yml` also runs the same check before staging, so a hazard is
+still stopped on the normal release path either way.
+
 ### Approver 2FA
 
 The maintainer who approves staged packages must have 2FA enabled on their npm account.

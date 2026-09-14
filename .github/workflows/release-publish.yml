@@ -104,6 +104,15 @@ jobs:
           # through to OIDC trusted publishing. OIDC needs no token config; npm
           # defaults to registry.npmjs.org.
 
+      - name: First-publish preflight
+        # flair#1674: the tag-triggered path is the NORMAL release path — and the
+        # one the @tpsdev-ai/harper reprint rode. Hard-stop an unapproved
+        # first-publish before anything is staged. Needs only the checkout and
+        # node (it reads package.json files and shells to `npm view`), so it runs
+        # before any install/build. No continue-on-error: a first-publish hazard
+        # must fail the job.
+        run: node scripts/first-publish-check.mjs
+
       - name: Upgrade npm to a staging-capable version
         # OIDC trusted publishing needs npm >= 11.5.1; `npm stage` needs >= 11.15.0.
         # Node 22 ships npm 10.x, so upgrade explicitly.
