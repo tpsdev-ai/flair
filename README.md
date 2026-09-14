@@ -59,6 +59,8 @@ Full walkthrough with expected output at every step: **[docs/quickstart.md](docs
 
 `npm install -g @tpsdev-ai/flair` puts a single command on your `PATH`: `flair`. That is the whole install, and it needs a **user-writable npm global prefix** — which is why step 1 says *no sudo*. A root-owned install can't write the embedding model into its own package directory, so semantic search silently degrades to keyword-only. Use `nvm`, or point npm at your home directory — `npm config set prefix ~/.npm-global`, then add `~/.npm-global/bin` to `PATH`. `flair init` and `flair doctor` both check for this and say so loudly.
 
+> **Known install-size issue.** `npm install -g @tpsdev-ai/flair` currently pulls roughly 130 MB of React Native tooling that a Node install never uses — an optional dependency of Harper's SQL engine. It is inert and Flair runs normally. The durable fix is upstream ([harperfast/harper#1937](https://github.com/harperfast/harper/issues/1937)). Do **not** install with `--omit=optional` to avoid it: that also drops Harper's platform RocksDB binding, and Flair will not start.
+
 Two different things get called "MCP" here, and you get them differently:
 
 - **The server has an MCP surface built in.** `/mcp` is a JSON-RPC endpoint exposing 12 curated tools, guarded by OAuth bearer tokens. It ships inside the package — and it is **off by default**: until you set `FLAIR_MCP_OAUTH` *and* a public issuer (`FLAIR_MCP_ISSUER`, falling back to `FLAIR_PUBLIC_URL`), no `/mcp` route is registered and the path returns 404. No documented client setup uses it today.
