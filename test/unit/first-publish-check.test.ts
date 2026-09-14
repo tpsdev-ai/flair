@@ -21,6 +21,7 @@ import { join } from "node:path";
 
 import {
   ALLOW_LIST_REL,
+  DEFAULT_REGISTRY,
   enumeratePublishTargets,
   parseApprovals,
   parseNpmAliasTarget,
@@ -41,8 +42,17 @@ interface FixtureOptions {
   rootName?: string;
   rootPrivate?: boolean;
   rootDependencies?: Record<string, string>;
-  packages?: Record<string, { private?: boolean }>;
+  rootPeerDependencies?: Record<string, string>;
+  packages?: Record<
+    string,
+    {
+      private?: boolean;
+      peerDependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    }
+  >;
   approved?: Array<Record<string, string>>;
+  releasePublishYml?: string;
   lookup: Record<string, FixtureLookupEntry>;
 }
 
@@ -55,6 +65,7 @@ function makeFixture(opts: FixtureOptions): { dir: string; lookupPath: string } 
   };
   if (opts.rootPrivate) rootPkg.private = true;
   if (opts.rootDependencies) rootPkg.dependencies = opts.rootDependencies;
+  if (opts.rootPeerDependencies) rootPkg.peerDependencies = opts.rootPeerDependencies;
   writeFileSync(join(dir, "package.json"), JSON.stringify(rootPkg, null, 2));
 
   for (const [pkgName, meta] of Object.entries(opts.packages ?? {})) {
@@ -62,7 +73,14 @@ function makeFixture(opts: FixtureOptions): { dir: string; lookupPath: string } 
     mkdirSync(pkgDir, { recursive: true });
     const pkg: Record<string, unknown> = { name: `@tpsdev-ai/${pkgName}`, version: "1.0.0" };
     if (meta.private) pkg.private = true;
+    if (meta.peerDependencies) pkg.peerDependencies = meta.peerDependencies;
+    if (meta.devDependencies) pkg.devDependencies = meta.devDependencies;
     writeFileSync(join(pkgDir, "package.json"), JSON.stringify(pkg, null, 2));
+  }
+
+  if (opts.releasePublishYml !== undefined) {
+    mkdirSync(join(dir, ".github", "workflows"), { recursive: true });
+    writeFileSync(join(dir, ".github", "workflows", "release-publish.yml"), opts.releasePublishYml);
   }
 
   if (opts.approved) {
@@ -75,11 +93,16 @@ function makeFixture(opts: FixtureOptions): { dir: string; lookupPath: string } 
   return { dir, lookupPath };
 }
 
-function runCli(dir: string, lookupPath: string): { status: number | null; out: string } {
+function runCli(
+  dir: string,
+  lookupPath: string,
+  env: Record<string, string> = {},
+): { status: number | null; out: string } {
   const r = spawnSync(process.execPath, [SCRIPT, "--root", dir, "--lookup-fixture", lookupPath], {
     cwd: REPO_ROOT,
     encoding: "utf8",
     timeout: 20_000,
+    env: { ...process.env, FPC_ALLOW_FIXTURE: "1", ...env },
   });
   return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
@@ -161,6 +184,20 @@ describe("first-publish preflight blocks the hazard", () => {
     expect(out).toContain(APPROVED_MESSAGE_FOR("@tpsdev-ai/harper"));
   });
 
+  test("an npm: alias in peerDependencies is enumerated and flagged (published manifest)", () => {
+    const { dir, lookupPath } = makeFixture({
+      packages: { pp: { peerDependencies: { harper: "npm:@tpsdev-ai/reprint@1.0.0" } } },
+      lookup: {
+        "@tpsdev-ai/root": { state: "live", version: "1.0.0" },
+        "@tpsdev-ai/pp": { state: "live", version: "1.0.0" },
+        "@tpsdev-ai/reprint": { state: "missing" },
+      },
+    });
+    const { status, out } = runCli(dir, lookupPath);
+    expect(status).not.toBe(0);
+    expect(out).toContain(APPROVED_MESSAGE_FOR("@tpsdev-ai/reprint"));
+  });
+
   test("private workspace packages are not publish targets", () => {
     const { dir, lookupPath } = makeFixture({
       packages: { "secret-pkg": { private: true } },
@@ -223,6 +260,80 @@ describe("first-publish enumeration", () => {
     expect(names.has(root.name)).toBe(true);
   });
 
+  test("enumerates npm: aliases from peerDependencies of a publishable package", () => {
+    const { dir } = makeFixture({
+      packages: { pp: { peerDependencies: { harper: "npm:@tpsdev-ai/reprint@1.0.0" } } },
+      lookup: {},
+    });
+    const { targets, problems } = enumeratePublishTargets(dir);
+    expect(problems).toEqual([]);
+    expect(targets.map((t) => t.name)).toContain("@tpsdev-ai/reprint");
+  });
+
+  test("does not scan devDependencies aliases (not shipped)", () => {
+    const { dir } = makeFixture({
+      packages: { pp: { devDependencies: { d: "npm:@tpsdev-ai/dev-reprint@1.0.0" } } },
+      lookup: {},
+    });
+    const { targets } = enumeratePublishTargets(dir);
+    expect(targets.map((t) => t.name)).not.toContain("@tpsdev-ai/dev-reprint");
+  });
+
+  test("blocks when release-publish.yml publishes a dir the enumeration did not cover", () => {
+    const { dir, lookupPath } = makeFixture({
+      packages: { "real-pkg": {} },
+      releasePublishYml: [
+        "jobs:",
+        "  stage-publish:",
+        "    steps:",
+        "      - name: Stage-publish all packages",
+        "        run: |",
+        "          DIRS=(",
+        "            packages/real-pkg",
+        "            .",
+        "            vendor/rogue",
+        "          )",
+        '          for dir in "${DIRS[@]}"; do',
+        '            ( cd "$dir" && npm stage publish )',
+        "          done",
+      ].join("\n"),
+      lookup: {
+        "@tpsdev-ai/root": { state: "live", version: "1.0.0" },
+        "@tpsdev-ai/real-pkg": { state: "live", version: "1.0.0" },
+      },
+    });
+    const { status, out } = runCli(dir, lookupPath);
+    expect(status).not.toBe(0);
+    expect(out).toContain("vendor/rogue");
+    expect(out).toContain("did not cover it");
+  });
+
+  test("blocks when an enumerated package is absent from release-publish.yml's publish set", () => {
+    const { dir, lookupPath } = makeFixture({
+      packages: { "real-pkg": {}, "unlisted-pkg": {} },
+      releasePublishYml: [
+        "jobs:",
+        "  stage-publish:",
+        "    steps:",
+        "      - name: Stage-publish all packages",
+        "        run: |",
+        "          DIRS=(",
+        "            packages/real-pkg",
+        "            .",
+        "          )",
+      ].join("\n"),
+      lookup: {
+        "@tpsdev-ai/root": { state: "live", version: "1.0.0" },
+        "@tpsdev-ai/real-pkg": { state: "live", version: "1.0.0" },
+        "@tpsdev-ai/unlisted-pkg": { state: "live", version: "1.0.0" },
+      },
+    });
+    const { status, out } = runCli(dir, lookupPath);
+    expect(status).not.toBe(0);
+    expect(out).toContain("packages/unlisted-pkg/package.json");
+    expect(out).toContain("have drifted");
+  });
+
   test("parseApprovals requires name/approver/date/reason", () => {
     const incomplete = parseApprovals(
       JSON.stringify({ approved: [{ name: "@tpsdev-ai/x", approver: "nathan", date: "2026-09-14" }] }),
@@ -249,6 +360,26 @@ describe("first-publish enumeration", () => {
   });
 });
 
+describe("first-publish preflight hardening (no fail-open seams)", () => {
+  test("--lookup-fixture is refused unless FPC_ALLOW_FIXTURE=1 is set", () => {
+    const { dir, lookupPath } = makeFixture({
+      packages: { "live-pkg": {} },
+      lookup: {
+        "@tpsdev-ai/root": { state: "live", version: "1.0.0" },
+        "@tpsdev-ai/live-pkg": { state: "live", version: "1.0.0" },
+      },
+    });
+    const { status, out } = runCli(dir, lookupPath, { FPC_ALLOW_FIXTURE: "" });
+    expect(status).not.toBe(0);
+    expect(out).toContain("FPC_ALLOW_FIXTURE");
+  });
+
+  test("the lookup does not honor FLAIR_NPM_REGISTRY (check and publish agree on one registry)", () => {
+    expect(DEFAULT_REGISTRY).toBe("https://registry.npmjs.org");
+    expect(readFileSync(SCRIPT, "utf8")).not.toContain("process.env.FLAIR_NPM_REGISTRY");
+  });
+});
+
 describe("first-publish preflight is wired into the release and CI", () => {
   test("release.sh runs the preflight", () => {
     const src = readFileSync(join(REPO_ROOT, "scripts", "release.sh"), "utf8");
@@ -259,5 +390,17 @@ describe("first-publish preflight is wired into the release and CI", () => {
     const src = readFileSync(join(REPO_ROOT, ".github", "workflows", "test.yml"), "utf8");
     expect(src).toContain("first-publish-check.mjs");
     expect(src).toMatch(/startsWith\(github\.head_ref, 'release\/v'\)/);
+  });
+
+  test("the tag-triggered release-publish workflow runs the preflight before staging", () => {
+    const src = readFileSync(join(REPO_ROOT, ".github", "workflows", "release-publish.yml"), "utf8");
+    expect(src).toContain("node scripts/first-publish-check.mjs");
+    const preflight = src.indexOf("- name: First-publish preflight");
+    const firstStage = src.indexOf("- name: Stage-publish all packages");
+    expect(preflight).toBeGreaterThan(-1);
+    expect(firstStage).toBeGreaterThan(-1);
+    expect(preflight).toBeLessThan(firstStage);
+    const block = src.slice(preflight, src.indexOf("- name:", preflight + 10));
+    expect(block).not.toMatch(/^\s*continue-on-error:/m);
   });
 });

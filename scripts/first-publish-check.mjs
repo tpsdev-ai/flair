@@ -18,10 +18,16 @@
  *   1. workspace packages whose package.json is not `private: true`, plus the
  *      root package if it is publishable; and
  *   2. any `npm:<name>@<version>` alias referenced by a published package's
- *      dependencies whose target is in OUR scope (`@tpsdev-ai/`). That is the
+ *      dependencies, optionalDependencies, or peerDependencies whose target is
+ *      in OUR scope (`@tpsdev-ai/`). Peer aliases ship in the published
+ *      manifest and npm auto-installs them, so they are a first-publish path
+ *      too. devDependencies are excluded: they are not shipped. That is the
  *      Harper shape: a reprint the release pipeline materialises and
  *      publishes, referenced by an already-published dependency rather than
- *      declared as its own workspace package.
+ *      declared as its own workspace package. It also cross-checks the
+ *      enumeration against the tag workflow's actual publish set
+ *      (release-publish.yml's `DIRS` array + stage-publish steps) and BLOCKS
+ *      on any drift, so the two lists cannot diverge.
  *
  * For each target it asks the registry whether the name is already live
  * (`npm view <name> version`; 404 = first-publish) and cross-checks any
@@ -46,7 +52,7 @@
  * Usage:
  *   node scripts/first-publish-check.mjs
  *   node scripts/first-publish-check.mjs --root <dir> [--allow-list <path>]
- *   node scripts/first-publish-check.mjs --lookup-fixture <path>   # tests only
+ *   FPC_ALLOW_FIXTURE=1 node scripts/first-publish-check.mjs --lookup-fixture <path>  # tests only
  *
  * Exit codes:
  *   0 — every publish target is already live, or is an approved first-publish
@@ -69,6 +75,18 @@ const DEFAULT_ROOT = join(SCRIPT_DIR, "..");
 export const OUR_SCOPE = "@tpsdev-ai/";
 /** Repo-relative path of the approvals file. The message names this literally. */
 export const ALLOW_LIST_REL = ".release/first-publish-approved.json";
+/**
+ * The tag-triggered release workflow. Its `DIRS` array + stage-publish steps are
+ * the actual publish set, so its path is where the drift assertion reads from.
+ */
+export const RELEASE_PUBLISH_WORKFLOW_REL = ".github/workflows/release-publish.yml";
+/**
+ * The one registry the check and `npm publish` agree on. Deliberately NOT
+ * overridable by env: a release host with FLAIR_NPM_REGISTRY pointed at a mirror
+ * that serves every name as live would fail this check open while `npm publish`
+ * still targeted npmjs.org.
+ */
+export const DEFAULT_REGISTRY = "https://registry.npmjs.org";
 /** Every approval entry must carry all of these to count as a positive act. */
 const REQUIRED_APPROVAL_FIELDS = ["name", "approver", "date", "reason"];
 
@@ -159,6 +177,93 @@ function expandWorkspacePattern(root, pattern, problems) {
 }
 
 /**
+ * Extract every directory the tag-triggered release workflow publishes from:
+ *   - the `DIRS=( ... )` array used by the dependency-order stage-publish loop, and
+ *   - each standalone step's `cd <dir> && npm stage publish` command.
+ * Variable references (the loop's `cd "$dir"`) are skipped — the DIRS array
+ * already carries those paths. Returns repo-relative dirs, de-duped in order.
+ */
+export function parseReleasePublishDirs(workflowText) {
+  const text = String(workflowText ?? "");
+  const dirs = [];
+
+  const dirsBlock = /DIRS=\(\s*([\s\S]*?)\s*\)/.exec(text);
+  if (dirsBlock) {
+    for (const line of dirsBlock[1].split("\n")) {
+      const dir = line.replace(/#.*$/, "").trim();
+      if (dir === "") continue;
+      dirs.push(dir);
+    }
+  }
+
+  const stageCmd = /cd\s+([^\s&)]+)\s*&&\s*npm\s+stage\s+publish/g;
+  let match;
+  while ((match = stageCmd.exec(text)) !== null) {
+    const raw = match[1];
+    if (raw.includes("$")) continue; // runtime variable — resolved from DIRS above
+    dirs.push(raw.replace(/^["']|[\"']$/g, ""));
+  }
+
+  return [...new Set(dirs)];
+}
+
+/**
+ * Cross-check the workspace enumeration against release-publish.yml's publish
+ * set — the paths the tag workflow actually stages. Two directions, both
+ * problems (a problem blocks):
+ *   - a directory the workflow publishes that the enumeration did not cover
+ *     (e.g. a `vendor/rogue` DIRS entry, or a reprint emitted outside the
+ *     workspace), and
+ *   - an enumerated workspace/root package absent from the workflow's publish
+ *     dirs.
+ * `npm:` alias targets are excluded from the second direction: reprints are
+ * materialised outside the workspace (a mktemp --emit-dir) and are not DIRS
+ * entries by construction — the registry lookup covers them. If the workflow
+ * file is absent the drift check is skipped; absent, there is no tag publish
+ * path to drift against.
+ */
+function checkPublishSetDrift(root, publishable, problems) {
+  let workflowText;
+  try {
+    workflowText = readFileSync(join(root, RELEASE_PUBLISH_WORKFLOW_REL), "utf8");
+  } catch (err) {
+    if (err?.code === "ENOENT") return;
+    problems.push(`could not read ${RELEASE_PUBLISH_WORKFLOW_REL}: ${err.message}`);
+    return;
+  }
+
+  const dirs = parseReleasePublishDirs(workflowText);
+  if (dirs.length === 0) {
+    problems.push(
+      `${RELEASE_PUBLISH_WORKFLOW_REL} declares no publish directories (no DIRS array, no "npm stage publish" steps). Refusing to treat the publish set as empty.`,
+    );
+    return;
+  }
+
+  const dirToPkgPath = (dir) => {
+    const clean = dir.replace(/\/$/, "");
+    return clean === "." ? "package.json" : `${clean}/package.json`;
+  };
+  const dirSet = new Set(dirs.map(dirToPkgPath));
+  const publishablePaths = new Set(publishable.map((p) => p.path));
+
+  for (const dir of dirs) {
+    const pkgPath = dirToPkgPath(dir);
+    if (publishablePaths.has(pkgPath)) continue;
+    problems.push(
+      `${RELEASE_PUBLISH_WORKFLOW_REL} publishes "${dir}" (${pkgPath}) but the package enumeration did not cover it. Update scripts/first-publish-check.mjs so the publish set has one source of truth.`,
+    );
+  }
+
+  for (const { path } of publishable) {
+    if (dirSet.has(path)) continue;
+    problems.push(
+      `enumerated publishable package ${path} is absent from ${RELEASE_PUBLISH_WORKFLOW_REL}'s publish set (DIRS + stage-publish steps). The two publish sets have drifted.`,
+    );
+  }
+}
+
+/**
  * Enumerate every package the release would publish.
  * Returns { targets: [{ name, source }], problems: string[] }.
  */
@@ -208,7 +313,7 @@ export function enumeratePublishTargets(root = DEFAULT_ROOT) {
 
   // npm: aliases into our scope, referenced by a package we would publish.
   for (const { pkg, path } of publishable) {
-    for (const depKind of ["dependencies", "optionalDependencies"]) {
+    for (const depKind of ["dependencies", "optionalDependencies", "peerDependencies"]) {
       const deps = pkg[depKind];
       if (!deps || typeof deps !== "object") continue;
       for (const [depName, spec] of Object.entries(deps)) {
@@ -218,6 +323,8 @@ export function enumeratePublishTargets(root = DEFAULT_ROOT) {
       }
     }
   }
+
+  checkPublishSetDrift(root, publishable, problems);
 
   return {
     targets: [...targets.entries()]
@@ -288,14 +395,11 @@ export function parseApprovals(raw, source = ALLOW_LIST_REL) {
  *   E404      -> missing (first-publish)
  *   any other -> error ("cannot confirm live" — blocks)
  */
-export async function lookupViaNpm(
-  name,
-  { registry = process.env.FLAIR_NPM_REGISTRY ?? "https://registry.npmjs.org", timeoutMs = 60_000 } = {},
-) {
+export async function lookupViaNpm(name, { timeoutMs = 60_000 } = {}) {
   try {
     const { stdout } = await execFileAsync(
       "npm",
-      ["view", name, "version", "--json", `--registry=${registry}`],
+      ["view", name, "version", "--json", `--registry=${DEFAULT_REGISTRY}`],
       {
         timeout: timeoutMs,
         encoding: "utf8",
@@ -425,6 +529,7 @@ function printUsage(stream = console.log) {
       "  --root <dir>             repo root to enumerate (default: this repo)",
       `  --allow-list <path>      approvals file (default: <root>/${ALLOW_LIST_REL})`,
       "  --lookup-fixture <path>  test-only: JSON map of name -> lookup result, instead of npm",
+      "                           (refused unless FPC_ALLOW_FIXTURE=1 is set)",
     ].join("\n"),
   );
 }
@@ -479,6 +584,11 @@ async function main() {
 
   let lookup = lookupViaNpm;
   if (opts.lookupFixture) {
+    if (process.env.FPC_ALLOW_FIXTURE !== "1") {
+      throw new Error(
+        "--lookup-fixture is a test-only registry seam and is refused unless FPC_ALLOW_FIXTURE=1 is set.",
+      );
+    }
     lookup = fixtureLookup(opts.lookupFixture);
   }
 

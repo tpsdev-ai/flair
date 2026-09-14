@@ -53,14 +53,14 @@ export interface CheckResult {
 
 export const OUR_SCOPE: string;
 export const ALLOW_LIST_REL: string;
+export const RELEASE_PUBLISH_WORKFLOW_REL: string;
+export const DEFAULT_REGISTRY: string;
 
 export function parseNpmAliasTarget(spec: unknown): string | null;
+export function parseReleasePublishDirs(workflowText: string): string[];
 export function enumeratePublishTargets(root?: string): Enumeration;
 export function parseApprovals(raw: string, source?: string): ParsedApprovals;
-export function lookupViaNpm(
-  name: string,
-  options?: { registry?: string; timeoutMs?: number },
-): Promise<LookupResult>;
+export function lookupViaNpm(name: string, options?: { timeoutMs?: number }): Promise<LookupResult>;
 export function runCheck(options?: {
   root?: string;
   lookup?: Lookup;
