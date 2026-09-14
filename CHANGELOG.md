@@ -18,6 +18,275 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.54.0] - 2026-09-14
+
+### Added
+
+- **A Cursor-side wake-runner drains directed OrgEvents and launches one Cloud Agent per dispatch.**
+  `packages/cursor-wake-runner` is the #1583 consume + wake half (flair#1613). It
+  pages `GET /OrgEventCatchup/{self}` — owner-scoped, never another agent's
+  feed — and for each directed `coord.dispatch` / `a2a.message` calls Cursor
+  `POST /v1/agents` with a client-supplied `agentId` derived from the OrgEvent
+  id (`bc-<sha256 uuid>`). Re-POST is `409 agent_id_conflict` and is treated as
+  already-handed-off, then the watermark acks. Redelivery cannot start a second
+  agent. A failed launch does not advance the cursor.
+
+  The runner **is** the wake trigger (cron / `--interval` / a Cursor Automation
+  that shells this CLI). Flair cannot wake a dormant Cursor agent. The
+  `coordinate` skill documents `coord.dispatch` / `coord.ack`.
+
+  > **Heads-up:** schedule this process. A Cursor Automation that starts a
+  > crew agent *without* the runner's deterministic `agentId` can double-launch
+  > on at-least-once redelivery.
+
+- **The build now refuses to ship CLI code that Node cannot load.** A command
+  module that combined CommonJS `require()` with top-level `await` made Node
+  reject the file at runtime — the crash behind `flair session snapshot list` —
+  and the new check fails the build before that reaches a release (flair#1653,
+  flair#1657).
+
+- **`flair_catchup` lets a running agent drain and ack its own org event feed.**
+  The stdio adapter (`@tpsdev-ai/flair-mcp`) gains an owner-scoped tool for the
+  direct-crew-comms path: it pages `GET /OrgEventCatchup/{caller}` — directed and
+  broadcast `OrgEvent`s after the caller's durable watermark — and advances that
+  watermark with `POST /OrgEventCatchup/{caller}` (flair#1583). Identity is the
+  same Ed25519 signature every other MCP write uses; the request body never
+  carries an `agentId`, and the tool refuses to read any feed but the caller's
+  own.
+
+  At-least-once by contract: `ack` is monotonic, so an event may be delivered
+  twice (re-delivery is safe), an acked event does not re-deliver, and an
+  un-acked event survives a restart. `after` / `limit` page a drain; `ack` —
+  passed the last processed position, or a drained page's `nextAfter` — advances
+  the watermark.
+
+  > **Heads-up:** `flair_catchup` ships on the stdio adapter only
+  > (`native: false`). The native `/mcp` surface still delivers events through
+  > `bootstrap` (`maxEvents` / `eventsHasMore`). This is one slice of #1583 — it
+  > does not close it.
+
+- **Ingest-throughput bench sweeps threads × gpuLayers and refuses to rank on overlap.** The harness under `test/bench/ingest-throughput/` now measures the `FLAIR_EMBED_THREADS` × `gpuLayers` grid, reports doc/s + spread per cell, and refuses a winner when run intervals overlap, when observed threads are unreadable, when `FLAIR_EMBED_THREADS=1` is not ≥1.3× slower, when `gpuLayers=99` lacks a Metal `ggml_metal_init` / compute-buffer readback, or when the box is not quiet. `FLAIR_EMBED_GPU_LAYERS` is a measurement pin; unset still leaves HFE's default of 0. (#1436)
+
+  > **Heads-up:** this does not change the product default for `threads` or `gpuLayers`. #1437 is that decision. On non-Metal hosts `gpuLayers=99` is skipped — do not invent GPU numbers.
+
+### Changed
+
+- **The `flair agent` command group now lives in `src/commands/agent.ts`.** Part of the `src/cli.ts` modularization epic (flair#1630, epic flair#1618), matching the federation, memory, soul, rem, fleet, mcp, idp, hook, bridge, and keys splits: `src/cli.ts` binds shared helpers into the module and calls `register(program)`.
+
+  Pure extraction — no behavior change. `test/unit-isolated/cli-surface-snapshot.test.ts` stays byte-green, which proves every `agent` subcommand, flag, and `--help` rendering is identical. Agent registration, Ed25519 key generation, and key-permission logic are moved verbatim; no auth or identity behavior was altered.
+
+- **The `flair bridge` command group now lives in `src/commands/bridge.ts`.** Part of the `src/cli.ts` modularization epic (flair#1628, epic flair#1618), matching the federation, memory, soul, rem, fleet, mcp, idp, and hook splits: `src/cli.ts` binds shared helpers into the module and calls `register(program)`.
+
+  Pure extraction — no behavior change. `test/unit-isolated/cli-surface-snapshot.test.ts` stays byte-green, which proves every `bridge` subcommand, flag, and `--help` rendering is identical. All bridge runtime logic still lives under `src/bridges/`.
+
+- **The `flair hook` command group now lives in `src/commands/hook.ts`.** Part of the `src/cli.ts` modularization epic (flair#1627, epic flair#1618), matching the federation, memory, soul, rem, fleet, mcp, and idp splits: `src/cli.ts` binds shared helpers into the module and calls `register(program)`.
+
+  Pure extraction — no behavior change. `test/unit-isolated/cli-surface-snapshot.test.ts` stays byte-green, which proves every `hook` subcommand (`install` / `uninstall` / `status`), flag, and `--help` rendering is identical. All hook mutation logic still lives in `src/hook-install.ts`.
+
+- **The `flair idp` command group now lives in `src/commands/idp.ts`.** Part of the `src/cli.ts` modularization epic (flair#1626, epic flair#1618), matching the federation, memory, soul, rem, fleet, and mcp splits: `src/cli.ts` binds shared helpers into the module and calls `register(program)`.
+
+  Pure extraction — no behavior change. `test/unit-isolated/cli-surface-snapshot.test.ts` stays byte-green, which proves every `idp` subcommand (`add` / `list` / `remove` / `test`), flag, and `--help` rendering is identical, so no auth or identity-provider path moved.
+
+- **The `flair keys` command group now lives in `src/commands/keys.ts`.** Part of the `src/cli.ts` modularization epic (flair#1629, epic flair#1618), matching the federation, memory, soul, rem, fleet, mcp, idp, hook, and bridge splits: `src/cli.ts` binds shared helpers into the module and calls `register(program)`.
+
+  Pure extraction — no behavior change. `test/unit-isolated/cli-surface-snapshot.test.ts` stays byte-green, and the `classifyKeysDir` / `applyKeyPrune` decision logic is still exported (now re-exported from `src/commands/keys.ts`) so `test/unit/keys-prune.test.ts` is unchanged. Key generation, path resolution, and file-permission behavior are untouched.
+
+- **The remaining standalone top-level `flair` commands now live in `src/commands/*.ts`.** The final extraction of the `src/cli.ts` modularization epic (flair#1636, epic flair#1618): the lifecycle standalones (`init`, `status` incl. `--deep`, `upgrade` + the `snapshot` group, `stop`/`start`/`restart`, `uninstall`, `doctor`, `quality`, `deploy`, `reembed`, `test`, `search`, `bootstrap`, `backup`/`restore`/`export`/`import`/`inspect`, `migrate-harness-memory`, `orgevent`, `attention`, `grant`/`revoke`) move out of `src/cli.ts` into their own modules, each exporting `bindCli(...)` + `register(program)` like the 16 group extractions before them.
+
+  Pure extraction — no behavior change. `src/cli.ts` shrinks from ~14.3K to ~5.9K lines and is now a thin registrar plus the shared helpers that extraction modules bind: `test/unit-isolated/cli-surface-snapshot.test.ts` stays byte-green, proving every command, flag, argument, and `--help` rendering is identical. Tests-visible symbols (e.g. `summarizeDoctorRun`, `createDataSnapshot`, `searchScoringFormula`, the `quality` planner helpers) stay re-exported from `src/cli.ts`, and the source-scanning structural tests (`cli-auth-floor`, `embedding-identity-tripwire`, `doctor-run`, `owned-pins-upgrade-doctor`, `mqtt-disable-complete`) follow the code to its new homes.
+
+- **The `flair mcp` command group now lives in `src/commands/mcp.ts`.** Part of the `src/cli.ts` modularization epic (flair#1625, epic flair#1618), matching the federation, memory, soul, and rem splits: `src/cli.ts` binds shared helpers into the module and calls `register(program)`.
+
+  Pure extraction — no behavior change. `test/unit-isolated/cli-surface-snapshot.test.ts` stays byte-green, which proves no command, flag, or `--help` output moved. The mcp grant/revoke/list/enable/disable/status implementations keep their existing exports (`grantMcpClient`, `revokeMcpClient`, `readMcpClientManifest`, `buildMcpGrantConfig`, `defaultMcpClientManifestPath`, the `McpClient*Error` classes), re-exported from `src/cli.ts` for existing importers.
+
+- **The `flair presence` command group now lives in `src/commands/presence.ts`.** Part of the `src/cli.ts` modularization epic (flair#1633, epic flair#1618), matching the federation, memory, soul, rem, fleet, mcp, idp, hook, bridge, keys, agent, session, and principal splits: `src/cli.ts` binds shared helpers into the module and calls `register(program)`.
+
+  Pure extraction — no behavior change. `test/unit-isolated/cli-surface-snapshot.test.ts` stays byte-green, proving `presence set` and its `--activity` / `--task` flags, validation, and `--help` rendering are identical. `VALID_PRESENCE_ACTIVITIES` / `MAX_TASK_LENGTH` stay re-exported from the CLI's testing surface.
+
+- **The `flair principal` command group now lives in `src/commands/principal.ts`.** Part of the `src/cli.ts` modularization epic (flair#1632, epic flair#1618), matching the federation, memory, soul, rem, fleet, mcp, idp, hook, bridge, keys, agent, and session splits: `src/cli.ts` binds shared helpers into the module and calls `register(program)`.
+
+  Pure extraction — no behavior change. `test/unit-isolated/cli-surface-snapshot.test.ts` stays byte-green, proving every `principal {add,list,show,disable,promote}` subcommand, flag, and `--help` rendering is identical. The flair#941 `role`-is-authority admin classification (`ADMIN_ROLE` / `agentRecordIsAdmin`) and all multi-tenant/ownership scoping are moved verbatim.
+
+- **The `flair relationship` command group now lives in `src/commands/relationship.ts`.** Part of the `src/cli.ts` modularization epic (flair#1634, epic flair#1618), matching the federation, memory, soul, rem, fleet, mcp, idp, hook, bridge, keys, agent, session, principal, and presence splits: `src/cli.ts` binds shared helpers into the module and calls `register(program)`.
+
+  Pure extraction — no behavior change. `test/unit-isolated/cli-surface-snapshot.test.ts` stays byte-green, proving `relationship add` and its flags/validation/`--help` rendering are identical. The `canonicalRelationshipId` upsert-id algorithm is a deliberate local copy of flair-client's — the drift guard (`test/unit/cli-relationship-add.test.ts`) still passes, so the CLI and client keep landing triples at the same id.
+
+- **The `flair session` command group now lives in `src/commands/session.ts`.** Part of the `src/cli.ts` modularization epic (flair#1631, epic flair#1618), matching the federation, memory, soul, rem, fleet, mcp, idp, hook, bridge, keys, and agent splits: `src/cli.ts` binds shared helpers into the module and calls `register(program)`.
+
+  Pure extraction — no behavior change. `test/unit-isolated/cli-surface-snapshot.test.ts` stays byte-green, proving every `session snapshot {create,list,restore}` subcommand, flag, and `--help` rendering is identical. The flair#903 fail-closed archive validation and the SNAPSHOT_ROOT layout are moved verbatim.
+
+- **The `flair workspace` command group now lives in `src/commands/workspace.ts`.** Part of the `src/cli.ts` modularization epic (flair#1635, epic flair#1618), matching the federation, memory, soul, rem, fleet, mcp, idp, hook, bridge, keys, agent, session, principal, presence, and relationship splits: `src/cli.ts` binds shared helpers into the module and calls `register(program)`.
+
+  Pure extraction — no behavior change. `test/unit-isolated/cli-surface-snapshot.test.ts` stays byte-green, proving `workspace set` and its flags/validation/`--help` rendering are identical. `MAX_WORKSPACE_FIELD_LENGTH` stays re-exported from the CLI's testing surface, and the shared `--entities <csv>` parse/description (also used by `memory add` / `orgevent`) still lives in `src/cli.ts`.
+
+- **Shared MCP tool descriptors so the stdio adapter cannot drift from `/mcp`.**
+  `@tpsdev-ai/flair-tool-descriptors` is the transport-agnostic source (name,
+  description, inputSchema, output shape). The server binds native descriptors
+  to Harper impls; `@tpsdev-ai/flair-mcp` derives its tool set from the same
+  list and binds FlairClient HTTP. Adding a both-surface descriptor appears on
+  both sides with zero hand-wiring (flair#1580).
+
+  > **Heads-up:** `@tpsdev-ai/flair-tool-descriptors` is a new workspace package
+  > and needs a one-time npm first-publish + Trusted Publisher registration
+  > before the next release can stage it (see `docs/releasing.md`). Until then,
+  > `@tpsdev-ai/flair` and `@tpsdev-ai/flair-mcp` tarballs **bundle** it
+  > (`bundleDependencies`) so `npm install` of those tarballs does not 404.
+
+  Stdio `inputSchema` omits native-only params FlairClient never forwards
+  (`includeTrust`, `abstain`, `includeArchived`, `includeEmbedding`, `entities`,
+  `includeContext`, `maxEvents`, `includeEventDetail`) so advertised tools match
+  handler behavior. `skill_get` has no `includeEmbedding` on either surface
+  (flair#1579 / flair#1593).
+
+### Fixed
+
+- **The benchmark config anchor now refuses non-portable numbers instead of silently breaking outside verification.**
+  A float — or `NaN`/`Infinity`, or an integer past 2^53 — entering the
+  pinned benchmark configuration now fails immediately, naming the offending
+  field and the fix: pin it as a string (`"0.95"`) or a scaled integer (`95`).
+  Previously such a value was hashed without warning, so the reported config
+  hash could silently stop being re-derivable by anyone verifying it outside
+  JavaScript — and a hash mismatch there reads as tampering. The anchor is now
+  portable by design, not by accident. Already-published hashes and artifacts
+  are unaffected. (Refs #1365)
+
+- **The Cursor wake-runner now tracks the Flair client version that ships, so a release can no longer be blocked by a stale dependency pin.** It previously pinned an exact client version that the release process does not update for this package, which failed the release's dependency-version check. It now resolves the client the same way the other packages in this repository do (flair#1583).
+
+- **`flair doctor` no longer fails federation-driver on installs with no peers.** Zero peers is N/A (`not configured (driver installed, idle)`), not ✗. A peered install with a missing or unloaded driver still fails. Config.yaml is resolved from the component directory first — the same order Harper uses — so the gate reads the real config, not only `~/.flair/config.yaml` (flair#1514).
+
+  > **Heads-up:** a standalone install with leftover sync-driver unit files now reports informational N/A instead of a red issue. Pair a hub (or put peers in the component `config.yaml`) before the driver check can fail.
+
+- **`flair doctor` no longer reports a healthy agent-keyed instance as missing its embeddings and audit checks.** The checks now sign in with a registered agent the same way a normal command does, instead of an unrelated local key that happened to sort first.
+
+  When the instance genuinely rejects the signature, doctor now shows a clear failure that names the identity and key it used — instead of a soft "not verified" that was easy to ignore on an install that was actually broken. (Refs #1501)
+
+- **The `doctor` and `init` probe tests give the same result on every machine.** They now point the key lookup at their own temporary directory instead of the real `~/.flair/keys`, so a release host with a real agent key behaves exactly like CI.
+
+  This is test-only: no runtime behaviour changes. Previously the tests passed in CI (which has no real keys) but could fail on a host where a real key outranked the test's temporary one, blocking the release.
+
+- **Status names an outstanding `embedding-stamp` migration instead of a generic mixed-models warning.** A Fabric instance that sat split for days after the searchprefix flip now self-heals in-process and `upgrade --target` waits until the corpus converges (flair#1073, flair#812, flair#807).
+
+  The boot-keyed runner could mark `embedding-stamp` complete from its own bookkeeping (a version short-circuit, or a first `detect()` against a not-yet-visible Fabric corpus) while pre-flip rows stayed on the bare model id. New writes stamped `+searchprefix`, so search crossed spaces and duplicate detection stayed inert — and `flair status` only offered a manual `flair reembed`. `embedding-stamp` now always re-reads the corpus, delayed follow-up cycles retry after boot, `/HealthDetail` names the migration and that dedup is inactive, and `flair deploy` / `upgrade --target` poll until the stamp migration converges (same `--no-verify` escape hatch as route verify).
+
+  > **Heads-up:** a split between `nomic-embed-text-v1.5-Q4_K_M` and `…+searchprefix` means `embedding-stamp` is still outstanding. `flair status` will say so; `upgrade --target` will not report success until it converges.
+
+- **Fabric deploys use a disposable npm cache, so hub quota no longer grows with every install.** `flair deploy` and `flair upgrade --target` pass Harper an `install_command` that runs `npm install --cache <tmp>` and deletes that directory after the install, instead of writing tarballs into the node's permanent `~/.npm/_cacache` (flair#886).
+
+  The slope was every install accumulating prebuilds (`node-llama-cpp`, Harper itself) until the hub filled its disk quota. Raising the quota bought time; operators should not need `npm cache clean`.
+
+- **Spoke pair refuses an empty hub public key.** `flair federation pair` errors instead of storing `publicKey: ""` (flair#822).
+
+  Pair already returns `instance.{id,publicKey}` when the hub has a FederationInstance row. An empty spoke hub-Peer key meant that row was missing at pair time (flair#839). This change is fail-closed on the spoke; it does not provision the hub Instance.
+
+  > **Heads-up:** pair now exits non-zero when the hub does not supply a public key. That pair is identity-incomplete. Hub Instance creation remains flair#839.
+
+- **`flair status` no longer warns that federation peers are disconnected when a paired hub just synced.** A `paired` peer with a recent `lastSyncAt` counts as connected; missing timestamps are unknown, not stale; revoked peers do not drive the >24h warning (flair#1499).
+
+  HealthDetail used to count only `status === "connected"` (pairing writes `paired`) and then take the oldest `lastSyncAt` including revoked rows. A healthy hub synced a minute ago plus a revoked June row printed `0 connected` and `federation peers all disconnected >24h`. Contact is now derived from a written `lastSyncAt`: within 24h → connected, older than 24h → disconnected, no stamp → unknown. The warning fires only when every non-revoked peer has a real last-contact older than 24h.
+
+  > **Heads-up:** `federation.peers` now includes `unknown`, and admin `peerList` rows include `liveness` (`connected` / `disconnected` / `unknown` / `revoked`). Stored `status` is unchanged (`paired`, `revoked`, …).
+
+- **Federation verify no longer reports FAIL when a probe cannot authenticate.** Unverifiable peers (401/403, unreachable, revoked) exit 0 with a warning; a reachable peer missing the canary still fails (flair#823). `--admin-pass` / `--admin-pass-file` now reach `GET /FederationPeers` (admin-gated), so a flag-only credential actually runs the check instead of exiting 0 as UNVERIFIABLE.
+
+  `flair federation verify` used to treat an auth-gated read-back, a 60s wait shorter than the sync cadence, and leftover revoked rows as "peer did not see the memory." It now pushes the canary itself (bring-up has no daemon yet), reports revoked/unauth/unreachable as UNVERIFIABLE, and uses `lastSyncAt` freshness when the push cannot inject. The canary is `standard` + `shared` (ephemeral+shared is refused by flair#1257; private never federates). After a successful inject, cleanup archives the row and syncs that update before the local delete — federation does not propagate DELETE.
+
+  > **Heads-up:** exit 0 now includes "checked peers have the memory, some peers unverifiable." Exit 1 still means a reachable peer was verified wrong. A 401 is not a sync failure.
+
+- **`@tpsdev-ai/flair-client` memory listing works again.** `FlairClient.memory.list()`
+  previously failed and returned no memories; it now returns the agent's memories,
+  with subject, tag, type, and durability filters plus ordering and limit applied
+  (flair#1649).
+
+- **Fleet verify no longer calls a converged deploy failed because federation peers have no endpoint.** Unverifiable peers (couldn't check) exit 0 with a warning; a reachable peer on the wrong version still fails as diverged (flair#988).
+
+  `flair fleet verify`, and the automatic post-`deploy` / `upgrade --target` sweep, used to treat "no endpoint on file" the same as a mixed-version fleet. That printed "deploy is NOT fully converged" and exited 3 for peers that were never federation-paired — standing config, unchanged by the deploy. Unverifiable rows are still listed (never green, never dropped). Exit 2 remains "a reachable node diverged."
+
+  > **Heads-up:** exit 0 now includes "probed nodes match, some peers unverifiable." Exit 2 still means a reachable node was verified wrong. `deploy`/`upgrade` no longer print "NOT fully converged" for couldn't-check peers.
+
+- **Flair now says when a named agent is not the identity that signs, instead of quietly using admin credentials.** If a command names an agent while an admin password is also available, it prints which credential it actually used and how to sign as the agent you named. A named agent is never silently overridden, and which identity signed is never hidden. Precedence itself is unchanged. (Refs #1500)
+
+- **Health checks now flag wildcard ops-API binds, not just bare ports.** An
+  install configured with `--ops-bind 0.0.0.0` (or `::`, `[::]`, or any other
+  non-loopback host) writes a host-qualified bind that used to be mistaken for
+  a narrowed one, so `flair doctor` and `flair status` could both stay green
+  while the ops API was reachable off-box. Only a loopback host (`127.0.0.1`,
+  `localhost`, `::1`) now counts as narrowed; everything else is reported as
+  exposed. This closes a blind spot that predates the two commands agreeing.
+
+- **Per-agent OrgEvent catch-up watermark stops silent drops past the old window and cap of 10.** Directed messages after the last ack are paged until drained; bootstrap uses the same cursor and reports `eventsHasMore` when a display cap still applies (flair#931).
+
+  `GET /OrgEventCatchup/{id}` no longer requires `since`. The durable cursor is a monotonic event position (`createdAt` + `id`), not a wall-clock window. Advance is on explicit ack (`POST /OrgEventCatchup/{id}` with `{ position }`, or `POST /AgentReadPosition/{id}`) so a crash between deliver and ack re-delivers (at-least-once). First watermark is a 24h backfill; set `FLAIR_CATCHUP_BACKFILL_MS=0` for Flint's "now".
+
+  > **Heads-up:** catch-up now returns `{ events, watermark, after, nextAfter, hasMore, pageSize }` instead of a bare array. Page with `after` until `hasMore` is false, then ack `nextAfter`. Callers that already read `data.events` keep working (A2A already did).
+
+- **Published `npm i @tpsdev-ai/flair` no longer pulls React Native.** The published pin replaces Harper with `@tpsdev-ai/harper`, a reprint that bundles AlaSQL with `react-native-fs` as an optional peer (the only npm form that is not auto-installed). Harper still boots and the platform RocksDB binding still installs (flair#847).
+
+  Repo-root `overrides` only apply when Flair is the install root — this repo and `npm i -g` — so they never reached a clean-directory install. A nested `./vendor/harper-*.tgz` pin works for `npm i ./flair.tgz` and then ENOENT's when the same tarball is installed by package name from a registry. The CI gate publishes the reprint and Flair to a throwaway registry, then runs `npm i @tpsdev-ai/flair` in a clean directory under npm 12 (the resolver that still pulled the 160 MB / 136-package React Native subtree) and requires `node_modules/react-native` to be absent.
+
+  > **Heads-up:** do not install with `--omit=optional` to skip React Native. That flag also drops Harper's RocksDB platform bindings. The next release that ships this pin needs `@tpsdev-ai/harper` live on npm first — see `docs/releasing.md`.
+
+- **`flair rem restore --apply` now correctly clears leftover restore candidates before rewriting the Soul.** A failed cleanup step used to leave stale candidate text in place, which could block the restore; the command now removes those rows first, then rewrites the Soul (flair#860).
+
+- **`flair session snapshot list` no longer crashes when a snapshots directory exists.** The published build exited with a module-format error the moment `~/.flair/snapshots/` was present; the command now lists snapshots normally (flair#1653).
+
+  The crash only appeared against an existing snapshots tree, so it could not
+  reproduce on a clean machine and CI had no built-binary check for that path.
+  A new dist-level smoke test now runs the shipped command with snapshots
+  present, so the failure cannot return unnoticed.
+
+- **`flair status` no longer reports "all checks passing" while the ops API is
+  exposed on all interfaces.** It now surfaces the same finding `flair doctor`
+  already made, so the two commands cannot disagree about the same instance.
+
+  > **Heads-up:** a local install whose Harper ops API is bound to every
+  > interface now shows a warning in `status` (and in `status --json`) instead
+  > of a green verdict. The fix is unchanged: `flair init && flair restart`
+  > rebinds it to loopback, or pass `--ops-bind` to keep it deliberately
+  > reachable.
+
+- **`flair uninstall --purge` now removes secrets, schedulers, and client wiring, and names what it leaves.** Purge used to delete only `~/.flair/data` and `~/.flair/keys` while printing "Flair fully purged", leaving `admin-pass`, backups/logs/upgrade-snapshots, the REM nightly shim and systemd/launchd units, and MCP/hook entries in client configs (flair#853).
+
+  The npm package is listed as an intentional leftover with `npm uninstall -g @tpsdev-ai/flair` — this CLI cannot uninstall itself.
+
+  > **Heads-up:** `--purge` now unwires Flair from `~/.claude.json`, `~/.codex/config.toml`, and the other MCP client configs, and removes REM/federation scheduler units. The `@tpsdev-ai/flair` package stays until you uninstall it.
+
+- **`flair uninstall --purge` no longer leaves SessionStart hook `.bak` files.** Hook uninstall writes a sibling backup even on a no-op; purge now deletes those copies so `~/.claude/settings.json.bak` and `~/.codex/hooks.json.bak` cannot survive a purge (flair#853).
+
+- **`flair upgrade` now reliably detects installed libraries and the OpenClaw plugin.** The version checks failed in the compiled CLI and could report an installed package as missing; they now load their helpers the same way as the rest of the command (flair#1657, flair#1658).
+
+  The checks only misbehaved in the built CLI under Node — the test suite's
+  runtime tolerated the old pattern, so it could not catch it. A new test now
+  runs the shipped CLI through Node, and the build refuses to emit the pattern
+  that caused it.
+
+- **`flair upgrade` refreshes SessionStart hook pins, and `flair doctor` fails a pin that is not the installed CLI version.** MCP server entries and hook commands share one catalogue of files Flair pins; upgrade rewrites every already-wired `@tpsdev-ai/flair-mcp@<ver>` to the new CLI, and doctor reports a stale hook as ✗ with `flair hook install` — never ✓ (flair#1485).
+
+  #1516 compared the hook pin to the MCP client pin and printed a warning after ✓ "still runs", so two equally-stale pins (or a hook left behind when no agent id was known) still passed. Currency is now pin === installed CLI version. A failed MCP `client.wire` (`skip` + `ok: false`) is printed on upgrade instead of dropped, and `flair doctor` fails a leftover stale MCP pin with `flair upgrade`.
+
+  > **Heads-up:** after `flair upgrade`, SessionStart hooks move to the new `@tpsdev-ai/flair-mcp` pin with the MCP client configs. `flair doctor` fails a leftover stale hook; the remedy is `flair hook install`. A stale MCP client pin is ✗ with `flair upgrade`.
+
+### Security
+
+- **Bumped adm-zip to 0.6.1, resolving GHSA-vwc7-r8mq-g2x9.** The dependency override pinned adm-zip to `^0.6.0`, but 0.6.0 is the top of the advisory's vulnerable range (`>=0.5.9 <=0.6.0`) and the patched 0.6.1 is now published. Raised the override to `^0.6.1` (bun.lock → adm-zip 0.6.1) and removed the now-stale `no-patch-published` audit-allowlist entry — `bun audit` no longer reports it. adm-zip is pulled transitively via `@tpsdev-ai/adk-flair` → `@google/adk`; flair does not call its extraction API directly.
+
+- **Self-heal requires Flair's /Health identity and the launched pid on the port.** A foreign 200 or a stale listener is not healed (flair#1478).
+
+  `flair stop` / `start` no longer treat “an HTTP server answered on this port” as proof the pre-#1454 daemon is ours. Adoption of a reconstructed `flair-daemon.json` now requires a 2xx `/Health` body that matches Flair’s public shape (`ok`, `version`, `searchReady`, `buildCommit`) and, when `lsof` can see the listener, that the port-owning pid is the instance we launched (worktree + `ROOTPATH` / dataDir). A decoy 200-responder or a leftover pid after a failed restart reports not healed.
+
+  > **Heads-up:** a process that answers 200 on Flair’s port is not enough. If `/Health` is not Flair, or a different pid still holds the port, the CLI refuses rather than claiming the daemon was healed.
+
+- **Native `/mcp` `skill_get` never returns the embedding vector.** The
+  handler used to honor `includeEmbedding: true` by returning the raw Memory
+  record, which bypassed `stripInternalFields`. Nothing in the skill_get
+  contract needs the vector, so the flag is gone and the strip is unconditional
+  (flair#1593). `memory_get` keeps its documented opt-in (flair#1188).
+
+- **flair-mcp `skill_get` never returns the embedding vector.** The stdio
+  adapter used to honor `includeEmbedding: true` by returning the raw Memory
+  record, which bypassed `stripInternalMemoryFields`. Nothing in the skill_get
+  contract needs the vector, so the flag is gone and the strip is unconditional
+  (flair#1579).
+
 ## [0.53.0] - 2026-09-10
 
 ### Added

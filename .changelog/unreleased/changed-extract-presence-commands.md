@@ -1,3 +1,0 @@
-- **The `flair presence` command group now lives in `src/commands/presence.ts`.** Part of the `src/cli.ts` modularization epic (flair#1633, epic flair#1618), matching the federation, memory, soul, rem, fleet, mcp, idp, hook, bridge, keys, agent, session, and principal splits: `src/cli.ts` binds shared helpers into the module and calls `register(program)`.
-
-  Pure extraction — no behavior change. `test/unit-isolated/cli-surface-snapshot.test.ts` stays byte-green, proving `presence set` and its `--activity` / `--task` flags, validation, and `--help` rendering are identical. `VALID_PRESENCE_ACTIVITIES` / `MAX_TASK_LENGTH` stay re-exported from the CLI's testing surface.

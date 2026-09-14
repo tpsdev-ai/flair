@@ -1,3 +1,0 @@
-- **The `flair session` command group now lives in `src/commands/session.ts`.** Part of the `src/cli.ts` modularization epic (flair#1631, epic flair#1618), matching the federation, memory, soul, rem, fleet, mcp, idp, hook, bridge, keys, and agent splits: `src/cli.ts` binds shared helpers into the module and calls `register(program)`.
-
-  Pure extraction — no behavior change. `test/unit-isolated/cli-surface-snapshot.test.ts` stays byte-green, proving every `session snapshot {create,list,restore}` subcommand, flag, and `--help` rendering is identical. The flair#903 fail-closed archive validation and the SNAPSHOT_ROOT layout are moved verbatim.

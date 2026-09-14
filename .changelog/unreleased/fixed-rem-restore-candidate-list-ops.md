@@ -1,1 +1,0 @@
-- **`flair rem restore --apply` now correctly clears leftover restore candidates before rewriting the Soul.** A failed cleanup step used to leave stale candidate text in place, which could block the restore; the command now removes those rows first, then rewrites the Soul (flair#860).

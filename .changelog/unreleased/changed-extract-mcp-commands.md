@@ -1,3 +1,0 @@
-- **The `flair mcp` command group now lives in `src/commands/mcp.ts`.** Part of the `src/cli.ts` modularization epic (flair#1625, epic flair#1618), matching the federation, memory, soul, and rem splits: `src/cli.ts` binds shared helpers into the module and calls `register(program)`.
-
-  Pure extraction — no behavior change. `test/unit-isolated/cli-surface-snapshot.test.ts` stays byte-green, which proves no command, flag, or `--help` output moved. The mcp grant/revoke/list/enable/disable/status implementations keep their existing exports (`grantMcpClient`, `revokeMcpClient`, `readMcpClientManifest`, `buildMcpGrantConfig`, `defaultMcpClientManifestPath`, the `McpClient*Error` classes), re-exported from `src/cli.ts` for existing importers.
