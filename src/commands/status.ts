@@ -8,6 +8,7 @@
  */
 import { Command } from "commander";
 import { resolveAdminUser } from "../lib/auth-resolve.js";
+import { opsApiBindFinding } from "../lib/ops-api-bind.js";
 import * as render from "../render.js";
 import { checkVersion, formatVersionNudge } from "../version-check.js";
 import { hostname } from "node:os";
@@ -19,6 +20,8 @@ export type StatusCli = {
   relativeTime: (...args: any[]) => any;
   resolveSigningAgentId: (...args: any[]) => any;
   sortSoulKeyEntries: (...args: any[]) => any;
+  defaultDataDir: (...args: any[]) => any;
+  readHarperConfig: (...args: any[]) => any;
   __pkgVersion: any;
 };
 
@@ -47,6 +50,33 @@ function resolveSigningAgentId(...args: any[]): any {
 
 function sortSoulKeyEntries(...args: any[]): any {
   return cli.sortSoulKeyEntries(...args);
+}
+
+function defaultDataDir(...args: any[]): any {
+  return cli.defaultDataDir(...args);
+}
+
+function readHarperConfig(...args: any[]): any {
+  return cli.readHarperConfig(...args);
+}
+
+/**
+ * Local install-health warnings that `flair doctor` also checks (flair#852).
+ *
+ * The ops-API bind is read from the same harper-config.yaml doctor reads.
+ * Only judged for a loopback target: the LOCAL install's config says nothing
+ * about a remote instance, and warning about the wrong machine is its own lie.
+ */
+function localOpsApiWarnings(baseUrl: string): Array<{ level: string; message: string }> {
+  const out: Array<{ level: string; message: string }> = [];
+  if (!isLocalhostUrl(baseUrl)) return out;
+  const finding = opsApiBindFinding(readHarperConfig(defaultDataDir()));
+  if (finding?.allInterfaces) {
+    // Name where the full explanation + fix live, matching the status warning
+    // convention (docs/quickstart.md: a warning names the command to run).
+    out.push({ level: "warn", message: `${finding.message} — run \`flair doctor\` for the fix` });
+  }
+  return out;
 }
 
 function federationPeerCountParts(peers: {
@@ -191,6 +221,12 @@ const statusCmd = program
     const { agentId: statusAgentId, source: statusSource } = resolveSigningAgentId(opts, "status");
     const { healthy, baseUrl, healthData } = await fetchHealthDetail(opts, statusAgentId, statusSource);
 
+    // Local ops-API bind (flair#852). `flair doctor` reads this from the same
+    // harper-config.yaml; the two commands must not disagree. A bare ops port
+    // is Harper's all-interfaces default, so reporting "all checks passing"
+    // while it is exposed is a lying green.
+    const localWarnings = localOpsApiWarnings(baseUrl);
+
     // When unreachable on a localhost URL, probe candidate ports to detect
     // config-vs-daemon port drift. Surface the actually-listening
     // port with a fix recipe — better UX than just "unreachable."
@@ -209,6 +245,12 @@ const statusCmd = program
 
     if (opts.json) {
       const out: any = { healthy, url: baseUrl, flairVersion: __pkgVersion, ...healthData };
+      if (localWarnings.length > 0) {
+        out.warnings = [
+          ...localWarnings,
+          ...(Array.isArray(healthData?.warnings) ? healthData.warnings : []),
+        ];
+      }
       if (discoveredPort != null) out.discoveredPort = discoveredPort;
       if (versionCheckResult.latest) out.latestVersion = versionCheckResult.latest;
       console.log(JSON.stringify(out, null, 2));
@@ -248,7 +290,10 @@ const statusCmd = program
     const pid = healthData?.pid ?? "";
     const agents = healthData?.agents;
     const memories = healthData?.memories;
-    const warnings: Array<{ level: string; message: string }> = Array.isArray(healthData?.warnings) ? healthData.warnings : [];
+    const warnings: Array<{ level: string; message: string }> = [
+      ...localWarnings,
+      ...(Array.isArray(healthData?.warnings) ? healthData.warnings : []),
+    ];
     // Scope warnings to the filtered agent if --agent is set
     const scopedWarnings = opts.agent && healthData?.agents?.perAgent
       ? warnings.filter((w: any) => {
@@ -272,6 +317,8 @@ const statusCmd = program
           if (w.message.includes("federation")) return true;
           // REM warnings are fleet-wide; keep them
           if (w.message.includes("REM") || w.message.includes("nightly")) return true;
+          // Ops-API bind is a host fact, not per-agent; keep it
+          if (w.message.includes("Ops API bound")) return true;
           // Default: keep fleet-wide warnings
           return !w.message.includes(opts.agent);
         })
@@ -662,6 +709,10 @@ statusCmd
     const opts = this.optsWithGlobals();
     const { healthy, baseUrl, healthData } = await fetchHealthDetail(opts);
 
+    // Same local install-health facts the plain `status` renders, so `--deep`
+    // cannot end on "✅ no warnings" while the ops API is exposed (flair#852).
+    const localWarnings = localOpsApiWarnings(baseUrl);
+
     if (!healthy) {
       if (opts.json) {
         console.log(JSON.stringify({ healthy: false, url: baseUrl, error: "unreachable" }, null, 2));
@@ -724,6 +775,12 @@ statusCmd
 
     if (opts.json) {
       const out: Record<string, any> = { healthy, url: baseUrl, flairVersion: __pkgVersion, ...healthData };
+      if (localWarnings.length > 0) {
+        out.warnings = [
+          ...localWarnings,
+          ...(Array.isArray(healthData?.warnings) ? healthData.warnings : []),
+        ];
+      }
       if (opts.bootstrap) out.bootstrapBytes = bootstrapBytes;
       console.log(JSON.stringify(out, null, 2));
       return;
@@ -891,7 +948,10 @@ statusCmd
       console.log(`Total:        ${humanBytes((d.dataBytes ?? 0) + (d.snapshotBytes ?? 0))}`);
     }
 
-    const warnings: Array<{ level: string; message: string }> = Array.isArray(healthData?.warnings) ? healthData.warnings : [];
+    const warnings: Array<{ level: string; message: string }> = [
+      ...localWarnings,
+      ...(Array.isArray(healthData?.warnings) ? healthData.warnings : []),
+    ];
     if (warnings.length > 0) {
       console.log("\n═══ Warnings ═════════════════════════════════════");
       for (const w of warnings) console.log(`  ${w.level === "warn" ? "⚠" : "ℹ"} ${w.message}`);
