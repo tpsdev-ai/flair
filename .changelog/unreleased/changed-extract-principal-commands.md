@@ -1,3 +1,0 @@
-- **The `flair principal` command group now lives in `src/commands/principal.ts`.** Part of the `src/cli.ts` modularization epic (flair#1632, epic flair#1618), matching the federation, memory, soul, rem, fleet, mcp, idp, hook, bridge, keys, agent, and session splits: `src/cli.ts` binds shared helpers into the module and calls `register(program)`.
-
-  Pure extraction — no behavior change. `test/unit-isolated/cli-surface-snapshot.test.ts` stays byte-green, proving every `principal {add,list,show,disable,promote}` subcommand, flag, and `--help` rendering is identical. The flair#941 `role`-is-authority admin classification (`ADMIN_ROLE` / `agentRecordIsAdmin`) and all multi-tenant/ownership scoping are moved verbatim.

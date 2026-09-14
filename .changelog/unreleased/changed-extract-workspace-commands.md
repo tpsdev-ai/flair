@@ -1,3 +1,0 @@
-- **The `flair workspace` command group now lives in `src/commands/workspace.ts`.** Part of the `src/cli.ts` modularization epic (flair#1635, epic flair#1618), matching the federation, memory, soul, rem, fleet, mcp, idp, hook, bridge, keys, agent, session, principal, presence, and relationship splits: `src/cli.ts` binds shared helpers into the module and calls `register(program)`.
-
-  Pure extraction — no behavior change. `test/unit-isolated/cli-surface-snapshot.test.ts` stays byte-green, proving `workspace set` and its flags/validation/`--help` rendering are identical. `MAX_WORKSPACE_FIELD_LENGTH` stays re-exported from the CLI's testing surface, and the shared `--entities <csv>` parse/description (also used by `memory add` / `orgevent`) still lives in `src/cli.ts`.

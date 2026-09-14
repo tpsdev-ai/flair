@@ -1,6 +1,6 @@
 {
   "name": "@tpsdev-ai/flair-mcp",
-  "version": "0.53.0",
+  "version": "0.54.0",
   "description": "MCP server for Flair — persistent memory for Claude Code, Cursor, and any MCP client.",
   "type": "module",
   "main": "dist/index.js",
@@ -29,8 +29,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.27.1",
-    "@tpsdev-ai/flair-client": "0.53.0",
-    "@tpsdev-ai/flair-tool-descriptors": "0.53.0",
+    "@tpsdev-ai/flair-client": "0.54.0",
+    "@tpsdev-ai/flair-tool-descriptors": "0.54.0",
     "zod": "4.3.6"
   },
   "bundleDependencies": [
