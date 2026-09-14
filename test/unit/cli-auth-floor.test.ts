@@ -471,6 +471,9 @@ describe("flair status / flair bootstrap — floor adoption (flair#747, subproce
 
 describe("structural: adopted commands consolidate onto authedRequest, not their own chains (flair#747)", () => {
   const cliSource = readFileSync(join(import.meta.dirname ?? __dirname, "..", "..", "src", "cli.ts"), "utf-8");
+  // flair#1636 (epic #1618) moved `flair bootstrap` into its own module; the
+  // structural checks below follow the command to its new home.
+  const bootstrapSource = readFileSync(join(import.meta.dirname ?? __dirname, "..", "..", "src", "commands", "bootstrap.ts"), "utf-8");
 
   /**
    * Extract a function/command body: locate `functionMarker` (disambiguates
@@ -489,28 +492,58 @@ describe("structural: adopted commands consolidate onto authedRequest, not their
    * bootstrap's `--json` option text literally contains
    * "...{context, tokenEstimate, ...}...").
    */
-  function skipString(i: number): number {
-    // cliSource[i] is an opening quote char; returns the index AFTER its
-    // closing quote. Deliberately naive about `${...}` interpolation inside
-    // template literals — it treats the WHOLE backtick-to-backtick span as
-    // opaque, which is fine here: we only need to know where the string
-    // ENDS, never what's inside it.
-    const quote = cliSource[i];
+  function skipString(i: number, src: string = cliSource): number {
+    // src[i] is an opening quote char; returns the index AFTER its
+    // closing quote. Plain strings end at the next unescaped matching
+    // quote. Template literals must track `${...}` interpolation: a nested
+    // template (`` `...${`...${x}...`}...` ``) would otherwise let the FIRST
+    // backtick inside the interpolation look like the terminator, desyncing
+    // every brace the caller counts afterward. flair#1636 (epic #1618): that
+    // desync is why fetchHealthDetail's structural check stopped balancing
+    // once the surrounding inline code moved out of src/cli.ts.
+    const quote = src[i];
+    let j = i + 1;
     let escaped = false;
-    for (let j = i + 1; j < cliSource.length; j++) {
-      const c = cliSource[j];
-      if (escaped) { escaped = false; continue; }
-      if (c === "\\") { escaped = true; continue; }
+    let interpolation = 0;
+    while (j < src.length) {
+      const c = src[j];
+      if (escaped) { escaped = false; j++; continue; }
+      if (c === "\\") { escaped = true; j++; continue; }
+      if (quote === "`") {
+        if (interpolation === 0 && c === "`") return j + 1;
+        if (c === "$" && src[j + 1] === "{") { interpolation++; j += 2; continue; }
+        if (interpolation > 0) {
+          if (c === "{") { interpolation++; j++; continue; }
+          if (c === "}") { interpolation--; j++; continue; }
+          if (c === '"' || c === "'" || c === "`") { j = skipString(j, src); continue; }
+        }
+        j++;
+        continue;
+      }
       if (c === quote) return j + 1;
+      j++;
     }
     throw new Error(`unterminated string literal starting at index ${i}`);
   }
 
-  function extractBody(functionMarker: string, bodyAnchor: string): string {
-    const markerStart = cliSource.indexOf(functionMarker);
-    if (markerStart === -1) throw new Error(`function marker not found in src/cli.ts: ${functionMarker}`);
-    const anchorIndex = cliSource.indexOf(bodyAnchor, markerStart);
-    if (anchorIndex === -1) throw new Error(`body anchor not found after marker in src/cli.ts: ${bodyAnchor}`);
+  function skipComment(i: number, src: string = cliSource): number {
+    // src[i] is the leading '/' of a line (`//`) or block (`/*`) comment;
+    // returns the index AFTER it. Comments carry apostrophes and braces in
+    // prose (e.g. "verifyAuthedGet's doc") that would otherwise be mistaken
+    // for a string opener or a body brace and desync the scan (flair#1636).
+    if (src[i + 1] === "/") {
+      const nl = src.indexOf("\n", i);
+      return nl === -1 ? src.length : nl + 1;
+    }
+    const close = src.indexOf("*/", i + 2);
+    return close === -1 ? src.length : close + 2;
+  }
+
+  function extractBody(functionMarker: string, bodyAnchor: string, src: string = cliSource): string {
+    const markerStart = src.indexOf(functionMarker);
+    if (markerStart === -1) throw new Error(`function marker not found: ${functionMarker}`);
+    const anchorIndex = src.indexOf(bodyAnchor, markerStart);
+    if (anchorIndex === -1) throw new Error(`body anchor not found after marker: ${bodyAnchor}`);
 
     // The body's opening brace is the LAST *real* (not inside a string/
     // template literal — e.g. a `${port}` interpolation between the
@@ -519,8 +552,9 @@ describe("structural: adopted commands consolidate onto authedRequest, not their
     let braceStart = -1;
     let i = markerStart;
     while (i < anchorIndex) {
-      const c = cliSource[i];
-      if (c === '"' || c === "'" || c === "`") { i = skipString(i); continue; }
+      const c = src[i];
+      if (c === "/" && (src[i + 1] === "/" || src[i + 1] === "*")) { i = skipComment(i, src); continue; }
+      if (c === '"' || c === "'" || c === "`") { i = skipString(i, src); continue; }
       if (c === "{") braceStart = i;
       i++;
     }
@@ -528,13 +562,14 @@ describe("structural: adopted commands consolidate onto authedRequest, not their
 
     let depth = 0;
     i = braceStart;
-    while (i < cliSource.length) {
-      const c = cliSource[i];
-      if (c === '"' || c === "'" || c === "`") { i = skipString(i); continue; }
+    while (i < src.length) {
+      const c = src[i];
+      if (c === "/" && (src[i + 1] === "/" || src[i + 1] === "*")) { i = skipComment(i, src); continue; }
+      if (c === '"' || c === "'" || c === "`") { i = skipString(i, src); continue; }
       if (c === "{") depth++;
       else if (c === "}") {
         depth--;
-        if (depth === 0) return cliSource.slice(braceStart, i + 1);
+        if (depth === 0) return src.slice(braceStart, i + 1);
       }
       i++;
     }
@@ -577,12 +612,13 @@ describe("structural: adopted commands consolidate onto authedRequest, not their
     expect(healthDetailFetches).toBe(0);
   });
 
-  test("`flair bootstrap`'s action delegates to authedRequest — no inline header-building / raw fetch of its own", () => {
+  test("`flair bootstrap`'s action delegates to authedRequest — no inline header-building / raw fetch of its own (src/commands/bootstrap.ts, flair#1636)", () => {
     const body = extractBody(
       '.command("bootstrap")',
       // flair#1183: bootstrap now resolves its signer through the canonical
       // seam (resolveSigningAgentId) instead of the low-level resolveAgentIdOrEnv.
       'const { agentId, source } = resolveSigningAgentId(opts, "bootstrap");',
+      bootstrapSource,
     );
     expect(body).toContain("authedRequest(");
     expect(body).not.toContain("buildEd25519Auth(");

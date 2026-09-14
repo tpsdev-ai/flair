@@ -20,6 +20,10 @@ function stripComments(s: string): string {
 }
 
 const cliSrc = stripComments(readFileSync(join(import.meta.dir, "..", "..", "src", "cli.ts"), "utf8"));
+// flair#1636 (epic #1618): `flair init`'s two HARPER_SET_CONFIG builders moved
+// to src/commands/init.ts, so "every production spawn path" now spans two files.
+const initSrc = stripComments(readFileSync(join(import.meta.dir, "..", "..", "src", "commands", "init.ts"), "utf8"));
+const spawnSrc = `${cliSrc}\n${initSrc}`;
 const lifecycleSrc = stripComments(
   readFileSync(join(import.meta.dir, "..", "helpers", "harper-lifecycle.ts"), "utf8"),
 );
@@ -32,9 +36,9 @@ describe("MQTT is fully disabled on every production spawn path (flair#1586)", (
   });
 
   test("all three HARPER_SET_CONFIG builders use MQTT_DISABLED_CONFIG", () => {
-    const uses = [...cliSrc.matchAll(/mqtt:\s*MQTT_DISABLED_CONFIG/g)];
+    const uses = [...spawnSrc.matchAll(/mqtt:\s*MQTT_DISABLED_CONFIG/g)];
     expect(uses.length).toBe(3);
-    expect(cliSrc).not.toMatch(/mqtt:\s*\{\s*network:\s*\{\s*port:\s*null\s*\}/);
+    expect(spawnSrc).not.toMatch(/mqtt:\s*\{\s*network:\s*\{\s*port:\s*null\s*\}/);
   });
 
   test("buildDirectSpawnEnv re-asserts the disable via MQTT_* env vars", () => {

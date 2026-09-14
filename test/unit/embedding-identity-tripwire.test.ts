@@ -79,8 +79,10 @@
  *      mixed vector spaces. Scoped (not whole-file) because health.ts also
  *      covers unrelated stats (Relationships, Soul, migrations) with no
  *      embedding-identity logic to false-positive on.
- *   3. src/cli.ts, SCOPED to the `reembed` command's action body — `flair
- *      reembed --stale-only`'s CLI-side staleness decision. A SEPARATE
+ *   3. src/commands/reembed.ts, SCOPED to the `reembed` command's action
+ *      body — `flair reembed --stale-only`'s CLI-side staleness decision
+ *      (moved out of src/cli.ts by flair#1636, epic #1618; see that command's
+ *      own comment). A SEPARATE
  *      build target from resources/**.ts (see that command's own comment:
  *      tsconfig.cli.json can't reach resources/), so it duplicates
  *      getModelId()'s gate-then-suffix logic as literals — a second place
@@ -260,8 +262,9 @@ function extractFunctionBody(src: string, fnName: string, file: string) {
 /**
  * Extract a `.command("<name>")` chain's `.action(async (opts) => { ... })`
  * body via brace-matching from the first `{` after the marker's next
- * `.action(async (opts) => {`. Used for src/cli.ts's `reembed` command,
- * which is an inline arrow function (no `function name(` to anchor on).
+ * `.action(async (opts) => {`. Used for the `reembed` command (now
+ * src/commands/reembed.ts, flair#1636), which is an inline arrow function
+ * (no `function name(` to anchor on).
  */
 function extractCommandActionBody(src: string, commandName: string, file: string) {
   const commandMarker = `.command("${commandName}")`;
@@ -324,8 +327,8 @@ const SCAN_TARGETS: ScanTarget[] = [
     extract: (src, file) => extractBetweenMarkers(src, "// ── Memory stats ──", "// ── Relationships ──", file),
   },
   {
-    file: "src/cli.ts",
-    label: "cli.ts:reembed action body",
+    file: "src/commands/reembed.ts",
+    label: "reembed.ts action body",
     why: "flair reembed --stale-only's CLI-side staleness decision — a separate build target that duplicates getModelId()'s gate-then-suffix logic as literals (must never drift from resources/embeddings-provider.ts's getModelId())",
     extract: (src, file) => extractCommandActionBody(src, "reembed", file),
   },
@@ -370,7 +373,7 @@ describe("embedding-identity tripwire (flair#749)", () => {
       new Set([
         "resources/migrations/embedding-stamp.ts",
         "resources/health.ts",
-        "src/cli.ts",
+        "src/commands/reembed.ts",
         "resources/Memory.ts",
       ]),
     );
@@ -378,7 +381,7 @@ describe("embedding-identity tripwire (flair#749)", () => {
 
   it("sanity: existing metadata comparisons do not trip the scanner (token-boundary check)", () => {
     // Mirrors real code shipped today (embedding-stamp.ts / health.ts /
-    // cli.ts's reembed command) — `embeddingModel === `/`!== ` and
+    // the reembed command) — `embeddingModel === `/`!== ` and
     // `JSON.stringify(embeddingModel)` are the CORRECT, encouraged pattern
     // and must never be flagged. See the file header's "What is (and isn't)
     // a violation" section for the character-boundary reasoning.

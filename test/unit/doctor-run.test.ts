@@ -121,7 +121,9 @@ describe("flair#1439 — catalog is the contract", () => {
   });
 
   test("flair doctor drives install-health through runDoctorChecks — one catalog widens both", () => {
-    const src = readFileSync(join(import.meta.dirname, "../../src/cli.ts"), "utf-8");
+    // flair#1636 (epic #1618): the `flair doctor` registration moved to
+    // src/commands/doctor.ts; follow it there.
+    const src = readFileSync(join(import.meta.dirname, "../../src/commands/doctor.ts"), "utf-8");
     const doctorIdx = src.indexOf('.command("doctor")');
     expect(doctorIdx).toBeGreaterThan(-1);
     const nextCommand = src.indexOf(".command(\"", doctorIdx + '.command("doctor")'.length);

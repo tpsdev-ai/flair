@@ -175,7 +175,9 @@ describe("flair#1485 — one catalogue of files we own and pin", () => {
   });
 
   it("flair upgrade's pin refresh calls refreshOwnedPins — one function, not a second list", () => {
-    const src = readFileSync(join(import.meta.dirname, "../../src/cli.ts"), "utf-8");
+    // flair#1636 (epic #1618): the `flair upgrade` registration moved to
+    // src/commands/upgrade.ts; follow it there.
+    const src = readFileSync(join(import.meta.dirname, "../../src/commands/upgrade.ts"), "utf-8");
     const upgradeIdx = src.indexOf(".command(\"upgrade\")");
     expect(upgradeIdx).toBeGreaterThan(-1);
     const nextCommand = src.indexOf(".command(\"", upgradeIdx + ".command(\"upgrade\")".length);
