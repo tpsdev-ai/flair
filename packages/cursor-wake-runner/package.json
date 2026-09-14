@@ -19,7 +19,7 @@
     "wake": "bun src/cli.ts"
   },
   "dependencies": {
-    "@tpsdev-ai/flair-client": "0.53.0"
+    "@tpsdev-ai/flair-client": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "24.11.0"
