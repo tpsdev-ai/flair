@@ -172,15 +172,24 @@ function proxyToUpstream(req, res) {
 
 const server = createServer((req, res) => {
   const pathname = decodeURIComponent((req.url ?? "/").split("?")[0]);
-  const isMetadata =
-    pathname === `/${pkgName}` ||
-    pathname === `/${pkgName}/` ||
+  // `/latest` is the VERSION MANIFEST on the real registry (a single version
+  // document with a top-level `version`), not the full packument. `flair
+  // upgrade` reads `data.version` from it, so serving the packument here would
+  // make the update check skip the package entirely.
+  const isLatest =
     pathname === `/${pkgName}/latest`;
+  const isPackument =
+    pathname === `/${pkgName}` ||
+    pathname === `/${pkgName}/`;
   const isTarball =
     pathname === `/${pkgName}/-/${tarballName}` || pathname.endsWith(`/${tarballName}`);
 
   if (req.method === "GET" || req.method === "HEAD") {
-    if (isMetadata) {
+    if (isLatest) {
+      sendJson(res, 200, versionDocument);
+      return;
+    }
+    if (isPackument) {
       sendJson(res, 200, packument);
       return;
     }

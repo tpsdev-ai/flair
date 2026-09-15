@@ -378,7 +378,16 @@ echo "npm @tpsdev-ai registry: $(npm config get @tpsdev-ai:registry)"
 echo "resolved target via npm: $(npm view '@tpsdev-ai/flair' version)"
 
 log "Upgrade baseline -> PR build (the flair#1683 path)"
-flair upgrade 2>&1 | tee "$DIAG_DIR/flair-upgrade.log"
+# `flair upgrade`'s update check fetches registry.npmjs.org with a hardcoded
+# host, bypassing the @tpsdev-ai:registry npm config set above. Without this
+# preload it compares the installed baseline against the public latest
+# dist-tag, reports "current", and no-ops — so the PR build is never installed
+# and this lane never reaches flair#1683. The preload rewrites only
+# @tpsdev-ai/* registry fetches to the local shim; the actual `npm install -g`
+# still resolves through the scoped registry config.
+NODE_OPTIONS="${NODE_OPTIONS:-} --require $WORKSPACE/scripts/ci/redirect-upgrade-registry.cjs" \
+  LOCAL_NPM_REGISTRY_URL="http://127.0.0.1:${REGISTRY_PORT}" \
+  flair upgrade 2>&1 | tee "$DIAG_DIR/flair-upgrade.log"
 
 log "Assert the upgraded instance is the PR build, under launchd"
 assert_launchd_serving "$LABEL" "post-upgrade" "$BASELINE_PID"
