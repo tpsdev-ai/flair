@@ -239,7 +239,6 @@ if [[ "$MODE" == "--publish" ]]; then
   echo "🔨 Building from merged main..."
   (cd "$ROOT" && npm run build && npm run build:cli) || { echo "❌ Build failed"; exit 1; }
   (cd "$ROOT/packages/flair-client" && npm run build) || { echo "❌ flair-client build failed"; exit 1; }
-  (cd "$ROOT/packages/flair-tool-descriptors" && npm run build) || { echo "❌ flair-tool-descriptors build failed"; exit 1; }
   (cd "$ROOT/packages/flair-mcp" && npm run build) || { echo "❌ flair-mcp build failed"; exit 1; }
   (cd "$ROOT/packages/n8n-nodes-flair" && npm run build) || { echo "❌ n8n-nodes-flair build failed"; exit 1; }
 
@@ -398,7 +397,12 @@ echo "📌 Bumping source version declarations..."
 }
 
 # 3. Update internal dependencies (flair-mcp + leaf packages depend on
-#    flair-client; flair-mcp + root depend on flair-tool-descriptors)
+#    flair-client).
+#
+#    There is deliberately NO @tpsdev-ai/flair-tool-descriptors entry: since
+#    flair#1683 that package is private and vendored into each consumer's source
+#    at build time, so no package.json declares it and there is no specifier to
+#    align (release.sh must not touch the descriptors package).
 echo "🔗 Aligning internal dependencies..."
 for INTERNAL_DEPENDENT in \
     "$ROOT/package.json" \
@@ -416,11 +420,6 @@ for INTERNAL_DEPENDENT in \
       pkg.dependencies['@tpsdev-ai/flair-client'] = '$VERSION';
       changed = true;
       console.log('  ✓ ' + pkg.name + ' → flair-client: $VERSION');
-    }
-    if (pkg.dependencies?.['@tpsdev-ai/flair-tool-descriptors']) {
-      pkg.dependencies['@tpsdev-ai/flair-tool-descriptors'] = '$VERSION';
-      changed = true;
-      console.log('  ✓ ' + pkg.name + ' → flair-tool-descriptors: $VERSION');
     }
     if (changed) fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + '\\n');
   "
@@ -453,8 +452,12 @@ echo "🔒 Refreshing bun.lock..."
 # untouched — the regex only matches the "x.y.z" version-string form), then
 # HARD-VERIFY with --frozen-lockfile so a residual desync fails the release loud
 # instead of silently shipping a broken lockfile.
+#
+# flair#1683: no @tpsdev-ai/flair-tool-descriptors alternative here — the
+# descriptors package is private and vendored at build time, so no published
+# specifier exists to align (and `bun install --frozen-lockfile` below proves it).
 echo "🔗 Aligning bun.lock internal-dep specifiers..."
-perl -i -pe 's{("\@tpsdev-ai/flair-client":\s*")\d+\.\d+\.\d+(")}{${1}'"$VERSION"'${2}}g; s{("\@tpsdev-ai/flair-tool-descriptors":\s*")\d+\.\d+\.\d+(")}{${1}'"$VERSION"'${2}}g' "$ROOT/bun.lock"
+perl -i -pe 's{("\@tpsdev-ai/flair-client":\s*")\d+\.\d+\.\d+(")}{${1}'"$VERSION"'${2}}g' "$ROOT/bun.lock"
 (cd "$ROOT" && bun install --frozen-lockfile) || {
   echo "❌ bun.lock still desynced after specifier alignment — investigate before releasing."; exit 1;
 }
@@ -463,7 +466,6 @@ perl -i -pe 's{("\@tpsdev-ai/flair-client":\s*")\d+\.\d+\.\d+(")}{${1}'"$VERSION
 echo "🔨 Building..."
 (cd "$ROOT" && npm run build && npm run build:cli) || { echo "❌ Build failed"; exit 1; }
 (cd "$ROOT/packages/flair-client" && npm run build) || { echo "❌ flair-client build failed"; exit 1; }
-(cd "$ROOT/packages/flair-tool-descriptors" && npm run build) || { echo "❌ flair-tool-descriptors build failed"; exit 1; }
 (cd "$ROOT/packages/flair-mcp" && npm run build) || { echo "❌ flair-mcp build failed"; exit 1; }
 (cd "$ROOT/packages/n8n-nodes-flair" && npm run build) || { echo "❌ n8n-nodes-flair build failed"; exit 1; }
 echo "  ✓ All packages built"

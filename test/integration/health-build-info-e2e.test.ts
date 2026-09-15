@@ -98,7 +98,14 @@ describe("/Health serves the build's own identity (flair#1076)", () => {
     // The stamp is only a deploy discriminator if it actually leaves the
     // building machine. --dry-run --json lists the real pack payload from the
     // files array; no tarball is written.
-    const out = execFileSync("npm", ["pack", "--dry-run", "--json"], {
+    //
+    // --ignore-scripts: flair#1683 added a root `prepack` (re-vendor + rebuild)
+    // so a bare `npm pack` cannot ship a stale dist. Here the payload is the
+    // ALREADY-BUILT dist this suite is running against — letting prepack fire
+    // would `rm -rf dist` and rebuild under a live harper mid-suite. The built
+    // artifact's identity is bound to the descriptor source in
+    // scripts/check-shipped-descriptors.mjs (install-weight lane).
+    const out = execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
       cwd: REPO_ROOT,
       encoding: "utf-8",
       maxBuffer: 64 * 1024 * 1024,

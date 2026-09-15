@@ -8,9 +8,12 @@
  *   npm warn reify invalid or damaged lockfile detected        (×8)
  *   added 50 packages                                          (0.53.0 added 543)
  *   require.resolve('fs-extra', { paths: [<tree>/…/harper/dist/utility/logging] })
- *     → MODULE_NOT_FOUND
+ *     → MODULE_NOT_FOUND (or, worse, a hit OUTSIDE the tree — see resolveFromLoggingDir)
  *   node <tree>/node_modules/harper/dist/bin/harper.js version
  *     → throws; the engine cannot start
+ *
+ * The package-count floor it enforces lives in the reviewed budget file
+ * (.github/install-weight-budget.json → minPackages), not in this script.
  *
  * Cause: 0.54.1's `bundleDependencies: ["@tpsdev-ai/flair-tool-descriptors"]`
  * (#1681) interacted with harper's own npm-shrinkwrap.json. npm's reify then
@@ -39,25 +42,42 @@
  *       never silently green. Mirrors check-install-weight.mjs.
  */
 
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
+/** Repo-relative path of the reviewed weight/floor budget (see readMinPackages). */
+export const BUDGET_REL = join(".github", "install-weight-budget.json");
+
+/** Repo root, resolved from this script's location (scripts/ → repo root). */
+export function repoRoot() {
+  return dirname(dirname(fileURLToPath(import.meta.url)));
+}
+
 /**
- * Minimum "added N packages" count for the installed tree.
+ * Floor for npm's "added N packages" line, read from the reviewed budget file
+ * (`.github/install-weight-budget.json` → `minPackages`) rather than a literal
+ * in this script, so the number is reviewed with the rest of the ratchet instead
+ * of moving in a diff nobody reads.
  *
- * Measured baseline: 0.53.0 (the last good release, no bundleDependencies)
- * reported "added 543 packages" on 2026-09-15; the broken 0.54.1 reported
- * "added 50 packages" (npm 10.9.4 / node 22). The flair#1683 report measured
- * 560 and 44 respectively on a different npm — same shape, slightly different
- * counts. 500 sits above both broken shapes and below both healthy baselines,
- * so ordinary dependency-graph churn does not trip it while a collapsed harper
- * subtree does. Re-measure and move this with a comment if a release
- * legitimately changes the tree by >40 packages.
+ * Measured baselines: 0.53.0 (the last good release, no bundleDependencies)
+ * reported "added 543 packages" on npm 10.9.4 / node 22 (this file's Linux CI
+ * box) and 560 on npm 11; the broken 0.54.1 reported 50 (npm 10) / 44 (npm 11
+ * on macOS). 515 is 95% of the npm-10 baseline, below both healthy baselines and
+ * above a 10% collapse (489). Re-measure and move the field with a comment if a
+ * release legitimately changes the tree by >40 packages.
  */
-export const MIN_PACKAGES = 500;
+export function readMinPackages(root = repoRoot()) {
+  const raw = JSON.parse(readFileSync(join(root, BUDGET_REL), "utf8"));
+  const value = Number(raw.minPackages);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${BUDGET_REL} is missing a positive minPackages`);
+  }
+  return value;
+}
 
 /** Harness paths inside a `--prefix <p>` global install. */
 export function treePaths(prefix) {
@@ -80,16 +100,35 @@ export function hasDamagedLockfileWarning(log) {
   return /invalid or damaged lockfile/.test(log);
 }
 
-/** Resolve `fs-extra` the way harper's logging dir would at runtime. */
+/**
+ * Resolve `fs-extra` the way harper's logging dir would at runtime, and require
+ * the hit to be INSIDE the installed tree.
+ *
+ * The in-tree assertion is the whole point: if harper's subtree was never built, a
+ * developer box whose TMPDIR sits under a tree with a node_modules/fs-extra would
+ * otherwise resolve the AMBIENT copy and report the broken install green (flaky-on-
+ * developer, green-on-CI). A hoisted/ambient hit is a failure, not a pass.
+ */
 export function resolveFromLoggingDir(paths) {
   const require = createRequire(import.meta.url);
+  let resolved;
   try {
-    return { ok: true, resolved: require.resolve("fs-extra", { paths: [paths.harperLoggingDir] }) };
+    resolved = require.resolve("fs-extra", { paths: [paths.harperLoggingDir] });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    // Drop Node's "Require stack:" tail — it names this script, not the tree.
+    // Drop node's "Require stack:" tail — it names this script, not the tree.
     return { ok: false, error: message.split("\n")[0].trim() };
   }
+  if (!resolved.startsWith(paths.flair)) {
+    return {
+      ok: false,
+      resolved,
+      error:
+        `resolved outside the installed tree (${resolved}) — an ambient/hoisted copy ` +
+        "hides harper's missing dependency tree",
+    };
+  }
+  return { ok: true, resolved };
 }
 
 /** Run the engine's own version probe. */
@@ -112,7 +151,10 @@ export function harperVersion(paths) {
  * and the on-disk tree, returns findings. Unit-tested in
  * test/unit/global-install-lockfile.test.ts.
  */
-export function evaluateInstall({ log, paths, minPackages = MIN_PACKAGES }) {
+export function evaluateInstall({ log, paths, minPackages }) {
+  if (!Number.isFinite(minPackages) || minPackages <= 0) {
+    throw new Error("evaluateInstall requires a positive minPackages (see readMinPackages)");
+  }
   const failures = [];
 
   if (hasDamagedLockfileWarning(log)) {
@@ -126,7 +168,10 @@ export function evaluateInstall({ log, paths, minPackages = MIN_PACKAGES }) {
   if (added === null) {
     failures.push('install log has no "added N packages" line — cannot confirm the tree was created');
   } else if (added < minPackages) {
-    failures.push(`added ${added} packages, below the ${minPackages} floor (0.53.0 measured 543) — dependency tree collapsed`);
+    failures.push(
+      `added ${added} packages, below the ${minPackages} floor ` +
+        `(0.53.0 measured 543 on npm 10, 560 on npm 11) — dependency tree collapsed`,
+    );
   }
 
   const fsExtra = resolveFromLoggingDir(paths);
@@ -143,7 +188,7 @@ export function evaluateInstall({ log, paths, minPackages = MIN_PACKAGES }) {
 }
 
 function parseArgs(argv) {
-  const opts = { pkg: null, keep: false, prefix: null, minPackages: MIN_PACKAGES };
+  const opts = { pkg: null, keep: false, prefix: null, minPackages: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--package" || a === "--tarball") opts.pkg = argv[++i];
@@ -198,7 +243,11 @@ function main() {
       process.exit(2);
     }
 
-    const result = evaluateInstall({ log, paths, minPackages: opts.minPackages });
+    const result = evaluateInstall({
+      log,
+      paths,
+      minPackages: opts.minPackages ?? readMinPackages(),
+    });
     console.error(
       `[global-install] added=${result.added ?? "(none)"} fs-extra=${result.fsExtra.ok ? "ok" : "FAIL"} ` +
         `harper version=${result.harper.ok ? result.harper.version : "FAIL"}`,

@@ -55,9 +55,30 @@ describe("vendored tool descriptors (flair#1683)", () => {
       expect(pkg.dependencies?.[BUNDLED_NAME], `${rel} dependencies`).toBeUndefined();
       expect(pkg.devDependencies?.[BUNDLED_NAME], `${rel} devDependencies`).toBeUndefined();
       expect(pkg.bundleDependencies ?? [], `${rel} bundleDependencies`).toEqual([]);
-      // The retired materializer ran here; nothing should prepack the descriptors.
-      expect(pkg.scripts?.prepack, `${rel} prepack`).toBeUndefined();
+      // The retired materializer ran here; nothing should prepack the descriptors
+      // PACKAGE. `prepack` itself must exist — it re-vendors + rebuilds so a bare
+      // `npm pack` cannot ship a stale/tampered dist (Sherlock's BLOCKING 2).
+      expect(pkg.scripts?.prepack, `${rel} prepack`).toBeDefined();
+      expect(pkg.scripts?.prepack, `${rel} prepack must not touch the private package`).not.toContain(
+        "flair-tool-descriptors",
+      );
     }
+  });
+
+  test("a bare `npm pack` re-vendors and rebuilds via prepack", () => {
+    // prepack (not prepublishOnly) because `npm pack` — what the Docker pack
+    // images, pack-smoke and install-weight run — fires prepack but NOT
+    // prepublishOnly. Without it, a stale dist/ ships verbatim: Sherlock injected
+    // a marker into dist/resources/tool-descriptors/index.js and packed it.
+    const root = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8"));
+    const mcp = JSON.parse(readFileSync(join(REPO, "packages/flair-mcp/package.json"), "utf8"));
+    // Rebuilding runs prebuild first, which is where the vendoring happens.
+    expect(root.scripts.prepack).toBe("npm run build && npm run build:cli");
+    expect(root.scripts.prebuild).toContain("scripts/vendor-tool-descriptors.mjs");
+    expect(mcp.scripts.prepack).toBe("npm run build");
+    expect(mcp.scripts.prebuild).toContain("scripts/vendor-tool-descriptors.mjs");
+    // And the shipped artifact is bound to the source of truth by the
+    // install-weight lane (scripts/check-shipped-descriptors.mjs).
   });
 
   test("both consumers vendor at prebuild time", () => {

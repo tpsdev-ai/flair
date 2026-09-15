@@ -2,6 +2,8 @@
   "_comment": "Ratchet on the installed tree of `npm i -g` of the packed tarball (apparent bytes, linux CI). NOT the tarball — that is a few MB and would hide a 400 MB tree (flair#1004). Bytes are what the gate compares. The report prints MB as bytes/1024/1024 — do not divide bytes by 1e6 and compare that to the printed MB figure. Linux CI on e1a3e71 measured 309004489 bytes / 542 packages (prints as 294.7 MB). Set slightly above that; lower on purpose when weight drops. Do not disable the gate.",
   "maxBytes": 330000000,
   "maxPackages": 570,
+  "_minPackagesComment": "Floor for the flair#1683 global-install check's added-N-packages line — a count below it means npm's reify gave up (0.54.1: 50 added on npm 10 / 44 on npm 11+macOS) instead of building harper's dependency tree. Reviewed here, with the rest of the ratchet, rather than as a literal in the script. Platform/npm variance: the last good release 0.53.0 measured 543 added on npm 10.9.4/node 22 (this file's Linux CI box) and 560 on npm 11/macOS; 515 is 95% of the npm-10 baseline — under both healthy baselines and above a 10% collapse (489). Re-measure and move it with a comment if a release legitimately shifts the tree by >40 packages.",
+  "minPackages": 515,
   "baseline": {
     "bytes": 309004489,
     "packages": 542,

@@ -19,6 +19,13 @@
   fails on any of the four symptoms above, so an install that cannot start its
   engine can no longer go green (Refs #1683, #1681, #1684).
 
+  The artifact that ships is bound to that source as well. `npm pack` now
+  re-vendors and rebuilds before packing, so a stale or hand-edited `dist/`
+  cannot ship verbatim, and the same lane extracts both published tarballs and
+  requires their descriptor modules to match
+  `packages/flair-tool-descriptors/src/index.ts` exactly — a tarball that ships
+  no descriptors fails instead of passing as "nothing to compare".
+
   > **Heads-up:** do not install `@tpsdev-ai/flair@0.54.1` into a global prefix.
   > Installing the next release replaces the broken tree in place; no manual
   > cleanup is needed.

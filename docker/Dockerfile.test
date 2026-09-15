@@ -37,8 +37,11 @@ RUN bun add @node-llama-cpp/linux-x64@3 --no-save
 
 # Build resources (tsc → dist/resources/*.js) and CLI (tsc → dist/cli.js).
 # flair#1683: prebuild vendors the descriptor source into resources/tool-descriptors,
-# so the built dist carries the descriptors and this stage no longer needs the
-# private workspace package materialized into node_modules.
+# so this build resolves it without the private workspace package materialized into
+# node_modules. The `test` stage below does `COPY --from=base /app/dist`, so this
+# RUN is what emits it — removing it fails the build with "failed to calculate
+# checksum" on that COPY (a from-scratch image has no host dist/ to fall back on).
+RUN bun run build && bun run build:cli
 
 # ── Test stage ────────────────────────────────────────────────────────────────
 

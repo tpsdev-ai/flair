@@ -356,6 +356,13 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
     // used to need the private descriptor package staged alongside it, so a
     // files[]-only `npm pack` here is enough (same set the Docker pack images
     // copy).
+    //
+    // --ignore-scripts because flair#1683 added a root `prepack` (re-vendor +
+    // rebuild) so a bare `npm pack` cannot ship a stale dist. This stage is a
+    // files[] subset — no src/, tsconfig or node_modules — so prepack would try
+    // to run `npm run build` here and fail. The payload is deliberately packed
+    // pre-built; the tarball's own build identity is asserted in
+    // scripts/check-shipped-descriptors.mjs (install-weight lane) instead.
     for (const entry of rootPkg.files) {
       const src = join(repoRoot, entry.replace(/\/$/, ""));
       if (!existsSync(src)) continue;
@@ -364,7 +371,7 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
     writeFileSync(join(stage, "package.json"), JSON.stringify({ ...rootPkg, version: localVersion }, null, 2) + "\n");
 
     const packed = expectOk(
-      await run("npm", ["pack", "--pack-destination", sandbox], { cwd: stage, env: packEnv, timeoutMs: CLI_TIMEOUT_MS }),
+      await run("npm", ["pack", "--ignore-scripts", "--pack-destination", sandbox], { cwd: stage, env: packEnv, timeoutMs: CLI_TIMEOUT_MS }),
       "npm pack (local upgrade)",
     );
     const tarball = join(sandbox, packed.stdout.trim().split("\n").pop()!.trim());

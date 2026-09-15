@@ -677,7 +677,12 @@ jobs:
       - name: Pack
         id: pack
         run: |
-          npm pack
+          # --ignore-scripts: flair#1683's root `prepack` re-vendors + rebuilds so a
+          # bare `npm pack` cannot ship stale dist. This lane packs the dist it just
+          # built and import-checked above (its point is the install surface, not the
+          # rebuild), so an extra build per matrix leg buys nothing. The install-weight
+          # lane packs WITHOUT the flag — that is where prepack is exercised in CI.
+          npm pack --ignore-scripts
           echo "TGZ_PATH=$(pwd)/$(ls tpsdev-ai-flair-*.tgz)" >> $GITHUB_OUTPUT
       - name: Install-from-tarball + daemon lifecycle round-trip
         run: |
@@ -1029,11 +1034,47 @@ jobs:
             bun-cache-${{ runner.os }}-
       - run: sfw bun install --frozen-lockfile
       - run: bun run build && bun run build:cli
+      # flair-mcp ships as its own package and is NOT built by the root scripts,
+      # so its vendored + compiled descriptor module does not exist yet. Build it
+      # here: the check below would otherwise exit 2 (DID NOT RUN) instead of
+      # binding the second consumer's shipped bytes.
+      - name: Build flair-mcp
+        run: bun run build
+        working-directory: packages/flair-mcp
+      - name: Built descriptors match the source of truth (flair#1683)
+        # Before packing: the dist this build produced must carry the vendored
+        # descriptor module, and that module's signature (count, tool names,
+        # native/stdio split, sha256 of the serialized descriptors) must equal a
+        # FRESH evaluation of packages/flair-tool-descriptors/src/index.ts. A
+        # vendoring step that silently no-ops, or a stale dist/, fails here.
+        run: |
+          node scripts/check-shipped-descriptors.mjs \
+            --module dist/resources/tool-descriptors/index.js \
+            --module packages/flair-mcp/dist/tool-descriptors/index.js
       - name: Pack
         id: pack
         run: |
           npm pack
           echo "TGZ_PATH=$(pwd)/$(ls tpsdev-ai-flair-*.tgz)" >> $GITHUB_OUTPUT
+      - name: Pack flair-mcp
+        id: pack-mcp
+        run: |
+          npm pack
+          echo "TGZ_PATH=$(pwd)/$(ls tpsdev-ai-flair-mcp-*.tgz)" >> $GITHUB_OUTPUT
+        working-directory: packages/flair-mcp
+      - name: Shipped descriptors match the source of truth (flair#1683)
+        # After packing: the tarballs a release would publish are the thing under
+        # test, not the worktree. Both packs above are BARE (`npm pack`, no
+        # --ignore-scripts), so the root `prepack` re-vendored and rebuilt first —
+        # a stale or tampered dist/ cannot be what ships. These checks then read
+        # the extracted payload and require every dist/**/tool-descriptors/
+        # index.js entry to match the same source signature. A tarball with ZERO
+        # such entries fails loudly (Sherlock: "an empty surface must not pass as
+        # nothing to compare").
+        run: |
+          node scripts/check-shipped-descriptors.mjs \
+            --tarball "${{ steps.pack.outputs.TGZ_PATH }}" \
+            --tarball "${{ steps.pack-mcp.outputs.TGZ_PATH }}"
       - name: Global-install the packed tarball and enforce the installed-tree budget
         run: node scripts/check-install-weight.mjs --tarball "${{ steps.pack.outputs.TGZ_PATH }}"
       - name: Global-install lockfile regression (flair#1683)
