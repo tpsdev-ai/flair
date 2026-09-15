@@ -1,0 +1,197 @@
+name: Post-publish canary — install + boot a published version
+
+# flair#1686. The 0.54.1 release was published with every CI light green and could
+# not start its engine on a fresh `npm i -g` (flair#1683); `latest` pointed at it
+# for ~1.5 h until a human moved the tag by hand. Nothing between publish and
+# announce installed the published artifact the way a user does and booted it.
+#
+# This is that last line. It is dispatched by whoever approved the staged package
+# on npmjs.com, immediately after the approval (npm exposes no approval webhook,
+# and polling a human action in CI is waste). `release-publish.yml` stages with
+# `--tag staged`, so between approval and promote the version is public but NOT
+# `latest` — the window this canary uses.
+#
+# It runs on a clean ubuntu-latest AND macos-latest, credential-less: no npm
+# token, no OIDC (`id-token: write` is deliberately absent — the publish
+# identity must never be in a job that installs and runs third-party code), and
+# lifecycle scripts are ON exactly as a user's install runs them.
+#
+# THE CONTRACT
+#   - The version is installed by EXACT version, never a dist-tag; the canary
+#     must install the bytes it was dispatched for.
+#   - The published tarball's sha256 must equal the `expected_sha256` recorded
+#     for the staged tarball. A mismatch is a stop (npm versions are immutable, so
+#     a matching sha is what makes the later promote race-free). npm exposes no
+#     sha256 directly — `dist.shasum` is SHA-1 — so
+#     `scripts/ci/registry-tarball-sha256.mjs` downloads the tarball and hashes it.
+#   - The four install-tree assertions and the boot contract live in shared
+#     scripts (`scripts/check-global-install-lockfile.mjs --registry-version` and
+#     `scripts/ci/check-instance-boot.sh`) — the PR install-weight lane and the
+#     rockit deploy ritual call the same definitions.
+#   - No `continue-on-error`. An unmeasurable canary (registry lag, runner
+#     outage, missing tree) is a FAIL, never a skip.
+#
+# WHAT IT EMITS
+#   PASS prints the complete, sha256-bound promote command; FAIL prints the
+#   `npm deprecate` command. The human's job is approve-on-npmjs, then paste one
+#   line — a stale PASS, a re-cut version, or a paste-from-FAIL aborts at the
+#   `test` before `latest` can move.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Published version to canary, exact (e.g. 0.54.2). Must be 2FA-approved and public."
+        required: true
+        type: string
+      expected_sha256:
+        description: "sha256 of the published @tpsdev-ai/flair@<version> tarball (64 hex); the canary downloads and verifies it."
+        required: true
+        type: string
+
+# Credential-less by construction: no top-level token, no OIDC. The job grants
+# only `contents: read` for checkout (with credentials not persisted).
+permissions: {}
+
+concurrency:
+  group: canary-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    name: canary ${{ inputs.version }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          # NO registry-url — that writes an .npmrc pointing at
+          # _authToken=${NODE_AUTH_TOKEN} and a job with no token fails E401.
+          # This job is credential-less and reads the public registry only.
+
+      - name: Pin npm
+        # flair#1686 A4d: the install-tree floor is npm-major-specific (543 added
+        # on npm 10.9.4, 560 on npm 11). A PASS must mean the number it printed,
+        # so the runner's npm is pinned to one exact version. Never `@latest`.
+        run: |
+          set -euo pipefail
+          npm install -g npm@11.19.1
+          echo "npm $(npm --version)"
+
+      - name: Verify the published tarball's sha256
+        id: sha
+        env:
+          VERSION: ${{ inputs.version }}
+          EXPECTED: ${{ inputs.expected_sha256 }}
+        run: |
+          set -uo pipefail
+          mkdir -p canary-logs
+          if ! printf '%s' "$EXPECTED" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "::error::expected_sha256 is not a 64-char hex sha256: '$EXPECTED'"
+            exit 1
+          fi
+          # npm exposes no sha256 (dist.shasum is SHA-1, dist.integrity is
+          # SHA-512), so this downloads the exact published tarball and hashes it.
+          if ! ACTUAL="$(node scripts/ci/registry-tarball-sha256.mjs "$VERSION" 2> canary-logs/sha256.err)"; then
+            echo "::error::could not hash @tpsdev-ai/flair@${VERSION} — is it approved and public? (unmeasurable is FAIL)"
+            tail -n 20 canary-logs/sha256.err || true
+            exit 1
+          fi
+          echo "expected sha256: ${EXPECTED}"
+          echo "registry sha256: ${ACTUAL}"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::sha256 mismatch — the published bytes are not the bytes the canary was dispatched for; do not promote"
+            exit 1
+          fi
+          echo "sha256 matches the published tarball"
+
+      - name: Install from the registry and run the four install-tree assertions
+        id: install
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -uo pipefail
+          mkdir -p canary-logs
+          PREFIX="$RUNNER_TEMP/flair-canary-prefix"
+          rm -rf "$PREFIX"
+          set +e
+          node scripts/check-global-install-lockfile.mjs --registry-version "$VERSION" --prefix "$PREFIX" > canary-logs/install.log 2>&1
+          rc=$?
+          set -e
+          # Evidence is grep/tail only — never a raw dump.
+          grep -nE "\[global-install\]|invalid or damaged lockfile|added [0-9]+ packages" canary-logs/install.log | tail -n 40 || true
+          if [ "$rc" -eq 2 ]; then
+            echo "::error::install check DID NOT RUN — unmeasurable is FAIL"
+            tail -n 40 canary-logs/install.log
+            exit 1
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::install check FAILED (flair#1683 class)"
+            grep -nE "✗|FAILED [0-9]+ check" canary-logs/install.log || tail -n 60 canary-logs/install.log
+            exit 1
+          fi
+          echo "PREFIX=$PREFIX" >> "$GITHUB_ENV"
+          echo "install-tree assertions PASSED"
+
+      - name: Boot the installed instance on the product path
+        id: boot
+        run: |
+          set -uo pipefail
+          mkdir -p canary-logs
+          set +e
+          FLAIR_BIN="$PREFIX/bin/flair" FLAIR_PREFIX="$PREFIX" \
+            LOG_DIR="$PWD/canary-logs/instance-boot" \
+            scripts/ci/check-instance-boot.sh > canary-logs/boot.log 2>&1
+          rc=$?
+          set -e
+          # Evidence is grep/tail only — never a raw dump (the log can carry
+          # provider URLs and paths; the password is never echoed).
+          grep -nE "^===|exit|supervised pid|descriptors present|PASS:|DID NOT RUN|::error" canary-logs/boot.log | tail -n 60 || true
+          if [ "$rc" -eq 2 ]; then
+            echo "::error::boot check DID NOT RUN — unmeasurable is FAIL"
+            tail -n 40 canary-logs/boot.log
+            exit 1
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::boot check FAILED"
+            tail -n 60 canary-logs/boot.log
+            exit 1
+          fi
+          echo "boot contract PASSED"
+
+      - name: Canary verdict — emit the promote or deprecate command
+        # Runs whether or not the checks passed; the job itself still fails on a
+        # red step (no continue-on-error anywhere). This step exists so the
+        # PASS/FAIL line — with the sha256-bound promote command, or the
+        # deprecate command — is the last thing both the log and the run summary
+        # show.
+        if: always()
+        env:
+          VERSION: ${{ inputs.version }}
+          EXPECTED: ${{ inputs.expected_sha256 }}
+          SHA_OUTCOME: ${{ steps.sha.outcome }}
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
+          BOOT_OUTCOME: ${{ steps.boot.outcome }}
+          OS_NAME: ${{ matrix.os }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          mkdir -p canary-logs
+          # The command text is defined once, in scripts/ci/canary-verdict.sh, so
+          # the emitted promote/deprecate line is the same thing the fails-first
+          # proof exercises.
+          if [ "$SHA_OUTCOME" = "success" ] && [ "$INSTALL_OUTCOME" = "success" ] && [ "$BOOT_OUTCOME" = "success" ]; then
+            scripts/ci/canary-verdict.sh pass "$VERSION" "$EXPECTED" "$RUN_URL" "$OS_NAME" | tee canary-logs/verdict.txt
+          else
+            scripts/ci/canary-verdict.sh fail "$VERSION" "$EXPECTED" "$RUN_URL" "$OS_NAME" | tee canary-logs/verdict.txt
+          fi
+          cat canary-logs/verdict.txt >> "$GITHUB_STEP_SUMMARY"

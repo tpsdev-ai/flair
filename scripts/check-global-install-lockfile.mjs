@@ -34,6 +34,14 @@
  * Usage:
  *   node scripts/check-global-install-lockfile.mjs --package <tarball|spec>
  *   node scripts/check-global-install-lockfile.mjs --package ./tpsdev-ai-flair-0.54.2.tgz --keep
+ *   node scripts/check-global-install-lockfile.mjs --registry-version 0.54.2   # flair#1686 canary
+ *
+ * flair#1686: `--registry-version <ver>` installs the published
+ * `@tpsdev-ai/flair@<ver>` from the public registry into a throwaway prefix and
+ * runs the SAME four assertions. It is the canary half of this script family —
+ * the PR lane installs the tarball packed at HEAD, the canary installs exactly
+ * what the registry serves a user, and both go through `evaluateInstall` so the
+ * contract cannot drift into two implementations.
  *
  * Exit codes:
  *   0 — every check passed
@@ -51,6 +59,24 @@ import { spawnSync } from "node:child_process";
 
 /** Repo-relative path of the reviewed weight/floor budget (see readMinPackages). */
 export const BUDGET_REL = join(".github", "install-weight-budget.json");
+
+/** The one package this regression lane knows how to install (flair#1683). */
+export const FLAIR_PACKAGE = "@tpsdev-ai/flair";
+
+/**
+ * Exact-version registry spec for the canary (`--registry-version`). Never a
+ * dist-tag: the canary must install the version it was dispatched for, not
+ * whatever `latest`/`staged` happens to point at when the job runs (flair#1686).
+ * Rejects anything that is not a plain semver so a malformed input fails closed
+ * here rather than installing an unintended spec.
+ */
+export function registryInstallSpec(version) {
+  const value = String(version ?? "").trim();
+  if (!/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?$/.test(value)) {
+    throw new Error(`--registry-version must be a semver (e.g. 0.54.2), got '${version}'`);
+  }
+  return `${FLAIR_PACKAGE}@${value}`;
+}
 
 /** Repo root, resolved from this script's location (scripts/ → repo root). */
 export function repoRoot() {
@@ -188,10 +214,11 @@ export function evaluateInstall({ log, paths, minPackages }) {
 }
 
 function parseArgs(argv) {
-  const opts = { pkg: null, keep: false, prefix: null, minPackages: null };
+  const opts = { pkg: null, registryVersion: null, keep: false, prefix: null, minPackages: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--package" || a === "--tarball") opts.pkg = argv[++i];
+    else if (a === "--registry-version") opts.registryVersion = argv[++i];
     else if (a === "--prefix") opts.prefix = argv[++i];
     else if (a === "--min-packages") opts.minPackages = Number(argv[++i]);
     else if (a === "--keep") opts.keep = true;
@@ -210,11 +237,26 @@ function main() {
     process.exit(2);
   }
   if (opts.help) {
-    console.error("usage: node scripts/check-global-install-lockfile.mjs --package <tarball|spec> [--prefix <dir>] [--keep]");
+    console.error(
+      "usage: node scripts/check-global-install-lockfile.mjs --package <tarball|spec> [--prefix <dir>] [--keep]\n" +
+        "       node scripts/check-global-install-lockfile.mjs --registry-version <ver> [--prefix <dir>] [--keep]",
+    );
     process.exit(0);
   }
+  if (opts.pkg && opts.registryVersion) {
+    console.error("DID NOT RUN: pass exactly one of --package / --registry-version, not both");
+    process.exit(2);
+  }
+  if (opts.registryVersion) {
+    try {
+      opts.pkg = registryInstallSpec(opts.registryVersion);
+    } catch (err) {
+      console.error(`DID NOT RUN: ${err instanceof Error ? err.message : err}`);
+      process.exit(2);
+    }
+  }
   if (!opts.pkg) {
-    console.error("DID NOT RUN: --package <tarball|spec> is required (nothing to install)");
+    console.error("DID NOT RUN: --package <tarball|spec> or --registry-version <ver> is required (nothing to install)");
     process.exit(2);
   }
   if (opts.pkg.endsWith(".tgz") && !existsSync(opts.pkg)) {
@@ -230,6 +272,7 @@ function main() {
 
   try {
     console.error(`[global-install] npm install -g --prefix ${prefix} ${opts.pkg}`);
+    if (opts.registryVersion) console.error(`[global-install] source: public registry, exact version ${opts.registryVersion} (flair#1686 canary)`);
     const run = spawnSync("npm", ["install", "-g", "--prefix", prefix, opts.pkg], {
       encoding: "utf8",
       env: { ...process.env, npm_config_fund: "false", npm_config_audit: "false" },

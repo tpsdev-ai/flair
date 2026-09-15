@@ -2,8 +2,17 @@
 
 Flair publishes nine workspace packages to npm under `@tpsdev-ai/*`. Releases are
 **tokenless** and **staged**: CI authenticates to npm with a short-lived OIDC token
-(no `NPM_TOKEN` lives anywhere) and submits each package to npm's **staging** area.
-A maintainer then approves the staged tarballs on npmjs.com with 2FA to make them live.
+(no `NPM_TOKEN` lives anywhere) and submits each package to npm's **staging** area
+**under the `staged` tag** (never straight to `latest`). A maintainer then approves
+the staged tarballs on npmjs.com with 2FA. Approval makes the version public, but
+**not `latest`** — a credential-less post-publish canary installs that exact version
+from the registry and boots it on Linux and macOS. Only a canary PASS prints the
+sha256-bound promote command that moves `latest`; the canary runs on the same
+definition of "it boots" the rockit ritual uses (`scripts/ci/check-instance-boot.sh`).
+
+The staging tag is an **immutable property of the staged package** (`npm help stage`):
+re-staging the same version under a different tag requires `npm stage reject` first.
+There is no "fix the stage in place" — you reject it and re-cut the next patch.
 
 > `flair-bench` is version-bumped and tagged in lockstep with the other 7, and stages in
 > its own step in CI for [historical reasons](#flair-bench-bootstrap-one-time-done). That
@@ -11,11 +20,18 @@ A maintainer then approves the staged tarballs on npmjs.com with 2FA to make the
 > for a release to pass.
 
 ```
- merge release PR ──▶ push tag v0.11.0 ──▶ CI stages all packages ──▶ npm staging
+ merge release PR ──▶ push tag v0.11.0 ──▶ CI stages all packages (tag: staged)
                                                                           │
                                                   maintainer reviews + approves (2FA)
                                                                           ▼
-                                                                      live on npm
+                                            public on npm, NOT latest ──▶ post-publish canary
+                                                                          │  installs the exact
+                                                                          │  version + boots it
+                                                       canary PASS ───────┘
+                                                                          │
+                                                    paste the emitted promote line
+                                                                          ▼
+                                                                  latest moves
 ```
 
 Pushing a `vX.Y.Z` tag triggers the release. This replaces the old "run
@@ -111,18 +127,59 @@ review each staged tarball, and approve with 2FA. Or from a machine logged into 
 ```bash
 npm stage list            # show staged packages + their stage-ids
 npm stage view <stage-id> # inspect one
-npm stage approve <stage-id>   # 2FA prompt; package goes live
+npm stage approve <stage-id>   # 2FA prompt; package is made public under `staged`
 ```
 
 There are eight lockstep-staged packages, so eight approvals (the web UI lists them on
 one page). Approve in dependency order if installing immediately — flair-client before
 its dependents — though staging does not itself resolve dependencies.
 
-Verify when done:
+Approval makes each version **public but not `latest`**: a user who runs the bare
+`npm install -g @tpsdev-ai/flair` still gets the previous `latest` until the promote
+step below. That window is what the canary uses.
 
-```bash
-npm view @tpsdev-ai/flair version   # should report the new version
-```
+The staging tag is immutable — if a staged package is wrong, **reject** it
+(`npm stage reject <stage-id>` on npmjs.com) and cut the next patch. The same version
+cannot be re-staged under a different tag.
+
+### Phase 4 — run the post-publish canary
+
+The moment the staged packages are approved, dispatch the
+[`post-publish canary`](../.github/workflows/canary.yml) (Actions → "Post-publish canary
+— install + boot a published version") with two inputs:
+
+| Input | Value |
+| ----- | ----- |
+| `version` | the version just approved, exact (e.g. `vX.Y.Z` without the `v`) |
+| `expected_sha256` | the published tarball's sha256 (64 hex). The canary computes it from the registry with `node scripts/ci/registry-tarball-sha256.mjs <ver>`. |
+
+The canary runs on clean `ubuntu-latest` and `macos-latest` runners and is
+**credential-less**: it installs `@tpsdev-ai/flair@<ver>` by exact version from the
+public registry, downloads the published tarball and verifies its sha256 equals
+`expected_sha256` (npm exposes no sha256 directly — `dist.shasum` is a SHA-1), runs
+the four install-tree assertions (`scripts/check-global-install-lockfile.mjs
+--registry-version`), and boots the installed instance
+(`scripts/ci/check-instance-boot.sh`: init with a 0600 pass file → adopt → `/Health`
+from the supervised process → `flair doctor` → descriptors → clean stop).
+
+Nothing about the canary is optional. There is no `continue-on-error`, and an
+unmeasurable run (registry lag, runner outage) is a FAIL, not a skip — a check that did
+not run must not read as a pass.
+
+### Phase 5 — promote `latest` (or deprecate)
+
+- **On PASS**, the canary emits the complete, sha256-bound promote command. Run it
+  from a repo checkout on a machine logged into npm:
+
+  ```bash
+  test "$(node scripts/ci/registry-tarball-sha256.mjs <ver>)" = "<sha256>" && npm dist-tag add @tpsdev-ai/flair@<ver> latest
+  ```
+
+  The `test` is the integrity guard: a stale PASS, a re-cut version, or a paste from a
+  failed run aborts before `latest` moves.
+- **On FAIL**, the version stays public but unpromoted. The canary emits the
+  `npm deprecate` command; run it, then re-cut the next patch. A version is never
+  refreshed in place.
 
 ## One-time setup
 
@@ -210,9 +267,10 @@ The maintainer who approves staged packages must have 2FA enabled on their npm a
 
 - **A staged package looks wrong** — reject it on npmjs.com instead of approving; it
   never goes live. Fix forward on `main` and cut a new patch version.
-- **Re-run the stage for the same version** — delete and re-push the tag
-  (`git push origin :v0.11.0` then `git tag -f v0.11.0 && git push origin v0.11.0`).
-  The tag push re-triggers the workflow.
+- **Re-run the stage for the same version** — you cannot. The `staged` tag is an
+  immutable property of the staged package, so re-stage requires reject first. Reject
+  the staged package(s) on npmjs.com, then cut and tag the next patch version; a
+  re-pushed tag re-triggers the workflow for that new version.
 - **Break-glass (CI down):** `./scripts/release.sh X.Y.Z --publish` still works from a
   machine logged into npm. Prefer the staged flow; this bypasses the staging gate.
 

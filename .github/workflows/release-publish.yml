@@ -6,6 +6,19 @@ name: Release — stage-publish (OIDC) + GitHub release
 # publishing live. A maintainer approves the staged tarballs on npmjs.com with 2FA
 # to go live — that approval is the release gate (see docs/releasing.md).
 #
+# flair#1686 — every package stages with `--tag staged`, NEVER straight to
+# `latest`. The staging tag is an IMMUTABLE property of the staged package
+# (`npm help stage`): re-staging the same version under a different tag requires
+# `npm stage reject` FIRST. So "re-cut, never refresh" is enforced by the tool, not
+# just policy — a bad stage cannot be fixed in place, it is rejected and the next
+# patch is cut. After a maintainer approves, the version is public but NOT
+# `latest`; the post-publish canary (.github/workflows/canary.yml) installs that
+# exact version from the registry and boots it on ubuntu-latest + macos-latest.
+# `latest` moves only when a human runs the sha256-bound promote command the
+# canary's PASS line prints. The canary is credential-less and `latest` is not a
+# dist-tag this workflow can move (the OIDC identity is scoped to
+# `npm stage publish` and has no dist-tag capability).
+#
 # A separate, INDEPENDENT job (github-release) cuts a GitHub release for the tag
 # from a lede+links rendering of the matching CHANGELOG.md section (flair#1392).
 # It does NOT depend on the npm staging approval — the GitHub release documents
@@ -223,7 +236,7 @@ jobs:
           for dir in "${DIRS[@]}"; do
             name="$(node -p "require('./$dir/package.json').name")"
             echo "::group::npm stage publish — $name ($dir)"
-            ( cd "$dir" && npm stage publish )
+            ( cd "$dir" && npm stage publish --tag staged )
             echo "::endgroup::"
           done
 
@@ -251,7 +264,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "::group::npm stage publish — @tpsdev-ai/flair-bench (packages/flair-bench)"
-          ( cd packages/flair-bench && npm stage publish )
+          ( cd packages/flair-bench && npm stage publish --tag staged )
           echo "::endgroup::"
 
       - name: Summary
@@ -259,13 +272,17 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
           {
-            echo "### 🚀 v$VERSION staged for release"
+            echo "### 🚀 v$VERSION staged for release (tag: staged)"
             echo ""
             echo "All 9 lockstep-versioned workspace packages submitted to npm **staging**"
-            echo "with provenance. They are **not live yet**."
+            echo "with provenance and staged under the **staged** tag. They are **not live at \`latest\`** yet."
             echo ""
             echo "**To release:** open [npmjs.com → Staged Packages](https://www.npmjs.com/settings/tpsdev-ai/staging),"
-            echo "review each tarball, and approve with 2FA. Or: \`npm stage list\` then \`npm stage approve <id>\`."
+            echo "review each tarball, and approve with 2FA. Then dispatch the post-publish canary"
+            echo "(Actions → \"Post-publish canary — install + boot a published version\") with this version"
+            echo "and the tarball's sha256. Only a canary PASS prints the sha256-bound promote command;"
+            echo "run that line to move \`latest\`. On a canary FAIL, run the emitted \`npm deprecate\` line"
+            echo "and re-cut the next patch — a staged tag is immutable, so a version is never refreshed in place."
           } >> "$GITHUB_STEP_SUMMARY"
 
   github-release:

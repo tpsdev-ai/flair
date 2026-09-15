@@ -3,6 +3,15 @@
 /** Repo-relative path of the reviewed weight/floor budget file. */
 export const BUDGET_REL: string;
 
+/** The one package this regression lane knows how to install (flair#1683). */
+export const FLAIR_PACKAGE: string;
+
+/**
+ * Exact-version registry install spec for `--registry-version` (flair#1686).
+ * Throws when `version` is not a plain semver.
+ */
+export function registryInstallSpec(version: string): string;
+
 /** Repo root, resolved from this script's location (scripts/ → repo root). */
 export function repoRoot(): string;
 

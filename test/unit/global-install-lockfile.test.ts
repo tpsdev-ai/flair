@@ -18,10 +18,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   BUDGET_REL,
+  FLAIR_PACKAGE,
   evaluateInstall,
   hasDamagedLockfileWarning,
   parseAddedCount,
   readMinPackages,
+  registryInstallSpec,
   resolveFromLoggingDir,
   treePaths,
 } from "../../scripts/check-global-install-lockfile.mjs";
@@ -94,6 +96,24 @@ function hoistedPrefix() {
   writeFileSync(paths.harperJs, 'console.log("5.2.8");\n');
   return { prefix, paths, ambient };
 }
+
+describe("check-global-install-lockfile — registry mode (flair#1686)", () => {
+  test("builds an exact-version spec, never a dist-tag", () => {
+    expect(registryInstallSpec("0.54.2")).toBe(`${FLAIR_PACKAGE}@0.54.2`);
+    expect(registryInstallSpec("1.0.0-rc.1")).toBe(`${FLAIR_PACKAGE}@1.0.0-rc.1`);
+    // The canary must install the version it was dispatched for, not whatever
+    // `latest`/`staged` resolves to; the spec is a pinned version string.
+    expect(registryInstallSpec("0.54.2").endsWith("@latest")).toBe(false);
+    expect(registryInstallSpec("0.54.2").endsWith("@staged")).toBe(false);
+  });
+
+  test("refuses a non-semver input rather than installing an unintended spec", () => {
+    expect(() => registryInstallSpec("latest")).toThrow(/semver/);
+    expect(() => registryInstallSpec("0.54")).toThrow(/semver/);
+    expect(() => registryInstallSpec("@tpsdev-ai/flair@0.54.2")).toThrow(/semver/);
+    expect(() => registryInstallSpec("")).toThrow(/semver/);
+  });
+});
 
 describe("check-global-install-lockfile — parsing", () => {
   test("treePaths points at the flair package inside the global prefix", () => {
