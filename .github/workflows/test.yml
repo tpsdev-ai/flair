@@ -264,7 +264,7 @@ jobs:
           printf '%s\n' "$changed"
           run=false
           # Single-file triggers (anchored) plus directory triggers (prefix).
-          if printf '%s\n' "$changed" | grep -Eq '^(src/cli\.ts|src/lib/(daemon-liveness|launchd-repair|mcp-enable)\.ts|resources/health\.ts|scripts/release[^/]*\.sh|scripts/ci/local-npm-registry\.mjs|scripts/ci/macos-launchd-upgrade-lane\.sh|scripts/ci/macos-launchd-passfile-missing-check\.sh|\.github/workflows/test\.yml)$' \
+          if printf '%s\n' "$changed" | grep -Eq '^(src/cli\.ts|src/lib/(daemon-liveness|launchd-repair|mcp-enable)\.ts|resources/health\.ts|scripts/release[^/]*\.sh|scripts/ci/local-npm-registry\.mjs|scripts/ci/redirect-upgrade-registry\.cjs|scripts/ci/redact-launchd-plist\.mjs|scripts/ci/macos-launchd-upgrade-lane\.sh|scripts/ci/macos-launchd-passfile-missing-check\.sh|\.github/workflows/test\.yml)$' \
              || printf '%s\n' "$changed" | grep -Eq '^(src/commands/|templates/launchd/)'; then
             run=true
           fi
@@ -322,8 +322,17 @@ jobs:
             echo "::error::cannot query the npm registry for @tpsdev-ai/flair versions"
             exit 1
           }
+          # The registry's recommended release, which is what a normal upgrade
+          # starts from. A version is still listed in `versions` after it is
+          # rolled back (0.54.1 shipped broken and `latest` stayed at 0.53.0),
+          # and a broken baseline cannot bring its instance up at all, let
+          # alone exercise the upgrade path this lane exists to test.
+          LATEST_TAG="$(npm view @tpsdev-ai/flair dist-tags.latest 2>/dev/null || true)"
+          export LATEST_TAG
           BASELINE_VERSION="$(printf '%s' "$PUBLISHED_VERSIONS" | node -e "
             const headVer = process.env.HEAD_VERSION;
+            const latest = process.env.LATEST_TAG || '';
+            const validLatest = /^[0-9]+\.[0-9]+\.[0-9]+$/.test(latest);
             const lt = (a, b) => {
               const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
               const len = Math.max(pa.length, pb.length);
@@ -341,7 +350,10 @@ jobs:
                 console.error('::error::no published version is strictly older than ' + headVer);
                 process.exit(1);
               }
-              console.log(older.sort(rsort)[0]);
+              const pool = validLatest && lt(latest, headVer)
+                ? older.filter(v => v === latest || lt(v, latest))
+                : older;
+              console.log(pool.sort(rsort)[0]);
             });
           ")"
           if [[ ! "$BASELINE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -353,7 +365,11 @@ jobs:
             exit 1
           fi
           echo "baseline_version=$BASELINE_VERSION" >> "$GITHUB_OUTPUT"
-          echo "Baseline (most recent npm-published version < ${HEAD_VERSION}): ${BASELINE_VERSION}"
+          if [[ "$BASELINE_VERSION" == "$LATEST_TAG" ]]; then
+            echo "Baseline (registry latest, < ${HEAD_VERSION}): ${BASELINE_VERSION}"
+          else
+            echo "Baseline (most recent npm-published version < ${HEAD_VERSION}, latest tag ${LATEST_TAG:-none}): ${BASELINE_VERSION}"
+          fi
       - name: Pre-download embedding model (shared)
         shell: bash
         run: |
@@ -403,6 +419,9 @@ jobs:
           name: launchd-adopt-upgrade-diagnostics
           path: diagnostics/launchd-adopt-upgrade/
           if-no-files-found: warn
+          # This repo is public; a short window limits exposure of the
+          # (redacted) diagnostics even if a future edit regresses F1.
+          retention-days: 7
 
   test-integration:
     name: Integration Tests

@@ -37,6 +37,47 @@ mkdir -p "$DIAG_DIR"
 
 log() { printf '\n=== %s ===\n' "$*"; }
 
+redact_plist() {
+  # flair#1684 review F1: this repo is public. `doctor --fix` may write the
+  # inline-secret plist (flair#1693) before the pass file exists; never print
+  # the raw bytes to the log.
+  node "$WORKSPACE/scripts/ci/redact-launchd-plist.mjs" "$@"
+}
+
+cleanup() {
+  # flair#1684 review F2: this step deliberately makes `doctor --fix` adopt a
+  # job whose pass file is missing. The buggy shape is KeepAlive=true /
+  # RunAtLoad=true — it respawns forever, and the (a) success path and the
+  # final `fail` both used to leave it loaded. Tear down every
+  # ai.tpsdev.flair.* job this step loaded (bootout by label), on every exit
+  # path, then assert none remains.
+  local status=$?
+  set +e
+  local uid label plist remaining attempt
+  uid="$(id -u)"
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    remaining="$(launchctl list 2>/dev/null | awk '$3 ~ /^ai\.tpsdev\.flair\./ {print $3}')"
+    [ -z "$remaining" ] && break
+    for label in $remaining; do
+      launchctl bootout "gui/${uid}/${label}" 2>/dev/null || true
+    done
+    for plist in "$LAUNCH_AGENTS_DIR"/ai.tpsdev.flair.*.plist; do
+      [ -e "$plist" ] || continue
+      launchctl bootout "gui/${uid}" "$plist" 2>/dev/null || true
+    done
+    sleep 1
+  done
+  remaining="$(launchctl list 2>/dev/null | awk '$3 ~ /^ai\.tpsdev\.flair\./ {print $3}')"
+  if [ -n "$remaining" ]; then
+    echo "::error title=flair#1684 cleanup::launchd job(s) still loaded after teardown: ${remaining}"
+    if [ "$status" -eq 0 ]; then status=1; fi
+  else
+    echo "pass-file-missing cleanup: launchctl list shows no ai.tpsdev.flair.* job"
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+
 find_plist() {
   local plist
   for plist in "$LAUNCH_AGENTS_DIR"/ai.tpsdev.flair.*.plist; do
@@ -54,11 +95,11 @@ dump_diagnostics() {
   ls -la "$PASS_FILE" 2>/dev/null || echo "(no ${PASS_FILE})"
   echo "--- launchctl list | grep flair ---"
   launchctl list | grep -i flair || echo "(no flair job)"
-  echo "--- plists ---"
+  echo "--- plists (credentials redacted) ---"
   for plist in "$LAUNCH_AGENTS_DIR"/ai.tpsdev.flair.*.plist "$LAUNCH_AGENTS_DIR"/ai.tpsdev.flair.*.plist.fails-first-bak; do
     [ -e "$plist" ] || continue
-    echo "### $plist"
-    cat "$plist"
+    echo "### $plist (credentials redacted)"
+    redact_plist "$plist"
   done
   echo "--- lsof :$PORT ---"
   lsof -nP -iTCP:"$PORT" 2>/dev/null || echo "(nothing listening on $PORT)"

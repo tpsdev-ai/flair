@@ -61,6 +61,41 @@ LABEL=""
 
 mkdir -p "$DIAG_DIR" "$FLAIR_MODELS_DIR"
 
+# flair#1688/#1692 shipped the npm registry resolver in 0.54.2. A baseline CLI
+# older than that has a HARDCODED registry.npmjs.org update check, so the
+# scoped `@tpsdev-ai:registry` config the lane sets never reaches it and
+# `flair upgrade` compares the installed version against the public `latest`,
+# reports "current", and no-ops. The redirect shim is a test double for that
+# pre-resolver update check ONLY; it self-retires the moment the derived
+# baseline is at or above 0.54.2, and that run becomes the acceptance test for
+# the product resolver (#1692). The PR build's own resolver is never shimmed.
+FIRST_RESOLVER_RELEASE="0.54.2"
+
+version_lt() {
+  # True when $1 is strictly older than $2 (both x.y.z). BSD bash 3.2 safe,
+  # and no IFS tampering (semgrep bash.lang.security.ifs-tampering).
+  local v1="$1" v2="$2"
+  local a1 a2 a3 b1 b2 b3
+  a1="${v1%%.*}"
+  a2="${v1#*.}"; a2="${a2%%.*}"
+  a3="${v1##*.}"
+  b1="${v2%%.*}"
+  b2="${v2#*.}"; b2="${b2%%.*}"
+  b3="${v2##*.}"
+  [ "$a1" -lt "$b1" ] && return 0
+  [ "$a1" -gt "$b1" ] && return 1
+  [ "$a2" -lt "$b2" ] && return 0
+  [ "$a2" -gt "$b2" ] && return 1
+  [ "$a3" -lt "$b3" ] && return 0
+  return 1
+}
+
+if version_lt "$BASELINE_VERSION" "$FIRST_RESOLVER_RELEASE"; then
+  BASELINE_NEEDS_SHIM=1
+else
+  BASELINE_NEEDS_SHIM=0
+fi
+
 # The reported rockit shape. These are the env keys the doctor --fix plist
 # carries (HTTP_PORT / OPERATIONSAPI_NETWORK_PORT / NODE_HOSTNAME); we export
 # them here so a direct-spawn fallback and the CLI's own port resolution see
@@ -82,6 +117,27 @@ export FLAIR_MODELS_DIR
 
 log() { printf '\n=== %s ===\n' "$*"; }
 
+redact_plist() {
+  # Print a plist with any inline credential removed (flair#1684 review F1).
+  # This repository is PUBLIC and the window between `flair init` (inline
+  # plist, flair#1693) and `flair doctor --fix` (pass-file launcher) is exactly
+  # when this dump can run, so a raw `cat`/`cp` here would publish the admin
+  # password. Never print the raw bytes.
+  node "$WORKSPACE/scripts/ci/redact-launchd-plist.mjs" "$@"
+}
+
+assert_no_inline_credentials() {
+  # Fails-first companion to redact_plist: after the dump, prove the lane's own
+  # admin password did not reach the artifact. The redactor unit test pins the
+  # generic key/value redaction; this pins the specific run's secret.
+  local dir="$1"
+  if [ -n "${ADMIN_PASS:-}" ] && grep -rIlF "$ADMIN_PASS" "$dir" >/dev/null 2>&1; then
+    echo "::error::the lane's admin password reached the diagnostics artifact under ${dir}"
+    return 1
+  fi
+  return 0
+}
+
 dump_diagnostics() {
   set +e
   echo "::group::launchd lane diagnostics"
@@ -89,12 +145,12 @@ dump_diagnostics() {
   echo "PORT=$PORT OPS_PORT=$OPS_PORT PR_VERSION=$PR_VERSION BASELINE_VERSION=$BASELINE_VERSION PR_COMMIT=$PR_COMMIT"
   echo "--- launchctl list | grep flair ---"
   launchctl list | grep -i flair || echo "(no flair job in launchctl list)"
-  echo "--- launchd plists ---"
+  echo "--- launchd plists (credentials redacted) ---"
   ls -la "$LAUNCH_AGENTS_DIR" 2>/dev/null || echo "(no LaunchAgents dir)"
   for plist in "$LAUNCH_AGENTS_DIR"/*.plist; do
     [ -e "$plist" ] || continue
-    echo "### $plist"
-    cat "$plist"
+    echo "### $plist (credentials redacted)"
+    redact_plist "$plist"
   done
   echo "--- lsof :$PORT ---"
   lsof -nP -iTCP:"$PORT" 2>/dev/null || echo "(nothing listening on $PORT)"
@@ -113,7 +169,15 @@ dump_diagnostics() {
   cp -f "$DATA_DIR/log/"*.log "$DIAG_DIR/data-log/" 2>/dev/null || true
   cp -f "$DATA_DIR/harper-config.yaml" "$DIAG_DIR/data-harper-config.yaml" 2>/dev/null || true
   cp -f "$HOME/.flair/config.yaml" "$DIAG_DIR/flair-config.yaml" 2>/dev/null || true
-  cp -f "$LAUNCH_AGENTS_DIR"/*.plist "$DIAG_DIR/" 2>/dev/null || true
+  # Copy plists REDACTED, not raw: the artifact is downloadable from a public
+  # repo. Redaction (rather than a skip) keeps the launcher shape diagnosable.
+  for plist in "$LAUNCH_AGENTS_DIR"/*.plist; do
+    [ -e "$plist" ] || continue
+    redact_plist "$plist" > "$DIAG_DIR/$(basename "$plist")"
+  done
+  if ! assert_no_inline_credentials "$DIAG_DIR"; then
+    echo "::error::diagnostics redaction FAILED — see the artifact scan above"
+  fi
   echo "::endgroup::"
 }
 
@@ -344,7 +408,9 @@ echo "baseline launchd pid: ${BASELINE_PID}"
 PLIST_PATH="$LAUNCH_AGENTS_DIR/${LABEL}.plist"
 if ! grep -q "start-flair-with-admin-pass.sh" "$PLIST_PATH"; then
   echo "adopted plist does not use the flair#1573 pass-file launcher" >&2
-  cat "$PLIST_PATH" >&2
+  # Redacted: this failure path runs in the flair#1693 window when the plist
+  # can still carry the inline admin password (flair#1684 review F1).
+  redact_plist "$PLIST_PATH" >&2
   exit 1
 fi
 
@@ -378,12 +444,98 @@ echo "npm @tpsdev-ai registry: $(npm config get @tpsdev-ai:registry)"
 echo "resolved target via npm: $(npm view '@tpsdev-ai/flair' version)"
 
 log "Upgrade baseline -> PR build (the flair#1683 path)"
-# flair#1688/#1692: `flair upgrade` resolves the registry from npm config (the
-# @tpsdev-ai:registry mapping set above) instead of a hardcoded host, and prints
-# the registry it resolved, so both the update check and the `npm install -g`
-# hit the local shim. No NODE_OPTIONS preload or registry env override is
-# needed — the scoped npm config above is the whole wiring.
-flair upgrade 2>&1 | tee "$DIAG_DIR/flair-upgrade.log"
+# flair#1688/#1692 resolution path, declared here and asserted from the log
+# after the upgrade. See FIRST_RESOLVER_RELEASE above.
+#
+# npm writes reify warnings to its debug log even though `flair upgrade` pipes
+# the child's stdio (which is why the log, not the tee, is the source for the
+# lockfile-warning evidence). Snapshot the log directory so the post-upgrade
+# scan only sees this install's logs.
+NPM_LOG_DIR="$(npm config get cache 2>/dev/null || true)/_logs"
+mkdir -p "$NPM_LOG_DIR"
+ls -1 "$NPM_LOG_DIR" 2>/dev/null | sort > "$DIAG_DIR/npm-logs-before.txt" || true
+
+if [ "$BASELINE_NEEDS_SHIM" -eq 1 ]; then
+  echo "registry path: SHIM — baseline ${BASELINE_VERSION} < ${FIRST_RESOLVER_RELEASE} (pre-#1688 resolver)"
+  echo "  the baseline CLI's update check hardcodes registry.npmjs.org; the CI shim rewrites"
+  echo "  @tpsdev-ai/* fetches to http://127.0.0.1:${REGISTRY_PORT}. The PR build's own resolver is not shimmed."
+  NODE_OPTIONS="${NODE_OPTIONS:-} --require $WORKSPACE/scripts/ci/redirect-upgrade-registry.cjs" \
+    LOCAL_NPM_REGISTRY_URL="http://127.0.0.1:${REGISTRY_PORT}" \
+    flair upgrade 2>&1 | tee "$DIAG_DIR/flair-upgrade.log"
+else
+  echo "registry path: RESOLVER — baseline ${BASELINE_VERSION} >= ${FIRST_RESOLVER_RELEASE} (carries #1688)"
+  echo "  the baseline CLI resolves the registry from npm config (expected http://127.0.0.1:${REGISTRY_PORT}); no shim"
+  flair upgrade 2>&1 | tee "$DIAG_DIR/flair-upgrade.log"
+fi
+
+# Assert which registry the baseline actually consulted, from the upgrade log.
+if [ "$BASELINE_NEEDS_SHIM" -eq 1 ]; then
+  if ! grep -q 'redirect-upgrade-registry] active' "$DIAG_DIR/flair-upgrade.log"; then
+    echo "the redirect shim never activated — the baseline's hardcoded update check could not reach the lane registry" >&2
+    exit 1
+  fi
+  echo "baseline consulted: registry.npmjs.org (hardcoded) -> shim -> http://127.0.0.1:${REGISTRY_PORT}"
+else
+  if ! grep -q "registry: http://127.0.0.1:${REGISTRY_PORT}" "$DIAG_DIR/flair-upgrade.log"; then
+    echo "the baseline resolver did not report the lane registry http://127.0.0.1:${REGISTRY_PORT}" >&2
+    grep -n "registry:" "$DIAG_DIR/flair-upgrade.log" >&2 || true
+    exit 1
+  fi
+  echo "baseline consulted: registry reported by the resolver in flair-upgrade.log (see registry: lines)"
+fi
+
+log "Verify the upgraded global tree is the healthy PR build (flair#1683 evidence)"
+# The task requires evidence the PR build was actually installed, not merely
+# that the launchd restart succeeded: `flair --version`, the global tree's
+# package count against the reviewed floor, zero reify lockfile warnings from
+# the upgrade's own npm log, and a live harper.js. If #1691 regresses, these
+# fail here instead of surfacing as a confusing post-restart timeout.
+GLOBAL_ROOT="$(npm root -g)"
+FLAIR_TREE="$GLOBAL_ROOT/@tpsdev-ai/flair"
+HARPER_JS="$FLAIR_TREE/node_modules/harper/dist/bin/harper.js"
+[ -e "$HARPER_JS" ] || HARPER_JS="$GLOBAL_ROOT/harper/dist/bin/harper.js"
+
+INSTALLED_VERSION="$(flair --version 2>&1 | tail -n1 | tr -d '[:space:]')"
+echo "flair --version: ${INSTALLED_VERSION} (expected ${PR_VERSION})"
+
+PKG_FLOOR="$(node -p "require('${WORKSPACE}/.github/install-weight-budget.json').minPackages")"
+set +e
+PKG_COUNT="$(npm ls -g --all --parseable 2>/dev/null | wc -l | tr -d ' ')"
+set -e
+echo "global tree packages (npm ls -g --all --parseable): ${PKG_COUNT} (floor ${PKG_FLOOR})"
+
+find "$NPM_LOG_DIR" -maxdepth 1 -name '*.log' -print > "$DIAG_DIR/npm-logs-after.txt" 2>/dev/null || true
+LOCKFILE_WARNINGS=0
+while IFS= read -r npm_log; do
+  [ -e "$npm_log" ] || continue
+  if grep -qxF "$(basename "$npm_log")" "$DIAG_DIR/npm-logs-before.txt" 2>/dev/null; then continue; fi
+  n="$(grep -c 'invalid or damaged lockfile' "$npm_log" 2>/dev/null || true)"
+  LOCKFILE_WARNINGS=$((LOCKFILE_WARNINGS + ${n:-0}))
+done < "$DIAG_DIR/npm-logs-after.txt"
+echo "invalid or damaged lockfile warnings in the upgrade's npm logs: ${LOCKFILE_WARNINGS}"
+
+set +e
+HARPER_OUT="$(node "$HARPER_JS" version 2>&1)"
+HARPER_STATUS=$?
+set -e
+echo "node harper.js version exit: ${HARPER_STATUS}; output: $(printf '%s' "$HARPER_OUT" | tail -n1)"
+
+if [ "$INSTALLED_VERSION" != "$PR_VERSION" ]; then
+  echo "installed flair is ${INSTALLED_VERSION}, expected the PR build ${PR_VERSION}" >&2
+  exit 1
+fi
+if [ "${PKG_COUNT:-0}" -lt "$PKG_FLOOR" ]; then
+  echo "global tree has ${PKG_COUNT} packages, below the ${PKG_FLOOR} floor — the install collapsed (flair#1683)" >&2
+  exit 1
+fi
+if [ "$LOCKFILE_WARNINGS" -ne 0 ]; then
+  echo "the upgrade's npm log carries ${LOCKFILE_WARNINGS} 'invalid or damaged lockfile' warning(s) (flair#1683)" >&2
+  exit 1
+fi
+if [ "$HARPER_STATUS" -ne 0 ]; then
+  echo "node harper.js version exited ${HARPER_STATUS} — the installed engine cannot start (flair#1683)" >&2
+  exit 1
+fi
 
 log "Assert the upgraded instance is the PR build, under launchd"
 assert_launchd_serving "$LABEL" "post-upgrade" "$BASELINE_PID"
