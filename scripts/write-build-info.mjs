@@ -23,6 +23,14 @@
 // Runs with cwd = the package root (how the package.json scripts invoke it);
 // everything below is cwd-relative so the stamp always describes the tree
 // being built, not wherever this script's source happens to live.
+//
+// OUTPUT DISCIPLINE (flair#1683): the success line goes to **stderr**, never
+// stdout. This script runs from `prepack` (via `build` and `build:cli`), and
+// `npm pack --silent` captures stdout as the tarball path — a stray stdout line
+// concatenates into it and the tarball name the caller installs becomes
+// `<build output>\ntpsdev-ai-flair-x.y.z.tgz`, which is what broke the
+// Dependency Audit gate's `TGZ=$(npm pack --silent)`. Same convention as
+// scripts/vendor-tool-descriptors.mjs.
 
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -63,4 +71,5 @@ const info = {
 
 mkdirSync(join(root, "dist"), { recursive: true });
 writeFileSync(join(root, "dist", "build-info.json"), JSON.stringify(info, null, 2) + "\n");
-console.log(`write-build-info: dist/build-info.json ${info.version} @ ${commit ?? "null (no git work tree)"}`);
+// stderr, not stdout: see OUTPUT DISCIPLINE at the top of this file.
+console.error(`write-build-info: dist/build-info.json ${info.version} @ ${commit ?? "null (no git work tree)"}`);

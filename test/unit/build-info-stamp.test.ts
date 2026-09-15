@@ -12,7 +12,7 @@
  * mutation-check targets.
  */
 import { describe, expect, test, afterAll } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -48,8 +48,12 @@ function scriptEnv(fixtureDir: string): Record<string, string> {
   return env;
 }
 
-function runScript(cwd: string): string {
-  return execFileSync("node", [SCRIPT], { cwd, env: scriptEnv(cwd), encoding: "utf-8" });
+function runScript(cwd: string): { stdout: string; stderr: string } {
+  // spawnSync, not execFileSync: the split between the two streams IS the
+  // contract under test (flair#1683) — see the stdout-discipline test below.
+  const res = spawnSync("node", [SCRIPT], { cwd, env: scriptEnv(cwd), encoding: "utf-8" });
+  if (res.status !== 0) throw new Error(`write-build-info exited ${res.status}: ${res.stderr}`);
+  return { stdout: res.stdout, stderr: res.stderr };
 }
 
 describe("scripts/write-build-info.mjs (flair#1076)", () => {
@@ -113,6 +117,19 @@ describe("scripts/write-build-info.mjs (flair#1076)", () => {
     // the context.
     const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf-8"));
     expect(pkg.files).toContain("dist/");
+  });
+
+  test("the success line goes to stderr, so `npm pack --silent` stdout is only the tarball path (flair#1683)", () => {
+    // This script runs from `prepack` (via build and build:cli). With the line
+    // on stdout, `TGZ=$(npm pack --silent)` captured
+    // "write-build-info: dist/build-info.json …\ntpsdev-ai-flair-x.y.z.tgz"
+    // and every caller that installs "$PREFIX/$TGZ" failed — which is exactly
+    // how the Dependency Audit gate went red on the flair#1683 PR. Same
+    // convention as scripts/vendor-tool-descriptors.mjs.
+    const dir = makePackageRoot("1.2.3-packsilent");
+    const { stdout, stderr } = runScript(dir);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("write-build-info: dist/build-info.json 1.2.3-packsilent");
   });
 
   test("resolveBuildInfo() from a source run (no stamp adjacent to the module) is an honest null", () => {
