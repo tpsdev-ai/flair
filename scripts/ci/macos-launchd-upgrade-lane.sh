@@ -192,7 +192,10 @@ wait_listener_owned_by() {
   # Poll until $1 (or a descendant) owns the ${PORT} listener. The launchd job
   # needs a moment after `launchctl list` first shows its pid to actually bind,
   # so a single check here would race the start and report a false failure.
-  local pid="$1" timeout="${2:-120}" deadline=$((SECONDS + timeout)) owner owners
+  local pid="$1"
+  local timeout="${2:-120}"
+  local deadline=$((SECONDS + timeout))
+  local owner owners
   while (( SECONDS < deadline )); do
     owners="$(listener_pids_on_port)"
     for owner in $owners; do
