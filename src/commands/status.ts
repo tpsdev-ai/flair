@@ -10,7 +10,8 @@ import { Command } from "commander";
 import { resolveAdminUser } from "../lib/auth-resolve.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
 import * as render from "../render.js";
-import { checkVersion, formatVersionNudge } from "../version-check.js";
+import { checkVersion, formatVersionNudge, FLAIR_PKG_NAME } from "../version-check.js";
+import { resolveRegistryNotice } from "../lib/npm-registry.js";
 import { hostname } from "node:os";
 import { join } from "node:path";
 
@@ -242,6 +243,10 @@ const statusCmd = program
     // fact is current (flair#1341). Independent of Harper health; runs either way.
     const versionCheckResult = await checkVersion(__pkgVersion);
     const versionNudge = formatVersionNudge(versionCheckResult);
+    // flair#1692: name the registry (and where it came from) on every status
+    // check, so a redirected mirror is never silent — including when the
+    // version answer came from cache and no network request was made.
+    const registryNotice = await resolveRegistryNotice(FLAIR_PKG_NAME);
 
     if (opts.json) {
       const out: any = { healthy, url: baseUrl, flairVersion: __pkgVersion, ...healthData };
@@ -253,6 +258,8 @@ const statusCmd = program
       }
       if (discoveredPort != null) out.discoveredPort = discoveredPort;
       if (versionCheckResult.latest) out.latestVersion = versionCheckResult.latest;
+      if (registryNotice.line) out.registry = registryNotice.line;
+      if (registryNotice.error) out.registryError = registryNotice.error;
       console.log(JSON.stringify(out, null, 2));
       if (!healthy) process.exit(1);
       return;
@@ -261,6 +268,8 @@ const statusCmd = program
     if (!healthy) {
       console.log(`Flair v${__pkgVersion} — 🔴 unreachable`);
       console.log(`  URL:  ${baseUrl}`);
+      if (registryNotice.line) console.log(`  ${registryNotice.line}`);
+      if (registryNotice.error) console.log(`  ⚠ ${registryNotice.error}`);
       if (discoveredPort != null) {
         const altUrl = `http://127.0.0.1:${discoveredPort}`;
         console.log(`\n  ⚠ Found a Flair daemon listening on port ${discoveredPort} (URL: ${altUrl}).`);
@@ -334,6 +343,8 @@ const statusCmd = program
     const metaParts = [pidPart, uptimePart].filter(Boolean).join(render.wrap(render.c.dim, " · "));
     console.log(`${versionStr} ${render.wrap(render.c.dim, "—")} ${runStatus}${metaParts ? `  ${metaParts}` : ""}`);
     console.log(render.kv("URL", baseUrl));
+    if (registryNotice.line) console.log(render.kv("Registry", registryNotice.line.replace(/^registry:\s*/, "")));
+    if (registryNotice.error) console.log(`  ${render.icons.warn} ${render.wrap(render.c.yellow, registryNotice.error)}`);
 
     if (versionNudge) {
       const color = versionNudge.severity === "red" ? render.c.red : render.c.yellow;

@@ -21,7 +21,8 @@ import { opsApiBindFinding } from "../lib/ops-api-bind.js";
 import { flairCliVersion, unpinnedSpecWarning } from "../lib/mcp-spec.js";
 import { staleSessionStartHookPins } from "../lib/owned-pins.js";
 import * as render from "../render.js";
-import { checkVersion, formatVersionNudge, probeInstanceVersion } from "../version-check.js";
+import { checkVersion, formatVersionNudge, probeInstanceVersion, FLAIR_PKG_NAME } from "../version-check.js";
+import { resolveRegistryNotice } from "../lib/npm-registry.js";
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
@@ -252,6 +253,17 @@ program
             `Commands run through the CLI; the instance serves the data.`)}`,
         );
       }
+    }
+
+    // flair#1692: name the registry (and where it came from) on every doctor
+    // check, so a redirected mirror is visible to the operator.
+    const registryNotice = await resolveRegistryNotice(FLAIR_PKG_NAME);
+    if (registryNotice.line) {
+      console.log(`  ${render.icons.info} ${render.wrap(render.c.dim, registryNotice.line)}`);
+    }
+    if (registryNotice.error) {
+      console.log(`  ${render.icons.warn} ${render.wrap(render.c.yellow, registryNotice.error)}`);
+      issues++;
     }
 
     // 0.5 npm global bin dir on PATH (flair#1134) — a user-prefix

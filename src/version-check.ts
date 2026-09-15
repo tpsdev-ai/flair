@@ -33,7 +33,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseSemverCore } from "./fabric-upgrade.js";
-import { resolveNpmRegistry } from "./lib/npm-registry.js";
+import { fetchLatestVersion } from "./lib/npm-registry.js";
 
 export const FLAIR_PKG_NAME = "@tpsdev-ai/flair";
 export const DEFAULT_CACHE_PATH = join(homedir(), ".flair", ".version-check-cache.json");
@@ -77,16 +77,33 @@ async function defaultFetchLatest(timeoutMs: number): Promise<string | null> {
     // `@scope:registry`, project/user/global .npmrc, env `npm_config_registry`)
     // rather than a hardcoded public host — a private mirror must not be
     // silently bypassed by the update check.
-    const registry = await resolveNpmRegistry(FLAIR_PKG_NAME);
-    const res = await fetch(`${registry}/${FLAIR_PKG_NAME}/latest`, {
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { version?: string };
-    return typeof data?.version === "string" ? data.version : null;
-  } catch {
+    //
+    // flair#1692: `fetchLatestVersion` validates the URL scheme, refuses
+    // redirects, applies npm's transport where a bare fetch cannot, and —
+    // critically — validates the returned value as strict semver before it can
+    // ever be used as an install spec.
+    const result = await fetchLatestVersion(FLAIR_PKG_NAME, { timeoutMs });
+    if (result.kind === "ok") return result.version;
+    if (result.kind === "invalid") {
+      // A hostile/compromised registry can return a URL or tag as `latest`;
+      // npm would install `pkg@<url>` as a remote tarball. Refuse, and say so
+      // rather than silently treating it as "no update".
+      console.error(
+        `flair version check: the configured registry returned a non-semver "latest" (${JSON.stringify(result.value)}) ` +
+          `from ${result.registry.url} — refusing to use it. Check \`registry\` / \`@scope:registry\` (source: ${result.registry.source}).`,
+      );
+      return null;
+    }
+    if (result.kind === "refused") {
+      console.error(result.message);
+      return null;
+    }
     // Offline, DNS failure, timeout, registry 5xx, bad JSON — all the same:
     // we couldn't determine "latest" over the network this time.
+    return null;
+  } catch {
+    // Defense-in-depth: the helper already swallows its failure modes. This
+    // guards the status/doctor never-throws contract even if it does not.
     return null;
   }
 }

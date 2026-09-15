@@ -31,7 +31,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "no
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
-import { resolveNpmRegistry } from "./lib/npm-registry.js";
+import { createRegistryNoticePrinter, fetchDeclaredDependencies, fetchLatestVersion } from "./lib/npm-registry.js";
 import type { DeployOptions, DeployResult } from "./deploy.js";
 
 /**
@@ -263,38 +263,47 @@ export interface FabricUpgradeResult {
 
 // ─── Default (real) dependency implementations ──────────────────────────────
 
+// flair#1692: one printer per process, so a Fabric upgrade names the registry
+// (and source) it stages from without repeating the line per lookup.
+const noticeRegistry = createRegistryNoticePrinter();
+
 async function defaultFetchLatestFlairVersion(): Promise<string> {
   // flair#1688: the configured registry (scoped `@tpsdev-ai:registry`,
   // project/user/global .npmrc, env `npm_config_registry`), not a hardcoded
   // host — a Fabric upgrade must stage the package from the mirror the
   // operator configured, or fail rather than silently use the public one.
-  const registry = await resolveNpmRegistry(FLAIR_PKG);
-  const res = await fetch(`${registry}/${FLAIR_PKG}/latest`, {
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (!res.ok) {
-    throw new Error(`npm registry returned ${res.status} for ${FLAIR_PKG}/latest`);
+  // flair#1692: the value is validated as strict semver before it is used as
+  // `dependencies` in the staged package.json (npm accepts `pkg@<url>` as a
+  // remote-tarball spec, so an unvalidated value is an arbitrary-install
+  // primitive).
+  const result = await fetchLatestVersion(FLAIR_PKG, { timeoutMs: 10_000, onRegistry: noticeRegistry });
+  if (result.kind === "ok") return result.version;
+  if (result.kind === "refused") throw new Error(result.message);
+  if (result.kind === "invalid") {
+    throw new Error(
+      `npm registry returned a non-semver latest version (${JSON.stringify(result.value)}) for ${FLAIR_PKG} ` +
+        `from ${result.registry.url} (source: ${result.registry.source}) — refusing to use it`,
+    );
   }
-  const data = (await res.json()) as { version?: string };
-  if (!data.version) throw new Error(`No version in registry response for ${FLAIR_PKG}`);
-  return data.version;
+  throw new Error(`Could not determine ${FLAIR_PKG}/latest: ${result.message}`);
 }
 
 async function defaultFetchDeclaredHarperVersion(
   flairVersion: string,
 ): Promise<string | null> {
-  const registry = await resolveNpmRegistry(FLAIR_PKG);
-  const res = await fetch(`${registry}/${FLAIR_PKG}/${flairVersion}`, {
-    signal: AbortSignal.timeout(10_000),
+  const result = await fetchDeclaredDependencies(FLAIR_PKG, flairVersion, {
+    timeoutMs: 10_000,
+    onRegistry: noticeRegistry,
   });
-  if (!res.ok) return null;
-  const data = (await res.json()) as {
-    dependencies?: Record<string, string>;
-  };
+  if (result.kind === "refused") {
+    console.error(result.message);
+    return null;
+  }
+  if (result.kind !== "ok") return null;
   // Either package name (flair#870) — pre-rename flair versions declare the
   // scoped one, and those are precisely the versions that may need an override.
   for (const name of HARPER_PKG_NAMES) {
-    const declared = data.dependencies?.[name];
+    const declared = result.dependencies?.[name];
     if (declared) return declared;
   }
   return null;

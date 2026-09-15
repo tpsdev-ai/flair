@@ -20,7 +20,7 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
-import { resolveNpmRegistry } from "./lib/npm-registry.js";
+import { fetchDeclaredDependencies } from "./lib/npm-registry.js";
 
 /** Filename of the engine-version stamp inside the data directory. */
 export const ENGINE_VERSION_STAMP = "engine-version.txt";
@@ -52,15 +52,15 @@ export async function fetchDeclaredHarperVersion(flairVersion: string): Promise<
   try {
     // flair#1688: resolve the configured registry rather than assuming npmjs —
     // the engine-version decision must look at the same package the upgrade
-    // will actually install.
-    const registry = await resolveNpmRegistry("@tpsdev-ai/flair");
-    const res = await fetch(
-      `${registry}/@tpsdev-ai/flair/${flairVersion}`,
-      { signal: AbortSignal.timeout(5000) },
-    );
-    if (!res.ok) return null;
-    const data = await res.json() as { dependencies?: Record<string, string> };
-    return data.dependencies?.harper ?? data.dependencies?.["@harperfast/harper"] ?? null;
+    // will actually install. flair#1692: the same scheme allowlist, redirect
+    // refusal, npm transport, and non-default-registry handling apply.
+    const result = await fetchDeclaredDependencies("@tpsdev-ai/flair", flairVersion, { timeoutMs: 5000 });
+    if (result.kind === "refused") {
+      console.error(result.message);
+      return null;
+    }
+    if (result.kind !== "ok") return null;
+    return result.dependencies?.harper ?? result.dependencies?.["@harperfast/harper"] ?? null;
   } catch {
     return null;
   }

@@ -16,7 +16,7 @@ import { defaultKeysDir } from "../lib/auth-resolve.js";
 import { renderVerifiedSummary } from "../lib/doctor-run.js";
 import { isDetached, renderDetachedWarning } from "../lib/launchd-management.js";
 import { FLAIR_MCP_PACKAGE, clearFlairCliVersionCache } from "../lib/mcp-spec.js";
-import { resolveNpmRegistry } from "../lib/npm-registry.js";
+import { createRegistryNoticePrinter, fetchLatestVersion, isStrictSemver } from "../lib/npm-registry.js";
 import { ownedPinRefreshShouldReport, refreshOwnedPins } from "../lib/owned-pins.js";
 import { extractSnapshotSafely, validateSnapshotArchive } from "../lib/safe-snapshot-extract.js";
 import { collectUpgradeExecPathWarning, findFlairPackageDir, resolveNpmGlobalFlairPackage, resolveServingFlairPackage } from "../lib/upgrade-exec-path.js";
@@ -1042,6 +1042,11 @@ program
     type Status = UpgradeStatus;
     const findings: Array<{ name: string; installed: string | null; latest: string; status: Status; kind: ProbeKind }> = [];
 
+    // flair#1692: name the registry (and where it came from) the moment it is
+    // resolved, so a redirected registry is visible to the operator before
+    // anything is fetched or installed. One line per distinct registry.
+    const noticeRegistry = createRegistryNoticePrinter();
+
     for (const { name, probe, kind, transitive } of packages) {
       if (transitive && !showAll) continue;
       try {
@@ -1049,12 +1054,24 @@ program
         try {
           // flair#1688: resolve the registry npm is configured to use for this
           // package (scope mapping + .npmrc + env) instead of a hardcoded host.
-          const registry = await resolveNpmRegistry(name);
-          const res = await fetch(`${registry}/${name}/latest`, { signal: AbortSignal.timeout(5000) });
-          if (res.ok) {
-            const data = await res.json() as { version?: string };
-            registryLatest = typeof data.version === "string" && data.version ? data.version : null;
+          // flair#1692: print it, refuse disallowed schemes, disable redirects,
+          // and validate the returned value as strict semver before it can be
+          // used as an `npm install` spec.
+          const lookup = await fetchLatestVersion(name, {
+            timeoutMs: 5000,
+            onRegistry: noticeRegistry,
+          });
+          if (lookup.kind === "ok") {
+            registryLatest = lookup.version;
+          } else if (lookup.kind === "invalid") {
+            console.error(
+              `  ⚠ ${name}: registry returned a non-semver "latest" (${JSON.stringify(lookup.value)}) ` +
+                `from ${lookup.registry.url} — refusing to use it as an install spec.`,
+            );
+          } else if (lookup.kind === "refused") {
+            console.error(lookup.message);
           }
+          // kind === "unavailable": offline/timed out — the pin path must still work.
         } catch { /* /latest timed out or failed — pin path must still work */ }
 
         let latest: string;
@@ -1072,7 +1089,16 @@ program
           if (!registryLatest) continue;
           latest = registryLatest;
         }
-        if (name === FLAIR_PKG_NAME && latest !== "unknown") {
+        // flair#1692: a non-semver target must never reach an install spec
+        // (npm treats `pkg@<url>` as a remote tarball). This also covers the
+        // operator pin on the plain-tree lane.
+        if (!isStrictSemver(latest)) {
+          console.error(
+            `  ⚠ ${name}: refusing non-semver install target ${JSON.stringify(latest)} — expected a version like 1.2.3.`,
+          );
+          continue;
+        }
+        if (name === FLAIR_PKG_NAME) {
           try { primeVersionCheckCache(latest); } catch { /* best-effort */ }
         }
 
@@ -1430,6 +1456,14 @@ program
     let flairInstallFailed = false;
     for (const { pkg, latest } of npmUpgrades) {
       try {
+        // flair#1692 backstop: the listing validated this, but the install is
+        // the point of no return. npm accepts `pkg@<url>` as a remote-tarball
+        // spec, so a non-semver target must never reach this argv.
+        if (!isStrictSemver(latest)) {
+          console.error(`  ❌ ${pkg} upgrade skipped: non-semver target ${JSON.stringify(latest)}`);
+          if (pkg === FLAIR_PKG_NAME) flairInstallFailed = true;
+          continue;
+        }
         if (treePlan && pkg === FLAIR_PKG_NAME) {
           console.log(`  Fetching ${pkg}@${latest} (npm pack) and swapping ${treePlan.treeDir}...`);
           await applyPlainTreeUpgrade(treePlan);
