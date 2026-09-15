@@ -560,12 +560,27 @@ export class BootstrapMemories extends Resource {
       // Sort by priority (lower = more important)
       soulEntries.sort((a, b) => a.priority - b.priority);
 
+      // flair#1431 — collapse VERBATIM duplicates. The live payload shipped the
+      // same IDENTITY.md body three times (`identity`, a second `identity`, and
+      // `identity-file`) and `user-context` twice: different soul keys holding
+      // byte-identical content. Dedupe by content (not by key) so the
+      // higher-priority key wins and the budget is not spent re-saying the same
+      // thing. (Roster/template-text cleanup is separate.)
+      const seenSoulValues = new Set<string>();
+      const admittedSoulEntries: typeof soulEntries = [];
+      for (const entry of soulEntries) {
+        const valueKey = JSON.stringify(entry.value ?? null);
+        if (seenSoulValues.has(valueKey)) continue;
+        seenSoulValues.add(valueKey);
+        admittedSoulEntries.push(entry);
+      }
+
       // flair#1371 — the structured `soul` map follows the admission decision.
       // Filling it during the scan (flair#1182) shipped every key even when
       // this loop dropped the entry, so sections.soul / soulTokens / the
       // context pointer described N while `soul` delivered N+1 (delivered
       // but not counted or charged — the #1206 mirror).
-      for (const entry of soulEntries) {
+      for (const entry of admittedSoulEntries) {
         if (soulTokens + entry.tokens > soulMaxTokens) {
           // Skip large entries that exceed budget — truncate or skip
           if (entry.priority >= 90) continue; // skip full workspace files

@@ -1,0 +1,1 @@
+- `bootstrap` no longer ships byte-identical soul entries more than once: the same IDENTITY.md body arriving under several keys (`identity`, a second `identity`, `identity-file`) and a duplicated `user-context` now collapse to a single entry, so the always-on portion of the payload stops re-saying the same thing and stops spending the token budget on it (Refs #1431).

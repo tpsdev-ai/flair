@@ -846,3 +846,39 @@ describe("MemoryBootstrap.post() — org-event watermark path (flair#931)", () =
     expect(ids).not.toContain("before-boot");
   });
 });
+
+
+// flair#1431 — bootstrap shipped the same IDENTITY.md body three times
+// (`identity`, a second `identity`, and `identity-file`) and `user-context`
+// twice: different soul keys holding byte-identical content. Byte-identical
+// soul entries must collapse to one, so the always-on budget is not spent
+// re-saying the same thing.
+describe("MemoryBootstrap.post() — verbatim soul duplicates collapse (flair#1431)", () => {
+  function seedSoul(agentId: string, key: string, value: string) {
+    soulStore.set(`${agentId}:${key}`, { id: `${agentId}:${key}`, agentId, key, value });
+  }
+
+  it("drops byte-identical soul entries across different keys (identity/identity-file, user-context x2)", async () => {
+    reset();
+    const agentId = "agent-soul-1431";
+    const IDENTITY_BODY = "IDENTITY_BODY_MARKER_UNIQUE";
+    const USER_BODY = "USER_BODY_MARKER_UNIQUE";
+    seedSoul(agentId, "identity", IDENTITY_BODY);
+    seedSoul(agentId, "identity-file", IDENTITY_BODY); // same body, different key
+    seedSoul(agentId, "user-context", USER_BODY);
+    soulStore.set(`${agentId}:user-context:dup`, { id: `${agentId}:user-context:dup`, agentId, key: "user-context", value: USER_BODY });
+
+    const b = makeBootstrap(agentCtx(agentId));
+    const res: any = await b.post({ agentId, maxTokens: 6000, includeContext: true });
+
+    // The duplicate body must render exactly once, not three times.
+    const occurrences = res.context.split("IDENTITY_BODY_MARKER").length - 1;
+    expect(occurrences).toBe(1);
+    expect(res.context.split("USER_BODY_MARKER").length - 1).toBe(1);
+    // ...and the shipped structured map must match the counted sections.
+    expect(res.sections.soul).toBe(Object.keys(res.soul).length);
+    expect(res.sections.soul).toBe(2);
+    expect(res.soul["identity-file"], "the duplicate key must not ship").toBeUndefined();
+    expect(res.soul.identity).toBe(IDENTITY_BODY);
+  });
+});
