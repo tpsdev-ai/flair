@@ -54,15 +54,8 @@ function opts(over: Partial<LaunchdPlistOptions> = {}): LaunchdPlistOptions {
     modelsDir: "/Users/example/.flair/data/models",
     setConfig: JSON.stringify({ rootPath: "/Users/example/.flair/data", http: { port: 9926 } }),
     adminUser: "admin",
-    adminPass: "PLACEHOLDER-not-a-real-password",
     httpPort: 9926,
     opsNetworkPort: "9925",
-    ...over,
-  };
-}
-
-function passFileOpts(over: Partial<LaunchdPlistOptions> = {}): LaunchdPlistOptions {
-  return opts({
     passFile: {
       launcher: "/opt/flair/templates/launchd/start-flair-with-admin-pass.sh",
       adminPassFile: "/Users/example/.flair/admin-pass",
@@ -70,8 +63,32 @@ function passFileOpts(over: Partial<LaunchdPlistOptions> = {}): LaunchdPlistOpti
       path: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
     },
     ...over,
-  });
+  };
 }
+
+function passFileOpts(over: Partial<LaunchdPlistOptions> = {}): LaunchdPlistOptions {
+  return opts(over);
+}
+
+// Compile-time pin (flair#1693). `passFile` is REQUIRED on LaunchdPlistOptions,
+// so the inline plist `flair init` used to write (node + harper.js + `run .`,
+// HDB_ADMIN_PASSWORD in EnvironmentVariables) cannot be constructed at all.
+// Evaluated by `tsc -p tsconfig.test.check.json`; if passFile is ever made
+// optional again, this unused @ts-expect-error fails CI.
+// @ts-expect-error passFile is required: an inline plist is unconstructable
+const _inlinePlist: LaunchdPlistOptions = {
+  label: "ai.tpsdev.flair.deadbeef",
+  execPath: "/usr/local/bin/node",
+  harperBinPath: "/opt/flair/harper.js",
+  workingDirectory: "/opt/flair",
+  dataDir: "/Users/example/.flair/data",
+  modelsDir: "/Users/example/.flair/data/models",
+  setConfig: JSON.stringify({ rootPath: "/Users/example/.flair/data", http: { port: 9926 } }),
+  adminUser: "admin",
+  httpPort: 9926,
+  opsNetworkPort: "9925",
+};
+void _inlinePlist;
 
 /** Parse a plist with Python's stdlib plistlib (raises on a malformed document). */
 function parsePlist(plistText: string): any {
@@ -128,17 +145,14 @@ describe("buildLaunchdPlist — pass-file mode", () => {
     expect(parsed.EnvironmentVariables.HOME).toBe(`/Users/${hostile}`);
   });
 
-  test("inline mode is unchanged: still embeds HDB_ADMIN_PASSWORD", () => {
-    const plist = buildLaunchdPlist(opts());
-    expect(plist).toContain("HDB_ADMIN_PASSWORD");
-    const parsed = parsePlist(plist);
-    expect(parsed.ProgramArguments).toEqual([
-      "/usr/local/bin/node",
-      "/opt/flair/harper.js",
-      "run",
-      ".",
-    ]);
-    expect(parsed.EnvironmentVariables.HDB_ADMIN_PASSWORD).toBe("PLACEHOLDER-not-a-real-password");
+  test("inline mode is GONE: buildLaunchdPlist always uses the pass-file launcher", () => {
+    // There is no inline branch to reach (flair#1693). The default `opts()`
+    // carries a pass file and the output must be the launcher shape, never the
+    // old [node, harper.js, run, .] argv.
+    const parsed = parsePlist(buildLaunchdPlist(opts()));
+    expect(parsed.ProgramArguments[0]).toContain("start-flair-with-admin-pass.sh");
+    expect(parsed.ProgramArguments).not.toEqual(["/usr/local/bin/node", "/opt/flair/harper.js", "run", "."]);
+    expect(parsed.EnvironmentVariables.HDB_ADMIN_PASSWORD).toBeUndefined();
   });
 });
 

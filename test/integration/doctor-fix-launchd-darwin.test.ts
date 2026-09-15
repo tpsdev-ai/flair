@@ -207,6 +207,46 @@ async function runDoctorFix(
   return { stdout, stderr, exitCode };
 }
 
+async function runInit(
+  tmpHome: string,
+  port: number,
+  extraArgs: string[] = [],
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  requireCliBuild();
+  const proc = spawn(
+    nodeBin(),
+    [CLI_JS, "init", "--port", String(port), "--no-mcp", "--skip-soul", ...extraArgs],
+    {
+      cwd: REPO_ROOT,
+      // No env credential: the sandbox's ~/.flair/admin-pass is the source, so
+      // this exercises the reuse leg of the resolution rather than a proof.
+      env: doctorEnv(tmpHome, { adminPassEnv: false }),
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let stdout = "";
+  let stderr = "";
+  proc.stdout?.on("data", (d: Buffer) => {
+    stdout += d.toString();
+  });
+  proc.stderr?.on("data", (d: Buffer) => {
+    stderr += d.toString();
+  });
+  const exitCode: number = await new Promise((resolveExit, reject) => {
+    proc.on("error", reject);
+    proc.on("exit", (code) => resolveExit(code ?? 1));
+    setTimeout(() => {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        /* already gone */
+      }
+      reject(new Error(`flair init timed out after 180s\nstdout:\n${stdout}\nstderr:\n${stderr}`));
+    }, 180_000);
+  });
+  return { stdout, stderr, exitCode };
+}
+
 async function waitForHttp(url: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let last = "";
@@ -732,6 +772,30 @@ test.skipIf(!isDarwin)(
       "a refusal must not leave a launchd plist whose launcher needs the missing pass file",
     ).toBe(false);
     expect(result.stdout + result.stderr).toMatch(/admin-pass|flair init/i);
+  },
+  TEST_TIMEOUT_MS,
+);
+
+test.skipIf(!isDarwin)(
+  "flair init on an already-adopted instance leaves the plist byte-identical (flair#1693)",
+  async () => {
+    requireCliBuild();
+    const sb = await newSandbox();
+    // newSandbox() has already adopted via doctor --fix, so the on-disk plist
+    // IS the #1573 pass-file shape. `flair init` must not touch it.
+    const before = readFileSync(sb.plistPath, "utf-8");
+    expect(before).toContain("start-flair-with-admin-pass.sh");
+    expect(before).not.toContain("HDB_ADMIN_PASSWORD");
+
+    const result = await runInit(sb.tmpHome, sb.httpPort);
+
+    const after = readFileSync(sb.plistPath, "utf-8");
+    expect(result.exitCode, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(after, "flair init must not rewrite an adopted plist (#1693)").toBe(before);
+    expect(after).not.toContain("HDB_ADMIN_PASSWORD");
+    expect(result.stdout + result.stderr).toMatch(/unchanged|already managed/i);
+    const managed = assessManaged(sb.dataDir, sb.httpPort, sb.launchAgentsDir);
+    expect(managed.state, managed.detail).toBe("managed");
   },
   TEST_TIMEOUT_MS,
 );

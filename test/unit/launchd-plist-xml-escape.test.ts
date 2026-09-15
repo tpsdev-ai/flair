@@ -54,9 +54,14 @@ function opts(over: Partial<LaunchdPlistOptions> = {}): LaunchdPlistOptions {
     modelsDir: "/Users/example/.flair/data/models",
     setConfig: JSON.stringify({ rootPath: "/Users/example/.flair/data", http: { port: 9926 } }),
     adminUser: "admin",
-    adminPass: "PLACEHOLDER-not-a-real-password",
     httpPort: 9926,
     opsNetworkPort: "9925",
+    passFile: {
+      launcher: "/opt/flair/templates/launchd/start-flair-with-admin-pass.sh",
+      adminPassFile: "/Users/example/.flair/admin-pass",
+      home: "/Users/example",
+      path: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+    },
     ...over,
   };
 }
@@ -219,11 +224,11 @@ describe("buildLaunchdPlist — every other interpolated value", () => {
     expect(readEnvVar(buildLaunchdPlist(opts({ adminUser: hostile })), "HDB_ADMIN_USERNAME")).toBe(hostile);
   });
 
-  test("a placeholder admin password containing metacharacters round-trips", () => {
-    // --admin-pass / an admin-pass file accepts arbitrary bytes, so this value
-    // is as capable of breaking the XML as any path. Placeholder only.
-    const placeholder = `PLACEHOLDER-${hostile}`;
-    expect(readEnvVar(buildLaunchdPlist(opts({ adminPass: placeholder })), "HDB_ADMIN_PASSWORD")).toBe(placeholder);
+  test("no admin password is ever embedded (flair#1693)", () => {
+    // The inline HDB_ADMIN_PASSWORD key is gone structurally: there is no
+    // inline branch and no adminPass field on LaunchdPlistOptions. The whole
+    // document must not mention the key.
+    expect(buildLaunchdPlist(opts())).not.toContain("HDB_ADMIN_PASSWORD");
   });
 
   test("re-asserts MQTT disable the same way buildDirectSpawnEnv does (flair#1586)", () => {
@@ -231,19 +236,6 @@ describe("buildLaunchdPlist — every other interpolated value", () => {
     expect(readEnvVar(plist, "MQTT_NETWORK_PORT")).toBe("null");
     expect(readEnvVar(plist, "MQTT_NETWORK_SECUREPORT")).toBe("null");
     expect(readEnvVar(plist, "MQTT_WEBSOCKET")).toBe("false");
-    const passFile = buildLaunchdPlist({
-      ...opts(),
-      adminPass: "",
-      passFile: {
-        launcher: "/opt/flair/templates/launchd/start-flair-with-admin-pass.sh",
-        adminPassFile: "/Users/example/.flair/admin-pass",
-        home: "/Users/example",
-        path: "/usr/bin:/bin",
-      },
-    });
-    expect(readEnvVar(passFile, "MQTT_NETWORK_PORT")).toBe("null");
-    expect(readEnvVar(passFile, "MQTT_NETWORK_SECUREPORT")).toBe("null");
-    expect(readEnvVar(passFile, "MQTT_WEBSOCKET")).toBe("false");
   });
 
   test("the HARPER_SET_CONFIG JSON payload round-trips as exact JSON", () => {
@@ -259,8 +251,10 @@ describe("buildLaunchdPlist — every other interpolated value", () => {
       harperBinPath: `/opt/${hostile}/harper.js`,
       workingDirectory: `/opt/${hostile}`,
     }));
-    expect(readProgramArg(plist, 0)).toBe(`/usr/${hostile}/node`);
-    expect(readProgramArg(plist, 1)).toBe(`/opt/${hostile}/harper.js`);
+    // Pass-file shape: argv[0] is the launcher, argv[1] the pass file, then
+    // the node binary and harper entrypoint the launcher execs.
+    expect(readProgramArg(plist, 2)).toBe(`/usr/${hostile}/node`);
+    expect(readProgramArg(plist, 3)).toBe(`/opt/${hostile}/harper.js`);
     expect(readTop(plist, "WorkingDirectory")).toBe(`/opt/${hostile}`);
   });
 

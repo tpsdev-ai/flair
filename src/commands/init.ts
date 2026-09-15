@@ -23,7 +23,6 @@ import nacl from "tweetnacl";
 export type InitCli = {
   api: (...args: any[]) => any;
   b64url: (...args: any[]) => any;
-  buildLaunchdPlist: (...args: any[]) => any;
   buildOperationsApiConfig: (...args: any[]) => any;
   cleanupLegacyLaunchdPlist: (...args: any[]) => any;
   defaultDataDir: (...args: any[]) => any;
@@ -57,6 +56,7 @@ export type InitCli = {
   verifySemanticSearch: (...args: any[]) => any;
   waitForHealth: (...args: any[]) => any;
   writeDaemonSidecar: (...args: any[]) => any;
+  writeInitLaunchdPlist: (...args: any[]) => any;
   MQTT_DISABLED_CONFIG: any;
   STARTUP_TIMEOUT_MS: any;
 };
@@ -74,10 +74,6 @@ function api(...args: any[]): any {
 
 function b64url(...args: any[]): any {
   return cli.b64url(...args);
-}
-
-function buildLaunchdPlist(...args: any[]): any {
-  return cli.buildLaunchdPlist(...args);
 }
 
 function buildOperationsApiConfig(...args: any[]): any {
@@ -210,6 +206,10 @@ function waitForHealth(...args: any[]): any {
 
 function writeDaemonSidecar(...args: any[]): any {
   return cli.writeDaemonSidecar(...args);
+}
+
+function writeInitLaunchdPlist(...args: any[]): any {
+  return cli.writeInitLaunchdPlist(...args);
 }
 
 export function register(program: Command): void {
@@ -770,21 +770,37 @@ program
           // backend on every KeepAlive restart in-process. See that file's
           // header (flair#694) for why this replaced the old HARPER_CONFIG
           // plist line.
-          const plist = buildLaunchdPlist({
+          //
+          // Credential before plist, ONE shape (flair#1693): the writer always
+          // emits the pass-file launcher and never HDB_ADMIN_PASSWORD. It reuses
+          // an existing valid ~/.flair/admin-pass, or proves the credential in
+          // hand against this (now-healthy) instance and writes it 0600, or
+          // refuses without writing a plist. An already-adopted instance is left
+          // byte-for-byte unchanged rather than downgraded to the inline shape.
+          const outcome = await writeInitLaunchdPlist({
+            dataDir,
+            plistPath,
             label,
+            adminPass,
+            adminUser,
+            modelsDir,
             execPath: process.execPath,
             harperBinPath,
             workingDirectory: flairPackageDir(),
-            dataDir,
-            modelsDir,
-            setConfig,
-            adminUser,
-            adminPass,
             httpPort,
             opsNetworkPort: opsNetworkPortValue(opsBindHost, opsPort),
+            setConfig,
+            port: httpPort,
           });
-          writeFileSync(plistPath, plist);
-          console.log("Launchd service registered ✓");
+          if (outcome.kind === "refused") {
+            console.error(`Error: ${outcome.detail}`);
+            process.exit(1);
+          }
+          console.log(
+            outcome.kind === "unchanged"
+              ? "Launchd service already managed — plist unchanged ✓"
+              : "Launchd service registered ✓",
+          );
         }
       }
     }

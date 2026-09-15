@@ -56,8 +56,11 @@ describe("MQTT is fully disabled on every production spawn path (flair#1586)", (
   });
 
   test("launchd plist and flair init re-assert the same MQTT_* env vars", () => {
+    // One plist writer, one shape (flair#1693): the inline branch is gone, so
+    // there is exactly ONE MQTT_* block in cli.ts, and it serves both init and
+    // the doctor repair.
     const plistKeys = [...cliSrc.matchAll(/<key>MQTT_NETWORK_PORT<\/key>/g)];
-    expect(plistKeys.length).toBe(2);
+    expect(plistKeys.length).toBe(1);
     expect(cliSrc).toMatch(/<key>MQTT_NETWORK_SECUREPORT<\/key><string>null<\/string>/);
     expect(cliSrc).toMatch(/<key>MQTT_WEBSOCKET<\/key><string>false<\/string>/);
     expect(cliSrc).toMatch(/MQTT_NETWORK_PORT:\s*"null"/);
