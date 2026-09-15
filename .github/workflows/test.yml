@@ -216,6 +216,166 @@ jobs:
       - name: Real-launchd doctor --fix integration (flair#1581)
         run: bun test test/integration/doctor-fix-launchd-darwin.test.ts
 
+  # flair#1671 slice 1 + flair#1683. The darwin-gated job above proves the
+  # #1573 adoption path works on a clean host. It does NOT prove the path
+  # survives a `flair upgrade` — the shape that broke production on rockit:
+  # 0.54.1 booted the engine under the adopted launchd job but never bound
+  # 127.0.0.1:9926, so waitForHealth timed out and the CLI rolled back. No
+  # lane ran that end-to-end before this one.
+  #
+  # `launchd-lane-changes` gates the macOS job by changed file (macOS minutes
+  # are the expensive input) without narrowing the whole CI workflow's
+  # triggers. It only runs for pull requests; pushes to main and
+  # workflow_dispatch run the lane unconditionally.
+  launchd-lane-changes:
+    name: "launchd adopt-then-upgrade: changed-files gate"
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          fetch-depth: 0
+      - id: filter
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="origin/${GITHUB_BASE_REF}"
+          git fetch --no-tags origin "+refs/heads/${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}" || true
+          changed="$(git diff --name-only "${base}...HEAD")"
+          echo "Changed files vs ${base}:"
+          printf '%s\n' "$changed"
+          run=false
+          # Single-file triggers (anchored) plus directory triggers (prefix).
+          if printf '%s\n' "$changed" | grep -Eq '^(src/cli\.ts|src/lib/(daemon-liveness|launchd-repair|mcp-enable)\.ts|resources/health\.ts|scripts/release[^/]*\.sh|scripts/ci/local-npm-registry\.mjs|scripts/ci/macos-launchd-upgrade-lane\.sh|\.github/workflows/test\.yml)$' \
+             || printf '%s\n' "$changed" | grep -Eq '^(src/commands/|templates/launchd/)'; then
+            run=true
+          fi
+          if [[ "${GITHUB_HEAD_REF:-}" == release/v* ]]; then
+            run=true
+          fi
+          echo "run=${run}" >> "$GITHUB_OUTPUT"
+
+  launchd-adopt-upgrade-darwin:
+    name: "launchd adopt-then-upgrade (macOS)"
+    needs: [launchd-lane-changes]
+    # Runs unconditionally on push to main and workflow_dispatch; on pull
+    # requests it runs only when the changed-files gate says the lane's
+    # surface moved (or the PR is a release/v* cut).
+    if: ${{ always() && (github.event_name != 'pull_request' || needs.launchd-lane-changes.outputs.run == 'true') }}
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
+        with:
+          bun-version: "1.3.10"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - name: Cache bun install
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-cache-${{ runner.os }}-
+      - name: Install workspace deps
+        run: bun install --frozen-lockfile
+      - name: Build the PR's resources and CLI
+        run: bun run build && bun run build:cli
+      - name: Pack the PR build (unpublished)
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARBALL_NAME="$(npm pack --silent | tail -n1)"
+          test -f "$TARBALL_NAME"
+          echo "tgz_path=$PWD/$TARBALL_NAME" >> "$GITHUB_OUTPUT"
+          echo "pr_version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+          echo "pr_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "packed $TARBALL_NAME"
+      - name: Derive the previously published baseline
+        id: baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HEAD_VERSION="${{ steps.pack.outputs.pr_version }}"
+          PUBLISHED_VERSIONS="$(npm view @tpsdev-ai/flair versions --json)" || {
+            echo "::error::cannot query the npm registry for @tpsdev-ai/flair versions"
+            exit 1
+          }
+          BASELINE_VERSION="$(printf '%s' "$PUBLISHED_VERSIONS" | node -e "
+            const headVer = process.env.HEAD_VERSION;
+            const lt = (a, b) => {
+              const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
+              const len = Math.max(pa.length, pb.length);
+              for (let i = 0; i < len; i++) {
+                const ca = pa[i] || 0, cb = pb[i] || 0;
+                if (ca < cb) return true;
+                if (ca > cb) return false;
+              }
+              return false;
+            };
+            const rsort = (a, b) => lt(b, a) ? -1 : lt(a, b) ? 1 : 0;
+            let d = ''; process.stdin.on('data', c => d += c); process.stdin.on('end', () => {
+              const older = JSON.parse(d).filter(v => !v.includes('-') && lt(v, headVer));
+              if (older.length === 0) {
+                console.error('::error::no published version is strictly older than ' + headVer);
+                process.exit(1);
+              }
+              console.log(older.sort(rsort)[0]);
+            });
+          ")"
+          if [[ ! "$BASELINE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::derived baseline '${BASELINE_VERSION}' is not x.y.z — refusing to install"
+            exit 1
+          fi
+          if [[ "$BASELINE_VERSION" == "$HEAD_VERSION" ]]; then
+            echo "::error::baseline ${BASELINE_VERSION} equals the PR build — the lane would compare a version to itself"
+            exit 1
+          fi
+          echo "baseline_version=$BASELINE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Baseline (most recent npm-published version < ${HEAD_VERSION}): ${BASELINE_VERSION}"
+      - name: Pre-download embedding model (shared)
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL=nomic-embed-text-v1.5.Q4_K_M.gguf
+          EXPECTED="$(awk -v f="$MODEL" '$1 == f { print $2 }' scripts/ci/model-checksums.txt)"
+          DEST="$GITHUB_WORKSPACE/models/$MODEL"
+          mkdir -p "$(dirname "$DEST")"
+          if [[ -f "$DEST" && "$(shasum -a 256 "$DEST" | awk '{print $1}')" == "$EXPECTED" ]]; then
+            echo "embedding model already present and verified"
+            exit 0
+          fi
+          curl -fSL --retry 5 --retry-delay 10 --retry-all-errors --connect-timeout 30 \
+            "https://github.com/tpsdev-ai/flair/releases/download/ci-models/${MODEL}" -o "$DEST.partial"
+          mv "$DEST.partial" "$DEST"
+          ACTUAL="$(shasum -a 256 "$DEST" | awk '{print $1}')"
+          if [[ "$ACTUAL" != "$EXPECTED" ]]; then
+            echo "::error::embedding model sha256 mismatch: expected ${EXPECTED} got ${ACTUAL}"
+            exit 1
+          fi
+          echo "embedding model verified"
+      - name: Run launchd adopt-then-upgrade lane (flair#1671/#1683)
+        env:
+          TGZ_PATH: ${{ steps.pack.outputs.tgz_path }}
+          PR_VERSION: ${{ steps.pack.outputs.pr_version }}
+          PR_COMMIT: ${{ steps.pack.outputs.pr_commit }}
+          BASELINE_VERSION: ${{ steps.baseline.outputs.baseline_version }}
+          FLAIR_MODELS_DIR: ${{ github.workspace }}/models
+        run: bash scripts/ci/macos-launchd-upgrade-lane.sh
+      - name: Upload launchd lane diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: launchd-adopt-upgrade-diagnostics
+          path: diagnostics/launchd-adopt-upgrade/
+          if-no-files-found: warn
+
   test-integration:
     name: Integration Tests
     runs-on: ubuntu-latest
