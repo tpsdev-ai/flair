@@ -23,7 +23,10 @@
 #      instance answering while the supervised job is dead is exactly the false
 #      green flair#1683 was (the macOS lane in #1684 asserts the same three
 #      facts for the upgrade path).
-#   4. `flair doctor` exits 0.
+#   4. `flair doctor` exits 0 — or exits non-zero with EVERY `✗` finding on the
+#      explicit advisory allow-list in scripts/ci/doctor-advisory.sh (initially
+#      the flair#1701 public-URL hint). Any other `✗` is a failure; the
+#      allow-list shrinks back to empty when the product fix ships.
 #   5. vendored tool descriptors are present in the INSTALLED tree at
 #      dist/resources/tool-descriptors/index.js. Vendoring first shipped with
 #      flair#1691 (flair#1683); older releases legitimately have no such module,
@@ -71,6 +74,10 @@ DATA_DIR="$HOME/.flair/data"           # flair's defaultDataDir()
 HTTP_URL="http://127.0.0.1:${PORT}"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 OS="$(uname -s)"
+# Sibling scripts (doctor-advisory.sh) live next to this one; resolve them from
+# BASH_SOURCE so the boot check works from any cwd (the canary and the rockit
+# ritual both invoke it by path).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 mkdir -p "$LOG_DIR" "$(dirname "$PASS_FILE")"
 
@@ -291,17 +298,29 @@ fi
 assert_listener_owned_by "$SUPERVISED_PID" "$LISTENER_TIMEOUT" || fail "the supervised pid does not own ${PORT} — something else is answering /Health"
 wait_health "$HTTP_URL/Health" 30 || fail "/Health did not answer after the supervised pid was confirmed"
 
-# ── 4. flair doctor exits 0 ─────────────────────────────────────────────────────
+# ── 4. flair doctor exits 0 (or every ✗ is an allow-listed advisory) ───────────
 log "flair doctor"
 set +e
 "$FLAIR_BIN" doctor --port "$PORT" > "$LOG_DIR/doctor.log" 2>&1
 DOCTOR_STATUS=$?
 set -e
 if [ "$DOCTOR_STATUS" -ne 0 ]; then
-  tail -n 40 "$LOG_DIR/doctor.log" >&2 || true
-  fail "flair doctor exited ${DOCTOR_STATUS} (see $LOG_DIR/doctor.log)"
+  # flair#1701: doctor can exit non-zero on a healthy loopback instance for a
+  # finding that is a hint, not a defect. Accept that ONLY when every ✗ finding
+  # is on the explicit allow-list in doctor-advisory.sh; any other ✗ (or a
+  # non-zero exit with no findings at all) fails as before.
+  ADVISORY_OUT="$LOG_DIR/doctor-advisory.log"
+  if bash "$SCRIPT_DIR/doctor-advisory.sh" "$LOG_DIR/doctor.log" > "$ADVISORY_OUT" 2>&1; then
+    cat "$ADVISORY_OUT"
+    echo "flair doctor exit ${DOCTOR_STATUS} — advisory-only, allow-listed"
+  else
+    cat "$ADVISORY_OUT" >&2 || true
+    tail -n 40 "$LOG_DIR/doctor.log" >&2 || true
+    fail "flair doctor exited ${DOCTOR_STATUS} with a non-advisory ✗ (see $LOG_DIR/doctor.log)"
+  fi
+else
+  echo "flair doctor exit 0"
 fi
-echo "flair doctor exit 0"
 
 # ── 5. vendored descriptors present in the installed tree ───────────────────────
 log "vendored descriptors present"
