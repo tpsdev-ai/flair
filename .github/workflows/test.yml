@@ -264,7 +264,7 @@ jobs:
           printf '%s\n' "$changed"
           run=false
           # Single-file triggers (anchored) plus directory triggers (prefix).
-          if printf '%s\n' "$changed" | grep -Eq '^(src/cli\.ts|src/lib/(daemon-liveness|launchd-repair|mcp-enable)\.ts|resources/health\.ts|scripts/release[^/]*\.sh|scripts/ci/local-npm-registry\.mjs|scripts/ci/redirect-upgrade-registry\.cjs|scripts/ci/macos-launchd-upgrade-lane\.sh|scripts/ci/macos-launchd-passfile-missing-check\.sh|\.github/workflows/test\.yml)$' \
+          if printf '%s\n' "$changed" | grep -Eq '^(src/cli\.ts|src/lib/(daemon-liveness|launchd-repair|mcp-enable)\.ts|resources/health\.ts|scripts/release[^/]*\.sh|scripts/ci/local-npm-registry\.mjs|scripts/ci/macos-launchd-upgrade-lane\.sh|scripts/ci/macos-launchd-passfile-missing-check\.sh|\.github/workflows/test\.yml)$' \
              || printf '%s\n' "$changed" | grep -Eq '^(src/commands/|templates/launchd/)'; then
             run=true
           fi
