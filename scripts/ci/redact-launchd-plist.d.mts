@@ -8,4 +8,6 @@ export function collectAdminPassSecrets(paths?: string[]): string[];
 
 export function redactPlist(text: string, extraSecrets?: string[]): string;
 
+export function unredactedKeyNames(text: string): string[];
+
 export function main(argv?: string[]): number;

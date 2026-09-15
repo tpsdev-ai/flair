@@ -10,6 +10,12 @@
  * `cat`ed verbatim. `redactPlist` must remove the value while leaving the
  * plist's structure (and the credential key, so the shape is still diagnosable)
  * intact.
+ *
+ * flair#1696 — the key list used to be hand-maintained and had already drifted
+ * from the product's own `NEVER_GENERATED_SECRET_KEYS`: `FLAIR_ADMIN_PASS` and
+ * four others were not covered. These tests pin the list to that export and
+ * prove `--check`/`unredactedKeyNames` flag a surviving `FLAIR_ADMIN_PASS`
+ * fixture (fails-first against the hand-maintained list).
  */
 
 import { describe, expect, test } from "bun:test";
@@ -18,13 +24,22 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { NEVER_GENERATED_SECRET_KEYS } from "../../src/component-env.js";
 import {
   REDACTED_KEYS,
   collectAdminPassSecrets,
   redactPlist,
+  unredactedKeyNames,
 } from "../../scripts/ci/redact-launchd-plist.mjs";
 
 const SCRIPT = join(import.meta.dir, "..", "..", "scripts", "ci", "redact-launchd-plist.mjs");
+
+// A plist carrying the product's REAL name for the admin password. It was
+// absent from the hand-maintained list, so it is the fails-first fixture for
+// the drift this issue fixes.
+const FLAIR_ADMIN_PASS_FIXTURE = `<dict>
+  <key>FLAIR_ADMIN_PASS</key><string>fixture-pass-value</string>
+</dict>`;
 
 const INLINE_PLIST = `<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
@@ -98,6 +113,70 @@ describe("redactPlist — inline credential plist", () => {
       expect(run.status).toBe(0);
       expect(run.stdout).not.toContain("s3cr3t-inline-value");
       expect(run.stdout).toContain("<key>HDB_ADMIN_PASSWORD</key><string>REDACTED</string>");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("REDACTED_KEYS — derived, not hand-maintained (flair#1696)", () => {
+  test("covers every key the product says must never carry a generated secret", () => {
+    // The load-bearing drift guard: importing the product export means a key
+    // added to src/component-env.ts fails THIS test until the redactor covers
+    // it. There is deliberately no copy of the list here or in the redactor.
+    for (const key of NEVER_GENERATED_SECRET_KEYS) {
+      expect(REDACTED_KEYS).toContain(key);
+    }
+  });
+
+  test("also covers the launchd-only FLAIR_TOKEN credential", () => {
+    expect(REDACTED_KEYS).toContain("FLAIR_TOKEN");
+  });
+});
+
+describe("unredactedKeyNames — the artifact/log assertion (flair#1696)", () => {
+  test("names each credential key still carrying a non-REDACTED value", () => {
+    const plist = `<dict>
+  <key>FLAIR_ADMIN_PASS</key><string>fixture-pass-value</string>
+  <key>FLAIR_TOKEN</key><string>fixture-token-value</string>
+  <key>HDB_ADMIN_PASSWORD</key><string>REDACTED</string>
+</dict>`;
+    expect(unredactedKeyNames(plist)).toEqual(["FLAIR_ADMIN_PASS", "FLAIR_TOKEN"]);
+  });
+
+  test("reports nothing once redactPlist has run", () => {
+    expect(unredactedKeyNames(redactPlist(INLINE_PLIST))).toEqual([]);
+  });
+});
+
+describe("redactPlist — product secret names (flair#1696)", () => {
+  test("redacts a FLAIR_ADMIN_PASS inline value", () => {
+    const out = redactPlist(FLAIR_ADMIN_PASS_FIXTURE);
+    expect(out).not.toContain("fixture-pass-value");
+    expect(out).toContain("<key>FLAIR_ADMIN_PASS</key><string>REDACTED</string>");
+  });
+});
+
+describe("--check — fails on a surviving credential key, names it not its value", () => {
+  test("exits 1 on the FLAIR_ADMIN_PASS fails-first fixture", () => {
+    const dir = mkdtempSync(join(tmpdir(), "redact-check-bad-"));
+    try {
+      writeFileSync(join(dir, "fixture.plist"), FLAIR_ADMIN_PASS_FIXTURE);
+      const run = spawnSync(process.execPath, [SCRIPT, "--check", dir], { encoding: "utf8" });
+      expect(run.status).toBe(1);
+      expect(run.stderr).toContain("FLAIR_ADMIN_PASS");
+      expect(run.stderr).not.toContain("fixture-pass-value");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("exits 0 on a redacted artifact directory", () => {
+    const dir = mkdtempSync(join(tmpdir(), "redact-check-ok-"));
+    try {
+      writeFileSync(join(dir, "redacted.plist"), redactPlist(INLINE_PLIST));
+      const run = spawnSync(process.execPath, [SCRIPT, "--check", dir], { encoding: "utf8" });
+      expect(run.status).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
