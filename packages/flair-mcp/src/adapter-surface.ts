@@ -2,11 +2,12 @@
  * adapter-surface.ts — the stdio adapter's derived tool set (flair#1580).
  *
  * `@tpsdev-ai/flair-mcp` no longer hand-wires per-tool string literals in
- * index.ts. The advertised set is STDIO_TOOL_DESCRIPTORS from the shared
- * `@tpsdev-ai/flair-tool-descriptors` module — the same descriptors the
- * server TOOLS registry binds to Harper impls. Drift is impossible by
- * construction: a new both-surface descriptor appears here once a
- * FlairClient handler is bound.
+ * index.ts. The advertised set is STDIO_TOOL_DESCRIPTORS from the descriptor
+ * module vendored at build time into `./tool-descriptors/` (flair#1683;
+ * source of truth: packages/flair-tool-descriptors/src/index.ts) — the same
+ * descriptors the server TOOLS registry binds to Harper impls. Drift is
+ * impossible by construction: a new both-surface descriptor appears here once
+ * a FlairClient handler is bound.
  *
  * This module remains the reviewed chokepoint for the stdio ↔ TOOLS seam:
  *
@@ -22,7 +23,7 @@ import {
   STDIO_TOOL_DESCRIPTORS,
   SURFACE_EXEMPTIONS,
   descriptorNames,
-} from "@tpsdev-ai/flair-tool-descriptors";
+} from "./tool-descriptors/index.js";
 
 /** Tools registered on the stdio adapter — derived from the shared descriptor list. */
 export const ADAPTER_TOOL_NAMES = descriptorNames(STDIO_TOOL_DESCRIPTORS);

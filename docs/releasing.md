@@ -149,8 +149,12 @@ human 2FA approval of a staged package.
 Packages: `flair-client`, `flair-mcp`, `flair`,
 `openclaw-flair`, `pi-flair`, `n8n-nodes-flair`, `langgraph-flair`, `flair-bench`.
 
-> `flair-tool-descriptors` is private and bundled into `flair` + `flair-mcp` at
-> prepack; it is never published.
+> `flair-tool-descriptors` is private and never published. Since flair#1683 it is a
+> **build-time source**: `scripts/vendor-tool-descriptors.mjs` copies it into each
+> consumer's own tree at prebuild (`resources/tool-descriptors/` for `flair`,
+> `packages/flair-mcp/src/tool-descriptors/` for `flair-mcp`) and the consumers
+> import it by relative path. Nothing declares or bundles it as a dependency —
+> 0.54.1's `bundleDependencies` broke fresh global installs (flair#1681 → #1683).
 
 ### `flair-bench` bootstrap (one-time, done)
 

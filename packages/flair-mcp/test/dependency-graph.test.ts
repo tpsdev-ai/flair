@@ -50,12 +50,15 @@ describe("flair-mcp dependency graph — no Harper-linked code (flair#1580)", ()
     expect(violations).toEqual([]);
   });
 
-  test("package.json does not depend on harper or the root flair server", () => {
+  test("package.json does not depend on harper, the root flair server, or the private descriptor package", () => {
     const pkg = JSON.parse(readFileSync(join(import.meta.dir, "..", "package.json"), "utf-8"));
     const deps = { ...pkg.dependencies, ...pkg.devDependencies };
     expect(deps.harper).toBeUndefined();
     expect(deps["@tpsdev-ai/flair"]).toBeUndefined();
-    expect(deps["@tpsdev-ai/flair-tool-descriptors"]).toBeDefined();
+    // flair#1683: descriptors are a build-time source vendored into dist/, not a
+    // dependency — the private package must not be declared or bundled.
+    expect(deps["@tpsdev-ai/flair-tool-descriptors"]).toBeUndefined();
+    expect(pkg.bundleDependencies ?? []).toEqual([]);
     expect(deps["@tpsdev-ai/flair-client"]).toBeDefined();
   });
 });

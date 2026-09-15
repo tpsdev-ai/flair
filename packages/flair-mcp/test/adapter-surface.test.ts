@@ -4,7 +4,7 @@ import { join } from "node:path";
 import {
   STDIO_TOOL_DESCRIPTORS,
   descriptorNames,
-} from "@tpsdev-ai/flair-tool-descriptors";
+} from "../src/tool-descriptors/index.js";
 import {
   ADAPTER_TOOL_NAMES,
   STDIO_ADAPTER_EXEMPTIONS,

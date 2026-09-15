@@ -13,7 +13,7 @@ import type { FlairClient } from "@tpsdev-ai/flair-client";
 import {
   STDIO_TOOL_DESCRIPTORS,
   toStdioMcpToolDef,
-} from "@tpsdev-ai/flair-tool-descriptors";
+} from "./tool-descriptors/index.js";
 import { buildCatchupRequest, summarizeCatchup, type CatchupPage } from "./catchup.js";
 import { classifyError } from "./errors.js";
 import { jsonSchemaToZodShape } from "./json-schema-zod.js";

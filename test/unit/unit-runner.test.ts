@@ -36,8 +36,8 @@ describe("shared unit lane", () => {
     const steps = unitPlan(root);
     const rootUnit = steps.find(step => step.name === "root unit tests");
     expect(rootUnit?.files.some(file => file.endsWith("/test/data-scoping.test.ts"))).toBe(true);
-    expect(steps.findIndex(step => step.name === "build flair-tool-descriptors")).toBeLessThan(steps.findIndex(step => step.name === "root unit tests"));
-    expect(steps.findIndex(step => step.name === "build flair-tool-descriptors")).toBeLessThan(steps.findIndex(step => step.name === "flair-mcp unit tests"));
+    expect(steps.findIndex(step => step.name === "vendor tool descriptors")).toBeLessThan(steps.findIndex(step => step.name === "root unit tests"));
+    expect(steps.findIndex(step => step.name === "vendor tool descriptors")).toBeLessThan(steps.findIndex(step => step.name === "flair-mcp unit tests"));
     const isolated = steps.filter(step => step.files.some(file => file.includes("/unit-isolated/")));
     expect(isolated.length).toBeGreaterThan(0);
     for (const step of isolated) {
@@ -48,7 +48,9 @@ describe("shared unit lane", () => {
     expect(steps.findIndex(step => step.name === "build flair-client")).toBeLessThan(steps.findIndex(step => step.name === "flair-mcp unit tests"));
     const prebuild = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).scripts.prebuild as string;
     // bun run build --workspace=... re-invokes root prebuild (infinite loop, exit 128).
-    expect(prebuild).toContain("cd packages/flair-tool-descriptors");
+    // flair#1683: prebuild now vendors the descriptor source into resources/.
+    expect(prebuild).toContain("node scripts/vendor-tool-descriptors.mjs");
+    expect(prebuild).not.toContain("packages/flair-tool-descriptors");
     expect(prebuild).not.toContain("--workspace");
   });
 

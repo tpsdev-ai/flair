@@ -26,8 +26,13 @@
  * the resolved agent, never from the tool arguments — an agent can only act as
  * itself (no forging of agentId / authorId in the body).
  *
- * NOTE (flair#1580): MCP-facing metadata (name, description, inputSchema,
- * output shape) lives in `@tpsdev-ai/flair-tool-descriptors`. This registry
+ * NOTE (flair#1580, vendored by flair#1683): MCP-facing metadata (name,
+ * description, inputSchema, output shape) lives in the descriptor module
+ * vendored at build time into `./tool-descriptors/` (source of truth:
+ * packages/flair-tool-descriptors/src/index.ts — see
+ * scripts/vendor-tool-descriptors.mjs). It is imported by RELATIVE PATH so it
+ * resolves inside the packed tarball with no registry dependency on the
+ * private descriptor package. This registry
  * binds each *native* descriptor to its Harper impl. The stdio adapter binds
  * the same list (stdio surface) to FlairClient HTTP — tool-set drift is
  * impossible by construction. One-sided tools (`attention`, archive verbs,
@@ -59,7 +64,7 @@ import {
   NATIVE_TOOL_DESCRIPTORS,
   toMcpToolDef,
   type McpToolDef,
-} from "@tpsdev-ai/flair-tool-descriptors";
+} from "./tool-descriptors/index.js";
 export type { McpToolDef };
 
 type HandlerKey = "SemanticSearch" | "Memory" | "BootstrapMemories" | "Soul" | "WorkspaceState" | "OrgEvent" | "AttentionQuery" | "RecordUsage";

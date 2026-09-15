@@ -1036,6 +1036,17 @@ jobs:
           echo "TGZ_PATH=$(pwd)/$(ls tpsdev-ai-flair-*.tgz)" >> $GITHUB_OUTPUT
       - name: Global-install the packed tarball and enforce the installed-tree budget
         run: node scripts/check-install-weight.mjs --tarball "${{ steps.pack.outputs.TGZ_PATH }}"
+      - name: Global-install lockfile regression (flair#1683)
+        # 0.54.1's `bundleDependencies` broke npm's reify against harper's own
+        # npm-shrinkwrap.json: `npm i -g` "succeeded" with "invalid or damaged
+        # lockfile" ×8, 50 packages instead of 543, harper with no dependency
+        # tree, and `harper.js version` dead. That is a green install that
+        # cannot start its engine, so the install's exit code is NOT the check:
+        # this script installs the tarball packed above into a throwaway prefix
+        # and asserts all four symptoms are absent. Fails-first verified against
+        # the published 0.54.1 tarball (flair#1683 PR body). Reuses this job's
+        # build+pack (~10s).
+        run: node scripts/check-global-install-lockfile.mjs --package "${{ steps.pack.outputs.TGZ_PATH }}"
 
   upgrade-smoke:
     name: Upgrade from npm-stable
@@ -1316,10 +1327,12 @@ jobs:
           restore-keys: |
             bun-cache-${{ runner.os }}-
       - run: sfw bun install --frozen-lockfile
-      # Workspace package exports point at dist/. Build before resources
-      # typecheck so `@tpsdev-ai/flair-tool-descriptors` resolves (flair#1580).
-      - name: Build flair-tool-descriptors
-        run: cd packages/flair-tool-descriptors && bun run build
+      # flair#1683: descriptors are a build-time source vendored into each
+      # consumer's own tree (resources/tool-descriptors/,
+      # packages/flair-mcp/src/tool-descriptors/) and imported by relative path,
+      # so resources/** typechecks with no workspace dependency.
+      - name: Vendor tool descriptors
+        run: node scripts/vendor-tool-descriptors.mjs
       - run: bunx tsc --noEmit -p tsconfig.check.json
 
   # Required-status-check adapter — see test-unit-gate's comment above.
@@ -1356,10 +1369,12 @@ jobs:
           restore-keys: |
             bun-cache-${{ runner.os }}-
       - run: sfw bun install --frozen-lockfile
-      # Workspace package exports point at dist/. Build before resources
-      # typecheck so `@tpsdev-ai/flair-tool-descriptors` resolves (flair#1580).
-      - name: Build flair-tool-descriptors
-        run: cd packages/flair-tool-descriptors && bun run build
+      # flair#1683: descriptors are a build-time source vendored into each
+      # consumer's own tree (resources/tool-descriptors/,
+      # packages/flair-mcp/src/tool-descriptors/) and imported by relative path,
+      # so the strict root + workspace typechecks need no built descriptor package.
+      - name: Vendor tool descriptors
+        run: node scripts/vendor-tool-descriptors.mjs
       # Root resources (tsconfig.check.json has harper paths override
       # so harper's raw .ts internals don't pollute the output)
       - name: Type check root (resources)

@@ -7,7 +7,7 @@
  */
 
 import { z, type ZodTypeAny } from "zod";
-import type { JsonSchemaObject, JsonSchemaProperty } from "@tpsdev-ai/flair-tool-descriptors";
+import type { JsonSchemaObject, JsonSchemaProperty } from "./tool-descriptors/index.js";
 
 export function jsonSchemaToZodShape(schema: JsonSchemaObject): Record<string, ZodTypeAny> {
   const required = new Set(schema.required ?? []);

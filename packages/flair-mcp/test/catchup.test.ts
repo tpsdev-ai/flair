@@ -4,7 +4,7 @@ import {
   TOOL_DESCRIPTORS,
   SURFACE_EXEMPTIONS,
   toStdioMcpToolDef,
-} from "@tpsdev-ai/flair-tool-descriptors";
+} from "../src/tool-descriptors/index.js";
 import { STDIO_TOOL_HANDLERS } from "../src/adapter-tools.ts";
 import { buildCatchupRequest, summarizeCatchup } from "../src/catchup.ts";
 

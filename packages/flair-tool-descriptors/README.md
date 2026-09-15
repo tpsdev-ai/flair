@@ -11,9 +11,18 @@ descriptor appears on every listed surface with zero hand-wiring (flair#1580).
 
 ## Install
 
-This package is **private and bundled** into `@tpsdev-ai/flair` and
-`@tpsdev-ai/flair-mcp` at prepack; it is never published to npm on its own.
+This package is **never published**. It is a **build-time source**, vendored at
+prebuild into the two packages that consume it — `@tpsdev-ai/flair`
+(`resources/tool-descriptors/`) and `@tpsdev-ai/flair-mcp`
+(`packages/flair-mcp/src/tool-descriptors/`) — by
+`scripts/vendor-tool-descriptors.mjs`. Both import the vendored copy by relative
+path, which is the only specifier that resolves inside a packed tarball.
 Install one of those instead.
+
+Do **not** add this package to any `dependencies` or `bundleDependencies`:
+the source here is the input, the vendored copy is the artifact. Listing it as a
+dependency 404s a fresh install (it is not on npm), and bundling it is what broke
+`npm install -g @tpsdev-ai/flair` in 0.54.1 (flair#1681 → #1683).
 
 ## Surfaces
 

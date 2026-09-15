@@ -3,7 +3,7 @@
 /**
  * Flair MCP Server — persistent memory for Claude Code and any MCP client.
  *
- * Tools (derived from @tpsdev-ai/flair-tool-descriptors — flair#1580):
+ * Tools (derived from the vendored descriptor module — flair#1580, flair#1683):
  *   - memory_search  — semantic search across memories
  *   - memory_store   — save a memory with type + durability
  *   - memory_update  — update an existing memory by ID (dedup-bypassed)
@@ -201,7 +201,7 @@ export async function runMcp(): Promise<void> {
 
   const server = new McpServer(serverInfo());
 
-  // ─── Tools (derived from @tpsdev-ai/flair-tool-descriptors) ───────────────
+  // ─── Tools (derived from the vendored tool-descriptors module) ────────────
   //
   // The advertised set is STDIO_TOOL_DESCRIPTORS. Handlers bind each
   // descriptor to a FlairClient HTTP call. A new shared descriptor appears

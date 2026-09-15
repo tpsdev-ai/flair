@@ -36,9 +36,12 @@ export function unitPlan(root: string): UnitStep[] {
   const unitFiles = requiredFiles("test/unit");
   const isolatedFiles = requiredFiles("test/unit-isolated");
   const steps: UnitStep[] = [{
-    name: "build flair-tool-descriptors",
-    cwd: join(root, "packages/flair-tool-descriptors"),
-    args: ["run", "build"],
+    // flair#1683: the private descriptor package is a build-time source, not a
+    // dependency. Vendor its copy into both consumers before anything reads it
+    // (there is no workspace symlink to fall back on).
+    name: "vendor tool descriptors",
+    cwd: root,
+    args: ["scripts/vendor-tool-descriptors.mjs"],
     files: [],
   }, {
     name: "root unit tests",
