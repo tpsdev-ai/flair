@@ -136,7 +136,11 @@ launchd_pid() {
 }
 
 wait_health() {
-  local url="$1" timeout="${2:-120}" attempt=0 last="000" deadline=$((SECONDS + timeout))
+  local url="$1"
+  local timeout="${2:-120}"
+  local attempt=0
+  local last="000"
+  local deadline=$((SECONDS + timeout))
   while (( SECONDS < deadline )); do
     attempt=$((attempt + 1))
     last="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$url" || true)"
@@ -151,7 +155,9 @@ wait_health() {
 }
 
 assert_bound_by_pid() {
-  local pid="$1" label="$2" outfile="$DIAG_DIR/lsof-${label}-${pid}.txt"
+  local pid="$1"
+  local label="$2"
+  local outfile="$DIAG_DIR/lsof-${label}-${pid}.txt"
   lsof -nP -p "$pid" -iTCP -sTCP:LISTEN > "$outfile" 2>/dev/null || true
   echo "--- $outfile ---"; cat "$outfile"
   if ! grep -Eq "127\\.0\\.0\\.1:${PORT}|\\*:${PORT}|localhost:${PORT}" "$outfile"; then
