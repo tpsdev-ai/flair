@@ -1,0 +1,1 @@
+- **The macOS launchd CI diagnostics now redact every credential name Flair knows about, not a hand-maintained subset.** The redactor derives its key list from the product's own secret-key inventory, and the lane fails if any credential key survives with a value in the uploaded artifact or the printed log.

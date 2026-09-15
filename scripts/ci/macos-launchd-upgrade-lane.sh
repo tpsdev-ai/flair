@@ -127,12 +127,20 @@ redact_plist() {
 }
 
 assert_no_inline_credentials() {
-  # Fails-first companion to redact_plist: after the dump, prove the lane's own
-  # admin password did not reach the artifact. The redactor unit test pins the
-  # generic key/value redaction; this pins the specific run's secret.
-  local dir="$1"
-  if [ -n "${ADMIN_PASS:-}" ] && grep -rIlF "$ADMIN_PASS" "$dir" >/dev/null 2>&1; then
-    echo "::error::the lane's admin password reached the diagnostics artifact under ${dir}"
+  # Fails-first companion to redact_plist. Two independent layers:
+  #   (1) the run's own admin password value must not appear anywhere; and
+  #   (2) no credential KEY may appear with a value other than REDACTED. A
+  #       *different* credential in a plist is exactly the shape layer (1)
+  #       cannot see, and this repository is PUBLIC.
+  # The key list lives in the redactor (derived from the product's own
+  # secret-key export), so this assertion widens with that list automatically.
+  local target="$1"
+  if [ -n "${ADMIN_PASS:-}" ] && grep -rIlF "$ADMIN_PASS" "$target" >/dev/null 2>&1; then
+    echo "::error::the lane's admin password reached the diagnostics output under ${target}"
+    return 1
+  fi
+  if ! node "$WORKSPACE/scripts/ci/redact-launchd-plist.mjs" --check "$target"; then
+    echo "::error::a credential key with a non-REDACTED value reached the diagnostics output under ${target}"
     return 1
   fi
   return 0
@@ -140,6 +148,12 @@ assert_no_inline_credentials() {
 
 dump_diagnostics() {
   set +e
+  local printed_log
+  printed_log="$(mktemp "${TMPDIR:-/tmp}/flair-launchd-lane-log.XXXXXX")"
+  # Tee the printed group to a temp log OUTSIDE the artifact dir so the same
+  # key-name assertion can run against what actually reached the runner log,
+  # not only against the artifact copy.
+  {
   echo "::group::launchd lane diagnostics"
   echo "--- env ---"
   echo "PORT=$PORT OPS_PORT=$OPS_PORT PR_VERSION=$PR_VERSION BASELINE_VERSION=$BASELINE_VERSION PR_COMMIT=$PR_COMMIT"
@@ -175,10 +189,18 @@ dump_diagnostics() {
     [ -e "$plist" ] || continue
     redact_plist "$plist" > "$DIAG_DIR/$(basename "$plist")"
   done
-  if ! assert_no_inline_credentials "$DIAG_DIR"; then
-    echo "::error::diagnostics redaction FAILED — see the artifact scan above"
-  fi
   echo "::endgroup::"
+  } 2>&1 | tee "$printed_log"
+  # Scan BOTH sinks: the artifact the diagnostics copied AND the log just
+  # printed. A plist printed but not copied would otherwise escape, and vice
+  # versa. Findings name keys and files only — never the value.
+  if ! assert_no_inline_credentials "$DIAG_DIR"; then
+    echo "::error::diagnostics redaction FAILED in the artifact — see the artifact scan above"
+  fi
+  if ! assert_no_inline_credentials "$printed_log"; then
+    echo "::error::diagnostics redaction FAILED in the printed log — see the log scan above"
+  fi
+  rm -f "$printed_log"
 }
 
 extract_symptom() {
