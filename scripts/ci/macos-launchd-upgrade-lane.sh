@@ -43,7 +43,6 @@ set -Eeuo pipefail
 
 PORT="${PORT:-9926}"
 OPS_PORT="${OPS_PORT:-9925}"
-ADMIN_PASS="${ADMIN_PASS:-launchd-lane-admin-$$}"
 FLAIR_MODELS_DIR="${FLAIR_MODELS_DIR:-$HOME/.flair/models}"
 WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
 DIAG_DIR="${DIAG_DIR:-$WORKSPACE/diagnostics/launchd-adopt-upgrade}"
@@ -66,11 +65,15 @@ mkdir -p "$DIAG_DIR" "$FLAIR_MODELS_DIR"
 # shape it is the launchd plist (written by doctor --fix from the instance's
 # harper-config.yaml) that supplies it, and exporting a second copy would
 # mask whether the plist's own value is what the upgraded server honours.
+#
+# The admin password is NOT exported here either. This instance must be
+# initialized the way a real install is (`flair init` generates the password
+# and writes the 0600 `~/.flair/admin-pass` that the pass-file launcher reads);
+# passing the password inline makes init skip the file, which is not the
+# rockit shape and makes the adopted launchd job fail to start.
 export HTTP_PORT="$PORT"
 export OPERATIONSAPI_NETWORK_PORT="127.0.0.1:${OPS_PORT}"
 export NODE_HOSTNAME="localhost"
-export HDB_ADMIN_PASSWORD="$ADMIN_PASS"
-export FLAIR_ADMIN_PASS="$ADMIN_PASS"
 export FLAIR_MODELS_DIR
 
 log() { printf '\n=== %s ===\n' "$*"; }
@@ -190,18 +193,36 @@ npm install -g "@tpsdev-ai/flair@${BASELINE_VERSION}"
 echo "installed: $(flair --version 2>&1 | tail -n1)"
 
 log "Bring the instance up the product way (flair init, direct-spawned)"
+# Unset any inherited admin password so init generates one and writes the 0600
+# `~/.flair/admin-pass` file that the pass-file launchd launcher reads.
+unset FLAIR_ADMIN_PASS HDB_ADMIN_PASSWORD
 flair init \
   --port "$PORT" \
   --ops-port "$OPS_PORT" \
   --ops-bind 127.0.0.1 \
-  --admin-pass "$ADMIN_PASS" \
   --skip-soul \
   --no-mcp
+if [ ! -s "$HOME/.flair/admin-pass" ]; then
+  echo "flair init did not write ~/.flair/admin-pass — the pass-file launcher cannot start" >&2
+  exit 1
+fi
+# From here on every restart/verify call shares the password the launchd
+# launcher reads from the file.
+ADMIN_PASS="$(cat "$HOME/.flair/admin-pass")"
+export HDB_ADMIN_PASSWORD="$ADMIN_PASS"
+export FLAIR_ADMIN_PASS="$ADMIN_PASS"
 wait_health "$HTTP_URL/Health" 180
 echo "instance is up before adoption"
 
 log "Adopt into launchd (flair doctor --fix, flair#1573)"
+# doctor --fix exits non-zero whenever ANY catalog check is still failing (e.g.
+# the missing keys dir on an agentless init) even when the launchd adopt itself
+# succeeded. The assertion is the adopted state below, not doctor's exit code.
+set +e
 flair doctor --fix --port "$PORT" 2>&1 | tee "$DIAG_DIR/doctor-fix.log"
+DOCTOR_STATUS="${PIPESTATUS[0]}"
+set -e
+echo "flair doctor --fix exit: ${DOCTOR_STATUS}"
 
 # Resolve the instance-scoped label from the plist doctor --fix just wrote.
 LABEL="$(
