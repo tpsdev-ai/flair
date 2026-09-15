@@ -18,6 +18,56 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.54.2] - 2026-09-15
+
+### Added
+
+- **Releases now stop before a brand-new package name goes public under our npm org without an explicit recorded approval.** Both the release pull request and the tag push that stages the release check this first, and a release fails up front unless a maintainer records the approval — name, approver, date, and reason — or removes the package from the release. The check covers reprints pulled in through any shipped dependency, and refuses to proceed if the release's declared package list and the packages it would actually publish have drifted apart (Refs #1674).
+
+### Changed
+
+- **Flair's MCP tool descriptors ship inside `flair` and `flair-mcp` instead of as a separate npm package.** There is no standalone descriptor package to install or pin; it always matches the Flair release you installed (Refs #1674).
+
+### Fixed
+
+- **`npm install -g @tpsdev-ai/flair` is fixed: 0.54.1 shipped a collapsed
+  dependency tree whose Harper engine could not start.**
+
+  `npm install -g @tpsdev-ai/flair@0.54.1` exited 0 but installed 50 packages
+  instead of 543 (the 0.53.0 count), logged `invalid or damaged lockfile` eight
+  times, and left `harper` with no dependency tree at all — `node
+  harper.js version` threw. The cause was 0.54.1's `bundleDependencies:
+  ["@tpsdev-ai/flair-tool-descriptors"]`, which made npm's reify give up on
+  harper's own `npm-shrinkwrap.json`.
+
+  The descriptors are no longer a dependency, bundled or otherwise: they are
+  copied into each consuming package's source tree at build time
+  (`resources/tool-descriptors/` for `flair`,
+  `packages/flair-mcp/src/tool-descriptors/` for `flair-mcp`) and imported by
+  relative path, so nothing about the install depends on the private descriptor
+  package any more.
+
+  A new CI lane global-installs the packed tarball on every pull request and
+  fails on any of the four symptoms above, so an install that cannot start its
+  engine can no longer go green (Refs #1683, #1681, #1684).
+
+  The artifact that ships is bound to that source as well. `npm pack` now
+  re-vendors and rebuilds before packing, so a stale or hand-edited `dist/`
+  cannot ship verbatim, and the same lane extracts both published tarballs and
+  requires their descriptor modules to match
+  `packages/flair-tool-descriptors/src/index.ts` exactly — a tarball that ships
+  no descriptors fails instead of passing as "nothing to compare".
+
+  > **Heads-up:** do not install `@tpsdev-ai/flair@0.54.1` into a global prefix.
+  > Installing the next release replaces the broken tree in place; no manual
+  > cleanup is needed.
+
+- **`flair upgrade` now checks for updates against the npm registry you configured, and names the registry it used.**
+
+  Private mirrors, scoped registries, and your `.npmrc` now drive the update check the same way they drive `npm install`; `flair upgrade`, `flair status`, and `flair doctor` print the registry and where the setting came from, so a redirected registry can never be silent. A machine with no registry configured is unchanged and still uses the public registry.
+
+  Previously the update check used a fixed public host, so a vetted internal mirror was bypassed: Flair could report "you are current" while your mirror had a newer release, or trigger an update based on a registry you configured away from. The check is also hardened: only secure registries are queried (plain HTTP is limited to your own machine, and anything unusual is refused with a fix), a version that is not a real version number is refused rather than installed, registry redirects are not followed, and private mirrors that need a certificate or a login token are supported. (Refs #1688, #1692, #1684, #1683)
+
 ## [0.54.1] - 2026-09-14
 
 ### Fixed

@@ -1,5 +1,0 @@
-- **`flair upgrade` now checks for updates against the npm registry you configured, and names the registry it used.**
-
-  Private mirrors, scoped registries, and your `.npmrc` now drive the update check the same way they drive `npm install`; `flair upgrade`, `flair status`, and `flair doctor` print the registry and where the setting came from, so a redirected registry can never be silent. A machine with no registry configured is unchanged and still uses the public registry.
-
-  Previously the update check used a fixed public host, so a vetted internal mirror was bypassed: Flair could report "you are current" while your mirror had a newer release, or trigger an update based on a registry you configured away from. The check is also hardened: only secure registries are queried (plain HTTP is limited to your own machine, and anything unusual is refused with a fix), a version that is not a real version number is refused rather than installed, registry redirects are not followed, and private mirrors that need a certificate or a login token are supported. (Refs #1688, #1692, #1684, #1683)

@@ -1,1 +1,0 @@
-- **Flair's MCP tool descriptors ship inside `flair` and `flair-mcp` instead of as a separate npm package.** There is no standalone descriptor package to install or pin; it always matches the Flair release you installed (Refs #1674).
