@@ -28,6 +28,8 @@ import {
   planLaunchdRepair,
   mapRepairThrow,
   decideAdoptStop,
+  verifyAdoptServing,
+  type AdminPassAvailability,
   type PlistDisposition,
 } from "../../src/lib/launchd-repair.ts";
 import type { LaunchdManagement } from "../../src/lib/launchd-management.ts";
@@ -35,6 +37,7 @@ import type { DaemonState, HealthResult } from "../../src/lib/daemon-liveness.ts
 
 const DATA_DIR = "/Users/example/.flair/data";
 const PLIST_PATH = "/Users/example/Library/LaunchAgents/ai.tpsdev.flair.deadbeef.plist";
+const ADMIN_PASS_PATH = "/Users/example/.flair/admin-pass";
 
 /** A minimal valid Flair plist (dict root, ROOTPATH present). */
 function plistXml(rootPath: string): string {
@@ -101,6 +104,8 @@ describe("planLaunchdRepair", () => {
     plistPath: PLIST_PATH,
     directProcessRunning: false,
     configReadable: true,
+    adminPassPath: ADMIN_PASS_PATH,
+    adminPass: { kind: "existing-valid" } as AdminPassAvailability,
     ...over,
   });
 
@@ -171,6 +176,132 @@ describe("planLaunchdRepair", () => {
     const plan = planLaunchdRepair(input({ disposition: "foreign", configReadable: false }));
     expect(plan.kind).toBe("refuse");
     if (plan.kind === "refuse") expect(plan.reason).toBe("config-unreadable");
+  });
+});
+
+// ─── the credential gate (flair#1685) ─────────────────────────────────────
+//
+// The generated plist is always pass-file mode, so its launcher cannot start
+// unless ~/.flair/admin-pass exists and is safe. The plan must never authorize
+// a plist the product has not itself made startable.
+
+describe("planLaunchdRepair — credential before plist (flair#1685)", () => {
+  const input = (over: Partial<Parameters<typeof planLaunchdRepair>[0]> = {}) => ({
+    observation: observation("detached"),
+    disposition: "absent" as PlistDisposition,
+    plistPath: PLIST_PATH,
+    directProcessRunning: false,
+    configReadable: true,
+    adminPassPath: ADMIN_PASS_PATH,
+    adminPass: { kind: "existing-valid" } as AdminPassAvailability,
+    ...over,
+  });
+
+  test("adopt with no pass file and no credential -> refuse, naming the file and 'flair init'", () => {
+    const plan = planLaunchdRepair(input({
+      directProcessRunning: true,
+      adminPass: {
+        kind: "missing",
+        detail: `the admin-pass file at ${ADMIN_PASS_PATH} does not exist and no credential is available in the environment. Run 'flair init' to provision ${ADMIN_PASS_PATH}.`,
+      },
+    }));
+    expect(plan.kind).toBe("refuse");
+    if (plan.kind === "refuse") {
+      expect(plan.reason).toBe("missing-credential");
+      expect(plan.detail).toContain(ADMIN_PASS_PATH);
+      expect(plan.detail).toContain("flair init");
+      expect(plan.plistPath).toBe(PLIST_PATH);
+    }
+  });
+
+  test("adopt with an env credential proven against a live instance -> will write the pass file", () => {
+    const plan = planLaunchdRepair(input({
+      directProcessRunning: true,
+      adminPass: { kind: "candidate", source: "env" },
+    }));
+    expect(plan.kind).toBe("adopt");
+    if (plan.kind === "adopt") {
+      expect(plan.credential.writeAdminPassFile).toBe(true);
+      expect(plan.credential.source).toBe("env");
+    }
+  });
+
+  test("regenerate with an env credential but NO live process -> refuse (nothing to prove it against)", () => {
+    const plan = planLaunchdRepair(input({
+      directProcessRunning: false,
+      adminPass: { kind: "candidate", source: "env" },
+    }));
+    expect(plan.kind).toBe("refuse");
+    if (plan.kind === "refuse") {
+      expect(plan.reason).toBe("missing-credential");
+      expect(plan.detail).toContain(ADMIN_PASS_PATH);
+    }
+  });
+
+  test("regenerate with an existing valid file -> reuse it, never rewrite", () => {
+    const plan = planLaunchdRepair(input({
+      directProcessRunning: false,
+      adminPass: { kind: "existing-valid" },
+    }));
+    expect(plan.kind).toBe("regenerate");
+    if (plan.kind === "regenerate") {
+      expect(plan.credential.writeAdminPassFile).toBe(false);
+      expect(plan.credential.source).toBe("existing-file");
+    }
+  });
+
+  test("config authority still precedes the credential gate", () => {
+    const plan = planLaunchdRepair(input({
+      configReadable: false,
+      directProcessRunning: true,
+      adminPass: { kind: "missing", detail: "no credential" },
+    }));
+    expect(plan.kind).toBe("refuse");
+    if (plan.kind === "refuse") expect(plan.reason).toBe("config-unreadable");
+  });
+
+  test("ownership guard still precedes the credential gate", () => {
+    const plan = planLaunchdRepair(input({
+      disposition: "foreign",
+      directProcessRunning: true,
+      adminPass: { kind: "missing", detail: "no credential" },
+    }));
+    expect(plan.kind).toBe("refuse");
+    if (plan.kind === "refuse") expect(plan.reason).toBe("foreign");
+  });
+});
+
+// ─── verifyAdoptServing: the post-adopt identity proof (flair#1685) ───────
+
+describe("verifyAdoptServing", () => {
+  test("proven: old pid dead, serving pid changed, and it is launchd's pid", () => {
+    expect(
+      verifyAdoptServing({ directPid: 100, managedPid: 200, servingPid: 200, directPidAlive: false }),
+    ).toBeNull();
+  });
+
+  test("fails when the pre-adopt process is still alive (the old process answers the port)", () => {
+    const proof = verifyAdoptServing({ directPid: 100, managedPid: 200, servingPid: 200, directPidAlive: true });
+    expect(proof).not.toBeNull();
+    expect(proof?.detail).toContain("still alive");
+  });
+
+  test("fails when the serving pid did not change (adoption did not bounce)", () => {
+    const proof = verifyAdoptServing({ directPid: 100, managedPid: 100, servingPid: 100, directPidAlive: false });
+    expect(proof).not.toBeNull();
+    expect(proof?.detail).toContain("did not bounce");
+  });
+
+  test("fails when the serving pid is not launchd's pid for the label", () => {
+    const proof = verifyAdoptServing({ directPid: 100, managedPid: 200, servingPid: 300, directPidAlive: false });
+    expect(proof).not.toBeNull();
+    expect(proof?.detail).toContain("does not own the listener");
+  });
+
+  test("fails when no serving pid can be identified", () => {
+    expect(
+      verifyAdoptServing({ directPid: 100, managedPid: 200, servingPid: null, directPidAlive: false }),
+    ).not.toBeNull();
   });
 });
 

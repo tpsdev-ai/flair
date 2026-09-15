@@ -502,3 +502,49 @@ describe("flair#989 — detection is not opt-in: a detected-but-unwired client i
     expect(run.healthy).toBe(true);
   });
 });
+
+// ─── flair#1693: an inline-password plist is a downgrade, not a pass ──────
+
+describe("flair#1693 — launchd plist must not carry HDB_ADMIN_PASSWORD inline", () => {
+  const LABEL = "ai.tpsdev.flair.deadbeef";
+  const managed = {
+    state: "managed" as const,
+    label: LABEL,
+    detail: `launchd job ${LABEL} is running as process 4242`,
+  };
+
+  function writePlist(raw: string): void {
+    const dir = join(isoHome, "Library", "LaunchAgents");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${LABEL}.plist`), raw);
+  }
+
+  test("managed job + inline password plist → FAIL (the running job masks the on-disk downgrade)", () => {
+    writePlist(`<?xml version="1.0"?><plist version="1.0"><dict>
+      <key>ProgramArguments</key><array><string>/usr/local/bin/node</string></array>
+      <key>EnvironmentVariables</key><dict><key>HDB_ADMIN_PASSWORD</key><string>PLACEHOLDER</string></dict>
+    </dict></plist>`);
+    const run = runDoctorChecks(
+      { homeDir: isoHome, cwd: isoCwd, detectedClientIds: [], launchd: managed },
+      { catalogIds: ["launchd-management"] },
+    );
+    const check = run.results.find((r) => r.id === "launchd-management");
+    expect(check?.status).toBe("fail");
+    expect(check?.detail).toContain("HDB_ADMIN_PASSWORD");
+    expect(check?.remedy).toBeTruthy();
+    expect(run.healthy).toBe(false);
+  });
+
+  test("managed job + pass-file launcher plist → pass (positive control)", () => {
+    writePlist(`<?xml version="1.0"?><plist version="1.0"><dict>
+      <key>ProgramArguments</key><array><string>/opt/flair/templates/launchd/start-flair-with-admin-pass.sh</string><string>/Users/example/.flair/admin-pass</string></array>
+    </dict></plist>`);
+    const run = runDoctorChecks(
+      { homeDir: isoHome, cwd: isoCwd, detectedClientIds: [], launchd: managed },
+      { catalogIds: ["launchd-management"] },
+    );
+    const check = run.results.find((r) => r.id === "launchd-management");
+    expect(check?.status).toBe("pass");
+    expect(run.healthy).toBe(true);
+  });
+});

@@ -16,6 +16,7 @@ import { checkGlobalBinOnPath, resolveNpmGlobalPrefix } from "../install/global-
 import { buildEd25519Auth, defaultKeysDir, resolveAdminUser, resolveKeyPath, resolveLocalAdminPass } from "../lib/auth-resolve.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
+import { plistCarriesInlineAdminPassword } from "../lib/launchd-management.js";
 import { DOCTOR_CHECK_IDS, catalogIssueDelta, renderCatalogDoctorLines, runDoctorChecks } from "../lib/doctor-run.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
 import { flairCliVersion, unpinnedSpecWarning } from "../lib/mcp-spec.js";
@@ -1247,6 +1248,13 @@ program
     //     verify) is repairLaunchdManagement, which is the only place that
     //     touches the real filesystem and launchctl.
     console.log(`\n  ${render.wrap(render.c.bold, "Launchd management")}`);
+    // #1693: an adopted/registered plist that embeds the admin password inline
+    // is a FAIL even when launchd still reports the job managed — launchd keeps
+    // the loaded definition, so the on-disk downgrade hides behind a healthy
+    // job. The path is resolved BEFORE the repair for the no-fix arm and AFTER
+    // it for the --fix arm, so a --fix that regenerated in pass-file mode (or
+    // migrated the label) clears the finding.
+    let launchdPlistForCheck: string | undefined;
     if (autoFix && !dryRun) {
       // Execute the repair directly; it re-derives the plan internally and
       // verifies via assessLaunchdManagement (fail-loud, never a silent pass).
@@ -1273,6 +1281,7 @@ program
       // Report only (no --fix, or --fix --dry-run): compute the plan, touch
       // nothing. A regenerate plan is drift; a refuse plan is a named refusal.
       const repairPlan = planLaunchdRepairFor(defaultDataDir(), effectivePort);
+      launchdPlistForCheck = repairPlan.plistPath as string | undefined;
       switch (repairPlan.plan.kind) {
         case "no-op":
           console.log(`  ${render.icons.ok} ${repairPlan.plan.detail}`);
@@ -1299,6 +1308,25 @@ program
             console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(clean-stops the direct process, regenerates the plist, loads it, and verifies — bounces the live instance)")}`);
           }
           break;
+      }
+    }
+    // flair#1693: the check itself (the shared plist writer that stops
+    // init/doctor/upgrade producing this shape is #1693's own change). In the
+    // --fix arm the plan was executed above, so resolve the (possibly
+    // label-migrated) plist path now and read post-repair bytes.
+    if (launchdPlistForCheck === undefined) {
+      launchdPlistForCheck = planLaunchdRepairFor(defaultDataDir(), effectivePort).plistPath as string | undefined;
+    }
+    if (typeof launchdPlistForCheck === "string" && existsSync(launchdPlistForCheck)) {
+      try {
+        const raw = readFileSync(launchdPlistForCheck, "utf-8");
+        if (plistCarriesInlineAdminPassword(raw)) {
+          issues++;
+          console.log(`  ${render.icons.error} the launchd plist at ${launchdPlistForCheck} embeds HDB_ADMIN_PASSWORD inline instead of using the pass-file launcher`);
+          console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(regenerate in pass-file mode; #1693)")}`);
+        }
+      } catch {
+        // Plist unreadable — the launchd plan above already reports presence.
       }
     }
 

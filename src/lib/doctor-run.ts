@@ -20,7 +20,8 @@
  * does not owe a Codex hook. Those checks execute and return `skip`.
  */
 
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import {
   checkClaudeMdBootstrap,
   checkSessionStartHook,
@@ -43,6 +44,7 @@ import { staleHookRemedy, staleMcpClientPins, staleSessionStartHookPins } from "
 import { flairCliVersion, isResolvedVersion } from "./mcp-spec.js";
 import {
   isDetached,
+  plistCarriesInlineAdminPassword,
   renderDetachedWarning,
   type LaunchdManagement,
 } from "./launchd-management.js";
@@ -327,6 +329,29 @@ function runLaunchdManagement(ctx: DoctorRunContext): DoctorCheckResult {
   }
   if (m.state === "not-applicable" || m.state === "no-service") {
     return result(id, label, "skip", { detail: m.detail, launchd: m });
+  }
+  // flair#1693: a registered plist that carries the admin password INLINE is a
+  // downgrade from the flair#1573 pass-file shape — the secret lives in a
+  // world-readable config file. The running job may be unaffected (launchd
+  // keeps the loaded definition), so `state === "managed"` is exactly the
+  // masked condition here: report the plist shape as a failure, not a pass.
+  if (m.label) {
+    const plistPath = join(ctx.homeDir, "Library", "LaunchAgents", `${m.label}.plist`);
+    try {
+      const raw = readFileSync(plistPath, "utf-8");
+      if (plistCarriesInlineAdminPassword(raw)) {
+        return result(id, label, "fail", {
+          detail:
+            `the launchd plist ${plistPath} embeds HDB_ADMIN_PASSWORD inline instead of using the ` +
+            "pass-file launcher, so the admin password is stored in a config file",
+          remedy: "flair doctor --fix",
+          launchd: m,
+        });
+      }
+    } catch {
+      // Plist unreadable — the management verdict above already covers a
+      // plist that should exist; this check adds no failure of its own.
+    }
   }
   return result(id, label, "pass", { detail: m.detail, launchd: m });
 }

@@ -37,6 +37,7 @@ import {
   launchdLauncherPath,
   type LaunchdPlistOptions,
 } from "../../src/cli.ts";
+import { readSecretFileSecure } from "../../src/lib/auth-resolve.ts";
 
 let tmp: string;
 beforeEach(() => { tmp = mkdtempSync(join(tmpdir(), "flair-pass-file-")); });
@@ -171,6 +172,15 @@ describe("writeAdminPassFile", () => {
     writeAdminPassFile(path, "PLACEHOLDER-password\n");
     expect(readFileSync(path, "utf-8")).toBe("PLACEHOLDER-password\n");
     expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  test("output passes readSecretFileSecure — the write primitive and the launcher's read gate agree", () => {
+    // flair#1685 hardening: adoption writes this file, then the launcher reads
+    // it. The two halves of that contract must be tested against each other,
+    // or adoption can write a file the launcher refuses (mode drift).
+    const path = join(tmp, "admin-pass");
+    writeAdminPassFile(path, "PLACEHOLDER-password\n");
+    expect(readSecretFileSecure(path, "--admin-pass-file")).toBe("PLACEHOLDER-password");
   });
 });
 

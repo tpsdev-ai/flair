@@ -134,6 +134,7 @@ import {
   diagnoseLaunchdPlistPaths,
   isDetached,
   pickInstancePid,
+  readLaunchctlJobState,
   renderDetachedWarning,
   LAUNCHCTL_QUERY_TIMEOUT_MS,
   type LaunchctlLister,
@@ -144,6 +145,8 @@ import {
   planLaunchdRepair,
   mapRepairThrow,
   decideAdoptStop,
+  verifyAdoptServing,
+  type AdminPassAvailability,
   type LaunchdRepairResult,
   type RepairPlan,
 } from "./lib/launchd-repair.js";
@@ -4913,6 +4916,84 @@ function buildRepairPlist(dataDir: string, config: Record<string, any>): string 
 }
 
 /**
+ * Resolve whether the pass-file launcher's argv is satisfiable (flair#1685),
+ * WITHOUT touching the network or writing anything. Pure filesystem + env:
+ *
+ *   - an existing valid 0600 non-empty file  -> reuse, never rewrite
+ *   - FLAIR_ADMIN_PASS / HDB_ADMIN_PASSWORD  -> a candidate the executor must
+ *     prove against the live instance before it may write it
+ *   - neither                                -> missing (refuse)
+ *
+ * An existing file that does not pass readSecretFileSecure (wrong mode, empty)
+ * is reported missing rather than reused: the launcher re-checks the mode at
+ * start time and would refuse the same file, so writing the plist around it
+ * would reproduce #1685 one level down.
+ */
+function resolveAdminPassAvailability(path: string): AdminPassAvailability {
+  if (existsSync(path)) {
+    try {
+      readAdminPassFileSecure(path);
+      return { kind: "existing-valid" };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        kind: "missing",
+        detail: `the admin-pass file at ${path} is unusable (${msg})`,
+      };
+    }
+  }
+  if (process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD) {
+    return { kind: "candidate", source: "env" };
+  }
+  return {
+    kind: "missing",
+    detail:
+      `the admin-pass file at ${path} does not exist and no credential is available in the environment. ` +
+      `Run 'flair init' to provision ${path}, or start the instance and re-run 'flair doctor --fix'.`,
+  };
+}
+
+/**
+ * Prove an admin credential belongs to the running instance before adoption
+ * materializes it into the 0600 pass file (flair#1685). The admin-gated
+ * /HealthDetail read is the proof: a rejected Basic credential produces 401 and
+ * is NOT retried through the agent-key floor (that floor only engages when no
+ * credential was sent at all), so success here means THIS credential was
+ * accepted by THIS instance. Never logs the secret.
+ */
+async function proveAdminPassAgainstInstance(
+  port: number,
+  adminPass: string,
+): Promise<string | null> {
+  try {
+    await api("GET", "/HealthDetail", undefined, {
+      baseUrl: `http://127.0.0.1:${port}`,
+      explicitAdminPass: adminPass,
+    });
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+/**
+ * Validate the pass file against the launcher's OWN read contract before the
+ * plist that names it is written (flair#1685): exists, readable, owner-only
+ * (no group/other bits), non-empty. This is exactly the four checks
+ * templates/launchd/start-flair-with-admin-pass.sh runs at start time; the
+ * write side applies them so a plist is never written around a file the
+ * launcher would refuse. Returns the problem, or null when the file is safe.
+ */
+function validateAdminPassFileForLauncher(path: string): string | null {
+  try {
+    readAdminPassFileSecure(path);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+/**
  * Compute the launchd repair plan for `dataDir` (flair#1573 slice b) WITHOUT
  * executing it — the detect + classify + decide half. The doctor command uses
  * this for dry-run / non-`--fix` reporting; `repairLaunchdManagement` (below)
@@ -4944,7 +5025,20 @@ function planLaunchdRepairFor(dataDir: string, port: number): {
   const instancePid = resolveInstanceServingPid(dataDir, port);
   const directProcessRunning = instancePid !== null && observation.state !== "managed";
 
-  const plan = planLaunchdRepair({ observation, disposition, plistPath, directProcessRunning, configReadable });
+  // Credential before plist (flair#1685): the plan may only authorize a
+  // pass-file plist whose launcher argv is satisfiable.
+  const adminPassPath = defaultAdminPassPath();
+  const adminPass = resolveAdminPassAvailability(adminPassPath);
+
+  const plan = planLaunchdRepair({
+    observation,
+    disposition,
+    plistPath,
+    directProcessRunning,
+    configReadable,
+    adminPassPath,
+    adminPass,
+  });
   return { plan, plistPath, isLegacy, config };
 }
 
@@ -4972,11 +5066,23 @@ function planLaunchdRepairFor(dataDir: string, port: number): {
  * process is refused by the liveness machine (DISAGREEMENT/UNKNOWN), never
  * signalled.
  *
+ * Credential before plist (flair#1685): the generated plist is always
+ * pass-file mode, so its launcher cannot start unless ~/.flair/admin-pass
+ * exists and is safe. An existing valid file is reused; an env credential is
+ * PROVEN against the live instance (before the adopt bounce) and only then
+ * written; nothing usable yields a refusal with no plist. The written file is
+ * validated against the launcher's own read contract (exists, mode 0600,
+ * non-empty) before load.
+ *
  * Never reports success on a direct-start fallback: the final verify is
- * assessLaunchdManagement, and anything short of `managed` is a `failed` result
- * with the detached detail + remedy, never a silent pass. The whole executor
- * arm is wrapped in try/catch (Kern's b1 defect): a throw becomes a named
- * `failed` result (or an engine-backwards `refused`), never a crash mid-report.
+ * assessLaunchdManagement (launchctl PID AND that PID is the serving process),
+ * and anything short of `managed` is a `failed` result with the detached detail
+ * + remedy, never a silent pass. On the adopt arm the verify additionally
+ * proves the serving pid CHANGED and the pre-adopt pid is dead, because port
+ * health alone is answered by the old process (flair#1684/#1685). The whole
+ * executor arm is wrapped in try/catch (Kern's b1 defect): a throw becomes a
+ * named `failed` result (or an engine-backwards `refused`), never a crash
+ * mid-report.
  */
 async function repairLaunchdManagement(dataDir: string, port: number): Promise<LaunchdRepairResult> {
   const { plan, plistPath, isLegacy, config } = planLaunchdRepairFor(dataDir, port);
@@ -4997,9 +5103,58 @@ async function repairLaunchdManagement(dataDir: string, port: number): Promise<L
         // the live instance (guard-after-stop would SIGTERM the instance and
         // then refuse, leaving it down with nothing to restart it).
         guardEngineNotBackwards(dataDir);
-        // Adopt (flair#1573 slice b2): clean-stop the direct process first, so
-        // the regenerate + load below does not collide on the port.
+        // Credential before plist (flair#1685). Resolve and, when the plan says
+        // the pass file must be materialized (an env candidate), PROVE the
+        // credential against the live instance BEFORE the adopt bounce stops
+        // it — then write the 0600 file. Refuse, with no plist and no bounce,
+        // when nothing proves.
+        const adminPassPath = defaultAdminPassPath();
+        if (plan.credential.writeAdminPassFile) {
+          const candidate = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
+          if (!candidate) {
+            return {
+              kind: "refused",
+              reason: "missing-credential",
+              detail:
+                `refusing to repair the launchd plist: ${adminPassPath} must be written from a credential, ` +
+                "but no credential is available in the environment.",
+              plistPath,
+            };
+          }
+          const proof = await proveAdminPassAgainstInstance(port, candidate);
+          if (proof) {
+            return {
+              kind: "refused",
+              reason: "missing-credential",
+              detail:
+                "refusing to repair the launchd plist: the credential in FLAIR_ADMIN_PASS/HDB_ADMIN_PASSWORD " +
+                `does not authenticate against the running instance (${proof}), so writing it to ` +
+                `${adminPassPath} would create a pass file the instance rejects. Run 'flair init' to provision ` +
+                "the correct credential.",
+              plistPath,
+            };
+          }
+          writeAdminPassFile(adminPassPath, candidate);
+        }
+        // Validate the pass file against the launcher's OWN read contract before
+        // any plist names it: an existing file that drifted to 0644 must refuse
+        // here, never be baked into a plist the launcher will reject at start.
+        const passFileProblem = validateAdminPassFileForLauncher(adminPassPath);
+        if (passFileProblem) {
+          return {
+            kind: "refused",
+            reason: "missing-credential",
+            detail: `refusing to repair the launchd plist: ${passFileProblem}`,
+            plistPath,
+          };
+        }
+        // Adopt (flair#1573 slice b2): capture the process serving the instance
+        // NOW (before the stop), then clean-stop it, so the regenerate + load
+        // below does not collide on the port. The captured pid is the evidence
+        // the post-load verify uses to prove the serving pid CHANGED.
+        let directPid: number | null = null;
         if (plan.kind === "adopt") {
+          directPid = resolveInstanceServingPid(dataDir, port);
           const stop = await stopDirectProcessForAdopt(port, dataDir);
           if (stop) return stop; // a named failed result
         }
@@ -5009,6 +5164,14 @@ async function repairLaunchdManagement(dataDir: string, port: number): Promise<L
         const plist = buildRepairPlist(dataDir, config!);
         const newPlistPath = launchdPlistPath(launchdLabel(dataDir));
         writeFileAtomic(newPlistPath, plist, 0o644);
+        // Validate the plist's absolute paths BEFORE launchd load (flair#1685
+        // hardening): launchctl load/start exit 0 for a job whose program is
+        // missing, so a stale launcher or node path produces a job that never
+        // starts — the same masked failure this repair exists to prevent.
+        const stalePlistPath = diagnoseLaunchdPlistPaths(newPlistPath);
+        if (stalePlistPath) {
+          return { kind: "failed", detail: stalePlistPath.message, remedy: stalePlistPath.remedy };
+        }
         // flair#1586 / #1581: a SET_CONFIG-less detach (MQTT_* via
         // buildDirectSpawnEnv) can persist mqtt.network as mtls, port,
         // securePort when Harper stored no originals for already-null ports.
@@ -5034,6 +5197,25 @@ async function repairLaunchdManagement(dataDir: string, port: number): Promise<L
         const after = observeLaunchdManagement(dataDir, port);
         if (after.state !== "managed") {
           return { kind: "failed", detail: after.detail, remedy: after.remedy };
+        }
+        // On the adopt arm, port health alone is the green light that lied in
+        // #1684: the pre-adopt direct process answered the port the whole time
+        // the launchd job was failing to start. Prove the launchd job itself
+        // serves — the old pid is dead, the serving pid changed, and it is
+        // launchd's reported pid for this label.
+        if (plan.kind === "adopt") {
+          const label = after.label ?? resolveLaunchdLabel(dataDir).label;
+          const managedPid = readLaunchctlJobState(label, realLaunchctlLister).pid;
+          const servingPid = resolveInstanceServingPid(dataDir, port);
+          const proof = verifyAdoptServing({
+            directPid,
+            managedPid,
+            servingPid,
+            directPidAlive: directPid !== null && isProcessAlive(directPid),
+          });
+          if (proof) {
+            return { kind: "failed", detail: proof.detail, remedy: ["flair stop", "flair doctor --fix"] };
+          }
         }
         const detail = plan.kind === "adopt"
           ? `adopted the direct-spawned instance into launchd (bounced the live instance): ${after.detail}`

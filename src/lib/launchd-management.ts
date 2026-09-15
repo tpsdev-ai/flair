@@ -104,6 +104,23 @@ export function readPlistProgramRefs(
 }
 
 /**
+ * Does this plist embed the admin password inline?
+ *
+ * The flair#1573 pass-file shape never contains this key: the launcher reads the
+ * password from a 0600 file at start time. A plist with the key
+ * `<key>HDB_ADMIN_PASSWORD</key>` is the pre-#1573 inline shape — a secret
+ * written into a config file (world-readable), and a downgrade of an adopted
+ * instance (flair#1693).
+ *
+ * Deliberately key-presence only: the pass-file launcher's argv names the file
+ * but never the key, so there is no legitimate plist shape this misfires on. It
+ * never returns plist contents — only the boolean.
+ */
+export function plistCarriesInlineAdminPassword(raw: string): boolean {
+  return /<key>HDB_ADMIN_PASSWORD<\/key>/.test(raw);
+}
+
+/**
  * A path a plist names that is no longer on disk.
  *
  * Modelled as `StalePlistPath | null` rather than a `{ ok: true } | { ok:

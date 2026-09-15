@@ -37,6 +37,10 @@
  *   - config unreadable           -> refuse.
  *   - detached-and-running (ours) -> adopt (clean-stop -> regenerate -> load).
  *   - detached-and-running (foreign) -> refuse (ownership guard).
+ *   - no satisfiable admin-pass   -> refuse (flair#1685; a pass-file plist
+ *     whose launcher argv names a missing/unsafe file can never start). The
+ *     plan carries the credential decision (`credential.writeAdminPassFile`)
+ *     so the executor only writes when the planner says it is proven.
  */
 
 import { resolve } from "node:path";
@@ -95,12 +99,44 @@ export type RepairPlan =
   | { kind: "no-op"; reason: "already-managed" | "not-applicable"; detail: string }
   | {
       kind: "refuse";
-      reason: "foreign" | "unattributable" | "config-unreadable";
+      reason: "foreign" | "unattributable" | "config-unreadable" | "missing-credential";
       detail: string;
       plistPath?: string;
     }
-  | { kind: "regenerate"; detail: string }
-  | { kind: "adopt"; detail: string };
+  | { kind: "regenerate"; detail: string; credential: RepairPlanCredential }
+  | { kind: "adopt"; detail: string; credential: RepairPlanCredential };
+
+/**
+ * How the executor can satisfy the pass-file launcher's argv (flair#1685).
+ *
+ * The generated plist is ALWAYS pass-file mode: its launcher
+ * (templates/launchd/start-flair-with-admin-pass.sh) reads a 0600 file as
+ * argv[1] and exits 1 when that file is missing or unsafe. So the planner may
+ * only emit a regenerate/adopt plan when the file is already valid, or when a
+ * credential is available AND a live instance exists to prove it against — the
+ * file is materialized from a credential that provably belonged to THIS
+ * instance seconds before the plist names it. Otherwise the plan refuses and
+ * writes no plist.
+ */
+export type AdminPassAvailability =
+  /** ~/.flair/admin-pass exists and satisfies readSecretFileSecure's mode check — reuse, never rewrite. */
+  | { kind: "existing-valid" }
+  /** A credential is available from the environment but has not yet been proven against the live instance. */
+  | { kind: "candidate"; source: "env" }
+  /** No usable credential and no usable pass file. `detail` states why, without the secret. */
+  | { kind: "missing"; detail: string };
+
+/** The credential half of a regenerate/adopt plan (flair#1685). */
+export interface RepairPlanCredential {
+  /**
+   * True when the executor must materialize the credential into the pass file
+   * BEFORE it writes the plist. Only ever true for an env candidate on the
+   * adopt arm — the one case with a live instance to prove it against.
+   */
+  writeAdminPassFile: boolean;
+  /** Where the credential comes from. */
+  source: "existing-file" | "env";
+}
 
 export interface PlanLaunchdRepairInput {
   observation: LaunchdManagement;
@@ -110,6 +146,10 @@ export interface PlanLaunchdRepairInput {
   directProcessRunning: boolean;
   /** True when the instance's harper-config.yaml is readable (the config-authority gate). */
   configReadable: boolean;
+  /** Absolute path the generated plist's launcher will read (defaultAdminPassPath()). */
+  adminPassPath: string;
+  /** Resolved pass-file availability (pure). */
+  adminPass: AdminPassAvailability;
 }
 
 /**
@@ -121,7 +161,7 @@ export interface PlanLaunchdRepairInput {
  * refusal.
  */
 export function planLaunchdRepair(input: PlanLaunchdRepairInput): RepairPlan {
-  const { observation, disposition, plistPath, directProcessRunning, configReadable } = input;
+  const { observation, disposition, plistPath, directProcessRunning, configReadable, adminPass, adminPassPath } = input;
 
   if (observation.state === "not-applicable") {
     return { kind: "no-op", reason: "not-applicable", detail: observation.detail };
@@ -164,6 +204,16 @@ export function planLaunchdRepair(input: PlanLaunchdRepairInput): RepairPlan {
     };
   }
 
+  // Credential before plist (flair#1685). The plist this plan authorizes is
+  // ALWAYS pass-file mode, so its launcher cannot start unless
+  // `adminPassPath` exists and is safe. Never authorize a write the product
+  // has not itself made startable: reuse a valid file, materialize a proven
+  // env candidate, or refuse.
+  const credential = planCredential(adminPass, directProcessRunning, adminPassPath, plistPath);
+  if ("kind" in credential) {
+    return credential;
+  }
+
   // Detached-and-running (flair#1573 slice b2): a direct (non-launchd) process
   // is serving this instance. The plist is ours/absent/corrupt (the foreign and
   // unattributable cases were refused above), so the direct process is THIS
@@ -177,6 +227,7 @@ export function planLaunchdRepair(input: PlanLaunchdRepairInput): RepairPlan {
         "the instance is running but not under launchd (direct-spawned) — adopting it into launchd " +
         "will clean-stop the live process (SIGTERM, wait for exit), regenerate the plist, and reload it. " +
         "This bounces the live instance.",
+      credential: credential as RepairPlanCredential,
     };
   }
 
@@ -184,14 +235,123 @@ export function planLaunchdRepair(input: PlanLaunchdRepairInput): RepairPlan {
   return {
     kind: "regenerate",
     detail: "regenerating the launchd plist for this instance",
+    credential: credential as RepairPlanCredential,
   };
+}
+
+/**
+ * Decide whether the pass-file launcher's argv is satisfiable, and how.
+ *
+ *   - an existing valid file          -> reuse it (never rewrite; flair#827)
+ *   - an env candidate + live instance -> write it, after the executor proves
+ *     it against the instance
+ *   - an env candidate with no live instance, or nothing at all -> refuse
+ *
+ * A live instance is required to WRITE because the password is not recoverable
+ * from Harper (it stores a hash): the only safe source of the file's bytes is a
+ * credential that authenticates against THIS instance right now. Trusting an
+ * unverified env value would reintroduce the flair#827 desync this avoids.
+ */
+function planCredential(
+  adminPass: AdminPassAvailability,
+  directProcessRunning: boolean,
+  adminPassPath: string,
+  plistPath: string,
+): RepairPlanCredential | Extract<RepairPlan, { kind: "refuse" }> {
+  if (adminPass.kind === "existing-valid") {
+    return { writeAdminPassFile: false, source: "existing-file" };
+  }
+  if (adminPass.kind === "candidate") {
+    if (directProcessRunning) return { writeAdminPassFile: true, source: "env" };
+    return {
+      kind: "refuse",
+      reason: "missing-credential",
+      detail:
+        `refusing to repair the launchd plist at ${plistPath}: a credential is present in the environment, ` +
+        `but no running instance is available to prove it against, so ${adminPassPath} cannot be written ` +
+        "safely. Start the instance and re-run 'flair doctor --fix', or run 'flair init' to provision " +
+        `${adminPassPath}.`,
+      plistPath,
+    };
+  }
+  return {
+    kind: "refuse",
+    reason: "missing-credential",
+    detail: `refusing to repair the launchd plist at ${plistPath}: ${adminPass.detail}`,
+    plistPath,
+  };
+}
+
+// ─── the post-adopt serving proof (flair#1685) ────────────────────────────
+
+/** The evidence available after an adopt bounce. */
+export interface AdoptServingEvidence {
+  /** The pid serving the instance BEFORE adoption (the direct process). */
+  directPid: number | null;
+  /** launchd's reported pid for the adopted job, or null when unreadable. */
+  managedPid: number | null;
+  /** The pid actually serving the instance AFTER load (hdb.pid or the port listener). */
+  servingPid: number | null;
+  /** Whether `directPid` is still alive after the bounce. */
+  directPidAlive: boolean;
+}
+
+/**
+ * The proof result, modelled as a nullable object rather than an
+ * `{ ok: true } | { ok: false }` union keyed on a boolean literal:
+ * `tsconfig.cli.json` compiles src/cli.ts with `strict: false`, and without
+ * `strictNullChecks` TypeScript does not narrow a boolean-literal discriminated
+ * union at call sites. A nullable object narrows under both configurations
+ * (same reason `StalePlistPath` is nullable). `null` means proven.
+ */
+export type AdoptServingProof = { detail: string } | null;
+
+/**
+ * Prove the adopted launchd job — not the old direct process — serves the
+ * instance (flair#1685). Port health ALONE is the green light that lied in
+ * #1684: the direct-spawned init instance answered 9926 the whole time the
+ * adopted job was failing to start. The proof is therefore about IDENTITY and
+ * CHANGE, not reachability:
+ *
+ *   1. the pre-adopt process must be dead (otherwise it is still answering);
+ *   2. the serving pid must have CHANGED from the pre-adopt pid;
+ *   3. the serving pid must be launchd's reported pid for the adopted label
+ *      (the label's process owns the listener).
+ */
+export function verifyAdoptServing(input: AdoptServingEvidence): AdoptServingProof {
+  const { directPid, managedPid, servingPid, directPidAlive } = input;
+  if (directPid !== null && directPidAlive) {
+    return {
+      detail:
+        `the pre-adopt process ${directPid} is still alive after the bounce, so whatever answers the port ` +
+        "may be that process, not the launchd job",
+    };
+  }
+  if (servingPid === null) {
+    return {
+      detail: "could not identify the process serving this instance after adoption (no hdb.pid and no port listener)",
+    };
+  }
+  if (directPid !== null && servingPid === directPid) {
+    return {
+      detail: `the serving process is still pid ${servingPid}, the pre-adopt process — adoption did not bounce the live instance`,
+    };
+  }
+  if (managedPid !== null && servingPid !== managedPid) {
+    return {
+      detail:
+        `the instance is served by pid ${servingPid}, but launchd reports pid ${managedPid} for the adopted ` +
+        "job — the launchd job does not own the listener",
+    };
+  }
+  return null;
 }
 
 // ─── the executor's result ─────────────────────────────────────────────────
 
 export type LaunchdRepairResult =
   | { kind: "no-op"; reason: "already-managed" | "not-applicable"; detail: string }
-  | { kind: "refused"; reason: "foreign" | "unattributable" | "config-unreadable" | "engine-backwards"; detail: string; plistPath?: string }
+  | { kind: "refused"; reason: "foreign" | "unattributable" | "config-unreadable" | "engine-backwards" | "missing-credential"; detail: string; plistPath?: string }
   | { kind: "repaired"; detail: string }
   | { kind: "failed"; detail: string; remedy?: string[] };
 
