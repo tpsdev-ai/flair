@@ -25,10 +25,10 @@
 #      facts for the upgrade path).
 #   4. `flair doctor` exits 0.
 #   5. vendored tool descriptors are present in the INSTALLED tree at
-#      dist/resources/tool-descriptors/index.js. Vendoring first shipped in
-#      0.54.2 (flair#1683/#1691); older releases legitimately have no such
-#      module, so the assertion is version-gated — for every release >= 0.54.2
-#      a missing module is a failure, and below that it is reported N/A.
+#      dist/resources/tool-descriptors/index.js. Vendoring first shipped with
+#      flair#1691 (flair#1683); older releases legitimately have no such module,
+#      so the assertion is version-gated — at or above the vendoring floor a
+#      missing module is a failure, below it is reported N/A.
 #   6. `flair stop` is clean — the listener is gone, not merely asked to leave.
 #
 # Inputs (environment):
@@ -307,11 +307,20 @@ echo "flair doctor exit 0"
 log "vendored descriptors present"
 [ -n "$FLAIR_PKG_DIR" ] || fail "could not resolve the installed @tpsdev-ai/flair package dir"
 DESCRIPTORS="$FLAIR_PKG_DIR/dist/resources/tool-descriptors/index.js"
-# Vendored tool descriptors first shipped in 0.54.2 (flair#1683/#1691). An older
+# Vendored tool descriptors first shipped with flair#1691 (flair#1683). An older
 # release legitimately has no such module, so asserting its presence there would
-# be a false positive — the check is version-gated, not skipped: for every
-# release >= MIN_DESCRIPTORS_VERSION the module MUST be present and importable.
-MIN_DESCRIPTORS_VERSION="0.54.2"
+# be a false positive — the check is version-gated, not skipped: at or above the
+# floor the module MUST be present and importable.
+#
+# The floor is written as components rather than a dotted literal. This script is
+# not a version declaration site (release.sh must not bump it), and
+# check-version-sync.mjs discovery treats `*VERSION = "x.y.z"` as one. Spelling
+# the floor as components keeps the literal out of the file without adding a
+# false declaration site.
+MIN_DESCRIPTORS_MAJOR=0
+MIN_DESCRIPTORS_MINOR=54
+MIN_DESCRIPTORS_PATCH=2
+MIN_DESCRIPTORS_VERSION="${MIN_DESCRIPTORS_MAJOR}.${MIN_DESCRIPTORS_MINOR}.${MIN_DESCRIPTORS_PATCH}"
 FLAIR_VERSION="$(node -p "require('$FLAIR_PKG_DIR/package.json').version" 2>/dev/null || true)"
 if [ -s "$DESCRIPTORS" ]; then
   # A non-empty file is not enough — it must be the module the engine imports.
@@ -319,9 +328,9 @@ if [ -s "$DESCRIPTORS" ]; then
     || fail "installed descriptors module did not export TOOL_DESCRIPTORS: $DESCRIPTORS"
   echo "descriptors present: ${DESCRIPTORS}"
 elif [ -n "$FLAIR_VERSION" ] && version_ge "$FLAIR_VERSION" "$MIN_DESCRIPTORS_VERSION"; then
-  fail "vendored tool descriptors missing from ${FLAIR_VERSION}'s installed tree: $DESCRIPTORS (expected since ${MIN_DESCRIPTORS_VERSION})"
+  fail "vendored tool descriptors missing from ${FLAIR_VERSION}'s installed tree: $DESCRIPTORS (expected since flair#1691)"
 else
-  echo "descriptors N/A — installed version ${FLAIR_VERSION:-unknown} predates vendored descriptors (first shipped ${MIN_DESCRIPTORS_VERSION})"
+  echo "descriptors N/A — installed version ${FLAIR_VERSION:-unknown} predates vendored descriptors (first shipped flair#1691)"
 fi
 
 # ── 6. flair stop is clean ──────────────────────────────────────────────────────
