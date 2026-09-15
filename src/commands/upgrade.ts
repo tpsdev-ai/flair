@@ -16,6 +16,7 @@ import { defaultKeysDir } from "../lib/auth-resolve.js";
 import { renderVerifiedSummary } from "../lib/doctor-run.js";
 import { isDetached, renderDetachedWarning } from "../lib/launchd-management.js";
 import { FLAIR_MCP_PACKAGE, clearFlairCliVersionCache } from "../lib/mcp-spec.js";
+import { resolveNpmRegistry } from "../lib/npm-registry.js";
 import { ownedPinRefreshShouldReport, refreshOwnedPins } from "../lib/owned-pins.js";
 import { extractSnapshotSafely, validateSnapshotArchive } from "../lib/safe-snapshot-extract.js";
 import { collectUpgradeExecPathWarning, findFlairPackageDir, resolveNpmGlobalFlairPackage, resolveServingFlairPackage } from "../lib/upgrade-exec-path.js";
@@ -1046,7 +1047,10 @@ program
       try {
         let registryLatest: string | null = null;
         try {
-          const res = await fetch(`https://registry.npmjs.org/${name}/latest`, { signal: AbortSignal.timeout(5000) });
+          // flair#1688: resolve the registry npm is configured to use for this
+          // package (scope mapping + .npmrc + env) instead of a hardcoded host.
+          const registry = await resolveNpmRegistry(name);
+          const res = await fetch(`${registry}/${name}/latest`, { signal: AbortSignal.timeout(5000) });
           if (res.ok) {
             const data = await res.json() as { version?: string };
             registryLatest = typeof data.version === "string" && data.version ? data.version : null;

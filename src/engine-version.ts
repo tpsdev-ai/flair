@@ -20,6 +20,7 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
+import { resolveNpmRegistry } from "./lib/npm-registry.js";
 
 /** Filename of the engine-version stamp inside the data directory. */
 export const ENGINE_VERSION_STAMP = "engine-version.txt";
@@ -49,8 +50,12 @@ export function readInstalledHarperVersion(packageRoot: string): string | null {
  */
 export async function fetchDeclaredHarperVersion(flairVersion: string): Promise<string | null> {
   try {
+    // flair#1688: resolve the configured registry rather than assuming npmjs —
+    // the engine-version decision must look at the same package the upgrade
+    // will actually install.
+    const registry = await resolveNpmRegistry("@tpsdev-ai/flair");
     const res = await fetch(
-      `https://registry.npmjs.org/@tpsdev-ai/flair/${flairVersion}`,
+      `${registry}/@tpsdev-ai/flair/${flairVersion}`,
       { signal: AbortSignal.timeout(5000) },
     );
     if (!res.ok) return null;

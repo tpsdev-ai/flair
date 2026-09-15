@@ -33,6 +33,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseSemverCore } from "./fabric-upgrade.js";
+import { resolveNpmRegistry } from "./lib/npm-registry.js";
 
 export const FLAIR_PKG_NAME = "@tpsdev-ai/flair";
 export const DEFAULT_CACHE_PATH = join(homedir(), ".flair", ".version-check-cache.json");
@@ -72,7 +73,12 @@ function writeCacheFile(path: string, entry: CacheFile): void {
 
 async function defaultFetchLatest(timeoutMs: number): Promise<string | null> {
   try {
-    const res = await fetch(`https://registry.npmjs.org/${FLAIR_PKG_NAME}/latest`, {
+    // flair#1688: honour the registry npm is configured to use (scoped
+    // `@scope:registry`, project/user/global .npmrc, env `npm_config_registry`)
+    // rather than a hardcoded public host — a private mirror must not be
+    // silently bypassed by the update check.
+    const registry = await resolveNpmRegistry(FLAIR_PKG_NAME);
+    const res = await fetch(`${registry}/${FLAIR_PKG_NAME}/latest`, {
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) return null;

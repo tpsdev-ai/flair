@@ -31,6 +31,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "no
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
+import { resolveNpmRegistry } from "./lib/npm-registry.js";
 import type { DeployOptions, DeployResult } from "./deploy.js";
 
 /**
@@ -262,10 +263,13 @@ export interface FabricUpgradeResult {
 
 // ─── Default (real) dependency implementations ──────────────────────────────
 
-const REGISTRY = "https://registry.npmjs.org";
-
 async function defaultFetchLatestFlairVersion(): Promise<string> {
-  const res = await fetch(`${REGISTRY}/${FLAIR_PKG}/latest`, {
+  // flair#1688: the configured registry (scoped `@tpsdev-ai:registry`,
+  // project/user/global .npmrc, env `npm_config_registry`), not a hardcoded
+  // host — a Fabric upgrade must stage the package from the mirror the
+  // operator configured, or fail rather than silently use the public one.
+  const registry = await resolveNpmRegistry(FLAIR_PKG);
+  const res = await fetch(`${registry}/${FLAIR_PKG}/latest`, {
     signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) {
@@ -279,7 +283,8 @@ async function defaultFetchLatestFlairVersion(): Promise<string> {
 async function defaultFetchDeclaredHarperVersion(
   flairVersion: string,
 ): Promise<string | null> {
-  const res = await fetch(`${REGISTRY}/${FLAIR_PKG}/${flairVersion}`, {
+  const registry = await resolveNpmRegistry(FLAIR_PKG);
+  const res = await fetch(`${registry}/${FLAIR_PKG}/${flairVersion}`, {
     signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) return null;
