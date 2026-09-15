@@ -223,6 +223,21 @@ jobs:
   # 127.0.0.1:9926, so waitForHealth timed out and the CLI rolled back. No
   # lane ran that end-to-end before this one.
   #
+  # ADVISORY, not a required check. The job name carries "(advisory)" and the
+  # job is gated by the changed-files filter below instead of being pinned in
+  # branch protection. `continue-on-error` is deliberately NOT used: a step
+  # marked continue-on-error reports success even when it failed, so the run
+  # summary stops being evidence. The job's own exit status is the signal.
+  #   (a) PROMOTION CRITERION — this job becomes a required check, and the
+  #       "(advisory)" suffix is dropped, once both product defects it tracks
+  #       are settled: flair#1683 (upgrade on the launchd-adopted shape) and
+  #       flair#1685 (doctor --fix adoption with ~/.flair/admin-pass absent).
+  #   (b) RE-EVALUATE when either issue closes, and at the next release cut
+  #       that includes both fixes — whichever comes first.
+  # The final step ("Pass-file-missing adoption fails-first") is EXPECTED to
+  # be red until #1685 lands. It lives inside this advisory job so the #1683
+  # result stays readable and a second macOS job is not needed for it.
+  #
   # `launchd-lane-changes` gates the macOS job by changed file (macOS minutes
   # are the expensive input) without narrowing the whole CI workflow's
   # triggers. It only runs for pull requests; pushes to main and
@@ -249,7 +264,7 @@ jobs:
           printf '%s\n' "$changed"
           run=false
           # Single-file triggers (anchored) plus directory triggers (prefix).
-          if printf '%s\n' "$changed" | grep -Eq '^(src/cli\.ts|src/lib/(daemon-liveness|launchd-repair|mcp-enable)\.ts|resources/health\.ts|scripts/release[^/]*\.sh|scripts/ci/local-npm-registry\.mjs|scripts/ci/macos-launchd-upgrade-lane\.sh|\.github/workflows/test\.yml)$' \
+          if printf '%s\n' "$changed" | grep -Eq '^(src/cli\.ts|src/lib/(daemon-liveness|launchd-repair|mcp-enable)\.ts|resources/health\.ts|scripts/release[^/]*\.sh|scripts/ci/local-npm-registry\.mjs|scripts/ci/macos-launchd-upgrade-lane\.sh|scripts/ci/macos-launchd-passfile-missing-check\.sh|\.github/workflows/test\.yml)$' \
              || printf '%s\n' "$changed" | grep -Eq '^(src/commands/|templates/launchd/)'; then
             run=true
           fi
@@ -259,7 +274,7 @@ jobs:
           echo "run=${run}" >> "$GITHUB_OUTPUT"
 
   launchd-adopt-upgrade-darwin:
-    name: "launchd adopt-then-upgrade (macOS)"
+    name: "launchd adopt-then-upgrade (macOS, advisory)"
     needs: [launchd-lane-changes]
     # Runs unconditionally on push to main and workflow_dispatch; on pull
     # requests it runs only when the changed-files gate says the lane's
@@ -368,6 +383,19 @@ jobs:
           BASELINE_VERSION: ${{ steps.baseline.outputs.baseline_version }}
           FLAIR_MODELS_DIR: ${{ github.workspace }}/models
         run: bash scripts/ci/macos-launchd-upgrade-lane.sh
+      # flair#1685 — fails-first companion step to the lane above. With
+      # ~/.flair/admin-pass absent, `doctor --fix` adoption must create the
+      # file from the running instance's credential or refuse without leaving
+      # a plist that can never start. It is EXPECTED TO FAIL until #1685
+      # lands, which is why the whole job is advisory. `if: always()` keeps it
+      # from being hidden by a main-lane failure; it exits 2 (DID NOT RUN),
+      # never 0, when the lane never reached the adopted state.
+      - name: "Pass-file-missing adoption fails-first (flair#1685)"
+        if: always()
+        env:
+          PORT: "9926"
+          FLAIR_MODELS_DIR: ${{ github.workspace }}/models
+        run: bash scripts/ci/macos-launchd-passfile-missing-check.sh
       - name: Upload launchd lane diagnostics
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

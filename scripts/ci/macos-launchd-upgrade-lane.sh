@@ -9,7 +9,9 @@
 #      `flair doctor --fix` so the instance runs under a per-user launchd
 #      agent built from templates/launchd/start-flair-with-admin-pass.sh
 #      (the flair#1573 adoption shape, same as the reported rockit job).
-#   3. Asserts the launchd-spawned pid is the one bound to 127.0.0.1:9926.
+#   3. Asserts the pre-adoption process is gone and the launchd-spawned pid
+#      (or a child) owns the 127.0.0.1:9926 listener — not merely that some
+#      process answers the port.
 #   4. Packs the PR checkout and serves that tarball as the registry's
 #      version, then runs `flair upgrade` against it — the exact path that
 #      broke production on rockit.
@@ -49,6 +51,7 @@ DIAG_DIR="${DIAG_DIR:-$WORKSPACE/diagnostics/launchd-adopt-upgrade}"
 REGISTRY_PORT="${REGISTRY_PORT:-4873}"
 
 DATA_DIR="$HOME/.flair/data"
+PASS_FILE="$HOME/.flair/admin-pass"
 HTTP_URL="http://127.0.0.1:${PORT}"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 REGISTRY_PID=""
@@ -66,11 +69,12 @@ mkdir -p "$DIAG_DIR" "$FLAIR_MODELS_DIR"
 # harper-config.yaml) that supplies it, and exporting a second copy would
 # mask whether the plist's own value is what the upgraded server honours.
 #
-# The admin password is NOT exported here either. This instance must be
-# initialized the way a real install is (`flair init` generates the password
-# and writes the 0600 `~/.flair/admin-pass` that the pass-file launcher reads);
-# passing the password inline makes init skip the file, which is not the
-# rockit shape and makes the adopted launchd job fail to start.
+# The admin password is NOT placed in argv: the lane writes it to the 0600
+# `~/.flair/admin-pass` and passes only that path to `flair init
+# --admin-pass-file`. Passing the password inline makes init skip the file,
+# which is not the rockit shape and makes the adopted launchd job fail to
+# start. The value reaches later restart/verify calls through the environment
+# only, and is never echoed.
 export HTTP_PORT="$PORT"
 export OPERATIONSAPI_NETWORK_PORT="127.0.0.1:${OPS_PORT}"
 export NODE_HOSTNAME="localhost"
@@ -94,6 +98,9 @@ dump_diagnostics() {
   done
   echo "--- lsof :$PORT ---"
   lsof -nP -iTCP:"$PORT" 2>/dev/null || echo "(nothing listening on $PORT)"
+  echo "--- listener pids on :$PORT (lsof -t) ---"
+  lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null || echo "(no listener pids)"
+  echo "--- direct pid recorded before adoption: ${DIRECT_PID:-unset} ---"
   echo "--- lsof :$OPS_PORT ---"
   lsof -nP -iTCP:"$OPS_PORT" 2>/dev/null || echo "(nothing listening on $OPS_PORT)"
   echo "--- hdb.log (tail 200) ---"
@@ -157,6 +164,49 @@ wait_health() {
   return 1
 }
 
+listener_pids_on_port() {
+  # -t prints only PIDs. sort -u so a process holding more than one socket on
+  # the port appears once. Empty output is "nobody is listening" — the caller
+  # decides whether that is a failure, never this helper. `|| true` is
+  # deliberate: lsof exits 1 when it matches nothing, and with pipefail that
+  # would otherwise abort the caller on the legitimate "no listener yet" state.
+  lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | sort -u || true
+}
+
+pid_is_self_or_descendant() {
+  # True when $1 is $2 or a descendant of $2. The launchd job execs the
+  # product launcher, which execs node, so today $1 == $2; the ancestor walk
+  # is what lets a future wrapper (launcher -> node -> worker) stay attributed
+  # instead of silently failing the ownership check. Bounded to guard against
+  # a malformed/cyclic ppid chain.
+  local candidate="$1" ancestor="$2" hops=0
+  while [ -n "$candidate" ] && [ "$candidate" != "0" ] && [ "$candidate" != "1" ] && [ "$hops" -lt 32 ]; do
+    [ "$candidate" = "$ancestor" ] && return 0
+    candidate="$(ps -o ppid= -p "$candidate" 2>/dev/null | tr -d ' ')"
+    hops=$((hops + 1))
+  done
+  return 1
+}
+
+wait_listener_owned_by() {
+  # Poll until $1 (or a descendant) owns the ${PORT} listener. The launchd job
+  # needs a moment after `launchctl list` first shows its pid to actually bind,
+  # so a single check here would race the start and report a false failure.
+  local pid="$1" timeout="${2:-120}" deadline=$((SECONDS + timeout)) owner owners
+  while (( SECONDS < deadline )); do
+    owners="$(listener_pids_on_port)"
+    for owner in $owners; do
+      if pid_is_self_or_descendant "$owner" "$pid"; then
+        echo "launchd pid ${pid} owns the ${PORT} listener (owner ${owner})"
+        return 0
+      fi
+    done
+    sleep 1
+  done
+  echo "launchd pid ${pid} never owned the ${PORT} listener within ${timeout}s (owners: ${owners:-none})" >&2
+  return 1
+}
+
 assert_bound_by_pid() {
   local pid="$1"
   local label="$2"
@@ -170,13 +220,33 @@ assert_bound_by_pid() {
 }
 
 assert_launchd_serving() {
-  local label="$1" expectation="$2"
+  # Three independent facts, in order, because port health alone is the signal
+  # that lied here (flair#1684 review): the direct-spawned instance answered
+  # 9926 the whole time the adopted launchd job was failing to start.
+  local label="$1" expectation="$2" predecessor_pid="${3:-}"
   SERVING_PID="$(launchd_pid "$label")"
   if [ -z "$SERVING_PID" ] || [ "$SERVING_PID" = "-" ]; then
     echo "launchctl list shows no running pid for ${label} (${expectation})" >&2
     return 1
   fi
   echo "launchd ${label} pid=${SERVING_PID} (${expectation})" >&2
+
+  # (1) The process that served this port before the bounce must actually be
+  # gone. If it is alive, whatever answers health is that process, not launchd.
+  if [ -n "$predecessor_pid" ]; then
+    if kill -0 "$predecessor_pid" 2>/dev/null; then
+      echo "predecessor pid ${predecessor_pid} is STILL ALIVE after ${expectation}; the launchd pid cannot own the port" >&2
+      return 1
+    fi
+    echo "predecessor pid ${predecessor_pid} is gone" >&2
+  fi
+
+  # (2) The launchd pid (or a child of it) must OWN the ${PORT} listener. Ask
+  # who owns the port — not merely whether the launchd pid has a socket open —
+  # because "some process answers 9926" is exactly the false green this guards.
+  wait_listener_owned_by "$SERVING_PID" 120
+
+  # (3) Only now does health mean the launchd-owned listener answers.
   wait_health "$HTTP_URL/Health" 120 >&2
   assert_bound_by_pid "$SERVING_PID" "$expectation" >&2
 }
@@ -193,28 +263,53 @@ npm install -g "@tpsdev-ai/flair@${BASELINE_VERSION}"
 echo "installed: $(flair --version 2>&1 | tail -n1)"
 
 log "Bring the instance up the product way (flair init, direct-spawned)"
-# Unset any inherited admin password so init generates one and writes the 0600
-# `~/.flair/admin-pass` file that the pass-file launchd launcher reads.
+# Match rockit exactly: the admin password lives in the 0600
+# `~/.flair/admin-pass`, and init reads it through `--admin-pass-file` (the
+# product's preferred flag). The #1573 pass-file launcher takes that same file
+# as argv[1], so the file has to exist BEFORE doctor --fix writes the plist.
+# Writing it here (rather than letting init generate it) keeps the secret out
+# of argv and out of the logs, and makes the lane's shape the one rockit runs.
+ADMIN_PASS="${ADMIN_PASS:-}"
+if [ -z "$ADMIN_PASS" ]; then
+  # Same generator init uses (base64url over 18 random bytes), invoked through
+  # node so the value never appears on a command line anyone can read.
+  ADMIN_PASS="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(18).toString("base64url"))')"
+fi
+mkdir -p "$HOME/.flair"
+# umask 077 + chmod: readAdminPassFileSecure refuses any group/other bit, and
+# the launcher re-checks the mode at start time.
+( umask 077; printf '%s\n' "$ADMIN_PASS" > "$PASS_FILE" )
+chmod 600 "$PASS_FILE"
+# init reads the file (passwordSource becomes "file"), so it neither writes
+# nor prints the secret. The env vars below are for this lane's own
+# restart/verify calls; they are not argv and are never echoed.
 unset FLAIR_ADMIN_PASS HDB_ADMIN_PASSWORD
 flair init \
   --port "$PORT" \
   --ops-port "$OPS_PORT" \
   --ops-bind 127.0.0.1 \
+  --admin-pass-file "$PASS_FILE" \
   --skip-soul \
   --no-mcp
-if [ ! -s "$HOME/.flair/admin-pass" ]; then
-  echo "flair init did not write ~/.flair/admin-pass — the pass-file launcher cannot start" >&2
+if [ ! -s "$PASS_FILE" ]; then
+  echo "admin-pass file ${PASS_FILE} is missing after flair init — the pass-file launcher cannot start" >&2
   exit 1
 fi
-# From here on every restart/verify call shares the password the launchd
-# launcher reads from the file.
-ADMIN_PASS="$(cat "$HOME/.flair/admin-pass")"
 export HDB_ADMIN_PASSWORD="$ADMIN_PASS"
 export FLAIR_ADMIN_PASS="$ADMIN_PASS"
 wait_health "$HTTP_URL/Health" 180
 echo "instance is up before adoption"
 
 log "Adopt into launchd (flair doctor --fix, flair#1573)"
+# Record who owns the port BEFORE adoption. The post-adopt assertion needs the
+# concrete pid to prove the direct-spawned process is gone; a bare "something
+# answers /Health" is not evidence the launchd job ever started.
+DIRECT_PID="$(listener_pids_on_port | head -n1 || true)"
+if [ -z "$DIRECT_PID" ]; then
+  echo "could not identify the direct-spawned listener on ${PORT} before adoption" >&2
+  exit 1
+fi
+echo "direct-spawned pid before adoption: ${DIRECT_PID}"
 # doctor --fix exits non-zero whenever ANY catalog check is still failing (e.g.
 # the missing keys dir on an agentless init) even when the launchd adopt itself
 # succeeded. The assertion is the adopted state below, not doctor's exit code.
@@ -237,7 +332,7 @@ if [ -z "$LABEL" ]; then
 fi
 echo "launchd label: ${LABEL}"
 
-assert_launchd_serving "$LABEL" "post-adopt baseline"
+assert_launchd_serving "$LABEL" "post-adopt baseline" "$DIRECT_PID"
 BASELINE_PID="$SERVING_PID"
 echo "baseline launchd pid: ${BASELINE_PID}"
 
@@ -283,7 +378,7 @@ log "Upgrade baseline -> PR build (the flair#1683 path)"
 flair upgrade 2>&1 | tee "$DIAG_DIR/flair-upgrade.log"
 
 log "Assert the upgraded instance is the PR build, under launchd"
-assert_launchd_serving "$LABEL" "post-upgrade"
+assert_launchd_serving "$LABEL" "post-upgrade" "$BASELINE_PID"
 NEW_PID="$SERVING_PID"
 if [ "$NEW_PID" = "$BASELINE_PID" ]; then
   echo "upgrade did not produce a new launchd pid (still ${BASELINE_PID})" >&2
