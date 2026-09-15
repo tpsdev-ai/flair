@@ -18,6 +18,10 @@ import {
   buildDescriptors,
   materializeBundledDescriptors,
 } from "../../scripts/materialize-bundled-descriptors.mjs";
+import {
+  enumeratePublishTargets,
+  parseReleasePublishDirs,
+} from "../../scripts/first-publish-check.mjs";
 
 const REPO = join(import.meta.dir, "../..");
 const fixtures: string[] = [];
@@ -36,6 +40,19 @@ describe("bundled flair-tool-descriptors (flair#1580 pack/install)", () => {
     expect(root.scripts.prepack).toBe("node scripts/materialize-bundled-descriptors.mjs");
     expect(root.scripts.prepublishOnly).toBe("npm run build && npm run build:cli");
     expect(mcp.scripts.prepack).toBe("node ../../scripts/materialize-bundled-descriptors.mjs");
+  });
+
+  test("descriptors are bundled-only: private, never staged, no publish-set drift", () => {
+    const pkg = JSON.parse(readFileSync(join(REPO, BUNDLED_REL, "package.json"), "utf8"));
+    expect(pkg.private).toBe(true);
+
+    const workflow = readFileSync(join(REPO, ".github/workflows/release-publish.yml"), "utf8");
+    expect(parseReleasePublishDirs(workflow)).not.toContain(BUNDLED_REL);
+    expect(workflow).not.toMatch(/npm\s+stage\s+publish[\s\S]{0,120}flair-tool-descriptors/);
+
+    const { targets, problems } = enumeratePublishTargets(REPO);
+    expect(problems).toEqual([]);
+    expect(targets.map((t) => t.name)).not.toContain(BUNDLED_NAME);
   });
 
   test("every Dockerfile that npm pack COPYs the prepack script (flair#1580)", () => {

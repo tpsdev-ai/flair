@@ -247,9 +247,6 @@ if [[ "$MODE" == "--publish" ]]; then
   echo "  Publishing @tpsdev-ai/flair-client..."
   (cd "$ROOT/packages/flair-client" && npm publish) || { echo "❌ flair-client publish failed"; exit 1; }
 
-  echo "  Publishing @tpsdev-ai/flair-tool-descriptors..."
-  (cd "$ROOT/packages/flair-tool-descriptors" && npm publish) || { echo "❌ flair-tool-descriptors publish failed"; exit 1; }
-
   echo "  Publishing @tpsdev-ai/flair-mcp..."
   (cd "$ROOT/packages/flair-mcp" && npm publish) || { echo "❌ flair-mcp publish failed"; exit 1; }
 

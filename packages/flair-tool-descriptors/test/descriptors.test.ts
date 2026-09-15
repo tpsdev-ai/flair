@@ -110,4 +110,9 @@ describe("tool descriptors — transport-agnostic source (flair#1580)", () => {
     expect(pkg.dependencies ?? {}).toEqual({});
     expect(pkg.name).toBe("@tpsdev-ai/flair-tool-descriptors");
   });
+
+  test("package.json is private — bundled only, never first-published", () => {
+    const pkg = JSON.parse(readFileSync(join(import.meta.dir, "..", "package.json"), "utf-8"));
+    expect(pkg.private).toBe(true);
+  });
 });

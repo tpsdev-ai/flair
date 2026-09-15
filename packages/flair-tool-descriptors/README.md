@@ -11,9 +11,9 @@ descriptor appears on every listed surface with zero hand-wiring (flair#1580).
 
 ## Install
 
-```bash
-npm install @tpsdev-ai/flair-tool-descriptors
-```
+This package is **private and bundled** into `@tpsdev-ai/flair` and
+`@tpsdev-ai/flair-mcp` at prepack; it is never published to npm on its own.
+Install one of those instead.
 
 ## Surfaces
 

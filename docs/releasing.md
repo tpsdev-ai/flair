@@ -8,8 +8,7 @@ A maintainer then approves the staged tarballs on npmjs.com with 2FA to make the
 > `flair-bench` is version-bumped and tagged in lockstep with the other 7, and stages in
 > its own step in CI for [historical reasons](#flair-bench-bootstrap-one-time-done). That
 > step is no longer allowed to fail: every already-published package must stage
-> for a release to pass. `@tpsdev-ai/flair-tool-descriptors` is the one
-> first-publish exception until an npm org owner bootstraps it.
+> for a release to pass.
 
 ```
  merge release PR ──▶ push tag v0.11.0 ──▶ CI stages all packages ──▶ npm staging
@@ -147,17 +146,11 @@ Leave `npm publish` **unchecked** under allowed actions. This structurally preve
 CI/OIDC identity from publishing anything live directly — the only path to live is the
 human 2FA approval of a staged package.
 
-Packages: `flair-client`, `flair-tool-descriptors`, `flair-mcp`, `flair`,
+Packages: `flair-client`, `flair-mcp`, `flair`,
 `openclaw-flair`, `pi-flair`, `n8n-nodes-flair`, `langgraph-flair`, `flair-bench`.
 
-> A package must already exist on npm before a trusted publisher can be added.
-> `@tpsdev-ai/flair-tool-descriptors` (flair#1580) is the next first-publish:
-> stage it with the dedicated continue-on-error step, then an npm org owner
-> publishes once and registers its Trusted Publisher (same playbook as
-> `flair-bench` below). Until that exists on the registry, `@tpsdev-ai/flair`
-> and `@tpsdev-ai/flair-mcp` tarballs bundle it (`bundleDependencies` +
-> `scripts/materialize-bundled-descriptors.mjs`) so `npm install` of those
-> tarballs does not 404.
+> `flair-tool-descriptors` is private and bundled into `flair` + `flair-mcp` at
+> prepack; it is never published.
 
 ### `flair-bench` bootstrap (one-time, done)
 
