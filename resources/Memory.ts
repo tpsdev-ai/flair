@@ -13,7 +13,7 @@ import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveAllowedOwners } from "./memory-read-scope.js";
 import { assertValidVisibility, assertVisibilityAllowedForDurability } from "./memory-visibility.js";
 import { assertValidDurability } from "./memory-durability.js";
-import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, skillEmbedText, skillScanGate } from "./skill-write.js";
+import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
 import {
   DEDUP_COSINE_THRESHOLD_DEFAULT,
   DEDUP_LEXICAL_THRESHOLD_DEFAULT,
@@ -859,6 +859,10 @@ export class Memory extends (databases as any).flair.Memory {
       const skillScanDenial = skillScanGate(content);
       if (skillScanDenial) return skillScanDenial;
     }
+    {
+      const skillSourceDenial = refuseSkillWriteSource(content);
+      if (skillSourceDenial) return skillSourceDenial;
+    }
 
     // Server-side conservative-duplicate gate (memory-integrity fix). A
     // supersede write is an intentional version-link, not an ambiguous "is
@@ -1191,6 +1195,10 @@ export class Memory extends (databases as any).flair.Memory {
     {
       const skillScanDenial = skillScanGate(content);
       if (skillScanDenial) return skillScanDenial;
+    }
+    {
+      const skillSourceDenial = refuseSkillWriteSource(content);
+      if (skillSourceDenial) return skillSourceDenial;
     }
 
     // Server-side conservative-duplicate gate (memory-integrity fix). PUT is

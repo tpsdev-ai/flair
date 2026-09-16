@@ -28,6 +28,7 @@ import { estimateTokens } from "./token-estimate.js";
 import { initialPosition, ORG_EVENT_STREAM } from "./agent-read-position-lib.js";
 import { defaultReadPositionTable, ensureReadPosition } from "./agent-read-position.js";
 import { catchupSeekTimestamp, isCatchupEligible } from "./org-event-catchup-lib.js";
+import { resolveActiveSkills } from "./skill-provenance.js";
 
 /**
  * POST /MemoryBootstrap
@@ -588,36 +589,13 @@ export class BootstrapMemories extends Resource {
       }
     }
 
-    // --- 1b. Skill assignments (ordered by priority, conflict detection) ---
+    // --- 1b. Skill assignments (durable source + stated conflict outcome) ---
+    // flair#1433: do not report-and-load-both. resolveActiveSkills decides
+    // (unique priority wins; equal-priority same-name tie refuses) and
+    // states the decision on the line. Non-durable sources are refused.
     if (skillAssignments.length > 0) {
-      const priorityOrder: Record<string, number> = { critical: 0, high: 1, standard: 2, low: 3 };
-      skillAssignments.sort((a, b) => {
-        const pa = priorityOrder[a.priority ?? "standard"] ?? 2;
-        const pb = priorityOrder[b.priority ?? "standard"] ?? 2;
-        return pa - pb;
-      });
-
-      // Detect conflicts at same priority level
-      const byPriority = new Map<string, any[]>();
-      for (const skill of skillAssignments) {
-        const p = skill.priority ?? "standard";
-        if (!byPriority.has(p)) byPriority.set(p, []);
-        byPriority.get(p)!.push(skill);
-      }
-
-      for (const skill of skillAssignments) {
-        const p = skill.priority ?? "standard";
-        let meta: any = {};
-        try { meta = typeof skill.metadata === "string" ? JSON.parse(skill.metadata) : (skill.metadata ?? {}); } catch {}
-        const source = meta.source ? `, source: ${meta.source}` : "";
-        let line = `- ${skill.value} (${p} priority${source})`;
-        // Flag conflicts at same priority level
-        const peers = byPriority.get(p) ?? [];
-        if (peers.length > 1) {
-          line += " [SKILL_CONFLICT]";
-        }
-        sections.skills.push(line);
-      }
+      const resolved = resolveActiveSkills(skillAssignments);
+      sections.skills.push(...resolved.lines);
     }
 
     // --- 1c. Team roster + cross-agent search nudge ---
