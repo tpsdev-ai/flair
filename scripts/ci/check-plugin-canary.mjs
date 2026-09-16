@@ -35,7 +35,13 @@
  * Usage:
  *   node scripts/ci/check-plugin-canary.mjs --version <ver> \
  *     [--flair-url <url>] [--agent <id>] [--key-path <path>] \
- *     [--flair-bin <path>] [--prefix <dir>] [--keep]
+ *     [--flair-bin <path>] [--prefix <dir>] [--keep] \
+ *     [--boot-outcome <success|failure|skipped>]
+ *
+ * `--boot-outcome` is the canary lane's prior boot step. Anything other than
+ * `success` prints the distinct `boot failed → plugin unmeasurable` line and
+ * exits 2 without installing or talking to a host — a second confusing red
+ * (restart failed / host down) is the failure this flag exists to prevent.
  */
 
 import { spawnSync } from "node:child_process";
@@ -64,6 +70,9 @@ export const REQUIRED_TOOLS = Object.freeze(["memory_store", "memory_get", "boot
 
 export const VERSION_RE = /^\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?$/;
 
+/** Distinct FAIL line when the boot contract already failed (flair#1338 (3)). */
+export const BOOT_FAILED_LINE = "boot failed → plugin unmeasurable";
+
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(SCRIPT_DIR, "..", "..");
 export const WORKSPACE_PACKAGES = join(REPO_ROOT, "packages");
@@ -77,6 +86,7 @@ export function parseArgs(argv) {
     flairBin: "",
     prefix: "",
     keep: false,
+    bootOutcome: "",
     help: false,
     unknown: "",
   };
@@ -88,6 +98,7 @@ export function parseArgs(argv) {
     else if (a === "--key-path") out.keyPath = argv[++i] ?? "";
     else if (a === "--flair-bin") out.flairBin = argv[++i] ?? "";
     else if (a === "--prefix") out.prefix = argv[++i] ?? "";
+    else if (a === "--boot-outcome") out.bootOutcome = argv[++i] ?? "";
     else if (a === "--keep") out.keep = true;
     else if (a === "--help" || a === "-h") out.help = true;
     else if (a === "--skip" || a === "--skip-live" || a === "--dry-run") {
@@ -183,7 +194,19 @@ export function pluginCanaryWired(yml) {
   const hasId = /^\s+id:\s+plugin\s*$/m.test(yml);
   const hasOutcome = yml.includes("PLUGIN_OUTCOME") && yml.includes("steps.plugin.outcome");
   const hasContinue = /plugin[\s\S]{0,400}continue-on-error:\s*true/.test(yml);
-  return { hasScript, hasId, hasOutcome, hasContinue, wired: hasScript && hasId && hasOutcome && !hasContinue };
+  const hasBootGuard =
+    yml.includes(BOOT_FAILED_LINE) &&
+    yml.includes("--boot-outcome") &&
+    yml.includes("BOOT_OUTCOME") &&
+    /if:\s*success\(\)\s*\|\|\s*failure\(\)/.test(yml);
+  return {
+    hasScript,
+    hasId,
+    hasOutcome,
+    hasContinue,
+    hasBootGuard,
+    wired: hasScript && hasId && hasOutcome && hasBootGuard && !hasContinue,
+  };
 }
 
 function dieDidNotRun(msg) {
@@ -371,9 +394,15 @@ export async function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   if (args.help) {
     console.log(
-      "Usage: node scripts/ci/check-plugin-canary.mjs --version <ver> [--flair-url <url>] [--agent <id>] [--key-path <path>] [--flair-bin <path>] [--prefix <dir>]",
+      "Usage: node scripts/ci/check-plugin-canary.mjs --version <ver> [--flair-url <url>] [--agent <id>] [--key-path <path>] [--flair-bin <path>] [--prefix <dir>] [--boot-outcome <success|failure|skipped>]",
     );
     return EXIT_OK;
+  }
+  // Condition (3): a failed/skipped boot must not fall through into install
+  // or "host unreachable" — that second red is what this line replaces.
+  if (args.bootOutcome && args.bootOutcome !== "success") {
+    console.error(BOOT_FAILED_LINE);
+    return dieDidNotRun(BOOT_FAILED_LINE);
   }
   if (args.unknown) {
     return dieDidNotRun(

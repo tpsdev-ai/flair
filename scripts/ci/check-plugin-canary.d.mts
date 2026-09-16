@@ -8,6 +8,7 @@ export const FLAIR_MCP_PACKAGE: "@tpsdev-ai/flair-mcp";
 export const FLAIR_CLIENT_PACKAGE: "@tpsdev-ai/flair-client";
 export const REQUIRED_TOOLS: readonly ["memory_store", "memory_get", "bootstrap"];
 export const VERSION_RE: RegExp;
+export const BOOT_FAILED_LINE: "boot failed → plugin unmeasurable";
 export const REPO_ROOT: string;
 export const WORKSPACE_PACKAGES: string;
 
@@ -19,6 +20,7 @@ export interface ParsedArgs {
   flairBin: string;
   prefix: string;
   keep: boolean;
+  bootOutcome: string;
   help: boolean;
   unknown: string;
 }
@@ -44,6 +46,7 @@ export interface PluginWired {
   hasId: boolean;
   hasOutcome: boolean;
   hasContinue: boolean;
+  hasBootGuard: boolean;
   wired: boolean;
 }
 

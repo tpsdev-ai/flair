@@ -176,11 +176,28 @@ jobs:
 
       - name: Plugin canary — published adapters, documented host wiring, tool-call
         id: plugin
+        # Run after a failed boot so the step can emit its own distinct line
+        # instead of being skipped (a skip looks like a second unexplained red
+        # at verdict time). Cancelled jobs do not run.
+        if: success() || failure()
         env:
           VERSION: ${{ inputs.version }}
+          BOOT_OUTCOME: ${{ steps.boot.outcome }}
         run: |
           set -uo pipefail
           mkdir -p canary-logs
+          # Condition (3): boot already failed (or never ran). Do not restart,
+          # install adapters, or produce a second "host unreachable" red.
+          # The distinct line is the plugin step's FAIL.
+          if [ "$BOOT_OUTCOME" != "success" ]; then
+            set +e
+            node scripts/ci/check-plugin-canary.mjs --boot-outcome "$BOOT_OUTCOME" \
+              > canary-logs/plugin.log 2>&1
+            set -e
+            grep -nE "boot failed|DID NOT RUN" canary-logs/plugin.log || true
+            echo "::error::boot failed → plugin unmeasurable"
+            exit 1
+          fi
           # Boot's contract includes a clean stop. Restart the already-inited
           # instance so the adapters have a live host. Failure to start is
           # unmeasurable — FAIL, never a skip.
@@ -200,6 +217,7 @@ jobs:
           set +e
           node scripts/ci/check-plugin-canary.mjs \
             --version "$VERSION" \
+            --boot-outcome "$BOOT_OUTCOME" \
             --flair-url "http://127.0.0.1:19926" \
             --agent canary \
             --key-path "$HOME/.flair/keys/canary.key" \

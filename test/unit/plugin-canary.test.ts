@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  BOOT_FAILED_LINE,
   EXIT_DID_NOT_RUN,
   EXIT_OK,
   FLAIR_CLIENT_PACKAGE,
@@ -75,6 +76,7 @@ jobs:
     expect(main.hasScript).toBe(false);
     expect(main.hasId).toBe(false);
     expect(main.hasOutcome).toBe(false);
+    expect(main.hasBootGuard).toBe(false);
     expect(main.wired).toBe(false);
   });
 
@@ -84,7 +86,23 @@ jobs:
     expect(wired.hasId).toBe(true);
     expect(wired.hasOutcome).toBe(true);
     expect(wired.hasContinue).toBe(false);
+    expect(wired.hasBootGuard).toBe(true);
     expect(wired.wired).toBe(true);
+  });
+
+  test("a plugin step without the boot-failed guard is not wired", () => {
+    const half = `
+      - name: plugin canary
+        id: plugin
+        run: node scripts/ci/check-plugin-canary.mjs --version 1.2.3
+      PLUGIN_OUTCOME: \${{ steps.plugin.outcome }}
+`;
+    const halfWired = pluginCanaryWired(half);
+    expect(halfWired.hasScript).toBe(true);
+    expect(halfWired.hasId).toBe(true);
+    expect(halfWired.hasOutcome).toBe(true);
+    expect(halfWired.hasBootGuard).toBe(false);
+    expect(halfWired.wired).toBe(false);
   });
 
   test("verdict pass requires PLUGIN_OUTCOME=success — a skipped plugin cannot promote", () => {
@@ -138,6 +156,37 @@ describe("CLI refuses to pass when it cannot run", () => {
     const r = runGate(["--help"]);
     expect(r.status).toBe(EXIT_OK);
     expect(r.out).toContain("--version");
+  });
+
+  test("boot-outcome failure prints the distinct line and does not ask for --version", () => {
+    const r = runGate(["--boot-outcome", "failure"]);
+    expect(r.status).toBe(EXIT_DID_NOT_RUN);
+    expect(r.out).toContain(BOOT_FAILED_LINE);
+    expect(r.out).not.toContain("missing --version");
+    expect(r.out).not.toContain("npm install");
+    expect(r.out).not.toContain("host ");
+  });
+
+  test("boot-outcome skipped is the same distinct unmeasurable, not a second host red", () => {
+    const r = runGate(["--boot-outcome", "skipped"]);
+    expect(r.status).toBe(EXIT_DID_NOT_RUN);
+    expect(r.out).toContain(BOOT_FAILED_LINE);
+    expect(r.out).not.toContain("could not restart");
+    expect(r.out).not.toContain("did not answer");
+  });
+
+  test("boot-outcome success falls through to the version gate", () => {
+    const r = runGate(["--boot-outcome", "success"]);
+    expect(r.status).toBe(EXIT_DID_NOT_RUN);
+    expect(r.out).toContain("missing --version");
+    expect(r.out).not.toContain(BOOT_FAILED_LINE);
+  });
+
+  test("canary.yml uses the same boot-failed line the script prints", () => {
+    expect(BOOT_FAILED_LINE).toBe("boot failed → plugin unmeasurable");
+    expect(CANARY_YML).toContain(BOOT_FAILED_LINE);
+    expect(CANARY_YML).toContain("--boot-outcome");
+    expect(CANARY_YML).toMatch(/if:\s*success\(\)\s*\|\|\s*failure\(\)/);
   });
 
   test("parseArgs reads the required flags", () => {
