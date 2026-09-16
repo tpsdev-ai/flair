@@ -49,6 +49,7 @@ export function register(program: Command): void {
     .requiredOption("--key <key>")
     .requiredOption("--value <value>")
     .option("--durability <d>", "permanent|persistent|standard|ephemeral (default permanent — soul entries are identity, not working memory)")
+    .option("--url <url>", "Flair base URL (overrides the URL resolved from config; env: FLAIR_URL)")
     .option("--json", "Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)")
     .action(async (opts: any) => {
       applyAdminPassFile(opts);
@@ -70,7 +71,7 @@ export function register(program: Command): void {
         value: opts.value,
         durability: opts.durability,
         createdAt: new Date().toISOString(),
-      }, { agentId, agentIdSource: source, explicitAdminPass: opts.adminPass, adminUser: opts.adminUser });
+      }, { agentId, agentIdSource: source, explicitAdminPass: opts.adminPass, adminUser: opts.adminUser, baseUrl: opts.url });
       const mode = render.resolveOutputMode(opts);
       if (mode === "json") {
         console.log(render.asJSON(out));
@@ -83,17 +84,19 @@ export function register(program: Command): void {
       if (opts.durability) console.log(render.kv("durability", render.wrap(render.c.magenta, opts.durability)));
     });
 
-  soul.command("get")
+  addSharedCredentialOptions(soul.command("get"))
     .description("Fetch a single soul entry by id (agent:key)")
     .argument("<id>")
     .option("--agent <id>", "Agent ID to sign the read as (or set FLAIR_AGENT_ID); falls back to the config-profile agent")
+    .option("--url <url>", "Flair base URL (overrides the URL resolved from config; env: FLAIR_URL)")
     .option("--json", "Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)")
     .action(async (id: string, opts: any) => {
+      applyAdminPassFile(opts);
       // flair#1183: /Soul reads are verified (any registered agent). Resolve the
       // signer through the canonical seam so soul get honors the SAME precedence
       // as every other family; a null result lets api() fall to admin-pass/floor.
       const { agentId, source } = resolveSigningAgentId(opts, "soul get");
-      const out = await api("GET", `/Soul/${id}`, undefined, { agentId, agentIdSource: source });
+      const out = await api("GET", `/Soul/${id}`, undefined, { agentId, agentIdSource: source, explicitAdminPass: opts.adminPass, adminUser: opts.adminUser, baseUrl: opts.url });
       const mode = render.resolveOutputMode(opts);
       if (mode === "json") {
         console.log(render.asJSON(out));
@@ -115,17 +118,19 @@ export function register(program: Command): void {
       }
     });
 
-  soul.command("list")
+  addSharedCredentialOptions(soul.command("list"))
     .description("List all soul entries for an agent")
     .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
+    .option("--url <url>", "Flair base URL (overrides the URL resolved from config; env: FLAIR_URL)")
     .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
     .action(async (opts: any) => {
+      applyAdminPassFile(opts);
       const { agentId, source } = resolveSigningAgentId(opts, "soul list");
       if (!agentId) {
         console.error(`${render.icons.error} --agent <id> required (or set FLAIR_AGENT_ID)`);
         process.exit(2);
       }
-      const out = await api("GET", `/Soul?agentId=${encodeURIComponent(agentId)}`, undefined, { agentId, agentIdSource: source });
+      const out = await api("GET", `/Soul?agentId=${encodeURIComponent(agentId)}`, undefined, { agentId, agentIdSource: source, explicitAdminPass: opts.adminPass, adminUser: opts.adminUser, baseUrl: opts.url });
       const mode = render.resolveOutputMode(opts);
       if (mode === "json") {
         console.log(render.asJSON(out));

@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=129 options=550
+# commands=129 options=559
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -2048,6 +2048,9 @@ flair soul set
     --durability <d>
       description: permanent|persistent|standard|ephemeral (default permanent — soul entries are identity, not working memory)
       attr: durability
+    --url <url>
+      description: Flair base URL (overrides the URL resolved from config; env: FLAIR_URL)
+      attr: url
     --json
       description: Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)
       attr: json
@@ -2058,9 +2061,21 @@ flair soul get
   arguments:
     id (required)
   options:
+    --admin-pass <pass>
+      description: Admin password (or set FLAIR_ADMIN_PASS env, or use --admin-pass-file)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read admin password from a file (e.g., ~/.flair/admin-pass). Preferred over --admin-pass for launchd/cron — keeps the secret out of ps and shell history.
+      attr: adminPassFile
+    --admin-user <name>
+      description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
+      attr: adminUser
     --agent <id>
       description: Agent ID to sign the read as (or set FLAIR_AGENT_ID); falls back to the config-profile agent
       attr: agent
+    --url <url>
+      description: Flair base URL (overrides the URL resolved from config; env: FLAIR_URL)
+      attr: url
     --json
       description: Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)
       attr: json
@@ -2069,9 +2084,21 @@ flair soul list
   description: List all soul entries for an agent
   usage: [options]
   options:
+    --admin-pass <pass>
+      description: Admin password (or set FLAIR_ADMIN_PASS env, or use --admin-pass-file)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read admin password from a file (e.g., ~/.flair/admin-pass). Preferred over --admin-pass for launchd/cron — keeps the secret out of ps and shell history.
+      attr: adminPassFile
+    --admin-user <name>
+      description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
+      attr: adminUser
     --agent <id>
       description: Agent ID (or set FLAIR_AGENT_ID env)
       attr: agent
+    --url <url>
+      description: Flair base URL (overrides the URL resolved from config; env: FLAIR_URL)
+      attr: url
     --json
       description: Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)
       attr: json
@@ -4758,6 +4785,8 @@ Options:
   --durability <d>          permanent|persistent|standard|ephemeral (default
                             permanent — soul entries are identity, not working
                             memory)
+  --url <url>               Flair base URL (overrides the URL resolved from
+                            config; env: FLAIR_URL)
   --json                    Emit raw JSON response (also: pipe +
                             FLAIR_OUTPUT=json)
   -h, --help                display help for command
@@ -4771,13 +4800,25 @@ Usage: flair soul get [options] <id>
 Fetch a single soul entry by id (agent:key)
 
 Options:
-  --agent <id>   Agent ID to sign the read as (or set FLAIR_AGENT_ID); falls
-                 back to the config-profile agent
-  --json         Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)
-  -h, --help     display help for command
+  --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env, or use
+                            --admin-pass-file)
+  --admin-pass-file <path>  Read admin password from a file (e.g.,
+                            ~/.flair/admin-pass). Preferred over --admin-pass
+                            for launchd/cron — keeps the secret out of ps and
+                            shell history.
+  --admin-user <name>       Admin username for Basic auth (env:
+                            FLAIR_ADMIN_USER; default: admin)
+  --agent <id>              Agent ID to sign the read as (or set
+                            FLAIR_AGENT_ID); falls back to the config-profile
+                            agent
+  --url <url>               Flair base URL (overrides the URL resolved from
+                            config; env: FLAIR_URL)
+  --json                    Emit raw JSON response (also: pipe +
+                            FLAIR_OUTPUT=json)
+  -h, --help                display help for command
 
 Global Options:
-  -v, --version  output the version number
+  -v, --version             output the version number
 
 ----- flair soul list -----
 Usage: flair soul list [options]
@@ -4785,12 +4826,22 @@ Usage: flair soul list [options]
 List all soul entries for an agent
 
 Options:
-  --agent <id>   Agent ID (or set FLAIR_AGENT_ID env)
-  --json         Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)
-  -h, --help     display help for command
+  --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env, or use
+                            --admin-pass-file)
+  --admin-pass-file <path>  Read admin password from a file (e.g.,
+                            ~/.flair/admin-pass). Preferred over --admin-pass
+                            for launchd/cron — keeps the secret out of ps and
+                            shell history.
+  --admin-user <name>       Admin username for Basic auth (env:
+                            FLAIR_ADMIN_USER; default: admin)
+  --agent <id>              Agent ID (or set FLAIR_AGENT_ID env)
+  --url <url>               Flair base URL (overrides the URL resolved from
+                            config; env: FLAIR_URL)
+  --json                    Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)
+  -h, --help                display help for command
 
 Global Options:
-  -v, --version  output the version number
+  -v, --version             output the version number
 
 ----- flair bridge -----
 Usage: flair bridge [options] [command]
