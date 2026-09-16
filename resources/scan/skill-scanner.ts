@@ -96,7 +96,7 @@ const CONTENT_HAZARD_PATTERNS: Pattern[] = [
 
 const SHELL_FENCE_LANGS = new Set(["", "sh", "bash", "shell", "zsh"]);
 
-function assessRisk(violations: Violation[]): RiskLevel {
+export function assessRisk(violations: Violation[]): RiskLevel {
   if (violations.length === 0) return "low";
 
   const types = new Set(violations.map((v) => v.type));
@@ -212,6 +212,18 @@ export function scanSkillContent(content: string): ScanResult {
     recordIfMatch(lineIndex, inline, CONTENT_HAZARD_PATTERNS);
   }
 
+  const riskLevel = assessRisk(violations);
+  return { safe: violations.length === 0, violations, riskLevel };
+}
+
+/**
+ * Merge independently-scanned parts (trigger, content) and re-apply the
+ * combinatorial risk rules. Parsing separately stops a crafted prefix
+ * from stealing frontmatter; assessing the union keeps
+ * `shell_backtick` + URL / encoding across fields at high/critical.
+ */
+export function combineScanResults(scans: ScanResult[]): ScanResult {
+  const violations = scans.flatMap((s) => s.violations);
   const riskLevel = assessRisk(violations);
   return { safe: violations.length === 0, violations, riskLevel };
 }

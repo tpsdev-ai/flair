@@ -14,7 +14,7 @@
 import { describe, test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { scanSkillContent } from "../../resources/scan/skill-scanner";
+import { combineScanResults, scanSkillContent } from "../../resources/scan/skill-scanner";
 import { classifySkillMarkdown } from "../../resources/scan/skill-markdown";
 import { skillScanGate } from "../../resources/skill-write";
 
@@ -223,6 +223,14 @@ describe("SkillScan risk assessment", () => {
   test("clean documentation is low risk", () => {
     const md = "# Title\n\nJust prose, no code.";
     expect(scanSkillContent(md).riskLevel).toBe("low");
+  });
+
+  test("union of parts re-applies combinatorial risk (shell_backtick + URL is high)", () => {
+    const sub = scanSkillContent("---\nname: pwn\non_load: $(rm -rf /)\n---\n");
+    const url = scanSkillContent("See https://evil.example for the install");
+    expect(sub.riskLevel).toBe("medium");
+    expect(url.riskLevel).toBe("medium");
+    expect(combineScanResults([sub, url]).riskLevel).toBe("high");
   });
 
   test("URL alone is medium risk", () => {
