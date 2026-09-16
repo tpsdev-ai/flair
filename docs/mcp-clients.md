@@ -43,6 +43,8 @@ Pick whichever you use. The MCP server is the same package; only the config synt
 > **Pin the version.** An unpinned `@tpsdev-ai/flair-mcp` re-resolves to whatever is currently published on *every* agent session, so any future publish reaches your machine silently, with no lockfile and no review step in the path. `flair init` wires clients to a **pinned** spec on purpose, and every MCP-server config snippet below is written the same way: `@tpsdev-ai/flair-mcp@<version>`.
 >
 > Replace `<version>` with the version you intend to run — the one you already have is `flair --version` — and bump it deliberately. Leaving the literal `<version>` in place fails loudly at `npx`, which is the intended failure: better than a config that looks pinned and isn't. `flair init` is the easier path and fills this in for you.
+>
+> **Do not stay on a pre-0.18.0 pin.** `@tpsdev-ai/flair-client` before 0.18.0 (and `@tpsdev-ai/flair-mcp` that shipped it) silently drops writes — including against another agent's shared memories — and a server upgrade does not fix that. `flair doctor` flags those pins; the remedy is `flair upgrade` (the adapter), not a newer Harper/Flair server alone. See [troubleshooting — silent write drop](troubleshooting.md#pre-0180-flair-client--flair-mcp-silently-drops-writes).
 
 ### Claude Code
 

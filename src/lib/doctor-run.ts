@@ -42,6 +42,7 @@ import {
 } from "../hook-install.js";
 import { staleHookRemedy, staleMcpClientPins, staleSessionStartHookPins } from "./owned-pins.js";
 import { flairCliVersion, isResolvedVersion } from "./mcp-spec.js";
+import { isUnsafeAdapterPin, unsafeAdapterPinDetail } from "./stale-client-pin.js";
 import {
   isDetached,
   plistCarriesInlineAdminPassword,
@@ -156,9 +157,14 @@ function runMcpBlock(ctx: DoctorRunContext): DoctorCheckResult {
       .filter((r) => wired.includes(r.target.id as (typeof MCP_CLIENT_IDS)[number]));
     if (stale.length > 0) {
       const first = stale[0]!;
-      const detail = stale.length === 1
-        ? `MCP server (${first.target.id}): pinned to flair-mcp@${first.pin} (installed CLI is ${expected})`
-        : `MCP server: stale pins ${stale.map((s) => `${s.target.id}@${s.pin}`).join(", ")} (installed CLI is ${expected})`;
+      // flair#1383: a pre-0.18.0 pin is not just "behind" — it silently
+      // drops writes. Name that hazard before the generic stale line.
+      const unsafe = stale.filter((s) => isUnsafeAdapterPin(s.pin));
+      const detail = unsafe.length > 0
+        ? unsafeAdapterPinDetail("MCP server", unsafe[0]!.target.id, unsafe[0]!.pin!)
+        : stale.length === 1
+          ? `MCP server (${first.target.id}): pinned to flair-mcp@${first.pin} (installed CLI is ${expected})`
+          : `MCP server: stale pins ${stale.map((s) => `${s.target.id}@${s.pin}`).join(", ")} (installed CLI is ${expected})`;
       return result(id, label, "fail", {
         detail,
         remedy: "flair upgrade",
@@ -268,9 +274,13 @@ function runSessionStartHook(ctx: DoctorRunContext): DoctorCheckResult {
       .filter((r) => harnesses.includes(r.target.id as Harness));
     if (stale.length > 0) {
       const first = stale[0]!;
-      const detail = stale.length === 1
-        ? `SessionStart hook (${first.target.id}): pinned to flair-mcp@${first.pin} (installed CLI is ${expected})`
-        : `SessionStart hook: stale pins ${stale.map((s) => `${s.target.id}@${s.pin}`).join(", ")} (installed CLI is ${expected})`;
+      // flair#1383 — same pre-0.18.0 write-loss finding as mcp-block.
+      const unsafe = stale.filter((s) => isUnsafeAdapterPin(s.pin));
+      const detail = unsafe.length > 0
+        ? unsafeAdapterPinDetail("SessionStart hook", unsafe[0]!.target.id, unsafe[0]!.pin!)
+        : stale.length === 1
+          ? `SessionStart hook (${first.target.id}): pinned to flair-mcp@${first.pin} (installed CLI is ${expected})`
+          : `SessionStart hook: stale pins ${stale.map((s) => `${s.target.id}@${s.pin}`).join(", ")} (installed CLI is ${expected})`;
       return result(id, label, "fail", {
         detail,
         remedy: staleHookRemedy(stale),

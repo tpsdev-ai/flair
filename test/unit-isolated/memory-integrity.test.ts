@@ -1739,3 +1739,77 @@ describe("flair#718 authorship-provenance — Memory.post()/put() claimedClient 
     expect(prov.claimed.client).toBe("codex");
   });
 });
+
+// ─── flair#1383: identified pre-0.18.0 clients are refused on write paths ──
+function clientHeaderCtx(agentId: string, token: string | null) {
+  return {
+    tpsAgent: agentId,
+    tpsAgentIsAdmin: false,
+    headers: {
+      get: (name: string) => (
+        token && name.toLowerCase() === "x-flair-client" ? token : null
+      ),
+      asObject: token ? { "x-flair-client": token } : {},
+    },
+  };
+}
+
+describe("flair#1383 — Memory write path refuses an identified pre-0.18.0 client", () => {
+  it("post() with X-Flair-Client: flair-client/0.17.0 is 426 and writes nothing", async () => {
+    const m = makeMemory(clientHeaderCtx("agent-1", "flair-client/0.17.0"));
+    const r: any = await m.post({
+      agentId: "agent-1",
+      content: "A write from a stale adapter, long enough for the gate.",
+    });
+    expect(r).toBeInstanceOf(Response);
+    expect(r.status).toBe(426);
+    const body = await r.json();
+    expect(body.error).toBe("stale_flair_client");
+    expect(body.clientVersion).toBe("0.17.0");
+    expect(body.message).toContain("Upgrade the adapter, not the server");
+    expect(memoryStore.size).toBe(0);
+  });
+
+  it("put() with X-Flair-Client: flair-client/0.17.0 is 426 and writes nothing", async () => {
+    const m = makeMemory(clientHeaderCtx("agent-1", "flair-client/0.17.0"));
+    const r: any = await m.put({
+      id: "agent-1-stale",
+      agentId: "agent-1",
+      content: "A PUT from a stale adapter, long enough for the gate.",
+    });
+    expect(r).toBeInstanceOf(Response);
+    expect(r.status).toBe(426);
+    expect(memoryStore.has("agent-1-stale")).toBe(false);
+  });
+
+  it("put() with flairClientVersion: 0.17.0 on the body is 426 and the field is not stored", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r: any = await m.put({
+      id: "agent-1-body-ver",
+      agentId: "agent-1",
+      content: "A PUT declaring an old client in the body, long enough for the gate.",
+      flairClientVersion: "0.17.0",
+    });
+    expect(r).toBeInstanceOf(Response);
+    expect(r.status).toBe(426);
+    expect(memoryStore.has("agent-1-body-ver")).toBe(false);
+  });
+
+  it("missing version and 0.18.0+ still write (current published clients send no header yet)", async () => {
+    const m0 = makeMemory(agentCtx("agent-1"));
+    const r0: any = await m0.post({
+      agentId: "agent-1",
+      content: "Unversioned current-client write, long enough for the gate.",
+    });
+    expect(r0.written).toBe(true);
+    expect(memoryStore.size).toBe(1);
+
+    const m1 = makeMemory(clientHeaderCtx("agent-1", "flair-client/0.18.0"));
+    const r1: any = await m1.post({
+      agentId: "agent-1",
+      content: "A write from the first safe client, long enough for the gate.",
+    });
+    expect(r1.written).toBe(true);
+    expect(memoryStore.size).toBe(2);
+  });
+});

@@ -39,6 +39,7 @@ import { attachTrust } from "./trust-block.js";
 import { recordCitations } from "./usage-recording.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 import { applyHitStats, clearHitStats, overlayHitStatsResult } from "./hit-tracking.js";
+import { refuseStaleClientWrite, stripClientVersionPassthrough } from "./client-version-gate.js";
 
 /**
  * flair#744 slice 1 — read the opt-in `includeTrust` flag for a by-id get.
@@ -668,6 +669,15 @@ export class Memory extends (databases as any).flair.Memory {
       if (auth.kind === "anonymous") {
         return UNAUTH();
       }
+      // flair#1383: an identified pre-0.18.0 flair-client silently drops
+      // writes client-side (including against another agent's shared
+      // memories). Refuse the write path loudly; missing version is not
+      // treated as old (current published clients do not send one yet).
+      {
+        const stale = refuseStaleClientWrite(ctx?.request, content);
+        if (stale) return stale;
+      }
+      stripClientVersionPassthrough(content);
       // No-forge attribution — mode/field drawn from RECORD_TYPES.Memory
       // (record-types slice 2, flair#520) rather than a hand-typed literal.
       // "validate-truthy" (see record-type-kit.ts's stampAttribution doc):
@@ -935,6 +945,12 @@ export class Memory extends (databases as any).flair.Memory {
   async patch(content: any, query?: any) {
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
     if (authorityDenial) return authorityDenial;
+    // flair#1383 — patch() routes past put(), so it needs its own refuse.
+    {
+      const stale = refuseStaleClientWrite((this as any).getContext?.()?.request, content);
+      if (stale) return stale;
+    }
+    stripClientVersionPassthrough(content);
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
     // ── flair#1542 + residual (Kern #1543 review 5135715289): reject skill patches ──
@@ -997,6 +1013,12 @@ export class Memory extends (databases as any).flair.Memory {
       if (auth.kind === "anonymous") {
         return UNAUTH();
       }
+      // flair#1383 — same write-path refuse as post().
+      {
+        const stale = refuseStaleClientWrite(ctx?.request, content);
+        if (stale) return stale;
+      }
+      stripClientVersionPassthrough(content);
       // No-forge attribution — mode/field drawn from RECORD_TYPES.Memory,
       // same rule as post(). "validate-truthy" (see record-type-kit.ts's
       // stampAttribution doc).

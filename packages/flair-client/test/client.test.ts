@@ -191,6 +191,20 @@ describe("MemoryApi", () => {
     expect(result.durability).toBe("standard");
   });
 
+  test("every request declares X-Flair-Client: flair-client/<this package version> (flair#1383)", async () => {
+    const { flairClientVersion, flairClientVersionToken, FLAIR_CLIENT_VERSION_HEADER } = await import("../src/version.js");
+    mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    await client.memory.write("hello world");
+
+    const call = (mockFetch as any).mock.calls[0];
+    expect(call[1].headers[FLAIR_CLIENT_VERSION_HEADER]).toBe(flairClientVersionToken());
+    expect(call[1].headers[FLAIR_CLIENT_VERSION_HEADER]).toMatch(/^flair-client\/\d+\.\d+\.\d+/);
+    expect(flairClientVersion()).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
   test("write with custom options", async () => {
     mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
     globalThis.fetch = mockFetch as any;
