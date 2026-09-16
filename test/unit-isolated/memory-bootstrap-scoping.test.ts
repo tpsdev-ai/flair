@@ -959,4 +959,32 @@ describe("MemoryBootstrap.post() — skill provenance and conflict (flair#1433)"
     };
     expect(skillsBlock(first.context)).toBe(skillsBlock(second.context));
   });
+
+  it("check 4: two different names at the same priority both load with no SKILL_CONFLICT (live #1433 false-positive shape)", async () => {
+    reset();
+    seedAssignment({
+      id: "best-practices",
+      agentId: "flint",
+      value: "harper-best-practices",
+      source: "/opt/flair/skills/harper-best-practices/SKILL.md",
+    });
+    seedAssignment({
+      id: "pkg",
+      agentId: "flint",
+      value: "harperfast-skills",
+      source: NPM_SOURCE,
+    });
+    const res: any = await makeBootstrap(agentCtx("flint")).post({
+      agentId: "flint",
+      includeSoul: true,
+      includeContext: true,
+    });
+    const start = res.context.indexOf("## Active Skills");
+    const next = res.context.indexOf("\n## ", start + 1);
+    const block = next === -1 ? res.context.slice(start) : res.context.slice(start, next);
+    expect(block).toContain("- harper-best-practices (standard priority");
+    expect(block).toContain(`- harperfast-skills (standard priority, source: ${NPM_SOURCE})`);
+    expect(block).not.toContain("SKILL_CONFLICT");
+    expect(res.sections.skills).toBe(2);
+  });
 });

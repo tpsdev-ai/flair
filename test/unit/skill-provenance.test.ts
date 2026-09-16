@@ -5,12 +5,18 @@
  * names the path. Against main, Soul/bootstrap accepted
  * `/tmp/harperfast-skills-inspect/...` as a durable source.
  *
- * Check (2): two conflicting skills at equal priority → outcome is
- * deterministic and stated. Asserting "a conflict is reported" is not
+ * Check (2): two conflicting skills at equal priority (same name) → outcome
+ * is deterministic and stated. Asserting "a conflict is reported" is not
  * enough; main already reports `[SKILL_CONFLICT]` and loads both.
  *
- * Negative control: a normally-installed, non-conflicting skill loads
- * silently (no SKILL_CONFLICT, no refusal).
+ * Check (3): negative control — a normally-installed, non-conflicting skill
+ * loads silently (no SKILL_CONFLICT, no refusal).
+ *
+ * Check (4): two *different* names at the same priority both load, with no
+ * `SKILL_CONFLICT` marker on either. That is the live #1433 payload shape
+ * (`harper-best-practices` and `harperfast-skills`). Main's detector flags
+ * same-priority rather than same-name, so that marker was a false positive;
+ * this check must fail against main.
  */
 import { describe, expect, test } from "bun:test";
 import { tmpdir } from "node:os";
@@ -167,13 +173,21 @@ describe("defect 2 — SKILL_CONFLICT determines a stated, deterministic outcome
     expect(resolveActiveSkills([high, low]).lines).toEqual(resolved.lines);
   });
 
-  test("two different names at standard priority both load silently (not a conflict)", () => {
+  test("check 4: two different names at the same priority both load with no SKILL_CONFLICT (live #1433 false-positive shape)", () => {
+    // Live evidence names from #1433 — different identities, both standard.
+    // Main flags any same-priority peers; this must fail against that detector.
     const resolved = resolveActiveSkills([
-      assignment("harper-best-practices", DURABLE_FS),
-      assignment("harperfast-skills", NPM_SOURCE),
+      assignment("harper-best-practices", DURABLE_FS, "standard"),
+      assignment("harperfast-skills", NPM_SOURCE, "standard"),
     ]);
-    expect(resolved.outcomes.every((o) => o.loaded && o.decision === "loaded")).toBe(true);
-    expect(resolved.lines.every((line) => !line.includes("SKILL_CONFLICT"))).toBe(true);
+    expect(resolved.outcomes).toHaveLength(2);
+    const byName = Object.fromEntries(resolved.outcomes.map((o) => [o.name, o]));
+    expect(byName["harper-best-practices"]?.loaded).toBe(true);
+    expect(byName["harperfast-skills"]?.loaded).toBe(true);
+    expect(byName["harper-best-practices"]?.line).not.toContain("SKILL_CONFLICT");
+    expect(byName["harperfast-skills"]?.line).not.toContain("SKILL_CONFLICT");
+    expect(byName["harper-best-practices"]?.decision).toBe("loaded");
+    expect(byName["harperfast-skills"]?.decision).toBe("loaded");
   });
 
   test("a /tmp assignment already on disk is refused at load and does not shadow a durable peer of the same name", () => {

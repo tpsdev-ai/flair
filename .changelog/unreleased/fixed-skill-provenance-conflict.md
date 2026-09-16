@@ -7,5 +7,11 @@
   unique higher priority is stated precedence. A single durable,
   non-conflicting skill still loads silently.
 
+  The live #1433 evidence listed `harper-best-practices` and
+  `harperfast-skills` — different names. Main's detector flags same-priority
+  rather than same-name, so that `[SKILL_CONFLICT]` marker was a false
+  positive. Two different names at the same priority now both load with no
+  marker.
+
   > **Heads-up:** scratch/inspect paths are no longer recorded as durable
   > skill provenance. Re-register from an npm specifier or a non-temp path.
