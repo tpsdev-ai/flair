@@ -20,15 +20,16 @@ import { scanSkillContent } from "./scan/skill-scanner.js";
  * Harper database.
  *
  * Markdown is parsed before scanning (see `./scan/skill-markdown.ts`):
- *  - Well-formed inline code spans and fenced blocks are documentation.
- *    Naming `npm create harper@latest` in a bullet is not a substitution
- *    the loader would execute, so it does not fire `shell_backtick`.
+ *  - Well-formed inline code spans and fenced blocks are documentation
+ *    for `shell_backtick`. Naming `npm create harper@latest` in a bullet
+ *    is not a substitution the loader would execute.
  *  - Executable surfaces are YAML frontmatter, prose, and fail-closed
  *    leftovers (unclosed fences, unmatched backtick runs). `$(...)` on
  *    those surfaces is a substitution and does fire `shell_backtick`.
- *  - Fenced interiors still run the non-backtick detectors (exec/network/
- *    fs/encoding). A bash fence that calls exec() is a payload; a fence
- *    marker is not. Unicode/homoglyph checks always run on the raw line.
+ *  - Inline and fenced interiors still run the non-backtick detectors
+ *    (exec/network/fs/encoding). Wrapping exec() in one backtick is not
+ *    an exemption. A fence marker is not scanned. Unicode/homoglyph
+ *    checks always run on the raw line.
  */
 
 export class SkillScan extends Resource {

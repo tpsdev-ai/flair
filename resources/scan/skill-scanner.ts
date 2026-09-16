@@ -7,10 +7,12 @@
  * runtime.
  *
  * Markdown is classified first (`./skill-markdown.ts`). Well-formed inline
- * code and fenced blocks are documentation. The scanner runs on prose,
- * YAML frontmatter, and fail-closed leftovers (unclosed fences / unmatched
- * backticks) — plus fenced interiors for non-backtick hazards, because a
- * bash fence that calls exec() is still a payload, not a named command.
+ * code and fenced blocks are documentation for `shell_backtick` — naming
+ * a command is not a substitution. The scanner still runs the non-backtick
+ * detectors (exec/fetch/writeFile/encoding) on inline and fenced interiors,
+ * because wrapping `exec(...)` in one backtick does not stop it being a
+ * payload. Prose, YAML frontmatter, and unclosed leftovers are fully
+ * scanned. Unicode/homoglyphs always run on the raw line.
  *
  * `shell_backtick` means a substitution the loader would see (`$(...)` in
  * an executable surface, or an unmatched backtick run). It does not mean
@@ -84,8 +86,8 @@ const UNICODE_PATTERNS: Pattern[] = [
   { regex: /[А-я]/, type: "cyrillic_homoglyph" },
 ];
 
-/** Language-agnostic patterns excluding unicode (unicode always scans the raw line). */
-const SEGMENT_PATTERNS: Pattern[] = [
+/** Network, fs, env, and encoding. Unicode always scans the raw line. */
+const CONTENT_HAZARD_PATTERNS: Pattern[] = [
   ...NETWORK_PATTERNS,
   ...FS_PATTERNS,
   ...ENV_PATTERNS,
@@ -183,12 +185,18 @@ export function scanSkillContent(content: string): ScanResult {
       if (SHELL_FENCE_LANGS.has(lang)) {
         recordIfMatch(lineIndex, text, SHELL_PATTERNS);
       }
-      recordIfMatch(lineIndex, text, SEGMENT_PATTERNS);
+      recordIfMatch(lineIndex, text, CONTENT_HAZARD_PATTERNS);
       continue;
     }
 
     const exec = executableText(lineSpans);
+    const inline = lineSpans
+      .filter((s) => s.kind === "inline_code")
+      .map((s) => s.text)
+      .join("");
     const hasUnclosed = lineSpans.some((s) => s.kind === "unclosed");
+    // shell_backtick is format-vs-hazard: only unclosed runs and $(...) on
+    // executable surfaces. A named command in a well-formed span is docs.
     if (hasUnclosed || hasCommandSubstitution(exec)) {
       violations.push({
         type: "shell_backtick",
@@ -197,7 +205,11 @@ export function scanSkillContent(content: string): ScanResult {
       });
     }
     recordIfMatch(lineIndex, exec, SHELL_PATTERNS);
-    recordIfMatch(lineIndex, exec, SEGMENT_PATTERNS);
+    recordIfMatch(lineIndex, exec, CONTENT_HAZARD_PATTERNS);
+    // Inline interiors get the same non-backtick detectors as fenced
+    // interiors. One backtick around exec() is not a documentation exemption.
+    recordIfMatch(lineIndex, inline, SHELL_PATTERNS);
+    recordIfMatch(lineIndex, inline, CONTENT_HAZARD_PATTERNS);
   }
 
   const riskLevel = assessRisk(violations);
