@@ -5,7 +5,7 @@ import { FORBIDDEN, UNAUTH, stampAttribution } from "./record-type-kit.js";
 import { guardAuthorityFields, stripAuthorityFields } from "./authority-field-guard.js";
 import { assertValidVisibility, assertVisibilityAllowedForDurability, PRIVATE_VISIBILITY } from "./memory-visibility.js";
 import { assertValidDurability } from "./memory-durability.js";
-import { enforceSkillDurability, skillScanGate } from "./skill-write.js";
+import { enforceSkillDurability, refuseSkillWriteSource, skillScanGate } from "./skill-write.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
 
 export class FeedMemories extends Resource {
@@ -73,6 +73,8 @@ export class FeedMemories extends Resource {
     {
       const skillScanDenial = skillScanGate(content);
       if (skillScanDenial) return skillScanDenial;
+      const skillSourceDenial = refuseSkillWriteSource(content);
+      if (skillSourceDenial) return skillSourceDenial;
       const skillDurabilityDenial = enforceSkillDurability(content);
       if (skillDurabilityDenial) return skillDurabilityDenial;
     }

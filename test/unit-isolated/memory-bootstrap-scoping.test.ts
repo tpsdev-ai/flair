@@ -846,3 +846,117 @@ describe("MemoryBootstrap.post() — org-event watermark path (flair#931)", () =
     expect(ids).not.toContain("before-boot");
   });
 });
+
+// flair#1433 — Active Skills through the real bootstrap payload. Pure-module
+// cases live in test/unit/skill-provenance.test.ts; these pin that
+// MemoryBootstrap.post() actually ships the stated outcome.
+describe("MemoryBootstrap.post() — skill provenance and conflict (flair#1433)", () => {
+  const KNOWN_TMP =
+    "/tmp/harperfast-skills-inspect/package/harper-best-practices/SKILL.md";
+  const NPM_SOURCE = "npm:@harperfast/skills@1.4.2@1.4.2";
+
+  function seedAssignment(row: {
+    id: string;
+    agentId: string;
+    value: string;
+    priority?: string;
+    source?: string;
+  }) {
+    soulStore.set(row.id, {
+      id: row.id,
+      agentId: row.agentId,
+      key: "skill-assignment",
+      value: row.value,
+      priority: row.priority ?? "standard",
+      metadata: row.source ? JSON.stringify({ source: row.source }) : undefined,
+    });
+  }
+
+  it("negative control: a normally-installed, non-conflicting skill loads silently", async () => {
+    reset();
+    seedAssignment({
+      id: "ok",
+      agentId: "flint",
+      value: "harperfast-skills",
+      source: NPM_SOURCE,
+    });
+    const res: any = await makeBootstrap(agentCtx("flint")).post({
+      agentId: "flint",
+      includeSoul: true,
+      includeContext: true,
+    });
+    expect(res.context).toContain("## Active Skills");
+    expect(res.context).toContain(`- harperfast-skills (standard priority, source: ${NPM_SOURCE})`);
+    expect(res.context).not.toContain("SKILL_CONFLICT");
+    expect(res.context).not.toContain("refused");
+    expect(res.sections.skills).toBe(1);
+  });
+
+  it("a /tmp inspect path is not loaded as durable provenance; the line names the path", async () => {
+    reset();
+    seedAssignment({
+      id: "tmp",
+      agentId: "flint",
+      value: "harper-best-practices",
+      source: KNOWN_TMP,
+    });
+    const res: any = await makeBootstrap(agentCtx("flint")).post({
+      agentId: "flint",
+      includeSoul: true,
+      includeContext: true,
+    });
+    expect(res.context).toContain(KNOWN_TMP);
+    expect(res.context).toContain("non-durable source");
+    expect(res.context).toContain("refused");
+    expect(res.context).not.toContain("[SKILL_CONFLICT]");
+  });
+
+  it("equal-priority same-identity conflict refuses the load; outcome is stated and order-independent", async () => {
+    reset();
+    seedAssignment({
+      id: "z-later",
+      agentId: "flint",
+      value: "harperfast-skills",
+      source: "npm:@harperfast/skills@2.0.0",
+    });
+    seedAssignment({
+      id: "a-earlier",
+      agentId: "flint",
+      value: "harperfast-skills",
+      source: NPM_SOURCE,
+    });
+    const first: any = await makeBootstrap(agentCtx("flint")).post({
+      agentId: "flint",
+      includeSoul: true,
+      includeContext: true,
+    });
+    reset();
+    seedAssignment({
+      id: "a-earlier",
+      agentId: "flint",
+      value: "harperfast-skills",
+      source: NPM_SOURCE,
+    });
+    seedAssignment({
+      id: "z-later",
+      agentId: "flint",
+      value: "harperfast-skills",
+      source: "npm:@harperfast/skills@2.0.0",
+    });
+    const second: any = await makeBootstrap(agentCtx("flint")).post({
+      agentId: "flint",
+      includeSoul: true,
+      includeContext: true,
+    });
+    expect(first.context).toContain("SKILL_CONFLICT refused:");
+    expect(first.context).toContain("equal-priority tie");
+    expect(first.context).toContain(NPM_SOURCE);
+    expect(first.context).toContain("npm:@harperfast/skills@2.0.0");
+    const skillsBlock = (ctx: string) => {
+      const start = ctx.indexOf("## Active Skills");
+      const next = ctx.indexOf("\n## ", start + 1);
+      return next === -1 ? ctx.slice(start) : ctx.slice(start, next);
+    };
+    expect(skillsBlock(first.context)).toBe(skillsBlock(second.context));
+  });
+});

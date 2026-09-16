@@ -226,4 +226,9 @@ describe("wiring tripwires — main's inline report-and-load-both must be gone",
     expect(src).toContain("refuseSkillAssignmentWrite");
     expect(src.match(/refuseSkillAssignmentWrite/g)?.length).toBeGreaterThanOrEqual(3);
   });
+
+  test("MemoryFeed runs refuseSkillWriteSource on the raw-table write (same gate as Memory.post)", () => {
+    const src = readFileSync("resources/MemoryFeed.ts", "utf8");
+    expect(src).toContain("refuseSkillWriteSource");
+  });
 });
