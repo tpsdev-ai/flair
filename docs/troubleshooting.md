@@ -12,7 +12,7 @@ flair doctor
 
 **Symptoms:** `memory_store` comes back as if it stored something (`written: false`, a `mergedWith` id, or a "deduplicated" record you did not write) and **zero rows** appear for the writing agent. The match it folded into can be **another agent's `shared` memory**. `flair doctor` after this server version names the pin.
 
-**This is not fixed by upgrading the server.** A pre-0.18.0 `@tpsdev-ai/flair-client` (shipped inside `@tpsdev-ai/flair-mcp` ≤ 0.17, and still live in stale adapter pins) runs a cosine-only preflight and returns the existing record **without ever issuing the PUT**. The server cannot run its cosine-AND-Jaccard gate on a request that never arrives.
+**This is not fixed by upgrading the server.** An `@tpsdev-ai/flair-client` older than 0.18.0 (shipped inside `@tpsdev-ai/flair-mcp` ≤ 0.17, and still live in stale adapter pins) runs a cosine-only preflight and returns the existing record **without ever issuing the PUT**. The server cannot run its cosine-AND-Jaccard gate on a request that never arrives.
 
 **Fix — upgrade the adapter:**
 
@@ -23,7 +23,7 @@ flair upgrade
 #   @tpsdev-ai/flair-client@<current>
 ```
 
-Then restart the MCP host so it respawns `flair-mcp`. A current server that *sees* a pre-0.18.0 client on a Memory write (`X-Flair-Client: flair-client/0.17.0`) refuses it with HTTP 426 `stale_flair_client` instead of serving silent loss.
+Then restart the MCP host so it respawns `flair-mcp`. A current server that *sees* a client older than 0.18.0 on a Memory write (`X-Flair-Client: flair-client/0.17.0`) refuses it with HTTP 426 `stale_flair_client` instead of serving silent loss.
 
 ### "Harper is not running"
 

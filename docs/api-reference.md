@@ -123,7 +123,7 @@ the same identity plane.
 | Method | Path | Auth | Read / write |
 |--------|------|------|--------------|
 | GET | `/Memory`, `/Memory/<id>` | Ed25519 | open-within-org. By-id deny = 404. |
-| POST / PUT / PATCH | `/Memory` | Ed25519 | Own `agentId` only. Auto-embed on write. Visibility defaults from durability (`permanent`/`persistent` → `shared`, `standard`/`ephemeral` → `private`). Identified pre-0.18.0 client → **426** `stale_flair_client` (missing version is served). |
+| POST / PUT / PATCH | `/Memory` | Ed25519 | Own `agentId` only. Auto-embed on write. Visibility defaults from durability (`permanent`/`persistent` → `shared`, `standard`/`ephemeral` → `private`). Identified client older than 0.18.0 → **426** `stale_flair_client` (missing version is served). |
 | DELETE | `/Memory/<id>` | Ed25519 | Owner or admin. `permanent` owner-delete is allowed. |
 | POST | `/SemanticSearch` | Ed25519 | Hybrid semantic + lexical. Same read-scope as Memory. Default scoring is `raw`. |
 | POST | `/BootstrapMemories` | Ed25519 | Cold-start context (soul + predicted memories + optional org events). |
@@ -148,8 +148,9 @@ Skill-tagged Memory rows embed from `trigger` (the recall signal), not
 
 #### Client version gate (HTTP 426 `stale_flair_client`)
 
-`POST` / `PUT` / `PATCH` `/Memory` refuse an **identified** pre-0.18.0
-`@tpsdev-ai/flair-client` or `@tpsdev-ai/flair-mcp`. Identification is the
+`POST` / `PUT` / `PATCH` `/Memory` refuse an **identified**
+`@tpsdev-ai/flair-client` or `@tpsdev-ai/flair-mcp` older than 0.18.0.
+Identification is the
 `X-Flair-Client` request header. A missing version is served — in-process
 `/mcp` (`delegationContext` does not set this header) and raw HTTP callers
 do not send one. Optional write-body `flairClientVersion` is also accepted

@@ -115,7 +115,7 @@ export class FlairClient {
   async request<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
-      // flair#1383: the server refuses pre-0.18.0 clients on write paths.
+      // flair#1383: the server refuses clients older than 0.18.0 on write paths.
       // Current clients declare themselves so a future minimum can be
       // enforced without fingerprinting. Pre-0.18.0 clients never sent this.
       [FLAIR_CLIENT_VERSION_HEADER]: flairClientVersionToken(),

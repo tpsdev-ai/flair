@@ -1,4 +1,4 @@
-- **A current server now refuses an identified pre-0.18.0 flair-client on memory writes, and `flair doctor` names the silent-drop pin.**
+- **A current server now refuses an identified flair-client older than 0.18.0 on memory writes, and `flair doctor` names the silent-drop pin.**
 
   `@tpsdev-ai/flair-client` before 0.18.0 still suppresses writes on the
   client — `written: false`, a `mergedWith` id, zero rows — including when
