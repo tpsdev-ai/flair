@@ -80,12 +80,9 @@ function applyCellEnv(cell: CellSpec): () => void {
   const savedGpu = process.env.FLAIR_EMBED_GPU_LAYERS;
   if (cell.threads === "default") delete process.env.FLAIR_EMBED_THREADS;
   else process.env.FLAIR_EMBED_THREADS = String(cell.threads);
-  if (cell.gpuLayers === 0) {
-    // Unset = HFE default 0. The sweep's cpu cell measures the real default path.
-    delete process.env.FLAIR_EMBED_GPU_LAYERS;
-  } else {
-    process.env.FLAIR_EMBED_GPU_LAYERS = String(cell.gpuLayers);
-  }
+  // Pin both cells. Unset now derives Metal (99) on darwin-arm64 (flair#1437);
+  // the CPU cell must still measure CPU, so it sets 0 rather than deleting.
+  process.env.FLAIR_EMBED_GPU_LAYERS = String(cell.gpuLayers);
   return () => {
     if (savedThreads === undefined) delete process.env.FLAIR_EMBED_THREADS;
     else process.env.FLAIR_EMBED_THREADS = savedThreads;

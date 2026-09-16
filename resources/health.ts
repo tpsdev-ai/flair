@@ -14,6 +14,7 @@ import { normalizeStamp } from "./embedding-space-guard.js";
 import { getModelId } from "./embeddings-provider.js";
 import { describeStampOutstanding, EMBEDDING_STAMP_ID } from "./migrations/stamp-outstanding.js";
 import { buildPublicHealthBody, resolveSearchReadiness, type ResourceRegistry, type SearchReadiness } from "./search-readiness.js";
+import { withEmbedGpuHealth } from "./embed-gpu.js";
 import {
   classifyPeerLiveness,
   federationPeersAllDisconnectedWarning,
@@ -112,10 +113,10 @@ export class Health extends Resource {
     // otherwise (tarball builds) — never omitted, never fabricated (Sherlock).
     const build = resolveBuildInfo();
     const readiness = currentSearchReadiness();
-    const body = buildPublicHealthBody(readiness, {
+    const body = withEmbedGpuHealth(buildPublicHealthBody(readiness, {
       version: build?.version ?? resolveVersion(),
       buildCommit: build?.commit ?? null,
-    });
+    }));
     if (readiness.status !== 200) {
       return new Response(JSON.stringify(body), {
         status: readiness.status,
@@ -180,6 +181,11 @@ export class HealthDetail extends Resource {
     // stays HTTP 200 (it is a stats dump, not a traffic gate); the field
     // and a warning name the lag so `flair status` / operators can see it.
     const readiness = currentSearchReadiness();
+    const embeddingBody = withEmbedGpuHealth({ ok: true });
+    stats.embedding = embeddingBody.embedding;
+    if (embeddingBody.embedding.fallback) {
+      warnings.push({ level: "warn", message: embeddingBody.embedding.fallback });
+    }
     stats.searchReady = readiness.searchReady;
     // Public/detail shape is unchanged: searchReadyReason stays a lag signal
     // (present iff !searchReady). Ready-path verification constants stay on

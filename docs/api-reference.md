@@ -93,7 +93,7 @@ is `GET /Name/<id>` unless noted.
 
 | Method | Path | Auth | Notes |
 |--------|------|------|-------|
-| GET | `/Health`, `/health` | Public | Liveness. `searchReady` is always present; HTTP 503 / `ok: false` when search cannot be served. |
+| GET | `/Health`, `/health` | Public | Liveness. `searchReady` is always present; HTTP 503 / `ok: false` when search cannot be served. `embedding: { backend, gpuLayers, source }` states the resolved embed device (flair#1437); `fallback` is present when GPU was requested but Metal did not engage. |
 | GET | `/HealthDetail` | Ed25519 | Rich stats (counts, agents, migration). |
 | GET | `/AgentCard/<agentId>` | Public | A2A agent-card; field-allowlisted. |
 | GET | `/a2a`, `/A2AAdapter` | Public | A2A discovery. |
