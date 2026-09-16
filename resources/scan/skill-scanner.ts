@@ -6,9 +6,23 @@
  * separate module lets the tests run without instantiating the Harper
  * runtime.
  *
- * See SkillScan.ts for the design rationale on markdown awareness and the
- * language-agnostic vs shell-only pattern split.
+ * Markdown is classified first (`./skill-markdown.ts`). Well-formed inline
+ * code and fenced blocks are documentation. The scanner runs on prose,
+ * YAML frontmatter, and fail-closed leftovers (unclosed fences / unmatched
+ * backticks) — plus fenced interiors for non-backtick hazards, because a
+ * bash fence that calls exec() is still a payload, not a named command.
+ *
+ * `shell_backtick` means a substitution the loader would see (`$(...)` in
+ * an executable surface, or an unmatched backtick run). It does not mean
+ * "this line contains a markdown code span."
  */
+
+import {
+  classifySkillMarkdown,
+  isExecutableSpan,
+  isFenceMarkerLine,
+  type MdSpan,
+} from "./skill-markdown.js";
 
 export interface Violation {
   type: string;
@@ -70,56 +84,30 @@ const UNICODE_PATTERNS: Pattern[] = [
   { regex: /[А-я]/, type: "cyrillic_homoglyph" },
 ];
 
-const LANG_AGNOSTIC_PATTERNS: Pattern[] = [
+/** Language-agnostic patterns excluding unicode (unicode always scans the raw line). */
+const SEGMENT_PATTERNS: Pattern[] = [
   ...NETWORK_PATTERNS,
   ...FS_PATTERNS,
   ...ENV_PATTERNS,
   ...ENCODING_PATTERNS,
-  ...UNICODE_PATTERNS,
 ];
 
 const SHELL_FENCE_LANGS = new Set(["", "sh", "bash", "shell", "zsh"]);
-const MARKDOWN_IDENTIFIER_RE = /^[\w@./-]+$/;
-
-const SHELL_BACKTICK_INDICATORS = [
-  /\s/,
-  /[|;&]/,
-  /\$\(/,
-  /\$\{/,
-  /^\$\w/,
-  />/,
-  /<\(/,
-];
-
-function lineHasShellishBacktick(line: string): boolean {
-  const matches = line.match(/`([^`\n]+)`/g);
-  if (!matches) return false;
-  for (const raw of matches) {
-    const inner = raw.slice(1, -1);
-    if (MARKDOWN_IDENTIFIER_RE.test(inner)) continue;
-    for (const indicator of SHELL_BACKTICK_INDICATORS) {
-      if (indicator.test(inner)) return true;
-    }
-  }
-  return false;
-}
 
 function assessRisk(violations: Violation[]): RiskLevel {
   if (violations.length === 0) return "low";
 
   const types = new Set(violations.map((v) => v.type));
-  // Programmatic shell call patterns: exec/spawn/system/child_process. These
-  // are definite payloads when they appear in a skill.
   const hasShellCommand = types.has("shell_command");
-  // Backticked shell-ish content in markdown prose. Could be `npm run deploy`
-  // in documentation (medium), or could combine with other smells (high).
+  // shell_backtick is a substitution on an executable surface, not a
+  // markdown code span. Alone it is still reviewable; with other smells
+  // it is a payload.
   const hasShellBacktick = types.has("shell_backtick");
   const hasFs = types.has("fs_write") || types.has("fs_redirect");
   const hasEncoding = types.has("base64_decode") || types.has("hex_decode");
   const hasZeroWidth = types.has("zero_width_char");
   const hasHomoglyph = types.has("cyrillic_homoglyph");
 
-  // Critical: any shell combined with encoded payloads, OR obfuscation chars.
   if (
     ((hasShellCommand || hasShellBacktick) && hasEncoding) ||
     hasZeroWidth ||
@@ -128,9 +116,6 @@ function assessRisk(violations: Violation[]): RiskLevel {
     return "critical";
   }
 
-  // High: programmatic shell, fs writes, or shell-backtick + other smells
-  // (env access, network call). A skill that quotes a command AND reads env
-  // AND fetches a URL is doing something, not just documenting.
   const hasOtherSmells =
     types.has("env_access") ||
     types.has("env_variable") ||
@@ -140,8 +125,6 @@ function assessRisk(violations: Violation[]): RiskLevel {
     return "high";
   }
 
-  // Medium: shell_backtick alone (doc reference), or network/encoding
-  // without shell. Reviewable but not blocked.
   if (hasShellBacktick || hasOtherSmells || hasEncoding) {
     return "medium";
   }
@@ -149,62 +132,72 @@ function assessRisk(violations: Violation[]): RiskLevel {
   return "low";
 }
 
-interface FenceState {
-  inFence: boolean;
-  lang: string;
+function executableText(spans: MdSpan[]): string {
+  return spans.filter((s) => isExecutableSpan(s.kind)).map((s) => s.text).join("");
 }
 
-function detectFenceTransition(line: string, state: FenceState): boolean {
-  const m = line.match(/^[ \t]*```([\w.-]*)\s*$/);
-  if (!m) return false;
-  if (state.inFence) {
-    state.inFence = false;
-    state.lang = "";
-  } else {
-    state.inFence = true;
-    state.lang = (m[1] || "").toLowerCase();
-  }
-  return true;
+function hasCommandSubstitution(text: string): boolean {
+  return /\$\(/.test(text);
 }
 
 export function scanSkillContent(content: string): ScanResult {
   const lines = content.split("\n");
+  const spans = classifySkillMarkdown(content);
   const violations: Violation[] = [];
-  const fence: FenceState = { inFence: false, lang: "" };
 
-  const recordIfMatch = (lineIndex: number, line: string, patterns: Pattern[]) => {
+  const recordIfMatch = (lineIndex: number, text: string, patterns: Pattern[]) => {
+    const original = (lines[lineIndex] ?? "").trim().slice(0, 200);
     for (const pattern of patterns) {
-      if (pattern.regex.test(line)) {
+      if (pattern.regex.test(text)) {
         violations.push({
           type: pattern.type,
           line: lineIndex + 1,
-          content: line.trim().slice(0, 200),
+          content: original || text.trim().slice(0, 200),
         });
       }
     }
   };
 
+  // Obfuscation is never "documentation format" — scan the raw line.
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i] ?? "";
+    recordIfMatch(i, lines[i] ?? "", UNICODE_PATTERNS);
+  }
 
-    if (detectFenceTransition(line, fence)) continue;
+  const byLine = new Map<number, MdSpan[]>();
+  for (const span of spans) {
+    const list = byLine.get(span.line) ?? [];
+    list.push(span);
+    byLine.set(span.line, list);
+  }
 
-    const insideShellFence = fence.inFence && SHELL_FENCE_LANGS.has(fence.lang);
-    const insideNonShellFence = fence.inFence && !insideShellFence;
+  for (const [lineNo, lineSpans] of byLine) {
+    const lineIndex = lineNo - 1;
+    const allFence = lineSpans.every((s) => s.kind === "fenced_code");
+    const rawLine = lineSpans[0]?.text ?? "";
 
-    if (!fence.inFence && lineHasShellishBacktick(line)) {
+    if (allFence && isFenceMarkerLine(rawLine)) continue;
+
+    if (allFence) {
+      const lang = lineSpans[0]?.lang ?? "";
+      const text = lineSpans.map((s) => s.text).join("");
+      if (SHELL_FENCE_LANGS.has(lang)) {
+        recordIfMatch(lineIndex, text, SHELL_PATTERNS);
+      }
+      recordIfMatch(lineIndex, text, SEGMENT_PATTERNS);
+      continue;
+    }
+
+    const exec = executableText(lineSpans);
+    const hasUnclosed = lineSpans.some((s) => s.kind === "unclosed");
+    if (hasUnclosed || hasCommandSubstitution(exec)) {
       violations.push({
         type: "shell_backtick",
-        line: i + 1,
-        content: line.trim().slice(0, 200),
+        line: lineNo,
+        content: (lines[lineIndex] ?? "").trim().slice(0, 200),
       });
     }
-
-    if (!insideNonShellFence) {
-      recordIfMatch(i, line, SHELL_PATTERNS);
-    }
-
-    recordIfMatch(i, line, LANG_AGNOSTIC_PATTERNS);
+    recordIfMatch(lineIndex, exec, SHELL_PATTERNS);
+    recordIfMatch(lineIndex, exec, SEGMENT_PATTERNS);
   }
 
   const riskLevel = assessRisk(violations);
