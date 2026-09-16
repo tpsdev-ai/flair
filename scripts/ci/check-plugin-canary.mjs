@@ -154,14 +154,14 @@ export function pinCheck(spec, packageName, version) {
  */
 export function assertPublishedResolve(resolvedPath, prefix) {
   const abs = resolve(String(resolvedPath));
+  const wsRoot = WORKSPACE_PACKAGES.endsWith(sep) ? WORKSPACE_PACKAGES : WORKSPACE_PACKAGES + sep;
+  if (abs.startsWith(wsRoot)) {
+    return { ok: false, reason: `resolved workspace package, not the published install: ${abs}` };
+  }
   const prefixAbs = resolve(String(prefix));
   const prefixRoot = prefixAbs.endsWith(sep) ? prefixAbs : prefixAbs + sep;
   if (!abs.startsWith(prefixRoot) && abs !== prefixAbs) {
     return { ok: false, reason: `resolved outside prefix: ${abs}` };
-  }
-  const wsRoot = WORKSPACE_PACKAGES.endsWith(sep) ? WORKSPACE_PACKAGES : WORKSPACE_PACKAGES + sep;
-  if (abs.startsWith(wsRoot)) {
-    return { ok: false, reason: `resolved workspace package, not the published install: ${abs}` };
   }
   return { ok: true, reason: abs };
 }
@@ -252,9 +252,36 @@ function portFromUrl(url) {
   }
 }
 
-function resolveFromPrefix(prefix, specifier) {
+/**
+ * Resolve a published package file from the throwaway prefix.
+ *
+ * `@tpsdev-ai/flair-client` ships `exports["."].import` only — no `require`
+ * condition and no usable CJS main for `createRequire`. Walking package.json
+ * ourselves is what makes the published ESM entry importable. Optional
+ * `subpath` is a file inside the package (the flair-mcp shim, SDK entries).
+ */
+export function resolvePublished(prefix, packageName, subpath) {
+  const pkgDir = join(prefix, "node_modules", ...String(packageName).split("/"));
+  const pkgJson = join(pkgDir, "package.json");
+  if (!existsSync(pkgJson)) throw new Error(`missing ${pkgJson}`);
+  if (subpath) return join(pkgDir, subpath);
+  const pkg = JSON.parse(readFileSync(pkgJson, "utf8"));
+  const exp = pkg.exports?.["."];
+  let rel = "dist/index.js";
+  if (typeof exp === "string") rel = exp;
+  else if (exp && typeof exp === "object") {
+    rel = exp.import || exp.default || exp.require || rel;
+    if (rel && typeof rel === "object") rel = rel.default || rel.import || "dist/index.js";
+  } else if (typeof pkg.module === "string") rel = pkg.module;
+  else if (typeof pkg.main === "string") rel = pkg.main;
+  return join(pkgDir, rel);
+}
+
+function resolveSdk(prefix, subpath) {
+  const esm = join(prefix, "node_modules", "@modelcontextprotocol", "sdk", "dist", "esm", subpath);
+  if (existsSync(esm)) return esm;
   const require = createRequire(join(prefix, "package.json"));
-  return require.resolve(specifier);
+  return require.resolve(`@modelcontextprotocol/sdk/${subpath}`);
 }
 
 function toolText(result) {
@@ -412,10 +439,10 @@ export async function main(argv = process.argv.slice(2)) {
   let sdkClient;
   let sdkStdio;
   try {
-    mcpBin = resolveFromPrefix(prefix, `${FLAIR_MCP_PACKAGE}/dist/mcp-shim.cjs`);
-    clientEntry = resolveFromPrefix(prefix, FLAIR_CLIENT_PACKAGE);
-    sdkClient = resolveFromPrefix(prefix, "@modelcontextprotocol/sdk/client/index.js");
-    sdkStdio = resolveFromPrefix(prefix, "@modelcontextprotocol/sdk/client/stdio.js");
+    mcpBin = resolvePublished(prefix, FLAIR_MCP_PACKAGE, "dist/mcp-shim.cjs");
+    clientEntry = resolvePublished(prefix, FLAIR_CLIENT_PACKAGE);
+    sdkClient = resolveSdk(prefix, "client/index.js");
+    sdkStdio = resolveSdk(prefix, "client/stdio.js");
   } catch (err) {
     return dieDidNotRun(`could not resolve published modules from prefix: ${err instanceof Error ? err.message : err}`);
   }

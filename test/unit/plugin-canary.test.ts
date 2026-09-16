@@ -36,6 +36,7 @@ import {
   readDocumentedPin,
   readInstalledVersion,
   registrySpec,
+  resolvePublished,
 } from "../../scripts/ci/check-plugin-canary.mjs";
 
 const REPO = join(import.meta.dir, "../..");
@@ -89,8 +90,11 @@ jobs:
   test("verdict pass requires PLUGIN_OUTCOME=success — a skipped plugin cannot promote", () => {
     expect(CANARY_YML).toContain("PLUGIN_OUTCOME");
     expect(CANARY_YML).toMatch(/PLUGIN_OUTCOME" = "success"/);
-    expect(CANARY_YML).not.toMatch(/plugin:[\s\S]{0,200}continue-on-error:\s*true/);
-    expect(CANARY_YML).not.toContain("continue-on-error");
+    // Comments may name the forbidden key. A YAML `continue-on-error:` key
+    // on any step would make an unmeasurable run look green.
+    const yamlKeys = CANARY_YML.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+    expect(yamlKeys).not.toMatch(/continue-on-error\s*:/);
+    expect(pluginCanaryWired(CANARY_YML).hasContinue).toBe(false);
   });
 
   test("releasing.md names the published-adapter step", () => {
@@ -218,6 +222,28 @@ describe("published resolve refuses the workspace copy", () => {
       const got = readInstalledVersion(prefix, FLAIR_MCP_PACKAGE);
       expect(got.version).toBeNull();
       expect(got.error).toMatch(/missing/);
+    } finally {
+      rmSync(prefix, { recursive: true, force: true });
+    }
+  });
+
+  test("resolvePublished reads an ESM-only exports.import (flair-client shape)", () => {
+    const prefix = mkdtempSync(join(tmpdir(), "flair-plugin-canary-esm-"));
+    try {
+      const dir = join(prefix, "node_modules", "@tpsdev-ai", "flair-client");
+      mkdirSync(join(dir, "dist"), { recursive: true });
+      writeFileSync(
+        join(dir, "package.json"),
+        JSON.stringify({
+          name: FLAIR_CLIENT_PACKAGE,
+          type: "module",
+          exports: { ".": { import: "./dist/index.js", types: "./dist/index.d.ts" } },
+        }),
+      );
+      writeFileSync(join(dir, "dist", "index.js"), "export class FlairClient {}\n");
+      const resolved = resolvePublished(prefix, FLAIR_CLIENT_PACKAGE);
+      expect(resolved).toBe(join(dir, "dist", "index.js"));
+      expect(assertPublishedResolve(resolved, prefix).ok).toBe(true);
     } finally {
       rmSync(prefix, { recursive: true, force: true });
     }

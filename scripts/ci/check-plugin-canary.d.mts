@@ -68,5 +68,6 @@ export function readDocumentedPin(config: unknown): PinRead;
 export function pinCheck(spec: string | null | undefined, packageName: string, version: string): PinCheck;
 export function assertPublishedResolve(resolvedPath: string, prefix: string): PinCheck;
 export function readInstalledVersion(prefix: string, packageName: string): InstalledVersion;
+export function resolvePublished(prefix: string, packageName: string, subpath?: string): string;
 export function pluginCanaryWired(yml: string): PluginWired;
 export function main(argv?: string[]): Promise<number>;
