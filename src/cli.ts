@@ -1654,20 +1654,37 @@ export interface ReadyOpsSocketPostureAfterStartOptions {
   pollMs?: number;
   /** After the wanted mode is observed, keep watching this long for a replace. */
   holdMs?: number;
+  /** Socket mtime older than this is leftover; unlink and wait for Harper. */
+  notBeforeMs?: number;
   sleep?: (ms: number) => Promise<void>;
   exists?: (path: string) => boolean;
   ready?: (dataDir: string) => OpsSocketPostureResult | null;
-  stat?: (path: string) => { mode: number; ino: number } | null;
+  stat?: (path: string) => { mode: number; ino: number; mtimeMs: number } | null;
+  unlink?: (path: string) => void;
 }
 
 const OPS_SOCKET_AFTER_START_HOLD_MS = 500;
 
-function statOpsSocket(path: string): { mode: number; ino: number } | null {
+function statOpsSocket(path: string): { mode: number; ino: number; mtimeMs: number } | null {
   try {
     const s = statSync(path);
-    return { mode: s.mode & 0o777, ino: s.ino };
+    return { mode: s.mode & 0o777, ino: s.ino, mtimeMs: s.mtimeMs };
   } catch {
     return null;
+  }
+}
+
+/**
+ * Drop `operations-server` while no process owns it (after the adopt stop,
+ * before launchd load). Darwin #1704: chmod on the leftover inode never
+ * became 0600 (`9413a80` burned the 10s wait, test still saw 0755). Harper
+ * bind()s a new file; the helper must wait for that one.
+ */
+export function unlinkStaleOpsSocket(dataDir: string): void {
+  try {
+    unlinkSync(join(dataDir, "operations-server"));
+  } catch {
+    /* ENOENT or busy — helper waits for a post-bounce inode */
   }
 }
 
@@ -1684,6 +1701,7 @@ function statOpsSocket(path: string): { mode: number; ino: number } | null {
  *
  * Keep applying while the socket exists until the wanted mode *holds*
  * for `holdMs` (Harper replacing the file during the hold restarts it).
+ * A socket older than `notBeforeMs` is leftover — unlink it, do not chmod it.
  */
 export async function readyOpsSocketPostureAfterStart(
   dataDir: string,
@@ -1693,10 +1711,12 @@ export async function readyOpsSocketPostureAfterStart(
   const timeoutMs = opts.timeoutMs ?? OPS_SOCKET_AFTER_START_TIMEOUT_MS;
   const pollMs = opts.pollMs ?? OPS_SOCKET_AFTER_START_POLL_MS;
   const holdMs = opts.holdMs ?? OPS_SOCKET_AFTER_START_HOLD_MS;
+  const notBeforeMs = opts.notBeforeMs;
   const sleep = opts.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
   const exists = opts.exists ?? existsSync;
   const ready = opts.ready ?? readyOpsSocketPosture;
   const stat = opts.stat ?? statOpsSocket;
+  const unlink = opts.unlink ?? ((p: string) => { try { unlinkSync(p); } catch { /* leftover busy */ } });
   const wanted = resolveSocketPosture(process.env.FLAIR_SOCKET_GROUP).socketMode;
 
   ready(dataDir); // dir gate now — the live socket may not exist yet
@@ -1705,6 +1725,12 @@ export async function readyOpsSocketPostureAfterStart(
 
   while (Date.now() < deadline) {
     if (exists(socketPath)) {
+      const seen = stat(socketPath);
+      if (seen && notBeforeMs != null && seen.mtimeMs < notBeforeMs) {
+        unlink(socketPath);
+        await sleep(pollMs);
+        continue;
+      }
       last = ready(dataDir);
       const applied = stat(socketPath);
       if (applied && applied.mode === wanted) {
@@ -1713,7 +1739,7 @@ export async function readyOpsSocketPostureAfterStart(
         while (Date.now() < holdDeadline) {
           await sleep(pollMs);
           const now = exists(socketPath) ? stat(socketPath) : null;
-          if (!now || now.mode !== wanted) {
+          if (!now || now.mode !== wanted || (notBeforeMs != null && now.mtimeMs < notBeforeMs)) {
             held = false;
             break;
           }
@@ -5443,7 +5469,12 @@ async function repairLaunchdManagement(dataDir: string, port: number): Promise<L
           try { execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe" }); } catch { /* best effort */ }
           try { unlinkSync(plistPath); } catch { /* best effort */ }
         }
-        // Load (unload -> load -> start).
+        // Load (unload -> load -> start). Drop the pre-bounce leftover
+        // socket first so exists() cannot be true on the dead inode —
+        // Darwin #1704 (`9413a80`) chmod'd that leftover for 10s and
+        // still read 0755 after Harper bind()d a new file.
+        const bounceAt = Date.now();
+        unlinkStaleOpsSocket(dataDir);
         ensureLaunchdServiceLoaded(dataDir, (cmd) => execSync(cmd, { stdio: "pipe" }));
         // Verify (fail-loud).
         const after = observeLaunchdManagement(dataDir, port);
@@ -5474,8 +5505,9 @@ async function repairLaunchdManagement(dataDir: string, port: number): Promise<L
         // new operations-server lands at 0777 & ~umask. Init / start /
         // restart already call this after health; without it here, doctor
         // flags ✗ Ops socket permissions until a second start. Wait for
-        // the socket — HTTP can answer before Harper bind()s it.
-        await readyOpsSocketPostureAfterStart(dataDir);
+        // Harper's bind() (HTTP can answer first); ignore leftover mtimes
+        // older than bounceAt.
+        await readyOpsSocketPostureAfterStart(dataDir, { notBeforeMs: bounceAt });
         const detail = plan.kind === "adopt"
           ? `adopted the direct-spawned instance into launchd (bounced the live instance): ${after.detail}`
           : after.detail;

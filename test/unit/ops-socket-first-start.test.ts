@@ -21,13 +21,14 @@
  *      start differ from restart.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   applyOpsSocketPosture,
   classifyOpsSocketPosture,
   readyOpsSocketPostureAfterStart,
+  unlinkStaleOpsSocket,
 } from "../../src/cli.ts";
 
 const CLI_SRC = readFileSync(join(import.meta.dir, "..", "..", "src", "cli.ts"), "utf8");
@@ -152,6 +153,63 @@ describe("first-start ops-socket posture on a fresh data dir (flair#1701)", () =
     expect(modeOf(dataDir)).toBe(0o700);
     expect(modeOf(socketPath)).toBe(0o600);
   });
+
+  test("FAILS-FIRST: leftover older than notBefore is unlinked; helper waits for the live socket", async () => {
+    // Darwin adopt CI on 9413a80: leftover made exists() true for the whole
+    // 10s wait; chmod never showed 0600 on that inode. The bounce must
+    // treat a pre-bounce mtime as stale.
+    const dataDir = mkdtempSync(join(tmpdir(), "flair-1701-ops-socket-stale-"));
+    temps.push(dataDir);
+    chmodSync(dataDir, 0o755);
+    const socketPath = join(dataDir, "operations-server");
+    writeFileSync(socketPath, "leftover");
+    chmodSync(socketPath, 0o755);
+    const unlinked: string[] = [];
+    let generation: "leftover" | "live" = "leftover";
+    const appearing = readyOpsSocketPostureAfterStart(dataDir, {
+      pollMs: 10,
+      timeoutMs: 1_000,
+      holdMs: 20,
+      notBeforeMs: 1_000,
+      unlink: (p) => {
+        unlinked.push(p);
+        unlinkSync(p);
+      },
+      stat: (p) => {
+        try {
+          const s = statSync(p);
+          return {
+            mode: s.mode & 0o777,
+            ino: s.ino,
+            mtimeMs: generation === "leftover" ? 100 : 2_000,
+          };
+        } catch {
+          return null;
+        }
+      },
+    });
+    const staleGoneBy = Date.now() + 400;
+    while (existsSync(socketPath) && Date.now() < staleGoneBy) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    generation = "live";
+    writeFileSync(socketPath, "post-bounce");
+    chmodSync(socketPath, 0o755);
+    const applied = await appearing;
+    expect(unlinked).toContain(socketPath);
+    expect(applied?.socketApplied).toBe(true);
+    expect(modeOf(dataDir)).toBe(0o700);
+    expect(modeOf(socketPath)).toBe(0o600);
+  });
+
+  test("FAILS-FIRST: unlinkStaleOpsSocket removes a leftover operations-server", () => {
+    const { dataDir, socketPath } = freshFirstStartDataDir();
+    expect(existsSync(socketPath)).toBe(true);
+    unlinkStaleOpsSocket(dataDir);
+    expect(existsSync(socketPath)).toBe(false);
+    unlinkStaleOpsSocket(dataDir); // idempotent
+    expect(existsSync(socketPath)).toBe(false);
+  });
 });
 
 describe("the adopt / first-start wire (flair#1701)", () => {
@@ -163,11 +221,15 @@ describe("the adopt / first-start wire (flair#1701)", () => {
     // red and a second `flair start` is what finally chmods — the 0.54.2
     // canary defect.
     const body = functionBody(src, "repairLaunchdManagement");
+    const unlinkAt = body.indexOf("unlinkStaleOpsSocket(");
     const loadAt = body.indexOf("ensureLaunchdServiceLoaded(");
+    expect(unlinkAt).toBeGreaterThan(-1);
     expect(loadAt).toBeGreaterThan(-1);
+    expect(unlinkAt).toBeLessThan(loadAt);
     const postureAt = body.indexOf("readyOpsSocketPostureAfterStart(");
     expect(postureAt).toBeGreaterThan(-1);
     expect(postureAt).toBeGreaterThan(loadAt);
+    expect(body).toContain("notBeforeMs: bounceAt");
   });
 
   test("the canary must not allow-list the ops-socket finding", () => {
