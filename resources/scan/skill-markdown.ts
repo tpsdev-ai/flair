@@ -45,25 +45,48 @@ export function isFenceMarkerLine(text: string): boolean {
  * (prose around inline code). Unclosed fences and unmatched backtick runs
  * are `unclosed` so the scanner can stay fail-closed.
  */
+/**
+ * YAML frontmatter is a `---` … `---` pair. It is usually the first line,
+ * but `skillScanGate` prepends `trigger` + a blank line, so the pair sits
+ * after leading prose. Treat that pair as frontmatter too — otherwise
+ * `$(...)` wrapped in inline code inside YAML is parsed as docs and the
+ * write gate can allow a payload the raw SKILL.md still scores high.
+ *
+ * A pair after a blank line with no closer is a thematic break, not
+ * frontmatter. Mis-identifying a hr pair as frontmatter is fail-closed
+ * (those lines are scanned as executable).
+ */
+function findFrontmatterRange(lines: string[]): { start: number; end: number } | null {
+  const starts: number[] = [];
+  if (lines[0] === "---") starts.push(0);
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i] === "---" && lines[i - 1] === "") {
+      starts.push(i);
+      break;
+    }
+  }
+  for (const start of starts) {
+    for (let j = start + 1; j < lines.length; j++) {
+      if (lines[j] === "---") return { start, end: j };
+    }
+  }
+  return null;
+}
+
 export function classifySkillMarkdown(content: string): MdSpan[] {
   const lines = content.split("\n");
   const spans: MdSpan[] = [];
   let i = 0;
 
-  if (lines[0] === "---") {
-    let end = -1;
-    for (let j = 1; j < lines.length; j++) {
-      if (lines[j] === "---") {
-        end = j;
-        break;
-      }
+  const fm = findFrontmatterRange(lines);
+  if (fm) {
+    for (let j = 0; j < fm.start; j++) {
+      spans.push(...splitProseLine(lines[j] ?? "", j + 1));
     }
-    if (end !== -1) {
-      for (let j = 0; j <= end; j++) {
-        spans.push({ kind: "frontmatter", line: j + 1, text: lines[j] ?? "" });
-      }
-      i = end + 1;
+    for (let j = fm.start; j <= fm.end; j++) {
+      spans.push({ kind: "frontmatter", line: j + 1, text: lines[j] ?? "" });
     }
+    i = fm.end + 1;
   }
 
   let fence:
