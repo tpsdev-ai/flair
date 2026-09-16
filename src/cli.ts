@@ -5370,6 +5370,12 @@ async function repairLaunchdManagement(dataDir: string, port: number): Promise<L
             return { kind: "failed", detail: proof.detail, remedy: ["flair stop", "flair doctor --fix"] };
           }
         }
+        // flair#1701: the launchd bounce (adopt and regenerate) is a first
+        // start. The product launcher execs Harper and never chmods, so the
+        // new operations-server lands at 0777 & ~umask. Init / start /
+        // restart already call this after health; without it here, doctor
+        // flags ✗ Ops socket permissions until a second start.
+        readyOpsSocketPosture(dataDir);
         const detail = plan.kind === "adopt"
           ? `adopted the direct-spawned instance into launchd (bounced the live instance): ${after.detail}`
           : after.detail;
