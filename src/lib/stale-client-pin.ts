@@ -1,9 +1,9 @@
 /**
  * stale-client-pin.ts — flair#1383
  *
- * `flair doctor` already fails a pin that is not the installed CLI version.
- * That generic staleness line does not say the thing an operator needs:
- * a pre-0.18.0 adapter silently drops writes, including against another
+ * `flair doctor` reads the actual `flair-mcp` / `flair-client` pins in
+ * wired host configs and cwd package.json. A pre-0.18.0 pin is not just
+ * "behind the CLI" — it silently drops writes, including against another
  * agent's shared memories, and upgrading the *server* does not fix it.
  *
  * This helper is the loud, specific finding. Threshold matches
@@ -25,6 +25,11 @@ export function isUnsafeAdapterPin(pin: string | null | undefined): boolean {
   return !semverGte(pin, MIN_SAFE_FLAIR_ADAPTER);
 }
 
-export function unsafeAdapterPinDetail(surface: string, id: string, pin: string): string {
-  return `${surface} (${id}): pinned to flair-mcp@${pin} — ${STALE_CLIENT_WRITE_HAZARD}`;
+export function unsafeAdapterPinDetail(
+  surface: string,
+  id: string,
+  pin: string,
+  pkg: string = "flair-mcp",
+): string {
+  return `${surface} (${id}): pinned to ${pkg}@${pin} — ${STALE_CLIENT_WRITE_HAZARD}`;
 }

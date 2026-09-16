@@ -200,10 +200,25 @@ describe("flair#1383 — server write-path gate (missing on main)", () => {
     expect(refuseStaleClientWrite({
       headers: { get: () => "flair-client/0.18.0" },
     })).toBeNull();
-    const content = { flairClientVersion: "0.17.0", text: "keep" };
+    const content: Record<string, unknown> = { flairClientVersion: "0.17.0", text: "keep" };
     expect(refuseStaleClientWrite({}, content)).toBeInstanceOf(Response);
     stripClientVersionPassthrough(content);
     expect(content).toEqual({ text: "keep" });
+  });
+
+  it("/mcp in-process (x-tps-agent only) and raw HTTP with no version are served", () => {
+    // resources/mcp-tools.ts delegationContext: headers.get returns only
+    // x-tps-agent. In-process /mcp never sets X-Flair-Client.
+    const mcpInProcess = {
+      tpsAgent: "agent-1",
+      tpsAgentIsAdmin: false,
+      headers: {
+        get: (k: string) => (k.toLowerCase() === "x-tps-agent" ? "agent-1" : undefined),
+      },
+    };
+    expect(refuseStaleClientWrite(mcpInProcess)).toBeNull();
+    // Signed REST: auth middleware stamps tpsAgent. No library version.
+    expect(refuseStaleClientWrite({ tpsAgent: "agent-1", tpsAgentIsAdmin: false })).toBeNull();
   });
 });
 
@@ -221,5 +236,7 @@ describe("flair#1383 — doctor names the silent-drop hazard for a 0.17 pin", ()
     expect(detail).toContain("flair-mcp@0.17.0");
     expect(detail).toContain(STALE_CLIENT_WRITE_HAZARD);
     expect(detail).not.toContain("installed CLI is");
+    expect(unsafeAdapterPinDetail("package.json", "cwd", "0.17.0", "flair-client"))
+      .toContain("flair-client@0.17.0");
   });
 });

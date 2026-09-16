@@ -40,9 +40,9 @@ import {
   type Harness,
   type HookMutationResult,
 } from "../hook-install.js";
-import { staleHookRemedy, staleMcpClientPins, staleSessionStartHookPins } from "./owned-pins.js";
+import { findUnsafeWiredPins, staleHookRemedy, staleMcpClientPins, staleSessionStartHookPins } from "./owned-pins.js";
 import { flairCliVersion, isResolvedVersion } from "./mcp-spec.js";
-import { isUnsafeAdapterPin, unsafeAdapterPinDetail } from "./stale-client-pin.js";
+import { unsafeAdapterPinDetail } from "./stale-client-pin.js";
 import {
   isDetached,
   plistCarriesInlineAdminPassword,
@@ -151,20 +151,30 @@ function runMcpBlock(ctx: DoctorRunContext): DoctorCheckResult {
   // flair#1485 / Bugbot: a failed MCP pin refresh used to print nothing and
   // leave the old @tpsdev-ai/flair-mcp pin in place. Presence is not
   // currency — the same catalogue upgrade refreshes must fail here too.
+  // flair#1383: read the pins that are actually installed — flair-mcp
+  // and flair-client — in wired host configs and cwd package.json.
+  // Independent of "pin !== CLI version": a current MCP pin next to
+  // flair-client@0.17.0 still silently drops writes.
+  const unsafeWired = findUnsafeWiredPins(ctx.homeDir, ctx.cwd).filter((p) =>
+    p.source === "package.json"
+    || (p.source === "mcp-client" && wired.includes(p.id as (typeof MCP_CLIENT_IDS)[number])),
+  );
+  if (unsafeWired.length > 0) {
+    const first = unsafeWired[0]!;
+    return result(id, label, "fail", {
+      detail: unsafeAdapterPinDetail(first.surface, first.id, first.version, first.package),
+      remedy: "flair upgrade",
+    });
+  }
   const expected = flairCliVersion();
   if (isResolvedVersion(expected)) {
     const stale = staleMcpClientPins(ctx.homeDir, expected)
       .filter((r) => wired.includes(r.target.id as (typeof MCP_CLIENT_IDS)[number]));
     if (stale.length > 0) {
       const first = stale[0]!;
-      // flair#1383: a pre-0.18.0 pin is not just "behind" — it silently
-      // drops writes. Name that hazard before the generic stale line.
-      const unsafe = stale.filter((s) => isUnsafeAdapterPin(s.pin));
-      const detail = unsafe.length > 0
-        ? unsafeAdapterPinDetail("MCP server", unsafe[0]!.target.id, unsafe[0]!.pin!)
-        : stale.length === 1
-          ? `MCP server (${first.target.id}): pinned to flair-mcp@${first.pin} (installed CLI is ${expected})`
-          : `MCP server: stale pins ${stale.map((s) => `${s.target.id}@${s.pin}`).join(", ")} (installed CLI is ${expected})`;
+      const detail = stale.length === 1
+        ? `MCP server (${first.target.id}): pinned to flair-mcp@${first.pin} (installed CLI is ${expected})`
+        : `MCP server: stale pins ${stale.map((s) => `${s.target.id}@${s.pin}`).join(", ")} (installed CLI is ${expected})`;
       return result(id, label, "fail", {
         detail,
         remedy: "flair upgrade",
@@ -268,19 +278,25 @@ function runSessionStartHook(ctx: DoctorRunContext): DoctorCheckResult {
   // session. Compare against flairCliVersion() — not the MCP client pin —
   // so two equally-stale pins cannot hide each other. Same owned-pin
   // catalogue `flair upgrade` refreshes.
+  const unsafeHook = findUnsafeWiredPins(ctx.homeDir).filter((p) =>
+    p.source === "session-start-hook" && harnesses.includes(p.id as Harness),
+  );
+  if (unsafeHook.length > 0) {
+    const first = unsafeHook[0]!;
+    return result(id, label, "fail", {
+      detail: unsafeAdapterPinDetail(first.surface, first.id, first.version, first.package),
+      remedy: "flair upgrade",
+    });
+  }
   const expected = flairCliVersion();
   if (isResolvedVersion(expected)) {
     const stale = staleSessionStartHookPins(ctx.homeDir, expected)
       .filter((r) => harnesses.includes(r.target.id as Harness));
     if (stale.length > 0) {
       const first = stale[0]!;
-      // flair#1383 — same pre-0.18.0 write-loss finding as mcp-block.
-      const unsafe = stale.filter((s) => isUnsafeAdapterPin(s.pin));
-      const detail = unsafe.length > 0
-        ? unsafeAdapterPinDetail("SessionStart hook", unsafe[0]!.target.id, unsafe[0]!.pin!)
-        : stale.length === 1
-          ? `SessionStart hook (${first.target.id}): pinned to flair-mcp@${first.pin} (installed CLI is ${expected})`
-          : `SessionStart hook: stale pins ${stale.map((s) => `${s.target.id}@${s.pin}`).join(", ")} (installed CLI is ${expected})`;
+      const detail = stale.length === 1
+        ? `SessionStart hook (${first.target.id}): pinned to flair-mcp@${first.pin} (installed CLI is ${expected})`
+        : `SessionStart hook: stale pins ${stale.map((s) => `${s.target.id}@${s.pin}`).join(", ")} (installed CLI is ${expected})`;
       return result(id, label, "fail", {
         detail,
         remedy: staleHookRemedy(stale),

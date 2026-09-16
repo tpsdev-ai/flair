@@ -123,7 +123,7 @@ the same identity plane.
 | Method | Path | Auth | Read / write |
 |--------|------|------|--------------|
 | GET | `/Memory`, `/Memory/<id>` | Ed25519 | open-within-org. By-id deny = 404. |
-| POST / PUT / PATCH | `/Memory` | Ed25519 | Own `agentId` only. Auto-embed on write. Visibility defaults from durability (`permanent`/`persistent` → `shared`, `standard`/`ephemeral` → `private`). |
+| POST / PUT / PATCH | `/Memory` | Ed25519 | Own `agentId` only. Auto-embed on write. Visibility defaults from durability (`permanent`/`persistent` → `shared`, `standard`/`ephemeral` → `private`). Identified pre-0.18.0 client → **426** `stale_flair_client` (missing version is served). |
 | DELETE | `/Memory/<id>` | Ed25519 | Owner or admin. `permanent` owner-delete is allowed. |
 | POST | `/SemanticSearch` | Ed25519 | Hybrid semantic + lexical. Same read-scope as Memory. Default scoring is `raw`. |
 | POST | `/BootstrapMemories` | Ed25519 | Cold-start context (soul + predicted memories + optional org events). |
@@ -145,6 +145,38 @@ the same identity plane.
 
 Skill-tagged Memory rows embed from `trigger` (the recall signal), not
 `content`. MCP tools: `skill_store`, `skill_search`, `skill_get`.
+
+#### Client version gate (HTTP 426 `stale_flair_client`)
+
+`POST` / `PUT` / `PATCH` `/Memory` refuse an **identified** pre-0.18.0
+`@tpsdev-ai/flair-client` or `@tpsdev-ai/flair-mcp`. Identification is the
+`X-Flair-Client` request header. A missing version is served — in-process
+`/mcp` (`delegationContext` does not set this header) and raw HTTP callers
+do not send one. Optional write-body `flairClientVersion` is also accepted
+and stripped so it is never stored.
+
+**Request header**
+
+```
+X-Flair-Client: flair-client/0.17.0
+```
+
+(`flair-mcp/<semver>` and a bare `<semver>` are also accepted.)
+
+**Response** — HTTP 426, `Content-Type: application/json`
+
+```json
+{
+  "error": "stale_flair_client",
+  "message": "This flair-client (0.17.0) silently drops writes — including against another agent's shared memories. Upgrade the adapter, not the server: `flair upgrade`, or pin @tpsdev-ai/flair-mcp / @tpsdev-ai/flair-client >= 0.18.0.",
+  "clientVersion": "0.17.0",
+  "minimumClientVersion": "0.18.0"
+}
+```
+
+The remedy is `flair upgrade` (the adapter), not a server upgrade alone.
+`flair doctor` names a wired `flair-mcp` / `flair-client` pin older than
+0.18.0. See [troubleshooting](troubleshooting.md#pre-0180-flair-client--flair-mcp-silently-drops-writes).
 
 ### Relationships, workspace, org events, attention
 

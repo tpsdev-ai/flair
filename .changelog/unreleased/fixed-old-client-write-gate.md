@@ -5,10 +5,11 @@
   the match is another agent's `shared` memory. The PUT never arrives, so
   no server upgrade closed it. Current `flair-client` now sends
   `X-Flair-Client: flair-client/<version>`; a write that declares `< 0.18.0`
-  is HTTP 426 `stale_flair_client`. `flair doctor` fails a
-  `flair-mcp@<0.18.0` pin with that hazard and `flair upgrade` as the
-  remedy. Missing version is still served — published 0.18–current clients
-  did not send a library version.
+  is HTTP 426 `stale_flair_client`. `flair doctor` reads the actual
+  `flair-mcp` / `flair-client` pins in wired host configs and cwd
+  `package.json` and fails any `< 0.18.0` with that hazard and
+  `flair upgrade` as the remedy. Missing version is still served —
+  published 0.18–current clients did not send a library version.
 
   > **Heads-up:** if writes look stored but never land, upgrade the adapter
   > (`flair upgrade` / pin `@tpsdev-ai/flair-mcp` and `@tpsdev-ai/flair-client`

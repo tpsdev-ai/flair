@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { resolveFlairMcpFinding } from "../../src/cli";
 import {
   extractFlairMcpPin,
+  extractFlairPackagePins,
   detectWiredFlairMcp,
   buildSessionStartHookCommand,
 } from "../../src/doctor-client";
@@ -81,6 +82,35 @@ describe("extractFlairMcpPin", () => {
 
   test("returns null when the package is absent entirely", () => {
     expect(extractFlairMcpPin('"args": ["-y", "some-other-package@1.0.0"]')).toBeNull();
+  });
+});
+
+describe("extractFlairPackagePins (flair#1383 — actual installed pins)", () => {
+  test("finds flair-mcp@ and flair-client@ specs in the same wiring string", () => {
+    const pins = extractFlairPackagePins(
+      '"args": ["-y", "@tpsdev-ai/flair-mcp@0.54.2"]\n"@tpsdev-ai/flair-client@0.17.0"',
+    );
+    expect(pins).toEqual([
+      { package: "flair-mcp", version: "0.54.2" },
+      { package: "flair-client", version: "0.17.0" },
+    ]);
+  });
+
+  test("finds package.json dependency pins, including a caret range", () => {
+    const pins = extractFlairPackagePins(JSON.stringify({
+      dependencies: { "@tpsdev-ai/flair-client": "^0.17.0" },
+      devDependencies: { "@tpsdev-ai/flair-mcp": "0.16.1" },
+    }));
+    expect(pins).toEqual([
+      { package: "flair-client", version: "0.17.0" },
+      { package: "flair-mcp", version: "0.16.1" },
+    ]);
+  });
+
+  test("ignores bare / latest / unrelated packages", () => {
+    expect(extractFlairPackagePins('"@tpsdev-ai/flair-mcp"')).toEqual([]);
+    expect(extractFlairPackagePins('"@tpsdev-ai/flair-client": "latest"')).toEqual([]);
+    expect(extractFlairPackagePins('"some-other-package": "0.17.0"')).toEqual([]);
   });
 });
 

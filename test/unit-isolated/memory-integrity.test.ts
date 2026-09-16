@@ -1795,21 +1795,43 @@ describe("flair#1383 — Memory write path refuses an identified pre-0.18.0 clie
     expect(memoryStore.has("agent-1-body-ver")).toBe(false);
   });
 
-  it("missing version and 0.18.0+ still write (current published clients send no header yet)", async () => {
-    const m0 = makeMemory(agentCtx("agent-1"));
-    const r0: any = await m0.post({
+  it("raw HTTP with no X-Flair-Client still writes", async () => {
+    // Signed REST: auth middleware stamps tpsAgent. No library version header.
+    const m = makeMemory(agentCtx("agent-1"));
+    const r: any = await m.post({
       agentId: "agent-1",
-      content: "Unversioned current-client write, long enough for the gate.",
+      content: "Raw HTTP unversioned write, long enough for the gate.",
     });
-    expect(r0.written).toBe(true);
+    expect(r.written).toBe(true);
     expect(memoryStore.size).toBe(1);
+  });
 
-    const m1 = makeMemory(clientHeaderCtx("agent-1", "flair-client/0.18.0"));
-    const r1: any = await m1.post({
+  it("/mcp in-process with no version still writes (delegationContext headers are x-tps-agent only)", async () => {
+    // resources/mcp-tools.ts delegationContext: headers.get returns only
+    // x-tps-agent. Missing version is served — not treated as old.
+    const mcpInProcess = {
+      tpsAgent: "agent-1",
+      tpsAgentIsAdmin: false,
+      headers: {
+        get: (k: string) => (k.toLowerCase() === "x-tps-agent" ? "agent-1" : undefined),
+      },
+    };
+    const m = makeMemory(mcpInProcess);
+    const r: any = await m.post({
+      agentId: "agent-1",
+      content: "In-process /mcp unversioned write, long enough for the gate.",
+    });
+    expect(r.written).toBe(true);
+    expect(memoryStore.size).toBe(1);
+  });
+
+  it("0.18.0+ still writes", async () => {
+    const m = makeMemory(clientHeaderCtx("agent-1", "flair-client/0.18.0"));
+    const r: any = await m.post({
       agentId: "agent-1",
       content: "A write from the first safe client, long enough for the gate.",
     });
-    expect(r1.written).toBe(true);
-    expect(memoryStore.size).toBe(2);
+    expect(r.written).toBe(true);
+    expect(memoryStore.size).toBe(1);
   });
 });

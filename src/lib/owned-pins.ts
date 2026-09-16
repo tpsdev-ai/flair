@@ -15,6 +15,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   ALL_CLIENTS,
   clientConfigPath,
@@ -24,9 +25,11 @@ import {
 import {
   checkSessionStartHook,
   extractFlairMcpPin,
+  extractFlairPackagePins,
   isFlairHookCommand,
   readClientMcpBlock,
 } from "../doctor-client.js";
+import { isUnsafeAdapterPin } from "./stale-client-pin.js";
 import {
   hookInstallHint,
   hookSettingsPath,
@@ -171,6 +174,74 @@ export function staleMcpClientPins(
   expectedVersion: string = flairCliVersion(),
 ): OwnedPinReading[] {
   return staleOwnedPins(homeDir, expectedVersion).filter((r) => r.target.kind === "mcp-client");
+}
+
+export type UnsafeWiredPinSource = OwnedPinKind | "package.json";
+
+/**
+ * A pre-0.18.0 `@tpsdev-ai/flair-mcp` or `@tpsdev-ai/flair-client` pin
+ * actually written in a wired host config or the cwd package.json.
+ *
+ * Independent of "pin !== CLI version". A current `flair-mcp` pin next to
+ * `flair-client@0.17.0` in package.json is still a silent-drop host
+ * (flair#1383).
+ */
+export interface UnsafeWiredPin {
+  source: UnsafeWiredPinSource;
+  id: string;
+  surface: string;
+  package: "flair-mcp" | "flair-client";
+  version: string;
+}
+
+/**
+ * Read the pins that are actually installed in wired hosts' configs
+ * (and the cwd package.json) and return those older than 0.18.0.
+ */
+export function findUnsafeWiredPins(homeDir: string, cwd?: string): UnsafeWiredPin[] {
+  const found: UnsafeWiredPin[] = [];
+  const seen = new Set<string>();
+  const add = (pin: UnsafeWiredPin): void => {
+    const key = `${pin.source}:${pin.id}:${pin.package}@${pin.version}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    found.push(pin);
+  };
+
+  for (const target of listOwnedPinTargets(homeDir)) {
+    const reading = readOwnedPin(target, homeDir);
+    if (!reading.present) continue;
+    const text = readFileText(target.path) ?? "";
+    const surface = target.kind === "mcp-client" ? "MCP server" : "SessionStart hook";
+    for (const pin of extractFlairPackagePins(text)) {
+      if (!isUnsafeAdapterPin(pin.version)) continue;
+      add({
+        source: target.kind,
+        id: target.id,
+        surface,
+        package: pin.package,
+        version: pin.version,
+      });
+    }
+  }
+
+  if (cwd) {
+    const pkgPath = join(cwd, "package.json");
+    const text = readFileText(pkgPath);
+    if (text) {
+      for (const pin of extractFlairPackagePins(text)) {
+        if (!isUnsafeAdapterPin(pin.version)) continue;
+        add({
+          source: "package.json",
+          id: "cwd",
+          surface: "package.json",
+          package: pin.package,
+          version: pin.version,
+        });
+      }
+    }
+  }
+  return found;
 }
 
 /**

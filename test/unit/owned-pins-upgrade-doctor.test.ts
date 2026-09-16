@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  findUnsafeWiredPins,
   listOwnedPinTargets,
   ownedPinRefreshShouldReport,
   refreshOwnedPins,
@@ -247,6 +248,29 @@ describe("flair#1485 — failed MCP pin refresh is not silent", () => {
     expect(mcp?.detail ?? "").toContain("another agent's shared memories");
     expect(mcp?.detail ?? "").toContain("Upgrade the adapter, not the server");
     expect(mcp?.detail ?? "").not.toContain(`installed CLI is ${INSTALLED}`);
+    expect(mcp?.remedy).toBe("flair upgrade");
+    expect(run.healthy).toBe(false);
+  });
+
+  it("flair#1383: current MCP pin + flair-client@0.17.0 in cwd package.json fails with silently drops writes", () => {
+    writeClaudeMcp(isoHome, CURRENT_SPEC, "local");
+    writeHook(isoHome, "claude-code", hookCommand("local", INSTALLED));
+    writeFileSync(
+      join(isoCwd, "package.json"),
+      JSON.stringify({
+        name: "host-app",
+        dependencies: { "@tpsdev-ai/flair-client": "0.17.0" },
+      }, null, 2) + "\n",
+    );
+    expect(staleMcpClientPins(isoHome, INSTALLED)).toEqual([]);
+    const pins = findUnsafeWiredPins(isoHome, isoCwd);
+    expect(pins.some((p) => p.package === "flair-client" && p.version === "0.17.0")).toBe(true);
+    const run = doctorOn(isoHome, ["claude-code"]);
+    const mcp = run.results.find((r) => r.id === "mcp-block");
+    expect(mcp?.status).toBe("fail");
+    expect(mcp?.detail ?? "").toContain("flair-client@0.17.0");
+    expect(mcp?.detail ?? "").toContain("silently drops writes");
+    expect(mcp?.detail ?? "").toContain("another agent's shared memories");
     expect(mcp?.remedy).toBe("flair upgrade");
     expect(run.healthy).toBe(false);
   });
