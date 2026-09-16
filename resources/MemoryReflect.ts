@@ -34,12 +34,15 @@
  *                                    dropped by the stale-intent post-filter
  *
  * The pure logic behind execute mode (prompt building, actor resolution,
- * generate+validate+retry, dedup) lives in ./memory-reflect-lib.ts — see that
- * file's header for why: importing Resource/databases/models here pulls in
- * the Harper runtime and can't be unit-tested directly (Harper injects
- * `Resource` as a runtime global; bun's ESM linker rejects `import {
- * Resource }` outright — see test/unit/resource-allow.test.ts). This
- * resource is a thin orchestrator over the lib's tested functions.
+ * generate+validate+retry, dedup, #1263 txn boundary) lives in
+ * ./memory-reflect-lib.ts — see that file's header for why: importing
+ * Resource/databases/models here pulls in the Harper runtime and can't be
+ * unit-tested directly (Harper injects `Resource` as a runtime global;
+ * bun's ESM linker rejects `import { Resource }` outright — see
+ * test/unit/resource-allow.test.ts). This resource is a thin orchestrator
+ * over the lib's tested functions. Execute mode releases the request
+ * transaction before `models.generate()` so a cold backend cannot trip
+ * Harper's 30s open-transaction 422 (flair#1263).
  */
 
 import { Resource, databases, models, logger } from "harper";
@@ -55,6 +58,8 @@ import {
   buildExecutePrompt,
   resolveReflectActor,
   generateCandidates,
+  releaseRequestTransaction,
+  runExecuteDistillation,
   dedupeCandidates,
   memoryMatchesReflectScope,
   buildStagedCandidateRow,
@@ -239,15 +244,113 @@ export class ReflectMemories extends Resource {
     const gatheredMemoryIds = new Set(promptInputs.map((m) => m.id));
     const configuredModel = process.env.FLAIR_REM_MODEL || undefined;
 
-    const outcome = await generateCandidates({
-      prompt: executePrompt,
-      model: configuredModel,
-      gatheredMemoryIds,
-      generate: (input, opts) => models.generate(input, opts),
+    // #1263: Resource dispatch already opened a request transaction around
+    // post(). A cold `models.generate()` (Ollama model load > 30s) held that
+    // write-bearing txn past storage.maxTransactionOpenTime → HTTP 422,
+    // not the documented 502/503. Release the request txn before generate
+    // (distill outside it); stage inside a fresh short write window.
+    const distill = await runExecuteDistillation({
+      releaseRequestTxn: () => releaseRequestTransaction(ctx),
+      generate: () => generateCandidates({
+        prompt: executePrompt,
+        model: configuredModel,
+        gatheredMemoryIds,
+        generate: (input, opts) => models.generate(input, opts),
+      }),
+      write: async (outcome) => {
+        if (!outcome.ok) return { kind: "failed" as const, outcome };
+
+        if (outcome.usedJsonFallback) {
+          logger.warn?.(`MemoryReflect: json-fallback path active for agent ${agentId} (schema-mode output failed validation)`);
+        }
+
+        // flair#1257 slice 3 — the stale-intent POST-FILTER (the testable second
+        // layer of the two-layer guard; the prompt rule above is the primary).
+        // Runs AFTER validation (a drop is a policy skip, never a batch failure)
+        // and BEFORE dedup/staging. Only continuity runs are filtered — for every
+        // other run this is a straight pass-through.
+        const staleIntentResult = isContinuityRun
+          ? filterStaleSessionIntentCandidates(outcome.candidates, {
+              sessionNewestCreatedAt,
+              now: executeNow,
+              horizonMs: staleHorizonMs,
+            })
+          : { kept: outcome.candidates, droppedStaleIntent: [] };
+        if (staleIntentResult.droppedStaleIntent.length > 0) {
+          logger.warn?.(
+            `MemoryReflect: stale-intent filter dropped ${staleIntentResult.droppedStaleIntent.length} candidate(s) for agent ${agentId} (stale continuity session)`,
+          );
+        }
+
+        // Dedup against this agent's existing pending candidates (spec §3A item 4).
+        const existingPendingClaims: string[] = [];
+        let writeYieldAt = performance.now() + REM_GATHER_YIELD_BUDGET_MS;
+        for await (const c of (databases as any).flair.MemoryCandidate.search({})) {
+          if (performance.now() >= writeYieldAt) {
+            await yieldToRequests();
+            writeYieldAt = performance.now() + REM_GATHER_YIELD_BUDGET_MS;
+          }
+          if (c.agentId !== agentId) continue;
+          if (c.status !== "pending") continue;
+          existingPendingClaims.push(c.claim);
+        }
+        const toStage = dedupeCandidates(staleIntentResult.kept, existingPendingClaims);
+
+        // generatedBy: GenerateResult in the pinned harper 5.1.17 has
+        // no model/backend-id field (content/finishReason/usage/toolCalls/trace
+        // only) — the "from the generate result if available" branch is
+        // unreachable in this version, so this always falls back to the
+        // configured logical name, matching Harper's own default routing name.
+        const resolvedModel = configuredModel ?? "default";
+        const generatedAt = new Date().toISOString();
+        const staged: any[] = [];
+        for (const c of toStage) {
+          // #1205b-1: buildStagedCandidateRow stamps `scopeTag` when this run was
+          // scope:"tagged" — the authoritative per-user tag promotion consumes
+          // directly (closing the #1205a source-re-read seam). Non-tagged runs
+          // leave scopeTag absent, unchanged.
+          const row = buildStagedCandidateRow({
+            id: `cand_${randomBytes(8).toString("hex")}`,
+            agentId,
+            claim: c.claim,
+            sourceMemoryIds: c.sourceMemoryIds,
+            rationalePrompt: executePrompt,
+            generatedBy: resolvedModel,
+            generatedAt,
+            scope,
+            tag,
+            // flair#1257 slice 3: record an AFFIRMATIVE shared ruling (with its
+            // team-relevance justification) on the candidate — continuity runs
+            // only. resolveCandidateVisibilityRuling returns null for anything
+            // less than shared+justified, and null stamps nothing: the promoted
+            // row then defaults private (Sherlock's default-private-unless).
+            visibilityRuling: isContinuityRun ? resolveCandidateVisibilityRuling(c) : null,
+          });
+          await (databases as any).flair.MemoryCandidate.put(row);
+          staged.push(row);
+        }
+
+        // Stamp after a successful generate on execute runs only. Prompt-only
+        // and 502/503/abort leave lastReflected unset so the next night retries
+        // the same sources instead of permanently skipping them (#1515 Bugbot).
+        if (shouldStampLastReflected({ execute, generateSucceeded: true })) {
+          const now = new Date().toISOString();
+          for (const memory of memories) {
+            patchRecordSilent((databases as any).flair.Memory, memory.id, { lastReflected: now });
+          }
+        }
+
+        return {
+          kind: "ok" as const,
+          staged,
+          resolvedModel,
+          droppedStaleIntent: staleIntentResult.droppedStaleIntent.length,
+        };
+      },
     });
 
-    if (!outcome.ok) {
-      if (outcome.reason === "no_backend") {
+    if (distill.kind === "failed") {
+      if (distill.outcome.reason === "no_backend") {
         // Static body (K&S) — never echo Harper version, backend lists, or endpoints.
         return new Response(
           JSON.stringify({ error: "No generative backend configured. See the models configuration docs." }),
@@ -260,100 +363,20 @@ export class ReflectMemories extends Resource {
       );
     }
 
-    if (outcome.usedJsonFallback) {
-      logger.warn?.(`MemoryReflect: json-fallback path active for agent ${agentId} (schema-mode output failed validation)`);
-    }
-
-    // flair#1257 slice 3 — the stale-intent POST-FILTER (the testable second
-    // layer of the two-layer guard; the prompt rule above is the primary).
-    // Runs AFTER validation (a drop is a policy skip, never a batch failure)
-    // and BEFORE dedup/staging. Only continuity runs are filtered — for every
-    // other run this is a straight pass-through.
-    const staleIntentResult = isContinuityRun
-      ? filterStaleSessionIntentCandidates(outcome.candidates, {
-          sessionNewestCreatedAt,
-          now: executeNow,
-          horizonMs: staleHorizonMs,
-        })
-      : { kept: outcome.candidates, droppedStaleIntent: [] };
-    if (staleIntentResult.droppedStaleIntent.length > 0) {
-      logger.warn?.(
-        `MemoryReflect: stale-intent filter dropped ${staleIntentResult.droppedStaleIntent.length} candidate(s) for agent ${agentId} (stale continuity session)`,
-      );
-    }
-
-    // Dedup against this agent's existing pending candidates (spec §3A item 4).
-    const existingPendingClaims: string[] = [];
-    yieldAt = performance.now() + REM_GATHER_YIELD_BUDGET_MS;
-    for await (const c of (databases as any).flair.MemoryCandidate.search({})) {
-      if (performance.now() >= yieldAt) {
-        await yieldToRequests();
-        yieldAt = performance.now() + REM_GATHER_YIELD_BUDGET_MS;
-      }
-      if (c.agentId !== agentId) continue;
-      if (c.status !== "pending") continue;
-      existingPendingClaims.push(c.claim);
-    }
-    const toStage = dedupeCandidates(staleIntentResult.kept, existingPendingClaims);
-
-    // generatedBy: GenerateResult in the pinned harper 5.1.17 has
-    // no model/backend-id field (content/finishReason/usage/toolCalls/trace
-    // only) — the "from the generate result if available" branch is
-    // unreachable in this version, so this always falls back to the
-    // configured logical name, matching Harper's own default routing name.
-    const resolvedModel = configuredModel ?? "default";
-    const generatedAt = new Date().toISOString();
-    const staged: any[] = [];
-    for (const c of toStage) {
-      // #1205b-1: buildStagedCandidateRow stamps `scopeTag` when this run was
-      // scope:"tagged" — the authoritative per-user tag promotion consumes
-      // directly (closing the #1205a source-re-read seam). Non-tagged runs
-      // leave scopeTag absent, unchanged.
-      const row = buildStagedCandidateRow({
-        id: `cand_${randomBytes(8).toString("hex")}`,
-        agentId,
-        claim: c.claim,
-        sourceMemoryIds: c.sourceMemoryIds,
-        rationalePrompt: executePrompt,
-        generatedBy: resolvedModel,
-        generatedAt,
-        scope,
-        tag,
-        // flair#1257 slice 3: record an AFFIRMATIVE shared ruling (with its
-        // team-relevance justification) on the candidate — continuity runs
-        // only. resolveCandidateVisibilityRuling returns null for anything
-        // less than shared+justified, and null stamps nothing: the promoted
-        // row then defaults private (Sherlock's default-private-unless).
-        visibilityRuling: isContinuityRun ? resolveCandidateVisibilityRuling(c) : null,
-      });
-      await (databases as any).flair.MemoryCandidate.put(row);
-      staged.push(row);
-    }
-
-    // Stamp after a successful generate on execute runs only. Prompt-only
-    // and 502/503/abort leave lastReflected unset so the next night retries
-    // the same sources instead of permanently skipping them (#1515 Bugbot).
-    if (shouldStampLastReflected({ execute, generateSucceeded: true })) {
-      const now = new Date().toISOString();
-      for (const memory of memories) {
-        patchRecordSilent((databases as any).flair.Memory, memory.id, { lastReflected: now });
-      }
-    }
-
     // Response omits rationalePrompt (spec §3A item 5: "no prompt field") —
     // it's identical across every row in this batch and already persisted
     // for audit on the MemoryCandidate row itself; echoing it back per
     // candidate would just repeat the same large string N times. Matches
     // `flair rem candidates`' own listing, which doesn't surface it either.
-    const responseCandidates = staged.map(({ rationalePrompt, ...rest }) => rest);
+    const responseCandidates = distill.staged.map(({ rationalePrompt, ...rest }) => rest);
     return {
       candidates: responseCandidates,
       count: responseCandidates.length,
-      model: resolvedModel,
+      model: distill.resolvedModel,
       ...gatherMeta,
       // flair#1257 slice 3: continuity-run observability — how many candidates
       // the stale-intent post-filter dropped (0 for non-continuity runs).
-      ...(isContinuityRun ? { droppedStaleIntent: staleIntentResult.droppedStaleIntent.length } : {}),
+      ...(isContinuityRun ? { droppedStaleIntent: distill.droppedStaleIntent } : {}),
     };
   }
 }
