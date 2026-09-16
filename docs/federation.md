@@ -4,14 +4,25 @@ Hub-and-spoke sync between Flair instances. A hub instance coordinates sync for 
 
 ## Overview
 
-Federation lets multiple Flair instances share memories, relationships, and agent records. Each instance maintains its own Ed25519 identity. Sync requests are signed and verified against pinned peer public keys.
+Federation lets multiple Flair instances share memories, relationships, and agent records **in one direction per call**. Each instance maintains its own Ed25519 identity. Sync requests are signed and verified against pinned peer public keys.
 
 ```
-Spoke A ──[signed sync]──▶ Hub ◀──[signed sync]── Spoke B
+Spoke A ──[POST /FederationSync]──▶ Hub
+Spoke B ──[POST /FederationSync]──▶ Hub
 ```
 
-- **Hub:** accepts sync pushes from paired spokes, can relay records between peers
-- **Spoke:** pushes local changes to the hub, receives changes from other spokes via the hub
+There is no hub → spoke arrow and no pull path. `FederationSync` declares `post()` only.
+
+- **Hub:** accepts signed sync pushes from paired spokes. It does not push records back, and it does not expose a pull endpoint.
+- **Spoke:** pushes local changes to the hub. It receives nothing back.
+
+**Sync is push-only — one direction per call.** A spoke that needs hub (or other-spoke) data has no supported path today. The honest options:
+
+1. **No downward path.** Do not plan on reading another instance's memories through the hub.
+2. **Mutual pairing.** For records both ways, each instance pairs **as a spoke of the other** — two pairings, two tokens, two syncs. Same workaround as [deploying-on-fabric.md](deploying-on-fabric.md#federation-is-push-only) and [embedding-in-a-harper-app.md](embedding-in-a-harper-app.md#federation).
+3. **Roadmap.** Deliberate hub-authorised downward flow is tracked in [#1452](https://github.com/tpsdev-ai/flair/issues/1452) (design) and the design frame on [#934](https://github.com/tpsdev-ai/flair/issues/934). This page does not claim that capability.
+
+The `direction: "pull"` field written to `SyncLog` on the hub is the hub logging that *it received a push*. It is not a spoke fetching.
 
 ## Pairing a New Spoke (Bootstrap-User Flow)
 
@@ -187,7 +198,7 @@ Re-pairing an existing peer (same instance ID, same public key) does not require
 
 ### Originator enforcement
 
-Spoke instances can only push records they originated. A spoke cannot overwrite records from another spoke or from the hub. The hub can relay records from any origin.
+Spoke instances can only push records they originated. A spoke cannot overwrite records from another spoke or from the hub. The hub can accept a pushed record that originated on any instance. That is receive-side originator policy on a push, not a hub-to-spoke delivery path.
 
 ### Per-record signatures and principalId
 
@@ -264,7 +275,7 @@ schemas: **[docs/api-reference.md](api-reference.md#federation)**.
 
 ## Limitations (1.0)
 
-- **HTTP push only** — no persistent WebSocket connections or real-time sync
+- **HTTP push only** — no persistent WebSocket connections, no real-time sync, and no pull endpoint
 - **Polled sync** — `flair federation sync enable` schedules a periodic one-shot (launchd / systemd, default 300s); there is no write-path trigger, so a new memory replicates on the next tick rather than immediately
-- **Single hub** — spoke-to-spoke sync goes through the hub
+- **Single hub, one-way** — spokes push to one hub; there is no spoke-to-spoke path and no hub-to-spoke pull
 - **Record-level LWW** — not field-level; concurrent edits to different fields of the same record may lose data

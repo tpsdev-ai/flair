@@ -5,6 +5,7 @@ import {
   skillEmbedText,
   enforceSkillDurability,
   rejectSkillWritePath,
+  refuseSkillWriteSource,
   skillScanGate,
 } from "../../resources/skill-write.ts";
 
@@ -84,6 +85,18 @@ describe("rejectSkillWritePath", () => {
     expect(res!.status).toBe(400);
     const body = await res!.json();
     expect(body.error).toBe("skill_write_path");
+  });
+});
+
+describe("refuseSkillWriteSource", () => {
+  test("non-skill rows are a no-op (null)", () => {
+    expect(refuseSkillWriteSource({
+      content: "hello",
+      metadata: JSON.stringify({ source: "/tmp/scratch/SKILL.md" }),
+    })).toBeNull();
+  });
+  test("skill rows without a source are a no-op (null)", () => {
+    expect(refuseSkillWriteSource({ tags: ["skill"], trigger: "when", content: "safe" })).toBeNull();
   });
 });
 

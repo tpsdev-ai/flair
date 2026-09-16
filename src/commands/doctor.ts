@@ -13,11 +13,13 @@ import { FleetPresenceRow, markStale, sortOldestVersionFirst } from "../fleet-pr
 import { hookSettingsPath, repinSessionStartHook, resolveHookAgentId } from "../hook-install.js";
 import { detectClients, wireAntigravity, wireClaudeCode, wireCodex, wireCursor, wireGemini } from "../install/clients.js";
 import { checkGlobalBinOnPath, resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
-import { buildEd25519Auth, defaultKeysDir, resolveAdminUser, resolveKeyPath, resolveLocalAdminPass } from "../lib/auth-resolve.js";
+import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, resolveAdminUser, resolveKeyPath, resolveLocalAdminPass } from "../lib/auth-resolve.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
 import { plistCarriesInlineAdminPassword } from "../lib/launchd-management.js";
 import { DOCTOR_CHECK_IDS, catalogIssueDelta, renderCatalogDoctorLines, runDoctorChecks } from "../lib/doctor-run.js";
+import { describeEmbedGpuDoctorFinding } from "../lib/embed-gpu-doctor.js";
+import { adminPassDesyncFinding, detectPersistedAdminUser } from "../lib/init-admin-pass.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
 import { flairCliVersion, unpinnedSpecWarning } from "../lib/mcp-spec.js";
 import { staleSessionStartHookPins } from "../lib/owned-pins.js";
@@ -430,12 +432,14 @@ program
     // every other command) nudges about on stderr; doctor prints the full
     // picture here instead of a one-liner and `--fix` offers the restart.
     let runningVersion: string | null = null;
+    let embedGpuFromHealth: unknown;
     if (harperResponding) {
       try {
         const healthRes = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(3000) });
         if (healthRes.ok) {
-          const body = (await healthRes.json()) as { version?: unknown };
+          const body = (await healthRes.json()) as { version?: unknown; embedding?: unknown };
           runningVersion = typeof body?.version === "string" ? body.version : null;
+          embedGpuFromHealth = body.embedding;
         }
       } catch { /* leave runningVersion null — reported below as "unknown" */ }
 
@@ -462,6 +466,15 @@ program
         console.log(`  ${render.icons.ok} Server running version matches CLI (${runningVersion})`);
       } else {
         console.log(`  ${render.icons.warn} Could not determine the running server's version`);
+      }
+
+      // flair#1437: fail-loud Metal fallback. Health states it; operators
+      // read doctor. A stated CPU default is silent here.
+      const embedGpuFinding = describeEmbedGpuDoctorFinding(embedGpuFromHealth);
+      if (embedGpuFinding) {
+        console.log(`  ${render.icons.error} ${embedGpuFinding.message}`);
+        console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${embedGpuFinding.fixHint}`);
+        issues++;
       }
     }
 
@@ -543,6 +556,25 @@ program
         issues++;
       }
     } catch { /* best-effort — don't fail doctor over a malformed harper-config.yaml */ }
+
+    // 3b2. Admin-pass vs persisted Harper user (flair#837) — report-only,
+    // never `--fix`. File missing + hdb_user still in the data dir is the
+    // state bare `init` used to "fix" by writing a fresh file that 401s.
+    // The remedy names the two exits: `--admin-pass-file` / `--reset-admin-pass`.
+    try {
+      const dataDir = defaultDataDir();
+      const finding = adminPassDesyncFinding({
+        adminPassFileExists: existsSync(defaultAdminPassPath()),
+        persistedAdminUser: detectPersistedAdminUser(dataDir),
+        dataDir,
+        adminPassPath: defaultAdminPassPath(),
+      });
+      if (finding?.flagged) {
+        console.log(`  ${render.icons.error} ${finding.message}`);
+        console.log(`     ${render.wrap(render.c.dim, finding.remedy)}`);
+        issues++;
+      }
+    } catch { /* best-effort — a missing data dir is not a doctor crash */ }
 
     // 3c. Ops-socket permission posture (flair#763) — report-only, never
     // auto-fixed. Re-tightening a live socket needs a restart, so the remedy is

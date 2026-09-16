@@ -12,6 +12,7 @@ import type { KeyObject } from "node:crypto";
 import { createHash, createPrivateKey } from "node:crypto";
 import { inspectKeyLookup, loadPrivateKey, signRequest, type KeyLookupState } from "./auth.js";
 import { readEnvOrUnset } from "./env-guard.js";
+import { FLAIR_CLIENT_VERSION_HEADER, flairClientVersionToken } from "./version.js";
 import type {
   FlairClientConfig,
   Memory,
@@ -112,7 +113,13 @@ export class FlairClient {
 
   /** Make an authenticated request to Flair. */
   async request<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      // flair#1383: the server refuses clients older than 0.18.0 on write paths.
+      // Current clients declare themselves so a future minimum can be
+      // enforced without fingerprinting. Pre-0.18.0 clients never sent this.
+      [FLAIR_CLIENT_VERSION_HEADER]: flairClientVersionToken(),
+    };
     const key = this.resolveKey();
     if (key) {
       headers["Authorization"] = signRequest(this.agentId, key, method, path);

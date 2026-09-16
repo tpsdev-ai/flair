@@ -16,7 +16,8 @@ if (!outPath) {
   process.exit(2);
 }
 
-const harper = await startHarper();
+const noPreload = process.argv.includes("--no-preload");
+const harper = await startHarper({ orphanExitPreload: !noPreload });
 writeFileSync(
   outPath,
   JSON.stringify({

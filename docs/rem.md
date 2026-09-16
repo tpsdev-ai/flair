@@ -56,7 +56,7 @@ Snapshot locality follows from this: a nightly cycle's pre-run snapshot (`~/.fla
 
 ## Interactive vs nightly
 
-- **Interactive (`flair rem rapid`):** one bounded, synchronous distillation call — gather cap 50 memories, bounded output tokens, seconds not minutes. Executes by default, staging candidates and printing a summary; `--prompt-only` returns the reflection prompt instead, for the bring-your-own-model handoff.
+- **Interactive (`flair rem rapid`):** one bounded, synchronous distillation call — gather cap 50 memories, bounded output tokens, seconds not minutes. Executes by default, staging candidates and printing a summary; `--prompt-only` returns the reflection prompt instead, for the bring-your-own-model handoff. A cold generative backend (first Ollama model load) is warmed outside Harper's request transaction so execute fails as the documented 502/503, not HTTP 422 from the 30s open-transaction ceiling.
 - **Nightly (`flair rem nightly enable` / `run-once`):** fully detached — the scheduler runs the full cycle (snapshot → maintenance → distillation), candidates land as pending rows, and an audit row lands in `~/.flair/logs/rem-nightly.jsonl`. The operator reviews in the morning via `flair rem candidates`.
 
 ### Safety bounds (a large backlog must not take the instance down)

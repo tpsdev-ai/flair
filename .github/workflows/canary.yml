@@ -28,8 +28,14 @@ name: Post-publish canary — install + boot a published version
 #     scripts (`scripts/check-global-install-lockfile.mjs --registry-version` and
 #     `scripts/ci/check-instance-boot.sh`) — the PR install-weight lane and the
 #     rockit deploy ritual call the same definitions.
+#   - The plugin canary (`scripts/ci/check-plugin-canary.mjs`, flair#1338)
+#     then installs published `@tpsdev-ai/flair-mcp` / `flair-client` at the
+#     same exact version, writes the documented host config, and asserts a
+#     real tools/call round-trip against the canary-booted instance. That is
+#     the hosted adapter path (HTTP + Ed25519), not an in-process import of
+#     our workspace sources.
 #   - No `continue-on-error`. An unmeasurable canary (registry lag, runner
-#     outage, missing tree) is a FAIL, never a skip.
+#     outage, missing tree, host unreachable) is a FAIL, never a skip.
 #
 # WHAT IT EMITS
 #   PASS prints the complete, sha256-bound promote command; FAIL prints the
@@ -168,6 +174,69 @@ jobs:
           fi
           echo "boot contract PASSED"
 
+      - name: Plugin canary — published adapters, documented host wiring, tool-call
+        id: plugin
+        # Run after a failed boot so the step can emit its own distinct line
+        # instead of being skipped (a skip looks like a second unexplained red
+        # at verdict time). Cancelled jobs do not run.
+        if: success() || failure()
+        env:
+          VERSION: ${{ inputs.version }}
+          BOOT_OUTCOME: ${{ steps.boot.outcome }}
+        run: |
+          set -uo pipefail
+          mkdir -p canary-logs
+          # Condition (3): boot already failed (or never ran). Do not restart,
+          # install adapters, or produce a second "host unreachable" red.
+          # The distinct line is the plugin step's FAIL.
+          if [ "$BOOT_OUTCOME" != "success" ]; then
+            set +e
+            node scripts/ci/check-plugin-canary.mjs --boot-outcome "$BOOT_OUTCOME" \
+              > canary-logs/plugin.log 2>&1
+            set -e
+            grep -nE "boot failed|DID NOT RUN" canary-logs/plugin.log || true
+            echo "::error::boot failed → plugin unmeasurable"
+            exit 1
+          fi
+          # Boot's contract includes a clean stop. Restart the already-inited
+          # instance so the adapters have a live host. Failure to start is
+          # unmeasurable — FAIL, never a skip.
+          cleanup() {
+            "$PREFIX/bin/flair" stop --port 19926 > canary-logs/plugin-stop.log 2>&1 || true
+          }
+          trap cleanup EXIT
+          set +e
+          "$PREFIX/bin/flair" start --port 19926 > canary-logs/plugin-start.log 2>&1
+          start_rc=$?
+          set -e
+          if [ "$start_rc" -ne 0 ]; then
+            echo "::error::plugin canary DID NOT RUN — could not restart the canary instance (unmeasurable is FAIL)"
+            tail -n 40 canary-logs/plugin-start.log || true
+            exit 1
+          fi
+          set +e
+          node scripts/ci/check-plugin-canary.mjs \
+            --version "$VERSION" \
+            --boot-outcome "$BOOT_OUTCOME" \
+            --flair-url "http://127.0.0.1:19926" \
+            --agent canary \
+            --key-path "$HOME/.flair/keys/canary.key" \
+            --flair-bin "$PREFIX/bin/flair" \
+            > canary-logs/plugin.log 2>&1
+          rc=$?
+          set -e
+          grep -nE "\[plugin-canary\]|DID NOT RUN|FAIL:|PASS —" canary-logs/plugin.log | tail -n 40 || true
+          if [ "$rc" -eq 2 ]; then
+            echo "::error::plugin canary DID NOT RUN — unmeasurable is FAIL"
+            tail -n 40 canary-logs/plugin.log
+            exit 1
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::plugin canary FAILED"
+            tail -n 60 canary-logs/plugin.log
+            exit 1
+          fi
+          echo "plugin canary PASSED"
+
       - name: Canary verdict — emit the promote or deprecate command
         # Runs whether or not the checks passed; the job itself still fails on a
         # red step (no continue-on-error anywhere). This step exists so the
@@ -181,6 +250,7 @@ jobs:
           SHA_OUTCOME: ${{ steps.sha.outcome }}
           INSTALL_OUTCOME: ${{ steps.install.outcome }}
           BOOT_OUTCOME: ${{ steps.boot.outcome }}
+          PLUGIN_OUTCOME: ${{ steps.plugin.outcome }}
           OS_NAME: ${{ matrix.os }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -189,7 +259,7 @@ jobs:
           # The command text is defined once, in scripts/ci/canary-verdict.sh, so
           # the emitted promote/deprecate line is the same thing the fails-first
           # proof exercises.
-          if [ "$SHA_OUTCOME" = "success" ] && [ "$INSTALL_OUTCOME" = "success" ] && [ "$BOOT_OUTCOME" = "success" ]; then
+          if [ "$SHA_OUTCOME" = "success" ] && [ "$INSTALL_OUTCOME" = "success" ] && [ "$BOOT_OUTCOME" = "success" ] && [ "$PLUGIN_OUTCOME" = "success" ]; then
             scripts/ci/canary-verdict.sh pass "$VERSION" "$EXPECTED" "$RUN_URL" "$OS_NAME" | tee canary-logs/verdict.txt
           else
             scripts/ci/canary-verdict.sh fail "$VERSION" "$EXPECTED" "$RUN_URL" "$OS_NAME" | tee canary-logs/verdict.txt

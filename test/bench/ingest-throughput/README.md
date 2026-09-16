@@ -5,8 +5,9 @@ only** — no retrieval, no reader, no judge, no provider. Embeddings are local;
 a run costs zero tokens. That is what makes it repeatable without a cap.
 
 This harness **produces a number**. It does not change any product default
-(`threads` or `gpuLayers`). The default-change decision is #1437; this bench
-is the measurement it is gated on.
+(`threads` or `gpuLayers`) — #1437 is the product default. The CPU cell
+pins `FLAIR_EMBED_GPU_LAYERS=0` so an Apple Silicon host does not derive
+Metal into the CPU measurement.
 
 ## What it measures
 
@@ -17,7 +18,7 @@ module-load), warms the embedder, ingests a LongMemEval_s slice, and reports:
 | Field | Meaning |
 |---|---|
 | requested threads | `FLAIR_EMBED_THREADS` (`default` = unset) |
-| requested gpuLayers | `FLAIR_EMBED_GPU_LAYERS` (`0` = unset / HFE default) |
+| requested gpuLayers | `FLAIR_EMBED_GPU_LAYERS` (always pinned per cell; `0` = CPU) |
 | **observed threads** | Warmup thread-count delta. Unreadable → **refuse**. |
 | documents, tokens | Records written; embedder-reported `hdb_model_calls.embedding_tokens` |
 | **doc/s + spread** | `documents / wall-s`, `[min, max]` across `--runs` |
@@ -80,8 +81,9 @@ The dataset is pinned by sha256 (see `config.ts`); fetch it as the
 LongMemEval_s bench does (`../longmemeval/README.md`). The model is pinned
 by GGUF sha256 at `models/nomic-embed-text-v1.5.Q4_K_M.gguf`.
 
-`FLAIR_EMBED_GPU_LAYERS` is the env pin the runner sets per cell. **Unset
-leaves HFE's default of 0.** This issue does not change that default.
+`FLAIR_EMBED_GPU_LAYERS` is the env pin the runner sets per cell. Both
+`0` and `99` are set explicitly — unset would now derive Metal on
+darwin-arm64 (flair#1437).
 
 ## Darwin / Metal (mac-arm64)
 

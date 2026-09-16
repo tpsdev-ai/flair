@@ -4,6 +4,7 @@ import { localInstanceId } from "./instance-identity.js";
 import { makeAuthGate, stampAttribution } from "./record-type-kit.js";
 import { RECORD_TYPES } from "./record-types.js";
 import { authorizeSoulWrite, refuseSoulWriteContent, soulProvenance } from "./soul-write-policy.js";
+import { refuseSkillAssignmentWrite } from "./skill-provenance.js";
 
 // Source authorization is independent of principal ownership: an admin runtime
 // may manage records elsewhere, but it cannot author identity-defining Soul.
@@ -44,6 +45,8 @@ export class Soul extends (databases as any).flair.Soul {
     // Learned artifacts cannot gain identity authority through an operator write.
     const learnedDenied = await refuseSoulWriteContent(content);
     if (learnedDenied) return learnedDenied;
+    const skillSourceDenied = refuseSkillAssignmentWrite(content);
+    if (skillSourceDenied) return skillSourceDenied;
     content.durability ||= "permanent";
     content.createdAt = new Date().toISOString();
     content.updatedAt = content.createdAt;
@@ -77,6 +80,8 @@ export class Soul extends (databases as any).flair.Soul {
     }
     const learnedDenied = await refuseSoulWriteContent({ ...existing, ...content });
     if (learnedDenied) return learnedDenied;
+    const skillSourceDenied = refuseSkillAssignmentWrite(content, existing);
+    if (skillSourceDenied) return skillSourceDenied;
     return super.patch(content, query);
   }
 
@@ -85,7 +90,13 @@ export class Soul extends (databases as any).flair.Soul {
     if (denied) return denied;
     const learnedDenied = await refuseSoulWriteContent(content);
     if (learnedDenied) return learnedDenied;
-    const ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
+    const existing = await super.get();
+    const existingRow = existing && typeof existing === "object" && !(existing instanceof Response)
+      ? existing
+      : undefined;
+    const skillSourceDenied = refuseSkillAssignmentWrite(content, existingRow);
+    if (skillSourceDenied) return skillSourceDenied;
+    const ownerDenial = await guardOwnerFieldImmutable(this, () => existing, content, "agentId");
     if (ownerDenial) return ownerDenial;
     content.updatedAt = new Date().toISOString();
     // Write-time originatorInstanceId stamp — see post() above / Memory.ts's

@@ -2,7 +2,7 @@
  * skill-write.ts — the WRITE-side skill policy (flair#1542 components 1-3).
  *
  * A skill is a Memory tagged "skill" (reuse the substrate — no new table).
- * This module centralizes the three write-side rules that make a skill-tagged
+ * This module centralizes the write-side rules that make a skill-tagged
  * Memory behave like a skill:
  *
  *   1. Embedding source: a skill-tagged row embeds from `trigger` (the
@@ -22,6 +22,11 @@
  *      ephemeral/session skill is a contradiction in terms — ephemeral/session
  *      are rejected outright, and every other value is forced to "persistent".
  *
+ *   4. Durable source (flair#1433): a skill-tagged write whose
+ *      `metadata.source` is a filesystem path under a temp directory is
+ *      refused. Content durability (3) and source durability (4) are
+ *      different axes.
+ *
  * Deliberately ZERO Harper imports — pure functions + constants, so the
  * coverage-gate test and unit tests can import this module without the
  * runtime (same load-bearing reason as memory-durability.ts /
@@ -29,6 +34,7 @@
  */
 
 import { scanSkillContent } from "./scan/skill-scanner.js";
+import { refuseNonDurableSourceResponse, skillSourceOf } from "./skill-provenance.js";
 
 /** The tag that marks a Memory as a skill. */
 export const SKILL_TAG = "skill";
@@ -103,6 +109,16 @@ export function rejectSkillWritePath(content: any): Response | null {
  *
  * Returns a 400 Response to short-circuit the write, or null to proceed.
  */
+/**
+ * Refuse a skill-tagged Memory whose metadata.source is a non-durable
+ * filesystem path (flair#1433). Non-skill rows and skills without a source
+ * are a no-op.
+ */
+export function refuseSkillWriteSource(content: any): Response | null {
+  if (!isSkillWrite(content)) return null;
+  return refuseNonDurableSourceResponse(skillSourceOf(content));
+}
+
 export function skillScanGate(content: any): Response | null {
   if (!isSkillWrite(content)) return null;
   const parts = [content.trigger, content.content].filter(

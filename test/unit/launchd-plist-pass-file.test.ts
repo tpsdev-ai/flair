@@ -145,6 +145,16 @@ describe("buildLaunchdPlist — pass-file mode", () => {
     expect(parsed.EnvironmentVariables.HOME).toBe(`/Users/${hostile}`);
   });
 
+  test("Umask 077 so Harper bind()s the ops socket owner-only (flair#1701)", () => {
+    // Darwin #1704: chmod on a listening AF_UNIX socket does not persist
+    // 0600 (9413a80 / b381b5b / b1032d3 all left 0755). bind() uses
+    // 0777 & ~umask; launchd Umask 077 (decimal 63) yields 0700, which
+    // doctor classify treats as default-clean.
+    const plist = buildLaunchdPlist(passFileOpts());
+    expect(plist).toMatch(/<key>Umask<\/key>\s*<integer>63<\/integer>/);
+    expect(parsePlist(plist).Umask).toBe(63);
+  });
+
   test("inline mode is GONE: buildLaunchdPlist always uses the pass-file launcher", () => {
     // There is no inline branch to reach (flair#1693). The default `opts()`
     // carries a pass file and the output must be the launcher shape, never the

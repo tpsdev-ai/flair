@@ -49,6 +49,15 @@ describe("resolveInitAdminPasswordSource — flair#827", () => {
   test("generates a new password for a genuinely fresh install (no existing file)", () => {
     expect(resolveInitAdminPasswordSource(false)).toBe("generate-new");
   });
+
+  test("FAILS-FIRST: missing file + persisted Harper user must not generate-new (flair#837)", () => {
+    // On main, the 1-arg function ignores persistence and returns generate-new.
+    // That is the #837 footgun: a fresh file whose value cannot rotate the
+    // stored hash, so the next ops-API call 401s. The 2-arg form must refuse
+    // or rotate — never write a desynced file.
+    const decision = resolveInitAdminPasswordSource(false, { persistedAdminUser: true });
+    expect(decision).not.toBe("generate-new");
+  });
 });
 
 // ─── End-to-end-ish: reused password matches exactly what a prior init wrote ──

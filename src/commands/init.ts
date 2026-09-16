@@ -10,12 +10,19 @@ import { Command } from "commander";
 import { applyOrReportClaudeMdBootstrap, applyOrReportSessionStartHook } from "../doctor-client.js";
 import { hookSettingsPath } from "../hook-install.js";
 import { ClientId, detectClients, renderWiringSummary, wireAntigravity, wireCodex, wireCursor, wireGemini, wirePi } from "../install/clients.js";
-import { DEFAULT_ADMIN_USER, authFetch, defaultKeysDir, readAdminPassFileSecure, resolveAdminUser } from "../lib/auth-resolve.js";
+import { DEFAULT_ADMIN_USER, authFetch, defaultAdminPassPath, defaultKeysDir, readAdminPassFileSecure, resolveAdminUser } from "../lib/auth-resolve.js";
+import {
+  detectPersistedAdminUser,
+  executeAdminPasswordRotate,
+  initAdminPassRefusalMessage,
+  resolveInitAdminPasswordRefuseReason,
+  resolveInitAdminPasswordSource,
+} from "../lib/init-admin-pass.js";
 import { mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
 import * as render from "../render.js";
 import { execSync, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import nacl from "tweetnacl";
@@ -42,7 +49,7 @@ export type InitCli = {
   pubKeyPath: (...args: any[]) => any;
   readyOpsSocketPosture: (...args: any[]) => any;
   resolveHttpPort: (...args: any[]) => any;
-  resolveInitAdminPasswordSource: (...args: any[]) => any;
+  writeAdminPassFile: (...args: any[]) => any;
   resolveOpsBindHost: (...args: any[]) => any;
   resolveOpsPort: (...args: any[]) => any;
   resolveOpsTarget: (...args: any[]) => any;
@@ -152,8 +159,8 @@ function resolveHttpPort(...args: any[]): any {
   return cli.resolveHttpPort(...args);
 }
 
-function resolveInitAdminPasswordSource(...args: any[]): any {
-  return cli.resolveInitAdminPasswordSource(...args);
+function writeAdminPassFile(...args: any[]): any {
+  return cli.writeAdminPassFile(...args);
 }
 
 function resolveOpsBindHost(...args: any[]): any {
@@ -234,6 +241,7 @@ program
   .option("--ops-bind <addr>", "Harper ops API bind address (env: FLAIR_OPS_BIND; default: 127.0.0.1 loopback-only for single-host — pass e.g. 0.0.0.0 for multi-host/Fabric remote admin)")
   .option("--admin-pass <pass>", "Admin password (generated if omitted)")
   .option("--admin-pass-file <path>", "Read admin password from file (chmod 600 recommended)")
+  .option("--reset-admin-pass", "Rotate Harper's persisted admin hash via the operations socket, then write ~/.flair/admin-pass")
   .option("--admin-user <name>", "Admin username when authenticating to an already-running instance via --target/--ops-target (env: FLAIR_ADMIN_USER; default: admin — local bootstrap and Fabric provisioning always create 'admin')")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .option("--data-dir <dir>", "Harper data directory")
@@ -478,11 +486,31 @@ program
       selectedClients.push(clientOpt as ClientId);
     }
 
-    // Admin password: determine from opts, env, or generate
-    // Priority: 1) --admin-pass-file, 2) env vars, 3) reuse existing file, 4) generate new
+    // Admin password: determine from opts, env, reuse, rotate, or generate.
+    // Priority: 1) --admin-pass-file, 2) env vars, 3) --admin-pass, 4) reuse
+    // existing file (#827), 5) refuse / rotate when Harper already has a
+    // persisted user and the file is gone (#837), 6) generate new (fresh).
     let adminPass: string;
     let passwordSource: "generated" | "file" | "env" = "generated";
     let reusedExistingAdminPass = false;
+    let pendingAdminPassRotate = false;
+    const adminPassPath = defaultAdminPassPath();
+    const persistedAdminUser = detectPersistedAdminUser(dataDir);
+    let alreadyRunning = false;
+    try {
+      const res = await fetch(`http://127.0.0.1:${httpPort}/health`, { signal: AbortSignal.timeout(1000) });
+      if (res.status > 0) alreadyRunning = true;
+    } catch { /* not running */ }
+    const explicitCredential = !!(
+      opts.adminPassFile || process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD || opts.adminPass
+    );
+    const passwordCtx = {
+      persistedAdminUser,
+      foreignInstanceOnPort: alreadyRunning && !persistedAdminUser,
+      explicitCredential,
+      resetRequested: !!opts.resetAdminPass,
+      opsSocketAvailable: alreadyRunning || !opts.skipStart,
+    };
 
     // Warn if --admin-pass is passed inline (not from env)
     if (shouldShowInlineSecretWarning(opts.adminPass, false, new Set(["--admin-pass"]), "--admin-pass")) {
@@ -491,6 +519,17 @@ program
         "to keep secrets out of shell history."
       );
     }
+
+    const refuseIfNeeded = (fileExists: boolean) => {
+      const reason = resolveInitAdminPasswordRefuseReason(fileExists, passwordCtx);
+      if (!reason) return;
+      console.error(initAdminPassRefusalMessage(reason, {
+        dataDir,
+        httpPort,
+        adminPassPath,
+      }));
+      process.exit(1);
+    };
 
     // Read from file if provided
     if (opts.adminPassFile) {
@@ -501,37 +540,47 @@ program
         process.exit(1);
       }
       passwordSource = "file";
+      if (opts.resetAdminPass) {
+        refuseIfNeeded(false);
+        pendingAdminPassRotate = resolveInitAdminPasswordSource(false, passwordCtx) === "rotate";
+      } else if (resolveInitAdminPasswordSource(false, passwordCtx) === "re-persist") {
+        writeAdminPassFile(adminPassPath, adminPass + "\n");
+      }
     } else if (process.env.FLAIR_ADMIN_PASS) {
       adminPass = process.env.FLAIR_ADMIN_PASS;
       passwordSource = "env";
+      if (opts.resetAdminPass) {
+        refuseIfNeeded(false);
+        pendingAdminPassRotate = resolveInitAdminPasswordSource(false, passwordCtx) === "rotate";
+      } else if (resolveInitAdminPasswordSource(false, passwordCtx) === "re-persist") {
+        writeAdminPassFile(adminPassPath, adminPass + "\n");
+      }
     } else if (process.env.HDB_ADMIN_PASSWORD) {
       adminPass = process.env.HDB_ADMIN_PASSWORD;
       passwordSource = "env";
+      if (opts.resetAdminPass) {
+        refuseIfNeeded(false);
+        pendingAdminPassRotate = resolveInitAdminPasswordSource(false, passwordCtx) === "rotate";
+      } else if (resolveInitAdminPasswordSource(false, passwordCtx) === "re-persist") {
+        writeAdminPassFile(adminPassPath, adminPass + "\n");
+      }
     } else if (opts.adminPass) {
       // Inline admin pass (deprecated)
       adminPass = opts.adminPass;
-      // Don't generate - don't write to file
       passwordSource = "env"; // Treat same as env for display purposes
+      if (opts.resetAdminPass) {
+        refuseIfNeeded(false);
+        pendingAdminPassRotate = resolveInitAdminPasswordSource(false, passwordCtx) === "rotate";
+      } else if (resolveInitAdminPasswordSource(false, passwordCtx) === "re-persist") {
+        writeAdminPassFile(adminPassPath, adminPass + "\n");
+      }
     } else {
-      const flairDir = join(homedir(), ".flair");
-      const adminPassPath = join(flairDir, "admin-pass");
       passwordSource = "generated";
-
-      if (resolveInitAdminPasswordSource(existsSync(adminPassPath)) === "reuse-existing") {
+      const fileExists = existsSync(adminPassPath);
+      const decision = resolveInitAdminPasswordSource(fileExists, passwordCtx);
+      if (decision === "reuse-existing") {
         // flair#827: an admin-pass file already on disk means a PRIOR `flair
         // init` already bootstrapped Harper's admin user with this password.
-        // HDB_ADMIN_PASSWORD only seeds a brand-new install — Harper does
-        // NOT rotate an existing user's stored password hash from env on
-        // every boot. Generating and overwriting the file here would desync
-        // it from what Harper actually has persisted, breaking ops-API auth
-        // (401 "Login failed") on THIS SAME init run (the agent-seeding call
-        // below) without fixing whatever the re-run was meant to fix — e.g.
-        // `flair doctor`'s ops-bind finding, whose only prescribed remedy is
-        // re-running `flair init`. Re-init must be idempotent here: reuse
-        // the existing password so it's always safe to re-run against a
-        // working install. Rotating the admin password on purpose is a
-        // separate, deliberate operation (see the ops runbook), not a side
-        // effect of re-init.
         try {
           adminPass = readAdminPassFileSecure(adminPassPath);
         } catch (err: any) {
@@ -539,32 +588,31 @@ program
           process.exit(1);
         }
         reusedExistingAdminPass = true;
-      } else {
-        // Generate new password and write to file atomically
+      } else if (decision === "generate-new") {
         adminPass = Buffer.from(nacl.randomBytes(18)).toString("base64url");
-
-        // Atomic write: create temp file in same dir, then rename
-        mkdirSync(flairDir, { recursive: true });
-        const tempPath = mkdtempSync(join(flairDir, ".admin-pass.tmp-"));
-        const finalTempPath = join(tempPath, "admin-pass");
-        try {
-          writeFileSync(finalTempPath, adminPass + "\n", { mode: 0o600 });
-          renameSync(finalTempPath, adminPassPath);
-          rmSync(tempPath, { recursive: true, force: true });
-        } catch (err) {
-          // Clean up temp dir on failure
-          try { rmSync(tempPath, { recursive: true, force: true }); } catch {}
-          throw err;
+        writeAdminPassFile(adminPassPath, adminPass + "\n");
+      } else if (decision === "rotate") {
+        if (!opts.resetAdminPass) {
+          throw new Error("unreachable: rotate without --reset-admin-pass");
         }
+        adminPass = Buffer.from(nacl.randomBytes(18)).toString("base64url");
+        pendingAdminPassRotate = true;
+      } else {
+        refuseIfNeeded(fileExists);
+        // refuseIfNeeded always exits on refuse; keep a throw so TS knows
+        // adminPass is assigned on every path.
+        throw new Error("unreachable: init admin-pass refuse");
       }
     }
     const adminUser = DEFAULT_ADMIN_USER;
 
-    // If we generated (or reused) the password, report where it lives
+    // If we generated (or reused) the password, report where it lives.
+    // A pending rotate writes the file only AFTER alter_user succeeds.
     if (passwordSource === "generated") {
-      const adminPassPath = join(homedir(), ".flair", "admin-pass");
       if (reusedExistingAdminPass) {
         console.log(`Reusing existing admin password from: ${adminPassPath} (flair#827: re-init never rotates it — see the ops runbook to change it deliberately)`);
+      } else if (pendingAdminPassRotate) {
+        console.log(`Will rotate the persisted admin password and write: ${adminPassPath}`);
       } else {
         console.log(`Admin password saved to: ${adminPassPath}`);
       }
@@ -572,8 +620,6 @@ program
     // Check Node.js version
     const major = parseInt(process.version.slice(1), 10);
     if (major < 18) throw new Error(`Node.js >= 18 required (found ${process.version})`);
-
-    let alreadyRunning = false;
 
     // <ROOTPATH>/models — resources/embeddings-provider.ts's resolveModelsDir()
     // tier 2 default; an operator override already in the environment wins
@@ -591,11 +637,9 @@ program
     readyOpsSocketPosture(dataDir);
 
     if (!opts.skipStart) {
-      // Check if already running
-      try {
-        const res = await fetch(`http://127.0.0.1:${httpPort}/health`, { signal: AbortSignal.timeout(1000) });
-        if (res.status > 0) { alreadyRunning = true; console.log(`Harper already running on port ${httpPort} — skipping start`); }
-      } catch { /* not running */ }
+      if (alreadyRunning) {
+        console.log(`Harper already running on port ${httpPort} — skipping start`);
+      }
 
       if (!alreadyRunning) {
         const bin = harperBin();
@@ -727,6 +771,29 @@ program
       // FLAIR_SOCKET_GROUP opt-in). The dir gate above is re-asserted idempotently.
       readyOpsSocketPosture(dataDir);
 
+      if (pendingAdminPassRotate) {
+        // HTTP /Health is not rotate-ready: Harper can answer it before
+        // operations-server accepts. Wait for a live socket, then alter_user,
+        // then write. A dead leftover inode is not-ready — refuse, no write.
+        const opsSocket = join(dataDir, "operations-server");
+        try {
+          await executeAdminPasswordRotate({
+            resetRequested: !!opts.resetAdminPass,
+            username: adminUser,
+            password: adminPass,
+            socketPath: opsSocket,
+            adminPassPath,
+            writeAdminPassFile,
+            onPreflight: (line) => console.log(line),
+          });
+        } catch (err: any) {
+          console.error(err?.message ?? err);
+          process.exit(1);
+        }
+        pendingAdminPassRotate = false;
+        console.log(`Admin password saved to: ${adminPassPath}`);
+      }
+
       // Register launchd service on macOS so Harper survives reboots
       // and `flair restart` / `flair stop` work via launchctl.
       if (process.platform === "darwin") {
@@ -803,6 +870,29 @@ program
           );
         }
       }
+    }
+
+    if (pendingAdminPassRotate) {
+      // Same gate as the post-health path: readiness is the operations
+      // socket accepting a connection, not HTTP. Never fall through to
+      // the HTTP ops path; never write the pass file if rotate did not land.
+      const opsSocket = join(dataDir, "operations-server");
+      try {
+        await executeAdminPasswordRotate({
+          resetRequested: !!opts.resetAdminPass,
+          username: adminUser,
+          password: adminPass,
+          socketPath: opsSocket,
+          adminPassPath,
+          writeAdminPassFile,
+          onPreflight: (line) => console.log(line),
+        });
+      } catch (err: any) {
+        console.error(err?.message ?? err);
+        process.exit(1);
+      }
+      pendingAdminPassRotate = false;
+      console.log(`Admin password saved to: ${adminPassPath}`);
     }
 
     // Persist the instance coordinates so other commands can find AND

@@ -18,6 +18,7 @@ Agents sign every request to Flair with this key. Flair refuses unsigned request
 - The `--admin-pass-file <path>` option allows reading the password from a file (for pre-staged secrets).
 - The `--admin-pass <pass>` option is deprecated due to shell history exposure; use `--admin-pass-file` or environment variables instead. A warning is printed when this option is used.
 - Environment variables `FLAIR_ADMIN_PASS` and `HDB_ADMIN_PASSWORD` are also supported.
+- After the first start, Harper's persisted user hash is the source of truth. `HDB_ADMIN_PASSWORD` will not rotate it. If `~/.flair/admin-pass` is missing and the data dir already has a user, `flair init` refuses rather than writing a file that 401s. Recovery is exact: `flair init --admin-pass-file <path>` if you have the original, or `flair init --reset-admin-pass` to rotate through the operations socket and rewrite the file.
 ## What Flair does *not* own: API keys, tokens, third-party credentials
 
 Things that are NOT Flair's job:

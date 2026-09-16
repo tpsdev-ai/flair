@@ -554,6 +554,85 @@ export type GenerateCandidatesOutcome =
   | { ok: false; reason: "validation_failed" };
 
 /**
+ * Harper's default `storage.maxTransactionOpenTime` (ms). A write-bearing
+ * request transaction that stays open past this ceiling is aborted with
+ * HTTP 422 — not the documented 502/503 execute-mode failures. See
+ * harper `resources/DatabaseTransaction.ts` `transactionOpenTooLongError`
+ * and flair#1263.
+ */
+export const HARPER_MAX_TRANSACTION_OPEN_TIME_MS = 30_000;
+
+/** Harper's status for `transactionOpenTooLongError`. */
+export const TRANSACTION_OPEN_TOO_LONG_STATUS = 422;
+
+/**
+ * Duck-typed release of the Harper request transaction that Resource
+ * dispatch opened around `post()`. Must run AFTER gather and BEFORE
+ * `models.generate()` so a cold generative backend cannot hold a
+ * write-bearing request transaction past `storage.maxTransactionOpenTime`.
+ *
+ * Harper's `transaction()` wrapper explicitly allows an in-handler
+ * `commit({ doneWriting: true })` followed by the wrapper's own final
+ * commit (DatabaseTransaction.commit documents this). Clearing
+ * `ctx.transaction` afterwards stops `models.generate()` accounting
+ * writes from joining the (now closed) request scope via AsyncLocalStorage.
+ */
+export async function releaseRequestTransaction(ctx: {
+  transaction?: { commit?: (opts?: { doneWriting?: boolean }) => unknown };
+} | null | undefined): Promise<void> {
+  const txn = ctx?.transaction;
+  if (!txn) return;
+  try {
+    const committed = txn.commit?.({ doneWriting: true });
+    if (committed && typeof (committed as Promise<unknown>).then === "function") {
+      await committed;
+    }
+  } catch {
+    // Already closed, timed out, or not a Harper transaction — still detach.
+  }
+  if (ctx) ctx.transaction = undefined;
+}
+
+/**
+ * Execute-mode order that keeps the request transaction short: release
+ * (and optional warm) first, generate outside any request txn, then write
+ * inside a fresh short txn. The helper is Harper-free so the 422 ceiling
+ * is unit-testable with an injected delay.
+ */
+export async function runExecuteDistillation<TGenerated, TWritten>(opts: {
+  releaseRequestTxn: () => void | Promise<void>;
+  /** Optional model-load ping; runs after release and before generate. */
+  warm?: () => void | Promise<void>;
+  generate: () => Promise<TGenerated>;
+  write: (generated: TGenerated) => Promise<TWritten>;
+}): Promise<TWritten> {
+  await opts.releaseRequestTxn();
+  if (opts.warm) await opts.warm();
+  const generated = await opts.generate();
+  return opts.write(generated);
+}
+
+/**
+ * Simulated Harper long-transaction monitor for fails-first tests.
+ * A write-bearing transaction that stays open while `generate` runs
+ * past `ceilingMs` is the 422 abort operators hit on a cold backend.
+ *
+ * `generateStartedWhileTxnOpen` is the MAIN interleaving (generate
+ * inside Resource.post()'s request txn). After #1263 it must be false.
+ */
+export function evaluateTxnCeiling(opts: {
+  generateStartedWhileTxnOpen: boolean;
+  generateDurationMs: number;
+  ceilingMs?: number;
+}): { status: 422 } | { ok: true } {
+  const ceilingMs = opts.ceilingMs ?? HARPER_MAX_TRANSACTION_OPEN_TIME_MS;
+  if (opts.generateStartedWhileTxnOpen && opts.generateDurationMs > ceilingMs) {
+    return { status: TRANSACTION_OPEN_TOO_LONG_STATUS };
+  }
+  return { ok: true };
+}
+
+/**
  * Calls generate(), validates the result, and on malformed/mismatched output
  * retries exactly once with an explicit `responseFormat: 'json'` (the
  * "json-fallback path" — spec §3A items 2 & 3: build-time check confirmed

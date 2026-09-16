@@ -4,6 +4,8 @@ Lightweight client for [Flair](https://tps.dev/#flair) — identity, memory, and
 
 Zero heavy dependencies. Just Ed25519 auth + HTTP. Works with any Flair instance, local or remote.
 
+Use **0.18.0 or newer**. Older clients silently drop writes (including against another agent's shared memories); a server upgrade does not fix that. Current `FlairClient` sends `X-Flair-Client` so the server can refuse a declared library older than 0.18.0. See [troubleshooting](../../docs/troubleshooting.md#pre-0180-flair-client--flair-mcp-silently-drops-writes).
+
 ## Install
 
 ```bash

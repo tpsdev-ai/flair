@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=129 options=549
+# commands=129 options=550
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -45,6 +45,9 @@ flair init
     --admin-pass-file <path>
       description: Read admin password from file (chmod 600 recommended)
       attr: adminPassFile
+    --reset-admin-pass
+      description: Rotate Harper's persisted admin hash via the operations socket, then write ~/.flair/admin-pass
+      attr: resetAdminPass
     --admin-user <name>
       description: Admin username when authenticating to an already-running instance via --target/--ops-target (env: FLAIR_ADMIN_USER; default: admin — local bootstrap and Fabric provisioning always create 'admin')
       attr: adminUser
@@ -2551,6 +2554,8 @@ Options:
   --admin-pass <pass>          Admin password (generated if omitted)
   --admin-pass-file <path>     Read admin password from file (chmod 600
                                recommended)
+  --reset-admin-pass           Rotate Harper's persisted admin hash via the
+                               operations socket, then write ~/.flair/admin-pass
   --admin-user <name>          Admin username when authenticating to an
                                already-running instance via
                                --target/--ops-target (env: FLAIR_ADMIN_USER;

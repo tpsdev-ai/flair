@@ -27,6 +27,7 @@ import { homedir, hostname, tmpdir } from "node:os";
 import { join, resolve, sep, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, execFileSync, spawnSync, execSync } from "node:child_process";
+import { createConnection } from "node:net";
 import { createRequire } from "node:module";
 import { createHash, randomUUID, randomBytes } from "node:crypto";
 import { create as tarCreate } from "tar";
@@ -167,9 +168,6 @@ import { ownedPinRefreshShouldReport, refreshOwnedPins, staleSessionStartHookPin
 import {
   classifyDaemonState,
   verifyIdentity,
-  parseProcStatStartTime,
-  procStartTimeToEpochMs,
-  parsePsLstart,
   parseSidecarJson,
   classifyHealthProbe,
   classifyPortOwner,
@@ -185,6 +183,7 @@ import {
   type PortOwnerResult,
   type InstanceMatch,
 } from "./lib/daemon-liveness.js";
+import { readProcessStartTimeMs } from "./lib/process-start-time.js";
 import {
   bindCli as bindFederationCli,
   register as registerFederation,
@@ -199,6 +198,12 @@ import {
   isFederationStatusAuthFailure,
   isFederationStatusAuthRemedy,
 } from "./commands/federation.js";
+import {
+  describeFederationPairHubAccessError,
+  describeFederationPairLocalAccessError,
+  rewriteFederationPairHubAccessError,
+  rewriteFederationPairLocalAccessError,
+} from "./lib/federation-pair-access.js";
 import {
   bindCli as bindMemoryCli,
   register as registerMemory,
@@ -589,6 +594,9 @@ export function buildLaunchdPlist(opts: LaunchdPlistOptions): string {
     <key>PATH</key><string>${e(passFile.path)}</string>
   </dict>`;
 
+  // Umask 077 (decimal 63): Harper bind()s operations-server at
+  // 0777 & ~umask = 0700. Darwin #1704: chmod on that AF_UNIX inode
+  // does not persist 0600. 0700 is owner-only; doctor classify is clean.
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -601,6 +609,8 @@ export function buildLaunchdPlist(opts: LaunchdPlistOptions): string {
   ${environmentVariables}
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>Umask</key>
+  <integer>63</integer>
   <key>StandardOutPath</key><string>${e(join(opts.dataDir, "log", "launchd-stdout.log"))}</string>
   <key>StandardErrorPath</key><string>${e(join(opts.dataDir, "log", "launchd-stderr.log"))}</string>
 </dict>
@@ -1394,34 +1404,37 @@ export function buildDirectSpawnEnv(opts: {
 // at the bottom of this file to preserve the public CLI module surface.
 
 /**
- * Decide the source `flair init` should use for the admin password when no
- * explicit `--admin-pass` / `--admin-pass-file` / env var was given
- * (flair#827).
- *
- * Before this existed, init ALWAYS generated a fresh random password and
- * overwrote `~/.flair/admin-pass` on every run — including a re-run against
- * an install that was already bootstrapped and working (e.g. following
- * `flair doctor`'s ops-bind finding, whose only prescribed remedy is
- * re-running `flair init`). Harper's `HDB_ADMIN_PASSWORD` env var only seeds
- * a brand-new install's user record — it does NOT rotate an existing user's
- * stored password hash on every boot. So overwriting the file desynced it
- * from what Harper actually had persisted, and the very next ops-API call in
- * that SAME init run (seeding the agent) failed with a 401 "Login failed",
- * breaking working auth on an install that had nothing wrong with its
- * credentials.
- *
- * An admin-pass file that already exists on disk IS the working install's
- * password — `flair init` is the only thing that ever writes it — so reuse
- * it instead of generating a new one. That makes re-init idempotent: safe to
- * run again at any time without risking the instance's auth. Deliberately
- * rotating the admin password is a separate operation, not a `flair init`
- * side effect.
+ * Decide the source `flair init` should use for the admin password
+ * (flair#827 + flair#837). Implementation lives in `src/lib/init-admin-pass.ts`
+ * so the persisted-user / rotate / refuse branches stay strictly typed and
+ * unit-tested without expanding this file. Re-exported here so existing
+ * imports of the CLI module surface keep working.
  */
-export function resolveInitAdminPasswordSource(
-  adminPassFileExists: boolean,
-): "reuse-existing" | "generate-new" {
-  return adminPassFileExists ? "reuse-existing" : "generate-new";
-}
+export {
+  resolveInitAdminPasswordSource,
+  detectPersistedAdminUser,
+  initAdminPassRefusalMessage,
+  adminPassDesyncFinding,
+  rotateAdminPasswordViaOpsSocket,
+  prepareAdminPasswordRotate,
+  formatAdminPasswordRotatePreflight,
+  assertExplicitAdminPasswordRotate,
+  assertOwnerOnlyOpsSocket,
+  isOwnerOnlyOpsSocketPosture,
+  callOpsSocket,
+  waitForOpsSocketReady,
+  executeAdminPasswordRotate,
+  probeOpsSocketAccepting,
+  INIT_RESET_ADMIN_PASS_COMMAND,
+  INIT_ADMIN_PASS_FILE_COMMAND,
+  INIT_STOP_FOREIGN_COMMAND,
+  ADMIN_PASS_DESYNC_REMEDY,
+} from "./lib/init-admin-pass.js";
+export type {
+  InitAdminPasswordDecision,
+  InitAdminPasswordContext,
+  InitAdminPasswordRefuseReason,
+} from "./lib/init-admin-pass.js";
 
 // ─── Ops-socket permission posture (flair#763) ─────────────────────────────────
 //
@@ -1571,6 +1584,12 @@ export function applyOpsSocketPosture(opts: ApplyOpsSocketPostureOptions): OpsSo
   let socketApplied = false;
   if (fs.existsSync(opts.socketPath)) {
     fs.chmodSync(opts.socketPath, posture.socketMode);
+    // Darwin: Node chmodSync on a unix socket can report success while
+    // stat still shows 0777 & ~umask. `/bin/chmod` is the same tool the
+    // operator would use; only on the real fs (tests inject FakeFs).
+    if (fs === NODE_SOCKET_FS) {
+      enforceSocketMode(opts.socketPath, posture.socketMode);
+    }
     if (gid !== null) {
       const st = fs.statSync(opts.socketPath);
       try {
@@ -1595,6 +1614,17 @@ export function applyOpsSocketPosture(opts: ApplyOpsSocketPostureOptions): OpsSo
     socketApplied,
     broadGroup,
   };
+}
+
+/** If Node chmodSync did not stick (Darwin unix sockets), use /bin/chmod. */
+function enforceSocketMode(path: string, mode: number): void {
+  const wanted = mode & 0o777;
+  const got = statSync(path).mode & 0o777;
+  if (got === wanted) return;
+  execFileSync("chmod", [wanted.toString(8).padStart(3, "0"), path], {
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 }
 
 /**
@@ -1626,6 +1656,144 @@ function readyOpsSocketPosture(dataDir: string): OpsSocketPostureResult | null {
     );
     return null;
   }
+}
+
+/** How long the first-start path waits for Harper to create operations-server. */
+export const OPS_SOCKET_AFTER_START_TIMEOUT_MS = 10_000;
+const OPS_SOCKET_AFTER_START_POLL_MS = 50;
+
+export interface ReadyOpsSocketPostureAfterStartOptions {
+  timeoutMs?: number;
+  pollMs?: number;
+  /** After the wanted mode is observed, keep watching this long for a replace. */
+  holdMs?: number;
+  /** Socket mtime older than this is leftover; unlink and wait for Harper. */
+  notBeforeMs?: number;
+  /** True when a process is accepting on the socket (not a dead leftover). */
+  isLive?: (path: string) => boolean | Promise<boolean>;
+  sleep?: (ms: number) => Promise<void>;
+  exists?: (path: string) => boolean;
+  ready?: (dataDir: string) => OpsSocketPostureResult | null;
+  stat?: (path: string) => { mode: number; ino: number; mtimeMs: number } | null;
+  unlink?: (path: string) => void;
+}
+
+const OPS_SOCKET_AFTER_START_HOLD_MS = 500;
+
+function statOpsSocket(path: string): { mode: number; ino: number; mtimeMs: number } | null {
+  try {
+    const s = statSync(path);
+    return { mode: s.mode & 0o777, ino: s.ino, mtimeMs: s.mtimeMs };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Drop `operations-server` while no process owns it (after the adopt stop,
+ * before launchd load). Darwin #1704: chmod on the leftover inode never
+ * became 0600 (`9413a80` burned the 10s wait, test still saw 0755). Harper
+ * bind()s a new file; the helper must wait for that one.
+ */
+export function unlinkStaleOpsSocket(dataDir: string): void {
+  try {
+    unlinkSync(join(dataDir, "operations-server"));
+  } catch {
+    /* ENOENT or busy — helper waits for a post-bounce inode */
+  }
+}
+
+/** True when something is accepting on `path` (dead leftover → false). */
+export function probeOpsSocketListening(
+  socketPath: string,
+  timeoutMs = 250,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      sock.removeAllListeners();
+      sock.destroy();
+      resolve(ok);
+    };
+    const sock = createConnection(socketPath);
+    sock.setTimeout(timeoutMs);
+    sock.once("connect", () => finish(true));
+    sock.once("error", () => finish(false));
+    sock.once("timeout", () => finish(false));
+  });
+}
+
+/**
+ * Apply the ops-socket posture after a start that did not go through
+ * `waitForHealth` in this process (the launchd adopt/regenerate bounce).
+ *
+ * Darwin adopt CI on #1704 measured two races:
+ *   1. HTTP can answer before Harper bind()s `operations-server`.
+ *   2. A leftover socket from the pre-adopt direct process makes
+ *      exists() true immediately; chmod'ing that inode is wasted —
+ *      Harper unlinks and bind()s a new file at 0777 & ~umask (0755
+ *      on the canary host). `76a9a15` hit (2): dir 0700, socket 0755.
+ *
+ * Keep applying while the socket exists until the wanted mode *holds*
+ * for `holdMs` (Harper replacing the file during the hold restarts it).
+ * A socket older than `notBeforeMs` is leftover — unlink it, do not chmod it.
+ * A path that exists but is not accepting connections is leftover too
+ * (`b381b5b` Darwin: chmod'd a dead inode to 0600, held 500ms, returned;
+ * Harper then bind()d 0755).
+ */
+export async function readyOpsSocketPostureAfterStart(
+  dataDir: string,
+  opts: ReadyOpsSocketPostureAfterStartOptions = {},
+): Promise<OpsSocketPostureResult | null> {
+  const socketPath = join(dataDir, "operations-server");
+  const timeoutMs = opts.timeoutMs ?? OPS_SOCKET_AFTER_START_TIMEOUT_MS;
+  const pollMs = opts.pollMs ?? OPS_SOCKET_AFTER_START_POLL_MS;
+  const holdMs = opts.holdMs ?? OPS_SOCKET_AFTER_START_HOLD_MS;
+  const notBeforeMs = opts.notBeforeMs;
+  const sleep = opts.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
+  const exists = opts.exists ?? existsSync;
+  const ready = opts.ready ?? readyOpsSocketPosture;
+  const stat = opts.stat ?? statOpsSocket;
+  const unlink = opts.unlink ?? ((p: string) => { try { unlinkSync(p); } catch { /* leftover busy */ } });
+  const isLive = opts.isLive ?? ((p: string) => probeOpsSocketListening(p));
+  const wanted = resolveSocketPosture(process.env.FLAIR_SOCKET_GROUP).socketMode;
+
+  ready(dataDir); // dir gate now — the live socket may not exist yet
+  const deadline = Date.now() + timeoutMs;
+  let last: OpsSocketPostureResult | null = null;
+
+  while (Date.now() < deadline) {
+    if (exists(socketPath)) {
+      const seen = stat(socketPath);
+      const live = await isLive(socketPath);
+      if (!live || (seen && notBeforeMs != null && seen.mtimeMs < notBeforeMs)) {
+        unlink(socketPath);
+        await sleep(pollMs);
+        continue;
+      }
+      last = ready(dataDir);
+      const applied = stat(socketPath);
+      if (applied && applied.mode === wanted) {
+        const holdDeadline = Date.now() + holdMs;
+        let held = true;
+        while (Date.now() < holdDeadline) {
+          await sleep(pollMs);
+          const now = exists(socketPath) ? stat(socketPath) : null;
+          const stillLive = now ? await isLive(socketPath) : false;
+          if (!now || now.mode !== wanted || !stillLive || (notBeforeMs != null && now.mtimeMs < notBeforeMs)) {
+            held = false;
+            break;
+          }
+        }
+        if (held) return last;
+        continue;
+      }
+    }
+    await sleep(pollMs);
+  }
+  return last ?? ready(dataDir);
 }
 
 /**
@@ -3886,7 +4054,7 @@ bindInitCli({
   pubKeyPath,
   readyOpsSocketPosture,
   resolveHttpPort,
-  resolveInitAdminPasswordSource,
+  writeAdminPassFile,
   resolveOpsBindHost,
   resolveOpsPort,
   resolveOpsTarget,
@@ -4326,42 +4494,6 @@ function probePidLiveness(pid: number): PidLiveness {
     if (err?.code === "EPERM") return { kind: "eperm" };
     return { kind: "gone" };
   }
-}
-
-/**
- * The live process's start time in epoch ms, or null when it cannot be read.
- * Linux reads `/proc/<pid>/stat` field 22 (starttime in clock ticks) plus
- * `/proc/uptime`; macOS shells out to `ps -o lstart=`. A null answer degrades
- * to "identity unverified" — it never decides a verdict toward the destructive
- * branch (flair#1454 decision 4).
- */
-function readProcessStartTimeMs(pid: number): number | null {
-  if (process.platform === "linux") {
-    try {
-      const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
-      const starttime = parseProcStatStartTime(stat);
-      if (starttime === null) return null;
-      const uptimeRaw = readFileSync("/proc/uptime", "utf-8").trim().split(/\s+/)[0];
-      const uptime = Number(uptimeRaw);
-      if (!Number.isFinite(uptime)) return null;
-      return procStartTimeToEpochMs(starttime, uptime, Date.now());
-    } catch {
-      return null;
-    }
-  }
-  if (process.platform === "darwin") {
-    try {
-      const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
-        encoding: "utf-8",
-        env: { ...(process.env as Record<string, string>), LC_ALL: "C" },
-        timeout: 2000,
-      });
-      return parsePsLstart(out);
-    } catch {
-      return null;
-    }
-  }
-  return null;
 }
 
 /**
@@ -5344,7 +5476,12 @@ async function repairLaunchdManagement(dataDir: string, port: number): Promise<L
           try { execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe" }); } catch { /* best effort */ }
           try { unlinkSync(plistPath); } catch { /* best effort */ }
         }
-        // Load (unload -> load -> start).
+        // Load (unload -> load -> start). Drop the pre-bounce leftover
+        // socket first so exists() cannot be true on the dead inode —
+        // Darwin #1704 (`9413a80`) chmod'd that leftover for 10s and
+        // still read 0755 after Harper bind()d a new file.
+        const bounceAt = Date.now();
+        unlinkStaleOpsSocket(dataDir);
         ensureLaunchdServiceLoaded(dataDir, (cmd) => execSync(cmd, { stdio: "pipe" }));
         // Verify (fail-loud).
         const after = observeLaunchdManagement(dataDir, port);
@@ -5370,6 +5507,14 @@ async function repairLaunchdManagement(dataDir: string, port: number): Promise<L
             return { kind: "failed", detail: proof.detail, remedy: ["flair stop", "flair doctor --fix"] };
           }
         }
+        // flair#1701: the launchd bounce (adopt and regenerate) is a first
+        // start. The product launcher execs Harper and never chmods, so the
+        // new operations-server lands at 0777 & ~umask. Init / start /
+        // restart already call this after health; without it here, doctor
+        // flags ✗ Ops socket permissions until a second start. Wait for
+        // Harper's bind() (HTTP can answer first); ignore leftover mtimes
+        // older than bounceAt.
+        await readyOpsSocketPostureAfterStart(dataDir, { notBeforeMs: bounceAt });
         const detail = plan.kind === "adopt"
           ? `adopted the direct-spawned instance into launchd (bounced the live instance): ${after.detail}`
           : after.detail;
@@ -6170,6 +6315,13 @@ export {
   rewriteFederationStatusFetchFailed,
   isFederationStatusAuthFailure,
   isFederationStatusAuthRemedy,
+};
+
+export {
+  describeFederationPairHubAccessError,
+  describeFederationPairLocalAccessError,
+  rewriteFederationPairHubAccessError,
+  rewriteFederationPairLocalAccessError,
 };
 
 export {

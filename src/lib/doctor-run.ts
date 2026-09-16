@@ -40,8 +40,9 @@ import {
   type Harness,
   type HookMutationResult,
 } from "../hook-install.js";
-import { staleHookRemedy, staleMcpClientPins, staleSessionStartHookPins } from "./owned-pins.js";
+import { findUnsafeWiredPins, staleHookRemedy, staleMcpClientPins, staleSessionStartHookPins } from "./owned-pins.js";
 import { flairCliVersion, isResolvedVersion } from "./mcp-spec.js";
+import { unsafeAdapterPinDetail } from "./stale-client-pin.js";
 import {
   isDetached,
   plistCarriesInlineAdminPassword,
@@ -150,6 +151,21 @@ function runMcpBlock(ctx: DoctorRunContext): DoctorCheckResult {
   // flair#1485 / Bugbot: a failed MCP pin refresh used to print nothing and
   // leave the old @tpsdev-ai/flair-mcp pin in place. Presence is not
   // currency — the same catalogue upgrade refreshes must fail here too.
+  // flair#1383: read the pins that are actually installed — flair-mcp
+  // and flair-client — in wired host configs and cwd package.json.
+  // Independent of "pin !== CLI version": a current MCP pin next to
+  // flair-client@0.17.0 still silently drops writes.
+  const unsafeWired = findUnsafeWiredPins(ctx.homeDir, ctx.cwd).filter((p) =>
+    p.source === "package.json"
+    || (p.source === "mcp-client" && wired.includes(p.id as (typeof MCP_CLIENT_IDS)[number])),
+  );
+  if (unsafeWired.length > 0) {
+    const first = unsafeWired[0]!;
+    return result(id, label, "fail", {
+      detail: unsafeAdapterPinDetail(first.surface, first.id, first.version, first.package),
+      remedy: "flair upgrade",
+    });
+  }
   const expected = flairCliVersion();
   if (isResolvedVersion(expected)) {
     const stale = staleMcpClientPins(ctx.homeDir, expected)
@@ -262,6 +278,16 @@ function runSessionStartHook(ctx: DoctorRunContext): DoctorCheckResult {
   // session. Compare against flairCliVersion() — not the MCP client pin —
   // so two equally-stale pins cannot hide each other. Same owned-pin
   // catalogue `flair upgrade` refreshes.
+  const unsafeHook = findUnsafeWiredPins(ctx.homeDir).filter((p) =>
+    p.source === "session-start-hook" && harnesses.includes(p.id as Harness),
+  );
+  if (unsafeHook.length > 0) {
+    const first = unsafeHook[0]!;
+    return result(id, label, "fail", {
+      detail: unsafeAdapterPinDetail(first.surface, first.id, first.version, first.package),
+      remedy: "flair upgrade",
+    });
+  }
   const expected = flairCliVersion();
   if (isResolvedVersion(expected)) {
     const stale = staleSessionStartHookPins(ctx.homeDir, expected)

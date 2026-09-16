@@ -1,0 +1,1 @@
+- **Orphaned ephemeral test Harpers are killed and removed on the next `startHarper`.** Recycled pids fail closed via the same start-time match the production daemon already uses. Darwin `ps lstart` is self-calibrated so a non-UTC host cannot hide an orphan. (Refs #1372)

@@ -8,6 +8,10 @@
  * never toward a fabricated ranking.
  */
 
+import { parseMetalEngaged, type MetalReadback } from "../../resources/embed-gpu.ts";
+
+export { parseMetalEngaged, type MetalReadback } from "../../resources/embed-gpu.ts";
+
 /** FLAIR_EMBED_THREADS=1 must be at least this many times slower than 8
  *  (tok/s_8 / tok/s_1 >= 1.3). A sweep over a setting that never applied
  *  must refuse to print a ranking. */
@@ -271,30 +275,6 @@ export function decidePositiveControl(opts: {
       `(mean ${measured.mean.toFixed(1)}) — not within variance`,
     expected,
     measured,
-  };
-}
-
-const METAL_INIT_RE = /ggml_metal_init/i;
-const METAL_BUFFER_RE = /compute[- ]buffer/i;
-
-export interface MetalReadback {
-  engaged: boolean;
-  hasInit: boolean;
-  hasComputeBuffer: boolean;
-  evidence: string[];
-}
-
-/** Prove GPU engagement from the engine log. Requested ≠ used. */
-export function parseMetalEngaged(log: string): MetalReadback {
-  const lines = (log ?? "").split(/\r?\n/);
-  const evidence = lines.filter((l) => METAL_INIT_RE.test(l) || METAL_BUFFER_RE.test(l));
-  const hasInit = evidence.some((l) => METAL_INIT_RE.test(l));
-  const hasComputeBuffer = evidence.some((l) => METAL_BUFFER_RE.test(l));
-  return {
-    engaged: hasInit && hasComputeBuffer,
-    hasInit,
-    hasComputeBuffer,
-    evidence: evidence.slice(0, 12),
   };
 }
 

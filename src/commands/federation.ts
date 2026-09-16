@@ -20,6 +20,10 @@ import * as render from "../render.js";
 import { runFederationVerify } from "../federation-verify.js";
 import { resolveHubPeerIdentity } from "../lib/federation-pair-identity.js";
 import {
+  rewriteFederationPairHubAccessError,
+  rewriteFederationPairLocalAccessError,
+} from "../lib/federation-pair-access.js";
+import {
   defaultAdminPassPath,
   isLocalBase,
   resolveAdminUser,
@@ -1112,9 +1116,25 @@ export function register(program: Command): void {
     .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
     .action(async (hubUrl: string, opts: any) => {
       const target = resolveTarget(opts);
-      const baseUrl = target ? target.replace(/\/$/, "") : undefined;
+      // One URL for the identity GET and the named error. resolveBaseUrl
+      // honors --target / FLAIR_TARGET / FLAIR_URL / --port — the same host
+      // the GET actually probes (do not cite resolveBaseUrl only in the
+      // rewriter while api() falls through to resolveHttpPort({})).
+      const identityUrl = resolveBaseUrl(opts).replace(/\/$/, "");
       try {
-        const instance = await api("GET", "/FederationInstance", undefined, baseUrl ? { baseUrl } : undefined);
+        // flair#820: the identity GET is pair's first step and is allowAdmin.
+        // A 403 here is LOCAL (or --target REMOTE), never the hub handshake.
+        // Rewrite Harper's raw AccessViolation into a named role/grant error.
+        let instance: any;
+        try {
+          instance = await api("GET", "/FederationInstance", undefined, { baseUrl: identityUrl });
+        } catch (err: unknown) {
+          throw rewriteFederationPairLocalAccessError(err, {
+            url: identityUrl,
+            side: target ? "REMOTE" : "LOCAL",
+            agentId: process.env.FLAIR_AGENT_ID,
+          });
+        }
         console.log(`${target ? "Remote" : "Local"} instance: ${instance.id} (${instance.role})`);
 
         // Determine token source: --token-from wins if both specified
@@ -1172,6 +1192,11 @@ export function register(program: Command): void {
 
         if (!res.ok) {
           const text = await res.text().catch(() => "");
+          const hubDenial = rewriteFederationPairHubAccessError(res.status, hubUrl, text);
+          if (hubDenial) {
+            console.error(`Error: ${hubDenial.message}`);
+            process.exit(1);
+          }
           console.error(`Pairing failed: ${res.status} ${text}`);
           process.exit(1);
         }

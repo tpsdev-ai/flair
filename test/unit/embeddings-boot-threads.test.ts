@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { resolveEmbedThreads, resolveEmbedGpuLayers } from "../../resources/embeddings-boot.ts";
+import { resolveEmbedGpuChoice } from "../../resources/embed-gpu.ts";
 
 /**
  * resolveEmbedThreads() (flair#1330) — the value embeddings-boot passes to
@@ -99,7 +100,7 @@ describe("embeddings-boot register() plumbing (flair#1330)", () => {
   });
 });
 
-describe("resolveEmbedGpuLayers (flair#1436 — measurement pin, default unchanged)", () => {
+describe("resolveEmbedGpuLayers (flair#1437 — stated derived default)", () => {
   const SAVED = process.env.FLAIR_EMBED_GPU_LAYERS;
 
   beforeEach(() => {
@@ -111,19 +112,24 @@ describe("resolveEmbedGpuLayers (flair#1436 — measurement pin, default unchang
     else process.env.FLAIR_EMBED_GPU_LAYERS = SAVED;
   });
 
-  it("unset → undefined (omit the field; HFE default 0 is unchanged)", () => {
-    expect(resolveEmbedGpuLayers({})).toBeUndefined();
-    expect(resolveEmbedGpuLayers()).toBeUndefined();
+  it("unset + no Metal → 0 (always pass a number; never omit for a silent HFE 0)", () => {
+    expect(resolveEmbedGpuLayers({}, { usable: false })).toBe(0);
+    expect(resolveEmbedGpuChoice({}, { usable: false }).source).toBe("default");
   });
 
-  it("honors 0 and 99", () => {
-    expect(resolveEmbedGpuLayers({ FLAIR_EMBED_GPU_LAYERS: "0" })).toBe(0);
-    expect(resolveEmbedGpuLayers({ FLAIR_EMBED_GPU_LAYERS: "99" })).toBe(99);
+  it("unset + usable Metal → 99, source=detected", () => {
+    expect(resolveEmbedGpuLayers({}, { usable: true })).toBe(99);
+    expect(resolveEmbedGpuChoice({}, { usable: true }).source).toBe("detected");
   });
 
-  it("invalid values fall through to omit (same as unset)", () => {
+  it("honors 0 and 99 as env overrides", () => {
+    expect(resolveEmbedGpuLayers({ FLAIR_EMBED_GPU_LAYERS: "0" }, { usable: true })).toBe(0);
+    expect(resolveEmbedGpuLayers({ FLAIR_EMBED_GPU_LAYERS: "99" }, { usable: false })).toBe(99);
+  });
+
+  it("invalid values fall through to the derived default (not omit)", () => {
     for (const raw of ["", "   ", "abc", "-1", "1.5", "NaN", "99gpu"]) {
-      expect(resolveEmbedGpuLayers({ FLAIR_EMBED_GPU_LAYERS: raw })).toBeUndefined();
+      expect(resolveEmbedGpuLayers({ FLAIR_EMBED_GPU_LAYERS: raw }, { usable: false })).toBe(0);
     }
   });
 
@@ -133,16 +139,17 @@ describe("resolveEmbedGpuLayers (flair#1436 — measurement pin, default unchang
   });
 });
 
-describe("embeddings-boot register() gpuLayers plumbing (flair#1436)", () => {
-  it("omits gpuLayers unless resolveEmbedGpuLayers() returns a number — no synthesized default", () => {
+describe("embeddings-boot register() gpuLayers plumbing (flair#1437)", () => {
+  it("always passes a stated gpuLayers number into HFE register() config", () => {
     const src = readFileSync(
       join(import.meta.dir, "..", "..", "resources", "embeddings-boot.ts"),
       "utf8",
     );
-    expect(src).toContain("const gpuLayers = resolveEmbedGpuLayers();");
-    expect(src).toContain("...(gpuLayers !== undefined ? { gpuLayers } : {})");
-    // Must not hardcode a product default (that is #1437).
-    expect(src).not.toMatch(/gpuLayers:\s*99/);
-    expect(src).not.toMatch(/gpuLayers:\s*resolveEmbedGpuLayers\(\)\s*\?\?/);
+    expect(src).toContain("resolveEmbedGpuChoice");
+    expect(src).toContain("gpuLayers: choice.gpuLayers");
+    expect(src).toContain("applyEmbedGpuChoice");
+    expect(src).toContain("formatEmbedGpuLogLine");
+    // The omit-when-unset pin is gone — a synthesized silent default is the bug.
+    expect(src).not.toContain("...(gpuLayers !== undefined ? { gpuLayers } : {})");
   });
 });

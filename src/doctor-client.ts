@@ -947,6 +947,57 @@ export function checkSessionStartHook(homeDir: string, settingsPath?: string): S
 // wiring carries — the mcpServerSpec() written into a client's MCP config
 // (pinned since #1135). Detect it there instead.
 
+export type FlairAdapterPackage = "flair-mcp" | "flair-client";
+
+export interface FlairPackagePin {
+  package: FlairAdapterPackage;
+  /** Declared version with range prefixes stripped (`^0.17.0` → `0.17.0`). */
+  version: string;
+}
+
+const FLAIR_AT_SPEC_RE = /@tpsdev-ai\/(flair-mcp|flair-client)@([0-9A-Za-z][^\s"'\],]*)/g;
+const FLAIR_JSON_DEP_RE = /"@tpsdev-ai\/(flair-mcp|flair-client)"\s*:\s*"([^"]+)"/g;
+
+/** Strip npm range / workspace prefixes so `^0.17.0` compares as `0.17.0`. */
+export function normalizeDeclaredPinVersion(raw: string): string | null {
+  if (typeof raw !== "string") return null;
+  let v = raw.trim();
+  if (!v) return null;
+  v = v.replace(/^(workspace|npm):/, "");
+  v = v.replace(/^[\^~>=<\s]+/, "");
+  v = v.replace(/^v/, "");
+  // Require X.Y.Z so `latest` / tags / bare names are not pins.
+  const m = v.match(/^(\d+\.\d+\.\d+[^\s"'\],]*)/);
+  return m ? m[1]! : null;
+}
+
+/**
+ * Every `@tpsdev-ai/flair-mcp` / `@tpsdev-ai/flair-client` pin in a wiring
+ * string or package.json. Covers `pkg@<ver>` specs (MCP args, hook commands)
+ * and `"pkg": "<ver>"` dependency fields. Bare / unpinned / `latest` specs
+ * contribute nothing.
+ *
+ * flair#1383: doctor must read the actual installed pins, not infer age
+ * from "pin !== CLI version".
+ */
+export function extractFlairPackagePins(text: string): FlairPackagePin[] {
+  if (typeof text !== "string") return [];
+  const out: FlairPackagePin[] = [];
+  const seen = new Set<string>();
+  const add = (pkg: string, rawVer: string): void => {
+    const version = normalizeDeclaredPinVersion(rawVer);
+    if (!version) return;
+    const name = pkg as FlairAdapterPackage;
+    const key = `${name}@${version}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ package: name, version });
+  };
+  for (const m of text.matchAll(FLAIR_AT_SPEC_RE)) add(m[1]!, m[2]!);
+  for (const m of text.matchAll(FLAIR_JSON_DEP_RE)) add(m[1]!, m[2]!);
+  return out;
+}
+
 /**
  * Extract a pinned `@tpsdev-ai/flair-mcp` version from any wiring string — a
  * client MCP `args` array, a Codex TOML args line, or a SessionStart hook
@@ -958,11 +1009,7 @@ export function checkSessionStartHook(homeDir: string, settingsPath?: string): S
  * establishes that flair-mcp is wired but contributes no version.
  */
 export function extractFlairMcpPin(text: string): string | null {
-  if (typeof text !== "string") return null;
-  // `@tpsdev-ai/flair-mcp@<version>`; the version token runs until the first
-  // character that can't appear in a spec embedded in JSON args / TOML.
-  const m = text.match(/@tpsdev-ai\/flair-mcp@([0-9A-Za-z][^\s"'\],]*)/);
-  return m ? m[1]! : null;
+  return extractFlairPackagePins(text).find((p) => p.package === "flair-mcp")?.version ?? null;
 }
 
 /**

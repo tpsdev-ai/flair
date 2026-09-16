@@ -162,6 +162,14 @@ the four install-tree assertions (`scripts/check-global-install-lockfile.mjs
 (`scripts/ci/check-instance-boot.sh`: init with a 0600 pass file → adopt → `/Health`
 from the supervised process → `flair doctor` → descriptors → clean stop).
 
+It then installs the published `@tpsdev-ai/flair-mcp@<ver>` and
+`@tpsdev-ai/flair-client@<ver>` (exact version, never a dist-tag) into a throwaway
+prefix, writes the documented host config (`npx -y @tpsdev-ai/flair-mcp@<ver>`),
+and drives a real `memory_store` → `memory_get` tool-call against the canary-booted
+instance (`scripts/ci/check-plugin-canary.mjs`). That is the path a host actually
+runs — not an in-process import of this checkout. A missing registry package, a
+host that never comes up, or any other unmeasurable result is a FAIL, not a skip.
+
 Nothing about the canary is optional. There is no `continue-on-error`, and an
 unmeasurable run (registry lag, runner outage) is a FAIL, not a skip — a check that did
 not run must not read as a pass.

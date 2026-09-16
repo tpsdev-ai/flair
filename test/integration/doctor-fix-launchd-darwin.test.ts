@@ -705,6 +705,20 @@ test.skipIf(!isDarwin)(
     assertSecretFreePlist(sb.plistPath);
     await assertNoRebootstrap(sb, before);
     expect(result.stdout + result.stderr).toMatch(/adopt|bounc/i);
+    // flair#1701: the adopt bounce is the first launchd start. Harper recreates
+    // operations-server at 0777 & ~umask. Darwin chmod on that AF_UNIX inode
+    // does not persist 0600 (#1704 CI). launchd Umask 077 makes bind() 0700;
+    // doctor classify treats 0700 and 0600 as default-clean. Group/world bits
+    // (0755) are the canary-red finding — do not allow-list those.
+    const socketPath = join(sb.dataDir, "operations-server");
+    expect(existsSync(socketPath), "ops socket must exist after adopt").toBe(true);
+    expect(statSync(sb.dataDir).mode & 0o777, "data dir must be 0700 after first adopt start").toBe(0o700);
+    const socketMode = statSync(socketPath).mode & 0o777;
+    expect(socketMode & 0o077, "ops socket must be owner-only after first adopt start").toBe(0);
+    expect(
+      socketMode === 0o600 || socketMode === 0o700,
+      `ops socket must be 0600 or 0700 after first adopt start, got ${socketMode.toString(8)}`,
+    ).toBe(true);
     await new Promise((r) => setTimeout(r, 2_000));
     expect(instancePid(sb.dataDir, sb.httpPort), "PID must stay stable after adopt (no KeepAlive restart loop)").toBe(
       managed.pid,
