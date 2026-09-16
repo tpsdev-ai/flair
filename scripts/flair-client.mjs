@@ -3,17 +3,83 @@
  * Flair CLI client with Ed25519 TPS auth.
  * All embeddings are handled server-side (in-process in Harper).
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { webcrypto } from 'node:crypto';
 const { subtle } = webcrypto;
 
 const FLAIR_URL = process.env.FLAIR_URL || 'http://127.0.0.1:9926';
 const AGENT_ID = process.env.FLAIR_AGENT_ID || 'flint';
-const PRIV_KEY_PATH = process.env.FLAIR_PRIV_KEY || `${process.env.HOME}/.tps/secrets/flair/${AGENT_ID}-priv.key`;
+
+// RFC 8410 PKCS8 prefix for an Ed25519 private key carrying a bare 32-byte seed.
+// `flair agent add` writes that bare seed; wrapping it here means no operator ever
+// has to hand-construct this DER again (flair#1736).
+const PKCS8_SEED_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
+
+/**
+ * Candidate private-key files for `agentId`, in probe order (flair#1736).
+ *
+ * `flair agent add` writes a raw 32-byte seed to ~/.flair/keys/<agent>.key; the
+ * legacy TPS layout is ~/.tps/secrets/flair/<agent>-priv.key (base64 PKCS8).
+ * FLAIR_PRIV_KEY is an explicit override and wins outright. The order mirrors the
+ * CLI's own resolveKeyPath() so the script and the CLI agree on where to look.
+ */
+function keyPathCandidates(agentId) {
+  if (process.env.FLAIR_PRIV_KEY) return [process.env.FLAIR_PRIV_KEY];
+  const homes = [...new Set([homedir(), process.env.HOME].filter(Boolean))];
+  const out = [];
+  if (process.env.FLAIR_KEY_DIR) out.push(join(process.env.FLAIR_KEY_DIR, `${agentId}.key`));
+  for (const home of homes) {
+    out.push(join(home, '.flair', 'keys', `${agentId}.key`));
+    out.push(join(home, '.tps', 'secrets', 'flair', `${agentId}-priv.key`));
+  }
+  return out;
+}
+
+/** First candidate that exists, or null. */
+function resolveKeyPath(agentId) {
+  return keyPathCandidates(agentId).find((p) => existsSync(p)) ?? null;
+}
+
+/**
+ * Load an Ed25519 signing key from `path`, accepting every shape Flair writes:
+ *   - a raw 32-byte seed (what `flair agent add` writes to ~/.flair/keys/*.key)
+ *   - base64 of that raw seed
+ *   - base64 PKCS8 DER (the legacy ~/.tps/secrets/flair/*-priv.key shape)
+ *
+ * A bare seed is wrapped in the fixed PKCS8 prefix above. Anything unrecognised
+ * throws an error that names the ENCODING problem (path + byte length), never the
+ * key bytes — so a malformed key cannot masquerade as an authentication failure.
+ */
+async function loadPrivateKeyFromFile(path) {
+  const raw = readFileSync(path);
+  const asPkcs8 = (der) => subtle.importKey('pkcs8', der, { name: 'Ed25519' }, false, ['sign']);
+  try {
+    if (raw.length === 32) return await asPkcs8(Buffer.concat([PKCS8_SEED_PREFIX, raw]));
+    const decoded = Buffer.from(raw.toString('utf8').trim(), 'base64');
+    if (decoded.length === 32) return await asPkcs8(Buffer.concat([PKCS8_SEED_PREFIX, decoded]));
+    if (decoded.length > 0) return await asPkcs8(decoded);
+    throw new Error('no bytes after base64 decode');
+  } catch (err) {
+    throw new Error(
+      `cannot load private key at ${path} (${raw.length} bytes): not a recognised Ed25519 key encoding. ` +
+        `Expected a raw 32-byte seed (what 'flair agent add' writes) or base64/DER PKCS8. ` +
+        `This is a key ENCODING problem, not an authentication failure. (${err.message})`,
+    );
+  }
+}
 
 async function loadPrivateKey() {
-  const b64 = readFileSync(PRIV_KEY_PATH, 'utf8').trim();
-  return subtle.importKey('pkcs8', Buffer.from(b64, 'base64'), { name: 'Ed25519' }, false, ['sign']);
+  const path = resolveKeyPath(AGENT_ID);
+  if (!path) {
+    throw new Error(
+      `no private key found for agent '${AGENT_ID}'. Looked in:\n  ` +
+        keyPathCandidates(AGENT_ID).join('\n  ') +
+        `\nRegister one with 'flair agent add ${AGENT_ID}', or point FLAIR_PRIV_KEY at its path.`,
+    );
+  }
+  return loadPrivateKeyFromFile(path);
 }
 
 async function flairFetch(method, path, body = null) {
