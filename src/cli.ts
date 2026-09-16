@@ -27,6 +27,7 @@ import { homedir, hostname, tmpdir } from "node:os";
 import { join, resolve, sep, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, execFileSync, spawnSync, execSync } from "node:child_process";
+import { createConnection } from "node:net";
 import { createRequire } from "node:module";
 import { createHash, randomUUID, randomBytes } from "node:crypto";
 import { create as tarCreate } from "tar";
@@ -1656,6 +1657,8 @@ export interface ReadyOpsSocketPostureAfterStartOptions {
   holdMs?: number;
   /** Socket mtime older than this is leftover; unlink and wait for Harper. */
   notBeforeMs?: number;
+  /** True when a process is accepting on the socket (not a dead leftover). */
+  isLive?: (path: string) => boolean | Promise<boolean>;
   sleep?: (ms: number) => Promise<void>;
   exists?: (path: string) => boolean;
   ready?: (dataDir: string) => OpsSocketPostureResult | null;
@@ -1688,6 +1691,28 @@ export function unlinkStaleOpsSocket(dataDir: string): void {
   }
 }
 
+/** True when something is accepting on `path` (dead leftover → false). */
+export function probeOpsSocketListening(
+  socketPath: string,
+  timeoutMs = 250,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      sock.removeAllListeners();
+      sock.destroy();
+      resolve(ok);
+    };
+    const sock = createConnection(socketPath);
+    sock.setTimeout(timeoutMs);
+    sock.once("connect", () => finish(true));
+    sock.once("error", () => finish(false));
+    sock.once("timeout", () => finish(false));
+  });
+}
+
 /**
  * Apply the ops-socket posture after a start that did not go through
  * `waitForHealth` in this process (the launchd adopt/regenerate bounce).
@@ -1702,6 +1727,9 @@ export function unlinkStaleOpsSocket(dataDir: string): void {
  * Keep applying while the socket exists until the wanted mode *holds*
  * for `holdMs` (Harper replacing the file during the hold restarts it).
  * A socket older than `notBeforeMs` is leftover — unlink it, do not chmod it.
+ * A path that exists but is not accepting connections is leftover too
+ * (`b381b5b` Darwin: chmod'd a dead inode to 0600, held 500ms, returned;
+ * Harper then bind()d 0755).
  */
 export async function readyOpsSocketPostureAfterStart(
   dataDir: string,
@@ -1717,6 +1745,7 @@ export async function readyOpsSocketPostureAfterStart(
   const ready = opts.ready ?? readyOpsSocketPosture;
   const stat = opts.stat ?? statOpsSocket;
   const unlink = opts.unlink ?? ((p: string) => { try { unlinkSync(p); } catch { /* leftover busy */ } });
+  const isLive = opts.isLive ?? ((p: string) => probeOpsSocketListening(p));
   const wanted = resolveSocketPosture(process.env.FLAIR_SOCKET_GROUP).socketMode;
 
   ready(dataDir); // dir gate now — the live socket may not exist yet
@@ -1726,7 +1755,8 @@ export async function readyOpsSocketPostureAfterStart(
   while (Date.now() < deadline) {
     if (exists(socketPath)) {
       const seen = stat(socketPath);
-      if (seen && notBeforeMs != null && seen.mtimeMs < notBeforeMs) {
+      const live = await isLive(socketPath);
+      if (!live || (seen && notBeforeMs != null && seen.mtimeMs < notBeforeMs)) {
         unlink(socketPath);
         await sleep(pollMs);
         continue;
@@ -1739,7 +1769,8 @@ export async function readyOpsSocketPostureAfterStart(
         while (Date.now() < holdDeadline) {
           await sleep(pollMs);
           const now = exists(socketPath) ? stat(socketPath) : null;
-          if (!now || now.mode !== wanted || (notBeforeMs != null && now.mtimeMs < notBeforeMs)) {
+          const stillLive = now ? await isLive(socketPath) : false;
+          if (!now || now.mode !== wanted || !stillLive || (notBeforeMs != null && now.mtimeMs < notBeforeMs)) {
             held = false;
             break;
           }

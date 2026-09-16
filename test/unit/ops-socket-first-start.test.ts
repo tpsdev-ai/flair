@@ -22,6 +22,7 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -118,6 +119,7 @@ describe("first-start ops-socket posture on a fresh data dir (flair#1701)", () =
       pollMs: 10,
       timeoutMs: 1_000,
       holdMs: 20,
+      isLive: () => existsSync(socketPath),
     });
     await new Promise((r) => setTimeout(r, 40));
     writeFileSync(socketPath, "");
@@ -143,6 +145,7 @@ describe("first-start ops-socket posture on a fresh data dir (flair#1701)", () =
       pollMs: 10,
       timeoutMs: 1_000,
       holdMs: 80,
+      isLive: () => existsSync(socketPath),
     });
     await new Promise((r) => setTimeout(r, 20));
     unlinkSync(socketPath);
@@ -171,6 +174,7 @@ describe("first-start ops-socket posture on a fresh data dir (flair#1701)", () =
       timeoutMs: 1_000,
       holdMs: 20,
       notBeforeMs: 1_000,
+      isLive: () => existsSync(socketPath),
       unlink: (p) => {
         unlinked.push(p);
         unlinkSync(p);
@@ -200,6 +204,42 @@ describe("first-start ops-socket posture on a fresh data dir (flair#1701)", () =
     expect(applied?.socketApplied).toBe(true);
     expect(modeOf(dataDir)).toBe(0o700);
     expect(modeOf(socketPath)).toBe(0o600);
+  });
+
+  test("FAILS-FIRST: a dead leftover is not live; helper waits for a listening socket", async () => {
+    // Darwin adopt CI on b381b5b: leftover existed, chmod reported 0600,
+    // hold 500ms returned; Harper then bind()d 0755. exists() is not
+    // enough — only an accepting unix socket is the post-bounce inode.
+    const dataDir = mkdtempSync(join(tmpdir(), "flair-1701-ops-socket-listen-"));
+    temps.push(dataDir);
+    chmodSync(dataDir, 0o755);
+    const socketPath = join(dataDir, "operations-server");
+    writeFileSync(socketPath, "dead-leftover");
+    chmodSync(socketPath, 0o755);
+    const appearing = readyOpsSocketPostureAfterStart(dataDir, {
+      pollMs: 20,
+      timeoutMs: 1_500,
+      holdMs: 20,
+    });
+    const staleGoneBy = Date.now() + 400;
+    while (existsSync(socketPath) && Date.now() < staleGoneBy) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    try { unlinkSync(socketPath); } catch { /* helper already dropped leftover */ }
+    const server = createServer();
+    await new Promise<void>((res, rej) => {
+      server.once("error", rej);
+      server.listen(socketPath, () => res());
+    });
+    chmodSync(socketPath, 0o755);
+    try {
+      const applied = await appearing;
+      expect(applied?.socketApplied).toBe(true);
+      expect(modeOf(dataDir)).toBe(0o700);
+      expect(modeOf(socketPath)).toBe(0o600);
+    } finally {
+      await new Promise<void>((res) => server.close(() => res()));
+    }
   });
 
   test("FAILS-FIRST: unlinkStaleOpsSocket removes a leftover operations-server", () => {
