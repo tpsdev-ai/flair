@@ -1571,6 +1571,12 @@ export function applyOpsSocketPosture(opts: ApplyOpsSocketPostureOptions): OpsSo
   let socketApplied = false;
   if (fs.existsSync(opts.socketPath)) {
     fs.chmodSync(opts.socketPath, posture.socketMode);
+    // Darwin: Node chmodSync on a unix socket can report success while
+    // stat still shows 0777 & ~umask. `/bin/chmod` is the same tool the
+    // operator would use; only on the real fs (tests inject FakeFs).
+    if (fs === NODE_SOCKET_FS) {
+      enforceSocketMode(opts.socketPath, posture.socketMode);
+    }
     if (gid !== null) {
       const st = fs.statSync(opts.socketPath);
       try {
@@ -1595,6 +1601,17 @@ export function applyOpsSocketPosture(opts: ApplyOpsSocketPostureOptions): OpsSo
     socketApplied,
     broadGroup,
   };
+}
+
+/** If Node chmodSync did not stick (Darwin unix sockets), use /bin/chmod. */
+function enforceSocketMode(path: string, mode: number): void {
+  const wanted = mode & 0o777;
+  const got = statSync(path).mode & 0o777;
+  if (got === wanted) return;
+  execFileSync("chmod", [wanted.toString(8).padStart(3, "0"), path], {
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 }
 
 /**
@@ -1635,20 +1652,38 @@ const OPS_SOCKET_AFTER_START_POLL_MS = 50;
 export interface ReadyOpsSocketPostureAfterStartOptions {
   timeoutMs?: number;
   pollMs?: number;
+  /** After the wanted mode is observed, keep watching this long for a replace. */
+  holdMs?: number;
   sleep?: (ms: number) => Promise<void>;
   exists?: (path: string) => boolean;
   ready?: (dataDir: string) => OpsSocketPostureResult | null;
+  stat?: (path: string) => { mode: number; ino: number } | null;
+}
+
+const OPS_SOCKET_AFTER_START_HOLD_MS = 500;
+
+function statOpsSocket(path: string): { mode: number; ino: number } | null {
+  try {
+    const s = statSync(path);
+    return { mode: s.mode & 0o777, ino: s.ino };
+  } catch {
+    return null;
+  }
 }
 
 /**
  * Apply the ops-socket posture after a start that did not go through
  * `waitForHealth` in this process (the launchd adopt/regenerate bounce).
  *
- * HTTP can be up before Harper bind()s `operations-server`. Applying once
- * immediately tightens the directory gate; applying again after the socket
- * appears is what sets 0600. Darwin CI on #1704 measured this: after the
- * bounce the dir was 0700 and the socket was still 0755 when the helper
- * ran before the file existed.
+ * Darwin adopt CI on #1704 measured two races:
+ *   1. HTTP can answer before Harper bind()s `operations-server`.
+ *   2. A leftover socket from the pre-adopt direct process makes
+ *      exists() true immediately; chmod'ing that inode is wasted —
+ *      Harper unlinks and bind()s a new file at 0777 & ~umask (0755
+ *      on the canary host). `76a9a15` hit (2): dir 0700, socket 0755.
+ *
+ * Keep applying while the socket exists until the wanted mode *holds*
+ * for `holdMs` (Harper replacing the file during the hold restarts it).
  */
 export async function readyOpsSocketPostureAfterStart(
   dataDir: string,
@@ -1657,16 +1692,39 @@ export async function readyOpsSocketPostureAfterStart(
   const socketPath = join(dataDir, "operations-server");
   const timeoutMs = opts.timeoutMs ?? OPS_SOCKET_AFTER_START_TIMEOUT_MS;
   const pollMs = opts.pollMs ?? OPS_SOCKET_AFTER_START_POLL_MS;
+  const holdMs = opts.holdMs ?? OPS_SOCKET_AFTER_START_HOLD_MS;
   const sleep = opts.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
   const exists = opts.exists ?? existsSync;
   const ready = opts.ready ?? readyOpsSocketPosture;
+  const stat = opts.stat ?? statOpsSocket;
+  const wanted = resolveSocketPosture(process.env.FLAIR_SOCKET_GROUP).socketMode;
 
-  ready(dataDir); // dir gate now — socket may not exist yet
+  ready(dataDir); // dir gate now — the live socket may not exist yet
   const deadline = Date.now() + timeoutMs;
-  while (!exists(socketPath) && Date.now() < deadline) {
+  let last: OpsSocketPostureResult | null = null;
+
+  while (Date.now() < deadline) {
+    if (exists(socketPath)) {
+      last = ready(dataDir);
+      const applied = stat(socketPath);
+      if (applied && applied.mode === wanted) {
+        const holdDeadline = Date.now() + holdMs;
+        let held = true;
+        while (Date.now() < holdDeadline) {
+          await sleep(pollMs);
+          const now = exists(socketPath) ? stat(socketPath) : null;
+          if (!now || now.mode !== wanted) {
+            held = false;
+            break;
+          }
+        }
+        if (held) return last;
+        continue;
+      }
+    }
     await sleep(pollMs);
   }
-  return ready(dataDir);
+  return last ?? ready(dataDir);
 }
 
 /**

@@ -21,7 +21,7 @@
  *      start differ from restart.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -113,9 +113,39 @@ describe("first-start ops-socket posture on a fresh data dir (flair#1701)", () =
     temps.push(dataDir);
     chmodSync(dataDir, 0o755);
     const socketPath = join(dataDir, "operations-server");
-    const appearing = readyOpsSocketPostureAfterStart(dataDir, { pollMs: 10, timeoutMs: 1_000 });
+    const appearing = readyOpsSocketPostureAfterStart(dataDir, {
+      pollMs: 10,
+      timeoutMs: 1_000,
+      holdMs: 20,
+    });
     await new Promise((r) => setTimeout(r, 40));
     writeFileSync(socketPath, "");
+    chmodSync(socketPath, 0o755);
+    const applied = await appearing;
+    expect(applied?.socketApplied).toBe(true);
+    expect(modeOf(dataDir)).toBe(0o700);
+    expect(modeOf(socketPath)).toBe(0o600);
+  });
+
+  test("FAILS-FIRST: Harper replacing the socket during the hold is re-applied to 0600", async () => {
+    // Darwin adopt CI on 76a9a15: leftover made exists() true immediately;
+    // chmod'ing that inode left dir 0700 and the live socket 0755 after
+    // Harper unlinked and bind()d. The helper must keep applying until
+    // 0600 holds.
+    const dataDir = mkdtempSync(join(tmpdir(), "flair-1701-ops-socket-leftover-"));
+    temps.push(dataDir);
+    chmodSync(dataDir, 0o755);
+    const socketPath = join(dataDir, "operations-server");
+    writeFileSync(socketPath, "leftover");
+    chmodSync(socketPath, 0o755);
+    const appearing = readyOpsSocketPostureAfterStart(dataDir, {
+      pollMs: 10,
+      timeoutMs: 1_000,
+      holdMs: 80,
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    unlinkSync(socketPath);
+    writeFileSync(socketPath, "post-bounce");
     chmodSync(socketPath, 0o755);
     const applied = await appearing;
     expect(applied?.socketApplied).toBe(true);
