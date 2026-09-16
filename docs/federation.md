@@ -11,7 +11,7 @@ Spoke A ──[POST /FederationSync]──▶ Hub
 Spoke B ──[POST /FederationSync]──▶ Hub
 ```
 
-There is no hub → spoke arrow and no spoke pull. `FederationSync` declares `post()` only.
+There is no hub → spoke arrow and no pull path. `FederationSync` declares `post()` only.
 
 - **Hub:** accepts signed sync pushes from paired spokes. It does not push records back, and it does not expose a pull endpoint.
 - **Spoke:** pushes local changes to the hub. It receives nothing back.

@@ -68,7 +68,7 @@ describe("FederationSync direction (flair#934)", () => {
   it("docs/federation.md Overview matches FederationSync's push-only direction", () => {
     expect(overview).toMatch(/push-only/i);
     expect(overview).toMatch(/receives nothing back/i);
-    expect(overview).toMatch(/no pull/i);
+    expect(overview).toMatch(/no pull path/i);
     expect(overview).toContain("POST /FederationSync");
     expect(overview).not.toMatch(/Hub\s+[─\-].*Spoke/i);
   });
