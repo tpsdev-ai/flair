@@ -15,8 +15,10 @@
  * scanned. Unicode/homoglyphs always run on the raw line.
  *
  * `shell_backtick` means a substitution the loader would see (`$(...)` in
- * an executable surface, or an unmatched backtick run). It does not mean
- * "this line contains a markdown code span."
+ * an executable surface, an unmatched backtick run, or any backtick in
+ * YAML frontmatter — YAML backticks are legacy shell substitution, not
+ * markdown docs). It does not mean "this line contains a markdown code
+ * span."
  */
 
 import {
@@ -195,9 +197,18 @@ export function scanSkillContent(content: string): ScanResult {
       .map((s) => s.text)
       .join("");
     const hasUnclosed = lineSpans.some((s) => s.kind === "unclosed");
-    // shell_backtick is format-vs-hazard: only unclosed runs and $(...) on
-    // executable surfaces. A named command in a well-formed span is docs.
-    if (hasUnclosed || hasCommandSubstitution(exec)) {
+    const execSpans = lineSpans.filter((s) => isExecutableSpan(s.kind));
+    // Frontmatter is an executable surface. A backtick pair there is YAML
+    // legacy shell substitution, not markdown documentation (Kern: the
+    // $()-less `curl … | sh` / `rm -rf /` variants must not walk past the
+    // gate when the $() form is already pinned as a refusal).
+    const frontmatterBacktick =
+      execSpans.length > 0 &&
+      execSpans.every((s) => s.kind === "frontmatter") &&
+      exec.includes("`");
+    // shell_backtick is format-vs-hazard on prose: only unclosed runs and
+    // $(...). A named command in a well-formed markdown span is docs.
+    if (hasUnclosed || hasCommandSubstitution(exec) || frontmatterBacktick) {
       violations.push({
         type: "shell_backtick",
         line: lineNo,

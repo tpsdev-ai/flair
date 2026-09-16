@@ -25,7 +25,9 @@ import { scanSkillContent } from "./scan/skill-scanner.js";
  *    is not a substitution the loader would execute.
  *  - Executable surfaces are YAML frontmatter, prose, and fail-closed
  *    leftovers (unclosed fences, unmatched backtick runs). `$(...)` on
- *    those surfaces is a substitution and does fire `shell_backtick`.
+ *    those surfaces is a substitution. A backtick pair in frontmatter is
+ *    YAML legacy substitution, not markdown docs, and also fires
+ *    `shell_backtick`.
  *  - Inline and fenced interiors still run the non-backtick detectors
  *    (exec/network/fs/encoding). Wrapping exec() in one backtick is not
  *    an exemption. A fence marker is not scanned. Unicode/homoglyph
