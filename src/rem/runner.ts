@@ -1043,7 +1043,16 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
   const row: RunnerLogRow = {
     ...baseRow,
     slice: sliceLabel,
-    status: opts.dryRun ? "dry-run" : "completed",
+    // flair#924 (defect 1): a run whose recorded `errors[]` is non-empty must
+    // NOT report success. A core stage that could not run — distillation with
+    // no generative backend, a per-tag distill failure, the dedup stat, an
+    // operator-aborted distill — is already pushed into `errors`; if any error
+    // stands, the run FAILED. Before this, a distillation-disabled cycle logged
+    // `status: "completed"` next to a populated `Errors:` block while the CLI
+    // exited 1 (src/commands/rem.ts), so the one signal a service manager can
+    // act on disagreed with the reported status. A populated errors[] can never
+    // coexist with "completed" again (regression-tested in rem-runner.test.ts).
+    status: errors.length > 0 ? "failed" : opts.dryRun ? "dry-run" : "completed",
     dryRun: opts.dryRun || undefined,
     snapshotPath,
     memoryCount,

@@ -6,8 +6,11 @@
  * (skip write but still log), happy path (writes snapshot + log row),
  * api failure (fail-stops-cycle + error in log row), soul shape coercion
  * (single row vs multi row), and step 5 distillation (§3B, issue #707): success populates
+ * `api failure (fail-stops-cycle + error in log row), soul shape coercion\n * (single row vs multi row), and step 5 distillation (§3B, issue #707): success populates
  * `candidates` and flips `slice` to "2"; failure is recorded in `errors[]`
- * without failing the cycle; dry-run skips the /ReflectMemories call
+ * and the run is reported `failed` (flair#924 defect 1: a populated errors[]
+ * must never coexist with `status: "completed"` — see the "status honesty"
+ * regression block below); dry-run skips the /ReflectMemories call
  * entirely and `slice` stays "2-maintenance".
  */
 
@@ -232,7 +235,7 @@ describe("step 5: distillation", () => {
     expect(r.logRow.errors).toEqual([]);
   });
 
-  it("distillation failure is recorded, not fatal — maintenance results stand, status completed", async () => {
+  it("distillation failure is recorded AND the run reports failed — maintenance results still stand", async () => {
     const r = await runNightlyCycle(baseOpts({
       apiCall: makeApi({
         "GET:/Memory": () => sampleMemories,
@@ -242,7 +245,7 @@ describe("step 5: distillation", () => {
         "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
       }),
     }));
-    expect(r.status).toBe("completed");
+    expect(r.status).toBe("failed");
     expect(r.logRow.slice).toBe("2");
     // Maintenance results from before the failed distillation call stand.
     expect(r.logRow.archived).toBe(12);
@@ -266,7 +269,9 @@ describe("step 5: distillation", () => {
         "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
       }),
     }));
-    expect(r.status).toBe("completed");
+    // A distillation that did not execute is a FAILED run (flair#924 defect 1),
+    // not a "completed" one with an error buried underneath.
+    expect(r.status).toBe("failed");
     expect(r.logRow.errors.length).toBe(1);
     expect(r.logRow.errors[0]).toBe("distillation: No generative backend configured. See the models configuration docs.");
   });
@@ -284,7 +289,7 @@ describe("step 5: distillation", () => {
         "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
       }),
     }));
-    expect(r.status).toBe("completed");
+    expect(r.status).toBe("failed");
     expect(r.logRow.errors.length).toBe(1);
     expect(r.logRow.errors[0]).toBe("distillation: distillation_failed: model output did not validate after one retry");
   });
@@ -326,8 +331,9 @@ describe("step 6: instance-wide dedup-cluster stat (flair-quality Slice 1c)", ()
         "POST:/MemoryDedupStats": () => { throw new Error(JSON.stringify({ error: "forbidden: admin required" })); },
       }),
     }));
-    // Maintenance + distillation already succeeded — the cycle still completes.
-    expect(r.status).toBe("completed");
+    // Maintenance + distillation already succeeded, but a recorded error still
+    // makes the run non-successful (flair#924 defect 1).
+    expect(r.status).toBe("failed");
     expect(r.logRow.dedup).toBeUndefined();
     expect(r.logRow.errors.length).toBe(1);
     expect(r.logRow.errors[0]).toBe("dedup: forbidden: admin required");
@@ -343,7 +349,7 @@ describe("step 6: instance-wide dedup-cluster stat (flair-quality Slice 1c)", ()
         "POST:/MemoryDedupStats": () => ({ ok: true }), // missing the expected fields
       }),
     }));
-    expect(r.status).toBe("completed");
+    expect(r.status).toBe("failed");
     expect(r.logRow.dedup).toBeUndefined();
     expect(r.logRow.errors).toEqual(["dedup: unexpected /MemoryDedupStats response shape"]);
   });
@@ -691,14 +697,14 @@ describe("tag-aware distillation cycle (#1205b-1)", () => {
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api }));
 
-    expect(r.status).toBe("completed");
+    expect(r.status).toBe("failed");
     expect(reflectCalls).toEqual([]);
     expect(reflectCalls.some((c) => c.scope === "all")).toBe(false);
     expect(autoPromoteCalls).toEqual([]);
     expect(r.logRow.errors.some((e) => e.includes("cross-user bleed"))).toBe(true);
   });
 
-  it("a per-tag failure is NON-FATAL: other tags still distill, cycle completes, error recorded", async () => {
+  it("a per-tag failure does not abort the remaining tags — recorded, and the run reports failed", async () => {
     const { api, reflectCalls } = makeTagAwareApi({
       activeTags: ["adk:app:alice", "adk:app:bob"],
       reflect: (body) => {
@@ -708,7 +714,7 @@ describe("tag-aware distillation cycle (#1205b-1)", () => {
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api }));
 
-    expect(r.status).toBe("completed");
+    expect(r.status).toBe("failed");
     expect(reflectCalls.length).toBe(2); // both attempted
     expect(r.logRow.candidates).toEqual(["cand_alice"]); // alice's still staged
     expect(r.logRow.errors.length).toBe(1);
@@ -722,7 +728,7 @@ describe("tag-aware distillation cycle (#1205b-1)", () => {
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api, maxTagsPerCycle: 2 }));
 
-    expect(r.status).toBe("completed");
+    expect(r.status).toBe("failed");
     expect(reflectCalls.length).toBe(2); // capped
     expect(r.logRow.errors.some((e) => e.includes("exceed the per-cycle cap"))).toBe(true);
     expect(DEFAULT_MAX_TAGS_PER_CYCLE).toBeGreaterThan(0);
@@ -803,7 +809,7 @@ describe("ADK auto-promote wiring (#1205b-2)", () => {
     expect(r.logRow.autoPromoted).toBeUndefined();
   });
 
-  it("an auto-promote failure is NON-FATAL: recorded in errors, cycle completes", async () => {
+  it("an auto-promote failure is recorded in errors and the run reports failed", async () => {
     const { api } = makeTagAwareApi({
       activeTags: ["adk:app:alice"],
       reflect: () => ({ candidates: [{ id: "cand_alice" }], count: 1, model: "default" }),
@@ -811,8 +817,9 @@ describe("ADK auto-promote wiring (#1205b-2)", () => {
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api }));
 
-    // distillation + maintenance still stand; the cycle is not aborted.
-    expect(r.status).toBe("completed");
+    // distillation + maintenance still stand; the cycle is not aborted, but the
+    // recorded error makes the run non-successful (flair#924 defect 1).
+    expect(r.status).toBe("failed");
     expect(r.logRow.candidates).toEqual(["cand_alice"]);
     expect(r.logRow.autoPromoted).toBeUndefined();
     expect(r.logRow.errors.some((e) => e.startsWith("auto-promote:"))).toBe(true);
@@ -1004,7 +1011,7 @@ describe("continuity distillation cycle wiring (flair#1257 slice 3)", () => {
       },
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api }));
-    expect(r.status).toBe("completed");
+    expect(r.status).toBe("failed");
     expect(r.logRow.errors.some((e) => e.includes(`distillation[${T("boom")}]:`))).toBe(true);
     expect(r.logRow.continuitySessions).toBe(0); // attempted, none succeeded
   });
@@ -1115,7 +1122,7 @@ describe("per-run distill cap + health refuse (#1515)", () => {
       },
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api }));
-    expect(r.status).toBe("completed");
+    expect(r.status).toBe("failed");
     expect(reflectCalls.map((c) => c.tag)).toEqual(["adk:app:alice"]);
     expect(r.logRow.candidates).toEqual(["cand_alice"]);
     expect(r.logRow.errors.some((e) => e.includes("aborted by operator"))).toBe(true);
@@ -1139,7 +1146,7 @@ describe("per-run distill cap + health refuse (#1515)", () => {
       return api(method, path, body);
     };
     const r = await runNightlyCycle(baseOpts({ apiCall: wrapped }));
-    expect(r.status).toBe("completed");
+    expect(r.status).toBe("failed");
     expect(reflectCalls.map((c) => c.tag)).toEqual(["adk:app:alice"]);
     expect(autoPromoteCalls).toEqual([]);
     expect(dedupCalls).toBe(0);
@@ -1161,12 +1168,77 @@ describe("per-run distill cap + health refuse (#1515)", () => {
       return api(method, path, body);
     };
     const r = await runNightlyCycle(baseOpts({ apiCall: wrapped }));
-    expect(r.status).toBe("completed");
+    expect(r.status).toBe("failed");
     expect(reflectCalls).toHaveLength(1);
     expect(reflectCalls[0].scope).toBe("all");
     expect(autoPromoteCalls).toEqual([]);
     expect(dedupCalls).toBe(0);
     expect(r.logRow.distill?.aborted).toBe(true);
     expect(r.logRow.dedup).toBeUndefined();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// flair#924 (defect 1) — status/exit-code honesty.
+//
+// A REM nightly run whose distillation stage did not execute is NOT a
+// completed run. Before this fix, src/rem/runner.ts built the audit row's
+// status as `opts.dryRun ? "dry-run" : "completed"` unconditionally, so a
+// cycle that recorded `distillation: No generative backend configured …` in
+// errors[] still logged `status: "completed"` — while `flair rem nightly
+// run-once` exited 1 (src/commands/rem.ts: `if (row.errors.length > 0)
+// process.exit(1)`). The reported status and the one signal launchd records
+// disagreed, and the failure hid for 58 consecutive nights.
+//
+// These tests encode the invariant the fix restores: a populated errors[]
+// can NEVER coexist with status "completed". They FAIL on the pre-fix runner
+// (which returned "completed" alongside a populated errors[]) and PASS after
+// it. See the PR body for both results.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("status honesty — a run that skipped a core stage is not 'completed' (flair#924 defect 1)", () => {
+  // The real failure shape from the issue: snapshot + maintenance succeed,
+  // distillation cannot start (503 no generative backend), so the run records
+  // `distillation: No generative backend configured …` in errors[].
+  const noBackendOpts = () => baseOpts({
+    apiCall: makeApi({
+      "GET:/Memory": () => sampleMemories,
+      "GET:/Soul": () => [sampleSoul],
+      "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+      // Mirrors api()'s throw shape (src/cli.ts) for a 503 response body.
+      "POST:/ReflectMemories": () => {
+        throw new Error(JSON.stringify({ error: "No generative backend configured. See the models configuration docs." }));
+      },
+      "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
+    }),
+  });
+
+  it("distillation not executing reports a non-success status", async () => {
+    const r = await runNightlyCycle(noBackendOpts());
+
+    // The distillation stage did not execute, and it said so:
+    expect(r.logRow.errors.length).toBeGreaterThan(0);
+    expect(r.logRow.errors[0]).toContain("distillation:");
+    // …so the run MUST NOT claim success:
+    expect(r.status).not.toBe("completed");
+    expect(r.status).toBe("failed");
+  });
+
+  it("INVARIANT: a populated errors[] cannot coexist with status 'completed'", async () => {
+    const r = await runNightlyCycle(noBackendOpts());
+
+    expect(r.logRow.errors.length).toBeGreaterThan(0);
+    expect(r.status).not.toBe("completed");
+    // The status the caller (`flair rem nightly run-once`) received and the
+    // status persisted to the audit log are the same value — the scheduler
+    // summary and the launchd exit code both read from this contract.
+    const rows = readLogRows();
+    expect(rows[0].status).toBe(r.status);
+    expect(rows[0].errors.length).toBeGreaterThan(0);
+  });
+
+  it("control: a clean run (empty errors[]) still reports 'completed'", async () => {
+    const r = await runNightlyCycle(baseOpts());
+    expect(r.logRow.errors).toEqual([]);
+    expect(r.status).toBe("completed");
   });
 });
