@@ -705,6 +705,13 @@ test.skipIf(!isDarwin)(
     assertSecretFreePlist(sb.plistPath);
     await assertNoRebootstrap(sb, before);
     expect(result.stdout + result.stderr).toMatch(/adopt|bounc/i);
+    // flair#1701: the adopt bounce is the first launchd start. Harper recreates
+    // operations-server at umask default; doctor --fix must leave 0700 / 0600
+    // on that first start so the canary's post-adopt `flair doctor` is green.
+    const socketPath = join(sb.dataDir, "operations-server");
+    expect(existsSync(socketPath), "ops socket must exist after adopt").toBe(true);
+    expect(statSync(sb.dataDir).mode & 0o777, "data dir must be 0700 after first adopt start").toBe(0o700);
+    expect(statSync(socketPath).mode & 0o777, "ops socket must be 0600 after first adopt start").toBe(0o600);
     await new Promise((r) => setTimeout(r, 2_000));
     expect(instancePid(sb.dataDir, sb.httpPort), "PID must stay stable after adopt (no KeepAlive restart loop)").toBe(
       managed.pid,
