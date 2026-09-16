@@ -18,6 +18,7 @@ import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
 import { plistCarriesInlineAdminPassword } from "../lib/launchd-management.js";
 import { DOCTOR_CHECK_IDS, catalogIssueDelta, renderCatalogDoctorLines, runDoctorChecks } from "../lib/doctor-run.js";
+import { describeEmbedGpuDoctorFinding } from "../lib/embed-gpu-doctor.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
 import { flairCliVersion, unpinnedSpecWarning } from "../lib/mcp-spec.js";
 import { staleSessionStartHookPins } from "../lib/owned-pins.js";
@@ -430,12 +431,14 @@ program
     // every other command) nudges about on stderr; doctor prints the full
     // picture here instead of a one-liner and `--fix` offers the restart.
     let runningVersion: string | null = null;
+    let embedGpuFromHealth: unknown;
     if (harperResponding) {
       try {
         const healthRes = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(3000) });
         if (healthRes.ok) {
-          const body = (await healthRes.json()) as { version?: unknown };
+          const body = (await healthRes.json()) as { version?: unknown; embedding?: unknown };
           runningVersion = typeof body?.version === "string" ? body.version : null;
+          embedGpuFromHealth = body.embedding;
         }
       } catch { /* leave runningVersion null — reported below as "unknown" */ }
 
@@ -462,6 +465,15 @@ program
         console.log(`  ${render.icons.ok} Server running version matches CLI (${runningVersion})`);
       } else {
         console.log(`  ${render.icons.warn} Could not determine the running server's version`);
+      }
+
+      // flair#1437: fail-loud Metal fallback. Health states it; operators
+      // read doctor. A stated CPU default is silent here.
+      const embedGpuFinding = describeEmbedGpuDoctorFinding(embedGpuFromHealth);
+      if (embedGpuFinding) {
+        console.log(`  ${render.icons.error} ${embedGpuFinding.message}`);
+        console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${embedGpuFinding.fixHint}`);
+        issues++;
       }
     }
 
