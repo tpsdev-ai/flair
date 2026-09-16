@@ -23,6 +23,7 @@ export type StatusCli = {
   sortSoulKeyEntries: (...args: any[]) => any;
   defaultDataDir: (...args: any[]) => any;
   readHarperConfig: (...args: any[]) => any;
+  readPortFromConfig: (...args: any[]) => any;
   __pkgVersion: any;
 };
 
@@ -59,6 +60,10 @@ function defaultDataDir(...args: any[]): any {
 
 function readHarperConfig(...args: any[]): any {
   return cli.readHarperConfig(...args);
+}
+
+function readPortFromConfig(): number | null {
+  return cli.readPortFromConfig();
 }
 
 /**
@@ -155,6 +160,56 @@ function oauthDetailLines(o: any): string[] {
 
 const LOCAL_FLAIR_PROBE_PORTS = [9926, 19926, 19925];
 
+
+/**
+ * The unreachable-path guidance for a localhost target, as printable lines.
+ *
+ * flair#1719: the old message asserted "Your config points at <resolved URL>"
+ * without ever reading the config, and then told the user to "set port: N" in
+ * a file that may already say exactly that — a remedy that cannot work. This
+ * reads the per-user config and only names it when it actually disagrees with
+ * the running daemon; when the config is already correct it points at the
+ * command that reconciles the instance record instead of the file.
+ *
+ * Pure so the wording is pinned by a unit test (the daemon is not required).
+ */
+export function formatPortDriftGuidance(args: {
+  baseUrl: string;
+  discoveredPort: number | null;
+  configuredPort: number | null;
+}): string[] {
+  const lines: string[] = [];
+  if (args.discoveredPort == null) {
+    if (args.configuredPort != null) {
+      lines.push(`\n  ~/.flair/config.yaml records port ${args.configuredPort}, but nothing answered there.`);
+    }
+    lines.push(`\n  Run: flair start  or  flair doctor`);
+    return lines;
+  }
+
+  const altUrl = `http://127.0.0.1:${args.discoveredPort}`;
+  lines.push(`\n  ⚠ Found a Flair daemon listening on port ${args.discoveredPort} (URL: ${altUrl}).`);
+
+  if (args.configuredPort === args.discoveredPort) {
+    // The config already names the running port. The divergence is in the
+    // instance's own record, not the operator's config — do not send them to
+    // edit a file that is already right.
+    lines.push(`    ~/.flair/config.yaml already records port ${args.configuredPort}; the resolved URL (${args.baseUrl}) is not that port.`);
+    lines.push(`\n  Quick fix: FLAIR_URL=${altUrl} flair status`);
+    lines.push(`  Permanent fix: flair doctor  (reconcile the instance's recorded port with the running daemon)`);
+  } else if (args.configuredPort != null) {
+    lines.push(`    ~/.flair/config.yaml records port ${args.configuredPort}; the daemon is on ${args.discoveredPort}.`);
+    lines.push(`\n  Quick fix: FLAIR_URL=${altUrl} flair status`);
+    lines.push(`  Permanent fix: edit ~/.flair/config.yaml to set port: ${args.discoveredPort}`);
+    lines.push(`  Or: flair doctor`);
+  } else {
+    lines.push(`    No port is recorded in ~/.flair/config.yaml.`);
+    lines.push(`\n  Quick fix: FLAIR_URL=${altUrl} flair status`);
+    lines.push(`  Permanent fix: edit ~/.flair/config.yaml to set port: ${args.discoveredPort}`);
+    lines.push(`  Or: flair doctor`);
+  }
+  return lines;
+}
 
 export function isLocalhostUrl(url: string): boolean {
   try {
@@ -271,14 +326,21 @@ const statusCmd = program
       if (registryNotice.line) console.log(`  ${registryNotice.line}`);
       if (registryNotice.error) console.log(`  ⚠ ${registryNotice.error}`);
       if (discoveredPort != null) {
-        const altUrl = `http://127.0.0.1:${discoveredPort}`;
-        console.log(`\n  ⚠ Found a Flair daemon listening on port ${discoveredPort} (URL: ${altUrl}).`);
-        console.log(`    Your config points at ${baseUrl} — drift detected.`);
-        console.log(`\n  Quick fix: FLAIR_URL=${altUrl} flair status`);
-        console.log(`  Permanent fix: edit ~/.flair/config.yaml to set port: ${discoveredPort}`);
-        console.log(`  Or: flair doctor (when port-drift detection lands there)`);
+        for (const line of formatPortDriftGuidance({
+          baseUrl,
+          discoveredPort,
+          configuredPort: readPortFromConfig(),
+        })) {
+          console.log(line);
+        }
       } else {
-        console.log(`\n  Run: flair start  or  flair doctor`);
+        for (const line of formatPortDriftGuidance({
+          baseUrl,
+          discoveredPort: null,
+          configuredPort: readPortFromConfig(),
+        })) {
+          console.log(line);
+        }
       }
       if (versionNudge) {
         const color = versionNudge.severity === "red" ? render.c.red : render.c.yellow;

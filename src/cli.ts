@@ -848,14 +848,22 @@ function configPath(): string {
  * genuinely mean the default instance, and as the source the instance-local
  * migration reads from. Anything that resolves a port for a NAMED instance
  * must go through `resolveHttpPort`, not this.
+ *
+ * Parsed as YAML, never regex-matched (flair#1719). A line-anchored
+ * `/port:\s*(\d+)/` misses valid configs the moment the value is quoted
+ * (`port: "9926"`), has whitespace before the colon (`port : 9926`), or a
+ * commented-out prior value appears first (`# port: 19926`) — in those cases
+ * the reader silently fell through to DEFAULT_PORT and the CLI talked to
+ * 19926 while the file said 9926. Parsing the document reads the value the
+ * user actually wrote, regardless of quoting or surrounding comments.
  */
-function readPortFromConfig(): number | null {
+function readPortFromConfig(path: string = configPath()): number | null {
   try {
-    const p = configPath();
-    if (existsSync(p)) {
-      const yaml = readFileSync(p, "utf-8");
-      const m = yaml.match(/port:\s*(\d+)/);
-      if (m) return Number(m[1]);
+    if (existsSync(path)) {
+      const parsed = parseYaml(readFileSync(path, "utf-8"));
+      if (parsed && typeof parsed === "object") {
+        return harperPortValue((parsed as Record<string, any>).port);
+      }
     }
   } catch { /* ignore */ }
   return null;
@@ -1101,6 +1109,29 @@ function resolveBaseUrl(opts: { target?: string; url?: string; port?: string | n
     || process.env.FLAIR_URL
     || `http://127.0.0.1:${resolveHttpPort(opts)}`
   );
+}
+
+/**
+ * The `~/.flair/config.yaml` port when it differs from the port
+ * `resolveHttpPort` would use — the fallback candidate for flair#1719.
+ *
+ * For the default install `resolveHttpPort` reads Harper's own boot record
+ * (`<dataDir>/harper-config.yaml`), which is authoritative for the port the
+ * instance *last* bound but can be stale relative to the per-user config the
+ * operator edits (the config says 9926 while Harper's record still says
+ * 19926 from an earlier boot). When the recorded port has no daemon and the
+ * configured port does, callers use this to reach the daemon the operator
+ * actually configured instead of reporting the recorded port unreachable.
+ *
+ * Returns `null` when an explicit override is in play (nothing to fall back
+ * from) or when the two ports already agree.
+ */
+function alternateConfiguredLocalPort(opts: { target?: string; url?: string; port?: string | number }): number | null {
+  if (opts.target || opts.url || process.env.FLAIR_TARGET || process.env.FLAIR_URL) return null;
+  const configured = readPortFromConfig();
+  if (configured === null) return null;
+  const resolved = resolveHttpPort(opts);
+  return configured === resolved ? null : configured;
 }
 
 // Resolve agent id from --agent flag or FLAIR_AGENT_ID env (flag > env).
@@ -2189,6 +2220,7 @@ function b64url(bytes: Uint8Array): string {
 async function api(method: string, path: string, body?: any, options?: { baseUrl?: string; keysDir?: string; agentId?: string | null; agentIdSource?: SigningIdentitySource; explicitAdminPass?: string; adminUser?: string }): Promise<any> {
   // Resolve port via the canonical path (flair#1129): options.baseUrl > FLAIR_URL > resolveHttpPort.
   // api() callers mean the default install, so resolveHttpPort({}) with no --data-dir is correct.
+  const hasExplicitBase = !!(options?.baseUrl || process.env.FLAIR_URL);
   const base = options?.baseUrl ?? (process.env.FLAIR_URL || `http://127.0.0.1:${resolveHttpPort({})}`);
 
   let agentId: string | undefined;
@@ -2209,14 +2241,52 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
     }
   }
 
-  return authedRequest(method, path, body, {
+  const requestOptions = {
     baseUrl: base,
     agentId,
     keysDir: options?.keysDir,
     explicitAdminPass: options?.explicitAdminPass,
     adminUser: options?.adminUser,
     agentIdSource: options?.agentIdSource,
-  });
+  };
+
+  try {
+    return await authedRequest(method, path, body, requestOptions);
+  } catch (err) {
+    // flair#1719: the resolved port came from Harper's boot record, which can
+    // be stale for the default install. Before surfacing a connect failure,
+    // try the port the operator actually wrote in ~/.flair/config.yaml.
+    const altPort = hasExplicitBase ? null : alternateConfiguredLocalPort({});
+    if (altPort !== null && isFederationStatusConnectFailure(err)) {
+      const altUrl = `http://127.0.0.1:${altPort}`;
+      try {
+        return await authedRequest(method, path, body, { ...requestOptions, baseUrl: altUrl });
+      } catch (altErr) {
+        throw describeApiConnectFailure(altErr, altUrl);
+      }
+    }
+    throw describeApiConnectFailure(err, base);
+  }
+}
+
+/**
+ * Turn undici/Node's bare `TypeError: fetch failed` into a sentence naming the
+ * actor (the Flair instance URL), the state (no HTTP response) and a remedy
+ * the operator can act on — flair#1719 requirement 3. Non-connect errors
+ * (HTTP 401/403/5xx, auth failures) pass through unchanged so callers keep
+ * their own handling. The `flairFriendly` marker lets the top-level CLI entry
+ * print just the message instead of a stack.
+ */
+function describeApiConnectFailure(err: unknown, url: string): unknown {
+  if (!isFederationStatusConnectFailure(err)) return err;
+  const friendly = new Error(
+    `Cannot reach the Flair instance at ${url} — the connection failed (no HTTP response).\n`
+    + `  Start it with \`flair start\`, or point this command at the right instance with `
+    + `FLAIR_URL=http://127.0.0.1:<port> (or --url on commands that accept it).`,
+  );
+  (friendly as { flairFriendly?: boolean }).flairFriendly = true;
+  (friendly as { cause?: unknown }).cause = err;
+  return friendly;
 }
 
 /**
@@ -4218,7 +4288,7 @@ async function fetchHealthDetail(opts: { port?: string; url?: string; target?: s
 }> {
   const port = resolveHttpPort(opts);
   // --target takes precedence, then --url, then FLAIR_TARGET, then FLAIR_URL, then localhost
-  const baseUrl = opts.target || opts.url || process.env.FLAIR_TARGET || (process.env.FLAIR_URL ?? `http://127.0.0.1:${port}`);
+  let baseUrl = opts.target || opts.url || process.env.FLAIR_TARGET || (process.env.FLAIR_URL ?? `http://127.0.0.1:${port}`);
   let healthy = false;
   let healthData: any = null;
 
@@ -4235,6 +4305,34 @@ async function fetchHealthDetail(opts: { port?: string; url?: string; target?: s
     }
     healthy = res.ok;
   } catch { /* unreachable */ }
+
+  // flair#1719: the resolved URL for the default install comes from Harper's
+  // boot record, which can be stale relative to ~/.flair/config.yaml. If that
+  // port is dead and the configured port has a live daemon, treat the
+  // configured port as the resolved URL rather than reporting the stale one
+  // unreachable (and then telling the user to edit a config that is correct).
+  if (!healthy) {
+    const altPort = alternateConfiguredLocalPort(opts);
+    if (altPort !== null) {
+      const altUrl = `http://127.0.0.1:${altPort}`;
+      try {
+        let res = await fetch(`${altUrl}/Health`, { signal: AbortSignal.timeout(5000) });
+        if (!res.ok && res.status === 401) {
+          const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
+          if (adminPass) {
+            res = await fetch(`${altUrl}/Health`, {
+              headers: { Authorization: `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPass}`).toString("base64")}` },
+              signal: AbortSignal.timeout(5000),
+            });
+          }
+        }
+        if (res.ok) {
+          baseUrl = altUrl;
+          healthy = true;
+        }
+      } catch { /* configured port also unreachable — fall through to the primary */ }
+    }
+  }
 
   if (healthy) {
     // flair#747: /HealthDetail is a verified-read (any registered agent, not
@@ -4274,6 +4372,7 @@ bindStatusCli({
   sortSoulKeyEntries,
   defaultDataDir,
   readHarperConfig,
+  readPortFromConfig,
   __pkgVersion,
 });
 registerStatus(program);
@@ -6292,7 +6391,17 @@ async function runCli(): Promise<void> {
     program.outputHelp();
     process.exit(0);
   }
-  await program.parseAsync();
+  try {
+    await program.parseAsync();
+  } catch (err: any) {
+    // Errors the API layer already translated (flair#1719) carry a sentence
+    // naming the actor, state and remedy; print it without the undici stack.
+    if (err && typeof err === "object" && err.flairFriendly === true) {
+      console.error(err.message);
+      process.exit(1);
+    }
+    throw err;
+  }
 }
 
 // Run CLI directly when this file is the entry point — covers `node dist/cli.js`,
