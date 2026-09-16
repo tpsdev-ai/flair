@@ -1628,6 +1628,47 @@ function readyOpsSocketPosture(dataDir: string): OpsSocketPostureResult | null {
   }
 }
 
+/** How long the first-start path waits for Harper to create operations-server. */
+export const OPS_SOCKET_AFTER_START_TIMEOUT_MS = 10_000;
+const OPS_SOCKET_AFTER_START_POLL_MS = 50;
+
+export interface ReadyOpsSocketPostureAfterStartOptions {
+  timeoutMs?: number;
+  pollMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  exists?: (path: string) => boolean;
+  ready?: (dataDir: string) => OpsSocketPostureResult | null;
+}
+
+/**
+ * Apply the ops-socket posture after a start that did not go through
+ * `waitForHealth` in this process (the launchd adopt/regenerate bounce).
+ *
+ * HTTP can be up before Harper bind()s `operations-server`. Applying once
+ * immediately tightens the directory gate; applying again after the socket
+ * appears is what sets 0600. Darwin CI on #1704 measured this: after the
+ * bounce the dir was 0700 and the socket was still 0755 when the helper
+ * ran before the file existed.
+ */
+export async function readyOpsSocketPostureAfterStart(
+  dataDir: string,
+  opts: ReadyOpsSocketPostureAfterStartOptions = {},
+): Promise<OpsSocketPostureResult | null> {
+  const socketPath = join(dataDir, "operations-server");
+  const timeoutMs = opts.timeoutMs ?? OPS_SOCKET_AFTER_START_TIMEOUT_MS;
+  const pollMs = opts.pollMs ?? OPS_SOCKET_AFTER_START_POLL_MS;
+  const sleep = opts.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
+  const exists = opts.exists ?? existsSync;
+  const ready = opts.ready ?? readyOpsSocketPosture;
+
+  ready(dataDir); // dir gate now — socket may not exist yet
+  const deadline = Date.now() + timeoutMs;
+  while (!exists(socketPath) && Date.now() < deadline) {
+    await sleep(pollMs);
+  }
+  return ready(dataDir);
+}
+
 /**
  * The `flair doctor` detection matrix for the ops-socket posture (flair#763,
  * Sherlock's exact six rows). Report-only — never auto-remediated (changing a
@@ -5374,8 +5415,9 @@ async function repairLaunchdManagement(dataDir: string, port: number): Promise<L
         // start. The product launcher execs Harper and never chmods, so the
         // new operations-server lands at 0777 & ~umask. Init / start /
         // restart already call this after health; without it here, doctor
-        // flags ✗ Ops socket permissions until a second start.
-        readyOpsSocketPosture(dataDir);
+        // flags ✗ Ops socket permissions until a second start. Wait for
+        // the socket — HTTP can answer before Harper bind()s it.
+        await readyOpsSocketPostureAfterStart(dataDir);
         const detail = plan.kind === "adopt"
           ? `adopted the direct-spawned instance into launchd (bounced the live instance): ${after.detail}`
           : after.detail;

@@ -24,7 +24,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyOpsSocketPosture, classifyOpsSocketPosture } from "../../src/cli.ts";
+import {
+  applyOpsSocketPosture,
+  classifyOpsSocketPosture,
+  readyOpsSocketPostureAfterStart,
+} from "../../src/cli.ts";
 
 const CLI_SRC = readFileSync(join(import.meta.dir, "..", "..", "src", "cli.ts"), "utf8");
 
@@ -100,6 +104,24 @@ describe("first-start ops-socket posture on a fresh data dir (flair#1701)", () =
     expect(modeOf(socketPath)).toBe(0o600);
     expect(classifyOpsSocketPosture(statSync(dataDir).mode, statSync(socketPath).mode, false).flagged).toBe(false);
   });
+
+  test("FAILS-FIRST: first-start helper waits for Harper to create the socket, then applies 0600", async () => {
+    // Darwin adopt CI (14fcd6c / dfbeae7): HTTP was up, dir went 0700, socket
+    // was still 0755 because the helper ran before bind(). The adopt path
+    // must wait, then chmod.
+    const dataDir = mkdtempSync(join(tmpdir(), "flair-1701-ops-socket-late-"));
+    temps.push(dataDir);
+    chmodSync(dataDir, 0o755);
+    const socketPath = join(dataDir, "operations-server");
+    const appearing = readyOpsSocketPostureAfterStart(dataDir, { pollMs: 10, timeoutMs: 1_000 });
+    await new Promise((r) => setTimeout(r, 40));
+    writeFileSync(socketPath, "");
+    chmodSync(socketPath, 0o755);
+    const applied = await appearing;
+    expect(applied?.socketApplied).toBe(true);
+    expect(modeOf(dataDir)).toBe(0o700);
+    expect(modeOf(socketPath)).toBe(0o600);
+  });
 });
 
 describe("the adopt / first-start wire (flair#1701)", () => {
@@ -113,7 +135,7 @@ describe("the adopt / first-start wire (flair#1701)", () => {
     const body = functionBody(src, "repairLaunchdManagement");
     const loadAt = body.indexOf("ensureLaunchdServiceLoaded(");
     expect(loadAt).toBeGreaterThan(-1);
-    const postureAt = body.indexOf("readyOpsSocketPosture(");
+    const postureAt = body.indexOf("readyOpsSocketPostureAfterStart(");
     expect(postureAt).toBeGreaterThan(-1);
     expect(postureAt).toBeGreaterThan(loadAt);
   });
