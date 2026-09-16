@@ -966,7 +966,8 @@ export function normalizeDeclaredPinVersion(raw: string): string | null {
   v = v.replace(/^(workspace|npm):/, "");
   v = v.replace(/^[\^~>=<\s]+/, "");
   v = v.replace(/^v/, "");
-  const m = v.match(/^([0-9A-Za-z][^\s"'\],]*)/);
+  // Require X.Y.Z so `latest` / tags / bare names are not pins.
+  const m = v.match(/^(\d+\.\d+\.\d+[^\s"'\],]*)/);
   return m ? m[1]! : null;
 }
 
