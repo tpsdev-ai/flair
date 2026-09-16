@@ -590,6 +590,9 @@ export function buildLaunchdPlist(opts: LaunchdPlistOptions): string {
     <key>PATH</key><string>${e(passFile.path)}</string>
   </dict>`;
 
+  // Umask 077 (decimal 63): Harper bind()s operations-server at
+  // 0777 & ~umask = 0700. Darwin #1704: chmod on that AF_UNIX inode
+  // does not persist 0600. 0700 is owner-only; doctor classify is clean.
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -602,6 +605,8 @@ export function buildLaunchdPlist(opts: LaunchdPlistOptions): string {
   ${environmentVariables}
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>Umask</key>
+  <integer>63</integer>
   <key>StandardOutPath</key><string>${e(join(opts.dataDir, "log", "launchd-stdout.log"))}</string>
   <key>StandardErrorPath</key><string>${e(join(opts.dataDir, "log", "launchd-stderr.log"))}</string>
 </dict>
