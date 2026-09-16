@@ -115,16 +115,16 @@ describe("evaluateTxnCeiling (Harper 422 shape)", () => {
 
 describe("MAIN interleaving vs runExecuteDistillation (injected cold delay)", () => {
   test("fails-first: generate while the request txn is still open + cold delay → 422", async () => {
-    let clock = 0;
-    const txn = new SimulatedRequestTxn(() => clock, SHORT_CEILING_MS);
+    expect(COLD_DELAY_MS).toBeGreaterThan(SHORT_CEILING_MS);
+    const txn = new SimulatedRequestTxn(() => performance.now(), SHORT_CEILING_MS);
     txn.start();
 
     let status = 200;
     try {
-      // MAIN: models.generate() joins the still-open request txn (accounting
+      // MAIN: the generative call joins the still-open request txn (accounting
       // write) and then blocks on a cold backend past the ceiling.
       txn.addWrite();
-      clock += COLD_DELAY_MS;
+      await delay(COLD_DELAY_MS);
       txn.addWrite();
       txn.commit();
     } catch (err: any) {
@@ -140,8 +140,7 @@ describe("MAIN interleaving vs runExecuteDistillation (injected cold delay)", ()
   });
 
   test("release → generate → write survives the same injected cold delay", async () => {
-    let clock = 0;
-    const txn = new SimulatedRequestTxn(() => clock, SHORT_CEILING_MS);
+    const txn = new SimulatedRequestTxn(() => performance.now(), SHORT_CEILING_MS);
     txn.start();
     const events: string[] = [];
 
@@ -162,7 +161,7 @@ describe("MAIN interleaving vs runExecuteDistillation (injected cold delay)", ()
       generate: async () => {
         events.push("generate");
         expect(txn.open).toBe(false);
-        clock += COLD_DELAY_MS;
+        await delay(COLD_DELAY_MS);
         // Generate-side accounting writes must not rejoin the released txn.
         txn.addWrite();
         return { candidates: [{ claim: "ok" }] };
@@ -227,6 +226,11 @@ describe("MAIN interleaving vs runExecuteDistillation (injected cold delay)", ()
 });
 
 describe("MemoryReflect.ts must use the #1263 helper (fails on main)", () => {
+  test("the resource does not call models.generate() directly", () => {
+    expect(MEMORY_REFLECT_SRC).not.toMatch(/models\.generate\s*\(/);
+    expect(MEMORY_REFLECT_SRC).toContain("reflectModelsGenerate");
+  });
+
   test("execute-mode generateCandidates is only invoked from runExecuteDistillation", () => {
     expect(MEMORY_REFLECT_SRC).toContain("runExecuteDistillation");
     expect(MEMORY_REFLECT_SRC).toContain("releaseRequestTransaction");
@@ -241,5 +245,8 @@ describe("MemoryReflect.ts must use the #1263 helper (fails on main)", () => {
     const releaseIdx = MEMORY_REFLECT_SRC.indexOf("releaseRequestTransaction(ctx)", executeIdx);
     expect(releaseIdx).toBeGreaterThan(0);
     expect(releaseIdx).toBeLessThan(generateIdx);
+
+    const binderIdx = MEMORY_REFLECT_SRC.indexOf("generate: reflectModelsGenerate", executeIdx);
+    expect(binderIdx).toBeGreaterThan(helperIdx);
   });
 });

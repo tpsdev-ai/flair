@@ -41,11 +41,11 @@
  * bun's ESM linker rejects `import { Resource }` outright — see
  * test/unit/resource-allow.test.ts). This resource is a thin orchestrator
  * over the lib's tested functions. Execute mode releases the request
- * transaction before `models.generate()` so a cold backend cannot trip
+ * transaction before the generative call so a cold backend cannot trip
  * Harper's 30s open-transaction 422 (flair#1263).
  */
 
-import { Resource, databases, models, logger } from "harper";
+import { Resource, databases, logger } from "harper";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -74,6 +74,7 @@ import {
   REM_GATHER_YIELD_BUDGET_MS,
   type ReflectMemoryInput,
 } from "./memory-reflect-lib.js";
+import { reflectModelsGenerate } from "./memory-reflect-models.js";
 
 /** Same path `flair rem pause` writes. Duplicated across the src/ boundary. */
 const REM_PAUSE_FLAG = resolve(homedir(), ".flair", "rem.paused");
@@ -245,17 +246,18 @@ export class ReflectMemories extends Resource {
     const configuredModel = process.env.FLAIR_REM_MODEL || undefined;
 
     // #1263: Resource dispatch already opened a request transaction around
-    // post(). A cold `models.generate()` (Ollama model load > 30s) held that
+    // post(). A cold generative call (Ollama model load > 30s) held that
     // write-bearing txn past storage.maxTransactionOpenTime → HTTP 422,
     // not the documented 502/503. Release the request txn before generate
     // (distill outside it); stage inside a fresh short write window.
+    // The resource reaches generate only through this helper + binder.
     const distill = await runExecuteDistillation({
       releaseRequestTxn: () => releaseRequestTransaction(ctx),
       generate: () => generateCandidates({
         prompt: executePrompt,
         model: configuredModel,
         gatheredMemoryIds,
-        generate: (input, opts) => models.generate(input, opts),
+        generate: reflectModelsGenerate,
       }),
       write: async (outcome) => {
         if (!outcome.ok) return { kind: "failed" as const, outcome };
@@ -303,6 +305,11 @@ export class ReflectMemories extends Resource {
         // configured logical name, matching Harper's own default routing name.
         const resolvedModel = configuredModel ?? "default";
         const generatedAt = new Date().toISOString();
+        // Write-window atomicity (#1263): generate has already succeeded.
+        // Each MemoryCandidate.put is its own short commit. A throw mid-loop
+        // leaves earlier puts durable and skips lastReflected (never reached).
+        // lastReflected is patchRecordSilent — it cannot fail the request.
+        // 502/503 stay generate-only (no_backend / distillation_failed).
         const staged: any[] = [];
         for (const c of toStage) {
           // #1205b-1: buildStagedCandidateRow stamps `scopeTag` when this run was

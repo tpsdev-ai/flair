@@ -554,18 +554,6 @@ export type GenerateCandidatesOutcome =
   | { ok: false; reason: "validation_failed" };
 
 /**
- * Calls generate(), validates the result, and on malformed/mismatched output
- * retries exactly once with an explicit `responseFormat: 'json'` (the
- * "json-fallback path" — spec §3A items 2 & 3: build-time check confirmed
- * `GenerateOpts.responseFormat` supports `{ schema }` in harper
- * 5.1.17's types, but not every backend enforces it, so the first attempt
- * requests schema mode and the fallback attempt requests plain json mode).
- * Both attempts run through the SAME parseAndValidateCandidates — a parse
- * that succeeds but doesn't match the shape fails closed exactly like
- * malformed JSON does. Two attempts total, then fail closed with zero
- * candidates — callers must stage nothing on `ok: false`.
- */
-/**
  * Harper's default `storage.maxTransactionOpenTime` (ms). A write-bearing
  * request transaction that stays open past this ceiling is aborted with
  * HTTP 422 — not the documented 502/503 execute-mode failures. See
@@ -644,6 +632,18 @@ export function evaluateTxnCeiling(opts: {
   return { ok: true };
 }
 
+/**
+ * Calls generate(), validates the result, and on malformed/mismatched output
+ * retries exactly once with an explicit `responseFormat: 'json'` (the
+ * "json-fallback path" — spec §3A items 2 & 3: build-time check confirmed
+ * `GenerateOpts.responseFormat` supports `{ schema }` in harper
+ * 5.1.17's types, but not every backend enforces it, so the first attempt
+ * requests schema mode and the fallback attempt requests plain json mode).
+ * Both attempts run through the SAME parseAndValidateCandidates — a parse
+ * that succeeds but doesn't match the shape fails closed exactly like
+ * malformed JSON does. Two attempts total, then fail closed with zero
+ * candidates — callers must stage nothing on `ok: false`.
+ */
 export async function generateCandidates(params: {
   prompt: string;
   model?: string;
