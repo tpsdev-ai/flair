@@ -175,10 +175,13 @@ function killVerifiedOrphanPid(pid: number, startedAt: number): void {
  * and any tree whose owner is still live (pid alive AND start time matches
  * the stamp). A stamped tree whose owner is dead and whose `hdb.pid` still
  * matches the stamped Harper identity is killed (TERM, bounded wait, KILL)
- * then removed — that is the 39.5 GB shape (flair#1372). A stampless tree
- * with a live `hdb.pid` is left alone (someone else's instance). Directory
- * mtime is only a race guard for unstamped dirs — Linux does not update
- * it when files inside subdirs are appended.
+ * then removed — that is the 39.5 GB shape (flair#1372). A start-time
+ * **mismatch** removes the tree without killing (pid recycled); that is
+ * safe only because `readProcessStartTimeMs` is zone-stable — a TZ-skewed
+ * parse must not look like a mismatch or the orphan goes invisible (Kern
+ * #1708). A stampless tree with a live `hdb.pid` is left alone (someone
+ * else's instance). Directory mtime is only a race guard for unstamped
+ * dirs — Linux does not update it when files inside subdirs are appended.
  *
  * @returns number of trees removed
  */

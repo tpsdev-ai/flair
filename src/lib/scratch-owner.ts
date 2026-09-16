@@ -10,6 +10,13 @@
  * Harper identity (Kern A1) is the same model: `harperPid` + `harperStartedAt`.
  * Start-time matching reuses `daemon-liveness` (`isStartTimeMatch`, ±2s) and
  * `readProcessStartTimeMs` — no second parser.
+ *
+ * Invariant: a start-time **mismatch** verdict (`already-gone`) removes the
+ * tree and may leave a still-live process whose identity did not match —
+ * correct for pid recycling. That is safe only because the shared reader is
+ * zone-stable (darwin self-calibrates `ps lstart` against this process). A
+ * TZ-skewed parse that looked like a mismatch would delete the stamp and
+ * hide a real orphan from the next sweep (Kern #1708).
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -133,8 +140,10 @@ export function hdbPidIsLive(dir: string): boolean {
  *
  * Kill only when `hdb.pid` (or stamped `harperPid`) is alive AND its start
  * time matches `harperStartedAt`. A mismatch is already-gone (the original
- * Harper is not that pid). Disagreement between the two names, or a
- * stampless tree with a live `hdb.pid`, is unverified — fail closed.
+ * Harper is not that pid): the tree is removed and a live mismatched-identity
+ * process is left alone — correct for pid recycling, and safe only because
+ * the start-time reader is zone-stable. Disagreement between the two names,
+ * or a stampless tree with a live `hdb.pid`, is unverified — fail closed.
  */
 export function classifyOrphanHarperKill(dir: string): OrphanHarperKillVerdict {
   const stamp = readScratchOwnerStamp(dir);
