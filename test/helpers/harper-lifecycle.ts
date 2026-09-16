@@ -7,11 +7,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  classifyOrphanHarperKill,
   hasScratchOwnerStamp,
-  hdbPidIsLive,
   scratchOwnerIsLive,
   writeScratchOwnerStamp,
 } from "../../src/lib/scratch-owner.js";
+import { isStartTimeMatch } from "../../src/lib/daemon-liveness.js";
+import { readProcessStartTimeMs } from "../../src/lib/process-start-time.js";
 
 // flair#1450: test-harness Harper only. NODE_OPTIONS --require of this file
 // makes the child exit on EPIPE / reparent rather than loop into a multi-GB
@@ -149,12 +151,32 @@ export function countStaleHarperTrees(): number {
 export const STALE_HARPER_TREE_MS = 2 * 60 * 60 * 1000;
 
 /**
+ * Kill one stamped Harper pid. Re-checks start time immediately before
+ * signalling: a mismatch or unreadable start time is a recycled pid and
+ * we refuse (Kern A1). TERM, bounded wait, then KILL. Never a pattern kill.
+ */
+function killVerifiedOrphanPid(pid: number, startedAt: number): void {
+  const actual = readProcessStartTimeMs(pid);
+  if (actual === null || !isStartTimeMatch(actual, startedAt)) return;
+  try { process.kill(pid, "SIGTERM"); } catch { return; }
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    try { process.kill(pid, 0); } catch { return; }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+  try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+}
+
+/**
  * Remove abandoned `flair-test-*` trees left by interrupted runs.
  *
  * A process-exit hook cannot cover SIGKILL, so the next `startHarper` has
- * to sweep what the last one left. Skips dirs this process still tracks,
- * any tree whose owner pid is still alive, and any tree whose `hdb.pid`
- * is still alive (a live Harper from before the stamp existed). Directory
+ * to sweep what the last one left. Skips dirs this process still tracks
+ * and any tree whose owner is still live (pid alive AND start time matches
+ * the stamp). A stamped tree whose owner is dead and whose `hdb.pid` still
+ * matches the stamped Harper identity is killed (TERM, bounded wait, KILL)
+ * then removed — that is the 39.5 GB shape (flair#1372). A stampless tree
+ * with a live `hdb.pid` is left alone (someone else's instance). Directory
  * mtime is only a race guard for unstamped dirs — Linux does not update
  * it when files inside subdirs are appended.
  *
@@ -178,7 +200,17 @@ export function sweepStaleHarperTrees(opts?: { olderThanMs?: number }): number {
     const dir = join(tmpdir(), name);
     if (live.has(dir)) continue;
     if (scratchOwnerIsLive(dir)) continue;
-    if (hdbPidIsLive(dir)) continue;
+    const verdict = classifyOrphanHarperKill(dir);
+    if (verdict.kind === "pid-disagreement") {
+      console.warn(
+        `[harper-lifecycle] sweep skipped ${dir}: hdb.pid=${verdict.hdbPid} but stamp harperPid=${verdict.harperPid}`,
+      );
+      continue;
+    }
+    if (verdict.kind === "unverified") continue;
+    if (verdict.kind === "kill") {
+      killVerifiedOrphanPid(verdict.pid, verdict.startedAt);
+    }
     try {
       if (!hasScratchOwnerStamp(dir)) {
         const st = statSync(dir);
@@ -523,6 +555,12 @@ export interface StartHarperOptions {
    * responsible for cleaning it up.
    */
   installDir?: string;
+  /**
+   * When false, skip the #1450 orphan-exit preload so a SIGKILL of this
+   * parent leaves Harper alive (the #1372 reap-on-start known-answer).
+   * Default true: production startHarper always injects the preload.
+   */
+  orphanExitPreload?: boolean;
 }
 
 export async function startHarper(opts: StartHarperOptions = {}): Promise<HarperInstance> {
@@ -554,7 +592,10 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
   // and a handler cannot cover those exits (flair#1032).
   if (ownsInstallDir) sweepStaleHarperTrees();
   const installDir = opts.installDir ?? await mkdtemp(join(tmpdir(), "flair-test-"));
-  if (ownsInstallDir) writeScratchOwnerStamp(installDir);
+  // A2: overwrite the owner identity before install/spawn so a concurrent
+  // sweep cannot see a dead previous owner + live hdb.pid on a re-adopted
+  // caller-supplied tree. Overwrite, never merge. Also stamps mkdtemp trees.
+  writeScratchOwnerStamp(installDir);
   // Track before install/spawn so a timeout or thrown install still reaps
   // the tree. stopHarper / the success-path return replace pid once we have it.
   const tracked: { pid?: number; installDir?: string; owns: boolean } = {
@@ -615,7 +656,7 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
   // above cannot cover SIGKILL of the harness (and we cannot install signal
   // handlers — federation-watch.test.ts SIGTERMs the runner as a fixture).
   // The preload runs IN the Harper process and exits on EPIPE / reparent.
-  applyOrphanExitPreload(baseEnv);
+  if (opts.orphanExitPreload !== false) applyOrphanExitPreload(baseEnv);
 
   // models (flair#504 Phase 1): no env var needed here anymore — the spawned
   // build's own dist/resources/embeddings-boot.js self-registers the backend
@@ -701,6 +742,12 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
       // pid is filled in now that spawn succeeded. The registry entry itself
       // was added before install so a thrown start still reaps the tree.
       tracked.pid = proc.pid;
+      if (proc.pid) {
+        writeScratchOwnerStamp(installDir, {
+          harperPid: proc.pid,
+          harperStartedAt: readProcessStartTimeMs(proc.pid) ?? undefined,
+        });
+      }
       started = true;
       return {
         httpURL, opsURL, installDir, process: proc,

@@ -167,9 +167,6 @@ import { ownedPinRefreshShouldReport, refreshOwnedPins, staleSessionStartHookPin
 import {
   classifyDaemonState,
   verifyIdentity,
-  parseProcStatStartTime,
-  procStartTimeToEpochMs,
-  parsePsLstart,
   parseSidecarJson,
   classifyHealthProbe,
   classifyPortOwner,
@@ -185,6 +182,7 @@ import {
   type PortOwnerResult,
   type InstanceMatch,
 } from "./lib/daemon-liveness.js";
+import { readProcessStartTimeMs } from "./lib/process-start-time.js";
 import {
   bindCli as bindFederationCli,
   register as registerFederation,
@@ -4326,42 +4324,6 @@ function probePidLiveness(pid: number): PidLiveness {
     if (err?.code === "EPERM") return { kind: "eperm" };
     return { kind: "gone" };
   }
-}
-
-/**
- * The live process's start time in epoch ms, or null when it cannot be read.
- * Linux reads `/proc/<pid>/stat` field 22 (starttime in clock ticks) plus
- * `/proc/uptime`; macOS shells out to `ps -o lstart=`. A null answer degrades
- * to "identity unverified" — it never decides a verdict toward the destructive
- * branch (flair#1454 decision 4).
- */
-function readProcessStartTimeMs(pid: number): number | null {
-  if (process.platform === "linux") {
-    try {
-      const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
-      const starttime = parseProcStatStartTime(stat);
-      if (starttime === null) return null;
-      const uptimeRaw = readFileSync("/proc/uptime", "utf-8").trim().split(/\s+/)[0];
-      const uptime = Number(uptimeRaw);
-      if (!Number.isFinite(uptime)) return null;
-      return procStartTimeToEpochMs(starttime, uptime, Date.now());
-    } catch {
-      return null;
-    }
-  }
-  if (process.platform === "darwin") {
-    try {
-      const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
-        encoding: "utf-8",
-        env: { ...(process.env as Record<string, string>), LC_ALL: "C" },
-        timeout: 2000,
-      });
-      return parsePsLstart(out);
-    } catch {
-      return null;
-    }
-  }
-  return null;
 }
 
 /**
