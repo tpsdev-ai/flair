@@ -1,14 +1,16 @@
 /**
  * Pure classifier for federation peer liveness — no Harper imports.
  *
- * flair#1499 / flair#1146: HealthDetail used to count `status === "connected"`
- * (a value pairing never writes — spokes stay `paired` even after a
- * successful lastSyncAt advance) and then take the oldest lastSyncAt across
- * ALL peers, including revoked. A healthy hub synced a minute ago plus a
- * revoked row from June therefore rendered as "0 connected" and fired
- * "federation peers all disconnected >24h". The same arithmetic is why a
- * spoke that never persisted lastSyncAt reported `connected: 0` while the
- * hub — which writes the stamp on every FederationSync receive — reported 1.
+ * flair#1499: HealthDetail used to count `status === "connected"` (a value
+ * pairing never writes — spokes stay `paired` even after a successful
+ * lastSyncAt advance) and then take the oldest lastSyncAt across ALL peers,
+ * including revoked. A healthy hub synced a minute ago plus a revoked row
+ * from June therefore rendered as "0 connected" and fired
+ * "federation peers all disconnected >24h". That pre-#1499 count is the
+ * 0.40.0 #1146 symptom (`connected: 0, disconnected: 0`, no `unknown`).
+ *
+ * flair#1146 names the measure (`PEER_LIVENESS_MEASURED_BY`) so the label
+ * cannot be read as a live socket. Do not infer contact from memory lastWrite.
  *
  * Three contact states, plus revoked (which never drives the staleness
  * warning). Same class as #988: missing/unreadable evidence is UNKNOWN,
@@ -21,6 +23,9 @@
  */
 
 export const PEER_STALE_MS = 24 * 3600 * 1000;
+
+/** What `federation.peers.connected` counts. HealthDetail copies this string. */
+export const PEER_LIVENESS_MEASURED_BY = "lastSyncAt" as const;
 
 export const FEDERATION_PEERS_ALL_DISCONNECTED_WARNING =
   "federation peers all disconnected >24h";

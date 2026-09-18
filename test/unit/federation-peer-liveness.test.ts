@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import {
   FEDERATION_PEERS_ALL_DISCONNECTED_WARNING,
+  PEER_LIVENESS_MEASURED_BY,
   PEER_STALE_MS,
   classifyPeerLiveness,
   federationPeersAllDisconnectedWarning,
@@ -189,12 +190,16 @@ describe("summarizePeerLiveness + warning", () => {
 });
 
 describe("HealthDetail wiring (flair#1499)", () => {
+  test("PEER_LIVENESS_MEASURED_BY is lastSyncAt", () => {
+    expect(PEER_LIVENESS_MEASURED_BY).toBe("lastSyncAt");
+  });
+
   test("derives counts from lastSyncAt, not status === connected", () => {
     const src = readFileSync(join(import.meta.dir, "../../resources/health.ts"), "utf8");
     expect(src).toContain("summarizePeerLiveness");
     expect(src).toContain("federationPeersAllDisconnectedWarning");
     expect(src).toContain("classifyPeerLiveness");
-    expect(src).toContain("measuredBy: \"lastSyncAt\"");
+    expect(src).toContain("PEER_LIVENESS_MEASURED_BY");
     expect(src).not.toMatch(/p\.status === "connected"/);
   });
 });

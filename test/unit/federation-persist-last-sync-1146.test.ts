@@ -1,12 +1,10 @@
 /**
  * persistLocalPeerLastSyncAt — flair#1146.
  *
- * The spoke's HealthDetail `peers.connected` count is lastSyncAt-within-24h.
- * Pairing writes the hub row as `paired` with no stamp. A partial Harper
- * `update` of `{id, lastSyncAt}` can fail to keep required Peer fields
- * (`publicKey` is String!). The persist helper must read the full row and
- * upsert it with lastSyncAt — a contact stamp from a completed push, never
- * a memory lastWrite.
+ * Callers stamp lastSyncAt only after confirmed FederationSync contact.
+ * The helper read-then-upserts the full Peer row (hardening, not because
+ * today's Harper partial `update` fails — Kern probed 5.2.8 / 5.1.22).
+ * Search-miss must refuse to write rather than upsert `{id, lastSyncAt}`.
  */
 
 import { describe, expect, test, mock, afterEach } from "bun:test";
@@ -72,5 +70,34 @@ describe("persistLocalPeerLastSyncAt (flair#1146)", () => {
     expect(row.status).toBe("paired");
     expect(row.lastSyncAt).toBe(stamp);
     expect(row.updatedAt).toBe(stamp);
+  });
+
+  test("search-miss refuses to upsert a partial Peer (no publicKey wipe path)", async () => {
+    const calls: Array<{ body?: any }> = [];
+    globalThis.fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ body });
+      if (body?.operation === "search_by_value") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [],
+          text: async () => "[]",
+        } as Response;
+      }
+      throw new Error(`upsert must not run on search-miss; got ${body?.operation}`);
+    }) as any;
+
+    const result = await persistLocalPeerLastSyncAt({
+      opsEndpoint: "http://127.0.0.1:19925",
+      auth: "Basic dGVzdA==",
+      peerId: "hub-1",
+      lastSyncAt: "2026-09-18T20:00:00.000Z",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/refused to upsert a partial Peer/);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.body?.operation).toBe("search_by_value");
   });
 });

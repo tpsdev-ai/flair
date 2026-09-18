@@ -1,22 +1,12 @@
 /**
  * status-federation-spoke-peers-1146.test.ts — flair#1146 against a REAL Harper.
  *
- * `flair status --json` is a pass-through of `/HealthDetail`. The bug is
- * what that JSON tells the operator about a spoke: `peers.connected: 0`
- * while the hub reports the same peer connected and sync is current.
- *
- * What the count measures (do not change this without reading the issue):
- * HealthDetail runs `summarizePeerLiveness` over Peer rows. `connected` is
- * "lastSyncAt within 24h", not a live socket and not `status === "connected"`.
- * Pairing writes the spoke's hub row as `paired` with no lastSyncAt. The hub
- * writes lastSyncAt on every FederationSync receive. A missing stamp is
- * `unknown` → `connected: 0`.
- *
- * These tests seed real Peer/Instance rows and assert the emitted
- * `status --json` (and the HealthDetail body it copies). They must fail on
- * today's HealthDetail (no `measuredBy`; a spoke-shaped paired+lastSyncAt
- * row is the #1499 arithmetic the command has to keep) and must not infer
- * connectivity from a memory `lastWrite`.
+ * `flair status --json` is a pass-through of `/HealthDetail`. #1499 already
+ * made `connected` mean lastSyncAt-within-24h (the 0.40.0 symptom was
+ * `status === "connected"`, a value pairing never writes). This suite is
+ * the fails-first pin that HealthDetail names that measure
+ * (`measuredBy: "lastSyncAt"`) and that a missing stamp stays unknown —
+ * not inferred from any other freshness.
  */
 
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";

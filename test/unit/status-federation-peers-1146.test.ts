@@ -1,27 +1,16 @@
 /**
  * status-federation-peers-1146.test.ts — flair#1146.
  *
- * `flair status --json` must not tell the operator that a healthy spoke has
- * `peers.connected: 0` while the hub reports the same peer connected.
+ * `flair status --json` is a pass-through of `/HealthDetail`. This file pins
+ * that the command does not recompute, drop, or invent `federation.peers`
+ * from some other signal (including `agents.perAgent.lastWriteAt`).
  *
- * Diagnosis (what the count measures): `/HealthDetail` (and therefore
- * `status --json`) does not probe a live socket and does not count
- * `Peer.status === "connected"`. It runs `summarizePeerLiveness` — peers
- * whose `lastSyncAt` is a parseable stamp within 24h. Pairing writes the
- * spoke's hub row as `status: "paired"` with no stamp; the hub writes
- * `lastSyncAt` on every FederationSync receive. A missing stamp is
- * `unknown`, which leaves `connected: 0` and reads as an outage.
+ * Fixtures are hand-written. This suite does NOT import
+ * `summarizePeerLiveness` — a test that feeds the classifier its own output
+ * and asserts the echo is tautological and passed on main.
  *
- * These tests drive the real `status` command (subprocess + mock
- * `/HealthDetail`) and assert the emitted JSON. They are not a helper-only
- * suite — the bug is what the command TELLS the operator.
- *
- * Fails on today's code: HealthDetail's peers block has no `measuredBy`,
- * and a spoke-shaped row that HAS a recent lastSyncAt must still appear as
- * `connected: 1` in the command output (the #1499 arithmetic). Hub-shaped
- * rows must not regress. A paired row with no lastSyncAt plus a fresh
- * memory `lastWrite` must stay `connected: 0` — do not infer from data
- * freshness.
+ * The fails-first assertion that HealthDetail *emits* `measuredBy` lives in
+ * `test/integration/status-federation-spoke-peers-1146.test.ts` (real Harper).
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
@@ -30,7 +19,6 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer, IncomingMessage, ServerResponse, Server } from "node:http";
 import nacl from "tweetnacl";
-import { summarizePeerLiveness } from "../../resources/federation-peer-liveness.ts";
 
 function makeTmpDir(prefix: string): string {
   const dir = join(tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -85,22 +73,7 @@ function installedVersion(): string {
   return String(pkg.version);
 }
 
-const NOW_MS = Date.parse("2026-09-18T20:00:00.000Z");
-const MINUTE_AGO = new Date(NOW_MS - 60_000).toISOString();
-
-function peersBlock(peers: Array<{ status?: string | null; lastSyncAt?: unknown }>) {
-  const summary = summarizePeerLiveness(peers, NOW_MS);
-  return {
-    total: summary.total,
-    connected: summary.connected,
-    disconnected: summary.disconnected,
-    revoked: summary.revoked,
-    unknown: summary.unknown,
-    measuredBy: "lastSyncAt" as const,
-  };
-}
-
-describe("flair status --json federation.peers (flair#1146)", () => {
+describe("flair status --json federation.peers pass-through (flair#1146)", () => {
   let tmpHome: string;
   let server: Server | undefined;
 
@@ -144,8 +117,15 @@ describe("flair status --json federation.peers (flair#1146)", () => {
     return JSON.parse(stdout);
   }
 
-  test("spoke-shaped peer (status=paired, lastSyncAt a minute ago) emits connected: 1", async () => {
-    const peers = peersBlock([{ status: "paired", lastSyncAt: MINUTE_AGO }]);
+  test("emits HealthDetail.federation.peers unchanged, including measuredBy", async () => {
+    const peers = {
+      total: 1,
+      connected: 1,
+      disconnected: 0,
+      revoked: 0,
+      unknown: 0,
+      measuredBy: "lastSyncAt",
+    };
     const out = await statusJson({
       federation: {
         instance: { id: "flair_spoke", role: "spoke", status: "active" },
@@ -153,50 +133,37 @@ describe("flair status --json federation.peers (flair#1146)", () => {
         pendingTokens: 0,
       },
     });
-    expect(out.federation.instance.role).toBe("spoke");
-    expect(out.federation.peers.total).toBe(1);
-    expect(out.federation.peers.connected).toBe(1);
-    expect(out.federation.peers.disconnected).toBe(0);
-    expect(out.federation.peers.revoked).toBe(0);
-    expect(out.federation.peers.unknown).toBe(0);
-    expect(out.federation.peers.measuredBy).toBe("lastSyncAt");
+    expect(out.federation.peers).toEqual(peers);
   });
 
-  test("hub-shaped peer (status=connected, lastSyncAt a minute ago) does not regress", async () => {
-    const peers = peersBlock([{ status: "connected", lastSyncAt: MINUTE_AGO }]);
-    const out = await statusJson({
-      federation: {
-        instance: { id: "flair_hub", role: "hub", status: "active" },
-        peers,
-        pendingTokens: 0,
-      },
-    });
-    expect(out.federation.instance.role).toBe("hub");
-    expect(out.federation.peers.total).toBe(1);
-    expect(out.federation.peers.connected).toBe(1);
-    expect(out.federation.peers.disconnected).toBe(0);
-    expect(out.federation.peers.revoked).toBe(0);
-    expect(out.federation.peers.measuredBy).toBe("lastSyncAt");
-  });
-
-  test("hazard: paired + no lastSyncAt + recent memory lastWrite is NOT connected", async () => {
-    const peers = peersBlock([{ status: "paired", lastSyncAt: null }]);
+  test("does not invent measuredBy when HealthDetail omitted it", async () => {
+    const peers = { total: 1, connected: 0, disconnected: 0, revoked: 0, unknown: 1 };
     const out = await statusJson({
       federation: {
         instance: { id: "flair_spoke", role: "spoke", status: "active" },
         peers,
+        pendingTokens: 0,
+      },
+    });
+    expect(out.federation.peers.measuredBy).toBeUndefined();
+    expect(out.federation.peers.connected).toBe(0);
+    expect(out.federation.peers.unknown).toBe(1);
+  });
+
+  test("does not raise connected from agents.perAgent.lastWriteAt", async () => {
+    const out = await statusJson({
+      federation: {
+        instance: { id: "flair_spoke", role: "spoke", status: "active" },
+        peers: { total: 1, connected: 0, disconnected: 0, revoked: 0, unknown: 1, measuredBy: "lastSyncAt" },
         pendingTokens: 0,
       },
       agents: {
         count: 1,
-        perAgent: [{ id: "agent-1", memoryCount: 1, lastWriteAt: MINUTE_AGO }],
+        perAgent: [{ id: "agent-1", memoryCount: 1, lastWriteAt: "2026-09-18T19:59:00.000Z" }],
       },
     });
-    expect(out.federation.peers.total).toBe(1);
     expect(out.federation.peers.connected).toBe(0);
-    expect(out.federation.peers.disconnected).toBe(0);
     expect(out.federation.peers.unknown).toBe(1);
-    expect(out.agents.perAgent[0].lastWriteAt).toBe(MINUTE_AGO);
-    expect(out.federation.peers.measuredBy).toBe("lastSyncAt");
+    expect(out.agents.perAgent[0].lastWriteAt).toBe("2026-09-18T19:59:00.000Z");
   });
 });

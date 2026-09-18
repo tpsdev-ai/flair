@@ -212,18 +212,26 @@ export function signRequestBody(body: Record<string, any>, secretKey: Uint8Array
 // Alias: signBodyFresh for clarity at call sites
 const signBodyFresh = signRequestBody;
 
+function isCompletePeerRow(row: unknown): row is Record<string, any> {
+  if (!row || typeof row !== "object") return false;
+  const r = row as Record<string, any>;
+  return typeof r.id === "string" && r.id.length > 0
+    && typeof r.publicKey === "string" && r.publicKey.length > 0;
+}
+
 /**
- * Persist last-contact on the local Peer row after a completed push.
+ * Persist last-contact on the local Peer row after confirmed hub contact.
  *
- * HealthDetail's `peers.connected` counts lastSyncAt within 24h (flair#1499 /
- * flair#1146). Pairing writes the spoke's hub row as `paired` with no stamp.
- * The hub writes lastSyncAt on every FederationSync receive. A spoke that
- * never persists this field reports `connected: 0` while the hub reports 1.
+ * Callers must invoke this only after a FederationSync 200 (sendBatch or
+ * the no-change liveness ping). lastSyncAt is the value HealthDetail counts
+ * as `connected` (flair#1499 / flair#1146). A failed ping must leave the
+ * stamp untouched so the answer stays `unknown`.
  *
- * This is a contact stamp from a push that already succeeded — not an
- * inference from memory lastWrite. Harper `update` with only `{id,lastSyncAt}`
- * can drop required Peer fields (`publicKey` is String!); read-then-upsert
- * the full row the same way pairing writes it.
+ * Why a full-row upsert rather than the `{id, lastSyncAt}` `update` that
+ * has shipped since #426: Kern probed that partial update on Harper 5.2.8
+ * and 5.1.22 — it already lands, `publicKey` intact. We keep read-then-upsert
+ * to harden against a future Harper that treats an incomplete upsert as
+ * replace. On search-miss we refuse to write rather than depend on merge.
  */
 export async function persistLocalPeerLastSyncAt(args: {
   opsEndpoint: string;
@@ -232,7 +240,7 @@ export async function persistLocalPeerLastSyncAt(args: {
   lastSyncAt: string;
 }): Promise<{ ok: boolean; status: number; error?: string }> {
   const headers = { "Content-Type": "application/json", Authorization: args.auth };
-  let existing: Record<string, any> = { id: args.peerId };
+  let existing: Record<string, any> | null = null;
   try {
     const searchRes = await fetch(`${args.opsEndpoint}/`, {
       method: "POST",
@@ -251,10 +259,13 @@ export async function persistLocalPeerLastSyncAt(args: {
     if (searchRes.ok) {
       const rows = await searchRes.json() as any;
       const row = Array.isArray(rows) ? rows[0] : rows;
-      if (row && typeof row === "object" && row.id) existing = row;
+      if (isCompletePeerRow(row) && row.id === args.peerId) existing = row;
     }
   } catch {
-    // Fall through and upsert with what we have — pairing always wrote id.
+    // Search miss — refuse to upsert an incomplete Peer.
+  }
+  if (!existing) {
+    return { ok: false, status: 0, error: "peer row missing or incomplete — refused to upsert a partial Peer" };
   }
 
   const upsertRes = await fetch(`${args.opsEndpoint}/`, {
@@ -487,12 +498,10 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
 
     console.log(`Syncing to hub: ${hub.id}...`);
     const since = hub.lastSyncAt ?? new Date(0).toISOString();
-    // Capture sync start time BEFORE we query records. We advance the local
-    // hub peer's lastSyncAt to this value after success so the next poll's
-    // `since` cursor moves forward — fixes task #146 (federation peer
-    // .lastSyncAt update bug). Records updated DURING this sync will have
-    // updatedAt > syncStartedAt and be picked up next cycle, not missed.
-    const syncStartedAt = new Date().toISOString();
+    // lastSyncAt advances only after confirmed FederationSync contact
+    // (completion time). Task #146 still holds: the next poll's `since`
+    // is that stamp. Do not stamp at run-start — that is a driver-ran
+    // costume, not contact (flair#1146).
     const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
@@ -691,34 +700,32 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       }
     }
 
-    // Advance the local hub peer's lastSyncAt cursor. The hub-side
-    // FederationSync handler updates ITS view of the spoke peer, but the
-    // spoke never updated its own view of the hub — so `since` stayed at
-    // whatever value was on the peer record at pair time (often near-epoch),
-    // and every poll re-queried `updatedAt > since` and re-sent every
-    // memory ever written. The receiver-side contentHash gate in
-    // Federation.ts prevents the actual blob re-write, but advancing the
-    // cursor here stops the redundant network traffic + Lambda compute
-    // entirely. Task #146 / flair#1146. Even no-change runs should advance:
-    // lastSyncAt is the contact stamp HealthDetail counts as `connected`.
-    try {
-      const advanced = await persistLocalPeerLastSyncAt({
-        opsEndpoint,
-        auth,
-        peerId: hub.id,
-        lastSyncAt: syncStartedAt,
-      });
-      if (!advanced.ok) {
-        console.warn(`⚠️  Local hub.lastSyncAt advance failed (${advanced.status}): ${advanced.error ?? ""}. Next poll will re-send memories.`);
+    // lastSyncAt is contact, not "the driver ran" (flair#1146). Persist only
+    // after a FederationSync 200 — sendBatch already threw on non-ok, so
+    // totalBatches > 0 means the hub answered. The no-change path must ping
+    // first; a failed ping leaves the stamp untouched → unknown.
+    const stampLocalContact = async () => {
+      const contactedAt = new Date().toISOString();
+      try {
+        const advanced = await persistLocalPeerLastSyncAt({
+          opsEndpoint,
+          auth,
+          peerId: hub.id,
+          lastSyncAt: contactedAt,
+        });
+        if (!advanced.ok) {
+          console.warn(`⚠️  Local hub.lastSyncAt advance failed (${advanced.status}): ${advanced.error ?? ""}. Next poll will re-send memories.`);
+        }
+      } catch (advErr: any) {
+        console.warn(`⚠️  Local hub.lastSyncAt advance error: ${advErr?.message ?? advErr}. Next poll will re-send memories.`);
       }
-    } catch (advErr: any) {
-      console.warn(`⚠️  Local hub.lastSyncAt advance error: ${advErr?.message ?? advErr}. Next poll will re-send memories.`);
-    }
+    };
 
     if (totalBatches === 0) {
       // No-change syncs must still ping the hub so it updates the
       // spoke's lastSyncAt (liveness). Without this, idle-but-alive spokes
       // look indistinguishable from dead ones on the hub dashboard.
+      let pingOk = false;
       try {
         if (!secretKey) secretKey = await loadInstanceSecretKey(instance.id, opts);
         const pingBody = signBodyFresh({
@@ -735,10 +742,13 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         if (!pingRes.ok) {
           const txt = await pingRes.text().catch(() => "");
           console.warn(`⚠️  Liveness ping to hub failed (${pingRes.status}): ${txt.slice(0, 200)}. Hub won't update spoke liveness.`);
+        } else {
+          pingOk = true;
         }
       } catch (pingErr: any) {
         console.warn(`⚠️  Liveness ping error: ${pingErr?.message ?? pingErr}. Hub won't update spoke liveness.`);
       }
+      if (pingOk) await stampLocalContact();
 
       // flair#1232: "No changes" is true only when nothing was found since
       // the cursor. If rows were found and every one was withheld as private,
@@ -752,6 +762,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       return { pushed: 0, skipped: 0 };
     }
 
+    await stampLocalContact();
     console.log(`✅ Synced ${totalMerged} records (${totalSkipped} skipped) across ${totalBatches} batches`);
     return { pushed: totalMerged, skipped: totalSkipped };
   } catch (err: any) {
