@@ -46,14 +46,15 @@ describe("federation liveness ping on no-change sync", () => {
   /**
    * Install fetch mock for a no-change sync run.
    *
-   * Call sequence (14 calls total):
+   * Call sequence (15 calls total):
    *  1. GET  /FederationPeers                  → api() helper
    *  2. GET  /FederationInstance               → api() helper
    *  3-10. POST ops/                           → 4 tables × 2 queries (all empty)
-   *  11. POST ops/                             → local hub.lastSyncAt advance
-   *  12. POST ops/                             → loadInstanceSecretKey DB fallback (keystore is empty in tests)
-   *  13. POST hub/FederationSync               → liveness ping (empty records)
-   *  14. POST hub/FederationSync               → (only if ping retries, shouldn't happen)
+   *  11. POST ops/                             → search Peer row for lastSyncAt upsert (flair#1146)
+   *  12. POST ops/                             → upsert local hub.lastSyncAt
+   *  13. POST ops/                             → loadInstanceSecretKey DB fallback (keystore is empty in tests)
+   *  14. POST hub/FederationSync               → liveness ping (empty records)
+   *  15. POST hub/FederationSync               → (only if ping retries, shouldn't happen)
    */
   function installNoChangeMock(pingStatus: number = 200) {
     let idx = 0;
@@ -68,9 +69,18 @@ describe("federation liveness ping on no-change sync", () => {
       res(true, 200, []), res(true, 200, []), // Soul
       res(true, 200, []), res(true, 200, []), // Agent
       res(true, 200, []), res(true, 200, []), // Relationship
-      // Call 11: Local hub.lastSyncAt advance
+      // Call 11: search existing hub Peer row (full-row lastSyncAt upsert)
+      res(true, 200, [{
+        id: "hub-1",
+        publicKey: "hub-pk",
+        role: "hub",
+        status: "paired",
+        endpoint: "http://hub:9926",
+        lastSyncAt: "2025-01-01T00:00:00.000Z",
+      }]),
+      // Call 12: upsert local hub.lastSyncAt
       res(true, 200, { ok: true }),
-      // Call 12: loadInstanceSecretKey DB fallback (keystore miss in test env)
+      // Call 13: loadInstanceSecretKey DB fallback (keystore miss in test env)
       res(true, 200, [{ id: "spoke-alpha", _keySeed: Buffer.from(testKp.secretKey.slice(0, 32)).toString("base64url") }]),
       // Call 13: Liveness ping to FederationSync
       res(pingStatus === 200, pingStatus, pingStatus === 200 ? { merged: 0, skipped: 0, skippedReasons: {}, total: 0, durationMs: 1 } : { error: "service unavailable" }),

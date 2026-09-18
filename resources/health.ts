@@ -382,9 +382,10 @@ export class HealthDetail extends Resource {
         stats.federation = null;
       } else {
         const inst = instances[0];
-        // flair#1499: derive connected/down from lastSyncAt, not stored
-        // status. Pairing writes `paired`; a recent lastSyncAt is connected.
-        // Revoked rows are counted separately and never drive the >24h warning.
+        // flair#1499 / flair#1146: derive connected/down from lastSyncAt,
+        // not stored status. Pairing writes `paired`; a recent lastSyncAt is
+        // connected. Revoked rows are counted separately and never drive the
+        // >24h warning. Do not substitute memory lastWrite for lastSyncAt.
         const liveness = summarizePeerLiveness(peers, nowMs);
         const peersBlock = {
           total: liveness.total,
@@ -392,6 +393,12 @@ export class HealthDetail extends Resource {
           disconnected: liveness.disconnected,
           revoked: liveness.revoked,
           unknown: liveness.unknown,
+          // flair#1146: `connected` is last-contact, not a live socket.
+          // Pairing writes `paired` with no lastSyncAt; the hub writes the
+          // stamp on every FederationSync receive. A spoke that never
+          // persists lastSyncAt reports connected: 0 while the hub reports 1.
+          // Name the measure so "0 connected" cannot be read as TCP-down.
+          measuredBy: "lastSyncAt",
         };
         const pendingTokens = tokens.filter(
           (t: any) => !t.consumedBy && t.expiresAt && new Date(t.expiresAt).getTime() > nowMs,

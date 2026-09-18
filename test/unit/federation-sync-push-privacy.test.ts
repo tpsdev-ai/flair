@@ -85,11 +85,21 @@ describe("federation sync push — private-visibility filter", () => {
         return res(true, 200, isMemoryUpdatedAtQuery ? memoryRows : []);
       }
       if (body?.operation === "search_by_value") {
+        if (body.table === "Peer") {
+          return res(true, 200, [{
+            id: "hub-1",
+            publicKey: "hub-pk",
+            role: "hub",
+            status: "paired",
+            endpoint: "http://hub:9926",
+            lastSyncAt: SINCE,
+          }]);
+        }
         // loadInstanceSecretKey DB fallback (keystore is empty in test env)
         return res(true, 200, [{ id: "spoke-alpha", _keySeed: Buffer.from(testKp.secretKey.slice(0, 32)).toString("base64url") }]);
       }
-      if (body?.operation === "update") {
-        // local hub.lastSyncAt advance
+      if (body?.operation === "update" || body?.operation === "upsert") {
+        // local hub.lastSyncAt persist (flair#1146)
         return res(true, 200, { ok: true });
       }
       if (method === "POST" && url.includes("/FederationSync")) {

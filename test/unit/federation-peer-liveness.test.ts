@@ -194,6 +194,7 @@ describe("HealthDetail wiring (flair#1499)", () => {
     expect(src).toContain("summarizePeerLiveness");
     expect(src).toContain("federationPeersAllDisconnectedWarning");
     expect(src).toContain("classifyPeerLiveness");
+    expect(src).toContain("measuredBy: \"lastSyncAt\"");
     expect(src).not.toMatch(/p\.status === "connected"/);
   });
 });

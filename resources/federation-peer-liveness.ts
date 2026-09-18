@@ -1,12 +1,14 @@
 /**
  * Pure classifier for federation peer liveness — no Harper imports.
  *
- * flair#1499: HealthDetail used to count `status === "connected"` (a value
- * pairing never writes — spokes stay `paired` even after a successful
- * lastSyncAt advance) and then take the oldest lastSyncAt across ALL peers,
- * including revoked. A healthy hub synced a minute ago plus a revoked row
- * from June therefore rendered as "0 connected" and fired
- * "federation peers all disconnected >24h".
+ * flair#1499 / flair#1146: HealthDetail used to count `status === "connected"`
+ * (a value pairing never writes — spokes stay `paired` even after a
+ * successful lastSyncAt advance) and then take the oldest lastSyncAt across
+ * ALL peers, including revoked. A healthy hub synced a minute ago plus a
+ * revoked row from June therefore rendered as "0 connected" and fired
+ * "federation peers all disconnected >24h". The same arithmetic is why a
+ * spoke that never persisted lastSyncAt reported `connected: 0` while the
+ * hub — which writes the stamp on every FederationSync receive — reported 1.
  *
  * Three contact states, plus revoked (which never drives the staleness
  * warning). Same class as #988: missing/unreadable evidence is UNKNOWN,

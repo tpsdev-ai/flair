@@ -213,6 +213,72 @@ export function signRequestBody(body: Record<string, any>, secretKey: Uint8Array
 const signBodyFresh = signRequestBody;
 
 /**
+ * Persist last-contact on the local Peer row after a completed push.
+ *
+ * HealthDetail's `peers.connected` counts lastSyncAt within 24h (flair#1499 /
+ * flair#1146). Pairing writes the spoke's hub row as `paired` with no stamp.
+ * The hub writes lastSyncAt on every FederationSync receive. A spoke that
+ * never persists this field reports `connected: 0` while the hub reports 1.
+ *
+ * This is a contact stamp from a push that already succeeded — not an
+ * inference from memory lastWrite. Harper `update` with only `{id,lastSyncAt}`
+ * can drop required Peer fields (`publicKey` is String!); read-then-upsert
+ * the full row the same way pairing writes it.
+ */
+export async function persistLocalPeerLastSyncAt(args: {
+  opsEndpoint: string;
+  auth: string;
+  peerId: string;
+  lastSyncAt: string;
+}): Promise<{ ok: boolean; status: number; error?: string }> {
+  const headers = { "Content-Type": "application/json", Authorization: args.auth };
+  let existing: Record<string, any> = { id: args.peerId };
+  try {
+    const searchRes = await fetch(`${args.opsEndpoint}/`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        operation: "search_by_value",
+        schema: "flair",
+        table: "Peer",
+        search_attribute: "id",
+        search_type: "equals",
+        search_value: args.peerId,
+        get_attributes: ["*"],
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (searchRes.ok) {
+      const rows = await searchRes.json() as any;
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row && typeof row === "object" && row.id) existing = row;
+    }
+  } catch {
+    // Fall through and upsert with what we have — pairing always wrote id.
+  }
+
+  const upsertRes = await fetch(`${args.opsEndpoint}/`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      operation: "upsert",
+      database: "flair",
+      table: "Peer",
+      records: [{
+        ...existing,
+        id: args.peerId,
+        lastSyncAt: args.lastSyncAt,
+        updatedAt: args.lastSyncAt,
+      }],
+    }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (upsertRes.ok) return { ok: true, status: upsertRes.status };
+  const txt = await upsertRes.text().catch(() => "");
+  return { ok: false, status: upsertRes.status, error: txt.slice(0, 200) };
+}
+
+/**
  * The most recent CONTACT with any peer (max of peer.lastSyncAt), or null.
  *
  * Contact, not merge: a sync that reaches the peer and legitimately has
@@ -633,22 +699,17 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     // memory ever written. The receiver-side contentHash gate in
     // Federation.ts prevents the actual blob re-write, but advancing the
     // cursor here stops the redundant network traffic + Lambda compute
-    // entirely. Task #146. Even no-change runs should advance.
+    // entirely. Task #146 / flair#1146. Even no-change runs should advance:
+    // lastSyncAt is the contact stamp HealthDetail counts as `connected`.
     try {
-      const advanceRes = await fetch(`${opsEndpoint}/`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: auth },
-        body: JSON.stringify({
-          operation: "update",
-          database: "flair",
-          table: "Peer",
-          records: [{ id: hub.id, lastSyncAt: syncStartedAt }],
-        }),
-        signal: AbortSignal.timeout(10_000),
+      const advanced = await persistLocalPeerLastSyncAt({
+        opsEndpoint,
+        auth,
+        peerId: hub.id,
+        lastSyncAt: syncStartedAt,
       });
-      if (!advanceRes.ok) {
-        const txt = await advanceRes.text().catch(() => "");
-        console.warn(`⚠️  Local hub.lastSyncAt advance failed (${advanceRes.status}): ${txt.slice(0, 200)}. Next poll will re-send memories.`);
+      if (!advanced.ok) {
+        console.warn(`⚠️  Local hub.lastSyncAt advance failed (${advanced.status}): ${advanced.error ?? ""}. Next poll will re-send memories.`);
       }
     } catch (advErr: any) {
       console.warn(`⚠️  Local hub.lastSyncAt advance error: ${advErr?.message ?? advErr}. Next poll will re-send memories.`);

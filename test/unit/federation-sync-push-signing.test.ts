@@ -100,10 +100,20 @@ describe("federation sync push — per-record signing (federation-edge-hardening
         return res(true, 200, isMemoryUpdatedAtQuery ? memoryRows : []);
       }
       if (body?.operation === "search_by_value") {
+        if (body.table === "Peer") {
+          return res(true, 200, [{
+            id: "hub-1",
+            publicKey: "hub-pk",
+            role: "hub",
+            status: "paired",
+            endpoint: "http://hub:9926",
+            lastSyncAt: SINCE,
+          }]);
+        }
         // loadInstanceSecretKey DB fallback (keystore is empty in test env)
         return res(true, 200, [{ id: INSTANCE_ID, _keySeed: Buffer.from(testKp.secretKey.slice(0, 32)).toString("base64url") }]);
       }
-      if (body?.operation === "update") {
+      if (body?.operation === "update" || body?.operation === "upsert") {
         return res(true, 200, { ok: true });
       }
       if (method === "POST" && url.includes("/FederationSync")) {

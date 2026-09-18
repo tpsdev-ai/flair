@@ -190,6 +190,7 @@ import {
   signRequestBody,
   parseTokenFromFile,
   runFederationSyncOnce,
+  persistLocalPeerLastSyncAt,
   runFederationWatch,
   federationStatusUrlSetting,
   describeFederationStatusFetchFailed,
@@ -6417,6 +6418,7 @@ export type { KeysPruneEntry, KeysPruneResult } from "./commands/keys.js";
 
 export {
   runFederationSyncOnce,
+  persistLocalPeerLastSyncAt,
   runFederationWatch,
   federationStatusUrlSetting,
   describeFederationStatusFetchFailed,
