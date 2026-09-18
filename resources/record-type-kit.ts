@@ -420,25 +420,61 @@ export function stampAttribution(
   // "fix" here; that change wants its own design pass):
   //
   // An admin AGENT KEY (a TPS-Ed25519 signature whose principal is in the
-  // admin set — agent-auth.ts resolves it and Basic super_user alike to
-  // `isAdmin: true`) is treated as an OPERATOR on this branch: every kit
-  // table's write path honors a body-supplied owner field from it (or
-  // defaults it under "stamp-default") rather than stamping the caller's
-  // own identity. That predates #1537's source-class model, which adopted
-  // the OPPOSITE rule for Soul — "Role is not source: an admin agent key or
-  // delegated OAuth identity is still a runtime credential. Only verified
-  // Basic admin auth enters the operator path" (resources/soul-write-
-  // policy.ts) — and this branch has NOT been re-adjudicated against it.
-  // Both controls were deliberate; nobody propagated the newer rule
-  // backward. That is policy drift, not code drift.
+  // admin set) is treated as an OPERATOR on this branch: every kit table's
+  // write path honors a body-supplied owner field from it (or defaults it
+  // under "stamp-default") rather than stamping the caller's own identity.
+  // agent-auth.ts resolves such a key and credentialed Basic super_user
+  // ALIKE to `isAdmin: true`, but from different evidence — the key's
+  // boolean is the middleware-computed `tpsAgentIsAdmin` annotation, the
+  // Basic one a `user.role.permission.super_user` role claim — and the
+  // verdict cannot tell which evidence produced it. That predates #1537's
+  // source-class model, which adopted the OPPOSITE rule for Soul — "Role
+  // is not source: an admin agent key or delegated OAuth identity is still
+  // a runtime credential. Only verified Basic admin auth enters the
+  // operator path" (resources/soul-write-policy.ts) — and this branch has
+  // NOT been re-adjudicated against it. Both controls were deliberate;
+  // nobody propagated the newer rule backward. That is policy drift, not
+  // code drift.
   //
-  // Reach, so this is taken seriously and not read as a Soul-only concern:
-  // this branch sits BEFORE the mode switch, so it covers EVERY kit call
-  // site in EVERY mode — Memory, MemoryFeed, Credential, OrgEvent,
+  // WRITE reach, so this is taken seriously and not read as a Soul-only
+  // concern: this branch sits BEFORE the mode switch, so it covers EVERY
+  // kit call site in EVERY mode — Memory, MemoryFeed, Credential, OrgEvent,
   // Relationship, WorkspaceState, Asset and MemoryCandidate. Soul is
   // protected only because its source gate (authorizeSoulWrite) lives
   // OUTSIDE the kit and re-reads the raw Authorization header before
   // stampAttribution is ever reached.
+  //
+  // READ reach — the SAME `isAdmin` boolean is also the READ authorization
+  // in this kit, so the exposure is unfiltered reads of owner-scoped data,
+  // not just forged provenance on writes: resolveAuthGate returns
+  // { kind: "unfiltered" } for admin (the verdict that also dispatches the
+  // Asset/MemoryCandidate/OrgEvent delete() paths), makeByIdReadGate
+  // returns superGet(target) with no ownership check, Credential.search()/
+  // get() branch on the same verdict out-of-kit (Credential.ts), and
+  // Message.ts hand-rolls the identical branch inline. With an admin agent
+  // key, that reads: MemoryCandidate rows whose contract is "a candidate
+  // must not be org-readable before a human/agent reviewer explicitly
+  // promotes or rejects it" (record-types.ts); other principals' Credential
+  // rows — get() strips tokenHash but returns the metadata, and search()'s
+  // admin branch strips NOTHING (the strip lives only in get()); and every
+  // Message in the table. Provenance integrity AND confidentiality, one
+  // root cause: the verdict conflates a runtime credential with the
+  // operator. Same fix — #1741's credential class.
+  //
+  // PINNING: the behaviour is pinned, but only as behaviour, and every pin
+  // passes `isAdmin` as a bare boolean (`agentCtx("agent-admin", true)`)
+  // because the code cannot express the credential distinction. Writes —
+  // record-type-kit.test.ts's "admin → always passthrough" (validate-
+  // truthy and validate-strict), "admin + field absent → default-if-absent
+  // (||=)" (stamp-default) and "admin → passthrough, NO default-if-absent"
+  // (stamp-strict). Reads — the same file's "admin agent → unfiltered via
+  // superGet, no ownership check" and "admin agent → unfiltered", plus
+  // memory-candidate-read-gate.test.ts's "admin agent → returns any id
+  // unchanged, no ownership check" and "an admin agent sees every
+  // candidate, unfiltered". Soul's out-of-kit gate — the TPS-Ed25519-
+  // adminAgent-toNull line in soul-adk-refusal.test.ts. Until #1741 lands,
+  // "an admin agent key cannot read X" is UNTESTABLE — the read path's
+  // credential-class property is pinned by nothing today.
   if (auth.isAdmin) {
     if (mode === "stamp-default") content[field] ||= auth.agentId;
     // every other mode: admin passthrough, untouched
