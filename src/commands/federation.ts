@@ -498,10 +498,13 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
 
     console.log(`Syncing to hub: ${hub.id}...`);
     const since = hub.lastSyncAt ?? new Date(0).toISOString();
-    // lastSyncAt advances only after confirmed FederationSync contact
-    // (completion time). Task #146 still holds: the next poll's `since`
-    // is that stamp. Do not stamp at run-start — that is a driver-ran
-    // costume, not contact (flair#1146).
+    // Capture queriedAt BEFORE the table queries (task #146 no-miss).
+    // Mid-sync writes have updatedAt > queriedAt and are re-sent next
+    // cycle. The stamp is still written only after confirmed FederationSync
+    // contact (flair#1146) — the gate is when we persist, not what value
+    // we persist. Completion time here would make those writes permanently
+    // unfederated.
+    const queriedAt = new Date().toISOString();
     const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
@@ -705,13 +708,12 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     // totalBatches > 0 means the hub answered. The no-change path must ping
     // first; a failed ping leaves the stamp untouched → unknown.
     const stampLocalContact = async () => {
-      const contactedAt = new Date().toISOString();
       try {
         const advanced = await persistLocalPeerLastSyncAt({
           opsEndpoint,
           auth,
           peerId: hub.id,
-          lastSyncAt: contactedAt,
+          lastSyncAt: queriedAt,
         });
         if (!advanced.ok) {
           console.warn(`⚠️  Local hub.lastSyncAt advance failed (${advanced.status}): ${advanced.error ?? ""}. Next poll will re-send memories.`);
