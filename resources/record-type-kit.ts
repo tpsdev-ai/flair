@@ -416,6 +416,29 @@ export function stampAttribution(
 ): AttributionResult {
   if (auth.kind !== "agent") return {}; // internal → always passthrough
 
+  // KNOWN, DATED ASYMMETRY (2026-09-18, tracked as flair#1741 — do not
+  // "fix" here; that change wants its own design pass):
+  //
+  // An admin AGENT KEY (a TPS-Ed25519 signature whose principal is in the
+  // admin set — agent-auth.ts resolves it and Basic super_user alike to
+  // `isAdmin: true`) is treated as an OPERATOR on this branch: every kit
+  // table's write path honors a body-supplied owner field from it (or
+  // defaults it under "stamp-default") rather than stamping the caller's
+  // own identity. That predates #1537's source-class model, which adopted
+  // the OPPOSITE rule for Soul — "Role is not source: an admin agent key or
+  // delegated OAuth identity is still a runtime credential. Only verified
+  // Basic admin auth enters the operator path" (resources/soul-write-
+  // policy.ts) — and this branch has NOT been re-adjudicated against it.
+  // Both controls were deliberate; nobody propagated the newer rule
+  // backward. That is policy drift, not code drift.
+  //
+  // Reach, so this is taken seriously and not read as a Soul-only concern:
+  // this branch sits BEFORE the mode switch, so it covers EVERY kit call
+  // site in EVERY mode — Memory, MemoryFeed, Credential, OrgEvent,
+  // Relationship, WorkspaceState, Asset and MemoryCandidate. Soul is
+  // protected only because its source gate (authorizeSoulWrite) lives
+  // OUTSIDE the kit and re-reads the raw Authorization header before
+  // stampAttribution is ever reached.
   if (auth.isAdmin) {
     if (mode === "stamp-default") content[field] ||= auth.agentId;
     // every other mode: admin passthrough, untouched
