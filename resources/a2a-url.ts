@@ -11,6 +11,8 @@
 // avoids the simulator-pattern drift that let the AdminInstance predicate be
 // reproduced-not-imported).
 
+import { harperPortValue } from "../src/lib/harper-port-value.js";
+
 // The CLI's DEFAULT_HTTP_PORT (src/cli.ts `DEFAULT_PORT`). Keep in sync.
 export const DEFAULT_HTTP_PORT = 19926;
 
@@ -19,9 +21,11 @@ export type RequestLike = { headers?: any } | undefined;
 // Loopback base URL for in-process self-calls (e.g. the streaming catch-up
 // fetch). Points at the port Flair is ACTUALLY listening on, which Harper
 // exposes via HTTP_PORT in the runtime env — never the public/proxy URL.
-// Falls back to DEFAULT_HTTP_PORT for a default local install.
+// `HTTP_PORT` is parsed through `harperPortValue` so a host-qualified value
+// (`127.0.0.1:19926`, `[::1]:19926`) yields a valid URL rather than a doubled
+// host. Falls back to DEFAULT_HTTP_PORT for a default local install.
 export function localBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
-  return `http://127.0.0.1:${env.HTTP_PORT || DEFAULT_HTTP_PORT}`;
+  return `http://127.0.0.1:${harperPortValue(env.HTTP_PORT) ?? DEFAULT_HTTP_PORT}`;
 }
 
 // Public base URL advertised in the A2A agent card so remote peers can reach

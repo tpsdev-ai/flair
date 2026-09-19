@@ -1,5 +1,7 @@
 import { databases } from "harper";
 import { allowAdmin } from "./agent-auth.js";
+import { harperPortValue } from "../src/lib/harper-port-value.js";
+import { DEFAULT_HTTP_PORT } from "./a2a-url.js";
 import { createHash, randomBytes } from "node:crypto";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 
@@ -201,6 +203,20 @@ async function resolveOrCreatePrincipal(
 }
 
 /**
+ * Base URL an ID-JAG is validated against: `FLAIR_PUBLIC_URL` when set,
+ * otherwise the loopback bind address. `HTTP_PORT` is parsed through
+ * `harperPortValue` so a host-qualified value (`127.0.0.1:19926`) yields a
+ * valid URL rather than a doubled host; the default is `DEFAULT_HTTP_PORT`
+ * (19926).
+ *
+ * Exported for direct unit testing — the grant handler itself needs a live
+ * Harper database (IdpConfig, Credential, Agent tables).
+ */
+export function jwtBearerBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return env.FLAIR_PUBLIC_URL || `http://127.0.0.1:${harperPortValue(env.HTTP_PORT) ?? DEFAULT_HTTP_PORT}`;
+}
+
+/**
  * Handle the jwt-bearer grant type at the token endpoint.
  * Called from OAuthToken when grant_type is urn:ietf:params:oauth:grant-type:jwt-bearer.
  */
@@ -213,7 +229,7 @@ export async function handleJwtBearerGrant(data: any): Promise<Response | object
     }), { status: 400, headers: { "content-type": "application/json" } });
   }
 
-  const baseUrl = process.env.FLAIR_PUBLIC_URL || `http://127.0.0.1:${process.env.HTTP_PORT || 19926}`;
+  const baseUrl = jwtBearerBaseUrl();
 
   try {
     const { payload, idpConfig } = await validateIdJag(assertion, baseUrl);

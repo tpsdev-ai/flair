@@ -135,6 +135,8 @@
  */
 import { databases } from "harper";
 import { getModelId } from "../embeddings-provider.js";
+import { harperPortValue } from "../../src/lib/harper-port-value.js";
+import { DEFAULT_HTTP_PORT } from "../a2a-url.js";
 import { currentSpaceRawForms, isCurrentSpaceStamp } from "../embedding-space-guard.js";
 import type { Migration, RunBatchResult } from "./types.js";
 import { EMBEDDING_STAMP_ID } from "./stamp-outstanding.js";
@@ -159,10 +161,19 @@ function resolveAdminAuthHeader(): string | null {
   return "Basic " + Buffer.from(`admin:${pass}`).toString("base64");
 }
 
-/** Same HTTP_PORT env resolution src/cli.ts sets on every Harper spawn (see that file's grep for HTTP_PORT). */
-function resolveSelfBaseUrl(): string {
-  const port = process.env.HTTP_PORT ?? "9926";
-  return `http://127.0.0.1:${port}`;
+/**
+ * Base URL for the loopback self-call that regenerates an embedding.
+ *
+ * `FLAIR_PUBLIC_URL` wins when set — the same precedence the other URL builders
+ * use (oauth-discovery, AdminInstance, XAA, a2a-url). Otherwise the loopback
+ * bind address, with `HTTP_PORT` parsed through `harperPortValue` so a
+ * host-qualified value (`127.0.0.1:19926`) yields a valid URL rather than a
+ * doubled host. Falls back to `DEFAULT_HTTP_PORT` (19926) — NOT the legacy
+ * early-install 9926 this used to reach for.
+ */
+export function resolveSelfBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+  if (env.FLAIR_PUBLIC_URL) return env.FLAIR_PUBLIC_URL.replace(/\/$/, "");
+  return `http://127.0.0.1:${harperPortValue(env.HTTP_PORT) ?? DEFAULT_HTTP_PORT}`;
 }
 
 /**

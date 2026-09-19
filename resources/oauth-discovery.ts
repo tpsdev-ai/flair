@@ -29,6 +29,8 @@
 
 import { mcpOAuthEnabled } from "./mcp-oauth-flag.js";
 import { dcrEnabled } from "./dcr-gate.js";
+import { harperPortValue } from "../src/lib/harper-port-value.js";
+import { DEFAULT_HTTP_PORT } from "./a2a-url.js";
 
 /** RFC 9728 §3.1 — Protected Resource Metadata well-known path. */
 export const PRM_PATH = "/.well-known/oauth-protected-resource";
@@ -43,7 +45,7 @@ export const AS_METADATA_PATH = "/.well-known/oauth-authorization-server";
  * existed — moved, not changed. See the header note on flair#1005.
  */
 export function oauthPublicBaseUrl(): string {
-  return process.env.FLAIR_PUBLIC_URL || `http://127.0.0.1:${process.env.HTTP_PORT || 19926}`;
+  return process.env.FLAIR_PUBLIC_URL || `http://127.0.0.1:${harperPortValue(process.env.HTTP_PORT) ?? DEFAULT_HTTP_PORT}`;
 }
 
 /**

@@ -6,6 +6,8 @@ import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { allowAdmin } from "./agent-auth.js";
+import { harperPortValue } from "../src/lib/harper-port-value.js";
+import { DEFAULT_HTTP_PORT } from "./a2a-url.js";
 
 /**
  * Resolve the public URL operators reach this Flair on.
@@ -22,6 +24,10 @@ import { allowAdmin } from "./agent-auth.js";
  *      — derives from how the operator actually reached the page
  *   3. `http://127.0.0.1:${HTTP_PORT}` — local-only installs fallback
  *
+ * Exported for direct unit testing: the Resource class pulls Harper at import
+ * time, so a test mocks `harper` and calls this pure resolver directly rather
+ * than re-deriving its predicate and drifting from it.
+ *
  * The request-header path closes the common case from flair#404:
  * remote/Fabric deployments without FLAIR_PUBLIC_URL set rendered
  * localhost URLs that operators couldn't copy-paste. Trusting the Host
@@ -29,7 +35,7 @@ import { allowAdmin } from "./agent-auth.js";
  * reverse proxy that doesn't set X-Forwarded-* headers correctly, the
  * operator should set FLAIR_PUBLIC_URL explicitly (which wins).
  */
-function resolvePublicUrl(request?: { headers?: any }): string {
+export function resolvePublicUrl(request?: { headers?: any }): string {
   if (process.env.FLAIR_PUBLIC_URL) {
     return process.env.FLAIR_PUBLIC_URL.replace(/\/$/, "");
   }
@@ -61,7 +67,7 @@ function resolvePublicUrl(request?: { headers?: any }): string {
     return `${effectiveScheme}://${host}`;
   }
 
-  return `http://127.0.0.1:${process.env.HTTP_PORT ?? "19926"}`;
+  return `http://127.0.0.1:${harperPortValue(process.env.HTTP_PORT) ?? DEFAULT_HTTP_PORT}`;
 }
 
 /**

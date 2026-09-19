@@ -67,6 +67,7 @@ import {
 import { markStale, sortOldestVersionFirst, type FleetPresenceRow } from "./fleet-presence.js";
 import { detectClients, renderWiringSummary, wireClaudeCode, wireCodex, wireGemini, wireCursor, wireAntigravity, wirePi, clientConfigPath, codexConfigHasFlairSection, type ClientId } from "./install/clients.js";
 import { flairCliVersion, clearFlairCliVersionCache, mcpServerSpec, unpinnedSpecWarning, FLAIR_MCP_PACKAGE } from "./lib/mcp-spec.js";
+import { harperPortValue } from "./lib/harper-port-value.js";
 import {
   readClientMcpBlock,
   effectiveFlairUrl,
@@ -951,26 +952,11 @@ function readHarperConfig(dataDir: string): Record<string, any> | null {
   return null;
 }
 
-/**
- * A Harper port config value as a number.
- *
- * Harper accepts both a bare port (`9926`, all interfaces) and the
- * host-qualified `host:port` form flair writes for the ops API (`127.0.0.1:9925`
- * — see `opsNetworkPortValue`). Both name the same port; only the bind differs,
- * and `detectOpsApiAllInterfacesBind` is what reads the host half. Splits on the
- * LAST colon so an IPv6 literal (`[::1]:9925`) keeps its port.
- */
-export function harperPortValue(value: unknown): number | null {
-  if (value === undefined || value === null) return null;
-  if (typeof value === "number") return Number.isInteger(value) && value > 0 ? value : null;
-  const str = String(value).trim();
-  if (str === "") return null;
-  const lastColon = str.lastIndexOf(":");
-  const portPart = lastColon > 0 ? str.slice(lastColon + 1) : str;
-  if (!/^\d+$/.test(portPart)) return null;
-  const n = Number(portPart);
-  return n > 0 ? n : null;
-}
+// `harperPortValue` lives in `./lib/harper-port-value.js` so the runtime
+// resources under `resources/` share the ONE parser with the CLI, rather than
+// each interpolating `HTTP_PORT` by hand. Re-exported here for existing
+// importers of this module (e.g. the launchd doctor integration test).
+export { harperPortValue };
 
 /** This instance's HTTP port, from Harper's own config in its data directory. */
 function readPortFromHarperConfig(dataDir: string): number | null {
