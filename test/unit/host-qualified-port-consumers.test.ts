@@ -12,9 +12,11 @@
  * so they are pinned here first.
  *
  * Table-driven over all five consumers × {absent, bare, host-qualified,
- * IPv6-literal-qualified} — each on the default port and on a non-default port.
- * On the pre-change tree the qualified cases are RED: interpolation produced
- * `http://127.0.0.1:127.0.0.1:19926`, which `new URL()` rejects.
+ * IPv6-literal-qualified, out-of-range} — each on the default port and on a
+ * non-default port. On the pre-change tree the qualified and out-of-range cases
+ * are RED: interpolation produced `http://127.0.0.1:127.0.0.1:19926` (doubled
+ * host) or `http://127.0.0.1:70000` (port above 65535), both rejected by
+ * `new URL()`.
  *
  * The modules that pull `harper` at import time (AdminInstance, XAA,
  * embedding-stamp) are loaded with a `harper` mock — the same superset shape
@@ -69,6 +71,17 @@ const CASES: PortCase[] = [
   { label: "bare (non-default)", httpPort: "31415", host: "127.0.0.1", port: "31415" },
   { label: "host-qualified (non-default)", httpPort: "127.0.0.1:31415", host: "127.0.0.1", port: "31415" },
   { label: "ipv6-literal-qualified (non-default)", httpPort: "[::1]:31415", host: "127.0.0.1", port: "31415" },
+  // Out-of-range: `harperPortValue` rejects these, so each consumer must fall
+  // back to DEFAULT_HTTP_PORT. Before the bound, the consumer interpolated the
+  // raw value and produced `http://127.0.0.1:70000`, which `new URL()` rejects
+  // (it refuses a port above 65535) — a throwing URL, not a usable one. These
+  // rows are RED on the pre-change tree for every consumer.
+  { label: "out-of-range (65536)", httpPort: "65536", host: "127.0.0.1", port: String(DEFAULT_HTTP_PORT) },
+  { label: "out-of-range (70000)", httpPort: "70000", host: "127.0.0.1", port: String(DEFAULT_HTTP_PORT) },
+  { label: "host-qualified out-of-range", httpPort: "127.0.0.1:70000", host: "127.0.0.1", port: String(DEFAULT_HTTP_PORT) },
+  // Boundary: the largest valid port must still round-trip (the bound rejects
+  // 65536, not 65535).
+  { label: "boundary (65535)", httpPort: "65535", host: "127.0.0.1", port: "65535" },
 ];
 
 /** The five consumers. Each reads `process.env` (via `env`) except localBaseUrl,
@@ -104,8 +117,10 @@ for (const c of CASES) {
     for (const consumer of CONSUMERS) {
       test(`${consumer.name} produces a valid URL on port ${c.port}`, () => {
         stageEnv(c);
-        // Throws (RED) on the pre-change tree, where a qualified value yielded
-        // `http://127.0.0.1:127.0.0.1:19926` — the doubled-host outage.
+        // Throws (RED) on the pre-change tree for the qualified and out-of-range
+        // rows: a qualified value yielded `http://127.0.0.1:127.0.0.1:19926` and
+        // an out-of-range value yielded `http://127.0.0.1:70000` — both rejected
+        // by `new URL()`.
         const u = new URL(consumer.build(process.env));
         expect(u.hostname).toBe(c.host);
         expect(u.port).toBe(c.port);
@@ -114,27 +129,31 @@ for (const c of CASES) {
   });
 }
 
-// ─── embedding-stamp's two independent defects (same region as above) ────────
+// ─── embedding-stamp's credentialed self-call target must stay loopback ──────
 
-describe("resources/migrations/embedding-stamp.ts — port + public-URL consistency", () => {
-  test("falls back to DEFAULT_HTTP_PORT (19926), not the legacy early-install 9926", () => {
-    const url = resolveSelfBaseUrl({} as NodeJS.ProcessEnv);
+describe("resources/migrations/embedding-stamp.ts — loopback self-call target", () => {
+  // `regenViaHttpPut` sends `Authorization: Basic admin:<password>` to this
+  // URL, so it must never be FLAIR_PUBLIC_URL (a remote / reverse-proxied
+  // origin). Regression test for the credential leak: RED on the pre-change
+  // tree, where resolveSelfBaseUrl returned FLAIR_PUBLIC_URL.
+  test("stays loopback even when FLAIR_PUBLIC_URL is set", () => {
+    const url = resolveSelfBaseUrl({ FLAIR_PUBLIC_URL: "https://flair.example.com" } as NodeJS.ProcessEnv);
     expect(url).toBe(`http://127.0.0.1:${DEFAULT_HTTP_PORT}`);
-    expect(url).not.toContain(":9926");
+    expect(url).not.toContain("flair.example.com");
   });
 
-  test("honours FLAIR_PUBLIC_URL first, like the other four consumers", () => {
-    expect(
-      resolveSelfBaseUrl({ FLAIR_PUBLIC_URL: "https://flair.example.com/" } as NodeJS.ProcessEnv),
-    ).toBe("https://flair.example.com");
-  });
-
-  test("FLAIR_PUBLIC_URL wins over a set HTTP_PORT", () => {
+  test("stays loopback (on the real port) when FLAIR_PUBLIC_URL and HTTP_PORT are both set", () => {
     expect(
       resolveSelfBaseUrl({
         FLAIR_PUBLIC_URL: "https://flair.example.com",
         HTTP_PORT: "31415",
       } as NodeJS.ProcessEnv),
-    ).toBe("https://flair.example.com");
+    ).toBe("http://127.0.0.1:31415");
+  });
+
+  test("falls back to DEFAULT_HTTP_PORT (19926), not the legacy early-install 9926", () => {
+    const url = resolveSelfBaseUrl({} as NodeJS.ProcessEnv);
+    expect(url).toBe(`http://127.0.0.1:${DEFAULT_HTTP_PORT}`);
+    expect(url).not.toContain(":9926");
   });
 });

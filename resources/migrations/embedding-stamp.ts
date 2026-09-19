@@ -164,15 +164,26 @@ function resolveAdminAuthHeader(): string | null {
 /**
  * Base URL for the loopback self-call that regenerates an embedding.
  *
- * `FLAIR_PUBLIC_URL` wins when set — the same precedence the other URL builders
- * use (oauth-discovery, AdminInstance, XAA, a2a-url). Otherwise the loopback
- * bind address, with `HTTP_PORT` parsed through `harperPortValue` so a
- * host-qualified value (`127.0.0.1:19926`) yields a valid URL rather than a
- * doubled host. Falls back to `DEFAULT_HTTP_PORT` (19926) — NOT the legacy
- * early-install 9926 this used to reach for.
+ * ALWAYS loopback. This is the destination of a credentialed self-call —
+ * `regenViaHttpPut` sends `Authorization: Basic` carrying the admin password to
+ * it — so it must never leave the box. `FLAIR_PUBLIC_URL` names a remote /
+ * reverse-proxied origin and is deliberately ignored here, matching
+ * `a2a-url.localBaseUrl` ("never the public/proxy URL"): two self-call
+ * resolvers, both pinned to loopback. The public-facing resolvers
+ * (oauth-discovery, AdminInstance, XAA) honour `FLAIR_PUBLIC_URL` precisely
+ * because their output is meant to be reachable off-box; this one's output is
+ * not.
+ *
+ * `HTTP_PORT` is parsed through `harperPortValue` so a host-qualified value
+ * (`127.0.0.1:19926`) yields a valid URL rather than a doubled host. Absent
+ * (or out-of-range) falls back to `DEFAULT_HTTP_PORT` (19926) — NOT the legacy
+ * early-install 9926 this used to reach for. 9926 is Harper's OWN default bind,
+ * which is what the one boot shape that reaches this fallback actually uses: a
+ * bare `harper run .` that flair did not spawn. On a pre-March data dir that
+ * 9926 coincidentally matched the real bind; post-March 19926 does. Both are
+ * guesses — `HTTP_PORT` is the only channel carrying the truth.
  */
 export function resolveSelfBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
-  if (env.FLAIR_PUBLIC_URL) return env.FLAIR_PUBLIC_URL.replace(/\/$/, "");
   return `http://127.0.0.1:${harperPortValue(env.HTTP_PORT) ?? DEFAULT_HTTP_PORT}`;
 }
 
