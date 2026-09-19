@@ -101,6 +101,12 @@ const TIMEOUT_CEILING_MS = 30_000;
 /** Empty, inert hook output. Printing this is always a safe no-op. */
 const NOOP_OUTPUT = "{}";
 
+/** Bootstrap / presence channel. Codex's installer sets FLAIR_HOOK_HARNESS;
+ *  unset keeps the historical Claude Code default (flair#1734). */
+function resolveHookChannel(): string {
+  return process.env.FLAIR_HOOK_HARNESS === "codex" ? "codex" : "claude-code";
+}
+
 /** Shape of the SessionStart payload Claude Code writes to stdin (subset).
  *  The "how did this session start" discriminator has appeared as both
  *  `source` and `how_started` across harness doc generations — read either. */
@@ -249,11 +255,14 @@ export async function runHook(
   // payload doesn't carry a task description (unlike the MCP `bootstrap`
   // tool call — see index.ts), so this only ever sets `activity`, leaving
   // currentTask exactly whatever it already was.
+  const skipPresence = process.env.FLAIR_HOOK_DELIVERY_PROBE != null
+    && process.env.FLAIR_HOOK_DELIVERY_PROBE !== ""
+    && process.env.FLAIR_HOOK_DELIVERY_PROBE !== "0";
   const presenceDone: Promise<void> =
-    typeof client.request === "function"
+    !skipPresence && typeof client.request === "function"
       ? postPresenceSafe(
           client as PresencePoster,
-          deriveActivity({ channel: "claude-code" }),
+          deriveActivity({ channel: resolveHookChannel() }),
           undefined,
           resolvePresenceTimeoutMs(),
         )
@@ -282,7 +291,7 @@ export async function runHook(
       Promise.resolve(
         client.bootstrap({
           maxTokens: BOOTSTRAP_MAX_TOKENS,
-          channel: "claude-code",
+          channel: resolveHookChannel(),
           subjects: project ? [project] : undefined,
         }),
       ),

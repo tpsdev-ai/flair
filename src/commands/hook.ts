@@ -16,11 +16,13 @@ import { Command } from "commander";
 import { homedir } from "node:os";
 import * as render from "../render.js";
 import { unpinnedSpecWarning } from "../lib/mcp-spec.js";
-import { readClientMcpBlock } from "../doctor-client.js";
+import { probeSessionStartHookDelivery, readClientMcpBlock } from "../doctor-client.js";
 import {
   installHook,
   uninstallHook,
   hookStatus,
+  hookStatusHeadline,
+  hookStatusFailureLine,
   hookStatusIdentityLines,
   HOOK_STATUS_UNPARSED,
   installContinuityHooks,
@@ -182,7 +184,9 @@ export function register(program: Command): void {
     .action((opts) => {
       const harness = requireSupportedHarness(opts.harness);
       const home = homedir();
-      const status = hookStatus(home, harness);
+      const status = hookStatus(home, harness, {
+        deliveryProbe: (command) => probeSessionStartHookDelivery(command),
+      });
 
       // Continuity pair (flair#1257) — reported alongside the SessionStart
       // status in every branch below. "absent" is NOT a failure: installing the
@@ -213,14 +217,19 @@ export function register(program: Command): void {
       }
 
       if (!status.wired) {
-        console.log(`  ${render.icons.error} not wired`);
+        console.log(`  ${render.icons.error} ${hookStatusHeadline(status)}`);
         console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${hookInstallHint(status.harness)}`);
         renderContinuity();
         console.log("");
         process.exit(1);
       }
 
-      console.log(`  ${status.correctShape ? render.icons.ok : render.icons.warn} wired${status.correctShape ? "" : " (unexpected shape — was it hand-edited?)"}`);
+      const headline = hookStatusHeadline(status);
+      const verified = status.delivery === "verified" && status.correctShape;
+      console.log(`  ${verified ? render.icons.ok : render.icons.warn} ${headline}${status.correctShape ? "" : " (unexpected shape — was it hand-edited?)"}`);
+      for (const reason of status.deliveryReasons) {
+        console.log(`     ${render.wrap(render.c.dim, reason)}`);
+      }
       // flair#1325 — skip the URL line only when agentId was recovered
       // (the installer form that omits FLAIR_URL). A wired correct-shape
       // command with no env assignments still prints unknown, not a
@@ -230,12 +239,14 @@ export function register(program: Command): void {
         const value = line.value === HOOK_STATUS_UNPARSED ? render.wrap(render.c.dim, line.value) : line.value;
         console.log(`     ${render.wrap(render.c.dim, label)} ${value}`);
       }
-      // flair#1007 — whether a command that stopped resolving would fail quietly
-      // or print an error on every session start.
-      if (status.silenced) {
-        console.log(`     ${render.wrap(render.c.dim, "On failure:")} silent (exit 0, no output)`);
+      // flair#1007 / #1734 — session-continue vs stderr visibility.
+      const failure = hookStatusFailureLine(status);
+      if (status.stderrDiscarded) {
+        console.log(`     ${render.wrap(render.c.dim, "On failure:")} ${failure}`);
+      } else if (status.silenced) {
+        console.log(`     ${render.wrap(render.c.dim, "On failure:")} ${failure}`);
       } else {
-        console.log(`     ${render.icons.warn} ${render.wrap(render.c.dim, "On failure:")} prints an error on every session — run \`${hookInstallHint(status.harness)}\` to adopt the silent form`);
+        console.log(`     ${render.icons.warn} ${render.wrap(render.c.dim, "On failure:")} ${failure} — run \`${hookInstallHint(status.harness)}\` to adopt the silent form`);
       }
       renderContinuity();
       console.log("");

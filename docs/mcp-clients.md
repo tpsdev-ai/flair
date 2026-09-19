@@ -94,7 +94,7 @@ symmetric with `flair hook uninstall`/`flair hook status`):
 ```bash
 flair hook install               # wires ~/.claude/settings.json for FLAIR_AGENT_ID/FLAIR_URL
 flair hook install --dry-run     # prints the exact JSON delta, writes nothing
-flair hook status                # wired? correct shape? which agent/instance?
+flair hook status                # configured? delivery verified? which agent/instance?
 flair hook uninstall             # removes only Flair's hook entry
 ```
 
@@ -138,7 +138,10 @@ manifests are not.
 `flair hook status` recognises both the current pinned `-p` form and an older
 unpinned `-p` invocation as `correctShape`. The pre-#1166 form (no `-p`, which
 runs the MCP shim) is still flagged. Prefer `flair hook install` over
-hand-editing.
+hand-editing. A green status means **delivery was verified**, not that a line
+exists in the harness file (flair#1734). Configured-but-unverified (Codex
+untrusted, hooks disabled, agent-id drift, empty bootstrap) is reported as
+such — never an unqualified `✓ wired`.
 
 The `sh -c ... || true` wrapper is not decoration. The invocation resolves a
 package binary through whatever Node runtime your shell exposes, and under a
@@ -165,7 +168,9 @@ every session start (`startup`, `resume`, `clear`, `compact`); add
 
 It honors the same env as the MCP server (`FLAIR_AGENT_ID`, `FLAIR_URL`,
 `FLAIR_KEY_PATH`), plus `FLAIR_HOOK_TIMEOUT_MS` (default 8000, clamped
-500–30000) for the bootstrap timeout.
+500–30000) for the bootstrap timeout. Codex's installer also sets
+`FLAIR_HOOK_HARNESS=codex` so bootstrap records the Codex channel; the
+stdout contract stays `hookSpecificOutput.additionalContext`.
 
 **It degrades to a no-op, always.** No `FLAIR_AGENT_ID`, Flair down, an auth
 error, or a hung daemon (past the timeout) → the hook prints `{}` and exits 0.
@@ -234,9 +239,12 @@ flair hook status --harness codex
 flair hook uninstall --harness codex
 ```
 
-`flair doctor` reports this hook when Codex is detected. After install, trust
-the new command in Codex with `/hooks` — untrusted hooks are listed and
-skipped.
+`flair doctor` reports this hook when Codex is detected. `flair hook install
+--harness codex` writes `FLAIR_HOOK_HARNESS=codex` and keeps hook stderr
+visible (auth failures must not be swallowed). After install, **re-approve**
+the command in Codex with `/hooks` — a wiring change resets trust, and
+untrusted hooks are listed and skipped. `flair hook status --harness codex`
+reports that pending-approval state as configured but delivery not verified.
 
 ---
 

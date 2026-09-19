@@ -63,6 +63,7 @@ import {
   computeContinuityHookInstall,
   computeContinuityHookRemoval,
   hookCommandIsSilenced,
+  hookCommandDiscardsStderr,
   isHookCommandValueSafe,
   isSessionStartHookInvocation,
   readClientMcpBlock,
@@ -152,8 +153,15 @@ export function hookBackupPath(settingsPath: string): string {
  *  so the invocation's failure behaviour is defined and tested in one place
  *  instead of drifting across three literals. Throws when agentId/flairUrl
  *  cannot be represented safely; installHook() checks first and reports. */
-export function buildHookCommand(agentId: string, flairUrl: string): string {
-  return buildSessionStartHookCommand(agentId, flairUrl);
+export function buildHookCommand(agentId: string, flairUrl: string, harness: Harness = "claude-code"): string {
+  return buildSessionStartHookCommand(agentId, flairUrl, { harness });
+}
+
+const CODEX_REAPPROVAL =
+  "Codex requires re-approval in /hooks before the change takes effect";
+
+function withCodexReapproval(harness: Harness, message: string): string {
+  return harness === "codex" ? `${message} — ${CODEX_REAPPROVAL}` : message;
 }
 
 /**
@@ -164,7 +172,7 @@ export function buildHookCommand(agentId: string, flairUrl: string): string {
 function unwrapInstallerHookCommand(command: string): string {
   const shc = command.match(/^sh\s+-c\s+(['"])([\s\S]*)\1\s*$/);
   const body = shc ? shc[2]! : command;
-  // SessionStart installer: `out=$(<invocation> 2>/dev/null) && printf ...`
+  // SessionStart installer: `out=$(<invocation> [2>/dev/null]) && printf ...`
   const captured = body.match(/^out=\$\((.*)\)\s*&&/);
   return captured ? captured[1]! : body;
 }
@@ -313,8 +321,9 @@ function computeInstallDelta(
   config: any,
   agentId: string,
   flairUrl: string,
+  harness: Harness,
 ): { action: HookDeltaAction; before: HookGroup | null; after: HookGroup; newConfig: any } {
-  const command = buildHookCommand(agentId, flairUrl);
+  const command = buildHookCommand(agentId, flairUrl, harness);
   const after = makeHookGroup(command);
   const existing = findHookEntry(config);
 
@@ -412,11 +421,11 @@ export function installHook(opts: InstallHookOptions): HookMutationResult {
         backupPath: null, delta: null,
       };
     }
-    const { action, before, after } = computeInstallDelta(read.parsed ?? {}, agentId, flairUrl);
+    const { action, before, after } = computeInstallDelta(read.parsed ?? {}, agentId, flairUrl, harness);
     const delta: HookDelta = { action, path, harness, before, after };
     const message = action === "noop"
-      ? `already correct in ${path} — no changes`
-      : `would ${action} the SessionStart hook in ${path} (dry run — nothing written)`;
+      ? withCodexReapproval(harness, `already correct in ${path} — no changes`)
+      : withCodexReapproval(harness, `would ${action} the SessionStart hook in ${path} (dry run — nothing written)`);
     return { ok: true, path, harness, dryRun, message, backupPath: null, delta };
   }
 
@@ -446,18 +455,25 @@ export function installHook(opts: InstallHookOptions): HookMutationResult {
     };
   }
 
-  const { action, before, after, newConfig } = computeInstallDelta(read.parsed ?? {}, agentId, flairUrl);
+  const { action, before, after, newConfig } = computeInstallDelta(read.parsed ?? {}, agentId, flairUrl, harness);
   const delta: HookDelta = { action, path, harness, before, after };
 
   if (action === "noop") {
-    return { ok: true, path, harness, dryRun, message: `SessionStart hook already correct in ${path}`, backupPath, delta };
+    return {
+      ok: true, path, harness, dryRun,
+      message: withCodexReapproval(harness, `SessionStart hook already correct in ${path}`),
+      backupPath, delta,
+    };
   }
 
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(newConfig, null, 2) + "\n");
   return {
     ok: true, path, harness, dryRun,
-    message: `${action === "add" ? "added" : "updated"} the SessionStart hook in ${path}`,
+    message: withCodexReapproval(
+      harness,
+      `${action === "add" ? "added" : "updated"} the SessionStart hook in ${path}`,
+    ),
     backupPath, delta,
   };
 }
@@ -523,7 +539,7 @@ export function repinSessionStartHook(homeDir: string, harness: Harness): HookRe
   }
   let next: string;
   try {
-    next = buildSessionStartHookCommand(env.agentId, env.flairUrl);
+    next = buildSessionStartHookCommand(env.agentId, env.flairUrl, { harness });
   } catch (err: unknown) {
     const reason = err instanceof Error ? err.message : String(err);
     return skip(false, `could not rebuild the SessionStart hook command for ${path}: ${reason}`);
@@ -617,6 +633,13 @@ export function uninstallHook(opts: UninstallHookOptions): HookMutationResult {
 
 // ── status ───────────────────────────────────────────────────────────────
 
+export type HookDeliveryState = "verified" | "unverified" | "absent";
+
+export interface HookDeliveryVerdict {
+  delivered: boolean;
+  reason: string;
+}
+
 export interface HookStatusResult {
   harness: Harness;
   path: string;
@@ -627,37 +650,202 @@ export interface HookStatusResult {
    *  still counts as `wired` for doctor-compat purposes but not `correctShape`). */
   correctShape: boolean;
   /** Does the wired command absorb its own failures, or would a command that
-   *  stopped resolving print an error on every session start (flair#1007)? */
+   *  stopped resolving print an error on every session start (flair#1007)?
+   *  Since flair#1734 this is `|| true` (session still starts), not stderr
+   *  discarded — Codex keeps stderr visible on purpose. */
   silenced: boolean;
+  /** True when the command discards stderr (`2>/dev/null`). Codex must not. */
+  stderrDiscarded: boolean;
   agentId?: string;
   flairUrl?: string;
   command?: string;
   parseError: string | null;
+  /** What status verified, not what it configured (flair#1734). */
+  delivery: HookDeliveryState;
+  deliveryReasons: string[];
+}
+
+/** Injectable so `hook status` can classify a real run without unit tests spawning npx. */
+export type HookDeliveryProbe = (command: string) => {
+  exitCode: number | null;
+  stdout: string;
+  stderr?: string;
+};
+
+export interface HookStatusOptions {
+  deliveryProbe?: HookDeliveryProbe;
+}
+
+/**
+ * Effect check: did SessionStart additionalContext actually arrive?
+ * Exit 0, inert `{}`, and empty stdout are not delivery. Do not treat
+ * FLAIR_HOOK_PROBE's `{}` as success.
+ */
+export function classifyHookDelivery(outcome: {
+  exitCode: number | null;
+  stdout: string;
+  stderr?: string;
+}): HookDeliveryVerdict {
+  if (outcome.exitCode !== 0) {
+    return { delivered: false, reason: `not delivered: exited ${outcome.exitCode}` };
+  }
+  const trimmed = (outcome.stdout ?? "").trim();
+  if (!trimmed) {
+    return { delivered: false, reason: "not delivered: empty stdout" };
+  }
+  if (trimmed === "{}") {
+    return { delivered: false, reason: "not delivered: inert empty context" };
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      hookSpecificOutput?: { additionalContext?: unknown };
+    };
+    const context = parsed?.hookSpecificOutput?.additionalContext;
+    if (typeof context === "string" && context.trim()) {
+      return { delivered: true, reason: "SessionStart additionalContext delivered" };
+    }
+  } catch {
+    // fall through — JSON-looking but not the documented contract
+  }
+  return { delivered: false, reason: "not delivered: no SessionStart additionalContext" };
+}
+
+/** Operator headline. Never an unqualified "wired" when delivery is unverified. */
+export function hookStatusHeadline(status: HookStatusResult): string {
+  if (!status.wired || status.delivery === "absent") return "not configured";
+  if (status.delivery === "verified") return "configured and verified";
+  return "configured; delivery NOT verified";
+}
+
+interface CodexHookRuntime {
+  hooksEnabled: boolean | undefined;
+  mcpAgentId?: string;
+  hasTrustedHash: boolean;
+}
+
+function readCodexConfigToml(homeDir: string): string | null {
+  const configPath = join(homeDir, ".codex", "config.toml");
+  if (!existsSync(configPath)) return null;
+  try {
+    return readFileSync(configPath, "utf-8");
+  } catch {
+    return null;
+  }
+}
+
+function scanCodexFeaturesHooksEnabled(raw: string): boolean | undefined {
+  const header = raw.match(/^\[features\]\s*$/m);
+  if (!header || header.index === undefined) return undefined;
+  const rest = raw.slice(header.index);
+  for (const line of rest.split("\n").slice(1)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("[")) break;
+    const match = trimmed.match(/^(?:hooks|codex_hooks)\s*=\s*(true|false)\b/);
+    if (match) return match[1] === "true";
+  }
+  return undefined;
+}
+
+function readCodexHookRuntime(homeDir: string): CodexHookRuntime {
+  const mcp = readClientMcpBlock("codex", homeDir);
+  const raw = readCodexConfigToml(homeDir);
+  if (raw == null) {
+    return { hooksEnabled: undefined, mcpAgentId: mcp.agentId, hasTrustedHash: false };
+  }
+  return {
+    hooksEnabled: scanCodexFeaturesHooksEnabled(raw),
+    mcpAgentId: mcp.agentId,
+    hasTrustedHash: /^\s*trusted_hash\s*=/m.test(raw),
+  };
+}
+
+function assessDelivery(
+  homeDir: string,
+  harness: Harness,
+  wired: boolean,
+  agentId: string | undefined,
+  correctShape: boolean,
+  command: string | undefined,
+  deliveryProbe?: HookDeliveryProbe,
+): { delivery: HookDeliveryState; deliveryReasons: string[] } {
+  if (!wired) return { delivery: "absent", deliveryReasons: [] };
+
+  const blockers: string[] = [];
+  const notes: string[] = [];
+  if (harness === "codex") {
+    const runtime = readCodexHookRuntime(homeDir);
+    if (runtime.hooksEnabled === false) {
+      blockers.push("Codex features.hooks is disabled — the harness will not run this hook");
+    }
+    if (runtime.mcpAgentId && agentId && runtime.mcpAgentId !== agentId) {
+      blockers.push(`agent id drift: hook command is '${agentId}', MCP env is '${runtime.mcpAgentId}'`);
+    }
+    if (runtime.hasTrustedHash) {
+      notes.push("trusted_hash is recorded but Flair cannot verify it matches the current definition");
+    } else if (runtime.hooksEnabled !== false) {
+      notes.push("Codex hook trust unread or untrusted — re-approval in /hooks required");
+    }
+  }
+
+  if (deliveryProbe && command) {
+    const verdict = classifyHookDelivery(deliveryProbe(command));
+    if (verdict.delivered && blockers.length === 0 && correctShape) {
+      return { delivery: "verified", deliveryReasons: [verdict.reason, ...notes] };
+    }
+    return { delivery: "unverified", deliveryReasons: [...blockers, verdict.reason, ...notes] };
+  }
+
+  return {
+    delivery: "unverified",
+    deliveryReasons: [
+      ...blockers,
+      "delivery not verified — no SessionStart additionalContext observed",
+      ...notes,
+    ],
+  };
+}
+
+/** On-failure line for `flair hook status`. Codex keeps stderr visible. */
+export function hookStatusFailureLine(status: Pick<HookStatusResult, "silenced" | "stderrDiscarded">): string {
+  if (status.stderrDiscarded) return "silent (exit 0, no output)";
+  if (status.silenced) return "session continues (exit 0); stderr is visible";
+  return "prints an error on every session";
 }
 
 /** Read-only report: is the hook wired, does it look right, and which agent
  *  / Flair instance does it point at (recovered from the wired command). */
-export function hookStatus(homeDir: string, harness: Harness): HookStatusResult {
+export function hookStatus(homeDir: string, harness: Harness, opts: HookStatusOptions = {}): HookStatusResult {
   const path = hookSettingsPath(homeDir, harness);
   const read = readSettingsFile(path);
   if (read.parseError) {
-    return { harness, path, wired: false, correctShape: false, silenced: false, parseError: read.parseError };
+    return {
+      harness, path, wired: false, correctShape: false, silenced: false, stderrDiscarded: false,
+      parseError: read.parseError, delivery: "absent", deliveryReasons: [],
+    };
   }
 
   const config = read.parsed ?? {};
   const existing = findHookEntry(config);
   if (!existing) {
-    return { harness, path, wired: false, correctShape: false, silenced: false, parseError: null };
+    return {
+      harness, path, wired: false, correctShape: false, silenced: false, stderrDiscarded: false,
+      parseError: null, delivery: "absent", deliveryReasons: [],
+    };
   }
 
   const hookEntry = config.hooks.SessionStart[existing.groupIndex].hooks[existing.hookIndex];
   const command: string = typeof hookEntry?.command === "string" ? hookEntry.command : "";
   const correctShape = hookEntry?.type === "command" && isSessionStartHookInvocation(command);
   const env = parseHookCommandEnv(command);
+  const assessed = assessDelivery(
+    homeDir, harness, true, env.agentId, correctShape, command, opts.deliveryProbe,
+  );
   return {
     harness, path, wired: true, correctShape,
     silenced: hookCommandIsSilenced(command),
+    stderrDiscarded: hookCommandDiscardsStderr(command),
     agentId: env.agentId, flairUrl: env.flairUrl, command, parseError: null,
+    delivery: assessed.delivery, deliveryReasons: assessed.deliveryReasons,
   };
 }
 
