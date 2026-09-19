@@ -21,6 +21,7 @@ import {
   installHook,
   uninstallHook,
   hookStatus,
+  hookStatusHeadline,
   hookStatusIdentityLines,
   HOOK_STATUS_UNPARSED,
   installContinuityHooks,
@@ -213,14 +214,19 @@ export function register(program: Command): void {
       }
 
       if (!status.wired) {
-        console.log(`  ${render.icons.error} not wired`);
+        console.log(`  ${render.icons.error} ${hookStatusHeadline(status)}`);
         console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${hookInstallHint(status.harness)}`);
         renderContinuity();
         console.log("");
         process.exit(1);
       }
 
-      console.log(`  ${status.correctShape ? render.icons.ok : render.icons.warn} wired${status.correctShape ? "" : " (unexpected shape — was it hand-edited?)"}`);
+      const headline = hookStatusHeadline(status);
+      const verified = status.delivery === "verified" && status.correctShape;
+      console.log(`  ${verified ? render.icons.ok : render.icons.warn} ${headline}${status.correctShape ? "" : " (unexpected shape — was it hand-edited?)"}`);
+      for (const reason of status.deliveryReasons) {
+        console.log(`     ${render.wrap(render.c.dim, reason)}`);
+      }
       // flair#1325 — skip the URL line only when agentId was recovered
       // (the installer form that omits FLAIR_URL). A wired correct-shape
       // command with no env assignments still prints unknown, not a

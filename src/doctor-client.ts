@@ -126,7 +126,17 @@ export function isHookCommandValueSafe(value: string): boolean {
  * Throws (rather than emitting a quoted approximation) when a value cannot be
  * represented safely — see HOOK_VALUE_SAFE_RE.
  */
-export function buildSessionStartHookCommand(agentId: string, flairUrl?: string): string {
+export type SessionStartHookBuildOptions = {
+  /** Codex writes FLAIR_HOOK_HARNESS and keeps stderr visible (flair#1734).
+   *  Claude Code keeps the #1007 silent wrapper. Default claude-code. */
+  harness?: "claude-code" | "codex";
+};
+
+export function buildSessionStartHookCommand(
+  agentId: string,
+  flairUrl?: string,
+  opts?: SessionStartHookBuildOptions,
+): string {
   if (!isHookCommandValueSafe(agentId)) {
     throw new Error(
       `agent id '${agentId}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`,
@@ -137,12 +147,27 @@ export function buildSessionStartHookCommand(agentId: string, flairUrl?: string)
       `Flair URL '${flairUrl}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`,
     );
   }
-  const env = flairUrl ? `FLAIR_AGENT_ID=${agentId} FLAIR_URL=${flairUrl}` : `FLAIR_AGENT_ID=${agentId}`;
+  const harness = opts?.harness ?? "claude-code";
+  const envParts = harness === "codex" ? [`FLAIR_HOOK_HARNESS=${harness}`] : [];
+  envParts.push(`FLAIR_AGENT_ID=${agentId}`);
+  if (flairUrl) envParts.push(`FLAIR_URL=${flairUrl}`);
+  const env = envParts.join(" ");
   // Same pin as user-local MCP client configs (mcpServerSpec / flair#907).
   // Public plugin mcp.json stays unpinned (flair#1308) — that is a scraped
   // listing, not a machine we just wired.
   const invocation = `${env} npx -y -p ${mcpServerSpec()} ${SESSION_START_HOOK_MARKER}`;
+  // Codex: keep `|| true` so a missing binary cannot brick session start
+  // (#1007) but do not swallow stderr — an auth_error must be visible (#1734).
+  if (harness === "codex") {
+    return `sh -c 'out=$(${invocation}) && printf %s "$out" || true'`;
+  }
   return `sh -c 'out=$(${invocation} 2>/dev/null) && printf %s "$out" || true'`;
+}
+
+/** Infer harness from the settings path `flair hook install` / doctor write. */
+export function hookHarnessFromSettingsPath(settingsPath: string): "claude-code" | "codex" {
+  const normalized = settingsPath.replace(/\\/g, "/");
+  return normalized.includes("/.codex/hooks.json") ? "codex" : "claude-code";
 }
 
 /**
@@ -160,16 +185,13 @@ export function isSessionStartHookInvocation(command: string): boolean {
 }
 
 /**
- * Does this command absorb a failure instead of surfacing it? Checked as two
- * independent PROPERTIES (stderr discarded, non-zero exit absorbed) rather
- * than by string equality with what we currently emit, so a hand-rolled
- * command that genuinely achieves both is not nagged about.
+ * Does this command absorb a failure so the harness session still starts?
+ * flair#1734: "silenced" means `|| true` (won't brick the session), not
+ * "stderr discarded". Codex's installer keeps stderr visible on purpose.
  */
 export function hookCommandIsSilenced(command: string): boolean {
   if (typeof command !== "string") return false;
-  const discardsStderr = command.includes("2>/dev/null") || command.includes("2>&-");
-  const absorbsFailure = /\|\|\s*(?:true|:)(?:\s|'|$)/.test(command) || /;\s*(?:true|:)\s*'?\s*$/.test(command);
-  return discardsStderr && absorbsFailure;
+  return /\|\|\s*(?:true|:)(?:\s|'|$)/.test(command) || /;\s*(?:true|:)\s*'?\s*$/.test(command);
 }
 
 /**
@@ -1171,7 +1193,7 @@ export function fixSessionStartHook(homeDir: string, agentId: string | undefined
       hooks: [
         {
           type: "command",
-          command: buildSessionStartHookCommand(agentId),
+          command: buildSessionStartHookCommand(agentId, undefined, { harness: hookHarnessFromSettingsPath(path) }),
         },
       ],
     });
@@ -1439,7 +1461,9 @@ export function upgradeSessionStartHookCommand(homeDir: string, settingsPath?: s
             message: `the SessionStart hook in ${path} is not the command Flair wrote — leaving it untouched`,
           };
         }
-        const next = buildSessionStartHookCommand(legacy.agentId, legacy.flairUrl);
+        const next = buildSessionStartHookCommand(legacy.agentId, legacy.flairUrl, {
+          harness: hookHarnessFromSettingsPath(path),
+        });
         if (next === hook.command) return { ok: true, path, changed: false, message: `SessionStart hook in ${path} is already current` };
         hook.command = next;
         writeFileSync(path, JSON.stringify(config, null, 2) + "\n");
@@ -1522,8 +1546,8 @@ function sessionStartHookHint(agentId: string, path: string): string {
             {
               type: "command",
               command: isHookCommandValueSafe(agentId)
-                ? buildSessionStartHookCommand(agentId)
-                : buildSessionStartHookCommand("me"),
+                ? buildSessionStartHookCommand(agentId, undefined, { harness: hookHarnessFromSettingsPath(path) })
+                : buildSessionStartHookCommand("me", undefined, { harness: hookHarnessFromSettingsPath(path) }),
             },
           ],
         },
