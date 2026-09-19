@@ -170,7 +170,7 @@ describe("HALF 2 — status reports verified delivery, not a bare wired check", 
 
     const status = statusOf("codex");
     expect(status.wired).toBe(true);
-    expect(status.delivery).not.toBe("verified");
+    expect(status.delivery).toBe("unverified");
     const headline = honesty.hookStatusHeadline!(status);
     expect(headline).not.toMatch(/^\s*wired\s*$/i);
     expect(headline).not.toContain("✓ wired");
@@ -233,7 +233,9 @@ describe("install / detectability (issue #1734 surviving asks)", () => {
   it("Codex install success text names the re-approval requirement", () => {
     const result = installHook({ homeDir: isoHome, harness: "codex", agentId: AGENT, flairUrl: URL });
     expect(result.ok).toBe(true);
-    expect(result.message).toMatch(/re-approval|\/hooks|trust/i);
+    // Must not match the file path `.../.codex/hooks.json` — that is how a
+    // `/hooks/` regex accidentally passed on main.
+    expect(result.message).toMatch(/re-approval/i);
   });
 
   it("Codex wired command does not swallow stderr with 2>/dev/null", () => {
