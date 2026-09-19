@@ -717,7 +717,10 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
     const env: Record<string, string> = {
       ...baseEnv,
       OPERATIONSAPI_NETWORK_PORT: String(opsPort),
-      HTTP_PORT: String(httpPort),
+      // ops-nv9d slice 2: the HTTP bind is host-qualified (host:port), the same
+      // shape a production spawn writes. Loopback so the ephemeral test-Harper
+      // is reachable at the 127.0.0.1 URL this helper probes.
+      HTTP_PORT: `127.0.0.1:${httpPort}`,
     };
     const httpURL = `http://127.0.0.1:${httpPort}`;
     const opsURL = `http://127.0.0.1:${opsPort}`;

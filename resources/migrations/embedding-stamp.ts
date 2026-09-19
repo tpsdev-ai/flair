@@ -169,10 +169,16 @@ function resolveAdminAuthHeader(): string | null {
  * it — so it must never leave the box. `FLAIR_PUBLIC_URL` names a remote /
  * reverse-proxied origin and is deliberately ignored here, matching
  * `a2a-url.localBaseUrl` ("never the public/proxy URL"): two self-call
- * resolvers, both pinned to loopback. The public-facing resolvers
- * (oauth-discovery, AdminInstance, XAA) honour `FLAIR_PUBLIC_URL` precisely
- * because their output is meant to be reachable off-box; this one's output is
- * not.
+ * resolvers, both pinned to loopback. The public-facing resolvers (e.g.
+ * oauth-discovery, AdminInstance, XAA; also a2a-url.resolvePublicBaseUrl and
+ * the MCP issuer resolvers) honour `FLAIR_PUBLIC_URL` precisely because their
+ * output is meant to be reachable off-box; this one's output is not. That list
+ * is illustrative, not exhaustive — the deciding question is whether the URL
+ * leaves the box, not a roster of call sites.
+ *
+ * Pinned by the "loopback self-call target" suite in
+ * test/unit/host-qualified-port-consumers.test.ts, which asserts this returns
+ * loopback even when `FLAIR_PUBLIC_URL` is set (and not merely that it parses).
  *
  * `HTTP_PORT` is parsed through `harperPortValue` so a host-qualified value
  * (`127.0.0.1:19926`) yields a valid URL rather than a doubled host. Absent

@@ -110,6 +110,12 @@ fi
 # which is not the rockit shape and makes the adopted launchd job fail to
 # start. The value reaches later restart/verify calls through the environment
 # only, and is never echoed.
+# ops-nv9d slice 2: these are BARE values on purpose. This lane deliberately
+# exports a bare port as "the reported rockit shape" and then installs + exercises
+# a PUBLISHED BASELINE (pre-parser) CLI. Qualifying HTTP_PORT here would delete
+# legacy-input coverage and hand a pre-parser baseline a value it cannot read.
+# Legacy bare inputs must keep being ACCEPTED on the way in; qualification is
+# asserted at the new bind builder's OUTPUT, not by rewriting this fixture.
 export HTTP_PORT="$PORT"
 export OPERATIONSAPI_NETWORK_PORT="127.0.0.1:${OPS_PORT}"
 export NODE_HOSTNAME="localhost"

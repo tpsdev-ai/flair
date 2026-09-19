@@ -26,6 +26,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import nacl from "tweetnacl";
+import { DEFAULT_HTTP_BIND_HOST, httpCorsAccessList } from "../lib/http-bind.js";
 
 export type InitCli = {
   api: (...args: any[]) => any;
@@ -51,6 +52,7 @@ export type InitCli = {
   resolveHttpPort: (...args: any[]) => any;
   writeAdminPassFile: (...args: any[]) => any;
   resolveOpsBindHost: (...args: any[]) => any;
+  resolveHttpBindFor: (...args: any[]) => any;
   resolveOpsPort: (...args: any[]) => any;
   resolveOpsTarget: (...args: any[]) => any;
   resolveOpsUrlFromTarget: (...args: any[]) => any;
@@ -167,6 +169,10 @@ function resolveOpsBindHost(...args: any[]): any {
   return cli.resolveOpsBindHost(...args);
 }
 
+function resolveHttpBindFor(...args: any[]): any {
+  return cli.resolveHttpBindFor(...args);
+}
+
 function resolveOpsPort(...args: any[]): any {
   return cli.resolveOpsPort(...args);
 }
@@ -239,6 +245,7 @@ program
   .option("--port <port>", "Harper HTTP port (default: this instance's current port, or 19926 for a new one)")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--ops-bind <addr>", "Harper ops API bind address (env: FLAIR_OPS_BIND; default: 127.0.0.1 loopback-only for single-host — pass e.g. 0.0.0.0 for multi-host/Fabric remote admin)")
+  .option("--http-bind <addr>", "Harper HTTP bind address (env: FLAIR_HTTP_BIND; default: 127.0.0.1 loopback-only). The listener MUST include IPv4 loopback (Flair's self-calls hardcode 127.0.0.1), so only 127.0.0.1 or a wildcard (0.0.0.0 / ::) is accepted; a specific non-loopback host is refused.")
   .option("--admin-pass <pass>", "Admin password (generated if omitted)")
   .option("--admin-pass-file <path>", "Read admin password from file (chmod 600 recommended)")
   .option("--reset-admin-pass", "Rotate Harper's persisted admin hash via the operations socket, then write ~/.flair/admin-pass")
@@ -469,6 +476,18 @@ program
     // which would ask the same question again in "address" mode.
     const opsPort = resolveOpsPort({ ...opts, port: httpPort });
     const opsBindHost = resolveOpsBindHost(opts);
+    // HTTP bind (ops-nv9d slice 2): the same escape-hatch shape as the ops API
+    // (--http-bind > FLAIR_HTTP_BIND > persisted httpBind > loopback), but
+    // VALIDATED — the constructor refuses any host that does not guarantee
+    // IPv4-loopback reachability. Resolved before any write so a bad host is
+    // refused without touching the instance.
+    let httpBind: any;
+    try {
+      httpBind = resolveHttpBindFor(httpPort, opts);
+    } catch (err) {
+      console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
 
     // Resolve MCP client selection (union of init's auto-wire + the multi-client
     // detection/wiring that the front-door command provides). `--no-mcp` sets
@@ -675,7 +694,7 @@ program
         // domainSocket schema path), escape hatch via --ops-bind/FLAIR_OPS_BIND.
         const harperSetConfig = JSON.stringify({
           rootPath: dataDir,
-          http: { port: httpPort, cors: true, corsAccessList: [`http://127.0.0.1:${httpPort}`, `http://localhost:${httpPort}`] },
+          http: { port: httpBind.bindValue, cors: true, corsAccessList: httpCorsAccessList(httpPort) },
           operationsApi: buildOperationsApiConfig(opsPort, opsSocket, opsBindHost),
           mqtt: MQTT_DISABLED_CONFIG,
           localStudio: { enabled: false },
@@ -692,7 +711,7 @@ program
           HDB_ADMIN_PASSWORD: adminPass,
           THREADS_COUNT: "1",
           NODE_HOSTNAME: "localhost",
-          HTTP_PORT: String(httpPort),
+          HTTP_PORT: httpBind.bindValue,
           // flair#863: host-qualified, NOT a bare port. A bare value here is
           // what Harper latches as `originalValues["operationsApi.network.port"]`
           // when HARPER_SET_CONFIG force-sets the same key — and restores on the
@@ -825,7 +844,7 @@ program
           // initial spawn above — the launchd-managed process must not diverge.
           const setConfig = JSON.stringify({
             rootPath: dataDir,
-            http: { port: httpPort, cors: true, corsAccessList: [`http://127.0.0.1:${httpPort}`, `http://localhost:${httpPort}`] },
+            http: { port: httpBind.bindValue, cors: true, corsAccessList: httpCorsAccessList(httpPort) },
             operationsApi: buildOperationsApiConfig(opsPort, opsSocket, opsBindHost),
             mqtt: MQTT_DISABLED_CONFIG,
             localStudio: { enabled: false },
@@ -854,7 +873,7 @@ program
             execPath: process.execPath,
             harperBinPath,
             workingDirectory: flairPackageDir(),
-            httpPort,
+            httpPort: httpBind.bindValue,
             opsNetworkPort: opsNetworkPortValue(opsBindHost, opsPort),
             setConfig,
             port: httpPort,
@@ -908,7 +927,18 @@ program
     // instance's own port needs no write here — Harper has just recorded it in
     // <dataDir>/harper-config.yaml, which is what resolveHttpPort reads (see
     // persistDefaultInstallCoordinates).
-    persistDefaultInstallCoordinates(dataDir, httpPort, opsPort, opsBindHost);
+    //
+    // `httpBind` is persisted only when it is NOT the loopback default, so a
+    // deliberate widening (`--http-bind 0.0.0.0`) survives the next
+    // `flair restart` / `upgrade` (neither takes the flag), the same durability
+    // the ops bind gets above.
+    persistDefaultInstallCoordinates(
+      dataDir,
+      httpPort,
+      opsPort,
+      opsBindHost,
+      httpBind.host === DEFAULT_HTTP_BIND_HOST ? undefined : httpBind.host,
+    );
 
     if (agentId) {
       // Generate or reuse keypair

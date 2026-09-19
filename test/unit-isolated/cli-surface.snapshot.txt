@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=129 options=559
+# commands=129 options=560
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -39,6 +39,9 @@ flair init
     --ops-bind <addr>
       description: Harper ops API bind address (env: FLAIR_OPS_BIND; default: 127.0.0.1 loopback-only for single-host — pass e.g. 0.0.0.0 for multi-host/Fabric remote admin)
       attr: opsBind
+    --http-bind <addr>
+      description: Harper HTTP bind address (env: FLAIR_HTTP_BIND; default: 127.0.0.1 loopback-only). The listener MUST include IPv4 loopback (Flair's self-calls hardcode 127.0.0.1), so only 127.0.0.1 or a wildcard (0.0.0.0 / ::) is accepted; a specific non-loopback host is refused.
+      attr: httpBind
     --admin-pass <pass>
       description: Admin password (generated if omitted)
       attr: adminPass
@@ -2578,6 +2581,12 @@ Options:
                                default: 127.0.0.1 loopback-only for single-host
                                — pass e.g. 0.0.0.0 for multi-host/Fabric remote
                                admin)
+  --http-bind <addr>           Harper HTTP bind address (env: FLAIR_HTTP_BIND;
+                               default: 127.0.0.1 loopback-only). The listener
+                               MUST include IPv4 loopback (Flair's self-calls
+                               hardcode 127.0.0.1), so only 127.0.0.1 or a
+                               wildcard (0.0.0.0 / ::) is accepted; a specific
+                               non-loopback host is refused.
   --admin-pass <pass>          Admin password (generated if omitted)
   --admin-pass-file <path>     Read admin password from file (chmod 600
                                recommended)

@@ -265,6 +265,28 @@ describe("buildDirectSpawnEnv (flair#863)", () => {
     expect(env.OPERATIONSAPI_NETWORK_PORT).not.toBe("19925");
   });
 
+  test("carries a host-qualified HTTP_PORT, never a bare port (ops-nv9d slice 2)", () => {
+    // The direct-spawn HTTP emitter. Before this slice HTTP_PORT was a bare
+    // number, i.e. an all-interfaces bind; qualification is what narrows it,
+    // and it must be the SAME shape the consumers parse (slice 1).
+    const env = buildDirectSpawnEnv(base);
+    expect(env.HTTP_PORT).toBe("127.0.0.1:19926");
+    expect(env.HTTP_PORT).toContain(":");
+    expect(env.HTTP_PORT).not.toBe("19926");
+  });
+
+  test("a wildcard HTTP bind host widens the HTTP_PORT bind (deliberate widening)", () => {
+    expect(buildDirectSpawnEnv({ ...base, httpBindHost: "0.0.0.0" }).HTTP_PORT).toBe("0.0.0.0:19926");
+    expect(buildDirectSpawnEnv({ ...base, httpBindHost: "::" }).HTTP_PORT).toBe("[::]:19926");
+  });
+
+  test("refuses a non-loopback HTTP bind host (the self-calls hardcode 127.0.0.1)", () => {
+    // 127.0.0.1 and a wildcard guarantee IPv4-loopback reachability; a specific
+    // non-loopback host does not, so it is refused at construction.
+    expect(() => buildDirectSpawnEnv({ ...base, httpBindHost: "192.168.1.9" })).toThrow(/IPv4 loopback/);
+    expect(() => buildDirectSpawnEnv({ ...base, httpBindHost: "evil.example.com" })).toThrow(/IPv4 loopback/);
+  });
+
   test("the widening escape hatch reaches the spawn verbatim", () => {
     const env = buildDirectSpawnEnv({ ...base, opsBindHost: "0.0.0.0" });
     expect(env.OPERATIONSAPI_NETWORK_PORT).toBe("0.0.0.0:19925");
@@ -280,7 +302,7 @@ describe("buildDirectSpawnEnv (flair#863)", () => {
     const env = buildDirectSpawnEnv(base);
     expect(env.ROOTPATH).toBe("/data");
     expect(env.FLAIR_MODELS_DIR).toBe("/models");
-    expect(env.HTTP_PORT).toBe("19926");
+    expect(env.HTTP_PORT).toBe("127.0.0.1:19926");
     expect(env.HDB_ADMIN_USERNAME).toBe("admin");
     expect(env.LOCAL_STUDIO).toBe("false");
     // flair#1586: direct-spawn re-asserts the mqtt disable so restart/upgrade

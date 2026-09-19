@@ -88,6 +88,11 @@ jobs:
 
       - name: Start Flair (ephemeral Harper + Flair components)
         run: |
+          # ops-nv9d slice 2: this smoke probe deliberately leaves Harper on a
+          # WILDCARD bind (bare HTTP_PORT + NODE_HOSTNAME=0.0.0.0) so the
+          # published container port is reachable from the CI host. It is a
+          # documented wildcard fixture, NOT the production narrow bind, and is
+          # outside the production-constructor claim (127.0.0.1 / wildcard).
           docker run -d \
             --name harper-flair-smoke \
             -p 9925:9925 -p 9926:9926 \

@@ -156,4 +156,18 @@ describe("resources/migrations/embedding-stamp.ts — loopback self-call target"
     expect(url).toBe(`http://127.0.0.1:${DEFAULT_HTTP_PORT}`);
     expect(url).not.toContain(":9926");
   });
+
+  test("ignores a hostile HOST half and still returns the loopback self-call (confirmation row)", () => {
+    // ops-nv9d slice 2, step 0.2 — and NOT a fails-first red: this passes on the
+    // pre-change tree too. As a test it becomes EVIDENCE for the property the
+    // next slice depends on. The credentialed consumer STRIPS the host half by
+    // construction, always building http://127.0.0.1:<port>; that stripping is
+    // what pins the destination of a call carrying the Harper admin password,
+    // and it must not change. (This is the CONSUMER side of the slice-2 rule:
+    // reject at construction, strip at consumption. The constructor's refusal of
+    // the same hostile host is a separate assertion in test/unit/http-bind.test.ts.)
+    expect(resolveSelfBaseUrl({ HTTP_PORT: "evil.example.com:19926" } as NodeJS.ProcessEnv)).toBe(
+      "http://127.0.0.1:19926",
+    );
+  });
 });

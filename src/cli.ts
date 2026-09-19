@@ -69,6 +69,12 @@ import { detectClients, renderWiringSummary, wireClaudeCode, wireCodex, wireGemi
 import { flairCliVersion, clearFlairCliVersionCache, mcpServerSpec, unpinnedSpecWarning, FLAIR_MCP_PACKAGE } from "./lib/mcp-spec.js";
 import { harperPortValue } from "./lib/harper-port-value.js";
 import {
+  httpBind,
+  httpCorsAccessList,
+  DEFAULT_HTTP_BIND_HOST,
+  type HarperHttpBind,
+} from "./lib/http-bind.js";
+import {
   readClientMcpBlock,
   effectiveFlairUrl,
   checkClaudeMdBootstrap,
@@ -992,6 +998,25 @@ function readOpsBindFromConfig(path: string = configPath()): string | null {
   return null;
 }
 
+/**
+ * Read the persisted HTTP bind host from ~/.flair/config.yaml.
+ *
+ * Same shape and rationale as `readOpsBindFromConfig`: line-anchored so another
+ * key ending in `httpBind` cannot satisfy it, quote-tolerant because a
+ * hand-edited config may quote it. `path` is injectable so tests exercise the
+ * real parse against a temp file.
+ */
+export function readHttpBindFromConfig(path: string = configPath()): string | null {
+  try {
+    if (existsSync(path)) {
+      const yaml = readFileSync(path, "utf-8");
+      const m = yaml.match(/^\s*httpBind:\s*["']?([^"'\s#]+)["']?/m);
+      if (m && m[1]) return m[1];
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
 /** Read the persisted ops-API port from ~/.flair/config.yaml (flair#863). */
 function readOpsPortFromConfig(path: string = configPath()): number | null {
   try {
@@ -1280,6 +1305,47 @@ function resolveOpsBindHost(opts: { opsBind?: string }): string {
   return resolveOpsBindHostFrom(opts.opsBind, process.env.FLAIR_OPS_BIND, readOpsBindFromConfig());
 }
 
+// HTTP bind-host resolution (ops-nv9d slice 2): --http-bind flag >
+// FLAIR_HTTP_BIND env > persisted `httpBind` in ~/.flair/config.yaml > loopback
+// default. Mirrors the ops-API escape hatch (resolveOpsBindHostFrom) so the two
+// binds cannot drift in how a deliberate widening is recorded, with ONE
+// deliberate difference: the ops resolver accepts an arbitrary string (Harper
+// parses whatever it can from `host:port`), while this one VALIDATES. The value
+// is built through `httpBind()`, which refuses any host that does not guarantee
+// IPv4-loopback reachability — a specific non-loopback host or an IPv6-only
+// loopback would leave every hardcoded `127.0.0.1` self-call pointing at a dead
+// port while the bind itself looked fine. Widening is still available, but only
+// to a wildcard.
+//
+// The config-file rung is what makes `--http-bind` durable: every Harper spawn
+// re-asserts the bind, and those spawns happen in `flair start` / `restart` /
+// `upgrade`, none of which take an `--http-bind` flag.
+export function resolveHttpBindHostFrom(
+  flag: string | undefined | null,
+  envBind: string | undefined | null,
+  configuredBind: string | undefined | null,
+): string | null {
+  if (flag !== undefined && flag !== null && String(flag).trim() !== "") return String(flag).trim();
+  if (envBind && envBind.trim() !== "") return envBind.trim();
+  if (configuredBind && configuredBind.trim() !== "") return configuredBind.trim();
+  return null;
+}
+
+function resolveHttpBindHost(opts: { httpBind?: string }): string {
+  return resolveHttpBindHostFrom(opts.httpBind, process.env.FLAIR_HTTP_BIND, readHttpBindFromConfig())
+    ?? DEFAULT_HTTP_BIND_HOST;
+}
+
+/**
+ * The validated HTTP bind (host-qualified string + its two halves) for a spawn
+ * env, a launchd plist, or a `HARPER_SET_CONFIG` payload. Throws
+ * `UnreachableHttpBindHostError` for a host outside {loopback, wildcard}; the
+ * caller must refuse before writing anything.
+ */
+export function resolveHttpBindFor(port: number, opts: { httpBind?: string }): HarperHttpBind {
+  return httpBind(resolveHttpBindHost(opts), port);
+}
+
 /**
  * The one place that renders Harper's `operationsApi.network.port` value
  * (flair#863). Used by both the HARPER_SET_CONFIG block
@@ -1381,6 +1447,8 @@ export function buildDirectSpawnEnv(opts: {
   dataDir: string;
   modelsDir: string;
   httpPort: number;
+  /** HTTP bind host (ops-nv9d slice 2). Defaults to 127.0.0.1; a wildcard widens for the self-calls that hardcode IPv4 loopback. */
+  httpBindHost?: string;
   opsPort: number;
   opsBindHost: string;
   adminUser: string;
@@ -1393,7 +1461,12 @@ export function buildDirectSpawnEnv(opts: {
     FLAIR_MODELS_DIR: opts.modelsDir,
     DEFAULTS_MODE: "dev",
     HDB_ADMIN_USERNAME: opts.adminUser,
-    HTTP_PORT: String(opts.httpPort),
+    // Host-qualified through the ONE bind constructor (ops-nv9d slice 2). A bare
+    // number here would bind all interfaces, which is exactly the widening this
+    // slice removes; qualification is what narrows it. The value is the same
+    // shape the consumers parse (slice 1). Refuses a host that cannot reach
+    // IPv4 loopback rather than silently producing an unreachable bind.
+    HTTP_PORT: httpBind(opts.httpBindHost, opts.httpPort).bindValue,
     OPERATIONSAPI_NETWORK_PORT: opsNetworkPortValue(opts.opsBindHost, opts.opsPort),
     // flair#1586: fully disable the MQTT broker (Flair does not use it). "null"
     // casts to a null port (Harper's castConfigValue), which passes config
@@ -1963,19 +2036,21 @@ function resolveOpsUrlFromTarget(targetUrl: string): string {
  * Persist the instance coordinates other commands need to find and re-assert
  * this install (flair#863).
  *
- * This rewrites the file wholesale, so `opsPort`/`opsBind` default to whatever
- * is already persisted rather than being dropped — otherwise an unrelated
- * caller (e.g. `flair doctor --fix` correcting a drifted HTTP port) would
- * silently erase the operator's `--ops-bind` choice and the next restart would
- * revert the bind.
+ * This rewrites the file wholesale, so `opsPort`/`opsBind`/`httpBind` default to
+ * whatever is already persisted rather than being dropped — otherwise an
+ * unrelated caller (e.g. `flair doctor --fix` correcting a drifted HTTP port)
+ * would silently erase the operator's `--ops-bind` or `--http-bind` choice and
+ * the next restart would revert the bind.
  */
-function writeConfig(port: number, opsPort?: number, opsBind?: string, path: string = configPath()): void {
+function writeConfig(port: number, opsPort?: number, opsBind?: string, path: string = configPath(), httpBind?: string): void {
   const resolvedOpsPort = opsPort ?? readOpsPortFromConfig(path);
   const resolvedOpsBind = opsBind ?? readOpsBindFromConfig(path);
+  const resolvedHttpBind = httpBind ?? readHttpBindFromConfig(path);
   mkdirSync(dirname(path), { recursive: true });
   let body = `# Flair configuration\nport: ${port}\n`;
   if (resolvedOpsPort !== null && resolvedOpsPort !== undefined) body += `opsPort: ${resolvedOpsPort}\n`;
   if (resolvedOpsBind) body += `opsBind: ${resolvedOpsBind}\n`;
+  if (resolvedHttpBind) body += `httpBind: ${resolvedHttpBind}\n`;
   writeFileSync(path, body);
 }
 
@@ -2005,8 +2080,8 @@ function writeConfig(port: number, opsPort?: number, opsBind?: string, path: str
  * Those read Harper's config directly when the lifecycle commands grow the flag,
  * and this file goes with them.
  */
-function persistDefaultInstallCoordinates(dataDir: string, port: number, opsPort?: number, opsBind?: string): void {
-  if (isDefaultDataDir(dataDir)) writeConfig(port, opsPort, opsBind);
+function persistDefaultInstallCoordinates(dataDir: string, port: number, opsPort?: number, opsBind?: string, httpBind?: string): void {
+  if (isDefaultDataDir(dataDir)) writeConfig(port, opsPort, opsBind, configPath(), httpBind);
 }
 
 function privKeyPath(agentId: string, keysDir: string): string {
@@ -4113,6 +4188,8 @@ bindInitCli({
   resolveHttpPort,
   writeAdminPassFile,
   resolveOpsBindHost,
+  resolveHttpBindFor,
+  resolveHttpBindHost,
   resolveOpsPort,
   resolveOpsTarget,
   resolveOpsUrlFromTarget,
@@ -4839,6 +4916,7 @@ bindServiceCli({
   probeHealth,
   readyOpsSocketPosture,
   resolveHarperBin,
+  resolveHttpBindHost,
   resolveHttpPort,
   resolveLaunchdLabel,
   resolveOpsBindHost,
@@ -5048,6 +5126,49 @@ function observeLaunchdManagement(dataDir: string, port: number): LaunchdManagem
 }
 
 /**
+ * Preserve an instance's recorded HTTP port value VERBATIM for a repair.
+ *
+ * Repair is the one bind emitter that does not go through the constructor: it
+ * promises not to move the instance's coordinates, so a bare legacy port stays
+ * bare and an already-qualified `host:port` keeps its host. It throws for a
+ * DISABLED value (absent, null or empty) and for an UNSUPPORTED value (a port
+ * that cannot be parsed) so the caller refuses rather than substituting a
+ * default — a default here is a coordinate change that can enable a listener
+ * the instance did not have.
+ */
+export function preserveHttpPortValue(raw: unknown): string {
+  if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) {
+    throw new Error(
+      "refusing to repair the launchd plist: the instance's harper-config.yaml records no http.port, " +
+        "so the HTTP listener is disabled. Repair preserves the instance's coordinates and will not " +
+        "substitute a default port, which would enable a listener the instance did not have.",
+    );
+  }
+  if (typeof raw === "number") {
+    if (Number.isInteger(raw) && raw >= 1 && raw <= 65535) return String(raw);
+    throw new Error(`refusing to repair the launchd plist: http.port is ${raw}, which is not a usable port`);
+  }
+  const str = String(raw).trim();
+  if (harperPortValue(str) === null) {
+    throw new Error(
+      `refusing to repair the launchd plist: http.port is "${str}", which is not a parseable bind value`,
+    );
+  }
+  return str;
+}
+
+/**
+ * Preserve a secure-listener port (http.securePort / operationsApi.network
+ * .securePort) verbatim. Returns undefined for a disabled value so the key is
+ * omitted from the regenerated config — a disabled listener STAYS disabled, and
+ * a static default is never substituted for a missing value.
+ */
+export function preserveSecurePort(raw: unknown): number | string | undefined {
+  if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) return undefined;
+  return raw as number | string;
+}
+
+/**
  * Build the launchd plist for a `doctor --fix` repair (flair#1573 slice b).
  *
  * Deliberately DIVERGES from the `flair init` plist in one way that matters:
@@ -5058,15 +5179,28 @@ function observeLaunchdManagement(dataDir: string, port: number): LaunchdManagem
  * or defaults, so the repair cannot re-bootstrap Harper against a different
  * directory or port.
  *
+ * REPAIR IS AN EXPLICIT EXCEPTION TO "every bind goes through the
+ * constructor". Credential repair promises not to move the instance's
+ * coordinates (see the repair contract above this function), so it PRESERVES
+ * the existing bind — host and port, in whatever form the instance recorded
+ * them — rather than qualifying, narrowing or widening it. A bare legacy port
+ * stays bare; an already-qualified `host:port` keeps its host; a wildcard TLS
+ * listener with no intent marker is preserved as-is (changing it is migration's
+ * job, not repair's). An unsupported (unparseable) or disabled value is
+ * REFUSED rather than defaulted: substituting DEFAULT_PORT is itself a
+ * coordinate change and would enable a plaintext listener on a TLS-only
+ * instance.
+ *
  * `config` is the parsed harper-config.yaml, already gated readable by the
  * caller. Throws when the Harper binary cannot be resolved — a plist pointing
  * at a missing binary is the stale-plist failure this repair must not write.
  */
-function buildRepairPlist(dataDir: string, config: Record<string, any>): string {
-  // The DEFAULT_PORT / httpPort-1 fallbacks below are practically unreachable:
-  // Harper writes harper-config.yaml ports on every boot (flair#914), so a
-  // readable config always carries them. They exist only as a last resort.
-  const httpPort = harperPortValue(config?.http?.port) ?? DEFAULT_PORT;
+export function buildRepairPlist(dataDir: string, config: Record<string, any>): string {
+  const httpRaw = config?.http?.port;
+  // Preserved verbatim (bare stays bare, qualified keeps its host). Throws for a
+  // disabled or unparseable value — refuse rather than replace the plist.
+  const httpBindValue = preserveHttpPortValue(httpRaw);
+  const httpPort = harperPortValue(httpRaw)!;
   const opsPortRaw = config?.operationsApi?.network?.port;
   const opsPort = harperPortValue(opsPortRaw) ?? (httpPort - 1);
   const opsBind = detectOpsApiAllInterfacesBind(opsPortRaw);
@@ -5078,10 +5212,27 @@ function buildRepairPlist(dataDir: string, config: Record<string, any>): string 
   const opsNetworkPort = typeof opsPortRaw === "string" && opsPortRaw.trim() !== ""
     ? opsPortRaw.trim()
     : opsNetworkPortValue(opsBindHost, opsPort);
+  // TLS is preserved, never qualified and never defaulted in: an enabled secure
+  // listener keeps its own port (a disabled one stays disabled because the key
+  // is simply not emitted). Same for the ops-API secure listener.
+  const httpSecurePort = preserveSecurePort(config?.http?.securePort);
+  const opsSecurePort = preserveSecurePort(config?.operationsApi?.network?.securePort);
   const setConfig = JSON.stringify({
     rootPath: dataDir,
-    http: { port: httpPort, cors: true, corsAccessList: [`http://127.0.0.1:${httpPort}`, `http://localhost:${httpPort}`] },
-    operationsApi: { network: { port: opsNetworkPort, cors: true, domainSocket: opsSocket } },
+    http: {
+      port: httpBindValue,
+      cors: true,
+      corsAccessList: httpCorsAccessList(httpPort),
+      ...(httpSecurePort === undefined ? {} : { securePort: httpSecurePort }),
+    },
+    operationsApi: {
+      network: {
+        port: opsNetworkPort,
+        cors: true,
+        domainSocket: opsSocket,
+        ...(opsSecurePort === undefined ? {} : { securePort: opsSecurePort }),
+      },
+    },
     mqtt: MQTT_DISABLED_CONFIG,
     localStudio: { enabled: false },
     authentication: { authorizeLocal: false, enableSessions: true },
@@ -5099,7 +5250,7 @@ function buildRepairPlist(dataDir: string, config: Record<string, any>): string 
     modelsDir,
     setConfig,
     adminUser: DEFAULT_ADMIN_USER,
-    httpPort,
+    httpPort: httpBindValue,
     opsNetworkPort,
     passFile: {
       launcher: launchdLauncherPath(),
@@ -5895,6 +6046,7 @@ async function startFlairProcess(port: number, dataDir: string): Promise<void> {
       dataDir,
       modelsDir: process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models"),
       httpPort: port,
+      httpBindHost: resolveHttpBindHost({}),
       opsPort: resolveOpsPort({ port }),
       opsBindHost: resolveOpsBindHost({}),
       adminUser: DEFAULT_ADMIN_USER,

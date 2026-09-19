@@ -27,6 +27,7 @@ export type ServiceCli = {
   probeHealth: (...args: any[]) => any;
   readyOpsSocketPosture: (...args: any[]) => any;
   resolveHarperBin: (...args: any[]) => any;
+  resolveHttpBindHost: (...args: any[]) => any;
   resolveHttpPort: (...args: any[]) => any;
   resolveLaunchdLabel: (...args: any[]) => any;
   resolveOpsBindHost: (...args: any[]) => any;
@@ -93,6 +94,10 @@ function readyOpsSocketPosture(...args: any[]): any {
 
 function resolveHarperBin(...args: any[]): any {
   return cli.resolveHarperBin(...args);
+}
+
+function resolveHttpBindHost(...args: any[]): any {
+  return cli.resolveHttpBindHost(...args);
 }
 
 function resolveHttpPort(...args: any[]): any {
@@ -322,6 +327,7 @@ program
         dataDir,
         modelsDir: process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models"),
         httpPort: port,
+        httpBindHost: resolveHttpBindHost({}),
         opsPort: resolveOpsPort(opts),
         opsBindHost: resolveOpsBindHost({}),
         adminUser: DEFAULT_ADMIN_USER,

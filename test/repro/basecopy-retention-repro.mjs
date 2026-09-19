@@ -220,7 +220,9 @@ async function makeNode(name, harper) {
 		HDB_ADMIN_PASSWORD: ADMIN.password,
 		THREADS_COUNT: '1',
 		OPERATIONSAPI_NETWORK_PORT: String(opsPort),
-		HTTP_PORT: String(httpPort),
+		// ops-nv9d slice 2: host-qualified HTTP bind (loopback), matching a
+		// production spawn.
+		HTTP_PORT: `127.0.0.1:${httpPort}`,
 	};
 	node.env = env;
 	say(`[${name}] install → ${dir} (ops:${opsPort} http:${httpPort} repl:${repPort})`);
