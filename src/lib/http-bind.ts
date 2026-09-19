@@ -216,12 +216,39 @@ export function bindHostOf(value: string): string | null {
  * The host to qualify an ENABLED secure listener with, given the (preserved)
  * plaintext bind host. A bare secure value binds ALL interfaces exactly like a
  * bare plaintext port does — Harper feeds `http.securePort` through the same
- * `listenOnPorts` path — so leaving it bare would narrow the plaintext listener
- * and leave TLS wide, the asymmetry this work exists to close. A plaintext host
- * that cannot guarantee IPv4 loopback (e.g. a legacy `::1`) is not mirrored;
- * the secure listener falls back to the loopback default instead of producing a
- * bind Flair's self-calls cannot reach.
+ * `listenOnPorts` path — so when the plaintext listener IS narrowed, a bare
+ * secure value is qualified with the same host, or TLS would stay wide while
+ * plaintext is narrowed. A plaintext host that cannot guarantee IPv4 loopback
+ * (e.g. a legacy `::1`) is not mirrored; the secure listener falls back to the
+ * loopback default instead of producing a bind Flair's self-calls cannot reach.
  */
 export function secureBindHostFor(plaintextHost: string | null): string {
   return plaintextHost !== null && guaranteesIpv4Loopback(plaintextHost) ? plaintextHost : DEFAULT_HTTP_BIND_HOST;
+}
+
+/**
+ * The secure-listener config value a repair should write, or undefined when the
+ * listener is disabled. Repair PRESERVES the instance's coordinates, and this
+ * rule is "both or neither" with respect to the plaintext bind:
+ *
+ *   - the secure value already names a host -> preserve that value verbatim
+ *     (repair never re-homes a listener the instance recorded with a host);
+ *   - the secure value is BARE and the plaintext value is ALSO bare -> preserve
+ *     it bare. Repair moves NEITHER listener; narrowing TLS here while leaving a
+ *     bare (all-interfaces) plaintext port in place would move one coordinate
+ *     and silently drop LAN TLS clients after a `doctor --fix` that promised to
+ *     change nothing;
+ *   - the secure value is BARE and the plaintext value is qualified -> qualify
+ *     the secure host the same way as the plaintext bind (a bare secure port
+ *     binds all interfaces exactly like a bare plaintext port, so leaving it
+ *     bare would narrow plaintext and leave TLS wide).
+ */
+export function qualifySecureBindValue(secureRaw: unknown, plaintextValue: string): string | undefined {
+  const port = preserveSecurePort(secureRaw);
+  if (port === undefined) return undefined;
+  const recorded = String(secureRaw).trim();
+  if (bindHostOf(recorded) !== null) return recorded;
+  const plaintextHost = bindHostOf(plaintextValue);
+  if (plaintextHost === null) return recorded;
+  return httpBind(secureBindHostFor(plaintextHost), port).bindValue;
 }

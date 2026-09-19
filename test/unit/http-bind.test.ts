@@ -264,6 +264,25 @@ describe("§2 emitter — buildRepairPlist preserves coordinates (never qualifie
     expect(setConfigOf(plist).http.securePort).toBe("0.0.0.0:9443");
   });
 
+  test("THE round-4 case: BARE plaintext + enabled secure — repair moves NEITHER", () => {
+    // With a bare plaintext port, `bindHostOf('19926')` is null and the old code
+    // fell back to 127.0.0.1 for the secure host: plaintext stayed wide while
+    // TLS was narrowed. That MOVES a coordinate on exactly the legacy installs
+    // this work targets, and silently drops LAN TLS clients after a
+    // `doctor --fix` that promised to change nothing. Both or neither.
+    const plist = buildRepairPlist(dataDir, { http: { port: 19926, securePort: 9443 } });
+    const setConfig = setConfigOf(plist);
+    expect(setConfig.http.port).toBe("19926");
+    expect(setConfig.http.securePort).toBe("9443");
+    // and both channels agree — HTTP_PORT stays bare too
+    expect(plist).toContain("<key>HTTP_PORT</key><string>19926</string>");
+  });
+
+  test("a secure value that already names a host is preserved verbatim", () => {
+    const plist = buildRepairPlist(dataDir, { http: { port: "127.0.0.1:19926", securePort: "0.0.0.0:9443" } });
+    expect(setConfigOf(plist).http.securePort).toBe("0.0.0.0:9443");
+  });
+
   test("a DISABLED secure listener stays disabled — no static default is substituted in", () => {
     const plist = buildRepairPlist(dataDir, { http: { port: "127.0.0.1:19926", securePort: null } });
     expect("securePort" in setConfigOf(plist).http).toBe(false);

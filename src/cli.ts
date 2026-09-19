@@ -73,8 +73,7 @@ import {
   httpCorsAccessList,
   preserveHttpPortValue,
   preserveSecurePort,
-  bindHostOf,
-  secureBindHostFor,
+  qualifySecureBindValue,
   DEFAULT_HTTP_BIND_HOST,
   type HarperHttpBind,
 } from "./lib/http-bind.js";
@@ -5161,7 +5160,7 @@ function observeLaunchdManagement(dataDir: string, port: number): LaunchdManagem
 // (src/lib/launchd-repair.ts) share the exact same preservation rules, and the
 // planner can refuse an unsupported configuration BEFORE the executor stops
 // anything. Re-exported here for existing importers of this module.
-export { preserveHttpPortValue, preserveSecurePort, bindHostOf };
+export { preserveHttpPortValue, preserveSecurePort };
 
 /**
  * Build the launchd plist for a `doctor --fix` repair (flair#1573 slice b).
@@ -5207,32 +5206,30 @@ export function buildRepairPlist(dataDir: string, config: Record<string, any>): 
   const opsNetworkPort = typeof opsPortRaw === "string" && opsPortRaw.trim() !== ""
     ? opsPortRaw.trim()
     : opsNetworkPortValue(opsBindHost, opsPort);
-  // TLS is preserved, never qualified with a static default and never enabled:
-  // an ENABLED secure listener keeps its own PORT but its HOST is qualified with
-  // the same policy as the plaintext bind, because a bare secure value binds ALL
-  // interfaces exactly like a bare plaintext port does — Harper feeds
-  // `http.securePort` through the same `listenOnPorts` path. Leaving it bare
-  // would narrow the plaintext listener and leave TLS wide: the asymmetry this
-  // work exists to close. A DISABLED secure listener stays disabled (the key is
-  // simply not emitted).
-  const httpSecurePort = preserveSecurePort(config?.http?.securePort);
-  const opsSecurePort = preserveSecurePort(config?.operationsApi?.network?.securePort);
-  const secureHost = secureBindHostFor(bindHostOf(httpBindValue));
-  const opsSecureHost = secureBindHostFor(bindHostOf(opsNetworkPort));
+  // TLS is preserved, never defaulted in and never enabled. The secure host
+  // follows a "both or neither" rule with the plaintext bind: a secure value
+  // that already names a host is preserved verbatim; a BARE secure value with a
+  // BARE plaintext port is preserved bare too (repair moves neither — narrowing
+  // TLS while plaintext stays wide would move a coordinate and drop LAN TLS
+  // clients); and a bare secure value with a qualified plaintext bind is
+  // qualified the same way as the plaintext host. A DISABLED secure listener
+  // stays disabled (the key is not emitted).
+  const httpSecureBind = qualifySecureBindValue(config?.http?.securePort, httpBindValue);
+  const opsSecureBind = qualifySecureBindValue(config?.operationsApi?.network?.securePort, opsNetworkPort);
   const setConfig = JSON.stringify({
     rootPath: dataDir,
     http: {
       port: httpBindValue,
       cors: true,
       corsAccessList: httpCorsAccessList(httpPort),
-      ...(httpSecurePort === undefined ? {} : { securePort: httpBind(secureHost, httpSecurePort).bindValue }),
+      ...(httpSecureBind === undefined ? {} : { securePort: httpSecureBind }),
     },
     operationsApi: {
       network: {
         port: opsNetworkPort,
         cors: true,
         domainSocket: opsSocket,
-        ...(opsSecurePort === undefined ? {} : { securePort: httpBind(opsSecureHost, opsSecurePort).bindValue }),
+        ...(opsSecureBind === undefined ? {} : { securePort: opsSecureBind }),
       },
     },
     mqtt: MQTT_DISABLED_CONFIG,
