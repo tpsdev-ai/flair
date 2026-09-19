@@ -194,6 +194,12 @@ export function hookCommandIsSilenced(command: string): boolean {
   return /\|\|\s*(?:true|:)(?:\s|'|$)/.test(command) || /;\s*(?:true|:)\s*'?\s*$/.test(command);
 }
 
+/** Does the command discard stderr? Codex's installer must not (flair#1734). */
+export function hookCommandDiscardsStderr(command: string): boolean {
+  if (typeof command !== "string") return false;
+  return command.includes("2>/dev/null") || command.includes("2>&-");
+}
+
 /**
  * The EXACT unwrapped shape Flair wrote before #1007. Recognising it precisely
  * (not "anything containing the marker") is what lets `flair doctor --fix`
@@ -1297,6 +1303,46 @@ const defaultProbeRunner: HookProbeRunner = (command, timeoutMs) => {
     spawnError: res.error && !timedOut ? res.error.message : null,
   };
 };
+
+/**
+ * Delivery probe (flair#1734): run the registered command so we can classify
+ * SessionStart additionalContext. Must NOT set FLAIR_HOOK_PROBE — that path
+ * prints inert `{}` and would make every status look undelivered.
+ */
+export function probeSessionStartHookDelivery(
+  command: string,
+  opts: { timeoutMs?: number; runner?: HookProbeRunner } = {},
+): HookProbeOutcome {
+  const timeoutMs = opts.timeoutMs ?? 8_000;
+  const runner = opts.runner ?? ((cmd, ms) => {
+    const res = spawnSync("/bin/sh", ["-c", cmd], {
+      input: "{}",
+      encoding: "utf-8",
+      timeout: ms,
+      env: {
+        ...process.env,
+        FLAIR_HOOK_PROBE: "0",
+        FLAIR_HOOK_DELIVERY_PROBE: "1",
+        FLAIR_HOOK_TIMEOUT_MS: "4000",
+        FLAIR_PRESENCE_TIMEOUT_MS: "1",
+      },
+    });
+    const timedOut = (res as { signal?: string | null }).signal === "SIGTERM" && res.status === null;
+    return {
+      exitCode: res.status,
+      stdout: res.stdout ?? "",
+      stderr: res.stderr ?? "",
+      timedOut,
+      spawnError: res.error && !timedOut ? res.error.message : null,
+    };
+  });
+  try {
+    return runner(command, timeoutMs);
+  } catch (err: unknown) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { exitCode: null, stdout: "", stderr: "", timedOut: false, spawnError: reason };
+  }
+}
 
 /**
  * Run a registered hook command once, bounded, with probe-mode env set.

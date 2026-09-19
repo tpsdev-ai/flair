@@ -255,8 +255,11 @@ export async function runHook(
   // payload doesn't carry a task description (unlike the MCP `bootstrap`
   // tool call — see index.ts), so this only ever sets `activity`, leaving
   // currentTask exactly whatever it already was.
+  const skipPresence = process.env.FLAIR_HOOK_DELIVERY_PROBE != null
+    && process.env.FLAIR_HOOK_DELIVERY_PROBE !== ""
+    && process.env.FLAIR_HOOK_DELIVERY_PROBE !== "0";
   const presenceDone: Promise<void> =
-    typeof client.request === "function"
+    !skipPresence && typeof client.request === "function"
       ? postPresenceSafe(
           client as PresencePoster,
           deriveActivity({ channel: resolveHookChannel() }),

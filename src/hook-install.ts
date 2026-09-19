@@ -63,6 +63,7 @@ import {
   computeContinuityHookInstall,
   computeContinuityHookRemoval,
   hookCommandIsSilenced,
+  hookCommandDiscardsStderr,
   isHookCommandValueSafe,
   isSessionStartHookInvocation,
   readClientMcpBlock,
@@ -653,6 +654,8 @@ export interface HookStatusResult {
    *  Since flair#1734 this is `|| true` (session still starts), not stderr
    *  discarded — Codex keeps stderr visible on purpose. */
   silenced: boolean;
+  /** True when the command discards stderr (`2>/dev/null`). Codex must not. */
+  stderrDiscarded: boolean;
   agentId?: string;
   flairUrl?: string;
   command?: string;
@@ -660,6 +663,17 @@ export interface HookStatusResult {
   /** What status verified, not what it configured (flair#1734). */
   delivery: HookDeliveryState;
   deliveryReasons: string[];
+}
+
+/** Injectable so `hook status` can classify a real run without unit tests spawning npx. */
+export type HookDeliveryProbe = (command: string) => {
+  exitCode: number | null;
+  stdout: string;
+  stderr?: string;
+};
+
+export interface HookStatusOptions {
+  deliveryProbe?: HookDeliveryProbe;
 }
 
 /**
@@ -750,38 +764,62 @@ function assessDelivery(
   harness: Harness,
   wired: boolean,
   agentId: string | undefined,
+  correctShape: boolean,
+  command: string | undefined,
+  deliveryProbe?: HookDeliveryProbe,
 ): { delivery: HookDeliveryState; deliveryReasons: string[] } {
   if (!wired) return { delivery: "absent", deliveryReasons: [] };
 
-  const reasons: string[] = [];
+  const blockers: string[] = [];
+  const notes: string[] = [];
   if (harness === "codex") {
     const runtime = readCodexHookRuntime(homeDir);
     if (runtime.hooksEnabled === false) {
-      reasons.push("Codex features.hooks is disabled — the harness will not run this hook");
+      blockers.push("Codex features.hooks is disabled — the harness will not run this hook");
     }
     if (runtime.mcpAgentId && agentId && runtime.mcpAgentId !== agentId) {
-      reasons.push(`agent id drift: hook command is '${agentId}', MCP env is '${runtime.mcpAgentId}'`);
+      blockers.push(`agent id drift: hook command is '${agentId}', MCP env is '${runtime.mcpAgentId}'`);
     }
     if (runtime.hasTrustedHash) {
-      reasons.push("trusted_hash is recorded but Flair cannot verify it matches the current definition");
+      notes.push("trusted_hash is recorded but Flair cannot verify it matches the current definition");
     } else if (runtime.hooksEnabled !== false) {
-      reasons.push("Codex hook trust unread or untrusted — re-approval in /hooks required");
+      notes.push("Codex hook trust unread or untrusted — re-approval in /hooks required");
     }
   }
-  // hookStatus is a filesystem read. A leftover hash, a correct-shape line,
-  // and exit 0 are not evidence that additionalContext reached the model.
-  reasons.push("delivery not verified — no SessionStart additionalContext observed");
-  return { delivery: "unverified", deliveryReasons: reasons };
+
+  if (deliveryProbe && command) {
+    const verdict = classifyHookDelivery(deliveryProbe(command));
+    if (verdict.delivered && blockers.length === 0 && correctShape) {
+      return { delivery: "verified", deliveryReasons: [verdict.reason, ...notes] };
+    }
+    return { delivery: "unverified", deliveryReasons: [...blockers, verdict.reason, ...notes] };
+  }
+
+  return {
+    delivery: "unverified",
+    deliveryReasons: [
+      ...blockers,
+      "delivery not verified — no SessionStart additionalContext observed",
+      ...notes,
+    ],
+  };
+}
+
+/** On-failure line for `flair hook status`. Codex keeps stderr visible. */
+export function hookStatusFailureLine(status: Pick<HookStatusResult, "silenced" | "stderrDiscarded">): string {
+  if (status.stderrDiscarded) return "silent (exit 0, no output)";
+  if (status.silenced) return "session continues (exit 0); stderr is visible";
+  return "prints an error on every session";
 }
 
 /** Read-only report: is the hook wired, does it look right, and which agent
  *  / Flair instance does it point at (recovered from the wired command). */
-export function hookStatus(homeDir: string, harness: Harness): HookStatusResult {
+export function hookStatus(homeDir: string, harness: Harness, opts: HookStatusOptions = {}): HookStatusResult {
   const path = hookSettingsPath(homeDir, harness);
   const read = readSettingsFile(path);
   if (read.parseError) {
     return {
-      harness, path, wired: false, correctShape: false, silenced: false,
+      harness, path, wired: false, correctShape: false, silenced: false, stderrDiscarded: false,
       parseError: read.parseError, delivery: "absent", deliveryReasons: [],
     };
   }
@@ -790,7 +828,7 @@ export function hookStatus(homeDir: string, harness: Harness): HookStatusResult 
   const existing = findHookEntry(config);
   if (!existing) {
     return {
-      harness, path, wired: false, correctShape: false, silenced: false,
+      harness, path, wired: false, correctShape: false, silenced: false, stderrDiscarded: false,
       parseError: null, delivery: "absent", deliveryReasons: [],
     };
   }
@@ -799,10 +837,13 @@ export function hookStatus(homeDir: string, harness: Harness): HookStatusResult 
   const command: string = typeof hookEntry?.command === "string" ? hookEntry.command : "";
   const correctShape = hookEntry?.type === "command" && isSessionStartHookInvocation(command);
   const env = parseHookCommandEnv(command);
-  const assessed = assessDelivery(homeDir, harness, true, env.agentId);
+  const assessed = assessDelivery(
+    homeDir, harness, true, env.agentId, correctShape, command, opts.deliveryProbe,
+  );
   return {
     harness, path, wired: true, correctShape,
     silenced: hookCommandIsSilenced(command),
+    stderrDiscarded: hookCommandDiscardsStderr(command),
     agentId: env.agentId, flairUrl: env.flairUrl, command, parseError: null,
     delivery: assessed.delivery, deliveryReasons: assessed.deliveryReasons,
   };

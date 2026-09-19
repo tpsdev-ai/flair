@@ -6,6 +6,7 @@ import { join } from "node:path";
 import * as hookInstall from "../../src/hook-install.ts";
 import {
   hookStatus,
+  hookStatusFailureLine,
   installHook,
   hookSettingsPath,
   type HookStatusResult,
@@ -65,6 +66,17 @@ afterEach(() => {
 
 function statusOf(harness: "codex" | "claude-code"): HonestStatus {
   return hookStatus(isoHome, harness) as HonestStatus;
+}
+
+const SOUL_STDOUT = JSON.stringify({
+  hookSpecificOutput: {
+    hookEventName: "SessionStart",
+    additionalContext: "## Identity\n**identity:** Gauge.",
+  },
+});
+
+function deliveredProbe(): { exitCode: number; stdout: string } {
+  return { exitCode: 0, stdout: SOUL_STDOUT };
 }
 
 function installedCodexCommand(): string {
@@ -241,5 +253,42 @@ describe("install / detectability (issue #1734 surviving asks)", () => {
   it("Codex wired command does not swallow stderr with 2>/dev/null", () => {
     installHook({ homeDir: isoHome, harness: "codex", agentId: AGENT, flairUrl: URL });
     expect(installedCodexCommand()).not.toContain("2>/dev/null");
+  });
+
+  it("Codex status must not claim failures stay silent with no output", () => {
+    installHook({ homeDir: isoHome, harness: "codex", agentId: AGENT, flairUrl: URL });
+    const status = statusOf("codex");
+    expect(status.stderrDiscarded).toBe(false);
+    expect(status.silenced).toBe(true);
+    expect(hookStatusFailureLine(status)).toMatch(/stderr is visible/i);
+    expect(hookStatusFailureLine(status)).not.toMatch(/no output/i);
+  });
+});
+
+describe("HALF 2 — verified is reachable when delivery is classified", () => {
+  it("injected SessionStart additionalContext + no blockers → verified", () => {
+    writeCodexMcpAgent(AGENT);
+    installHook({ homeDir: isoHome, harness: "codex", agentId: AGENT, flairUrl: URL });
+    const status = hookStatus(isoHome, "codex", { deliveryProbe: deliveredProbe });
+    expect(status.delivery).toBe("verified");
+    expect(honesty.hookStatusHeadline!(status).toLowerCase()).toMatch(/verified/);
+    expect(honesty.hookStatusHeadline!(status)).not.toMatch(/^\s*wired\s*$/i);
+  });
+
+  it("additionalContext does not verify when Codex hooks are disabled", () => {
+    installHook({ homeDir: isoHome, harness: "codex", agentId: AGENT, flairUrl: URL });
+    writeFileSync(join(isoHome, ".codex", "config.toml"), ["[features]", "hooks = false", ""].join("\n"));
+    const status = hookStatus(isoHome, "codex", { deliveryProbe: deliveredProbe });
+    expect(status.delivery).toBe("unverified");
+    expect(status.deliveryReasons.join(" ")).toMatch(/disabled|features\.hooks|not run/i);
+  });
+
+  it("exit 0 + inert {} stays unverified even with an injected probe", () => {
+    writeCodexMcpAgent(AGENT);
+    installHook({ homeDir: isoHome, harness: "codex", agentId: AGENT, flairUrl: URL });
+    const status = hookStatus(isoHome, "codex", {
+      deliveryProbe: () => ({ exitCode: 0, stdout: "{}" }),
+    });
+    expect(status.delivery).toBe("unverified");
   });
 });
