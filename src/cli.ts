@@ -71,6 +71,10 @@ import { harperPortValue } from "./lib/harper-port-value.js";
 import {
   httpBind,
   httpCorsAccessList,
+  preserveHttpPortValue,
+  preserveSecurePort,
+  bindHostOf,
+  secureBindHostFor,
   DEFAULT_HTTP_BIND_HOST,
   type HarperHttpBind,
 } from "./lib/http-bind.js";
@@ -1488,6 +1492,33 @@ export function buildDirectSpawnEnv(opts: {
   };
   if (opts.adminPass) env.HDB_ADMIN_PASSWORD = opts.adminPass;
   return env;
+}
+
+/**
+ * Harper config env vars that outrank the individual bind vars. Harper filters
+ * its env/argv against `HARPER_SET_CONFIG` before applying anything
+ * (`filterArgsAgainstRuntimeConfig`), and `http.port` is a key flair's own
+ * SET_CONFIG names — so an ambient `HARPER_SET_CONFIG` left in `process.env`
+ * would DROP the qualified `HTTP_PORT` the direct-spawn path writes, bind the
+ * port wide, and leave every bind assertion green.
+ */
+export const HARPER_CONFIG_ENV_VARS = ["HARPER_DEFAULT_CONFIG", "HARPER_CONFIG", "HARPER_SET_CONFIG"] as const;
+
+/**
+ * A CLOSED direct-spawn environment: `base` with every Harper config env var
+ * removed, then `overrides` applied. The direct-spawn paths (`flair start`'s
+ * fallback, `restart`, `upgrade`) do not set `HARPER_SET_CONFIG` themselves and
+ * their whole contract is the INDIVIDUAL vars — so an inherited SET_CONFIG from
+ * the operator's shell must not survive into the spawn and outrank them. (The
+ * `init` install path DOES set SET_CONFIG deliberately and does not use this.)
+ */
+export function closedDirectSpawnEnv(
+  base: NodeJS.ProcessEnv,
+  overrides: Record<string, string>,
+): Record<string, string> {
+  const env = { ...(base as Record<string, string>) };
+  for (const key of HARPER_CONFIG_ENV_VARS) delete env[key];
+  return { ...env, ...overrides };
 }
 
 // detectOpsApiAllInterfacesBind now lives in src/lib/ops-api-bind.ts so
@@ -4904,6 +4935,7 @@ export function assertLaunchdServiceOwnedBy(
 // Bind shared cli-locals first so the extracted module never imports this file.
 bindServiceCli({
   buildDirectSpawnEnv,
+  closedDirectSpawnEnv,
   defaultDataDir,
   ensureLaunchdServiceLoaded,
   flairPackageDir,
@@ -5124,48 +5156,12 @@ function observeLaunchdManagement(dataDir: string, port: number): LaunchdManagem
   });
 }
 
-/**
- * Preserve an instance's recorded HTTP port value VERBATIM for a repair.
- *
- * Repair is the one bind emitter that does not go through the constructor: it
- * promises not to move the instance's coordinates, so a bare legacy port stays
- * bare and an already-qualified `host:port` keeps its host. It throws for a
- * DISABLED value (absent, null or empty) and for an UNSUPPORTED value (a port
- * that cannot be parsed) so the caller refuses rather than substituting a
- * default — a default here is a coordinate change that can enable a listener
- * the instance did not have.
- */
-export function preserveHttpPortValue(raw: unknown): string {
-  if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) {
-    throw new Error(
-      "refusing to repair the launchd plist: the instance's harper-config.yaml records no http.port, " +
-        "so the HTTP listener is disabled. Repair preserves the instance's coordinates and will not " +
-        "substitute a default port, which would enable a listener the instance did not have.",
-    );
-  }
-  if (typeof raw === "number") {
-    if (Number.isInteger(raw) && raw >= 1 && raw <= 65535) return String(raw);
-    throw new Error(`refusing to repair the launchd plist: http.port is ${raw}, which is not a usable port`);
-  }
-  const str = String(raw).trim();
-  if (harperPortValue(str) === null) {
-    throw new Error(
-      `refusing to repair the launchd plist: http.port is "${str}", which is not a parseable bind value`,
-    );
-  }
-  return str;
-}
-
-/**
- * Preserve a secure-listener port (http.securePort / operationsApi.network
- * .securePort) verbatim. Returns undefined for a disabled value so the key is
- * omitted from the regenerated config — a disabled listener STAYS disabled, and
- * a static default is never substituted for a missing value.
- */
-export function preserveSecurePort(raw: unknown): number | string | undefined {
-  if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) return undefined;
-  return raw as number | string;
-}
+// `preserveHttpPortValue` / `preserveSecurePort` / `bindHostOf` live in
+// src/lib/http-bind.ts so the CLI's plist writer and the pure repair PLANNER
+// (src/lib/launchd-repair.ts) share the exact same preservation rules, and the
+// planner can refuse an unsupported configuration BEFORE the executor stops
+// anything. Re-exported here for existing importers of this module.
+export { preserveHttpPortValue, preserveSecurePort, bindHostOf };
 
 /**
  * Build the launchd plist for a `doctor --fix` repair (flair#1573 slice b).
@@ -5211,25 +5207,32 @@ export function buildRepairPlist(dataDir: string, config: Record<string, any>): 
   const opsNetworkPort = typeof opsPortRaw === "string" && opsPortRaw.trim() !== ""
     ? opsPortRaw.trim()
     : opsNetworkPortValue(opsBindHost, opsPort);
-  // TLS is preserved, never qualified and never defaulted in: an enabled secure
-  // listener keeps its own port (a disabled one stays disabled because the key
-  // is simply not emitted). Same for the ops-API secure listener.
+  // TLS is preserved, never qualified with a static default and never enabled:
+  // an ENABLED secure listener keeps its own PORT but its HOST is qualified with
+  // the same policy as the plaintext bind, because a bare secure value binds ALL
+  // interfaces exactly like a bare plaintext port does — Harper feeds
+  // `http.securePort` through the same `listenOnPorts` path. Leaving it bare
+  // would narrow the plaintext listener and leave TLS wide: the asymmetry this
+  // work exists to close. A DISABLED secure listener stays disabled (the key is
+  // simply not emitted).
   const httpSecurePort = preserveSecurePort(config?.http?.securePort);
   const opsSecurePort = preserveSecurePort(config?.operationsApi?.network?.securePort);
+  const secureHost = secureBindHostFor(bindHostOf(httpBindValue));
+  const opsSecureHost = secureBindHostFor(bindHostOf(opsNetworkPort));
   const setConfig = JSON.stringify({
     rootPath: dataDir,
     http: {
       port: httpBindValue,
       cors: true,
       corsAccessList: httpCorsAccessList(httpPort),
-      ...(httpSecurePort === undefined ? {} : { securePort: httpSecurePort }),
+      ...(httpSecurePort === undefined ? {} : { securePort: httpBind(secureHost, httpSecurePort).bindValue }),
     },
     operationsApi: {
       network: {
         port: opsNetworkPort,
         cors: true,
         domainSocket: opsSocket,
-        ...(opsSecurePort === undefined ? {} : { securePort: opsSecurePort }),
+        ...(opsSecurePort === undefined ? {} : { securePort: httpBind(opsSecureHost, opsSecurePort).bindValue }),
       },
     },
     mqtt: MQTT_DISABLED_CONFIG,
@@ -5559,6 +5562,18 @@ function planLaunchdRepairFor(dataDir: string, port: number): {
     configReadable,
     adminPassPath,
     adminPass,
+    // Hand the instance's own bind values to the PLANNER so an unsupported one
+    // (a disabled or unparseable http.port) refuses BEFORE the executor's adopt
+    // arm clean-stops the live instance. Deciding this in the executor's writer
+    // would bounce first and refuse after — leaving the instance down with a
+    // remedy that re-runs this very command.
+    configBindValues: config
+      ? {
+          httpPort: config.http?.port,
+          httpSecurePort: config.http?.securePort,
+          opsSecurePort: config.operationsApi?.network?.securePort,
+        }
+      : undefined,
   });
   return { plan, plistPath, isLegacy, config };
 }
@@ -6039,19 +6054,16 @@ async function startFlairProcess(port: number, dataDir: string): Promise<void> {
   // value is what the next boot reads. It also made doctor's
   // `flair init && flair restart` remedy a no-op: the restart undid whatever
   // init had just written.
-  const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-    ...buildDirectSpawnEnv({
-      dataDir,
-      modelsDir: process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models"),
-      httpPort: port,
-      httpBindHost: resolveHttpBindHost({}),
-      opsPort: resolveOpsPort({ port }),
-      opsBindHost: resolveOpsBindHost({}),
-      adminUser: DEFAULT_ADMIN_USER,
-      adminPass,
-    }),
-  };
+  const env: Record<string, string> = closedDirectSpawnEnv(process.env, buildDirectSpawnEnv({
+    dataDir,
+    modelsDir: process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models"),
+    httpPort: port,
+    httpBindHost: resolveHttpBindHost({}),
+    opsPort: resolveOpsPort({ port }),
+    opsBindHost: resolveOpsBindHost({}),
+    adminUser: DEFAULT_ADMIN_USER,
+    adminPass,
+  }));
 
   const proc = spawn(process.execPath, [bin, "run", "."], {
     cwd: flairPackageDir(), env, detached: true, stdio: "ignore",

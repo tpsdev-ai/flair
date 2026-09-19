@@ -48,6 +48,8 @@
  * requirement.
  */
 
+import { harperPortValue } from "./harper-port-value.js";
+
 /** The only non-wildcard host Flair will bind: it is IPv4 loopback by definition. */
 export const DEFAULT_HTTP_BIND_HOST = "127.0.0.1";
 
@@ -57,6 +59,7 @@ export const DEFAULT_HTTP_BIND_HOST = "127.0.0.1";
  * wildcard is the only widening the constructor will produce.
  */
 const WILDCARD_HOSTS = new Set(["0.0.0.0", "::", "0:0:0:0:0:0:0:0"]);
+
 
 /** A resolved Harper HTTP bind: the qualified string plus its two halves. */
 export interface HarperHttpBind {
@@ -137,4 +140,88 @@ export function httpBind(host: string | null | undefined, port: number | string)
  */
 export function httpCorsAccessList(port: number | string): string[] {
   return [`http://127.0.0.1:${port}`, `http://localhost:${port}`];
+}
+
+// ─── repair: preserving an instance's recorded coordinates ─────────────────
+//
+// `doctor --fix` is the ONE bind emitter that does not go through `httpBind()`:
+// it promises not to move the instance's coordinates, so it PRESERVES what the
+// instance recorded (a bare legacy port stays bare; an already-qualified
+// `host:port` keeps its host). The helpers below are shared between the CLI's
+// plist writer and the pure repair PLANNER, so the planner can refuse an
+// unsupported configuration BEFORE the executor stops anything.
+
+/**
+ * Preserve an instance's recorded HTTP port value VERBATIM for a repair.
+ *
+ * Throws for a DISABLED value (absent, null or empty) and for an UNSUPPORTED
+ * value (a port that cannot be parsed). Callers refuse rather than substituting
+ * a default: a default here is a coordinate change that can enable a listener
+ * the instance never had.
+ */
+export function preserveHttpPortValue(raw: unknown): string {
+  if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) {
+    throw new Error(
+      "refusing to repair the launchd plist: the instance's harper-config.yaml records no http.port, " +
+        "so the HTTP listener is disabled. Repair preserves the instance's coordinates and will not " +
+        "substitute a default port, which would enable a listener the instance did not have.",
+    );
+  }
+  if (typeof raw === "number") {
+    if (Number.isInteger(raw) && raw >= 1 && raw <= 65535) return String(raw);
+    throw new Error(`refusing to repair the launchd plist: http.port is ${raw}, which is not a usable port`);
+  }
+  const str = String(raw).trim();
+  if (harperPortValue(str) === null) {
+    throw new Error(
+      `refusing to repair the launchd plist: http.port is "${str}", which is not a parseable bind value`,
+    );
+  }
+  return str;
+}
+
+/**
+ * A secure-listener port, reduced to its number. Returns undefined for a
+ * disabled value (so the key is omitted and a disabled listener STAYS
+ * disabled), and throws for an unparseable one (so a caller refuses rather than
+ * writing a value it cannot read).
+ */
+export function preserveSecurePort(raw: unknown): number | undefined {
+  if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) return undefined;
+  const port = harperPortValue(raw);
+  if (port === null) {
+    throw new Error(`refusing to repair the launchd plist: secure port "${String(raw)}" is not a usable port`);
+  }
+  return port;
+}
+
+/**
+ * The host half of a preserved `host:port` bind value, or null when the value
+ * is bare (no host) or unparseable. Mirrors `ops-api-bind.ts`'s `parseBindHost`
+ * so both readers agree on what "the host half" is.
+ */
+export function bindHostOf(value: string): string | null {
+  const s = value.trim();
+  if (s.startsWith("[")) {
+    const close = s.indexOf("]");
+    return close === -1 ? null : s.slice(1, close);
+  }
+  const lastColon = s.lastIndexOf(":");
+  if (lastColon <= 0) return null;
+  const tail = s.slice(lastColon + 1);
+  return /^\d+$/.test(tail) ? s.slice(0, lastColon) : null;
+}
+
+/**
+ * The host to qualify an ENABLED secure listener with, given the (preserved)
+ * plaintext bind host. A bare secure value binds ALL interfaces exactly like a
+ * bare plaintext port does — Harper feeds `http.securePort` through the same
+ * `listenOnPorts` path — so leaving it bare would narrow the plaintext listener
+ * and leave TLS wide, the asymmetry this work exists to close. A plaintext host
+ * that cannot guarantee IPv4 loopback (e.g. a legacy `::1`) is not mirrored;
+ * the secure listener falls back to the loopback default instead of producing a
+ * bind Flair's self-calls cannot reach.
+ */
+export function secureBindHostFor(plaintextHost: string | null): string {
+  return plaintextHost !== null && guaranteesIpv4Loopback(plaintextHost) ? plaintextHost : DEFAULT_HTTP_BIND_HOST;
 }

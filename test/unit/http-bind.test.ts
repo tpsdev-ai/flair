@@ -26,10 +26,12 @@ import { describe, test, expect } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import {
   buildDirectSpawnEnv,
   buildLaunchdPlist,
   buildRepairPlist,
+  closedDirectSpawnEnv,
   resolveHttpBindFor,
   resolveHttpBindHostFrom,
   readHttpBindFromConfig,
@@ -248,9 +250,18 @@ describe("§2 emitter — buildRepairPlist preserves coordinates (never qualifie
     expect(() => buildRepairPlist(dataDir, { http: { port: "not-a-port" } })).toThrow(/refus/i);
   });
 
-  test("preserves an ENABLED secure listener's port (and TLS is never qualified)", () => {
+  test("QUALIFIES an ENABLED secure listener's host (a bare secure port binds all interfaces)", () => {
+    // A bare securePort binds ALL interfaces exactly like a bare plaintext port
+    // (Harper feeds http.securePort through the same listenOnPorts path), so it
+    // is qualified with the same policy as the plaintext bind — otherwise TLS
+    // stays wide while plaintext is narrowed.
     const plist = buildRepairPlist(dataDir, { http: { port: "127.0.0.1:19926", securePort: 9443 } });
-    expect(setConfigOf(plist).http.securePort).toBe(9443);
+    expect(setConfigOf(plist).http.securePort).toBe("127.0.0.1:9443");
+  });
+
+  test("an enabled secure listener mirrors a wildcard plaintext host", () => {
+    const plist = buildRepairPlist(dataDir, { http: { port: "0.0.0.0:19926", securePort: 9443 } });
+    expect(setConfigOf(plist).http.securePort).toBe("0.0.0.0:9443");
   });
 
   test("a DISABLED secure listener stays disabled — no static default is substituted in", () => {
@@ -258,13 +269,13 @@ describe("§2 emitter — buildRepairPlist preserves coordinates (never qualifie
     expect("securePort" in setConfigOf(plist).http).toBe(false);
   });
 
-  test("preserves the ops-API secure listener port too", () => {
+  test("QUALIFIES the ops-API secure listener's host too", () => {
     const plist = buildRepairPlist(dataDir, {
       http: { port: "127.0.0.1:19926" },
       operationsApi: { network: { port: "127.0.0.1:19925", securePort: 9444 } },
     });
     const setConfig = setConfigOf(plist);
-    expect(setConfig.operationsApi.network.securePort).toBe(9444);
+    expect(setConfig.operationsApi.network.securePort).toBe("127.0.0.1:9444");
     // The qualified ops host is still preserved (flair#863 behaviour intact).
     expect(setConfig.operationsApi.network.port).toBe("127.0.0.1:19925");
   });
@@ -287,6 +298,86 @@ describe("§3 httpBind survives a wholesale config rewrite", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test("the hatch is NOT a one-way door: an explicit loopback overwrites a persisted wildcard", () => {
+    // `undefined` used to mean BOTH "no preference" and "read from disk", so a
+    // later `--http-bind 127.0.0.1` narrowed only that run and the next restart
+    // re-widened. init now always persists the resolved host, so narrowing sticks.
+    const dir = mkdtempSync(join(tmpdir(), "flair-httpbind-oneway-"));
+    try {
+      const cfg = join(dir, "config.yaml");
+      writeConfig(19926, 19925, "127.0.0.1", cfg, "0.0.0.0"); // widen
+      expect(readHttpBindFromConfig(cfg)).toBe("0.0.0.0");
+      writeConfig(19926, 19925, "127.0.0.1", cfg, "127.0.0.1"); // explicit narrow
+      expect(readHttpBindFromConfig(cfg)).toBe("127.0.0.1");
+      // What the next restart resolves from the persisted value:
+      expect(resolveHttpBindHostFrom(undefined, undefined, readHttpBindFromConfig(cfg))).toBe("127.0.0.1");
+      expect(resolveHttpBindFor(19926, { httpBind: readHttpBindFromConfig(cfg)! }).bindValue).toBe("127.0.0.1:19926");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("end to end: widen via the CLI, then narrow via the CLI, and the persisted value stays narrow", () => {
+    const home = mkdtempSync(join(tmpdir(), "flair-httpbind-e2e-"));
+    const cli = join(import.meta.dir, "..", "..", "src", "cli.ts");
+    const env: Record<string, string> = {
+      ...(process.env as Record<string, string>),
+      HOME: home,
+      FLAIR_ADMIN_PASS: "x",
+      FLAIR_MODELS_DIR: join(home, "models"),
+    };
+    delete env.HARPER_SET_CONFIG;
+    const runInit = (bind: string) =>
+      spawnSync(process.execPath, [cli, "init", "--skip-start", "--no-mcp", "--port", "20991", "--http-bind", bind], {
+        cwd: join(import.meta.dir, "..", ".."),
+        env,
+        encoding: "utf8",
+      });
+    try {
+      const wide = runInit("0.0.0.0");
+      expect(wide.status, wide.stderr).toBe(0);
+      const cfg = join(home, ".flair", "config.yaml");
+      expect(readHttpBindFromConfig(cfg)).toBe("0.0.0.0");
+      const narrow = runInit("127.0.0.1");
+      expect(narrow.status, narrow.stderr).toBe(0);
+      expect(readHttpBindFromConfig(cfg), "an explicit loopback must survive to the next restart").toBe("127.0.0.1");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
+
+// ─── §4 — the direct-spawn env must be CLOSED ─────────────
+describe("§4 closedDirectSpawnEnv — an inherited HARPER_SET_CONFIG cannot outrank HTTP_PORT", () => {
+  test("strips HARPER_SET_CONFIG and its siblings, then applies the overrides", () => {
+    const inherited: NodeJS.ProcessEnv = {
+      PATH: "/bin",
+      HARPER_SET_CONFIG: '{"http":{"port":9926}}',
+      HARPER_CONFIG: "stale",
+      HARPER_DEFAULT_CONFIG: "stale",
+    };
+    const env = closedDirectSpawnEnv(
+      inherited,
+      buildDirectSpawnEnv({ dataDir: "/d", modelsDir: "/m", httpPort: 19926, opsPort: 19925, opsBindHost: "127.0.0.1", adminUser: "a" }),
+    );
+    expect(env.HARPER_SET_CONFIG).toBeUndefined();
+    expect(env.HARPER_CONFIG).toBeUndefined();
+    expect(env.HARPER_DEFAULT_CONFIG).toBeUndefined();
+    expect(env.HTTP_PORT).toBe("127.0.0.1:19926");
+    expect(env.OPERATIONSAPI_NETWORK_PORT).toBe("127.0.0.1:19925");
+    expect(env.PATH).toBe("/bin");
+  });
+
+  test("both direct-spawn sites build through it (wiring)", () => {
+    const cliSrc = readFileSync(join(import.meta.dir, "..", "..", "src", "cli.ts"), "utf8");
+    const svcSrc = readFileSync(join(import.meta.dir, "..", "..", "src", "commands", "service.ts"), "utf8");
+    expect([...cliSrc.matchAll(/closedDirectSpawnEnv\(process\.env, buildDirectSpawnEnv\(/g)].length).toBe(1);
+    expect([...svcSrc.matchAll(/closedDirectSpawnEnv\(process\.env, buildDirectSpawnEnv\(/g)].length).toBe(1);
+    // and neither site spreads process.env straight into the spawn env any more
+    expect(cliSrc).not.toMatch(/\.\.\.\(process\.env as Record<string, string>\),\n\s*\.\.\.buildDirectSpawnEnv/);
+    expect(svcSrc).not.toMatch(/\.\.\.\(process\.env as Record<string, string>\),\n\s*\.\.\.buildDirectSpawnEnv/);
   });
 });
 

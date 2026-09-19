@@ -26,7 +26,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import nacl from "tweetnacl";
-import { DEFAULT_HTTP_BIND_HOST, httpCorsAccessList } from "../lib/http-bind.js";
+import { httpCorsAccessList } from "../lib/http-bind.js";
 
 export type InitCli = {
   api: (...args: any[]) => any;
@@ -928,17 +928,14 @@ program
     // <dataDir>/harper-config.yaml, which is what resolveHttpPort reads (see
     // persistDefaultInstallCoordinates).
     //
-    // `httpBind` is persisted only when it is NOT the loopback default, so a
-    // deliberate widening (`--http-bind 0.0.0.0`) survives the next
-    // `flair restart` / `upgrade` (neither takes the flag), the same durability
-    // the ops bind gets above.
-    persistDefaultInstallCoordinates(
-      dataDir,
-      httpPort,
-      opsPort,
-      opsBindHost,
-      httpBind.host === DEFAULT_HTTP_BIND_HOST ? undefined : httpBind.host,
-    );
+    // `httpBind` is persisted with THIS run's resolved host, always — not only
+    // when it differs from the loopback default. `undefined` would mean both
+    // "no preference" and "read from disk", so persisting it only for a
+    // non-default host made the hatch a ONE-WAY DOOR: a later `--http-bind
+    // 127.0.0.1` narrowed only that run's spawn, and the next restart re-widened
+    // from the still-persisted wildcard. Writing the resolved host on every init
+    // means an explicit loopback also persists, so a widening can be reversed.
+    persistDefaultInstallCoordinates(dataDir, httpPort, opsPort, opsBindHost, httpBind.host);
 
     if (agentId) {
       // Generate or reuse keypair

@@ -46,6 +46,7 @@
 import { resolve } from "node:path";
 import type { LaunchdManagement } from "./launchd-management.js";
 import type { DaemonState, HealthResult } from "./daemon-liveness.js";
+import { preserveHttpPortValue, preserveSecurePort } from "./http-bind.js";
 
 // ─── plist disposition (the ownership guard's first question) ─────────────
 
@@ -99,7 +100,7 @@ export type RepairPlan =
   | { kind: "no-op"; reason: "already-managed" | "not-applicable"; detail: string }
   | {
       kind: "refuse";
-      reason: "foreign" | "unattributable" | "config-unreadable" | "missing-credential";
+      reason: "foreign" | "unattributable" | "config-unreadable" | "unsupported-config" | "missing-credential";
       detail: string;
       plistPath?: string;
     }
@@ -150,6 +151,45 @@ export interface PlanLaunchdRepairInput {
   adminPassPath: string;
   /** Resolved pass-file availability (pure). */
   adminPass: AdminPassAvailability;
+  /**
+   * The instance's OWN recorded bind values, when the caller read a config.
+   * Supplying them lets the PLANNER refuse a configuration the executor cannot
+   * serialise (a disabled or unparseable http.port) BEFORE it stops anything —
+   * see `validateRepairBindValues`. Omitted by callers with no config (the
+   * config-authority gate refuses those anyway).
+   */
+  configBindValues?: RepairConfigBindValues;
+}
+
+/** The bind values a repair would serialise, read from harper-config.yaml. */
+export interface RepairConfigBindValues {
+  /** `http.port` — may be a bare port, a `host:port`, or null/absent (disabled). */
+  httpPort: unknown;
+  /** `http.securePort`, when the instance records one. */
+  httpSecurePort?: unknown;
+  /** `operationsApi.network.securePort`, when the instance records one. */
+  opsSecurePort?: unknown;
+}
+
+/**
+ * Refuse an instance whose recorded bind values a repair cannot serialise,
+ * WITHOUT bouncing or writing anything. Returns the refusal detail, or null when
+ * the values are repairable.
+ *
+ * This must run during PLANNING. `buildRepairPlist` (the executor's writer) is
+ * the first caller of the preservation helpers and runs AFTER the adopt arm's
+ * clean-stop, so a throw there would leave the live instance DOWN with the
+ * circular remedy "flair doctor --fix" — the command that just bounced it.
+ */
+export function validateRepairBindValues(values: RepairConfigBindValues): string | null {
+  try {
+    preserveHttpPortValue(values.httpPort);
+    preserveSecurePort(values.httpSecurePort);
+    preserveSecurePort(values.opsSecurePort);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
 }
 
 /**
@@ -202,6 +242,16 @@ export function planLaunchdRepair(input: PlanLaunchdRepairInput): RepairPlan {
         "proven to belong to this instance.",
       plistPath,
     };
+  }
+
+  // Bind values the executor could not serialise (ops-nv9d slice 2). Decided
+  // HERE, before any arm that stops the live instance, so an unsupported
+  // configuration refuses instead of bouncing first and refusing after.
+  if (input.configBindValues) {
+    const unsupported = validateRepairBindValues(input.configBindValues);
+    if (unsupported) {
+      return { kind: "refuse", reason: "unsupported-config", detail: unsupported, plistPath };
+    }
   }
 
   // Credential before plist (flair#1685). The plist this plan authorizes is
@@ -351,7 +401,7 @@ export function verifyAdoptServing(input: AdoptServingEvidence): AdoptServingPro
 
 export type LaunchdRepairResult =
   | { kind: "no-op"; reason: "already-managed" | "not-applicable"; detail: string }
-  | { kind: "refused"; reason: "foreign" | "unattributable" | "config-unreadable" | "engine-backwards" | "missing-credential"; detail: string; plistPath?: string }
+  | { kind: "refused"; reason: "foreign" | "unattributable" | "config-unreadable" | "unsupported-config" | "engine-backwards" | "missing-credential"; detail: string; plistPath?: string }
   | { kind: "repaired"; detail: string }
   | { kind: "failed"; detail: string; remedy?: string[] };
 

@@ -16,6 +16,7 @@ import { join } from "node:path";
 
 export type ServiceCli = {
   buildDirectSpawnEnv: (...args: any[]) => any;
+  closedDirectSpawnEnv: (...args: any[]) => any;
   defaultDataDir: (...args: any[]) => any;
   ensureLaunchdServiceLoaded: (...args: any[]) => any;
   flairPackageDir: (...args: any[]) => any;
@@ -50,6 +51,10 @@ export function bindCli(fns: ServiceCli): void {
 
 function buildDirectSpawnEnv(...args: any[]): any {
   return cli.buildDirectSpawnEnv(...args);
+}
+
+function closedDirectSpawnEnv(...args: any[]): any {
+  return cli.closedDirectSpawnEnv(...args);
 }
 
 function defaultDataDir(...args: any[]): any {
@@ -321,19 +326,16 @@ program
     // every spawn — see buildDirectSpawnEnv. The escape hatch on this path is
     // FLAIR_OPS_BIND or the `opsBind` that `flair init --ops-bind` persisted to
     // ~/.flair/config.yaml; there is no --ops-bind flag on `start`.
-    const env: Record<string, string> = {
-      ...(process.env as Record<string, string>),
-      ...buildDirectSpawnEnv({
-        dataDir,
-        modelsDir: process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models"),
-        httpPort: port,
-        httpBindHost: resolveHttpBindHost({}),
-        opsPort: resolveOpsPort(opts),
-        opsBindHost: resolveOpsBindHost({}),
-        adminUser: DEFAULT_ADMIN_USER,
-        adminPass,
-      }),
-    };
+    const env: Record<string, string> = closedDirectSpawnEnv(process.env, buildDirectSpawnEnv({
+      dataDir,
+      modelsDir: process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models"),
+      httpPort: port,
+      httpBindHost: resolveHttpBindHost({}),
+      opsPort: resolveOpsPort(opts),
+      opsBindHost: resolveOpsBindHost({}),
+      adminUser: DEFAULT_ADMIN_USER,
+      adminPass,
+    }));
 
     const proc = spawn(process.execPath, [bin, "run", "."], {
       cwd: flairPackageDir(), env, detached: true, stdio: "ignore",

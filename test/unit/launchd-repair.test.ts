@@ -23,6 +23,8 @@
  */
 
 import { describe, test, expect } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   classifyPlist,
   planLaunchdRepair,
@@ -396,5 +398,72 @@ describe("decideAdoptStop", () => {
     const result = decideAdoptStop({ state: "UNKNOWN", detail: "cannot tell" }, refused);
     expect(result).not.toBe("proceed");
     if (result !== "proceed") expect(result.kind).toBe("failed");
+  });
+});
+
+// ─── bind-value validation happens at PLAN time (ops-nv9d slice 2) ────────
+//
+// The executor clean-stops the live instance on the adopt arm BEFORE its plist
+// writer (the first caller of preserveHttpPortValue) can throw. So an
+// unsupported configuration must be refused while PLANNING: if it is not, an
+// operator ends up DOWN with the circular remedy "flair doctor --fix" — the
+// command that just bounced them.
+describe("planLaunchdRepair — unsupported bind values refuse WITHOUT an adopt plan", () => {
+  const input = (over: Partial<Parameters<typeof planLaunchdRepair>[0]> = {}) => ({
+    observation: observation("detached"),
+    disposition: "absent" as PlistDisposition,
+    plistPath: PLIST_PATH,
+    directProcessRunning: false,
+    configReadable: true,
+    adminPassPath: ADMIN_PASS_PATH,
+    adminPass: { kind: "existing-valid" } as AdminPassAvailability,
+    ...over,
+  });
+
+  test("THE deliverable: a disabled http.port refuses, and the instance is never bounced", () => {
+    // directProcessRunning: true is exactly the adopt precondition — the plan
+    // that WOULD stop the live process. It must refuse instead.
+    const plan = planLaunchdRepair(input({
+      directProcessRunning: true,
+      configBindValues: { httpPort: null },
+    }));
+    expect(plan.kind).toBe("refuse");
+    if (plan.kind === "refuse") {
+      expect(plan.reason).toBe("unsupported-config");
+      expect(plan.detail).toContain("http.port");
+    }
+    // The executor only stops on `adopt`; a refusal never reaches it.
+    expect(plan.kind).not.toBe("adopt");
+  });
+
+  test("an unparseable http.port refuses too", () => {
+    const plan = planLaunchdRepair(input({ directProcessRunning: true, configBindValues: { httpPort: "nope" } }));
+    expect(plan.kind).toBe("refuse");
+    if (plan.kind === "refuse") expect(plan.reason).toBe("unsupported-config");
+  });
+
+  test("a supported configuration still plans the adopt (the validation is not a blanket refusal)", () => {
+    const plan = planLaunchdRepair(input({ directProcessRunning: true, configBindValues: { httpPort: "127.0.0.1:19926" } }));
+    expect(plan.kind).toBe("adopt");
+  });
+
+  test("when no config values are supplied the validation is skipped (older callers unaffected)", () => {
+    const plan = planLaunchdRepair(input({ directProcessRunning: true }));
+    expect(plan.kind).toBe("adopt");
+  });
+
+  test("validateRepairBindValues accepts a healthy config and rejects the unsupported one", async () => {
+    const { validateRepairBindValues } = await import("../../src/lib/launchd-repair.ts");
+    expect(validateRepairBindValues({ httpPort: "127.0.0.1:19926", httpSecurePort: 9443 })).toBe(null);
+    expect(validateRepairBindValues({ httpPort: null })).toContain("http.port");
+    expect(validateRepairBindValues({ httpPort: 19926, httpSecurePort: "bad" })).toContain("secure port");
+  });
+
+  test("the CLI planner actually FEEDS the config bind values to the plan (wiring)", () => {
+    // Without this the pure validation above would pass while the real planner
+    // never ran it — the exact "assumption with no test" shape.
+    const cliSrc = readFileSync(join(import.meta.dir, "..", "..", "src", "cli.ts"), "utf8");
+    expect(cliSrc).toMatch(/configBindValues:\s*config\s*\?/);
+    expect(cliSrc).toMatch(/httpPort:\s*config\.http\?\.port/);
   });
 });
