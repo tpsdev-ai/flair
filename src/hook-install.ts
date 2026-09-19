@@ -64,6 +64,7 @@ import {
   computeContinuityHookRemoval,
   hookCommandIsSilenced,
   hookCommandDiscardsStderr,
+  isFlairHookCommand,
   isHookCommandValueSafe,
   isSessionStartHookInvocation,
   readClientMcpBlock,
@@ -670,6 +671,8 @@ export type HookDeliveryProbe = (command: string) => {
   exitCode: number | null;
   stdout: string;
   stderr?: string;
+  timedOut?: boolean;
+  spawnError?: string | null;
 };
 
 export interface HookStatusOptions {
@@ -685,8 +688,19 @@ export function classifyHookDelivery(outcome: {
   exitCode: number | null;
   stdout: string;
   stderr?: string;
+  timedOut?: boolean;
+  spawnError?: string | null;
 }): HookDeliveryVerdict {
+  if (outcome.timedOut) {
+    return { delivered: false, reason: "not delivered: probe timed out" };
+  }
+  if (outcome.spawnError) {
+    return { delivered: false, reason: `not delivered: probe spawn failed (${outcome.spawnError})` };
+  }
   if (outcome.exitCode !== 0) {
+    if (outcome.exitCode == null) {
+      return { delivered: false, reason: "not delivered: probe did not exit" };
+    }
     return { delivered: false, reason: `not delivered: exited ${outcome.exitCode}` };
   }
   const trimmed = (outcome.stdout ?? "").trim();
@@ -788,8 +802,18 @@ function assessDelivery(
   }
 
   if (deliveryProbe && command) {
+    if (!isFlairHookCommand(command) || !correctShape) {
+      return {
+        delivery: "unverified",
+        deliveryReasons: [
+          ...blockers,
+          "delivery not probed — command is not the Flair installer shape",
+          ...notes,
+        ],
+      };
+    }
     const verdict = classifyHookDelivery(deliveryProbe(command));
-    if (verdict.delivered && blockers.length === 0 && correctShape) {
+    if (verdict.delivered && blockers.length === 0) {
       return { delivery: "verified", deliveryReasons: [verdict.reason, ...notes] };
     }
     return { delivery: "unverified", deliveryReasons: [...blockers, verdict.reason, ...notes] };

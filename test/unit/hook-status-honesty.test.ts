@@ -49,6 +49,8 @@ type HonestyExports = typeof hookInstall & {
     exitCode: number | null;
     stdout: string;
     stderr?: string;
+    timedOut?: boolean;
+    spawnError?: string | null;
   }) => { delivered: boolean; reason: string };
 };
 
@@ -290,5 +292,80 @@ describe("HALF 2 — verified is reachable when delivery is classified", () => {
       deliveryProbe: () => ({ exitCode: 0, stdout: "{}" }),
     });
     expect(status.delivery).toBe("unverified");
+  });
+});
+
+describe("HALF 2 — status does not spawn a stranger hook", () => {
+  function writeStrangerHook(command: string): void {
+    mkdirSync(join(isoHome, ".codex"), { recursive: true });
+    writeFileSync(
+      hookSettingsPath(isoHome, "codex"),
+      JSON.stringify({
+        hooks: { SessionStart: [{ hooks: [{ type: "command", command }] }] },
+      }),
+    );
+  }
+
+  it("does not probe a marker-only decoy", () => {
+    writeStrangerHook(`echo ${SESSION_START_HOOK_MARKER}-decoy`);
+    let probed = false;
+    const status = hookStatus(isoHome, "codex", {
+      deliveryProbe: () => {
+        probed = true;
+        return deliveredProbe();
+      },
+    });
+    expect(probed).toBe(false);
+    expect(status.delivery).toBe("unverified");
+    expect(status.deliveryReasons.join(" ")).toMatch(/not probed|installer shape/i);
+  });
+
+  it("does not probe my-own-flair-session-start-script.sh", () => {
+    writeStrangerHook("my-own-flair-session-start-script.sh");
+    let probed = false;
+    const status = hookStatus(isoHome, "codex", {
+      deliveryProbe: () => {
+        probed = true;
+        return deliveredProbe();
+      },
+    });
+    expect(probed).toBe(false);
+    expect(status.wired).toBe(true);
+    expect(status.delivery).toBe("unverified");
+  });
+});
+
+describe("HALF 2 — probe timeout and spawn errors are not exited null", () => {
+  it("timedOut is reported as a timeout, not exited null", () => {
+    const verdict = honesty.classifyHookDelivery!({
+      exitCode: null,
+      stdout: "",
+      timedOut: true,
+    });
+    expect(verdict.delivered).toBe(false);
+    expect(verdict.reason).toMatch(/timed out/i);
+    expect(verdict.reason).not.toMatch(/exited null/i);
+  });
+
+  it("spawnError is reported as a spawn failure, not exited null", () => {
+    const verdict = honesty.classifyHookDelivery!({
+      exitCode: null,
+      stdout: "",
+      spawnError: "ENOENT",
+    });
+    expect(verdict.delivered).toBe(false);
+    expect(verdict.reason).toMatch(/spawn|ENOENT/i);
+    expect(verdict.reason).not.toMatch(/exited null/i);
+  });
+
+  it("hookStatus surfaces a timed-out probe on an installer-shaped command", () => {
+    writeCodexMcpAgent(AGENT);
+    installHook({ homeDir: isoHome, harness: "codex", agentId: AGENT, flairUrl: URL });
+    const status = hookStatus(isoHome, "codex", {
+      deliveryProbe: () => ({ exitCode: null, stdout: "", timedOut: true }),
+    });
+    expect(status.delivery).toBe("unverified");
+    expect(status.deliveryReasons.join(" ")).toMatch(/timed out/i);
+    expect(status.deliveryReasons.join(" ")).not.toMatch(/exited null/i);
   });
 });
