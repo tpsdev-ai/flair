@@ -43,13 +43,30 @@ export function unitPlan(root: string): UnitStep[] {
     cwd: root,
     args: ["scripts/vendor-tool-descriptors.mjs"],
     files: [],
-  }, {
+  }];
+  // Strict typechecks. bun's transpiler STRIPS types rather than checking them,
+  // so no `bun test` step can see a type error: a tree that does not compile can
+  // report a green lane. (Found 2026-09-19 — an excess property in a bindCli
+  // object literal shipped while this lane read "matches baseline".) These mirror
+  // the "Type Check (strict)" CI job exactly, in the same order, so the lane and
+  // CI cannot disagree about whether the tree compiles. The first four require
+  // the vendored descriptors above; none require the flair-client build.
+  const typecheckConfigs: Array<[string, string]> = [
+    ["resources (strict)", "tsconfig.check.json"],
+    ["src (strict, excl. cli.ts)", "tsconfig.check.src.json"],
+    ["root CLI", "tsconfig.cli.json"],
+    ["test suite (strict)", "tsconfig.test.check.json"],
+  ];
+  for (const [label, config] of typecheckConfigs) {
+    steps.push({ name: `typecheck: ${label}`, cwd: root, args: ["x", "tsc", "--noEmit", "-p", config], files: [] });
+  }
+  steps.push({
     name: "root unit tests",
     cwd: root,
     // Preserve CI's existing grouping; mock.module isolation is per process.
     args: ["test", "test/unit/", ...rootFiles.map(file => relative(root, file))],
     files: [...unitFiles, ...rootFiles],
-  }];
+  });
   for (const file of isolatedFiles) {
     steps.push({ name: relative(root, file), cwd: root, args: ["test", file], files: [file] });
   }

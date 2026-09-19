@@ -4189,7 +4189,6 @@ bindInitCli({
   writeAdminPassFile,
   resolveOpsBindHost,
   resolveHttpBindFor,
-  resolveHttpBindHost,
   resolveOpsPort,
   resolveOpsTarget,
   resolveOpsUrlFromTarget,
