@@ -677,9 +677,9 @@ export interface HookStatusOptions {
 }
 
 /**
- * Effect check: did SessionStart additionalContext actually arrive?
- * Exit 0, inert `{}`, and empty stdout are not delivery. Do not treat
- * FLAIR_HOOK_PROBE's `{}` as success.
+ * Effect check: did the hook command produce SessionStart additionalContext?
+ * Exit 0, inert `{}`, and empty stdout are not that. Do not treat
+ * FLAIR_HOOK_PROBE's `{}` as success. This is not harness delivery.
  */
 export function classifyHookDelivery(outcome: {
   exitCode: number | null;
@@ -702,7 +702,7 @@ export function classifyHookDelivery(outcome: {
     };
     const context = parsed?.hookSpecificOutput?.additionalContext;
     if (typeof context === "string" && context.trim()) {
-      return { delivered: true, reason: "SessionStart additionalContext delivered" };
+      return { delivered: true, reason: "the hook command produced additionalContext" };
     }
   } catch {
     // fall through — JSON-looking but not the documented contract
@@ -713,7 +713,7 @@ export function classifyHookDelivery(outcome: {
 /** Operator headline. Never an unqualified "wired" when delivery is unverified. */
 export function hookStatusHeadline(status: HookStatusResult): string {
   if (!status.wired || status.delivery === "absent") return "not configured";
-  if (status.delivery === "verified") return "configured and verified";
+  if (status.delivery === "verified") return "configured; verified the hook command produced additionalContext";
   return "configured; delivery NOT verified";
 }
 

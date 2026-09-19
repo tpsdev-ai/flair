@@ -7,6 +7,9 @@
   SessionStart payload stays the documented
   `hookSpecificOutput.additionalContext` contract. (Refs #1734)
 
-  > **Heads-up:** a green hook status means delivery was verified, not
-  > that a line exists in `hooks.json`. After install, re-approve the
-  > hook in Codex (`/hooks`) before the next session.
+  > **Heads-up:** a green hook status verified that the hook command
+  > produces SessionStart additionalContext when run — final delivery
+  > still depends on harness trust (re-approve in `/hooks`) and the
+  > harness's own injection step. It does not mean a line exists in
+  > `hooks.json`. After install, re-approve the hook in Codex (`/hooks`)
+  > before the next session.

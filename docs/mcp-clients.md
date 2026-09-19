@@ -94,7 +94,7 @@ symmetric with `flair hook uninstall`/`flair hook status`):
 ```bash
 flair hook install               # wires ~/.claude/settings.json for FLAIR_AGENT_ID/FLAIR_URL
 flair hook install --dry-run     # prints the exact JSON delta, writes nothing
-flair hook status                # configured? delivery verified? which agent/instance?
+flair hook status                # configured? hook command produced additionalContext? which agent/instance?
 flair hook uninstall             # removes only Flair's hook entry
 ```
 
@@ -138,10 +138,13 @@ manifests are not.
 `flair hook status` recognises both the current pinned `-p` form and an older
 unpinned `-p` invocation as `correctShape`. The pre-#1166 form (no `-p`, which
 runs the MCP shim) is still flagged. Prefer `flair hook install` over
-hand-editing. A green status means **delivery was verified**, not that a line
-exists in the harness file (flair#1734). Configured-but-unverified (Codex
-untrusted, hooks disabled, agent-id drift, empty bootstrap) is reported as
-such — never an unqualified `✓ wired`.
+hand-editing. A green status means the hook command **produced
+additionalContext when run**, not that a line exists in the harness file
+and not that the harness trusted or injected it (flair#1734). Final
+delivery still depends on harness trust (re-approve in `/hooks`) and the
+harness's own injection step. Configured-but-unverified (Codex untrusted,
+hooks disabled, agent-id drift, empty bootstrap) is reported as such —
+never an unqualified `✓ wired`.
 
 The `sh -c ... || true` wrapper is not decoration. The invocation resolves a
 package binary through whatever Node runtime your shell exposes, and under a
