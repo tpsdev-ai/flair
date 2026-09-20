@@ -125,6 +125,18 @@ so a hand-written entry here is lost.
   direct-spawn path backs `restart` and `upgrade`, so an existing install picks
   the change up on its next restart. (Refs #1502)
 
+  > **Heads-up:** the new default is **strictly narrower** — before this, a bare port
+  > bound every interface, including the credentialed HTTP surface, and that narrowing
+  > is the fix. It also means **an install reachable remotely today will answer only on
+  > `127.0.0.1` after its next `flair restart` or `flair upgrade`**, with no error:
+  > remote agents, LAN clients and federation peers simply stop connecting. Widening is
+  > now deliberate — declare it with `flair init --http-bind <host>`, the
+  > `FLAIR_HTTP_BIND` environment variable, or a **top-level `httpBind:`** key in
+  > `~/.flair/config.yaml`. The `http.host` key shown in older deployment docs is **not**
+  > read by Flair and will not preserve a widened bind, so set one of those three before
+  > upgrading. Only hosts that include IPv4 loopback (loopback itself or a wildcard) are
+  > accepted.
+
 - **Apple Silicon now embeds on Metal by default, and Health says so.**
 
   When a usable Metal backend is present (darwin-arm64 plus a resolvable
@@ -265,7 +277,9 @@ so a hand-written entry here is lost.
 
   > **Heads-up:** this fixes the *lane*, not the product. A real deploy whose systemd unit
   > names a symlinked path (`/opt/flair -> /srv/flair`) is still never discovered, so
-  > `flair upgrade` swaps the tree and silently does not restart the service. Tracked
+  > `flair upgrade` restarts the instance **outside** that unit — the service comes back,
+  > but systemd's supervision is bypassed and it is left unsupervised. Set
+  > `FLAIR_SYSTEMD_UNIT=<unit>` to restart through the unit until this is fixed. Tracked
   > separately.
 
 - **Orphaned ephemeral test Harpers are killed and removed on the next `startHarper`.** Recycled pids fail closed via the same start-time match the production daemon already uses. Darwin `ps lstart` is self-calibrated so a non-UTC host cannot hide an orphan. (Refs #1372)
