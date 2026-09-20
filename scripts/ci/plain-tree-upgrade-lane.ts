@@ -11,7 +11,7 @@
  * Exit 0 prints `PASS: plain-tree upgrade lane`. Any missing assertion exits 1.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,8 +50,18 @@ function fail(message: string, extra = ""): never {
   process.exit(1);
 }
 
-const home = homedir();
-const scratch = mkdtempSync(join(tmpdir(), "flair-plain-tree-lane-"));
+// Canonicalize BOTH paths the fixture writes and later asserts on.
+// The product canonicalizes a tree before matching units against it
+// (readFlairPackageAt -> canonicalPath, src/lib/upgrade-exec-path.ts),
+// so a fixture that writes a unit naming a NON-canonical path can never
+// be matched: the unit says /var/folders/... while the lookup asks for
+// /private/var/folders/... . That is platform-independent -- it bites
+// wherever TMPDIR or HOME sits behind a symlink, which on macOS is the
+// default (/var -> /private/var, /tmp -> /private/tmp) and on Linux is
+// usually not. The lane passed on Linux by accident of /tmp being a real
+// directory there, NOT because the lane is Linux-only. Refs #1753.
+const home = realpathSync(homedir());
+const scratch = realpathSync(mkdtempSync(join(tmpdir(), "flair-plain-tree-lane-")));
 const tree = join(scratch, "spoke");
 const cleanup = (): void => {
   rmSync(scratch, { recursive: true, force: true });

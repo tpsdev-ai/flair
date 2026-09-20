@@ -25,14 +25,7 @@ describe("plain-tree upgrade CI lane (flair#1109 a)", () => {
     expect(existsSync(SCRIPT)).toBe(true);
   });
 
-  // The lane under test is the SYSTEMD spoke ritual — the docblock above calls it
-  // "non-launchd" deliberately; the launchd path has its own lane
-  // (scripts/ci/macos-launchd-upgrade-lane.sh). On darwin the script correctly
-  // reports "no systemd unit found" and exits 1, so this case can never pass there.
-  // It ran anyway, because release.sh runs the whole unit suite on the macOS release
-  // host — flair#1012 inverted. skipIf (not test.if) so the skip is REPORTED, per
-  // scripts/check-darwin-gated-tests.mjs's rule. Refs #1753.
-  test.skipIf(process.platform !== "linux")("spoke-ritual --check takes the tarball-swap lane (packed extract + unit)", () => {
+  test("spoke-ritual --check takes the tarball-swap lane (packed extract + unit)", () => {
     const home = mkdtempSync(join(tmpdir(), "flair-plain-tree-ci-home-"));
     mkdirSync(join(home, ".config"), { recursive: true });
     try {
