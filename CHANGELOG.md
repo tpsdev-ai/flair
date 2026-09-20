@@ -168,7 +168,12 @@ so a hand-written entry here is lost.
   service file that still carries the password inline is reported as a failure.
   (Refs #1685 #1693 #1684 #1573)
 
-- `bootstrap` no longer ships byte-identical soul entries more than once: the same IDENTITY.md body arriving under several keys (`identity`, a second `identity`, `identity-file`) and a duplicated `user-context` now collapse to a single entry, so the always-on portion of the payload stops re-saying the same thing and stops spending the token budget on it (Refs #1431).
+- **`bootstrap` no longer ships byte-identical soul entries more than once.**
+
+  The same IDENTITY.md body arriving under several keys (`identity`, a second
+  `identity`, `identity-file`) and a duplicated `user-context` now collapse to a
+  single entry, so the always-on portion of the payload stops re-saying the same
+  thing and stops spending the token budget on it. (Refs #1431)
 
 - **The macOS launchd CI diagnostics now redact every credential name Flair knows about, not a hand-maintained subset.** The redactor derives its key list from the product's own secret-key inventory, and the lane fails if any credential key survives with a value in the uploaded artifact or the printed log.
 
@@ -259,6 +264,12 @@ so a hand-written entry here is lost.
   re-applies the same posture once the launchd job is serving, matching
   restart. (Refs #1701)
 
+  Regenerated launchd plists also carry `Umask` `077` (written as integer `63`),
+  which is what actually makes the socket owner-only: Harper binds
+  `operations-server` at `0777 & ~umask`, and on Darwin a `chmod` against that
+  AF_UNIX inode does not persist. Visible in a plist diff on any instance whose
+  service file is rewritten.
+
 - **The plain-tree upgrade CI lane now canonicalizes its fixture paths, so it is truthful on hosts where `TMPDIR` is a symlink.**
 
   The lane wrote its systemd unit naming a non-canonical scratch path while the product
@@ -330,8 +341,10 @@ so a hand-written entry here is lost.
   not `status === "connected"`. #1499 already fixed the 0.40.0 spoke
   `connected: 0` (pairing never writes that status). This adds
   `measuredBy: "lastSyncAt"` and stamps the spoke's hub row only after a
-  confirmed FederationSync 200 (batch or liveness ping), using completion
-  time. A failed ping leaves the stamp untouched. (Refs #1146)
+  confirmed FederationSync 200 (batch or liveness ping), with the sync's
+  `queriedAt` — captured before the table reads, so a write that lands mid-sync
+  is re-sent next cycle instead of being permanently unfederated. A failed ping
+  leaves the stamp untouched. (Refs #1146)
 
   > **Heads-up:** `federation.peers` now includes `measuredBy: "lastSyncAt"`.
   > `connected` is last-contact within 24h, not a live TCP session.
