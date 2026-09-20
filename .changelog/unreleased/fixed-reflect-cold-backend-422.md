@@ -1,1 +1,0 @@
-- **`POST /ReflectMemories` execute no longer dies with HTTP 422 when the generative backend is cold.** Distillation (`models.generate`) runs after the request transaction is released; candidate writes use a short follow-up window. A slow model load returns the documented 502/503, not Harper's 30s open-transaction abort. (Refs #1263)

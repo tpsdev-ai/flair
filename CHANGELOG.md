@@ -18,6 +18,310 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.55.0] - 2026-09-20
+
+### Added
+
+- **A macOS continuous-integration lane now exercises the real launchd upgrade path a production install follows.** It starts the previous published release with the same 0600 admin-pass file a real host uses, adopts the instance under launchd the way `flair doctor --fix` does, upgrades to the build under test from an unpublished tarball, and fails unless the launchd-managed process itself owns the serving port. This closes the gap that let a 0.53.0 → 0.54.1 upgrade pass every check and still break a production host (Refs #1671, #1683).
+
+  The lane is advisory — it does not block a merge while the two product defects it tracks are open. A companion fails-first check records that `flair doctor --fix` can adopt into a launchd job whose pass file does not exist (Refs #1685).
+
+- **A CI lane now exercises `flair upgrade --check --tree` on a packed extract plus systemd unit.** It builds the spoke ritual (npm pack shape, operator launcher, user unit — not launchd, not npm-global), runs the real CLI, and fails unless the command takes the in-place tarball-swap lane. The product lane itself shipped in #1564; this is the fixture that was missing on main (Refs #1109).
+
+- **The post-publish canary now installs published flair-mcp and flair-client and asserts a tool-call.**
+
+  After the installed CLI boots, the canary installs `@tpsdev-ai/flair-mcp` and
+  `@tpsdev-ai/flair-client` at the exact dispatched version from the public
+  registry, writes the documented host config, and drives a real
+  `memory_store` → `memory_get` round-trip against that instance. A missing
+  package, an unreachable host, or any other unmeasurable result fails the
+  canary — it is never skipped. `latest` still moves only after a full PASS.
+
+  > **Heads-up:** a canary that cannot resolve or drive the published adapters
+  > is a FAIL. Do not promote from a run that did not complete that step.
+
+- **Flair releases now stop at a staged tag until a clean-machine canary installs and boots the published version.**
+
+  Publishing a release no longer moves `latest`. The release pipeline stages the
+  packages under a `staged` tag, a maintainer approves them with 2FA, and a job
+  with no stored credentials then installs that exact version from the public
+  registry on Linux and macOS and boots it — with install scripts on, exactly as a
+  user's install runs. `latest` moves only after the canary passes, when the
+  emitted checksum-bound promote command is run. If the canary fails, the release
+  prints the command to deprecate the broken version and the next patch is cut; a
+  staged version is never refreshed in place.
+
+  > **Heads-up:** after approving a release, run the post-publish canary and paste
+  > the command it prints. Until you do, `latest` still points at the previous
+  > version.
+
+- **`bun run test:unit` now type-checks the tree before it runs tests.**
+
+  The unit lane runs the same four strict `tsc` configs as CI's "Type Check
+  (strict)" job, in the same order, ahead of the test steps. bun's test
+  transpiler strips types rather than checking them, so without this the lane
+  could report a green result on a tree that does not compile.
+
+### Changed
+
+- **The post-publish canary now passes a healthy instance when `flair doctor`'s only complaint is a known advisory hint.**
+
+  A fresh loopback instance makes `flair doctor` exit non-zero with a
+  conditional hint about the public URL (flair#1701). The canary's boot check
+  now accepts exactly that allow-listed finding — logging
+  `doctor: advisory-only (allow-listed): <n>` — and still fails on every other
+  finding, or when a non-zero exit prints no findings at all. The allow-list is
+  removed when the product fix ships. (Refs #1686 #1698 #1701)
+
+- **`@tpsdev-ai/flair-client` now sends `X-Flair-Client: flair-client/<version>` on every request.**
+
+  Current published clients (0.18–0.54) sent no library version. A current
+  server uses this header to refuse an identified adapter older than 0.18.0 with
+  HTTP 426 `stale_flair_client`. Lockstep with the server write-path gate
+  (flair#1383). A missing header is still served.
+
+  > **Heads-up:** upgrade `@tpsdev-ai/flair-client` (and `@tpsdev-ai/flair-mcp`)
+  > with this release. A server upgrade alone does not identify a silent old
+  > client.
+
+- **Flair's URL builders now share one parser for the `HTTP_PORT` value.** They
+  accept a bare port or a host-qualified `host:port`, so none can render a
+  malformed URL when the environment carries the qualified form.
+
+  The parser also rejects a port outside 1–65535, so an out-of-range `HTTP_PORT`
+  falls back to the default instead of handing a URL builder a value `new URL()`
+  throws on. `embedding-stamp`'s loopback fallback now uses the current default
+  port (19926) rather than the legacy early-install 9926.
+
+- **The HTTP bind hardening also covers TLS listeners, reverses a widening, and closes the spawn environment.**
+
+  An enabled TLS listener's host is now qualified the same way as the plaintext
+  bind when the plaintext bind is qualified, because a bare secure port binds
+  all interfaces too. A listener pair that both recorded bare ports is preserved
+  as-is — repair moves neither. `flair init --http-bind 127.0.0.1` now narrows a
+  previously widened install back, and the direct-spawn paths (`start` fallback,
+  `restart`, `upgrade`) no longer pass an inherited `HARPER_SET_CONFIG` through
+  to Harper.
+
+- **Flair's HTTP listener is now bound by host and port, defaulting to loopback.**
+
+  Every place Flair hands Harper an HTTP listener address — the launchd service
+  file, the direct-spawn environment used by `restart`/`upgrade`, and the
+  `HARPER_SET_CONFIG` payloads written by `init` and by `doctor --fix` — now
+  writes a host-qualified `host:port` value built by one constructor, defaulting
+  to `127.0.0.1`. A new escape hatch (`flair init --http-bind`,
+  `FLAIR_HTTP_BIND`, persisted as `httpBind` in `~/.flair/config.yaml`) records a
+  deliberate widening, and only hosts that include IPv4 loopback (loopback or a
+  wildcard) are accepted — Flair's own credentialed self-calls are hardcoded to
+  `127.0.0.1`, so a bind that excludes it would leave them pointing at a dead
+  port while every bind check still passed.
+
+  `flair doctor --fix` preserves an instance's existing listener coordinates —
+  a bare or qualified HTTP bind, plus its enabled/disabled TLS listeners —
+  instead of rewriting them, and refuses rather than substituting a default for
+  a value it cannot read.
+
+  This changes behaviour for EXISTING installs, not only fresh ones: the
+  direct-spawn path backs `restart` and `upgrade`, so an existing install picks
+  the change up on its next restart. (Refs #1502)
+
+- **Apple Silicon now embeds on Metal by default, and Health says so.**
+
+  When a usable Metal backend is present (darwin-arm64 plus a resolvable
+  `@node-llama-cpp/mac-arm64-metal` prebuilt), flair derives `gpuLayers=99`
+  and states it on the boot log and `/Health` (`embedding.backend` /
+  `gpuLayers` / `source`). Everywhere else the default stays CPU (`0`).
+  `FLAIR_EMBED_GPU_LAYERS` still overrides. If offload is requested and
+  Metal does not engage, `flair doctor`, Health, and the boot log state
+  the CPU fallback — never a silent CPU run under a GPU claim. (Refs #1437)
+
+  > **Heads-up:** `FLAIR_EMBED_GPU_LAYERS=0` pins CPU on Apple Silicon.
+  > Unset now means "derive", not "HFE's 0".
+
+### Fixed
+
+- **Flair now keeps the admin password out of the launchd service file; `flair init` and `flair doctor --fix` refuse to write an unstartable one.**
+
+  `flair init` used to rewrite an already-adopted service into the old shape
+  that embedded the admin password in the service file itself — putting the
+  secret in a config file and undoing the safe launcher form. Init now always
+  writes the launcher form (the password stays in `~/.flair/admin-pass`, 0600),
+  and running it against an already-adopted service leaves that file unchanged.
+
+  Both commands use the same rule: reuse an existing valid password file, or
+  check a supplied credential against the running instance and only then write
+  the file, or refuse with the exact command to fix it and write no service
+  file. Adoption also proves the launchd job — not the old process still
+  answering the port — serves the instance before reporting success, and a
+  service file that still carries the password inline is reported as a failure.
+  (Refs #1685 #1693 #1684 #1573)
+
+- `bootstrap` no longer ships byte-identical soul entries more than once: the same IDENTITY.md body arriving under several keys (`identity`, a second `identity`, `identity-file`) and a duplicated `user-context` now collapse to a single entry, so the always-on portion of the payload stops re-saying the same thing and stops spending the token budget on it (Refs #1431).
+
+- **The macOS launchd CI diagnostics now redact every credential name Flair knows about, not a hand-maintained subset.** The redactor derives its key list from the product's own secret-key inventory, and the lane fails if any credential key survives with a value in the uploaded artifact or the printed log.
+
+- **The CLI honours the `port:` in `~/.flair/config.yaml`, and an unreachable instance no longer blames a config that is already correct.** A bare `flair status`, `flair soul set`, or `flair soul list` now reaches the port you configured even when Flair's own last-boot record still names an older one. When nothing answers, the printed remedy is one that can change something — never "set `port:`" in a file that already says it.
+
+  `flair soul get` and `flair soul list` now accept the same `--admin-pass-file`, `--admin-pass`, `--admin-user`, and `--url` options as `flair soul set`, so the auth and targeting surfaces no longer differ between sibling subcommands. A genuine connection failure is reported as a sentence naming the URL, the state, and how to fix it, instead of a bare `TypeError: fetch failed` (Refs #1719).
+
+- **`docs/federation.md` now states that sync is push-only.** A spoke pushes
+  to the hub and receives nothing back; there is no pull path. Bidirectional
+  flow is still a roadmap item (#1452), not present capability. (Refs #934)
+
+- **`flair federation pair` names a local `/FederationInstance` 403 instead of dumping raw AccessViolation.**
+
+  Pair's first step is a signed GET of the local instance identity
+  (`allowAdmin`). A 403 now throws `FederationPairLocalAccessError` naming
+  the LOCAL side, the missing admin role/grant, `FLAIR_ADMIN_AGENTS` /
+  `flair principal add <id> --admin`, and the hub pairing-role restore
+  (`flair init --remote` → `flair_pair_initiator`). Only a true
+  AccessViolation is rewritten; a hub POST is named as a missing pairing
+  role only when the body says so. Refs #820.
+
+  > **Heads-up:** a 403 on pair is usually the local identity read, not the
+  > hub. Check `FLAIR_ADMIN_AGENTS` in the *server* process env, or
+  > `flair principal add <id> --admin`, before chasing hub tokens.
+
+- **`scripts/flair-client.mjs` loads the raw 32-byte key `flair agent add` writes.**
+  The client now accepts a bare Ed25519 seed (or a base64 seed, or base64/DER
+  PKCS8) and probes `~/.flair/keys/<agent>.key` before the legacy
+  `~/.tps/secrets/flair/<agent>-priv.key`, so a freshly registered agent can make
+  an authenticated call with no manual DER prefix and no key surgery. A malformed
+  key now fails with an error naming the encoding problem, not a signature/auth
+  failure. (Refs #1736)
+
+- **`flair hook status` reports verified delivery, not a bare wired check.**
+
+  Status now distinguishes not configured, configured but delivery not
+  verified (Codex untrusted / hooks disabled / agent-id drift / empty
+  bootstrap), and configured+verified. `flair hook install --harness
+  codex` names the Codex `/hooks` re-approval requirement. The Codex
+  SessionStart payload stays the documented
+  `hookSpecificOutput.additionalContext` contract. (Refs #1734)
+
+  > **Heads-up:** a green hook status verified that the hook command
+  > produces SessionStart additionalContext when run — final delivery
+  > still depends on harness trust (re-approve in `/hooks`) and the
+  > harness's own injection step. It does not mean a line exists in
+  > `hooks.json`. After install, re-approve the hook in Codex (`/hooks`)
+  > before the next session.
+
+- **`flair init` no longer writes a fresh admin-pass file that 401s against a persisted Harper user.**
+
+  When `~/.flair/admin-pass` is missing but the data dir already has an
+  admin user, bare `init` refuses and names the two exits: pass the original
+  with `--admin-pass-file <path>`, or rotate on purpose with
+  `flair init --reset-admin-pass` (the operations socket `alter_user`, then write the
+  file). A leftover Harper answering on the port against a fresh data dir
+  is refused with `flair stop`. `flair doctor` reports the missing-file
+  desync the same way.
+
+  > **Heads-up:** `HDB_ADMIN_PASSWORD` still only seeds a brand-new install.
+  > Re-init never rotates a stored hash unless you pass `--reset-admin-pass`.
+  > That flag prints the user, socket, and destination file first, and refuses
+  > if the operations socket is not owner-only (0700 dir / 0600 socket).
+
+- **A current server now refuses an identified flair-client older than 0.18.0 on memory writes, and `flair doctor` names the silent-drop pin.**
+
+  `@tpsdev-ai/flair-client` before 0.18.0 still suppresses writes on the
+  client — `written: false`, a `mergedWith` id, zero rows — including when
+  the match is another agent's `shared` memory. The PUT never arrives, so
+  no server upgrade closed it. Current `flair-client` now sends
+  `X-Flair-Client: flair-client/<version>`; a write that declares `< 0.18.0`
+  is HTTP 426 `stale_flair_client`. `flair doctor` reads the actual
+  `flair-mcp` / `flair-client` pins in wired host configs and cwd
+  `package.json` and fails any `< 0.18.0` with that hazard and
+  `flair upgrade` as the remedy. Missing version is still served —
+  published 0.18–current clients did not send a library version.
+
+  > **Heads-up:** if writes look stored but never land, upgrade the adapter
+  > (`flair upgrade` / pin `@tpsdev-ai/flair-mcp` and `@tpsdev-ai/flair-client`
+  > >= 0.18.0), not the server. Restart the MCP host after the pin moves.
+
+- **A fresh launchd instance now applies owner-only socket permissions on first start, so `flair doctor` is green without a second restart.**
+
+  `flair init` and `flair start` already tightened the data directory to `0700`
+  and the operations socket to `0600` after Harper came up. Adopting that
+  instance into launchd (`flair doctor --fix`) bounced it and left the new
+  socket at Harper's default mode until the next start. The adopt path now
+  re-applies the same posture once the launchd job is serving, matching
+  restart. (Refs #1701)
+
+- **The plain-tree upgrade CI lane now canonicalizes its fixture paths, so it is truthful on hosts where `TMPDIR` is a symlink.**
+
+  The lane wrote its systemd unit naming a non-canonical scratch path while the product
+  canonicalizes a tree before matching units against it (`readFlairPackageAt` →
+  `canonicalPath`). Wherever `TMPDIR` or `HOME` sits behind a symlink the two never matched,
+  the lane reported `no systemd unit found`, and `release.sh` failed on the macOS release
+  host. On Linux runners `/tmp` is a real directory, so fixture path equalled canonical path
+  and the lane was green **by accident of the platform's filesystem layout** — not because
+  the lane is Linux-only. Measured on one macOS host with nothing but `TMPDIR` changed:
+  `/private/tmp` (real) passed, `/tmp` (symlink) failed.
+
+  The fixture now resolves both `home` and its scratch directory with `realpathSync`, so the
+  case runs — and passes — on macOS and Linux alike. That is a stronger guarantee than
+  skipping it on one platform, which was the first attempt and would have removed coverage
+  from the only host where the mismatch reproduces.
+
+  > **Heads-up:** this fixes the *lane*, not the product. A real deploy whose systemd unit
+  > names a symlinked path (`/opt/flair -> /srv/flair`) is still never discovered, so
+  > `flair upgrade` swaps the tree and silently does not restart the service. Tracked
+  > separately.
+
+- **Orphaned ephemeral test Harpers are killed and removed on the next `startHarper`.** Recycled pids fail closed via the same start-time match the production daemon already uses. Darwin `ps lstart` is self-calibrated so a non-UTC host cannot hide an orphan. (Refs #1372)
+
+- **`POST /ReflectMemories` execute no longer dies with HTTP 422 when the generative backend is cold.** Distillation (`models.generate`) runs after the request transaction is released; candidate writes use a short follow-up window. A slow model load returns the documented 502/503, not Harper's 30s open-transaction abort. (Refs #1263)
+
+- **REM nightly no longer reports `completed` when a core stage did not run.**
+  `runNightlyCycle` now marks a cycle `failed` whenever its audit row carries a
+  non-empty `errors[]`, so a run whose distillation never executed (for example
+  against a missing generative backend) stops logging `completed` next to a
+  populated `Errors:` block. The reported status now agrees with the launchd
+  exit code, which was already `1` — a service manager and `flair doctor` see
+  the same signal. Surfacing defect 1 of #924; the missing backend itself is
+  tracked separately (#1503). (Refs #924)
+
+- **Skill registration refuses `/tmp` sources and resolves `SKILL_CONFLICT`.**
+
+  A skill-assignment whose `metadata.source` is a filesystem path under a
+  temp directory (`/tmp`, `/private/tmp`, `/var/tmp`, `os.tmpdir()`, and
+  `file:` URLs into those) fails at registration and names the path. Two
+  assignments of the same skill name at equal priority refuse to load; a
+  unique higher priority is stated precedence. A single durable,
+  non-conflicting skill still loads silently.
+
+  The live #1433 evidence listed `harper-best-practices` and
+  `harperfast-skills` — different names. Main's detector flags same-priority
+  rather than same-name, so that `[SKILL_CONFLICT]` marker was a false
+  positive. Two different names at the same priority now both load with no
+  marker.
+
+  > **Heads-up:** scratch/inspect paths are no longer recorded as durable
+  > skill provenance. Re-register from an npm specifier or a non-temp path.
+
+- **SkillScan no longer treats markdown inline code as shell injection.**
+
+  Registering a SKILL.md that names commands in backticks (the published
+  `@harperfast/skills` `harper-best-practices` skill) scans clean. A
+  genuine command substitution on an executable surface still scores high.
+  Backticks in YAML frontmatter are treated as shell substitution, not docs.
+
+  > **Heads-up:** `tps skill register` still refuses `high`/`critical` with
+  > no bypass. The verdict does not yet gate skill *loading* (that is a
+  > later #1434 step).
+
+- **`flair status --json` names what `federation.peers.connected` measures.**
+
+  The count is last-contact (`lastSyncAt` within 24h), not a live socket and
+  not `status === "connected"`. #1499 already fixed the 0.40.0 spoke
+  `connected: 0` (pairing never writes that status). This adds
+  `measuredBy: "lastSyncAt"` and stamps the spoke's hub row only after a
+  confirmed FederationSync 200 (batch or liveness ping), using completion
+  time. A failed ping leaves the stamp untouched. (Refs #1146)
+
+  > **Heads-up:** `federation.peers` now includes `measuredBy: "lastSyncAt"`.
+  > `connected` is last-contact within 24h, not a live TCP session.
+
 ## [0.54.2] - 2026-09-15
 
 ### Added
