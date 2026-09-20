@@ -51,15 +51,28 @@ function fail(message: string, extra = ""): never {
 }
 
 // Canonicalize BOTH paths the fixture writes and later asserts on.
-// The product canonicalizes a tree before matching units against it
-// (readFlairPackageAt -> canonicalPath, src/lib/upgrade-exec-path.ts),
-// so a fixture that writes a unit naming a NON-canonical path can never
-// be matched: the unit says /var/folders/... while the lookup asks for
-// /private/var/folders/... . That is platform-independent -- it bites
-// wherever TMPDIR or HOME sits behind a symlink, which on macOS is the
-// default (/var -> /private/var, /tmp -> /private/tmp) and on Linux is
-// usually not. The lane passed on Linux by accident of /tmp being a real
-// directory there, NOT because the lane is Linux-only. Refs #1753.
+//
+// The product realpaths a tree before it prints or matches anything
+// (canonicalPath, src/lib/upgrade-exec-path.ts; used at
+// upgrade-plain-tree.ts:157,:261,:355). A fixture holding the LEXICAL path
+// therefore disagrees with every path the product emits. One root cause,
+// two symptoms, in this order:
+//   1. the banner assertion below fails -- the product prints
+//      "Plain-tree install: /private/var/..." while the fixture asserts
+//      "/var/..."  ("missing plain-tree banner for the packed extract");
+//   2. unit discovery misses -- the unit text names the lexical path, the
+//      lookup asks for the canonical one ("no systemd unit found").
+//
+// This is NOT a platform fact. The lane never invokes systemctl: it writes
+// a unit file and asserts on `--check` PLAN output, which is filesystem +
+// stdout and runs anywhere. What varies is whether TMPDIR/HOME sit behind a
+// symlink -- the macOS default (/var -> /private/var, /tmp -> /private/tmp)
+// and not usually Linux, so CI was green by accident of the runner's
+// filesystem layout. A Linux host with a symlinked /tmp fails identically,
+// which is why a platform gate would key on the wrong variable.
+//
+// realpath is a no-op where the path is already canonical. Refs #1753;
+// the product-side half is #1758.
 const home = realpathSync(homedir());
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "flair-plain-tree-lane-")));
 const tree = join(scratch, "spoke");
