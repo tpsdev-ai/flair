@@ -612,13 +612,40 @@ describe("systemd unit discovery", () => {
     )).toBe(true);
   });
 
-  test("directive keys are case-insensitive (systemd)", () => {
+  test("directive keys are case-SENSITIVE (systemd ignores a mis-cased key)", () => {
     const tree = join(tmp, "srv", "flair");
     writeFlairTree(tree, { version: "0.36.0" });
     const canonicalTree = realpathSync(tree);
-    expect(unitTextMentionsTree(`[Service]\nworkingdirectory=${canonicalTree}\n`, canonicalTree)).toBe(true);
-    expect(unitTextMentionsTree(`[Service]\nWORKINGDIRECTORY=${canonicalTree}\n`, canonicalTree)).toBe(true);
-    expect(unitTextMentionsTree(`[Service]\nexecstart=${canonicalTree}/flair start\n`, canonicalTree)).toBe(true);
+    // systemd logs "Unknown key 'workingdirectory' ... ignoring" and the
+    // directive has NO effect, so a mis-cased key must NOT match — otherwise we
+    // would restart a unit whose active configuration does not use the tree.
+    expect(unitTextMentionsTree(`[Service]\nworkingdirectory=${canonicalTree}\n`, canonicalTree)).toBe(false);
+    expect(unitTextMentionsTree(`[Service]\nWORKINGDIRECTORY=${canonicalTree}\n`, canonicalTree)).toBe(false);
+    expect(unitTextMentionsTree(`[Service]\nexecstart=${canonicalTree}/flair start\n`, canonicalTree)).toBe(false);
+    // control: the canonical spelling still matches.
+    expect(unitTextMentionsTree(`[Service]\nWorkingDirectory=${canonicalTree}\n`, canonicalTree)).toBe(true);
+  });
+
+  test("a comment after a backslash-continued line is ignored and the continuation joins what follows (systemd.syntax(7))", () => {
+    const tree = join(tmp, "srv", "flair");
+    writeFlairTree(tree, { version: "0.36.0" });
+    const canonicalTree = realpathSync(tree);
+
+    // A) systemd ignores the comment and the continuation has nothing after it,
+    //    so only /bin/echo is an operand -> nomatch. Flushing the comment into
+    //    the value would read the tree path and match (a false positive).
+    expect(unitTextMentionsTree(
+      ["[Service]", "ExecStart=/bin/echo \\", `# ${canonicalTree}/flair`].join("\n"),
+      canonicalTree,
+    )).toBe(false);
+
+    // B) the man-page shape: the continuation joins the line AFTER the comment
+    //    block, so the tree operand is present -> match. Dropping it is the miss
+    //    that sends `flair upgrade` back outside the unit.
+    expect(unitTextMentionsTree(
+      ["[Service]", "ExecStart=/usr/bin/env \\", "# start flair", `${canonicalTree}/flair start`].join("\n"),
+      canonicalTree,
+    )).toBe(true);
   });
 
   test("a literal trailing backslash in an operand is not the tree (pins the Bun/Node realpath divergence)", () => {

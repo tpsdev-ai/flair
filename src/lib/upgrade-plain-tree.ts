@@ -460,28 +460,32 @@ function endsWithUnescapedBackslash(line: string): boolean {
 /**
  * Fold systemd line continuations into logical lines before parsing: a physical
  * line ending in an unescaped backslash joins the next line (the backslash and
- * the newline become a single space). Comment lines (`#`/`;`) do not continue,
- * so they pass through verbatim. Folding first means a directive whose value
- * lands on the continuation line is still read as one directive — otherwise it
- * looks like an empty (reset) assignment.
+ * the newline become a single space). Folding first means a directive whose
+ * value lands on the continuation line is still read as one directive —
+ * otherwise it looks like an empty (reset) assignment.
  *
- * UNRESOLVED (do NOT change without checking systemd.syntax(7) first): whether
- * a comment block FOLLOWING a backslash-continued line is ignored — so the
- * continuation concatenates with whatever follows the comment (Sherlock's
- * reading of systemd.syntax(7)) — or whether comments do not exist inside a
- * continuation at all, making folding the comment into the value correct
- * (Kern's reading). Two reviewers disagree on the facts; the current code
- * treats a comment as terminating the continuation, and is left as-is pending
- * systemd.syntax(7).
+ * Comment lines (`#`/`;`) are dropped BEFORE the continuation logic, matching
+ * systemd's `config_parse()` (`src/shared/conf-parser.c:358` skips a comment at
+ * the top of the loop and does NOT touch the pending `continuation`;
+ * `:372-401` appends only after that check; `:432` parses a leftover
+ * continuation at EOF). A comment block after a backslash-continued line is
+ * therefore IGNORED, and the continuation joins whatever follows it —
+ * `systemd.syntax(7)`:
+ *   KeyThree=value 3\
+ *   # this line is ignored
+ *   ; this line is ignored too
+ *   value 3 continued   ->   KeyThree=value 3 value 3 continued
  */
 function foldSystemdContinuations(unitText: string): string[] {
   const logical: string[] = [];
   let acc = "";
   let accumulating = false;
   for (const raw of unitText.split(/\r?\n/)) {
-    const isComment = raw.trimStart().startsWith("#") || raw.trimStart().startsWith(";");
+    // Comments first: systemd skips them before continuation handling, so a
+    // comment line must not terminate (or be flushed into) a pending fold.
+    if (raw.trimStart().startsWith("#") || raw.trimStart().startsWith(";")) continue;
     const line = accumulating ? raw.replace(/^[ \t]+/, "") : raw;
-    if (!isComment && endsWithUnescapedBackslash(line)) {
+    if (endsWithUnescapedBackslash(line)) {
       acc += line.replace(/[ \t]+$/, "").slice(0, -1) + " ";
       accumulating = true;
       continue;
@@ -502,9 +506,14 @@ function foldSystemdContinuations(unitText: string): string[] {
  * The values of every active `key` directive inside `[Service]`. systemd's
  * RESET semantics are honoured: a blank value (`WorkingDirectory=` /
  * `ExecStart=`) clears the values collected so far for that key, and later
- * non-blank values accumulate again. Directive keys are case-insensitive
- * (systemd does not require canonical case). Comments, directives in other
- * sections, and continued lines (folded first) are handled.
+ * non-blank values accumulate again. Comments, directives in other sections,
+ * and continued lines (folded first) are handled.
+ *
+ * Directive names are case-SENSITIVE. `config_item_table_lookup` matches with
+ * `streq` (`src/shared/conf-parser.c:67`) and the gperf table carries no
+ * `%ignore-case` (`src/core/load-fragment-gperf.gperf.in`), so a mis-cased key
+ * (e.g. `workingdirectory=`) is logged as "Unknown key … ignoring" and has NO
+ * effect. Matching it here would select a unit systemd does not configure.
  *
  * `opts.single` selects the storage rule for the key. systemd treats
  * `WorkingDirectory` as SINGLE-valued (`config_parse_working_directory` does
@@ -517,7 +526,6 @@ function activeServiceDirectiveValues(
   key: string,
   opts: { single?: boolean } = {},
 ): string[] {
-  const needle = key.toLowerCase();
   const values: string[] = [];
   let section = "";
   for (const rawLine of foldSystemdContinuations(unitText)) {
@@ -530,7 +538,8 @@ function activeServiceDirectiveValues(
     if (section !== "service") continue;
     const eq = line.indexOf("=");
     if (eq < 0) continue;
-    if (line.slice(0, eq).trim().toLowerCase() !== needle) continue;
+    // Exact case — systemd is case-sensitive for directive names (see above).
+    if (line.slice(0, eq).trim() !== key) continue;
     const value = line.slice(eq + 1).trim();
     if (value === "") {
       // Blank assignment RESETS the list for this key — it is NOT a no-op.
