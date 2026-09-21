@@ -192,7 +192,15 @@ jobs:
           set -e
           # Evidence is grep/tail only — never a raw dump (the log can carry
           # provider URLs and paths; the password is never echoed).
-          grep -nE "^===|exit|supervised pid|descriptors present|PASS:|DID NOT RUN|::error" canary-logs/boot.log | tail -n 60 || true
+          # flair#1782: ALSO surface doctor's FINDING lines (✗ / ⚠ / "issues
+          # found") — the reason a `doctor --fix` or `doctor` exited non-zero
+          # lives in the doctor logs, not boot.log, so grep them too. Keep the
+          # existing patterns. The full logs are uploaded as an artifact below.
+          grep -nE "^===|exit|supervised pid|descriptors present|PASS:|DID NOT RUN|::error|✗|⚠|issues? found" \
+            canary-logs/boot.log \
+            canary-logs/instance-boot/doctor-fix.log \
+            canary-logs/instance-boot/doctor.log \
+            | tail -n 60 || true
           if [ "$rc" -eq 2 ]; then
             echo "::error::boot check DID NOT RUN — unmeasurable is FAIL"
             tail -n 40 canary-logs/boot.log
@@ -328,3 +336,16 @@ jobs:
             scripts/ci/canary-verdict.sh fail "$VERSION" "$RUN_URL" --os "$OS_NAME" ${LOCKSTEP_SHAS:-} | tee canary-logs/verdict.txt
           fi
           cat canary-logs/verdict.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload canary logs
+        # flair#1782: the logs (boot, doctor, verdict, skew) are the EVIDENCE for
+        # a non-zero exit — `gh run download` reported nothing before because
+        # canary-logs/ was never uploaded. Upload on EVERY run, both OS legs.
+        # Short retention: this repo is public.
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: canary-logs-${{ matrix.os }}-${{ inputs.version }}
+          path: canary-logs/
+          if-no-files-found: warn
+          retention-days: 7
