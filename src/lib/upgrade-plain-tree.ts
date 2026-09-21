@@ -437,15 +437,60 @@ function splitSystemdWords(value: string): string[] {
 }
 
 /**
- * The values of every active `key` directive inside `[Service]`. A blank value
- * (`WorkingDirectory=` / `ExecStart=`) resets the list — systemd treats it as
- * "unset" — so it is not returned. Comments and directives in other sections
- * are ignored.
+ * True when `line` ends in an unescaped backslash — systemd's continuation
+ * marker. Counts the run of trailing backslashes so an escaped `\\` is not
+ * treated as a continuation.
+ */
+function endsWithUnescapedBackslash(line: string): boolean {
+  const stripped = line.replace(/[ \t]+$/, "");
+  let n = 0;
+  for (let i = stripped.length - 1; i >= 0 && stripped[i] === "\\"; i--) n++;
+  return n % 2 === 1;
+}
+
+/**
+ * Fold systemd line continuations into logical lines before parsing: a physical
+ * line ending in an unescaped backslash joins the next line (the backslash and
+ * the newline become a single space). Comment lines (`#`/`;`) do not continue,
+ * so they pass through verbatim. Folding first means a directive whose value
+ * lands on the continuation line is still read as one directive — otherwise it
+ * looks like an empty (reset) assignment.
+ */
+function foldSystemdContinuations(unitText: string): string[] {
+  const logical: string[] = [];
+  let acc = "";
+  let accumulating = false;
+  for (const raw of unitText.split(/\r?\n/)) {
+    const isComment = raw.trimStart().startsWith("#") || raw.trimStart().startsWith(";");
+    const line = accumulating ? raw.replace(/^[ \t]+/, "") : raw;
+    if (!isComment && endsWithUnescapedBackslash(line)) {
+      acc += line.replace(/[ \t]+$/, "").slice(0, -1) + " ";
+      accumulating = true;
+      continue;
+    }
+    if (accumulating) {
+      logical.push(acc + line);
+      acc = "";
+      accumulating = false;
+    } else {
+      logical.push(line);
+    }
+  }
+  if (accumulating) logical.push(acc);
+  return logical;
+}
+
+/**
+ * The values of every active `key` directive inside `[Service]`. systemd's
+ * RESET semantics are honoured: a blank value (`WorkingDirectory=` /
+ * `ExecStart=`) clears the values collected so far for that key, and later
+ * non-blank values accumulate again. Comments, directives in other sections,
+ * and continued lines (folded first) are handled.
  */
 function activeServiceDirectiveValues(unitText: string, key: string): string[] {
   const values: string[] = [];
   let section = "";
-  for (const rawLine of unitText.split(/\r?\n/)) {
+  for (const rawLine of foldSystemdContinuations(unitText)) {
     const line = rawLine.trim();
     if (line === "" || line.startsWith("#") || line.startsWith(";")) continue;
     if (line.startsWith("[")) {
@@ -457,7 +502,12 @@ function activeServiceDirectiveValues(unitText: string, key: string): string[] {
     if (eq < 0) continue;
     if (line.slice(0, eq).trim() !== key) continue;
     const value = line.slice(eq + 1).trim();
-    if (value === "") continue; // reset, not an operand
+    if (value === "") {
+      // Blank assignment RESETS the list for this key — it is NOT a no-op.
+      // Drop everything collected so far; later non-blank values accumulate.
+      values.length = 0;
+      continue;
+    }
     values.push(value);
   }
   return values;

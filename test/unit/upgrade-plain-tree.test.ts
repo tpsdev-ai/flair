@@ -509,6 +509,69 @@ describe("systemd unit discovery", () => {
     expect(discover(negDir, canonicalReal2)).toEqual([]);
   });
 
+  test("reset semantics: a blank assignment clears collected operands (flair#1758 follow-up)", () => {
+    const tree = join(tmp, "srv", "flair");
+    writeFlairTree(tree, { version: "0.36.0" });
+    const canonicalTree = realpathSync(tree);
+    const other = join(tmp, "elsewhere");
+    mkdirSync(other, { recursive: true });
+
+    // systemd: `Key=` with a blank value RESETS the list for that key.
+    expect(unitTextMentionsTree(
+      ["[Service]", `WorkingDirectory=${canonicalTree}`, "WorkingDirectory="].join("\n"),
+      canonicalTree,
+    )).toBe(false);
+    expect(unitTextMentionsTree(
+      ["[Service]", `ExecStart=${canonicalTree}/flair start`, "ExecStart="].join("\n"),
+      canonicalTree,
+    )).toBe(false);
+
+    // reset with no prior value: no match, no crash.
+    expect(unitTextMentionsTree("[Service]\nWorkingDirectory=\n", canonicalTree)).toBe(false);
+    expect(unitTextMentionsTree("[Service]\nExecStart=\n", canonicalTree)).toBe(false);
+
+    // set, reset, set-again: only the LAST value counts.
+    expect(unitTextMentionsTree(
+      ["[Service]", `WorkingDirectory=${canonicalTree}`, "WorkingDirectory=", `WorkingDirectory=${other}`].join("\n"),
+      canonicalTree,
+    )).toBe(false); // the pre-reset tree value was cleared
+    expect(unitTextMentionsTree(
+      ["[Service]", `WorkingDirectory=${other}`, "WorkingDirectory=", `WorkingDirectory=${canonicalTree}`].join("\n"),
+      canonicalTree,
+    )).toBe(true); // the last value is the tree
+    expect(unitTextMentionsTree(
+      ["[Service]", `ExecStart=${canonicalTree}/flair start`, "ExecStart=", `ExecStart=${other}/flair start`].join("\n"),
+      canonicalTree,
+    )).toBe(false);
+    expect(unitTextMentionsTree(
+      ["[Service]", `ExecStart=${other}/flair start`, "ExecStart=", `ExecStart=${canonicalTree}/flair start`].join("\n"),
+      canonicalTree,
+    )).toBe(true);
+  });
+
+  test("folds systemd line continuations before parsing operands", () => {
+    const tree = join(tmp, "srv", "flair");
+    writeFlairTree(tree, { version: "0.36.0" });
+    const canonicalTree = realpathSync(tree);
+
+    // The value lands on the CONTINUATION line, so without folding the
+    // declaration would be read as an empty (reset) assignment.
+    expect(unitTextMentionsTree(
+      ["[Service]", "WorkingDirectory=\\", canonicalTree].join("\n"),
+      canonicalTree,
+    )).toBe(true);
+    expect(unitTextMentionsTree(
+      ["[Service]", "ExecStart=\\", `${canonicalTree}/flair start`].join("\n"),
+      canonicalTree,
+    )).toBe(true);
+
+    // Also the shape where the executable is complete but the command continues.
+    expect(unitTextMentionsTree(
+      ["[Service]", `ExecStart=${canonicalTree}/flair \\`, "  start --port 9926"].join("\n"),
+      canonicalTree,
+    )).toBe(true);
+  });
+
   test("finds a system unit that names the tree and ignores one that does not", () => {
     const systemDir = join(tmp, "system");
     const userDir = join(tmp, "user");
