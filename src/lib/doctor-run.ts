@@ -40,7 +40,7 @@ import {
   type Harness,
   type HookMutationResult,
 } from "../hook-install.js";
-import { findUnsafeWiredPins, staleHookRemedy, staleMcpClientPins, staleSessionStartHookPins } from "./owned-pins.js";
+import { findUnsafeWiredPins, sessionStartHookPinFindings, staleHookRemedy, staleMcpClientPins } from "./owned-pins.js";
 import { flairCliVersion, isResolvedVersion } from "./mcp-spec.js";
 import { unsafeAdapterPinDetail } from "./stale-client-pin.js";
 import {
@@ -290,17 +290,31 @@ function runSessionStartHook(ctx: DoctorRunContext): DoctorCheckResult {
   }
   const expected = flairCliVersion();
   if (isResolvedVersion(expected)) {
-    const stale = staleSessionStartHookPins(ctx.homeDir, expected)
-      .filter((r) => harnesses.includes(r.target.id as Harness));
-    if (stale.length > 0) {
-      const first = stale[0]!;
-      const detail = stale.length === 1
-        ? `SessionStart hook (${first.target.id}): pinned to flair-mcp@${first.pin} (installed CLI is ${expected})`
-        : `SessionStart hook: stale pins ${stale.map((s) => `${s.target.id}@${s.pin}`).join(", ")} (installed CLI is ${expected})`;
-      return result(id, label, "fail", {
-        detail,
-        remedy: staleHookRemedy(stale),
-      });
+    const findings = sessionStartHookPinFindings(ctx.homeDir, expected)
+      .filter((f) => harnesses.includes(f.reading.target.id as Harness));
+    if (findings.length > 0) {
+      // flair#1778 follow-up: PIN DIRECTION matters. A pin AHEAD of the running
+      // CLI is not a stale pin to fix — re-pinning would LOWER it, and the
+      // refresh holds it. It is a PASS, not a failure, so doctor (and
+      // `doctor --fix`) does not count it as an issue and exits on the state it
+      // deliberately preserves. Only a pin BEHIND the running CLI is stale.
+      const behind = findings.filter((f) => f.direction !== "ahead");
+      const aheadFindings = findings.filter((f) => f.direction === "ahead");
+      if (behind.length > 0) {
+        const readings = behind.map((f) => f.reading);
+        const first = readings[0]!;
+        const detail = behind.length === 1
+          ? `SessionStart hook (${first.target.id}): pinned to flair-mcp@${first.pin} (installed CLI is ${expected})`
+          : `SessionStart hook: stale pins ${readings.map((r) => `${r.target.id}@${r.pin}`).join(", ")} (installed CLI is ${expected})`;
+        return result(id, label, "fail", {
+          detail,
+          remedy: staleHookRemedy(readings),
+        });
+      }
+      const aheadDetail = aheadFindings.length === 1
+        ? `SessionStart hook (${aheadFindings[0]!.reading.target.id}): pinned to flair-mcp@${aheadFindings[0]!.reading.pin}, ahead of the installed CLI ${expected} — held`
+        : `SessionStart hook: pins ahead of the installed CLI ${expected} — held (${aheadFindings.map((f) => `${f.reading.target.id}@${f.reading.pin}`).join(", ")})`;
+      return result(id, label, "pass", { detail: aheadDetail });
     }
   }
   return result(id, label, "pass", {

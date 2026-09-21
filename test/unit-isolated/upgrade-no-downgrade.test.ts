@@ -274,7 +274,7 @@ describe("flair#1778 — an install AHEAD of registry latest is never downgraded
     // the printed line names both pins.
     expect(readFileSync(CLAUDE_JSON, "utf-8")).toBe(claudeBefore);
     expect(stdout).toContain("keeping pinned 0.55.6");
-    expect(stdout).toContain("the refresh never lowers a pin");
+    expect(stdout).toContain("a pin is never lowered");
 
     // Post-install verification expects the RUNNING flair version (0.55.0),
     // never registry latest (0.54.2) — the primeVersionCheckCache effective
@@ -286,5 +286,52 @@ describe("flair#1778 — an install AHEAD of registry latest is never downgraded
     expect(stdout).not.toContain("Rolling back");
     expect(stdout).not.toContain("upgrade failed");
     expect(status).toBe(0);
+  });
+
+  test("Q2: an openclaw plugin with an unparseable version renders ❔ unknown and the neutral summary", async () => {
+    // probeOpenclawPluginVersion returns the extension package.json's version
+    // VERBATIM (no regex), so `unknown` is reachable for the openclaw-plugin
+    // kind (unlike the flair/flair-mcp bin probes, which only return
+    // semver-shaped strings).
+    setInstalled("0.55.0");
+    mkdirSync(join(HOME, ".openclaw", "extensions", "openclaw-flair"), { recursive: true });
+    writeFileSync(
+      join(HOME, ".openclaw", "extensions", "openclaw-flair", "package.json"),
+      JSON.stringify({ name: "@tpsdev-ai/openclaw-flair", version: "garbage" }),
+    );
+    writeFileSync(NPM_LOG, "");
+    const reg = await startRegistry({ "@tpsdev-ai/flair": "0.54.2" });
+    const { stdout } = await runUpgrade(reg, []);
+    expect(stdout).not.toContain("Everything is up to date");
+    expect(stdout).toContain("No upgrades available");
+    expect(stdout).toContain('@tpsdev-ai/openclaw-flair: could not parse installed version "garbage"');
+    const npm = npmInvocations();
+    expect(npm).not.toContain("install -g @tpsdev-ai/openclaw-flair");
+    expect(npm).not.toContain("install -g @tpsdev-ai/flair@");
+  });
+
+  test("Q3: with flair ahead and a sibling undetected, the summary never says 'up to date'", async () => {
+    setInstalled("0.55.0");
+    // Clean wiring so flair-mcp is genuinely UNDETECTED (no global bin, not
+    // wired) and no openclaw unknown lingers from Q2.
+    rmSync(CLAUDE_JSON, { force: true });
+    rmSync(join(HOME, ".openclaw", "extensions", "openclaw-flair"), { recursive: true, force: true });
+    const mcpStub = join(BIN, "flair-mcp");
+    const original = readFileSync(mcpStub, "utf-8");
+    writeFileSync(mcpStub, "#!/bin/sh\nexit 0\n");
+    chmodSync(mcpStub, 0o755);
+    try {
+      const reg = await startRegistry({ "@tpsdev-ai/flair": "0.54.2" });
+      const { stdout } = await runUpgrade(reg, []);
+      // The `missing > 0` branch used to claim "all detected packages are up to
+      // date" even with an ahead finding — the same false convergence N1 fixes.
+      expect(stdout).not.toContain("all detected packages are up to date");
+      expect(stdout).toContain("no upgrades available for the rest");
+      expect(stdout).toContain("not detected");
+      expect(stdout).toContain("@tpsdev-ai/flair: 0.55.0 (ahead of latest 0.54.2)");
+    } finally {
+      writeFileSync(mcpStub, original);
+      chmodSync(mcpStub, 0o755);
+    }
   });
 });

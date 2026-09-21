@@ -22,7 +22,7 @@ import { describeEmbedGpuDoctorFinding } from "../lib/embed-gpu-doctor.js";
 import { adminPassDesyncFinding, detectPersistedAdminUser } from "../lib/init-admin-pass.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
 import { flairCliVersion, unpinnedSpecWarning } from "../lib/mcp-spec.js";
-import { repinSessionStartHookGuarded, staleSessionStartHookPins } from "../lib/owned-pins.js";
+import { repinSessionStartHookGuarded, sessionStartHookPinFindings } from "../lib/owned-pins.js";
 import * as render from "../render.js";
 import { checkVersion, formatVersionNudge, probeInstanceVersion, FLAIR_PKG_NAME } from "../version-check.js";
 import { resolveRegistryNotice } from "../lib/npm-registry.js";
@@ -1065,9 +1065,14 @@ program
           // flair#1485: pin ≠ installed CLI version is a failure, never a
           // ✓ "still runs". Check freshness first so a stale pin cannot
           // hide behind the execution probe. Catalog owns the issue count.
-          const claudeStale = staleSessionStartHookPins(homedir()).find((r) => r.target.id === "claude-code");
-          if (claudeStale) {
-            console.log(`  ${render.icons.error} SessionStart hook: pinned to flair-mcp@${claudeStale.pin} (installed CLI is ${flairCliVersion()}) — the hook still launches the OLD adapter on every session`);
+          const claudeStale = sessionStartHookPinFindings(homedir()).find((f) => f.reading.target.id === "claude-code");
+          if (claudeStale && claudeStale.direction === "ahead") {
+            // flair#1778 follow-up: a pin AHEAD of the running CLI is not stale
+            // — re-pinning would LOWER it and the refresh HOLDS it. Report a
+            // held pass: no ✗, no issue count (the catalog agrees), no --fix.
+            console.log(`  ${render.icons.ok} SessionStart hook: pinned to flair-mcp@${claudeStale.reading.pin}, ahead of the installed CLI ${flairCliVersion()} — held`);
+          } else if (claudeStale) {
+            console.log(`  ${render.icons.error} SessionStart hook: pinned to flair-mcp@${claudeStale.reading.pin} (installed CLI is ${flairCliVersion()}) — the hook still launches the OLD adapter on every session`);
             if (autoFix) {
               if (dryRun) {
                 console.log(`     ${render.wrap(render.c.dim, "Would re-pin the SessionStart hook in")} ${hook.path}`);
@@ -1219,9 +1224,12 @@ program
       if (codexConfigured) {
         const hook = inspectSessionStartHook(homedir(), { settingsPath: hookSettingsPath(homedir(), "codex") });
         if (hook.present) {
-          const codexStale = staleSessionStartHookPins(homedir()).find((r) => r.target.id === "codex");
-          if (codexStale) {
-            console.log(`  ${render.icons.error} SessionStart hook (codex): pinned to flair-mcp@${codexStale.pin} (installed CLI is ${flairCliVersion()}) — the hook still launches the OLD adapter on every session`);
+          const codexStale = sessionStartHookPinFindings(homedir()).find((f) => f.reading.target.id === "codex");
+          if (codexStale && codexStale.direction === "ahead") {
+            // flair#1778 follow-up: same direction rule as Claude Code above.
+            console.log(`  ${render.icons.ok} SessionStart hook (codex): pinned to flair-mcp@${codexStale.reading.pin}, ahead of the installed CLI ${flairCliVersion()} — held`);
+          } else if (codexStale) {
+            console.log(`  ${render.icons.error} SessionStart hook (codex): pinned to flair-mcp@${codexStale.reading.pin} (installed CLI is ${flairCliVersion()}) — the hook still launches the OLD adapter on every session`);
             if (autoFix) {
               if (dryRun) {
                 console.log(`     ${render.wrap(render.c.dim, "Would re-pin the SessionStart hook in")} ${hook.path}`);

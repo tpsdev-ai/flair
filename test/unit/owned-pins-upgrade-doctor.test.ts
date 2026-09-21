@@ -399,3 +399,37 @@ describe("flair#1778 — the pin refresh never LOWERS an owned pin", () => {
     expect(results.some((r) => r.target.kind === "session-start-hook" && r.action === "update")).toBe(true);
   });
 });
+
+describe("flair#1778 follow-up — doctor classifies SessionStart-hook pin DIRECTION (catalog)", () => {
+  const dirCore = parseSemverCore(INSTALLED);
+  if (!dirCore) throw new Error(`CLI version is not semver: ${INSTALLED}`);
+  const AHEAD_VER = `${dirCore[0]}.${dirCore[1]}.${dirCore[2] + 1}`;
+
+  function blockingIds(home: string): string[] {
+    return doctorOn(home, ["claude-code"]).results
+      .filter((r) => r.status === "fail" || r.status === "unrun")
+      .map((r) => r.id);
+  }
+
+  it("a hook pin AHEAD of the running CLI is a PASS, not a blocking catalog failure", () => {
+    writeClaudeMcp(isoHome, CURRENT_SPEC, "local");
+    writeHook(isoHome, "claude-code", hookCommand("local", AHEAD_VER));
+    const run = doctorOn(isoHome, ["claude-code"]);
+    const hook = run.results.find((r) => r.id === "session-start-hook");
+    expect(hook?.status).toBe("pass");
+    expect(hook?.detail ?? "").toContain("ahead of the installed CLI");
+    // The exit-code source (`issues += catalogDelta.found`): an ahead hook must
+    // not be counted as a blocking check.
+    expect(blockingIds(isoHome)).not.toContain("session-start-hook");
+  });
+
+  it("a hook pin BEHIND the running CLI is still a blocking failure", () => {
+    writeClaudeMcp(isoHome, CURRENT_SPEC, "local");
+    writeHook(isoHome, "claude-code", hookCommand("local", STALE_VER));
+    const run = doctorOn(isoHome, ["claude-code"]);
+    const hook = run.results.find((r) => r.id === "session-start-hook");
+    expect(hook?.status).toBe("fail");
+    expect(hook?.remedy).toBe("flair hook install");
+    expect(blockingIds(isoHome)).toContain("session-start-hook");
+  });
+});

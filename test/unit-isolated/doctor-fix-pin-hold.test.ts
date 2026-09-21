@@ -1,25 +1,26 @@
 /**
- * doctor-fix-pin-hold.test.ts — flair#1778 slice-1 follow-up (N4), fails-on-main.
+ * doctor-fix-pin-hold.test.ts — flair#1778 slice-1 follow-up (Q1), fails-on-main.
  *
- * THE HAZARD. `flair doctor --fix` re-pinned the SessionStart hook through
- * `repinSessionStartHook`, which was NOT behind the `isPinDowngrade` hold that
- * #1786 added to `flair upgrade`'s pin refresh. So a `doctor --fix` on an AHEAD
- * pin (a staged / never-promoted adapter pin) lowered it — the same downgrade
- * #1786 stopped for the upgrade path, left reachable via doctor.
+ * THE DEFECT. `staleSessionStartHookPins` flags ANY pin != the installed CLI,
+ * so a pin AHEAD of the CLI rendered as a `✗ SessionStart hook: ... the hook
+ * still launches the OLD adapter ...` error, was counted as an issue, and —
+ * with the #1786/#1787 never-lower guard now holding the pin — `flair doctor
+ * --fix` printed the hold line, left the issue "remaining", and exited 1 on a
+ * state it deliberately preserves.
  *
- * THE PROOF. Write a wired Claude Code MCP block and a SessionStart hook whose
- * flair-mcp pin is AHEAD of this CLI's running version, run the real CLI as a
- * HOME-isolated child (`doctor --fix`), and assert the hook file is
- * byte-identical and the shared hold line is printed naming both pins.
+ * THE FIX. Classify pin DIRECTION before rendering (both claude-code and
+ * codex): a pin AHEAD of the running CLI is a held pass (no ✗, no issue count,
+ * no --fix); a pin BEHIND is today's stale error + re-pin, unchanged.
  *
- * Isolated: the CLI is spawned as a CHILD with HOME set at spawn, so its data
- * dir is a scratch tree — never a real instance. No real instance, no service
- * manager, no install. The hook pin is computed from the RUNNING CLI version
- * (the brief's "0.55.0 vs CLI 0.54.2" is the same direction: pin ahead of CLI).
+ * These run the real CLI as a HOME-isolated child. The running CLI's own
+ * version is used; AHEAD is one patch above it, BEHIND one patch below (the
+ * brief's "0.55.0 vs CLI 0.54.2" is the same direction). A dead --port keeps
+ * the instance probe deterministic across runs.
  */
 
 import { describe, test, expect, afterAll, setDefaultTimeout } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { flairCliVersion } from "../../src/lib/mcp-spec.ts";
@@ -27,94 +28,134 @@ import { parseSemverCore } from "../../src/fabric-upgrade.ts";
 
 const REPO = join(import.meta.dirname, "..", "..");
 const FLAIR_MCP_PACKAGE = "@tpsdev-ai/flair-mcp";
-
-// doctor does a lot of HOME-local probing; give the child room.
 setDefaultTimeout(120_000);
 
 const INSTALLED = flairCliVersion();
 const core = parseSemverCore(INSTALLED);
 if (!core) throw new Error(`CLI version is not semver: ${INSTALLED}`);
-// One patch ahead of the running CLI: a re-pin would write INSTALLED over it — a
-// downgrade. It must be HELD.
 const AHEAD = `${core[0]}.${core[1]}.${core[2] + 1}`;
+const BEHIND = core[2] > 0 ? `${core[0]}.${core[1]}.${core[2] - 1}` : `${core[0]}.${core[1] - 1}.0`;
 
-const HOME = mkdtempSync(join(tmpdir(), "flair-1778-n4-home-"));
-const HOOK_PATH = join(HOME, ".claude", "settings.json");
-const CLAUDE_JSON = join(HOME, ".claude.json");
+const homes: string[] = [];
+afterAll(() => {
+  for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true });
+});
+
+/** One free localhost port (bound then released) for a deterministic dead probe. */
+function freePort(): Promise<number> {
+  return new Promise((resolve) => {
+    const srv = createServer();
+    srv.listen(0, "127.0.0.1", () => {
+      const p = (srv.address() as { port: number }).port;
+      srv.close(() => resolve(p));
+    });
+  });
+}
 
 function hookCommand(agentId: string, version: string): string {
   return `sh -c 'out=$(FLAIR_AGENT_ID=${agentId} npx -y -p ${FLAIR_MCP_PACKAGE}@${version} flair-session-start 2>/dev/null) && printf %s "$out" || true'`;
 }
 
-// A wired Claude Code MCP block (current pin) so doctor reaches the hook branch.
-mkdirSync(join(HOME, ".claude"), { recursive: true });
-writeFileSync(
-  CLAUDE_JSON,
-  JSON.stringify({
-    mcpServers: {
-      flair: {
-        command: "npx",
-        args: ["-y", `${FLAIR_MCP_PACKAGE}@${INSTALLED}`],
-        type: "stdio",
-        env: { FLAIR_AGENT_ID: "local", FLAIR_URL: "http://127.0.0.1:9" },
+function makeHome(hookVersion: string): string {
+  const home = mkdtempSync(join(tmpdir(), "flair-1778-q1-home-"));
+  homes.push(home);
+  mkdirSync(join(home, ".claude"), { recursive: true });
+  writeFileSync(
+    join(home, ".claude.json"),
+    JSON.stringify({
+      mcpServers: {
+        flair: {
+          command: "npx",
+          args: ["-y", `${FLAIR_MCP_PACKAGE}@${INSTALLED}`],
+          type: "stdio",
+          env: { FLAIR_AGENT_ID: "local", FLAIR_URL: "http://127.0.0.1:9" },
+        },
       },
-    },
-  }, null, 2) + "\n",
-);
-// A wired SessionStart hook pinned AHEAD of the running CLI.
-writeFileSync(
-  HOOK_PATH,
-  JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: hookCommand("local", AHEAD) }] }] } }, null, 2) + "\n",
-);
+    }, null, 2) + "\n",
+  );
+  writeFileSync(
+    join(home, ".claude", "settings.json"),
+    JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: hookCommand("local", hookVersion) }] }] } }, null, 2) + "\n",
+  );
+  return home;
+}
 
-const HOOK_BEFORE = readFileSync(HOOK_PATH, "utf-8");
+function hookPath(home: string): string {
+  return join(home, ".claude", "settings.json");
+}
 
-afterAll(() => {
-  rmSync(HOME, { recursive: true, force: true });
-});
+function stripAnsi(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*m/g, "");
+}
 
-async function runDoctorFix(): Promise<{ stdout: string; stderr: string; status: number | null }> {
-  const env = {
-    ...process.env,
-    HOME,
-    FLAIR_URL: "http://127.0.0.1:9", // dead port: no instance can be detected
-  };
-  const proc = Bun.spawn(["bun", join(REPO, "src", "cli.ts"), "doctor", "--fix"], {
-    // cwd = the scratch HOME, not the repo: doctor --fix will ADD a bootstrap
-    // line to ./CLAUDE.md when one is missing, and autoFix is on. Pointing cwd
-    // at the scratch tree keeps every write inside it (the repo stays clean).
-    cwd: HOME,
-    env,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+async function runDoctor(home: string, deadPort: number, args: string[] = []): Promise<{ out: string; status: number | null }> {
+  const env = { ...process.env, HOME: home, FLAIR_URL: `http://127.0.0.1:${deadPort}` };
+  const proc = Bun.spawn(
+    ["bun", join(REPO, "src", "cli.ts"), "doctor", "--port", String(deadPort), ...args],
+    { cwd: home, env, stdout: "pipe", stderr: "pipe" },
+  );
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
   ]);
   const status = await proc.exited;
-  return { stdout, stderr, status };
+  return { out: stripAnsi(stdout + "\n" + stderr), status };
 }
 
-describe("flair#1778 N4 — doctor --fix never LOWERS an ahead SessionStart-hook pin", () => {
-  test("an AHEAD hook pin is held: the hook file is byte-identical and the hold line prints", async () => {
+/** The doctor issue count from its summary line ("N issues found" / "No issues found"). */
+function issueCount(out: string): number {
+  const m = out.match(/(\d+) issues? found/);
+  if (m) return Number(m[1]);
+  if (/No issues found/.test(out)) return 0;
+  return -1; // summary line not found — the probe saw nothing
+}
+
+describe("flair#1778 Q1 — doctor classifies SessionStart-hook pin DIRECTION", () => {
+  test("AHEAD: held pass (no ✗, no --fix) and the hook file is byte-identical", async () => {
     expect(AHEAD).not.toBe(INSTALLED);
-    expect(existsSync(HOOK_PATH)).toBe(true);
+    const home = makeHome(AHEAD);
+    const before = readFileSync(hookPath(home), "utf-8");
+    const deadPort = await freePort();
 
-    const { stdout, stderr } = await runDoctorFix();
-    const out = stdout + "\n" + stderr;
+    const plain = await runDoctor(home, deadPort);
+    expect(plain.out).toContain(`SessionStart hook: pinned to flair-mcp@${AHEAD}, ahead of the installed CLI ${INSTALLED} — held`);
+    expect(plain.out).not.toContain("✗ SessionStart hook");
+    expect(plain.out).not.toContain("the hook still launches the OLD adapter");
 
-    // The hook file was NOT rewritten (the downgrade would have replaced AHEAD
-    // with INSTALLED).
-    expect(readFileSync(HOOK_PATH, "utf-8")).toBe(HOOK_BEFORE);
-    expect(readFileSync(HOOK_PATH, "utf-8")).toContain(`${FLAIR_MCP_PACKAGE}@${AHEAD}`);
+    const fix = await runDoctor(home, deadPort, ["--fix"]);
+    expect(readFileSync(hookPath(home), "utf-8")).toBe(before);
+    expect(fix.out).toContain(`SessionStart hook: pinned to flair-mcp@${AHEAD}, ahead of the installed CLI ${INSTALLED} — held`);
+    expect(fix.out).not.toContain(`re-pinned the SessionStart hook in ${hookPath(home)} to ${FLAIR_MCP_PACKAGE}@${INSTALLED}`);
+  });
 
-    // The shared hold line is printed, naming BOTH pins.
-    expect(out).toContain(`keeping pinned ${AHEAD}`);
-    expect(out).toContain(`running CLI ${INSTALLED} is older`);
-    expect(out).toContain("the refresh never lowers a pin");
+  test("the AHEAD pin adds ZERO issues (exit/count parity with a current pin)", async () => {
+    const deadPort = await freePort();
+    const aheadHome = makeHome(AHEAD);
+    const currentHome = makeHome(INSTALLED);
 
-    // ...and it was NOT re-pinned DOWN to the running CLI.
-    expect(out).not.toContain(`re-pinned the SessionStart hook in ${HOOK_PATH} to ${FLAIR_MCP_PACKAGE}@${INSTALLED}`);
+    const ahead = await runDoctor(aheadHome, deadPort);
+    const current = await runDoctor(currentHome, deadPort);
+
+    // Same otherwise-identical home: the ONLY difference is the pin direction.
+    // A current pin is not an issue; an ahead pin must not be either.
+    expect(current.out).not.toContain("✗ SessionStart hook");
+    expect(ahead.out).not.toContain("✗ SessionStart hook");
+    expect(issueCount(ahead.out)).toBe(issueCount(current.out));
+    expect(issueCount(ahead.out)).toBeGreaterThanOrEqual(0); // the summary line was read
+    expect(ahead.status).toBe(current.status);
+  });
+
+  test("BEHIND: unchanged behaviour — ✗ stale error, and --fix re-pins to the running CLI", async () => {
+    expect(BEHIND).not.toBe(INSTALLED);
+    const home = makeHome(BEHIND);
+    const deadPort = await freePort();
+
+    const plain = await runDoctor(home, deadPort);
+    expect(plain.out).toContain(`✗ SessionStart hook: pinned to flair-mcp@${BEHIND} (installed CLI is ${INSTALLED}) — the hook still launches the OLD adapter on every session`);
+
+    const fix = await runDoctor(home, deadPort, ["--fix"]);
+    const after = readFileSync(hookPath(home), "utf-8");
+    expect(after).toContain(`${FLAIR_MCP_PACKAGE}@${INSTALLED}`);
+    expect(after).not.toContain(`${FLAIR_MCP_PACKAGE}@${BEHIND}`);
   });
 });

@@ -1293,7 +1293,16 @@ program
       if (missing.length > 0) {
         const npmMissing = missing.filter((f) => f.name !== FLAIR_MCP_PACKAGE);
         const mcpMissing = missing.some((f) => f.name === FLAIR_MCP_PACKAGE);
-        console.log(`\n❔ ${missing.length} package${missing.length > 1 ? "s" : ""} not detected — all detected packages are up to date.`);
+        // flair#1778 follow-up: "all detected packages are up to date" is the
+        // same false-convergence claim the no-upgrade summary above avoids, so
+        // guard it with the same condition — when any detected package is
+        // `ahead` or `unknown`, say only that there are no upgrades for the
+        // rest, never that they are up to date.
+        const anyAheadOrUnknown = findings.some((f) => f.status === "ahead" || f.status === "unknown");
+        const tail = anyAheadOrUnknown
+          ? "no upgrades available for the rest"
+          : "all detected packages are up to date";
+        console.log(`\n❔ ${missing.length} package${missing.length > 1 ? "s" : ""} not detected — ${tail}.`);
         if (npmMissing.length > 0) {
           console.log(`   Install missing: npm install -g ${npmMissing.map((f) => f.name).join(" ")}`);
         }

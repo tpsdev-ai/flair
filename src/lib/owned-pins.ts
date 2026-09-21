@@ -270,6 +270,53 @@ export function staleHookRemedy(readings: readonly OwnedPinReading[]): string {
   return [...new Set(harnesses)].map((h) => hookInstallHint(h)).join(" ; ");
 }
 
+export type PinDirection = "ahead" | "behind" | "unknown";
+
+/**
+ * Direction of an owned pin relative to `target` (the version a refresh would
+ * write — the running CLI's). Uses the ONE comparison #1786 introduced
+ * (`isPinDowngrade`) so no call site re-derives the ordering itself.
+ *
+ *   pin > target           -> "ahead"   (writing target over it would LOWER it)
+ *   pin < target           -> "behind"
+ *   equal / not comparable -> "unknown"
+ */
+export function pinDirection(pin: string | null | undefined, target: string | null | undefined): PinDirection {
+  if (isPinDowngrade(pin, target)) return "ahead";
+  if (isPinDowngrade(target, pin)) return "behind";
+  return "unknown";
+}
+
+export interface SessionStartHookPinFinding {
+  reading: OwnedPinReading;
+  direction: PinDirection;
+}
+
+/**
+ * Stale SessionStart-hook pins, each annotated with its direction — the ONE
+ * place a caller goes for "which way is this pin off" (flair#1778 follow-up).
+ * SessionStart hooks only: an MCP-client pin that is ahead is a different
+ * surface with its own rendering.
+ */
+export function sessionStartHookPinFindings(
+  homeDir: string,
+  expectedVersion: string = flairCliVersion(),
+): SessionStartHookPinFinding[] {
+  return staleSessionStartHookPins(homeDir, expectedVersion).map((reading) => ({
+    reading,
+    direction: pinDirection(reading.pin, expectedVersion),
+  }));
+}
+
+/**
+ * The ONE hold line a refresh prints when it refuses to lower an owned pin.
+ * Phrased neutrally ("a pin is never lowered") because both `flair upgrade`'s
+ * refresh and `flair doctor --fix` print it — no per-caller copy.
+ */
+function heldPinMessage(id: string, pin: string, runningCli: string): string {
+  return `${id}: keeping pinned ${pin} (running CLI ${runningCli} is older — a pin is never lowered)`;
+}
+
 /**
  * The ONE SessionStart-hook re-pin guard (flair#1778 D4), shared by
  * `flair upgrade`'s pin refresh and `flair doctor --fix`.
@@ -305,7 +352,7 @@ export function repinSessionStartHookGuarded(
       target: resolved,
       action: "hold",
       ok: true,
-      message: `${resolved.id}: keeping pinned ${existing} (running CLI ${wouldWrite} is older — the refresh never lowers a pin)`,
+      message: heldPinMessage(resolved.id, existing as string, wouldWrite),
     };
   }
   const repin = repinSessionStartHook(homeDir, harness);
@@ -387,7 +434,7 @@ export function refreshOwnedPins(opts: RefreshOwnedPinsOptions): OwnedPinRefresh
           target,
           action: "hold",
           ok: true,
-          message: `${target.id}: keeping pinned ${before} (running CLI ${wouldWritePin} is older — the refresh never lowers a pin)`,
+          message: heldPinMessage(target.id, before as string, wouldWritePin),
         });
         continue;
       }
