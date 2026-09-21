@@ -136,9 +136,40 @@ Then set `FLAIR_URL=http://localhost:19926` on the client.
 
 ### Direct network access
 
-Edit `~/.flair/config.yaml`:
+Flair reads the HTTP bind host from three places — the first one set wins:
+
+1. `flair init --http-bind <host>`
+2. `FLAIR_HTTP_BIND` in the Flair process environment
+3. a **top-level** `httpBind:` key in `~/.flair/config.yaml`
+
+`127.0.0.1` is the default when none is set. **Only hosts that include IPv4
+loopback are accepted** — `127.0.0.1` itself, or a wildcard (`0.0.0.0` / `::`).
+Every credentialed self-call Flair makes hardcodes `127.0.0.1`, so a bind that
+excludes it is refused: it would leave those calls pointing at a dead port
+while every bind check still passed.
+
+To widen deliberately, pass the flag — or record it in config so the choice
+survives `flair restart` / `flair upgrade`, neither of which takes the flag:
+
+```bash
+flair init --http-bind 0.0.0.0
+```
 
 ```yaml
+# ~/.flair/config.yaml — top-level, NOT nested under `http:`
+httpBind: 0.0.0.0
+```
+
+> **`http.host` is not read.** Earlier versions of this page told you to widen
+> the bind with a nested `http.host:` key. **Flair never read that key**, and
+> from 0.55.0 it is ignored outright: an install that was only ever wide
+> because the old default bound every interface will narrow to `127.0.0.1` on
+> the next `flair restart` or `flair upgrade`. The block below is kept so this
+> section stays findable from a snippet you may already have — **do not copy
+> it**; use `httpBind:` (or `--http-bind` / `FLAIR_HTTP_BIND`) instead.
+
+```yaml
+# OLD — ignored by Flair. Replace with `httpBind:` as above.
 http:
   port: 19926
   host: 0.0.0.0  # listen on all interfaces
@@ -154,7 +185,7 @@ All configuration lives in `~/.flair/`:
 
 ```
 ~/.flair/
-├── config.yaml          # port, host, embedding model
+├── config.yaml          # port, bind host, embedding model
 ├── data/                # Harper database
 ├── keys/                # Ed25519 keypairs per agent
 └── backups/             # flair backup output
@@ -163,9 +194,10 @@ All configuration lives in `~/.flair/`:
 ### Key config options (`~/.flair/config.yaml`)
 
 ```yaml
-http:
-  port: 19926            # API port (ops port = this - 1)
-  host: 127.0.0.1        # bind address
+# Top-level keys — Flair's config has no nested `http:` block, and no
+# `http.host`.
+port: 19926            # API port (ops port = this - 1)
+httpBind: 127.0.0.1    # HTTP bind host (see "Direct network access" above)
 
 clustering:
   nodeName: flair
@@ -185,6 +217,7 @@ Set these in the Flair process environment (`~/Library/LaunchAgents/ai.tpsdev.fl
 | `HDB_ADMIN_PASSWORD` | Bootstrap password for the embedded Harper. After first start, the persisted user record is the source of truth; rotate via the Harper ops API, not by changing this env var. | Set at install time. See [secrets-and-keys.md](secrets-and-keys.md) for rotation. |
 | `FLAIR_KEY_PASSPHRASE` | Passphrase used to derive the AES-256-GCM key that wraps federation private-key seeds at rest. Auto-generated to `~/.flair/keys/.passphrase` if unset. | Set explicitly for production federation deployments so the passphrase isn't auto-generated and lost on disk wipe. |
 | `HTTP_PORT` | Override the Harper HTTP port. Useful for sandboxes; production deployments should configure the port in `config.yaml` instead. | Rare. |
+| `FLAIR_HTTP_BIND` | Bind address for the Harper **HTTP API**. Resolution order: `flair init --http-bind` > this variable > the top-level `httpBind` key `flair init` persists in `~/.flair/config.yaml` > `127.0.0.1`. Only `127.0.0.1` or a wildcard (`0.0.0.0` / `::`) is accepted — the listener must include IPv4 loopback for Flair's own `127.0.0.1` self-calls. Every Flair-managed Harper start re-asserts the resolved value, so the persisted key is what survives `flair restart` / `flair upgrade`. | Only for deployments that need the HTTP API reachable off-host — set it to `0.0.0.0`, or record it once with `flair init --http-bind 0.0.0.0`. Single-host installs want the loopback default. |
 | `FLAIR_OPS_BIND` | Bind address for the Harper **ops API**. Resolution order: `flair init --ops-bind` > this variable > the `opsBind` key `flair init` persists in `~/.flair/config.yaml` > `127.0.0.1`. Every Flair-managed Harper start re-asserts the resolved value, so the persisted key is what makes a choice survive `flair restart` / `flair upgrade`. | Only for deployments that genuinely need remote ops admin (multi-host / Fabric) — set it to `0.0.0.0`, or record it once with `flair init --ops-bind 0.0.0.0`. Single-host installs want the loopback default. |
 
 ### Performance-related environment variables
