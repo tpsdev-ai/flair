@@ -810,22 +810,31 @@ describe("flair#1478 — self-heal requires flair /Health identity and pid→por
     }
   }
 
+  // flair#1770: the decoy binds an OS-CHOSEN ephemeral port and reports it back,
+  // instead of a fixed 5998x port. Those ports sit inside the kernel's ephemeral
+  // range (32768-60999 on Linux, 49152-65535 on macOS), so any concurrent socket
+  // in a busy unit lane can transiently hold one; the decoy's bind then fails and
+  // the readiness poll below spins out (~4 s) — the one-lane flake. Binding :0 is
+  // atomic (the OS never hands out a port already bound), so there is no TOCTOU
+  // window either.
   async function spawnHttpOnPort(
-    port: number,
     body: string,
     extra: { env?: Record<string, string>; cwd?: string } = {},
-  ): Promise<number> {
-    const script = join(tmpHome, `decoy-${port}.mjs`);
+  ): Promise<{ pid: number; port: number }> {
+    const tag = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const portFile = join(tmpHome, `decoy-port-${tag}.txt`);
+    const script = join(tmpHome, `decoy-${tag}.mjs`);
     writeFileSync(
       script,
       [
         `import { createServer } from "node:http";`,
+        `import { writeFileSync } from "node:fs";`,
         `const body = ${JSON.stringify(body)};`,
         `const srv = createServer((req, res) => {`,
         `  res.writeHead(200, { "content-type": "application/json" });`,
         `  res.end(body);`,
         `});`,
-        `srv.listen(${port}, "127.0.0.1");`,
+        `srv.listen(0, "127.0.0.1", () => writeFileSync(${JSON.stringify(portFile)}, String(srv.address().port)));`,
       ].join("\n"),
     );
     const proc = Bun.spawn(["bun", script], {
@@ -836,10 +845,22 @@ describe("flair#1478 — self-heal requires flair /Health identity and pid→por
     });
     spawned.push(proc as unknown as { kill: (sig?: NodeJS.Signals | number) => void });
     const pid = (proc as unknown as { pid: number }).pid;
+
+    // Learn the port the decoy actually bound (never a fixed-port guess).
+    let port = 0;
+    for (let i = 0; i < 80 && port === 0; i++) {
+      if (existsSync(portFile)) {
+        const n = Number(readFileSync(portFile, "utf-8").trim());
+        if (Number.isInteger(n) && n > 0) port = n;
+      }
+      if (port === 0) await new Promise((r) => setTimeout(r, 50));
+    }
+    if (port === 0) throw new Error("decoy did not report a bound port");
+
     for (let i = 0; i < 80; i++) {
       try {
         const res = await fetch(`http://127.0.0.1:${port}/Health`, { signal: AbortSignal.timeout(200) });
-        if (res.status === 200) return pid;
+        if (res.status === 200) return { pid, port };
       } catch { /* not up yet */ }
       await new Promise((r) => setTimeout(r, 50));
     }
@@ -852,11 +873,10 @@ describe("flair#1478 — self-heal requires flair /Health identity and pid→por
       // The decoy owns the port AND is the pidfile pid — body identity is
       // the gate that must reject it. A pre-#1478 probeHealth would call
       // this "ok" and adopt the sidecar, then `flair stop` would SIGTERM it.
-      const PORT = 59987;
-      const pid = await spawnHttpOnPort(PORT, JSON.stringify({ ok: true, status: "healthy" }));
+      const { pid, port } = await spawnHttpOnPort(JSON.stringify({ ok: true, status: "healthy" }));
       writeFileSync(join(dataDir, "hdb.pid"), String(pid));
 
-      const { stdout, stderr, exitCode } = await runStop(PORT);
+      const { stdout, stderr, exitCode } = await runStop(port);
 
       expect(exitCode).not.toBe(0);
       expect(stdout + stderr).not.toMatch(/Flair stopped/i);
@@ -874,7 +894,6 @@ describe("flair#1478 — self-heal requires flair /Health identity and pid→por
       // still holds the port and even answers with a flair-shaped /Health.
       // That is the failed-restart shape: something answered 200, but it is
       // not the instance we launched.
-      const PORT = 59986;
       const sleeper = Bun.spawn(["bun", "-e", "await new Promise(()=>{})"], {
         stdout: "ignore",
         stderr: "ignore",
@@ -883,13 +902,13 @@ describe("flair#1478 — self-heal requires flair /Health identity and pid→por
       const launchedPid = (sleeper as unknown as { pid: number }).pid;
       writeFileSync(join(dataDir, "hdb.pid"), String(launchedPid));
 
-      const listenerPid = await spawnHttpOnPort(PORT, FLAIR_HEALTH_JSON, {
+      const { pid: listenerPid, port } = await spawnHttpOnPort(FLAIR_HEALTH_JSON, {
         cwd: join(import.meta.dirname, "..", ".."),
         env: { ROOTPATH: dataDir },
       });
       expect(listenerPid).not.toBe(launchedPid);
 
-      const { stdout, stderr, exitCode } = await runStop(PORT);
+      const { stdout, stderr, exitCode } = await runStop(port);
 
       expect(exitCode).not.toBe(0);
       expect(stdout + stderr).not.toMatch(/Flair stopped/i);
@@ -904,15 +923,14 @@ describe("flair#1478 — self-heal requires flair /Health identity and pid→por
   test(
     "positive control: flair-shaped /Health + launched pid on the port + worktree/dataDir heals",
     async () => {
-      const PORT = 59985;
       const repoRoot = join(import.meta.dirname, "..", "..");
-      const pid = await spawnHttpOnPort(PORT, FLAIR_HEALTH_JSON, {
+      const { pid, port } = await spawnHttpOnPort(FLAIR_HEALTH_JSON, {
         cwd: repoRoot,
         env: { ROOTPATH: dataDir },
       });
       writeFileSync(join(dataDir, "hdb.pid"), String(pid));
 
-      const { stdout, stderr, exitCode } = await runStop(PORT);
+      const { stdout, stderr, exitCode } = await runStop(port);
 
       expect(exitCode).toBe(0);
       expect(stdout + stderr).toMatch(/Flair stopped/i);
