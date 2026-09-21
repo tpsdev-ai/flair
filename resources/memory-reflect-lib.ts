@@ -300,16 +300,44 @@ interface PromptHeaderParams {
  * adversarial source can't smuggle instructions into the distillation call
  * just by being included as input.
  */
-/** Per-source character budget for the Source Memories block. */
+/**
+ * Per-source budget for the Source Memories block, measured in ESCAPED
+ * characters of the rendered element body (see sourceMemoryElement).
+ *
+ * The budget is charged against the rendered/escaped body, not the raw content.
+ * Escaping expands characters (`<` -> `&lt;`), so charging the raw text would
+ * let the rendered prompt grow past the invariant this constant protects. The
+ * invariant is "the prompt does not grow"; the escaped form is what pins it.
+ * flair#1756 item 1 is about honesty of the excerpt — marking a partial source
+ * — not about sending more tokens.
+ */
 export const SOURCE_EXCERPT_BUDGET = 300;
 
 /**
  * Explicit marker appended to a source memory presented as an excerpt. The
  * marker is charged against the SAME per-source budget, so marking an excerpt
- * never enlarges the prompt — flair#1756 item 1 is about honesty of the
- * excerpt, not about sending more tokens.
+ * never enlarges the prompt.
  */
 const SOURCE_EXCERPT_MARKER = "…[excerpt truncated]";
+
+/**
+ * Escape text destined for a `<memory>` element body. `&` is escaped first so
+ * an existing entity is not reinterpreted, then the delimiters that can close
+ * a body and open a new element (`<`, `>`). Escaping is structural only: it
+ * makes the element's own delimiters unproducible from the data, and claims
+ * nothing about whether the text is semantically complete.
+ */
+function escapeElementText(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/**
+ * Escape a value destined for a double-quoted attribute. Adds `"` (which
+ * closes the attribute) to the element-body set (`&`, `<`, `>`).
+ */
+function escapeAttributeValue(value: string): string {
+  return escapeElementText(value).replace(/"/g, "&quot;");
+}
 
 /**
  * Render one source memory as a `<memory>` element.
@@ -319,15 +347,35 @@ const SOURCE_EXCERPT_MARKER = "…[excerpt truncated]";
  * and in the text — never as an arbitrary, silent prefix. Presenting a silent
  * prefix lets a complete source reach the model as an unfinished expression
  * (flair#1756: the model then faithfully distils a fragment).
+ *
+ * The element body AND every attribute value are ESCAPED (flair#1767 review).
+ * Without escaping, attacker-controlled source content longer than the budget
+ * could close the marked wrapper and open an unmarked one, so the completeness
+ * annotation this element carries could be counterfeited by the very content it
+ * describes. Escaping makes the annotation structurally inseparable from the
+ * content: neither a body nor a quoted attribute can be terminated by the data.
+ * This closes a delimiter ambiguity — it is NOT a claim that an excerpt is
+ * semantically complete, and nothing here should be read as one.
  */
 function sourceMemoryElement(m: ReflectMemoryInput): string {
-  const date = m.createdAt?.slice(0, 10) ?? "?";
+  const id = escapeAttributeValue(m.id ?? "");
+  const date = escapeAttributeValue(m.createdAt?.slice(0, 10) ?? "?");
   const content = m.content ?? "";
-  if (content.length <= SOURCE_EXCERPT_BUDGET) {
-    return `<memory id="${m.id}" date="${date}">${content}</memory>`;
+  const escaped = escapeElementText(content);
+  if (escaped.length <= SOURCE_EXCERPT_BUDGET) {
+    return `<memory id="${id}" date="${date}">${escaped}</memory>`;
   }
-  const kept = content.slice(0, Math.max(0, SOURCE_EXCERPT_BUDGET - SOURCE_EXCERPT_MARKER.length));
-  return `<memory id="${m.id}" date="${date}" excerpt="true">${kept}${SOURCE_EXCERPT_MARKER}</memory>`;
+  // Budget is charged against the ESCAPED body, so the excerpt stays within the
+  // same rendered length the whole-source case is held to. Trim the raw prefix
+  // until its escaped form fits the room the marker leaves.
+  const limit = Math.max(0, SOURCE_EXCERPT_BUDGET - SOURCE_EXCERPT_MARKER.length);
+  let kept = content.slice(0, limit);
+  let keptEscaped = escapeElementText(kept);
+  while (keptEscaped.length > limit && kept.length > 0) {
+    kept = kept.slice(0, -1);
+    keptEscaped = escapeElementText(kept);
+  }
+  return `<memory id="${id}" date="${date}" excerpt="true">${keptEscaped}${SOURCE_EXCERPT_MARKER}</memory>`;
 }
 
 function buildSourceMemoriesBlock(memories: ReflectMemoryInput[]): string {
