@@ -487,3 +487,48 @@ describe("flair#1778 — an UNREADABLE pin FAILS CLOSED (never silently overwrit
     expect(row?.icon).toBe("warn");
   });
 });
+
+describe("flair#1789 — doctor classifies the MCP-block pin DIRECTION", () => {
+  const dirCore = parseSemverCore(INSTALLED);
+  if (!dirCore) throw new Error(`CLI version is not semver: ${INSTALLED}`);
+  const AHEAD_VER = `${dirCore[0]}.${dirCore[1]}.${dirCore[2] + 1}`;
+  const RAW = "0.55.1.rc";
+
+  function mcpBlocking(home: string): boolean {
+    return doctorOn(home, ["claude-code"]).results
+      .filter((r) => r.status === "fail" || r.status === "unrun")
+      .some((r) => r.id === "mcp-block");
+  }
+
+  it("an MCP pin AHEAD of the running CLI is a held PASS (no remedy, not blocking)", () => {
+    writeClaudeMcp(isoHome, `${FLAIR_MCP_PACKAGE}@${AHEAD_VER}`, "local");
+    const run = doctorOn(isoHome, ["claude-code"]);
+    const mcp = run.results.find((r) => r.id === "mcp-block");
+    expect(mcp?.status).toBe("pass");
+    expect(mcp?.detail ?? "").toContain("ahead of the installed CLI");
+    expect(mcp?.remedy).toBeUndefined();
+    expect(mcpBlocking(isoHome)).toBe(false);
+  });
+
+  it("an UNREADABLE MCP pin is a NON-BLOCKING warn naming the raw value", () => {
+    writeClaudeMcp(isoHome, `${FLAIR_MCP_PACKAGE}@${RAW}`, "local");
+    const run = doctorOn(isoHome, ["claude-code"]);
+    const mcp = run.results.find((r) => r.id === "mcp-block");
+    expect(mcp?.status).toBe("warn");
+    expect(mcp?.detail ?? "").toContain(RAW);
+    expect(mcp?.detail ?? "").toContain("not a version I can compare");
+    expect(mcp?.remedy).toBeUndefined();
+    expect(mcpBlocking(isoHome)).toBe(false);
+    const row = renderCatalogDoctorLines(run).find((r) => r.line.includes("MCP server block"));
+    expect(row?.icon).toBe("warn");
+  });
+
+  it("an MCP pin BEHIND the running CLI is still a blocking fail + flair upgrade", () => {
+    writeClaudeMcp(isoHome, STALE_SPEC, "local");
+    const run = doctorOn(isoHome, ["claude-code"]);
+    const mcp = run.results.find((r) => r.id === "mcp-block");
+    expect(mcp?.status).toBe("fail");
+    expect(mcp?.remedy).toBe("flair upgrade");
+    expect(mcpBlocking(isoHome)).toBe(true);
+  });
+});

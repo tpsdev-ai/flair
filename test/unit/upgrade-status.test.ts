@@ -116,6 +116,9 @@ describe("pinWriteWouldLowerOrIsUnknown — the never-lower guard, FAIL CLOSED (
   test("false only when the write is provably not a lowering AND a pin is present", () => {
     expect(pinWriteWouldLowerOrIsUnknown(null, "0.54.2")).toBe(false); // no pin to lower
     expect(pinWriteWouldLowerOrIsUnknown(undefined, undefined)).toBe(false);
+    // C2 contract: an ABSENT pin is nothing to lower even when `next` is
+    // unresolved (which yields an unpinned spec by design) — a valid write.
+    expect(pinWriteWouldLowerOrIsUnknown(null, "not-a-version")).toBe(false);
   });
 });
 
@@ -128,5 +131,9 @@ describe("comparePinVersions — the ONE pure comparison", () => {
     expect(comparePinVersions("0.55.1", "0.55.1.rc")).toBeNull();
     expect(comparePinVersions("0.55.1.rc", "garbage")).toBeNull();
     expect(comparePinVersions(null, "0.55.1")).toBeNull();
+    // C1: strict — a leading "v" is NOT canonical, even though semver.valid
+    // normalises it (semver.valid("v0.54.0") === "0.54.0").
+    expect(comparePinVersions("v0.54.0", "0.55.0")).toBeNull();
+    expect(comparePinVersions("0.55.0", "v0.55.0")).toBeNull();
   });
 });

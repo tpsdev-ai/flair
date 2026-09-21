@@ -310,6 +310,28 @@ export function sessionStartHookPinFindings(
   }));
 }
 
+/** A stale MCP-client pin, annotated with its direction (flair#1789). */
+export interface McpClientPinFinding {
+  reading: OwnedPinReading;
+  direction: PinDirection;
+}
+
+/**
+ * Stale MCP-client pins, each annotated with its direction — the client-side
+ * twin of `sessionStartHookPinFindings`, so `flair doctor`'s install-health
+ * catalog can give an MCP pin the same three-valued treatment as the
+ * SessionStart hook (flair#1789).
+ */
+export function mcpClientPinFindings(
+  homeDir: string,
+  expectedVersion: string = flairCliVersion(),
+): McpClientPinFinding[] {
+  return staleMcpClientPins(homeDir, expectedVersion).map((reading) => ({
+    reading,
+    direction: pinDirection(reading.pin, expectedVersion),
+  }));
+}
+
 /**
  * The ONE hold line a refresh prints when it refuses to rewrite an owned pin.
  * Phrased neutrally ("a pin is never lowered") because both `flair upgrade`'s

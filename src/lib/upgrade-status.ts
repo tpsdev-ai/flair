@@ -17,6 +17,7 @@
  */
 import semver from "semver";
 import { FLAIR_MCP_PACKAGE } from "./mcp-spec.js";
+import { isStrictSemver } from "./npm-registry.js";
 
 export type UpgradeStatus =
   | "current"   // installed version equals registry latest
@@ -137,13 +138,18 @@ export function formatUpgradeStatusLine(line: UpgradeStatusLine): string {
 }
 
 /**
- * Compare two pin/version strings with strict semver, or null when either side
+ * Compare two pin/version strings with STRICT semver, or null when either side
  * is absent or not strict semver (a comparison we cannot make). Pure — the ONE
  * place ordering is derived from.
+ *
+ * Strictness is `isStrictSemver` (the one definition, flair#1692): `semver.valid`
+ * alone NORMALISES a leading "v" (`semver.valid("v0.54.0") === "0.54.0"`), which
+ * would let a non-canonical pin compare as if it were canonical. The guard's
+ * contract must not depend on every caller normalising first (flair#1789 C1).
  */
 export function comparePinVersions(a: string | null | undefined, b: string | null | undefined): number | null {
   if (!a || !b) return null;
-  if (!semver.valid(a) || !semver.valid(b)) return null;
+  if (!isStrictSemver(a) || !isStrictSemver(b)) return null;
   return semver.compare(a, b);
 }
 
@@ -166,6 +172,11 @@ export function pinWriteWouldLowerOrIsUnknown(
   existing: string | null | undefined,
   next: string | null | undefined,
 ): boolean {
+  // CONTRACT (flair#1789 C2): an ABSENT `existing` is nothing to lower — return
+  // false (a first write, or an unpinned hook/client) even when `next` is
+  // unresolved, because an unresolved `next` yields an UNPINNED spec by design
+  // (mcpServerSpec falls back to the bare package). The guard only fails closed
+  // when a pin IS present.
   if (!existing) return false;
   const cmp = comparePinVersions(existing, next);
   if (cmp === null) return true; // cannot compare => fail closed
