@@ -230,7 +230,7 @@ describe("flair#1485 — failed MCP pin refresh is not silent", () => {
     expect(mcp?.status).toBe("fail");
     expect(mcp?.detail ?? "").toContain(STALE_VER);
     expect(mcp?.detail ?? "").toContain(INSTALLED);
-    expect(mcp?.remedy).toBe("flair upgrade");
+    expect(mcp?.remedy).toBe("flair doctor --fix");
     expect(run.healthy).toBe(false);
     expect(staleMcpClientPins(isoHome, INSTALLED).map((r) => r.pin)).toEqual([STALE_VER]);
     const lines = renderCatalogDoctorLines(run);
@@ -523,12 +523,12 @@ describe("flair#1789 — doctor classifies the MCP-block pin DIRECTION", () => {
     expect(row?.icon).toBe("warn");
   });
 
-  it("an MCP pin BEHIND the running CLI is still a blocking fail + flair upgrade", () => {
+  it("an MCP pin BEHIND the running CLI is still a blocking fail + flair doctor --fix", () => {
     writeClaudeMcp(isoHome, STALE_SPEC, "local");
     const run = doctorOn(isoHome, ["claude-code"]);
     const mcp = run.results.find((r) => r.id === "mcp-block");
     expect(mcp?.status).toBe("fail");
-    expect(mcp?.remedy).toBe("flair upgrade");
+    expect(mcp?.remedy).toBe("flair doctor --fix");
     expect(mcpBlocking(isoHome)).toBe(true);
   });
 });

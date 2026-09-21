@@ -11,7 +11,7 @@ import { COMPONENT_ENV_FILENAME, PUBLIC_URL_KEY, describePublicUrlFinding, readE
 import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, describeAgentGateFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
 import { FleetPresenceRow, markStale, sortOldestVersionFirst } from "../fleet-presence.js";
 import { hookSettingsPath, resolveHookAgentId } from "../hook-install.js";
-import { detectClients, wireAntigravity, wireClaudeCode, wireCodex, wireCursor, wireGemini } from "../install/clients.js";
+import { detectClients, type ClientId, wireAntigravity, wireClaudeCode, wireCodex, wireCursor, wireGemini } from "../install/clients.js";
 import { checkGlobalBinOnPath, resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
 import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, resolveAdminUser, resolveKeyPath, resolveLocalAdminPass } from "../lib/auth-resolve.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
@@ -21,8 +21,8 @@ import { DOCTOR_CHECK_IDS, catalogIssueDelta, renderCatalogDoctorLines, runDocto
 import { describeEmbedGpuDoctorFinding } from "../lib/embed-gpu-doctor.js";
 import { adminPassDesyncFinding, detectPersistedAdminUser } from "../lib/init-admin-pass.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
-import { flairCliVersion, unpinnedSpecWarning } from "../lib/mcp-spec.js";
-import { repinSessionStartHookGuarded, sessionStartHookPinFindings } from "../lib/owned-pins.js";
+import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
+import { mcpClientPinFindings, refreshOwnedPins, repinSessionStartHookGuarded, sessionStartHookPinFindings } from "../lib/owned-pins.js";
 import * as render from "../render.js";
 import { checkVersion, formatVersionNudge, probeInstanceVersion, FLAIR_PKG_NAME } from "../version-check.js";
 import { resolveRegistryNotice } from "../lib/npm-registry.js";
@@ -1006,6 +1006,41 @@ program
           // rather than echoing a detail that may claim the opposite.
           const finding = describeAgentGateFinding(block.agentId!, reg.state, reg.detail, { instanceReachable: reachable });
           console.log(`     ${render.icons.warn} ${finding?.message ?? `could not verify agent registration (${reg.detail})`}`);
+        }
+      }
+
+      // flair#1779: `doctor --fix` re-pins a BEHIND MCP-client block the same
+      // way it re-pins a behind SessionStart hook. It routes through the ONE
+      // guarded writer the upgrade refresh uses (refreshOwnedPins), restricted
+      // to the behind wired clients and preserving each block's OWN agent id
+      // and FLAIR_URL. ahead/unknown are HELD (already a pass/warn), so only
+      // `behind` is written; the catalog delta below counts the fix.
+      if (autoFix) {
+        const behindMcp = mcpClientPinFindings(homedir(), flairCliVersion())
+          .filter((f) => f.direction === "behind")
+          .filter((f) => readClientMcpBlock(f.reading.target.id as ClientId, homedir()).present);
+        if (behindMcp.length > 0) {
+          if (dryRun) {
+            for (const f of behindMcp) {
+              console.log(`     ${render.wrap(render.c.dim, "Would re-pin the MCP server block in")} ${f.reading.target.path}`);
+            }
+          } else {
+            const overrides = behindMcp.map((f) => {
+              const id = f.reading.target.id as ClientId;
+              const block = readClientMcpBlock(id, homedir());
+              return { kind: "mcp-client" as const, id, agentId: block.agentId ?? null, flairUrl: effectiveFlairUrl(block).url };
+            });
+            const results = refreshOwnedPins({ homeDir: homedir(), targets: overrides });
+            for (const r of results) {
+              if (r.target.kind !== "mcp-client") continue;
+              if (r.action === "update") {
+                const old = behindMcp.find((f) => f.reading.target.id === r.target.id)?.reading.pin;
+                console.log(`     ${render.icons.ok} re-pinned the MCP server block in ${render.wrap(render.c.dim, r.target.path)} (${FLAIR_MCP_PACKAGE}@${old} -> ${mcpServerSpec()})`);
+              } else {
+                console.log(`     ${r.ok ? render.icons.ok : render.icons.warn} ${r.message}`);
+              }
+            }
+          }
         }
       }
 

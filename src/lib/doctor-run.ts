@@ -173,7 +173,10 @@ function runMcpBlock(ctx: DoctorRunContext): DoctorCheckResult {
       .filter((f) => wired.includes(f.reading.target.id as (typeof MCP_CLIENT_IDS)[number]));
     if (findings.length > 0) {
       // flair#1789: the same three-valued treatment the SessionStart hook gets.
-      //   behind  -> stale, blocking: today's error + `flair upgrade`.
+      //   behind  -> stale, blocking: today's error + `flair doctor --fix`,
+      //              which now re-pins a behind MCP block (flair#1779). It used
+      //              to say `flair upgrade`, which in this state says
+      //              up-to-date and acts on nothing.
       //   ahead   -> a held PASS: the refresh HOLDS an ahead pin (re-pinning
       //              would LOWER it), so a failure here would be a dead-end
       //              remedy that cannot act.
@@ -191,7 +194,7 @@ function runMcpBlock(ctx: DoctorRunContext): DoctorCheckResult {
           : `MCP server: stale pins ${readings.map((r) => `${r.target.id}@${r.pin}`).join(", ")} (installed CLI is ${expected})`;
         return result(id, label, "fail", {
           detail,
-          remedy: "flair upgrade",
+          remedy: "flair doctor --fix",
         });
       }
       if (unknownFindings.length > 0) {

@@ -69,6 +69,16 @@ export interface RefreshOwnedPinsOptions {
   /** Required to refresh MCP client pins. Hook re-pin reads the agent from the hook. */
   agentId?: string | null;
   flairUrl?: string;
+  /**
+   * Restrict the refresh to specific targets, each carrying the agent id / URL
+   * to wire (flair#1779). When set, ONLY these targets are visited.
+   *
+   * `flair doctor --fix` uses this to re-pin a behind MCP-client block through
+   * the SAME guarded writer the upgrade refresh uses — and to preserve each
+   * block's OWN agent id and FLAIR_URL rather than upgrade's single resolved
+   * identity. Upgrading the one function beats a second writer.
+   */
+  targets?: ReadonlyArray<{ kind: OwnedPinKind; id: string; agentId?: string | null; flairUrl?: string }>;
 }
 
 function withHome<T>(homeDir: string, fn: () => T): T {
@@ -411,9 +421,16 @@ export function refreshOwnedPins(opts: RefreshOwnedPinsOptions): OwnedPinRefresh
   const agentId = opts.agentId ?? null;
   const targets = listOwnedPinTargets(homeDir);
   const results: OwnedPinRefreshResult[] = [];
+  // flair#1779: an optional restriction to specific targets (kind + id), each
+  // with the agent id / URL to wire. ONLY restricted targets are visited.
+  const restricted = opts.targets
+    ? new Map(opts.targets.map((t) => [`${t.kind}:${t.id}`, t]))
+    : null;
 
   return withHome(homeDir, () => {
     for (const target of targets) {
+      const override = restricted ? restricted.get(`${target.kind}:${target.id}`) : undefined;
+      if (restricted && !override) continue;
       if (target.kind === "session-start-hook") {
         // flair#1778 D4: never re-pin a hook DOWN. The guard lives in ONE place
         // (repinSessionStartHookGuarded) so `flair doctor --fix` shares it
@@ -432,7 +449,8 @@ export function refreshOwnedPins(opts: RefreshOwnedPinsOptions): OwnedPinRefresh
         });
         continue;
       }
-      if (!agentId) {
+      const clientAgentId = override?.agentId ?? agentId;
+      if (!clientAgentId) {
         results.push({
           target,
           action: "skip",
@@ -452,8 +470,8 @@ export function refreshOwnedPins(opts: RefreshOwnedPinsOptions): OwnedPinRefresh
         continue;
       }
       const env: WireEnv = {
-        FLAIR_AGENT_ID: agentId,
-        FLAIR_URL: flairUrl,
+        FLAIR_AGENT_ID: clientAgentId,
+        FLAIR_URL: override?.flairUrl ?? flairUrl,
         FLAIR_CLIENT: target.id,
       };
       const before = extractFlairMcpPin(readFileText(target.path) ?? "");
