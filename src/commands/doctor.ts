@@ -160,6 +160,35 @@ export function summarizeDoctorRun(
   };
 }
 
+/**
+ * flair#1761 — the single place a Health-derived Metal finding becomes doctor
+ * output and exit-code weight. Extracted from the action callback so the
+ * detected-vs-env-vs-unrecognized severity is exercised on the real
+ * rendering/counting path (the action's Harper probe, console side effects
+ * and process.exit cannot be driven directly — see doctor-summary.test.ts for
+ * the same extraction convention).
+ *
+ * The finding carries its own icon and issue weight: a derived ("detected")
+ * Metal default is rendered as a persistent warning and does NOT increment
+ * the issue count, while an explicit request or an unrecognized source is a
+ * blocking `✗` that does. `lines` is returned for tests; production passes a
+ * writer (default: console.log).
+ */
+export function renderEmbedGpuDoctorFinding(
+  embedding: unknown,
+  write: (line: string) => void = (line) => console.log(line),
+): { lines: string[]; issueDelta: number } {
+  const finding = describeEmbedGpuDoctorFinding(embedding);
+  if (!finding) return { lines: [], issueDelta: 0 };
+  const icon = finding.icon === "warn" ? render.icons.warn : render.icons.error;
+  const lines = [
+    `  ${icon} ${finding.message}`,
+    `     ${render.wrap(render.c.dim, "Fix:")} ${finding.fixHint}`,
+  ];
+  for (const line of lines) write(line);
+  return { lines, issueDelta: finding.isIssue ? 1 : 0 };
+}
+
 // ─── flair doctor ─────────────────────────────────────────────────────────────
 
 
@@ -468,14 +497,12 @@ program
         console.log(`  ${render.icons.warn} Could not determine the running server's version`);
       }
 
-      // flair#1437: fail-loud Metal fallback. Health states it; operators
-      // read doctor. A stated CPU default is silent here.
-      const embedGpuFinding = describeEmbedGpuDoctorFinding(embedGpuFromHealth);
-      if (embedGpuFinding) {
-        console.log(`  ${render.icons.error} ${embedGpuFinding.message}`);
-        console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${embedGpuFinding.fixHint}`);
-        issues++;
-      }
+      // flair#1437 (severity split flair#1761): Health states an unconfirmed
+      // Metal offload; operators read doctor. The finding carries its own
+      // severity — a derived ("detected") default is an advisory warning that
+      // does NOT fail the run, while an explicit request or an unrecognized
+      // source still fails closed. A stated CPU default is silent here.
+      issues += renderEmbedGpuDoctorFinding(embedGpuFromHealth).issueDelta;
     }
 
     // 2. Keys directory
