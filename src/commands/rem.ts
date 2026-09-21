@@ -24,6 +24,8 @@ import {
   decideCandidateAction,
   derivePromotedTags,
   validateHumanReviewerId,
+  structuralImbalance,
+  hasTerminalPunctuation,
   type SourceMemoryFetch,
 } from "../rem/promote-policy.js";
 
@@ -124,6 +126,25 @@ export function formatCandidateLine(candidate: { id?: string; claim?: string }, 
   const claim = candidate.claim ?? "";
   const truncated = claim.length > maxClaimLen ? `${claim.slice(0, maxClaimLen)}…` : claim;
   return `  [${candidate.id ?? "?"}] ${truncated}`;
+}
+
+/**
+ * Flag a probable truncated claim for the HUMAN reviewer (flair#1756 slice 2,
+ * issue suggestion 3). Returns null when nothing is off; otherwise a short
+ * descriptor. This is advisory ONLY — the refusal for structural imbalance
+ * lives server-side in decideAutoPromote (the unattended path); a human
+ * promote is a legitimate place to look at a fragment and decide.
+ *
+ * Reports STRUCTURAL imbalance (unbalanced backtick/paren/bracket/brace) and, as
+ * a weaker signal, missing terminal punctuation. Neither claims the text is
+ * incomplete — a balanced claim can still be a fragment.
+ */
+export function candidateIncompleteFlag(claim: string | undefined): string | null {
+  const text = claim ?? "";
+  const imbalance = structuralImbalance(text);
+  if (imbalance !== null) return `structurally incomplete (${imbalance}); the unattended auto-promote path refuses this`;
+  if (!hasTerminalPunctuation(text)) return "no terminal punctuation — possible fragment";
+  return null;
 }
 
 /**
@@ -484,7 +505,8 @@ export function register(program: Command): void {
         const mode = render.resolveOutputMode(opts);
 
         if (mode === "json") {
-          console.log(render.asJSON({ agentId, status, count: candidates.length, candidates }));
+          const annotated = candidates.map((c: any) => ({ ...c, incompleteFlag: candidateIncompleteFlag(c.claim) }));
+          console.log(render.asJSON({ agentId, status, count: candidates.length, candidates: annotated }));
           return;
         }
 
@@ -517,6 +539,10 @@ export function register(program: Command): void {
           }
           console.log(`  ${render.wrap(render.c.dim, c.id)}  ${tag}`);
           console.log(`    ${c.claim}`);
+          const incompleteFlag = candidateIncompleteFlag(c.claim);
+          if (incompleteFlag) {
+            console.log(`    ${render.wrap(render.c.yellow, "⚠ possible incomplete claim")} ${render.wrap(render.c.dim, `— ${incompleteFlag}`)}`);
+          }
           if (c.supersedes) {
             console.log(`    ${render.wrap(render.c.dim, `(supersedes ${c.supersedes} — recurring proposal)`)}`);
           }

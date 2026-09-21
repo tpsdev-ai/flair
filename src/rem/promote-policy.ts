@@ -234,3 +234,41 @@ export function validateHumanReviewerId(reviewerId: string): string | null {
   return null;
 }
 
+// ─── Structural-truncation signal (flair#1756 slice 2) — CLI mirror ──────────
+// The GATE for structural truncation lives server-side in
+// resources/auto-promote-lib.ts (structuralImbalance, used by decideAutoPromote
+// — the UNATTENDED path). This is a MIRROR of that pure signal, present only so
+// `flair rem candidates` (src/commands/rem.ts) can FLAG a probable fragment for
+// the human reviewer instead of it sitting indistinguishable from the good ones
+// (issue #1756, suggestion 3). The two files sit on opposite sides of the
+// npm-packaging boundary (src/ ships as the CLI bundle, resources/ as the Harper
+// component) and cannot import one another — kept in sync by the shared
+// canonical logic, same discipline as MACHINE_REVIEWER_* above. Divergence is
+// guarded by a test that runs both copies over the same inputs.
+//
+// Detects STRUCTURAL imbalance (unclosed/unmatched backtick, paren, bracket,
+// brace) — NOT semantic completeness. A balanced claim can still be a fragment.
+
+const STRUCTURAL_CLOSERS: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
+
+/** Mirror of resources/auto-promote-lib.ts structuralImbalance. Pure. */
+export function structuralImbalance(claim: string): string | null {
+  const stack: string[] = [];
+  for (const ch of claim) {
+    if (ch === "(" || ch === "[" || ch === "{") {
+      stack.push(ch);
+    } else if (ch in STRUCTURAL_CLOSERS) {
+      if (stack.pop() !== STRUCTURAL_CLOSERS[ch]) return `unmatched '${ch}'`;
+    }
+  }
+  if (stack.length > 0) return `unclosed '${stack[stack.length - 1]}'`;
+  if (((claim.match(/`/g) ?? []).length) % 2 !== 0) return "unbalanced backtick";
+  return null;
+}
+
+/** Mirror of resources/auto-promote-lib.ts hasTerminalPunctuation. Pure. Flag
+ *  input only — never a refusal. */
+export function hasTerminalPunctuation(claim: string): boolean {
+  return /[.!?]["')\]}»”’]*$/.test(claim.trimEnd());
+}
+

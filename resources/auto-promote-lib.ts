@@ -84,6 +84,7 @@ export type AutoPromoteSkipReason =
   | "not_pending"          // already promoted/rejected (idempotency)
   | "no_adk_scope_tag"     // Req 2: absent/empty/non-adk stamped scopeTag → fail closed
   | "empty_claim"          // nothing to promote
+  | "incomplete_claim"     // slice 2: structurally truncated (unbalanced delimiters) → fail closed
   | `content_safety:${string}`; // Req 3: claim flagged by scanFields (flags appended)
 
 export type AutoPromoteDecision =
@@ -95,6 +96,61 @@ export interface AutoPromoteCandidateInput {
   status?: string;
   claim?: string;
   scopeTag?: string | null;
+}
+
+// ─── Structural-truncation signal (flair#1756 slice 2) ───────────────────────
+//
+// Slice 1 handled a generation the backend LABELLED incomplete (finishReason
+// `length` / `content_filter`). This handles the harder case from the issue
+// body: the backend reports `stop`, the JSON parses, the shape validates, and
+// the claim is still a fragment because a nested UNESCAPED quote terminated the
+// JSON string early — the intent `new Function("import(...)")` arriving as
+// `...via ` + "`new Function("`.
+//
+// Such a fragment is not harmless. It reads as plausible, authoritative and
+// INCOMPLETE, and once promoted it becomes durable recalled context asserting
+// something it never finished saying. Shape validation cannot see it: a
+// truncated string is a perfectly valid string in a perfectly valid object.
+//
+// WHAT THIS DETECTS: STRUCTURAL imbalance — an unclosed/unmatched backtick,
+// paren, bracket or brace. It does NOT detect semantic completeness. A balanced
+// claim can still be a fragment, and a refusal here proves only that the text is
+// structurally lopsided — never that a promoted claim is complete. Do not
+// describe it otherwise anywhere (comment, changelog, skip reason) — we amended
+// the 0.55.0 Metal entry for exactly this overclaim shape.
+
+const STRUCTURAL_CLOSERS: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
+
+/**
+ * Return a description of the STRUCTURAL imbalance in `claim` (an unmatched or
+ * closing-first bracket, an unclosed opener, or an odd number of backticks), or
+ * null if it is balanced. Pure. The description is for diagnostics only — it is
+ * NOT surfaced as a claim about completeness.
+ */
+export function structuralImbalance(claim: string): string | null {
+  const stack: string[] = [];
+  for (const ch of claim) {
+    if (ch === "(" || ch === "[" || ch === "{") {
+      stack.push(ch);
+    } else if (ch in STRUCTURAL_CLOSERS) {
+      if (stack.pop() !== STRUCTURAL_CLOSERS[ch]) return `unmatched '${ch}'`;
+    }
+  }
+  if (stack.length > 0) return `unclosed '${stack[stack.length - 1]}'`;
+  // Backticks are symmetric (inline-code / fence delimiters), so their signal is
+  // parity: an odd count is an unclosed code span.
+  if (((claim.match(/`/g) ?? []).length) % 2 !== 0) return "unbalanced backtick";
+  return null;
+}
+
+/**
+ * True iff `claim` ends with terminal punctuation (optionally followed by a
+ * closing quote/bracket). This is a FLAG INPUT ONLY, never a refusal: plenty of
+ * legitimate claims end without a full stop, and on the UNATTENDED path a false
+ * refusal is silent. `flair rem candidates` surfaces it for the human reviewer.
+ */
+export function hasTerminalPunctuation(claim: string): boolean {
+  return /[.!?]["')\]}»”’]*$/.test(claim.trimEnd());
 }
 
 /**
@@ -138,6 +194,17 @@ export function decideAutoPromote(candidate: AutoPromoteCandidateInput): AutoPro
   const safety = scanFields({ content: claim }, ["content"]);
   if (!safety.safe) {
     return { promote: false, reason: `content_safety:${safety.flags.join(",")}` };
+  }
+
+  // ── Structural truncation (flair#1756 slice 2) — APPENDED, so none of the
+  // refusals above is masked: each still fires in its own right when its own
+  // condition holds. An unbalanced delimiter set is evidence of the observed
+  // defect (a claim cut off at `new Function(` by an unescaped inner quote), so
+  // it is REFUSED: the unattended path must never persist a fragment. Missing
+  // terminal punctuation is deliberately NOT checked here — it is a FLAG, not a
+  // refusal (see hasTerminalPunctuation).
+  if (structuralImbalance(claim) !== null) {
+    return { promote: false, reason: "incomplete_claim" };
   }
 
   return {
