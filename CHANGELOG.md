@@ -18,6 +18,66 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.55.1] - 2026-09-21
+
+### Fixed
+
+- **Deployment docs now name the HTTP bind keys Flair reads instead of the ignored `http.host`.**
+
+  `docs/deployment.md` and `docs/standalone-local.md` documented widening the
+  HTTP listener with a nested `http.host:` key that nothing in the tree reads.
+  They now name what is actually consulted — `flair init --http-bind <host>`,
+  the `FLAIR_HTTP_BIND` environment variable, and a top-level `httpBind:` key
+  in `~/.flair/config.yaml`, in that precedence, defaulting to `127.0.0.1` —
+  and state that only hosts including IPv4 loopback (`127.0.0.1` or a
+  wildcard) are accepted, because Flair's credentialed self-calls are
+  hardcoded to `127.0.0.1`. The old snippet is kept and labelled as ignored,
+  so an operator who used `http.host` can find the migration. (Refs #1760)
+
+  > **Heads-up:** `http.host` is not read and is now documented as such. An
+  > install that was only wide because the default before 0.55.0 bound every
+  > interface narrows to `127.0.0.1` on the next `flair restart` or
+  > `flair upgrade`. Set `httpBind:` (or `--http-bind` / `FLAIR_HTTP_BIND`) to
+  > keep the HTTP listener reachable.
+
+- **The Metal-default doctor finding is an advisory warning, not a blocking error.**
+
+  `flair doctor` now reads `source` off the Health embedding field. A derived
+  (`detected`) Metal default — the operator never chose GPU offload — renders a
+  persistent `⚠` and no longer fails the run, while an explicit
+  `FLAIR_EMBED_GPU_LAYERS` request (`env`) or an unrecognized/missing source
+  stays a blocking `✗` (fail closed). The detected wording is now "Automatic
+  Metal acceleration was requested, but engagement could not be verified.":
+  the old sentence was a log heuristic, so it can no longer claim the GPU did
+  not engage. Genuine semantic failure stays blocking. (Refs #1761)
+
+  > **Heads-up:** on a darwin-arm64 host that never set
+  > `FLAIR_EMBED_GPU_LAYERS`, the derived Metal default now shows a persistent
+  > warning instead of failing `flair doctor`. Set the variable explicitly if
+  > you want an unconfirmed offload to remain a loud, blocking error.
+
+- **`flair upgrade` now finds a systemd unit that names the tree through a symlinked path.**
+
+  Discovery canonicalizes the tree (`readFlairPackageAt` → `canonicalPath`)
+  before matching, but the unit on disk holds whatever path the operator wrote,
+  so any symlink in that path meant no unit was found and the upgrade restarted
+  the instance **outside** systemd — silently losing systemd supervision
+  (`systemctl status` no longer describing the running process). Discovery now
+  extracts the ACTIVE `[Service]` `WorkingDirectory` and `ExecStart` path
+  operands and compares canonical-to-canonical, resolving a symlinked operand
+  via its deepest existing ancestor (a `WorkingDirectory` must equal the tree;
+  an `ExecStart` operand must be inside it, on path-component boundaries).
+
+  The same rewrite removes the matching side's **false positives**: a canonical
+  path inside a comment, or an unrelated pathname that merely *contains* the
+  tree path, no longer selects a unit. Comments and inactive directives are
+  ignored; quoted/escaped operands are tokenized with systemd's rules rather
+  than split on whitespace; operands carrying a `%`-specifier or `$` variable
+  are not treated as host paths. `RootDirectory`/`RootImage`/bind mounts mean
+  host realpath is not universal proof of service identity, so automatic
+  matching stays scoped to host-path semantics and `FLAIR_SYSTEMD_UNIT` remains
+  the escape hatch. (Refs #1758)
+
 ## [0.55.0] - 2026-09-20
 
 ### Added
