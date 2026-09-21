@@ -12,7 +12,8 @@ import {
   formatUpgradeStatusLine,
   upgradeStatusSuffix,
   shouldPrintUpgradeLine,
-  isPinDowngrade,
+  comparePinVersions,
+  pinWriteWouldLowerOrIsUnknown,
 } from "../../src/lib/upgrade-status.ts";
 import { resolveFlairMcpFinding } from "../../src/cli.ts";
 
@@ -100,16 +101,32 @@ describe("resolveFlairMcpFinding produces 'ahead' (flair#1778)", () => {
   });
 });
 
-describe("isPinDowngrade — the never-lower guard (flair#1778 D4)", () => {
-  test("true only when next < existing", () => {
-    expect(isPinDowngrade("0.55.0", "0.54.2")).toBe(true);
-    expect(isPinDowngrade("0.54.2", "0.55.0")).toBe(false);
-    expect(isPinDowngrade("0.55.0", "0.55.0")).toBe(false);
+describe("pinWriteWouldLowerOrIsUnknown — the never-lower guard, FAIL CLOSED (flair#1778)", () => {
+  test("true when the write would LOWER the pin (next < existing)", () => {
+    expect(pinWriteWouldLowerOrIsUnknown("0.55.0", "0.54.2")).toBe(true);
+    expect(pinWriteWouldLowerOrIsUnknown("0.54.2", "0.55.0")).toBe(false);
+    expect(pinWriteWouldLowerOrIsUnknown("0.55.0", "0.55.0")).toBe(false);
   });
-  test("false when either side is absent or not semver (cannot prove a drop)", () => {
-    expect(isPinDowngrade("n/a", "0.54.2")).toBe(false);
-    expect(isPinDowngrade(null, "0.54.2")).toBe(false);
-    expect(isPinDowngrade("0.55.0", null)).toBe(false);
-    expect(isPinDowngrade(undefined, undefined)).toBe(false);
+  test("true for EVERY unreadable-side case (cannot compare => fail closed)", () => {
+    expect(pinWriteWouldLowerOrIsUnknown("0.55.1.rc", "0.55.1")).toBe(true); // invalid existing
+    expect(pinWriteWouldLowerOrIsUnknown("0.55.1", "0.55.1.rc")).toBe(true); // invalid next
+    expect(pinWriteWouldLowerOrIsUnknown("not-a-version", "garbage")).toBe(true); // both invalid
+    expect(pinWriteWouldLowerOrIsUnknown("0.55.0", null)).toBe(true); // next absent
+  });
+  test("false only when the write is provably not a lowering AND a pin is present", () => {
+    expect(pinWriteWouldLowerOrIsUnknown(null, "0.54.2")).toBe(false); // no pin to lower
+    expect(pinWriteWouldLowerOrIsUnknown(undefined, undefined)).toBe(false);
+  });
+});
+
+describe("comparePinVersions — the ONE pure comparison", () => {
+  test("orders strict semver, null when either side cannot be compared", () => {
+    expect(comparePinVersions("0.55.0", "0.54.2")).toBeGreaterThan(0);
+    expect(comparePinVersions("0.54.2", "0.55.0")).toBeLessThan(0);
+    expect(comparePinVersions("0.55.0", "0.55.0")).toBe(0);
+    expect(comparePinVersions("0.55.1.rc", "0.55.1")).toBeNull();
+    expect(comparePinVersions("0.55.1", "0.55.1.rc")).toBeNull();
+    expect(comparePinVersions("0.55.1.rc", "garbage")).toBeNull();
+    expect(comparePinVersions(null, "0.55.1")).toBeNull();
   });
 });

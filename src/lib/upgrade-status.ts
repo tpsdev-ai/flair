@@ -137,16 +137,37 @@ export function formatUpgradeStatusLine(line: UpgradeStatusLine): string {
 }
 
 /**
- * True when writing `next` over `existing` would LOWER the value (a downgrade).
- * False when either side is absent or not strict semver — a comparison we
- * cannot make is not a downgrade, so a pin is only ever held on a proven drop.
- *
- * Used by the post-install pin refresh (flair#1778 D4): the refresh must never
- * rewrite an owned pin to a LOWER version, even when an unrelated package did
- * upgrade.
+ * Compare two pin/version strings with strict semver, or null when either side
+ * is absent or not strict semver (a comparison we cannot make). Pure — the ONE
+ * place ordering is derived from.
  */
-export function isPinDowngrade(existing: string | null | undefined, next: string | null | undefined): boolean {
-  if (!existing || !next) return false;
-  if (!semver.valid(existing) || !semver.valid(next)) return false;
-  return semver.lt(next, existing);
+export function comparePinVersions(a: string | null | undefined, b: string | null | undefined): number | null {
+  if (!a || !b) return null;
+  if (!semver.valid(a) || !semver.valid(b)) return null;
+  return semver.compare(a, b);
+}
+
+/**
+ * The never-lower guard's decision: would writing `next` over `existing` be
+ * UNSAFE? TRUE when the write would LOWER the pin (`next < existing`) OR when
+ * either side is not strict semver — an unreadable pin cannot be PROVEN safe,
+ * so the guard holds. FAILS CLOSED: a pin is rewritten only when the write is
+ * provably not a lowering.
+ *
+ * Named for what it decides, deliberately NOT a boolean called "downgrade":
+ * one that returned false for "cannot tell" is exactly the hole this closes
+ * (flair#1778). `null`/absent `existing` is not a lowering — there is no pin to
+ * lower, so an unpinned hook/client is still (re)written.
+ *
+ * Used by the pin refresh (flair#1778 D4): the refresh must never rewrite an
+ * owned pin to a lower version — or to anything at all it cannot read.
+ */
+export function pinWriteWouldLowerOrIsUnknown(
+  existing: string | null | undefined,
+  next: string | null | undefined,
+): boolean {
+  if (!existing) return false;
+  const cmp = comparePinVersions(existing, next);
+  if (cmp === null) return true; // cannot compare => fail closed
+  return cmp > 0; // existing > next  <=>  writing next would LOWER the pin
 }

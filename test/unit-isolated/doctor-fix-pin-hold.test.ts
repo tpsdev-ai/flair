@@ -159,3 +159,38 @@ describe("flair#1778 Q1 — doctor classifies SessionStart-hook pin DIRECTION", 
     expect(after).not.toContain(`${FLAIR_MCP_PACKAGE}@${BEHIND}`);
   });
 });
+
+const UNPARSEABLE = "0.55.1.rc";
+
+describe("flair#1778 — doctor reports an UNPARSEABLE pin separately (not as stale)", () => {
+  test("UNKNOWN: a warn line (no ✗) and --fix leaves the hook byte-identical", async () => {
+    const home = makeHome(UNPARSEABLE);
+    const before = readFileSync(hookPath(home), "utf-8");
+    const deadPort = await freePort();
+
+    const plain = await runDoctor(home, deadPort);
+    expect(plain.out).toContain(`SessionStart hook: pin is not a version I can compare: ${UNPARSEABLE} — not re-pinned`);
+    expect(plain.out).not.toContain("✗ SessionStart hook");
+    expect(plain.out).not.toContain("the hook still launches the OLD adapter");
+
+    const fix = await runDoctor(home, deadPort, ["--fix"]);
+    expect(readFileSync(hookPath(home), "utf-8")).toBe(before);
+    expect(fix.out).toContain(`pin is not a version I can compare: ${UNPARSEABLE}`);
+    expect(fix.out).not.toContain(`re-pinned the SessionStart hook in ${hookPath(home)}`);
+  });
+
+  test("UNKNOWN: the unreadable pin adds ZERO blocking issues (parity with a current pin)", async () => {
+    const deadPort = await freePort();
+    const unknownHome = makeHome(UNPARSEABLE);
+    const currentHome = makeHome(INSTALLED);
+
+    const unknown = await runDoctor(unknownHome, deadPort);
+    const current = await runDoctor(currentHome, deadPort);
+
+    expect(current.out).not.toContain("✗ SessionStart hook");
+    expect(unknown.out).not.toContain("✗ SessionStart hook");
+    expect(issueCount(unknown.out)).toBe(issueCount(current.out));
+    expect(issueCount(unknown.out)).toBeGreaterThanOrEqual(0);
+    expect(unknown.status).toBe(current.status);
+  });
+});

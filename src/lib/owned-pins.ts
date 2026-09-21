@@ -38,7 +38,7 @@ import {
   type Harness,
 } from "../hook-install.js";
 import { flairCliVersion, isResolvedVersion } from "./mcp-spec.js";
-import { isPinDowngrade } from "./upgrade-status.js";
+import { comparePinVersions, pinWriteWouldLowerOrIsUnknown } from "./upgrade-status.js";
 
 export type OwnedPinKind = "mcp-client" | "session-start-hook";
 
@@ -274,17 +274,19 @@ export type PinDirection = "ahead" | "behind" | "unknown";
 
 /**
  * Direction of an owned pin relative to `target` (the version a refresh would
- * write — the running CLI's). Uses the ONE comparison #1786 introduced
- * (`isPinDowngrade`) so no call site re-derives the ordering itself.
+ * write — the running CLI's). Uses the ONE comparison (`comparePinVersions`) so
+ * no call site re-derives the ordering itself.
  *
  *   pin > target           -> "ahead"   (writing target over it would LOWER it)
  *   pin < target           -> "behind"
  *   equal / not comparable -> "unknown"
  */
 export function pinDirection(pin: string | null | undefined, target: string | null | undefined): PinDirection {
-  if (isPinDowngrade(pin, target)) return "ahead";
-  if (isPinDowngrade(target, pin)) return "behind";
-  return "unknown";
+  const cmp = comparePinVersions(pin, target);
+  if (cmp === null) return "unknown";
+  if (cmp > 0) return "ahead";
+  if (cmp < 0) return "behind";
+  return "unknown"; // equal — not stale, but not a direction either
 }
 
 export interface SessionStartHookPinFinding {
@@ -309,11 +311,16 @@ export function sessionStartHookPinFindings(
 }
 
 /**
- * The ONE hold line a refresh prints when it refuses to lower an owned pin.
+ * The ONE hold line a refresh prints when it refuses to rewrite an owned pin.
  * Phrased neutrally ("a pin is never lowered") because both `flair upgrade`'s
- * refresh and `flair doctor --fix` print it — no per-caller copy.
+ * refresh and `flair doctor --fix` print it — no per-caller copy. An
+ * unreadable pin names the reason it is held (flair#1778): a pin we cannot
+ * compare is never lowered either.
  */
 function heldPinMessage(id: string, pin: string, runningCli: string): string {
+  if (comparePinVersions(pin, runningCli) === null) {
+    return `${id}: keeping pinned ${pin} (the pin is not a version I can compare to running CLI ${runningCli} — a pin is never lowered)`;
+  }
   return `${id}: keeping pinned ${pin} (running CLI ${runningCli} is older — a pin is never lowered)`;
 }
 
@@ -322,9 +329,11 @@ function heldPinMessage(id: string, pin: string, runningCli: string): string {
  * `flair upgrade`'s pin refresh and `flair doctor --fix`.
  *
  * Rebuilds an already-wired hook to the running CLI's version, but never
- * LOWERS an owned pin: when the running CLI is older than the pin present
- * (`isPinDowngrade`), it HOLDS — `action: "hold"`, with a line naming both
- * versions — instead of rewriting. There is no second copy of this decision:
+ * LOWERS an owned pin: when the running CLI is older than the pin present, OR
+ * when the pin cannot be compared (not strict semver), it HOLDS — `action:
+ * "hold"`, with a line naming both versions — instead of rewriting. The guard
+ * FAILS CLOSED on an unreadable pin (`pinWriteWouldLowerOrIsUnknown`). There is
+ * no second copy of this decision:
  * `flair doctor --fix`'s stale-hook repair routes through here too, so a
  * `doctor --fix` on an ahead pin holds exactly as the upgrade refresh does
  * (flair#1778 slice-1 follow-up, N4).
@@ -347,7 +356,7 @@ export function repinSessionStartHookGuarded(
   };
   const wouldWrite = flairCliVersion();
   const existing = readOwnedPin(resolved, homeDir).pin;
-  if (isPinDowngrade(existing, wouldWrite)) {
+  if (pinWriteWouldLowerOrIsUnknown(existing, wouldWrite)) {
     return {
       target: resolved,
       action: "hold",
@@ -427,9 +436,9 @@ export function refreshOwnedPins(opts: RefreshOwnedPinsOptions): OwnedPinRefresh
       };
       const before = extractFlairMcpPin(readFileText(target.path) ?? "");
       // flair#1778 D4: the wire writes the running CLI's version; never let the
-      // refresh LOWER a pin that is ahead.
+      // refresh LOWER a pin that is ahead — or rewrite a pin it cannot read.
       const wouldWritePin = flairCliVersion();
-      if (isPinDowngrade(before, wouldWritePin)) {
+      if (pinWriteWouldLowerOrIsUnknown(before, wouldWritePin)) {
         results.push({
           target,
           action: "hold",

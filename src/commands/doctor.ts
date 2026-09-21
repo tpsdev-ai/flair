@@ -1066,7 +1066,12 @@ program
           // ✓ "still runs". Check freshness first so a stale pin cannot
           // hide behind the execution probe. Catalog owns the issue count.
           const claudeStale = sessionStartHookPinFindings(homedir()).find((f) => f.reading.target.id === "claude-code");
-          if (claudeStale && claudeStale.direction === "ahead") {
+          if (claudeStale && claudeStale.direction === "unknown") {
+            // flair#1778: a pin we cannot compare is its OWN finding — a warn,
+            // never the stale "old adapter" error, and NOT re-pinned (the
+            // refresh holds an unreadable pin). Needs no --fix.
+            console.log(`  ${render.icons.warn} SessionStart hook: pin is not a version I can compare: ${claudeStale.reading.pin} — not re-pinned; re-run flair init or edit the hook if this is unintended`);
+          } else if (claudeStale && claudeStale.direction === "ahead") {
             // flair#1778 follow-up: a pin AHEAD of the running CLI is not stale
             // — re-pinning would LOWER it and the refresh HOLDS it. Report a
             // held pass: no ✗, no issue count (the catalog agrees), no --fix.
@@ -1225,7 +1230,10 @@ program
         const hook = inspectSessionStartHook(homedir(), { settingsPath: hookSettingsPath(homedir(), "codex") });
         if (hook.present) {
           const codexStale = sessionStartHookPinFindings(homedir()).find((f) => f.reading.target.id === "codex");
-          if (codexStale && codexStale.direction === "ahead") {
+          if (codexStale && codexStale.direction === "unknown") {
+            // flair#1778: same direction rule as Claude Code above.
+            console.log(`  ${render.icons.warn} SessionStart hook (codex): pin is not a version I can compare: ${codexStale.reading.pin} — not re-pinned; re-run flair init or edit the hook if this is unintended`);
+          } else if (codexStale && codexStale.direction === "ahead") {
             // flair#1778 follow-up: same direction rule as Claude Code above.
             console.log(`  ${render.icons.ok} SessionStart hook (codex): pinned to flair-mcp@${codexStale.reading.pin}, ahead of the installed CLI ${flairCliVersion()} — held`);
           } else if (codexStale) {
