@@ -11,13 +11,16 @@
   actually outdated). When nothing needs installing, the summary reads
   "No upgrades available" rather than "Everything is up to date".
 
-  The post-install pin refresh also never LOWERS an owned pin: it compares the
-  version it would write against the pin present, and holds (with a printed
-  line naming both) when the write would be a downgrade — so an unrelated
-  package upgrading can no longer drag an ahead `flair-mcp` pin down. After a
-  no-op, post-upgrade verification expects the RUNNING version, not registry
-  `latest`. An installed version that fails to parse renders as `❔ unknown`
-  with the raw string, never as `outdated`, and is never dropped.
+  The pin refresh also never LOWERS an owned pin — in `flair upgrade`'s
+  post-install refresh AND in `flair doctor --fix` alike. Both route through
+  one guard that compares the version it would write against the pin present,
+  and holds (with a printed line naming both) when the write would be a
+  downgrade. So an unrelated package upgrading can no longer drag an ahead
+  `flair-mcp` pin down, and `doctor --fix` on an ahead SessionStart-hook pin no
+  longer lowers it either. After a no-op, post-upgrade verification expects the
+  RUNNING version, not registry `latest`. An installed version that fails to
+  parse renders as `❔ unknown` with the raw string, never as `outdated`, and
+  is never dropped.
 
   `--flair-version` is unchanged: an explicit pin is still the operator's
   requested target (its downgrade semantics are a later slice), so no

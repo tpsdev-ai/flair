@@ -120,4 +120,42 @@ describe("flair upgrade plain-tree wiring", () => {
     expect(text).toContain("@tpsdev-ai/flair: 0.36.0 → 0.40.0");
     expect(text).toContain("in-place tarball swap");
   });
+
+  test("flair#1778 N2: no plan is CONSTRUCTED when the tree install is AHEAD of latest", async () => {
+    const tree = realpathSync(mkdtempSync(join(tmpdir(), "flair-plain-tree-ahead-")));
+    fixtures.push(tree);
+    writePackedTree(tree, "0.55.0");
+
+    // Observe plan CONSTRUCTION, not the swap: --check never swaps, but the
+    // plan object is built iff planPlainTreeUpgrade() is called. Spy on the
+    // module namespace (upgrade.ts imports the same module instance, so its
+    // internal call goes through this property — verified).
+    const plainTree = await import("../../src/lib/upgrade-plain-tree.js");
+    const realPlan = plainTree.planPlainTreeUpgrade;
+    const planCalls: string[] = [];
+    const planSpy = spyOn(plainTree, "planPlainTreeUpgrade").mockImplementation(((input: any) => {
+      planCalls.push(input?.toVersion);
+      return realPlan(input);
+    }) as unknown as typeof plainTree.planPlainTreeUpgrade);
+
+    try {
+      const { logs, exitCode } = await runUpgradeCheck(
+        ["upgrade", "--check", "--tree", tree],
+        (async () => new Response(JSON.stringify({ version: "0.54.2" }), { status: 200 })) as unknown as typeof fetch,
+      );
+      const text = logs.join("\n");
+      expect(exitCode).toBeNull();
+      // The tree install (0.55.0) is ahead of latest (0.54.2): the swap plan
+      // must NOT be built (a plan built for an install that is not changing
+      // would stage a swap that never happens).
+      expect(planCalls).toEqual([]);
+      expect(text).not.toContain("Plain-tree plan:");
+      expect(text).not.toContain("in-place tarball swap");
+      // ...and the ahead state renders: no arrow, ahead-of-latest wording.
+      expect(text).toContain("@tpsdev-ai/flair: 0.55.0 (ahead of latest 0.54.2)");
+      expect(text).not.toContain("0.55.0 → 0.54.2");
+    } finally {
+      planSpy.mockRestore();
+    }
+  });
 });

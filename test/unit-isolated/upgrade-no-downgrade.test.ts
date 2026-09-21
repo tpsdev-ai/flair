@@ -37,8 +37,19 @@ const BIN = join(SCRATCH, "bin");
 const PREFIX = join(SCRATCH, "prefix");
 const INSTALLED_FILE = join(SCRATCH, "installed-version");
 const NPM_LOG = join(SCRATCH, "npm-invocations.log");
+// A scratch node_modules reachable via NODE_PATH: this is the "genuinely
+// outdated sibling" (flair-client@0.1.0) that the mixed fixture installs,
+// while @tpsdev-ai/flair is ahead. probeLibVersion resolves it from here.
+const NODE_MODULES = join(SCRATCH, "node_modules");
+const CACHE_FILE = join(HOME, ".flair", ".version-check-cache.json");
+const CLAUDE_JSON = join(HOME, ".claude.json");
 mkdirSync(BIN, { recursive: true });
 mkdirSync(join(PREFIX, "lib", "node_modules"), { recursive: true });
+mkdirSync(join(NODE_MODULES, "@tpsdev-ai", "flair-client"), { recursive: true });
+writeFileSync(
+  join(NODE_MODULES, "@tpsdev-ai", "flair-client", "package.json"),
+  JSON.stringify({ name: "@tpsdev-ai/flair-client", version: "0.1.0" }),
+);
 writeFileSync(INSTALLED_FILE, "0.55.0\n");
 
 for (const bin of ["flair", "flair-mcp"]) {
@@ -82,7 +93,11 @@ function setInstalled(version: string): void {
   writeFileSync(INSTALLED_FILE, `${version}\n`);
 }
 
-async function runUpgrade(registry: string, args: string[]): Promise<{ stdout: string; stderr: string; status: number | null }> {
+async function runUpgrade(
+  registry: string,
+  args: string[],
+  extraEnv: Record<string, string> = {},
+): Promise<{ stdout: string; stderr: string; status: number | null }> {
   const env = {
     ...process.env,
     HOME,
@@ -93,6 +108,7 @@ async function runUpgrade(registry: string, args: string[]): Promise<{ stdout: s
     npm_config_userconfig: join(SCRATCH, "user-npmrc"),
     npm_config_globalconfig: join(SCRATCH, "global-npmrc"),
     FLAIR_ALLOW_INSECURE_REGISTRY: "1",
+    ...extraEnv,
   };
   // Async spawn, NOT spawnSync: the stub registry lives in THIS process, and a
   // synchronous child would block the event loop so the stub could never answer.
@@ -125,6 +141,16 @@ function manifestHash(dir: string): string {
 
 function npmInvocations(): string {
   return existsSync(NPM_LOG) ? readFileSync(NPM_LOG, "utf-8") : "";
+}
+
+/** The primed version-check cache (`~/.flair/.version-check-cache.json`). */
+function readVersionCheckCache(): { latest?: string; checkedAt?: number } | null {
+  if (!existsSync(CACHE_FILE)) return null;
+  try {
+    return JSON.parse(readFileSync(CACHE_FILE, "utf-8"));
+  } catch {
+    return null;
+  }
 }
 
 describe("flair#1778 — an install AHEAD of registry latest is never downgraded", () => {
@@ -185,5 +211,80 @@ describe("flair#1778 — an install AHEAD of registry latest is never downgraded
     await runUpgrade(reg, []);
     expect(manifestHash(PREFIX)).toBe(before);
     expect(npmInvocations()).not.toContain("install");
+  });
+
+  test("N1: an unparseable installed version is never summarised as 'Everything is up to date'", async () => {
+    // The summary must be NEUTRAL whenever any finding is `ahead` OR `unknown`:
+    // "✅ Everything is up to date." claims a convergence we cannot see when the
+    // installed version did not even parse (flair#1778 slice-1 follow-up).
+    //
+    // NOTE: the raw string must be one the bin probe RETURNS VERBATIM yet semver
+    // rejects. probeBinVersion only yields a semver-SHAPED match (its regex
+    // requires digits), and any non-match falls back to probeLibVersion, which
+    // self-references this package (0.55.x) — so a bare "not-a-version" would
+    // resolve to "current" and never exercise the unknown path. "0.55.1.rc" is
+    // version-shaped (so it comes back from the probe) but not valid semver.
+    const unparseable = "0.55.1.rc";
+    setInstalled(unparseable);
+    const reg = await startRegistry({ "": "0.55.1" });
+    const { stdout } = await runUpgrade(reg, []);
+    expect(stdout).not.toContain("Everything is up to date");
+    expect(stdout).toContain("No upgrades available");
+    // ...and ONE line naming the package and the raw string that was unparsed.
+    expect(stdout).toContain(`@tpsdev-ai/flair: could not parse installed version "${unparseable}"`);
+  });
+
+  test("N3: flair ahead + an outdated sibling — only the sibling installs; the pin holds; the cache expects the RUNNING flair", async () => {
+    setInstalled("0.55.0");
+    // A wired MCP pin AHEAD of the running CLI: the post-install pin refresh
+    // must HOLD it (never lower a pin), so this file stays byte-identical.
+    const ahead = "0.55.6";
+    const claudeBefore = JSON.stringify({
+      mcpServers: {
+        flair: {
+          command: "npx",
+          args: ["-y", `@tpsdev-ai/flair-mcp@${ahead}`],
+          type: "stdio",
+          env: { FLAIR_AGENT_ID: "local", FLAIR_URL: "http://127.0.0.1:9" },
+        },
+      },
+    }, null, 2) + "\n";
+    writeFileSync(CLAUDE_JSON, claudeBefore);
+    writeFileSync(NPM_LOG, "");
+
+    // flair ahead of latest (0.54.2); flair-client genuinely outdated (0.1.0
+    // vs 0.60.0). --all surfaces the usually-hidden transitive flair-client.
+    const reg = await startRegistry({
+      "@tpsdev-ai/flair": "0.54.2",
+      "@tpsdev-ai/flair-client": "0.60.0",
+    });
+    const { stdout, status } = await runUpgrade(reg, ["--all", "--no-restart"], {
+      NODE_PATH: NODE_MODULES,
+      FLAIR_AGENT_ID: "local",
+    });
+
+    // The genuinely-outdated sibling IS installed...
+    const npm = npmInvocations();
+    expect(npm).toContain("install -g @tpsdev-ai/flair-client@0.60.0");
+    // ...and flair, ahead of latest, is NEVER installed (no downgrade).
+    expect(npm).not.toContain("install -g @tpsdev-ai/flair@");
+    expect(stdout).toContain("@tpsdev-ai/flair: 0.55.0 (ahead of latest 0.54.2)");
+
+    // The owned-pin refresh HOLDS: the wired pin file is byte-identical, and
+    // the printed line names both pins.
+    expect(readFileSync(CLAUDE_JSON, "utf-8")).toBe(claudeBefore);
+    expect(stdout).toContain("keeping pinned 0.55.6");
+    expect(stdout).toContain("the refresh never lowers a pin");
+
+    // Post-install verification expects the RUNNING flair version (0.55.0),
+    // never registry latest (0.54.2) — the primeVersionCheckCache effective
+    // target. This is the observable of the "effective-target line".
+    expect(readVersionCheckCache()?.latest).toBe("0.55.0");
+
+    // No failed-upgrade / rollback report.
+    expect(stdout).not.toContain("post-restart verification failed");
+    expect(stdout).not.toContain("Rolling back");
+    expect(stdout).not.toContain("upgrade failed");
+    expect(status).toBe(0);
   });
 });

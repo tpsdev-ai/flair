@@ -10,7 +10,7 @@ import { Command } from "commander";
 import { COMPONENT_ENV_FILENAME, PUBLIC_URL_KEY, describePublicUrlFinding, readEnvValue } from "../component-env.js";
 import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, describeAgentGateFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
 import { FleetPresenceRow, markStale, sortOldestVersionFirst } from "../fleet-presence.js";
-import { hookSettingsPath, repinSessionStartHook, resolveHookAgentId } from "../hook-install.js";
+import { hookSettingsPath, resolveHookAgentId } from "../hook-install.js";
 import { detectClients, wireAntigravity, wireClaudeCode, wireCodex, wireCursor, wireGemini } from "../install/clients.js";
 import { checkGlobalBinOnPath, resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
 import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, resolveAdminUser, resolveKeyPath, resolveLocalAdminPass } from "../lib/auth-resolve.js";
@@ -22,7 +22,7 @@ import { describeEmbedGpuDoctorFinding } from "../lib/embed-gpu-doctor.js";
 import { adminPassDesyncFinding, detectPersistedAdminUser } from "../lib/init-admin-pass.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
 import { flairCliVersion, unpinnedSpecWarning } from "../lib/mcp-spec.js";
-import { staleSessionStartHookPins } from "../lib/owned-pins.js";
+import { repinSessionStartHookGuarded, staleSessionStartHookPins } from "../lib/owned-pins.js";
 import * as render from "../render.js";
 import { checkVersion, formatVersionNudge, probeInstanceVersion, FLAIR_PKG_NAME } from "../version-check.js";
 import { resolveRegistryNotice } from "../lib/npm-registry.js";
@@ -1072,7 +1072,7 @@ program
               if (dryRun) {
                 console.log(`     ${render.wrap(render.c.dim, "Would re-pin the SessionStart hook in")} ${hook.path}`);
               } else {
-                const repin = repinSessionStartHook(homedir(), "claude-code");
+                const repin = repinSessionStartHookGuarded(homedir(), "claude-code");
                 console.log(`     ${repin.ok ? render.icons.ok : render.icons.warn} ${repin.message}`);
               }
             } else {
@@ -1226,7 +1226,7 @@ program
               if (dryRun) {
                 console.log(`     ${render.wrap(render.c.dim, "Would re-pin the SessionStart hook in")} ${hook.path}`);
               } else {
-                const repin = repinSessionStartHook(homedir(), "codex");
+                const repin = repinSessionStartHookGuarded(homedir(), "codex");
                 console.log(`     ${repin.ok ? render.icons.ok : render.icons.warn} ${repin.message}`);
               }
             } else {
