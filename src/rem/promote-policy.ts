@@ -250,13 +250,16 @@ export function validateHumanReviewerId(reviewerId: string): string | null {
 //
 // The delimiter set is an ENUMERATED table (STRUCTURAL_PAIRS, below): the ASCII
 // pairs `( )`, `[ ]`, `{ }` AND the full-width/CJK pairs
-// `（）［］｛｝【】〔〕〖〗「」『』`. Both the opener set and the closer map are
-// DERIVED from that one list, so a pair cannot be added to one side and missed
-// on the other. The set is deliberately NOT derived from Unicode general
-// categories (`\p{Ps}` / `\p{Pe}`) and is NOT described as "Unicode-aware":
-// category membership does not establish paired usage (Ogham `᚛` and bare
-// `༺`/`༻`, `⸢`/`⸣`, `⌈`/`⌉` are permitted standalone by the core spec), and a
-// category counter refuses ordinary COMPLETE prose — see the quotation-mark note
+// `（）［］｛｝【】〔〕〖〗「」『』《》〈〉〘〙〚〛`. Both the opener set and the closer
+// map are DERIVED from that one list, so a pair cannot be added to one side and
+// missed on the other. The table IS the boundary: mathematical and ornamental
+// brackets (`⟨⟩ ⟦⟧ ⌈⌉ ⌊⌋ ⁅⁆ ｟｠ ❨❩ ༺༻`) are deliberately EXCLUDED — they are used
+// standalone in real text, so counting them by category would over-refuse. The
+// set is deliberately NOT derived from Unicode general categories
+// (`\p{Ps}` / `\p{Pe}`) and is NOT described as "Unicode-aware": category
+// membership does not establish paired usage (Ogham `᚛` and bare `༺`/`༻`,
+// `⸢`/`⸣`, `⌈`/`⌉` are permitted standalone by the core spec), and a category
+// counter refuses ordinary COMPLETE prose — see the quotation-mark note
 // immediately below. There is no vendored Unicode data and no codegen here.
 //
 // QUOTATION MARKS OF EVERY SCRIPT ARE OUT OF SCOPE. `“ ” ‘ ’ „ “ ‚ ‘ « »` are
@@ -280,16 +283,19 @@ export function validateHumanReviewerId(reviewerId: string): string | null {
 // pairs — never completeness, and never coverage of an unenumerated script.
 
 // The one source of truth: [opener, closer]. The two lookups below are DERIVED,
-// so there is no second hand-kept list that can drift out of step.
-const STRUCTURAL_PAIRS: ReadonlyArray<readonly [string, string]> = [
+// so there is no second hand-kept list that can drift out of step. All three are
+// exported so the pair-table invariant can be pinned by a test without
+// duplicating the list here.
+export const STRUCTURAL_PAIRS: ReadonlyArray<readonly [string, string]> = [
   ["(", ")"], ["[", "]"], ["{", "}"],
   ["（", "）"], ["［", "］"], ["｛", "｝"],
   ["【", "】"], ["〔", "〕"], ["〖", "〗"],
   ["「", "」"], ["『", "』"],
+  ["《", "》"], ["〈", "〉"], ["〘", "〙"], ["〚", "〛"],
 ];
 
-const STRUCTURAL_OPENERS: ReadonlyMap<string, string> = new Map(STRUCTURAL_PAIRS);
-const STRUCTURAL_CLOSERS: ReadonlyMap<string, string> = new Map(
+export const STRUCTURAL_OPENERS: ReadonlyMap<string, string> = new Map(STRUCTURAL_PAIRS);
+export const STRUCTURAL_CLOSERS: ReadonlyMap<string, string> = new Map(
   STRUCTURAL_PAIRS.map(([opener, closer]) => [closer, opener] as const),
 );
 
@@ -325,11 +331,11 @@ export function structuralImbalance(claim: string): string | null {
  *
  * Terminators: ASCII `.` `!` `?` plus the full-width/CJK `。` (U+3002), `！`
  * (U+FF01), `？` (U+FF1F). The trailing-suffix class accepts the quote/bracket
- * closers it always did plus the enumerated bracket closers `」』）］｝】〕〗`. The
- * single-dot leaders `…` `‥` `․` are deliberately NOT terminators — they are not
- * interchangeable with a full stop.
+ * closers it always did plus the enumerated bracket closers
+ * `」』）］｝】〕〗》〉〙〛`. The single-dot leaders `…` `‥` `․` are deliberately NOT
+ * terminators — they are not interchangeable with a full stop.
  */
 export function hasTerminalPunctuation(claim: string): boolean {
-  return /[.!?。！？]["')\]}»”’」』）］｝】〕〗]*$/.test(claim.trimEnd());
+  return /[.!?。！？]["')\]}»”’」』）］｝】〕〗》〉〙〛]*$/.test(claim.trimEnd());
 }
 

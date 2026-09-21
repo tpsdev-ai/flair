@@ -29,6 +29,9 @@ import {
 import {
   structuralImbalance,
   hasTerminalPunctuation,
+  STRUCTURAL_PAIRS,
+  STRUCTURAL_OPENERS,
+  STRUCTURAL_CLOSERS,
 } from "../../src/rem/promote-policy.ts";
 
 const ADK_TAG = `${ADK_SCOPE_TAG_PREFIX}myapp:alice`;
@@ -329,6 +332,60 @@ describe("hasTerminalPunctuation — CJK/full-width terminators (flair#1776 slic
     expect(hasTerminalPunctuation("待機‥")).toBe(false);
     expect(hasTerminalPunctuation("完了․")).toBe(false);
     expect(hasTerminalPunctuation("完了")).toBe(false);
+  });
+});
+
+// ─── flair#1776 follow-up — remaining CJK-family pairs + derived-map pin ──────
+describe("decideAutoPromote — CJK-family bracket pairs (flair#1776 follow-up)", () => {
+  const gate = (claim: string) => decideAutoPromote({ status: "pending", scopeTag: ADK_TAG, claim });
+
+  // FAILS-ON-MAIN evidence: on unmodified origin/main both are PROMOTED (the
+  // table stopped at 「」『』); on this branch they REFUSE.
+  test("fails-on-main pair: unclosed 《 / 〈 openers → refused with incomplete_claim", () => {
+    for (const claim of ["《未完成", "〈未完"]) {
+      expect(gate(claim)).toEqual({ promote: false, reason: "incomplete_claim" });
+    }
+  });
+
+  test("balanced new pairs → PROMOTED (false-positive guard)", () => {
+    for (const claim of ["《完成》", "〈完了〉", "〘a〙", "〚b〛"]) {
+      expect(gate(claim).promote).toBe(true);
+    }
+  });
+
+  test("structuralImbalance names the new openers", () => {
+    expect(structuralImbalance("《未完成")).toBe("unclosed '《'");
+    expect(structuralImbalance("〈未完")).toBe("unclosed '〈'");
+    expect(structuralImbalance("〘未完")).toBe("unclosed '〘'");
+    expect(structuralImbalance("〚未完")).toBe("unclosed '〚'");
+    expect(structuralImbalance("《完成》")).toBeNull();
+  });
+
+  test("the widened terminal-punctuation suffix class accepts the new closers", () => {
+    expect(hasTerminalPunctuation("「完了」《補足》。")).toBe(true);
+    for (const claim of ["完了。》", "完了。〉", "完了。〙", "完了。〛"]) {
+      expect(hasTerminalPunctuation(claim)).toBe(true);
+    }
+    // A bare closer is not itself a terminator.
+    expect(hasTerminalPunctuation("完了》")).toBe(false);
+  });
+});
+
+// ─── derived-map invariant pin (flair#1776 follow-up) ────────────────────────
+// Pins the single-source property the table relies on: both lookups are DERIVED
+// from STRUCTURAL_PAIRS, not kept in parallel by hand. If someone inlines or
+// forks one side, this fails.
+describe("STRUCTURAL_PAIRS invariant (flair#1776 follow-up)", () => {
+  test("opener and closer maps are the same size as the pair list", () => {
+    expect(STRUCTURAL_OPENERS.size).toBe(STRUCTURAL_PAIRS.length);
+    expect(STRUCTURAL_CLOSERS.size).toBe(STRUCTURAL_PAIRS.length);
+  });
+
+  test("every [opener, closer] round-trips through both maps", () => {
+    for (const [opener, closer] of STRUCTURAL_PAIRS) {
+      expect(STRUCTURAL_OPENERS.get(opener)).toBe(closer);
+      expect(STRUCTURAL_CLOSERS.get(closer)).toBe(opener);
+    }
   });
 });
 

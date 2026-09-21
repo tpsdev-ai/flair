@@ -11,8 +11,9 @@
 //
 // The delta IS the review artifact for the widening. A single rate can hide a
 // systematic false-positive class in one script; the per-candidate diff cannot.
-// A refusal here means "no detected imbalance": the candidate is left pending
-// (reviewer load), never dropped.
+// A refusal here means a DETECTED imbalance (the detector found a structural
+// imbalance): the candidate is left pending (reviewer load), never dropped.
+// Passing means NO detected imbalance — never that a claim is complete.
 //
 // This starts no Harper process and touches no live data — it is a pure
 // function over the JSON you hand it.

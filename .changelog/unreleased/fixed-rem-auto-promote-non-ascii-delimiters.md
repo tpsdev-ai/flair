@@ -4,14 +4,14 @@
   path with an ASCII-only delimiter table, so a truncated full-width or CJK
   claim was judged balanced and auto-promoted. The table is extended from the
   ASCII pairs `( )`, `[ ]`, `{ }` to exactly the enumerated set
-  `( ) [ ] { } （ ） ［ ］ ｛ ｝ 【 】 〔 〕 〖 〗 「 」 『 』`. One list is the
-  single source: the opener set and the closer map are both derived from it. A
-  truncated claim that leaves any of those open, or closes one with a
-  mismatched partner (across widths too, e.g. `（… )`), is refused with
-  `incomplete_claim` and left pending for the human `rem promote` path. The
-  advisory `hasTerminalPunctuation` flag gains the full-width/CJK terminators
-  `。` `！` `？` and the matching bracket closers in the same pass, so the two
-  halves of the signal keep the same coverage.
+  `( ) [ ] { } （ ） ［ ］ ｛ ｝ 【 】 〔 〕 〖 〗 「 」 『 』 《 》 〈 〉 〘 〙 〚 〛`.
+  One list is the single source: the opener set and the closer map are both
+  derived from it. A truncated claim that leaves any of those open, or closes
+  one with a mismatched partner (across widths too, e.g. `（… )`), is refused
+  with `incomplete_claim` and left pending for the human `rem promote` path.
+  The advisory `hasTerminalPunctuation` flag gains the full-width/CJK
+  terminators `。` `！` `？` and the matching bracket closers in the same pass, so
+  the two halves of the signal keep the same coverage.
 
   **The claim is these enumerated pairs, nothing more.** The check is not
   derived from Unicode general categories and is not "Unicode-aware": category
@@ -38,6 +38,10 @@
     refused.** The delimiter is counted without interpreting context, so prose
     that mentions an unmatched delimiter — an interval written half-open, or a
     lone bracket quoted in text — is refused on the unattended path.
+  - **Mathematical and ornamental brackets are not in the table.** `⟨ ⟩`,
+    `⟦ ⟧`, `⌈ ⌉`, `⌊ ⌋`, `⁅ ⁆`, `｟ ｠`, `❨ ❩` and `༺ ༻` are used standalone in
+    real text, so they are deliberately excluded; the enumerated table IS the
+    boundary, not a Unicode general category.
 
   Such candidates are not lost: they remain pending for manual promotion, and
   the rate is unmeasured.
