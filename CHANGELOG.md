@@ -61,7 +61,8 @@ so a hand-written entry here is lost.
   Discovery canonicalizes the tree (`readFlairPackageAt` → `canonicalPath`)
   before matching, but the unit on disk holds whatever path the operator wrote,
   so any symlink in that path meant no unit was found and the upgrade restarted
-  the instance **outside** systemd — silently losing systemd supervision
+  the instance **outside** systemd — losing systemd supervision without it
+  being reported afterwards
   (`systemctl status` no longer describing the running process). Discovery now
   extracts the ACTIVE `[Service]` `WorkingDirectory` and `ExecStart` path
   operands and compares canonical-to-canonical, resolving a symlinked operand
@@ -71,12 +72,23 @@ so a hand-written entry here is lost.
   The same rewrite removes the matching side's **false positives**: a canonical
   path inside a comment, or an unrelated pathname that merely *contains* the
   tree path, no longer selects a unit. Comments and inactive directives are
-  ignored; quoted/escaped operands are tokenized with systemd's rules rather
-  than split on whitespace; operands carrying a `%`-specifier or `$` variable
+  ignored; quoted/escaped operands are tokenized the way systemd splits words
+  rather than split on whitespace; operands carrying a `%`-specifier or `$` variable
   are not treated as host paths. `RootDirectory`/`RootImage`/bind mounts mean
   host realpath is not universal proof of service identity, so automatic
   matching stays scoped to host-path semantics and `FLAIR_SYSTEMD_UNIT` remains
   the escape hatch. (Refs #1758)
+
+  > **Heads-up:** if your systemd install's unit names the tree through a
+  > symlinked path, an upgrade **before** this release may have restarted the
+  > instance outside the unit — `systemctl status` no longer describes the
+  > running process and systemd supervision is lost. This release fixes
+  > discovery for **future** upgrades; it does not re-adopt an already-unmanaged
+  > process, and Flair has no systemd equivalent of its launchd detach check, so
+  > nothing in the product will tell you. Run `systemctl restart <unit>` to bring
+  > it back under supervision, or set `FLAIR_SYSTEMD_UNIT=<unit>` if discovery
+  > still does not find it. The loose matching shipped in v0.54.2 as well, so an
+  > install never upgraded past 0.54.2 can be affected too.
 
 ## [0.55.0] - 2026-09-20
 
