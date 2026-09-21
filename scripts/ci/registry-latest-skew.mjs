@@ -31,7 +31,14 @@ if (expected && !/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?$/.test(expected)) {
   process.exit(2);
 }
 
-const packages = lockstepPackages();
+const packages = (() => {
+  try {
+    return lockstepPackages();
+  } catch (err) {
+    console.error(`registry-latest-skew: DID NOT RUN — ${err instanceof Error ? err.message : err}`);
+    process.exit(2);
+  }
+})();
 if (packages.length === 0) {
   console.error("registry-latest-skew: DID NOT RUN — no lockstep packages found");
   process.exit(2);

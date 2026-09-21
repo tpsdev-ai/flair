@@ -24,11 +24,17 @@
 
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import semver from "semver";
 
 const DEFAULT_PACKAGE = "@tpsdev-ai/flair";
 const version = process.argv[2] ?? "";
 const packageName = process.argv[3] ?? DEFAULT_PACKAGE;
-if (!/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?$/.test(version)) {
+// Strict semver via the semver lib (a runtime dep): one definition of "strict",
+// and it accepts every legal prerelease form — including a hyphen inside a
+// prerelease identifier (`1.2.3-rc-1`), which the old hand-rolled regex rejected
+// and turned into a DID-NOT-RUN for an otherwise measurable canary (flair#1781
+// R4). A leading "v" is NOT canonical (`semver.valid("v1.2.3") === "1.2.3"`).
+if (semver.valid(version) !== version) {
   console.error(`usage: node scripts/ci/registry-tarball-sha256.mjs <version> [package] (got version '${version}')`);
   process.exit(2);
 }

@@ -99,6 +99,22 @@ describe("registry-tarball-sha256 — optional package argument", () => {
     expect(r.status).toBe(2);
     expect(r.stderr).toContain("usage:");
   });
+
+  test("accepts a hyphen inside a prerelease identifier (flair#1781 R4)", async () => {
+    const bytes = Buffer.from("prerelease-shaped-tarball-bytes");
+    const sha = createHash("sha256").update(bytes).digest("hex");
+    const srv = createServer((_req, res) => { res.writeHead(200); res.end(bytes); });
+    const port = await listen(srv);
+    setFixtures({ "@tpsdev-ai/flair": { tarball: `http://127.0.0.1:${port}/rc.tgz` } });
+    const r = await runNode(SHA_SCRIPT, ["1.2.3-rc-1"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe(sha);
+  });
+
+  test("still strict: a leading \"v\" or a non-semver version is DID NOT RUN", async () => {
+    expect((await runNode(SHA_SCRIPT, ["v1.2.3"])).status).toBe(2);
+    expect((await runNode(SHA_SCRIPT, ["0.55.1.rc"])).status).toBe(2);
+  });
 });
 
 describe("registry-latest-skew — the lockstep set must agree on `latest`", () => {

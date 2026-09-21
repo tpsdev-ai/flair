@@ -34,20 +34,38 @@ export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..")
 export const FLAIR_ROOT_PACKAGE = "@tpsdev-ai/flair";
 
 /**
+ * Raised when a manifest that EXISTS cannot be read or parsed. A silently
+ * skipped manifest would yield a partial set that the canary then hashed,
+ * promoted and deprecated as if complete (flair#1781 R2), so this is fatal.
+ */
+export class LockstepManifestError extends Error {}
+
+/**
  * The lockstep package names, derived from the manifests and ordered with
  * `@tpsdev-ai/flair` last. Deterministic (sorted by name within the rest).
+ *
+ * A MISSING `packages/<dir>/package.json` is skipped (a directory that is not a
+ * package). An EXISTING one that cannot be read/parsed throws
+ * {@link LockstepManifestError} — never a silent partial set.
  */
 export function lockstepPackages(root = ROOT) {
   const names = [];
   const add = (manifestPath) => {
     if (!existsSync(manifestPath)) return;
+    let raw;
     try {
-      const pkg = JSON.parse(readFileSync(manifestPath, "utf8"));
-      if (typeof pkg?.name === "string" && pkg.name.length > 0 && pkg.private !== true) {
-        names.push(pkg.name);
-      }
-    } catch {
-      // A malformed manifest is surfaced by the empty-result refusal below.
+      raw = readFileSync(manifestPath, "utf8");
+    } catch (err) {
+      throw new LockstepManifestError(`cannot read ${manifestPath}: ${err instanceof Error ? err.message : err}`);
+    }
+    let pkg;
+    try {
+      pkg = JSON.parse(raw);
+    } catch (err) {
+      throw new LockstepManifestError(`cannot parse ${manifestPath}: ${err instanceof Error ? err.message : err}`);
+    }
+    if (typeof pkg?.name === "string" && pkg.name.length > 0 && pkg.private !== true) {
+      names.push(pkg.name);
     }
   };
 
@@ -66,7 +84,13 @@ export function lockstepPackages(root = ROOT) {
 
 const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (invokedDirectly) {
-  const packages = lockstepPackages();
+  let packages;
+  try {
+    packages = lockstepPackages();
+  } catch (err) {
+    console.error(`lockstep-packages: DID NOT RUN — ${err instanceof Error ? err.message : err}`);
+    process.exit(2);
+  }
   if (packages.length === 0) {
     console.error("lockstep-packages: DID NOT RUN — no publishable package manifests found");
     process.exit(2);

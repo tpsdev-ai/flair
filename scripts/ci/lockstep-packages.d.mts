@@ -9,6 +9,9 @@ export declare const ROOT: string;
 /** The CLI package, ordered last in every emitted list. */
 export declare const FLAIR_ROOT_PACKAGE: string;
 
+/** Raised when a manifest that exists cannot be read or parsed (fatal). */
+export declare class LockstepManifestError extends Error {}
+
 /**
  * The lockstep package names, derived from the manifests and ordered with
  * `@tpsdev-ai/flair` last.

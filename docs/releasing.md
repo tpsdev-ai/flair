@@ -95,10 +95,11 @@ workflow, which:
 
 1. Resolves the version from the tag and validates it as semver.
 2. Verifies the tagged commit is an ancestor of `main` (a tag can't ship un-merged code).
-3. Verifies all 8 `package.json` files are at that version.
+3. Verifies every lockstep package's `package.json` is at that version.
 4. Builds every package.
-5. Runs `npm stage publish` for each package in dependency order (flair-client first),
-   then `flair-bench` in its own step. Any one of the eight failing fails the release.
+5. Runs `npm stage publish` for each lockstep package in dependency order
+   (flair-client first), then `flair-bench` in its own step. Any lockstep package
+   failing to stage fails the release.
 
 It authenticates via OIDC — no secrets, and it does **not** create or move any tag (the
 tag you pushed is the trigger). Watch the run; when it's green, the packages are staged
@@ -131,9 +132,10 @@ npm stage view <stage-id> # inspect one
 npm stage approve <stage-id>   # 2FA prompt; package is made public under `staged`
 ```
 
-There are eight lockstep-staged packages, so eight approvals (the web UI lists them on
-one page). Approve in dependency order if installing immediately — flair-client before
-its dependents — though staging does not itself resolve dependencies.
+The lockstep set is nine today (`node scripts/ci/lockstep-packages.mjs` prints the
+list), so that many approvals (the web UI lists them on one page). Approve in dependency
+order if installing immediately — flair-client before its dependents — though staging
+does not itself resolve dependencies.
 
 Approval makes each version **public but not `latest`**: a user who runs the bare
 `npm install -g @tpsdev-ai/flair` still gets the previous `latest` until the promote
@@ -182,23 +184,42 @@ none does. `flair` at `latest` 0.55.1 while `flair-client` / `flair-mcp` / the
 plugins sit at 0.54.2 is exactly the mismatch `flair#1383` detects at runtime —
 and 0.55.1's promote had to be assembled by hand, line by line, for this reason.
 
-- **On PASS**, the canary emits the complete, sha256-bound promote block — one
-  line per lockstep package, `@tpsdev-ai/flair` LAST so a partial paste never
-  leaves the CLI ahead of its client library. Run every line from a repo checkout
-  on a machine logged into npm. Under 2FA each `dist-tag add` may prompt for an
-  OTP separately, so capture one code and pass it to all of them with `--otp`:
+- **On PASS**, the canary emits the complete, sha256-bound promote block as ONE
+  snippet to paste once, from a repo checkout on a machine logged into npm. It
+  runs in two phases: it verifies EVERY package's published-tarball sha256 first
+  (so a registry hiccup mid-paste touches no tag), then runs the `npm dist-tag
+  add` lines — `@tpsdev-ai/flair` LAST, so a partial paste never leaves the CLI
+  ahead of its client library — then the skew check. Under 2FA each `dist-tag add`
+  may prompt for an OTP separately, so capture one code and pass it to all of them
+  with `--otp`:
 
   ```bash
+  set -e
   OTP=123456   # fresh from your authenticator; valid for a short window
-  test "$(node scripts/ci/registry-tarball-sha256.mjs <ver> @tpsdev-ai/flair-client)" = "<sha>" && npm dist-tag add @tpsdev-ai/flair-client@<ver> latest --otp "$OTP"
-  test "$(node scripts/ci/registry-tarball-sha256.mjs <ver> @tpsdev-ai/flair-mcp)"    = "<sha>" && npm dist-tag add @tpsdev-ai/flair-mcp@<ver> latest --otp "$OTP"
-  # … one line per package; @tpsdev-ai/flair last …
-  test "$(node scripts/ci/registry-tarball-sha256.mjs <ver> @tpsdev-ai/flair)"        = "<sha>" && npm dist-tag add @tpsdev-ai/flair@<ver> latest --otp "$OTP"
+
+  # 1. Preflight — every published tarball must hash to its recorded sha256.
+  test "$(node scripts/ci/registry-tarball-sha256.mjs <ver> @tpsdev-ai/flair-client)" = "<sha>"
+  test "$(node scripts/ci/registry-tarball-sha256.mjs <ver> @tpsdev-ai/flair-mcp)"    = "<sha>"
+  # … one line per lockstep package; @tpsdev-ai/flair last …
+  test "$(node scripts/ci/registry-tarball-sha256.mjs <ver> @tpsdev-ai/flair)"        = "<sha>"
+
+  # 2. Promote every lockstep package (`@tpsdev-ai/flair` LAST).
+  npm dist-tag add @tpsdev-ai/flair-client@<ver> latest --otp "$OTP"
+  npm dist-tag add @tpsdev-ai/flair-mcp@<ver> latest --otp "$OTP"
+  # … one line per lockstep package …
+  npm dist-tag add @tpsdev-ai/flair@<ver> latest --otp "$OTP"
+
+  # 3. Confirm the set converged.
+  node scripts/ci/registry-latest-skew.mjs <ver>
   ```
 
-  The `test` is the integrity guard: a stale PASS, a re-cut version, or a paste
-  from a failed run aborts before `latest` moves. Paste **all** lines or **none**
-  — a partial paste is the skew this phase exists to prevent.
+  The preflight `test` guards integrity: a stale PASS, a re-cut version, or a
+  paste from a failed run aborts before `latest` moves. Paste **all** of the block
+  or **none** — a partial paste is the skew this phase exists to prevent.
+
+  The block runs under bash; `scripts/ci/canary-verdict.sh` is bash **3.2**-safe,
+  so stock macOS `/bin/bash` runs it (and the emitted block) locally — no newer
+  bash required. Anything older than 3.2 fails fast with a clear message.
 - **Confirm the set converged** — the last step, after pasting:
 
   ```bash
@@ -218,7 +239,8 @@ These are configured once and reused for every release.
 
 ### npm trusted publisher (per package)
 
-For **each** of the eight packages, on npmjs.com → the package → **Settings → Trusted
+For **each** lockstep package (nine today; `node scripts/ci/lockstep-packages.mjs`
+prints the list), on npmjs.com → the package → **Settings → Trusted
 Publisher → Add**:
 
 | Field           | Value                       |
@@ -234,10 +256,9 @@ Leave `npm publish` **unchecked** under allowed actions. This structurally preve
 CI/OIDC identity from publishing anything live directly — the only path to live is the
 human 2FA approval of a staged package.
 
-Packages: `flair-client`, `flair-mcp`, `flair`,
-`openclaw-flair`, `pi-flair`, `n8n-nodes-flair`, `langgraph-flair`, `flair-bench`.
-
-> `flair-tool-descriptors` is private and never published. Since flair#1683 it is a
+Lockstep packages: the list `node scripts/ci/lockstep-packages.mjs` prints (root +
+`packages/*` that are not `private`). `flair-tool-descriptors` is private and never
+published; since flair#1683 it is a
 > **build-time source**: `scripts/vendor-tool-descriptors.mjs` copies it into each
 > consumer's own tree at prebuild (`resources/tool-descriptors/` for `flair`,
 > `packages/flair-mcp/src/tool-descriptors/` for `flair-mcp`) and the consumers
