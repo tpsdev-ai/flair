@@ -31,8 +31,10 @@ import {
   isRemAbortRequested,
   resolveMaxMemoriesPerRun,
   shouldStampLastReflected,
+  isIncompleteFinishReason,
   DEFAULT_MAX_MEMORIES_PER_RUN,
   ABSOLUTE_MAX_MEMORIES_PER_RUN,
+  SOURCE_EXCERPT_BUDGET,
   type GenerateFn,
   type RawCandidate,
 } from "../../resources/memory-reflect-lib.ts";
@@ -131,6 +133,42 @@ describe("buildExecutePrompt (execute: true)", () => {
     // A no-backend failure only ever occurs inside generateCandidates(), which
     // prompt mode never calls — buildReflectionPrompt has no dependency on it.
     expect(() => buildReflectionPrompt(promptParams())).not.toThrow();
+  });
+});
+
+// ─── Source excerpt honesty (flair#1756 item 1) ──────────────────────────────
+
+describe("source excerpt honesty (flair#1756 item 1)", () => {
+  const longContent = "A".repeat(SOURCE_EXCERPT_BUDGET + 55);
+  const longMemory = { id: "m1", createdAt: "2026-07-01T00:00:00.000Z", content: longContent };
+
+  test("a source within budget is presented whole (no excerpt marker)", () => {
+    for (const build of [buildReflectionPrompt, buildExecutePrompt]) {
+      const prompt = build(promptParams());
+      expect(prompt).toContain('<memory id="m1" date="2026-07-01">first memory</memory>');
+      expect(prompt).not.toContain('<memory id="m1" date="2026-07-01" excerpt="true"');
+    }
+  });
+
+  test("a source longer than the budget is marked as an excerpt — never a silent prefix", () => {
+    for (const build of [buildReflectionPrompt, buildExecutePrompt]) {
+      const prompt = build(promptParams({ memories: [longMemory] }));
+      // Explicit, structural + textual marking so the model knows it is partial.
+      expect(prompt).toContain('excerpt="true"');
+      expect(prompt).toContain("excerpt truncated");
+      // The whole 300-char prefix is NOT presented as if it were the content.
+      expect(prompt).not.toContain(`>${longContent.slice(0, SOURCE_EXCERPT_BUDGET)}</memory>`);
+      // The excerpt instruction tells the model not to treat it as complete.
+      expect(prompt).toContain("PARTIAL excerpt");
+    }
+  });
+
+  test("the excerpt marker is charged against the per-source budget (no prompt growth)", () => {
+    const prompt = buildExecutePrompt(promptParams({ memories: [longMemory] }));
+    const element = prompt.slice(prompt.indexOf('<memory id="m1"'), prompt.indexOf("</memory>", prompt.indexOf('<memory id="m1"')));
+    const body = element.slice(element.indexOf(">") + 1);
+    // source content sent (excerpt + marker) never exceeds the budget
+    expect(body.length).toBeLessThanOrEqual(SOURCE_EXCERPT_BUDGET);
   });
 });
 
@@ -255,15 +293,18 @@ describe("parseAndValidateCandidates", () => {
 
 // ─── generate + validate + retry orchestration ─────────────────────────────
 
-function makeGenerate(responses: Array<string | { throw: any }>): { fn: GenerateFn; calls: any[] } {
+function makeGenerate(responses: Array<string | { throw: any } | { content: string; finishReason?: string }>): { fn: GenerateFn; calls: any[] } {
   const calls: any[] = [];
   let i = 0;
   const fn: GenerateFn = async (input, opts) => {
     calls.push({ input, opts });
     const next = responses[Math.min(i, responses.length - 1)];
     i++;
-    if (typeof next === "object" && "throw" in next) throw next.throw;
-    return { content: next };
+    if (typeof next === "object" && next !== null && "throw" in next) throw next.throw;
+    if (typeof next === "object" && next !== null && "content" in next) {
+      return { content: next.content, finishReason: next.finishReason };
+    }
+    return { content: next as string };
   };
   return { fn, calls };
 }
@@ -370,6 +411,52 @@ describe("generateCandidates", () => {
     await generateCandidates({ prompt: "p", gatheredMemoryIds: gathered, generate: fn });
     expect(Number.isFinite(calls[0].opts.maxTokens)).toBe(true);
     expect(calls[0].opts.maxTokens).toBeGreaterThan(0);
+  });
+
+  test("isIncompleteFinishReason: only length/content_filter prove incompleteness", () => {
+    expect(isIncompleteFinishReason("length")).toBe(true);
+    expect(isIncompleteFinishReason("content_filter")).toBe(true);
+    expect(isIncompleteFinishReason("stop")).toBe(false);
+    expect(isIncompleteFinishReason("tool_calls")).toBe(false);
+    expect(isIncompleteFinishReason(undefined)).toBe(false);
+  });
+
+  test("finishReason 'length' with valid-looking JSON is REJECTED, not staged (retried once)", async () => {
+    const { fn, calls } = makeGenerate([{ content: validJson, finishReason: "length" }]);
+    const outcome = await generateCandidates({ prompt: "p", gatheredMemoryIds: gathered, generate: fn });
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.reason).toBe("incomplete_generation");
+    // Retried once (json fallback), then fail closed — no candidates to stage.
+    expect(calls).toHaveLength(2);
+    expect(calls[1].opts.responseFormat).toBe("json");
+  });
+
+  test("finishReason 'content_filter' is REJECTED", async () => {
+    const { fn } = makeGenerate([{ content: validJson, finishReason: "content_filter" }]);
+    const outcome = await generateCandidates({ prompt: "p", gatheredMemoryIds: gathered, generate: fn });
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.reason).toBe("incomplete_generation");
+  });
+
+  test("finishReason 'stop' with a well-formed candidate still stages (no regression)", async () => {
+    const { fn, calls } = makeGenerate([{ content: validJson, finishReason: "stop" }]);
+    const outcome = await generateCandidates({ prompt: "p", gatheredMemoryIds: gathered, generate: fn });
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) {
+      expect(outcome.candidates).toHaveLength(1);
+      expect(outcome.usedJsonFallback).toBe(false);
+    }
+    expect(calls).toHaveLength(1);
+  });
+
+  test("length on attempt 1, ordinary completion on the retry → staged (retry recovers)", async () => {
+    const { fn } = makeGenerate([
+      { content: validJson, finishReason: "length" },
+      { content: validJson, finishReason: "stop" },
+    ]);
+    const outcome = await generateCandidates({ prompt: "p", gatheredMemoryIds: gathered, generate: fn });
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) expect(outcome.usedJsonFallback).toBe(true);
   });
 });
 

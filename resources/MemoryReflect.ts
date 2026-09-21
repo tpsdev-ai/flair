@@ -364,6 +364,19 @@ export class ReflectMemories extends Resource {
           { status: 503 },
         );
       }
+      if (distill.outcome.reason === "incomplete_generation") {
+        // The backend PROVED the generation was cut short (finishReason
+        // `length` or `content_filter`). Valid-looking JSON from an incomplete
+        // response must not stage as a finished thought (flair#1756). Static
+        // body — never echo backend detail.
+        return new Response(
+          JSON.stringify({
+            error: "distillation_failed",
+            detail: "model output was incomplete — the backend reported the generation was cut short",
+          }),
+          { status: 502 },
+        );
+      }
       return new Response(
         JSON.stringify({ error: "distillation_failed", detail: "model output did not validate after one retry" }),
         { status: 502 },
