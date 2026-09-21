@@ -11,7 +11,7 @@
   so an operator who used `http.host` can find the migration. (Refs #1760)
 
   > **Heads-up:** `http.host` is not read and is now documented as such. An
-  > install that was only wide because the pre-0.55.0 default bound every
+  > install that was only wide because the default before 0.55.0 bound every
   > interface narrows to `127.0.0.1` on the next `flair restart` or
   > `flair upgrade`. Set `httpBind:` (or `--http-bind` / `FLAIR_HTTP_BIND`) to
   > keep the HTTP listener reachable.
