@@ -1,0 +1,189 @@
+/**
+ * upgrade-no-downgrade.test.ts — flair#1778 slice 1, fails-on-main.
+ *
+ * THE HAZARD. `flair upgrade` classified by bare equality, so an install AHEAD
+ * of registry `latest` (a staged / never-promoted version, e.g. 0.55.0 while
+ * `latest` is still 0.54.2) was "outdated": `--check` printed
+ * "⬆️ 0.55.0 → 0.54.2", and a plain `flair upgrade` reached
+ * `npm install -g @tpsdev-ai/flair@0.54.2` — a silent downgrade on a documented
+ * command.
+ *
+ * THE PROOF. Serve a local registry whose `latest` is 0.54.2, put a stub `flair`
+ * reporting 0.55.0 on PATH, and run the real CLI with a scratch HOME, a stub npm
+ * that only RECORDS its argv, and a dead FLAIR_URL. On main the output carries
+ * the arrow and npm is invoked; after the fix it prints
+ * "(ahead of latest 0.54.2)", never the arrow, and npm is never asked to install.
+ *
+ * Isolated: the CLI is spawned as a CHILD with HOME set at spawn (so its data
+ * dir is a scratch tree — never a real instance), and every write stays inside
+ * scratch trees. No real instance, no service manager, no install.
+ */
+
+import { describe, test, expect, afterAll, setDefaultTimeout } from "bun:test";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import { createHash } from "node:crypto";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+const REPO = join(import.meta.dirname, "..", "..");
+
+// Each case spawns the real CLI as a child; bun's 5s default is too tight.
+setDefaultTimeout(60_000);
+
+const HOME = mkdtempSync(join(tmpdir(), "flair-1778-home-"));
+const SCRATCH = mkdtempSync(join(tmpdir(), "flair-1778-scratch-"));
+const BIN = join(SCRATCH, "bin");
+const PREFIX = join(SCRATCH, "prefix");
+const INSTALLED_FILE = join(SCRATCH, "installed-version");
+const NPM_LOG = join(SCRATCH, "npm-invocations.log");
+mkdirSync(BIN, { recursive: true });
+mkdirSync(join(PREFIX, "lib", "node_modules"), { recursive: true });
+writeFileSync(INSTALLED_FILE, "0.55.0\n");
+
+for (const bin of ["flair", "flair-mcp"]) {
+  const p = join(BIN, bin);
+  writeFileSync(p, `#!/bin/sh\ncat ${INSTALLED_FILE}\n`);
+  chmodSync(p, 0o755);
+}
+writeFileSync(
+  join(BIN, "npm"),
+  `#!/bin/sh\nprintf '%s\\n' "$*" >> ${NPM_LOG}\nif [ "$1" = "prefix" ]; then echo ${PREFIX}; fi\nexit 0\n`,
+);
+chmodSync(join(BIN, "npm"), 0o755);
+
+const servers: Server[] = [];
+function listen(srv: Server): Promise<number> {
+  servers.push(srv);
+  return new Promise((resolve) => srv.listen(0, "127.0.0.1", () => resolve((srv.address() as any).port)));
+}
+
+/** Minimal registry stand-in: a per-package `latest`, default LATEST. */
+async function startRegistry(overrides: Record<string, string> = {}): Promise<string> {
+  const srv = createServer((req, res) => {
+    const url = req.url ?? "";
+    let version = "0.54.2";
+    for (const [pkg, v] of Object.entries(overrides)) if (url.includes(pkg)) version = v;
+    const body = JSON.stringify({ name: "@tpsdev-ai/flair", version });
+    res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
+    res.end(body);
+  });
+  const port = await listen(srv);
+  return `http://127.0.0.1:${port}`;
+}
+
+afterAll(() => {
+  for (const s of servers) s.close();
+  rmSync(HOME, { recursive: true, force: true });
+  rmSync(SCRATCH, { recursive: true, force: true });
+});
+
+function setInstalled(version: string): void {
+  writeFileSync(INSTALLED_FILE, `${version}\n`);
+}
+
+async function runUpgrade(registry: string, args: string[]): Promise<{ stdout: string; stderr: string; status: number | null }> {
+  const env = {
+    ...process.env,
+    HOME,
+    PATH: `${BIN}:${process.env.PATH}`,
+    FLAIR_URL: "http://127.0.0.1:9", // dead port: no instance can be detected
+    npm_config_prefix: PREFIX,
+    npm_config_registry: registry,
+    npm_config_userconfig: join(SCRATCH, "user-npmrc"),
+    npm_config_globalconfig: join(SCRATCH, "global-npmrc"),
+    FLAIR_ALLOW_INSECURE_REGISTRY: "1",
+  };
+  // Async spawn, NOT spawnSync: the stub registry lives in THIS process, and a
+  // synchronous child would block the event loop so the stub could never answer.
+  const proc = Bun.spawn(["bun", join(REPO, "src", "cli.ts"), "upgrade", ...args], {
+    cwd: REPO,
+    env,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const status = await proc.exited;
+  return { stdout, stderr, status };
+}
+
+function manifestHash(dir: string): string {
+  const entries: string[] = [];
+  const walk = (d: string): void => {
+    for (const e of readdirSync(d, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else entries.push(`${p}:${statSync(p).size}`);
+    }
+  };
+  if (existsSync(dir)) walk(dir);
+  return createHash("sha256").update(entries.join("\n")).digest("hex");
+}
+
+function npmInvocations(): string {
+  return existsSync(NPM_LOG) ? readFileSync(NPM_LOG, "utf-8") : "";
+}
+
+describe("flair#1778 — an install AHEAD of registry latest is never downgraded", () => {
+  test("HAZARD: --check shows '(ahead of latest)', no arrow, no '→ 0.54.2'", async () => {
+    setInstalled("0.55.0");
+    const reg = await startRegistry();
+    const { stdout } = await runUpgrade(reg, ["--check"]);
+    expect(stdout).not.toContain("⬆️");
+    expect(stdout).not.toContain("→ 0.54.2");
+    expect(stdout).toContain("(ahead of latest 0.54.2)");
+    expect(stdout).toContain("No upgrades available");
+  });
+
+  test("HAZARD: plain run invokes NO install and leaves the tree byte-identical", async () => {
+    setInstalled("0.55.0");
+    const reg = await startRegistry();
+    const before = manifestHash(PREFIX);
+    const { stdout } = await runUpgrade(reg, []);
+    expect(manifestHash(PREFIX)).toBe(before);
+    const npm = npmInvocations();
+    expect(npm).not.toContain("install");
+    expect(npm).not.toContain("@tpsdev-ai/flair@0.54.2");
+    expect(stdout).not.toContain("⬆️");
+    expect(stdout).toContain("(ahead of latest 0.54.2)");
+  });
+
+  test("regression: installed 0.54.2 / latest 0.55.1 still upgrades", async () => {
+    setInstalled("0.54.2");
+    const reg = await startRegistry({ "": "0.55.1" });
+    const { stdout } = await runUpgrade(reg, ["--check"]);
+    expect(stdout).toContain("⬆️");
+    expect(stdout).toContain("→ 0.55.1");
+  });
+
+  test("prerelease: installed 0.56.0-rc.1 ahead of 0.55.1; 0.55.1 outdated vs a prerelease latest", async () => {
+    setInstalled("0.56.0-rc.1");
+    let r = await runUpgrade(await startRegistry({ "": "0.55.1" }), ["--check"]);
+    expect(r.stdout).toContain("(ahead of latest 0.55.1)");
+    expect(r.stdout).not.toContain("⬆️");
+
+    // The registry validator (isStrictSemver) ACCEPTS a prerelease `latest`, so
+    // a prerelease can be a real upgrade target — asserted, not assumed.
+    setInstalled("0.55.1");
+    r = await runUpgrade(await startRegistry({ "": "0.56.0-rc.1" }), ["--check"]);
+    expect(r.stdout).toContain("→ 0.56.0-rc.1");
+  });
+
+  test("unparseable installed version renders '❔ unknown', no arrow, no install", async () => {
+    // A version-shaped but semver-INVALID string: the bin probe returns it, and
+    // the classifier must render "unknown", never "outdated", never drop it.
+    setInstalled("1.2.3.4");
+    const reg = await startRegistry();
+    const check = await runUpgrade(reg, ["--check"]);
+    expect(check.stdout).toContain("1.2.3.4 (unknown)");
+    expect(check.stdout).not.toContain("⬆️");
+
+    const before = manifestHash(PREFIX);
+    await runUpgrade(reg, []);
+    expect(manifestHash(PREFIX)).toBe(before);
+    expect(npmInvocations()).not.toContain("install");
+  });
+});

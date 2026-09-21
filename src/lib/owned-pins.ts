@@ -38,6 +38,7 @@ import {
   type Harness,
 } from "../hook-install.js";
 import { flairCliVersion, isResolvedVersion } from "./mcp-spec.js";
+import { isPinDowngrade } from "./upgrade-status.js";
 
 export type OwnedPinKind = "mcp-client" | "session-start-hook";
 
@@ -58,7 +59,7 @@ export interface OwnedPinReading {
 
 export interface OwnedPinRefreshResult {
   target: OwnedPinTarget;
-  action: "update" | "noop" | "skip";
+  action: "update" | "noop" | "skip" | "hold";
   ok: boolean;
   message: string;
 }
@@ -254,6 +255,9 @@ export function findUnsafeWiredPins(homeDir: string, cwd?: string): UnsafeWiredP
  */
 export function ownedPinRefreshShouldReport(r: OwnedPinRefreshResult): boolean {
   if (!r.ok) return true;
+  // A HELD pin (a refresh that would LOWER an owned pin) always prints — the
+  // operator needs to see why the pin was not refreshed (flair#1778 D4).
+  if (r.action === "hold") return true;
   if (r.target.kind === "mcp-client") return r.action !== "skip";
   return r.action === "update";
 }
@@ -287,6 +291,21 @@ export function refreshOwnedPins(opts: RefreshOwnedPinsOptions): OwnedPinRefresh
     for (const target of targets) {
       if (target.kind === "session-start-hook") {
         const harness = target.id as Harness;
+        // flair#1778 D4: never re-pin a hook DOWN. The rebuild would write the
+        // running CLI's version; if that is LOWER than the pin present, hold it
+        // rather than lower the pin (an unrelated package upgrading must not
+        // drag an ahead pin down).
+        const existingHookPin = readOwnedPin(target, homeDir).pin;
+        const wouldWriteHook = flairCliVersion();
+        if (isPinDowngrade(existingHookPin, wouldWriteHook)) {
+          results.push({
+            target,
+            action: "hold",
+            ok: true,
+            message: `${target.id}: keeping pinned ${existingHookPin} (running CLI ${wouldWriteHook} is older — the refresh never lowers a pin)`,
+          });
+          continue;
+        }
         const repin = repinSessionStartHook(homeDir, harness);
         results.push({
           target,
@@ -332,6 +351,18 @@ export function refreshOwnedPins(opts: RefreshOwnedPinsOptions): OwnedPinRefresh
         FLAIR_CLIENT: target.id,
       };
       const before = extractFlairMcpPin(readFileText(target.path) ?? "");
+      // flair#1778 D4: the wire writes the running CLI's version; never let the
+      // refresh LOWER a pin that is ahead.
+      const wouldWritePin = flairCliVersion();
+      if (isPinDowngrade(before, wouldWritePin)) {
+        results.push({
+          target,
+          action: "hold",
+          ok: true,
+          message: `${target.id}: keeping pinned ${before} (running CLI ${wouldWritePin} is older — the refresh never lowers a pin)`,
+        });
+        continue;
+      }
       const wired = client.wire(env);
       const after = extractFlairMcpPin(readFileText(target.path) ?? "");
       // Failed write stays skip+ok:false (fail-closed, like hook re-pin).

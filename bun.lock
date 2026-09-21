@@ -12,12 +12,14 @@
         "harper-fabric-embeddings": "^0.5.0",
         "jose": "6.2.2",
         "js-yaml": "^4.3.2",
+        "semver": "^7.8.5",
         "tar": "^7.5.22",
         "tweetnacl": "1.0.3",
       },
       "devDependencies": {
         "@playwright/test": "1.59.1",
         "@types/node": "24.11.0",
+        "@types/semver": "^7.8.0",
         "@types/tar": "7.0.87",
         "bun-types": "1.3.11",
         "typescript": "5.9.3",
@@ -810,6 +812,8 @@
     "@types/request": ["@types/request@2.48.13", "", { "dependencies": { "@types/caseless": "*", "@types/node": "*", "@types/tough-cookie": "*", "form-data": "^2.5.5" } }, "sha512-FGJ6udDNUCjd19pp0Q3iTiDkwhYup7J8hpMW9c4k53NrccQFFWKRho6hvtPPEhnXWKvukfwAlB6DbDz4yhH5Gg=="],
 
     "@types/retry": ["@types/retry@0.12.0", "", {}, "sha512-wWKOClTTiizcZhXnPY4wikVAwmdYHp8q6DmC+EJUzAMsycb7HB32Kh9RN4+0gExjmPmZSAQjgURXIGATPegAvA=="],
+
+    "@types/semver": ["@types/semver@7.8.0", "", {}, "sha512-1mAINjtQCXXeLkJ9ehXkwOcBpqtLxiVtKhpUf83DdRNdQKV0iXZpaHYqRr7nj+wvxuJzoAmAwXI+sCNMv1CzLQ=="],
 
     "@types/tar": ["@types/tar@7.0.87", "", { "dependencies": { "tar": "*" } }, "sha512-3IxNBV8LeY5oi2ZFpvAhOtW1+mHswkzM7BuisVrwJgPv67GBO2rkLPQlEKtzfHuLdhDDczhkCZeT+RuizMay4A=="],
 

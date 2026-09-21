@@ -30,8 +30,11 @@ import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { create as tarCreate } from "tar";
 
-// Type-only dependency kept local (defined in src/cli.ts):
-export type UpgradeStatus = "current" | "outdated" | "missing" | "optional";
+// The status set is defined ONCE in src/lib/upgrade-status.ts and shared with
+// src/cli.ts (flair#1778) — this module never imports src/cli.ts, so the set
+// cannot live there.
+import type { UpgradeStatus } from "../lib/upgrade-status.js";
+import { classifyInstalledVersion, formatUpgradeStatusLine } from "../lib/upgrade-status.js";
 
 export type UpgradeCli = {
   decideAfterRollbackVerify: (...args: any[]) => any;
@@ -1047,6 +1050,14 @@ program
     // anything is fetched or installed. One line per distinct registry.
     const noticeRegistry = createRegistryNoticePrinter();
 
+    // An explicit --flair-version pin is the operator's requested target (its
+    // downgrade semantics are slice 2, flair#1778 D7) — when set, the
+    // plain-tree lane keeps its existing explicit-target behaviour rather than
+    // the direction-aware "ahead" gate.
+    const flairVersionPin = typeof opts.flairVersion === "string" && opts.flairVersion.trim() !== ""
+      ? opts.flairVersion
+      : null;
+
     for (const { name, probe, kind, transitive } of packages) {
       if (transitive && !showAll) continue;
       try {
@@ -1081,7 +1092,7 @@ program
           // that, a requested tarball swap reports up to date and does nothing.
           const listing = resolvePlainTreeListingTarget({
             registryLatest,
-            pin: typeof opts.flairVersion === "string" ? opts.flairVersion : null,
+            pin: flairVersionPin,
           });
           if (!listing) continue;
           latest = listing.version;
@@ -1098,9 +1109,6 @@ program
           );
           continue;
         }
-        if (name === FLAIR_PKG_NAME) {
-          try { primeVersionCheckCache(latest); } catch { /* best-effort */ }
-        }
 
         const globalProbe = probe();
         let installed: string | null;
@@ -1110,8 +1118,12 @@ program
           // require.resolve probe would report the npm-global relic.
           installed = treeLane.version;
           if (installed === null) status = "missing";
-          else if (installed === latest) status = "current";
-          else status = "outdated";
+          // An explicit --flair-version pin IS the requested target (slice 2
+          // owns its downgrade semantics) — do not gate it. Without a pin,
+          // classify by semver direction so an install ahead of registry
+          // latest is never mistaken for an upgrade (flair#1778).
+          else if (flairVersionPin !== null) status = installed === latest ? "current" : "outdated";
+          else status = classifyInstalledVersion(installed, latest);
         } else if (name === FLAIR_MCP_PACKAGE) {
           // flair-mcp is zero-install via npx (#1168) — a null global probe is
           // the NORMAL state, not "missing". Resolve it from its actual wiring
@@ -1125,13 +1137,24 @@ program
             // openclaw-plugin packages are optional — if openclaw isn't
             // installed, don't surface a misleading "install with npm" advice.
             status = kind === "openclaw-plugin" ? "optional" : "missing";
-          } else if (installed === latest) {
-            status = "current";
           } else {
-            status = "outdated";
+            // Direction-aware (flair#1778): an install ahead of latest is a
+            // distinct state, never rendered as an upgrade, never installed.
+            status = classifyInstalledVersion(installed, latest);
           }
         }
         findings.push({ name, installed, latest, status, kind });
+
+        // flair#1778 D5: prime the version-check cache with the EFFECTIVE
+        // target. When the install is AHEAD of latest nothing will be installed,
+        // so priming `latest` would make a later version check nudge a
+        // downgrade.
+        if (name === FLAIR_PKG_NAME) {
+          const effectiveTarget = status === "ahead" ? installed : latest;
+          if (effectiveTarget) {
+            try { primeVersionCheckCache(effectiveTarget); } catch { /* best-effort */ }
+          }
+        }
 
         // Suppress the line for openclaw plugins that are optional-because-
         // openclaw-is-absent: on machines without openclaw the
@@ -1140,13 +1163,11 @@ program
         // (current/outdated) or under --all.
         if (!shouldPrintUpgradeLine(status, showAll)) continue;
 
-        const icon = status === "current" ? "✅"
-          : status === "outdated" ? "⬆️"
-          : status === "optional" ? "○"
-          : "❔";
-        const installedLabel = installed ?? (status === "optional" ? "not installed (openclaw not detected)" : "not detected");
+        // ONE renderer (src/lib/upgrade-status.ts). An install AHEAD of latest
+        // prints with NO arrow and NO remedy (flair#1778); an unparseable
+        // installed version prints the raw string as "❔ unknown".
         const suffix = upgradeStatusSuffix(name, status);
-        console.log(`  ${icon} ${name}: ${installedLabel} → ${latest}${suffix}`);
+        console.log(formatUpgradeStatusLine({ name, installed, latest, status, suffix }));
       } catch { /* skip unavailable packages */ }
     }
 
@@ -1182,26 +1203,34 @@ program
     let treePlan: PlainTreeUpgradePlan | null = null;
     if (treeLane) {
       const flairFindingForPlan = findings.find((f) => f.name === FLAIR_PKG_NAME);
-      // flair#1758: unit discovery is captured HERE, into the plan, while apply
-      // later renames the selected canonical tree (applyPlainTreeUpgrade). A
-      // concurrent symlink retarget between discovery and apply can therefore
-      // make the restart launch a DIFFERENT tree than the one that matched.
-      // Resolving both sides fresh narrows the window; it is not transaction
-      // locking.
-      treePlan = planPlainTreeUpgrade({
-        treeDir: treeLane.dir,
-        fromVersion: treeLane.version,
-        toVersion: flairFindingForPlan?.latest ?? treeLane.version ?? "unknown",
-        systemdUnits: findSystemdUnitsForTree(treeLane.dir),
-      });
+      // flair#1778 D3: CONSTRUCT the plan only when flair is actually being
+      // upgraded. Downstream restart/rollback/cleanup key on `treePlan`'s
+      // presence, so a plan built for an install that is not changing would
+      // stage a swap that never happens.
       if (flairFindingForPlan?.status === "outdated") {
+        // flair#1758: unit discovery is captured HERE, into the plan, while
+        // apply later renames the selected canonical tree
+        // (applyPlainTreeUpgrade). A concurrent symlink retarget between
+        // discovery and apply can therefore make the restart launch a
+        // DIFFERENT tree than the one that matched. Resolving both sides fresh
+        // narrows the window; it is not transaction locking.
+        treePlan = planPlainTreeUpgrade({
+          treeDir: treeLane.dir,
+          fromVersion: treeLane.version,
+          toVersion: flairFindingForPlan.latest,
+          systemdUnits: findSystemdUnitsForTree(treeLane.dir),
+        });
         console.log("");
         console.log(formatPlainTreePlan(treePlan));
       }
     }
 
     if (outdated.length === 0 && missing.length === 0) {
-      console.log("\n✅ Everything is up to date.");
+      // An install AHEAD of latest is not an upgrade (flair#1778): say "No
+      // upgrades available" rather than "Everything is up to date", which would
+      // claim a convergence we cannot see.
+      const anyAhead = findings.some((f) => f.status === "ahead");
+      console.log(anyAhead ? "\nNo upgrades available." : "\n✅ Everything is up to date.");
       return;
     }
 

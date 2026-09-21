@@ -358,3 +358,44 @@ describe("flair#1485 — MUST-FAIL FIRST: doctor reports a stale hook pin as ✗
     expect(staleSessionStartHookPins(isoHome, INSTALLED)).toEqual([]);
   });
 });
+
+describe("flair#1778 — the pin refresh never LOWERS an owned pin", () => {
+  const core = parseSemverCore(INSTALLED);
+  if (!core) throw new Error(`CLI version is not semver: ${INSTALLED}`);
+  // One patch ahead of the running CLI: the refresh would write INSTALLED over
+  // it, which is a downgrade. It must be HELD, not rewritten.
+  const AHEAD_VER = `${core[0]}.${core[1]}.${core[2] + 1}`;
+  const AHEAD_SPEC = `${FLAIR_MCP_PACKAGE}@${AHEAD_VER}`;
+
+  it("MCP pin ahead of the running CLI is held, not rewritten down", () => {
+    const mcpPath = writeClaudeMcp(isoHome, AHEAD_SPEC, "local");
+    const results = refreshOwnedPins({ homeDir: isoHome, agentId: "local", flairUrl: "http://127.0.0.1:9926" });
+    expect(extractFlairMcpPin(readFileSync(mcpPath, "utf-8"))).toBe(AHEAD_VER);
+    const held = results.find((r) => r.target.id === "claude-code" && r.action === "hold");
+    expect(held).toBeDefined();
+    expect(held?.message).toContain(AHEAD_VER);
+    expect(held?.message).toContain(INSTALLED);
+    expect(ownedPinRefreshShouldReport(held!)).toBe(true);
+  });
+
+  it("hook pin ahead of the running CLI is held, not rewritten down", () => {
+    writeHook(isoHome, "claude-code", hookCommand("local", AHEAD_VER));
+    const results = refreshOwnedPins({ homeDir: isoHome, agentId: "local", flairUrl: "http://127.0.0.1:9926" });
+    expect(readHookPin(isoHome, "claude-code")).toBe(AHEAD_VER);
+    const held = results.find((r) => r.target.kind === "session-start-hook" && r.action === "hold");
+    expect(held).toBeDefined();
+    expect(held?.message).toContain(AHEAD_VER);
+  });
+
+  it("an unrelated behind pin still advances while an ahead pin is held (mixed)", () => {
+    const mcpPath = writeClaudeMcp(isoHome, AHEAD_SPEC, "local");
+    writeHook(isoHome, "codex", hookCommand("local", STALE_VER));
+    const results = refreshOwnedPins({ homeDir: isoHome, agentId: "local", flairUrl: "http://127.0.0.1:9926" });
+    // The ahead MCP pin is untouched...
+    expect(extractFlairMcpPin(readFileSync(mcpPath, "utf-8"))).toBe(AHEAD_VER);
+    // ...while the behind hook pin still advances to the running CLI version.
+    expect(readHookPin(isoHome, "codex")).toBe(INSTALLED);
+    expect(results.some((r) => r.action === "hold")).toBe(true);
+    expect(results.some((r) => r.target.kind === "session-start-hook" && r.action === "update")).toBe(true);
+  });
+});

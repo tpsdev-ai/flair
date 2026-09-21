@@ -66,7 +66,7 @@ import {
 } from "./fleet-verify.js";
 import { markStale, sortOldestVersionFirst, type FleetPresenceRow } from "./fleet-presence.js";
 import { detectClients, renderWiringSummary, wireClaudeCode, wireCodex, wireGemini, wireCursor, wireAntigravity, wirePi, clientConfigPath, codexConfigHasFlairSection, type ClientId } from "./install/clients.js";
-import { flairCliVersion, clearFlairCliVersionCache, mcpServerSpec, unpinnedSpecWarning, FLAIR_MCP_PACKAGE } from "./lib/mcp-spec.js";
+import { flairCliVersion, clearFlairCliVersionCache, mcpServerSpec, unpinnedSpecWarning } from "./lib/mcp-spec.js";
 import { harperPortValue } from "./lib/harper-port-value.js";
 import {
   httpBind,
@@ -175,6 +175,7 @@ import {
   type DoctorRun,
 } from "./lib/doctor-run.js";
 import { ownedPinRefreshShouldReport, refreshOwnedPins, staleSessionStartHookPins } from "./lib/owned-pins.js";
+import { classifyInstalledVersion, shouldPrintUpgradeLine, upgradeStatusSuffix, type UpgradeStatus } from "./lib/upgrade-status.js";
 import {
   classifyDaemonState,
   verifyIdentity,
@@ -3773,50 +3774,14 @@ export function probeOpenclawPluginVersion(extensionName: string): string | null
 }
 
 /**
- * Status of a package in the `flair upgrade` listing.
- *   current  — installed version matches registry latest
- *   outdated — installed version is older than latest
- *   missing  — not detected; default packages → install advised
- *   optional — openclaw plugin; openclaw isn't installed (don't nag)
+ * Per-package status for the `flair upgrade` listing — the state set, the
+ * direction-aware classifier and the renderers live ONCE in
+ * src/lib/upgrade-status.ts and are re-exported here so existing importers keep
+ * working (flair#1778). src/commands/upgrade.ts cannot import this file, so the
+ * shared definition has to live outside both.
  */
-export type UpgradeStatus = "current" | "outdated" | "missing" | "optional";
-
-/**
- * Whether a package's status line should be printed in the default `flair
- * upgrade` listing. Suppresses optional-because-openclaw-is-absent lines
- * — pure noise on machines without openclaw — unless `--all`
- * (showAll) is set. All other statuses always print.
- */
-export function shouldPrintUpgradeLine(status: UpgradeStatus, showAll: boolean): boolean {
-  if (status === "optional" && !showAll) return false;
-  return true;
-}
-
-/**
- * Returns the human-readable suffix for a package status line in
- * `flair upgrade` / `flair upgrade --check` output.
- *
- * flair-mcp is zero-install via npx — its suffix must never suggest a
- * global install (flair#1168).
- */
-export function upgradeStatusSuffix(name: string, status: UpgradeStatus): string {
-  if (status === "current") return " (current)";
-  if (status === "missing") {
-    return name === FLAIR_MCP_PACKAGE
-      ? " (zero-install via npx — run: flair doctor --fix)"
-      : " (run: npm install -g)";
-  }
-  if (status === "optional") return " (install via: openclaw plugins install @tpsdev-ai/openclaw-flair)";
-  // flair-mcp is refreshed by re-pinning its wiring, never `npm install -g` —
-  // a global bin does nothing for an `npx -y -p @tpsdev-ai/flair-mcp`
-  // invocation (flair#1208). The re-pin is `flair upgrade`'s own job (the
-  // #1135/#1167 pin refresh) — never advise `doctor --fix` for it
-  // (flair#1324).
-  if (status === "outdated" && name === FLAIR_MCP_PACKAGE) {
-    return " (npx-wired — flair upgrade refreshes the pin)";
-  }
-  return "";
-}
+export { shouldPrintUpgradeLine, upgradeStatusSuffix };
+export type { UpgradeStatus };
 
 /**
  * Resolve the `flair upgrade` finding for flair-mcp from its ACTUAL wiring,
@@ -3832,7 +3797,8 @@ export function upgradeStatusSuffix(name: string, status: UpgradeStatus): string
  *   2. Not wired anywhere — genuinely missing; the remedy (upgradeStatusSuffix)
  *      is `flair doctor --fix`, never `npm install -g`.
  *   3. Wired with a concrete pin — that pin IS the installed version
- *      (current when it equals latest, else outdated → re-pin via doctor).
+ *      (current / ahead / outdated by semver direction; outdated → re-pin via
+ *      doctor, ahead never re-pins down — flair#1778).
  *   4. Wired but unpinned (a bare npx spec / a pre-#1143 SessionStart hook) —
  *      `npx -y` re-resolves latest every session, so the effective version IS
  *      latest → current.
@@ -3844,7 +3810,7 @@ export function resolveFlairMcpFinding(
 ): { installed: string | null; status: UpgradeStatus } {
   // 1. Legacy global install.
   if (globalProbe !== null) {
-    return { installed: globalProbe, status: globalProbe === latest ? "current" : "outdated" };
+    return { installed: globalProbe, status: classifyInstalledVersion(globalProbe, latest) };
   }
   // 2. Not wired anywhere.
   if (!wiring.wired) {
@@ -3854,7 +3820,7 @@ export function resolveFlairMcpFinding(
   if (wiring.pinnedVersion) {
     return {
       installed: wiring.pinnedVersion,
-      status: wiring.pinnedVersion === latest ? "current" : "outdated",
+      status: classifyInstalledVersion(wiring.pinnedVersion, latest),
     };
   }
   // 4. Wired but unpinned — npx resolves latest on every session.
