@@ -379,15 +379,24 @@ function canonicalizeOperand(rawPath: string): string | null {
   let cur = abs;
   const tail: string[] = [];
   for (;;) {
-    try {
-      const real = realpathSync(cur);
+    // `existsSync` is the STRICT check in both runtimes; gate `realpathSync` on
+    // it. Bun's `realpathSync` is lenient — for a path ending in a literal
+    // backslash it silently drops the backslash and returns the canonical dir,
+    // where Node throws ENOENT — so relying on `realpathSync` alone makes the
+    // matcher depend on the runtime (production ships Node, tests run Bun).
+    // With the gate, a backslash operand falls through to the ancestor walk on
+    // both, yielding `path + "\\"` (≠ the tree).
+    if (existsSync(cur)) {
+      let real = cur;
+      try {
+        real = realpathSync(cur);
+      } catch { /* unreadable — fall back to the existing lexical prefix */ }
       return tail.length > 0 ? join(real, ...tail.reverse()) : real;
-    } catch {
-      const parent = dirname(cur);
-      if (parent === cur) return abs; // nothing on this path exists — lexical
-      tail.push(basename(cur));
-      cur = parent;
     }
+    const parent = dirname(cur);
+    if (parent === cur) return abs; // nothing on this path exists — lexical
+    tail.push(basename(cur));
+    cur = parent;
   }
 }
 
@@ -455,6 +464,15 @@ function endsWithUnescapedBackslash(line: string): boolean {
  * so they pass through verbatim. Folding first means a directive whose value
  * lands on the continuation line is still read as one directive — otherwise it
  * looks like an empty (reset) assignment.
+ *
+ * UNRESOLVED (do NOT change without checking systemd.syntax(7) first): whether
+ * a comment block FOLLOWING a backslash-continued line is ignored — so the
+ * continuation concatenates with whatever follows the comment (Sherlock's
+ * reading of systemd.syntax(7)) — or whether comments do not exist inside a
+ * continuation at all, making folding the comment into the value correct
+ * (Kern's reading). Two reviewers disagree on the facts; the current code
+ * treats a comment as terminating the continuation, and is left as-is pending
+ * systemd.syntax(7).
  */
 function foldSystemdContinuations(unitText: string): string[] {
   const logical: string[] = [];
@@ -484,10 +502,22 @@ function foldSystemdContinuations(unitText: string): string[] {
  * The values of every active `key` directive inside `[Service]`. systemd's
  * RESET semantics are honoured: a blank value (`WorkingDirectory=` /
  * `ExecStart=`) clears the values collected so far for that key, and later
- * non-blank values accumulate again. Comments, directives in other sections,
- * and continued lines (folded first) are handled.
+ * non-blank values accumulate again. Directive keys are case-insensitive
+ * (systemd does not require canonical case). Comments, directives in other
+ * sections, and continued lines (folded first) are handled.
+ *
+ * `opts.single` selects the storage rule for the key. systemd treats
+ * `WorkingDirectory` as SINGLE-valued (`config_parse_working_directory` does
+ * `free_and_replace`, so the LAST non-blank assignment wins) but `ExecStart` as
+ * a genuine LIST whose assignments accumulate. Sharing this scanner — rather
+ * than a second reader — keeps reset/continuation/comment handling identical.
  */
-function activeServiceDirectiveValues(unitText: string, key: string): string[] {
+function activeServiceDirectiveValues(
+  unitText: string,
+  key: string,
+  opts: { single?: boolean } = {},
+): string[] {
+  const needle = key.toLowerCase();
   const values: string[] = [];
   let section = "";
   for (const rawLine of foldSystemdContinuations(unitText)) {
@@ -500,7 +530,7 @@ function activeServiceDirectiveValues(unitText: string, key: string): string[] {
     if (section !== "service") continue;
     const eq = line.indexOf("=");
     if (eq < 0) continue;
-    if (line.slice(0, eq).trim() !== key) continue;
+    if (line.slice(0, eq).trim().toLowerCase() !== needle) continue;
     const value = line.slice(eq + 1).trim();
     if (value === "") {
       // Blank assignment RESETS the list for this key — it is NOT a no-op.
@@ -508,6 +538,9 @@ function activeServiceDirectiveValues(unitText: string, key: string): string[] {
       values.length = 0;
       continue;
     }
+    // Single-valued key: the LAST non-blank assignment wins. List key: every
+    // non-blank value is an operand.
+    if (opts.single) values.length = 0;
     values.push(value);
   }
   return values;
@@ -521,8 +554,9 @@ function activeServiceDirectiveValues(unitText: string, key: string): string[] {
 export function unitTextMentionsTree(unitText: string, treeDir: string): boolean {
   const tree = canonicalPath(treeDir);
 
-  // WorkingDirectory: the resolved directory must BE the tree.
-  for (const value of activeServiceDirectiveValues(unitText, "WorkingDirectory")) {
+  // WorkingDirectory: SINGLE-valued — only the last non-blank assignment counts
+  // — and its resolved path must BE the tree.
+  for (const value of activeServiceDirectiveValues(unitText, "WorkingDirectory", { single: true })) {
     const [first] = splitSystemdWords(value);
     if (first === undefined) continue;
     const resolved = canonicalizeOperand(stripSystemdExecPrefix(first));
