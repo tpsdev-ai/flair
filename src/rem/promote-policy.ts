@@ -247,6 +247,13 @@ export function validateHumanReviewerId(reviewerId: string): string | null {
 //
 // Detects STRUCTURAL imbalance (unclosed/unmatched backtick, paren, bracket,
 // brace) — NOT semantic completeness. A balanced claim can still be a fragment.
+//
+// The detection is ASCII-ONLY. It recognizes the ASCII backtick and the ASCII
+// pairs `( )`, `[ ]` and `{ }`. Non-ASCII delimiter pairs — full-width
+// `（）`/`［］`/`｛｝` and CJK lenticular `【】`/`〔〕`/`〖〗` — are NOT covered, so a
+// truncated claim written in those scripts is judged balanced and is NOT
+// refused on either path. Do not assume Unicode coverage here.
+//
 // The check counts delimiters without interpreting context, so a complete claim
 // that merely DISCUSSES an unmatched delimiter is also flagged/refused
 // (fail-closed; nothing is lost — the candidate stays pending for the human
@@ -257,8 +264,10 @@ const STRUCTURAL_CLOSERS: Record<string, string> = { ")": "(", "]": "[", "}": "{
 /**
  * Return a description of the STRUCTURAL imbalance in `claim` (an unmatched or
  * closing-first bracket, an unclosed opener, or an odd number of backticks), or
- * null if it is balanced. Pure. The description is for diagnostics only — it is
- * NOT surfaced as a claim about completeness.
+ * null if it is balanced. ASCII delimiters only (see the note above) — a
+ * non-ASCII delimiter pair is not examined and does not make this non-null.
+ * Pure. The description is for diagnostics only — it is NOT surfaced as a claim
+ * about completeness.
  */
 export function structuralImbalance(claim: string): string | null {
   const stack: string[] = [];
