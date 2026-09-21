@@ -28,8 +28,9 @@ import {
   readFileSync,
   statSync,
   lstatSync,
+  realpathSync,
 } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { extract as tarExtract } from "tar";
@@ -311,58 +312,185 @@ function formatUnitRef(u: SystemdUnitRef): string {
   return `${u.name} (${u.scope}: ${u.path})`;
 }
 
+// ─── unit path operands (flair#1758) ────────────────────────────────────────
+//
+// Discovery compares the tree against the PATHS A UNIT ACTUALLY USES, not
+// against arbitrary text. The original matcher scanned the whole file with only
+// a trailing-boundary check, so a canonical path inside a COMMENT matched, and
+// any unrelated value that merely CONTAINED the tree path matched too. Because
+// the caller already canonicalizes the tree (readFlairPackageAt →
+// canonicalPath), the "also try canonicalPath(treeDir)" variant here was dead
+// code: the operand that needs resolving is the one read out of the unit file,
+// not the tree.
+//
+// So: extract operands from ACTIVE `[Service]` `WorkingDirectory` and
+// `ExecStart` directives, then compare canonical-to-canonical.
+//
+//   - `WorkingDirectory` is a directory: its resolved path must EQUAL the tree.
+//   - `ExecStart` operands are executables/scripts/arguments: keep the original
+//     tree-DESCENDANT intent, on PATH-COMPONENT boundaries (so `/opt/flair-spoke`
+//     is not "inside" `/opt/flair`).
+//
+// Explicitly NOT done: the whole command line is never canonicalized as one
+// string; quoted values are tokenized with systemd quoting rules rather than
+// split on whitespace; and an operand carrying a systemd specifier (`%i`, `%n`)
+// or a shell variable (`$VAR`) is not a literal host path, so it is skipped
+// rather than matched.
+//
+// KNOWN LIMIT — `RootDirectory=`, `RootImage=` and service-specific bind mounts
+// mean a unit can see DIFFERENT content at the same host pathname, so host
+// `realpath` is not proof of service identity. Automatic matching stays scoped
+// to host-path semantics; `FLAIR_SYSTEMD_UNIT` remains the escape hatch for
+// namespaced configurations.
+
+/** True when `child` is `root` itself or a path-component descendant of it. */
+function isPathInside(child: string, root: string): boolean {
+  if (child === root) return true;
+  return child.startsWith(root.endsWith("/") ? root : `${root}/`);
+}
+
+/** Strip a leading systemd ExecStart/WorkingDirectory prefix (`-`, `@`, `+`, `!`, `:`). */
+function stripSystemdExecPrefix(word: string): string {
+  let i = 0;
+  while (i < word.length && "-@+!:".includes(word[i])) i++;
+  return word.slice(i);
+}
+
 /**
- * After a directory path, the next character must not continue the last
- * path segment. `/opt/flair` matches `WorkingDirectory=/opt/flair`,
- * `/opt/flair/`, and `/opt/flair/dist/cli.js` — not `/opt/flair-spoke`.
+ * Canonicalize a path even when its leaf — or a middle segment — does not
+ * exist, by realpath-ing the deepest EXISTING ancestor and re-appending the
+ * remainder.
  *
- * String scan, not `new RegExp(variable)` — Semgrep
- * `detect-non-literal-regexp` (same reason `readHarperConfig` parses YAML
- * instead of interpolating a key into a regex).
+ * `canonicalPath` alone is not enough: `realpathSync("/opt/flair/flair")`
+ * throws when that file is absent, and its fallback returns the LEXICAL path,
+ * so a symlinked `/opt/flair` would never resolve for a unit naming a file
+ * inside it. Resolving the ancestor is what makes the unit operand and the tree
+ * comparable.
+ *
+ * Only ABSOLUTE host paths are canonicalized — a relative operand is not a path
+ * into the tree. Returns null for anything that is not a literal host path
+ * (relative, or containing an unresolved `%`/`$`).
  */
-function isDirPathBoundary(next: string | undefined): boolean {
-  if (next === undefined) return true;
-  switch (next) {
-    case "/":
-    case "\\":
-    case "\"":
-    case "'":
-    case "=":
-    case ":":
-    case " ":
-    case "\t":
-    case "\n":
-    case "\r":
-    case "\f":
-    case "\v":
-      return true;
-    default:
-      return false;
+function canonicalizeOperand(rawPath: string): string | null {
+  const raw = rawPath.trim();
+  if (!raw.startsWith("/")) return null;
+  if (raw.includes("%") || raw.includes("$")) return null;
+  const abs = resolve(raw);
+  let cur = abs;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      const real = realpathSync(cur);
+      return tail.length > 0 ? join(real, ...tail.reverse()) : real;
+    } catch {
+      const parent = dirname(cur);
+      if (parent === cur) return abs; // nothing on this path exists — lexical
+      tail.push(basename(cur));
+      cur = parent;
+    }
   }
 }
 
-function textMentionsDir(text: string, dir: string): boolean {
-  let from = 0;
-  while (from <= text.length) {
-    const i = text.indexOf(dir, from);
-    if (i < 0) return false;
-    if (isDirPathBoundary(text[i + dir.length])) return true;
-    from = i + 1;
+/**
+ * Tokenize a systemd directive value the way systemd splits ExecStart /
+ * WorkingDirectory: whitespace-separated words, single quotes literal, double
+ * quotes literal except for `\"`, `\\`, `\$`, and backslash escaping outside
+ * quotes. No variable/specifier expansion — callers treat those as non-paths.
+ */
+function splitSystemdWords(value: string): string[] {
+  const words: string[] = [];
+  let cur = "";
+  let started = false;
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    if (inSingle) {
+      if (ch === "'") inSingle = false;
+      else cur += ch;
+      started = true;
+      continue;
+    }
+    if (inDouble) {
+      if (ch === "\\" && i + 1 < value.length && "\"\\$".includes(value[i + 1])) {
+        cur += value[++i];
+        started = true;
+        continue;
+      }
+      if (ch === "\"") inDouble = false;
+      else cur += ch;
+      started = true;
+      continue;
+    }
+    if (ch === "'") { inSingle = true; started = true; continue; }
+    if (ch === "\"") { inDouble = true; started = true; continue; }
+    if (ch === "\\" && i + 1 < value.length) { cur += value[++i]; started = true; continue; }
+    if (ch === " " || ch === "\t") {
+      if (started) { words.push(cur); cur = ""; started = false; }
+      continue;
+    }
+    cur += ch;
+    started = true;
   }
-  return false;
+  if (started) words.push(cur);
+  return words;
 }
 
+/**
+ * The values of every active `key` directive inside `[Service]`. A blank value
+ * (`WorkingDirectory=` / `ExecStart=`) resets the list — systemd treats it as
+ * "unset" — so it is not returned. Comments and directives in other sections
+ * are ignored.
+ */
+function activeServiceDirectiveValues(unitText: string, key: string): string[] {
+  const values: string[] = [];
+  let section = "";
+  for (const rawLine of unitText.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line === "" || line.startsWith("#") || line.startsWith(";")) continue;
+    if (line.startsWith("[")) {
+      section = line.slice(1).replace(/\].*$/, "").trim().toLowerCase();
+      continue;
+    }
+    if (section !== "service") continue;
+    const eq = line.indexOf("=");
+    if (eq < 0) continue;
+    if (line.slice(0, eq).trim() !== key) continue;
+    const value = line.slice(eq + 1).trim();
+    if (value === "") continue; // reset, not an operand
+    values.push(value);
+  }
+  return values;
+}
+
+/**
+ * Does this unit's ACTIVE, parsed path operands name the tree? Canonicalizes the
+ * unit-side operand (resolving symlinks via its existing ancestor) and the tree,
+ * then compares. See the block comment above for what is deliberately excluded.
+ */
 export function unitTextMentionsTree(unitText: string, treeDir: string): boolean {
-  const variants = new Set<string>();
-  const add = (p: string): void => {
-    const trimmed = p.replace(/\/+$/, "");
-    if (trimmed.length > 1) variants.add(trimmed);
-  };
-  add(treeDir);
-  try {
-    add(canonicalPath(treeDir));
-  } catch { /* lexical variants are enough */ }
-  return [...variants].some((v) => textMentionsDir(unitText, v));
+  const tree = canonicalPath(treeDir);
+
+  // WorkingDirectory: the resolved directory must BE the tree.
+  for (const value of activeServiceDirectiveValues(unitText, "WorkingDirectory")) {
+    const [first] = splitSystemdWords(value);
+    if (first === undefined) continue;
+    const resolved = canonicalizeOperand(stripSystemdExecPrefix(first));
+    if (resolved !== null && resolved === tree) return true;
+  }
+
+  // ExecStart: a path operand that lives INSIDE the tree (executable / script /
+  // argument), on path-component boundaries.
+  for (const value of activeServiceDirectiveValues(unitText, "ExecStart")) {
+    const words = splitSystemdWords(value);
+    for (let i = 0; i < words.length; i++) {
+      const operand = i === 0 ? stripSystemdExecPrefix(words[i]) : words[i];
+      const resolved = canonicalizeOperand(operand);
+      if (resolved !== null && isPathInside(resolved, tree)) return true;
+    }
+  }
+
+  return false;
 }
 
 const SYSTEM_UNIT_DIRS = ["/etc/systemd/system"];
@@ -558,6 +686,10 @@ export async function applyPlainTreeUpgrade(
       rmSync(plan.previousDir, { recursive: true, force: true });
     }
 
+    // flair#1758: this rename moves the tree discovery matched. If a symlink in
+    // the tree's path is retargeted between discovery (upgrade.ts) and here, the
+    // restart can launch a different tree. Documented, not solved — fresh
+    // comparison is not locking.
     try {
       renameSync(plan.treeDir, plan.previousDir);
     } catch (err) {

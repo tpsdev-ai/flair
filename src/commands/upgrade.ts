@@ -1182,6 +1182,12 @@ program
     let treePlan: PlainTreeUpgradePlan | null = null;
     if (treeLane) {
       const flairFindingForPlan = findings.find((f) => f.name === FLAIR_PKG_NAME);
+      // flair#1758: unit discovery is captured HERE, into the plan, while apply
+      // later renames the selected canonical tree (applyPlainTreeUpgrade). A
+      // concurrent symlink retarget between discovery and apply can therefore
+      // make the restart launch a DIFFERENT tree than the one that matched.
+      // Resolving both sides fresh narrows the window; it is not transaction
+      // locking.
       treePlan = planPlainTreeUpgrade({
         treeDir: treeLane.dir,
         fromVersion: treeLane.version,

@@ -53,15 +53,24 @@ function fail(message: string, extra = ""): never {
 // Canonicalize BOTH paths the fixture writes and later asserts on.
 //
 // The product realpaths a tree before it prints or matches anything
-// (canonicalPath, src/lib/upgrade-exec-path.ts; used at
-// upgrade-plain-tree.ts:157,:261,:355). A fixture holding the LEXICAL path
-// therefore disagrees with every path the product emits. One root cause,
-// two symptoms, in this order:
+// (canonicalPath, src/lib/upgrade-exec-path.ts; used by upgrade-plain-tree.ts
+// for the banner and the plan). A fixture holding the LEXICAL path therefore
+// disagrees with every path the product emits. One root cause, two symptoms, in
+// this order:
 //   1. the banner assertion below fails -- the product prints
 //      "Plain-tree install: /private/var/..." while the fixture asserts
 //      "/var/..."  ("missing plain-tree banner for the packed extract");
 //   2. unit discovery misses -- the unit text names the lexical path, the
 //      lookup asks for the canonical one ("no systemd unit found").
+//
+// Symptom 2 was the product-side half, fixed in #1758: discovery no longer
+// scans arbitrary text. It extracts the ACTIVE [Service] WorkingDirectory /
+// ExecStart operands and canonicalizes the unit-side path too (resolving a
+// symlink via its existing ancestor), so a unit naming either spelling matches.
+// Because this fixture is now canonical, THIS lane can no longer create the
+// mismatch -- the regression coverage lives in test/unit/upgrade-plain-tree.test.ts
+// ("discovers a unit naming a symlinked tree ..."), which builds the symlink on
+// purpose.
 //
 // This is NOT a platform fact. The lane never invokes systemctl: it writes
 // a unit file and asserts on `--check` PLAN output, which is filesystem +

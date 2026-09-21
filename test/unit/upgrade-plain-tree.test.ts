@@ -18,8 +18,9 @@ import {
   existsSync,
   realpathSync,
   cpSync,
+  unlinkSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { create as tarCreate } from "tar";
 import {
@@ -396,6 +397,116 @@ describe("systemd unit discovery", () => {
       envUnit: "",
     });
     expect(forSpoke.map((u) => u.name)).toEqual(["spoke.service"]);
+  });
+
+  test("discovers a unit naming a symlinked tree after target resolution canonicalizes either --tree spelling", () => {
+    // The fixture ROOT stays canonical and the mismatch is created
+    // deliberately beneath it (#1754 canonicalized the CI lane's fixture, so
+    // that lane can no longer build this shape — the coverage lives here).
+    //
+    // The product canonicalizes the tree before matching anything
+    // (readFlairPackageAt → canonicalPath) and discovery is called with that
+    // canonical dir, while the unit on disk holds whatever the operator wrote.
+    const realTree = join(tmp, "srv", "flair");
+    writeFlairTree(realTree, { version: "0.36.0" });
+    const aliasTree = join(tmp, "opt", "flair");
+    mkdirSync(dirname(aliasTree), { recursive: true });
+    symlinkSync(realTree, aliasTree, "dir");
+    const canonicalReal = realpathSync(realTree);
+
+    const userDir = join(tmp, "user-empty");
+
+    // One unit naming the ALIAS spelling via BOTH directives.
+    const bothDir = join(tmp, "units-both");
+    mkdirSync(bothDir, { recursive: true });
+    writeFileSync(
+      join(bothDir, "alias.service"),
+      ["[Service]", `WorkingDirectory=${aliasTree}`, `ExecStart=${aliasTree}/flair start`].join("\n"),
+    );
+    // WorkingDirectory ALONE, so a WorkingDirectory-only matcher is exercised.
+    const wdDir = join(tmp, "units-wd");
+    mkdirSync(wdDir, { recursive: true });
+    writeFileSync(
+      join(wdDir, "wd.service"),
+      ["[Service]", `WorkingDirectory=${aliasTree}`].join("\n"),
+    );
+    // ExecStart ALONE, so an ExecStart-only matcher is exercised.
+    const execDir = join(tmp, "units-exec");
+    mkdirSync(execDir, { recursive: true });
+    writeFileSync(
+      join(execDir, "exec.service"),
+      ["[Service]", `ExecStart=${aliasTree}/flair start`].join("\n"),
+    );
+
+    const discover = (dir: string, treeDir: string) =>
+      findSystemdUnitsForTree(treeDir, { systemDirs: [dir], userDir, envUnit: "" });
+
+    // For BOTH the alias and the real --tree spelling, target resolution yields
+    // the same canonical dir — the dir discovery is actually handed.
+    for (const spelling of [aliasTree, realTree]) {
+      const target = resolvePlainTreeTarget({
+        treeFlag: spelling,
+        serving: null,
+        cli: null,
+        global: null,
+      });
+      expect(target.kind).toBe("use");
+      if (target.kind !== "use") return;
+      expect(target.inspection.dir).toBe(canonicalReal);
+
+      expect(discover(bothDir, target.inspection.dir)).toEqual([
+        { name: "alias.service", path: join(bothDir, "alias.service"), scope: "system" },
+      ]);
+      expect(discover(wdDir, target.inspection.dir).map((u) => u.name)).toEqual(["wd.service"]);
+      expect(discover(execDir, target.inspection.dir).map((u) => u.name)).toEqual(["exec.service"]);
+    }
+
+    // Properly QUOTED operands are handled (systemd quoting, not a blind split).
+    const quotedDir = join(tmp, "units-quoted");
+    mkdirSync(quotedDir, { recursive: true });
+    writeFileSync(
+      join(quotedDir, "q.service"),
+      ["[Service]", `WorkingDirectory="${aliasTree}"`, `ExecStart="${aliasTree}/flair" start`].join("\n"),
+    );
+    expect(discover(quotedDir, canonicalReal).map((u) => u.name)).toEqual(["q.service"]);
+
+    // RETARGET: point the alias at another packed tree. Fresh discovery must
+    // match the NEW target and reject the old one.
+    const realTree2 = join(tmp, "srv2", "flair");
+    writeFlairTree(realTree2, { version: "0.40.0" });
+    unlinkSync(aliasTree);
+    symlinkSync(realTree2, aliasTree, "dir");
+    const canonicalReal2 = realpathSync(realTree2);
+
+    expect(discover(bothDir, canonicalReal2)).toEqual([
+      { name: "alias.service", path: join(bothDir, "alias.service"), scope: "system" },
+    ]);
+    expect(discover(bothDir, canonicalReal)).toEqual([]);
+
+    // NEGATIVE — the false-positive half: discovery must NOT select on text that
+    // merely contains the tree path.
+    const negDir = join(tmp, "units-neg");
+    mkdirSync(negDir, { recursive: true });
+    // the canonical path inside a COMMENT
+    writeFileSync(
+      join(negDir, "comment.service"),
+      ["[Service]", `# WorkingDirectory=${canonicalReal2}`, `# ExecStart=${canonicalReal2}/flair start`].join("\n"),
+    );
+    // an unrelated pathname that merely CONTAINS the tree path
+    writeFileSync(
+      join(negDir, "sibling.service"),
+      ["[Service]", `WorkingDirectory=${canonicalReal2}-spoke`, `ExecStart=${canonicalReal2}-spoke/flair start`].join("\n"),
+    );
+    // quoted paths that are NOT path operands: a shell string and an env value
+    writeFileSync(
+      join(negDir, "quoted.service"),
+      [
+        "[Service]",
+        `ExecStart=/bin/sh -c "cd ${canonicalReal2} && ./flair start"`,
+        `Environment="FLAIR_HOME=${canonicalReal2}"`,
+      ].join("\n"),
+    );
+    expect(discover(negDir, canonicalReal2)).toEqual([]);
   });
 
   test("finds a system unit that names the tree and ignores one that does not", () => {
