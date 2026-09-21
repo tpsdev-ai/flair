@@ -15,13 +15,10 @@
   advisory flag in `flair rem candidates` (and as `incompleteFlag` in its
   `--json` output) instead.
 
-  **The delimiter check is ASCII-only.** It recognizes the ASCII backtick and the
-  ASCII pairs `( )`, `[ ]` and `{ }`. It does NOT recognize non-ASCII pairs —
-  full-width parentheses and brackets (`（）`, `［］`, `｛｝`) and CJK lenticular
-  brackets (`【】`, `〔〕`, `〖〗`) — so a truncated claim written with those
-  characters is judged balanced and CAN STILL BE AUTO-PROMOTED on the unattended
-  path. A candidate's locale is not bounded. Extending the delimiter set to
-  non-ASCII pairs is a separate change, not this one.
+  **The delimiter check in this slice is ASCII-only** — the ASCII backtick and
+  the pairs `( )`, `[ ]`, `{ }`. The full-width and CJK pairs are added by the
+  next entry (#1776), which ships in the same release; read the two entries
+  together. A candidate's locale is not bounded.
 
   Known limits:
 
