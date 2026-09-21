@@ -41,6 +41,7 @@
 // Harper process — the same split resources/memory-reflect-lib.ts uses.
 
 import { scanFields } from "./content-safety.js";
+import { structuralImbalance } from "../src/rem/promote-policy.js";
 
 // ─── ADK scope tag (the per-user access-control boundary) ────────────────────
 // adk-flair collapses (app, user) → ONE Flair agentId, separating users ONLY by
@@ -99,18 +100,32 @@ export interface AutoPromoteCandidateInput {
 }
 
 // ─── Structural-truncation signal (flair#1756 slice 2) ───────────────────────
+// The signal (structuralImbalance / hasTerminalPunctuation) is defined ONCE in
+// src/rem/promote-policy.ts. This gate imports structuralImbalance from it; the
+// CLI flag path (src/commands/rem.ts) uses hasTerminalPunctuation from the same
+// module. A server file importing a PURE helper from src/ is established practice
+// in this repo (resources/PromoteMemoryCandidate.ts and resources/soul-adk-guard.ts
+// both import that module); what does not survive npm packaging is a CLI file
+// importing FROM resources/. One definition lets the CLI and this gate share a
+// single implementation rather than a hand-kept pair.
 //
 // Slice 1 handled a generation the backend LABELLED incomplete (finishReason
-// `length` / `content_filter`). This handles the harder case from the issue
-// body: the backend reports `stop`, the JSON parses, the shape validates, and
-// the claim is still a fragment because a nested UNESCAPED quote terminated the
-// JSON string early — the intent `new Function("import(...)")` arriving as
-// `...via ` + "`new Function("`.
+// `length` / `content_filter`). This handles the other case: a claim reaches
+// staging STRUCTURALLY TRUNCATED while the response PARSES and VALIDATES — the
+// observed candidate ended at an unclosed code span and parenthesis, and because
+// validation checks only SHAPE, a truncated string is still a valid string in a
+// valid object, so nothing upstream rejects it.
+//
+// WHY the model emitted a well-formed payload carrying an unfinished claim is NOT
+// ESTABLISHED. It was NOT an unescaped inner quote terminating the JSON string:
+// parseAndValidateCandidates calls JSON.parse and would return invalid_json, so
+// such a payload never reaches staging at all. This signal keys on the SYMPTOM —
+// structural imbalance — which is identical however the fragment arose, so the
+// mechanism does not need to be known in order to refuse it.
 //
 // Such a fragment is not harmless. It reads as plausible, authoritative and
 // INCOMPLETE, and once promoted it becomes durable recalled context asserting
-// something it never finished saying. Shape validation cannot see it: a
-// truncated string is a perfectly valid string in a perfectly valid object.
+// something it never finished saying.
 //
 // WHAT THIS DETECTS: STRUCTURAL imbalance — an unclosed/unmatched backtick,
 // paren, bracket or brace. It does NOT detect semantic completeness. A balanced
@@ -118,40 +133,12 @@ export interface AutoPromoteCandidateInput {
 // structurally lopsided — never that a promoted claim is complete. Do not
 // describe it otherwise anywhere (comment, changelog, skip reason) — we amended
 // the 0.55.0 Metal entry for exactly this overclaim shape.
-
-const STRUCTURAL_CLOSERS: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
-
-/**
- * Return a description of the STRUCTURAL imbalance in `claim` (an unmatched or
- * closing-first bracket, an unclosed opener, or an odd number of backticks), or
- * null if it is balanced. Pure. The description is for diagnostics only — it is
- * NOT surfaced as a claim about completeness.
- */
-export function structuralImbalance(claim: string): string | null {
-  const stack: string[] = [];
-  for (const ch of claim) {
-    if (ch === "(" || ch === "[" || ch === "{") {
-      stack.push(ch);
-    } else if (ch in STRUCTURAL_CLOSERS) {
-      if (stack.pop() !== STRUCTURAL_CLOSERS[ch]) return `unmatched '${ch}'`;
-    }
-  }
-  if (stack.length > 0) return `unclosed '${stack[stack.length - 1]}'`;
-  // Backticks are symmetric (inline-code / fence delimiters), so their signal is
-  // parity: an odd count is an unclosed code span.
-  if (((claim.match(/`/g) ?? []).length) % 2 !== 0) return "unbalanced backtick";
-  return null;
-}
-
-/**
- * True iff `claim` ends with terminal punctuation (optionally followed by a
- * closing quote/bracket). This is a FLAG INPUT ONLY, never a refusal: plenty of
- * legitimate claims end without a full stop, and on the UNATTENDED path a false
- * refusal is silent. `flair rem candidates` surfaces it for the human reviewer.
- */
-export function hasTerminalPunctuation(claim: string): boolean {
-  return /[.!?]["')\]}»”’]*$/.test(claim.trimEnd());
-}
+//
+// The check counts delimiters WITHOUT interpreting context, so it is deliberately
+// over-broad: a COMPLETE claim that merely discusses an unmatched delimiter (an
+// interval written half-open, prose quoting a lone bracket) is also refused. On
+// this unattended path that is fail-closed and loses nothing — the candidate
+// stays pending for the human `rem promote` path.
 
 /**
  * Decide whether an ADK-sourced candidate may be auto-promoted to own memory.
@@ -198,9 +185,9 @@ export function decideAutoPromote(candidate: AutoPromoteCandidateInput): AutoPro
 
   // ── Structural truncation (flair#1756 slice 2) — APPENDED, so none of the
   // refusals above is masked: each still fires in its own right when its own
-  // condition holds. An unbalanced delimiter set is evidence of the observed
-  // defect (a claim cut off at `new Function(` by an unescaped inner quote), so
-  // it is REFUSED: the unattended path must never persist a fragment. Missing
+  // condition holds. An unbalanced delimiter set is the SYMPTOM of the observed
+  // defect (a claim staged mid-expression — it ended at `new Function(`), so it
+  // is REFUSED: the unattended path must never persist a fragment. Missing
   // terminal punctuation is deliberately NOT checked here — it is a FLAG, not a
   // refusal (see hasTerminalPunctuation).
   if (structuralImbalance(claim) !== null) {

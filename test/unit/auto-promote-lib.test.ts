@@ -17,8 +17,6 @@ import {
   decideAutoPromote,
   buildAutoPromotedTags,
   isMachineReviewerId,
-  structuralImbalance,
-  hasTerminalPunctuation,
   ADK_SCOPE_TAG_PREFIX,
   MACHINE_REVIEWER_PREFIX,
   MACHINE_REVIEWER_ADK_AUTO_PROMOTE,
@@ -26,6 +24,12 @@ import {
   DEFAULT_MAX_AUTO_PROMOTE_PER_CYCLE,
   type AutoPromoteSkipReason,
 } from "../../resources/auto-promote-lib.ts";
+// The signal itself is defined once in promote-policy and imported by the gate;
+// the primitives are exercised from their single definition.
+import {
+  structuralImbalance,
+  hasTerminalPunctuation,
+} from "../../src/rem/promote-policy.ts";
 
 const ADK_TAG = `${ADK_SCOPE_TAG_PREFIX}myapp:alice`;
 
@@ -138,11 +142,13 @@ describe("buildAutoPromotedTags", () => {
 
 // ─── flair#1756 slice 2 — structural truncation at the unattended gate ────────
 //
-// The observed defect: the backend reported `stop`, the JSON parsed, the shape
-// validated, and the claim was STILL a fragment because a nested unescaped quote
-// terminated the JSON string early. decideAutoPromote REFUSES on structural
-// imbalance; missing terminal punctuation is FLAG-only (never a refusal on this
-// path — a false refusal here is silent).
+// The observed symptom: a claim reaches staging STRUCTURALLY TRUNCATED — it ended
+// mid-expression at an unclosed code span and paren — while the response parses
+// and validates, so shape validation cannot catch it. Why the model produced a
+// well-formed payload carrying an unfinished claim is not established. The gate
+// keys on the symptom: decideAutoPromote REFUSES on structural imbalance; missing
+// terminal punctuation is FLAG-only (never a refusal on this path — a false
+// refusal here is silent).
 
 describe("decideAutoPromote — structural truncation REFUSES (flair#1756 slice 2)", () => {
   // The EXACT observed claim from issue #1756 (len 74). MUST be refused.

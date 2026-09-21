@@ -234,24 +234,32 @@ export function validateHumanReviewerId(reviewerId: string): string | null {
   return null;
 }
 
-// ─── Structural-truncation signal (flair#1756 slice 2) — CLI mirror ──────────
-// The GATE for structural truncation lives server-side in
-// resources/auto-promote-lib.ts (structuralImbalance, used by decideAutoPromote
-// — the UNATTENDED path). This is a MIRROR of that pure signal, present only so
-// `flair rem candidates` (src/commands/rem.ts) can FLAG a probable fragment for
-// the human reviewer instead of it sitting indistinguishable from the good ones
-// (issue #1756, suggestion 3). The two files sit on opposite sides of the
-// npm-packaging boundary (src/ ships as the CLI bundle, resources/ as the Harper
-// component) and cannot import one another — kept in sync by the shared
-// canonical logic, same discipline as MACHINE_REVIEWER_* above. Divergence is
-// guarded by a test that runs both copies over the same inputs.
+// ─── Structural-truncation signal (flair#1756 slice 2) ───────────────────────
+// The SINGLE definition of the structural-truncation signal. The GATE for it
+// lives server-side in resources/auto-promote-lib.ts (decideAutoPromote — the
+// UNATTENDED path), which IMPORTS these from here. The direction is deliberate
+// and established in this repo: a server file may import a PURE helper from src/
+// (resources/PromoteMemoryCandidate.ts and resources/soul-adk-guard.ts already
+// import this very module); it is a CLI file importing FROM resources/ that does
+// not survive npm packaging. Defining it here lets the CLI side
+// (src/commands/rem.ts, `flair rem candidates`) and the server gate share ONE
+// implementation rather than a hand-kept pair.
 //
 // Detects STRUCTURAL imbalance (unclosed/unmatched backtick, paren, bracket,
 // brace) — NOT semantic completeness. A balanced claim can still be a fragment.
+// The check counts delimiters without interpreting context, so a complete claim
+// that merely DISCUSSES an unmatched delimiter is also flagged/refused
+// (fail-closed; nothing is lost — the candidate stays pending for the human
+// `rem promote` path).
 
 const STRUCTURAL_CLOSERS: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
 
-/** Mirror of resources/auto-promote-lib.ts structuralImbalance. Pure. */
+/**
+ * Return a description of the STRUCTURAL imbalance in `claim` (an unmatched or
+ * closing-first bracket, an unclosed opener, or an odd number of backticks), or
+ * null if it is balanced. Pure. The description is for diagnostics only — it is
+ * NOT surfaced as a claim about completeness.
+ */
 export function structuralImbalance(claim: string): string | null {
   const stack: string[] = [];
   for (const ch of claim) {
@@ -266,8 +274,12 @@ export function structuralImbalance(claim: string): string | null {
   return null;
 }
 
-/** Mirror of resources/auto-promote-lib.ts hasTerminalPunctuation. Pure. Flag
- *  input only — never a refusal. */
+/**
+ * True iff `claim` ends with terminal punctuation (optionally followed by a
+ * closing quote/bracket). This is a FLAG INPUT ONLY, never a refusal: plenty of
+ * legitimate claims end without a full stop, and on the UNATTENDED path a false
+ * refusal is silent. `flair rem candidates` surfaces it for the human reviewer.
+ */
 export function hasTerminalPunctuation(claim: string): boolean {
   return /[.!?]["')\]}»”’]*$/.test(claim.trimEnd());
 }

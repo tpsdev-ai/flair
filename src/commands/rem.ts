@@ -139,8 +139,10 @@ export function formatCandidateLine(candidate: { id?: string; claim?: string }, 
  * a weaker signal, missing terminal punctuation. Neither claims the text is
  * incomplete — a balanced claim can still be a fragment.
  */
-export function candidateIncompleteFlag(claim: string | undefined): string | null {
-  const text = claim ?? "";
+export function candidateIncompleteFlag(claim: unknown): string | null {
+  // A malformed row can carry a non-string claim; normalize rather than throw,
+  // so listing one bad candidate never takes down the whole review surface.
+  const text = typeof claim === "string" ? claim : "";
   const imbalance = structuralImbalance(text);
   if (imbalance !== null) return `structurally incomplete (${imbalance}); the unattended auto-promote path refuses this`;
   if (!hasTerminalPunctuation(text)) return "no terminal punctuation — possible fragment";
