@@ -244,6 +244,94 @@ describe("structural signal primitives", () => {
   });
 });
 
+// ─── flair#1776 slice 3 — the enumerated non-ASCII delimiter table ────────────
+//
+// Slice 2 (above) refuses a structurally truncated claim on the unattended path
+// with an ASCII-only delimiter table. This extends that table to the enumerated
+// full-width/CJK pairs in src/rem/promote-policy.ts (STRUCTURAL_PAIRS) and
+// widens `hasTerminalPunctuation` in the same pass. Quotation marks of every
+// script stay OUT of the table (see the source comment for why Unicode general
+// categories were rejected in favour of an enumerated table).
+
+describe("decideAutoPromote — enumerated non-ASCII delimiters (flair#1776 slice 3)", () => {
+  const gate = (claim: string) => decideAutoPromote({ status: "pending", scopeTag: ADK_TAG, claim });
+
+  // FAILS-ON-MAIN evidence: on unmodified origin/main both of these are
+  // PROMOTED (the ASCII table cannot see a full-width/CJK opener), so they are
+  // the fixtures that fail before the change and pass after. The PR body records
+  // the origin/main verdicts; here they must REFUSE.
+  test("fails-on-main pair: unclosed full-width/CJK openers → refused with incomplete_claim", () => {
+    for (const claim of ["（補足", "【補足"]) {
+      expect(gate(claim)).toEqual({ promote: false, reason: "incomplete_claim" });
+    }
+  });
+
+  test("balanced non-ASCII pairs → PROMOTED (false-positive guard, asserted not omitted)", () => {
+    for (const claim of ["（補足）", "【補足】", "「完了」"]) {
+      expect(gate(claim).promote).toBe(true);
+    }
+  });
+
+  test("an unclosed CJK corner-bracket opener → refused", () => {
+    expect(gate("「未完")).toEqual({ promote: false, reason: "incomplete_claim" });
+  });
+
+  test("cross-width and cross-pair mismatches keep refusing (the conservative quarantine)", () => {
+    for (const claim of ["（補足)", "(a]", "The parser calls f( after token ]"]) {
+      expect(gate(claim)).toEqual({ promote: false, reason: "incomplete_claim" });
+    }
+  });
+
+  test("the observed #1756 claim (ASCII backtick + paren) still refuses", () => {
+    expect(gate("Dynamic imports in Harper's VM sandbox require escaping via `new Function(")).toEqual({
+      promote: false,
+      reason: "incomplete_claim",
+    });
+  });
+
+  // Guard: if anyone later adds a Unicode-general-category (`\p{Ps}`/`\p{Pe}`)
+  // counter or a quotation-mark leg, these ordinary COMPLETE claims would start
+  // refusing — `„Fertig.“`/`‚Fertig.‘` on the category mis-pairing, `isn’t` on
+  // the apostrophe. They must stay PROMOTED.
+  test("quotation marks of any script are NOT counted → PROMOTED (guards a category/quote leg)", () => {
+    for (const claim of ["„Fertig.“", "‚Fertig.‘", "isn’t working", "«Незавершённая мысль"]) {
+      expect(gate(claim).promote).toBe(true);
+    }
+  });
+
+  // Reviewer-cost made visible, not hidden: the same class as the ASCII `1)`
+  // closing-first case, now recognised in full-width form.
+  test('closing-first full-width prose → refused (same class as ASCII "1)")', () => {
+    expect(gate("1） 設定を保存する。")).toEqual({ promote: false, reason: "incomplete_claim" });
+  });
+
+  test("structuralImbalance drives the same verdicts at the primitive level", () => {
+    expect(structuralImbalance("a （b） 「c」 【d】")).toBeNull();
+    expect(structuralImbalance("a （b")).toBe("unclosed '（'");
+    expect(structuralImbalance("a 【b")).toBe("unclosed '【'");
+    expect(structuralImbalance("a 「b")).toBe("unclosed '「'");
+    expect(structuralImbalance("（補足)")).toBe("unmatched ')'");
+    expect(structuralImbalance("1） x")).toBe("unmatched '）'");
+    // A quotation mark is not a delimiter and does not make this non-null.
+    expect(structuralImbalance("„Fertig.“ ‘done’ isn’t «open")).toBeNull();
+  });
+});
+
+describe("hasTerminalPunctuation — CJK/full-width terminators (flair#1776 slice 3)", () => {
+  test("full-width/CJK terminators and the new bracket closers count", () => {
+    expect(hasTerminalPunctuation("「完了」。")).toBe(true);
+    expect(hasTerminalPunctuation("「完了。」")).toBe(true);
+    expect(hasTerminalPunctuation("完了！")).toBe(true);
+    expect(hasTerminalPunctuation("完了？")).toBe(true);
+  });
+  test("single-dot leaders and a bare claim do NOT count", () => {
+    expect(hasTerminalPunctuation("待機…")).toBe(false);
+    expect(hasTerminalPunctuation("待機‥")).toBe(false);
+    expect(hasTerminalPunctuation("完了․")).toBe(false);
+    expect(hasTerminalPunctuation("完了")).toBe(false);
+  });
+});
+
 describe("cost ceiling (Kern)", () => {
   test("a sane per-cycle default exists", () => {
     expect(DEFAULT_MAX_AUTO_PROMOTE_PER_CYCLE).toBeGreaterThan(0);

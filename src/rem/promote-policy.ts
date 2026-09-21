@@ -234,7 +234,7 @@ export function validateHumanReviewerId(reviewerId: string): string | null {
   return null;
 }
 
-// ─── Structural-truncation signal (flair#1756 slice 2) ───────────────────────
+// ─── Structural-truncation signal (flair#1756 slice 2, #1776 slice 3) ────────
 // The SINGLE definition of the structural-truncation signal. The GATE for it
 // lives server-side in resources/auto-promote-lib.ts (decideAutoPromote — the
 // UNATTENDED path), which IMPORTS these from here. The direction is deliberate
@@ -245,37 +245,71 @@ export function validateHumanReviewerId(reviewerId: string): string | null {
 // (src/commands/rem.ts, `flair rem candidates`) and the server gate share ONE
 // implementation rather than a hand-kept pair.
 //
-// Detects STRUCTURAL imbalance (unclosed/unmatched backtick, paren, bracket,
+// Detects STRUCTURAL imbalance (unclosed/unmatched backtick, bracket, paren,
 // brace) — NOT semantic completeness. A balanced claim can still be a fragment.
 //
-// The detection is ASCII-ONLY. It recognizes the ASCII backtick and the ASCII
-// pairs `( )`, `[ ]` and `{ }`. Non-ASCII delimiter pairs — full-width
-// `（）`/`［］`/`｛｝` and CJK lenticular `【】`/`〔〕`/`〖〗` — are NOT covered, so a
-// truncated claim written in those scripts is judged balanced and is NOT
-// refused on either path. Do not assume Unicode coverage here.
+// The delimiter set is an ENUMERATED table (STRUCTURAL_PAIRS, below): the ASCII
+// pairs `( )`, `[ ]`, `{ }` AND the full-width/CJK pairs
+// `（）［］｛｝【】〔〕〖〗「」『』`. Both the opener set and the closer map are
+// DERIVED from that one list, so a pair cannot be added to one side and missed
+// on the other. The set is deliberately NOT derived from Unicode general
+// categories (`\p{Ps}` / `\p{Pe}`) and is NOT described as "Unicode-aware":
+// category membership does not establish paired usage (Ogham `᚛` and bare
+// `༺`/`༻`, `⸢`/`⸣`, `⌈`/`⌉` are permitted standalone by the core spec), and a
+// category counter refuses ordinary COMPLETE prose — see the quotation-mark note
+// immediately below. There is no vendored Unicode data and no codegen here.
+//
+// QUOTATION MARKS OF EVERY SCRIPT ARE OUT OF SCOPE. `“ ” ‘ ’ „ “ ‚ ‘ « »` are
+// NOT counted, so a claim truncated mid-quotation is judged balanced. The reason
+// is concrete, not a preference: U+201E `„` (and U+201A `‚`) is category Ps
+// while its closing mark U+201C (U+2018) is Pi, so ANY category-based counter
+// reports positive depth on the ordinary COMPLETE German quotation `„Fertig.“`
+// and refuses it; and U+2019 `’` is the standard English apostrophe (category
+// Pf), so a quote-counting leg refuses every English contraction (e.g. `isn’t`).
+// Enumerating matched bracket pairs avoids both false positives. That is why
+// categories were rejected in favour of this table.
 //
 // The check counts delimiters without interpreting context, so a complete claim
 // that merely DISCUSSES an unmatched delimiter is also flagged/refused
 // (fail-closed; nothing is lost — the candidate stays pending for the human
 // `rem promote` path).
+//
+// Runtimes this signal was exercised against (2026-09-21): Node v22.22.1
+// (process.versions.unicode = 17.0) and Bun 1.3.10 (process.versions.unicode =
+// 15.1). Passing the check means NO DETECTED IMBALANCE for the enumerated
+// pairs — never completeness, and never coverage of an unenumerated script.
 
-const STRUCTURAL_CLOSERS: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
+// The one source of truth: [opener, closer]. The two lookups below are DERIVED,
+// so there is no second hand-kept list that can drift out of step.
+const STRUCTURAL_PAIRS: ReadonlyArray<readonly [string, string]> = [
+  ["(", ")"], ["[", "]"], ["{", "}"],
+  ["（", "）"], ["［", "］"], ["｛", "｝"],
+  ["【", "】"], ["〔", "〕"], ["〖", "〗"],
+  ["「", "」"], ["『", "』"],
+];
+
+const STRUCTURAL_OPENERS: ReadonlyMap<string, string> = new Map(STRUCTURAL_PAIRS);
+const STRUCTURAL_CLOSERS: ReadonlyMap<string, string> = new Map(
+  STRUCTURAL_PAIRS.map(([opener, closer]) => [closer, opener] as const),
+);
 
 /**
  * Return a description of the STRUCTURAL imbalance in `claim` (an unmatched or
  * closing-first bracket, an unclosed opener, or an odd number of backticks), or
- * null if it is balanced. ASCII delimiters only (see the note above) — a
- * non-ASCII delimiter pair is not examined and does not make this non-null.
- * Pure. The description is for diagnostics only — it is NOT surfaced as a claim
- * about completeness.
+ * null if it is balanced. The delimiter set is the ENUMERATED table above
+ * (ASCII + full-width/CJK pairs); a delimiter outside that set — in particular a
+ * quotation mark of any script — is not examined and does not make this
+ * non-null. Pure. The description is for diagnostics only — it is NOT surfaced
+ * as a claim about completeness.
  */
 export function structuralImbalance(claim: string): string | null {
   const stack: string[] = [];
   for (const ch of claim) {
-    if (ch === "(" || ch === "[" || ch === "{") {
+    if (STRUCTURAL_OPENERS.has(ch)) {
       stack.push(ch);
-    } else if (ch in STRUCTURAL_CLOSERS) {
-      if (stack.pop() !== STRUCTURAL_CLOSERS[ch]) return `unmatched '${ch}'`;
+    } else {
+      const opener = STRUCTURAL_CLOSERS.get(ch);
+      if (opener !== undefined && stack.pop() !== opener) return `unmatched '${ch}'`;
     }
   }
   if (stack.length > 0) return `unclosed '${stack[stack.length - 1]}'`;
@@ -288,8 +322,14 @@ export function structuralImbalance(claim: string): string | null {
  * closing quote/bracket). This is a FLAG INPUT ONLY, never a refusal: plenty of
  * legitimate claims end without a full stop, and on the UNATTENDED path a false
  * refusal is silent. `flair rem candidates` surfaces it for the human reviewer.
+ *
+ * Terminators: ASCII `.` `!` `?` plus the full-width/CJK `。` (U+3002), `！`
+ * (U+FF01), `？` (U+FF1F). The trailing-suffix class accepts the quote/bracket
+ * closers it always did plus the enumerated bracket closers `」』）］｝】〕〗`. The
+ * single-dot leaders `…` `‥` `․` are deliberately NOT terminators — they are not
+ * interchangeable with a full stop.
  */
 export function hasTerminalPunctuation(claim: string): boolean {
-  return /[.!?]["')\]}»”’]*$/.test(claim.trimEnd());
+  return /[.!?。！？]["')\]}»”’」』）］｝】〕〗]*$/.test(claim.trimEnd());
 }
 

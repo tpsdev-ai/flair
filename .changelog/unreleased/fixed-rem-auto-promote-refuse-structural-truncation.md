@@ -43,4 +43,4 @@
   > says only that the text is structurally lopsided, never that a promoted
   > claim is complete.
 
-  (Refs #1756, #1775)
+  (Refs #1756, #1775, #1776)
