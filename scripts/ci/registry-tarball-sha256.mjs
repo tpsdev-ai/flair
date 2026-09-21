@@ -12,23 +12,34 @@
  * the promote command and the stage job all talk about the same hash.
  *
  * Usage:
- *   node scripts/ci/registry-tarball-sha256.mjs <version>
+ *   node scripts/ci/registry-tarball-sha256.mjs <version> [package]
+ *
+ * `package` defaults to `@tpsdev-ai/flair` (flair#1781). The promote step binds
+ * ONE line per lockstep package, so each line carries its own package's sha.
  *
  * Prints the 64-char hex sha256 on stdout. Exit codes:
  *   0 — printed
- *   2 — DID NOT RUN (bad version, could not resolve, fetch failed) — never green.
+ *   2 — DID NOT RUN (bad version/package, could not resolve, fetch failed) — never green.
  */
 
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 
+const DEFAULT_PACKAGE = "@tpsdev-ai/flair";
 const version = process.argv[2] ?? "";
+const packageName = process.argv[3] ?? DEFAULT_PACKAGE;
 if (!/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?$/.test(version)) {
-  console.error(`usage: node scripts/ci/registry-tarball-sha256.mjs <version> (got '${version}')`);
+  console.error(`usage: node scripts/ci/registry-tarball-sha256.mjs <version> [package] (got version '${version}')`);
+  process.exit(2);
+}
+// npm package names are lowercase; a scoped name is @scope/name. A bad value
+// must not be interpolated into an `npm view` spec.
+if (!/^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/.test(packageName)) {
+  console.error(`usage: node scripts/ci/registry-tarball-sha256.mjs <version> [package] (got package '${packageName}')`);
   process.exit(2);
 }
 
-const spec = `@tpsdev-ai/flair@${version}`;
+const spec = `${packageName}@${version}`;
 let url;
 try {
   url = execFileSync("npm", ["view", spec, "dist.tarball"], { encoding: "utf8" }).trim();

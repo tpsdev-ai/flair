@@ -7,8 +7,9 @@ Flair publishes nine workspace packages to npm under `@tpsdev-ai/*`. Releases ar
 the staged tarballs on npmjs.com with 2FA. Approval makes the version public, but
 **not `latest`** — a credential-less post-publish canary installs that exact version
 from the registry and boots it on Linux and macOS. Only a canary PASS prints the
-sha256-bound promote command that moves `latest`; the canary runs on the same
-definition of "it boots" the rockit ritual uses (`scripts/ci/check-instance-boot.sh`).
+sha256-bound promote commands that move `latest` — one per lockstep package, all
+or none; the canary runs on the same definition of "it boots" the rockit ritual
+uses (`scripts/ci/check-instance-boot.sh`).
 
 The staging tag is an **immutable property of the staged package** (`npm help stage`):
 re-staging the same version under a different tag requires `npm stage reject` first.
@@ -29,7 +30,7 @@ There is no "fix the stage in place" — you reject it and re-cut the next patch
                                                                           │  version + boots it
                                                        canary PASS ───────┘
                                                                           │
-                                                    paste the emitted promote line
+                                                    paste the emitted promote block
                                                                           ▼
                                                                   latest moves
 ```
@@ -176,18 +177,40 @@ not run must not read as a pass.
 
 ### Phase 5 — promote `latest` (or deprecate)
 
-- **On PASS**, the canary emits the complete, sha256-bound promote command. Run it
-  from a repo checkout on a machine logged into npm:
+The promote is **lockstep**: every package the release staged moves together, or
+none does. `flair` at `latest` 0.55.1 while `flair-client` / `flair-mcp` / the
+plugins sit at 0.54.2 is exactly the mismatch `flair#1383` detects at runtime —
+and 0.55.1's promote had to be assembled by hand, line by line, for this reason.
+
+- **On PASS**, the canary emits the complete, sha256-bound promote block — one
+  line per lockstep package, `@tpsdev-ai/flair` LAST so a partial paste never
+  leaves the CLI ahead of its client library. Run every line from a repo checkout
+  on a machine logged into npm. Under 2FA each `dist-tag add` may prompt for an
+  OTP separately, so capture one code and pass it to all of them with `--otp`:
 
   ```bash
-  test "$(node scripts/ci/registry-tarball-sha256.mjs <ver>)" = "<sha256>" && npm dist-tag add @tpsdev-ai/flair@<ver> latest
+  OTP=123456   # fresh from your authenticator; valid for a short window
+  test "$(node scripts/ci/registry-tarball-sha256.mjs <ver> @tpsdev-ai/flair-client)" = "<sha>" && npm dist-tag add @tpsdev-ai/flair-client@<ver> latest --otp "$OTP"
+  test "$(node scripts/ci/registry-tarball-sha256.mjs <ver> @tpsdev-ai/flair-mcp)"    = "<sha>" && npm dist-tag add @tpsdev-ai/flair-mcp@<ver> latest --otp "$OTP"
+  # … one line per package; @tpsdev-ai/flair last …
+  test "$(node scripts/ci/registry-tarball-sha256.mjs <ver> @tpsdev-ai/flair)"        = "<sha>" && npm dist-tag add @tpsdev-ai/flair@<ver> latest --otp "$OTP"
   ```
 
-  The `test` is the integrity guard: a stale PASS, a re-cut version, or a paste from a
-  failed run aborts before `latest` moves.
-- **On FAIL**, the version stays public but unpromoted. The canary emits the
-  `npm deprecate` command; run it, then re-cut the next patch. A version is never
-  refreshed in place.
+  The `test` is the integrity guard: a stale PASS, a re-cut version, or a paste
+  from a failed run aborts before `latest` moves. Paste **all** lines or **none**
+  — a partial paste is the skew this phase exists to prevent.
+- **Confirm the set converged** — the last step, after pasting:
+
+  ```bash
+  node scripts/ci/registry-latest-skew.mjs <ver>
+  ```
+
+  It reads `dist-tags.latest` for every lockstep package and exits non-zero
+  naming any that disagree (or that differ from `<ver>`). The canary runs the same
+  check BEFORE the verdict, so a pre-existing skew is visible there too.
+- **On FAIL**, the version stays public but unpromoted. The canary emits one
+  `npm deprecate` line per package; run them, then re-cut the next patch. A
+  version is never refreshed in place.
 
 ## One-time setup
 

@@ -24,6 +24,9 @@ name: Post-publish canary — install + boot a published version
 #     a matching sha is what makes the later promote race-free). npm exposes no
 #     sha256 directly — `dist.shasum` is SHA-1 — so
 #     `scripts/ci/registry-tarball-sha256.mjs` downloads the tarball and hashes it.
+#     flair#1781: EVERY lockstep package is hashed (each promote line binds its
+#     own package's sha), and `@tpsdev-ai/flair` is also checked against
+#     `expected_sha256`.
 #   - The four install-tree assertions and the boot contract live in shared
 #     scripts (`scripts/check-global-install-lockfile.mjs --registry-version` and
 #     `scripts/ci/check-instance-boot.sh`) — the PR install-weight lane and the
@@ -38,10 +41,11 @@ name: Post-publish canary — install + boot a published version
 #     outage, missing tree, host unreachable) is a FAIL, never a skip.
 #
 # WHAT IT EMITS
-#   PASS prints the complete, sha256-bound promote command; FAIL prints the
-#   `npm deprecate` command. The human's job is approve-on-npmjs, then paste one
-#   line — a stale PASS, a re-cut version, or a paste-from-FAIL aborts at the
-#   `test` before `latest` can move.
+#   PASS prints the complete, sha256-bound promote block — ONE line per lockstep
+#   package (all or none; `@tpsdev-ai/flair` LAST); FAIL prints one `npm deprecate`
+#   line per package. The human's job is approve-on-npmjs, then paste the block —
+#   a stale PASS, a re-cut version, or a paste-from-FAIL aborts at the `test`
+#   before `latest` can move.
 
 on:
   workflow_dispatch:
@@ -95,7 +99,7 @@ jobs:
           npm install -g npm@11.19.1
           echo "npm $(npm --version)"
 
-      - name: Verify the published tarball's sha256
+      - name: Verify the published tarballs' sha256 (all lockstep packages)
         id: sha
         env:
           VERSION: ${{ inputs.version }}
@@ -107,20 +111,46 @@ jobs:
             echo "::error::expected_sha256 is not a 64-char hex sha256: '$EXPECTED'"
             exit 1
           fi
-          # npm exposes no sha256 (dist.shasum is SHA-1, dist.integrity is
-          # SHA-512), so this downloads the exact published tarball and hashes it.
-          if ! ACTUAL="$(node scripts/ci/registry-tarball-sha256.mjs "$VERSION" 2> canary-logs/sha256.err)"; then
-            echo "::error::could not hash @tpsdev-ai/flair@${VERSION} — is it approved and public? (unmeasurable is FAIL)"
-            tail -n 20 canary-logs/sha256.err || true
+          # flair#1781: the promote is lockstep, so hash EVERY lockstep package's
+          # published tarball, not only @tpsdev-ai/flair — each promote line binds
+          # its own package's sha. npm exposes no sha256 (dist.shasum is SHA-1,
+          # dist.integrity is SHA-512), so this downloads each published tarball
+          # and hashes it. @tpsdev-ai/flair is additionally checked against the
+          # dispatched expected_sha256.
+          : > canary-logs/sha256.err
+          : > canary-logs/lockstep-sha256.txt
+          missing=0
+          while read -r pkg; do
+            [ -n "$pkg" ] || continue
+            if ! sha="$(node scripts/ci/registry-tarball-sha256.mjs "$VERSION" "$pkg" 2>> canary-logs/sha256.err)"; then
+              echo "::error::could not hash ${pkg}@${VERSION} — is it approved and public? (unmeasurable is FAIL)"
+              missing=1
+              continue
+            fi
+            echo "${pkg}=${sha}" >> canary-logs/lockstep-sha256.txt
+            if [ "$pkg" = "@tpsdev-ai/flair" ]; then
+              echo "expected sha256: ${EXPECTED}"
+              echo "registry sha256 (@tpsdev-ai/flair): ${sha}"
+              if [ "$sha" != "$EXPECTED" ]; then
+                echo "::error::sha256 mismatch for @tpsdev-ai/flair — the published bytes are not the bytes the canary was dispatched for; do not promote"
+                missing=1
+              fi
+            fi
+          done < <(node scripts/ci/lockstep-packages.mjs)
+          tail -n 20 canary-logs/sha256.err || true
+          # An empty or short loop (the derivation failed) must not read as a pass.
+          expected_count="$(node scripts/ci/lockstep-packages.mjs | wc -l | tr -d ' ')"
+          got_count="$(wc -l < canary-logs/lockstep-sha256.txt | tr -d ' ')"
+          if [ "$got_count" != "$expected_count" ] || [ "$expected_count" -eq 0 ]; then
+            echo "::error::hashed ${got_count}/${expected_count} lockstep tarballs — refusing to promote a partial set"
             exit 1
           fi
-          echo "expected sha256: ${EXPECTED}"
-          echo "registry sha256: ${ACTUAL}"
-          if [ "$ACTUAL" != "$EXPECTED" ]; then
-            echo "::error::sha256 mismatch — the published bytes are not the bytes the canary was dispatched for; do not promote"
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::one or more lockstep tarballs could not be hashed or did not match"
             exit 1
           fi
-          echo "sha256 matches the published tarball"
+          echo "all ${got_count} lockstep tarball sha256 values verified"
+          { echo "LOCKSTEP_SHAS<<EOF"; cat canary-logs/lockstep-sha256.txt; echo "EOF"; } >> "$GITHUB_ENV"
 
       - name: Install from the registry and run the four install-tree assertions
         id: install
@@ -237,6 +267,37 @@ jobs:
           fi
           echo "plugin canary PASSED"
 
+      - name: Lockstep `latest` skew (pre-promote)
+        # flair#1781: before the verdict, surface whether the lockstep set is
+        # ALREADY skewed on `latest` (a prior partial promote, or the older
+        # single-package flow). The all-or-none promote block below is what
+        # converges the set, so a pre-existing skew is reported, not blocked;
+        # an unmeasurable check is named too, never silently green.
+        id: skew
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -uo pipefail
+          mkdir -p canary-logs
+          set +e
+          node scripts/ci/registry-latest-skew.mjs > canary-logs/skew.txt 2>&1
+          rc=$?
+          set -e
+          cat canary-logs/skew.txt || true
+          {
+            echo ""
+            echo "#### Lockstep \`latest\` skew (pre-promote)"
+            echo '```'
+            cat canary-logs/skew.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY" || true
+          if [ "$rc" -eq 1 ]; then
+            echo "::warning::lockstep \`latest\` is already skewed (see above) — the promote block below converges the set"
+          elif [ "$rc" -eq 2 ]; then
+            echo "::warning::lockstep skew check DID NOT RUN — could not read every dist-tags.latest"
+          fi
+          exit 0
+
       - name: Canary verdict — emit the promote or deprecate command
         # Runs whether or not the checks passed; the job itself still fails on a
         # red step (no continue-on-error anywhere). This step exists so the
@@ -257,11 +318,13 @@ jobs:
           set -uo pipefail
           mkdir -p canary-logs
           # The command text is defined once, in scripts/ci/canary-verdict.sh, so
-          # the emitted promote/deprecate line is the same thing the fails-first
-          # proof exercises.
+          # the emitted promote/deprecate block is the same thing the fails-first
+          # proof exercises. LOCKSTEP_SHAS (pkg=sha256 per line, from the sha
+          # step) word-splits into one `<pkg>=<sha256>` argument per package;
+          # PASS refuses a partial set.
           if [ "$SHA_OUTCOME" = "success" ] && [ "$INSTALL_OUTCOME" = "success" ] && [ "$BOOT_OUTCOME" = "success" ] && [ "$PLUGIN_OUTCOME" = "success" ]; then
-            scripts/ci/canary-verdict.sh pass "$VERSION" "$EXPECTED" "$RUN_URL" "$OS_NAME" | tee canary-logs/verdict.txt
+            scripts/ci/canary-verdict.sh pass "$VERSION" "$RUN_URL" --os "$OS_NAME" ${LOCKSTEP_SHAS:-} | tee canary-logs/verdict.txt
           else
-            scripts/ci/canary-verdict.sh fail "$VERSION" "$EXPECTED" "$RUN_URL" "$OS_NAME" | tee canary-logs/verdict.txt
+            scripts/ci/canary-verdict.sh fail "$VERSION" "$RUN_URL" --os "$OS_NAME" ${LOCKSTEP_SHAS:-} | tee canary-logs/verdict.txt
           fi
           cat canary-logs/verdict.txt >> "$GITHUB_STEP_SUMMARY"
