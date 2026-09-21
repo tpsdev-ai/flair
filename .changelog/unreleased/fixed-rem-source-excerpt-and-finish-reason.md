@@ -7,8 +7,10 @@
   `[excerpt truncated]` marker, charged against the same per-source budget),
   never a silent prefix. Source text and attribute values are escaped so the
   excerpt annotation cannot be counterfeited by the content it annotates, and
-  the per-source budget is charged against the escaped body so escaping never
-  grows the prompt. The local generate contract now carries Harper's
+  the per-source budget is charged against the escaped body, keeping the
+  EMITTED body within the per-source budget (a source that only overflows once
+  escaped is now presented as a marked excerpt rather than as a longer literal
+  prefix). The local generate contract now carries Harper's
   `finishReason`, and a response the backend flagged `length` or
   `content_filter` is rejected/retried (`incomplete_generation`, HTTP 502)
   rather than staged as a finished thought. Detection depends on the completion

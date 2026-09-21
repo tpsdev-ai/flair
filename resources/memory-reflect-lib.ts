@@ -326,6 +326,18 @@ const SOURCE_EXCERPT_MARKER = "…[excerpt truncated]";
  * a body and open a new element (`<`, `>`). Escaping is structural only: it
  * makes the element's own delimiters unproducible from the data, and claims
  * nothing about whether the text is semantically complete.
+ *
+ * INVARIANT for future emitters (flair#1767): ANY value that originates from a
+ * gathered source memory — content, id, date, anything added later — must be
+ * escaped for the context it lands in BEFORE it reaches prompt text. The escape
+ * set is role-specific: `& < >` for a `<memory>` element body (this function),
+ * plus `"` for a double-quoted attribute (escapeAttributeValue), plus JSON
+ * string escaping for a value embedded in prose (JSON.stringify, which also
+ * neutralises newlines/carriage returns). There are TWO such sinks today:
+ * sourceMemoryElement (element body + attributes) and buildExecutePrompt's
+ * `validIds` rule list (a raw id dropped into prose, not an element at all).
+ * Escaping one sink does not cover the other — a fix scoped only to element
+ * emitters would miss the prose sink entirely.
  */
 function escapeElementText(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -429,7 +441,18 @@ export function buildExecutePrompt(
 ): string {
   const { agentId, focus, scope, sinceISO, memories, continuity } = params;
   const focusText = FOCUS_PROMPTS[focus] ?? FOCUS_PROMPTS.lessons_learned;
-  const validIds = memories.map((m) => `"${m.id}"`).join(", ");
+  // flair#1767 blocking: this id reaches a SECOND sink — the raw id is
+  // interpolated into output-contract PROSE, not into a <memory> element.
+  // escapeElementText alone is not enough here: it stops the literal `<memory>`
+  // text from surviving, but a newline (or `\r`) in the id still splits the
+  // rule line and lets an id forge extra rule blocks. JSON.stringify neutralises
+  // newlines, carriage returns and embedded quotes by escaping them into the
+  // string literal. BOTH legs are required — element escaping for the tag text,
+  // JSON string escaping for the prose context — and neither is sufficient
+  // alone (measured: escapeElementText only still forges rule lines;
+  // JSON.stringify only still emits a live element tag). Do not simplify one
+  // leg away.
+  const validIds = memories.map((m) => JSON.stringify(escapeElementText(m.id ?? ""))).join(", ");
   const candidateShape = continuity
     ? `{"candidates": [{"claim": string, "sourceMemoryIds": string[], "tags"?: string[], "visibility"?: "shared", "teamRelevance"?: string}]}`
     : `{"candidates": [{"claim": string, "sourceMemoryIds": string[], "tags"?: string[]}]}`;
