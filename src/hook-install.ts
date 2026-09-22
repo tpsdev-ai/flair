@@ -53,7 +53,7 @@
 //   6. Size-budgeted payload — also owned by session-start-hook.ts, which
 //      reuses bootstrap's own maxTokens machinery.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   SESSION_START_HOOK_MARKER,
@@ -75,6 +75,19 @@ import {
 import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec } from "./lib/mcp-spec.js";
 import { decidePinWrite, type PinWriteDecision } from "./lib/pin-write-guard.js";
 import { withConfigCriticalSection } from "./lib/config-critical-section.js";
+import {
+  backupBytesTo,
+  encodeConfig,
+  hookBackupPath,
+  parseSettingsBytes,
+  type ReadSettingsResult,
+} from "./lib/settings-bytes.js";
+
+// flair#1778 2c-i-c: the bytes-level helpers (parse / encode / backup) moved to
+// the shared leaf `./lib/settings-bytes.js` so this module and
+// src/doctor-client.ts cannot drift. Re-exported here because `hookBackupPath`
+// was a public export of this module and callers still import it from here.
+export { hookBackupPath };
 
 // ── harness registry ────────────────────────────────────────────────────────
 
@@ -135,13 +148,7 @@ export function resolveHookAgentId(
   );
 }
 
-/** Backup path convention: a single sibling `<path>.bak`, overwritten on
- *  every mutating run — recovery insurance for the mutation that's about to
- *  happen, not a version history. Exported so tests assert against the same
- *  constant this module uses internally. */
-export function hookBackupPath(settingsPath: string): string {
-  return `${settingsPath}.bak`;
-}
+// `hookBackupPath` lives in `./lib/settings-bytes.js` now (re-exported above).
 
 // ── the hook command itself ─────────────────────────────────────────────────
 
@@ -271,15 +278,6 @@ function findHookEntry(config: any): { groupIndex: number; hookIndex: number } |
 
 // ── settings.json read (fail-closed) ────────────────────────────────────────
 
-interface ReadSettingsResult {
-  exists: boolean;
-  parsed: any | null;
-  /** Set (parsed is null) on ANY reason we must not proceed: missing-file is
-   *  NOT an error (parsed defaults to {}), but an unreadable or unparseable
-   *  existing file always is — never silently coerced to "absent". */
-  parseError: string | null;
-}
-
 function readSettingsFile(path: string): ReadSettingsResult {
   if (!existsSync(path)) return { exists: false, parsed: {}, parseError: null };
   let raw: string;
@@ -298,36 +296,10 @@ function readSettingsFile(path: string): ReadSettingsResult {
   }
 }
 
-/** Parse settings bytes read INSIDE the critical section (flair#1778
- *  2c-i-b). The primitive hands `decide` the LOCKED snapshot, so parsing must
- *  consume those bytes — never a pre-lock read. */
-function parseSettingsBytes(bytes: Uint8Array | null, path: string): ReadSettingsResult {
-  if (bytes === null) return { exists: false, parsed: {}, parseError: null };
-  const raw = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("utf-8");
-  if (!raw.trim()) return { exists: true, parsed: {}, parseError: null };
-  try {
-    return { exists: true, parsed: JSON.parse(raw), parseError: null };
-  } catch (err: unknown) {
-    const reason = err instanceof Error ? err.message : String(err);
-    return { exists: true, parsed: null, parseError: `malformed JSON in ${path} (${reason})` };
-  }
-}
-
-/** The primitive-managed backup: write the IN-LOCK bytes to the sibling
- *  `<path>.bak` (overwritten every mutating run). Throws so the primitive can
- *  short-circuit to a named refusal BEFORE `decide` runs. */
-function backupBytesTo(path: string, bytes: Uint8Array): string {
-  const dest = hookBackupPath(path);
-  writeFileSync(dest, bytes);
-  return dest;
-}
-
-const CONFIG_ENCODER = new TextEncoder();
-
-/** The exact bytes every hook config writer emits: 2-space JSON + newline. */
-function encodeConfig(config: unknown): Uint8Array {
-  return CONFIG_ENCODER.encode(JSON.stringify(config, null, 2) + "\n");
-}
+// `parseSettingsBytes`, `backupBytesTo` and `encodeConfig` live in
+// `./lib/settings-bytes.js` now — imported above, shared with
+// src/doctor-client.ts. `readSettingsFile` stays here: it is the READ-ONLY
+// path's helper (dry-run / status), which never enters the critical section.
 
 // ── delta computation (pure) ────────────────────────────────────────────────
 

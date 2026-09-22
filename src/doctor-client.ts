@@ -34,6 +34,12 @@ import {
 } from "./install/clients.js";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec } from "./lib/mcp-spec.js";
 import { decidePinWrite, type PinWriteDecision } from "./lib/pin-write-guard.js";
+import { withConfigCriticalSection } from "./lib/config-critical-section.js";
+import {
+  backupBytesTo,
+  encodeConfig,
+  parseSettingsBytes,
+} from "./lib/settings-bytes.js";
 import {
   decodeWiringSpec,
   decodeWiringSpecs,
@@ -560,6 +566,22 @@ export function computeContinuityHookRemoval(config: any): {
 }
 
 /**
+ * The four doctor hook writers printed `could not write/update <path>:
+ * <reason>` before the flair#1778 2c-i-c migration, where <reason> was the
+ * JSON.parse failure message. The shared parser (./lib/settings-bytes.js)
+ * reports the SAME failure as `malformed JSON in <path> (<reason>)`. Peeling
+ * that wrapper lets each migrated writer keep its exact pre-migration line
+ * (the brief's "keep the existing line wherever one exists"). Falls back to
+ * the parser's text unchanged if the shape ever differs.
+ */
+function jsonFailureReason(path: string, parseError: string): string {
+  const prefix = `malformed JSON in ${path} (`;
+  return parseError.startsWith(prefix) && parseError.endsWith(")")
+    ? parseError.slice(prefix.length, parseError.length - 1)
+    : parseError;
+}
+
+/**
  * `flair doctor --fix` write path: register (or repair to current form) the
  * continuity pair in ~/.claude/settings.json. Merge-safe read-parse-write,
  * mirroring fixSessionStartHook — creates the file if absent, refuses on a
@@ -597,20 +619,39 @@ export function fixContinuityCaptureHooks(
       message: `Flair URL '${flairUrl}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`,
     };
   }
+  // Parent creation stays OUTSIDE the primitive: it needs the resolved parent
+  // to exist before it can observe an absent destination (flair#1778 2c-i-b).
+  // Everything from here (observe → decide → write) is ONE critical section.
   try {
-    let config: any = {};
-    const raw = readTextFile(path);
-    if (raw && raw.trim()) config = JSON.parse(raw);
-    const { changed, newConfig, decision } = computeContinuityHookInstall(config, agentId, flairUrl);
-    if (decision) {
-      return { ok: true, path, changed: false, message: decision.line! };
-    }
-    if (!changed) {
-      return { ok: true, path, changed: false, message: `continuity capture hooks already current in ${path}` };
-    }
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify(newConfig, null, 2) + "\n");
-    return { ok: true, path, changed: true, message: `wired the continuity capture hooks (PostToolUse + Stop) in ${path} (agent '${agentId}')` };
+    let outcome: { ok: boolean; path: string; message: string; changed: boolean } | null = null;
+    const result = withConfigCriticalSection(
+      path,
+      (bytes) => {
+        const read = parseSettingsBytes(bytes, path);
+        if (read.parseError) {
+          outcome = { ok: false, path, changed: false, message: `could not write ${path}: ${jsonFailureReason(path, read.parseError)}` };
+          return { hold: outcome.message };
+        }
+        const { changed, newConfig, decision } = computeContinuityHookInstall(read.parsed ?? {}, agentId, flairUrl);
+        if (decision) {
+          outcome = { ok: true, path, changed: false, message: decision.line! };
+          return { hold: decision.line! };
+        }
+        if (!changed) {
+          outcome = { ok: true, path, changed: false, message: `continuity capture hooks already current in ${path}` };
+          return { noop: outcome.message };
+        }
+        return { write: encodeConfig(newConfig) };
+      },
+      { backup: (bytes) => backupBytesTo(path, bytes) },
+    );
+    if (result.status === "written") {
+      return { ok: true, path, changed: true, message: `wired the continuity capture hooks (PostToolUse + Stop) in ${path} (agent '${agentId}')` };
+    }
+    const settled = outcome as { ok: boolean; path: string; message: string; changed: boolean } | null;
+    if (settled) return settled;
+    return { ok: false, path, changed: false, message: result.message };
   } catch (err: unknown) {
     const reason = err instanceof Error ? err.message : String(err);
     return { ok: false, path, changed: false, message: `could not write ${path}: ${reason}` };
@@ -628,18 +669,38 @@ export function fixContinuityCaptureHooks(
  */
 export function removeContinuityCaptureHooks(homeDir: string): { ok: boolean; path: string; message: string; changed: boolean } {
   const path = join(homeDir, ".claude", "settings.json");
+  // A pre-lock existence/emptiness probe: this removal writer must keep its
+  // exact "not enabled" line and take no lock (and no backup) where there is
+  // nothing to remove at all.
   const raw = readTextFile(path);
   if (!raw || !raw.trim()) {
     return { ok: true, path, changed: false, message: `no ${path} — continuity capture hooks are not enabled` };
   }
   try {
-    const config = JSON.parse(raw);
-    const { changed, newConfig } = computeContinuityHookRemoval(config);
-    if (!changed) {
-      return { ok: true, path, changed: false, message: `no continuity capture hooks found in ${path} — nothing to remove` };
+    let outcome: { ok: boolean; path: string; message: string; changed: boolean } | null = null;
+    const result = withConfigCriticalSection(
+      path,
+      (bytes) => {
+        const read = parseSettingsBytes(bytes, path);
+        if (read.parseError) {
+          outcome = { ok: false, path, changed: false, message: `could not update ${path}: ${jsonFailureReason(path, read.parseError)}` };
+          return { hold: outcome.message };
+        }
+        const { changed, newConfig } = computeContinuityHookRemoval(read.parsed ?? {});
+        if (!changed) {
+          outcome = { ok: true, path, changed: false, message: `no continuity capture hooks found in ${path} — nothing to remove` };
+          return { noop: outcome.message };
+        }
+        return { write: encodeConfig(newConfig) };
+      },
+      { backup: (bytes) => backupBytesTo(path, bytes) },
+    );
+    if (result.status === "written") {
+      return { ok: true, path, changed: true, message: `removed the continuity capture hooks (PostToolUse + Stop) from ${path}` };
     }
-    writeFileSync(path, JSON.stringify(newConfig, null, 2) + "\n");
-    return { ok: true, path, changed: true, message: `removed the continuity capture hooks (PostToolUse + Stop) from ${path}` };
+    const settled = outcome as { ok: boolean; path: string; message: string; changed: boolean } | null;
+    if (settled) return settled;
+    return { ok: false, path, changed: false, message: result.message };
   } catch (err: unknown) {
     const reason = err instanceof Error ? err.message : String(err);
     return { ok: false, path, changed: false, message: `could not update ${path}: ${reason}` };
@@ -1286,49 +1347,70 @@ export function fixSessionStartHook(homeDir: string, agentId: string | undefined
       message: `agent id '${agentId}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`,
     };
   }
+  // Parent creation stays OUTSIDE the primitive (flair#1778 2c-i-b): the
+  // primitive needs the resolved parent to exist to observe an absent
+  // destination. Everything from here is ONE critical section.
   try {
-    let config: any = {};
-    const raw = readTextFile(path);
-    if (raw && raw.trim()) config = JSON.parse(raw);
-
-    config.hooks = config.hooks && typeof config.hooks === "object" ? config.hooks : {};
-    config.hooks.SessionStart = Array.isArray(config.hooks.SessionStart) ? config.hooks.SessionStart : [];
-
-    const alreadyPresent = config.hooks.SessionStart.some(
-      (group: any) =>
-        Array.isArray(group?.hooks) &&
-        group.hooks.some((h: any) => typeof h?.command === "string" && h.command.includes(SESSION_START_HOOK_MARKER)),
-    );
-    if (alreadyPresent) {
-      return { ok: true, path, message: `already present in ${path}` };
-    }
-
-    // flair#1778 2c-i-a3: the ADD arm is a version-carrying write (the command
-    // pins @tpsdev-ai/flair-mcp). Consult the ONE never-lower guard with an
-    // ABSENT entry — a healthy version still writes (pinned up to the running
-    // CLI), an unreadable one refuses by name and creates nothing.
-    const decision = decidePinWrite({
-      pkg: FLAIR_MCP_PACKAGE,
-      entry: `SessionStart hook in ${path}`,
-      existingText: null,
-      runningVersion: flairCliVersion(),
-    });
-    if (decision.action !== "write") {
-      return { ok: false, path, message: decision.line! };
-    }
-
-    config.hooks.SessionStart.push({
-      hooks: [
-        {
-          type: "command",
-          command: buildSessionStartHookCommand(agentId, undefined, { harness: hookHarnessFromSettingsPath(path) }),
-        },
-      ],
-    });
-
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify(config, null, 2) + "\n");
-    return { ok: true, path, message: `added SessionStart hook to ${path} (agent '${agentId}')` };
+    let outcome: { ok: boolean; message: string } | null = null;
+    const result = withConfigCriticalSection(
+      path,
+      (bytes) => {
+        const read = parseSettingsBytes(bytes, path);
+        if (read.parseError) {
+          outcome = { ok: false, message: `could not write ${path}: ${jsonFailureReason(path, read.parseError)}` };
+          return { hold: outcome.message };
+        }
+        const config: any = read.parsed ?? {};
+
+        config.hooks = config.hooks && typeof config.hooks === "object" ? config.hooks : {};
+        config.hooks.SessionStart = Array.isArray(config.hooks.SessionStart) ? config.hooks.SessionStart : [];
+
+        const alreadyPresent = config.hooks.SessionStart.some(
+          (group: any) =>
+            Array.isArray(group?.hooks) &&
+            group.hooks.some((h: any) => typeof h?.command === "string" && h.command.includes(SESSION_START_HOOK_MARKER)),
+        );
+        if (alreadyPresent) {
+          outcome = { ok: true, message: `already present in ${path}` };
+          return { noop: outcome.message };
+        }
+
+        // flair#1778 2c-i-a3: the ADD arm is a version-carrying write (the
+        // command pins @tpsdev-ai/flair-mcp). Consult the ONE never-lower guard
+        // with an ABSENT entry — on the IN-LOCK bytes, inside the critical
+        // section — a healthy version still writes (pinned up to the running
+        // CLI), an unreadable one refuses by name and creates nothing.
+        const decision = decidePinWrite({
+          pkg: FLAIR_MCP_PACKAGE,
+          entry: `SessionStart hook in ${path}`,
+          existingText: null,
+          runningVersion: flairCliVersion(),
+        });
+        if (decision.action !== "write") {
+          outcome = { ok: false, message: decision.line! };
+          return { hold: outcome.message };
+        }
+
+        config.hooks.SessionStart.push({
+          hooks: [
+            {
+              type: "command",
+              command: buildSessionStartHookCommand(agentId, undefined, { harness: hookHarnessFromSettingsPath(path) }),
+            },
+          ],
+        });
+
+        return { write: encodeConfig(config) };
+      },
+      { backup: (bytes) => backupBytesTo(path, bytes) },
+    );
+    if (result.status === "written") {
+      return { ok: true, path, message: `added SessionStart hook to ${path} (agent '${agentId}')` };
+    }
+    const settled = outcome as { ok: boolean; message: string } | null;
+    if (settled) return { ok: settled.ok, path, message: settled.message };
+    return { ok: false, path, message: result.message };
   } catch (err: unknown) {
     const reason = err instanceof Error ? err.message : String(err);
     return { ok: false, path, message: `could not write ${path}: ${reason}` };
@@ -1602,56 +1684,82 @@ export function classifyHookReadiness(report: SessionStartHookCommandReport): Ho
  */
 export function upgradeSessionStartHookCommand(homeDir: string, settingsPath?: string): { ok: boolean; path: string; message: string; changed: boolean } {
   const path = settingsPath ?? join(homeDir, ".claude", "settings.json");
+  // A pre-lock existence/emptiness probe: this repair writer never creates the
+  // file or its parent, and must keep its exact "no <path> to update" line and
+  // take no lock (and no backup) where there is no destination at all.
+  const raw = readTextFile(path);
+  if (!raw || !raw.trim()) return { ok: false, path, changed: false, message: `no ${path} to update` };
   try {
-    const raw = readTextFile(path);
-    if (!raw || !raw.trim()) return { ok: false, path, changed: false, message: `no ${path} to update` };
-    const config = JSON.parse(raw);
-    const groups = config?.hooks?.SessionStart;
-    if (!Array.isArray(groups)) return { ok: false, path, changed: false, message: `no SessionStart hooks in ${path}` };
+    let outcome: { ok: boolean; path: string; message: string; changed: boolean } | null = null;
+    const result = withConfigCriticalSection(
+      path,
+      (bytes) => {
+        const read = parseSettingsBytes(bytes, path);
+        if (read.parseError) {
+          outcome = { ok: false, path, changed: false, message: `could not update ${path}: ${jsonFailureReason(path, read.parseError)}` };
+          return { hold: outcome.message };
+        }
+        const config: any = read.parsed ?? {};
+        const groups = config?.hooks?.SessionStart;
+        if (!Array.isArray(groups)) {
+          outcome = { ok: false, path, changed: false, message: `no SessionStart hooks in ${path}` };
+          return { hold: outcome.message };
+        }
 
-    for (const group of groups) {
-      const hooks = group?.hooks;
-      if (!Array.isArray(hooks)) continue;
-      for (const hook of hooks) {
-        if (typeof hook?.command !== "string" || !hook.command.includes(SESSION_START_HOOK_MARKER)) continue;
-        // Already absorbing its own failures — nothing to repair, whether we
-        // wrote it or the user did. Checked BEFORE the legacy match so a second
-        // run is a clean no-op rather than "that isn't the command we wrote".
-        if (hookCommandIsSilenced(hook.command)) {
-          return { ok: true, path, changed: false, message: `SessionStart hook in ${path} is already current` };
+        for (const group of groups) {
+          const hooks = group?.hooks;
+          if (!Array.isArray(hooks)) continue;
+          for (const hook of hooks) {
+            if (typeof hook?.command !== "string" || !hook.command.includes(SESSION_START_HOOK_MARKER)) continue;
+            // Already absorbing its own failures — nothing to repair, whether we
+            // wrote it or the user did. Checked BEFORE the legacy match so a second
+            // run is a clean no-op rather than "that isn't the command we wrote".
+            if (hookCommandIsSilenced(hook.command)) {
+              outcome = { ok: true, path, changed: false, message: `SessionStart hook in ${path} is already current` };
+              return { noop: outcome.message };
+            }
+            const legacy = parseLegacySessionStartHookCommand(hook.command);
+            if (!legacy) {
+              outcome = { ok: false, path, changed: false, message: `the SessionStart hook in ${path} is not the command Flair wrote — leaving it untouched` };
+              return { hold: outcome.message };
+            }
+            // flair#1778 2c-i-a3: the repair rewrites the entry to a version-
+            // carrying command, so it consults the never-lower guard first — on
+            // the IN-LOCK bytes, inside the critical section. A hold (AHEAD /
+            // not comparable) or a refuse (unreadable running version) writes
+            // nothing.
+            const decision = decidePinWrite({
+              pkg: FLAIR_MCP_PACKAGE,
+              entry: `SessionStart hook in ${path}`,
+              existingText: hook.command,
+              runningVersion: flairCliVersion(),
+            });
+            if (decision.action !== "write") {
+              outcome = { ok: false, path, changed: false, message: decision.line! };
+              return { hold: outcome.message };
+            }
+            const next = buildSessionStartHookCommand(legacy.agentId, legacy.flairUrl, {
+              harness: hookHarnessFromSettingsPath(path),
+            });
+            if (next === hook.command) {
+              outcome = { ok: true, path, changed: false, message: `SessionStart hook in ${path} is already current` };
+              return { noop: outcome.message };
+            }
+            hook.command = next;
+            return { write: encodeConfig(config) };
+          }
         }
-        const legacy = parseLegacySessionStartHookCommand(hook.command);
-        if (!legacy) {
-          return {
-            ok: false,
-            path,
-            changed: false,
-            message: `the SessionStart hook in ${path} is not the command Flair wrote — leaving it untouched`,
-          };
-        }
-        // flair#1778 2c-i-a3: the repair rewrites the entry to a version-
-        // carrying command, so it consults the never-lower guard first. A hold
-        // (AHEAD / not comparable) or a refuse (unreadable running version)
-        // writes nothing.
-        const decision = decidePinWrite({
-          pkg: FLAIR_MCP_PACKAGE,
-          entry: `SessionStart hook in ${path}`,
-          existingText: hook.command,
-          runningVersion: flairCliVersion(),
-        });
-        if (decision.action !== "write") {
-          return { ok: false, path, changed: false, message: decision.line! };
-        }
-        const next = buildSessionStartHookCommand(legacy.agentId, legacy.flairUrl, {
-          harness: hookHarnessFromSettingsPath(path),
-        });
-        if (next === hook.command) return { ok: true, path, changed: false, message: `SessionStart hook in ${path} is already current` };
-        hook.command = next;
-        writeFileSync(path, JSON.stringify(config, null, 2) + "\n");
-        return { ok: true, path, changed: true, message: `rewrote the SessionStart hook in ${path} so a failure to resolve stays silent` };
-      }
+        outcome = { ok: false, path, changed: false, message: `no Flair SessionStart hook found in ${path}` };
+        return { hold: outcome.message };
+      },
+      { backup: (bytes) => backupBytesTo(path, bytes) },
+    );
+    if (result.status === "written") {
+      return { ok: true, path, changed: true, message: `rewrote the SessionStart hook in ${path} so a failure to resolve stays silent` };
     }
-    return { ok: false, path, changed: false, message: `no Flair SessionStart hook found in ${path}` };
+    const settled = outcome as { ok: boolean; path: string; message: string; changed: boolean } | null;
+    if (settled) return settled;
+    return { ok: false, path, changed: false, message: result.message };
   } catch (err: unknown) {
     const reason = err instanceof Error ? err.message : String(err);
     return { ok: false, path, changed: false, message: `could not update ${path}: ${reason}` };
