@@ -81,32 +81,87 @@ export function partitionWiringToken(rawToken: string): WiringToken {
   return { kind: "malformed", value: token };
 }
 
-function escapeRe(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 /**
- * Envelope A — a package spec `pkg@<spec>`, wherever it appears in a wiring
- * string: an `npx -y -p <pkg>@<spec>` command, an MCP client `args` array, a
- * Codex TOML `args = [...]` line, a SessionStart hook command, or pi's
- * `npm:<pkg>@<spec>` source. One total decoder for all of them, because they
- * all reduce to the same `<pkg>@<spec>` substring.
+ * The token terminators for a `<pkg>@<token>` spec: whitespace, `"`, `'`, `,`,
+ * `]` (the delimiters an args array / hook command / TOML line can use).
  */
-function decodePackageSpec(text: string, pkg: string): WiringSpec | null {
-  const at = new RegExp(`${escapeRe(pkg)}@([^\\s"',\\]]*)`).exec(text);
-  if (!at) return null;
-  return { raw: at[0], pkg, token: partitionWiringToken(at[1] ?? "") };
+function isTokenTerminator(ch: string | undefined): boolean {
+  return ch === undefined || ch === "" || /\s/.test(ch) || ch === '"' || ch === "'" || ch === "," || ch === "]";
 }
 
 /**
- * Envelope B — a dependency field `"pkg": "<spec>"` (package.json), whose value
- * may carry the `workspace:` / `npm:` protocol (`workspace:^0.55.0` →
- * `^0.55.0`).
+ * True when the match at `idx` starts at a token boundary — the start of the
+ * text, or a non-identifier character before it. This keeps `<pkg>@` from
+ * matching inside a LONGER sibling package name (e.g. `@tpsdev-ai/flair-mcp`
+ * inside `@tpsdev-ai/flair-mcp-extra@1.0`), or a name that merely ends with it.
+ */
+function isTokenStart(s: string, idx: number): boolean {
+  if (idx <= 0) return true;
+  return !/[A-Za-z0-9_\-.]/.test(s[idx - 1]!);
+}
+
+/** Read from `from` up to the first token terminator. */
+function readSpecToken(s: string, from: number): string {
+  let i = from;
+  while (i < s.length && !isTokenTerminator(s[i])) i++;
+  return s.slice(from, i);
+}
+
+/**
+ * Envelope A — every `<pkg>@<token>` occurrence, found by a plain `indexOf`
+ * scan (NO dynamic RegExp). One decoder for all of them: an
+ * `npx -y -p <pkg>@<spec>` command, an MCP client `args` array, a Codex TOML
+ * `args = [...]` line, a SessionStart hook command, or pi's
+ * `npm:<pkg>@<spec>` source all reduce to the same `<pkg>@<spec>` substring.
+ */
+function findPackageSpecs(text: string, pkg: string): Array<{ raw: string; token: string }> {
+  const needle = `${pkg}@`;
+  const out: Array<{ raw: string; token: string }> = [];
+  let from = 0;
+  for (;;) {
+    const idx = text.indexOf(needle, from);
+    if (idx === -1) break;
+    if (isTokenStart(text, idx)) {
+      const token = readSpecToken(text, idx + needle.length);
+      out.push({ raw: needle + token, token });
+    }
+    from = idx + needle.length;
+  }
+  return out;
+}
+
+/**
+ * Envelope B — a dependency field `"pkg": "<spec>"` (package.json), whose
+ * value may carry the `workspace:` / `npm:` protocol (`workspace:^0.55.0` →
+ * `^0.55.0`). Found by string operations: the quoted key, optional whitespace,
+ * `:`, optional whitespace, a `"`, then the value up to the next `"`.
  */
 function decodeDependencyField(text: string, pkg: string): WiringSpec | null {
-  const dep = new RegExp(`"${escapeRe(pkg)}"\\s*:\\s*"([^"]*)"`).exec(text);
-  if (!dep) return null;
-  return { raw: dep[0], pkg, token: partitionWiringToken(stripSpecProtocol(dep[1] ?? "")) };
+  const key = `"${pkg}"`;
+  let from = 0;
+  for (;;) {
+    const idx = text.indexOf(key, from);
+    if (idx === -1) return null;
+    if (isTokenStart(text, idx)) {
+      let i = idx + key.length;
+      while (i < text.length && /\s/.test(text[i]!)) i++;
+      if (text[i] === ":") {
+        i++;
+        while (i < text.length && /\s/.test(text[i]!)) i++;
+        if (text[i] === '"') {
+          const valueStart = i + 1;
+          const end = text.indexOf('"', valueStart);
+          if (end === -1) return null;
+          return {
+            raw: text.slice(idx, end + 1),
+            pkg,
+            token: partitionWiringToken(stripSpecProtocol(text.slice(valueStart, end))),
+          };
+        }
+      }
+    }
+    from = idx + key.length;
+  }
 }
 
 /**
@@ -116,27 +171,27 @@ function decodeDependencyField(text: string, pkg: string): WiringSpec | null {
  */
 export function decodeWiringSpec(text: string, pkg: string): WiringSpec | null {
   if (typeof text !== "string" || !text.includes(pkg)) return null;
-  const byPkg = decodePackageSpec(text, pkg);
-  if (byPkg) return byPkg;
+  const first = findPackageSpecs(text, pkg)[0];
+  if (first) return { raw: first.raw, pkg, token: partitionWiringToken(first.token) };
   const byDep = decodeDependencyField(text, pkg);
   if (byDep) return byDep;
   return { raw: pkg, pkg, token: { kind: "none", value: null } };
 }
 
 /**
- * Decode EVERY `pkg@<spec>` occurrence in `text` (plus a dependency field when
- * present) — one WiringSpec per entry, never collapsing to the first. Useful to
- * a caller that must enumerate all wired artifacts (flair#1778 I6).
+ * Decode EVERY `<pkg>@<spec>` occurrence in `text` (plus a dependency field
+ * when present) — one WiringSpec per entry, never collapsing to the first, in
+ * TEXT ORDER. Useful to a caller that must enumerate all wired artifacts
+ * (flair#1778 I6).
  */
 export function decodeWiringSpecs(text: string, pkg: string): WiringSpec[] {
   if (typeof text !== "string" || !text.includes(pkg)) return [];
   const out: WiringSpec[] = [];
   const seen = new Set<string>();
-  for (const m of text.matchAll(new RegExp(`${escapeRe(pkg)}@([^\\s"',\\]]*)`, "g"))) {
-    const key = m[0];
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ raw: m[0], pkg, token: partitionWiringToken(m[1] ?? "") });
+  for (const spec of findPackageSpecs(text, pkg)) {
+    if (seen.has(spec.raw)) continue;
+    seen.add(spec.raw);
+    out.push({ raw: spec.raw, pkg, token: partitionWiringToken(spec.token) });
   }
   const dep = decodeDependencyField(text, pkg);
   if (dep && !seen.has(dep.raw)) out.push(dep);

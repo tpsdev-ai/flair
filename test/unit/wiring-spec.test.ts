@@ -123,6 +123,18 @@ describe("decodeWiringSpec — envelopes reduce to <pkg>@<spec>", () => {
     expect(decodeWiringSpec(`"${MCP}": "0.55.0"`, MCP)?.token).toEqual({ kind: "version", value: "0.55.0" });
   });
 
+  test("boundary: a longer sibling package name is NOT read as this package's spec", () => {
+    // `@tpsdev-ai/flair-mcp` inside `@tpsdev-ai/flair-mcp-extra@1.0.0` must NOT
+    // match — otherwise a sibling package's pin would be read as ours.
+    const sibling = `-p @tpsdev-ai/flair-mcp-extra@1.0.0`;
+    expect(wiringPinString(decodeWiringSpec(sibling, MCP))).toBeNull(); // NOT "1.0.0"
+    expect(decodeWiringSpecs(sibling, MCP).map((s) => s.token.kind)).toEqual(["none"]);
+    // A name that merely ENDS with it, preceded by an identifier character.
+    expect(wiringPinString(decodeWiringSpec(`-p x${MCP}@1.0.0`, MCP))).toBeNull();
+    // POSITIVE: the real package still matches at a token boundary.
+    expect(wiringPinString(decodeWiringSpec(`-p ${MCP}@1.0.0`, MCP))).toBe("1.0.0");
+  });
+
   test("null when the package is not wired at all", () => {
     expect(decodeWiringSpec("nothing about flair here", MCP)).toBeNull();
     expect(decodeWiringSpec("", MCP)).toBeNull();
