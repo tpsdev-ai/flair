@@ -99,8 +99,9 @@ function tsconfigInputs(path: string, seen = new Set<string>()): string[] {
   return out;
 }
 
-/** Every build INPUT whose change must make dist/cli.js stale. */
-function buildInputs(): string[] {
+/** Every build INPUT whose change must make dist/cli.js stale. Exported so a
+ *  fixture pins the set — a stale-dist escape here is silent. */
+export function buildCliInputs(): string[] {
   return [
     SRC_DIR,
     ...tsconfigInputs(TSCONFIG_CLI),
@@ -115,7 +116,7 @@ export function cliIsFresh(): boolean {
   try {
     if (!existsSync(CLI_JS)) return false;
     const cli = statSync(CLI_JS).mtimeMs;
-    return buildInputs().every((input) => cli >= newestMtimeMs(input));
+    return buildCliInputs().every((input) => cli >= newestMtimeMs(input));
   } catch {
     return false;
   }
