@@ -41,6 +41,18 @@ afterEach(() => {
 
 const settingsPath = () => join(isoHome, ".claude", "settings.json");
 
+/** The reason V8's JSON.parse reports for `text` — the runtime-specific part of
+ *  the pre-migration `could not write <path>: <reason>` line. Computed rather
+ *  than hard-coded so the assertion is exact on every Node version. */
+function jsonParseReason(text: string): string {
+  try {
+    JSON.parse(text);
+    return "(unexpectedly parsed)";
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
 function writeSettings(value: unknown): void {
   mkdirSync(join(isoHome, ".claude"), { recursive: true });
   writeFileSync(settingsPath(), JSON.stringify(value, null, 2) + "\n");
@@ -115,11 +127,24 @@ describe("C4 REPORT PARITY — a REGRESSION guard (not a fails-on-main check)", 
     const malformed = "{ not valid json, definitely broken";
     mkdirSync(join(isoHome, ".claude"), { recursive: true });
     writeFileSync(settingsPath(), malformed);
+    const expectedReason = jsonParseReason(malformed);
 
     const res = fixSessionStartHook(isoHome, AGENT);
     expect(res.ok).toBe(false);
-    expect(res.message.startsWith(`could not write ${settingsPath()}: `)).toBe(true);
-    expect(res.message.length).toBeGreaterThan(`could not write ${settingsPath()}: `.length);
+    // EXACT pre-migration line: 'could not write <path>: <the JSON.parse reason>'.
+    expect(res.message).toBe(`could not write ${settingsPath()}: ${expectedReason}`);
+    expect(readFileSync(settingsPath(), "utf-8")).toBe(malformed);
+  });
+
+  it("(a) unparseable JSON on the REMOVAL writer → the pre-migration 'could not update <path>: <reason>' line", () => {
+    const malformed = "{ not valid json, definitely broken";
+    mkdirSync(join(isoHome, ".claude"), { recursive: true });
+    writeFileSync(settingsPath(), malformed);
+    const expectedReason = jsonParseReason(malformed);
+
+    const res = removeContinuityCaptureHooks(isoHome);
+    expect(res.ok).toBe(false);
+    expect(res.message).toBe(`could not update ${settingsPath()}: ${expectedReason}`);
     expect(readFileSync(settingsPath(), "utf-8")).toBe(malformed);
   });
 
