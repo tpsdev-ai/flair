@@ -31,6 +31,12 @@
 import { describe, it, expect } from "bun:test";
 import { spawn } from "node:child_process";
 import { createServer, Server } from "node:http";
+import { childOverranDeadline } from "../helpers/child-deadline.js";
+
+// flair#1807: the child's OWN deadline (a mock-server CLI run) and a per-test
+// budget ABOVE it (deadline + 5 s for the mock server setup and assertions).
+const CHILD_DEADLINE_MS = 20_000;
+const CASE_BUDGET_MS = 25_000;
 
 type Capture = { method?: string; path?: string; body?: any };
 
@@ -54,14 +60,28 @@ function startMockServer(onRequest: (cap: Capture) => void): Promise<{ server: S
   });
 }
 
-function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    const child = spawn("bun", ["src/cli.ts", ...args], { cwd: ".", env });
+function runCli(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  leg: string,
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("bun", ["src/cli.ts", ...args], { cwd: ".", env, timeout: CHILD_DEADLINE_MS });
     let out = "";
     let err = "";
     child.stdout?.on("data", (d) => (out += d.toString()));
     child.stderr?.on("data", (d) => (err += d.toString()));
-    child.on("close", (code) => resolve({ code, stdout: out, stderr: err }));
+    child.on("close", (code, signal) => {
+      if (signal !== null) {
+        reject(
+          new Error(
+            childOverranDeadline("flair CLI", leg, CHILD_DEADLINE_MS, { status: code, signal, stdout: out, stderr: err }),
+          ),
+        );
+        return;
+      }
+      resolve({ code, stdout: out, stderr: err });
+    });
   });
 }
 
@@ -73,6 +93,7 @@ describe("flair memory add --visibility (Flair #509)", () => {
       const { code } = await runCli(
         ["memory", "add", "team-wide announcement", "--agent", "krais", "--admin-pass", "test-admin", "--visibility", "shared"],
         { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        "visibility shared",
       );
       expect(code).toBe(0);
 
@@ -83,7 +104,7 @@ describe("flair memory add --visibility (Flair #509)", () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
-  });
+  }, CASE_BUDGET_MS);
 
   it("sets visibility=private on the written memory so it stays owner-only", async () => {
     const captures: Capture[] = [];
@@ -92,6 +113,7 @@ describe("flair memory add --visibility (Flair #509)", () => {
       const { code } = await runCli(
         ["memory", "add", "a deliberately private note", "--agent", "krais", "--admin-pass", "test-admin", "--visibility", "private"],
         { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        "visibility private",
       );
       expect(code).toBe(0);
       const put = captures.find((c) => c.method === "PUT" && c.path?.startsWith("/Memory/"));
@@ -99,7 +121,7 @@ describe("flair memory add --visibility (Flair #509)", () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
-  });
+  }, CASE_BUDGET_MS);
 
   it("trims surrounding whitespace on the visibility value", async () => {
     const captures: Capture[] = [];
@@ -108,6 +130,7 @@ describe("flair memory add --visibility (Flair #509)", () => {
       const { code } = await runCli(
         ["memory", "add", "another shared note", "--agent", "krais", "--admin-pass", "test-admin", "--visibility", "  shared  "],
         { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        "visibility trimmed",
       );
       expect(code).toBe(0);
       const put = captures.find((c) => c.method === "PUT" && c.path?.startsWith("/Memory/"));
@@ -115,7 +138,7 @@ describe("flair memory add --visibility (Flair #509)", () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
-  });
+  }, CASE_BUDGET_MS);
 
   it("omits visibility when --visibility is not passed (server applies the durability-keyed default)", async () => {
     const captures: Capture[] = [];
@@ -124,6 +147,7 @@ describe("flair memory add --visibility (Flair #509)", () => {
       const { code } = await runCli(
         ["memory", "add", "a private memory", "--agent", "krais", "--admin-pass", "test-admin"],
         { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        "visibility omitted",
       );
       expect(code).toBe(0);
       const put = captures.find((c) => c.method === "PUT" && c.path?.startsWith("/Memory/"));
@@ -132,7 +156,7 @@ describe("flair memory add --visibility (Flair #509)", () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
-  });
+  }, CASE_BUDGET_MS);
 
   // ─── #991: a typo must never widen who can read a memory ──────────────────
   //
@@ -148,6 +172,7 @@ describe("flair memory add --visibility (Flair #509)", () => {
           const { code, stderr } = await runCli(
             ["memory", "add", "a memory whose visibility is misspelled", "--agent", "krais", "--admin-pass", "test-admin", "--visibility", bad],
             { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+            `visibility ${bad}`,
           );
           expect(code).not.toBe(0);
           expect(stderr).toContain("--visibility must be 'private' or 'shared'");
@@ -159,7 +184,7 @@ describe("flair memory add --visibility (Flair #509)", () => {
         } finally {
           await new Promise<void>((r) => server.close(() => r()));
         }
-      });
+      }, CASE_BUDGET_MS);
     }
   });
 });
