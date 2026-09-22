@@ -3047,6 +3047,144 @@ function opsAuth401Hint(adminUser: string | undefined): string {
  * or hardened instance. Hardening the ops-API loopback posture is tracked in
  * flair#654.
  */
+// ─── flair#1790: the ops-API seed names its failure and retries once ──────────
+//
+// Both seed helpers below insert through the operations API with a single bare
+// `fetch` under a 10 s client timeout. On a timeout that surfaced ONLY as an
+// undici `DOMException [TimeoutError]` stack — no operation, no target, no
+// timeout value — so a post-restart `flair init` that timed out produced an
+// unactionable failure and no daemon evidence.
+//
+// The wrap here names the failure and retries the insert ONCE, on the CLIENT
+// timeout only. The retry is safe because the insert is idempotent: a duplicate
+// answers 409 (or a "duplicate"/"already exists" body) and is treated as
+// success below, so a retried insert cannot double-apply. What is NOT retried:
+// an auth failure (401 keeps its existing hint) or any other HTTP or network
+// error — those are answers, not stalls.
+//
+// This is diagnosis + ergonomics, NOT a claim about WHY a seed timed out; the
+// mechanism is unknown (flair#1790).
+const OPS_AGENT_SEED_TIMEOUT_MS = 10_000;
+const OPS_AGENT_SEED_ATTEMPTS = 2;
+
+/**
+ * A target URL safe to print: userinfo and query/fragment stripped. The seed
+ * target is operator-supplied (`--target` / `--ops-target`), so it may carry
+ * credentials or query values that must never reach init output or a log line.
+ */
+function sanitizeOpsTargetUrl(raw: string): string {
+  try {
+    const u = new URL(raw);
+    u.username = "";
+    u.password = "";
+    u.search = "";
+    u.hash = "";
+    return u.toString();
+  } catch {
+    return raw.replace(/\/\/[^/@]*@/, "//").split(/[?#]/)[0];
+  }
+}
+
+/** True only for the abort our OWN AbortSignal.timeout raises (never a server answer). */
+function isOwnedSeedTimeout(err: unknown): boolean {
+  const name = (err as { name?: unknown } | null | undefined)?.name;
+  return name === "TimeoutError" || name === "AbortError";
+}
+
+interface OpsSeedRequest {
+  /** Raw target URL (sanitised before it reaches any message). */
+  url: string;
+  auth?: string;
+  body: unknown;
+  /** Message label, e.g. "Agent" / "Federation Instance". */
+  kind: string;
+  /** Lowercase noun, e.g. "agent" / "federation instance". */
+  noun: string;
+  /** Fully-qualified table, e.g. "flair.Agent" / "flair.Instance". */
+  tableName: string;
+  /** The record id being seeded. */
+  id: string;
+  /** Kind-specific 401 message (the existing hint text is preserved). */
+  auth401Message: (text: string) => string;
+  /** Kind-specific generic non-ok message (the existing text is preserved). */
+  httpErrorMessage: (status: number, text: string) => string;
+}
+
+/**
+ * The concise both-attempts-timed-out CLI error. `flairFriendly` makes runCli
+ * print just this sentence (no undici/Node stack); the cause stays attached for
+ * `--verbose`/diagnostics and is never printed by the default handler.
+ */
+function opsSeedBothAttemptsTimedOut(
+  req: Pick<OpsSeedRequest, "noun" | "tableName" | "id">,
+  sanitizedUrl: string,
+  cause: unknown,
+): Error {
+  const message =
+    `Flair could not seed ${req.noun} '${req.id}': Operations API insert into ${req.tableName} at ` +
+    `${sanitizedUrl} timed out on both attempts (${OPS_AGENT_SEED_TIMEOUT_MS} ms per attempt). ` +
+    `Inspect the target daemon's logs, then rerun the same init command.\n` +
+    ` A timed-out insert may still complete; retrying the same ${req.noun} ID is supported.`;
+  const err = new Error(message, { cause });
+  (err as { flairFriendly?: boolean }).flairFriendly = true;
+  return err;
+}
+
+/**
+ * POST one ops-API insert, retrying once on the client timeout. The response
+ * body is read under the SAME attempt's signal, so each attempt's fresh
+ * deadline covers the body read too. Returns normally on success or on the
+ * idempotent duplicate path; throws a named error otherwise.
+ */
+async function opsSeedInsertWithRetry(req: OpsSeedRequest): Promise<void> {
+  const sanitizedUrl = sanitizeOpsTargetUrl(req.url);
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(req.auth ? { Authorization: `Basic ${req.auth}` } : {}),
+  };
+  const overallStart = Date.now();
+  for (let attempt = 1; attempt <= OPS_AGENT_SEED_ATTEMPTS; attempt++) {
+    const attemptStart = Date.now();
+    try {
+      const res = await fetch(req.url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(req.body),
+        signal: AbortSignal.timeout(OPS_AGENT_SEED_TIMEOUT_MS),
+      });
+      const text = await res.text().catch((e: unknown) => {
+        if (isOwnedSeedTimeout(e)) throw e;
+        return "";
+      });
+      const duplicate = res.status === 409 || text.includes("duplicate") || text.includes("already exists");
+      if (!res.ok && !duplicate) {
+        if (res.status === 401) throw new Error(req.auth401Message(text));
+        throw new Error(req.httpErrorMessage(res.status, text));
+      }
+      // Success, or the idempotent duplicate path.
+      const outcome = res.ok ? "inserted" : "already exists";
+      if (attempt > 1) {
+        console.log(
+          `${req.kind} seed attempt ${attempt} completed in ${Date.now() - attemptStart} ms (${outcome}); ` +
+            `total ${Date.now() - overallStart} ms.`,
+        );
+      }
+      return;
+    } catch (err) {
+      // Auth / HTTP / other network errors are answers, not stalls: never retried.
+      if (!isOwnedSeedTimeout(err)) throw err;
+      if (attempt < OPS_AGENT_SEED_ATTEMPTS) {
+        console.warn(
+          `${req.kind} seed attempt ${attempt} timed out after ${OPS_AGENT_SEED_TIMEOUT_MS} ms; retrying once. ` +
+            `Target: ${sanitizedUrl} (${req.noun} '${req.id}').`,
+        );
+        continue;
+      }
+      throw opsSeedBothAttemptsTimedOut(req, sanitizedUrl, err);
+    }
+  }
+}
+
 export async function seedAgentViaOpsApi(
   opsPortOrUrl: number | string,
   agentId: string,
@@ -3084,22 +3222,18 @@ export async function seedAgentViaOpsApi(
       updatedAt: now,
     }],
   };
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...(auth ? { Authorization: `Basic ${auth}` } : {}) },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(10_000),
+  await opsSeedInsertWithRetry({
+    url,
+    auth,
+    body,
+    kind: "Agent",
+    noun: "agent",
+    tableName: "flair.Agent",
+    id: agentId,
+    auth401Message: (text) =>
+      `Operations API insert failed (401): ${text}${opsAuth401Hint(auth === undefined ? undefined : adminUser)}`,
+    httpErrorMessage: (status, text) => `Operations API insert failed (${status}): ${text}`,
   });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    if (res.status === 409 || text.includes("duplicate") || text.includes("already exists")) return;
-    if (res.status === 401) {
-      throw new Error(
-        `Operations API insert failed (401): ${text}${opsAuth401Hint(auth === undefined ? undefined : adminUser)}`,
-      );
-    }
-    throw new Error(`Operations API insert failed (${res.status}): ${text}`);
-  }
 }
 
 // NOTE: agent records are seeded exclusively via the Harper operations API
@@ -3149,22 +3283,18 @@ export async function seedFederationInstanceViaOpsApi(
       updatedAt: now,
     }],
   };
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...(auth ? { Authorization: `Basic ${auth}` } : {}) },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(10_000),
+  await opsSeedInsertWithRetry({
+    url,
+    auth,
+    body,
+    kind: "Federation Instance",
+    noun: "federation instance",
+    tableName: "flair.Instance",
+    id: instanceId,
+    auth401Message: (text) =>
+      `Federation Instance insert via ops API failed (401): ${text}${opsAuth401Hint(auth === undefined ? undefined : adminUser)}`,
+    httpErrorMessage: (status, text) => `Federation Instance insert via ops API failed (${status}): ${text}`,
   });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    if (res.status === 409 || text.includes("duplicate") || text.includes("already exists")) return;
-    if (res.status === 401) {
-      throw new Error(
-        `Federation Instance insert via ops API failed (401): ${text}${opsAuth401Hint(auth === undefined ? undefined : adminUser)}`,
-      );
-    }
-    throw new Error(`Federation Instance insert via ops API failed (${res.status}): ${text}`);
-  }
 }
 
 // ─── Provision Flair on Harper Fabric ──────────────────────────────────────

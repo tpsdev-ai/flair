@@ -1109,6 +1109,38 @@ jobs:
           # Tear down
           $FLAIR stop --port $PORT || true
 
+      # flair#1790: an install-from-tarball `flair init` agent seed timed out
+      # over the ops API after a restart, and the job carried NO daemon
+      # evidence — the smoke's Harper output is not printed by any step. On
+      # failure, dump the daemon's own live log so the next instance can be
+      # diagnosed from CI. Harper 5.2+ writes ~/.flair/data/log/system.log
+      # (docs/troubleshooting.md); hdb.log is the frozen pre-5.2 / ops
+      # read_log target and is dumped too when present.
+      - name: Dump daemon logs (flair#1790)
+        if: failure()
+        run: |
+          set -u
+          mkdir -p daemon-logs
+          for f in system.log hdb.log; do
+            src="$HOME/.flair/data/log/$f"
+            if [ -f "$src" ]; then
+              echo "===== $f (last 400 lines) ====="
+              tail -n 400 "$src" | tee "daemon-logs/$f.tail"
+            else
+              echo "===== $f: not found at $src ====="
+            fi
+          done
+      - name: Upload daemon logs (flair#1790)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pack-smoke-daemon-logs
+          path: daemon-logs/
+          if-no-files-found: warn
+          # Public repo; a short window limits exposure of daemon logs even if
+          # a future edit regresses redaction elsewhere.
+          retention-days: 7
+
   pack-smoke-gate:
     # Same reason test-unit-gate and typecheck-gate exist: GitHub suffixes a
     # matrixed job's display name per leg ("Install-from-tarball smoke (node
