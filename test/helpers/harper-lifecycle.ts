@@ -405,6 +405,89 @@ export async function waitForLocksFree(
   throw new Error(`Harper database lock still held after ${timeoutMs}ms: ${held.join(", ")}`);
 }
 
+/**
+ * flair#1785 — the component dependency install is part of BOOT.
+ *
+ * Harper runs `installApplications()` when it loads a root component
+ * (node_modules/harper/dist/server/loadRootComponents.js); per application it
+ * SKIPS the install when the component dir already has `node_modules`, and
+ * otherwise runs the package manager (`npm install --force`), fetching the
+ * public registry. When that fails it logs the failure at error level and
+ * THROWS
+ *   `Failed to install dependencies for <name> using <via>. Exit code: <code>`
+ * where <via> is the package manager (`npm default`, `pnpm`, …) or, for a
+ * custom command, `custom install command: <cmd>`.
+ * A failed install means the component never loaded, so its migrations never
+ * ran — but Harper keeps serving /Health, so a harness that waits only on health
+ * returns "started" and the real failure (the install) is buried in the log.
+ * These helpers surface it so a boot failure is named, never a downstream
+ * "absence of state" timeout.
+ */
+const COMPONENT_INSTALL_FAILURE_RE =
+  /Failed to install dependencies for (\S+) using (.+?)\. Exit code: (\d+)/;
+
+export interface ComponentInstallFailure {
+  application: string;
+  /** The package manager (`npm default`) or a custom install command. */
+  via: string;
+  status: number;
+  line: string;
+}
+
+/** Harper's component-install-failure line, or null when the log has none. */
+export function componentInstallFailure(log: string): ComponentInstallFailure | null {
+  for (const line of String(log).split("\n")) {
+    const m = line.match(COMPONENT_INSTALL_FAILURE_RE);
+    if (m) return { application: m[1], via: m[2], status: Number(m[3]), line: line.trim() };
+  }
+  return null;
+}
+
+/** The named boot failure text, or null when the log shows no install failure. */
+export function componentInstallFailureMessage(log: string): string | null {
+  const f = componentInstallFailure(log);
+  if (!f) return null;
+  return (
+    `Harper failed to install the '${f.application}' component's dependencies ` +
+    `(${f.via}, Exit code: ${f.status}) — the component did not load, so the boot ` +
+    `cycle never ran. This is the failure, not the absence of migration state. ${f.line}`
+  );
+}
+
+/**
+ * Wait for `statePath` to carry a parseable object with `entry`, failing FAST and
+ * NAMED when the boot's component install failed (flair#1785): the install
+ * failure is the REPORTED failure, never a 60-second absence-of-state timeout.
+ * `getLog` is consulted on every tick.
+ */
+export async function awaitMigrationStateFile(opts: {
+  statePath: string;
+  entry: string;
+  getLog?: () => string;
+  timeoutMs?: number;
+  pollMs?: number;
+}): Promise<Record<string, any>> {
+  const timeoutMs = opts.timeoutMs ?? 60_000;
+  const pollMs = opts.pollMs ?? 500;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const installFailure = opts.getLog ? componentInstallFailureMessage(opts.getLog()) : null;
+    if (installFailure) throw new Error(installFailure);
+    if (existsSync(opts.statePath)) {
+      try {
+        const parsed = JSON.parse(readFileSync(opts.statePath, "utf-8")) as Record<string, any>;
+        if (parsed?.[opts.entry]) return parsed;
+      } catch {
+        // partially-written file — keep waiting rather than failing
+      }
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  throw new Error(
+    `no parseable ${opts.statePath} carrying a ${opts.entry} entry within ${Math.round(timeoutMs / 1000)}s`,
+  );
+}
+
 async function waitForHealth(
   httpURL: string,
   timeoutMs = 60_000,

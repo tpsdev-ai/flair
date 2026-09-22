@@ -38,9 +38,16 @@
  * migrations-synthetic-e2e.test.ts, and the same shape as a real upgrade.
  */
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
-import { existsSync, lstatSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { tmpdir } from "node:os";
+import {
+  startHarper,
+  stopHarper,
+  awaitMigrationStateFile,
+  componentInstallFailureMessage,
+  type HarperInstance,
+} from "../helpers/harper-lifecycle";
 
 const RESERVED_TEST_AGENT_ID = "__flair_migration_datadir_test_agent__";
 const SEED_IDS = Array.from({ length: 4 }, (_, i) => `datadir-seed-${i}`);
@@ -140,34 +147,22 @@ describe("zero-touch migrations — provisioned shape whose ~/.flair/data is unu
 
   test("the boot cycle still runs: migration state is written under ROOTPATH", async () => {
     const statePath = join(harper.installDir, ".migrations", "state.json");
-    const deadline = Date.now() + 60_000;
-    // Poll for the POSTCONDITION, not a proxy for it. The runner creates
+    // Wait for the POSTCONDITION, not a proxy for it. The runner creates
     // state.json before writing into it, so `existsSync` can be true while the
     // file is still empty or a partial object — JSON.parse then throws and the
     // test fails intermittently on a migration that actually succeeded
-    // (flair#890). Waiting until it parses AND carries the entry removes the
-    // race without weakening the assertions below.
-    let state: Record<string, any> | null = null;
-    while (Date.now() < deadline) {
-      if (existsSync(statePath)) {
-        try {
-          const parsed = JSON.parse(readFileSync(statePath, "utf-8"));
-          if (parsed?.["visibility-backfill"]) {
-            state = parsed;
-            break;
-          }
-        } catch {
-          // partially-written file — keep waiting rather than failing
-        }
-      }
-      await new Promise((r) => setTimeout(r, 500));
-    }
-
-    if (state === null) {
-      throw new Error(
-        `no parseable .migrations/state.json carrying a visibility-backfill entry at ${statePath} within 60s`,
-      );
-    }
+    // (flair#890). `awaitMigrationStateFile` waits until it parses AND carries
+    // the entry, removing the race without weakening the assertions below.
+    //
+    // flair#1785: it ALSO watches Harper's log. A failed component install
+    // means the component never loaded and the cycle never ran — that install
+    // failure is the REPORTED failure, named, in seconds, rather than a 60 s
+    // "no parseable state.json" timeout that names the wrong thing.
+    const state = await awaitMigrationStateFile({
+      statePath,
+      entry: "visibility-backfill",
+      getLog: () => harper.getLog?.() ?? "",
+    });
     expect(state["visibility-backfill"]?.lastOutcome).toBe("success");
     expect(state["visibility-backfill"]?.rowsProcessed).toBe(SEED_IDS.length);
   }, 90_000);
@@ -176,6 +171,10 @@ describe("zero-touch migrations — provisioned shape whose ~/.flair/data is unu
     const deadline = Date.now() + 60_000;
     let rows: any[] = [];
     while (Date.now() < deadline) {
+      // flair#1785: surface a failed component install as the failure, not as
+      // rows that mysteriously never gain a visibility.
+      const installFailure = componentInstallFailureMessage(harper.getLog?.() ?? "");
+      if (installFailure) throw new Error(installFailure);
       rows = await seededRows();
       if (rows.length === SEED_IDS.length && rows.every((r) => r.visibility != null)) break;
       await new Promise((r) => setTimeout(r, 1000));
@@ -199,4 +198,55 @@ describe("zero-touch migrations — provisioned shape whose ~/.flair/data is unu
     const backfill = detail.migrations.migrations.find((m: any) => m.id === "visibility-backfill");
     expect(backfill?.state).toBe("completed");
   });
+});
+
+/**
+ * flair#1785 — the install failure is the REPORTED failure.
+ *
+ * Forcing Harper's own component install to fail from the harness is not
+ * reliable: Harper SKIPS the install whenever the component dir already has
+ * `node_modules` (node_modules/harper/dist/components/Application.js), and this
+ * lane `bun install`s before the tests, so the install is normally skipped and
+ * the CI failure shape is not reachable from here. What IS testable, and what
+ * the fix actually changes, is the WAIT: given a boot log that carries Harper's
+ * install-failure line, the state waiter must raise that named deploy failure
+ * in seconds — not sit on a 60 s absence-of-state timeout that names the wrong
+ * thing. The log below is Harper's real output shape; the timeout is the real
+ * 60 s, so a regression to the swallow shows up as a ~60 s "no parseable"
+ * failure. Mutation-check: drop the `getLog` scan from `awaitMigrationStateFile`
+ * and this test fails.
+ */
+describe("flair#1785 — a failed component install is surfaced as the boot failure", () => {
+  test("a forced install failure yields the named deploy error in seconds, never a 60 s absence-of-state timeout", async () => {
+    const failingLog = [
+      "[harper] Loading application from /repo",
+      "error: Failed to install dependencies for flair using npm default. Exit code: 217",
+      "[harper] Application flair failed to deploy; continuing to serve /Health",
+    ].join("\n");
+
+    const startedAt = Date.now();
+    let err: Error | null = null;
+    try {
+      await awaitMigrationStateFile({
+        statePath: join(tmpdir(), "flair-1785-never-written-state.json"),
+        entry: "visibility-backfill",
+        getLog: () => failingLog,
+        timeoutMs: 60_000,
+        pollMs: 20,
+      });
+    } catch (e) {
+      err = e as Error;
+    }
+
+    expect(err).not.toBeNull();
+    // The deploy error text, the operation, and the status — all named.
+    expect(err!.message).toContain(
+      "Failed to install dependencies for flair using npm default. Exit code: 217",
+    );
+    expect(err!.message).toContain("the component did not load");
+    // NOT the downstream absence-of-state timeout.
+    expect(err!.message).not.toMatch(/no parseable/);
+    // Bounded: seconds, though the configured wait is 60 s.
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+  }, 90_000);
 });
