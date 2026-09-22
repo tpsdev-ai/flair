@@ -455,6 +455,81 @@ export function componentInstallFailureMessage(log: string): string | null {
 }
 
 /**
+ * flair#1785 (addendum) — surface a component-install failure that a wait loop's
+ * LAST iteration could not see.
+ *
+ * A polling loop that reads the log only at the START of each iteration never
+ * reads a line Harper writes during the FINAL sleep, so the loop exits and
+ * reports its generic "not ready"/absence outcome instead of the named deploy
+ * failure. Call this as the final act before a wait loop's generic assertion:
+ * it re-reads the log once more and throws the named failure if present, and is
+ * a no-op otherwise. (Same shape as the final scan #1802 added to
+ * `awaitMigrationStateFile`; the rows-wait in the provisioned-datadir fixture
+ * uses it for the same reason.)
+ */
+export function throwIfComponentInstallFailed(log: string): void {
+  const msg = componentInstallFailureMessage(log);
+  if (msg) throw new Error(msg);
+}
+
+/** The last `maxLines` lines of a captured boot log (the whole log when shorter). */
+export function bootLogTail(log: string, maxLines: number): string {
+  const lines = String(log).split("\n");
+  if (maxLines <= 0 || lines.length <= maxLines) return String(log);
+  return lines.slice(lines.length - maxLines).join("\n");
+}
+
+export interface BootLogRef {
+  /** Label for the dump, e.g. "boot 1 (seed phase)". */
+  label: string;
+  /** The instance whose captured stdout/stderr to dump; skipped when absent. */
+  inst?: HarperInstance | null;
+}
+
+/**
+ * flair#1785 (C) — a bounded, labelled dump of test-Harper boots' captured
+ * stdout/stderr.
+ *
+ * `startHarper` keeps each child's output in memory and prints it only on a
+ * STARTUP failure (the `waitForHealth`/`awaitStartup` error paths). Every other
+ * failure — a setup throw, a failed assertion, a waiter timeout — reports the
+ * symptom with none of the boot's own evidence. This formats the tails of one
+ * or more boots, each prefixed with its label, ROOTPATH and HTTP port, so a
+ * failing run carries them.
+ *
+ * This is a plain helper the failing path calls: nothing here runs on success,
+ * and there is no global `afterEach`. A test that wants boot evidence on
+ * failure keeps its instances and calls `dumpBootLogs(...)` from its failure
+ * path (or wraps its bodies — see the provisioned-datadir fixture). Bounded to
+ * the last `maxLines` (default 300) lines per boot.
+ */
+export function formatBootLogDump(
+  boots: ReadonlyArray<BootLogRef>,
+  opts: { maxLines?: number } = {},
+): string {
+  const maxLines = opts.maxLines ?? 300;
+  const chunks: string[] = [];
+  for (const b of boots) {
+    const log = b.inst?.getLog?.() ?? "";
+    if (!log) continue;
+    const rootPath = b.inst?.installDir || "(external)";
+    const http = b.inst?.httpURL ?? "(unknown)";
+    chunks.push(
+      `──── ${b.label} — ROOTPATH=${rootPath} http=${http} — last ${maxLines} lines ────\n` +
+        bootLogTail(log, maxLines),
+    );
+  }
+  return chunks.join("\n");
+}
+
+/** Print `formatBootLogDump` to stderr. No-op when every boot's log is empty. */
+export function dumpBootLogs(boots: ReadonlyArray<BootLogRef>, opts?: { maxLines?: number }): void {
+  const dump = formatBootLogDump(boots, opts);
+  if (!dump) return;
+  console.error(`\n=== flair#1785 captured boot logs ===\n${dump}\n=== end captured boot logs ===\n`);
+}
+
+/**
  * Wait for `statePath` to carry a parseable object with `entry`, failing FAST and
  * NAMED when the boot's component install failed (flair#1785): the install
  * failure is the REPORTED failure, never a 60-second absence-of-state timeout.
