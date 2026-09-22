@@ -826,20 +826,35 @@ describe("flair#1478 — self-heal requires flair /Health identity and pid→por
     const script = join(tmpHome, `decoy-${tag}.mjs`);
     writeFileSync(
       script,
+      // flair#1770 (CodeQL "Improper code sanitization"): this decoy script is
+      // STATIC. Its body and port-file path arrive through the child's
+      // environment (DECOY_BODY / DECOY_PORT_FILE) and are read via
+      // process.env here — never interpolated into the source. JSON.stringify is
+      // not a code sanitizer (it leaves U+2028/U+2029 raw), so assembling source
+      // by interpolation is exactly the pattern #1767 round 4 rejected in
+      // product code; tests should not carry it either.
       [
         `import { createServer } from "node:http";`,
         `import { writeFileSync } from "node:fs";`,
-        `const body = ${JSON.stringify(body)};`,
+        `const body = process.env.DECOY_BODY ?? "";`,
+        `const portFile = process.env.DECOY_PORT_FILE;`,
         `const srv = createServer((req, res) => {`,
         `  res.writeHead(200, { "content-type": "application/json" });`,
         `  res.end(body);`,
         `});`,
-        `srv.listen(0, "127.0.0.1", () => writeFileSync(${JSON.stringify(portFile)}, String(srv.address().port)));`,
+        `srv.listen(0, "127.0.0.1", () => writeFileSync(portFile, String(srv.address().port)));`,
       ].join("\n"),
     );
     const proc = Bun.spawn(["bun", script], {
       cwd: extra.cwd ?? tmpHome,
-      env: { ...(process.env as Record<string, string>), ...(extra.env ?? {}) },
+      env: {
+        ...(process.env as Record<string, string>),
+        ...(extra.env ?? {}),
+        // The decoy's inputs, out-of-band. Set last so a caller's `extra.env`
+        // cannot accidentally shadow them.
+        DECOY_BODY: body,
+        DECOY_PORT_FILE: portFile,
+      },
       stdout: "ignore",
       stderr: "ignore",
     });
