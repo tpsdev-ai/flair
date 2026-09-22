@@ -224,6 +224,27 @@ describe("flair#1790 — seed retry on the OWNED timeout", () => {
     }
   });
 
+  test("a 401 whose BODY READ times out on the owned signal stays the AUTH error; 1 call, no retry", async () => {
+    const f = installFetch((_call, _i, abort) => {
+      // The status line arrived (401); the body read then stalls and the
+      // attempt's own signal aborts — an owned body-read timeout on a NON-OK
+      // response. Before the fix this was retried (regardless of res.ok), so
+      // attempt 2 timed out too and the caller saw "timed out on both attempts"
+      // instead of the real 401.
+      abort();
+      return { ok: false, status: 401, text: async () => { throw timeoutError(); } } as unknown as Response;
+    });
+    try {
+      const msg = await messageOf(() => seedAgentViaOpsApi(19925, "smoke", "pubkey", "operator", "bad-pass"));
+      expect(f.calls.length).toBe(1);
+      expect(msg).toContain("Operations API insert failed (401)");
+      expect(msg).toContain("--admin-user");
+      expect(msg).not.toContain("timed out on both attempts");
+    } finally {
+      f.restore();
+    }
+  });
+
   test("a non-timeout HTTP failure is NOT retried and keeps the existing message; 1 call", async () => {
     const f = installFetch(() => new Response("boom", { status: 500 }));
     try {

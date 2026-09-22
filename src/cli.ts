@@ -3161,10 +3161,20 @@ async function opsSeedInsertWithRetry(req: OpsSeedRequest): Promise<void> {
         body: JSON.stringify(req.body),
         signal,
       });
-      const text = await res.text().catch((e: unknown) => {
-        if (isOwnedSeedTimeout(e, signal)) throw e;
-        return "";
-      });
+      let text: string;
+      try {
+        text = await res.text();
+      } catch (e: unknown) {
+        // flair#1790 follow-up (A): an owned BODY-READ timeout is retryable ONLY
+        // for an OK response — a 2xx whose body stalled is OUR stall, so retry
+        // it. For a NON-OK response the STATUS is the answer: use empty text and
+        // fall through to the status handling (401 → auth error first, then
+        // 409/marker → duplicate) instead of retrying away the real error. A 401
+        // whose body read stalls must stay the auth error, not become a
+        // bogus "timed out on both attempts".
+        if (res.ok && isOwnedSeedTimeout(e, signal)) throw e;
+        text = "";
+      }
       // flair#1790 review C2: 401 FIRST. An auth failure must never be masked by
       // a body that happens to carry a "duplicate"/"already exists" marker.
       if (res.status === 401) throw new Error(req.auth401Message(text));
