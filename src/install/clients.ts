@@ -85,8 +85,9 @@ export interface UnwireResult {
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { flairCliVersion, isResolvedVersion, mcpServerSpec } from "../lib/mcp-spec.js";
+import { FLAIR_MCP_PACKAGE, flairCliVersion, isResolvedVersion, mcpServerSpec } from "../lib/mcp-spec.js";
 import { decodeWiringSpec, wiringPinString } from "../lib/wiring-spec.js";
+import { decidePinWrite } from "../lib/pin-write-guard.js";
 
 /**
  * Resolve the user's home dir. Prefer the live HOME/USERPROFILE env over
@@ -258,16 +259,20 @@ export function removeCodexFlairBlock(raw: string): string {
  * CURRENT pinned mcpServerSpec()? Pure string scan — no TOML parser needed
  * (same rationale as codexConfigHasFlairSection).
  */
-function codexFlairSectionHasCurrentPin(raw: string): boolean {
+function codexFlairSectionText(raw: string): string | null {
   const idx = raw.indexOf("[mcp_servers.flair]");
-  if (idx === -1) return false;
+  if (idx === -1) return null;
   const after = raw.slice(idx);
   // Find the end of the section: the next top-level [header] that is NOT a
   // sub-table of mcp_servers.flair (e.g. [mcp_servers.flair.env] is part of
   // the same logical section and must not terminate the scan).
   const nextHeader = after.slice("[mcp_servers.flair]".length).search(/\n\[(?!mcp_servers\.flair\.)/);
-  const section = nextHeader === -1 ? after : after.slice(0, "[mcp_servers.flair]".length + nextHeader);
-  return section.includes(mcpServerSpec());
+  return nextHeader === -1 ? after : after.slice(0, "[mcp_servers.flair]".length + nextHeader);
+}
+
+function codexFlairSectionHasCurrentPin(raw: string): boolean {
+  const section = codexFlairSectionText(raw);
+  return section !== null && section.includes(mcpServerSpec());
 }
 
 /**
@@ -322,6 +327,18 @@ function wireJsonMcp(
     // A matching pin stays a no-op (idempotent); only a stale pin triggers a re-write.
     if (urlAgentMatch && argsMatch) {
       return { ok: true, message: `${label}: already wired in ${display}` };
+    }
+    // flair#1778 slice 2c-i-a2: a mismatch above is NOT automatically a
+    // re-write — never LOWER the existing pin, and never overwrite a
+    // range/tag/unsupported spec (see pin-write-guard.ts for the matrix).
+    const decision = decidePinWrite({
+      pkg: FLAIR_MCP_PACKAGE,
+      entry: `${label} config ${display}`,
+      existingText: existing ? JSON.stringify(existing) : null,
+      runningVersion: flairCliVersion(),
+    });
+    if (decision.action !== "write") {
+      return { ok: true, message: decision.line! };
     }
     config.mcpServers.flair = flairMcpEntry(env);
     mkdirSync(dirname(configPath), { recursive: true });
@@ -610,6 +627,20 @@ function _wirePi(env: WireEnv): { ok: boolean; message: string } {
       return { ok: true, message: `pi: already wired in ${display} (${spec})` };
     }
 
+    if (entrySource !== null) {
+      // flair#1778 slice 2c-i-a2: never LOWER an existing pi pin, and never
+      // overwrite a range/tag/unsupported source.
+      const decision = decidePinWrite({
+        pkg: PI_FLAIR_PACKAGE,
+        entry: `pi packages entry in ${display}`,
+        existingText: entrySource,
+        runningVersion: flairCliVersion(),
+      });
+      if (decision.action !== "write") {
+        return { ok: true, message: decision.line! };
+      }
+    }
+
     if (!movedFromExtensions && entryIndex === -1) {
       // No packages entry and nothing misplaced — honor a working file-path
       // extensions entry (pre-0.49 workaround) instead of double-wiring.
@@ -741,7 +772,17 @@ function _wireCodex(env: WireEnv): { ok: boolean; message: string } {
         return { ok: true, message: `Codex: already wired in ${display}` };
       }
       if (codexConfigHasFlairSection(raw)) {
-        // Section exists but pin is stale — replace it.
+        // Section exists but the pin differs — never LOWER it (flair#1778 2c-i-a2).
+        const decision = decidePinWrite({
+          pkg: FLAIR_MCP_PACKAGE,
+          entry: `Codex config ${display}`,
+          existingText: codexFlairSectionText(raw),
+          runningVersion: flairCliVersion(),
+        });
+        if (decision.action !== "write") {
+          return { ok: true, message: decision.line! };
+        }
+        // Pin is BEHIND (or equal) — replace it with the current one.
         writeFileSync(path, replaceCodexFlairBlock(raw, env));
         return { ok: true, message: `Codex: refreshed pin in ${display} (restart Codex to pick it up)` };
       }

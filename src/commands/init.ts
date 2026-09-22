@@ -18,7 +18,8 @@ import {
   resolveInitAdminPasswordRefuseReason,
   resolveInitAdminPasswordSource,
 } from "../lib/init-admin-pass.js";
-import { mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
+import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
+import { decidePinWrite } from "../lib/pin-write-guard.js";
 import * as render from "../render.js";
 import { execSync, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -1189,6 +1190,26 @@ program
                 console.log(`   ✓ Claude Code already wired in ~/.claude.json`);
                 wiringResults.push({ client: "claude-code", message: "already wired", wired: true });
               } else {
+                // flair#1778 slice 2c-i-a2: a pin mismatch is NOT automatically a
+                // re-write — never LOWER the pin already in ~/.claude.json (and
+                // never overwrite a range/tag/unsupported spec, nor write when
+                // this CLI cannot read its own version).
+                const decision = decidePinWrite({
+                  pkg: FLAIR_MCP_PACKAGE,
+                  entry: "Claude Code config ~/.claude.json",
+                  existingText: existing ? JSON.stringify(existing) : null,
+                  runningVersion: flairCliVersion(),
+                });
+                if (decision.action !== "write") {
+                  console.log(`   ${render.icons.warn} ${decision.line}`);
+                  wiringResults.push({
+                    client: "claude-code",
+                    message: decision.action === "hold"
+                      ? "held the existing pin in ~/.claude.json"
+                      : "refused to write ~/.claude.json (unreadable CLI version)",
+                    wired: !!existing,
+                  });
+                } else {
                 claudeJson.mcpServers = claudeJson.mcpServers || {};
                 claudeJson.mcpServers.flair = flairMcpConfig;
                 writeFileSync(claudeJsonPath, JSON.stringify(claudeJson, null, 2));
@@ -1203,6 +1224,7 @@ program
                     : "created and wired ~/.claude.json",
                   wired: true,
                 });
+                }
               }
             } catch (err: unknown) {
               // Only a genuine read/parse/write failure lands here now (bad
