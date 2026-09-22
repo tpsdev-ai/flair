@@ -169,3 +169,22 @@ describe("wiringPinString — the one behaviour change", () => {
     expect(isComparableWiringPin(decodeWiringSpec(`npx -y ${MCP}`, MCP))).toBe(false);
   });
 });
+
+describe("flair#1809 review carry-overs", () => {
+  test("a scoped SIBLING's pinned tail is not read as an unscoped package's spec", () => {
+    // `flair-mcp@` matches inside `@tpsdev-ai/flair-mcp@`, whose preceding
+    // char is the scope's "/". Before the isTokenStart "/" rejection this
+    // read the sibling's 1.0.0 pin as pkg "flair-mcp"'s own.
+    const spec = decodeWiringSpec("npm:@other/@tpsdev-ai/flair-mcp@1.0.0", "flair-mcp");
+    expect(spec?.token.kind).toBe("none");
+    expect(wiringPinString(spec)).toBeNull();
+  });
+
+  test("npm-conventional dist-tags classify as range-or-tag, not malformed", () => {
+    for (const tag of ["beta", "alpha", "rc", "canary", "stable", "dev", "experimental"]) {
+      expect(partitionWiringToken(tag).kind).toBe("range-or-tag");
+    }
+    // present-but-not-comparable either way — only the label changed
+    expect(wiringPinString(decodeWiringSpec(`${MCP}@beta`, MCP))).toBe("beta");
+  });
+});

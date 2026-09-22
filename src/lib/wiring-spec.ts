@@ -32,8 +32,12 @@
  *      (strict `X.Y.Z[-prerelease][+build]`, no leading `v`; a prerelease like
  *       `0.56.0-rc.1` IS a version.)
  *   5. `semver.validRange(token)` or a dist-tag word
- *      (`latest` / `next` / `*`)                           → `range-or-tag`
- *      (this catches `0.55`, `~0.55`, `^0.55.0`, `>=1 <2`.)
+ *      (`latest` / `next` / `beta` / `alpha` / `rc` / `canary` / `stable` /
+ *      `dev` / `experimental` / `*`)                       → `range-or-tag`
+ *      (this catches `0.55`, `~0.55`, `^0.55.0`, `>=1 <2`; the tag set is the
+ *       npm-conventional one — flair#1809 review carry-over — so `@beta`
+ *       classifies as a tag rather than `malformed`. Either way it is
+ *       PRESENT-BUT-NOT-COMPARABLE; only the label differs.)
  *   6. anything else (a 4-part `1.2.3.4`, garbage)          → `malformed`
  *
  * `raw` is always kept, so a consumer can preserve the exact bytes it read.
@@ -61,7 +65,18 @@ export interface WiringSpec {
 const UNSUPPORTED_SOURCE_RE = /^(?:file:|link:|git:|git\+https:|git\+ssh:|github:|https?:)/;
 
 /** The dist-tag words npm resolves by name, plus the `*` wildcard. */
-const DIST_TAG_WORDS = new Set(["latest", "next", "*"]);
+const DIST_TAG_WORDS = new Set([
+  "latest",
+  "next",
+  "beta",
+  "alpha",
+  "rc",
+  "canary",
+  "stable",
+  "dev",
+  "experimental",
+  "*",
+]);
 
 /** Strip the `workspace:` / `npm:` protocol from a dependency-field value. */
 function stripSpecProtocol(spec: string): string {
@@ -97,6 +112,13 @@ function isTokenTerminator(ch: string | undefined): boolean {
  */
 function isTokenStart(s: string, idx: number): boolean {
   if (idx <= 0) return true;
+  // A preceding "/" means this match is the TAIL OF A SCOPED SIBLING, not the
+  // package: in `npm:@other/@tpsdev-ai/flair-mcp@1.0.0` the `flair-mcp@` match
+  // begins right after the sibling scope's "/". Every pkg constant today is
+  // scoped (@tpsdev-ai/…), so the gap is unreachable in practice, but an
+  // unscoped caller would otherwise read the sibling's pinned tail as its own
+  // (flair#1809 review carry-over).
+  if (s[idx - 1] === "/") return false;
   return !/[A-Za-z0-9_\-.]/.test(s[idx - 1]!);
 }
 

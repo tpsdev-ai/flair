@@ -989,22 +989,6 @@ export interface FlairPackagePin {
   version: string;
 }
 
-const FLAIR_AT_SPEC_RE = /@tpsdev-ai\/(flair-mcp|flair-client)@([0-9A-Za-z][^\s"'\],]*)/g;
-const FLAIR_JSON_DEP_RE = /"@tpsdev-ai\/(flair-mcp|flair-client)"\s*:\s*"([^"]+)"/g;
-
-/** Strip npm range / workspace prefixes so `^0.17.0` compares as `0.17.0`. */
-export function normalizeDeclaredPinVersion(raw: string): string | null {
-  if (typeof raw !== "string") return null;
-  let v = raw.trim();
-  if (!v) return null;
-  v = v.replace(/^(workspace|npm):/, "");
-  v = v.replace(/^[\^~>=<\s]+/, "");
-  v = v.replace(/^v/, "");
-  // Require X.Y.Z so `latest` / tags / bare names are not pins.
-  const m = v.match(/^(\d+\.\d+\.\d+[^\s"'\],]*)/);
-  return m ? m[1]! : null;
-}
-
 /**
  * Every `@tpsdev-ai/flair-mcp` / `@tpsdev-ai/flair-client` pin in a wiring
  * string or package.json.
