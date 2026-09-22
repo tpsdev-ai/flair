@@ -46,6 +46,7 @@ import {
   stopHarper,
   awaitMigrationStateFile,
   componentInstallFailureMessage,
+  bootLogRefs,
   dumpBootLogs,
   throwIfComponentInstallFailed,
   type HarperInstance,
@@ -67,6 +68,11 @@ let harper: HarperInstance;
 // are available to dump on failure, not only boot 2's (the `harper` slot is
 // overwritten by boot 2).
 let firstHarper: HarperInstance | undefined;
+// flair#1785 review B2: boot 2 in its OWN variable, undefined until the second
+// startHarper returns. `harper` still points at boot 1 through the whole of
+// beforeAll's seed → null-check → stop → GUARD → rmSync sequence, so dumping
+// `harper` as "boot 2" there produced boot 1 twice.
+let secondHarper: HarperInstance | undefined;
 let authHeader: string;
 let blockedFlairDir: string;
 // flair#1785 (B): ms from the seed to boot 1's stop, carried into the guard's
@@ -74,17 +80,16 @@ let blockedFlairDir: string;
 let seedToStopMs: number | undefined;
 
 /**
- * flair#1785 (C): dump BOTH boots' captured Harper stdout/stderr (bounded, each
+ * flair#1785 (C): dump the boots' captured Harper stdout/stderr (bounded, each
  * prefixed with its ROOTPATH/port). Called only from a failing path.
+ *
+ * flair#1785 review B2: the boot-2 entry is included ONLY once boot 2 actually
+ * exists — a beforeAll failure (the guard, the rmSync, or boot 2's own start)
+ * happens while `harper` is still boot 1, and must dump boot 1 ONCE, not a
+ * second block labelled "boot 2" carrying boot 1's ROOTPATH/port.
  */
 function dumpBothBoots(): void {
-  dumpBootLogs(
-    [
-      { label: "boot 1 (seed phase)", inst: firstHarper },
-      { label: "boot 2 (provisioned)", inst: harper },
-    ],
-    { maxLines: 300 },
-  );
+  dumpBootLogs(bootLogRefs(firstHarper, secondHarper), { maxLines: 300 });
 }
 
 /**
@@ -185,6 +190,7 @@ describe("zero-touch migrations — provisioned shape whose ~/.flair/data is unu
       writeFileSync(blockedFlairDir, "flair#812: this path is deliberately not a directory\n");
 
       harper = await startHarper({ installDir: first.installDir });
+      secondHarper = harper;
     } catch (err) {
       // flair#1785 (C): setup failure → dump both boots' captured logs.
       dumpBothBoots();

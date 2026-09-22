@@ -472,11 +472,37 @@ export function throwIfComponentInstallFailed(log: string): void {
   if (msg) throw new Error(msg);
 }
 
-/** The last `maxLines` lines of a captured boot log (the whole log when shorter). */
+/** Strip ANSI CSI/SGR escape sequences (Harper colours its banner and log lines). */
+function stripAnsiEscapes(s: string): string {
+  return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+}
+
+/**
+ * Index of the first line that looks like real log output rather than the
+ * startup ASCII-art banner: the banner is art with no letters/digits, so the
+ * first line carrying an alphanumeric is where the log proper begins.
+ */
+function firstLogLineIndex(lines: string[]): number {
+  for (let i = 0; i < lines.length; i++) {
+    if (/[A-Za-z0-9]/.test(lines[i])) return i;
+  }
+  return lines.length;
+}
+
+/**
+ * The last `maxLines` lines of a captured boot log, bounded for a failure dump.
+ *
+ * flair#1785 review N1: Harper's log opens with an ASCII-art banner (and carries
+ * ANSI colour escapes throughout), which is most of a SHORT boot's line count —
+ * so a plain tail spends the cap on the banner and buries the migration payload
+ * past it. Strip ANSI and drop the leading banner block FIRST, then apply the
+ * cap (still bounded).
+ */
 export function bootLogTail(log: string, maxLines: number): string {
-  const lines = String(log).split("\n");
-  if (maxLines <= 0 || lines.length <= maxLines) return String(log);
-  return lines.slice(lines.length - maxLines).join("\n");
+  const lines = stripAnsiEscapes(String(log)).split("\n");
+  const body = lines.slice(firstLogLineIndex(lines));
+  if (maxLines <= 0 || body.length <= maxLines) return body.join("\n");
+  return body.slice(body.length - maxLines).join("\n");
 }
 
 export interface BootLogRef {
@@ -484,6 +510,25 @@ export interface BootLogRef {
   label: string;
   /** The instance whose captured stdout/stderr to dump; skipped when absent. */
   inst?: HarperInstance | null;
+}
+
+/**
+ * flair#1785 (review B2): the boot-log refs for a fixture with a boot 1 and an
+ * OPTIONAL boot 2 — boot 1 always, boot 2 ONLY once it exists.
+ *
+ * Kept here rather than inline in the test so the "no phantom boot 2" property
+ * is unit-testable: during a beforeAll failure (the guard, the rmSync, or boot
+ * 2's own start) the caller's boot-2 slot is still boot 1, and passing it
+ * unconditionally dumped boot 1 twice — the second block labelled "boot 2"
+ * while carrying boot 1's ROOTPATH/port.
+ */
+export function bootLogRefs(
+  boot1: HarperInstance | undefined,
+  boot2: HarperInstance | undefined,
+): BootLogRef[] {
+  const refs: BootLogRef[] = [{ label: "boot 1 (seed phase)", inst: boot1 }];
+  if (boot2) refs.push({ label: "boot 2 (provisioned)", inst: boot2 });
+  return refs;
 }
 
 /**

@@ -26,8 +26,9 @@
  *                              runner writes no entry on the nothing-pending
  *                              path (`resources/migrations/runner.ts`).
  *   - present, no entry      → satisfied.
- *   - present WITH the entry → the precondition failure (named below).
- *   - present, unreadable or malformed → a SEPARATE inspection failure. Never
+ *   - present WITH an object entry → the precondition failure (named below).
+ *   - present, unreadable, malformed, OR carrying a NON-OBJECT entry value
+ *     (including null/false/0/"") → a SEPARATE inspection failure. Never
  *                              counted as absence: an unreadable state file is
  *                              "could not establish the precondition", not
  *                              "the precondition holds".
@@ -91,7 +92,18 @@ export function assertSeedOnlyPrecondition(opts: SeedOnlyPreconditionOptions): v
     throw new Error(seedOnlyInspectionMessage(statePath, "parsed value is not a JSON object"));
   }
   const state = parsed as Record<string, unknown>;
-  if (!state[entry]) return;
+  // PRESENCE, not truthiness (flair#1785 review B1):
+  // `{"<entry>": null}` / false / 0 / "" is a present-but-non-object value —
+  // malformed, an INSPECTION failure — NOT "no entry". A truthiness test
+  // would let exactly those slip through as satisfied, contradicting this
+  // module's contract.
+  if (!Object.prototype.hasOwnProperty.call(state, entry)) return;
 
+  const value = state[entry];
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(
+      seedOnlyInspectionMessage(statePath, `entry '${entry}' is present but is not a JSON object`),
+    );
+  }
   throw new Error(seedOnlyPreconditionMessage(statePath, entry, opts.seedToStopMs));
 }

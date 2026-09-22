@@ -17,6 +17,7 @@ import {
   SEED_ONLY_ENTRY,
 } from "../helpers/migration-precondition.js";
 import {
+  bootLogRefs,
   bootLogTail,
   formatBootLogDump,
   throwIfComponentInstallFailed,
@@ -112,6 +113,34 @@ describe("flair#1785 B — seed-only precondition guard", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // flair#1785 review B1: a PRESENT-but-non-object entry value is malformed —
+  // an inspection failure, NOT "no entry". A truthiness test let all four of
+  // these slip through as satisfied.
+  for (const [label, json] of [
+    ["null", JSON.stringify({ "visibility-backfill": null })],
+    ["false", JSON.stringify({ "visibility-backfill": false })],
+    ["0", JSON.stringify({ "visibility-backfill": 0 })],
+    ['""', JSON.stringify({ "visibility-backfill": "" })],
+  ] as const) {
+    test(`a present-but-non-object entry value (${label}) → inspection failure, never satisfied`, () => {
+      const { dir, statePath } = withStateFile(json);
+      try {
+        let err: Error | null = null;
+        try {
+          assertSeedOnlyPrecondition({ statePath });
+        } catch (e) {
+          err = e as Error;
+        }
+        expect(err).not.toBeNull();
+        expect(err!.message).toContain(`could not read boot 1's migration state at ${statePath}:`);
+        // NOT the precondition failure, and NOT silently read as absent.
+        expect(err!.message).not.toContain("the seed-only precondition is not established");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
 });
 
 describe("flair#1785 addendum — the final install-failure rescan before a wait loop's generic path", () => {
@@ -154,5 +183,39 @@ describe("flair#1785 C — bounded, labelled boot-log dump", () => {
   test("an instance with no captured log contributes nothing (no global afterEach prints on success)", () => {
     expect(formatBootLogDump([{ label: "boot 1", inst: fake("", "/tmp/x", "http://127.0.0.1:1") }])).toBe("");
     expect(formatBootLogDump([{ label: "boot 1", inst: undefined }])).toBe("");
+  });
+
+  // flair#1785 review B2: one boot instance → exactly ONE block. The caller
+  // (dumpBothBoots) must therefore include the boot-2 entry only once boot 2
+  // exists, or a beforeAll failure before the second startHarper dumps boot 1
+  // twice with the second block mislabelled.
+  test("one boot instance yields exactly ONE block", () => {
+    const dump = formatBootLogDump([
+      { label: "boot 1 (seed phase)", inst: fake("hello", "/tmp/install-1", "http://127.0.0.1:1111") },
+    ]);
+    expect(dump.split("\n").filter((l) => l.includes("ROOTPATH="))).toHaveLength(1);
+  });
+
+  test("bootLogRefs: boot 2 is included ONLY once it exists (no phantom boot 2)", () => {
+    const inst = fake("x", "/tmp/install-1", "http://127.0.0.1:1111");
+    expect(bootLogRefs(inst, undefined).map((r) => r.label)).toEqual(["boot 1 (seed phase)"]);
+    expect(bootLogRefs(inst, inst).map((r) => r.label)).toEqual([
+      "boot 1 (seed phase)",
+      "boot 2 (provisioned)",
+    ]);
+    // And the whole dump over the one-boot list is a single block.
+    const oneBootDump = formatBootLogDump(bootLogRefs(inst, undefined));
+    expect(oneBootDump.split("\n").filter((l) => l.includes("ROOTPATH="))).toHaveLength(1);
+  });
+
+  // flair#1785 review N1: Harper's log opens with an ASCII-art banner and ANSI
+  // escapes; strip both before the cap so the payload is not pushed past it.
+  test("bootLogTail strips ANSI and the leading banner block before the cap", () => {
+    const banner = ["", "\x1b[32m ##   ##  ###  ####  \x1b[0m", " ##   ##  ##   ##    ", ""].join("\n");
+    const body = Array.from({ length: 5 }, (_, i) => `[log] line ${i}`).join("\n");
+    const out = bootLogTail(`${banner}\n${body}`, 3);
+    expect(out).toBe("[log] line 2\n[log] line 3\n[log] line 4");
+    expect(out).not.toContain("\x1b");
+    expect(out).not.toContain("##");
   });
 });
