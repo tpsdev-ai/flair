@@ -24,11 +24,15 @@ import {
 } from "../install/clients.js";
 import {
   checkSessionStartHook,
-  extractFlairMcpPin,
-  extractFlairPackagePins,
   isFlairHookCommand,
   readClientMcpBlock,
 } from "../doctor-client.js";
+import {
+  decodeWiringSpec,
+  decodeWiringSpecs,
+  isComparableWiringPin,
+  wiringPinString,
+} from "./wiring-spec.js";
 import { isUnsafeAdapterPin } from "./stale-client-pin.js";
 import {
   hookInstallHint,
@@ -37,7 +41,7 @@ import {
   SUPPORTED_HARNESSES,
   type Harness,
 } from "../hook-install.js";
-import { flairCliVersion, isResolvedVersion } from "./mcp-spec.js";
+import { flairCliVersion, isResolvedVersion, FLAIR_MCP_PACKAGE } from "./mcp-spec.js";
 import { comparePinVersions, pinWriteWouldLowerOrIsUnknown } from "./upgrade-status.js";
 
 export type OwnedPinKind = "mcp-client" | "session-start-hook";
@@ -143,7 +147,7 @@ export function readOwnedPin(target: OwnedPinTarget, homeDir: string): OwnedPinR
     return {
       target,
       present,
-      pin: present ? extractFlairMcpPin(hook.command ?? "") : null,
+      pin: present ? wiringPinString(decodeWiringSpec(hook.command ?? "", FLAIR_MCP_PACKAGE)) : null,
     };
   }
   const block = readClientMcpBlock(target.id as ClientId, homeDir);
@@ -151,7 +155,7 @@ export function readOwnedPin(target: OwnedPinTarget, homeDir: string): OwnedPinR
   return {
     target,
     present: block.present,
-    pin: block.present ? extractFlairMcpPin(text) : null,
+    pin: block.present ? wiringPinString(decodeWiringSpec(text, FLAIR_MCP_PACKAGE)) : null,
   };
 }
 
@@ -224,15 +228,22 @@ export function findUnsafeWiredPins(homeDir: string, cwd?: string): UnsafeWiredP
     if (!reading.present) continue;
     const text = readFileText(target.path) ?? "";
     const surface = target.kind === "mcp-client" ? "MCP server" : "SessionStart hook";
-    for (const pin of extractFlairPackagePins(text)) {
-      if (!isUnsafeAdapterPin(pin.version)) continue;
-      add({
-        source: target.kind,
-        id: target.id,
-        surface,
-        package: pin.package,
-        version: pin.version,
-      });
+    for (const pkg of ["flair-mcp", "flair-client"] as const) {
+      for (const spec of decodeWiringSpecs(text, `@tpsdev-ai/${pkg}`)) {
+        // flair#1778 2c-i-a1: only a CONCRETE pin can be an unsafe (< 0.18.0)
+        // adapter pin; a range/tag/unsupported/malformed spec is present-not-
+        // comparable and is neither dropped nor treated as unsafe.
+        if (!isComparableWiringPin(spec)) continue;
+        const version = spec.token.value as string;
+        if (!isUnsafeAdapterPin(version)) continue;
+        add({
+          source: target.kind,
+          id: target.id,
+          surface,
+          package: pkg,
+          version,
+        });
+      }
     }
   }
 
@@ -240,15 +251,19 @@ export function findUnsafeWiredPins(homeDir: string, cwd?: string): UnsafeWiredP
     const pkgPath = join(cwd, "package.json");
     const text = readFileText(pkgPath);
     if (text) {
-      for (const pin of extractFlairPackagePins(text)) {
-        if (!isUnsafeAdapterPin(pin.version)) continue;
-        add({
-          source: "package.json",
-          id: "cwd",
-          surface: "package.json",
-          package: pin.package,
-          version: pin.version,
-        });
+      for (const pkg of ["flair-mcp", "flair-client"] as const) {
+        for (const spec of decodeWiringSpecs(text, `@tpsdev-ai/${pkg}`)) {
+          if (!isComparableWiringPin(spec)) continue;
+          const version = spec.token.value as string;
+          if (!isUnsafeAdapterPin(version)) continue;
+          add({
+            source: "package.json",
+            id: "cwd",
+            surface: "package.json",
+            package: pkg,
+            version,
+          });
+        }
       }
     }
   }
@@ -474,7 +489,7 @@ export function refreshOwnedPins(opts: RefreshOwnedPinsOptions): OwnedPinRefresh
         FLAIR_URL: override?.flairUrl ?? flairUrl,
         FLAIR_CLIENT: target.id,
       };
-      const before = extractFlairMcpPin(readFileText(target.path) ?? "");
+      const before = wiringPinString(decodeWiringSpec(readFileText(target.path) ?? "", FLAIR_MCP_PACKAGE));
       // flair#1778 D4: the wire writes the running CLI's version; never let the
       // refresh LOWER a pin that is ahead — or rewrite a pin it cannot read.
       const wouldWritePin = flairCliVersion();
@@ -488,7 +503,7 @@ export function refreshOwnedPins(opts: RefreshOwnedPinsOptions): OwnedPinRefresh
         continue;
       }
       const wired = client.wire(env);
-      const after = extractFlairMcpPin(readFileText(target.path) ?? "");
+      const after = wiringPinString(decodeWiringSpec(readFileText(target.path) ?? "", FLAIR_MCP_PACKAGE));
       // Failed write stays skip+ok:false (fail-closed, like hook re-pin).
       // ownedPinRefreshShouldReport treats !ok as printable — do not recode
       // this as a quiet skip.

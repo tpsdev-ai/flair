@@ -33,6 +33,12 @@ import {
   type PiSettingsScan,
 } from "./install/clients.js";
 import { FLAIR_MCP_PACKAGE, mcpServerSpec } from "./lib/mcp-spec.js";
+import {
+  decodeWiringSpec,
+  decodeWiringSpecs,
+  wiringPinString,
+  type WiringSpec,
+} from "./lib/wiring-spec.js";
 
 // The exact substring `flair init` writes into CLAUDE.md (src/cli.ts, the
 // `init` action) and that the doctor check + fix both key off of.
@@ -1001,40 +1007,45 @@ export function normalizeDeclaredPinVersion(raw: string): string | null {
 
 /**
  * Every `@tpsdev-ai/flair-mcp` / `@tpsdev-ai/flair-client` pin in a wiring
- * string or package.json. Covers `pkg@<ver>` specs (MCP args, hook commands)
- * and `"pkg": "<ver>"` dependency fields. Bare / unpinned / `latest` specs
- * contribute nothing.
+ * string or package.json.
+ *
+ * flair#1778 slice 2c-i-a1: a THIN ADAPTER over the interim `WiringSpec` model
+ * (`./lib/wiring-spec.js`). For a concrete `version` token the result is
+ * byte-identical to before; for `range-or-tag` / `unsupported` / `malformed`
+ * the spec is now returned as its RAW token (PRESENT, not comparable) instead
+ * of being dropped as `null`/absent. `none` (unpinned) still contributes
+ * nothing. Callers that have migrated read `WiringSpec` directly.
  *
  * flair#1383: doctor must read the actual installed pins, not infer age
  * from "pin !== CLI version".
  */
 export function extractFlairPackagePins(text: string): FlairPackagePin[] {
   if (typeof text !== "string") return [];
-  const out: FlairPackagePin[] = [];
+  const found: Array<{ at: number; pin: FlairPackagePin }> = [];
   const seen = new Set<string>();
-  const add = (pkg: string, rawVer: string): void => {
-    const version = normalizeDeclaredPinVersion(rawVer);
-    if (!version) return;
-    const name = pkg as FlairAdapterPackage;
-    const key = `${name}@${version}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    out.push({ package: name, version });
-  };
-  for (const m of text.matchAll(FLAIR_AT_SPEC_RE)) add(m[1]!, m[2]!);
-  for (const m of text.matchAll(FLAIR_JSON_DEP_RE)) add(m[1]!, m[2]!);
-  return out;
+  for (const pkg of ["flair-mcp", "flair-client"] as const) {
+    for (const spec of decodeWiringSpecs(text, `@tpsdev-ai/${pkg}`)) {
+      const version = wiringPinString(spec);
+      if (version === null) continue;
+      const key = `${pkg}@${version}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      // Preserve the ORDER pins appear in the text (the old extractor's
+      // match-position order), not the order packages are enumerated.
+      const at = text.indexOf(spec.raw);
+      found.push({ at: at < 0 ? Number.MAX_SAFE_INTEGER : at, pin: { package: pkg, version } });
+    }
+  }
+  found.sort((a, b) => a.at - b.at);
+  return found.map((f) => f.pin);
 }
 
 /**
- * Extract a pinned `@tpsdev-ai/flair-mcp` version from any wiring string — a
- * client MCP `args` array, a Codex TOML args line, or a SessionStart hook
- * command. Returns the version when the spec is written
- * `@tpsdev-ai/flair-mcp@<ver>`; null for a bare/unpinned spec.
- *
- * SessionStart hooks written since flair#1143 carry the same pin as a
- * client MCP config (`mcpServerSpec()`). A pre-#1143 unpinned hook still
- * establishes that flair-mcp is wired but contributes no version.
+ * Extract the `@tpsdev-ai/flair-mcp` spec from any wiring string — a client MCP
+ * `args` array, a Codex TOML args line, or a SessionStart hook command. A
+ * concrete version returns its version; a range/tag/unsupported/malformed spec
+ * returns its RAW token (present-not-comparable); a bare/unpinned spec returns
+ * null.
  */
 export function extractFlairMcpPin(text: string): string | null {
   return extractFlairPackagePins(text).find((p) => p.package === "flair-mcp")?.version ?? null;
@@ -1066,16 +1077,18 @@ export interface FlairMcpWiring {
 
 export function detectWiredFlairMcp(homeDir: string): FlairMcpWiring {
   let wired = false;
-  let pinnedVersion: string | null = null;
+  // flair#1778 slice 2c-i-a1: decode EVERY wired entry into its own WiringSpec
+  // — one per entry, never collapsing to the first. A bare/unpinned entry still
+  // establishes `wired` (today's outcome) but contributes no spec.
+  const specs: WiringSpec[] = [];
 
   // The package name only ever appears in a Flair MCP wiring block, so its
   // presence in a config's text is a reliable "flair-mcp is wired here" signal.
   const note = (text: string | null | undefined): void => {
     if (!text || !text.includes(FLAIR_MCP_PACKAGE)) return;
     wired = true;
-    if (!pinnedVersion) {
-      const pin = extractFlairMcpPin(text);
-      if (pin) pinnedVersion = pin;
+    for (const spec of decodeWiringSpecs(text, FLAIR_MCP_PACKAGE)) {
+      if (spec.token.kind !== "none") specs.push(spec);
     }
   };
 
@@ -1100,6 +1113,17 @@ export function detectWiredFlairMcp(homeDir: string): FlairMcpWiring {
     const hook = checkSessionStartHook(homeDir, hookPath);
     if (hook.present && isFlairHookCommand(hook.command ?? "")) note(hook.command);
   }
+
+  // A concrete version wins (today's precedence, over the SAME ordered entry
+  // list); otherwise a present-not-comparable spec is reported as its raw token
+  // rather than dropped as absent. A bare entry alone leaves `pinnedVersion`
+  // null — unchanged.
+  const firstVersion = specs.find((s) => s.token.kind === "version");
+  const pinnedVersion: string | null = firstVersion
+    ? firstVersion.token.value
+    : specs.length > 0
+      ? wiringPinString(specs[0]!)
+      : null;
 
   return { wired, pinnedVersion };
 }

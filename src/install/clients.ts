@@ -86,6 +86,7 @@ import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSy
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { flairCliVersion, isResolvedVersion, mcpServerSpec } from "../lib/mcp-spec.js";
+import { decodeWiringSpec, wiringPinString } from "../lib/wiring-spec.js";
 
 /**
  * Resolve the user's home dir. Prefer the live HOME/USERPROFILE env over
@@ -443,12 +444,17 @@ export function isPiFlairNpmSource(source: string): boolean {
   return spec === PI_FLAIR_PACKAGE || spec.startsWith(`${PI_FLAIR_PACKAGE}@`);
 }
 
-/** The version text of a pinned pi-flair npm source, or null when bare. */
+/**
+ * The version text of a pinned pi-flair npm source, or null when bare.
+ *
+ * flair#1778 slice 2c-i-a1: read the spec through the ONE wiring decoder. A
+ * concrete version returns as before; a range/tag/unsupported/malformed spec is
+ * PRESENT-but-not-comparable (its raw token) instead of being dropped as null;
+ * a bare `npm:<pkg>` stays null.
+ */
 export function extractPiFlairPin(source: string): string | null {
   if (!isPiFlairNpmSource(source)) return null;
-  const spec = source.slice("npm:".length).trim();
-  const version = spec.slice(`${PI_FLAIR_PACKAGE}@`.length);
-  return spec.startsWith(`${PI_FLAIR_PACKAGE}@`) && version ? version : null;
+  return wiringPinString(decodeWiringSpec(source, PI_FLAIR_PACKAGE));
 }
 
 /**

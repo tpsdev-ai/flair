@@ -96,20 +96,27 @@ describe("extractFlairPackagePins (flair#1383 — actual installed pins)", () =>
     ]);
   });
 
-  test("finds package.json dependency pins, including a caret range", () => {
+  test("finds package.json dependency pins; a caret range is reported as its RAW spec (flair#1778 2c-i-a1)", () => {
     const pins = extractFlairPackagePins(JSON.stringify({
       dependencies: { "@tpsdev-ai/flair-client": "^0.17.0" },
       devDependencies: { "@tpsdev-ai/flair-mcp": "0.16.1" },
     }));
+    // flair#1778 slice 2c-i-a1: a caret range is PRESENT-but-not-comparable, not
+    // stripped to a bare version (that stripping is what let `@^0.55.0` be read
+    // as the version `0.55.0` and overwritten). A concrete pin is unchanged.
     expect(pins).toEqual([
-      { package: "flair-client", version: "0.17.0" },
+      { package: "flair-client", version: "^0.17.0" },
       { package: "flair-mcp", version: "0.16.1" },
     ]);
   });
 
-  test("ignores bare / latest / unrelated packages", () => {
+  test("a bare dependency field stays out; a dist-tag is PRESENT-not-comparable (flair#1778 2c-i-a1)", () => {
+    // A bare package with no spec contributes nothing (unpinned, `none`).
     expect(extractFlairPackagePins('"@tpsdev-ai/flair-mcp"')).toEqual([]);
-    expect(extractFlairPackagePins('"@tpsdev-ai/flair-client": "latest"')).toEqual([]);
+    // A tag is no longer dropped as if absent — it is reported as its raw token.
+    expect(extractFlairPackagePins('"@tpsdev-ai/flair-client": "latest"')).toEqual([
+      { package: "flair-client", version: "latest" },
+    ]);
     expect(extractFlairPackagePins('"some-other-package": "0.17.0"')).toEqual([]);
   });
 });
