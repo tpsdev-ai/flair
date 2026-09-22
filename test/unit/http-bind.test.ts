@@ -48,6 +48,13 @@ import {
 } from "../../src/lib/http-bind.ts";
 import { unescapeXml } from "../../src/lib/xml-escape.ts";
 
+// flair#1807: the child's OWN deadline + a per-case budget. The only CLI spawn
+// here is the §3 e2e `flair init` (two spawnSyncs), which runs in ~300 ms
+// measured; the deadline is 20 s and the budget is 25 s = 20 s deadline + ~5 s
+// margin, so bun's per-test timer cannot fire before the deadline names a hang.
+const CHILD_DEADLINE_MS = 20_000;
+const CASE_BUDGET_MS = 25_000;
+
 /** Extract the HARPER_SET_CONFIG payload from a plist and decode the XML entities. */
 function setConfigOf(plist: string): any {
   const raw = plist.split("<key>HARPER_SET_CONFIG</key><string>")[1].split("</string>")[0];
@@ -353,6 +360,9 @@ describe("§3 httpBind survives a wholesale config rewrite", () => {
         cwd: join(import.meta.dir, "..", ".."),
         env,
         encoding: "utf8",
+        // flair#1807: the child's OWN deadline, so a hung `flair init` is
+        // reported by the deadline (and named) rather than by bun's timer.
+        timeout: CHILD_DEADLINE_MS,
       });
     try {
       const wide = runInit("0.0.0.0");
@@ -365,7 +375,7 @@ describe("§3 httpBind survives a wholesale config rewrite", () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
-  }, 30_000);
+  }, CASE_BUDGET_MS);
 });
 
 // ─── §4 — the direct-spawn env must be CLOSED ─────────────

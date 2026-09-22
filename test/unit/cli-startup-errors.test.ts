@@ -36,6 +36,7 @@ interface RunResult {
 }
 
 function runCLI(args: string[], leg: string, opts: { env?: Record<string, string> } = {}): RunResult {
+  const startedAt = Date.now();
   const r = spawnSync("bun", [CLI_SOURCE, ...args], {
     env: { ...process.env, ...opts.env },
     timeout: CHILD_DEADLINE_MS,
@@ -50,6 +51,8 @@ function runCLI(args: string[], leg: string, opts: { env?: Record<string, string
         signal: r.signal,
         stdout: r.stdout,
         stderr: r.stderr,
+        elapsedMs: Date.now() - startedAt,
+        timeoutSignal: "SIGTERM",
       }),
     );
   }

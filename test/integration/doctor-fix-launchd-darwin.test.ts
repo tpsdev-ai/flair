@@ -62,6 +62,7 @@ import {
   resolveHarperBin,
 } from "../../src/cli.ts";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle.ts";
+import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.ts";
 
 const isDarwin = process.platform === "darwin";
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
@@ -72,7 +73,15 @@ const ADMIN_PASS = "test123";
 const SEED_IDS = ["b3b-mem-1", "b3b-mem-2", "b3b-mem-3"] as const;
 const PROMPT_RE =
   /Please enter a password|readline was closed|ERR_USE_AFTER_CLOSE|Please enter a destination for Harper|\[hidden\]/i;
-const TEST_TIMEOUT_MS = 240_000;
+// flair#1807: the child's OWN deadline + a per-case budget, sized from CI rather
+// than guessed. Measured per-case durations in the `test-darwin-gated` job's
+// "Real-launchd doctor --fix integration" step across the last green runs with
+// readable logs: 9.5-30.6 s (this host cannot run the file — it is
+// darwin-gated). Deadline = max observed ~30.6 s + margin, rounded up to a
+// 30 s multiple = 60 s (the old manual kill was 180 s, far above the observed
+// max); the case budget is the deadline + 30 s = 90 s.
+const CHILD_DEADLINE_MS = 60_000;
+const CASE_BUDGET_MS = 90_000;
 
 /** Jobs this file loaded. Unloaded on afterEach and on process exit. */
 const LOADED_JOBS = new Set<{ label: string; plistPath: string }>();
@@ -183,6 +192,7 @@ async function runDoctorFix(
     cwd: REPO_ROOT,
     env: doctorEnv(tmpHome, opts),
     stdio: ["ignore", "pipe", "pipe"],
+    timeout: CHILD_DEADLINE_MS,
   });
   let stdout = "";
   let stderr = "";
@@ -192,17 +202,16 @@ async function runDoctorFix(
   proc.stderr?.on("data", (d: Buffer) => {
     stderr += d.toString();
   });
+  const startedAt = Date.now();
   const exitCode: number = await new Promise((resolveExit, reject) => {
     proc.on("error", reject);
-    proc.on("exit", (code) => resolveExit(code ?? 1));
-    setTimeout(() => {
-      try {
-        proc.kill("SIGTERM");
-      } catch {
-        /* already gone */
+    proc.on("exit", (code, signal) => {
+      if (signal !== null) {
+        reject(new Error(childOverranDeadline("flair CLI", cliLeg(["doctor", "--fix"]), CHILD_DEADLINE_MS, { status: code, signal, stdout, stderr, elapsedMs: Date.now() - startedAt, timeoutSignal: "SIGTERM" })));
+        return;
       }
-      reject(new Error(`flair doctor --fix timed out after 180s\nstdout:\n${stdout}\nstderr:\n${stderr}`));
-    }, 180_000);
+      resolveExit(code ?? 1);
+    });
   });
   return { stdout, stderr, exitCode };
 }
@@ -222,6 +231,7 @@ async function runInit(
       // this exercises the reuse leg of the resolution rather than a proof.
       env: doctorEnv(tmpHome, { adminPassEnv: false }),
       stdio: ["ignore", "pipe", "pipe"],
+      timeout: CHILD_DEADLINE_MS,
     },
   );
   let stdout = "";
@@ -232,17 +242,16 @@ async function runInit(
   proc.stderr?.on("data", (d: Buffer) => {
     stderr += d.toString();
   });
+  const startedAt = Date.now();
   const exitCode: number = await new Promise((resolveExit, reject) => {
     proc.on("error", reject);
-    proc.on("exit", (code) => resolveExit(code ?? 1));
-    setTimeout(() => {
-      try {
-        proc.kill("SIGTERM");
-      } catch {
-        /* already gone */
+    proc.on("exit", (code, signal) => {
+      if (signal !== null) {
+        reject(new Error(childOverranDeadline("flair CLI", cliLeg(["init"]), CHILD_DEADLINE_MS, { status: code, signal, stdout, stderr, elapsedMs: Date.now() - startedAt, timeoutSignal: "SIGTERM" })));
+        return;
       }
-      reject(new Error(`flair init timed out after 180s\nstdout:\n${stdout}\nstderr:\n${stderr}`));
-    }, 180_000);
+      resolveExit(code ?? 1);
+    });
   });
   return { stdout, stderr, exitCode };
 }
@@ -673,7 +682,7 @@ test.skipIf(!isDarwin)(
     expect(result.stdout + result.stderr).toMatch(/launchd|regenerat|managed/i);
     expect(managed.pid).toBeGreaterThan(0);
   },
-  TEST_TIMEOUT_MS,
+  CASE_BUDGET_MS,
 );
 
 test.skipIf(!isDarwin)(
@@ -724,7 +733,7 @@ test.skipIf(!isDarwin)(
       managed.pid,
     );
   },
-  TEST_TIMEOUT_MS,
+  CASE_BUDGET_MS,
 );
 
 test.skipIf(!isDarwin)(
@@ -757,7 +766,7 @@ test.skipIf(!isDarwin)(
     expect(result.stdout + result.stderr).toMatch(/adopt|bounc/i);
     await assertNoRebootstrap(sb, before);
   },
-  TEST_TIMEOUT_MS,
+  CASE_BUDGET_MS,
 );
 
 test.skipIf(!isDarwin)(
@@ -787,7 +796,7 @@ test.skipIf(!isDarwin)(
     ).toBe(false);
     expect(result.stdout + result.stderr).toMatch(/admin-pass|flair init/i);
   },
-  TEST_TIMEOUT_MS,
+  CASE_BUDGET_MS,
 );
 
 test.skipIf(!isDarwin)(
@@ -811,5 +820,5 @@ test.skipIf(!isDarwin)(
     const managed = assessManaged(sb.dataDir, sb.httpPort, sb.launchAgentsDir);
     expect(managed.state, managed.detail).toBe("managed");
   },
-  TEST_TIMEOUT_MS,
+  CASE_BUDGET_MS,
 );

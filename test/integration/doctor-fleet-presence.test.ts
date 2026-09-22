@@ -17,6 +17,7 @@
 
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { spawn } from "node:child_process";
+import { childOverranDeadline, cliLeg } from "../helpers/child-deadline";
 import { mkdtemp, rm, mkdir, writeFile, unlink } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,6 +26,14 @@ import nacl from "tweetnacl";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
+// flair#1807: the child's OWN deadline + a per-case budget. Each case issues
+// 1-3 `flair` subprocesses against a throwaway Harper started in beforeAll; the
+// CLI runs are sub-second (measured) and the deadline is 20 s — generous for a
+// cold node start against a live server — so the budget is 25 s = 20 s deadline
+// + the measured case work + margin, and bun's per-test timer stays out of the
+// way of the deadline's named overrun.
+const CHILD_DEADLINE_MS = 20_000;
+const CASE_BUDGET_MS = 25_000;
 const ADMIN_PASS = "test123"; // matches harper-lifecycle's seeded admin pass
 const AGENT_A = "fleet-doctor-agent-a";
 const LEGACY_STALE_ID = "fleet-doctor-agent-old";
@@ -41,6 +50,7 @@ interface RunResult {
 function runCli(args: string[], extraEnv: Record<string, string> = {}): Promise<RunResult> {
   const opsPort = new URL(harper.opsURL).port;
   return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
     const child = spawn(process.execPath, [CLI, ...args], {
       env: {
         ...process.env,
@@ -51,14 +61,20 @@ function runCli(args: string[], extraEnv: Record<string, string> = {}): Promise<
         FLAIR_ADMIN_PASS: "",
         ...extraEnv,
       },
+      timeout: CHILD_DEADLINE_MS,
     });
     let stdout = "";
     let stderr = "";
     child.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
     child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
     child.on("error", reject);
-    child.on("exit", (code) => resolve({ code, stdout, stderr }));
-    setTimeout(() => { child.kill(); reject(new Error(`CLI timed out: ${args.join(" ")}\n${stdout}\n${stderr}`)); }, 30_000);
+    child.on("exit", (code, signal) => {
+      if (signal !== null) {
+        reject(new Error(childOverranDeadline("flair CLI", cliLeg(args), CHILD_DEADLINE_MS, { status: code, signal, stdout, stderr, elapsedMs: Date.now() - startedAt, timeoutSignal: "SIGTERM" })));
+        return;
+      }
+      resolve({ code, stdout, stderr });
+    });
   });
 }
 
@@ -116,7 +132,7 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     expect(out).not.toContain("stale");
     // We passed --agent with a real key → versions must NOT be hidden.
     expect(out).not.toContain("hidden");
-  }, 40_000);
+  }, CASE_BUDGET_MS);
 
   test("doctor without --agent: auto-iterates the local key (flair#722) — versions are NOT hidden", async () => {
     // cliHome already has AGENT_A's key on disk from the "agent add" call
@@ -132,7 +148,7 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     expect(out).toContain(`v${REAL_FLAIR_VERSION}`);
     expect(out).not.toContain("hidden");
     expect(out).not.toContain("Pass --agent");
-  }, 40_000);
+  }, CASE_BUDGET_MS);
 
   test("doctor without --agent, zero local keys: fleet identities still show, but versions are hidden (verified-reader gate)", async () => {
     // A totally separate, empty HOME (no `agent add` ever ran here) —
@@ -152,7 +168,7 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     } finally {
       await rm(emptyHome, { recursive: true, force: true, maxRetries: 4 });
     }
-  }, 40_000);
+  }, CASE_BUDGET_MS);
 
   test("failure isolation (flair#722): an unregistered local key reports its own finding without hiding the registered agent's subsection", async () => {
     // Plant a second, bogus key directly in cliHome/.flair/keys — same shape
@@ -184,7 +200,7 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     } finally {
       await unlink(join(keysDir, `${BOGUS_ID}.key`)).catch(() => {});
     }
-  }, 40_000);
+  }, CASE_BUDGET_MS);
 
   test("an older-version instance is flagged stale and sorted ahead of the current one", async () => {
     // Seed a second, artificially OLD presence row directly via the ops API
@@ -227,7 +243,7 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     expect(oldIdx).toBeGreaterThan(-1);
     expect(currentIdx).toBeGreaterThan(-1);
     expect(oldIdx).toBeLessThan(currentIdx);
-  }, 40_000);
+  }, CASE_BUDGET_MS);
 
   test("natural-presence: a stale-activity instance renders 'offline' with its last-known activity, not a live label", async () => {
     // Seed a row with a CURRENT version (not version-stale) but a long-stale
@@ -264,5 +280,5 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     expect(line).toContain("offline");
     // Last-known activity is shown as "(was: debugging)", never a live label.
     expect(line).toContain("was: debugging");
-  }, 40_000);
+  }, CASE_BUDGET_MS);
 });

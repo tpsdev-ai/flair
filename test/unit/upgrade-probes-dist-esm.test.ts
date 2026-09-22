@@ -15,7 +15,8 @@
  * absent build fails the test rather than passing it vacuously.
  */
 import { describe, test, expect, beforeAll, afterEach } from "bun:test";
-import { execSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -37,10 +38,11 @@ console.log(JSON.stringify({
 let home: string;
 let runnerDir: string;
 
+// Build dist/cli.js AT MOST ONCE per lane (flair#1807) — see
+// test/helpers/build-cli-once.ts. The 120 s budget names a build hang.
 beforeAll(() => {
-  // Own the dependency so a stale/missing build cannot make the run vacuous.
-  execSync("bun run build:cli", { cwd: ROOT, stdio: "ignore" });
-});
+  ensureCliBuild();
+}, 120_000);
 
 afterEach(() => {
   if (home) rmSync(home, { recursive: true, force: true });

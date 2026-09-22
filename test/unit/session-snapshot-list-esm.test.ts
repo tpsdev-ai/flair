@@ -20,7 +20,8 @@
  * a stale or absent build fails the test rather than passing it vacuously.
  */
 import { describe, test, expect, beforeAll, afterEach } from "bun:test";
-import { spawnSync, execSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -50,10 +51,15 @@ function runCli(args: string[], home: string): RunResult {
 
 let home: string | undefined;
 
+// Build dist/cli.js AT MOST ONCE per lane (flair#1807): this hook used to race
+// the same `bun run build:cli` in sibling files' beforeAll (all concurrent
+// writers of dist/, all racing bun's 5 s hook default). ensureCliBuild() skips
+// the build when dist/cli.js is already newer than src/, and serializes
+// concurrent callers on a "wx" lock so exactly one build runs. The 120 s budget
+// names a genuine build hang instead of letting the 5 s default kill it bare.
 beforeAll(() => {
-  // Own the dependency so a stale/missing build cannot make the run vacuous.
-  execSync("bun run build:cli", { cwd: ROOT, stdio: "ignore" });
-});
+  ensureCliBuild();
+}, 120_000);
 
 afterEach(() => {
   if (home) rmSync(home, { recursive: true, force: true });

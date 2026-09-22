@@ -31,6 +31,7 @@ function runCli(
   leg: string,
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
     const child = spawn("bun", [cliPath, ...args], {
       env,
       cwd: join(import.meta.dirname, "..", ".."),
@@ -44,7 +45,7 @@ function runCli(
       if (signal !== null) {
         reject(
           new Error(
-            childOverranDeadline("flair CLI", leg, CHILD_DEADLINE_MS, { status: code, signal, stdout: out, stderr: err }),
+            childOverranDeadline("flair CLI", leg, CHILD_DEADLINE_MS, { status: code, signal, stdout: out, stderr: err, elapsedMs: Date.now() - startedAt, timeoutSignal: "SIGTERM" }),
           ),
         );
         return;

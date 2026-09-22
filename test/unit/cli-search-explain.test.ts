@@ -19,6 +19,15 @@ import { describe, it, expect } from "bun:test";
 import { spawn } from "node:child_process";
 import { createServer, Server } from "node:http";
 import { buildSearchExplain, formatSearchExplain, searchScoringFormula } from "../../src/cli.js";
+import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
+
+// flair#1807: a child deadline on the spawn and a per-case budget on the case.
+// The CLI spawn here is ~130-310 ms warm (measured on this tree); the deadline
+// is 20 s — a cold `bun src/cli.ts` start against a mock HTTP server stays well
+// inside it — and the case budget is 25 s = the 20 s deadline + ~5 s margin, so
+// bun's per-test timer can never fire before the deadline can name an overrun.
+const CHILD_DEADLINE_MS = 20_000;
+const CASE_BUDGET_MS = 25_000;
 
 const HIT = {
   id: "m1",
@@ -53,13 +62,20 @@ function startMockServer(payload: unknown): Promise<{ server: Server; url: strin
 
 // stdout is a pipe here, never a TTY — that is the point of this harness.
 function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    const child = spawn("bun", ["src/cli.ts", ...args], { cwd: ".", env });
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+    const child = spawn("bun", ["src/cli.ts", ...args], { cwd: ".", env, timeout: CHILD_DEADLINE_MS });
     let out = "";
     let err = "";
     child.stdout?.on("data", (d) => (out += d.toString()));
     child.stderr?.on("data", (d) => (err += d.toString()));
-    child.on("close", (code) => resolve({ code, stdout: out, stderr: err }));
+    child.on("close", (code, signal) => {
+      if (signal !== null) {
+        reject(new Error(childOverranDeadline("flair CLI", cliLeg(args), CHILD_DEADLINE_MS, { status: code, signal, stdout: out, stderr: err, elapsedMs: Date.now() - startedAt, timeoutSignal: "SIGTERM" })));
+        return;
+      }
+      resolve({ code, stdout: out, stderr: err });
+    });
   });
 }
 
@@ -98,7 +114,7 @@ describe("flair search --explain over a non-TTY stdout (flair#992)", () => {
     expect(parsed[0]._explain.durability).toBe("permanent");
     expect(parsed[0]._explain.usageCount).toBe(3);
     expect(typeof parsed[0]._explain.ageDays).toBe("number");
-  });
+  }, CASE_BUDGET_MS);
 
   it("emits _explain under --explain --json too", async () => {
     const { code, stdout } = await searchWith(
@@ -109,7 +125,7 @@ describe("flair search --explain over a non-TTY stdout (flair#992)", () => {
     const parsed = JSON.parse(stdout);
     expect(parsed[0]._explain).toBeDefined();
     expect(parsed[0]._explain.formula).toBe("cosine similarity only");
-  });
+  }, CASE_BUDGET_MS);
 
   it("reports composite and raw as separate terms under --scoring composite", async () => {
     const { code, stdout } = await searchWith(
@@ -121,7 +137,7 @@ describe("flair search --explain over a non-TTY stdout (flair#992)", () => {
     expect(ex.scoring).toBe("composite");
     expect(ex.raw).toBe(0.744); // _rawScore — the pre-composite semantic score
     expect(ex.composite).toBe(0.812); // _score
-  });
+  }, CASE_BUDGET_MS);
 
   it("never labels a raw score 'composite' under the default raw scoring", async () => {
     // Under --scoring raw the server puts the raw score in _score and omits
@@ -134,7 +150,7 @@ describe("flair search --explain over a non-TTY stdout (flair#992)", () => {
     const ex = JSON.parse(stdout)[0]._explain;
     expect(ex.raw).toBe(0.744);
     expect(ex.composite).toBeUndefined();
-  });
+  }, CASE_BUDGET_MS);
 
   it("does not report retrievalCount as a scoring term (flair#683 removed it)", async () => {
     const { stdout } = await searchWith(
@@ -145,7 +161,7 @@ describe("flair search --explain over a non-TTY stdout (flair#992)", () => {
     expect(ex.retrievalCount).toBeUndefined();
     expect(ex.retrievals).toBeUndefined();
     expect(JSON.stringify(ex)).not.toContain("retrieval");
-  });
+  }, CASE_BUDGET_MS);
 
   it("leaves JSON output byte-identical when --explain is absent", async () => {
     // Positive control for the opt-in claim: the widened shape must appear
@@ -154,7 +170,7 @@ describe("flair search --explain over a non-TTY stdout (flair#992)", () => {
     const parsed = JSON.parse(stdout);
     expect(parsed[0]._explain).toBeUndefined();
     expect(parsed[0]).toEqual(HIT as any);
-  });
+  }, CASE_BUDGET_MS);
 });
 
 describe("buildSearchExplain / formatSearchExplain (flair#992)", () => {
