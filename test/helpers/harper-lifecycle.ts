@@ -432,8 +432,9 @@ export async function waitForLocksFree(
 // regex cannot tell the two apart. We match it ON PURPOSE: the configured
 // manager did fail before the fallback, which a harness should surface rather
 // than swallow. No regex change — no narrower pattern can distinguish the
-// sites, and the warn site is unreachable for flair's component today (it needs
-// devEngines.packageManager.onFail === 'warn').
+// sites without coupling the matcher to Harper's log presentation (a level tag
+// / `Error:` prefix in some log configs), and the warn site is unreachable for
+// flair's component today (it needs devEngines.packageManager.onFail === 'warn').
 const COMPONENT_INSTALL_FAILURE_RE =
   /Failed to install dependencies for (\S+) using (.+?)\. Exit code: (\d+)/;
 
