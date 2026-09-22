@@ -197,8 +197,13 @@ function detectBin(bin: string): boolean {
  * Code array fallback were all wired unpinned while only the inline Claude
  * Code path in cli.ts got the pin it was documented to get (flair#907).
  */
-function flairMcpEntry(env: WireEnv) {
+function flairMcpEntry(env: WireEnv, opts: { stdioType?: boolean } = {}) {
   return {
+    // flair#1778 2c-i-d1: Claude Code's own writer (init) has always written
+    // `type: "stdio"`; the shared entry builder KEEPS it for Claude Code so
+    // neither writer strips it from users' files. It is optional for Claude
+    // Code (an omitted type defaults to stdio) — see the JSON-client docs.
+    ...(opts.stdioType ? { type: "stdio" as const } : {}),
     command: "npx",
     args: ["-y", mcpServerSpec()],
     env: {
@@ -314,43 +319,64 @@ function replaceCodexFlairBlock(raw: string, env: WireEnv): string {
   return before + newBlock + sep + rest;
 }
 
+/** Resolve the display form (~/...) of a config path against the live home. */
+function displayPath(configPath: string): string {
+  const home = resolveHome();
+  return configPath.startsWith(home) ? "~" + configPath.slice(home.length) : configPath;
+}
+
+/** flair#1778 2c-i-d1: the STRUCTURED outcome of a JSON-client wire, so a
+ *  caller that renders its own user-visible lines (init's Claude Code block)
+ *  can share ONE writer without losing the created / refreshed / held /
+ *  refused / already-present distinctions. `wireJsonMcp` is the thin wrapper
+ *  that collapses it back to ok/message for the other JSON clients. */
+export interface JsonWireResult {
+  kind: "written" | "already" | "held" | "refused" | "manual";
+  /** The config file existed before this run (drives the "(created)" suffix). */
+  existed: boolean;
+  /** The flair ENTRY was present in the config before this run. */
+  entryPresent: boolean;
+  /** A write that re-pinned an entry already carrying this env (vs a fresh wire). */
+  refreshed: boolean;
+  /** For held / refused: the guard's own line (the pin is named in it). */
+  line: string | null;
+  /** For manual: why the write did not happen (parse / lock / backup / IO). */
+  reason: string | null;
+}
+
 /**
- * Merge the Flair MCP server into a JSON config file with an `mcpServers` map.
+ * Merge the Flair MCP server into a JSON config file with an `mcpServers` map,
+ * as ONE critical section: observe → decide on the IN-LOCK bytes → write.
  * Creates the file (and parent dir) if absent; preserves existing servers and
- * any other top-level keys. Returns ok:true only when the file was written.
+ * any other top-level keys.
  */
-function wireJsonMcp(
+function wireJsonMcpCore(
   configPath: string,
   label: string,
   env: WireEnv,
-  // The parenthetical appended to a successful wire/refresh message. Defaults to
-  // the confident "restart <label> to pick it up". A client whose end-to-end
-  // pickup Flair has NOT verified (Antigravity — flair#1209) passes an honest
-  // note instead, so the message claims only what it did (wrote the config), not
-  // that the client will read it.
-  pickupNote?: string,
-): { ok: boolean; message: string } {
-  const home = resolveHome();
-  const display = configPath.startsWith(home) ? "~" + configPath.slice(home.length) : configPath;
-  const note = pickupNote ?? `restart ${label} to pick it up`;
+  opts: { stdioType?: boolean } = {},
+): JsonWireResult {
+  const display = displayPath(configPath);
+  const state = { existed: false, entryPresent: false, refreshed: false };
+  let settled: JsonWireResult | null = null;
   // Parent creation stays OUTSIDE the primitive (it needs the resolved parent
   // to observe an absent destination). Everything from here — observe → decide
   // on the IN-LOCK bytes → write — is ONE critical section (flair#1778 2c-i-d1).
   try {
     mkdirSync(dirname(configPath), { recursive: true });
-    let outcome: { ok: boolean; message: string } | null = null;
-    let action: "wired" | "refreshed pin in" = "wired";
     const result = withConfigCriticalSection(
       configPath,
       (bytes) => {
+        state.existed = bytes !== null;
         const read = parseSettingsBytes(bytes, configPath);
         if (read.parseError) {
-          outcome = { ok: false, message: manualWireMessage(label, display, jsonFailureReason(configPath, read.parseError), env) };
-          return { hold: outcome.message };
+          settled = { kind: "manual", existed: state.existed, entryPresent: false, refreshed: false, line: null, reason: jsonFailureReason(configPath, read.parseError) };
+          return { hold: settled.reason! };
         }
         const config: any = read.parsed ?? {};
         config.mcpServers = config.mcpServers || {};
         const existing = config.mcpServers.flair;
+        state.entryPresent = existing !== undefined && existing !== null;
         const currentSpec = mcpServerSpec();
         const existingArgs = existing?.args;
         const argsMatch = Array.isArray(existingArgs) && existingArgs.includes(currentSpec);
@@ -358,8 +384,8 @@ function wireJsonMcp(
         // flair#1135: the pin in `args` must match the current mcpServerSpec().
         // A matching pin stays a no-op (idempotent); only a stale pin triggers a re-write.
         if (urlAgentMatch && argsMatch) {
-          outcome = { ok: true, message: `${label}: already wired in ${display}` };
-          return { noop: outcome.message };
+          settled = { kind: "already", existed: state.existed, entryPresent: state.entryPresent, refreshed: false, line: null, reason: null };
+          return { noop: `${label}: already wired in ${display}` };
         }
         // flair#1778 slice 2c-i-a2: a mismatch above is NOT automatically a
         // re-write — never LOWER the existing pin, and never overwrite a
@@ -372,26 +398,63 @@ function wireJsonMcp(
           runningVersion: flairCliVersion(),
         });
         if (decision.action !== "write") {
-          outcome = { ok: true, message: decision.line! };
-          return { hold: outcome.message };
+          settled = {
+            kind: decision.action === "hold" ? "held" : "refused",
+            existed: state.existed,
+            entryPresent: state.entryPresent,
+            refreshed: false,
+            line: decision.line,
+            reason: null,
+          };
+          return { hold: decision.line! };
         }
-        action = urlAgentMatch ? "refreshed pin in" : "wired";
-        config.mcpServers.flair = flairMcpEntry(env);
+        state.refreshed = !!urlAgentMatch;
+        config.mcpServers.flair = flairMcpEntry(env, opts);
         return { write: encodeConfig(config) };
       },
       { backup: (bytes) => backupBytesTo(configPath, bytes) },
     );
-    const settled = outcome as { ok: boolean; message: string } | null;
     if (result.status === "written") {
-      return { ok: true, message: `${label}: ${action} ${display} (${note})` };
+      return { kind: "written", existed: state.existed, entryPresent: true, refreshed: state.refreshed, line: null, reason: null };
     }
-    if (settled) return settled;
+    const s = settled as JsonWireResult | null;
+    if (s) return s;
     // held (observation change) or refused (lock / backup): the pre-migration
     // manual-wiring line, naming the reason.
-    return { ok: false, message: manualWireMessage(label, display, result.message, env) };
+    return { kind: "manual", existed: state.existed, entryPresent: state.entryPresent, refreshed: false, line: null, reason: result.message };
   } catch (err: unknown) {
     const reason = err instanceof Error ? err.message : String(err);
-    return { ok: false, message: manualWireMessage(label, display, reason, env) };
+    return { kind: "manual", existed: state.existed, entryPresent: state.entryPresent, refreshed: false, line: null, reason };
+  }
+}
+
+/** The pre-migration ok/message collapse of `wireJsonMcpCore`, unchanged for
+ *  the Gemini / Cursor / Antigravity (and Claude Code array-fallback) callers. */
+function wireJsonMcp(
+  configPath: string,
+  label: string,
+  env: WireEnv,
+  // The parenthetical appended to a successful wire/refresh message. Defaults to
+  // the confident "restart <label> to pick it up". A client whose end-to-end
+  // pickup Flair has NOT verified (Antigravity — flair#1209) passes an honest
+  // note instead, so the message claims only what it did (wrote the config), not
+  // that the client will read it.
+  pickupNote?: string,
+  opts: { stdioType?: boolean } = {},
+): { ok: boolean; message: string } {
+  const display = displayPath(configPath);
+  const note = pickupNote ?? `restart ${label} to pick it up`;
+  const r = wireJsonMcpCore(configPath, label, env, opts);
+  switch (r.kind) {
+    case "written":
+      return { ok: true, message: `${label}: ${r.refreshed ? "refreshed pin in" : "wired"} ${display} (${note})` };
+    case "already":
+      return { ok: true, message: `${label}: already wired in ${display}` };
+    case "held":
+    case "refused":
+      return { ok: true, message: r.line! };
+    case "manual":
+      return { ok: false, message: manualWireMessage(label, display, r.reason!, env) };
   }
 }
 
@@ -817,16 +880,29 @@ export function clientConfigPath(id: ClientId): string {
 
 // ---- Internal wiring functions --------------------------------------------------
 //
-// Claude Code wiring lives inline in src/cli.ts (it writes ~/.claude.json, the
-// one client the CLI safely edits, cross-platform). _wireClaudeCode here is the
-// fallback used when something calls the array form; it returns the snippet for
-// ~/.claude.json so the message is unambiguous and correct on every OS.
+// Claude Code wiring lives in src/commands/init.ts (it writes ~/.claude.json, the
+// one client the CLI safely edits, cross-platform), and DELEGATES to the same
+// JSON writer here (flair#1778 2c-i-d1). _wireClaudeCode is the array-form entry
+// (used by doctor --fix and the owned-pin refresh); it writes the same bytes.
 
 function _wireClaudeCode(env: WireEnv): { ok: boolean; message: string } {
-  // The real auto-wire is inline in cli.ts. If reached via the array, point at
-  // the correct cross-platform path (~/.claude.json — same on macOS/Linux/Win)
-  // and give the exact snippet. Never emit macOS-only paths here.
-  return wireJsonMcp(join(resolveHome(), ".claude.json"), "Claude Code", env);
+  // Point at the correct cross-platform path (~/.claude.json — same on
+  // macOS/Linux/Win). Never emit macOS-only paths here. `type: "stdio"` is
+  // KEPT (init has always written it); the shared entry builder owns it.
+  return wireJsonMcp(join(resolveHome(), ".claude.json"), "Claude Code", env, undefined, { stdioType: true });
+}
+
+/** flair#1778 2c-i-d1: the STRUCTURED Claude Code wire `flair init` renders its
+ *  own lines from — ONE writer for ~/.claude.json shared with `wireClaudeCode`,
+ *  so init and doctor/upgrade cannot drift on its bytes. */
+export function wireClaudeCodeJson(env: WireEnv): JsonWireResult {
+  return wireJsonMcpCore(join(resolveHome(), ".claude.json"), "Claude Code", env, { stdioType: true });
+}
+
+/** The Claude Code MCP entry (with the stdio type), built by the ONE shared
+ *  entry builder — for init's copy-paste snippet fallback. */
+export function claudeCodeMcpEntry(env: WireEnv) {
+  return flairMcpEntry(env, { stdioType: true });
 }
 
 function _wireCodex(env: WireEnv): { ok: boolean; message: string } {
