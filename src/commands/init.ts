@@ -9,7 +9,7 @@
 import { Command } from "commander";
 import { applyOrReportClaudeMdBootstrap, applyOrReportSessionStartHook } from "../doctor-client.js";
 import { hookSettingsPath } from "../hook-install.js";
-import { ClientId, detectClients, renderWiringSummary, wireAntigravity, wireCodex, wireCursor, wireGemini, wirePi } from "../install/clients.js";
+import { ClientId, detectClients, renderWiringSummary, resolveHome, wireAntigravity, wireCodex, wireCursor, wireGemini, wirePi } from "../install/clients.js";
 import { DEFAULT_ADMIN_USER, authFetch, defaultAdminPassPath, defaultKeysDir, readAdminPassFileSecure, resolveAdminUser } from "../lib/auth-resolve.js";
 import {
   detectPersistedAdminUser,
@@ -1155,7 +1155,12 @@ program
             // Claude Code gets real auto-wiring into ~/.claude.json (zero-install
             // npx form; matches the snippets everywhere else). Other clients only
             // get printed instructions — the CLI can't safely edit their configs.
-            const claudeJsonPath = join(homedir(), ".claude.json");
+            // flair#1778 2c-i-d1: resolve through the SAME home resolver the
+            // clients.ts writers use (process.env.HOME || USERPROFILE ||
+            // homedir()) — os.homedir() is fixed at LAUNCH under Bun and
+            // ignores an in-process HOME change, so a test isolating HOME would
+            // still write the REAL ~/.claude.json through this path.
+            const claudeJsonPath = join(resolveHome(), ".claude.json");
             const flairMcpConfig = {
               type: "stdio" as const,
               command: "npx",

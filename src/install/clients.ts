@@ -88,6 +88,28 @@ import { dirname, join } from "node:path";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, isResolvedVersion, mcpServerSpec } from "../lib/mcp-spec.js";
 import { decodeWiringSpec, wiringPinString } from "../lib/wiring-spec.js";
 import { decidePinWrite, type PinWriteDecision } from "../lib/pin-write-guard.js";
+import { withConfigCriticalSection } from "../lib/config-critical-section.js";
+import { backupBytesTo, encodeConfig, parseSettingsBytes } from "../lib/settings-bytes.js";
+
+/**
+ * The JSON.parse reason embedded in the shared parser's
+ * `malformed JSON in <path> (<reason>)` text, so the client writers can keep
+ * their pre-migration `...: <reason>` lines byte-identical.
+ */
+function jsonFailureReason(path: string, parseError: string): string {
+  const prefix = `malformed JSON in ${path} (`;
+  return parseError.startsWith(prefix) && parseError.endsWith(")")
+    ? parseError.slice(prefix.length, parseError.length - 1)
+    : parseError;
+}
+
+/** The pre-migration manual-wiring line (kept byte-identical). */
+function manualWireMessage(label: string, display: string, reason: string, env: WireEnv): string {
+  return (
+    `${label}: manual wiring needed (could not write ${display}: ${reason}).\n` +
+    `   Add this to ${display}:\n${indent(jsonSnippet(env))}`
+  );
+}
 
 /**
  * Resolve the user's home dir. Prefer the live HOME/USERPROFILE env over
@@ -95,7 +117,7 @@ import { decidePinWrite, type PinWriteDecision } from "../lib/pin-write-guard.js
  * runtime HOME override — same convention as src/cli.ts ("so tests can
  * override"). Production behavior is unchanged (HOME is set on every OS).
  */
-function resolveHome(): string {
+export function resolveHome(): string {
   return process.env.HOME || process.env.USERPROFILE || homedir();
 }
 
@@ -311,47 +333,65 @@ function wireJsonMcp(
   const home = resolveHome();
   const display = configPath.startsWith(home) ? "~" + configPath.slice(home.length) : configPath;
   const note = pickupNote ?? `restart ${label} to pick it up`;
+  // Parent creation stays OUTSIDE the primitive (it needs the resolved parent
+  // to observe an absent destination). Everything from here — observe → decide
+  // on the IN-LOCK bytes → write — is ONE critical section (flair#1778 2c-i-d1).
   try {
-    let config: any = {};
-    if (existsSync(configPath)) {
-      const raw = readFileSync(configPath, "utf-8").trim();
-      if (raw) config = JSON.parse(raw);
-    }
-    config.mcpServers = config.mcpServers || {};
-    const existing = config.mcpServers.flair;
-    const currentSpec = mcpServerSpec();
-    const existingArgs = existing?.args;
-    const argsMatch = Array.isArray(existingArgs) && existingArgs.includes(currentSpec);
-    const urlAgentMatch = existing && existing.env?.FLAIR_URL === env.FLAIR_URL && existing.env?.FLAIR_AGENT_ID === env.FLAIR_AGENT_ID;
-    // flair#1135: the pin in `args` must match the current mcpServerSpec().
-    // A matching pin stays a no-op (idempotent); only a stale pin triggers a re-write.
-    if (urlAgentMatch && argsMatch) {
-      return { ok: true, message: `${label}: already wired in ${display}` };
-    }
-    // flair#1778 slice 2c-i-a2: a mismatch above is NOT automatically a
-    // re-write — never LOWER the existing pin, and never overwrite a
-    // range/tag/unsupported spec (see pin-write-guard.ts for the matrix).
-    const decision = decidePinWrite({
-      pkg: FLAIR_MCP_PACKAGE,
-      entry: `${label} config ${display}`,
-      existingText: existing ? JSON.stringify(existing) : null,
-      runningVersion: flairCliVersion(),
-    });
-    if (decision.action !== "write") {
-      return { ok: true, message: decision.line! };
-    }
-    config.mcpServers.flair = flairMcpEntry(env);
     mkdirSync(dirname(configPath), { recursive: true });
-    writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
-    const action = urlAgentMatch ? "refreshed pin in" : "wired";
-    return { ok: true, message: `${label}: ${action} ${display} (${note})` };
+    let outcome: { ok: boolean; message: string } | null = null;
+    let action: "wired" | "refreshed pin in" = "wired";
+    const result = withConfigCriticalSection(
+      configPath,
+      (bytes) => {
+        const read = parseSettingsBytes(bytes, configPath);
+        if (read.parseError) {
+          outcome = { ok: false, message: manualWireMessage(label, display, jsonFailureReason(configPath, read.parseError), env) };
+          return { hold: outcome.message };
+        }
+        const config: any = read.parsed ?? {};
+        config.mcpServers = config.mcpServers || {};
+        const existing = config.mcpServers.flair;
+        const currentSpec = mcpServerSpec();
+        const existingArgs = existing?.args;
+        const argsMatch = Array.isArray(existingArgs) && existingArgs.includes(currentSpec);
+        const urlAgentMatch = existing && existing.env?.FLAIR_URL === env.FLAIR_URL && existing.env?.FLAIR_AGENT_ID === env.FLAIR_AGENT_ID;
+        // flair#1135: the pin in `args` must match the current mcpServerSpec().
+        // A matching pin stays a no-op (idempotent); only a stale pin triggers a re-write.
+        if (urlAgentMatch && argsMatch) {
+          outcome = { ok: true, message: `${label}: already wired in ${display}` };
+          return { noop: outcome.message };
+        }
+        // flair#1778 slice 2c-i-a2: a mismatch above is NOT automatically a
+        // re-write — never LOWER the existing pin, and never overwrite a
+        // range/tag/unsupported spec (see pin-write-guard.ts for the matrix).
+        // The guard runs on the IN-LOCK parse, inside the critical section.
+        const decision = decidePinWrite({
+          pkg: FLAIR_MCP_PACKAGE,
+          entry: `${label} config ${display}`,
+          existingText: existing ? JSON.stringify(existing) : null,
+          runningVersion: flairCliVersion(),
+        });
+        if (decision.action !== "write") {
+          outcome = { ok: true, message: decision.line! };
+          return { hold: outcome.message };
+        }
+        action = urlAgentMatch ? "refreshed pin in" : "wired";
+        config.mcpServers.flair = flairMcpEntry(env);
+        return { write: encodeConfig(config) };
+      },
+      { backup: (bytes) => backupBytesTo(configPath, bytes) },
+    );
+    const settled = outcome as { ok: boolean; message: string } | null;
+    if (result.status === "written") {
+      return { ok: true, message: `${label}: ${action} ${display} (${note})` };
+    }
+    if (settled) return settled;
+    // held (observation change) or refused (lock / backup): the pre-migration
+    // manual-wiring line, naming the reason.
+    return { ok: false, message: manualWireMessage(label, display, result.message, env) };
   } catch (err: unknown) {
     const reason = err instanceof Error ? err.message : String(err);
-    return {
-      ok: false,
-      message: `${label}: manual wiring needed (could not write ${display}: ${reason}).\n` +
-        `   Add this to ${display}:\n${indent(jsonSnippet(env))}`,
-    };
+    return { ok: false, message: manualWireMessage(label, display, reason, env) };
   }
 }
 
@@ -901,24 +941,39 @@ function unwireJsonMcp(configPath: string, label: string): UnwireResult {
     return { ok: true, removed: false, message: `${label}: no config at ${display}` };
   }
   try {
-    const raw = readFileSync(configPath, "utf-8").trim();
-    if (!raw) {
-      return { ok: true, removed: false, message: `${label}: no Flair MCP entry in ${display}` };
+    let outcome: UnwireResult | null = null;
+    const result = withConfigCriticalSection(
+      configPath,
+      (bytes) => {
+        const read = parseSettingsBytes(bytes, configPath);
+        if (read.parseError) {
+          outcome = { ok: false, removed: false, message: `${label}: could not unwire ${display}: ${jsonFailureReason(configPath, read.parseError)}` };
+          return { hold: outcome.message };
+        }
+        const config: any = read.parsed ?? {};
+        if (!config || typeof config !== "object" || Array.isArray(config)) {
+          outcome = { ok: false, removed: false, message: `${label}: refusing to modify a non-object config at ${display}` };
+          return { hold: outcome.message };
+        }
+        const servers = config.mcpServers;
+        if (!servers || typeof servers !== "object" || Array.isArray(servers) || !("flair" in servers)) {
+          outcome = { ok: true, removed: false, message: `${label}: no Flair MCP entry in ${display}` };
+          return { noop: outcome.message };
+        }
+        delete (servers as { flair?: unknown }).flair;
+        if (Object.keys(servers).length === 0) {
+          delete (config as { mcpServers?: unknown }).mcpServers;
+        }
+        return { write: encodeConfig(config) };
+      },
+      { backup: (bytes) => backupBytesTo(configPath, bytes) },
+    );
+    if (result.status === "written") {
+      return { ok: true, removed: true, message: `${label}: unwired ${display}` };
     }
-    const config = JSON.parse(raw);
-    if (!config || typeof config !== "object" || Array.isArray(config)) {
-      return { ok: false, removed: false, message: `${label}: refusing to modify a non-object config at ${display}` };
-    }
-    const servers = (config as { mcpServers?: unknown }).mcpServers;
-    if (!servers || typeof servers !== "object" || Array.isArray(servers) || !("flair" in servers)) {
-      return { ok: true, removed: false, message: `${label}: no Flair MCP entry in ${display}` };
-    }
-    delete (servers as { flair?: unknown }).flair;
-    if (Object.keys(servers).length === 0) {
-      delete (config as { mcpServers?: unknown }).mcpServers;
-    }
-    writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
-    return { ok: true, removed: true, message: `${label}: unwired ${display}` };
+    const settled = outcome as UnwireResult | null;
+    if (settled) return settled;
+    return { ok: false, removed: false, message: `${label}: could not unwire ${display}: ${result.message}` };
   } catch (err: unknown) {
     const reason = err instanceof Error ? err.message : String(err);
     return { ok: false, removed: false, message: `${label}: could not unwire ${display}: ${reason}` };
