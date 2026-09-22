@@ -3085,10 +3085,16 @@ function sanitizeOpsTargetUrl(raw: string): string {
   }
 }
 
-/** True only for the abort our OWN AbortSignal.timeout raises (never a server answer). */
-function isOwnedSeedTimeout(err: unknown): boolean {
+/**
+ * True only for the abort our OWN AbortSignal.timeout raises (never a server
+ * answer, never a foreign abort). Checked by name AND by the attempt's own
+ * signal being aborted (flair#1790 review S1), so a stray TimeoutError from some
+ * other AbortSignal is not retried as if it were ours.
+ */
+function isOwnedSeedTimeout(err: unknown, signal?: AbortSignal): boolean {
   const name = (err as { name?: unknown } | null | undefined)?.name;
-  return name === "TimeoutError" || name === "AbortError";
+  if (name !== "TimeoutError" && name !== "AbortError") return false;
+  return signal ? signal.aborted : true;
 }
 
 interface OpsSeedRequest {
@@ -3124,7 +3130,7 @@ function opsSeedBothAttemptsTimedOut(
     `Flair could not seed ${req.noun} '${req.id}': Operations API insert into ${req.tableName} at ` +
     `${sanitizedUrl} timed out on both attempts (${OPS_AGENT_SEED_TIMEOUT_MS} ms per attempt). ` +
     `Inspect the target daemon's logs, then rerun the same init command.\n` +
-    ` A timed-out insert may still complete; retrying the same ${req.noun} ID is supported.`;
+    `A timed-out insert may still complete; retrying the same ${req.noun} ID is supported.`;
   const err = new Error(message, { cause });
   (err as { flairFriendly?: boolean }).flairFriendly = true;
   return err;
@@ -3145,22 +3151,27 @@ async function opsSeedInsertWithRetry(req: OpsSeedRequest): Promise<void> {
   const overallStart = Date.now();
   for (let attempt = 1; attempt <= OPS_AGENT_SEED_ATTEMPTS; attempt++) {
     const attemptStart = Date.now();
+    // A FRESH deadline per attempt; the response-body read runs under the SAME
+    // signal, so it too is bounded by this attempt's timeout.
+    const signal = AbortSignal.timeout(OPS_AGENT_SEED_TIMEOUT_MS);
     try {
       const res = await fetch(req.url, {
         method: "POST",
         headers,
         body: JSON.stringify(req.body),
-        signal: AbortSignal.timeout(OPS_AGENT_SEED_TIMEOUT_MS),
+        signal,
       });
       const text = await res.text().catch((e: unknown) => {
-        if (isOwnedSeedTimeout(e)) throw e;
+        if (isOwnedSeedTimeout(e, signal)) throw e;
         return "";
       });
+      // flair#1790 review C2: 401 FIRST. An auth failure must never be masked by
+      // a body that happens to carry a "duplicate"/"already exists" marker.
+      if (res.status === 401) throw new Error(req.auth401Message(text));
+      // THEN the idempotent duplicate path: an unconditional 409, then the
+      // marker match for the remaining non-OK shapes.
       const duplicate = res.status === 409 || text.includes("duplicate") || text.includes("already exists");
-      if (!res.ok && !duplicate) {
-        if (res.status === 401) throw new Error(req.auth401Message(text));
-        throw new Error(req.httpErrorMessage(res.status, text));
-      }
+      if (!res.ok && !duplicate) throw new Error(req.httpErrorMessage(res.status, text));
       // Success, or the idempotent duplicate path.
       const outcome = res.ok ? "inserted" : "already exists";
       if (attempt > 1) {
@@ -3172,7 +3183,7 @@ async function opsSeedInsertWithRetry(req: OpsSeedRequest): Promise<void> {
       return;
     } catch (err) {
       // Auth / HTTP / other network errors are answers, not stalls: never retried.
-      if (!isOwnedSeedTimeout(err)) throw err;
+      if (!isOwnedSeedTimeout(err, signal)) throw err;
       if (attempt < OPS_AGENT_SEED_ATTEMPTS) {
         console.warn(
           `${req.kind} seed attempt ${attempt} timed out after ${OPS_AGENT_SEED_TIMEOUT_MS} ms; retrying once. ` +

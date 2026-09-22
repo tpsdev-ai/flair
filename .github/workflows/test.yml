@@ -1134,7 +1134,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: pack-smoke-daemon-logs
+          name: pack-smoke-daemon-logs-node${{ matrix.node-version }}
           path: daemon-logs/
           if-no-files-found: warn
           # Public repo; a short window limits exposure of daemon logs even if
