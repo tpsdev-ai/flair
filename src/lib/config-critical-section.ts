@@ -439,9 +439,23 @@ type ReplaceResult =
   | { ok: true; cleanupWarning: string | null; reason?: undefined }
   | { ok: false; reason: string; cleanupWarning?: undefined };
 
-function writeAllSync(fd: number, buf: Buffer): void {
+/**
+ * Write the whole buffer, looping until every byte is out. A single `writeSync`
+ * may write FEWER bytes than asked (a short write), so the returned count must
+ * be added to the offset and the loop resumed — a truncated staging file
+ * renamed into place is a false recovery copy. Exported so the hook-backup
+ * helper reuses THIS loop rather than a second copy (flair#1778).
+ *
+ * `write` is injectable for the backup helper's test seam; production callers
+ * leave it as node's writeSync.
+ */
+export function writeAllSync(
+  fd: number,
+  buf: Buffer,
+  write: (fd: number, buf: Buffer, offset: number, length: number) => number = writeSync,
+): void {
   let off = 0;
-  while (off < buf.length) off += writeSync(fd, buf, off, buf.length - off);
+  while (off < buf.length) off += write(fd, buf, off, buf.length - off);
 }
 
 /**

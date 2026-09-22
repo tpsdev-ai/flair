@@ -24,9 +24,9 @@ import {
   renameSync,
   unlinkSync,
   writeFileSync,
-  writeSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { writeAllSync } from "./config-critical-section.js";
 
 /** Result of reading/parsing a settings file. `parsed` is null and
  *  `parseError` set on ANY reason we must not proceed: a missing file is NOT
@@ -74,26 +74,43 @@ export function parseSettingsBytes(bytes: Uint8Array | null, path: string): Read
  *    - `openSync(dest, "wx", 0o600)` (exclusive create) FAILS outright when the
  *      file already exists.
  *  Instead follow the primitive's own pattern: write a sibling temp opened `wx`
- *  0600, write, fsync, then rename over `<path>.bak`. A rename REPLACES the
- *  inode, so an existing `.bak` is tightened to 0600, and the token bytes never
- *  sit in a world-readable file, even briefly. */
-export function backupBytesTo(path: string, bytes: Uint8Array): string {
+ *  0600, write ALL the bytes, fsync, then rename over `<path>.bak`. A rename
+ *  REPLACES the inode, so an existing `.bak` is tightened to 0600, the token
+ *  bytes never sit in a world-readable file even briefly, and a `.bak` that is
+ *  a SYMLINK is replaced (not written through to its target).
+ *
+ *  Two protections the staging write must NOT drop (flair#1778 follow-up):
+ *    - SHORT WRITE: a single `writeSync` may write fewer bytes than asked, so
+ *      reuse the primitive's `writeAllSync` loop — a truncated temp renamed into
+ *      place is a false recovery copy;
+ *    - TEMP LEAK: the temp is unlinked on EVERY failure path (open/write/fsync/
+ *      close/rename), never left behind with partial token bytes in it. */
+export interface BackupIo {
+  /** TEST-ONLY seam: the low-level write. Production leaves it as node's
+   *  writeSync (the primitive calls this helper with its in-lock bytes only). */
+  write?: (fd: number, buf: Buffer, offset: number, length: number) => number;
+  /** TEST-ONLY seam: the fsync. Production leaves it as node's fsyncSync. */
+  fsync?: (fd: number) => void;
+}
+
+export function backupBytesTo(path: string, bytes: Uint8Array, io?: BackupIo): string {
   const dest = hookBackupPath(path);
   const tmp = `${dest}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
-  const fd = openSync(tmp, "wx", 0o600);
+  let fd = -1;
+  const cleanupTemp = () => { try { unlinkSync(tmp); } catch { /* nothing to remove */ } };
   try {
-    writeSync(fd, bytes);
-    fsyncSync(fd);
-  } finally {
+    fd = openSync(tmp, "wx", 0o600);
+    writeAllSync(fd, Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength), io?.write);
+    (io?.fsync ?? fsyncSync)(fd);
     closeSync(fd);
-  }
-  try {
+    fd = -1;
     renameSync(tmp, dest);
+    return dest;
   } catch (err) {
-    try { unlinkSync(tmp); } catch { /* best effort — a leaked temp beats a false success */ }
+    if (fd >= 0) { try { closeSync(fd); } catch { /* already closed */ } }
+    cleanupTemp();
     throw err;
   }
-  return dest;
 }
 
 const CONFIG_ENCODER = new TextEncoder();
