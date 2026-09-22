@@ -1933,6 +1933,22 @@ jobs:
         run: bun run build:cli
       - run: node scripts/docs-freshness-check.mjs
 
+  # flair#1807: the CLI spawn-budget gate. Every test that spawns the CLI entry
+  # must carry its own child deadline (a `timeout:` on the spawn), and the case
+  # that reaches it must carry a per-case budget, so a hung child is reported by
+  # the deadline, by name, with its output — never by bun's per-test timer. The
+  # allow-list is EMPTY on purpose and there is no skip flag: a file that cannot
+  # budget its spawns is a real offender, not an exception.
+  cli-spawn-budgets:
+    name: "Doc/Code Lint: CLI spawn budgets"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - run: node scripts/ci/check-cli-spawn-budgets.mjs
+
   dist-esm-guard:
     # flair#1657 — the flair#1653 class. A compiled dist/**/*.js ES module that
     # calls require() while the build has top-level await makes Node throw
