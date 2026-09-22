@@ -36,6 +36,23 @@ function resolvePublicUrl(
   return `http://127.0.0.1:${httpPort}`;
 }
 
+// flair#1817: the shared lane runs ALL of test/unit in ONE process and bun
+// discovers files in DIRECTORY order, so a sibling importing
+// resources/AdminInstance.ts under its own `mock.module("harper", …)` stub can
+// poison the module cache for every later file. This file does NOT import the
+// AdminInstance module graph (it is a pure predicate simulator — see the file
+// header), so it neither poisons nor is poisoned; it moves to the ISOLATED lane
+// (one process per file) with its AdminInstance sibling for a stable order.
+// The guard names the hazard if this file ever grows that import: it asserts
+// the thing this file constructs, so a poisoned graph fails BY NAME rather than
+// with a bare TypeError somewhere downstream.
+if (typeof resolvePublicUrl !== "function") {
+  throw new Error(
+    "admin-instance-resolve-url: resolvePublicUrl is unavailable — a mock-order / module-cache hazard " +
+      "(flair#1817). This file must run in the isolated lane (test/unit-isolated/), one process per file.",
+  );
+}
+
 describe("AdminInstance.resolvePublicUrl — flair#404", () => {
   test("FLAIR_PUBLIC_URL wins over everything else", () => {
     expect(resolvePublicUrl("https://my-flair.example.com", { Host: "wrong.example.com" }))

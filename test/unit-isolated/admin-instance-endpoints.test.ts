@@ -39,6 +39,22 @@ const { AdminInstance } = await import("../../resources/AdminInstance.ts");
 const { registerMcpOAuthRoute } = await import("../../resources/mcp-oauth.ts");
 const { esc } = await import("../../resources/admin-layout.ts");
 
+// flair#1817: the shared lane runs ALL of test/unit in ONE `bun test` process,
+// and bun discovers files in DIRECTORY order (not alphabetical). A sibling file
+// that imports the resources/AdminInstance.ts module graph under its OWN
+// `mock.module("harper", …)` stub can populate the module cache first, so the
+// cached class extends a stub with no `get` — six bare `TypeError: inst.get is
+// not a function` with nothing naming the cause. This file lives in the
+// ISOLATED lane (one process per file), where that cannot happen; the guard
+// below turns any recurrence into a NAMED failure instead of those six.
+if (typeof (new (AdminInstance as any)()).get !== "function") {
+  throw new Error(
+    "admin-instance-endpoints: AdminInstance.get is not a function — the module cache was poisoned by " +
+      "another test file's mock.module(\"harper\") stub (flair#1817). This file must run in the isolated " +
+      "lane (test/unit-isolated/), one process per file.",
+  );
+}
+
 const ENV = ["FLAIR_MCP_OAUTH", "FLAIR_MCP_ISSUER", "FLAIR_PUBLIC_URL"];
 function clearEnv() { for (const k of ENV) delete process.env[k]; }
 
