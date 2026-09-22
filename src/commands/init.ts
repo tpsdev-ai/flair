@@ -1311,8 +1311,11 @@ program
       if (!opts.skipSmoke && !noMcp && clientOpt !== "none" && wiringResults.length > 0 && wiredAnyMcpClient) {
         console.log("\n   Smoke-testing MCP server...");
         try {
-          // Same spec that gets WIRED above — the smoke test must exercise the
-          // exact version the user will run, not whatever npm resolves latest to.
+          // The RUNNING CLI's own server: mcpServerSpec() pins to THIS
+          // CLI's version. That is not necessarily the version a client
+          // config ends up keeping — on a HELD pin the config is deliberately
+          // left on a HIGHER version than this CLI — so the smoke exercises
+          // what this CLI can run, not the held pin.
           const mcpProc = spawn("npx", ["-y", mcpServerSpec()], {
             env: { ...process.env, FLAIR_AGENT_ID: agentId, FLAIR_URL: httpUrl },
             stdio: ["pipe", "pipe", "pipe"],
@@ -1347,12 +1350,12 @@ program
             for (const line of lines) {
               const parsed = JSON.parse(line);
               if (parsed.jsonrpc === "2.0" && parsed.id === 1 && !parsed.error) {
-                console.log("   ✓ MCP server responded");
+                console.log(`   ✓ MCP server responded (this CLI's ${mcpServerSpec()} server, not the pinned config's)`);
                 break;
               }
             }
           } catch {
-            console.log("   ⚠ MCP server responded but response could not be parsed");
+            console.log("   ⚠ MCP server responded but response could not be parsed (this CLI's server, not the pinned config's)");
           } finally {
             // Reap the child even on the resolve path: the MCP server exits on
             // stdin close, but the `npx` wrapper can linger holding the loop.

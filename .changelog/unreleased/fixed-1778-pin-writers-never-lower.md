@@ -17,6 +17,8 @@
   > **Heads-up:** a run whose own version cannot be read now refuses to write
   > rather than falling back to the unpinned spec. An unreadable version means
   > a broken install, and quietly replacing a pin with nothing is the downgrade
-  > this change exists to stop.
+  > this change exists to stop. The same refusal also declines a legitimate
+  > FIRST install on a fresh home — nothing is created — until the version can
+  > be read again.
 
   (Refs #1778)
