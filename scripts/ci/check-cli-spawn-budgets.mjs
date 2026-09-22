@@ -317,10 +317,72 @@ export function cliEntryIdentifiers(source) {
   return ids;
 }
 
+/**
+ * A single character that can appear inside a JS identifier (or the `$` of one).
+ * The test is a literal regex over ONE character — no RegExp is ever built from
+ * data in this file (the class Semgrep's detect-non-literal-regexp blocks, and
+ * the one that blocked #1809).
+ */
+export function isIdentChar(ch) {
+  return /[A-Za-z0-9_$]/.test(ch);
+}
+
+/**
+ * Index of the next occurrence of `id` in `text` at or after `from` that is a
+ * WHOLE identifier — neither the character before it nor the one after it is an
+ * identifier character. Returns -1 when there is none.
+ *
+ * This replaces a regex built from the identifier. The identifiers here come from
+ * `[A-Za-z_$][\w$]*` captures, so they cannot carry a backslash TODAY — but this
+ * scanner is a CONTROL, and a control must not depend on that. Building a RegExp
+ * from captured data is exactly what a backslash would silently change, so the
+ * match is plain string scanning instead (flair#1809).
+ */
+export function findIdentifier(text, id, from = 0) {
+  if (id === "") return -1;
+  const last = text.length - id.length;
+  for (let i = from; i <= last; ) {
+    const at = text.indexOf(id, i);
+    if (at === -1) return -1;
+    const before = at === 0 ? "" : text[at - 1];
+    const after = text[at + id.length] ?? "";
+    if (!isIdentChar(before) && !isIdentChar(after)) return at;
+    i = at + 1;
+  }
+  return -1;
+}
+
+/**
+ * `idx` points just past an identifier. True when the next non-whitespace
+ * character is `(` — i.e. the identifier is CALLED. This replaces a regex built
+ * from the identifier; the match is string scanning, never a RegExp built from
+ * it (flair#1809).
+ */
+export function identifierCallFollows(text, idx) {
+  let i = idx;
+  while (i < text.length && /\s/.test(text[i])) i++;
+  return text[i] === "(";
+}
+
+/**
+ * The helper-detection predicate: does `text` contain `id` as a whole
+ * identifier followed by optional whitespace and `(`? Any occurrence counts —
+ * the old `.test()` asked the same question — so a whole-word hit that is not a
+ * call does not end the search.
+ */
+function identifierCalled(text, id) {
+  for (let from = 0; ; ) {
+    const at = findIdentifier(text, id, from);
+    if (at === -1) return false;
+    if (identifierCallFollows(text, at + id.length)) return true;
+    from = at + 1;
+  }
+}
+
 function textNamesCliEntry(text, ids) {
   if (looksLikeCliEntry(text)) return true;
   for (const id of ids) {
-    if (new RegExp(`\\b${id.replace(/[$]/g, "\\$")}\\b`).test(text)) return true;
+    if (findIdentifier(text, id, 0) !== -1) return true;
   }
   return false;
 }
@@ -420,7 +482,7 @@ export function localHelpersThatSpawn(source, calls) {
     for (const body of bodies) {
       const text = src.slice(body.start, body.end);
       const direct = spawnIdx.some((i) => i > body.start && i < body.end);
-      const via = [...helpers].some((h) => new RegExp(`\\b${h}\\s*\\(`).test(text));
+      const via = [...helpers].some((h) => identifierCalled(text, h));
       if ((direct || via) && !helpers.has(body.name)) {
         helpers.add(body.name);
         added = true;
@@ -454,7 +516,7 @@ export function findCases(source, calls, helpers) {
     let reaches = cliSpawnRanges.some((i) => i > open && i < args.close);
     if (!reaches) {
       for (const helper of helpers) {
-        if (new RegExp(`\\b${helper}\\s*\\(`).test(body)) {
+        if (identifierCalled(body, helper)) {
           reaches = true;
           break;
         }
