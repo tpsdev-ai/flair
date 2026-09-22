@@ -1,10 +1,11 @@
 import { describe, test, expect, afterEach } from "bun:test";
-import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { isProbeMode } from "../src/session-start-hook.ts";
+import { childOverranDeadline } from "../../../test/helpers/child-deadline.js";
 
 /**
  * flair#1007 — probe mode.
@@ -45,22 +46,6 @@ const NOOP = "{}";
  * if this path is ever wrong, that must be loud.
  */
 const ENTRY = join(import.meta.dir, "..", "src", "session-start-hook.ts");
-
-/**
- * flair#1796 — describe a child that overran its OWN deadline, with what it
- * produced, so the leg that was slow is named rather than reported as a bare
- * test timeout.
- */
-function childOverranDeadline(leg: string, deadlineMs: number, r: SpawnSyncReturns<string>): string {
-  const outcome =
-    r.signal !== null
-      ? `did not exit within ${deadlineMs} ms`
-      : `exited early with status ${r.status} (signal ${r.signal})`;
-  return `hook entry point (${leg} leg) ${outcome}; stdout/stderr so far: ${JSON.stringify({
-    stdout: r.stdout,
-    stderr: r.stderr,
-  })}`;
-}
 
 const ORIGINAL_AGENT_ID = process.env.FLAIR_AGENT_ID;
 afterEach(() => {
@@ -161,7 +146,7 @@ describe("probe mode short-circuits the whole hook (spawned entry point)", () =>
         // flair#1796: name the leg and show what it produced, instead of letting
         // bun's per-test timer replace this with a bare "timed out".
         if (probed.signal !== null || probed.status !== 0) {
-          throw new Error(childOverranDeadline("probe", PROBE_DEADLINE_MS, probed));
+          throw new Error(childOverranDeadline("hook entry point", "probe", PROBE_DEADLINE_MS, probed));
         }
         expect(probed.signal).toBeNull();
         expect(probed.status).toBe(0);
@@ -203,7 +188,7 @@ describe("probe mode short-circuits the whole hook (spawned entry point)", () =>
       // flair#1796 (follow-up F1): name THIS leg too, so a hung child is reported
       // by spawnSync with its output rather than as a bare bun "timed out".
       if (res.signal !== null || res.status !== 0) {
-        throw new Error(childOverranDeadline("no-probe regression", NOOP_DEADLINE_MS, res));
+        throw new Error(childOverranDeadline("hook entry point", "no-probe regression", NOOP_DEADLINE_MS, res));
       }
       expect(res.signal).toBeNull();
       expect(res.status).toBe(0);

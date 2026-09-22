@@ -405,7 +405,9 @@ describe("local init admin password handling", () => {
     expect(existsSync(adminPassPath)).toBe(false); // Because we provided password via env, not generated
     // The admin password should not be printed
     expect(stdout).not.toContain(testPass);
-  });
+    // flair#1807: this case spawns the CLI — budget it above the child's own
+    // deadline so a hung child is named, not killed by bun's 5 s default.
+  }, 60_000);
 
   it("respects admin password from deprecated --admin-pass option (with warning)", async () => {
     const testPass = "testinlinepass123";
@@ -437,5 +439,5 @@ describe("local init admin password handling", () => {
     expect(stdout).not.toContain(testPass);
     // But a warning should be in stderr about inline admin pass
     expect(stderr).toContain("warning: --admin-pass passed inline");
-  });
+  }, 60_000); // flair#1807: budget the CLI-spawning case
 });

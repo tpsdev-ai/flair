@@ -15,17 +15,42 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { childOverranDeadline } from "../helpers/child-deadline.js";
 
 const cliPath = join(import.meta.dirname, "..", "..", "src", "cli.ts");
 
-function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    const child = spawn("bun", [cliPath, ...args], { env, cwd: join(import.meta.dirname, "..", "..") });
+// flair#1807: the child's OWN deadline, and a per-test budget ABOVE it — so a
+// hung child is reported by the child's deadline, by name, with its output,
+// never as bun's bare per-test "timed out".
+const CHILD_DEADLINE_MS = 20_000;
+const CASE_BUDGET_MS = 25_000;
+
+function runCli(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  leg: string,
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("bun", [cliPath, ...args], {
+      env,
+      cwd: join(import.meta.dirname, "..", ".."),
+      timeout: CHILD_DEADLINE_MS,
+    });
     let out = "";
     let err = "";
     child.stdout?.on("data", (d) => (out += d.toString()));
     child.stderr?.on("data", (d) => (err += d.toString()));
-    child.on("close", (code) => resolve({ code, stdout: out, stderr: err }));
+    child.on("close", (code, signal) => {
+      if (signal !== null) {
+        reject(
+          new Error(
+            childOverranDeadline("flair CLI", leg, CHILD_DEADLINE_MS, { status: code, signal, stdout: out, stderr: err }),
+          ),
+        );
+        return;
+      }
+      resolve({ code, stdout: out, stderr: err });
+    });
   });
 }
 
@@ -51,20 +76,20 @@ describe("flair#1351 — flair test banner prints the resolved target URL", () =
     const override = "https://casa.example.test:9926";
     const { env, cleanup } = isolatedEnv({ FLAIR_URL: override });
     try {
-      const { stdout } = await runCli(["test", "--agent", "test-1351"], env);
+      const { stdout } = await runCli(["test", "--agent", "test-1351"], env, "banner FLAIR_URL override");
       expect(stdout).toContain(`(url: ${override})`);
       expect(stdout).not.toContain("127.0.0.1:9926");
       expect(stdout).not.toContain("127.0.0.1:19926");
     } finally {
       cleanup();
     }
-  });
+  }, CASE_BUDGET_MS);
 
   test("default banner is stock :19926, not the stale :9926 literal (#1347 family sweep)", async () => {
     const { env, cleanup } = isolatedEnv();
     delete env.FLAIR_URL;
     try {
-      const { stdout } = await runCli(["test", "--agent", "test-1351"], env);
+      const { stdout } = await runCli(["test", "--agent", "test-1351"], env, "default banner");
       expect(stdout).toContain("(url: http://127.0.0.1:19926)");
       // Colon-anchored: ":19926" contains the substring "9926", so a bare
       // contains-check could never catch a flip back to the fossilized spoke
@@ -74,7 +99,7 @@ describe("flair#1351 — flair test banner prints the resolved target URL", () =
     } finally {
       cleanup();
     }
-  });
+  }, CASE_BUDGET_MS);
 
   test("source sweep: flair test command does not hardcode 127.0.0.1:9926", () => {
     const src = readFileSync(cliPath, "utf-8");
