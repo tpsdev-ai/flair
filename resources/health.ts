@@ -622,10 +622,28 @@ export class HealthDetail extends Resource {
         // flair#1800: the durable record can lag the in-memory outcome — a
         // failed state.json write is surfaced here so "completed" here does
         // not read as "recorded". Read-only; no new endpoint.
-        // { path: string | null, lastWriteError: { migrationId, at, message } | null }
+        // { path: string | null, lastWriteError: { migrationId, at, message? } | null }
+        //
+        // flair#1800 review C2 (information disclosure): allowRead is
+        // allowVerified, so verified NON-admin agents reach this — and the path
+        // (an absolute <dataDir>/.migrations/state.json) plus the raw fs error
+        // message (which can embed that path) are absolute paths the resource
+        // keeps admin-only elsewhere (the disk block below does
+        // `isAdmin ? dataDir : redactHome(dataDir)`). Same idiom here.
         stateFile: {
-          path: snapshot.stateFile.path,
-          lastWriteError: snapshot.stateFile.lastWriteError,
+          path: snapshot.stateFile.path
+            ? isAdmin
+              ? snapshot.stateFile.path
+              : redactHome(snapshot.stateFile.path)
+            : null,
+          lastWriteError: snapshot.stateFile.lastWriteError
+            ? isAdmin
+              ? snapshot.stateFile.lastWriteError
+              : {
+                  migrationId: snapshot.stateFile.lastWriteError.migrationId,
+                  at: snapshot.stateFile.lastWriteError.at,
+                }
+            : null,
         },
       };
       for (const m of snapshot.migrations) {
