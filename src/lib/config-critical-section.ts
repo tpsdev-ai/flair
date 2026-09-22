@@ -40,6 +40,12 @@
  *      configured symlink. A failure BEFORE the rename leaves the original
  *      intact ("nothing written"); a failure AFTER it is a COMMITTED write
  *      with a cleanup warning, never reported as "nothing written".
+ *
+ * BACKUP SEMANTICS. `opts.backup` runs on the IN-LOCK bytes BEFORE `decide` on
+ * every call that reaches the read — INCLUDING calls whose decision ends up
+ * noop or held. A backup of the current bytes is never wrong; the churn is the
+ * price of backing up before parsing. It is skipped only where the read is
+ * skipped: an absent destination, or a non-regular one (refused above).
  *   6. FRESH-ATTEMPT PROTOCOL: another cooperative writer's committed
  *      replacement changes the target inode, so a waiting writer's in-lock
  *      comparison FAILS and it is HELD — by design, never waived. The
@@ -70,7 +76,10 @@
  * METADATA / BEHAVIOUR CHANGE. Every config sink this replaces writes IN PLACE
  * and preserves the inode. Temp+rename REPLACES the inode, so: (a) an
  * owner/group change the process cannot preserve is a REFUSE, never a silent
- * success; (b) a client holding an open fd keeps the OLD inode until it reopens
+ * success — UNTESTED (needs a privilege drop): exercising the refusal needs the
+ * ORIGINAL to be owned by a uid the process cannot `fchown` the replacement to,
+ * which a same-user fixture cannot arrange, so this branch is covered by review,
+ * not by a test; (b) a client holding an open fd keeps the OLD inode until it reopens
  * (every wired client re-reads at startup). ACL, xattr and hard-link
  * preservation are NOT handled and are documented, not silently dropped.
  *

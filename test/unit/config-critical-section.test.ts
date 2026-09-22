@@ -11,7 +11,7 @@
  * TEST-ONLY and inert in production.
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -178,10 +178,94 @@ describe("fresh-attempt protocol", () => {
       },
     });
     expect(res.status).toBe("held");
-    expect(res.changed).toBe("resolved-path");
     expect(res.attempts).toBe(1);
     expect(readFileSync(a, "utf-8")).toBe("A");
     expect(readFileSync(b, "utf-8")).toBe("B");
+    // The comparator's DOCUMENTED priority checks a symlink entry's OWN link
+    // identity BEFORE the resolved path. unlink+symlink installs a FRESH symlink
+    // inode: on APFS (and any filesystem that does not reuse freed inodes) the
+    // entry identity changes, so the hold is labelled "entry-identity"; on ext4
+    // the freed inode MAY be reused, leaving the entry identity equal and the
+    // retarget surfacing as "resolved-path". Both are correct FINAL holds — which
+    // field is named is a property of inode reuse, NOT of the contract — so
+    // assert the guaranteed set, never one platform-dependent field.
+    expect(["entry-identity", "resolved-path", "target-identity"]).toContain(res.changed ?? "");
+  });
+});
+
+// ── fixture 13 — non-regular destinations (F1) ──────────────────────────────
+
+describe("fixture 13 — a non-regular destination is REFUSED by name (F1)", () => {
+  // The refusal is BEFORE the read and before any temp: a FIFO read would block,
+  // and a rename onto a FIFO would destroy it. Nothing may be staged, nothing
+  // written, the lock released.
+  const expectNoStagingNoLock = (): void => {
+    expect(readdirSync(dir).filter((f) => f.includes(".tmp-"))).toEqual([]);
+    expect(readdirSync(dir).filter((f) => f.endsWith(".lock"))).toEqual([]);
+  };
+
+  it("a DIRECTORY destination is refused before any temp is created; lock released", () => {
+    mkdirSync(cfg); // the resolved target is a directory
+    let tempSeen = false;
+    const res = withConfigCriticalSection(cfg, () => ({ write: enc("NEW") }), {
+      testHooks: { afterTempCreate: () => { tempSeen = true; } },
+    });
+    expect(res.status).toBe("refused");
+    expect(res.message).toContain("not a regular file");
+    expect(tempSeen).toBe(false); // refused BEFORE the staging temp exists
+    expect(statSync(cfg).isDirectory()).toBe(true); // the destination is untouched
+    expect(existsSync(lockPath())).toBe(false); // lock released
+    expectNoStagingNoLock();
+  });
+
+  it("a FIFO destination is refused before any temp is created (never read, never replaced)", () => {
+    execFileSync("mkfifo", [cfg]); // a named pipe: reading it would block, so the refusal must precede the read
+    let tempSeen = false;
+    const res = withConfigCriticalSection(cfg, () => ({ write: enc("NEW") }), {
+      testHooks: { afterTempCreate: () => { tempSeen = true; } },
+    });
+    expect(res.status).toBe("refused");
+    expect(res.message).toContain("not a regular file");
+    expect(tempSeen).toBe(false);
+    expect(statSync(cfg).isFIFO()).toBe(true); // the FIFO survives, not replaced by a regular file
+    expect(existsSync(lockPath())).toBe(false);
+    expectNoStagingNoLock();
+  });
+});
+
+// ── fixture 14 — the link's OWN identity, alone (F3) ────────────────────────
+
+describe("fixture 14 — a replaced SYMLINK entry holds on its own link identity (F3)", () => {
+  it("a NEW symlink to the SAME target holds with changed === 'entry-identity'", () => {
+    const target = join(dir, "target.json");
+    writeFileSync(target, "TARGET");
+    symlinkSync(target, cfg);
+    // Pre-create the replacement while the ORIGINAL link still exists, so the
+    // two symlinks are allocated at different times and are guaranteed distinct
+    // inodes — this fixture names entry-identity, so it must not depend on
+    // whether the filesystem reuses a freed inode (cf. fixture 12's retarget,
+    // where the label legitimately varies). rename then swaps the link with no
+    // window of absence.
+    const replacement = join(dir, "link-replacement");
+    symlinkSync(target, replacement);
+    expect(lstatSync(replacement).ino).not.toBe(lstatSync(cfg).ino);
+
+    let swapped = false;
+    const res = withConfigCriticalSection(cfg, () => ({ write: enc("NEW") }), {
+      testHooks: {
+        afterPreObserve: () => {
+          if (swapped) return;
+          swapped = true;
+          renameSync(replacement, cfg);
+        },
+      },
+    });
+    expect(res.status).toBe("held");
+    expect(res.changed).toBe("entry-identity"); // ONLY the link's own inode changed
+    expect(res.attempts).toBe(1);
+    expect(readFileSync(target, "utf-8")).toBe("TARGET"); // nothing written through the link
+    expect(readFileSync(cfg, "utf-8")).toBe("TARGET");
+    expect(existsSync(lockPath())).toBe(false);
   });
 });
 
@@ -265,6 +349,25 @@ describe("metadata preservation (temp+rename replaces the inode)", () => {
     });
     expect(res.status).toBe("written");
     expect(observed.tempMode).toBe(0o600);
+  });
+
+  // F2 (flair#1778 2c-i-b r2): the docblock claims setuid/setgid/sticky are
+  // stripped; here is the test that fails when the strip is skipped.
+  it("F2: setuid/setgid/sticky are STRIPPED from the replacement, the rest preserved", () => {
+    for (const special of [0o4755, 0o2755, 0o1755]) {
+      writeConfig("BASE");
+      // Set the special bits with the `chmod` BINARY: bun's own chmod/fchmod
+      // silently drops setuid/setgid/sticky (measured on this host), so a fixture
+      // that chmods in-process cannot even INSTALL the precondition.
+      execFileSync("chmod", [special.toString(8), cfg]);
+      expect(statSync(cfg).mode & 0o7777).toBe(special); // precondition: the bits ARE set
+      const res = withConfigCriticalSection(cfg, () => ({ write: enc("NEW") }));
+      expect(res.status).toBe("written");
+      expect(readFileSync(cfg, "utf-8")).toBe("NEW");
+      const mode = statSync(cfg).mode;
+      expect(mode & 0o7000).toBe(0); // setuid/setgid/sticky gone
+      expect(mode & 0o777).toBe(special & 0o777); // everything else preserved
+    }
   });
 });
 
