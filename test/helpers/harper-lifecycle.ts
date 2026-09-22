@@ -423,6 +423,17 @@ export async function waitForLocksFree(
  * These helpers surface it so a boot failure is named, never a downstream
  * "absence of state" timeout.
  */
+// flair#1797 (item 2b): this matches ALL FOUR of Harper's install-failure
+// phrasings — the `npm default` site, named package managers, the
+// `custom install command: <cmd>` site, and the `onFail === 'warn'` site
+// (Application.js ~864). At the warn site a CONFIGURED package manager failed
+// and Harper fell through to `npm install --force`, so the component MAY still
+// install; the line carries the SAME text as the hard-failure site, so this
+// regex cannot tell the two apart. We match it ON PURPOSE: the configured
+// manager did fail before the fallback, which a harness should surface rather
+// than swallow. No regex change — no narrower pattern can distinguish the
+// sites, and the warn site is unreachable for flair's component today (it needs
+// devEngines.packageManager.onFail === 'warn').
 const COMPONENT_INSTALL_FAILURE_RE =
   /Failed to install dependencies for (\S+) using (.+?)\. Exit code: (\d+)/;
 
@@ -471,6 +482,12 @@ export async function awaitMigrationStateFile(opts: {
   const pollMs = opts.pollMs ?? 500;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    // flair#1797 (item 2a): the install-failure scan runs BEFORE the state-file
+    // read, deliberately. When a boot's log carries an install-failure phrasing,
+    // a present-and-valid state.json must NOT win — the component never loaded,
+    // so a file on disk is not evidence this boot's cycle ran. The rows-wait in
+    // test/integration/migrations-provisioned-datadir.test.ts uses the same
+    // precedence (scan the log first).
     const installFailure = opts.getLog ? componentInstallFailureMessage(opts.getLog()) : null;
     if (installFailure) throw new Error(installFailure);
     if (existsSync(opts.statePath)) {
@@ -483,6 +500,13 @@ export async function awaitMigrationStateFile(opts: {
     }
     await new Promise((r) => setTimeout(r, pollMs));
   }
+  // flair#1797 (item 1): one final scan, AFTER the loop. The loop reads the log
+  // only at the START of each iteration, so an install-failure line Harper
+  // writes during the LAST sleep is never read — the loop exits and reports the
+  // generic absence-of-state timeout instead of the named deploy failure. This
+  // rescan makes the late-arriving failure the REPORTED error.
+  const finalInstallFailure = opts.getLog ? componentInstallFailureMessage(opts.getLog()) : null;
+  if (finalInstallFailure) throw new Error(finalInstallFailure);
   throw new Error(
     `no parseable ${opts.statePath} carrying a ${opts.entry} entry within ${Math.round(timeoutMs / 1000)}s`,
   );
