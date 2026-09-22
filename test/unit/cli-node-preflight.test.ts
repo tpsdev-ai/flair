@@ -19,21 +19,22 @@
  */
 
 import { describe, test, expect, beforeAll } from "bun:test";
-import { spawnSync, execSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { ensureCliBuild } from "../helpers/build-cli-once.js";
 
 const ROOT = join(__dirname, "..", "..");
 const SHIM = join(ROOT, "dist", "cli-shim.cjs");
 
-// Build the CLI (incl. the shim) once if it isn't already present, so the test
-// is self-contained whether or not a prior `npm run build:cli` ran.
+// Build the CLI (incl. the shim) once for the whole lane, through the shared
+// bounded helper — never a private untimed `npm run build:cli` (flair#1807).
+// The 120 s hook budget lets a genuine build hang be NAMED, not killed bare at
+// bun's short hook default.
 beforeAll(() => {
-  if (!existsSync(SHIM)) {
-    execSync("npm run build:cli", { cwd: ROOT, stdio: "ignore" });
-  }
-});
+  ensureCliBuild();
+}, 120_000);
 
 describe("Node-version preflight shim (dist/cli-shim.cjs)", () => {
   test("the built shim exists (it is the published bin entry)", () => {
