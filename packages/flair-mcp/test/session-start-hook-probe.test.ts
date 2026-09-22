@@ -97,6 +97,26 @@ describe("probe mode short-circuits the whole hook (spawned entry point)", () =>
   const NORMAL_DEADLINE_MS = 3_000;
   const CASE_BUDGET_MS = 20_000;
 
+  // flair#1796 (follow-up F1): the sibling regression guard below spawns ONE
+  // child with a 20 s deadline but carried no per-test budget, so it inherited
+  // bun's 5000 ms default — a hung child there would surface as a bare
+  // "timed out" instead of the named leg. Its budget sits ABOVE that child
+  // deadline (20 s child + 2 s spawn/assert headroom, the same +2 s pattern as
+  // CASE_BUDGET_MS above: 15 s + 3 s of deadlines + 2 s), and its overrun routes
+  // through childOverranDeadline with its own leg name.
+  const NOOP_DEADLINE_MS = 20_000;
+  const NOOP_CASE_BUDGET_MS = 22_000;
+
+  // flair#1796 (follow-up F2): probe mode exists to be FAST, but the 20 s case
+  // budget above also silences a probe leg that is slow-but-not-hung — it would
+  // pass anywhere under 20 s. Keep an alarm on the PROBE leg's measured wall
+  // time alone. Bound from measured lane numbers on this 2-core host (60
+  // samples each): idle min/median/max = 21/23/37 ms; under a 6x parallel
+  // whole-suite load, 39/88/270 ms. 2000 ms is ~7x the loaded max and sits
+  // below the positive control's fixed 3 s, so ordinary spawn variance is not an
+  // alarm while a genuinely-slow probe leg is.
+  const PROBE_LEG_BOUND_MS = 2_000;
+
   // If the entry point is not where this file thinks it is, FAIL loudly — an
   // unrun check must never look like a pass.
   test("the hook entry point exists to be probed", () => {
@@ -130,12 +150,14 @@ describe("probe mode short-circuits the whole hook (spawned entry point)", () =>
           FLAIR_KEY_PATH: fifo,
         };
 
+        const probeStart = performance.now();
         const probed = spawnSync(process.execPath, [ENTRY], {
           input: "{}",
           encoding: "utf-8",
           timeout: PROBE_DEADLINE_MS,
           env: { ...env, FLAIR_HOOK_PROBE: "1" },
         });
+        const probeMs = performance.now() - probeStart;
         // flair#1796: name the leg and show what it produced, instead of letting
         // bun's per-test timer replace this with a bare "timed out".
         if (probed.signal !== null || probed.status !== 0) {
@@ -144,6 +166,14 @@ describe("probe mode short-circuits the whole hook (spawned entry point)", () =>
         expect(probed.signal).toBeNull();
         expect(probed.status).toBe(0);
         expect(probed.stdout).toBe(NOOP);
+        // flair#1796 (follow-up F2): the 20 s case budget absorbs load, so a
+        // slow-but-not-hung probe leg would pass silently. Alarm on the PROBE
+        // leg's own measured duration, named with the leg, the measured ms and
+        // the bound (bound rationale: PROBE_LEG_BOUND_MS above).
+        expect(
+          probeMs,
+          `hook entry point (probe leg) took ${Math.round(probeMs)} ms, above the ${PROBE_LEG_BOUND_MS} ms probe-leg bound — probe mode must stay fast`,
+        ).toBeLessThanOrEqual(PROBE_LEG_BOUND_MS);
 
         const normal = spawnSync(process.execPath, [ENTRY], {
           input: "{}",
@@ -159,16 +189,26 @@ describe("probe mode short-circuits the whole hook (spawned entry point)", () =>
     CASE_BUDGET_MS,
   );
 
-  test("without FLAIR_HOOK_PROBE the binary still no-ops safely (regression guard)", () => {
-    // The positive control for the two tests above: probe mode is an ADDITION,
-    // it must not have become the only path.
-    const res = spawnSync(process.execPath, [ENTRY], {
-      input: "{}",
-      encoding: "utf-8",
-      timeout: 20_000,
-      env: { ...process.env, FLAIR_HOOK_PROBE: "", FLAIR_AGENT_ID: "" },
-    });
-    expect(res.status).toBe(0);
-    expect(res.stdout).toBe(NOOP);
-  });
+  test(
+    "without FLAIR_HOOK_PROBE the binary still no-ops safely (regression guard)",
+    () => {
+      // The positive control for the two tests above: probe mode is an ADDITION,
+      // it must not have become the only path.
+      const res = spawnSync(process.execPath, [ENTRY], {
+        input: "{}",
+        encoding: "utf-8",
+        timeout: NOOP_DEADLINE_MS,
+        env: { ...process.env, FLAIR_HOOK_PROBE: "", FLAIR_AGENT_ID: "" },
+      });
+      // flair#1796 (follow-up F1): name THIS leg too, so a hung child is reported
+      // by spawnSync with its output rather than as a bare bun "timed out".
+      if (res.signal !== null || res.status !== 0) {
+        throw new Error(childOverranDeadline("no-probe regression", NOOP_DEADLINE_MS, res));
+      }
+      expect(res.signal).toBeNull();
+      expect(res.status).toBe(0);
+      expect(res.stdout).toBe(NOOP);
+    },
+    NOOP_CASE_BUDGET_MS,
+  );
 });
