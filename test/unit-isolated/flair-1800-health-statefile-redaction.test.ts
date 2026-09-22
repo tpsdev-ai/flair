@@ -82,7 +82,10 @@ describe("flair#1800 C2 — /HealthDetail stateFile is redacted for non-admin ca
     const sf = stats.migrations.stateFile;
     expect(sf.path).toBe(STATE_PATH);
     expect(sf.lastWriteError.migrationId).toBe("visibility-backfill");
-    expect(sf.lastWriteError.message).toContain("ENOTDIR");
+    // flair#1806 follow-up (B): the admin contract is the FULL detail —
+    // assert equality with the exact message, so a truncated or redacted
+    // message fails this (a `toContain` would pass on a prefix).
+    expect(sf.lastWriteError.message).toBe(WRITE_ERROR.message);
   });
 
   test("no write attempt yet: stateFile.path is null for both callers", async () => {
