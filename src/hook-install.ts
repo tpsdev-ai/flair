@@ -53,7 +53,7 @@
 //   6. Size-budgeted payload — also owned by session-start-hook.ts, which
 //      reuses bootstrap's own maxTokens machinery.
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   SESSION_START_HOOK_MARKER,
@@ -74,6 +74,7 @@ import {
 } from "./doctor-client.js";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec } from "./lib/mcp-spec.js";
 import { decidePinWrite, type PinWriteDecision } from "./lib/pin-write-guard.js";
+import { withConfigCriticalSection } from "./lib/config-critical-section.js";
 
 // ── harness registry ────────────────────────────────────────────────────────
 
@@ -297,14 +298,35 @@ function readSettingsFile(path: string): ReadSettingsResult {
   }
 }
 
-/** Copy the existing file to its backup path. Caller must only call this
- *  when the file exists AND we're about to mutate for real (never during
- *  --dry-run — a backup is itself a write). Throws on failure so the caller
- *  can fail closed rather than silently proceeding without a safety copy. */
-function takeBackup(path: string): string {
+/** Parse settings bytes read INSIDE the critical section (flair#1778
+ *  2c-i-b). The primitive hands `decide` the LOCKED snapshot, so parsing must
+ *  consume those bytes — never a pre-lock read. */
+function parseSettingsBytes(bytes: Uint8Array | null, path: string): ReadSettingsResult {
+  if (bytes === null) return { exists: false, parsed: {}, parseError: null };
+  const raw = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("utf-8");
+  if (!raw.trim()) return { exists: true, parsed: {}, parseError: null };
+  try {
+    return { exists: true, parsed: JSON.parse(raw), parseError: null };
+  } catch (err: unknown) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { exists: true, parsed: null, parseError: `malformed JSON in ${path} (${reason})` };
+  }
+}
+
+/** The primitive-managed backup: write the IN-LOCK bytes to the sibling
+ *  `<path>.bak` (overwritten every mutating run). Throws so the primitive can
+ *  short-circuit to a named refusal BEFORE `decide` runs. */
+function backupBytesTo(path: string, bytes: Uint8Array): string {
   const dest = hookBackupPath(path);
-  copyFileSync(path, dest);
+  writeFileSync(dest, bytes);
   return dest;
+}
+
+const CONFIG_ENCODER = new TextEncoder();
+
+/** The exact bytes every hook config writer emits: 2-space JSON + newline. */
+function encodeConfig(config: unknown): Uint8Array {
+  return CONFIG_ENCODER.encode(JSON.stringify(config, null, 2) + "\n");
 }
 
 // ── delta computation (pure) ────────────────────────────────────────────────
@@ -431,74 +453,68 @@ export function installHook(opts: InstallHookOptions): HookMutationResult {
     return { ok: true, path, harness, dryRun, message, backupPath: null, delta };
   }
 
-  // Backup BEFORE the parse attempt (Sherlock condition 1) — only meaningful
-  // when a file already exists; a fresh install has nothing to protect.
-  let backupPath: string | null = null;
-  if (existsSync(path)) {
-    try {
-      backupPath = takeBackup(path);
-    } catch (err: unknown) {
-      const reason = err instanceof Error ? err.message : String(err);
-      return {
-        ok: false, path, harness, dryRun,
-        message: `could not back up ${path} before mutating it: ${reason} — refusing to touch it`,
-        backupPath: null, delta: null,
-      };
-    }
-  }
+  // Parent creation stays OUTSIDE the primitive: the primitive requires the
+  // resolved parent to exist before it can observe an absent destination
+  // (flair#1778 2c-i-b). Everything from here is ONE critical section.
+  mkdirSync(dirname(path), { recursive: true });
 
-  const read = readSettingsFile(path);
-  if (read.parseError) {
-    return {
-      ok: false, path, harness, dryRun,
-      message: `${read.parseError} — refusing to modify a file we can't safely parse. Original left untouched at ${path}` +
-        (backupPath ? `; backup copy at ${backupPath}.` : "."),
-      backupPath, delta: null,
-    };
-  }
+  let delta: HookDelta | null = null;
+  let parseRefused = false;
 
-  const { action, before, after, newConfig } = computeInstallDelta(read.parsed ?? {}, agentId, flairUrl, harness);
-  const delta: HookDelta = { action, path, harness, before, after };
+  const result = withConfigCriticalSection(
+    path,
+    (bytes) => {
+      const read = parseSettingsBytes(bytes, path);
+      if (read.parseError) {
+        parseRefused = true;
+        return {
+          hold: `${read.parseError} — refusing to modify a file we can't safely parse. Original left untouched at ${path}.`,
+        };
+      }
+      const { action, before, after, newConfig } = computeInstallDelta(read.parsed ?? {}, agentId, flairUrl, harness);
+      delta = { action, path, harness, before, after };
+      if (action === "noop") {
+        return { noop: withCodexReapproval(harness, `SessionStart hook already correct in ${path}`) };
+      }
+      // flair#1778 2c-i-a3: the SessionStart command carries <pkg>@<spec> (the
+      // pin from buildHookCommand), so the write consults the ONE never-lower
+      // guard — on the IN-LOCK bytes, inside the critical section.
+      const existingCommand =
+        action === "update"
+          ? (before?.hooks?.find(
+              (h) => typeof h?.command === "string" && h.command.includes(SESSION_START_HOOK_MARKER),
+            )?.command ?? null)
+          : null;
+      const decision = decidePinWrite({
+        pkg: FLAIR_MCP_PACKAGE,
+        entry: `SessionStart hook in ${path}`,
+        existingText: existingCommand,
+        runningVersion: flairCliVersion(),
+      });
+      if (decision.action !== "write") return { hold: decision.line! };
+      return { write: encodeConfig(newConfig) };
+    },
+    { backup: (bytes) => backupBytesTo(path, bytes) },
+  );
 
-  if (action === "noop") {
+  const backupPath = result.backupPath ?? null;
+  if (result.status === "written") {
     return {
       ok: true, path, harness, dryRun,
-      message: withCodexReapproval(harness, `SessionStart hook already correct in ${path}`),
+      message: withCodexReapproval(
+        harness,
+        `${(delta as HookDelta | null)?.action === "add" ? "added" : "updated"} the SessionStart hook in ${path}`,
+      ),
       backupPath, delta,
     };
   }
-
-  // flair#1778 2c-i-a3: the SessionStart command carries <pkg>@<spec> (the
-  // pin from buildHookCommand), so the write consults the ONE never-lower
-  // guard first. "update" replaces an existing entry — that entry's command is
-  // the existingText; "add" (a genuine hook install) is absent → pinned up to
-  // the running CLI, or refused when the version cannot be read.
-  const existingCommand =
-    action === "update"
-      ? (before?.hooks?.find(
-          (h) => typeof h?.command === "string" && h.command.includes(SESSION_START_HOOK_MARKER),
-        )?.command ?? null)
-      : null;
-  const decision = decidePinWrite({
-    pkg: FLAIR_MCP_PACKAGE,
-    entry: `SessionStart hook in ${path}`,
-    existingText: existingCommand,
-    runningVersion: flairCliVersion(),
-  });
-  if (decision.action !== "write") {
-    return { ok: true, path, harness, dryRun, message: decision.line!, backupPath, delta };
+  if (result.status === "noop") {
+    return { ok: true, path, harness, dryRun, message: result.message, backupPath, delta };
   }
-
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(newConfig, null, 2) + "\n");
-  return {
-    ok: true, path, harness, dryRun,
-    message: withCodexReapproval(
-      harness,
-      `${action === "add" ? "added" : "updated"} the SessionStart hook in ${path}`,
-    ),
-    backupPath, delta,
-  };
+  if (result.status === "held") {
+    return { ok: !parseRefused, path, harness, dryRun, message: result.message, backupPath, delta: parseRefused ? null : delta };
+  }
+  return { ok: false, path, harness, dryRun, message: result.message, backupPath, delta: null };
 }
 
 export interface HookRepinResult {
@@ -539,65 +555,76 @@ export function repinSessionStartHook(homeDir: string, harness: Harness): HookRe
   const path = hookSettingsPath(homeDir, harness);
   const skip = (ok: boolean, message: string): HookRepinResult => ({ ok, path, harness, action: "skip", message, backupPath: null });
 
-  const read = readSettingsFile(path);
-  if (read.parseError) {
-    return skip(false, `${read.parseError} — refusing to re-pin a file we can't safely parse; left untouched`);
-  }
-  const config = read.parsed ?? {};
-  const existing = findHookEntry(config);
-  if (!existing) {
+  // Re-pin NEVER adds a hook and never creates the destination's parent — a
+  // home with no Flair hook is a clean `skip`. If the parent is absent there
+  // is nothing to observe, so return before the primitive (which requires a
+  // resolved parent).
+  if (!existsSync(dirname(path))) {
     return skip(true, `no Flair SessionStart hook in ${path} — nothing to re-pin`);
   }
-  const current: string = config.hooks.SessionStart[existing.groupIndex].hooks[existing.hookIndex]?.command ?? "";
-  // Only re-pin the canonical invocation Flair writes. A legacy (pre-#1143,
-  // no `-p`) or hand-edited command is NOT version-bumped here — `flair
-  // doctor`/`flair hook install` own the legacy → current rewrite, with their
-  // own consent.
-  if (!isSessionStartHookInvocation(current)) {
-    return skip(true, `SessionStart hook in ${path} is not the canonical form Flair writes — left untouched`);
+
+  let refused = false;
+  const result = withConfigCriticalSection(
+    path,
+    (bytes) => {
+      const read = parseSettingsBytes(bytes, path);
+      if (read.parseError) {
+        refused = true;
+        return { hold: `${read.parseError} — refusing to re-pin a file we can't safely parse; left untouched` };
+      }
+      const config = read.parsed ?? {};
+      const existing = findHookEntry(config);
+      if (!existing) return { hold: `no Flair SessionStart hook in ${path} — nothing to re-pin` };
+      const current: string = config.hooks.SessionStart[existing.groupIndex].hooks[existing.hookIndex]?.command ?? "";
+      // Only re-pin the canonical invocation Flair writes. A legacy (pre-#1143,
+      // no `-p`) or hand-edited command is NOT version-bumped here — `flair
+      // doctor`/`flair hook install` own the legacy → current rewrite.
+      if (!isSessionStartHookInvocation(current)) {
+        return { hold: `SessionStart hook in ${path} is not the canonical form Flair writes — left untouched` };
+      }
+      const env = parseHookCommandEnv(current);
+      if (!env.agentId) {
+        return { hold: `could not read the agent id from the SessionStart hook in ${path} — left untouched` };
+      }
+      let next: string;
+      try {
+        next = buildSessionStartHookCommand(env.agentId, env.flairUrl, { harness });
+      } catch (err: unknown) {
+        const reason = err instanceof Error ? err.message : String(err);
+        refused = true;
+        return { hold: `could not rebuild the SessionStart hook command for ${path}: ${reason}` };
+      }
+      if (next === current) {
+        return { noop: `SessionStart hook in ${path} already pinned to ${mcpServerSpec()}` };
+      }
+      // flair#1778 2c-i-a3: this EXPORTED raw writer consults the ONE
+      // never-lower guard itself, so no caller can bypass it — on the in-lock
+      // bytes, inside the critical section.
+      const decision = decidePinWrite({
+        pkg: FLAIR_MCP_PACKAGE,
+        entry: `SessionStart hook in ${path}`,
+        existingText: current,
+        runningVersion: flairCliVersion(),
+      });
+      if (decision.action !== "write") return { hold: decision.line! };
+      const newConfig = deepClone(config);
+      newConfig.hooks.SessionStart[existing.groupIndex].hooks[existing.hookIndex] = { type: "command", command: next };
+      return { write: encodeConfig(newConfig) };
+    },
+    { backup: (bytes) => backupBytesTo(path, bytes) },
+  );
+
+  if (result.status === "written") {
+    return {
+      ok: true, path, harness, action: "update",
+      message: `re-pinned the SessionStart hook in ${path} to ${mcpServerSpec()}`,
+      backupPath: result.backupPath ?? null,
+    };
   }
-  const env = parseHookCommandEnv(current);
-  if (!env.agentId) {
-    return skip(true, `could not read the agent id from the SessionStart hook in ${path} — left untouched`);
+  if (result.status === "noop") {
+    return { ok: true, path, harness, action: "noop", message: result.message, backupPath: result.backupPath ?? null };
   }
-  let next: string;
-  try {
-    next = buildSessionStartHookCommand(env.agentId, env.flairUrl, { harness });
-  } catch (err: unknown) {
-    const reason = err instanceof Error ? err.message : String(err);
-    return skip(false, `could not rebuild the SessionStart hook command for ${path}: ${reason}`);
-  }
-  if (next === current) {
-    return { ok: true, path, harness, action: "noop", message: `SessionStart hook in ${path} already pinned to ${mcpServerSpec()}`, backupPath: null };
-  }
-  // flair#1778 2c-i-a3: this EXPORTED raw writer consults the ONE never-lower
-  // guard itself, so no caller can bypass it (the owned-pins wrapper holds
-  // before calling; this is the writer-level guard). An AHEAD or not-comparable
-  // entry holds with bytes untouched; an unreadable running version refuses.
-  const decision = decidePinWrite({
-    pkg: FLAIR_MCP_PACKAGE,
-    entry: `SessionStart hook in ${path}`,
-    existingText: current,
-    runningVersion: flairCliVersion(),
-  });
-  if (decision.action !== "write") {
-    return { ok: true, path, harness, action: "skip", message: decision.line!, backupPath: null };
-  }
-  let backupPath: string | null = null;
-  try {
-    backupPath = takeBackup(path);
-  } catch (err: unknown) {
-    const reason = err instanceof Error ? err.message : String(err);
-    return skip(false, `could not back up ${path} before re-pinning it: ${reason} — refusing to touch it`);
-  }
-  const newConfig = deepClone(config);
-  newConfig.hooks.SessionStart[existing.groupIndex].hooks[existing.hookIndex] = { type: "command", command: next };
-  writeFileSync(path, JSON.stringify(newConfig, null, 2) + "\n");
-  return {
-    ok: true, path, harness, action: "update",
-    message: `re-pinned the SessionStart hook in ${path} to ${mcpServerSpec()}`,
-    backupPath,
-  };
+  return { ok: !refused, path, harness, action: "skip", message: result.message, backupPath: result.backupPath ?? null };
 }
 
 export interface UninstallHookOptions {
@@ -637,39 +664,47 @@ export function uninstallHook(opts: UninstallHookOptions): HookMutationResult {
     return { ok: true, path, harness, dryRun, message, backupPath: null, delta };
   }
 
-  let backupPath: string | null = null;
-  if (existsSync(path)) {
-    try {
-      backupPath = takeBackup(path);
-    } catch (err: unknown) {
-      const reason = err instanceof Error ? err.message : String(err);
-      return {
-        ok: false, path, harness, dryRun,
-        message: `could not back up ${path} before mutating it: ${reason} — refusing to touch it`,
-        backupPath: null, delta: null,
-      };
-    }
-  }
-
-  const read = readSettingsFile(path);
-  if (read.parseError) {
+  // Removal never creates the destination's parent — if it is absent there is
+  // nothing to remove and nothing to observe.
+  if (!existsSync(dirname(path))) {
     return {
-      ok: false, path, harness, dryRun,
-      message: `${read.parseError} — refusing to modify a file we can't safely parse. Original left untouched at ${path}` +
-        (backupPath ? `; backup copy at ${backupPath}.` : "."),
-      backupPath, delta: null,
+      ok: true, path, harness, dryRun,
+      message: `no Flair SessionStart hook found in ${path} — nothing to remove`,
+      backupPath: null, delta: { action: "noop", path, harness, before: null, after: null },
     };
   }
 
-  const { action, before, newConfig } = computeRemovalDelta(read.parsed ?? {});
-  const delta: HookDelta = { action, path, harness, before, after: null };
+  let delta: HookDelta | null = null;
+  let refused = false;
+  const result = withConfigCriticalSection(
+    path,
+    (bytes) => {
+      const read = parseSettingsBytes(bytes, path);
+      if (read.parseError) {
+        refused = true;
+        return {
+          hold: `${read.parseError} — refusing to modify a file we can't safely parse. Original left untouched at ${path}.`,
+        };
+      }
+      const { action, before, newConfig } = computeRemovalDelta(read.parsed ?? {});
+      delta = { action, path, harness, before, after: null };
+      if (action === "noop") return { noop: `no Flair SessionStart hook found in ${path} — nothing to remove` };
+      return { write: encodeConfig(newConfig) };
+    },
+    { backup: (bytes) => backupBytesTo(path, bytes) },
+  );
 
-  if (action === "noop") {
-    return { ok: true, path, harness, dryRun, message: `no Flair SessionStart hook found in ${path} — nothing to remove`, backupPath, delta };
+  const backupPath = result.backupPath ?? null;
+  if (result.status === "written") {
+    return { ok: true, path, harness, dryRun, message: `removed the Flair SessionStart hook from ${path}`, backupPath, delta };
   }
-
-  writeFileSync(path, JSON.stringify(newConfig, null, 2) + "\n");
-  return { ok: true, path, harness, dryRun, message: `removed the Flair SessionStart hook from ${path}`, backupPath, delta };
+  if (result.status === "noop") {
+    return { ok: true, path, harness, dryRun, message: result.message, backupPath, delta };
+  }
+  if (result.status === "held") {
+    return { ok: !refused, path, harness, dryRun, message: result.message, backupPath, delta: refused ? null : delta };
+  }
+  return { ok: false, path, harness, dryRun, message: result.message, backupPath, delta: null };
 }
 
 // ── status ───────────────────────────────────────────────────────────────
@@ -986,46 +1021,45 @@ export function installContinuityHooks(opts: InstallHookOptions): ContinuityMuta
     return { ok: true, path, harness, dryRun, message, backupPath: null, actions };
   }
 
-  let backupPath: string | null = null;
-  if (existsSync(path)) {
-    try {
-      backupPath = takeBackup(path);
-    } catch (err: unknown) {
-      const reason = err instanceof Error ? err.message : String(err);
-      return {
-        ok: false, path, harness, dryRun,
-        message: `could not back up ${path} before mutating it: ${reason} — refusing to touch it`,
-        backupPath: null, actions: null,
-      };
-    }
-  }
+  // Parent creation stays OUTSIDE the primitive; the whole mutation is ONE
+  // critical section.
+  mkdirSync(dirname(path), { recursive: true });
+  let actions: ContinuityMutationResult["actions"] = null;
+  let refused = false;
+  const result = withConfigCriticalSection(
+    path,
+    (bytes) => {
+      const read = parseSettingsBytes(bytes, path);
+      if (read.parseError) {
+        refused = true;
+        return {
+          hold: `${read.parseError} — refusing to modify a file we can't safely parse. Original left untouched at ${path}.`,
+        };
+      }
+      const res = computeContinuityHookInstall(read.parsed ?? {}, agentId, flairUrl);
+      actions = res.actions;
+      if (res.decision) return { hold: res.decision.line! };
+      if (!res.changed) return { noop: `continuity capture hooks already current in ${path}` };
+      return { write: encodeConfig(res.newConfig) };
+    },
+    { backup: (bytes) => backupBytesTo(path, bytes) },
+  );
 
-  const read = readSettingsFile(path);
-  if (read.parseError) {
+  const backupPath = result.backupPath ?? null;
+  if (result.status === "written") {
     return {
-      ok: false, path, harness, dryRun,
-      message: `${read.parseError} — refusing to modify a file we can't safely parse. Original left untouched at ${path}` +
-        (backupPath ? `; backup copy at ${backupPath}.` : "."),
-      backupPath, actions: null,
+      ok: true, path, harness, dryRun,
+      message: `wired the continuity capture hooks (PostToolUse: ${actions!.PostToolUse}, Stop: ${actions!.Stop}) in ${path}`,
+      backupPath, actions,
     };
   }
-
-  const { changed, actions, newConfig, decision } = computeContinuityHookInstall(read.parsed ?? {}, agentId, flairUrl);
-  if (decision) {
-    // The never-lower guard held or refused: nothing is written, bytes as read.
-    return { ok: true, path, harness, dryRun, message: decision.line!, backupPath, actions };
+  if (result.status === "noop") {
+    return { ok: true, path, harness, dryRun, message: result.message, backupPath, actions };
   }
-  if (!changed) {
-    return { ok: true, path, harness, dryRun, message: `continuity capture hooks already current in ${path}`, backupPath, actions };
+  if (result.status === "held") {
+    return { ok: !refused, path, harness, dryRun, message: result.message, backupPath, actions: refused ? null : actions };
   }
-
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(newConfig, null, 2) + "\n");
-  return {
-    ok: true, path, harness, dryRun,
-    message: `wired the continuity capture hooks (PostToolUse: ${actions.PostToolUse}, Stop: ${actions.Stop}) in ${path}`,
-    backupPath, actions,
-  };
+  return { ok: false, path, harness, dryRun, message: result.message, backupPath, actions: null };
 }
 
 /** Symmetric removal of the continuity pair — only ours, everything else in
@@ -1055,41 +1089,48 @@ export function uninstallContinuityHooks(opts: UninstallHookOptions): Continuity
     return { ok: true, path, harness, dryRun, message, backupPath: null, actions };
   }
 
-  let backupPath: string | null = null;
-  if (existsSync(path)) {
-    try {
-      backupPath = takeBackup(path);
-    } catch (err: unknown) {
-      const reason = err instanceof Error ? err.message : String(err);
-      return {
-        ok: false, path, harness, dryRun,
-        message: `could not back up ${path} before mutating it: ${reason} — refusing to touch it`,
-        backupPath: null, actions: null,
-      };
-    }
-  }
-
-  const read = readSettingsFile(path);
-  if (read.parseError) {
+  if (!existsSync(dirname(path))) {
     return {
-      ok: false, path, harness, dryRun,
-      message: `${read.parseError} — refusing to modify a file we can't safely parse. Original left untouched at ${path}` +
-        (backupPath ? `; backup copy at ${backupPath}.` : "."),
-      backupPath, actions: null,
+      ok: true, path, harness, dryRun,
+      message: `no continuity capture hooks found in ${path} — nothing to remove`,
+      backupPath: null, actions: { PostToolUse: "noop", Stop: "noop" },
     };
   }
+  let actions: ContinuityMutationResult["actions"] = null;
+  let refused = false;
+  const result = withConfigCriticalSection(
+    path,
+    (bytes) => {
+      const read = parseSettingsBytes(bytes, path);
+      if (read.parseError) {
+        refused = true;
+        return {
+          hold: `${read.parseError} — refusing to modify a file we can't safely parse. Original left untouched at ${path}.`,
+        };
+      }
+      const res = computeContinuityHookRemoval(read.parsed ?? {});
+      actions = res.actions;
+      if (!res.changed) return { noop: `no continuity capture hooks found in ${path} — nothing to remove` };
+      return { write: encodeConfig(res.newConfig) };
+    },
+    { backup: (bytes) => backupBytesTo(path, bytes) },
+  );
 
-  const { changed, actions, newConfig } = computeContinuityHookRemoval(read.parsed ?? {});
-  if (!changed) {
-    return { ok: true, path, harness, dryRun, message: `no continuity capture hooks found in ${path} — nothing to remove`, backupPath, actions };
+  const backupPath = result.backupPath ?? null;
+  if (result.status === "written") {
+    return {
+      ok: true, path, harness, dryRun,
+      message: `removed the continuity capture hooks (PostToolUse + Stop) from ${path}`,
+      backupPath, actions,
+    };
   }
-
-  writeFileSync(path, JSON.stringify(newConfig, null, 2) + "\n");
-  return {
-    ok: true, path, harness, dryRun,
-    message: `removed the continuity capture hooks (PostToolUse + Stop) from ${path}`,
-    backupPath, actions,
-  };
+  if (result.status === "noop") {
+    return { ok: true, path, harness, dryRun, message: result.message, backupPath, actions };
+  }
+  if (result.status === "held") {
+    return { ok: !refused, path, harness, dryRun, message: result.message, backupPath, actions: refused ? null : actions };
+  }
+  return { ok: false, path, harness, dryRun, message: result.message, backupPath, actions: null };
 }
 
 /** Read-only continuity status for `flair hook status` — the same report
