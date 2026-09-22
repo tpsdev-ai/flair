@@ -11,12 +11,22 @@
  * parses the IN-LOCK bytes with the same parser, emits the same byte shape,
  * and backs up to the same sibling path.
  *
- * Leaf module: imports only `node:fs`. NEVER import `src/cli.ts` here (its
- * `writeFileAtomic` lacks exclusive temp creation, fsync, locking and identity
- * checks — flair#1778 2c-i-b ruling). `parseSettingsBytes` must consume the
- * bytes the primitive hands `decide` — never a pre-lock read.
+ * Leaf module: imports only `node:fs` and `node:crypto`. NEVER import
+ * `src/cli.ts` here (its `writeFileAtomic` lacks exclusive temp creation,
+ * fsync, locking and identity checks — flair#1778 2c-i-b ruling).
+ * `parseSettingsBytes` must consume the bytes the primitive hands `decide` —
+ * never a pre-lock read.
  */
-import { writeFileSync } from "node:fs";
+import {
+  closeSync,
+  fsyncSync,
+  openSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
+import { randomBytes } from "node:crypto";
 
 /** Result of reading/parsing a settings file. `parsed` is null and
  *  `parseError` set on ANY reason we must not proceed: a missing file is NOT
@@ -53,10 +63,36 @@ export function parseSettingsBytes(bytes: Uint8Array | null, path: string): Read
 
 /** The primitive-managed backup: write the IN-LOCK bytes to the sibling
  *  `<path>.bak` (overwritten every mutating run). Throws so the primitive can
- *  short-circuit to a named refusal BEFORE `decide` runs. */
+ *  short-circuit to a named refusal BEFORE `decide` runs.
+ *
+ *  The backup may hold SECRET material (a settings file carrying a token), so
+ *  it is written 0600 ALWAYS — never the umask default, and never the mode of a
+ *  pre-existing `.bak`. Two obvious shapes do NOT get there:
+ *    - `writeFileSync(dest, bytes, { mode: 0o600 })` applies the mode only on
+ *      CREATE (`O_CREAT`), so an overwrite truncates in place and keeps the old
+ *      bits — an existing 0644 `.bak` would stay 0644;
+ *    - `openSync(dest, "wx", 0o600)` (exclusive create) FAILS outright when the
+ *      file already exists.
+ *  Instead follow the primitive's own pattern: write a sibling temp opened `wx`
+ *  0600, write, fsync, then rename over `<path>.bak`. A rename REPLACES the
+ *  inode, so an existing `.bak` is tightened to 0600, and the token bytes never
+ *  sit in a world-readable file, even briefly. */
 export function backupBytesTo(path: string, bytes: Uint8Array): string {
   const dest = hookBackupPath(path);
-  writeFileSync(dest, bytes);
+  const tmp = `${dest}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
+  const fd = openSync(tmp, "wx", 0o600);
+  try {
+    writeSync(fd, bytes);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    renameSync(tmp, dest);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* best effort — a leaked temp beats a false success */ }
+    throw err;
+  }
   return dest;
 }
 

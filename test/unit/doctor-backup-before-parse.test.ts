@@ -12,7 +12,7 @@
  * failure, so `<path>.bak` would not exist.
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -50,6 +50,8 @@ describe("C6 — a DOCTOR hook writer backs up the in-lock bytes before parsing"
     // The backup exists and holds the malformed bytes exactly.
     expect(existsSync(hookBackupPath(settingsPath()))).toBe(true);
     expect(readFileSync(hookBackupPath(settingsPath()), "utf-8")).toBe(malformed);
+    // The backup may hold secret material, so it is 0600 (round 2).
+    expect(statSync(hookBackupPath(settingsPath())).mode & 0o777).toBe(0o600);
   });
 
   it("fixContinuityCaptureHooks: malformed bytes → refuses by name, target untouched, <path>.bak == the malformed bytes", () => {
@@ -63,5 +65,7 @@ describe("C6 — a DOCTOR hook writer backs up the in-lock bytes before parsing"
     expect(readFileSync(settingsPath(), "utf-8")).toBe(malformed);
     expect(existsSync(hookBackupPath(settingsPath()))).toBe(true);
     expect(readFileSync(hookBackupPath(settingsPath()), "utf-8")).toBe(malformed);
+    // The backup may hold secret material, so it is 0600 (round 2).
+    expect(statSync(hookBackupPath(settingsPath())).mode & 0o777).toBe(0o600);
   });
 });
