@@ -208,13 +208,21 @@ describe("flair#1485 — failed MCP pin refresh is not silent", () => {
 
   it("a write failure from client.wire stays ok:false and is reportable", () => {
     const path = writeClaudeMcp(isoHome, STALE_SPEC, "local");
-    chmodSync(path, 0o444);
-    const results = refreshOwnedPins({
-      homeDir: isoHome,
-      agentId: "local",
-      flairUrl: "http://127.0.0.1:9926",
-    });
-    chmodSync(path, 0o644);
+    // flair#1778 2c-i-d1: the writer now stages a temp and renames it over the
+    // config, so a read-only FILE no longer blocks it (rename needs write on the
+    // DIRECTORY, not the file). Make the parent dir read-only so the critical
+    // section's lock cannot be created — the write failure this test pins.
+    chmodSync(isoHome, 0o555);
+    let results: ReturnType<typeof refreshOwnedPins>;
+    try {
+      results = refreshOwnedPins({
+        homeDir: isoHome,
+        agentId: "local",
+        flairUrl: "http://127.0.0.1:9926",
+      });
+    } finally {
+      chmodSync(isoHome, 0o755);
+    }
     const mcp = results.find((r) => r.target.kind === "mcp-client" && r.target.id === "claude-code");
     expect(mcp?.ok).toBe(false);
     expect(mcp?.action).toBe("skip");
