@@ -78,10 +78,19 @@ const PROMPT_RE =
 // "Real-launchd doctor --fix integration" step across the last green runs with
 // readable logs: 9.5-30.6 s (this host cannot run the file — it is
 // darwin-gated). Deadline = max observed ~30.6 s + margin, rounded up to a
-// 30 s multiple = 60 s (the old manual kill was 180 s, far above the observed
-// max); the case budget is the deadline + 30 s = 90 s.
+// 30 s multiple = 60 s (the old manual kill on main was 180 s, far above the
+// observed max; main's case budget was 240 s).
+//
+// ROUND 2: a case budget must exceed the SUM of every wait that can run
+// serially in it. A case here runs `newSandbox()` (a doctor --fix =
+// runDoctorFix 60 s + waitForHttp 60 s) then a second `doctor --fix`
+// (60 s + 60 s), plus snapshotBeforeFix's waitForHttp 30 s, assertNoRebootstrap's
+// waitForHttp 30 s, stopManagedHarper's waitDead 20 s and the direct-spawn
+// waitForHttp 60 s — past the old 90 s (and past 240 s). Helper-internal
+// startHarper/stopHarper are bounded inside harper-lifecycle. The budget below
+// covers the serial sum for the heaviest (adopt) case plus margin.
 const CHILD_DEADLINE_MS = 60_000;
-const CASE_BUDGET_MS = 90_000;
+const CASE_BUDGET_MS = 540_000;
 
 /** Jobs this file loaded. Unloaded on afterEach and on process exit. */
 const LOADED_JOBS = new Set<{ label: string; plistPath: string }>();

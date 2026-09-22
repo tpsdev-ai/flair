@@ -33,7 +33,14 @@ const CLI = join(process.cwd(), "dist", "cli.js");
 // + the measured case work + margin, and bun's per-test timer stays out of the
 // way of the deadline's named overrun.
 const CHILD_DEADLINE_MS = 20_000;
-const CASE_BUDGET_MS = 25_000;
+// A case's budget must exceed the SUM of every wait that can run serially in it,
+// plus a margin (flair#1807 round 2). Three CLI runs need 3 x 20 s, not 25 s; a
+// bounded ops fetch plus one CLI run needs 15 s + 20 s.
+const CASE_BUDGET_MS = 25_000;            // one CLI run
+const THREE_CLI_CASE_BUDGET_MS = 75_000;  // three CLI runs (3 x CHILD_DEADLINE_MS + 15 s margin)
+const FETCH_PLUS_CLI_CASE_BUDGET_MS = 45_000; // HARPER_OP_TIMEOUT_MS + CHILD_DEADLINE_MS + 10 s margin
+/** The ops-API fetch deadline — the one stage that had NO bound at all. */
+const HARPER_OP_TIMEOUT_MS = 15_000;
 const ADMIN_PASS = "test123"; // matches harper-lifecycle's seeded admin pass
 const AGENT_A = "fleet-doctor-agent-a";
 const LEGACY_STALE_ID = "fleet-doctor-agent-old";
@@ -94,6 +101,17 @@ const opsPort = () => new URL(harper.opsURL).port;
 // The exact package.json this repo's resolveVersion() (resources/Presence.ts)
 // reads at runtime — Harper is spawned with cwd: process.cwd() (this
 // worktree root), so this is the SAME file the running server resolves.
+/** A bounded, NAMED ops fetch — a hang here is reported by the deadline. */
+async function fetchOpsWithDeadline(url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(HARPER_OP_TIMEOUT_MS) });
+  } catch (err) {
+    throw new Error(
+      `ops request to ${url} did not answer within ${HARPER_OP_TIMEOUT_MS} ms: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
 const REAL_FLAIR_VERSION: string = JSON.parse(
   readFileSync(join(process.cwd(), "package.json"), "utf-8"),
 ).version;
@@ -132,7 +150,7 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     expect(out).not.toContain("stale");
     // We passed --agent with a real key → versions must NOT be hidden.
     expect(out).not.toContain("hidden");
-  }, CASE_BUDGET_MS);
+  }, THREE_CLI_CASE_BUDGET_MS);
 
   test("doctor without --agent: auto-iterates the local key (flair#722) — versions are NOT hidden", async () => {
     // cliHome already has AGENT_A's key on disk from the "agent add" call
@@ -208,7 +226,7 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     // version by design — there's no way to make a live heartbeat report an
     // old version other than actually running an old build).
     const auth = "Basic " + Buffer.from(`admin:${ADMIN_PASS}`).toString("base64");
-    const seedRes = await fetch(harper.opsURL, {
+    const seedRes = await fetchOpsWithDeadline(harper.opsURL, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: auth },
       body: JSON.stringify({
@@ -243,7 +261,7 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     expect(oldIdx).toBeGreaterThan(-1);
     expect(currentIdx).toBeGreaterThan(-1);
     expect(oldIdx).toBeLessThan(currentIdx);
-  }, CASE_BUDGET_MS);
+  }, FETCH_PLUS_CLI_CASE_BUDGET_MS);
 
   test("natural-presence: a stale-activity instance renders 'offline' with its last-known activity, not a live label", async () => {
     // Seed a row with a CURRENT version (not version-stale) but a long-stale
@@ -253,7 +271,7 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     const STALE_ACT_ID = "fleet-doctor-agent-stale-activity";
     const staleAt = Date.now() - 13 * 24 * 60 * 60 * 1000;
     const auth = "Basic " + Buffer.from(`admin:${ADMIN_PASS}`).toString("base64");
-    const seedRes = await fetch(harper.opsURL, {
+    const seedRes = await fetchOpsWithDeadline(harper.opsURL, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: auth },
       body: JSON.stringify({
@@ -280,5 +298,5 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     expect(line).toContain("offline");
     // Last-known activity is shown as "(was: debugging)", never a live label.
     expect(line).toContain("was: debugging");
-  }, CASE_BUDGET_MS);
+  }, FETCH_PLUS_CLI_CASE_BUDGET_MS);
 });
