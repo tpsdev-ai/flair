@@ -48,6 +48,14 @@ import {
 } from "../../src/lib/http-bind.ts";
 import { unescapeXml } from "../../src/lib/xml-escape.ts";
 
+// flair#1807: the child's OWN deadline + a per-case budget. The only CLI spawn
+// here is the §3 e2e `flair init`, which makes TWO spawnSyncs in ONE case; the
+// per-case budget must exceed their SUM (flair#1807 round 2), so the e2e case
+// gets its own constant = 2 x CHILD_DEADLINE_MS + margin.
+const CHILD_DEADLINE_MS = 20_000;
+const CASE_BUDGET_MS = 25_000;
+const E2E_TWO_INIT_CASE_BUDGET_MS = 45_000;
+
 /** Extract the HARPER_SET_CONFIG payload from a plist and decode the XML entities. */
 function setConfigOf(plist: string): any {
   const raw = plist.split("<key>HARPER_SET_CONFIG</key><string>")[1].split("</string>")[0];
@@ -353,6 +361,9 @@ describe("§3 httpBind survives a wholesale config rewrite", () => {
         cwd: join(import.meta.dir, "..", ".."),
         env,
         encoding: "utf8",
+        // flair#1807: the child's OWN deadline, so a hung `flair init` is
+        // reported by the deadline (and named) rather than by bun's timer.
+        timeout: CHILD_DEADLINE_MS,
       });
     try {
       const wide = runInit("0.0.0.0");
@@ -365,7 +376,7 @@ describe("§3 httpBind survives a wholesale config rewrite", () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
-  }, 30_000);
+  }, E2E_TWO_INIT_CASE_BUDGET_MS);
 });
 
 // ─── §4 — the direct-spawn env must be CLOSED ─────────────

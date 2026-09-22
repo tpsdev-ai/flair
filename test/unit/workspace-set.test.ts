@@ -20,7 +20,8 @@
  */
 
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "bun:test";
-import { spawn, execSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { mkdirSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -113,9 +114,11 @@ describe("flair workspace set", () => {
   let tmpDir: string;
   let keysDir: string;
 
+  // Build dist/cli.js AT MOST ONCE per lane (flair#1807) — see
+  // test/helpers/build-cli-once.ts.
   beforeAll(() => {
-    execSync("bun run build:cli", { stdio: "ignore" });
-  });
+    ensureCliBuild();
+  }, 120_000);
 
   beforeEach(() => {
     tmpDir = makeTmpDir();

@@ -20,7 +20,8 @@
  */
 
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "bun:test";
-import { spawn, execSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { mkdirSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -114,12 +115,12 @@ describe("flair orgevent", () => {
   let tmpDir: string;
   let keysDir: string;
 
-  // #1300: this hook execSyncs a full CLI build, which under parallel CI
-  // runner load has blown bun's default 5s hook budget (observed 5005ms on a
-  // PR that never touched this file). Explicit generous timeout removes the
-  // dice-roll; bun applies it per-hook (HookOptions = number | { timeout }).
+  // #1300: this hook built the CLI with execSync, which under parallel CI runner
+  // load has blown bun's default 5 s hook budget. flair#1807: the build is now
+  // shared per lane (test/helpers/build-cli-once.ts) — one build for all four
+  // racing files — and the explicit budget names a genuine build hang.
   beforeAll(() => {
-    execSync("bun run build:cli", { stdio: "ignore" });
+    ensureCliBuild();
   }, 120_000);
 
   beforeEach(() => {
