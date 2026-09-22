@@ -11,7 +11,7 @@
  * TEST-ONLY and inert in production.
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -354,19 +354,50 @@ describe("metadata preservation (temp+rename replaces the inode)", () => {
   // F2 (flair#1778 2c-i-b r2): the docblock claims setuid/setgid/sticky are
   // stripped; here is the test that fails when the strip is skipped.
   it("F2: setuid/setgid/sticky are STRIPPED from the replacement, the rest preserved", () => {
-    for (const special of [0o4755, 0o2755, 0o1755]) {
-      writeConfig("BASE");
-      // Set the special bits with the `chmod` BINARY: bun's own chmod/fchmod
-      // silently drops setuid/setgid/sticky (measured on this host), so a fixture
-      // that chmods in-process cannot even INSTALL the precondition.
-      execFileSync("chmod", [special.toString(8), cfg]);
-      expect(statSync(cfg).mode & 0o7777).toBe(special); // precondition: the bits ARE set
-      const res = withConfigCriticalSection(cfg, () => ({ write: enc("NEW") }));
-      expect(res.status).toBe("written");
-      expect(readFileSync(cfg, "utf-8")).toBe("NEW");
-      const mode = statSync(cfg).mode;
-      expect(mode & 0o7000).toBe(0); // setuid/setgid/sticky gone
-      expect(mode & 0o777).toBe(special & 0o777); // everything else preserved
+    // bun's chmod/fchmod SILENTLY DROPS setuid/setgid/sticky (measured: Linux x64,
+    // bun 1.3.10), so a bun process can neither install the precondition NOR
+    // observe the strip — an in-process fixture would pass with the strip
+    // REMOVED. node's chmod keeps the bits, so drive the SAME production
+    // primitive there, in a node child. The primitive is a leaf (node:fs,
+    // node:crypto, node:os, node:path only), so it transpiles to a standalone
+    // module with no local imports to chase.
+    const childDir = join(dir, "f2-node");
+    mkdirSync(childDir);
+    const primitiveSrc = readFileSync(
+      join(import.meta.dirname, "..", "..", "src", "lib", "config-critical-section.ts"),
+      "utf-8",
+    );
+    const modPath = join(childDir, "config-critical-section.mjs");
+    writeFileSync(modPath, new Bun.Transpiler({ loader: "ts" }).transformSync(primitiveSrc));
+    const runner = join(childDir, "runner.mjs");
+    writeFileSync(
+      runner,
+      [
+        "import { withConfigCriticalSection } from " + JSON.stringify(modPath) + ";",
+        'import { chmodSync, writeFileSync, statSync } from "node:fs";',
+        "const [cfg, ...specials] = process.argv.slice(2);",
+        "const out = [];",
+        "for (const s of specials) {",
+        '  writeFileSync(cfg, "BASE");',
+        "  chmodSync(cfg, parseInt(s, 8));",
+        "  const pre = statSync(cfg).mode & 0o7777;",
+        '  const res = withConfigCriticalSection(cfg, () => ({ write: new TextEncoder().encode("NEW") }));',
+        "  out.push({ special: s, pre: pre.toString(8), status: res.status, mode: (statSync(cfg).mode & 0o7777).toString(8) });",
+        "}",
+        'console.log("RESULT=" + JSON.stringify(out));',
+      ].join("\n"),
+      "utf-8",
+    );
+    const r = spawnSync("node", [runner, cfg, "4755", "2755", "1755"], { encoding: "utf8", timeout: 20000 });
+    expect(r.status).toBe(0);
+    const line = (r.stdout ?? "").split("\n").find((l) => l.startsWith("RESULT=")) ?? "";
+    expect(line.startsWith("RESULT=")).toBe(true);
+    const results = JSON.parse(line.slice("RESULT=".length)) as Array<{ special: string; pre: string; status: string; mode: string }>;
+    expect(results).toHaveLength(3);
+    for (const x of results) {
+      expect(x.pre).toBe(x.special); // the ORIGINAL really carried the special bits
+      expect(x.status).toBe("written");
+      expect(x.mode).toBe((parseInt(x.special, 8) & 0o777).toString(8)); // stripped, rest preserved
     }
   });
 });
