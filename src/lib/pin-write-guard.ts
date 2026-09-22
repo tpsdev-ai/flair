@@ -33,7 +33,10 @@
  * the UNPINNED spec (mcpServerSpec's `version unknown` branch) at these
  * writers, which would have turned a pinned entry into a weaker one on a
  * broken install. A writer that cannot read its own version now declines to
- * write rather than quietly unpinning.
+ * write rather than quietly unpinning. Note the row has a second,
+ * non-defect consequence (review carry-over): the same refusal also declines a
+ * legitimate FIRST install on a fresh home — nothing is created — until the
+ * version can be read again. The refused line names that.
  */
 import { isResolvedVersion } from "./mcp-spec.js";
 import { pinWriteWouldLowerOrIsUnknown } from "./upgrade-status.js";
@@ -66,7 +69,10 @@ export function decidePinWrite(input: PinWriteInput): PinWriteDecision {
   const { pkg, entry, existingText, runningVersion } = input;
 
   // Running CLI version unreadable → REFUSE by name; nothing is written.
-  // (A broken install must not silently downgrade a pinned entry to unpinned.)
+  // (A broken install must not silently downgrade a pinned entry to unpinned.
+  // The same refusal also declines a legitimate FIRST install on a fresh home:
+  // nothing is created until the version can be read again — named here so the
+  // consequence is visible, not a surprise.)
   if (!isResolvedVersion(runningVersion)) {
     return {
       action: "refuse",
@@ -74,7 +80,8 @@ export function decidePinWrite(input: PinWriteInput): PinWriteDecision {
       line:
         `${entry}: REFUSING to write — this CLI cannot read its own version ` +
         `(got "${runningVersion}"), so it cannot pin ${pkg} and must not overwrite the entry ` +
-        `unpinned; nothing written.`,
+        `unpinned; nothing written. On a fresh home this also declines a legitimate FIRST install ` +
+        `(nothing is created) until the version can be read again.`,
     };
   }
 

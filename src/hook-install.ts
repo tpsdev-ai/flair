@@ -72,7 +72,8 @@ import {
   type ContinuityHookEvent,
   type ContinuityMutationAction,
 } from "./doctor-client.js";
-import { mcpServerSpec } from "./lib/mcp-spec.js";
+import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec } from "./lib/mcp-spec.js";
+import { decidePinWrite, type PinWriteDecision } from "./lib/pin-write-guard.js";
 
 // ── harness registry ────────────────────────────────────────────────────────
 
@@ -467,6 +468,27 @@ export function installHook(opts: InstallHookOptions): HookMutationResult {
     };
   }
 
+  // flair#1778 2c-i-a3: the SessionStart command carries <pkg>@<spec> (the
+  // pin from buildHookCommand), so the write consults the ONE never-lower
+  // guard first. "update" replaces an existing entry — that entry's command is
+  // the existingText; "add" (a genuine hook install) is absent → pinned up to
+  // the running CLI, or refused when the version cannot be read.
+  const existingCommand =
+    action === "update"
+      ? (before?.hooks?.find(
+          (h) => typeof h?.command === "string" && h.command.includes(SESSION_START_HOOK_MARKER),
+        )?.command ?? null)
+      : null;
+  const decision = decidePinWrite({
+    pkg: FLAIR_MCP_PACKAGE,
+    entry: `SessionStart hook in ${path}`,
+    existingText: existingCommand,
+    runningVersion: flairCliVersion(),
+  });
+  if (decision.action !== "write") {
+    return { ok: true, path, harness, dryRun, message: decision.line!, backupPath, delta };
+  }
+
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(newConfig, null, 2) + "\n");
   return {
@@ -548,6 +570,19 @@ export function repinSessionStartHook(homeDir: string, harness: Harness): HookRe
   if (next === current) {
     return { ok: true, path, harness, action: "noop", message: `SessionStart hook in ${path} already pinned to ${mcpServerSpec()}`, backupPath: null };
   }
+  // flair#1778 2c-i-a3: this EXPORTED raw writer consults the ONE never-lower
+  // guard itself, so no caller can bypass it (the owned-pins wrapper holds
+  // before calling; this is the writer-level guard). An AHEAD or not-comparable
+  // entry holds with bytes untouched; an unreadable running version refuses.
+  const decision = decidePinWrite({
+    pkg: FLAIR_MCP_PACKAGE,
+    entry: `SessionStart hook in ${path}`,
+    existingText: current,
+    runningVersion: flairCliVersion(),
+  });
+  if (decision.action !== "write") {
+    return { ok: true, path, harness, action: "skip", message: decision.line!, backupPath: null };
+  }
   let backupPath: string | null = null;
   try {
     backupPath = takeBackup(path);
@@ -574,7 +609,12 @@ export interface UninstallHookOptions {
 /** Symmetric removal — deletes ONLY our hook entry (found the same way
  *  install finds it: SESSION_START_HOOK_MARKER substring match), never
  *  touches unrelated hooks/keys. A no-op (ok:true, action "noop") when
- *  nothing is installed — never creates a file that didn't already exist. */
+ *  nothing is installed — never creates a file that didn't already exist.
+ *
+ *  NOT a version writer (flair#1778 2c-i-a3): it only SPLICES OUT our entry —
+ *  no version-carrying spec is written, and every other byte (a sibling hook's
+ *  pin included) is preserved — so it carries no version and cannot lower one,
+ *  which is why it needs no guard. */
 export function uninstallHook(opts: UninstallHookOptions): HookMutationResult {
   const { homeDir, harness } = opts;
   const dryRun = !!opts.dryRun;
@@ -970,7 +1010,11 @@ export function installContinuityHooks(opts: InstallHookOptions): ContinuityMuta
     };
   }
 
-  const { changed, actions, newConfig } = computeContinuityHookInstall(read.parsed ?? {}, agentId, flairUrl);
+  const { changed, actions, newConfig, decision } = computeContinuityHookInstall(read.parsed ?? {}, agentId, flairUrl);
+  if (decision) {
+    // The never-lower guard held or refused: nothing is written, bytes as read.
+    return { ok: true, path, harness, dryRun, message: decision.line!, backupPath, actions };
+  }
   if (!changed) {
     return { ok: true, path, harness, dryRun, message: `continuity capture hooks already current in ${path}`, backupPath, actions };
   }
@@ -985,7 +1029,11 @@ export function installContinuityHooks(opts: InstallHookOptions): ContinuityMuta
 }
 
 /** Symmetric removal of the continuity pair — only ours, everything else in
- *  the file left untouched. A no-op when nothing is installed. */
+ *  the file left untouched. A no-op when nothing is installed.
+ *
+ *  NOT a version writer (flair#1778 2c-i-a3): like uninstallHook it only
+ *  deletes our entries and preserves every other byte, so it cannot lower a
+ *  pin and needs no guard. */
 export function uninstallContinuityHooks(opts: UninstallHookOptions): ContinuityMutationResult {
   const { homeDir, harness } = opts;
   const dryRun = !!opts.dryRun;

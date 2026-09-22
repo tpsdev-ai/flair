@@ -664,12 +664,17 @@ function _wirePi(env: WireEnv): { ok: boolean; message: string } {
     //     one holds, so a single hold/refuse wins the group;
     //   • neither → ABSENT (null): an unreadable version REFUSES rather than
     //     creating an unpinned entry.
-    const pinTexts: Array<{ text: string | null; entry: string }> =
-      entrySource !== null
-        ? [{ text: entrySource, entry: `pi packages entry in ${display}` }]
-        : movedSources.length > 0
-          ? movedSources.map((text) => ({ text, entry: `pi "extensions" entry in ${display}` }))
-          : [{ text: null, entry: `pi packages entry in ${display}` }];
+    const pinTexts: Array<{ text: string | null; entry: string }> = [];
+    if (entrySource !== null) pinTexts.push({ text: entrySource, entry: `pi packages entry in ${display}` });
+    // flair#1778 2c-i-a3 (pi decoy, noted by both a2 reviewers): when a packages
+    // entry EXISTS *and* a misplaced `npm:` source sits under extensions, the
+    // old shape consulted only the packages entry and DROPPED the extension
+    // pin. Decide on BOTH — the highest comparable governs and any
+    // non-comparable holds — so the move can never lower a misplaced pin.
+    for (const text of movedSources) {
+      pinTexts.push({ text, entry: `pi "extensions" entry in ${display}` });
+    }
+    if (pinTexts.length === 0) pinTexts.push({ text: null, entry: `pi packages entry in ${display}` });
     let held: PinWriteDecision | null = null;
     for (const { text, entry } of pinTexts) {
       const decision = decidePinWrite({

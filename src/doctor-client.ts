@@ -32,10 +32,12 @@ import {
   type ClientId,
   type PiSettingsScan,
 } from "./install/clients.js";
-import { FLAIR_MCP_PACKAGE, mcpServerSpec } from "./lib/mcp-spec.js";
+import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec } from "./lib/mcp-spec.js";
+import { decidePinWrite, type PinWriteDecision } from "./lib/pin-write-guard.js";
 import {
   decodeWiringSpec,
   decodeWiringSpecs,
+  isComparableWiringPin,
   wiringPinString,
   type WiringSpec,
 } from "./lib/wiring-spec.js";
@@ -257,6 +259,15 @@ export function isFlairHookCommand(command: string): boolean {
 export const CONTINUITY_CAPTURE_HOOK_MARKER = "flair-continuity-capture";
 
 /**
+ * The npx invocation of the continuity marker — pinned (`@tpsdev-ai/flair-mcp@<v>`)
+ * or the unpinned form. Used by the continuity report so BOTH the pinned form
+ * (a fresh provision, flair#1778 2c-i-a3) and the older unpinned form read as
+ * the current shape, while an unsilenced / non-`-p` hand-edit still reads stale.
+ */
+const CONTINUITY_INVOCATION_RE =
+  /npx -y -p @tpsdev-ai\/flair-mcp(?:@[^\s"']+)? flair-continuity-capture/;
+
+/**
  * The PostToolUse matcher written alongside our hook entry — the EXACT
  * mutating-tool allowlist the capture binary enforces internally
  * (packages/flair-mcp/src/continuity.ts's MUTATING_TOOLS: Write/Edit/
@@ -272,8 +283,18 @@ export const CONTINUITY_POST_TOOL_USE_MATCHER = "Write|Edit|NotebookEdit|Bash";
  * (PostToolUse and Stop run the same binary; the payload's hook_event_name
  * tells it which fired). Same strict value allow-list as the SessionStart
  * builder — throws rather than emitting a quoted approximation.
+ *
+ * `pin` is the version the entry's OWN pin state calls for (flair#1778 2c-i-a3,
+ * continuity-preserve): a concrete version re-emits it verbatim so a repair
+ * never UNPINS a pinned entry, and `null`/omitted keeps the pre-#1143 unpinned
+ * form an unpinned entry already has. A fresh (absent) entry is provisioned
+ * pinned to the running CLI by the caller, matching today's MCP policy.
  */
-export function buildContinuityCaptureHookCommand(agentId: string, flairUrl?: string): string {
+export function buildContinuityCaptureHookCommand(
+  agentId: string,
+  flairUrl?: string,
+  pin?: string | null,
+): string {
   if (!isHookCommandValueSafe(agentId)) {
     throw new Error(
       `agent id '${agentId}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`,
@@ -285,7 +306,8 @@ export function buildContinuityCaptureHookCommand(agentId: string, flairUrl?: st
     );
   }
   const env = flairUrl ? `FLAIR_AGENT_ID=${agentId} FLAIR_URL=${flairUrl}` : `FLAIR_AGENT_ID=${agentId}`;
-  const invocation = `${env} npx -y -p @tpsdev-ai/flair-mcp ${CONTINUITY_CAPTURE_HOOK_MARKER}`;
+  const spec = pin ? `@tpsdev-ai/flair-mcp@${pin}` : "@tpsdev-ai/flair-mcp";
+  const invocation = `${env} npx -y -p ${spec} ${CONTINUITY_CAPTURE_HOOK_MARKER}`;
   return `sh -c '${invocation} >/dev/null 2>/dev/null || true'`;
 }
 
@@ -357,7 +379,7 @@ function continuityEventReport(config: any, event: ContinuityHookEvent): Continu
   const matcher: string | undefined = typeof found.group?.matcher === "string" ? found.group.matcher : undefined;
   const shapeOk =
     hook?.type === "command" &&
-    command.includes(`npx -y -p @tpsdev-ai/flair-mcp ${CONTINUITY_CAPTURE_HOOK_MARKER}`) &&
+    CONTINUITY_INVOCATION_RE.test(command) &&
     hookCommandIsSilenced(command);
   const matcherOk = event !== "PostToolUse" || matcher === CONTINUITY_POST_TOOL_USE_MATCHER;
   return { present: true, command, matcher, currentForm: shapeOk && matcherOk };
@@ -391,6 +413,45 @@ export function checkContinuityCaptureHooks(homeDir: string, settingsPath?: stri
 
 export type ContinuityMutationAction = "add" | "update" | "noop";
 
+export interface ContinuityHookInstall {
+  changed: boolean;
+  actions: Record<ContinuityHookEvent, ContinuityMutationAction>;
+  newConfig: any;
+  /** The never-lower guard's verdict for the entry(ies) about to be replaced.
+   *  Non-null → NO write may occur; callers surface `line` and leave the bytes
+   *  as read. null → every arm is a permitted write. */
+  decision: PinWriteDecision | null;
+}
+
+/**
+ * The never-lower decision for ONE continuity event's entry, in
+ * continuity-preserve mode (flair#1778 2c-i-a3).
+ *
+ * `decidePinWrite` (the SAME a2 primitive — no second comparison idiom here) is
+ * consulted for EVERY arm:
+ *   • hold / refuse   → propagated verbatim (an AHEAD pin, a range/tag/
+ *                       unsupported spec, or an unreadable running version);
+ *   • write, absent   → the running CLI's version (provision pinned to it,
+ *                       today's MCP policy);
+ *   • write, existing → the ENTRY'S OWN pin state, preserved — a pinned entry
+ *                       keeps its version (a repair never UNPINS it: Kern's
+ *                       finding), an unpinned entry stays unpinned. Continuity
+ *                       never repins a BEHIND entry UP; it repairs shape only.
+ */
+function decideContinuityWrite(existingCommand: string | null, entryLabel: string): PinWriteDecision {
+  const decision = decidePinWrite({
+    pkg: FLAIR_MCP_PACKAGE,
+    entry: entryLabel,
+    existingText: existingCommand,
+    runningVersion: flairCliVersion(),
+  });
+  if (decision.action !== "write") return decision;
+  if (existingCommand === null) return decision; // absent → provision at the running CLI
+  const spec = decodeWiringSpec(existingCommand, FLAIR_MCP_PACKAGE);
+  if (isComparableWiringPin(spec)) return { action: "write", pin: wiringPinString(spec), line: null };
+  return { action: "write", pin: null, line: null }; // unpinned → repair, stay unpinned
+}
+
 /**
  * Pure merge of the continuity pair into a parsed settings object — the ONE
  * mutation core both write paths (`flair doctor --fix` via
@@ -400,21 +461,39 @@ export type ContinuityMutationAction = "add" | "update" | "noop";
  * groups and keys are preserved byte-identical; a group we don't own keeps
  * its matcher (our binary's internal allowlist still filters — the matcher is
  * an efficiency, not the control).
+ *
+ * CONTINUITY-PRESERVE (flair#1778 2c-i-a3): the version written is the entry's
+ * OWN pin state, so repairing a pinned entry never silently unpins it, and the
+ * a2 never-lower guard is consulted on every entry the write would replace.
+ * A hold/refuse on EITHER event yields `decision` set and the ORIGINAL config
+ * returned, so both arrays stay byte-identical.
  */
 export function computeContinuityHookInstall(
   config: any,
   agentId: string,
   flairUrl?: string,
-): { changed: boolean; actions: Record<ContinuityHookEvent, ContinuityMutationAction>; newConfig: any } {
-  const command = buildContinuityCaptureHookCommand(agentId, flairUrl);
-  const newConfig = JSON.parse(JSON.stringify(config ?? {}));
+): ContinuityHookInstall {
+  const original = config ?? {};
+  const newConfig = JSON.parse(JSON.stringify(original));
   const actions = { PostToolUse: "noop", Stop: "noop" } as Record<ContinuityHookEvent, ContinuityMutationAction>;
   let changed = false;
+  let decision: PinWriteDecision | null = null;
 
   newConfig.hooks = newConfig.hooks && typeof newConfig.hooks === "object" && !Array.isArray(newConfig.hooks) ? newConfig.hooks : {};
 
   for (const event of CONTINUITY_HOOK_EVENTS) {
     const existing = findContinuityEntry(newConfig, event);
+    const existingCommand =
+      existing && typeof existing.group?.hooks?.[existing.hookIndex]?.command === "string"
+        ? (existing.group.hooks[existing.hookIndex].command as string)
+        : null;
+    const eventDecision = decideContinuityWrite(existingCommand, `${event} continuity capture hook`);
+    if (eventDecision.action !== "write") {
+      if (decision === null || eventDecision.action === "refuse") decision = eventDecision;
+      continue;
+    }
+    const command = buildContinuityCaptureHookCommand(agentId, flairUrl, eventDecision.pin);
+
     if (existing) {
       const hook = existing.group.hooks[existing.hookIndex];
       const soleOwner = existing.group.hooks.length === 1;
@@ -435,7 +514,15 @@ export function computeContinuityHookInstall(
     changed = true;
   }
 
-  return { changed, actions, newConfig };
+  if (decision !== null) {
+    return {
+      changed: false,
+      actions: { PostToolUse: "noop", Stop: "noop" },
+      newConfig: original,
+      decision,
+    };
+  }
+  return { changed, actions, newConfig, decision: null };
 }
 
 /**
@@ -476,7 +563,9 @@ export function computeContinuityHookRemoval(config: any): {
  * `flair doctor --fix` write path: register (or repair to current form) the
  * continuity pair in ~/.claude/settings.json. Merge-safe read-parse-write,
  * mirroring fixSessionStartHook — creates the file if absent, refuses on a
- * file it cannot parse.
+ * file it cannot parse. The write is CONTINUITY-PRESERVE (flair#1778 2c-i-a3):
+ * it keeps each entry's own pin state and consults the never-lower guard, so a
+ * repair never unpins a pinned entry; a hold/refuse writes nothing.
  */
 export function fixContinuityCaptureHooks(
   homeDir: string,
@@ -512,7 +601,10 @@ export function fixContinuityCaptureHooks(
     let config: any = {};
     const raw = readTextFile(path);
     if (raw && raw.trim()) config = JSON.parse(raw);
-    const { changed, newConfig } = computeContinuityHookInstall(config, agentId, flairUrl);
+    const { changed, newConfig, decision } = computeContinuityHookInstall(config, agentId, flairUrl);
+    if (decision) {
+      return { ok: true, path, changed: false, message: decision.line! };
+    }
     if (!changed) {
       return { ok: true, path, changed: false, message: `continuity capture hooks already current in ${path}` };
     }
@@ -529,6 +621,10 @@ export function fixContinuityCaptureHooks(
  * Symmetric removal path (`flair doctor --fix` when disabling / `flair hook
  * uninstall --continuity`). A no-op when nothing is wired — never creates a
  * file that didn't exist, refuses on a file it cannot parse.
+ *
+ * NOT a version writer (flair#1778 2c-i-a3): it only DELETES our entries and
+ * preserves every other byte (see the merge-safe removal test) — it never
+ * writes a version-carrying spec, so it cannot lower a pin and needs no guard.
  */
 export function removeContinuityCaptureHooks(homeDir: string): { ok: boolean; path: string; message: string; changed: boolean } {
   const path = join(homeDir, ".claude", "settings.json");
@@ -913,6 +1009,10 @@ export function checkClaudeMdBootstrap(cwd: string, homeDir: string): ClaudeMdCh
  * Append the bootstrap instruction to `${cwd}/CLAUDE.md` (creating it if
  * absent). Idempotent — safe to call twice; a second call is a no-op that
  * still reports ok:true.
+ *
+ * NOT a version writer (flair#1778 2c-i-a3): it writes a CLAUDE.md prose line,
+ * not a wiring entry — the block carries no `<pkg>@<spec>`, so there is no pin
+ * to lower and nothing for the guard to decide.
  */
 export function fixClaudeMdBootstrap(cwd: string): { ok: boolean; path: string; message: string } {
   const path = join(cwd, "CLAUDE.md");
@@ -1201,6 +1301,20 @@ export function fixSessionStartHook(homeDir: string, agentId: string | undefined
     );
     if (alreadyPresent) {
       return { ok: true, path, message: `already present in ${path}` };
+    }
+
+    // flair#1778 2c-i-a3: the ADD arm is a version-carrying write (the command
+    // pins @tpsdev-ai/flair-mcp). Consult the ONE never-lower guard with an
+    // ABSENT entry — a healthy version still writes (pinned up to the running
+    // CLI), an unreadable one refuses by name and creates nothing.
+    const decision = decidePinWrite({
+      pkg: FLAIR_MCP_PACKAGE,
+      entry: `SessionStart hook in ${path}`,
+      existingText: null,
+      runningVersion: flairCliVersion(),
+    });
+    if (decision.action !== "write") {
+      return { ok: false, path, message: decision.line! };
     }
 
     config.hooks.SessionStart.push({
@@ -1514,6 +1628,19 @@ export function upgradeSessionStartHookCommand(homeDir: string, settingsPath?: s
             changed: false,
             message: `the SessionStart hook in ${path} is not the command Flair wrote — leaving it untouched`,
           };
+        }
+        // flair#1778 2c-i-a3: the repair rewrites the entry to a version-
+        // carrying command, so it consults the never-lower guard first. A hold
+        // (AHEAD / not comparable) or a refuse (unreadable running version)
+        // writes nothing.
+        const decision = decidePinWrite({
+          pkg: FLAIR_MCP_PACKAGE,
+          entry: `SessionStart hook in ${path}`,
+          existingText: hook.command,
+          runningVersion: flairCliVersion(),
+        });
+        if (decision.action !== "write") {
+          return { ok: false, path, changed: false, message: decision.line! };
         }
         const next = buildSessionStartHookCommand(legacy.agentId, legacy.flairUrl, {
           harness: hookHarnessFromSettingsPath(path),
