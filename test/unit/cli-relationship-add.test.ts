@@ -29,6 +29,7 @@ import { mkdirSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import nacl from "tweetnacl";
+import { childOverranDeadline } from "../helpers/child-deadline.js";
 
 // flair#1500: `--agent flint` is a flag-pinned identity and must sign as flint
 // (a keyless flag-pinned agent is a hard error, never an admin fallback), so the
@@ -68,14 +69,35 @@ function startMockServer(onRequest: (cap: Capture) => void): Promise<{ server: S
   });
 }
 
-function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    const child = spawn("bun", ["src/cli.ts", ...args], { cwd: ".", env });
+// flair#1807: the child's OWN deadline (a mock-server CLI run) and a per-test
+// budget ABOVE it (deadline + 5 s for the mock server setup and assertions), so
+// a hung child is reported by the child's deadline, by name, with its output —
+// never as bun's bare per-test "timed out".
+const CHILD_DEADLINE_MS = 20_000;
+const CASE_BUDGET_MS = 25_000;
+
+function runCli(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  leg: string,
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("bun", ["src/cli.ts", ...args], { cwd: ".", env, timeout: CHILD_DEADLINE_MS });
     let out = "";
     let err = "";
     child.stdout?.on("data", (d) => (out += d.toString()));
     child.stderr?.on("data", (d) => (err += d.toString()));
-    child.on("close", (code) => resolve({ code, stdout: out, stderr: err }));
+    child.on("close", (code, signal) => {
+      if (signal !== null) {
+        reject(
+          new Error(
+            childOverranDeadline("flair CLI", leg, CHILD_DEADLINE_MS, { status: code, signal, stdout: out, stderr: err }),
+          ),
+        );
+        return;
+      }
+      resolve({ code, stdout: out, stderr: err });
+    });
   });
 }
 
@@ -87,6 +109,7 @@ describe("flair relationship add (relationship-write-path)", () => {
       const { code, stderr } = await runCli(
         ["relationship", "add", "--agent", "flint", "--subject", "nathan", "--predicate", "manages", "--object", "flair"],
         { ...process.env, HOME: tmpHome, FLAIR_ADMIN_PASS: undefined, HDB_ADMIN_PASSWORD: undefined, FLAIR_TOKEN: undefined, FLAIR_KEY_DIR: undefined, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        "canonical id + agentId",
       );
       expect(code, stderr).toBe(0);
 
@@ -100,7 +123,7 @@ describe("flair relationship add (relationship-write-path)", () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
-  });
+  }, CASE_BUDGET_MS);
 
   it("forwards --confidence/--valid-from/--valid-to/--source only when passed", async () => {
     const captures: Capture[] = [];
@@ -113,6 +136,7 @@ describe("flair relationship add (relationship-write-path)", () => {
           "--confidence", "0.8", "--valid-from", "2026-01-01T00:00:00Z", "--source", "mem-123",
         ],
         { ...process.env, HOME: tmpHome, FLAIR_ADMIN_PASS: undefined, HDB_ADMIN_PASSWORD: undefined, FLAIR_TOKEN: undefined, FLAIR_KEY_DIR: undefined, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        "optional fields forwarded",
       );
       expect(code, stderr).toBe(0);
       const put = captures.find((c) => c.method === "PUT" && c.path?.startsWith("/Relationship/"));
@@ -123,7 +147,7 @@ describe("flair relationship add (relationship-write-path)", () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
-  });
+  }, CASE_BUDGET_MS);
 
   it("re-running with the SAME triple writes to the SAME canonical id (upsert, not a new row)", async () => {
     const captures: Capture[] = [];
@@ -132,10 +156,12 @@ describe("flair relationship add (relationship-write-path)", () => {
       await runCli(
         ["relationship", "add", "--agent", "flint", "--subject", "nathan", "--predicate", "manages", "--object", "flair", "--confidence", "1.0"],
         { ...process.env, HOME: tmpHome, FLAIR_ADMIN_PASS: undefined, HDB_ADMIN_PASSWORD: undefined, FLAIR_TOKEN: undefined, FLAIR_KEY_DIR: undefined, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        "same-triple upsert first",
       );
       await runCli(
         ["relationship", "add", "--agent", "flint", "--subject", "nathan", "--predicate", "manages", "--object", "flair", "--confidence", "0.5"],
         { ...process.env, HOME: tmpHome, FLAIR_ADMIN_PASS: undefined, HDB_ADMIN_PASSWORD: undefined, FLAIR_TOKEN: undefined, FLAIR_KEY_DIR: undefined, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        "same-triple upsert second",
       );
       const puts = captures.filter((c) => c.method === "PUT" && c.path?.startsWith("/Relationship/"));
       expect(puts).toHaveLength(2);
@@ -143,7 +169,7 @@ describe("flair relationship add (relationship-write-path)", () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
-  });
+  }, CASE_BUDGET_MS);
 
   it("a DIFFERENT triple (different predicate) writes to a DIFFERENT canonical id", async () => {
     const captures: Capture[] = [];
@@ -152,10 +178,12 @@ describe("flair relationship add (relationship-write-path)", () => {
       await runCli(
         ["relationship", "add", "--agent", "flint", "--subject", "nathan", "--predicate", "manages", "--object", "flair"],
         { ...process.env, HOME: tmpHome, FLAIR_ADMIN_PASS: undefined, HDB_ADMIN_PASSWORD: undefined, FLAIR_TOKEN: undefined, FLAIR_KEY_DIR: undefined, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        "different-triple first",
       );
       await runCli(
         ["relationship", "add", "--agent", "flint", "--subject", "nathan", "--predicate", "advises", "--object", "flair"],
         { ...process.env, HOME: tmpHome, FLAIR_ADMIN_PASS: undefined, HDB_ADMIN_PASSWORD: undefined, FLAIR_TOKEN: undefined, FLAIR_KEY_DIR: undefined, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        "different-triple second",
       );
       const puts = captures.filter((c) => c.method === "PUT" && c.path?.startsWith("/Relationship/"));
       expect(puts).toHaveLength(2);
@@ -163,7 +191,7 @@ describe("flair relationship add (relationship-write-path)", () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
-  });
+  }, CASE_BUDGET_MS);
 
   it("DRIFT GUARD: the CLI's local canonical-id algorithm matches flair-client's canonicalRelationshipId() exactly", async () => {
     const captures: Capture[] = [];
@@ -172,6 +200,7 @@ describe("flair relationship add (relationship-write-path)", () => {
       const { code, stderr } = await runCli(
         ["relationship", "add", "--agent", "flint", "--subject", "Nathan", "--predicate", "MANAGES", "--object", "Flair"],
         { ...process.env, HOME: tmpHome, FLAIR_ADMIN_PASS: undefined, HDB_ADMIN_PASSWORD: undefined, FLAIR_TOKEN: undefined, FLAIR_KEY_DIR: undefined, FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        "drift-guard client parity",
       );
       expect(code, stderr).toBe(0);
       const put = captures.find((c) => c.method === "PUT" && c.path?.startsWith("/Relationship/"));
@@ -182,5 +211,5 @@ describe("flair relationship add (relationship-write-path)", () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
-  });
+  }, CASE_BUDGET_MS);
 });

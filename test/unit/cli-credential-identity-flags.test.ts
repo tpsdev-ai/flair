@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { program, SHARED_CREDENTIAL_FLAGS, SHARED_IDENTITY_FLAGS } from "../../src/cli";
+import { childOverranDeadline } from "../helpers/child-deadline.js";
 
 function findCommand(root: { commands: readonly { name: () => string }[] }, path: string[]): any {
   let node: any = root;
@@ -117,14 +118,35 @@ function startMockServer(onRequest: (cap: Capture) => void): Promise<{ server: S
   });
 }
 
-function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    const child = spawn("bun", ["src/cli.ts", ...args], { cwd: ".", env });
+// flair#1807: the child's OWN deadline (a mock-server CLI run) and a per-test
+// budget ABOVE it (deadline + 5 s for the mock server setup and assertions), so
+// a hung child is reported by the child's deadline, by name, with its output —
+// never as bun's bare per-test "timed out".
+const CHILD_DEADLINE_MS = 20_000;
+const CASE_BUDGET_MS = 25_000;
+
+function runCli(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  leg: string,
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("bun", ["src/cli.ts", ...args], { cwd: ".", env, timeout: CHILD_DEADLINE_MS });
     let out = "";
     let err = "";
     child.stdout?.on("data", (d) => (out += d.toString()));
     child.stderr?.on("data", (d) => (err += d.toString()));
-    child.on("close", (code) => resolve({ code, stdout: out, stderr: err }));
+    child.on("close", (code, signal) => {
+      if (signal !== null) {
+        reject(
+          new Error(
+            childOverranDeadline("flair CLI", leg, CHILD_DEADLINE_MS, { status: code, signal, stdout: out, stderr: err }),
+          ),
+        );
+        return;
+      }
+      resolve({ code, stdout: out, stderr: err });
+    });
   });
 }
 
@@ -133,23 +155,25 @@ describe("flair#1106 — memory add accepts the shared flags for real", () => {
     const r = await runCli(
       ["memory", "add", "hello", "--agent", "krais", "--admin-pass-file", "/no/such/admin-pass"],
       { ...process.env, FLAIR_AGENT_ID: "" },
+      "admin-pass-file missing",
     );
     const text = `${r.stderr}${r.stdout}`;
     expect(text.toLowerCase()).not.toMatch(/unknown option/);
     expect(text).toMatch(/--admin-pass-file/);
     expect(r.code).not.toBe(0);
-  });
+  }, CASE_BUDGET_MS);
 
   it("does not treat --agent as a commander requiredOption when FLAIR_AGENT_ID is unset", async () => {
     const r = await runCli(
       ["memory", "add", "hello"],
       { ...process.env, FLAIR_AGENT_ID: "" },
+      "agent not a commander requiredOption",
     );
     const text = `${r.stderr}${r.stdout}`;
     expect(text).not.toMatch(/required option '--agent/);
     expect(text).toMatch(/--agent <id> required \(or set FLAIR_AGENT_ID\)/);
     expect(r.code).not.toBe(0);
-  });
+  }, CASE_BUDGET_MS);
 
   it("writes the memory under FLAIR_AGENT_ID when --agent is omitted", async () => {
     const captures: Capture[] = [];
@@ -158,6 +182,7 @@ describe("flair#1106 — memory add accepts the shared flags for real", () => {
       const { code, stderr, stdout } = await runCli(
         ["memory", "add", "env-identity memory"],
         { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "krais" },
+        "env identity write",
       );
       expect(code).toBe(0);
       expect(`${stderr}${stdout}`).not.toMatch(/required option '--agent/);
@@ -168,7 +193,7 @@ describe("flair#1106 — memory add accepts the shared flags for real", () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
-  });
+  }, CASE_BUDGET_MS);
 
   it("accepts --admin-pass-file and sends Basic auth from the file (shared credential path)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "flair-1106-"));
@@ -182,6 +207,7 @@ describe("flair#1106 — memory add accepts the shared flags for real", () => {
       const { code, stderr, stdout } = await runCli(
         ["memory", "add", "file-cred memory", "--admin-pass-file", passFile],
         { ...process.env, FLAIR_URL: url, FLAIR_AGENT_ID: "krais", FLAIR_ADMIN_PASS: "" },
+        "admin-pass-file Basic auth",
       );
       expect(`${stderr}${stdout}`).not.toMatch(/unknown option/);
       expect(code).toBe(0);
@@ -195,5 +221,5 @@ describe("flair#1106 — memory add accepts the shared flags for real", () => {
       await new Promise<void>((r) => server.close(() => r()));
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, CASE_BUDGET_MS);
 });

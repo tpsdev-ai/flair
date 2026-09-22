@@ -34,6 +34,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer, IncomingMessage, ServerResponse, Server } from "node:http";
 import nacl from "tweetnacl";
+import { childOverranDeadline } from "../helpers/child-deadline.js";
 
 import {
   ENTITY_TYPES as CLI_ENTITY_TYPES,
@@ -53,6 +54,13 @@ const REPO_ROOT = join(import.meta.dirname ?? __dirname, "..", "..");
 /** Every assertion on the improved error message, in one place. */
 const FORMAT_SNIPPET = "type:value";
 const TYPE_LIST_SNIPPET = "valid types: repo, issue, customer, subsystem, agent, person";
+
+// flair#1807: the child's OWN deadline (a mock-server CLI run) and a per-test
+// budget ABOVE it (deadline + 5 s for the mock server setup and assertions), so
+// a hung child is reported by the child's deadline, by name, with its output —
+// never as bun's bare per-test "timed out".
+const CHILD_DEADLINE_MS = 20_000;
+const CASE_BUDGET_MS = 25_000;
 
 type Capture = { method?: string; path?: string; body?: any };
 
@@ -107,18 +115,33 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  function runCli(args: string[], env: Record<string, string>): Promise<{ code: number | null; stdout: string; stderr: string }> {
-    return new Promise((resolve) => {
+  function runCli(
+    args: string[],
+    env: Record<string, string>,
+    leg: string,
+  ): Promise<{ code: number | null; stdout: string; stderr: string }> {
+    return new Promise((resolve, reject) => {
       const child = spawn("bun", ["src/cli.ts", ...args], {
         cwd: REPO_ROOT,
         // HOME → tmp dir: no invocation may read or write the real ~/.flair.
         env: { ...process.env, HOME: tmpDir, FLAIR_KEY_DIR: keysDir, ...env },
+        timeout: CHILD_DEADLINE_MS,
       });
       let out = "";
       let err = "";
       child.stdout?.on("data", (d) => (out += d.toString()));
       child.stderr?.on("data", (d) => (err += d.toString()));
-      child.on("close", (code) => resolve({ code, stdout: out, stderr: err }));
+      child.on("close", (code, signal) => {
+        if (signal !== null) {
+          reject(
+            new Error(
+              childOverranDeadline("flair CLI", leg, CHILD_DEADLINE_MS, { status: code, signal, stdout: out, stderr: err }),
+            ),
+          );
+          return;
+        }
+        resolve({ code, stdout: out, stderr: err });
+      });
     });
   }
 
@@ -139,6 +162,7 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
         ["memory", "add", "attention-plane memory", "--agent", "krais", "--admin-pass", "test-admin",
          "--entities", "repo:tpsdev-ai/flair, issue:tpsdev-ai/flair#1288"],
         { FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        "memory add entities",
       );
       expect(code).toBe(0);
       const put = captures.find((c) => c.method === "PUT" && c.path?.startsWith("/Memory/"));
@@ -147,7 +171,7 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
     } finally {
       await stopServer(server);
     }
-  });
+  }, CASE_BUDGET_MS);
 
   it("memory add: omitting --entities leaves the field off the record (no regression)", async () => {
     const captures: Capture[] = [];
@@ -156,6 +180,7 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
       const { code } = await runCli(
         ["memory", "add", "a plain memory", "--agent", "krais", "--admin-pass", "test-admin"],
         { FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        "memory add no entities",
       );
       expect(code).toBe(0);
       const put = captures.find((c) => c.method === "PUT" && c.path?.startsWith("/Memory/"));
@@ -164,7 +189,7 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
     } finally {
       await stopServer(server);
     }
-  });
+  }, CASE_BUDGET_MS);
 
   it("memory add: an unknown entity type is rejected with the format + type-set message, before any write", async () => {
     const captures: Capture[] = [];
@@ -173,6 +198,7 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
       const { code, stderr } = await runCli(
         ["memory", "add", "content", "--agent", "krais", "--admin-pass", "test-admin", "--entities", "repo:tpsdev-ai/flair,project:foo"],
         { FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        "memory add unknown type",
       );
       expect(code).toBe(1);
       expectImprovedMessage(stderr, "project:foo");
@@ -180,7 +206,7 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
     } finally {
       await stopServer(server);
     }
-  });
+  }, CASE_BUDGET_MS);
 
   it("memory add: a colon-less value is rejected with the same message", async () => {
     const captures: Capture[] = [];
@@ -189,6 +215,7 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
       const { code, stderr } = await runCli(
         ["memory", "add", "content", "--agent", "krais", "--admin-pass", "test-admin", "--entities", "not-a-vocab-string"],
         { FLAIR_URL: url, FLAIR_AGENT_ID: "" },
+        "memory add colon-less",
       );
       expect(code).toBe(1);
       expectImprovedMessage(stderr, "not-a-vocab-string");
@@ -196,7 +223,7 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
     } finally {
       await stopServer(server);
     }
-  });
+  }, CASE_BUDGET_MS);
 
   // ── flair workspace set ───────────────────────────────────────────────────
 
@@ -209,6 +236,7 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
       const { code } = await runCli(
         ["workspace", "set", "--ref", "feat/1288-entities-cli", "--entities", "repo:tpsdev-ai/flair,subsystem:attention_plane"],
         { FLAIR_AGENT_ID: agentId, FLAIR_URL: url },
+        "workspace set entities",
       );
       expect(code).toBe(0);
       const put = captures.find((c) => c.method === "PUT" && c.path?.startsWith("/WorkspaceState/"));
@@ -218,7 +246,7 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
     } finally {
       await stopServer(server);
     }
-  });
+  }, CASE_BUDGET_MS);
 
   it("workspace set: a malformed entity is rejected with the format + type-set message, before any write", async () => {
     const agentId = "test-agent-ws";
@@ -229,6 +257,7 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
       const { code, stderr } = await runCli(
         ["workspace", "set", "--ref", "feat/x", "--entities", "repo:UPPER/Case"],
         { FLAIR_AGENT_ID: agentId, FLAIR_URL: url },
+        "workspace set malformed",
       );
       expect(code).toBe(1);
       expectImprovedMessage(stderr, "repo:UPPER/Case");
@@ -236,7 +265,7 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
     } finally {
       await stopServer(server);
     }
-  });
+  }, CASE_BUDGET_MS);
 
   // ── flair orgevent ────────────────────────────────────────────────────────
 
@@ -250,6 +279,7 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
         ["orgevent", "--kind", "coord.claim", "--summary", "claiming the attention plane",
          "--entities", "repo:tpsdev-ai/flair,agent:flint"],
         { FLAIR_AGENT_ID: agentId, FLAIR_URL: url },
+        "orgevent entities",
       );
       expect(code).toBe(0);
       const put = captures.find((c) => c.method === "PUT" && c.path?.startsWith("/OrgEvent/"));
@@ -259,7 +289,7 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
     } finally {
       await stopServer(server);
     }
-  });
+  }, CASE_BUDGET_MS);
 
   it("orgevent: a malformed entity is rejected with the format + type-set message, before any write", async () => {
     const agentId = "test-agent-oe";
@@ -270,6 +300,7 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
       const { code, stderr } = await runCli(
         ["orgevent", "--kind", "status", "--summary", "hi", "--entities", "issue:tpsdev-ai/flair#0"],
         { FLAIR_AGENT_ID: agentId, FLAIR_URL: url },
+        "orgevent malformed",
       );
       expect(code).toBe(1);
       expectImprovedMessage(stderr, "issue:tpsdev-ai/flair#0");
@@ -277,7 +308,7 @@ describe("--entities on the CLI write commands (flair#1288)", () => {
     } finally {
       await stopServer(server);
     }
-  });
+  }, CASE_BUDGET_MS);
 });
 
 // ── the inlined CLI copy is pinned to the canonical module ──────────────────
