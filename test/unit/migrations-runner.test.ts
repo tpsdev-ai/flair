@@ -18,6 +18,7 @@ const { runMigrationCycle } = await import("../../resources/migrations/runner.ts
 const { MigrationRegistry } = await import("../../resources/migrations/registry.ts");
 const { readMigrationState, defaultStatePath } = await import("../../resources/migrations/state.ts");
 const { listMigrationProgress, _resetProgressForTests, getCycleStatus } = await import("../../resources/migrations/progress.ts");
+const { getMigrationStatusSnapshot } = await import("../../resources/migrations/status.ts");
 const { _resetInProcessLockForTests } = await import("../../resources/migrations/lock.ts");
 const { hashSourceFields } = await import("../../resources/migrations/source-fields.ts");
 
@@ -1105,5 +1106,78 @@ describe("runMigrationCycle — test-only batch-delay knob (FLAIR_MIGRATION_TEST
     process.env.FLAIR_MIGRATION_TEST_BATCH_DELAY_MS = "not-a-number";
     const sleeps = await runOneCycleCapturingSleeps();
     expect(sleeps).toContain(100);
+  });
+});
+
+describe("runMigrationCycle — a failed state-file write is logged and surfaced (flair#1800)", () => {
+  it("logs the WARN, keeps the migration completed, records stateFile.lastWriteError, then clears it on the next success", async () => {
+    const memory = makeStore([{ id: "m1", content: "a", agentId: "a1", stale: true }]);
+    const relationship = makeStore([]);
+    const registry = buildRegistryWith(makeDerivedOnlyMigration(memory, "fake-derived"));
+
+    // Make the write fail: a REGULAR FILE (mode 0700, so dir-safety's verify
+    // passes) at the directory the state path needs — writeSecureFile's
+    // writeFileSync then throws ENOTDIR. Deterministic for any uid, unlike a
+    // perms-based trick that root would ignore.
+    const blockedDir = join(testRoot, "blocked-state-dir");
+    writeFileSync(blockedDir, "not a directory", { mode: 0o700 });
+    const failedStatePath = join(blockedDir, "state.json");
+    const warnPrefix = `[flair-migrations] could not record fake-derived in ${failedStatePath}: `;
+
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    let errMsg = "";
+    try {
+      const ledgerEvents: unknown[] = [];
+      const result = await runMigrationCycle({
+        registry,
+        getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+        dataDir,
+        runningVersion: "0.1.0",
+        sleep: fastSleep,
+        statePath: failedStatePath,
+        ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      });
+
+      // (b) the DATA outcome is unchanged — the migration still completes.
+      expect(result.ran).toBe(true);
+      expect(memory.map.get("m1")!.stale).toBe(false);
+      expect(listMigrationProgress().find((p) => p.id === "fake-derived")?.state).toBe("completed");
+
+      // (a) the exact WARN line — VISIBLE, naming the migration id, the path and the error.
+      const warns = warnSpy.mock.calls.map((c) => String(c[0]));
+      const recordWarn = warns.find((w) => w.startsWith(warnPrefix));
+      expect(recordWarn).toBeDefined();
+      errMsg = recordWarn!.slice(warnPrefix.length);
+      expect(errMsg.length).toBeGreaterThan(0); // the err.message is present
+
+      // (c) /HealthDetail's migrations detail (via the shared snapshot) carries it.
+      const snapshot = getMigrationStatusSnapshot(dataDir);
+      expect(snapshot.stateFile.path).toBe(failedStatePath);
+      expect(snapshot.stateFile.lastWriteError?.migrationId).toBe("fake-derived");
+      expect(snapshot.stateFile.lastWriteError?.message).toBe(errMsg);
+      expect(typeof snapshot.stateFile.lastWriteError?.at).toBe("string");
+      expect(Number.isNaN(Date.parse(snapshot.stateFile.lastWriteError!.at))).toBe(false); // ISO
+      // The mismatch the issue names: in-memory says completed, the durable
+      // record is empty — and the write really did fail.
+      expect(snapshot.migrations.find((m) => m.id === "fake-derived")?.state).toBe("completed");
+      expect(existsSync(failedStatePath)).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+    }
+
+    // (d) a subsequent SUCCESSFUL write clears the record.
+    memory.map.set("m2", { id: "m2", content: "b", agentId: "a1", stale: true });
+    const result2 = await runMigrationCycle({
+      registry,
+      getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+      dataDir,
+      runningVersion: "0.2.0", // newer version → detect() runs again
+      sleep: fastSleep,
+      // no statePath override → the writable default under dataDir
+    });
+    expect(result2.ran).toBe(true);
+    const after = getMigrationStatusSnapshot(dataDir);
+    expect(after.stateFile.lastWriteError).toBeNull();
+    expect(after.stateFile.path).toBe(defaultStatePath(dataDir));
   });
 });

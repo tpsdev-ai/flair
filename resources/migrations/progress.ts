@@ -34,6 +34,55 @@ export interface CycleStatus {
 let cycleStatus: CycleStatus = { phase: "idle" };
 const progressById = new Map<string, MigrationProgress>();
 
+/**
+ * flair#1800 — the last state-file WRITE outcome, for `/HealthDetail`.
+ *
+ * `state.json` is the only DURABLE record that a migration ran;
+ * `/HealthDetail` is in-memory and resets on restart. So when a write fails and
+ * is swallowed, a completed migration becomes indistinguishable from one that
+ * never ran the moment the process restarts. The runner reports every write
+ * attempt here (`path` + the last failure) and `resources/health.ts` surfaces
+ * it, so a reader can tell "completed and recorded" from "completed, record
+ * failed".
+ *
+ * In-memory by construction (same rationale as the rest of this module): the
+ * durable source of truth is the state file itself — which is exactly what
+ * failed to update. `lastWriteError` is cleared on the next successful write.
+ */
+export interface StateFileWriteError {
+  migrationId: string;
+  /** ISO timestamp of the failed attempt. */
+  at: string;
+  message: string;
+}
+
+export interface StateFileStatus {
+  /** The resolved state path of the most recent write attempt, or null if none has run yet. */
+  path: string | null;
+  lastWriteError: StateFileWriteError | null;
+}
+
+let stateFileStatus: StateFileStatus = { path: null, lastWriteError: null };
+
+/** Records the resolved state path on each write ATTEMPT (success or failure). */
+export function noteStateWriteAttempt(path: string): void {
+  stateFileStatus.path = path;
+}
+
+/** Records a failed write; cleared by the next successful write. */
+export function noteStateWriteFailure(err: StateFileWriteError): void {
+  stateFileStatus.lastWriteError = err;
+}
+
+/** Clears the recorded failure after a successful write. */
+export function noteStateWriteSuccess(): void {
+  stateFileStatus.lastWriteError = null;
+}
+
+export function getStateFileStatus(): StateFileStatus {
+  return { path: stateFileStatus.path, lastWriteError: stateFileStatus.lastWriteError };
+}
+
 export function setCyclePhase(phase: CyclePhase, error?: string): void {
   cycleStatus = { phase, lastCycleError: error, lastCycleAt: new Date().toISOString() };
 }
@@ -101,4 +150,5 @@ export function markIdleMigrationsFailed(ids: readonly string[], reason: string)
 export function _resetProgressForTests(): void {
   progressById.clear();
   cycleStatus = { phase: "idle" };
+  stateFileStatus = { path: null, lastWriteError: null };
 }

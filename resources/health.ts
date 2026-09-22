@@ -619,6 +619,14 @@ export class HealthDetail extends Resource {
         lastCycleAt: snapshot.lastCycleAt ?? null,
         lastCycleError: snapshot.lastCycleError ?? null,
         migrations: snapshot.migrations,
+        // flair#1800: the durable record can lag the in-memory outcome — a
+        // failed state.json write is surfaced here so "completed" here does
+        // not read as "recorded". Read-only; no new endpoint.
+        // { path: string | null, lastWriteError: { migrationId, at, message } | null }
+        stateFile: {
+          path: snapshot.stateFile.path,
+          lastWriteError: snapshot.stateFile.lastWriteError,
+        },
       };
       for (const m of snapshot.migrations) {
         if (m.state === "halted" || m.state === "failed") {

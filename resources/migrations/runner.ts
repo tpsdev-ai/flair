@@ -22,9 +22,9 @@ import { createContentOnlyExport } from "./export.js";
 import { computeCorpusEnvelope, type CorpusEnvelope, type TableAccessor } from "./envelope.js";
 import { hashSourceFields, sourceFieldsFor } from "./source-fields.js";
 import { postureFor, type SnapshotScope } from "./risk-policy.js";
-import { readMigrationState, writeMigrationStateEntry, isShortCircuited, defaultStatePath } from "./state.js";
+import { readMigrationState, writeMigrationStateEntry, isShortCircuited, defaultStatePath, type MigrationStateEntry } from "./state.js";
 import { writeLedgerEvent, type LedgerDeps, type LedgerEvent } from "./ledger.js";
-import { setCyclePhase, setMigrationProgress, seedIdleProgress } from "./progress.js";
+import { setCyclePhase, setMigrationProgress, seedIdleProgress, noteStateWriteAttempt, noteStateWriteSuccess, noteStateWriteFailure } from "./progress.js";
 import { shouldRegisterSyntheticMigration } from "./synthetic-test-migration.js";
 import type { MigrationRegistry } from "./registry.js";
 import type { Migration, RiskClass, SourceTable } from "./types.js";
@@ -112,6 +112,30 @@ function resolveDeps(deps: RunnerDeps): ResolvedDeps {
 }
 
 // ─── space/snapshot sizing heuristics (overridable via RunnerDeps in future if ever needed) ──
+
+/**
+ * flair#1800 — a failed state-file write must not be silent.
+ *
+ * `state.json` is the only DURABLE record that a migration ran (`/HealthDetail`
+ * is in-memory and resets on restart), so a swallowed write makes a completed
+ * migration indistinguishable from one that never ran the moment the process
+ * restarts. This wrapper keeps the write best-effort — the data outcome is
+ * unchanged and it NEVER rethrows — but logs the failure at WARN with the
+ * migration id, the resolved state path and the error, and records it for
+ * `/HealthDetail` (progress.ts's state-file status, cleared on the next
+ * successful write).
+ */
+function recordMigrationStateEntry(path: string, id: string, entry: MigrationStateEntry): void {
+  noteStateWriteAttempt(path);
+  try {
+    writeMigrationStateEntry(path, id, entry);
+    noteStateWriteSuccess();
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    console.warn(`[flair-migrations] could not record ${id} in ${path}: ${message}`);
+    noteStateWriteFailure({ migrationId: id, at: new Date().toISOString(), message });
+  }
+}
 
 function estimateSnapshotBytes(scope: SnapshotScope, pendingCount: number): number {
   switch (scope) {
@@ -345,20 +369,17 @@ async function haltMigration(
     // already safely stopped on the pre-migration shape either way.
   }
 
-  // Deliberately NOT calling writeMigrationStateEntry with lastOutcome
-  // "halted" as completedAtVersion-bearing — isShortCircuited() only fires
+  // Deliberately NOT recording lastOutcome "halted" as
+  // completedAtVersion-bearing — isShortCircuited() only fires
   // on lastOutcome === "success", so a halted migration is retried on every
-  // subsequent boot until it clears, never permanently stuck.
-  try {
-    writeMigrationStateEntry(deps.statePath, migration.id, {
-      lastOutcome: "halted",
-      reason,
-      rowsProcessed: rowsDone,
-      rowsRemaining,
-    });
-  } catch {
-    /* best-effort — the in-memory progress + ledger event already recorded the halt */
-  }
+  // subsequent boot until it clears, never permanently stuck. A failed write
+  // is logged + surfaced (flair#1800), still best-effort.
+  recordMigrationStateEntry(deps.statePath, migration.id, {
+    lastOutcome: "halted",
+    reason,
+    rowsProcessed: rowsDone,
+    rowsRemaining,
+  });
 }
 
 /**
@@ -638,17 +659,17 @@ async function runOneMigration(
     // flip the outcome to failed — the data-safety work already completed.
   }
 
-  try {
-    writeMigrationStateEntry(deps.statePath, migration.id, {
-      completedAtVersion: deps.runningVersion,
-      completedAt: endedAt,
-      lastOutcome: "success",
-      rowsProcessed: rowsDone,
-      rowsRemaining: 0,
-    });
-  } catch {
-    /* best-effort — worst case this migration's detect() runs (cheaply) again next boot */
-  }
+  // flair#1800: best-effort, but a failure is now LOGGED and surfaced in
+  // /HealthDetail. Worst case this migration's detect() runs (cheaply) again
+  // next boot — and /HealthDetail still says "completed" while state.json
+  // never got the entry. That failure must be visible, not swallowed.
+  recordMigrationStateEntry(deps.statePath, migration.id, {
+    completedAtVersion: deps.runningVersion,
+    completedAt: endedAt,
+    lastOutcome: "success",
+    rowsProcessed: rowsDone,
+    rowsRemaining: 0,
+  });
 
   pruneMigrationSnapshots(deps.snapshotRoot);
   setMigrationProgress({ id: migration.id, rowsDone, rowsRemaining: 0, state: "completed" });

@@ -10,7 +10,7 @@
  * completed/halted outcome is still genuinely useful in that window instead
  * of reporting nothing.
  */
-import { listMigrationProgress, getCycleStatus } from "./progress.js";
+import { listMigrationProgress, getCycleStatus, getStateFileStatus, type StateFileStatus } from "./progress.js";
 import { readMigrationState, defaultStatePath } from "./state.js";
 import type { MigrationProgress, MigrationState } from "./types.js";
 
@@ -19,6 +19,13 @@ export interface MigrationStatusSnapshot {
   lastCycleError?: string;
   lastCycleAt?: string;
   migrations: MigrationProgress[];
+  /**
+   * flair#1800: the durable-record write status — the resolved state path and
+   * the last write failure (null once a write succeeds). Surfaced so
+   * `/HealthDetail` can distinguish "completed and recorded" from "completed,
+   * record failed" (the in-memory outcome does not prove the durable one).
+   */
+  stateFile: StateFileStatus;
 }
 
 export function getMigrationStatusSnapshot(dataDir: string): MigrationStatusSnapshot {
@@ -46,5 +53,6 @@ export function getMigrationStatusSnapshot(dataDir: string): MigrationStatusSnap
     lastCycleError: cycle.lastCycleError,
     lastCycleAt: cycle.lastCycleAt,
     migrations,
+    stateFile: getStateFileStatus(),
   };
 }
