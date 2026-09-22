@@ -73,24 +73,44 @@ const ADMIN_PASS = "test123";
 const SEED_IDS = ["b3b-mem-1", "b3b-mem-2", "b3b-mem-3"] as const;
 const PROMPT_RE =
   /Please enter a password|readline was closed|ERR_USE_AFTER_CLOSE|Please enter a destination for Harper|\[hidden\]/i;
-// flair#1807: the child's OWN deadline + a per-case budget, sized from CI rather
-// than guessed. Measured per-case durations in the `test-darwin-gated` job's
-// "Real-launchd doctor --fix integration" step across the last green runs with
-// readable logs: 9.5-30.6 s (this host cannot run the file — it is
-// darwin-gated). Deadline = max observed ~30.6 s + margin, rounded up to a
-// 30 s multiple = 60 s (the old manual kill on main was 180 s, far above the
-// observed max; main's case budget was 240 s).
+// flair#1807: the child's OWN deadline + PER-CASE budgets, recounted from each
+// case body against harper-lifecycle's REAL bounds (this host cannot run the
+// file — it is darwin-gated). Deadline = max observed ~30.6 s + margin, rounded
+// to 60 s (main's manual kill was 180 s; main's case budget was 240 s).
 //
-// ROUND 2: a case budget must exceed the SUM of every wait that can run
-// serially in it. A case here runs `newSandbox()` (a doctor --fix =
-// runDoctorFix 60 s + waitForHttp 60 s) then a second `doctor --fix`
-// (60 s + 60 s), plus snapshotBeforeFix's waitForHttp 30 s, assertNoRebootstrap's
-// waitForHttp 30 s, stopManagedHarper's waitDead 20 s and the direct-spawn
-// waitForHttp 60 s — past the old 90 s (and past 240 s). Helper-internal
-// startHarper/stopHarper are bounded inside harper-lifecycle. The budget below
-// covers the serial sum for the heaviest (adopt) case plus margin.
+// ROUND 3: one uniform 540 s constant did not match the cases, and a hang in a
+// LATE case hit the JOB timeout first (an anonymous cancellation). Each case's
+// budget is now its own worst-case SUM + margin. Per-wait bounds used here:
+//   startHarper          = install 20 s + awaitStartup 45 s + the two
+//                          waitForHealth calls IN PARALLEL 60 s = 125 s
+//   stopHarper           = killProcess (SIGKILL 3 s) + waitForLocksFree 5 s = 8 s
+//   adminOp (ops fetch)  = 30 s    waitForHttp = its argument
+//   waitDead             = its argument    runDoctorFix/runInit = 60 s deadline
+//   launchctl list = 5 s   launchctl unload + bootout = 10 s + 10 s = 20 s
+// Helper sums:
+//   populateDataDir     = startHarper 125 + 2 x adminOp 60 + stopHarper 8 = 193 s
+//   doctorFixToManaged  = runDoctorFix 60 + waitForHttp 60 + launchctl 5 = 125 s
+//   newSandbox          = populateDataDir 193 + doctorFixToManaged 125 = 318 s
+//   snapshotBeforeFix   = waitForHttp 30 + adminOp 30 = 60 s
+//   stopManagedHarper   = unload 20 + waitDead 20 + (list 5 + lsof 5) = 50 s
+//   directSpawnDetached = waitForHttp 60 + (list 5 + lsof 5) = 70 s
+//   assertNoRebootstrap = waitForHttp 30 + adminOp 30 = 60 s
+// Cases (sum -> budget):
+//   corrupt-plist   newSandbox 318 + snapshot 60 + stop 50 + doctorFix 125
+//                   + assertManaged 20 + noRebootstrap 60 = 633 -> 660 s
+//   adopt-detached  newSandbox 318 + snapshot 60 + 10 + stop 50 + directSpawn 70
+//                   + 20 + doctorFix 125 + assertManaged 20 + noRebootstrap 60
+//                   + 2 s = 735 -> 760 s
+//   adopt-no-pass   newSandbox 318 + snapshot 60 + 10 + stop 50 + directSpawn 70
+//                   + doctorFix 125 + assertManaged 20 + noRebootstrap 60 = 713 -> 740 s
+//   refuse-no-pass  newSandbox 318 + stop 50 + runDoctorFix 60 = 428 -> 450 s
+//   init-unchanged  newSandbox 318 + runInit 60 + assertManaged 20 = 398 -> 420 s
 const CHILD_DEADLINE_MS = 60_000;
-const CASE_BUDGET_MS = 540_000;
+const CORRUPT_PLIST_CASE_BUDGET_MS = 660_000;
+const ADOPT_DETACHED_CASE_BUDGET_MS = 760_000;
+const ADOPT_NO_PASS_CASE_BUDGET_MS = 740_000;
+const REFUSE_NO_PASS_CASE_BUDGET_MS = 450_000;
+const INIT_UNCHANGED_CASE_BUDGET_MS = 420_000;
 
 /** Jobs this file loaded. Unloaded on afterEach and on process exit. */
 const LOADED_JOBS = new Set<{ label: string; plistPath: string }>();
@@ -691,7 +711,7 @@ test.skipIf(!isDarwin)(
     expect(result.stdout + result.stderr).toMatch(/launchd|regenerat|managed/i);
     expect(managed.pid).toBeGreaterThan(0);
   },
-  CASE_BUDGET_MS,
+  CORRUPT_PLIST_CASE_BUDGET_MS,
 );
 
 test.skipIf(!isDarwin)(
@@ -742,7 +762,7 @@ test.skipIf(!isDarwin)(
       managed.pid,
     );
   },
-  CASE_BUDGET_MS,
+  ADOPT_DETACHED_CASE_BUDGET_MS,
 );
 
 test.skipIf(!isDarwin)(
@@ -775,7 +795,7 @@ test.skipIf(!isDarwin)(
     expect(result.stdout + result.stderr).toMatch(/adopt|bounc/i);
     await assertNoRebootstrap(sb, before);
   },
-  CASE_BUDGET_MS,
+  ADOPT_NO_PASS_CASE_BUDGET_MS,
 );
 
 test.skipIf(!isDarwin)(
@@ -805,7 +825,7 @@ test.skipIf(!isDarwin)(
     ).toBe(false);
     expect(result.stdout + result.stderr).toMatch(/admin-pass|flair init/i);
   },
-  CASE_BUDGET_MS,
+  REFUSE_NO_PASS_CASE_BUDGET_MS,
 );
 
 test.skipIf(!isDarwin)(
@@ -829,5 +849,5 @@ test.skipIf(!isDarwin)(
     const managed = assessManaged(sb.dataDir, sb.httpPort, sb.launchAgentsDir);
     expect(managed.state, managed.detail).toBe("managed");
   },
-  CASE_BUDGET_MS,
+  INIT_UNCHANGED_CASE_BUDGET_MS,
 );

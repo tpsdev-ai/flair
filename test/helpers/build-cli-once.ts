@@ -27,6 +27,14 @@
  * rather than through a `bun run` shell layer that can orphan grandchildren. The
  * timeout becomes a NAMED error. No Atomics.wait anywhere.
  *
+ * SCOPE OF THE KILL (flair#1807 round 3): spawnSync's SIGKILL reaches only the
+ * DIRECT child. The production build has no grandchild that writes dist/ — it
+ * spawns `node → tsc` and `node → write-build-info` with no shell layer — so
+ * the kill covers it. A SHELL-LAYERED stub's backgrounded grandchild does
+ * survive the kill (both reviewers probed it), so: do NOT add a shell layer
+ * here, and do NOT make a fixture stub write dist/ (or background a writer) on
+ * the assumption that the kill reaps descendants.
+ *
  * FRESHNESS INPUTS. cliIsFresh compares dist/cli.js against src/, the
  * tsconfig.cli.json chain (following `extends` recursively; none today),
  * package.json, bun.lock and scripts/write-build-info.mjs. Exclusions an mtime
