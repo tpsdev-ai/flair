@@ -37,6 +37,15 @@
 // flag for the same reason. If a genuine exception appears, budget the spawn or
 // change the rule — do not add an entry here.
 //
+// SCOPE — NODE `child_process` FORMS ONLY. This gate understands the node
+// child_process family (spawn / spawnSync / exec / execFile / fork and their
+// Sync forms). It does NOT see `Bun.spawn` / `Bun.spawnSync`. An exploratory
+// scan puts the un-scanned surface at roughly 27 spawn offenders and 81
+// unbudgeted cases, and an ungameable exception list needs its own design, so
+// that extension is its own PR (flair#1825). Until it lands this gate must not
+// be read as "the class is closed": it is closed for the node child_process
+// forms only. Do NOT add Bun.spawn detection or an allow-list here.
+//
 // SCANNING. Test files are read as TEXT, not parsed: no AST dependency, so the
 // gate runs before `bun install`. That makes one thing load-bearing — the
 // scanner must not confuse code with prose. Comments are masked (an apostrophe
