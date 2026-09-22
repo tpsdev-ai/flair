@@ -32,6 +32,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
 import {
   CONTINUITY_CAPTURE_HOOK_MARKER,
   buildContinuityCaptureHookCommand,
@@ -45,9 +46,15 @@ const AGENT = "canary-test";
 // A port nothing listens on — keeps doctor away from any real local Flair.
 const DEAD_PORT = "59993";
 const URL = `http://127.0.0.1:${DEAD_PORT}`;
-// Generous: each case cold-starts the CLI under bun and lets doctor walk all
-// of its (offline-failing) probes on a shared CI runner.
-const SPAWN_TEST_TIMEOUT = 120_000;
+// flair#1807: the child's OWN deadline, and the per-case budget above it.
+// Measured on this host, `flair doctor --fix --agent canary-test --port 59993`
+// — every probe failing offline, which is the slow path this fixture takes —
+// takes ~0.5 s, so 20 s is ~40x headroom. The 110 s spawn bound and 120 s
+// per-case budget this file used to carry were sized for a loaded shared CI
+// runner and were never needed; the budget here is the deadline + 5 s. A hung
+// child is named by ITS deadline, with its captured output.
+const CHILD_DEADLINE_MS = 20_000;
+const CASE_BUDGET_MS = 25_000;
 
 let isoHome: string;
 let isoCwd: string;
@@ -70,6 +77,7 @@ afterEach(() => {
 });
 
 function runCLI(args: string[]): { exitCode: number | null; stdout: string; stderr: string } {
+  const startedAt = Date.now();
   const r = spawnSync("bun", [CLI_SOURCE, ...args], {
     cwd: isoCwd, // doctor --fix appends to ./CLAUDE.md — keep that off the repo
     env: {
@@ -82,9 +90,22 @@ function runCLI(args: string[]): { exitCode: number | null; stdout: string; stde
       FLAIR_URL: "",
       FLAIR_TARGET: "",
     },
-    timeout: SPAWN_TEST_TIMEOUT - 10_000,
+    // flair#1807: the child carries its OWN deadline, so a signal kill is
+    // reported by name, with the child's output, rather than as a bare exit.
+    timeout: CHILD_DEADLINE_MS,
     encoding: "utf8",
   });
+  if (r.signal !== null) {
+    throw new Error(
+      childOverranDeadline("flair CLI", cliLeg(args), CHILD_DEADLINE_MS, {
+        status: r.status,
+        signal: r.signal,
+        elapsedMs: Date.now() - startedAt,
+        stdout: r.stdout,
+        stderr: r.stderr,
+      }),
+    );
+  }
   return { exitCode: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
@@ -123,7 +144,7 @@ describe("doctor --fix and the opt-in continuity capture hooks (flair#1324)", ()
       expect(settingsContainsContinuityMarker()).toBe(false);
       expect(checkContinuityCaptureHooks(isoHome).state).toBe("absent");
     },
-    SPAWN_TEST_TIMEOUT,
+    CASE_BUDGET_MS,
   );
 
   it(
@@ -137,7 +158,7 @@ describe("doctor --fix and the opt-in continuity capture hooks (flair#1324)", ()
       expect(settingsContainsContinuityMarker()).toBe(true);
       expect(checkContinuityCaptureHooks(isoHome).state).toBe("installed");
     },
-    SPAWN_TEST_TIMEOUT,
+    CASE_BUDGET_MS,
   );
 
   it(
@@ -148,7 +169,7 @@ describe("doctor --fix and the opt-in continuity capture hooks (flair#1324)", ()
       expect(r.stdout).not.toContain("Would wire the continuity capture hooks");
       expect(settingsContainsContinuityMarker()).toBe(false);
     },
-    SPAWN_TEST_TIMEOUT,
+    CASE_BUDGET_MS,
   );
 
   it(
@@ -164,7 +185,7 @@ describe("doctor --fix and the opt-in continuity capture hooks (flair#1324)", ()
       // The repair keeps the instance the user opted into — no silent re-point.
       expect(after.postToolUse.command).toContain(`FLAIR_URL=${URL}`);
     },
-    SPAWN_TEST_TIMEOUT,
+    CASE_BUDGET_MS,
   );
 
   it(
@@ -175,7 +196,7 @@ describe("doctor --fix and the opt-in continuity capture hooks (flair#1324)", ()
       expect(r.stdout).toContain("Would rewrite the continuity capture hooks");
       expect(checkContinuityCaptureHooks(isoHome).state).toBe("partial");
     },
-    SPAWN_TEST_TIMEOUT,
+    CASE_BUDGET_MS,
   );
 });
 

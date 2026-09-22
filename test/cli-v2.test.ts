@@ -11,6 +11,16 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer, IncomingMessage, ServerResponse, Server } from "node:http";
 import nacl from "tweetnacl";
+import { childOverranDeadline } from "./helpers/child-deadline.js";
+
+// flair#1807: the child's OWN deadline, and the per-case budget above it. A
+// full `flair init --skip-start --skip-soul` run on this host measures ~0.2 s,
+// so 20 s is ~100x headroom and the 60 s budget these cases used to carry was
+// never buying anything; the budget is the deadline + 5 s. A hung child is
+// named by ITS deadline, with its output — never bun's bare per-test "timed
+// out", which discards both.
+const CHILD_DEADLINE_MS = 20_000;
+const CASE_BUDGET_MS = 25_000;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -18,6 +28,48 @@ function makeTmpDir(): string {
   const dir = join(tmpdir(), `flair-cli-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+// Spawn the real CLI under bun with its own deadline. `leg` names the case so a
+// deadline kill points at the right one.
+function runCli(args: string[], leg: string): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+    const child = spawn("bun", ["src/cli.ts", ...args], {
+      cwd: ".",
+      env: process.env,
+      timeout: CHILD_DEADLINE_MS,
+    });
+    let out = "";
+    let err = "";
+    child.stdout?.on("data", (data) => {
+      out += data.toString();
+    });
+    child.stderr?.on("data", (data) => {
+      err += data.toString();
+    });
+    child.on("close", (code, signal) => {
+      if (signal !== null) {
+        reject(
+          new Error(
+            childOverranDeadline("flair CLI", leg, CHILD_DEADLINE_MS, {
+              status: code,
+              signal,
+              elapsedMs: Date.now() - startedAt,
+              stdout: out,
+              stderr: err,
+            }),
+          ),
+        );
+        return;
+      }
+      if (code !== 0) {
+        reject(new Error(`flair init exited with code ${code}`));
+        return;
+      }
+      resolve({ stdout: out, stderr: err });
+    });
+  });
 }
 
 type Handler = (req: IncomingMessage, body: string, res: ServerResponse) => void;
@@ -338,27 +390,10 @@ describe("local init admin password handling", () => {
 
   it("does not print generated admin password to stdout", async () => {
     // Run flair init with --skip-start and --skip-soul to avoid Harper startup and soul wizard
-    const { stdout, stderr } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-      const child = spawn("bun", ["src/cli.ts", "init", "--skip-start", "--skip-soul"], {
-        cwd: ".",
-        env: process.env,
-      });
-      let out = "";
-      let err = "";
-      child.stdout?.on("data", (data) => {
-        out += data.toString();
-      });
-      child.stderr?.on("data", (data) => {
-        err += data.toString();
-      });
-      child.on("close", (code) => {
-        if (code !== 0) {
-          reject(new Error(`flair init exited with code ${code}`));
-          return;
-        }
-        resolve({ stdout: out, stderr: err });
-      });
-    });
+    const { stdout, stderr } = await runCli(
+      ["init", "--skip-start", "--skip-soul"],
+      "init: generated password not printed",
+    );
 
     // Read the generated admin password file
     const adminPassPath = join(tmpDir, ".flair", "admin-pass");
@@ -373,65 +408,32 @@ describe("local init admin password handling", () => {
     expect(stdout).not.toContain(adminPass);
     // Also assert that it's not in stderr (though warnings may be there)
     expect(stderr).not.toContain(adminPass);
-  });
+  }, CASE_BUDGET_MS);
 
   it("respects admin password from environment variable", async () => {
     const testPass = "testenvpass123";
     process.env.FLAIR_ADMIN_PASS = testPass;
 
-    const { stdout } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-      const child = spawn("bun", ["src/cli.ts", "init", "--skip-start", "--skip-soul"], {
-        cwd: ".",
-        env: process.env,
-      });
-      let out = "";
-      let err = "";
-      child.stdout?.on("data", (data) => {
-        out += data.toString();
-      });
-      child.stderr?.on("data", (data) => {
-        err += data.toString();
-      });
-      child.on("close", (code) => {
-        if (code !== 0) {
-          reject(new Error(`flair init exited with code ${code}`));
-          return;
-        }
-        resolve({ stdout: out, stderr: err });
-      });
-    });
+    const { stdout } = await runCli(
+      ["init", "--skip-start", "--skip-soul"],
+      "init: admin password from environment",
+    );
 
     const adminPassPath = join(tmpDir, ".flair", "admin-pass");
     expect(existsSync(adminPassPath)).toBe(false); // Because we provided password via env, not generated
     // The admin password should not be printed
     expect(stdout).not.toContain(testPass);
-    // flair#1807: this case spawns the CLI — budget it above the child's own
-    // deadline so a hung child is named, not killed by bun's 5 s default.
-  }, 60_000);
+    // flair#1807: measured, a full `flair init --skip-start --skip-soul` run on
+    // this host takes ~0.2 s; the budget is the child's 20 s deadline + 5 s, so
+    // a hung child is named by its own deadline, not killed by bun's 5 s default.
+  }, CASE_BUDGET_MS);
 
   it("respects admin password from deprecated --admin-pass option (with warning)", async () => {
     const testPass = "testinlinepass123";
-    const { stdout, stderr } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-      const child = spawn("bun", ["src/cli.ts", "init", "--skip-start", "--skip-soul", "--admin-pass", testPass], {
-        cwd: ".",
-        env: process.env,
-      });
-      let out = "";
-      let err = "";
-      child.stdout?.on("data", (data) => {
-        out += data.toString();
-      });
-      child.stderr?.on("data", (data) => {
-        err += data.toString();
-      });
-      child.on("close", (code) => {
-        if (code !== 0) {
-          reject(new Error(`flair init exited with code ${code}`));
-          return;
-        }
-        resolve({ stdout: out, stderr: err });
-      });
-    });
+    const { stdout, stderr } = await runCli(
+      ["init", "--skip-start", "--skip-soul", "--admin-pass", testPass],
+      "init: deprecated --admin-pass option",
+    );
 
     const adminPassPath = join(tmpDir, ".flair", "admin-pass");
     expect(existsSync(adminPassPath)).toBe(false); // Not generated
@@ -439,5 +441,5 @@ describe("local init admin password handling", () => {
     expect(stdout).not.toContain(testPass);
     // But a warning should be in stderr about inline admin pass
     expect(stderr).toContain("warning: --admin-pass passed inline");
-  }, 60_000); // flair#1807: budget the CLI-spawning case
+  }, CASE_BUDGET_MS); // flair#1807: budget above the child's own 20 s deadline
 });

@@ -33,6 +33,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { httpStatus } from "../helpers/http-status";
+import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
+
+// flair#1807: the CLI child's OWN deadline, and the per-case budget above it.
+// This is the integration lane's own invocation (`bun test
+// test/integration/*.test.ts`): the shared Harper boot is paid ONCE in
+// beforeAll, so what a case spends is one CLI child against that live Harper.
+// Measured here over three runs, a case's CLI child takes 0.14-0.31 s, so the
+// budget is the 20 s child deadline + well under a second of work + a wide
+// margin = 25 s. Before this a case had no budget at all (bun's 5 s default)
+// and the child's only bound was a manual 30 s kill that discarded the child's
+// output.
+const CHILD_DEADLINE_MS = 20_000;
+const CASE_BUDGET_MS = 25_000;
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 const AGENT_ID = "krais-onboarding";
@@ -53,6 +66,7 @@ interface RunResult {
 function runCli(args: string[], extraEnv: Record<string, string> = {}): Promise<RunResult> {
   const opsPort = new URL(harper.opsURL).port;
   return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
     const child = spawn(process.execPath, [CLI, ...args], {
       env: {
         ...process.env,
@@ -66,14 +80,32 @@ function runCli(args: string[], extraEnv: Record<string, string> = {}): Promise<
         FLAIR_ADMIN_PASS: "",
         ...extraEnv,
       },
+      // flair#1807: the child carries its OWN deadline (it replaces the manual
+      // 30 s kill this used to arm); a signal kill is named, with its output.
+      timeout: CHILD_DEADLINE_MS,
     });
     let stdout = "";
     let stderr = "";
     child.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
     child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
     child.on("error", reject);
-    child.on("exit", (code) => resolve({ code, stdout, stderr }));
-    setTimeout(() => { child.kill(); reject(new Error(`CLI timed out: ${args.join(" ")}\n${stdout}\n${stderr}`)); }, 30_000);
+    child.on("exit", (code, signal) => {
+      if (signal !== null) {
+        reject(
+          new Error(
+            childOverranDeadline("flair CLI", cliLeg(args), CHILD_DEADLINE_MS, {
+              status: code,
+              signal,
+              elapsedMs: Date.now() - startedAt,
+              stdout,
+              stderr,
+            }),
+          ),
+        );
+        return;
+      }
+      resolve({ code, stdout, stderr });
+    });
   });
 }
 
@@ -106,7 +138,7 @@ describe("first-run onboarding (real CLI, isolated temp Harper + home)", () => {
     // The old bug surfaced as a REST 405; assert that error never appears.
     expect(`${r.stdout}${r.stderr}`).not.toMatch(httpStatus(405));
     expect(`${r.stdout}${r.stderr}`).not.toContain("does not have a post method");
-  });
+  }, CASE_BUDGET_MS);
 
   // #498: soul set must PUT /Soul/{id}, not POST the collection.
   test("soul set succeeds via PUT /Soul/{id} (#498)", async () => {
@@ -133,7 +165,7 @@ describe("first-run onboarding (real CLI, isolated temp Harper + home)", () => {
     const soul = await res.json() as { id?: string; value?: string };
     expect(soul.id).toBe(id);
     expect(soul.value).toBe("onboarding smoke");
-  });
+  }, CASE_BUDGET_MS);
 
   // #500: agent list with --admin-pass must not null-scan the PK.
   test("agent list does not null-scan the PK (#500)", async () => {
@@ -153,5 +185,5 @@ describe("first-run onboarding (real CLI, isolated temp Harper + home)", () => {
     const agents = JSON.parse(r.stdout) as Array<{ id: string }>;
     expect(Array.isArray(agents)).toBe(true);
     expect(agents.some(a => a.id === AGENT_ID)).toBe(true);
-  });
+  }, CASE_BUDGET_MS);
 });

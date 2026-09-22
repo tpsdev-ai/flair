@@ -26,6 +26,16 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer, IncomingMessage, ServerResponse, Server } from "node:http";
 import nacl from "tweetnacl";
+import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
+
+// flair#1807: the spawned CLI's OWN deadline, and the per-case budget above it.
+// Every case here runs the built CLI once against a local mock server, so 20 s
+// covers a cold `bun dist/cli.js` start many times over; the budget is the
+// deadline + 5 s for the mock-server setup, the assertions and the teardown. A
+// hung child is named by ITS deadline, with its captured output — never bun's
+// bare per-test "timed out".
+const CHILD_DEADLINE_MS = 20_000;
+const CASE_BUDGET_MS = 25_000;
 
 function makeTmpDir(): string {
   const dir = join(tmpdir(), `flair-orgevent-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -68,17 +78,35 @@ function writeAgentKey(keysDir: string, agentId: string): void {
 
 function runCli(args: string[], env: Record<string, string> = {}): Promise<{ stdout: string; stderr: string; code: number | null }> {
   const cliPath = join(import.meta.dirname ?? __dirname, "..", "..", "dist", "cli.js");
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
     const child = spawn("bun", [cliPath, ...args], {
       // Each case supplies its own identity; a developer's agent must not fill it in.
       env: { ...process.env, FLAIR_AGENT_ID: "", ...env },
       stdio: ["inherit", "pipe", "pipe"],
+      timeout: CHILD_DEADLINE_MS,
     });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
     child.stderr.on("data", (d) => (stderr += d));
-    child.on("close", (code) => resolve({ stdout, stderr, code }));
+    child.on("close", (code, signal) => {
+      if (signal !== null) {
+        reject(
+          new Error(
+            childOverranDeadline("flair CLI", cliLeg(args), CHILD_DEADLINE_MS, {
+              status: code,
+              signal,
+              elapsedMs: Date.now() - startedAt,
+              stdout,
+              stderr,
+            }),
+          ),
+        );
+        return;
+      }
+      resolve({ stdout, stderr, code });
+    });
   });
 }
 
@@ -113,7 +141,7 @@ describe("flair orgevent", () => {
     );
     expect(code).not.toBe(0);
     expect(stderr).toContain("--kind");
-  });
+  }, CASE_BUDGET_MS);
 
   it("rejects missing --summary", async () => {
     const agentId = "test-agent-oe";
@@ -124,7 +152,7 @@ describe("flair orgevent", () => {
     );
     expect(code).not.toBe(0);
     expect(stderr).toContain("--summary");
-  });
+  }, CASE_BUDGET_MS);
 
   it("rejects missing agent ID", async () => {
     const { stderr, code } = await runCli(
@@ -133,7 +161,7 @@ describe("flair orgevent", () => {
     );
     expect(code).toBe(1);
     expect(stderr).toContain("agent ID required");
-  });
+  }, CASE_BUDGET_MS);
 
   it("PUTs to /OrgEvent/{id} with kind/summary/targets/authorId/id/createdAt (#679)", async () => {
     const agentId = "test-agent-oe";
@@ -171,7 +199,7 @@ describe("flair orgevent", () => {
     } finally {
       await stopServer(server);
     }
-  });
+  }, CASE_BUDGET_MS);
 
   it("sends an Ed25519 Authorization header signed by the agent", async () => {
     const agentId = "test-agent-oe";
@@ -195,7 +223,7 @@ describe("flair orgevent", () => {
     } finally {
       await stopServer(server);
     }
-  });
+  }, CASE_BUDGET_MS);
 
   it("exits with error on server 5xx", async () => {
     const agentId = "test-agent-oe";
@@ -216,5 +244,5 @@ describe("flair orgevent", () => {
     } finally {
       await stopServer(server);
     }
-  });
+  }, CASE_BUDGET_MS);
 });
