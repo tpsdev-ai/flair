@@ -35,37 +35,42 @@ function freePort(): Promise<number> {
 function stripAnsi(s: string): string { return s.replace(/\x1b\[[0-9;]*m/g, ""); }
 
 /**
- * A PATH with every directory that holds a `codex` executable removed, so the
- * Codex caller runs in a CI-like environment where Codex is NOT detectable on
- * PATH. This is what keeps the test host-independent: on a developer box with
- * Codex installed, a `codex` binary on PATH made doctor wire Codex first
- * (detected → --fix wires the MCP block → the hook arm runs), so the test went
- * green for the WRONG reason and hid the gate. Stripping it pins the behaviour
- * that matters — a wired ~/.codex/hooks.json is honoured even when Codex itself
- * is not detected (flair#1834 PR-H).
+ * A PATH with every directory that holds a `claude` or `codex` executable
+ * removed, so both hook callers run in a CI-like environment where NEITHER
+ * harness is detectable on PATH. This keeps the file host-independent: on a
+ * developer box with the CLIs installed, the binaries on PATH made doctor
+ * DETECT (and, with --fix, first WIRE) the client, so the hook arm ran and the
+ * test went green for the WRONG reason — hiding the gate each case exists to
+ * pin. Stripping them pins the behaviour that matters: a hook file on disk is
+ * honoured even when its harness is not detected (flair#1834 PR-H).
  */
-function pathWithoutCodex(): string {
+function pathWithoutHookHarnesses(): string {
+  const BINS = ["claude", "codex"];
   return (process.env.PATH ?? "")
     .split(":")
-    .filter((dir) => dir.length > 0 && !existsSync(join(dir, "codex")))
+    .filter((dir) => dir.length > 0 && !BINS.some((bin) => existsSync(join(dir, bin))))
     .join(":");
 }
 
-function makeHome(harness: "claude-code" | "codex", command: string): string {
+function makeHome(harness: "claude-code" | "codex", command: string, opts: { mcp?: boolean } = {}): string {
   const home = mkdtempSync(join(tmpdir(), "flair-1834-hookdoc-"));
   homes.push(home);
   mkdirSync(join(home, ".claude"), { recursive: true });
   mkdirSync(join(home, ".codex"), { recursive: true });
-  // Wire the MCP block so the harness counts as configured.
-  const claudeEntry = { mcpServers: { flair: { command: "npx", args: ["-y", `${FLAIR_MCP_PACKAGE}@${INSTALLED}`], env: { FLAIR_AGENT_ID: "local", FLAIR_URL: "http://127.0.0.1:9" } } } };
-  writeFileSync(join(home, ".claude.json"), JSON.stringify(claudeEntry, null, 2) + "\n");
+  // Wire the MCP block so the harness counts as configured — unless the case is
+  // specifically about a hook whose harness is NOT wired (e.g. the flair MCP
+  // server configured project-scoped in a project's .mcp.json, not ~/.claude.json).
+  if (opts.mcp !== false) {
+    const claudeEntry = { mcpServers: { flair: { command: "npx", args: ["-y", `${FLAIR_MCP_PACKAGE}@${INSTALLED}`], env: { FLAIR_AGENT_ID: "local", FLAIR_URL: "http://127.0.0.1:9" } } } };
+    writeFileSync(join(home, ".claude.json"), JSON.stringify(claudeEntry, null, 2) + "\n");
+  }
   const hookFile = harness === "codex" ? join(home, ".codex", "hooks.json") : join(home, ".claude", "settings.json");
   writeFileSync(hookFile, JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command }] }] } }, null, 2) + "\n");
   return home;
 }
 
 async function runDoctor(home: string, deadPort: number, args: string[]): Promise<{ out: string; status: number | null }> {
-  const env = { ...process.env, HOME: home, FLAIR_URL: `http://127.0.0.1:${deadPort}`, PATH: pathWithoutCodex() };
+  const env = { ...process.env, HOME: home, FLAIR_URL: `http://127.0.0.1:${deadPort}`, PATH: pathWithoutHookHarnesses() };
   const proc = Bun.spawn(["bun", join(REPO, "src", "cli.ts"), "doctor", "--port", String(deadPort), ...args], { cwd: home, env, stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
   const status = await proc.exited;
@@ -93,5 +98,20 @@ describe("flair#1834 PR-H — doctor --fix prints a hook HOLD (not a quiet skip)
     expect(fix.out).toContain("not one of the installer forms");
     expect(fix.out).not.toContain("re-pinned the SessionStart hook");
     expect(readFileSync(join(home, ".codex", "hooks.json"), "utf-8")).toBe(before);
+  });
+
+  test("claude-code caller, hook wired but Claude Code NOT configured (project-scoped MCP): the HOLD is still printed", async () => {
+    // ~/.claude/settings.json carries the hook, but there is NO ~/.claude.json
+    // flair MCP block and NO `claude` binary on PATH, so claudeCodeConfigured is
+    // false. A hook file on disk IS the wiring: the HOLD (and the byte-identical
+    // file) must hold anyway, exactly as for a configured Claude Code.
+    const dup = `FLAIR_AGENT_ID=a FLAIR_AGENT_ID=b npx -y -p ${FLAIR_MCP_PACKAGE}@${OLD} flair-session-start`;
+    const home = makeHome("claude-code", dup, { mcp: false });
+    const before = readFileSync(join(home, ".claude", "settings.json"), "utf-8");
+    const deadPort = await freePort();
+    const fix = await runDoctor(home, deadPort, ["--fix"]);
+    expect(fix.out).toContain("not one of the installer forms");
+    expect(fix.out).not.toContain("re-pinned the SessionStart hook");
+    expect(readFileSync(join(home, ".claude", "settings.json"), "utf-8")).toBe(before);
   });
 });
