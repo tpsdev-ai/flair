@@ -76,7 +76,8 @@ describe("federation liveness ping on no-change sync", () => {
         return res(true, 200, [{ id: "spoke-alpha", _keySeed: Buffer.from(testKp.secretKey.slice(0, 32)).toString("base64url") }]);
       }
       if (body?.operation === "update" || body?.operation === "upsert") {
-        return res(true, 200, { ok: true });
+        const ids = (body?.records ?? []).map((r: any) => r.id);
+        return res(true, 200, { message: `${body.operation} ${ids.length} of ${ids.length}`, update_hashes: ids, upserted_hashes: ids, skipped_hashes: [] });
       }
       if (method === "POST" && url.includes("/FederationSync")) {
         return res(
@@ -89,6 +90,9 @@ describe("federation liveness ping on no-change sync", () => {
     }) as any;
   }
 
+  function peerCursorWrites() {
+    return capturedCalls.filter((c) => c.body?.operation === "update" && c.body?.table === "Peer");
+  }
   function peerUpserts() {
     return capturedCalls.filter((c) => c.body?.operation === "upsert" && c.body?.table === "Peer");
   }
@@ -151,8 +155,8 @@ describe("federation liveness ping on no-change sync", () => {
       opsPort: "9925",
     });
 
+    expect(peerCursorWrites()).toHaveLength(0);
     expect(peerUpserts()).toHaveLength(0);
-    expect(capturedCalls.some((c) => c.body?.operation === "update" && c.body?.table === "Peer")).toBe(false);
   });
 
   it("ping ok → lastSyncAt is written AFTER the ping, at completion time", async () => {
@@ -166,10 +170,10 @@ describe("federation liveness ping on no-change sync", () => {
     });
 
     const pingIdx = capturedCalls.findIndex((c) => c.url.includes("/FederationSync") && c.method === "POST");
-    const upsertIdx = capturedCalls.findIndex((c) => c.body?.operation === "upsert" && c.body?.table === "Peer");
+    const cursorIdx = capturedCalls.findIndex((c) => c.body?.operation === "update" && c.body?.table === "Peer");
     expect(pingIdx).toBeGreaterThan(-1);
-    expect(upsertIdx).toBeGreaterThan(pingIdx);
-    const stamp = capturedCalls[upsertIdx]?.body?.records?.[0]?.lastSyncAt;
+    expect(cursorIdx).toBeGreaterThan(pingIdx);
+    const stamp = capturedCalls[cursorIdx]?.body?.records?.[0]?.lastSyncAt;
     expect(typeof stamp).toBe("string");
     expect(Date.parse(stamp)).toBeGreaterThanOrEqual(t0);
   });

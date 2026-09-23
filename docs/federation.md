@@ -173,6 +173,25 @@ The check is local to the machine running the CLI, so it is omitted when
 
 Driver logs: `~/.flair/logs/federation-sync.{stdout,stderr}.log`.
 
+### What `connected` means
+
+`federation.peers.connected` counts **recent contact** — a peer whose
+`lastSyncAt` sits inside the staleness window. `lastSyncAt` is the spoke's
+outbound sync cursor: it is stamped after a successful sync batch or a
+successful no-change liveness ping, and `federation sync` re-sends from it, so a
+frozen cursor re-sends from the frozen point on every poll.
+
+`connected` is **not** a verified hub identity and **not** pull readiness.
+Inbound federation separately verifies each request against the peer's pinned
+public key, so a peer row whose stored key is missing still reads `connected`
+when it has synced recently — that is correct under this definition. A missing
+key is a `connected`-but-unauthenticated state, repaired by re-pairing, never
+silently trusted.
+
+The cursor stamp is written as a field-only update of the peer row (only
+`lastSyncAt` and `updatedAt`), so it cannot revert a concurrent key repair or
+revocation, and it never inserts a row that is not there.
+
 ## Security
 
 ### Signed requests
