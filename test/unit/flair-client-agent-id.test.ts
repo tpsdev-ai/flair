@@ -5,7 +5,7 @@
 // 'flint' — a shipped default was the trust anchor, and ownership-scoped
 // operations then bound to an identity the caller never chose. Mutations now
 // refuse without an explicit identity (`FLAIR_AGENT_ID` or `--agent <id>`);
-// read-only actions keep the default.
+// #1851 extended that to every signed action, reads included.
 //
 // These tests spawn the real script as a subprocess with an explicitly
 // constructed environment — no ambient FLAIR_*, and HOME/USERPROFILE/FLAIR_KEY_DIR
@@ -117,15 +117,18 @@ describe("flair-client agent identity (flair#1816)", () => {
     expect(r.stderr).not.toContain("refusing");
   });
 
-  it("POSITIVE: read-only actions keep the shipped default identity", async () => {
+  // #1851: a read signs too, so it refuses exactly like a mutation. The
+  // no-network proof lives in flair-client-identity-required-1851.test.ts.
+  it("NEGATIVE: read-only actions refuse without an identity too", async () => {
     for (const args of [
       ["memory", "get", "flint-1"],
       ["memory", "list"],
       ["memory", "search", "deploy"],
     ]) {
       const r = await runClient(args);
-      expect(r.stderr).toContain("no private key found for agent 'flint'");
-      expect(r.stderr).not.toContain("refusing");
+      expect(r.exitCode).toBe(1);
+      expect(r.stderr).toContain(`refusing to ${args[1]!}`);
+      expect(r.stderr).not.toContain("no private key found");
     }
   });
 

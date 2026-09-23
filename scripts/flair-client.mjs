@@ -10,13 +10,18 @@ import { webcrypto } from 'node:crypto';
 const { subtle } = webcrypto;
 
 const FLAIR_URL = process.env.FLAIR_URL || 'http://127.0.0.1:9926';
-// The signing identity. `FLAIR_AGENT_ID` or `--agent <id>` is explicit; a
-// shipped default is a trust anchor by omission (flair#1816), so the default
-// only serves read-only actions — mutations refuse without one, resolved in
-// the argv section below once the action is known.
-const DEFAULT_AGENT_ID = 'flint';
-const MUTATING_ACTIONS = new Set(['write', 'set', 'delete']);
-let AGENT_ID = DEFAULT_AGENT_ID;
+// The signing identity. `FLAIR_AGENT_ID` or `--agent <id>` is explicit; a shipped
+// default is a trust anchor by omission (flair#1816), and a read is as much a
+// signed request as a write (flair#1851): an identity-less `search`/`get`/`list`
+// signed as whoever the default named and returned that principal's non-shared
+// records to a caller who never chose it. EVERY action this script supports goes
+// through flairFetch, which always sets an Authorization header, so every action
+// refuses without an explicit identity — resolved in the argv section below once
+// the action is known. There is no genuinely-unsigned action here; if one is ever
+// added (one that sends no Authorization header) it may run identity-less, so
+// exempt it from this set and test that it sends no header.
+const SIGNING_ACTIONS = new Set(['list', 'get', 'write', 'set', 'delete', 'search']);
+let AGENT_ID;
 
 // RFC 8410 PKCS8 prefix for an Ed25519 private key carrying a bare 32-byte seed.
 // `flair agent add` writes that bare seed; wrapping it here means no operator ever
@@ -103,16 +108,17 @@ async function flairFetch(method, path, body = null) {
 
 const [,, resource, action, ...rest] = process.argv;
 if (!resource || !action) {
-  console.error('Usage: flair-client.mjs <memory|soul|agent> <list|get|write|set|delete|search> [args]');
+  console.error('Usage: flair-client.mjs <memory|soul|agent> <list|get|write|set|delete|search> [--agent <id>] [args]');
+  console.error('Every action signs its request, so every action needs an explicit identity: set FLAIR_AGENT_ID or pass --agent <id>.');
   process.exit(1);
 }
 
-// Signing identity (flair#1816): FLAIR_AGENT_ID wins, then an explicit
-// `--agent <id>`. A MUTATING action without either refuses instead of
-// defaulting — the old shipped default signed every forgotten caller as
-// 'flint', and ownership-scoped operations then bound to an identity nobody
-// chose. Read-only actions keep the default so `list`/`get`/`search` still
-// work for a configured host.
+// Signing identity (flair#1816, flair#1851): FLAIR_AGENT_ID wins, then an
+// explicit `--agent <id>`. Any SIGNING action without either refuses instead of
+// defaulting — the old shipped default signed every forgotten caller as 'flint',
+// and ownership-scoped operations then bound to an identity nobody chose. Reads
+// were no exception: the same default made an identity-less `search`/`get`/`list`
+// return that principal's records to a caller who never chose them.
 const agentFlagIndex = rest.indexOf('--agent');
 const agentFromFlag = agentFlagIndex === -1 ? undefined : rest[agentFlagIndex + 1];
 if (agentFlagIndex !== -1) {
@@ -129,14 +135,14 @@ if (agentFlagIndex !== -1) {
     process.exit(1);
   }
 }
-if (!process.env.FLAIR_AGENT_ID && !agentFromFlag && MUTATING_ACTIONS.has(action)) {
+if (SIGNING_ACTIONS.has(action) && !process.env.FLAIR_AGENT_ID && !agentFromFlag) {
   console.error(
     `refusing to ${action}: no agent identity. Set FLAIR_AGENT_ID or pass --agent <id>. ` +
       `A default identity would sign as a principal the caller did not choose (flair#1816).`,
   );
   process.exit(1);
 }
-AGENT_ID = process.env.FLAIR_AGENT_ID || agentFromFlag || DEFAULT_AGENT_ID;
+AGENT_ID = process.env.FLAIR_AGENT_ID || agentFromFlag;
 
 const table = resource.charAt(0).toUpperCase() + resource.slice(1);
 
