@@ -709,6 +709,42 @@ function countFlairPackageTokens(text: string): number {
 const CODEX_FLAIR_HEADER_RE = /^\[mcp_servers\.flair\]\s*$/gm;
 /** A builder-emitted single-line args element: `args = ["-y", "<spec>"]`. */
 const CODEX_ARGS_LINE_RE = /^[ \t]*args[ \t]*=[ \t]*\[[ \t]*"-y"[ \t]*,[ \t]*"([^"]*)"[ \t]*\][ \t]*$/m;
+/**
+ * A top-level header that CONTINUES the `[mcp_servers.flair]` section: the
+ * exact header itself or one of its dotted subtables (`[mcp_servers.flair.env]`,
+ * `[mcp_servers.flair.env.x]`), optionally followed by a comment. A SIBLING
+ * table — `[mcp_servers.flair2]`, `[mcp_servers.flair-x]` — is NOT part of the
+ * section. Matching a sibling (as a bare `^\[mcp_servers\.flair` prefix does)
+ * let the args line of the sibling be read as this section's, so a re-pin could
+ * replace the WRONG span and report a Flair re-pin (flair#1834 A2 round 3).
+ */
+const CODEX_FLAIR_SECTION_HEADER_RE = /^\[mcp_servers\.flair(?:\.[^\]]+)?\]\s*(?:#.*)?$/;
+
+/**
+ * The ACTIVE, non-empty `FLAIR_AGENT_ID` value a `[mcp_servers.flair]` section
+ * configures, or null when it configures none. Decides "no identity" from the
+ * value the section actually sets: a commented `# FLAIR_AGENT_ID = "x"` and an
+ * explicit `FLAIR_AGENT_ID = ""` are both "no identity", not an identity
+ * (flair#1834 A2 round 3).
+ */
+function activeCodexIdentity(section: string): string | null {
+  for (const raw of section.split("\n")) {
+    const m = raw.match(/^[ \t]*FLAIR_AGENT_ID[ \t]*=[ \t]*(.*)$/);
+    if (!m) continue;
+    const rhs = m[1]!.trim();
+    if (rhs === "" || rhs.startsWith("#")) continue; // absent value, or the whole assignment is commented out
+    let value: string;
+    if (rhs.startsWith('"') || rhs.startsWith("'")) {
+      const quote = rhs[0]!;
+      const end = rhs.indexOf(quote, 1);
+      value = end === -1 ? rhs.slice(1) : rhs.slice(1, end);
+    } else {
+      value = rhs.split(/[\s#]/, 1)[0]!;
+    }
+    if (value !== "") return value;
+  }
+  return null;
+}
 
 /**
  * Decide the pin-only re-pin for an already-wired Codex `[mcp_servers.flair]`
@@ -742,7 +778,7 @@ export function decideCodexPinOnly(raw: string, label: string): PinOnlyDecision 
   for (let li = 0; li < lines.length; li++) {
     const line = lines[li]!;
     if (/^\[/.test(line)) {
-      if (/^\[mcp_servers\.flair/.test(line)) { consumed += line.length + 1; continue; }
+      if (CODEX_FLAIR_SECTION_HEADER_RE.test(line)) { consumed += line.length + 1; continue; }
       if (/^\[\[/.test(line)) return hold("the section ends at an array-of-tables header ([[...]]) — refusing to rewrite it");
       sectionEnd = bodyStart + consumed;
       break;
@@ -775,7 +811,7 @@ export function decideCodexPinOnly(raw: string, label: string): PinOnlyDecision 
   const lineAbsEnd = lineAbsStart + argsMatch[0]!.length;
   const newLine = argsMatch[0]!.replace(`"${spec}"`, () => `"${newSpec}"`);
   const newRaw = raw.slice(0, lineAbsStart) + newLine + raw.slice(lineAbsEnd);
-  const noIdentity = !/FLAIR_AGENT_ID[ \t]*=/.test(section);
+  const noIdentity = activeCodexIdentity(section) === null;
   return { result: { kind: "repinned", oldPin: spec, newPin: newSpec, noIdentity, line: null }, write: encodeText(newRaw) };
 }
 
