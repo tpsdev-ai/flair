@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -70,6 +70,18 @@ describe("flair#1834 round 2 — absent parent is a quiet skip", () => {
     const r = results.find((x) => x.target.id === "gemini");
     expect(r).toBeDefined();
     expect(r!.ok).toBe(false);
+    expect(ownedPinRefreshShouldReport(r!)).toBe(true);
+  });
+
+  it("a DANGLING symlink parent is LOUD (broken config), naming the link", () => {
+    // ~/.gemini is a symlink whose target does not exist. statSync would follow
+    // it and report ENOENT, quiet-skipping a genuinely broken configuration.
+    symlinkSync(join(isoHome, "missing-gemini-target"), join(isoHome, ".gemini"));
+    const results = refreshOwnedPins({ homeDir: isoHome });
+    const r = results.find((x) => x.target.id === "gemini");
+    expect(r).toBeDefined();
+    expect(r!.ok).toBe(false);
+    expect(r!.message).toContain(".gemini");
     expect(ownedPinRefreshShouldReport(r!)).toBe(true);
   });
 });

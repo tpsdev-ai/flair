@@ -123,6 +123,18 @@ function result(
   return { id, label, status, ...extra };
 }
 
+/**
+ * flair#1834 round 3 (CodeRabbit): the icon for a `doctor --fix` MCP re-pin line.
+ * An ATTEMPTED-but-SKIPPED fix (e.g. a behind Codex pin until A2 lands, or any
+ * other skip) is not a success — render it with the warn icon, never ok. A hold
+ * and a failed write are also warn. Only an actual update, or an already-current
+ * noop, is ok.
+ */
+export function mcpRepinIcon(action: "update" | "noop" | "skip" | "hold", ok: boolean): "ok" | "warn" {
+  if (!ok) return "warn";
+  return action === "update" || action === "noop" ? "ok" : "warn";
+}
+
 function runMcpBlock(ctx: DoctorRunContext): DoctorCheckResult {
   const id = "mcp-block";
   const label = "MCP server block";
@@ -163,7 +175,7 @@ function runMcpBlock(ctx: DoctorRunContext): DoctorCheckResult {
   // flair-client@0.17.0 still silently drops writes.
   const unsafeWired = findUnsafeWiredPins(ctx.homeDir, ctx.cwd).filter((p) =>
     p.source === "package.json"
-    || (p.source === "mcp-client" && wired.includes(p.id as (typeof MCP_CLIENT_IDS)[number])),
+    || (p.source === "mcp-client" && visitable.includes(p.id as (typeof MCP_CLIENT_IDS)[number])),
   );
   if (unsafeWired.length > 0) {
     const first = unsafeWired[0]!;
@@ -213,6 +225,20 @@ function runMcpBlock(ctx: DoctorRunContext): DoctorCheckResult {
         : `MCP server: pins ahead of the installed CLI ${expected} — held (${aheadFindings.map((f) => `${f.reading.target.id}@${f.reading.pin}`).join(", ")})`;
       return result(id, label, "pass", { detail: aheadDetail });
     }
+  }
+  // flair#1834 round 3 (CodeRabbit MAJOR): a VISITABLE entry with no
+  // FLAIR_AGENT_ID is an INCOMPLETE configuration — flair-mcp refuses to start
+  // without one, and the client-integration path treats the entry as not wired.
+  // The catalog must not report it "configured". Keep the structural entry for
+  // pin findings (the checks above); say the identity is missing, with a remedy.
+  const identityless = visitable.filter((clientId) => !readClientMcpBlock(clientId, ctx.homeDir).present);
+  if (identityless.length > 0) {
+    return result(id, label, "warn", {
+      detail:
+        `MCP server (${identityless.join(", ")}): a Flair entry is present but carries no FLAIR_AGENT_ID — ` +
+        `set FLAIR_AGENT_ID in the entry, or run flair init / flair doctor --fix to wire it`,
+      remedy: "flair doctor --fix",
+    });
   }
   return result(id, label, "pass", { detail: `configured for ${visitable.join(", ")}` });
 }

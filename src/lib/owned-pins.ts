@@ -14,7 +14,7 @@
  * it here automatically — no second list to forget on the next upgrade.
  */
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   ALL_CLIENTS,
@@ -489,9 +489,32 @@ export function refreshOwnedPins(opts: RefreshOwnedPinsOptions): OwnedPinRefresh
       // directory is present but broken) is NOT absence: fall through so the
       // refusal stays LOUD.
       if (!readOwnedPin(target, homeDir).entryExists) {
+        // flair#1834 A1 round 3: lstat does NOT follow a symlink, so a DANGLING
+        // symlink directory is caught here — statSync would follow it and report
+        // ENOENT, quiet-skipping a broken configuration. A genuinely absent
+        // parent (ENOENT on the link itself) stays a quiet skip; EACCES / ELOOP
+        // / ENOTDIR stay loud (fall through to the writer, below).
+        const parent = dirname(target.path);
         let parentAbsent = false;
-        try { statSync(dirname(target.path)); } catch (err) {
+        let dangling = false;
+        try {
+          const st = lstatSync(parent);
+          if (st.isSymbolicLink()) {
+            try { statSync(parent); } catch (err) {
+              if ((err as NodeJS.ErrnoException)?.code === "ENOENT") dangling = true;
+            }
+          }
+        } catch (err) {
           if ((err as NodeJS.ErrnoException)?.code === "ENOENT") parentAbsent = true;
+        }
+        if (dangling) {
+          results.push({
+            target,
+            action: "skip",
+            ok: false,
+            message: `${target.id}: ${parent} is a dangling symlink (its target does not exist) — refusing to treat a broken configuration as unwired; fix the link`,
+          });
+          continue;
         }
         if (parentAbsent) {
           results.push({ target, action: "skip", ok: true, message: `${target.id}: not wired — skip` });

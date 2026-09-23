@@ -17,7 +17,7 @@ import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, resolveAdminUse
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
 import { plistCarriesInlineAdminPassword } from "../lib/launchd-management.js";
-import { DOCTOR_CHECK_IDS, catalogIssueDelta, renderCatalogDoctorLines, runDoctorChecks } from "../lib/doctor-run.js";
+import { DOCTOR_CHECK_IDS, catalogIssueDelta, mcpRepinIcon, renderCatalogDoctorLines, runDoctorChecks } from "../lib/doctor-run.js";
 import { describeEmbedGpuDoctorFinding } from "../lib/embed-gpu-doctor.js";
 import { adminPassDesyncFinding, detectPersistedAdminUser } from "../lib/init-admin-pass.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
@@ -1036,11 +1036,9 @@ program
             const results = refreshOwnedPins({ homeDir: homedir(), targets: overrides });
             for (const r of results) {
               if (r.target.kind !== "mcp-client") continue;
-              // flair#1834 A1 round 2: print the WRITER's in-lock result
-              // (r.message) — its (old -> new) comes from the same observation
-              // the write used, so a concurrent change cannot print a stale old
-              // pin. A HOLD is not a success: render it with the warn icon.
-              console.log(`     ${r.action === "hold" || !r.ok ? render.icons.warn : render.icons.ok} ${r.message}`);
+              // flair#1834 round 3: an attempted-but-skipped fix (e.g. a behind
+              // Codex pin until A2 lands) is not a success — never ✓.
+              console.log(`     ${render.icons[mcpRepinIcon(r.action, r.ok)]} ${r.message}`);
             }
           }
         }
