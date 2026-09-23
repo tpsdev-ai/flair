@@ -63,7 +63,24 @@ function listen(srv: Server): Promise<number> {
   servers.push(srv);
   return new Promise((resolve) => srv.listen(0, "127.0.0.1", () => resolve((srv.address() as { port: number }).port)));
 }
-const tarballBytes = (url: string) => `tarball-bytes:${url}`;
+// flair#1856 R3: the mock registry's bytes come from a FIXED map built BEFORE the
+// server starts. No response byte is derived from `req.url` at request time —
+// echoing the request path into the body reads as reflected XSS to a taint
+// analyser, and a required security check is red for it. A lookup that misses
+// gets a constant body.
+const PI_FLAIR_TARBALL_PATH = "/@tpsdev-ai/pi-flair@0.55.1.tgz";
+const tarballBody = (path: string): Buffer => Buffer.from(`tarball-bytes:${path}`);
+const TARBALL_BODIES = new Map<string, Buffer>([[PI_FLAIR_TARBALL_PATH, tarballBody(PI_FLAIR_TARBALL_PATH)]]);
+const NOT_FOUND_BODY = Buffer.from("not found");
+
+/** A mock registry: it answers ONLY the precomputed paths, else a constant 404. */
+function mockRegistry(): Server {
+  return createServer((req, res) => {
+    const body = TARBALL_BODIES.get(req.url ?? "");
+    res.writeHead(body ? 200 : 404, { "Content-Type": "application/octet-stream" });
+    res.end(body ?? NOT_FOUND_BODY);
+  });
+}
 
 const npmStub = [
   "#!/usr/bin/env bash",
@@ -143,10 +160,10 @@ async function runNode(cwd: string, args: string[], extraEnv: Record<string, str
 
 describe("the canary's sha256 helpers are recognised through a symlinked path (flair#1856 R2)", () => {
   test("registry-tarball-sha256.mjs prints a 64-hex sha and exits 0 (was: empty output, exit 0)", async () => {
-    const srv = createServer((req, res) => { res.writeHead(200); res.end(tarballBytes(req.url ?? "")); });
+    const srv = mockRegistry();
     const port = await listen(srv);
     writeFileSync(FIXTURES, `http://127.0.0.1:${port}`);
-    const expected = createHash("sha256").update(tarballBytes("/@tpsdev-ai/pi-flair@0.55.1.tgz")).digest("hex");
+    const expected = createHash("sha256").update(TARBALL_BODIES.get(PI_FLAIR_TARBALL_PATH)!).digest("hex");
 
     // cwd is the SYMLINKED checkout; argv[1] carries the symlinked path.
     const r = await runNode(LINKREPO, ["scripts/ci/registry-tarball-sha256.mjs", "0.55.1", "@tpsdev-ai/pi-flair"]);
