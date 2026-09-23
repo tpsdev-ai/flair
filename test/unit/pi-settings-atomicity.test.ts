@@ -22,7 +22,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -90,10 +90,17 @@ async function raceOnce(): Promise<Outcome> {
 
   const lens: number[] = [];
   const ts: number[] = [];
+  // COVERAGE samples are a cheap stat (high rate, so the writer's window is
+  // always spanned even under load); TEAR detection reads the CONTENT (slower,
+  // but a partial read is only visible in the content). We keep both.
+  const coverTs: number[] = [];
   let i = 0;
   while (!done) {
-    try { lens.push(readFileSync(cfgPath()).length); ts.push(Date.now()); } catch { /* transient */ }
-    if ((++i % 200) === 0) await new Promise((r) => setImmediate(r));
+    try { statSync(cfgPath()); coverTs.push(Date.now()); } catch { /* transient */ }
+    if ((i++ % 20) === 0) {
+      try { lens.push(readFileSync(cfgPath()).length); ts.push(Date.now()); } catch { /* transient */ }
+    }
+    if ((i % 2000) === 0) await new Promise((r) => setImmediate(r));
   }
   if (child.exitCode === null) await new Promise((r) => child.on("close", r));
 
@@ -101,8 +108,11 @@ async function raceOnce(): Promise<Outcome> {
   const info = JSON.parse(out.match(/\{[^}]*\}/)![0]);
   const complete = new Set([oldLen, newLen]);
   const tears = lens.filter((l) => !complete.has(l)).length;
-  const inWindow = ts.filter((t) => t >= info.start && t <= info.end).length;
-  const detail = `old=${oldLen} new=${newLen} samples=${lens.length} inWindow=${inWindow} tears=${tears}`;
+  // Coverage: any reader sample (the cheap stat OR a content read) inside [start, end].
+  const inWindow =
+    coverTs.filter((t) => t >= info.start && t <= info.end).length +
+    ts.filter((t) => t >= info.start && t <= info.end).length;
+  const detail = `old=${oldLen} new=${newLen} stat=${coverTs.length} content=${lens.length} inWindow=${inWindow} tears=${tears}`;
   rmSync(cfgPath(), { force: true });
   return { tears, coverageMiss: inWindow === 0, detail };
 }

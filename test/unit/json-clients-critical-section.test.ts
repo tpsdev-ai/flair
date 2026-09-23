@@ -102,11 +102,10 @@ describe("E3 — the JSON writers are on the critical section; the rest are exac
     expect(initSrc).not.toContain('join(homedir(), ".claude.json")');
   });
 
-  it("the ONLY remaining raw writeFileSync sites in clients.ts are the pi writers (out of this slice)", () => {
-    const sites = rawWriteSites(clientsSrc).sort();
-    // 2c-i-d2 has since migrated the Codex writers too, so with both slices in
-    // the tree the only raw writeFileSync left is the pi writers (2c-i-d3).
-    expect(sites).toEqual(["_unwirePi", "_wirePi"]);
+  it("clients.ts contains NO raw writeFileSync at all — every client-config writer is on the critical section", () => {
+    // 2c-i-d3 migrated the pi writers too, so with all three slices in the tree
+    // NO raw config write remains in clients.ts.
+    expect(rawWriteSites(clientsSrc).sort()).toEqual([]);
   });
 });
 
