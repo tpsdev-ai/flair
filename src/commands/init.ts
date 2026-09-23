@@ -19,6 +19,7 @@ import {
   resolveInitAdminPasswordSource,
 } from "../lib/init-admin-pass.js";
 import { mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
+import { opsSocketPathRefusal } from "../lib/socket-path-limit.js";
 import * as render from "../render.js";
 import { execSync, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -458,6 +459,22 @@ program
     // ── Local init (full one-command setup) ──
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
     const dataDir: string = opts.dataDir ?? defaultDataDir();
+
+    // flair#916: the Harper operations API is a Unix domain socket at
+    // `<data-dir>/operations-server`, and Unix socket paths are capped by
+    // `sun_path` (darwin 104 / linux 108, counting the trailing NUL, so the
+    // USABLE length is 103 / 107). A long `--data-dir` pushes the socket past
+    // the cap, and Harper then dies with a bare `listen EINVAL` that names
+    // neither the socket nor the limit — the worst moment (first run, no
+    // working install to compare against). Refuse HERE, before any install,
+    // config write, keypair, or Harper start: a refusal must leave nothing on
+    // disk. The socket path is built exactly as Harper binds it (join with the
+    // fixed "operations-server" suffix), so the measured length is the real one.
+    const socketRefusal = opsSocketPathRefusal(dataDir, process.platform);
+    if (socketRefusal) {
+      console.error(socketRefusal);
+      process.exit(1);
+    }
     // "create" mode (flair#914): init ESTABLISHES an instance, so a data
     // directory with no recorded port is a new instance taking the default,
     // not the hard error every other caller gets — otherwise `flair init

@@ -10,6 +10,7 @@ import { Command } from "commander";
 import { DEFAULT_ADMIN_USER } from "../lib/auth-resolve.js";
 import { classifyDaemonState } from "../lib/daemon-liveness.js";
 import { diagnoseLaunchdPlistPaths, isDetached, renderDetachedWarning } from "../lib/launchd-management.js";
+import { opsSocketPathRefusal } from "../lib/socket-path-limit.js";
 import { execSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -235,7 +236,19 @@ program
     const port = resolveHttpPort(opts);
     const dataDir = defaultDataDir();
 
-    // Already-running check via the five-state liveness machine (flair#1454).
+       // flair#916: the operations socket is a Unix domain socket whose path is
+      // capped by sun_path (darwin 103 / linux 107, NUL-excluded); a too-long
+      // data dir would make Harper die with a bare `listen EINVAL` on boot.
+      // This command uses the hardcoded defaultDataDir() today, so the limit is
+      // unreachable here — the preflight is defensive against a future
+      // --data-dir or a lengthened default. Refuse before touching disk.
+    const socketRefusal = opsSocketPathRefusal(dataDir, process.platform);
+    if (socketRefusal) {
+      console.error(socketRefusal);
+      process.exit(1);
+        }
+
+     // Already-running check via the five-state liveness machine (flair#1454).
     // The old check was a bare `fetch /Health` that treated "got a response"
     // as "already running" and exited 0 — half of #1454. Now the machine
     // classifies, and every non-NOT_RUNNING state refuses with a non-zero exit.
@@ -373,8 +386,20 @@ program
     // Explicit, not defaulted inside restartFlair (flair#902): `flair
     // restart` has no --data-dir, so the default install IS what it means —
     // and saying so here is what keeps that true when someone adds one.
+      // flair#916: the same defensive preflight `flair start` runs — the
+      // operations socket path is capped by sun_path; refuse here, before a
+      // restart touches the instance, rather than let Harper die with a bare
+      // `listen EINVAL` on boot. `restart` uses the hardcoded defaultDataDir()
+      // today, so the limit is unreachable; this is defense against a future
+      // --data-dir or a lengthened default.
+    const dataDir = defaultDataDir();
+    const socketRefusal = opsSocketPathRefusal(dataDir, process.platform);
+    if (socketRefusal) {
+      console.error(socketRefusal);
+      process.exit(1);
+      }
     try {
-      await restartFlair(port, defaultDataDir());
+      await restartFlair(port, dataDir);
       // flair#1022: a restart that fell back off launchd left the instance
       // running but unmanaged, and "✅ Flair restarted" was true of both
       // outcomes. Ask launchd what it is actually running now — an
