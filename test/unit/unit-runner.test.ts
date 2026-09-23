@@ -68,6 +68,41 @@ describe("shared unit lane", () => {
     expect(new Set(pids).size).toBe(2);
   });
 
+  test("the final guard fails the lane even when every step SUCCEEDED", () => {
+    // The guard is the lane's last line of defence, and an exit-code test that
+    // only ever fails a step proves nothing about it: the non-zero code could
+    // come from the failed step. Here the child SUCCEEDS and writes a real
+    // client config, so the only source of a non-zero code is the guard.
+    const home = fixture();
+    const marker = join(home, "child-succeeded");
+    const config = join(home, ".codex", "config.toml");
+    const script = [
+      'const fs = require("node:fs"), path = require("node:path");',
+      `fs.mkdirSync(path.dirname(${JSON.stringify(config)}), { recursive: true });`,
+      `fs.writeFileSync(${JSON.stringify(config)}, "planted\\n");`,
+      `fs.writeFileSync(${JSON.stringify(marker)}, "ok");`,
+    ].join("");
+
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
+    let code: number;
+    try {
+      code = runUnitSteps(
+        [{ name: "succeeds but writes a real config", cwd: home, args: ["-e", script], files: [] }],
+        process.execPath,
+        home,
+      );
+    } finally {
+      console.error = originalError;
+    }
+
+    expect(readFileSync(marker, "utf8")).toBe("ok");
+    expect(code).toBe(1);
+    expect(errors.join("\n")).toContain("Home-isolation guard FAILED");
+    expect(errors.join("\n")).toContain(".codex/config.toml");
+  });
+
   test("a failed step stops the lane before later work", () => {
     const dir = fixture();
     expect(runUnitSteps([

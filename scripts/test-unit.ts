@@ -85,14 +85,16 @@ export function unitPlan(root: string): UnitStep[] {
   return steps;
 }
 
-export function runUnitSteps(steps: UnitStep[], executable = process.execPath): number {
+export function runUnitSteps(steps: UnitStep[], executable = process.execPath, guardHome = realHomeDir()): number {
   // Fingerprint the REAL client configs before the lane and compare after it.
-  // realHomeDir() reads the passwd database, not HOME, so neither the sandbox
-  // this module installs nor the per-step HOME below can hide a real write.
-  const realHome = realHomeDir();
-  const before = snapshotClientConfigs(realHome);
+  // `guardHome` defaults to the real home (realHomeDir() reads the passwd
+  // database, not HOME, so neither the sandbox this module installs nor the
+  // per-step HOME below can hide a real write); the parameter lets a test point
+  // the guard at a fixture home and prove the boundary without ever touching the
+  // real one (flair#1853 round 3).
+  const before = snapshotClientConfigs(guardHome);
   const guardPassed = (): boolean => {
-    const changed = changedConfigs(before, snapshotClientConfigs(realHome));
+    const changed = changedConfigs(before, snapshotClientConfigs(guardHome));
     if (!changed.length) return true;
     console.error(
       `Home-isolation guard FAILED: a real client config changed during the lane: ${changed.join(", ")}. ` +
