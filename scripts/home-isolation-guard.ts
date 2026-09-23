@@ -79,10 +79,17 @@ function fingerprintClaudeJson(full: string): ConfigFingerprint {
   if (!existsSync(full)) return { path: CLAUDE_JSON_SUBTREE, state: "absent", hash: null };
   try {
     const parsed: unknown = JSON.parse(readFileSync(full, "utf8"));
-    const sub =
-      parsed && typeof parsed === "object"
-        ? (parsed as Record<string, unknown>).mcpServers
-        : undefined;
+    // A parsed object with no OWN `mcpServers` property fingerprints as ABSENT —
+    // the same subtree (none) as a file that does not exist. Claude Code
+    // creates ~/.claude.json with only a `projects` key long before it writes
+    // any mcpServers; treating that as "present" made an UNCHANGED subtree read
+    // as a change and fail the lane (flair#1853 round 3).
+    const hasMcpServers =
+      parsed !== null &&
+      typeof parsed === "object" &&
+      Object.prototype.hasOwnProperty.call(parsed, "mcpServers");
+    if (!hasMcpServers) return { path: CLAUDE_JSON_SUBTREE, state: "absent", hash: null };
+    const sub = (parsed as Record<string, unknown>).mcpServers;
     return { path: CLAUDE_JSON_SUBTREE, state: "present", hash: sha256(canonical(sub ?? null)) };
   } catch {
     // A file we cannot parse is neither absent nor readable; record it so a

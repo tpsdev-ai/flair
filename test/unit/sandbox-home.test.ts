@@ -97,6 +97,19 @@ describe("real-config guard (flair#1853)", () => {
     expect(changedConfigs(before, snapshotClientConfigs(home))).toContain(CLAUDE_JSON_SUBTREE);
   });
 
+  it("treats a projects-only ~/.claude.json as the same (absent) mcpServers subtree", () => {
+    const home = fakeHome();
+    const before = snapshotClientConfigs(home); // no ~/.claude.json at all
+    // Claude Code creates ~/.claude.json with only a `projects` key long before
+    // it writes any mcpServers. The subtree is unchanged (none) — this must NOT
+    // read as a change.
+    plant(home, ".claude.json", JSON.stringify({ projects: { a: 1 } }));
+    expect(changedConfigs(before, snapshotClientConfigs(home))).toEqual([]);
+    // Actually writing mcpServers IS a change.
+    writeFileSync(join(home, ".claude.json"), JSON.stringify({ projects: { a: 1 }, mcpServers: {} }));
+    expect(changedConfigs(before, snapshotClientConfigs(home))).toContain(CLAUDE_JSON_SUBTREE);
+  });
+
   it("runGuarded returns the path a body changed", () => {
     const home = fakeHome();
     const target = REAL_CLIENT_CONFIGS[1]!;
