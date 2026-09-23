@@ -608,6 +608,20 @@ export async function decideAdoptStopWithWait(
     sleep?: (ms: number) => Promise<void>;
   },
 ): Promise<AdoptStopWaitResult> {
+  // flair#1827 review: a STATE refusal (DISAGREEMENT / UNKNOWN) does not depend on
+  // the port probe, and the caller sends no SIGTERM for it — so decide it BEFORE
+  // polling, with ONE health observation. Otherwise the poll could wait the full
+  // deadline on a process that is still serving and append a misleading
+  // "waited … for the port to free" suffix. decideAdoptStop with a `refused`
+  // probe returns "proceed" for RUNNING/WEDGED/NOT_RUNNING (so those still poll)
+  // and the refusal for the state cases.
+  const stateDecision = decideAdoptStop(state, { kind: "refused" });
+  if (stateDecision !== "proceed") {
+    const now = opts.now ?? (() => Date.now());
+    const start = now();
+    const health = await opts.observe();
+    return { health, decision: stateDecision, timedOut: false, waitedMs: now() - start, observations: 1 };
+  }
   const poll = await pollUntil<HealthResult>({
     observe: opts.observe,
     until: (h) => h.kind === "refused",

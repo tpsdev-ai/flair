@@ -25,8 +25,8 @@
 
 import { describe, test, expect } from "bun:test";
 import * as mod from "../../src/lib/launchd-repair.ts";
-import type { AdoptServingEvidence, DaemonState } from "../../src/lib/launchd-repair.ts";
-import type { HealthResult } from "../../src/lib/daemon-liveness.ts";
+import type { AdoptServingEvidence } from "../../src/lib/launchd-repair.ts";
+import type { DaemonState, HealthResult } from "../../src/lib/daemon-liveness.ts";
 
 /** A deterministic clock: `now()` reads `t`; `sleep(ms)` advances it. */
 function clocked() {
@@ -107,6 +107,32 @@ describe("C4 — stop side fails at the deadline with the existing wording", () 
     const detail = (r.decision as { detail: string }).detail;
     expect(detail).toContain("not confirmed free");
     expect(detail).toContain("3000");
+  });
+});
+
+describe("C6 — a state refusal is decided before any poll", () => {
+  test("DISAGREEMENT refuses with ONE observation, no deadline wait", async () => {
+    const c = clocked();
+    let calls = 0;
+    const observe = (): HealthResult => { calls++; return { kind: "ok" }; };
+    const r = await mod.decideAdoptStopWithWait({ state: "DISAGREEMENT", detail: "identity unverified" }, {
+      observe, deadlineMs: 60_000, intervalMs: 250, now: c.now, sleep: c.sleep,
+    });
+    expect(r.timedOut).toBe(false);
+    expect(r.decision).not.toBe("proceed");
+    expect((r.decision as { detail: string }).detail).toContain("refusing to adopt");
+    expect((r.decision as { detail: string }).detail).not.toContain("waited");
+    expect(r.observations).toBe(1);
+    expect(calls).toBe(1);
+  });
+
+  test("UNKNOWN refuses with ONE observation", async () => {
+    const c = clocked();
+    const r = await mod.decideAdoptStopWithWait({ state: "UNKNOWN", detail: "cannot tell" }, {
+      observe: () => ({ kind: "refused" }) as HealthResult, deadlineMs: 60_000, intervalMs: 250, now: c.now, sleep: c.sleep,
+    });
+    expect(r.decision).not.toBe("proceed");
+    expect(r.observations).toBe(1);
   });
 });
 
