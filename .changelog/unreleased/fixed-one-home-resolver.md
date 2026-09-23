@@ -7,8 +7,11 @@
   them: in one process doctor could inspect a different home from the one the writers used.
   Every lookup now calls `resolveHome()` (an explicit `homeDir` override is kept where a
   function already took one), and a guard test fails if `src/` calls `homedir()` or reads
-  `process.env.HOME` / `USERPROFILE` outside `src/lib/home.ts`. The only exceptions are the
-  three `withHome()` harnesses that save and restore `HOME` to point an in-process call at
-  an explicit home — a test/CLI override, not a home lookup.
+  `process.env.HOME` / `USERPROFILE` outside `src/lib/home.ts`. The `withHome()`
+  override now lives there too: it sets BOTH `HOME` and `USERPROFILE`, so an
+  explicit home is honoured on Windows as well — the three private copies set only
+  `HOME`, which `resolveHome()` ignores on win32, so doctor, the pin refresh and
+  uninstall's unwire() acted on the real profile instead of the caller's home.
+  The allow-list is empty.
 
   (Closes #1858)

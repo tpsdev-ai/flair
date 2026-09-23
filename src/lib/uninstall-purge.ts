@@ -17,7 +17,7 @@
 
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { resolveHome } from "./home.js";
+import { resolveHome, withHome } from "./home.js";
 import { ALL_CLIENTS } from "../install/clients.js";
 import {
   uninstallContinuityHooks,
@@ -67,17 +67,6 @@ export interface PurgeOptions {
    * assert the "fully purged" headline. Production always lists the package.
    */
   omitNpmLeftover?: boolean;
-}
-
-function withHome<T>(homeDir: string, fn: () => T): T {
-  const prev = process.env.HOME;
-  process.env.HOME = homeDir;
-  try {
-    return fn();
-  } finally {
-    if (prev === undefined) delete process.env.HOME;
-    else process.env.HOME = prev;
-  }
 }
 
 function displayUnderHome(homeDir: string, absPath: string): string {

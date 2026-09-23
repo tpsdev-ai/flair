@@ -32,26 +32,12 @@ const RESOLVER = "src/lib/home.ts";
 /**
  * Files allowed to resolve home outside `src/lib/home.ts`, with a reason.
  *
- * These are not un-migrated files and not invocation-home lookups: each is a
- * `withHome()` harness that SAVES `process.env.HOME` so it can point an
- * in-process call at an explicit `homeDir` and restore it afterwards. The read
- * is the save, not a resolution of where home is. Every real lookup in `src/`
- * goes through `resolveHome()`.
+ * EMPTY (flair#1858 round 2): the `withHome()` overrides that read
+ * `process.env.HOME` now live IN `src/lib/home.ts` (it sets HOME and USERPROFILE),
+ * so no other file in `src/` reads either variable. Anything added here must say
+ * why it is not a home lookup.
  */
-const ALLOW: Array<{ file: string; reason: string }> = [
-  {
-    file: "src/lib/uninstall-purge.ts",
-    reason: "withHome() saves/restores process.env.HOME to point the in-process client unwire() at an explicit homeDir — a test/CLI override, not a home lookup.",
-  },
-  {
-    file: "src/lib/owned-pins.ts",
-    reason: "withHome() saves/restores process.env.HOME to point an in-process refresh at an explicit homeDir — the same override harness.",
-  },
-  {
-    file: "src/doctor-client.ts",
-    reason: "withHome() saves/restores process.env.HOME to point doctor's in-process client read at an explicit homeDir — the same override harness.",
-  },
-];
+const ALLOW: Array<{ file: string; reason: string }> = [];
 
 interface Hit {
   file: string;
