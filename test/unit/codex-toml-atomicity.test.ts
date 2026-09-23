@@ -27,6 +27,15 @@ import { join } from "node:path";
 
 import { withConfigCriticalSection } from "../../src/lib/config-critical-section.ts";
 import { wireCodex } from "../../src/install/clients.ts";
+import {
+  CoverageSampler,
+  countInWindows,
+  countTears,
+  parseWindow,
+  runRaceWithCoverage,
+  type RaceOutcome,
+  type Window,
+} from "../helpers/torn-read-sampler.ts";
 import { createHash } from "node:crypto";
 
 const repoRoot = join(import.meta.dirname, "..", "..");
@@ -34,6 +43,7 @@ const clientsModule = join(repoRoot, "src", "install", "clients.ts");
 const CHILD_DEADLINE_MS = 20_000;
 const CASE_BUDGET_MS = 90_000;
 const RUNS = 3;
+const ATTEMPTS = 5;
 const PAD = "x".repeat(2 * 1024 * 1024);
 
 let home: string;
@@ -78,57 +88,50 @@ function writerHarness(): string {
   ].join("\n");
 }
 
-describe("T1a — torn read", () => {
+describe("T1a — torn read (EMPIRICAL and HOST-DEPENDENT on the pre-fix baseline)", () => {
   it("a reader polling during the writer's rewrite sees ONLY the complete old or new bytes", async () => {
-    const failures: string[] = [];
-    let totalInWindow = 0;
+    const coverageFailures: string[] = [];
+    const tears: string[] = [];
     for (let run = 0; run < RUNS; run++) {
-      mkdirSync(dir(), { recursive: true });
-      const oldText = staleSection("@tpsdev-ai/flair-mcp@0.0.1") + `# ${PAD}\n`;
-      writeFileSync(cfgPath(), oldText, "utf-8");
-      const oldLen = Buffer.byteLength(oldText);
+      const o = await runRaceWithCoverage(async (): Promise<RaceOutcome> => {
+        mkdirSync(dir(), { recursive: true });
+        const oldText = staleSection("@tpsdev-ai/flair-mcp@0.0.1") + `# ${PAD}\n`;
+        writeFileSync(cfgPath(), oldText, "utf-8");
+        const oldLen = Buffer.byteLength(oldText);
 
-      const hpath = join(home, `w-${run}.mjs`);
-      writeFileSync(hpath, writerHarness(), "utf-8");
-      const child = spawn("bun", [hpath], { cwd: repoRoot, env: { ...process.env, HOME: home }, timeout: CHILD_DEADLINE_MS });
-      let out = "";
-      let err = "";
-      child.stdout?.on("data", (d) => (out += d.toString()));
-      child.stderr?.on("data", (d) => (err += d.toString()));
-      const ended = new Promise((r) => child.on("close", () => r(null)));
+        const hpath = join(home, `w-${run}.mjs`);
+        writeFileSync(hpath, writerHarness(), "utf-8");
+        const sampler = CoverageSampler.start(cfgPath());
+        const child = spawn("bun", [hpath], { cwd: repoRoot, env: { ...process.env, HOME: home }, timeout: CHILD_DEADLINE_MS });
+        let out = "";
+        child.stdout?.on("data", (d) => (out += d.toString()));
+        let done = false;
+        child.on("close", () => { done = true; });
 
-      const lens: number[] = [];
-      const ts: number[] = [];
-      const pollStart = Date.now();
-      const pollUntil = pollStart + 8000;
-      let i = 0;
-      // Yield to the event loop periodically so the child's 'close' sets
-      // child.exitCode; a pure sync loop would block it.
-      while (Date.now() < pollUntil && child.exitCode === null) {
-        try { lens.push(readFileSync(cfgPath()).length); ts.push(Date.now()); } catch { /* transient */ }
-        if ((++i % 300) === 0) await new Promise((r) => setImmediate(r));
-      }
-      await ended;
+        const contentLens: number[] = [];
+        let i = 0;
+        while (!done) {
+          try { contentLens.push(readFileSync(cfgPath()).length); } catch { /* transient */ }
+          if ((++i % 200) === 0) await new Promise((r) => setImmediate(r));
+        }
+        if (child.exitCode === null) await new Promise((r) => child.on("close", r));
 
-      const newLen = readFileSync(cfgPath()).length;
-      let info: { start: number; end: number; ok: boolean } | null = null;
-      try { info = JSON.parse(out); } catch { /* child failed */ }
-      const complete = new Set([oldLen, newLen]);
-      const torn = lens.filter((l) => !complete.has(l));
-      const inWindow = info ? ts.filter((t) => t >= info.start && t <= info.end).length : 0;
-      totalInWindow += inWindow;
-      const lastTs = ts.length ? ts[ts.length - 1]! : 0;
-      const covered = !!info && pollStart <= info.start && lastTs >= info.end;
-
-      if (!info || !info.ok) failures.push(`run ${run}: writer failed (out=${out.slice(0, 80)} err=${err.slice(0, 80)})`);
-      else if (torn.length > 0) failures.push(`run ${run}: ${torn.length} torn read(s), e.g. len=${torn[0]} not in [${oldLen}, ${newLen}]`);
-      else if (!covered) failures.push(`run ${run}: reader did NOT span the write window (pollStart=${pollStart} start=${info.start} last=${lastTs} end=${info.end})`);
-      rmSync(dir(), { recursive: true, force: true });
+        const coverTs = await sampler.stop();
+        sampler.dispose();
+        const newLen = readFileSync(cfgPath()).length;
+        const win = parseWindow(out);
+        const windows: Window[] = win ? [win] : [];
+        const inWindow = windows.length ? countInWindows(coverTs, windows) : 0;
+        const t = countTears(contentLens, [oldLen, newLen]);
+        const detail = `old=${oldLen} new=${newLen} cover=${coverTs.length} content=${contentLens.length} inWindow=${inWindow} tears=${t}`;
+        rmSync(dir(), { recursive: true, force: true });
+        return { covered: windows.length > 0 && inWindow > 0, tears: t, detail };
+      }, ATTEMPTS);
+      if (o.coverageFailure) coverageFailures.push(`run ${run} (${o.attempts} attempts): ${o.details.join(" ; ")}`);
+      else if (o.tears > 0) tears.push(`run ${run}: ${o.details[o.details.length - 1]}`);
     }
-    // The reader must have sampled INSIDE the write window at least once across
-    // all runs, or the check could not fire.
-    expect(totalInWindow).toBeGreaterThan(0);
-    expect(failures, failures.join(" | ")).toEqual([]);
+    expect(coverageFailures, `coverage failures (${coverageFailures.length}/${RUNS}): ${coverageFailures.join(" | ")}`).toEqual([]);
+    expect(tears, `torn reads (${tears.length}/${RUNS}): ${tears.join(" | ")}`).toEqual([]);
   }, CASE_BUDGET_MS);
 });
 

@@ -9,17 +9,21 @@
  * concurrent reader never sees a half-written config.toml — the raw writer
  * truncated in place; the primitive stages a temp and renames.
  *
- * DETERMINISTIC RED ON MAIN (round 2, cli#1830 review): the reader must have
- * SAMPLED INSIDE a writer's [start, end] window (each writer reports its own
- * window), or the torn check could not fire — a race with no in-window sample
- * is a NAMED FAILURE, never a pass. The poll runs across the writers' full
- * lifetimes plus a grace tail (bounded by a deadline that is itself a failure),
- * so the window is always covered. A large pad widens each writer's window so
- * the raw writer's in-place truncate is reliably observed.
+ * COVERAGE is checked PER WRITER ([start, end] from each writer), and comes from
+ * a DEDICATED sampler process (test/helpers/torn-read-sampler.ts) so the reader's
+ * own content reads cannot starve it; an uncovered race is RETRIED (bounded) and
+ * is a named failure only if coverage cannot be achieved. A tear on a COVERED
+ * race fails immediately.
+ *
+ * HONEST LIMIT: the window spans the WHOLE production call (parse + stringify
+ * included), so an in-window sample does NOT prove a sample fell inside the
+ * destructive truncate-then-write gap. On a pre-fix (raw writer) baseline the
+ * tear RED is EMPIRICAL and HOST-DEPENDENT — measured 12/12 RED on one host and
+ * 1/7 on another — NOT deterministic; it is reported as measured.
  *
  * The reader's "torn" check compares each sample against EVERY complete state
  * (derived by running the production writers serially), so a legitimate
- * intermediate cannot be misread as torn. FAILS-ON-MAIN (05012c2).
+ * intermediate cannot be misread as torn.
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { spawn } from "node:child_process";
@@ -28,12 +32,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { wireCodex, unwireCodex } from "../../src/install/clients.ts";
+import {
+  CoverageSampler,
+  countInWindows,
+  parseWindow,
+  runRaceWithCoverage,
+  type RaceOutcome,
+  type Window,
+} from "../helpers/torn-read-sampler.ts";
 
 const repoRoot = join(import.meta.dirname, "..", "..");
 const clientsModule = join(repoRoot, "src", "install", "clients.ts");
 const CHILD_DEADLINE_MS = 20_000;
-const CASE_BUDGET_MS = 240_000;
+const CASE_BUDGET_MS = 400_000;
 const RUNS = 10;
+const ATTEMPTS = 5;
 const PAD = "x".repeat(8 * 1024 * 1024);
 
 let home: string;
@@ -118,9 +131,7 @@ function harnessSource(): string {
   ].join("\n");
 }
 
-interface Window { start: number; end: number; }
-
-async function raceOnce(states: Set<string>): Promise<{ torn: number; inWindow: number; detail: string }> {
+async function raceOnce(states: Set<string>): Promise<RaceOutcome> {
   mkdirSync(dir(), { recursive: true });
   writeFileSync(cfgPath(), staleBaseline(), "utf-8");
 
@@ -128,17 +139,17 @@ async function raceOnce(states: Set<string>): Promise<{ torn: number; inWindow: 
   writeFileSync(hpath, harnessSource(), "utf-8");
   const mk = (mode: string) =>
     spawn("bun", [hpath, mode], { cwd: repoRoot, env: { ...process.env, HOME: home, FLAIR_TEST_CRITICAL_BARRIER: barrierDir }, timeout: CHILD_DEADLINE_MS });
+  const sampler = CoverageSampler.start(cfgPath());
   const a = mk("wire");
   const b = mk("unwire");
   const outs = new Map<number, string>();
+  const cap = (c: ReturnType<typeof spawn>) => { c.stdout?.on("data", (d) => outs.set(c.pid ?? -1, (outs.get(c.pid ?? -1) ?? "") + d.toString())); };
+  cap(a); cap(b);
   let done = 0;
-  a.stdout?.on("data", (d) => outs.set(a.pid ?? -1, (outs.get(a.pid ?? -1) ?? "") + d.toString()));
-  b.stdout?.on("data", (d) => outs.set(b.pid ?? -1, (outs.get(b.pid ?? -1) ?? "") + d.toString()));
-  const fin = () => { done++; };
-  a.on("close", fin);
-  b.on("close", fin);
+  a.on("close", () => { done++; });
+  b.on("close", () => { done++; });
 
-  // Rendezvous (harness-level, so it works against the raw writer on main too).
+  // Harness-level rendezvous (works against the raw writer on main too).
   const armDeadline = Date.now() + 9000;
   while (Date.now() < armDeadline) {
     if (readdirSync(barrierDir).filter((f) => f.endsWith(".arm")).length >= 2) break;
@@ -146,50 +157,44 @@ async function raceOnce(states: Set<string>): Promise<{ torn: number; inWindow: 
   }
   writeFileSync(join(barrierDir, "go"), "1");
 
-  // Poll ACROSS the writers' full lifetimes, plus a grace tail so the window is
-  // always covered. The hard deadline expiring without coverage is a failure.
-  const samples: { t: number; text: string }[] = [];
-  const pollDeadline = Date.now() + 20_000;
-  const GRACE_MS = 250;
-  let exitedAt = 0;
+  // Content reads for TEAR detection (coverage is the sampler's job).
+  const contentSamples: string[] = [];
   let i = 0;
-  while (Date.now() < pollDeadline) {
-    try { samples.push({ t: Date.now(), text: readFileSync(cfgPath(), "utf-8") }); } catch { /* transient */ }
-    if (done === 2 && exitedAt === 0) exitedAt = Date.now();
-    if (exitedAt !== 0 && Date.now() - exitedAt > GRACE_MS) break;
+  while (done < 2) {
+    try { contentSamples.push(readFileSync(cfgPath(), "utf-8")); } catch { /* transient */ }
     if ((++i % 200) === 0) await new Promise((r) => setImmediate(r));
   }
 
-  // Parse each writer's own [start, end] window.
+  const coverTs = await sampler.stop();
+  sampler.dispose();
+
   const windows: Window[] = [];
   for (const out of outs.values()) {
-    const parsed = out.match(/\{[^}]*\}/g);
-    if (parsed) for (const p of parsed) { try { const o = JSON.parse(p); if (typeof o.start === "number" && typeof o.end === "number") windows.push({ start: o.start, end: o.end }); } catch { /* */ } }
+    const w = parseWindow(out);
+    if (w) windows.push(w);
   }
-
-  const inWindow = samples.filter((s) => windows.some((w) => s.t >= w.start && s.t <= w.end)).length;
-  const tornSamples = samples.filter((s) => !states.has(s.text));
-  const distinct = [...new Set(tornSamples.map((s) => s.text.length))].slice(0, 8);
-  const detail = `samples=${samples.length} inWindow=${inWindow} windows=${JSON.stringify(windows)} torn=${tornSamples.length} distinctTornLen=[${distinct}] states=${states.size}`;
+  const inWindow = countInWindows(coverTs, windows);
+  const tornSamples = contentSamples.filter((s) => !states.has(s));
+  const distinct = [...new Set(tornSamples.map((s) => s.length))].slice(0, 8);
+  const detail = `cover=${coverTs.length} content=${contentSamples.length} windows=${windows.length} inWindow=${inWindow} torn=${tornSamples.length} distinctTornLen=[${distinct}] states=${states.size}`;
   rmSync(dir(), { recursive: true, force: true });
-  return { torn: tornSamples.length, inWindow, detail };
+  return { covered: windows.length > 0 && inWindow > 0, tears: tornSamples.length, detail };
 }
 
 describe("T2 — two Codex writers share one critical section (mechanism)", () => {
   it(
-    "a concurrent reader never sees a half-written config.toml (deterministically fails on main)",
+    "a concurrent reader never sees a half-written config.toml (EMPIRICAL, host-dependent RED on main)",
     async () => {
       const states = completeStates(staleBaseline());
-      const failures: string[] = [];
-      let tornRuns = 0;
+      const coverageFailures: string[] = [];
+      const tears: string[] = [];
       for (let run = 0; run < RUNS; run++) {
-        const { torn, inWindow, detail } = await raceOnce(states);
-        // The reader MUST have sampled inside a writer's window, or the check
-        // could not fire — that is a named failure, never a pass.
-        if (inWindow === 0) failures.push(`run ${run}: reader never sampled inside a writer window — ${detail}`);
-        else if (torn > 0) { failures.push(`run ${run}: ${detail}`); tornRuns++; }
+        const o = await runRaceWithCoverage(() => raceOnce(states), ATTEMPTS);
+        if (o.coverageFailure) coverageFailures.push(`run ${run} (${o.attempts} attempts): ${o.details.join(" ; ")}`);
+        else if (o.tears > 0) tears.push(`run ${run}: ${o.details[o.details.length - 1]}`);
       }
-      expect(failures, `${tornRuns}/${RUNS} runs torn; ${failures.join(" | ")}`).toEqual([]);
+      expect(coverageFailures, `coverage failures (${coverageFailures.length}/${RUNS}): ${coverageFailures.join(" | ")}`).toEqual([]);
+      expect(tears, `torn reads (${tears.length}/${RUNS}): ${tears.join(" | ")}`).toEqual([]);
     },
     CASE_BUDGET_MS,
   );
