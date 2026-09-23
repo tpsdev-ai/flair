@@ -1264,8 +1264,16 @@ program
       // command Claude Code uses, written to ~/.codex/hooks.json. Continuity
       // and CLAUDE.md stay Claude-Code-only; Codex's session-start mechanism
       // is the hook file.
-      if (codexConfigured) {
-        const hook = inspectSessionStartHook(homedir(), { settingsPath: hookSettingsPath(homedir(), "codex") });
+      // flair#1834 PR-H: a hook file on disk IS the wiring. Inspect Codex's
+      // SessionStart hook whenever one is PRESENT on disk, not only when Codex
+      // is otherwise detected/configured on this box (a `codex` binary on PATH
+      // or a wired ~/.codex/config.toml). Gating the whole block on Codex's MCP
+      // configuration silently skipped a wired ~/.codex/hooks.json when Codex
+      // was not installed — exactly the quiet skip PR-H exists to prevent (a
+      // HOLD must be printed). A `codexConfigured` box with NO hook still falls
+      // through to the "not found / add" report below.
+      const hook = inspectSessionStartHook(homedir(), { settingsPath: hookSettingsPath(homedir(), "codex") });
+      if (codexConfigured || hook.present) {
         if (hook.present) {
           const codexStale = sessionStartHookPinFindings(homedir()).find((f) => f.reading.target.id === "codex");
           if (codexStale && codexStale.direction === "unknown") {

@@ -8,7 +8,7 @@
  */
 
 import { describe, test, expect, afterAll, setDefaultTimeout } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -34,6 +34,23 @@ function freePort(): Promise<number> {
 
 function stripAnsi(s: string): string { return s.replace(/\x1b\[[0-9;]*m/g, ""); }
 
+/**
+ * A PATH with every directory that holds a `codex` executable removed, so the
+ * Codex caller runs in a CI-like environment where Codex is NOT detectable on
+ * PATH. This is what keeps the test host-independent: on a developer box with
+ * Codex installed, a `codex` binary on PATH made doctor wire Codex first
+ * (detected → --fix wires the MCP block → the hook arm runs), so the test went
+ * green for the WRONG reason and hid the gate. Stripping it pins the behaviour
+ * that matters — a wired ~/.codex/hooks.json is honoured even when Codex itself
+ * is not detected (flair#1834 PR-H).
+ */
+function pathWithoutCodex(): string {
+  return (process.env.PATH ?? "")
+    .split(":")
+    .filter((dir) => dir.length > 0 && !existsSync(join(dir, "codex")))
+    .join(":");
+}
+
 function makeHome(harness: "claude-code" | "codex", command: string): string {
   const home = mkdtempSync(join(tmpdir(), "flair-1834-hookdoc-"));
   homes.push(home);
@@ -48,7 +65,7 @@ function makeHome(harness: "claude-code" | "codex", command: string): string {
 }
 
 async function runDoctor(home: string, deadPort: number, args: string[]): Promise<{ out: string; status: number | null }> {
-  const env = { ...process.env, HOME: home, FLAIR_URL: `http://127.0.0.1:${deadPort}` };
+  const env = { ...process.env, HOME: home, FLAIR_URL: `http://127.0.0.1:${deadPort}`, PATH: pathWithoutCodex() };
   const proc = Bun.spawn(["bun", join(REPO, "src", "cli.ts"), "doctor", "--port", String(deadPort), ...args], { cwd: home, env, stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
   const status = await proc.exited;
