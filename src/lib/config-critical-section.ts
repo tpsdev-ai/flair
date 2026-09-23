@@ -185,7 +185,10 @@ export interface ConfigSectionOptions {
    *  created and before any bytes are written; `afterFsync` fires after the
    *  staging file is fsynced and before the rename (the crash window).
    *  Child-process fixtures use the `FLAIR_TEST_CRITICAL_BARRIER` env
-   *  directory instead (see `envBarrier`). */
+   *  directory instead (see `envBarrier`). NOTE: that env path assumes a
+   *  TRUSTED environment — anyone who can set a flair process's environment can
+   *  already set HOME / FLAIR_*, so it grants no capability it did not already
+   *  have, and it is self-releasing (a barrier waits at most 15 s). */
   testHooks?: {
     afterPreObserve?: (attempt: number) => void;
     afterRead?: (attempt: number) => void;
@@ -229,7 +232,13 @@ function sleepSync(ms: number): void {
 
 /** ENV-GATED barrier for child-process fixtures: after marking its own stage
  *  file it waits (bounded) for a `go` file the schedule controller drops.
- *  Inert unless `FLAIR_TEST_CRITICAL_BARRIER` names a directory. */
+ *  Inert unless `FLAIR_TEST_CRITICAL_BARRIER` names a directory.
+ *
+ *  TRUSTED-ENV ASSUMPTION: this path is only as privileged as the environment
+ *  it is set in. Anyone who can set a flair process's `FLAIR_TEST_CRITICAL_BARRIER`
+ *  can already set `HOME` / `FLAIR_*`, so the barrier grants no capability that
+ *  was not already available to them; and it self-releases — a stale barrier
+ *  waits at most 15 s, then proceeds. */
 function envBarrier(stage: string): void {
   const dir = process.env.FLAIR_TEST_CRITICAL_BARRIER;
   if (!dir) return;

@@ -15,10 +15,12 @@
 
   > **Heads-up (behaviour change):** config.toml writes now replace the file's
   > inode instead of writing in place, so a reader holding an open fd keeps the
-  > OLD contents until it reopens (Codex re-reads at startup); and a 0600
+  > OLD contents until it reopens (Codex re-reads at startup); a 0600
   > `<path>.bak` is written on every mutating call where the file EXISTS —
   > including a no-op (already wired) or a held pin — overwritten from the
-  > IN-LOCK bytes. A newly CREATED file takes no backup (there are no prior
+  > IN-LOCK bytes; and a config.toml CREATED by Flair now lands **0600** (the
+  > primitive's staging mode), where the old raw create arm got the umask
+  > default (~0644). A newly CREATED file takes no backup (there are no prior
   > bytes).
 
   > **Heads-up (threat boundary, unchanged):** this serializes cooperative Flair

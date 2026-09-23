@@ -20,11 +20,13 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { hostname } from "node:os";
 import { join } from "node:path";
 
 import { withConfigCriticalSection } from "../../src/lib/config-critical-section.ts";
+import { wireCodex } from "../../src/install/clients.ts";
 import { createHash } from "node:crypto";
 
 const repoRoot = join(import.meta.dirname, "..", "..");
@@ -35,8 +37,20 @@ const RUNS = 3;
 const PAD = "x".repeat(2 * 1024 * 1024);
 
 let home: string;
-beforeEach(() => { home = mkdtempSync(join(tmpdir(), "flair-2cid2-t1-home-")); });
-afterEach(() => { rmSync(home, { recursive: true, force: true }); });
+let prevHome: string | undefined;
+beforeEach(() => {
+  home = mkdtempSync(join(tmpdir(), "flair-2cid2-t1-home-"));
+  // T1a spawns children with HOME=home; T1c additionally drives the PRODUCTION
+  // writer IN-PROCESS, which resolves ~ via resolveHome() — so the test process
+  // HOME must be isolated too (never the real ~/.codex/config.toml).
+  prevHome = process.env.HOME;
+  process.env.HOME = home;
+});
+afterEach(() => {
+  if (prevHome !== undefined) process.env.HOME = prevHome;
+  else delete process.env.HOME;
+  rmSync(home, { recursive: true, force: true });
+});
 
 const cfgPath = () => join(home, ".codex", "config.toml");
 const dir = () => join(home, ".codex");
@@ -183,17 +197,26 @@ describe("T1c — SIGKILL after fsync, before rename", () => {
       expect(afterHash).toBe(beforeHash);
 
       const temps = readdirSync(dir()).filter((f) => f.includes(".tmp-"));
-      const lockExists = existsSync(`${cfgPath()}.lock`);
+      const lockPath = `${cfgPath()}.lock`;
+      const lockExists = existsSync(lockPath);
       // REPORT (do not assert absent): a SIGKILL bypasses the temp cleanup and
-      // the lock release. Nothing auto-cleans the temp; a later writer REFUSES
-      // on the orphaned lock by name (the stale-lock path) until an operator
-      // removes it on the recorded host.
+      // the lock release. The orphaned lock is NOT ignored: a later writer
+      // REFUSES on it by name until an operator removes it on the recorded host
+      // (crash-only provable reclaim is tracked as flair#1831).
       console.log(`T1c orphaned: temp=${JSON.stringify(temps)} lock=${lockExists}`);
       expect(temps.length, "expected an orphaned staging temp after SIGKILL").toBeGreaterThan(0);
       expect(lockExists, "expected an orphaned lock after SIGKILL").toBe(true);
-      // The reader (a later writer) must refuse by name, not corrupt.
-      const refusal = (() => { try { return statSync(`${cfgPath()}.lock`).size; } catch { return -1; } })();
-      expect(refusal).toBeGreaterThanOrEqual(0);
+
+      // A SECOND production writer against the SAME file must REFUSE by name —
+      // on the orphaned lock, naming the recorded holder (pid + host) and the
+      // lock path — and must NOT touch the target.
+      const refused = wireCodex({ FLAIR_AGENT_ID: "codexbot", FLAIR_URL: "http://127.0.0.1:19926", FLAIR_CLIENT: "codex" });
+      expect(refused.ok).toBe(false);
+      expect(refused.message).toContain(lockPath);
+      expect(refused.message).toContain(`recorded holder pid ${child.pid}`);
+      expect(refused.message).toContain(hostname());
+      expect(refused.message).toContain("Quiesce Flair writers");
+      expect(createHash("sha256").update(readFileSync(cfgPath())).digest("hex")).toBe(beforeHash);
     } finally {
       rmSync(barrierDir, { recursive: true, force: true });
     }

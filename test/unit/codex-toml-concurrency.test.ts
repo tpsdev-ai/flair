@@ -9,15 +9,21 @@
  * concurrent reader never sees a half-written config.toml — the raw writer
  * truncated in place; the primitive stages a temp and renames.
  *
+ * DETERMINISTIC RED ON MAIN (round 2, cli#1830 review): the reader must have
+ * SAMPLED INSIDE a writer's [start, end] window (each writer reports its own
+ * window), or the torn check could not fire — a race with no in-window sample
+ * is a NAMED FAILURE, never a pass. The poll runs across the writers' full
+ * lifetimes plus a grace tail (bounded by a deadline that is itself a failure),
+ * so the window is always covered. A large pad widens each writer's window so
+ * the raw writer's in-place truncate is reliably observed.
+ *
  * The reader's "torn" check compares each sample against EVERY complete state
- * (derived by running the production writers serially), so it cannot be fooled
- * by a legitimate intermediate. A harness rendezvous sits BEFORE the production
- * writers (the hook-critical-concurrency.test.ts shape). FAILS-ON-MAIN
- * (05012c2): the raw writers truncate in place, so partial files are observed.
+ * (derived by running the production writers serially), so a legitimate
+ * intermediate cannot be misread as torn. FAILS-ON-MAIN (05012c2).
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -26,9 +32,9 @@ import { wireCodex, unwireCodex } from "../../src/install/clients.ts";
 const repoRoot = join(import.meta.dirname, "..", "..");
 const clientsModule = join(repoRoot, "src", "install", "clients.ts");
 const CHILD_DEADLINE_MS = 20_000;
-const CASE_BUDGET_MS = 90_000;
-const RUNS = 5;
-const PAD = "x".repeat(2 * 1024 * 1024);
+const CASE_BUDGET_MS = 240_000;
+const RUNS = 10;
+const PAD = "x".repeat(8 * 1024 * 1024);
 
 let home: string;
 let barrierDir: string;
@@ -65,7 +71,7 @@ function staleBaseline(): string {
 /** Run the production writers serially on a copy to enumerate complete states. */
 function completeStates(baseline: string): Set<string> {
   const states = new Set<string>([baseline]);
-  const seq = (steps: Array<"wire" | "unwire">): string => {
+  const seq = (steps: Array<"wire" | "unwire">): void => {
     const h = mkdtempSync(join(tmpdir(), "flair-2cid2-t2-seq-"));
     const prev = process.env.HOME;
     process.env.HOME = h;
@@ -77,7 +83,6 @@ function completeStates(baseline: string): Set<string> {
         else unwireCodex();
         states.add(readFileSync(join(h, ".codex", "config.toml"), "utf-8"));
       }
-      return readFileSync(join(h, ".codex", "config.toml"), "utf-8");
     } finally {
       if (prev !== undefined) process.env.HOME = prev; else delete process.env.HOME;
       rmSync(h, { recursive: true, force: true });
@@ -105,23 +110,35 @@ function harnessSource(): string {
     "  const deadline = Date.now() + 15000;",
     "  while (!existsSync(go) && Date.now() < deadline) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5); }",
     "}",
+    "const start = Date.now();",
     "const res = mode === 'wire' ? wireCodex({ FLAIR_AGENT_ID: 'codexbot', FLAIR_URL: 'http://127.0.0.1:19926', FLAIR_CLIENT: 'codex' }) : unwireCodex();",
+    "const end = Date.now();",
+    "process.stdout.write(JSON.stringify({ start, end, ok: res.ok, mode }));",
     "process.exit(res.ok ? 0 : 1);",
   ].join("\n");
 }
 
-async function raceOnce(states: Set<string>): Promise<{ torn: number; detail: string }> {
+interface Window { start: number; end: number; }
+
+async function raceOnce(states: Set<string>): Promise<{ torn: number; inWindow: number; detail: string }> {
   mkdirSync(dir(), { recursive: true });
   writeFileSync(cfgPath(), staleBaseline(), "utf-8");
 
   const hpath = join(home, "race.mjs");
   writeFileSync(hpath, harnessSource(), "utf-8");
-  const mk = (mode: string) => spawn("bun", [hpath, mode], { cwd: repoRoot, env: { ...process.env, HOME: home, FLAIR_TEST_CRITICAL_BARRIER: barrierDir }, timeout: CHILD_DEADLINE_MS });
+  const mk = (mode: string) =>
+    spawn("bun", [hpath, mode], { cwd: repoRoot, env: { ...process.env, HOME: home, FLAIR_TEST_CRITICAL_BARRIER: barrierDir }, timeout: CHILD_DEADLINE_MS });
   const a = mk("wire");
   const b = mk("unwire");
+  const outs = new Map<number, string>();
   let done = 0;
-  const all = new Promise((r) => { const fin = () => { if (++done === 2) r(null); }; a.on("close", fin); b.on("close", fin); });
+  a.stdout?.on("data", (d) => outs.set(a.pid ?? -1, (outs.get(a.pid ?? -1) ?? "") + d.toString()));
+  b.stdout?.on("data", (d) => outs.set(b.pid ?? -1, (outs.get(b.pid ?? -1) ?? "") + d.toString()));
+  const fin = () => { done++; };
+  a.on("close", fin);
+  b.on("close", fin);
 
+  // Rendezvous (harness-level, so it works against the raw writer on main too).
   const armDeadline = Date.now() + 9000;
   while (Date.now() < armDeadline) {
     if (readdirSync(barrierDir).filter((f) => f.endsWith(".arm")).length >= 2) break;
@@ -129,31 +146,51 @@ async function raceOnce(states: Set<string>): Promise<{ torn: number; detail: st
   }
   writeFileSync(join(barrierDir, "go"), "1");
 
-  const samples: string[] = [];
-  const pollUntil = Date.now() + 6000;
+  // Poll ACROSS the writers' full lifetimes, plus a grace tail so the window is
+  // always covered. The hard deadline expiring without coverage is a failure.
+  const samples: { t: number; text: string }[] = [];
+  const pollDeadline = Date.now() + 20_000;
+  const GRACE_MS = 250;
+  let exitedAt = 0;
   let i = 0;
-  while (Date.now() < pollUntil) {
-    try { samples.push(readFileSync(cfgPath(), "utf-8")); } catch { /* transient */ }
+  while (Date.now() < pollDeadline) {
+    try { samples.push({ t: Date.now(), text: readFileSync(cfgPath(), "utf-8") }); } catch { /* transient */ }
+    if (done === 2 && exitedAt === 0) exitedAt = Date.now();
+    if (exitedAt !== 0 && Date.now() - exitedAt > GRACE_MS) break;
     if ((++i % 200) === 0) await new Promise((r) => setImmediate(r));
-    if (done === 2 && samples.length > 0) break;
   }
-  await all;
 
-  const tornSamples = samples.filter((s) => !states.has(s));
-  const distinct = [...new Set(tornSamples.map((s) => s.length))].slice(0, 8);
-  const detail = `samples=${samples.length} torn=${tornSamples.length} distinctTornLen=[${distinct}] states=${states.size}`;
+  // Parse each writer's own [start, end] window.
+  const windows: Window[] = [];
+  for (const out of outs.values()) {
+    const parsed = out.match(/\{[^}]*\}/g);
+    if (parsed) for (const p of parsed) { try { const o = JSON.parse(p); if (typeof o.start === "number" && typeof o.end === "number") windows.push({ start: o.start, end: o.end }); } catch { /* */ } }
+  }
+
+  const inWindow = samples.filter((s) => windows.some((w) => s.t >= w.start && s.t <= w.end)).length;
+  const tornSamples = samples.filter((s) => !states.has(s.text));
+  const distinct = [...new Set(tornSamples.map((s) => s.text.length))].slice(0, 8);
+  const detail = `samples=${samples.length} inWindow=${inWindow} windows=${JSON.stringify(windows)} torn=${tornSamples.length} distinctTornLen=[${distinct}] states=${states.size}`;
   rmSync(dir(), { recursive: true, force: true });
-  return { torn: tornSamples.length, detail };
+  return { torn: tornSamples.length, inWindow, detail };
 }
 
 describe("T2 — two Codex writers share one critical section (mechanism)", () => {
-  it("a concurrent reader never sees a half-written config.toml (fails on main: the raw writer truncates in place)", async () => {
-    const states = completeStates(staleBaseline());
-    const failures: string[] = [];
-    for (let run = 0; run < RUNS; run++) {
-      const { torn, detail } = await raceOnce(states);
-      if (torn > 0) failures.push(`run ${run}: ${detail}`);
-    }
-    expect(failures, failures.join(" | ")).toEqual([]);
-  }, CASE_BUDGET_MS);
+  it(
+    "a concurrent reader never sees a half-written config.toml (deterministically fails on main)",
+    async () => {
+      const states = completeStates(staleBaseline());
+      const failures: string[] = [];
+      let tornRuns = 0;
+      for (let run = 0; run < RUNS; run++) {
+        const { torn, inWindow, detail } = await raceOnce(states);
+        // The reader MUST have sampled inside a writer's window, or the check
+        // could not fire — that is a named failure, never a pass.
+        if (inWindow === 0) failures.push(`run ${run}: reader never sampled inside a writer window — ${detail}`);
+        else if (torn > 0) { failures.push(`run ${run}: ${detail}`); tornRuns++; }
+      }
+      expect(failures, `${tornRuns}/${RUNS} runs torn; ${failures.join(" | ")}`).toEqual([]);
+    },
+    CASE_BUDGET_MS,
+  );
 });

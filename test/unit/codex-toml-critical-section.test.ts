@@ -110,6 +110,10 @@ describe("T5 — byte goldens (the helpers' output, unchanged)", () => {
     expect(readFileSync(cfgPath(), "utf-8")).toBe(goldenBlock(ENV) + "\n");
     expect(readFileSync(cfgPath(), "utf-8")).toBe(tomlSnippet(ENV) + "\n");
     expect(existsSync(bakPath())).toBe(false); // no backup on first create
+    // K1 (declared behaviour change): a CREATED config.toml lands 0600 (the
+    // primitive's staging mode), where the old raw create arm got the umask
+    // default (~0644). Matches the approved 2c-i-b "new file is 0600" rule.
+    expect(statSync(cfgPath()).mode & 0o777).toBe(0o600);
   });
 
   it("APPEND (file exists, no section) preserves the file and appends the block", () => {
