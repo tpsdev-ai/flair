@@ -79,16 +79,18 @@ Earlier designs relied on `allowCreate=true` combined with body-only authenticat
 A managed Harper Fabric hub has no shell. Mint the triple from any machine that can reach it, then pair from the spoke. The full bring-up, including why `--ops-target` names port 9925, is [spoke-bringup.md §5a](spoke-bringup.md#harper-fabric-hub-no-shell). <!-- docs-freshness-allow: Fabric ops API port, not legacy data port -->
 
 ```bash
-# 1. On any machine (the spoke itself is fine) — no ssh, no scp
-flair federation token \
+# 1. On any machine (the spoke itself is fine) — no ssh, no scp.
+# umask 077 before the redirect so the one-time password is owner-only.
+(umask 077 && flair federation token \
   --target https://<hub>.<org>.harperfabric.com \
   --admin-pass <hub-admin-password> \
   --ttl 60 \
-  --ops-target https://<hub>.<org>.harperfabric.com:9925 > ./pair-triple.json  # docs-freshness-allow: Fabric ops API port, not legacy data port
+  --ops-target https://<hub>.<org>.harperfabric.com:9925 > ./pair-triple.json)  # docs-freshness-allow: Fabric ops API port, not legacy data port
 
-# 2. On the spoke
+# 2. On the spoke — admin auth writes the local Peer row
 flair federation pair https://<hub>.<org>.harperfabric.com \
-  --token-from ./pair-triple.json
+  --token-from ./pair-triple.json \
+  --admin-pass "$FLAIR_ADMIN_PASS"
 ```
 
 Replace `<hub>`, `<org>`, and `<hub-admin-password>` with your actual values.

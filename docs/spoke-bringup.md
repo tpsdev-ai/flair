@@ -115,7 +115,7 @@ The command prints one JSON object. Tokens expire after **60 minutes** by defaul
 On the **hub host**, an admin runs:
 
 ```bash
-flair federation token --admin-pass <hub-admin-pass> > pair-triple.json
+(umask 077 && flair federation token --admin-pass <hub-admin-pass> > pair-triple.json)
 ```
 
 #### Harper Fabric hub (no shell)
@@ -123,11 +123,11 @@ flair federation token --admin-pass <hub-admin-pass> > pair-triple.json
 A Fabric-deployed hub is a Harper component on a managed cluster. There is no host to shell into. Mint the triple from any machine that can reach the hub — for a personal spoke, that machine is the spoke — and name both the data URL and the ops URL:
 
 ```bash
-flair federation token \
+(umask 077 && flair federation token \
   --target https://<hub>.<org>.harperfabric.com \
   --admin-pass <cluster-admin-pass> \
   --ttl 60 \
-  --ops-target https://<hub>.<org>.harperfabric.com:9925 > pair-triple.json  # docs-freshness-allow: Fabric ops API port, not legacy data port
+  --ops-target https://<hub>.<org>.harperfabric.com:9925 > pair-triple.json)  # docs-freshness-allow: Fabric ops API port, not legacy data port
 ```
 
 `--ops-target` is the Harper operations API on the same hostname at port 9925. <!-- docs-freshness-allow: Fabric ops API port, not legacy data port --> A portless `https://` `--target` derives that same port. Pass `--ops-target` so the URL is the one you chose. An explicit port other than 443 still derives as REST port minus one, which is not this ops port. `federation token` reads the admin password from `--admin-pass` (or `FLAIR_ADMIN_PASS`).
