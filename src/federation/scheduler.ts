@@ -59,7 +59,7 @@
  */
 import { existsSync, chmodSync, rmSync, readFileSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
-import { homedir } from "node:os";
+
 import { fileURLToPath } from "node:url";
 import { escapeXml } from "../lib/xml-escape.js";
 import {
@@ -81,6 +81,7 @@ import {
   STATUS_CHECK_TIMEOUT_MS,
   type UserBusSessionFacts,
 } from "../lib/scheduler-platform.js";
+import { resolveHome } from "../lib/home.js";
 
 export type { SchedulerPlatform };
 
@@ -88,9 +89,9 @@ export const LAUNCHD_LABEL = "dev.flair.federation.sync";
 export const SYSTEMD_TIMER_UNIT = "flair-federation-sync.timer";
 export const SYSTEMD_SERVICE_UNIT = "flair-federation-sync.service";
 
-export const SHIM_PATH_DEFAULT = resolve(homedir(), ".flair", "bin", "flair-federation-sync");
-export const LAUNCHD_PLIST_PATH = resolve(homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
-export const SYSTEMD_USER_DIR = resolve(homedir(), ".config", "systemd", "user");
+export const SHIM_PATH_DEFAULT = resolve(resolveHome(), ".flair", "bin", "flair-federation-sync");
+export const LAUNCHD_PLIST_PATH = resolve(resolveHome(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+export const SYSTEMD_USER_DIR = resolve(resolveHome(), ".config", "systemd", "user");
 export const SYSTEMD_TIMER_PATH = resolve(SYSTEMD_USER_DIR, SYSTEMD_TIMER_UNIT);
 export const SYSTEMD_SERVICE_PATH = resolve(SYSTEMD_USER_DIR, SYSTEMD_SERVICE_UNIT);
 
@@ -292,7 +293,7 @@ function buildSubstitutions(opts: EnableOpts, shimPath: string, flairBin: string
     FLAIR_BIN: flairBin,
     NODE_BIN: nodeBin,
     SHIM_PATH: shimPath,
-    HOME: opts.homeOverride ?? homedir(),
+    HOME: opts.homeOverride ?? resolveHome(),
     INTERVAL_SECONDS: String(opts.intervalSeconds),
     ADMIN_PASS_FILE: adminPassFile,
     FLAIR_TARGET: opts.target ?? "",

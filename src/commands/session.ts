@@ -19,11 +19,12 @@
  */
 import { Command } from "commander";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, readdirSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+
 import { resolve } from "node:path";
 import { create as tarCreate, extract as tarExtract, list as tarList } from "tar";
 import type { ReadEntry as TarReadEntry } from "tar";
 import { validateSnapshotArchive } from "../lib/safe-snapshot-extract.js";
+import { resolveHome } from "../lib/home.js";
 
 export type SessionCli = {
   humanBytes: (n: number) => string;
@@ -53,7 +54,7 @@ export function register(program: Command): void {
   // Standalone-callable today; harness slices 3+4 will wire it into the
   // session-reset pipeline.
 
-  const SNAPSHOT_ROOT = resolve(homedir(), ".flair", "snapshots");
+  const SNAPSHOT_ROOT = resolve(resolveHome(), ".flair", "snapshots");
 
   function sessionSnapshotDir(agent: string): string {
     if (!/^[a-zA-Z0-9_-]+$/.test(agent)) throw new Error(`invalid agent id: ${agent}`);

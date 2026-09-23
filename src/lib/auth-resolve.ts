@@ -69,10 +69,11 @@ import {
   readdirSync,
   statSync,
 } from "node:fs";
-import { homedir } from "node:os";
+
 import { join } from "node:path";
 import { createPrivateKey, randomUUID, sign as nodeCryptoSign } from "node:crypto";
 import type { SigningIdentitySource } from "./signing-identity.js";
+import { resolveHome } from "./home.js";
 
 // ─── Failure classification ─────────────────────────────────────────────────
 
@@ -144,7 +145,7 @@ export function readAdminPassFileSecure(path: string): string {
 }
 
 export function defaultAdminPassPath(): string {
-  return join(homedir(), ".flair", "admin-pass");
+  return join(resolveHome(), ".flair", "admin-pass");
 }
 
 /** The admin username Harper's bootstrap creates and every Basic-auth path
@@ -178,7 +179,7 @@ export function resolveAdminUser(explicit?: string): string {
 }
 
 export function defaultKeysDir(): string {
-  return join(homedir(), ".flair", "keys");
+  return join(resolveHome(), ".flair", "keys");
 }
 
 /**
@@ -240,8 +241,8 @@ export function resolveLocalAdminPass(
 export function resolveKeyPath(agentId: string): string | null {
   const candidates = [
     process.env.FLAIR_KEY_DIR ? join(process.env.FLAIR_KEY_DIR, `${agentId}.key`) : null,
-    join(homedir(), ".flair", "keys", `${agentId}.key`),
-    join(homedir(), ".tps", "secrets", "flair", `${agentId}-priv.key`),
+    join(resolveHome(), ".flair", "keys", `${agentId}.key`),
+    join(resolveHome(), ".tps", "secrets", "flair", `${agentId}-priv.key`),
   ].filter(Boolean) as string[];
   return candidates.find((p) => existsSync(p)) ?? null;
 }

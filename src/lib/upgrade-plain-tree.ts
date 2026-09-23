@@ -31,7 +31,7 @@ import {
   realpathSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { homedir } from "node:os";
+
 import { execFileSync } from "node:child_process";
 import { extract as tarExtract } from "tar";
 import {
@@ -41,6 +41,7 @@ import {
   sameInstallPath,
   type FlairPackageLocation,
 } from "./upgrade-exec-path.js";
+import { resolveHome } from "./home.js";
 
 export const FLAIR_PACKAGE = "@tpsdev-ai/flair";
 
@@ -588,7 +589,7 @@ export function unitTextMentionsTree(unitText: string, treeDir: string): boolean
 
 const SYSTEM_UNIT_DIRS = ["/etc/systemd/system"];
 
-export function userSystemdDir(home: string = homedir()): string {
+export function userSystemdDir(home: string = resolveHome()): string {
   return join(home, ".config", "systemd", "user");
 }
 

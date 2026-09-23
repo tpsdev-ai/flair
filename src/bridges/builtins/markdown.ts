@@ -10,10 +10,11 @@
 
 import { promises as fsp } from "node:fs";
 import { basename, join } from "node:path";
-import { homedir } from "node:os";
+
 import { parseRecords } from "../runtime/formats.js";
 import type { BridgeContext, BridgeMemory, MemoryBridge } from "../types.js";
 import { BridgeRuntimeError } from "../types.js";
+import { resolveHome } from "../../lib/home.js";
 
 export async function* importFromDirectory(
   opts: Record<string, unknown>,
@@ -21,7 +22,7 @@ export async function* importFromDirectory(
 ): AsyncIterable<BridgeMemory> {
   // Resolve source directory
   const sourceDir: string =
-    typeof opts.source === "string" ? opts.source : join(homedir(), "notes");
+    typeof opts.source === "string" ? opts.source : join(resolveHome(), "notes");
   
   ctx.log.info(`scanning markdown directory`, { path: sourceDir });
   

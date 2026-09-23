@@ -18,12 +18,13 @@
  */
 import { mkdirSync, writeFileSync, statSync, chmodSync, rmSync, existsSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { homedir } from "node:os";
+
 import { create as tarCreate, extract as tarExtract, list as tarList } from "tar";
 import type { ReadEntry } from "tar";
 import { validateSnapshotArchive } from "../lib/safe-snapshot-extract.js";
+import { resolveHome } from "../lib/home.js";
 
-export const SNAPSHOT_ROOT = resolve(homedir(), ".flair", "snapshots");
+export const SNAPSHOT_ROOT = resolve(resolveHome(), ".flair", "snapshots");
 
 /** Validates the agent id and returns its snapshot directory. */
 export function remSnapshotDir(agent: string): string {

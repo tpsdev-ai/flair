@@ -55,8 +55,9 @@
 
 import { createPrivateKey, createPublicKey, randomUUID, sign, type KeyObject } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+
 import { join } from "node:path";
+import { resolveHome } from "./lib/home.js";
 
 // ─── RFC 7523 constants ─────────────────────────────────────────────────────
 
@@ -92,8 +93,8 @@ export function resolveAgentKeyPath(agentId: string, keysDirOverride?: string): 
   const candidates = [
     keysDirOverride ? join(keysDirOverride, `${agentId}.key`) : null,
     process.env.FLAIR_KEY_DIR ? join(process.env.FLAIR_KEY_DIR, `${agentId}.key`) : null,
-    join(homedir(), ".flair", "keys", `${agentId}.key`),
-    join(homedir(), ".tps", "secrets", "flair", `${agentId}-priv.key`),
+    join(resolveHome(), ".flair", "keys", `${agentId}.key`),
+    join(resolveHome(), ".tps", "secrets", "flair", `${agentId}-priv.key`),
   ].filter((p): p is string => Boolean(p));
   return candidates.find((p) => existsSync(p)) ?? null;
 }

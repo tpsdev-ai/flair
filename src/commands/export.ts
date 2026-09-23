@@ -10,8 +10,9 @@ import { Command } from "commander";
 import { defaultKeysDir, resolveAdminUser } from "../lib/auth-resolve.js";
 import * as render from "../render.js";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+
 import { join, resolve } from "node:path";
+import { resolveHome } from "../lib/home.js";
 
 export type ExportCli = {
   privKeyPath: (...args: any[]) => any;
@@ -108,7 +109,7 @@ program
       ...(privateKey ? { privateKey } : {}),
     };
 
-    const rawOutputPath = opts.output ?? join(homedir(), ".flair", "exports", `${agentId}-${Date.now()}.json`);
+    const rawOutputPath = opts.output ?? join(resolveHome(), ".flair", "exports", `${agentId}-${Date.now()}.json`);
     // Canonicalize to prevent path traversal (e.g. ../../etc/passwd)
     const outputPath = resolve(rawOutputPath);
     mkdirSync(join(outputPath, ".."), { recursive: true });

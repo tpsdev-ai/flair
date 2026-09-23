@@ -8,9 +8,9 @@
  */
 import { Command } from "commander";
 import { resolveAdminUser } from "../lib/auth-resolve.js";
+import { flairBackupOutputPath } from "../lib/flair-paths.js";
 import * as render from "../render.js";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 
 export type BackupCli = {
@@ -130,7 +130,7 @@ addSharedCredentialOptions(
 
     // Determine output path
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const defaultOutput = join(homedir(), ".flair", "backups", `flair-backup-${timestamp}.json`);
+    const defaultOutput = flairBackupOutputPath(timestamp);
     const outputPath: string = opts.output ?? defaultOutput;
     mkdirSync(join(outputPath, ".."), { recursive: true });
 

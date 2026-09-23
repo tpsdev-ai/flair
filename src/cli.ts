@@ -23,7 +23,7 @@ import {
   chownSync,
   constants as fsConstants,
 } from "node:fs";
-import { homedir, hostname, tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join, resolve, sep, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, execFileSync, spawnSync, execSync } from "node:child_process";
@@ -68,6 +68,7 @@ import { markStale, sortOldestVersionFirst, type FleetPresenceRow } from "./flee
 import { detectClients, renderWiringSummary, wireClaudeCode, wireCodex, wireGemini, wireCursor, wireAntigravity, wirePi, clientConfigPath, codexConfigHasFlairSection, type ClientId } from "./install/clients.js";
 import { flairCliVersion, clearFlairCliVersionCache, mcpServerSpec, unpinnedSpecWarning } from "./lib/mcp-spec.js";
 import { harperPortValue } from "./lib/harper-port-value.js";
+import { flairConfigPath, flairDataDir } from "./lib/flair-paths.js";
 import {
   httpBind,
   httpCorsAccessList,
@@ -401,6 +402,7 @@ import {
   bindCli as bindGrantCli,
   register as registerGrant,
 } from "./commands/grant.js";
+import { resolveHome } from "./lib/home.js";
 
 // Federation crypto helpers + private-visibility filter live with the
 // federation command group (src/commands/federation.ts, flair#1620). Inlined
@@ -479,7 +481,7 @@ const DEFAULT_OPS_BIND_HOST = "127.0.0.1";
 // the public CLI module surface is unchanged.
 
 function defaultDataDir(): string {
-  return join(homedir(), ".flair", "data");
+  return flairDataDir();
 }
 
 // ─── launchd label (flair#693) ─────────────────────────────────────────────
@@ -502,7 +504,7 @@ function defaultDataDir(): string {
 const LEGACY_LAUNCHD_LABEL = "ai.tpsdev.flair";
 
 function defaultLaunchAgentsDir(): string {
-  return join(homedir(), "Library", "LaunchAgents");
+  return join(resolveHome(), "Library", "LaunchAgents");
 }
 
 /** Instance-scoped launchd label for `dataDir`: ai.tpsdev.flair.<8-hex-char sha256 of the resolved data dir>. */
@@ -846,10 +848,7 @@ function ensureLaunchdServiceLoaded(
 
 function configPath(): string {
   // Check both .yaml and .yml extensions
-  const yamlPath = join(homedir(), ".flair", "config.yaml");
-  const ymlPath = join(homedir(), ".flair", "config.yml");
-  if (existsSync(ymlPath) && !existsSync(yamlPath)) return ymlPath;
-  return yamlPath;
+  return flairConfigPath();
 }
 
 /**
@@ -3914,7 +3913,7 @@ export function probeOpenclawPluginVersion(extensionName: string): string | null
   try {
     // process.env.HOME first so tests can override; homedir() as fallback —
     // homedir() doesn't honor runtime HOME changes (caches at module load).
-    const home = process.env.HOME ?? homedir();
+    const home = resolveHome();
     const pkgJsonPath = resolve(home, ".openclaw", "extensions", extensionName, "package.json");
     if (!existsSync(pkgJsonPath)) return null;
     const pkg = JSON.parse(readFileSync(pkgJsonPath, "utf-8"));
@@ -5164,7 +5163,7 @@ async function doctorRunAfterUpgrade(args: {
   /** Newly installed (target) version — null when unknown. */
   toVersion: string | null;
 }): Promise<DoctorRun> {
-  const homeDir = homedir();
+  const homeDir = resolveHome();
   const keysDir = defaultKeysDir();
   const detectedClientIds = detectClients().filter((c) => c.detected).map((c) => c.id);
 
@@ -5370,7 +5369,7 @@ export function buildRepairPlist(dataDir: string, config: Record<string, any>): 
     passFile: {
       launcher: launchdLauncherPath(),
       adminPassFile: defaultAdminPassPath(),
-      home: homedir(),
+      home: resolveHome(),
       path: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
     },
   });
@@ -5621,7 +5620,7 @@ export async function writeInitLaunchdPlist(
     passFile: {
       launcher: launchdLauncherPath(),
       adminPassFile: adminPassPath,
-      home: homedir(),
+      home: resolveHome(),
       path: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
     },
   });

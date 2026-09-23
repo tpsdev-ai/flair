@@ -15,8 +15,8 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { resolveHome } from "./home.js";
 
 export interface ResolveFlairConfigYamlOpts {
   cwd?: string;
@@ -38,7 +38,7 @@ function configFilesIn(dir: string): string[] {
  */
 export function flairConfigYamlCandidates(opts: ResolveFlairConfigYamlOpts = {}): string[] {
   const cwd = resolve(opts.cwd ?? process.cwd());
-  const homeDir = opts.homeDir ?? homedir();
+  const homeDir = opts.homeDir ?? resolveHome();
   const out: string[] = [...configFilesIn(cwd)];
   if (opts.componentDir) {
     const componentDir = resolve(opts.componentDir);

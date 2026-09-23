@@ -56,12 +56,13 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { homedir } from "node:os";
+
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { createSnapshot } from "./snapshot.js";
+import { resolveHome } from "../lib/home.js";
 
-export const REM_PAUSE_FLAG = resolve(homedir(), ".flair", "rem.paused");
-export const REM_NIGHTLY_LOG = resolve(homedir(), ".flair", "logs", "rem-nightly.jsonl");
+export const REM_PAUSE_FLAG = resolve(resolveHome(), ".flair", "rem.paused");
+export const REM_NIGHTLY_LOG = resolve(resolveHome(), ".flair", "logs", "rem-nightly.jsonl");
 
 // ─── ADK per-tag distillation (#1205b-1) ─────────────────────────────────────
 // adk-flair collapses (app_name, user_id) → ONE Flair agentId, distinguishing

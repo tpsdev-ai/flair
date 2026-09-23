@@ -2,14 +2,17 @@
  * Pins flair#1619 stabilize rules without importing src/cli.ts.
  * A leaked process.version is how a byte-identical dump false-fails one
  * Node matrix leg; the committed snapshot must not contain it.
+ *
+ * The home is normalized with `resolveHome()` (flair#1858) — the same resolver
+ * the option defaults are built from — so this pins THAT home, not `os.homedir()`.
  */
 import { describe, expect, test } from "bun:test";
-import { homedir } from "node:os";
+import { resolveHome } from "../../src/lib/home.ts";
 import { stabilizeCliSurfaceText } from "../helpers/cli-surface.ts";
 
 describe("stabilizeCliSurfaceText", () => {
-  test("replaces homedir, package version, and process.version", () => {
-    const raw = `home=${homedir()} pkg=9.9.9 runtime=${process.version}`;
+  test("replaces the resolved home, package version, and process.version", () => {
+    const raw = `home=${resolveHome()} pkg=9.9.9 runtime=${process.version}`;
     expect(stabilizeCliSurfaceText(raw, { version: "9.9.9" })).toBe(
       "home=~ pkg=$FLAIR_VERSION runtime=$NODE_VERSION",
     );

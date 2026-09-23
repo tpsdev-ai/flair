@@ -16,8 +16,8 @@
  */
 
 import { existsSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { resolveHome } from "./home.js";
 import { ALL_CLIENTS } from "../install/clients.js";
 import {
   uninstallContinuityHooks,
@@ -67,10 +67,6 @@ export interface PurgeOptions {
    * assert the "fully purged" headline. Production always lists the package.
    */
   omitNpmLeftover?: boolean;
-}
-
-function resolveHome(homeDir?: string): string {
-  return homeDir ?? process.env.HOME ?? process.env.USERPROFILE ?? homedir();
 }
 
 function withHome<T>(homeDir: string, fn: () => T): T {
@@ -190,7 +186,7 @@ function sweepHookBackup(
  * unless `omitNpmLeftover` is set.
  */
 export function purgeFlairInstall(opts: PurgeOptions = {}): PurgeResult {
-  const homeDir = resolveHome(opts.homeDir);
+  const homeDir = opts.homeDir ?? resolveHome();
   const skipUnload = !!opts.skipSchedulerUnload;
   const removed: string[] = [];
   const leftovers: PurgeLeftover[] = [];

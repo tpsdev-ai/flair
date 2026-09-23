@@ -12,9 +12,10 @@
  */
 
 import { promises as fsp } from "node:fs";
-import { homedir } from "node:os";
+
 import { join, dirname, basename } from "node:path";
 import type { BridgeKind, DiscoveredBridge } from "./types.js";
+import { resolveHome } from "../lib/home.js";
 
 // Exported for tests. Consumers should prefer `discover()`.
 export interface DiscoverOptions {
@@ -147,7 +148,7 @@ async function scanModuleRoot(base: string): Promise<DiscoveredBridge[]> {
  */
 export async function discover(opts: DiscoverOptions = {}): Promise<DiscoveredBridge[]> {
   const cwd = opts.cwd ?? process.cwd();
-  const home = opts.home ?? homedir();
+  const home = opts.home ?? resolveHome();
   const moduleRoots = opts.moduleRoots ?? [
     join(cwd, "node_modules"),
     join(home, ".flair", "node_modules"),
