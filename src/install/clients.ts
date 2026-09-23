@@ -88,6 +88,8 @@ import { dirname, join } from "node:path";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, isResolvedVersion, mcpServerSpec } from "../lib/mcp-spec.js";
 import { decodeWiringSpec, wiringPinString } from "../lib/wiring-spec.js";
 import { decidePinWrite, type PinWriteDecision } from "../lib/pin-write-guard.js";
+import { withConfigCriticalSection } from "../lib/config-critical-section.js";
+import { backupBytesTo, encodeText } from "../lib/settings-bytes.js";
 
 /**
  * Resolve the user's home dir. Prefer the live HOME/USERPROFILE env over
@@ -357,6 +359,13 @@ function wireJsonMcp(
 
 function indent(s: string): string {
   return s.split("\n").map((l) => `     ${l}`).join("\n");
+}
+
+/** Decode the primitive's IN-LOCK bytes as UTF-8 TEXT (flair#1778 2c-i-d2):
+ *  Codex's config.toml is not JSON, so it is read as text — never parsed with
+ *  parseSettingsBytes. `null` (an absent destination) decodes to "". */
+function decodeText(bytes: Uint8Array | null): string {
+  return bytes === null ? "" : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("utf-8");
 }
 
 // ---- Per-client config paths (cross-platform, Linux included) --------------------
@@ -798,57 +807,65 @@ function _wireCodex(env: WireEnv): { ok: boolean; message: string } {
   //
   // flair#1135: the "already wired" check is now version-aware — a section
   // with a stale pin triggers a re-write instead of a no-op.
+  //
+  // flair#1778 2c-i-d2: ONE critical section — observe → decide on the IN-LOCK
+  // TEXT → write via temp + fsync + rename (the primitive), with a 0600 `.bak`
+  // of the in-lock bytes. The three former write arms (append / replace /
+  // create) are ONE decide with three outcomes; the pure TOML helpers are
+  // unchanged, so the bytes written are exactly today's.
   const path = codexConfigPath();
   const display = "~/.codex/config.toml";
+  // Parent creation stays OUTSIDE the primitive (it needs the resolved parent
+  // to observe an absent destination).
   try {
-    if (existsSync(path)) {
-      const raw = readFileSync(path, "utf-8");
-      const hasSection = codexConfigHasFlairSection(raw);
-      // flair#1778 2c-i-a2 (fix round): the decision runs FIRST, on EVERY path
-      // below — including the section-absent append, which used to be written
-      // unguarded. The old order also produced N3: the "already wired" scan
-      // compared the section text against mcpServerSpec(), which on an
-      // unreadable version is the UNPINNED spec, and a pinned section CONTAINS
-      // that bare package substring — so it matched and reported a false
-      // "already wired" instead of the refusal. Nothing is written until the
-      // decision says `write`.
-      const decision = decidePinWrite({
-        pkg: FLAIR_MCP_PACKAGE,
-        entry: `Codex config ${display}`,
-        existingText: hasSection ? codexFlairSectionText(raw) : null,
-        runningVersion: flairCliVersion(),
-      });
-      if (decision.action !== "write") {
-        return { ok: true, message: decision.line! };
-      }
-      if (!hasSection) {
-        // Genuinely absent: the decision above was consulted with an ABSENT
-        // entry, and a `write` here is today's plain append (pinned).
-        writeFileSync(path, appendCodexFlairBlock(raw, env));
-        return { ok: true, message: `Codex: wired ${display} (restart Codex to pick it up)` };
-      }
-      if (codexFlairSectionHasCurrentPin(raw)) {
-        return { ok: true, message: `Codex: already wired in ${display}` };
-      }
-      // Pin is BEHIND (or equal) — replace it with the current one.
-      writeFileSync(path, replaceCodexFlairBlock(raw, env));
-      return { ok: true, message: `Codex: refreshed pin in ${display} (restart Codex to pick it up)` };
-    }
-    // No config file: creating one is still a version-carrying WRITE, so the
-    // decision runs first (entry ABSENT) — an unreadable version refuses and
-    // nothing is created.
-    const createDecision = decidePinWrite({
-      pkg: FLAIR_MCP_PACKAGE,
-      entry: `Codex config ${display}`,
-      existingText: null,
-      runningVersion: flairCliVersion(),
-    });
-    if (createDecision.action !== "write") {
-      return { ok: true, message: createDecision.line! };
-    }
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, tomlSnippet(env) + "\n");
-    return { ok: true, message: `Codex: wired ${display} (restart Codex to pick it up)` };
+    let settled: { ok: boolean; message: string } | null = null;
+    let success: string | null = null;
+    const result = withConfigCriticalSection(
+      path,
+      (bytes) => {
+        const raw = decodeText(bytes);
+        const hasSection = codexConfigHasFlairSection(raw);
+        // flair#1778 2c-i-a2 (fix round): the decision runs FIRST, on EVERY
+        // path below — including the section-absent append and the absent-file
+        // create, which used to be written unguarded. Nothing is written until
+        // the decision says `write`; an unreadable running version REFUSES.
+        const decision = decidePinWrite({
+          pkg: FLAIR_MCP_PACKAGE,
+          entry: `Codex config ${display}`,
+          existingText: hasSection ? codexFlairSectionText(raw) : null,
+          runningVersion: flairCliVersion(),
+        });
+        if (decision.action !== "write") {
+          settled = { ok: true, message: decision.line! };
+          return { hold: decision.line! };
+        }
+        if (hasSection) {
+          // A pinned section that already carries the current spec is an
+          // idempotent no-op; otherwise (BEHIND or equal) replace it.
+          if (codexFlairSectionHasCurrentPin(raw)) {
+            settled = { ok: true, message: `Codex: already wired in ${display}` };
+            return { noop: settled.message };
+          }
+          success = `Codex: refreshed pin in ${display} (restart Codex to pick it up)`;
+          return { write: encodeText(replaceCodexFlairBlock(raw, env)) };
+        }
+        // Section absent (or file absent, where raw === "" IS the create
+        // case): the decision above was consulted with an ABSENT entry, and a
+        // `write` here is today's plain append.
+        success = `Codex: wired ${display} (restart Codex to pick it up)`;
+        return { write: encodeText(appendCodexFlairBlock(raw, env)) };
+      },
+      { backup: (bytes) => backupBytesTo(path, bytes) },
+    );
+    if (result.status === "written") return { ok: true, message: success! };
+    const s = settled as { ok: boolean; message: string } | null;
+    if (s) return s;
+    return {
+      ok: false,
+      message: `Codex: manual wiring needed (could not write ${display}: ${result.message}).\n` +
+        `   Add this block to ${display}:\n${indent(tomlSnippet(env))}`,
+    };
   } catch (err: unknown) {
     const reason = err instanceof Error ? err.message : String(err);
     return {
@@ -930,18 +947,39 @@ function _unwireClaudeCode(): UnwireResult {
 }
 
 function _unwireCodex(): UnwireResult {
+  // flair#1778 2c-i-d2: ONE critical section — observe → decide on the IN-LOCK
+  // text → write via temp + fsync + rename, with a 0600 `.bak` of the in-lock
+  // bytes. The absent-file short-circuit stays OUTSIDE (no lock for a file that
+  // does not exist), matching the JSON unwire.
   const path = codexConfigPath();
   const display = "~/.codex/config.toml";
   if (!existsSync(path)) {
     return { ok: true, removed: false, message: `Codex: no config at ${display}` };
   }
   try {
-    const raw = readFileSync(path, "utf-8");
-    if (!codexConfigHasFlairSection(raw)) {
-      return { ok: true, removed: false, message: `Codex: no Flair MCP entry in ${display}` };
-    }
-    writeFileSync(path, removeCodexFlairBlock(raw));
-    return { ok: true, removed: true, message: `Codex: unwired ${display}` };
+    let settled: UnwireResult | null = null;
+    const result = withConfigCriticalSection(
+      path,
+      (bytes) => {
+        if (bytes === null) {
+          const s: UnwireResult = { ok: true, removed: false, message: `Codex: no config at ${display}` };
+          settled = s;
+          return { noop: s.message };
+        }
+        const raw = decodeText(bytes);
+        if (!codexConfigHasFlairSection(raw)) {
+          const s: UnwireResult = { ok: true, removed: false, message: `Codex: no Flair MCP entry in ${display}` };
+          settled = s;
+          return { noop: s.message };
+        }
+        return { write: encodeText(removeCodexFlairBlock(raw)) };
+      },
+      { backup: (bytes) => backupBytesTo(path, bytes) },
+    );
+    if (result.status === "written") return { ok: true, removed: true, message: `Codex: unwired ${display}` };
+    const s = settled as UnwireResult | null;
+    if (s) return s;
+    return { ok: false, removed: false, message: `Codex: could not unwire ${display}: ${result.message}` };
   } catch (err: unknown) {
     const reason = err instanceof Error ? err.message : String(err);
     return { ok: false, removed: false, message: `Codex: could not unwire ${display}: ${reason}` };

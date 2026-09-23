@@ -119,3 +119,10 @@ const CONFIG_ENCODER = new TextEncoder();
 export function encodeConfig(config: unknown): Uint8Array {
   return CONFIG_ENCODER.encode(JSON.stringify(config, null, 2) + "\n");
 }
+
+/** The exact bytes a TEXT config writer emits (Codex's TOML, flair#1778
+ *  2c-i-d2): the raw UTF-8 of the text the pure helpers produced — never a
+ *  re-serialization. */
+export function encodeText(text: string): Uint8Array {
+  return CONFIG_ENCODER.encode(text);
+}
