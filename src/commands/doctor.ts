@@ -11,7 +11,7 @@ import { COMPONENT_ENV_FILENAME, PUBLIC_URL_KEY, describePublicUrlFinding, readE
 import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, describeAgentGateFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
 import { FleetPresenceRow, markStale, sortOldestVersionFirst } from "../fleet-presence.js";
 import { hookSettingsPath, resolveHookAgentId } from "../hook-install.js";
-import { detectClients, type ClientId, wireAntigravity, wireClaudeCode, wireCodex, wireCursor, wireGemini } from "../install/clients.js";
+import { ALL_CLIENTS, decideCodexPinOnly, decideJsonPinOnly, detectClients, type ClientId, wireAntigravity, wireClaudeCode, wireCodex, wireCursor, wireGemini } from "../install/clients.js";
 import { checkGlobalBinOnPath, resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
 import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, resolveAdminUser, resolveKeyPath, resolveLocalAdminPass } from "../lib/auth-resolve.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
@@ -1025,8 +1025,25 @@ program
           .filter((f) => f.reading.entryExists);
         if (behindMcp.length > 0) {
           if (dryRun) {
+            // flair#1834 A2: derive each dry-run line from the SAME
+            // classification the real run uses, so there is never a "Would
+            // re-pin" for a target the real run would HOLD or skip.
             for (const f of behindMcp) {
-              console.log(`     ${render.wrap(render.c.dim, "Would re-pin the MCP server block in")} ${f.reading.target.path}`);
+              const id = f.reading.target.id as ClientId;
+              const label = ALL_CLIENTS.find((c) => c.id === id)?.label ?? id;
+              let dec;
+              try {
+                const raw = readFileSync(f.reading.target.path, "utf-8");
+                dec = id === "codex" ? decideCodexPinOnly(raw, label) : decideJsonPinOnly(raw, label, f.reading.target.path);
+              } catch (err) {
+                console.log(`     ${render.icons.warn} ${label}: could not read ${f.reading.target.path} (${err instanceof Error ? err.message : String(err)}) — would not re-pin`);
+                continue;
+              }
+              if (dec.result.kind === "repinned") {
+                console.log(`     ${render.wrap(render.c.dim, "Would re-pin the MCP server block in")} ${f.reading.target.path} (${FLAIR_MCP_PACKAGE}@${dec.result.oldPin} -> ${dec.result.newPin})`);
+              } else {
+                console.log(`     ${render.icons.warn} ${dec.result.line ?? `${label}: ${dec.result.kind} — would not re-pin`}`);
+              }
             }
           } else {
             const overrides = behindMcp.map((f) => {

@@ -19,6 +19,7 @@ import { dirname, join } from "node:path";
 import {
   ALL_CLIENTS,
   clientConfigPath,
+  repinCodexPin,
   repinJsonMcpPin,
   type ClientId,
 } from "../install/clients.js";
@@ -470,17 +471,9 @@ export function refreshOwnedPins(opts: RefreshOwnedPinsOptions): OwnedPinRefresh
       // `@tpsdev-ai/flair-mcp` element of the entry's args, preserving the
       // entry's OWN identity (FLAIR_AGENT_ID, FLAIR_URL) and every other key.
       // There is no host-wide identity to guess and no full re-wire here.
-      if (target.id === "codex") {
-        // Codex is TOML and has its own pin-only writer in PR-A2; until then
-        // its refresh SKIPS (a stale pin, never corruption). flair#1834 item 6.
-        results.push({
-          target,
-          action: "skip",
-          ok: true,
-          message: `${target.id}: refresh awaits the TOML pin-only writer — skip`,
-        });
-        continue;
-      }
+      // flair#1834 A2: Codex (TOML) has its own pin-only writer
+      // (repinCodexPin), so its refresh no longer skips — it flows through the
+      // SAME visit gate and the SAME writer-result seam below.
       // flair#1834 A1 round 2 (Kern BLOCKING): a VISIT gate. When the entry is
       // not visible AND its directory is absent, there is nothing to visit —
       // the primitive cannot resolve the parent and refuses, which the writer
@@ -531,10 +524,11 @@ export function refreshOwnedPins(opts: RefreshOwnedPinsOptions): OwnedPinRefresh
         });
         continue;
       }
-      // repinJsonMcpPin fails closed on a duplicated key, an ambiguous shape or
-      // a pin the never-lower guard cannot prove safe; it never wires an absent
-      // entry (an absent entry is a clean `skip`).
-      const repin = repinJsonMcpPin(target.path, client.label);
+      // Both writers fail closed on an ambiguous shape or a pin the never-lower
+      // guard cannot prove safe; neither wires an absent entry (a clean `skip`).
+      const repin = target.id === "codex"
+        ? repinCodexPin(target.path, client.label)
+        : repinJsonMcpPin(target.path, client.label);
       switch (repin.kind) {
         case "repinned":
           results.push({

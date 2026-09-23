@@ -137,7 +137,7 @@ function issueCount(out: string): number {
 }
 
 describe("flair#1779 — doctor --fix re-pins a BEHIND MCP-client block", () => {
-  test("BEHIND (claude-code + codex): --fix re-pins the JSON client; codex refresh skips (A1, pending A2)", async () => {
+  test("BEHIND (claude-code + codex): --fix rewrites BOTH and prints a line each", async () => {
     const home = makeHome({ claude: BEHIND, codex: BEHIND });
     const deadPort = await freePort();
 
@@ -149,19 +149,21 @@ describe("flair#1779 — doctor --fix re-pins a BEHIND MCP-client block", () => 
     // The JSON client (claude-code) is re-pinned from the WRITER's in-lock
     // result (round 2: r.message carries the (old -> new) the write saw).
     expect(fix.out).toContain(`re-pinned Claude Code (${FLAIR_MCP_PACKAGE}@${BEHIND} -> ${FLAIR_MCP_PACKAGE}@${INSTALLED})`);
-    // flair#1834 A1: Codex is TOML and gets its own pin-only writer in A2; until
-    // then the refresh SKIPS it — the pin stays stale, never corrupted.
-    expect(fix.out).toContain("codex: refresh awaits the TOML pin-only writer — skip");
-    // The JSON block carries the CLI version; the TOML block is untouched.
+    // flair#1834 A2: Codex (TOML) has its own pin-only writer now, so it too is
+    // re-pinned — through the same visit gate and the same in-lock r.message.
+    expect(fix.out).toContain(`re-pinned Codex (${FLAIR_MCP_PACKAGE}@${BEHIND} -> ${FLAIR_MCP_PACKAGE}@${INSTALLED})`);
+    // Both blocks carry the CLI version now.
     expect(readFileSync(claudePath(home), "utf-8")).toContain(`${FLAIR_MCP_PACKAGE}@${INSTALLED}`);
     expect(readFileSync(claudePath(home), "utf-8")).not.toContain(`${FLAIR_MCP_PACKAGE}@${BEHIND}`);
-    expect(readFileSync(codexPath(home), "utf-8")).toContain(`${FLAIR_MCP_PACKAGE}@${BEHIND}`);
-    // A1 limitation, named: the catalog (recomputed after the fix) still flags
-    // the codex block behind until A2 lands.
-    expect(fix.out).toContain("✗ MCP server block: fail");
+    expect(readFileSync(codexPath(home), "utf-8")).toContain(`${FLAIR_MCP_PACKAGE}@${INSTALLED}`);
+    expect(readFileSync(codexPath(home), "utf-8")).not.toContain(`${FLAIR_MCP_PACKAGE}@${BEHIND}`);
+    // The catalog (recomputed after the fix) is clean for the block.
+    expect(fix.out).not.toContain("✗ MCP server block");
 
+    // A second `doctor` is clean.
     const second = await runDoctor(home, deadPort);
-    expect(second.out).toContain("✗ MCP server block: fail");
+    expect(second.out).toContain("✓ MCP server block: pass");
+    expect(second.out).not.toContain("✗ MCP server block");
   });
 
   test("BEHIND + AHEAD: only the behind client is rewritten; the ahead one is byte-identical (held)", async () => {

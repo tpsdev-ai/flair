@@ -624,6 +624,162 @@ export interface JsonPinRepinResult {
 }
 
 /**
+ * The SHARED pin-only decision (flair#1834 A2): one classifier feeds both the
+ * writer and doctor's dry-run, so the dry-run can never claim a re-pin the real
+ * run would HOLD or skip. `write` is present iff `kind === "repinned"`.
+ */
+export interface PinOnlyDecision {
+  result: JsonPinRepinResult;
+  write?: Uint8Array;
+}
+
+/**
+ * Decide the pin-only re-pin for an already-wired JSON MCP entry, from the raw
+ * file text. Pure (no I/O); the writer calls it on the IN-LOCK bytes, and
+ * doctor's dry-run calls it on the file it reads — the SAME classification.
+ */
+export function decideJsonPinOnly(raw: string, label: string, configPath: string): PinOnlyDecision {
+  const display = displayPath(configPath);
+  const hold = (line: string): PinOnlyDecision => ({ result: { kind: "hold", oldPin: null, newPin: null, noIdentity: false, line } });
+  const failed = (line: string): PinOnlyDecision => ({ result: { kind: "failed", oldPin: null, newPin: null, noIdentity: false, line } });
+  const skip = (line: string): PinOnlyDecision => ({ result: { kind: "skip", oldPin: null, newPin: null, noIdentity: false, line } });
+  // 1. Raw duplicate scan BEFORE parse, by DECODED key name (design item 5;
+  //    round 2 — an escaped duplicate must not evade the HOLD). Scoped to
+  //    root → mcpServers → flair → env.
+  const dupAt = findDuplicateOnPath(raw);
+  if (dupAt !== null) {
+    return hold(`the config carries a duplicate key at ${dupAt} — refusing to rewrite it`);
+  }
+  const read = parseSettingsBytes(Buffer.from(raw, "utf-8"), configPath);
+  if (read.parseError) return failed(jsonFailureReason(configPath, read.parseError));
+  const config: any = read.parsed ?? {};
+  const entry = config?.mcpServers?.flair;
+  if (entry === undefined || entry === null) return skip(`${label}: not wired in ${display} — skip`);
+  if (typeof entry !== "object" || Array.isArray(entry)) return hold("the flair entry is not an object — refusing to rewrite it");
+  const classified = classifyFlairEntryArgs(entry);
+  if ("reason" in classified) return hold(classified.reason);
+  const { index, arg } = classified;
+  const wouldWrite = flairCliVersion();
+  const pinStr = wiringPinString(decodeWiringSpec(arg, FLAIR_MCP_PACKAGE));
+  // 2. The never-lower / unknown-pin guard.
+  if (pinWriteWouldLowerOrIsUnknown(pinStr, wouldWrite)) {
+    return { result: { kind: "hold", oldPin: arg, newPin: mcpServerSpec(), noIdentity: false, line: heldMcpPinReason(pinStr as string, wouldWrite) } };
+  }
+  const newArg = mcpServerSpec();
+  if (arg === newArg) return { result: { kind: "noop", oldPin: arg, newPin: newArg, noIdentity: false, line: `${label}: already pinned to ${newArg}` } };
+  // 3. Mutate ONLY the one array element; everything else is deep-equal.
+  const noIdentity = !(typeof entry.env?.FLAIR_AGENT_ID === "string" && entry.env.FLAIR_AGENT_ID);
+  config.mcpServers.flair.args[index] = newArg;
+  return { result: { kind: "repinned", oldPin: arg, newPin: newArg, noIdentity, line: null }, write: encodeConfig(config) };
+}
+
+/** How many times `needle` occurs in `text` (non-overlapping). */
+function countText(text: string, needle: string): number {
+  let n = 0;
+  let from = 0;
+  for (;;) {
+    const i = text.indexOf(needle, from);
+    if (i === -1) break;
+    n++;
+    from = i + needle.length;
+  }
+  return n;
+}
+
+/**
+ * Standalone `<pkg>` tokens (bare OR pinned) in `text`. A scoped sibling like
+ * `@tpsdev-ai/flair-mcp-extra` does NOT count (the char before the match is part
+ * of a longer name), matching `wiring-spec`'s token-start rule.
+ */
+function countFlairPackageTokens(text: string): number {
+  const pkg = FLAIR_MCP_PACKAGE;
+  let n = 0;
+  let from = 0;
+  for (;;) {
+    const i = text.indexOf(pkg, from);
+    if (i === -1) break;
+    from = i + pkg.length;
+    const before = i === 0 ? "" : text[i - 1]!;
+    if (before !== "" && /[A-Za-z0-9_./-]/.test(before)) continue;
+    n++;
+  }
+  return n;
+}
+
+const CODEX_FLAIR_HEADER_RE = /^\[mcp_servers\.flair\]\s*$/gm;
+/** A builder-emitted single-line args element: `args = ["-y", "<spec>"]`. */
+const CODEX_ARGS_LINE_RE = /^[ \t]*args[ \t]*=[ \t]*\[[ \t]*"-y"[ \t]*,[ \t]*"([^"]*)"[ \t]*\][ \t]*$/m;
+
+/**
+ * Decide the pin-only re-pin for an already-wired Codex `[mcp_servers.flair]`
+ * TOML section, from the raw file text. Changes ONLY the `@tpsdev-ai/flair-mcp`
+ * string span inside the single-line `args` element; every other byte of
+ * config.toml — env tables, other args, other servers, comments, quoting and
+ * line endings — is identical. Fail-closed HOLDs (bytes untouched) when the
+ * shape is not the builder-emitted one (flair#1834 A2 design item 3).
+ */
+export function decideCodexPinOnly(raw: string, label: string): PinOnlyDecision {
+  const display = "~/.codex/config.toml";
+  const hold = (line: string): PinOnlyDecision => ({ result: { kind: "hold", oldPin: null, newPin: null, noIdentity: false, line } });
+  // 1. Exactly one header (the locator is otherwise fence-blind).
+  const headers = [...raw.matchAll(CODEX_FLAIR_HEADER_RE)];
+  if (headers.length === 0) return { result: { kind: "skip", oldPin: null, newPin: null, noIdentity: false, line: `${label}: not wired in ${display} — skip` } };
+  if (headers.length > 1) return hold("more than one [mcp_servers.flair] header — refusing to rewrite it");
+  const headerIdx = headers[0]!.index!;
+  // 2. No unmatched multiline-string fence before the header (a fake header
+  //    inside another server's `"""` / `'''` string).
+  if (countText(raw.slice(0, headerIdx), '"""') % 2 === 1) return hold('an unmatched """ fence precedes [mcp_servers.flair] — refusing to rewrite it');
+  if (countText(raw.slice(0, headerIdx), "'''") % 2 === 1) return hold("an unmatched ''' fence precedes [mcp_servers.flair] — refusing to rewrite it");
+  // 3. Locate the section: its end is a clean top-level header line (a flair
+  //    sub-table is part of the section). An array-of-tables boundary, an
+  //    array header inside the section, or a comment that looks like a header
+  //    is a HOLD (not a clean boundary).
+  const headerLineEnd = raw.indexOf("\n", headerIdx);
+  const bodyStart = headerLineEnd === -1 ? raw.length : headerLineEnd + 1;
+  const lines = raw.slice(bodyStart).split("\n");
+  let consumed = 0;
+  let sectionEnd = raw.length;
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li]!;
+    if (/^\[/.test(line)) {
+      if (/^\[mcp_servers\.flair/.test(line)) { consumed += line.length + 1; continue; }
+      if (/^\[\[/.test(line)) return hold("the section ends at an array-of-tables header ([[...]]) — refusing to rewrite it");
+      sectionEnd = bodyStart + consumed;
+      break;
+    }
+    if (/^[ \t]*\[\[/.test(line)) return hold("the section contains an array-of-tables header ([[...]]) — refusing to rewrite it");
+    if (/^[ \t]*#.*\[/.test(line)) return hold("the section contains a comment that looks like a header — refusing to rewrite it");
+    consumed += line.length + 1;
+  }
+  const section = raw.slice(headerIdx, sectionEnd);
+  // 4. Exactly one package token, and it is the args element.
+  const tokens = countFlairPackageTokens(section);
+  if (tokens === 0) return hold("no identifiable package argument in [mcp_servers.flair]");
+  if (tokens > 1) return hold("the package appears more than once in [mcp_servers.flair] — refusing to rewrite it");
+  const argsMatch = section.match(CODEX_ARGS_LINE_RE);
+  if (!argsMatch || argsMatch.index === undefined) return hold("the [mcp_servers.flair] args is not a single-line double-quoted element");
+  const spec = argsMatch[1]!;
+  if (!(spec === FLAIR_MCP_PACKAGE || spec.startsWith(`${FLAIR_MCP_PACKAGE}@`))) {
+    return hold("the package string in [mcp_servers.flair] is not on the args line — refusing to rewrite it");
+  }
+  // 5. Guard (never lower / unknown) — the SAME guard the JSON path uses.
+  const wouldWrite = flairCliVersion();
+  const pinStr = wiringPinString(decodeWiringSpec(spec, FLAIR_MCP_PACKAGE));
+  if (pinWriteWouldLowerOrIsUnknown(pinStr, wouldWrite)) {
+    return { result: { kind: "hold", oldPin: spec, newPin: mcpServerSpec(), noIdentity: false, line: heldMcpPinReason(pinStr as string, wouldWrite) } };
+  }
+  const newSpec = mcpServerSpec();
+  if (spec === newSpec) return { result: { kind: "noop", oldPin: spec, newPin: newSpec, noIdentity: false, line: `${label}: already pinned to ${newSpec}` } };
+  // 6. Replace ONLY the quoted spec span on the args line.
+  const lineAbsStart = headerIdx + argsMatch.index;
+  const lineAbsEnd = lineAbsStart + argsMatch[0]!.length;
+  const newLine = argsMatch[0]!.replace(`"${spec}"`, () => `"${newSpec}"`);
+  const newRaw = raw.slice(0, lineAbsStart) + newLine + raw.slice(lineAbsEnd);
+  const noIdentity = !/FLAIR_AGENT_ID[ \t]*=/.test(section);
+  return { result: { kind: "repinned", oldPin: spec, newPin: newSpec, noIdentity, line: null }, write: encodeText(newRaw) };
+}
+
+/**
  * Re-pin an ALREADY-WIRED JSON MCP entry to the running CLI's spec, changing
  * ONLY the one `@tpsdev-ai/flair-mcp` element of `args`. Preserves every other
  * field, every sibling server and every other top-level key; never takes an
@@ -633,7 +789,25 @@ export interface JsonPinRepinResult {
  * is a HOLD with the bytes untouched.
  */
 export function repinJsonMcpPin(configPath: string, label: string): JsonPinRepinResult {
-  const display = displayPath(configPath);
+  return repinPinOnly(configPath, label, (raw, l) => decideJsonPinOnly(raw, l, configPath));
+}
+
+/**
+ * Re-pin an ALREADY-WIRED Codex `[mcp_servers.flair]` TOML section to the
+ * running CLI's spec, changing ONLY the `@tpsdev-ai/flair-mcp` span inside the
+ * single-line `args` element (flair#1834 A2). Reuses A1's in-lock helper and
+ * structured hold seam; never wires a missing section.
+ */
+export function repinCodexPin(configPath: string, label: string): JsonPinRepinResult {
+  return repinPinOnly(configPath, label, (raw, l) => decideCodexPinOnly(raw, l));
+}
+
+/** The shared in-lock wrapper: observe in-lock bytes → classify → write-or-not. */
+function repinPinOnly(
+  configPath: string,
+  label: string,
+  decide: (raw: string, label: string) => PinOnlyDecision,
+): JsonPinRepinResult {
   const empty = (kind: JsonPinRepinKind, line: string | null = null): JsonPinRepinResult =>
     ({ kind, oldPin: null, newPin: null, noIdentity: false, line });
   let settled: JsonPinRepinResult | null = null;
@@ -642,52 +816,10 @@ export function repinJsonMcpPin(configPath: string, label: string): JsonPinRepin
       configPath,
       (bytes) => {
         const raw = bytes === null ? "" : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("utf-8");
-        // 1. Raw duplicate scan BEFORE parse, by DECODED key name (design item 5;
-        //    round 2 — an escaped duplicate must not evade the HOLD). Scoped to
-        //    root → mcpServers → flair → env.
-        const dupAt = findDuplicateOnPath(raw);
-        if (dupAt !== null) {
-          settled = empty("hold", `the config carries a duplicate key at ${dupAt} — refusing to rewrite it`);
-          return { hold: settled.line! };
-        }
-        const read = parseSettingsBytes(bytes, configPath);
-        if (read.parseError) {
-          settled = empty("failed", jsonFailureReason(configPath, read.parseError));
-          return { hold: settled.line! };
-        }
-        const config: any = read.parsed ?? {};
-        const entry = config?.mcpServers?.flair;
-        if (entry === undefined || entry === null) {
-          settled = empty("skip", `${label}: not wired in ${display} — skip`);
-          return { noop: settled.line! };
-        }
-        if (typeof entry !== "object" || Array.isArray(entry)) {
-          settled = empty("hold", "the flair entry is not an object — refusing to rewrite it");
-          return { hold: settled.line! };
-        }
-        const classified = classifyFlairEntryArgs(entry);
-        if ("reason" in classified) {
-          settled = empty("hold", classified.reason);
-          return { hold: settled.line! };
-        }
-        const { index, arg } = classified;
-        const wouldWrite = flairCliVersion();
-        const pinStr = wiringPinString(decodeWiringSpec(arg, FLAIR_MCP_PACKAGE));
-        // 2. The never-lower / unknown-pin guard, on the IN-LOCK bytes.
-        if (pinWriteWouldLowerOrIsUnknown(pinStr, wouldWrite)) {
-          settled = { kind: "hold", oldPin: arg, newPin: mcpServerSpec(), noIdentity: false, line: heldMcpPinReason(pinStr as string, wouldWrite) };
-          return { hold: settled.line! };
-        }
-        const newArg = mcpServerSpec();
-        if (arg === newArg) {
-          settled = { kind: "noop", oldPin: arg, newPin: newArg, noIdentity: false, line: `${label}: already pinned to ${newArg}` };
-          return { noop: settled.line! };
-        }
-        // 3. Mutate ONLY the one array element; everything else is deep-equal.
-        const noIdentity = !(typeof entry.env?.FLAIR_AGENT_ID === "string" && entry.env.FLAIR_AGENT_ID);
-        config.mcpServers.flair.args[index] = newArg;
-        settled = { kind: "repinned", oldPin: arg, newPin: newArg, noIdentity, line: null };
-        return { write: encodeConfig(config) };
+        const dec = decide(raw, label);
+        settled = dec.result;
+        if (dec.write) return { write: dec.write };
+        return dec.result.kind === "skip" ? { noop: dec.result.line! } : { hold: dec.result.line ?? "refusing to rewrite this entry" };
       },
       { backup: (bytes) => backupBytesTo(configPath, bytes) },
     );
