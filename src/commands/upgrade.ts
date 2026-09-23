@@ -7,7 +7,7 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
-import { detectWiredFlairMcp, isNodeKeyId } from "../doctor-client.js";
+import { detectWiredFlairMcp } from "../doctor-client.js";
 import { UPGRADE_SNAPSHOT_ROOT, fetchDeclaredHarperVersion, readInstalledHarperVersion } from "../engine-version.js";
 import { fabricUpgrade } from "../fabric-upgrade.js";
 import { renderFleetSweepTable, sweepFleet } from "../fleet-verify.js";
@@ -51,7 +51,6 @@ export type UpgradeCli = {
   probeLibVersion: (...args: any[]) => any;
   probeOpenclawPluginVersion: (...args: any[]) => any;
   relativeTime: (...args: any[]) => any;
-  resolveAgentIdOrEnv: (...args: any[]) => any;
   resolveFabricCredentials: (...args: any[]) => any;
   resolveFlairMcpFinding: (...args: any[]) => any;
   resolveHttpPort: (...args: any[]) => any;
@@ -129,10 +128,6 @@ function probeOpenclawPluginVersion(...args: any[]): any {
 
 function relativeTime(...args: any[]): any {
   return cli.relativeTime(...args);
-}
-
-function resolveAgentIdOrEnv(...args: any[]): any {
-  return cli.resolveAgentIdOrEnv(...args);
 }
 
 function resolveFabricCredentials(...args: any[]): any {
@@ -1249,30 +1244,14 @@ program
     // `doctor --fix` round-trip. Only refreshes clients that are ALREADY
     // wired — never wires new ones. Best-effort: failures warn but never fail
     // the upgrade.
-    async function refreshWiredMcpClientPins(targetPort: number): Promise<void> {
-      const agentId = resolveAgentIdOrEnv({}) ?? (() => {
-        try {
-          const kd = defaultKeysDir();
-          const keyFiles = readdirSync(kd).filter((f) => f.endsWith(".key"));
-          // Node-scoped federation keys aren't agents (flair#1193) — never
-          // pin-refresh a connector as one.
-          const agentKeyFile = keyFiles.find((f) => !isNodeKeyId(f.replace(/\.key$/, ""), kd));
-          return agentKeyFile ? agentKeyFile.replace(/\.key$/, "") : null;
-        } catch { return null; }
-      })();
-      // flair#1485: one catalogue (listOwnedPinTargets) for every file we
-      // pin — MCP client configs AND SessionStart hooks. A missing agent id
-      // skips MCP only; hook re-pin reads the agent from the existing command
-      // and must still run (the early return here used to leave hooks stale).
-      if (!agentId) {
-        console.log("\n   (no agent id known — skip MCP client pin refresh; SessionStart hooks still re-pin)");
-      }
+    async function refreshWiredMcpClientPins(): Promise<void> {
+      // flair#1834 A1: the refresh is PIN-ONLY. It no longer resolves a
+      // host-wide agent id (the old first-`.key` fallback in this function) or a FLAIR_URL, because those were written into EVERY wired
+      // client's env — rewriting each client's FLAIR_AGENT_ID to whichever key
+      // happened to sort first. The writer preserves each entry's own identity
+      // and changes only the pinned package argument.
       const homeDir = process.env.HOME || process.env.USERPROFILE || homedir();
-      const results = refreshOwnedPins({
-        homeDir,
-        agentId: agentId ?? null,
-        flairUrl: `http://127.0.0.1:${targetPort}`,
-      });
+      const results = refreshOwnedPins({ homeDir });
       const noteworthy = results.filter(ownedPinRefreshShouldReport);
       if (noteworthy.length === 0) return;
       console.log("\n   Refreshing MCP client and SessionStart hook pins...");
@@ -1315,7 +1294,7 @@ program
         if (checkOnly) {
           console.log("   Run: flair upgrade (refreshes the pin)");
         } else {
-          await refreshWiredMcpClientPins(resolveHttpPort({}));
+          await refreshWiredMcpClientPins();
         }
       }
       return;
@@ -1561,7 +1540,7 @@ program
     // version. Runs BEFORE the restart so --no-restart and --no-verify paths
     // also get the refresh (flair#1167). Best-effort: failures warn but never
     // fail the upgrade.
-    await refreshWiredMcpClientPins(upgradePort);
+    await refreshWiredMcpClientPins();
 
     // ── Restart + verify + rollback (flair#635) ─────────────────────────────
     // Decision (2026-07-08): restart is now the default post-upgrade step —

@@ -88,6 +88,7 @@ import { dirname, join } from "node:path";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, isResolvedVersion, mcpServerSpec } from "../lib/mcp-spec.js";
 import { decodeWiringSpec, wiringPinString } from "../lib/wiring-spec.js";
 import { decidePinWrite, type PinWriteDecision } from "../lib/pin-write-guard.js";
+import { pinWriteWouldLowerOrIsUnknown, comparePinVersions } from "../lib/upgrade-status.js";
 import { withConfigCriticalSection } from "../lib/config-critical-section.js";
 import { backupBytesTo, encodeConfig, encodeText, parseSettingsBytes } from "../lib/settings-bytes.js";
 
@@ -460,6 +461,173 @@ function wireJsonMcp(
 
 function indent(s: string): string {
   return s.split("\n").map((l) => `     ${l}`).join("\n");
+}
+
+// ── Pin-only JSON MCP re-pin (flair#1834 A1) ────────────────────────────────
+//
+// `flair upgrade`'s refresh and `flair doctor --fix`'s targeted re-pin must
+// change ONLY the `@tpsdev-ai/flair-mcp` element of an already-wired entry's
+// `args`. The full wire functions (`wireJsonMcpCore` above) REBUILD the whole
+// entry from a `WireEnv`, so using one for a refresh rewrote FLAIR_AGENT_ID,
+// FLAIR_URL and every other key from a host-wide guess — flair#1834's defect
+// (a 0.55.1 deploy rewrote every wired client's agent id to the first key in
+// ~/.lair/keys). This writer never takes an identity: it locates the one
+// package argument, guards it against lowering, replaces just that array
+// element, and leaves every other byte of the parsed entry deep-equal.
+
+/** Count a JSON object KEY (`"key":`) in raw text — the duplicate scan runs
+ *  BEFORE `JSON.parse`, which keeps the last duplicate and would let a
+ *  re-stringify silently collapse it (flair#1834 design item 5). Literal
+ *  regexes: the two keys are constants, so there is no dynamic pattern. */
+function countJsonKey(raw: string, re: RegExp): number {
+  return (raw.match(re) ?? []).length;
+}
+const FLAIR_KEY_RE = /"flair"\s*:/g;
+const AGENT_ID_KEY_RE = /"FLAIR_AGENT_ID"\s*:/g;
+
+/** True when an `args` element names the Flair MCP package (bare or pinned). */
+function argNamesFlairPackage(arg: string): boolean {
+  return arg === FLAIR_MCP_PACKAGE || arg.startsWith(`${FLAIR_MCP_PACKAGE}@`);
+}
+
+/** True when an `args` element looks like some OTHER scoped npm package — a
+ *  signal we cannot safely assume the entry is ours to touch (design item 4:
+ *  "any other scoped package name → HOLD"). */
+function argIsOtherScopedPackage(arg: string): boolean {
+  return /^@[^/\s]+\/[A-Za-z0-9._-]+(?:@[^\s]*)?$/.test(arg) && !argNamesFlairPackage(arg);
+}
+
+type FlairArgClassification =
+  | { ok: true; index: number; arg: string }
+  | { ok: false; reason: string };
+
+/** The shape policy (design item 4) for one already-present JSON flair entry:
+ *  exactly one identifiable package argument in `args`, no sibling scoped
+ *  package. Anything else is a HOLD with a reason. */
+function classifyFlairEntryArgs(entry: unknown): FlairArgClassification {
+  const args = (entry as { args?: unknown } | null)?.args;
+  if (!Array.isArray(args)) {
+    return { ok: false, reason: "the flair entry has no args array" };
+  }
+  const matches: number[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (typeof a !== "string") continue;
+    if (argNamesFlairPackage(a)) {
+      matches.push(i);
+    } else if (argIsOtherScopedPackage(a)) {
+      return { ok: false, reason: `the flair entry's args name another package (${a})` };
+    }
+  }
+  if (matches.length === 0) {
+    return { ok: false, reason: "the flair entry has no identifiable package argument" };
+  }
+  if (matches.length > 1) {
+    return { ok: false, reason: "the flair entry names the package more than once" };
+  }
+  return { ok: true, index: matches[0]!, arg: args[matches[0]!] as string };
+}
+
+/** The never-lower hold reason for a MCP entry, phrased for the caller to
+ *  prefix. Mirrors owned-pins.ts's `heldPinMessage` wording (the hook path
+ *  keeps that one); kept here so this writer owns its own guard's reason. */
+function heldMcpPinReason(pin: string, runningCli: string): string {
+  if (comparePinVersions(pin, runningCli) === null) {
+    return `keeping pinned ${pin} (the pin is not a version I can compare to running CLI ${runningCli} — a pin is never lowered)`;
+  }
+  return `keeping pinned ${pin} (running CLI ${runningCli} is older — a pin is never lowered)`;
+}
+
+export type JsonPinRepinKind = "repinned" | "noop" | "skip" | "hold" | "failed";
+
+export interface JsonPinRepinResult {
+  kind: JsonPinRepinKind;
+  /** The exact args element before the write (null when none was identifiable). */
+  oldPin: string | null;
+  /** The spec the write pinned to (the running CLI's), when known. */
+  newPin: string | null;
+  /** True when the entry carried no FLAIR_AGENT_ID at all (it was still re-pinned). */
+  noIdentity: boolean;
+  /** For hold/failed: the reason line (no label prefix). */
+  line: string | null;
+}
+
+/**
+ * Re-pin an ALREADY-WIRED JSON MCP entry to the running CLI's spec, changing
+ * ONLY the one `@tpsdev-ai/flair-mcp` element of `args`. Preserves every other
+ * field, every sibling server and every other top-level key; never takes an
+ * identity, so it cannot rewrite FLAIR_AGENT_ID/FLAIR_URL. Never wires a
+ * missing entry. Fail-closed: a duplicated flair key or FLAIR_AGENT_ID, an
+ * unreadable/ambiguous shape, or a pin the never-lower guard cannot prove safe
+ * is a HOLD with the bytes untouched.
+ */
+export function repinJsonMcpPin(configPath: string, label: string): JsonPinRepinResult {
+  const display = displayPath(configPath);
+  const empty = (kind: JsonPinRepinKind, line: string | null = null): JsonPinRepinResult =>
+    ({ kind, oldPin: null, newPin: null, noIdentity: false, line });
+  let settled: JsonPinRepinResult | null = null;
+  try {
+    const result = withConfigCriticalSection(
+      configPath,
+      (bytes) => {
+        const raw = bytes === null ? "" : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("utf-8");
+        // 1. Raw duplicate scan BEFORE parse (design item 5).
+        if (countJsonKey(raw, FLAIR_KEY_RE) > 1 || countJsonKey(raw, AGENT_ID_KEY_RE) > 1) {
+          settled = empty("hold", "the config carries a duplicated flair entry or FLAIR_AGENT_ID — refusing to rewrite it");
+          return { hold: settled.line! };
+        }
+        const read = parseSettingsBytes(bytes, configPath);
+        if (read.parseError) {
+          settled = empty("failed", jsonFailureReason(configPath, read.parseError));
+          return { hold: settled.line! };
+        }
+        const config: any = read.parsed ?? {};
+        const entry = config?.mcpServers?.flair;
+        if (entry === undefined || entry === null) {
+          settled = empty("skip", `${label}: not wired in ${display} — skip`);
+          return { noop: settled.line! };
+        }
+        if (typeof entry !== "object" || Array.isArray(entry)) {
+          settled = empty("hold", "the flair entry is not an object — refusing to rewrite it");
+          return { hold: settled.line! };
+        }
+        const classified = classifyFlairEntryArgs(entry);
+        if ("reason" in classified) {
+          settled = empty("hold", classified.reason);
+          return { hold: settled.line! };
+        }
+        const { index, arg } = classified;
+        const wouldWrite = flairCliVersion();
+        const pinStr = wiringPinString(decodeWiringSpec(arg, FLAIR_MCP_PACKAGE));
+        // 2. The never-lower / unknown-pin guard, on the IN-LOCK bytes.
+        if (pinWriteWouldLowerOrIsUnknown(pinStr, wouldWrite)) {
+          settled = { kind: "hold", oldPin: arg, newPin: mcpServerSpec(), noIdentity: false, line: heldMcpPinReason(pinStr as string, wouldWrite) };
+          return { hold: settled.line! };
+        }
+        const newArg = mcpServerSpec();
+        if (arg === newArg) {
+          settled = { kind: "noop", oldPin: arg, newPin: newArg, noIdentity: false, line: `${label}: already pinned to ${newArg}` };
+          return { noop: settled.line! };
+        }
+        // 3. Mutate ONLY the one array element; everything else is deep-equal.
+        const noIdentity = !(typeof entry.env?.FLAIR_AGENT_ID === "string" && entry.env.FLAIR_AGENT_ID);
+        config.mcpServers.flair.args[index] = newArg;
+        settled = { kind: "repinned", oldPin: arg, newPin: newArg, noIdentity, line: null };
+        return { write: encodeConfig(config) };
+      },
+      { backup: (bytes) => backupBytesTo(configPath, bytes) },
+    );
+    if (result.status === "written") {
+      return (settled as JsonPinRepinResult | null) ?? { kind: "repinned", oldPin: null, newPin: mcpServerSpec(), noIdentity: false, line: null };
+    }
+    const s = settled as JsonPinRepinResult | null;
+    if (s) return s;
+    // held (observation change) or refused (lock / backup / IO): nothing written.
+    return empty("failed", result.message);
+  } catch (err: unknown) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return empty("failed", reason);
+  }
 }
 
 /** The pre-migration pi manual-wiring line (kept byte-identical). */

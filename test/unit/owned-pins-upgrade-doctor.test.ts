@@ -217,8 +217,6 @@ describe("flair#1485 — failed MCP pin refresh is not silent", () => {
     try {
       results = refreshOwnedPins({
         homeDir: isoHome,
-        agentId: "local",
-        flairUrl: "http://127.0.0.1:9926",
       });
     } finally {
       chmodSync(isoHome, 0o755);
@@ -297,8 +295,6 @@ describe("flair#1485 — MUST-FAIL FIRST: upgrade moves a hook pinned to <instal
 
     const results = refreshOwnedPins({
       homeDir: isoHome,
-      agentId: "local",
-      flairUrl: "http://127.0.0.1:9926",
     });
 
     expect(readHookPin(isoHome, "claude-code")).toBe(INSTALLED);
@@ -314,8 +310,6 @@ describe("flair#1485 — MUST-FAIL FIRST: upgrade moves a hook pinned to <instal
 
     refreshOwnedPins({
       homeDir: isoHome,
-      agentId: null,
-      flairUrl: "http://127.0.0.1:9926",
     });
 
     expect(readHookPin(isoHome, "claude-code")).toBe(INSTALLED);
@@ -378,7 +372,7 @@ describe("flair#1778 — the pin refresh never LOWERS an owned pin", () => {
 
   it("MCP pin ahead of the running CLI is held, not rewritten down", () => {
     const mcpPath = writeClaudeMcp(isoHome, AHEAD_SPEC, "local");
-    const results = refreshOwnedPins({ homeDir: isoHome, agentId: "local", flairUrl: "http://127.0.0.1:9926" });
+    const results = refreshOwnedPins({ homeDir: isoHome });
     expect(extractFlairMcpPin(readFileSync(mcpPath, "utf-8"))).toBe(AHEAD_VER);
     const held = results.find((r) => r.target.id === "claude-code" && r.action === "hold");
     expect(held).toBeDefined();
@@ -389,7 +383,7 @@ describe("flair#1778 — the pin refresh never LOWERS an owned pin", () => {
 
   it("hook pin ahead of the running CLI is held, not rewritten down", () => {
     writeHook(isoHome, "claude-code", hookCommand("local", AHEAD_VER));
-    const results = refreshOwnedPins({ homeDir: isoHome, agentId: "local", flairUrl: "http://127.0.0.1:9926" });
+    const results = refreshOwnedPins({ homeDir: isoHome });
     expect(readHookPin(isoHome, "claude-code")).toBe(AHEAD_VER);
     const held = results.find((r) => r.target.kind === "session-start-hook" && r.action === "hold");
     expect(held).toBeDefined();
@@ -399,7 +393,7 @@ describe("flair#1778 — the pin refresh never LOWERS an owned pin", () => {
   it("an unrelated behind pin still advances while an ahead pin is held (mixed)", () => {
     const mcpPath = writeClaudeMcp(isoHome, AHEAD_SPEC, "local");
     writeHook(isoHome, "codex", hookCommand("local", STALE_VER));
-    const results = refreshOwnedPins({ homeDir: isoHome, agentId: "local", flairUrl: "http://127.0.0.1:9926" });
+    const results = refreshOwnedPins({ homeDir: isoHome });
     // The ahead MCP pin is untouched...
     expect(extractFlairMcpPin(readFileSync(mcpPath, "utf-8"))).toBe(AHEAD_VER);
     // ...while the behind hook pin still advances to the running CLI version.
@@ -460,7 +454,7 @@ describe("flair#1778 — an UNREADABLE pin FAILS CLOSED (never silently overwrit
   it("hook refresh: an unreadable pin is HELD, byte-identical, and the line names the raw value", () => {
     const p = writeHook(isoHome, "claude-code", hookCommand("local", RAW));
     const before = readFileSync(p, "utf-8");
-    const results = refreshOwnedPins({ homeDir: isoHome, agentId: "local", flairUrl: "http://127.0.0.1:9926" });
+    const results = refreshOwnedPins({ homeDir: isoHome });
     expect(readFileSync(p, "utf-8")).toBe(before);
     const held = results.find((r) => r.target.kind === "session-start-hook" && r.action === "hold");
     expect(held).toBeDefined();
@@ -471,7 +465,7 @@ describe("flair#1778 — an UNREADABLE pin FAILS CLOSED (never silently overwrit
   it("MCP refresh: an unreadable pin is HELD, byte-identical, and the line names the raw value", () => {
     const p = writeClaudeMcp(isoHome, RAW_SPEC, "local");
     const before = readFileSync(p, "utf-8");
-    const results = refreshOwnedPins({ homeDir: isoHome, agentId: "local", flairUrl: "http://127.0.0.1:9926" });
+    const results = refreshOwnedPins({ homeDir: isoHome });
     expect(readFileSync(p, "utf-8")).toBe(before);
     const held = results.find((r) => r.target.kind === "mcp-client" && r.action === "hold");
     expect(held).toBeDefined();

@@ -4687,7 +4687,6 @@ bindUpgradeCli({
   probeLibVersion,
   probeOpenclawPluginVersion,
   relativeTime,
-  resolveAgentIdOrEnv,
   resolveFabricCredentials,
   resolveFlairMcpFinding,
   resolveHttpPort,

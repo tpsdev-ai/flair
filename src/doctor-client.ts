@@ -754,6 +754,14 @@ export const FLAIR_CLIENT_DEFAULT_URL = "http://localhost:19926";
 
 export interface ClientMcpBlockResult {
   present: boolean;
+  /** STRUCTURAL presence, separate from identity (flair#1834 A1): true when
+   *  the config carries a Flair MCP entry at all, whether or not it names a
+   *  FLAIR_AGENT_ID. `present` stays `!!agentId` ("wired AND identified") so
+   *  doctor's wiring offer can tell "entry without identity" from "no entry"
+   *  (flair#1834 design item 1); a pin refresh/pin finding keys off this one,
+   *  because a refresh preserves whatever identity the entry already carries
+   *  rather than inventing one. */
+  entryExists: boolean;
   configPath: string;
   agentId?: string;
   flairUrl?: string;
@@ -796,21 +804,22 @@ export function readClientMcpBlock(clientId: ClientId, homeDir: string): ClientM
 
 function readJsonFlairBlock(configPath: string): ClientMcpBlockResult {
   const raw = readTextFile(configPath);
-  if (!raw || !raw.trim()) return { present: false, configPath };
+  if (!raw || !raw.trim()) return { present: false, entryExists: false, configPath };
   try {
     const config = JSON.parse(raw);
     const flair = config?.mcpServers?.flair;
-    if (!flair || typeof flair !== "object") return { present: false, configPath };
+    if (!flair || typeof flair !== "object") return { present: false, entryExists: false, configPath };
     const agentId: string | undefined = typeof flair.env?.FLAIR_AGENT_ID === "string" && flair.env.FLAIR_AGENT_ID ? flair.env.FLAIR_AGENT_ID : undefined;
     const flairUrl: string | undefined = typeof flair.env?.FLAIR_URL === "string" && flair.env.FLAIR_URL ? flair.env.FLAIR_URL : undefined;
     // FLAIR_URL optional — see readClientMcpBlock's doc (flair#1287). Any
     // extra fields the client's own tooling writes (e.g. `claude mcp add`'s
     // `type: "stdio"`) are irrelevant to presence and deliberately ignored.
     const present = !!agentId;
-    return { present, configPath, agentId, flairUrl, urlDefaulted: present && !flairUrl };
+    // entryExists is true here: the flair key was found and is an object.
+    return { present, entryExists: true, configPath, agentId, flairUrl, urlDefaulted: present && !flairUrl };
   } catch {
     // Malformed JSON — treat as "not present", never throw.
-    return { present: false, configPath };
+    return { present: false, entryExists: false, configPath };
   }
 }
 
@@ -835,9 +844,9 @@ function readJsonFlairBlock(configPath: string): ClientMcpBlockResult {
  */
 function readCodexFlairBlock(configPath: string): ClientMcpBlockResult {
   const raw = readTextFile(configPath);
-  if (!raw) return { present: false, configPath };
+  if (!raw) return { present: false, entryExists: false, configPath };
   const scanned = scanCodexFlairBlock(raw);
-  return { present: scanned.present, configPath, agentId: scanned.agentId, flairUrl: scanned.flairUrl, urlDefaulted: scanned.urlDefaulted };
+  return { present: scanned.present, entryExists: scanned.entryExists, configPath, agentId: scanned.agentId, flairUrl: scanned.flairUrl, urlDefaulted: scanned.urlDefaulted };
 }
 
 /**
@@ -888,9 +897,9 @@ function scanCodexEnvValue(block: string, key: keyof typeof CODEX_ENV_PATTERNS):
   return undefined;
 }
 
-function scanCodexFlairBlock(raw: string): { present: boolean; agentId?: string; flairUrl?: string; urlDefaulted?: boolean } {
+function scanCodexFlairBlock(raw: string): { present: boolean; entryExists: boolean; agentId?: string; flairUrl?: string; urlDefaulted?: boolean } {
   const startMatch = raw.match(/^\[mcp_servers\.flair\]\s*$/m);
-  if (!startMatch || startMatch.index === undefined) return { present: false };
+  if (!startMatch || startMatch.index === undefined) return { present: false, entryExists: false };
 
   const rest = raw.slice(startMatch.index);
   const lines = rest.split("\n");
@@ -907,7 +916,7 @@ function scanCodexFlairBlock(raw: string): { present: boolean; agentId?: string;
   // FLAIR_URL optional — same contract as readJsonFlairBlock (flair#1287);
   // docs/mcp-clients.md's own Codex snippet sets only FLAIR_AGENT_ID.
   const present = !!agentId;
-  return { present, agentId, flairUrl, urlDefaulted: present && !flairUrl };
+  return { present, entryExists: true, agentId, flairUrl, urlDefaulted: present && !flairUrl };
 }
 
 // ── check 1b: pi native-extension wiring (flair#1342) ───────────────────────

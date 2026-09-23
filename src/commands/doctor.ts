@@ -1018,7 +1018,11 @@ program
       if (autoFix) {
         const behindMcp = mcpClientPinFindings(homedir(), flairCliVersion())
           .filter((f) => f.direction === "behind")
-          .filter((f) => readClientMcpBlock(f.reading.target.id as ClientId, homedir()).present);
+          // flair#1834 A1: key off STRUCTURAL presence (entryExists), not
+          // `present` (= agent id set). A behind entry without an identity is
+          // still a pin we own and re-pin — the pin-only writer preserves
+          // whatever identity the entry carries.
+          .filter((f) => f.reading.entryExists);
         if (behindMcp.length > 0) {
           if (dryRun) {
             for (const f of behindMcp) {
@@ -1027,8 +1031,7 @@ program
           } else {
             const overrides = behindMcp.map((f) => {
               const id = f.reading.target.id as ClientId;
-              const block = readClientMcpBlock(id, homedir());
-              return { kind: "mcp-client" as const, id, agentId: block.agentId ?? null, flairUrl: effectiveFlairUrl(block).url };
+              return { kind: "mcp-client" as const, id };
             });
             const results = refreshOwnedPins({ homeDir: homedir(), targets: overrides });
             for (const r of results) {
