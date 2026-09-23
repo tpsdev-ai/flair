@@ -89,7 +89,7 @@ import { FLAIR_MCP_PACKAGE, flairCliVersion, isResolvedVersion, mcpServerSpec } 
 import { decodeWiringSpec, wiringPinString } from "../lib/wiring-spec.js";
 import { decidePinWrite, type PinWriteDecision } from "../lib/pin-write-guard.js";
 import { pinWriteWouldLowerOrIsUnknown, comparePinVersions } from "../lib/upgrade-status.js";
-import { withConfigCriticalSection } from "../lib/config-critical-section.js";
+import { withConfigCriticalSection, type ConfigSectionOptions } from "../lib/config-critical-section.js";
 import { backupBytesTo, encodeConfig, encodeText, parseSettingsBytes } from "../lib/settings-bytes.js";
 
 /**
@@ -788,8 +788,12 @@ export function decideCodexPinOnly(raw: string, label: string): PinOnlyDecision 
  * unreadable/ambiguous shape, or a pin the never-lower guard cannot prove safe
  * is a HOLD with the bytes untouched.
  */
-export function repinJsonMcpPin(configPath: string, label: string): JsonPinRepinResult {
-  return repinPinOnly(configPath, label, (raw, l) => decideJsonPinOnly(raw, l, configPath));
+export function repinJsonMcpPin(
+  configPath: string,
+  label: string,
+  testHooks?: ConfigSectionOptions["testHooks"],
+): JsonPinRepinResult {
+  return repinPinOnly(configPath, label, (raw, l) => decideJsonPinOnly(raw, l, configPath), testHooks);
 }
 
 /**
@@ -798,8 +802,12 @@ export function repinJsonMcpPin(configPath: string, label: string): JsonPinRepin
  * single-line `args` element (flair#1834 A2). Reuses A1's in-lock helper and
  * structured hold seam; never wires a missing section.
  */
-export function repinCodexPin(configPath: string, label: string): JsonPinRepinResult {
-  return repinPinOnly(configPath, label, (raw, l) => decideCodexPinOnly(raw, l));
+export function repinCodexPin(
+  configPath: string,
+  label: string,
+  testHooks?: ConfigSectionOptions["testHooks"],
+): JsonPinRepinResult {
+  return repinPinOnly(configPath, label, (raw, l) => decideCodexPinOnly(raw, l), testHooks);
 }
 
 /** The shared in-lock wrapper: observe in-lock bytes → classify → write-or-not. */
@@ -807,6 +815,7 @@ function repinPinOnly(
   configPath: string,
   label: string,
   decide: (raw: string, label: string) => PinOnlyDecision,
+  testHooks?: ConfigSectionOptions["testHooks"],
 ): JsonPinRepinResult {
   const empty = (kind: JsonPinRepinKind, line: string | null = null): JsonPinRepinResult =>
     ({ kind, oldPin: null, newPin: null, noIdentity: false, line });
@@ -821,14 +830,18 @@ function repinPinOnly(
         if (dec.write) return { write: dec.write };
         return dec.result.kind === "skip" ? { noop: dec.result.line! } : { hold: dec.result.line ?? "refusing to rewrite this entry" };
       },
-      { backup: (bytes) => backupBytesTo(configPath, bytes) },
+      { backup: (bytes) => backupBytesTo(configPath, bytes), testHooks },
     );
     if (result.status === "written") {
       return (settled as JsonPinRepinResult | null) ?? { kind: "repinned", oldPin: null, newPin: mcpServerSpec(), noIdentity: false, line: null };
     }
     const s = settled as JsonPinRepinResult | null;
-    if (s) return s;
-    // held (observation change) or refused (lock / backup / IO): nothing written.
+    // A decided re-pin is truthful ONLY once the write COMMITS. Here nothing was
+    // written, so a stored "repinned" means atomicReplace refused AFTER the
+    // decision — a failed write, which must be a FAILURE (skip, ok false, loud),
+    // never a success. Hold/skip verdicts stand; an absent result (a lock /
+    // backup / IO refusal, or an observation change) is a failure too.
+    if (s && s.kind !== "repinned") return s;
     return empty("failed", result.message);
   } catch (err: unknown) {
     const reason = err instanceof Error ? err.message : String(err);

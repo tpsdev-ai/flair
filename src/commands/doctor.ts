@@ -1040,7 +1040,14 @@ program
                 continue;
               }
               if (dec.result.kind === "repinned") {
-                console.log(`     ${render.wrap(render.c.dim, "Would re-pin the MCP server block in")} ${f.reading.target.path} (${FLAIR_MCP_PACKAGE}@${dec.result.oldPin} -> ${dec.result.newPin})`);
+                // flair#1834 A2 round 2: `oldPin` is already the full pinned spec
+                // (`@tpsdev-ai/flair-mcp@<ver>`); do NOT re-prefix the package.
+                // Match the real run's format: `(<oldPin> -> <newPin>)`.
+                console.log(`     ${render.wrap(render.c.dim, "Would re-pin the MCP server block in")} ${f.reading.target.path} (${dec.result.oldPin} -> ${dec.result.newPin})`);
+              } else if (dec.result.kind === "hold") {
+                // Match the real run's HOLD format, which names the client so a
+                // multi-client dry-run says which hold is whose.
+                console.log(`     ${render.icons.warn} HOLD ${label}: ${dec.result.line ?? "refusing to rewrite this entry"}`);
               } else {
                 console.log(`     ${render.icons.warn} ${dec.result.line ?? `${label}: ${dec.result.kind} — would not re-pin`}`);
               }

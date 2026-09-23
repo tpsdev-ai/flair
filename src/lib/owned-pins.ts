@@ -35,6 +35,7 @@ import {
   wiringPinString,
 } from "./wiring-spec.js";
 import { isUnsafeAdapterPin } from "./stale-client-pin.js";
+import { type ConfigSectionOptions } from "./config-critical-section.js";
 import {
   hookInstallHint,
   hookSettingsPath,
@@ -88,6 +89,12 @@ export interface RefreshOwnedPinsOptions {
    * host-wide guess. Only kind/id remain.
    */
   targets?: ReadonlyArray<{ kind: OwnedPinKind; id: string }>;
+  /**
+   * TEST-ONLY: stage barriers forwarded to the pin-only writers' primitive
+   * (see `config-critical-section.ts`). Inert in production; used by fixtures
+   * that must inject a refused write after the decision.
+   */
+  testHooks?: ConfigSectionOptions["testHooks"];
 }
 
 function withHome<T>(homeDir: string, fn: () => T): T {
@@ -527,8 +534,8 @@ export function refreshOwnedPins(opts: RefreshOwnedPinsOptions): OwnedPinRefresh
       // Both writers fail closed on an ambiguous shape or a pin the never-lower
       // guard cannot prove safe; neither wires an absent entry (a clean `skip`).
       const repin = target.id === "codex"
-        ? repinCodexPin(target.path, client.label)
-        : repinJsonMcpPin(target.path, client.label);
+        ? repinCodexPin(target.path, client.label, opts.testHooks)
+        : repinJsonMcpPin(target.path, client.label, opts.testHooks);
       switch (repin.kind) {
         case "repinned":
           results.push({
