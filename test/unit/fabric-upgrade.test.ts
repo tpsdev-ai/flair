@@ -5,7 +5,7 @@
  * with deploy()/npm/registry fully mocked — NO real Fabric deploy, no network.
  */
 
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -22,6 +22,29 @@ import {
   type FabricUpgradeDeps,
 } from "../../src/fabric-upgrade.js";
 import type { DeployOptions, DeployResult } from "../../src/deploy.js";
+
+// flair#1845: isolate the host's Flair install out of these unit tests.
+// `resolveStagedHarperVersion`'s last resort resolves `harper` through the
+// staged tree, but createRequire walks node_modules UPWARD and consults the
+// resolver's global roots — on a host whose global flair carries Harper it can
+// find a package OUTSIDE the staging dir, and the "nothing installed" case
+// stops being about the fixture. Point HOME (and NODE_PATH) at a bare scratch
+// tree for every test, and build the staging fixtures under it.
+let scratchHome = "";
+let prevHome: string | undefined;
+let prevNodePath: string | undefined;
+beforeEach(() => {
+  scratchHome = mkdtempSync(join(tmpdir(), "flair-1845-home-"));
+  prevHome = process.env.HOME;
+  prevNodePath = process.env.NODE_PATH;
+  process.env.HOME = scratchHome;
+  delete process.env.NODE_PATH;
+});
+afterEach(() => {
+  if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+  if (prevNodePath === undefined) delete process.env.NODE_PATH; else process.env.NODE_PATH = prevNodePath;
+  rmSync(scratchHome, { recursive: true, force: true });
+});
 
 // ─── semver helpers ─────────────────────────────────────────────────────────
 
@@ -174,8 +197,20 @@ describe("resolveStagedHarperVersion", () => {
   });
 
   test("returns null when nothing is installed", () => {
-    const dir = mkdtempSync(join(tmpdir(), "flair-staged-"));
+    // flair#1845: under the isolated HOME, and every harper package name the
+    // resolver probes is shadowed by a package.json with no version. The
+    // resolver walks node_modules upward and consults its global roots, so on a
+    // host with a global flair install (Harper present) an unguarded empty dir
+    // finds the HOST's Harper; the shadow makes every candidate (nested,
+    // hoisted, last resort) land on the fixture's unreadable entry instead, so
+    // the assertion is about this fixture and not the machine.
+    const dir = mkdtempSync(join(scratchHome, "flair-staged-"));
     try {
+      for (const name of ["harper", "@harperfast/harper"]) {
+        const shadow = join(dir, "node_modules", name);
+        mkdirSync(shadow, { recursive: true });
+        writeFileSync(join(shadow, "package.json"), JSON.stringify({ name }));
+      }
       expect(resolveStagedHarperVersion(dir)).toBeNull();
     } finally {
       rmSync(dir, { recursive: true, force: true });
