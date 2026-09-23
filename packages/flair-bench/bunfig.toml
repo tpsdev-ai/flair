@@ -1,0 +1,6 @@
+[test]
+# Sandbox every `bun test` for this package in a throwaway HOME before any test
+# module loads (flair#1853). The root bunfig.toml does not reach a `bun test`
+# run from a package dir, and CI runs some package suites that way. The preload
+# path is relative to THIS file.
+preload = ["../../test/helpers/sandbox-home.ts"]
