@@ -18,6 +18,879 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.55.2] - 2026-09-23
+
+### Fixed
+
+- **Codex's `~/.codex/config.toml` writers are now one locked, atomic critical section.**
+
+  `_wireCodex` and `_unwireCodex` (reached by `flair init` codex,
+  `doctor --fix`, the owned-pin refresh and `uninstall --purge`) wrote the file
+  in place with a raw `writeFileSync` — truncate then write. A reader (Codex
+  itself) could see a half-written config, and a crash mid-write could leave it
+  partial. Both now observe → decide on the IN-LOCK TEXT (decoded UTF-8, not the
+  JSON parser) → write via `withConfigCriticalSection` (temp + `fsync` + atomic
+  rename), with a 0600 `<path>.bak` of the in-lock bytes. The three former write
+  arms (append / replace / create) are ONE decision with three outcomes, and the
+  never-lower pin guard (`decidePinWrite`) now runs on the in-lock text. The
+  pure TOML helpers are unchanged, so the bytes written are exactly today's, and
+  every report line is byte-identical. `hook-install.ts`'s
+  `readCodexConfigToml` stays read-only.
+
+  > **Heads-up (behaviour change):** config.toml writes now replace the file's
+  > inode instead of writing in place, so a reader holding an open fd keeps the
+  > OLD contents until it reopens (Codex re-reads at startup); a 0600
+  > `<path>.bak` is written on every mutating call where the file EXISTS —
+  > including a no-op (already wired) or a held pin — overwritten from the
+  > IN-LOCK bytes; and a config.toml CREATED by Flair now lands **0600** (the
+  > primitive's staging mode), where the old raw create arm got the umask
+  > default (~0644). A newly CREATED file takes no backup (there are no prior
+  > bytes).
+
+  > **Heads-up (threat boundary, unchanged):** this serializes cooperative Flair
+  > writers. Codex itself also writes config.toml (`codex features enable/
+  > disable` persist to `$CODEX_HOME/config.toml`); an external write landing
+  > during Flair's decide/replace is still overwritten — a tracked design issue,
+  > out of scope here.
+
+  (Refs #1778)
+
+- **Every `flair hook` config write is now one locked, identity-checked critical section, so two Flair writers can no longer lose an edit.**
+
+  The hook settings file (`~/.claude/settings.json` / `~/.codex/hooks.json`) is
+  read-modify-write, and its writers wrote it back in place with no lock. Two
+  writers racing on it — `flair hook install` and `flair hook install
+  --continuity`, or two of the five `src/hook-install.ts` writers — both read
+  the same bytes and the second write silently discarded the first: a lost
+  update, and a path by which a concurrent re-pin could be dropped.
+
+  A new leaf primitive, `src/lib/config-critical-section.ts`
+  (`withConfigCriticalSection`), makes observe → decide → write ONE critical
+  section: an `O_EXCL` `<resolvedTarget>.lock`, an identity re-check of the
+  configured entry, the resolved target and the resolved parent inside the
+  lock, the decision taken on the IN-LOCK bytes, and a temp + `fsync` + atomic
+  `rename` write. A committed replacement by another writer is HELD and retried
+  on a fresh observation (up to three attempts); a retarget, type change,
+  parent change or absence change is a final hold naming the changed
+  observation. A lock already held REFUSES by name with the recorded holder and
+  host — never reclaimed. All five `src/hook-install.ts` writers now go through
+  it (the four `src/doctor-client.ts` writers and the client sinks follow).
+
+  > **Heads-up (behaviour change):** config writes now replace the file's inode
+  > instead of writing in place, so a client holding an open fd keeps the OLD
+  > contents until it reopens (every wired client re-reads at startup); and an
+  > owner/group the process cannot preserve is a refusal before the rename, not
+  > a silent ownership change.
+
+  > **Heads-up (threat boundary):** this serializes cooperative Flair writers
+  > and detects identity changes made before its final check; it does not defend
+  > against an ancestor directory replaced between that check and the rename.
+  > On NFS/SMB homes `O_EXCL` is unreliable and safety degrades to the in-lock
+  > re-observe plus the fresh-attempt protocol; a stale cross-host lock is a
+  > named availability refusal.
+
+  (Refs #1778)
+
+- **The four `flair doctor` hook-file writers now share the same locked critical section, so every writer of the hook settings file is race-free.**
+
+  An earlier slice (`src/lib/config-critical-section.ts`) put the five
+  `src/hook-install.ts` writers onto one observe → decide → write critical
+  section, but the four `src/doctor-client.ts` writers that also write
+  `~/.claude/settings.json` / `~/.codex/hooks.json` — doctor `--fix`'s
+  continuity install and removal, the SessionStart hook add, and the legacy
+  SessionStart command repair — still wrote the file in place with no lock. A
+  migrated writer and a raw one racing on it could read a torn file and clobber
+  the single `<path>.bak` with it. All four now go through
+  `withConfigCriticalSection`: each decides on the IN-LOCK bytes, backs up those
+  bytes before deciding, and writes via temp + `fsync` + atomic rename.
+
+  The bytes-level helpers (`parseSettingsBytes`, `encodeConfig`,
+  `backupBytesTo` and the `hookBackupPath` convention) moved to a shared leaf,
+  `src/lib/settings-bytes.ts`, imported by both modules so they cannot drift.
+  `flair hook install` is byte-for-byte unchanged, and the doctor writers keep
+  their exact user-visible lines (fixed / already-present / held / `--skip-hook`).
+
+  > **Heads-up (behaviour change):** the four doctor writers now take a backup on
+  > every mutating run — including a no-op or a held pin — overwriting the single
+  > `<path>.bak` from the IN-LOCK bytes, matching `flair hook install`. A newly
+  > created settings file is written `0600` (temp + rename), where a raw write
+  > previously created it with the default mode.
+
+  (Refs #1778)
+
+- **The hook writers never lower a pin, repair a continuity command without unpinning it, and decide on every pi source at once.**
+
+  The direct writers that install and repair Flair's harness hooks used to
+  rewrite the entry to the running CLI's spec regardless of direction, and the
+  continuity capture command was written unpinned unconditionally — so
+  repairing a PINNED continuity entry silently UNPINNED it. Each writer now
+  consults the same never-lower guard as the client writers
+  (`src/lib/pin-write-guard.ts`): an AHEAD pin is held with its bytes untouched
+  and the reason named (the entry, the pinned version and the running version);
+  a range/tag/unsupported/malformed spec is held exactly as written; a BEHIND
+  pin is re-pinned up; an unpinned entry is pinned to the running CLI; and a run
+  whose own version cannot be read refuses by name and writes nothing.
+
+  Which mode each path uses, and why:
+
+  - `flair hook install` (SessionStart) and doctor's SessionStart add and legacy
+    repair use **pin-to-running-cli** — they write the canonical pinned
+    invocation, so an AHEAD entry is held rather than downgraded.
+  - the continuity capture pair (doctor's `--fix` and `flair hook
+    install --continuity`) uses **continuity-preserve** — a repair keeps the
+    entry's OWN pin state, because the continuity command is a capture hook the
+    user may have pinned; a fresh (absent) pair is provisioned pinned to the
+    running CLI.
+  - the removal writers (`uninstallHook`, `uninstallContinuityHooks`,
+    doctor's continuity removal) carry no version — they only delete our entries
+    and preserve every other byte — so they cannot lower a pin.
+  - the pi writer now decides on the `packages` entry AND any misplaced
+    `extensions` `npm:` source together (the highest comparable governs, a
+    non-comparable one holds), so the #1346 move can no longer drop a pin.
+
+  > **Heads-up (carried from the earlier slice, restated where it bites):** a run
+  > whose own version cannot be read refuses to write instead of falling back to
+  > the unpinned spec. On a fresh home that also declines a legitimate FIRST
+  > install — nothing is created — until the version can be read again.
+
+  (Refs #1778)
+
+- **Every writer of the four JSON client-MCP config files is now one locked, identity-checked critical section — and `flair init` no longer writes `~/.claude.json` itself.**
+
+  `~/.claude.json` (Claude Code), `~/.gemini/settings.json` (Gemini),
+  `~/.cursor/mcp.json` (Cursor) and `~/.gemini/config/mcp_config.json`
+  (Antigravity) are read-modify-write and were written in place with no lock.
+  Two writers racing on one of them both read the same bytes and the second
+  write silently discarded the first.
+
+  `wireJsonMcp` and `unwireJsonMcp` now observe → decide on the IN-LOCK bytes
+  (via `parseSettingsBytes`) → write via `withConfigCriticalSection`, with a
+  0600 `<path>.bak` from the hardened `backupBytesTo`, and their pin guard runs
+  on the in-lock parse. The parent directory is created outside the section.
+  Report lines are byte-identical.
+
+  `flair init`'s Claude Code wiring used to build `~/.claude.json` with its own
+  inline read-modify-write (`os.homedir()`, a different entry shape, no trailing
+  newline). It now DELEGATES to the shared writer, which returns a STRUCTURED
+  outcome (created / refreshed / held / refused / already-present / fallback
+  snippet) that init renders its existing lines from, keeping the FLAIR_CLIENT
+  label and the guard's entry label. Both writers of the file now emit ONE
+  shape.
+
+  > **Heads-up (behaviour change):** the JSON writers take a 0600 `<path>.bak`
+  > on every mutating call — including a no-op or a held pin — overwriting the
+  > single sibling `.bak` from the IN-LOCK bytes.
+
+  > **Heads-up (byte change on ~/.claude.json):** `flair init` now writes a
+  > trailing newline (it wrote none) and KEEPS `type: "stdio"` in the entry (the
+  > shared builder owns it, so neither writer strips it); an EMPTY
+  > `~/.claude.json` now reads as `{}` and is wired, where the old
+  > `JSON.parse("")` threw and downgraded the run to a printed snippet. The
+  > Gemini, Cursor and Antigravity entry bytes are unchanged.
+
+  (Refs #1778)
+
+- **pi's `settings.json` writers are now one locked, atomic critical section — the last client-config sink (Refs #1778).**
+
+  `_wirePi` and `_unwirePi` (reached by `flair init` pi and `flair uninstall
+  --purge`; NOT by the upgrade/doctor pin refresh — `owned-pins` filters
+  `kind === "mcp-client"` and pi is a native extension) wrote `$PI_CODING_AGENT_DIR/
+  settings.json` (default `~/.pi/agent/settings.json`) in place with a raw
+  `writeFileSync` — truncate then write. A reader (pi itself) could see a
+  half-written settings file, and a crash mid-write could leave it partial. Both
+  now observe → decide on the IN-LOCK bytes (`parseSettingsBytes`) → run the
+  pi-flair pin guard (`decidePinWrite`) inside decide → write via
+  `withConfigCriticalSection` (temp + `fsync` + atomic rename), with a 0600
+  `<path>.bak` of the in-lock bytes. The pure helpers are unchanged, so the bytes
+  written are exactly today's and every report line is byte-identical. With this
+  slice **no raw config write remains anywhere in `src/install/clients.ts`** —
+  the flair#1778 client-config migration is complete.
+
+  > **Heads-up (behaviour change):** settings.json writes now replace the file's
+  > inode instead of writing in place, so a reader holding an open fd keeps the
+  > OLD contents until it reopens (pi re-reads at startup); a 0600
+  > `<path>.bak` is written on every mutating call where the file EXISTS —
+  > including a no-op (already wired) or a held pin — overwritten from the
+  > IN-LOCK bytes; and a settings.json CREATED by Flair lands **0600** (the
+  > primitive's staging mode), where the old raw create arm got the umask
+  > default (~0644). A newly CREATED file takes no backup.
+
+  > **Heads-up (threat boundary, unchanged):** this serializes cooperative Flair
+  > writers. pi also writes its own settings; an external write landing during
+  > Flair's decide/replace is still overwritten (a tracked design issue, out of
+  > scope here). An orphaned lock left by a crash blocks later writes until it
+  > is removed by hand (a later writer REFUSES by name) — crash-only provable
+  > reclaim is tracked separately.
+
+  (Refs #1778)
+
+- **The direct client writers never lower a pin, never overwrite a range/tag/unsupported spec, and refuse to write when the CLI cannot read its own version.**
+
+  `flair init` (into `~/.claude.json`) and the JSON, Codex-TOML and pi writers
+  used to ask only "does the entry carry the running CLI's spec?" and, on any
+  mismatch, overwrote it — direction-blind. A CLI older than the config it
+  found (a downgrade, a config shared between installs, a hand-pinned newer
+  version) silently replaced a higher pin with a lower one, and a `@^0.55.0`
+  range, a `@latest` tag or a `file:` source was treated as merely stale and
+  rewritten. Each writer now reads the existing entry through the wiring-spec
+  model and compares it with the running CLI's version through the one
+  never-lower guard (`src/lib/pin-write-guard.ts`): an AHEAD pin is held with
+  its bytes untouched, and the reason — the entry, the pinned version and the
+  running version — is named; a BEHIND pin is re-pinned up; an unpinned entry
+  is pinned to the running CLI; and a range/tag/unsupported/malformed spec is
+  held exactly as written.
+
+  > **Heads-up:** a run whose own version cannot be read now refuses to write
+  > rather than falling back to the unpinned spec. An unreadable version means
+  > a broken install, and quietly replacing a pin with nothing is the downgrade
+  > this change exists to stop. The same refusal also declines a legitimate
+  > FIRST install on a fresh home — nothing is created — until the version can
+  > be read again.
+
+  (Refs #1778)
+
+- **Wiring specs that are a range, tag or unsupported source are no longer read as absent (and overwritten); they are held as present-but-not-comparable.**
+
+  The shared wiring extractor reported a `@^0.55.0` range, a `@latest` tag, a
+  `file:`/`git:` source or a non-canonical token (`v0.55.0`, `1.2.3.4`) as
+  `null` — i.e. as if the entry carried no spec at all — and the never-lower
+  guard reads `null` as "nothing to protect", so the next write replaced the
+  spec with the running CLI's own. A new interim wiring-spec model
+  (`src/lib/wiring-spec.ts`) decodes each wiring envelope (`npx -y -p`,
+  MCP/TOML args, pi `npm:`, a bare package, the `workspace:` protocol) and
+  partitions the spec in six ordered steps; every consumer — the shared
+  extractor, `detectWiredFlairMcp`, the owned-pin readers and the pi pin
+  reader — now reads it. A concrete version and an unpinned entry are unchanged;
+  a range/tag/unsupported/malformed spec is now reported as its raw token, so
+  the existing fail-closed guard holds instead of overwriting it.
+
+  (Refs #1778)
+
+- **`flair init`: an ops-API agent-seed timeout now names the operation, target and timeout, and retries once.**
+
+  Both ops-API seed paths — `flair init`'s agent seed and the `--remote` hub
+  init's federation-instance seed — inserted through the Harper operations API
+  with a single bare `fetch` under a 10 s client timeout. On a timeout the only
+  output was an undici `DOMException [TimeoutError]` stack: no operation, no
+  target, no timeout value. Each seed now retries the insert ONCE on the client
+  timeout (safe because the insert is idempotent — a duplicate answers 409 and
+  is treated as success), reports the first attempt's timeout and the second
+  attempt's outcome with the sanitized target URL and the record id, and when
+  both attempts time out fails with a concise error naming the operation, the
+  table, the target and the 10 s budget. An auth failure (401) or any other
+  HTTP or network error is never retried and keeps its existing message.
+
+  (Refs #1790)
+
+- **`flair init`'s ops-API seed no longer retries away a real error when a non-OK response's body read stalls.**
+
+  The bounded retry treated an owned body-read timeout as retryable regardless of
+  the response status, so a 401 whose body stalled was retried — and if attempt
+  2's body also stalled, the caller saw "timed out on both attempts" instead of
+  the auth error. Every non-OK response was affected the same way. A body-read
+  timeout is now retryable ONLY for an OK response (a 2xx whose body stalled is
+  our stall); for a non-OK response the status is the answer, so it falls through
+  to the status handling (401 → the auth error first, then 409/duplicate).
+
+  (Refs #1790)
+
+- **migrations: a failed `state.json` write is now logged and surfaced in `/HealthDetail`.**
+
+  A migration's durable record — `<dataDir>/.migrations/state.json` — was written
+  on the success path inside a `catch { /* best-effort */ }` with no log line, so a
+  failed write left the migration reporting `completed` in `/HealthDetail`
+  (in-memory, resets on restart) and everywhere else, while the one place a later
+  boot, `doctor` or a test reads never got the entry. The failure was
+  indistinguishable from "never ran".
+
+  Every failed write is now logged at warn level with the migration id and the
+  resolved path (`[flair-migrations] could not record <id> in <path>: <err>`), and
+  the migrations detail in `/HealthDetail` carries
+  `stateFile: { path, lastWriteError: { migrationId, at, message } | null }`
+  (the path and the raw error message are redacted for non-admin callers),
+  cleared on the next successful write. The write stays best-effort — the data
+  outcome is unchanged and nothing rethrows.
+
+  (Refs #1800)
+
+- **The CLI-build test helper can no longer hang a hook: it builds once, bounded and SIGKILLed (flair#1807).**
+
+  Every unit file that needs `dist/cli.js` ran its own untimed build in a
+  `beforeAll`. On the pinned bun the files of one `bun test` invocation run
+  sequentially in one process (and CI runs each lane as one invocation), so the
+  defect was not a race — it was serial redundancy and an unbounded child: a
+  hung build was killed by the hook timer and reported with no name. The helper
+  now skips the build when `dist/cli.js` is fresh against every input (`src/`,
+  the `tsconfig.cli.json` chain, `package.json`, `bun.lock`,
+  `scripts/write-build-info.mjs`), remembers a successful build for the rest of
+  the process, and otherwise runs ONE build with a named timeout and
+  `killSignal: "SIGKILL"` (a SIGTERM timeout does not stop a child that ignores
+  it). The concurrency lock is deleted: it defended an execution model this bun
+  does not have, and it could sleep with `Atomics.wait`, which bun's hook timer
+  cannot interrupt. Every CLI build caller now routes through the helper.
+
+  Case budgets were recomputed to exceed the SUM of the bounded waits that can
+  run serially in a case (a case with three 20 s CLI runs is no longer held to a
+  25 s budget), and one unbounded `fetch` in the fleet-presence fixture gained a
+  named `AbortSignal.timeout`.
+
+  > **Heads-up:** in CI nothing changes (both lanes pre-build); on a dev box the
+  > build runs at most once per test process and a hung one is now named.
+
+  (Refs #1807)
+
+- **The macOS launchd adopt repair now waits for the started process before judging it, instead of failing on one early observation.**
+
+  `flair doctor --fix`'s launchd adopt arm read the serving pid and the
+  post-stop port health exactly once — before the launchd-started Harper had
+  written `hdb.pid` or bound the port — so a healthy slow start was reported as a
+  false failure ("port not confirmed free after stopping the direct process").
+  Both sides now poll until the evidence is decisive or a deadline (the startup
+  budget) passes, then apply the existing verdicts unchanged. If the deadline
+  passes, the failure names how long it waited and what it last observed; the
+  remedies are unchanged. Adoption is still proven by identity and change, never
+  by port health alone.
+
+  > **Heads-up:** on macOS, `flair doctor --fix` can now take up to the startup
+  > budget when adopting an instance into launchd — it waits for the process to
+  > serve rather than failing fast on a slow start.
+
+  (Closes #1827)
+
+- **A Codex TOML pin refresh no longer rewrites a line that sits inside a multiline string.**
+
+  The pin-only editor decided its section boundaries and located the `args` line
+  by scanning raw lines, so a `"""` or `'''` string that opened and closed inside
+  `[mcp_servers.flair]` could carry a line shaped like a flair sub-table header
+  and an `args` line. The scan accepted that fake sub-table as part of the
+  section and the substitution rewrote the STRING's content — a wrong-span write
+  against a section that carries no package argument. Any multiline-string fence
+  between the flair header and the section end is now HELD with the bytes
+  untouched, and the reason names the fence. The existing before-the-header
+  unmatched-fence rule is unchanged.
+
+  (Refs #1834)
+
+- **A Codex TOML pin refresh now changes only the pinned package span, and `flair doctor --fix` re-pins a behind Codex block again.**
+
+  PR-A1 made the JSON MCP pin refresh pin-only and left Codex (TOML) skipping
+  until its own writer landed. This adds that writer: it locates the single
+  `@tpsdev-ai/flair-mcp` span inside `[mcp_servers.flair]`'s single-line `args`
+  element and replaces only that span — env tables, other args, other servers,
+  comments, quoting and line endings stay byte-identical. Ambiguous shapes (a
+  duplicated header, a package occurrence that is not the args element, an
+  unmatched multiline-string fence before the header, an array-of-tables
+  boundary) and a pin the never-lower guard cannot prove safe are HELD with the
+  bytes untouched. `flair doctor --fix` re-pins a behind Codex block again, and
+  its dry-run is derived from the same classification, so a target the real run
+  would HOLD or skip never prints "Would re-pin".
+
+  (Refs #1834)
+
+- **A Codex TOML pin refresh no longer mistakes a sibling `[mcp_servers.flair*]` table for the Flair section.**
+
+  The section-boundary matcher accepted any header beginning
+  `[mcp_servers.flair`, so a sibling table such as `[mcp_servers.flair2]` was
+  swallowed into the section. When the real `[mcp_servers.flair]` table carried
+  no `args`, the sibling's args line became the section's and the refresh
+  replaced the SIBLING's pin while reporting a Flair re-pin — a wrong-span
+  write. The matcher now accepts only the exact header and its dotted subtables,
+  so any other header ends the section and the ambiguous shape is HELD with the
+  bytes untouched. "No identity configured" is also now decided from the
+  section's active, non-empty `FLAIR_AGENT_ID` value, so a commented or empty
+  assignment no longer reads as a configured identity.
+
+  (Refs #1834)
+
+- **`flair doctor` now checks a wired Claude Code SessionStart hook whatever Claude Code's install state.**
+
+  The Claude Code hook arm — and the client-integration section that contains
+  it — was gated on Claude Code being detected/configured (its MCP block present
+  in `~/.claude.json`). A project-scoped flair MCP setup (the server in a
+  project's `.mcp.json`) with the SessionStart hook wired in
+  `~/.claude/settings.json` therefore skipped the hook and silently missed a
+  HOLD, the exact state this series exists to prevent. A hook file on disk is
+  the wiring: the Claude Code SessionStart hook is now inspected whenever it is
+  present, and a configured Claude Code with no hook still reports the missing
+  hook and offers the fix.
+
+  (Refs #1834)
+
+- **`flair doctor` now checks a wired Codex SessionStart hook whatever Codex's install state.**
+
+  Doctor's Codex hook arm was gated on Codex being detected/configured (a
+  `codex` binary on PATH or a wired `~/.codex/config.toml`), so a machine with a
+  wired `~/.codex/hooks.json` but no detectable Codex silently skipped the hook
+  — including a HOLD that should have been printed. A hook file on disk is the
+  wiring: the Codex SessionStart hook is now inspected whenever it is present
+  on disk, and a `codexConfigured` box with no hook still reports the missing
+  hook and offers the fix.
+
+  (Refs #1834)
+
+- **SessionStart hook re-pins hand the never-lower guard the exact span they rewrite, not the whole command.**
+
+  The guard decoded the first `<pkg>@<ver>` occurrence in whatever text it was
+  given. The hook command's agent-id and URL charsets admit `@`, `/`, `.` and
+  digits, so a hand-edited id or URL could EMBED a decoy `<pkg>@<ver>` that
+  decoded ahead of the real `-p` pin — the guard proved the decoy safe while the
+  write lowered the real (ahead) pin. `repinSessionStartHook` and `installHook`
+  now pass the captured `-p <pkg>@<ver>` span, so the version proven safe is the
+  version the substitution writes.
+
+  (Refs #1834)
+
+- **A stale hook pinned with both a pre-release and a build suffix is re-pinned, not held.**
+
+  The installer-form matcher admitted a pre-release OR a build suffix but not
+  both at once, so a pin such as `0.54.0-rc.1+build.5` matched no form: a stale
+  `flair-session-start` hook was HELD and left running the previous adapter
+  instead of being updated. The three forms now carry separate optional
+  pre-release and build groups, so a combined suffix is matched and re-pinned;
+  only the pinned package span changes.
+
+  (Refs #1834)
+
+- **A SessionStart hook is now re-pinned only when its full command is one of the exact installer forms; every other shape is held, not rewritten.**
+
+  The hook re-pin validated a command with an unanchored substring match, which
+  accepted shapes Flair never wrote and could rewrite the identity the command
+  actually used. It now re-pins only when the **full** command equals one of the
+  three installer forms (`buildSessionStartHookCommand` output), substituting
+  just the pinned version; anything else — a hand-edited command, duplicate
+  matching entries, extra shell syntax, an unsupported env var or unsupported
+  hook metadata, or the legacy unpinned form — is a visible, byte-preserving
+  HOLD. `flair doctor`'s legacy-form rewrite and the hook status display are
+  unchanged.
+
+  (Refs #1834)
+
+- **A Flair SessionStart hook re-pin no longer reports success when its write was refused.**
+
+  `flair upgrade` and `flair doctor --fix` re-pin an already-wired
+  `flair-session-start` hook. The result recorded an "update" before the write,
+  so when the atomic write refused — a staging or rename failure, or an
+  unwritable destination — the run still reported ok with "re-pinned …", and
+  `flair doctor` rendered a success for a write that never happened. The result
+  now follows what the write actually did: a committed write reports the update,
+  and a refusal reports a failure (`ok: false`, action "skip") carrying the write
+  layer's own message. The settings file is left byte-identical when the write
+  is refused.
+
+  (Refs #1834)
+
+- **A pin refresh now changes only the pinned package argument, never a wired client's agent identity.**
+
+  `flair upgrade`'s pin refresh and `flair doctor --fix`'s targeted re-pin used
+  to rebuild each wired JSON MCP entry from a host-wide identity guess, rewriting
+  every client's `FLAIR_AGENT_ID` (and `FLAIR_URL`, `type`, extra env keys and
+  extra fields) — the 0.55.1 defect that pointed every wired client at whichever
+  key sorted first. The refresh is now pin-only: it locates the single
+  `@tpsdev-ai/flair-mcp` argument, advances just that array element, and leaves
+  the rest of the entry deep-equal. Ambiguous shapes (a duplicated `flair` key or
+  `FLAIR_AGENT_ID`, a bare-plus-pinned package, no identifiable package) and a pin
+  the never-lower guard cannot prove safe are HELD with the bytes untouched. Codex
+  (TOML) keeps its stale pin until its own pin-only writer lands.
+
+  > **Heads-up:** a release that installs this fix runs the PREVIOUS version's
+  > refresh one last time when upgraded with `flair upgrade`. Prefer
+  > `npm i -g @tpsdev-ai/flair@<version>`, then `flair restart`, then
+  > `flair doctor --fix`. Identities already corrupted by the old refresh cannot
+  > be recovered.
+
+  (Refs #1834)
+
+- **A pin refresh no longer reports a missing client directory as a failure, and duplicate-key detection compares decoded key names.**
+
+  `flair upgrade`'s refresh now visits an MCP client only when its config
+  directory exists — an absent parent (a Claude-Code-only machine has no
+  `~/.gemini`, `~/.cursor` or `~/.gemini/config`) is a quiet "not wired" skip
+  instead of 2-3 failure-looking lines. A genuinely unreadable parent
+  (EACCES / ELOOP / ENOTDIR) is still reported loudly. The duplicate-key guard
+  now compares DECODED key names, so a Unicode-escaped duplicate can no longer
+  slip past it and drop the shadowed entry's bytes; a HOLD leaves the file
+  byte-identical. The install-health catalog flags a behind MCP pin on an entry
+  without an identity (the same entry `doctor --fix` repairs), and `doctor`
+  prints a held pin with a warning icon.
+
+  (Refs #1834)
+
+- **The federation sync cursor advances on a legacy hub row, and a field-only write can no longer revert a key repair or revocation.**
+
+  `flair federation sync` stamps `lastSyncAt` after a successful sync batch or
+  the no-change liveness ping. That value is the spoke's outbound cursor (sync
+  re-sends from it) and the contact stamp behind `connected`. The previous write
+  read the local hub `Peer` row and re-upserted it whole, gated on a non-empty
+  `publicKey` — so a legacy pairing (key recorded as empty) refused on every
+  poll, the cursor froze, and the hub dashboard went stale. The write is now a
+  field-only `update` of `{id, lastSyncAt, updatedAt}`: it carries no
+  `publicKey`/`status`, so it cannot revert a concurrent key repair or
+  revocation; it never inserts a missing row, and it refuses (naming the remedy)
+  when the update matches no row.
+
+  > **Heads-up:** a legacy spoke whose hub row has an empty `publicKey` no longer
+  > warns every poll — its cursor advances again. The missing key itself is not
+  > repaired here; re-pair the hub to restore it. `connected` means recent
+  > contact, not a verified identity or pull readiness.
+
+  (Closes #1835)
+
+- **The `.bak` backup now writes every byte and never leaks its staging temp.**
+
+  `backupBytesTo` staged the backup through a `wx` 0600 temp but used a single
+  `writeSync` — a short write would rename a truncated file into place as a
+  false recovery copy — and it unlinked the temp only when the RENAME failed, so
+  a `write`/`fsync` failure left partial token bytes on disk. It now reuses the
+  primitive's `writeAllSync` loop and unlinks the temp on every failure path.
+
+  (Refs #1778)
+
+- **`flair-client`: signing operations now refuse to run without an explicit agent identity.**
+
+  `memory write`, `soul set`, and `memory delete` resolve their identity from
+  `FLAIR_AGENT_ID` or the new `--agent <id>` flag and exit non-zero naming both
+  when neither is set, instead of silently signing as the shipped `flint`
+  default. Read-only actions (`list`, `get`, `search`) keep the default. The
+  old behaviour let a caller that forgot one environment variable author
+  records as `flint`, with ownership-scoped operations then binding to an
+  identity nobody chose.
+
+  > **Heads-up:** scripted writes that relied on the default identity now fail
+  > closed — set `FLAIR_AGENT_ID` or pass `--agent <id>` at those call sites.
+
+  (Refs #1816)
+
+- **`flair doctor --fix --dry-run` now prints MCP re-pin lines in the real run's format.**
+
+  The would-re-pin line prefixed `@tpsdev-ai/flair-mcp@` to an old pin that was
+  already the full pinned spec, so the package printed twice; and a HOLD line
+  omitted the client label the real run prints, so with several behind clients
+  the dry-run output did not say which client each hold applied to. The dry-run
+  lines now match the real run: `(<oldPin> -> <newPin>)` for a would-re-pin, and
+  `HOLD <client>: <reason>` for a hold.
+
+  (Refs #1834)
+
+- **`flair doctor --fix` now re-pins a behind MCP-client block, not just the SessionStart hook, through the one shared writer.**
+
+  `flair doctor --fix` re-pinned the SessionStart hook but never the MCP-client
+  block, so a pin behind the running CLI stayed a blocking failure whose remedy
+  (`flair upgrade`) reports up-to-date in that state and acts on nothing. The
+  fix routes the write through the ONE guarded writer the upgrade refresh
+  already uses (`refreshOwnedPins`, now targetable per client), so #1485's "one
+  source of truth" finally has a single FIXER too: behind => re-pinned (old ->
+  new, one printed line per client), ahead/unknown => held, only wired clients.
+  The remedy for a behind MCP pin is now `flair doctor --fix`.
+
+  (Refs #1779, #1485, #1778)
+
+- **The SessionStart hook re-pin substitutes only the captured version span.**
+
+  `flair upgrade`'s hook refresh and `flair doctor --fix` rebuilt a wired hook
+  with a first-substring replace of the package spec. A hand-edited agent id or
+  Flair URL that itself contained the package-spec string passed full-form
+  validation, so the replacement landed inside the identity (or URL) instead of
+  the `-p` pin: the real pin stayed stale and the run still reported
+  "re-pinned". The re-pin now substitutes the exact span the form regex
+  captured, so the id and URL are byte-identical and only the pin advances.
+
+  The form's version group is also tightened from "anything up to the next
+  delimiter" to a semver, so `@0.55.0;<cmd>` and `@0.55.0$X` are rejected by
+  the form rather than being held only by the never-lower guard.
+
+  (Refs #1834)
+
+- **A pin refresh whose write is refused now reports a failure, never a false success.**
+
+  The shared in-lock pin-only writer stored its "re-pinned" verdict in memory
+  *before* the write committed. If the atomic replace then refused — a staging
+  failure, a non-regular destination, a rename failure — `flair upgrade`'s pin
+  refresh and `flair doctor --fix` still reported `re-pinned …` with
+  `ok: true`, while the config on disk still held the old pin: a failed write
+  reported as success. A decided re-pin is now truthful only for a committed
+  write; any failure after the decision is reported as a failed write — the
+  target is skipped, `ok` is false, and the reason is printed, with the bytes
+  untouched. The JSON and Codex-TOML pin writers share this seam, so one fix
+  covers both.
+
+  > **Heads-up:** nothing to do. A refresh that cannot complete its write is
+  > now loud instead of silently claiming the new pin.
+
+  (Refs #1834)
+
+- **The canary now emits a sha256-bound promote block for every lockstep package, so `latest` no longer skews on release.**
+
+  The promote step moved `latest` for one of the lockstep packages, so a release
+  left `flair` at the new version while `flair-client` / `flair-mcp` / the plugins
+  stayed behind — the mismatch `flair#1383` detects at runtime, manufactured by
+  the release chain on every release.
+
+  The canary's PASS block is now ONE snippet pasted once, in TWO phases: it
+  verifies EVERY package's published-tarball sha256 first (so a registry hiccup
+  mid-paste touches no tag), then runs the `npm dist-tag add` lines
+  (`@tpsdev-ai/flair` last, so a partial paste never leads with the CLI), then
+  the skew check; a missing sha refuses the whole block (all or none). The FAIL
+  block prints one `npm deprecate` line per package, the CLI first. A new
+  registry-skew check names any `latest` that disagrees, the canary runs it
+  before the verdict, and the release docs show the block, the `--otp` form
+  under 2FA, and the skew check as the last step. The package list is derived
+  once from the manifests — never copied into the verdict script.
+
+  (Refs #1781, #1686, #1383)
+
+- **The canary verdict script runs on stock macOS bash and treats an unreadable release manifest as fatal.**
+
+  `scripts/ci/canary-verdict.sh` is bash-3.2-safe (no `declare -A`, no
+  `mapfile`), so the macOS canary leg and a local run under stock `/bin/bash`
+  both produce the block instead of a `declare: -A: invalid option` and 0 bytes;
+  a shell older than 3.2 fails fast with a clear message rather than a feature
+  syntax error. The lockstep package list now treats a manifest that EXISTS but
+  cannot be read or parsed as fatal (DID NOT RUN, naming the path) instead of a
+  silent partial set, so the canary can never hash, promote or deprecate an
+  incomplete list. `registry-tarball-sha256.mjs` accepts a legal prerelease such
+  as `1.2.3-rc-1` (its hand-rolled regex refused it), and a duplicate sha256
+  binding is rejected by name.
+
+  (Refs #1781)
+
+- **The ADK auto-promote delimiter table gains the CJK angle and hollow-bracket pairs.**
+
+  The four matched pairs `《 》`, `〈 〉`, `〘 〙`, `〚 〛` join the enumerated table,
+  and their closers `》 〉 〙 〛` join the terminal-punctuation suffix class. The
+  table is the boundary: mathematical and ornamental brackets stay out because
+  they are used standalone in real text. The full enumerated list is authoritative
+  in the sibling widening entry (see the entry below).
+
+  (Refs #1776)
+
+- **The ADK auto-promote structural-truncation check now covers the enumerated full-width and CJK bracket pairs.**
+
+  Slice 2 refused a structurally truncated claim on the unattended promotion
+  path with an ASCII-only delimiter table, so a truncated full-width or CJK
+  claim was judged balanced and auto-promoted. The table is extended from the
+  ASCII pairs `( )`, `[ ]`, `{ }` to exactly the enumerated set
+  `( ) [ ] { } （ ） ［ ］ ｛ ｝ 【 】 〔 〕 〖 〗 「 」 『 』 《 》 〈 〉 〘 〙 〚 〛`.
+  One list is the single source: the opener set and the closer map are both
+  derived from it. A truncated claim that leaves any of those open, or closes
+  one with a mismatched partner (across widths too, e.g. `（… )`), is refused
+  with `incomplete_claim` and left pending for the human `rem promote` path.
+  The advisory `hasTerminalPunctuation` flag gains the full-width/CJK
+  terminators `。` `！` `？` and the matching bracket closers in the same pass, so
+  the two halves of the signal keep the same coverage.
+
+  **The claim is these enumerated pairs, nothing more.** The check is not
+  derived from Unicode general categories and is not "Unicode-aware": category
+  membership does not establish paired usage, and a category counter refuses
+  ordinary complete prose (see the quotation-mark limit below). No Unicode data
+  is vendored and nothing is generated.
+
+  Known limits:
+
+  - **Backtick parity is not pairing.** The check counts backticks and refuses
+    an odd total; it never matches an opener to a closer. A legitimate Markdown
+    escape span — a literal backtick wrapped in a double-backtick span (`` ` ``)
+    — is a complete, well-formed span yet has an odd backtick count, so it is
+    refused.
+  - **Quotation marks of any script are not counted.** `“ ” ‘ ’ „ “ ‚ ‘ « »`
+    are not in the table, so a claim truncated mid-quotation is judged balanced
+    and is not refused. This is deliberate, not an oversight: U+201E `„` (and
+    U+201A `‚`) is category Ps while its closing mark U+201C (U+2018) is Pi, so
+    a category-based counter refuses the ordinary *complete* German quotation
+    `„Fertig.“`; and U+2019 `’` is the standard English apostrophe, so a quote
+    leg refuses every English contraction. Enumerating the pairs avoids both
+    false positives.
+  - **A complete claim that merely discusses an unmatched delimiter is
+    refused.** The delimiter is counted without interpreting context, so prose
+    that mentions an unmatched delimiter — an interval written half-open, or a
+    lone bracket quoted in text — is refused on the unattended path.
+  - **Mathematical and ornamental brackets are not in the table.** `⟨ ⟩`,
+    `⟦ ⟧`, `⌈ ⌉`, `⌊ ⌋`, `⁅ ⁆`, `｟ ｠`, `❨ ❩` and `༺ ༻` are used standalone in
+    real text, so they are deliberately excluded; the enumerated table IS the
+    boundary, not a Unicode general category.
+
+  Such candidates are not lost: they remain pending for manual promotion, and
+  the rate is unmeasured.
+
+  > **Heads-up:** this detects STRUCTURAL truncation, not semantic completeness.
+  > A claim can be perfectly balanced and still be a fragment; passing the check
+  > says only that no imbalance was detected in the enumerated pairs, never that
+  > a promoted claim is complete.
+
+  (Refs #1756, #1775, #1776)
+
+- **ADK auto-promote refuses a structurally truncated claim instead of persisting a fragment.**
+
+  Slice 1 handled a generation the backend labelled incomplete (`finishReason`
+  `length` / `content_filter`). This handles the other case: a claim reaches
+  staging STRUCTURALLY TRUNCATED while the response still parses and validates —
+  the observed candidate ended at an unclosed code span and parenthesis, and a
+  truncated string is still a valid string in a valid object, so nothing upstream
+  rejects it. The mechanism that produces such a well-formed fragment is not
+  established. `decideAutoPromote` (the UNATTENDED promotion path) now refuses a
+  claim with unbalanced ASCII backticks, parentheses, brackets or braces via a
+  new typed skip reason `incomplete_claim`; the candidate stays pending for the
+  human `rem promote` path. Missing terminal punctuation is deliberately NOT a
+  refusal — plenty of legitimate claims end without a full stop, and a false
+  refusal on an unattended path is silent — so that signal is surfaced as an
+  advisory flag in `flair rem candidates` (and as `incompleteFlag` in its
+  `--json` output) instead.
+
+  **The delimiter check in this slice is ASCII-only** — the ASCII backtick and
+  the pairs `( )`, `[ ]`, `{ }`. The full-width and CJK pairs are added by the
+  next entry (#1776), which ships in the same release; read the two entries
+  together. A candidate's locale is not bounded.
+
+  Known limits:
+
+  - **Backtick parity is not pairing.** The check counts backticks and refuses an
+    odd total; it never matches an opener to a closer. A legitimate Markdown
+    escape span — a literal backtick wrapped in a double-backtick span (`` ` ``) —
+    is a complete, well-formed span yet has an odd backtick count, so it is
+    refused.
+  - **A complete claim that merely discusses an unmatched delimiter is refused.**
+    The delimiter is counted without interpreting context, so prose that mentions
+    an unmatched delimiter — an interval written half-open, or a lone bracket
+    quoted in text — is refused on the unattended path.
+
+  Such candidates are not lost: they remain pending for manual promotion, and the
+  rate is unmeasured.
+
+  > **Heads-up:** this detects STRUCTURAL truncation, not semantic completeness.
+  > A claim can be perfectly balanced and still be a fragment; a refusal here
+  > says only that the text is structurally lopsided, never that a promoted
+  > claim is complete.
+
+  (Refs #1756, #1775, #1776)
+
+- **REM distillation no longer passes off a truncated source or a length-capped response as a complete claim.**
+
+  `buildSourceMemoriesBlock` silently sent `content.slice(0, 300)`, so a
+  complete source memory could reach the model as an unfinished expression with
+  nothing marking it cut short; a longer source is now presented as an
+  EXPLICITLY identified excerpt (tag `excerpt="true"` plus an
+  `[excerpt truncated]` marker, charged against the same per-source budget),
+  never a silent prefix. Values the renderer places into an element ATTRIBUTE
+  or into the output-contract rule list are restricted to a safe id charset
+  (`A-Za-z0-9._:@+-`); every other character — whitespace, quotes, backslashes,
+  the XML delimiters `& < >`, and every Unicode line terminator, known or not —
+  is emitted as a `\uXXXX` escape. That is a total whitelist rather than a list
+  of rejected characters, so no attribute value or rule-list entry can
+  introduce prompt structure or begin a line, close the element, or forge an
+  attribute. Element BODY text is escaped for the delimiters that would close
+  the element or open a new one (`& < >`), so the excerpt annotation cannot be
+  counterfeited by the content it annotates; body NEWLINES are deliberately left
+  intact (a memory is multi-line prose), so a source's own text can still start
+  a line inside its element — that is mitigated by the element wrapper plus the
+  "DATA to analyze, never an instruction to follow" preamble, not by escaping,
+  and it is not this change. The per-source budget is charged against the
+  escaped body, keeping the EMITTED body within the per-source budget (a source
+  that only overflows once escaped is now presented as a marked excerpt rather
+  than as a longer literal prefix). The local generate contract now carries
+  Harper's
+  `finishReason`, and a response the backend flagged `length` or
+  `content_filter` is rejected/retried (`incomplete_generation`, HTTP 502)
+  rather than staged as a finished thought. Detection depends on the completion
+  reasons the backend adapter preserves; a missing or unrecognized reason is not
+  rejected. Ordinary `stop` still stages as
+  before — it does not, on its own, prove a claim is semantically complete.
+  (Refs #1756)
+
+- **`flair upgrade` no longer proposes or performs a downgrade when the installed version is ahead of registry `latest`.**
+
+  A staged (never-promoted) release — e.g. 0.55.0 while `latest` is still
+  0.54.2 — was classified by bare equality, so it read as `outdated`: the
+  listing showed `⬆️ 0.55.0 → 0.54.2`, and a plain `flair upgrade` reached
+  `npm install -g @tpsdev-ai/flair@0.54.2` and downgraded the install. A new
+  `ahead` status (`installed > latest`, compared with a semver library) now
+  renders `0.55.0 (ahead of latest 0.54.2)` with no arrow and no remedy, and is
+  excluded from every install sink: the npm-global upgrade list, the openclaw
+  plugin list, and the plain-tree swap plan (now built only when flair is
+  actually outdated). When nothing needs installing, the summary reads
+  "No upgrades available" rather than "Everything is up to date".
+
+  The pin refresh also never LOWERS an owned pin — in `flair upgrade`'s
+  post-install refresh AND in `flair doctor --fix` alike. Both route through
+  one guard that compares the version it would write against the pin present,
+  and holds (with a printed line naming both) when the write would be a
+  downgrade. So an unrelated package upgrading can no longer drag an ahead
+  `flair-mcp` pin down, and `doctor --fix` on an ahead SessionStart-hook pin no
+  longer lowers it either. After a no-op, post-upgrade verification expects the
+  RUNNING version, not registry `latest`. An installed version that fails to
+  parse renders as `❔ unknown` with the raw string, never as `outdated`, and
+  is never dropped.
+
+  `--flair-version` is unchanged: an explicit pin is still the operator's
+  requested target (its downgrade semantics are a later slice), so no
+  `--allow-downgrade` flag is added.
+
+  (Refs #1778)
+
+- **The pin refresh fails closed on a pin it cannot compare, and `flair doctor` reports an unparseable pin instead of calling it stale.**
+
+  A hook or client pin that is not strict semver — e.g. `0.55.1.rc`, `"1.2"`, or
+  a hand-edited value, exactly what `semver.valid` rejects — passed the
+  never-lower guard and was OVERWRITTEN with the running CLI's version, and
+  `flair doctor` rendered it as a stale "OLD adapter" error routed to `--fix`.
+  (Prerelease-shaped pins such as `0.55.1-rc.1` or `0.55.1-nightly.20260921` ARE
+  strict semver and compare normally.) The guard's decision now fails closed: any
+  write it cannot PROVE is not a lowering — including one it cannot compare at
+  all — is held, so an unreadable pin is never rewritten. `pinDirection` stays
+  three-valued, and `unknown` is its own finding — a non-blocking warning on BOTH
+  surfaces (the SessionStart hook in doctor's output, and the MCP-server pin in
+  the install-health catalog's mcp-block check) — that names the raw value, is
+  never auto-re-pinned, and is never worded as an old adapter. `behind` (stale
+  error, re-pin) and `ahead` (held pass) are unchanged.
+
+  (Refs #1778)
+
+- **`flair upgrade` and `flair doctor` no longer misreport an install ahead of, or unparseable against, the published version.**
+
+  `flair upgrade`'s no-upgrade summary printed `✅ Everything is up to date.` when
+  an installed version could not be parsed — a convergence it cannot see — and
+  the "N package not detected" line still claimed "all detected packages are up
+  to date" with an `ahead`/`unknown` finding present. Both now say only what is
+  true: the summary is neutral ("No upgrades available.") whenever any package is
+  `ahead` OR `unknown`, an `unknown` package prints one line naming it and the
+  raw string that could not be parsed, and the not-detected line reads "no
+  upgrades available for the rest".
+
+  `flair doctor` (and `doctor --fix`) classified ANY pin != the installed CLI as
+  a stale failure, so a SessionStart-hook pin AHEAD of the running CLI rendered
+  as `✗ … the hook still launches the OLD adapter`, was counted as an issue, and
+  made `doctor --fix` exit 1 on a pin the never-lower guard deliberately
+  preserves. Doctor now classifies pin direction before rendering: a pin AHEAD
+  of the running CLI is a held pass (no `✗`, no issue count, no `--fix`); a pin
+  BEHIND keeps today's stale error and re-pin.
+
+  (Refs #1778)
+
+### Security
+
+- **A `<path>.bak` planted as a symlink is now replaced, not written through.**
+
+  The backup writes a temp and renames it over `<path>.bak`, so a `<path>.bak`
+  that is a symlink to another file is replaced by a regular 0600 file holding
+  the backup bytes — the bare `writeFileSync` it replaced wrote THROUGH the link
+  and clobbered the victim. After a run `lstat(.bak)` is a regular file and the
+  victim is untouched.
+
+  (Refs #1778)
+
+- **The `<path>.bak` hook-config backup is now written 0600, never the umask default.**
+
+  `backupBytesTo` used a bare `writeFileSync`, so under umask 022 a 0600 settings
+  file holding a token produced a 0644 `<path>.bak` with the token bytes verbatim
+  — on every mutating run, and (because the critical-section primitive backs up on
+  every call that reaches the read) on a no-op run too. The backup is now written
+  through a sibling temp opened `wx` 0600, fsynced, then renamed over `<path>.bak`,
+  so the bytes are never world-readable even briefly and an existing 0644 `.bak`
+  is tightened to 0600.
+
+  > **Heads-up (behaviour change):** a `<path>.bak` created by an older release is
+  > tightened from its current mode to 0600 on the next run that takes a backup.
+
+  (Refs #1778)
+
 ## [0.55.1] - 2026-09-21
 
 ### Fixed
