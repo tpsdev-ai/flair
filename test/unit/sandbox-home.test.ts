@@ -149,4 +149,20 @@ describe("realHomeDir ignores a swapped HOME (flair#1854 follow-up)", () => {
     expect(got).toBe(realHome);
     expect(got).not.toBe(sandbox);
   });
+
+  it("FAILS CLOSED when node cannot answer — never falls back to the sandbox-following in-process value", () => {
+    // Before the fix, a failed or missing `node` fell back to Bun's in-process
+    // os.userInfo().homedir, which follows the swapped HOME: the guard then
+    // fingerprinted the SANDBOX and passed after a real config change.
+    const sandbox = fakeHome();
+    const probe = join(sandbox, "probe-real-home.ts");
+    writeFileSync(probe, `import { realHomeDir } from ${JSON.stringify(GUARD)};\nprocess.stdout.write(realHomeDir());\n`);
+    const emptyBin = fakeHome(); // a PATH with no node on it
+    const noNode = { ...process.env, HOME: sandbox, USERPROFILE: sandbox, PI_CODING_AGENT_DIR: sandbox, PATH: emptyBin };
+
+    const r = spawnSync(process.execPath, [probe], { encoding: "utf8", env: noNode });
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).not.toContain(sandbox);
+    expect(`${r.stderr}${r.stdout}`).toContain("cannot resolve the real home directory");
+  });
 });

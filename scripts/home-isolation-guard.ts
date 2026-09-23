@@ -25,7 +25,6 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { userInfo } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
@@ -58,24 +57,33 @@ export interface ConfigFingerprint {
  * database and ignores HOME, but Bun's `os.userInfo().homedir` follows the HOME
  * the process STARTED with, and the lane runs under Bun with a swapped HOME — so
  * reading it here could return the SANDBOX and fingerprint nothing at all. Ask a
- * `node` child with HOME/USERPROFILE removed instead. Fall back to in-process
- * `os.userInfo()` only if node cannot be run (weaker, but the lane already
- * requires node on PATH).
+ * `node` child with HOME/USERPROFILE removed instead. NEVER falls back to the
+ * in-process `os.userInfo()`: under Bun that is exactly the value that can be the
+ * sandbox, and a guard that silently fingerprints the sandbox passes after a real
+ * config change. If node cannot answer, throw, so the lane fails loudly (fail closed).
  */
 export function realHomeDir(): string {
   const env = { ...process.env };
   delete env.HOME;
   delete env.USERPROFILE;
+  let out: string;
   try {
-    const out = execFileSync("node", ["-p", "require('node:os').userInfo().homedir"], {
+    out = execFileSync("node", ["-p", "require('node:os').userInfo().homedir"], {
       encoding: "utf8",
       env,
     }).trim();
-    if (out) return out;
-  } catch {
-    // node missing or failed — fall through to the in-process value.
+  } catch (err) {
+    throw new Error(
+      `home-isolation guard: cannot resolve the real home directory — running \`node\` to read the passwd entry failed (${(err as Error).message.split("\n")[0]}). ` +
+        "Refusing to fall back to os.userInfo(), which follows HOME under Bun and would make this guard check the sandbox instead of the real client configs. Put node on PATH and re-run.",
+    );
   }
-  return userInfo().homedir;
+  if (!out) {
+    throw new Error(
+      "home-isolation guard: `node` returned an empty home directory for the current user — refusing to guess. Check the passwd entry for this uid.",
+    );
+  }
+  return out;
 }
 
 function sha256(bytes: string | Buffer): string {
