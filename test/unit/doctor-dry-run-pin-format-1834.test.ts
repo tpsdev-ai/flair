@@ -21,12 +21,13 @@ import { join } from "node:path";
 import { clientConfigPath } from "../../src/install/clients.ts";
 import { FLAIR_MCP_PACKAGE, mcpServerSpec, flairCliVersion } from "../../src/lib/mcp-spec.ts";
 import { parseSemverCore } from "../../src/fabric-upgrade.ts";
+import { staleVersion } from "../helpers/stale-version.ts";
 
 const CLI_SOURCE = join(import.meta.dirname, "..", "..", "src", "cli.ts");
 const CURRENT_SPEC = mcpServerSpec();
 const core = parseSemverCore(flairCliVersion());
 if (!core) throw new Error(`CLI version is not semver: ${flairCliVersion()}`);
-const STALE_VER = core[2] > 0 ? `${core[0]}.${core[1]}.${core[2] - 1}` : `${core[0]}.${core[1] - 1}.0`;
+const STALE_VER = staleVersion(core);
 const STALE_SPEC = `${FLAIR_MCP_PACKAGE}@${STALE_VER}`;
 // A port nothing listens on — keeps doctor away from any real local Flair.
 const DEAD_PORT = "59993";

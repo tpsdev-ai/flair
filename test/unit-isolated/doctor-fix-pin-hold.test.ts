@@ -25,6 +25,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { flairCliVersion } from "../../src/lib/mcp-spec.ts";
 import { parseSemverCore } from "../../src/fabric-upgrade.ts";
+import { staleVersion } from "../helpers/stale-version.ts";
 
 const REPO = join(import.meta.dirname, "..", "..");
 const FLAIR_MCP_PACKAGE = "@tpsdev-ai/flair-mcp";
@@ -34,7 +35,7 @@ const INSTALLED = flairCliVersion();
 const core = parseSemverCore(INSTALLED);
 if (!core) throw new Error(`CLI version is not semver: ${INSTALLED}`);
 const AHEAD = `${core[0]}.${core[1]}.${core[2] + 1}`;
-const BEHIND = core[2] > 0 ? `${core[0]}.${core[1]}.${core[2] - 1}` : `${core[0]}.${core[1] - 1}.0`;
+const BEHIND = staleVersion(core);
 
 const homes: string[] = [];
 afterAll(() => {

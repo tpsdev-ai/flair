@@ -14,13 +14,14 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { FLAIR_MCP_PACKAGE, flairCliVersion } from "../../src/lib/mcp-spec.ts";
 import { parseSemverCore } from "../../src/fabric-upgrade.ts";
+import { staleVersion } from "../helpers/stale-version.ts";
 
 const REPO = join(import.meta.dirname, "..", "..");
 setDefaultTimeout(120_000);
 
 const INSTALLED = flairCliVersion();
 const core = parseSemverCore(INSTALLED)!;
-const OLD = core[2] > 0 ? `${core[0]}.${core[1]}.${core[2] - 1}` : `${core[0]}.${core[1] - 1}.0`;
+const OLD = staleVersion(core);
 
 const homes: string[] = [];
 afterAll(() => { for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true }); });

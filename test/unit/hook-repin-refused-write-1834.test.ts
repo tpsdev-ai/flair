@@ -24,12 +24,13 @@ import { join } from "node:path";
 import { repinSessionStartHook, hookSettingsPath } from "../../src/hook-install.ts";
 import { FLAIR_MCP_PACKAGE, mcpServerSpec, flairCliVersion } from "../../src/lib/mcp-spec.ts";
 import { parseSemverCore } from "../../src/fabric-upgrade.ts";
+import { staleVersion } from "../helpers/stale-version.ts";
 import { mcpRepinIcon } from "../../src/lib/doctor-run.ts";
 
 const CURRENT_VER = flairCliVersion();
 const core = parseSemverCore(CURRENT_VER);
 if (!core) throw new Error(`CLI version is not semver: ${CURRENT_VER}`);
-const STALE_VER = core[2] > 0 ? `${core[0]}.${core[1]}.${core[2] - 1}` : `${core[0]}.${core[1] - 1}.0`;
+const STALE_VER = staleVersion(core);
 const STALE_SPEC = `${FLAIR_MCP_PACKAGE}@${STALE_VER}`;
 const CURRENT_SPEC = mcpServerSpec();
 

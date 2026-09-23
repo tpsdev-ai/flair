@@ -21,11 +21,12 @@ import { repinSessionStartHook, hookSettingsPath, type Harness } from "../../src
 import { refreshOwnedPins, ownedPinRefreshShouldReport } from "../../src/lib/owned-pins.ts";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec } from "../../src/lib/mcp-spec.ts";
 import { parseSemverCore } from "../../src/fabric-upgrade.ts";
+import { staleVersion } from "../helpers/stale-version.ts";
 
 const INSTALLED = flairCliVersion();
 const CURRENT = mcpServerSpec();
 const core = parseSemverCore(INSTALLED)!;
-const OLD = core[2] > 0 ? `${core[0]}.${core[1]}.${core[2] - 1}` : `${core[0]}.${core[1] - 1}.0`;
+const OLD = staleVersion(core);
 
 let home: string;
 let prevHome: string | undefined;

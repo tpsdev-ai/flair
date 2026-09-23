@@ -20,12 +20,13 @@ import * as clients from "../../src/install/clients.ts";
 import { refreshOwnedPins } from "../../src/lib/owned-pins.ts";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec } from "../../src/lib/mcp-spec.ts";
 import { parseSemverCore } from "../../src/fabric-upgrade.ts";
+import { staleVersion } from "../helpers/stale-version.ts";
 
 const INSTALLED = flairCliVersion();
 const CURRENT_SPEC = mcpServerSpec();
 const core = parseSemverCore(INSTALLED);
 if (!core) throw new Error(`CLI version is not semver: ${INSTALLED}`);
-const STALE_VER = core[2] > 0 ? `${core[0]}.${core[1]}.${core[2] - 1}` : `${core[0]}.${core[1] - 1}.0`;
+const STALE_VER = staleVersion(core);
 const STALE_SPEC = `${FLAIR_MCP_PACKAGE}@${STALE_VER}`;
 
 let isoHome: string;
