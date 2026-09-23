@@ -140,7 +140,12 @@ function runMcpBlock(ctx: DoctorRunContext): DoctorCheckResult {
   // client is surfaced as info by `flair doctor`, never counted as a failure
   // here (which used to inflate the ✗ count with clients the user never chose).
   const wired = mcp.filter((clientId) => readClientMcpBlock(clientId, ctx.homeDir).present);
-  if (wired.length === 0) {
+  // flair#1834 A1 round 2: the PIN finding (and the opted-in check) keys on
+  // STRUCTURAL presence — an entry without an identity is still an entry the
+  // refresh repairs, so the catalog must flag it too. `present` stays for the
+  // identity-keyed checks (unsafeWired below).
+  const visitable = mcp.filter((clientId) => readClientMcpBlock(clientId, ctx.homeDir).entryExists);
+  if (visitable.length === 0) {
     // Detected clients exist, but Flair is wired to none of them. Not a
     // per-client failure (nothing was opted in) — a skip that names the
     // detected clients, so a zero-wiring run neither invents a failure the
@@ -170,7 +175,7 @@ function runMcpBlock(ctx: DoctorRunContext): DoctorCheckResult {
   const expected = flairCliVersion();
   if (isResolvedVersion(expected)) {
     const findings = mcpClientPinFindings(ctx.homeDir, expected)
-      .filter((f) => wired.includes(f.reading.target.id as (typeof MCP_CLIENT_IDS)[number]));
+      .filter((f) => visitable.includes(f.reading.target.id as (typeof MCP_CLIENT_IDS)[number]));
     if (findings.length > 0) {
       // flair#1789: the same three-valued treatment the SessionStart hook gets.
       //   behind  -> stale, blocking: today's error + `flair doctor --fix`,
@@ -209,7 +214,7 @@ function runMcpBlock(ctx: DoctorRunContext): DoctorCheckResult {
       return result(id, label, "pass", { detail: aheadDetail });
     }
   }
-  return result(id, label, "pass", { detail: `configured for ${wired.join(", ")}` });
+  return result(id, label, "pass", { detail: `configured for ${visitable.join(", ")}` });
 }
 
 function runFlairUrl(ctx: DoctorRunContext): DoctorCheckResult {

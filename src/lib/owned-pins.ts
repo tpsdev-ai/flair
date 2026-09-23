@@ -14,8 +14,8 @@
  * it here automatically — no second list to forget on the next upgrade.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
   ALL_CLIENTS,
   clientConfigPath,
@@ -431,10 +431,16 @@ export function repinSessionStartHookGuarded(
 /**
  * Refresh every already-wired owned pin to the running CLI's spec.
  *
- * MCP client pins need `agentId` (the wire functions rewrite the env block).
- * SessionStart hooks do not — `repinSessionStartHook` reads the agent from
- * the existing command. A missing agentId therefore skips MCP only; it must
- * not skip hooks (that was the early-return hole in the inline upgrade path).
+ * PIN-ONLY (flair#1834 A1): the JSON MCP writer changes only the
+ * `@tpsdev-ai/flair-mcp` element of an entry's `args`, so a refresh needs NO
+ * agent id — it preserves each entry's OWN identity. SessionStart hooks were
+ * always identity-free here (`repinSessionStartHook` reads the agent from the
+ * existing command). Nothing here invents a host-wide identity.
+ *
+ * The MCP branch VISITS a target only when its entry exists or its directory
+ * exists (round 2): an absent parent (a Claude-Code-only home has no ~/.gemini
+ * etc.) is a quiet skip, while an EACCES / ELOOP / ENOTDIR parent still falls
+ * through so the refusal is reported.
  *
  * NEVER adds a hook or wires a new client.
  */
@@ -474,6 +480,23 @@ export function refreshOwnedPins(opts: RefreshOwnedPinsOptions): OwnedPinRefresh
           message: `${target.id}: refresh awaits the TOML pin-only writer — skip`,
         });
         continue;
+      }
+      // flair#1834 A1 round 2 (Kern BLOCKING): a VISIT gate. When the entry is
+      // not visible AND its directory is absent, there is nothing to visit —
+      // the primitive cannot resolve the parent and refuses, which the writer
+      // reported as a failure (2-3 such lines on every upgrade for a
+      // Claude-Code-only machine). Skip quietly. EACCES / ELOOP / ENOTDIR (the
+      // directory is present but broken) is NOT absence: fall through so the
+      // refusal stays LOUD.
+      if (!readOwnedPin(target, homeDir).entryExists) {
+        let parentAbsent = false;
+        try { statSync(dirname(target.path)); } catch (err) {
+          if ((err as NodeJS.ErrnoException)?.code === "ENOENT") parentAbsent = true;
+        }
+        if (parentAbsent) {
+          results.push({ target, action: "skip", ok: true, message: `${target.id}: not wired — skip` });
+          continue;
+        }
       }
       const client = ALL_CLIENTS.find((c) => c.id === target.id);
       if (!client) {

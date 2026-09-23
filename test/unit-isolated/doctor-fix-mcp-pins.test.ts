@@ -146,9 +146,9 @@ describe("flair#1779 — doctor --fix re-pins a BEHIND MCP-client block", () => 
     expect(plain.out).toContain(`stale pins claude-code@${BEHIND}, codex@${BEHIND}`);
 
     const fix = await runDoctor(home, deadPort, ["--fix"]);
-    // The JSON client (claude-code) is re-pinned, old -> new, the same shape as
-    // the hook line.
-    expect(fix.out).toContain(`re-pinned the MCP server block in ${claudePath(home)} (${FLAIR_MCP_PACKAGE}@${BEHIND} -> ${FLAIR_MCP_PACKAGE}@${INSTALLED})`);
+    // The JSON client (claude-code) is re-pinned from the WRITER's in-lock
+    // result (round 2: r.message carries the (old -> new) the write saw).
+    expect(fix.out).toContain(`re-pinned Claude Code (${FLAIR_MCP_PACKAGE}@${BEHIND} -> ${FLAIR_MCP_PACKAGE}@${INSTALLED})`);
     // flair#1834 A1: Codex is TOML and gets its own pin-only writer in A2; until
     // then the refresh SKIPS it — the pin stays stale, never corrupted.
     expect(fix.out).toContain("codex: refresh awaits the TOML pin-only writer — skip");
@@ -172,9 +172,9 @@ describe("flair#1779 — doctor --fix re-pins a BEHIND MCP-client block", () => 
     const fix = await runDoctor(home, deadPort, ["--fix"]);
     expect(readFileSync(claudePath(home), "utf-8")).toContain(`${FLAIR_MCP_PACKAGE}@${INSTALLED}`);
     expect(readFileSync(codexPath(home), "utf-8")).toBe(codexBefore); // untouched
-    expect(fix.out).toContain(`re-pinned the MCP server block in ${claudePath(home)} (${FLAIR_MCP_PACKAGE}@${BEHIND} -> ${FLAIR_MCP_PACKAGE}@${INSTALLED})`);
+    expect(fix.out).toContain(`re-pinned Claude Code (${FLAIR_MCP_PACKAGE}@${BEHIND} -> ${FLAIR_MCP_PACKAGE}@${INSTALLED})`);
     expect(fix.out).toContain(`MCP server (codex): pinned to flair-mcp@${AHEAD}, ahead of the installed CLI ${INSTALLED} — held`);
-    expect(fix.out).not.toContain(`re-pinned the MCP server block in ${codexPath(home)}`);
+    expect(fix.out).not.toContain(`re-pinned Codex`);
   });
 
   test("UNKNOWN: untouched, a warn line, and zero blocking issues (parity with a current pin)", async () => {

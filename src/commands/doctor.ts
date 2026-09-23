@@ -1036,12 +1036,11 @@ program
             const results = refreshOwnedPins({ homeDir: homedir(), targets: overrides });
             for (const r of results) {
               if (r.target.kind !== "mcp-client") continue;
-              if (r.action === "update") {
-                const old = behindMcp.find((f) => f.reading.target.id === r.target.id)?.reading.pin;
-                console.log(`     ${render.icons.ok} re-pinned the MCP server block in ${render.wrap(render.c.dim, r.target.path)} (${FLAIR_MCP_PACKAGE}@${old} -> ${mcpServerSpec()})`);
-              } else {
-                console.log(`     ${r.ok ? render.icons.ok : render.icons.warn} ${r.message}`);
-              }
+              // flair#1834 A1 round 2: print the WRITER's in-lock result
+              // (r.message) — its (old -> new) comes from the same observation
+              // the write used, so a concurrent change cannot print a stale old
+              // pin. A HOLD is not a success: render it with the warn icon.
+              console.log(`     ${r.action === "hold" || !r.ok ? render.icons.warn : render.icons.ok} ${r.message}`);
             }
           }
         }

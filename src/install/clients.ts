@@ -475,15 +475,86 @@ function indent(s: string): string {
 // package argument, guards it against lowering, replaces just that array
 // element, and leaves every other byte of the parsed entry deep-equal.
 
-/** Count a JSON object KEY (`"key":`) in raw text — the duplicate scan runs
- *  BEFORE `JSON.parse`, which keeps the last duplicate and would let a
- *  re-stringify silently collapse it (flair#1834 design item 5). Literal
- *  regexes: the two keys are constants, so there is no dynamic pattern. */
-function countJsonKey(raw: string, re: RegExp): number {
-  return (raw.match(re) ?? []).length;
+/**
+ * flair#1834 A1 round 2 (Kern): detect duplicate object keys by DECODED key
+ * name, per object, on the path root → mcpServers → flair entry → env.
+ *
+ * A literal raw scan (`/"flair"\s*:/`) counts ZERO for a Unicode-escaped key
+ * (`"\u0066lair"` decodes to `flair`). `JSON.parse` keeps the last duplicate,
+ * so the writer would re-pin and silently DROP the shadowed entry's bytes,
+ * evading the "duplicate → HOLD, bytes untouched" contract. A `JSON.parse`
+ * reviver cannot see it either — the duplicates are already collapsed. So this
+ * walks the raw text with an escape-aware tokenizer.
+ *
+ * Returns the path of the offending object (e.g. "mcpServers.flair") or null.
+ */
+function findDuplicateOnPath(raw: string): string | null {
+  const IN_SCOPE = (path: string[]): boolean =>
+    path.length === 0 ||
+    (path.length === 1 && path[0] === "mcpServers") ||
+    (path.length === 2 && path[0] === "mcpServers" && path[1] === "flair") ||
+    (path.length === 3 && path[0] === "mcpServers" && path[1] === "flair" && path[2] === "env");
+  let i = 0;
+  const n = raw.length;
+  let found: string | null = null;
+  const ws = (): void => { while (i < n && /\s/.test(raw[i]!)) i++; };
+  const readString = (): string => {
+    const start = i;
+    i++; // opening quote
+    while (i < n) {
+      const c = raw[i];
+      if (c === "\\") { i += 2; continue; }
+      if (c === '"') { i++; break; }
+      i++;
+    }
+    const token = raw.slice(start, i);
+    try { return JSON.parse(token); } catch { return token.slice(1, -1); }
+  };
+  const parseValue = (path: string[]): void => {
+    ws();
+    const c = raw[i];
+    if (c === "{") return parseObject(path);
+    if (c === "[") return parseArray(path);
+    if (c === '"') { readString(); return; }
+    while (i < n && !",}]".includes(raw[i]!) && !/\s/.test(raw[i]!)) i++;
+  };
+  const parseArray = (path: string[]): void => {
+    i++; // [
+    ws();
+    if (raw[i] === "]") { i++; return; }
+    for (;;) {
+      parseValue(path);
+      ws();
+      if (raw[i] === ",") { i++; continue; }
+      if (raw[i] === "]") { i++; break; }
+      return; // malformed — let the parser report it
+    }
+  };
+  const parseObject = (path: string[]): void => {
+    i++; // {
+    const seen = new Set<string>();
+    let dup = false;
+    ws();
+    if (raw[i] === "}") { i++; return; }
+    for (;;) {
+      ws();
+      if (raw[i] !== '"') return; // malformed
+      const key = readString();
+      ws();
+      if (raw[i] !== ":") return;
+      i++;
+      if (seen.has(key)) dup = true; else seen.add(key);
+      parseValue([...path, key]);
+      ws();
+      if (raw[i] === ",") { i++; continue; }
+      if (raw[i] === "}") { i++; break; }
+      return; // malformed
+    }
+    if (dup && IN_SCOPE(path) && found === null) found = path.length === 0 ? "(root)" : path.join(".");
+  };
+  parseValue([]);
+  return found;
 }
-const FLAIR_KEY_RE = /"flair"\s*:/g;
-const AGENT_ID_KEY_RE = /"FLAIR_AGENT_ID"\s*:/g;
 
 /** True when an `args` element names the Flair MCP package (bare or pinned). */
 function argNamesFlairPackage(arg: string): boolean {
@@ -571,9 +642,12 @@ export function repinJsonMcpPin(configPath: string, label: string): JsonPinRepin
       configPath,
       (bytes) => {
         const raw = bytes === null ? "" : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("utf-8");
-        // 1. Raw duplicate scan BEFORE parse (design item 5).
-        if (countJsonKey(raw, FLAIR_KEY_RE) > 1 || countJsonKey(raw, AGENT_ID_KEY_RE) > 1) {
-          settled = empty("hold", "the config carries a duplicated flair entry or FLAIR_AGENT_ID — refusing to rewrite it");
+        // 1. Raw duplicate scan BEFORE parse, by DECODED key name (design item 5;
+        //    round 2 — an escaped duplicate must not evade the HOLD). Scoped to
+        //    root → mcpServers → flair → env.
+        const dupAt = findDuplicateOnPath(raw);
+        if (dupAt !== null) {
+          settled = empty("hold", `the config carries a duplicate key at ${dupAt} — refusing to rewrite it`);
           return { hold: settled.line! };
         }
         const read = parseSettingsBytes(bytes, configPath);
