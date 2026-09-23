@@ -481,3 +481,153 @@ export function decideAdoptStop(
   }
   return "proceed";
 }
+
+// ─── poll-then-verify (flair#1827) ───────────────────────────────────────────
+//
+// Both adopt gates used to read ONE observation. On a slow (but healthy) start
+// the launchd-started Harper had not yet written hdb.pid or bound the port when
+// the serving side read it, and the stop side read the post-stop health before
+// the listener was gone — so adoption was reported as a false failure. The
+// helpers below poll an INJECTED observation until a predicate holds or a
+// deadline passes, then hand the FINAL observation to the UNCHANGED verdicts.
+
+export interface PollUntilOptions<T> {
+  observe: () => T | Promise<T>;
+  until: (value: T) => boolean;
+  deadlineMs: number;
+  intervalMs?: number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export interface PollUntilResult<T> {
+  value: T;
+  timedOut: boolean;
+  waitedMs: number;
+  observations: number;
+}
+
+/**
+ * Poll `observe` until `until(value)` holds or `deadlineMs` elapses (measured on
+ * the injected `now`). No global timers live in the logic — `sleep` is injected
+ * too — so the whole loop is deterministic and unit-testable. Returns the LAST
+ * observation plus whether it timed out.
+ */
+export async function pollUntil<T>(opts: PollUntilOptions<T>): Promise<PollUntilResult<T>> {
+  const now = opts.now ?? (() => Date.now());
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const intervalMs = opts.intervalMs ?? 250;
+  const start = now();
+  let value = await opts.observe();
+  let observations = 1;
+  while (!opts.until(value)) {
+    if (now() - start >= opts.deadlineMs) {
+      return { value, timedOut: true, waitedMs: now() - start, observations };
+    }
+    await sleep(intervalMs);
+    value = await opts.observe();
+    observations++;
+  }
+  return { value, timedOut: false, waitedMs: now() - start, observations };
+}
+
+function fmtPid(pid: number | null): string {
+  return pid === null ? "null" : String(pid);
+}
+
+export interface AdoptServingWaitResult {
+  evidence: AdoptServingEvidence;
+  proof: AdoptServingProof;
+  timedOut: boolean;
+  waitedMs: number;
+  observations: number;
+}
+
+/**
+ * Wait for the adopted job to actually serve, then prove it with
+ * `verifyAdoptServing` UNCHANGED (flair#1827). Polls `{managedPid, servingPid,
+ * directPidAlive}` until `servingPid !== null && !directPidAlive` (the launchd
+ * job has written hdb.pid / bound the port AND the pre-adopt process is gone) or
+ * the deadline. On timeout the failure detail names the wait and the last
+ * observation. All three identity rules of the proof are preserved.
+ */
+export async function verifyAdoptServingWithWait(opts: {
+  observe: () => AdoptServingEvidence | Promise<AdoptServingEvidence>;
+  deadlineMs: number;
+  intervalMs?: number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}): Promise<AdoptServingWaitResult> {
+  const poll = await pollUntil<AdoptServingEvidence>({
+    observe: opts.observe,
+    until: (e) => e.servingPid !== null && !e.directPidAlive,
+    deadlineMs: opts.deadlineMs,
+    intervalMs: opts.intervalMs,
+    now: opts.now,
+    sleep: opts.sleep,
+  });
+  const proof = verifyAdoptServing(poll.value);
+  if (proof && poll.timedOut) {
+    return {
+      evidence: poll.value,
+      proof: {
+        detail:
+          `${proof.detail} (waited ${poll.waitedMs}ms for the launchd job to serve; last observation: ` +
+          `managedPid=${fmtPid(poll.value.managedPid)}, servingPid=${fmtPid(poll.value.servingPid)}, ` +
+          `directPidAlive=${poll.value.directPidAlive})`,
+      },
+      timedOut: true,
+      waitedMs: poll.waitedMs,
+      observations: poll.observations,
+    };
+  }
+  return { evidence: poll.value, proof, timedOut: poll.timedOut, waitedMs: poll.waitedMs, observations: poll.observations };
+}
+
+export interface AdoptStopWaitResult {
+  health: HealthResult;
+  decision: "proceed" | LaunchdRepairResult;
+  timedOut: boolean;
+  waitedMs: number;
+  observations: number;
+}
+
+/**
+ * Wait for the port to be provably free, then apply `decideAdoptStop` UNCHANGED
+ * (flair#1827). Polls the post-stop health until `refused` (ECONNREFUSED) or the
+ * deadline; on timeout the failure keeps the existing refusal wording and adds
+ * how long it waited and the last health observed.
+ */
+export async function decideAdoptStopWithWait(
+  state: DaemonState,
+  opts: {
+    observe: () => HealthResult | Promise<HealthResult>;
+    deadlineMs: number;
+    intervalMs?: number;
+    now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
+  },
+): Promise<AdoptStopWaitResult> {
+  const poll = await pollUntil<HealthResult>({
+    observe: opts.observe,
+    until: (h) => h.kind === "refused",
+    deadlineMs: opts.deadlineMs,
+    intervalMs: opts.intervalMs,
+    now: opts.now,
+    sleep: opts.sleep,
+  });
+  const decision = decideAdoptStop(state, poll.value);
+  if (decision !== "proceed" && poll.timedOut) {
+    return {
+      health: poll.value,
+      decision: {
+        ...decision,
+        detail: `${decision.detail} (waited ${poll.waitedMs}ms for the port to free; last health probe: ${poll.value.kind})`,
+      },
+      timedOut: true,
+      waitedMs: poll.waitedMs,
+      observations: poll.observations,
+    };
+  }
+  return { health: poll.value, decision, timedOut: poll.timedOut, waitedMs: poll.waitedMs, observations: poll.observations };
+}

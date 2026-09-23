@@ -157,8 +157,8 @@ import {
   classifyPlist,
   planLaunchdRepair,
   mapRepairThrow,
-  decideAdoptStop,
-  verifyAdoptServing,
+  decideAdoptStopWithWait,
+  verifyAdoptServingWithWait,
   type AdminPassAvailability,
   type LaunchdRepairResult,
   type RepairPlan,
@@ -5860,16 +5860,21 @@ async function repairLaunchdManagement(dataDir: string, port: number): Promise<L
         // launchd's reported pid for this label.
         if (plan.kind === "adopt") {
           const label = after.label ?? resolveLaunchdLabel(dataDir).label;
-          const managedPid = readLaunchctlJobState(label, realLaunchctlLister).pid;
-          const servingPid = resolveInstanceServingPid(dataDir, port);
-          const proof = verifyAdoptServing({
-            directPid,
-            managedPid,
-            servingPid,
-            directPidAlive: directPid !== null && isProcessAlive(directPid),
+          // flair#1827: poll — the launchd-started Harper may not have written
+          // hdb.pid or bound the port yet. Wait for it to serve (and for the
+          // pre-adopt process to be gone), THEN prove identity with
+          // verifyAdoptServing UNCHANGED on the final observation.
+          const waited = await verifyAdoptServingWithWait({
+            observe: () => ({
+              directPid,
+              managedPid: readLaunchctlJobState(label, realLaunchctlLister).pid,
+              servingPid: resolveInstanceServingPid(dataDir, port),
+              directPidAlive: directPid !== null && isProcessAlive(directPid),
+            }),
+            deadlineMs: STARTUP_TIMEOUT_MS,
           });
-          if (proof) {
-            return { kind: "failed", detail: proof.detail, remedy: ["flair stop", "flair doctor --fix"] };
+          if (waited.proof) {
+            return { kind: "failed", detail: waited.proof.detail, remedy: ["flair stop", "flair doctor --fix"] };
           }
         }
         // flair#1701: the launchd bounce (adopt and regenerate) is a first
@@ -5912,9 +5917,15 @@ async function stopDirectProcessForAdopt(port: number, dataDir: string): Promise
     try { process.kill(state.pid, "SIGTERM"); } catch { /* already gone */ }
     try { await waitForProcessExit(state.pid, STARTUP_TIMEOUT_MS); } catch { /* best-effort — the port check below surfaces the real problem */ }
   }
-  const postStopHealth = await probeHealth(port);
-  const decision = decideAdoptStop(state, postStopHealth);
-  if (decision !== "proceed") return decision;
+  // flair#1827: poll the post-stop health until the port is provably free — a
+  // single observation that caught the listener mid-release flaked with "port
+  // not confirmed free". decideAdoptStop is UNCHANGED; it decides on the final
+  // observation, and a timeout names the wait and the last probe.
+  const decision = await decideAdoptStopWithWait(state, {
+    observe: () => probeHealth(port),
+    deadlineMs: STARTUP_TIMEOUT_MS,
+  });
+  if (decision.decision !== "proceed") return decision.decision;
   // Belt-and-suspenders: lsof confirms no TCP listener remains before the
   // caller loads the plist. probeHealth "refused" (ECONNREFUSED) already means
   // nothing is listening, but a port that is BOUND yet refuses connections
