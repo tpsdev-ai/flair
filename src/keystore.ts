@@ -28,8 +28,21 @@ export interface KeyStore {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+/**
+ * Resolve the home dir at CALL time, preferring the live HOME/USERPROFILE env
+ * over os.homedir(). The runtime caches `homedir()` at process start, so a HOME
+ * set after start (the test harness in test/helpers/sandbox-home.ts) is
+ * invisible to it and the keystore would reach the REAL ~/.flair/keys — the
+ * exact leak that made the federation-watch lane resolve /home/runner in CI
+ * (flair#1853 round 2). Production is unchanged: HOME is set before the process
+ * starts on every OS. Same convention as resolveHome() in install/clients.ts.
+ */
+function resolveHomeDir(): string {
+  return process.env.HOME || process.env.USERPROFILE || homedir();
+}
+
 function keysDir(): string {
-  return join(homedir(), ".flair", "keys");
+  return join(resolveHomeDir(), ".flair", "keys");
 }
 
 function keyPath(instanceId: string): string {
