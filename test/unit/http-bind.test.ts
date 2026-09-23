@@ -22,11 +22,25 @@
  * the constructor REFUSES the same host here. Reject at construction, strip at
  * consumption.
  */
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, mock } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+
+// flair#1845: readHttpBindFromConfig() resolves ~/.flair/config.yaml through
+// homedir(), which caches at module load — a bare `process.env.HOME = tmp`
+// inside a test comes too late. Delegate homedir() to process.env.HOME
+// (falling back to the real one) so a test can point it at a scratch home.
+// Registered BEFORE src/cli.ts is imported (the #1163/#1164 pattern).
+mock.module("node:os", () => {
+  const actual = { ...require("node:os") };
+  return {
+    ...actual,
+    homedir: () => process.env.HOME || actual.homedir(),
+  };
+});
+
 import {
   buildDirectSpawnEnv,
   buildLaunchdPlist,
@@ -176,8 +190,25 @@ describe("§1 resolveHttpBindHostFrom — flag > env > config, else null", () =>
   test("resolveHttpBindFor validates the resolved host (refuses a non-loopback non-wildcard)", () => {
     expect(resolveHttpBindFor(19926, { httpBind: "0.0.0.0" }).bindValue).toBe("0.0.0.0:19926");
     expect(() => resolveHttpBindFor(19926, { httpBind: "evil.example.com" })).toThrow(UnreachableHttpBindHostError);
-    // DEFAULT_HTTP_BIND_HOST is the floor when nothing is configured.
-    expect(resolveHttpBindFor(19926, {}).host).toBe(DEFAULT_HTTP_BIND_HOST);
+    // flair#1845: with no explicit host this falls through to
+    // readHttpBindFromConfig() on the DEFAULT path — the real
+    // ~/.flair/config.yaml. A host that has persisted `httpBind:` (a supported,
+    // documented setting) would otherwise decide this assertion. Point HOME at a
+    // scratch dir (the node:os shim above makes the late assignment effective)
+    // and clear the env hatch, so "nothing configured" means nothing configured.
+    const prevHome = process.env.HOME;
+    const prevEnvBind = process.env.FLAIR_HTTP_BIND;
+    const scratch = mkdtempSync(join(tmpdir(), "flair-1845-home-"));
+    process.env.HOME = scratch;
+    delete process.env.FLAIR_HTTP_BIND;
+    try {
+      // DEFAULT_HTTP_BIND_HOST is the floor when nothing is configured.
+      expect(resolveHttpBindFor(19926, {}).host).toBe(DEFAULT_HTTP_BIND_HOST);
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+      if (prevEnvBind === undefined) delete process.env.FLAIR_HTTP_BIND; else process.env.FLAIR_HTTP_BIND = prevEnvBind;
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 });
 

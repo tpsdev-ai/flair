@@ -212,26 +212,33 @@ export function signRequestBody(body: Record<string, any>, secretKey: Uint8Array
 // Alias: signBodyFresh for clarity at call sites
 const signBodyFresh = signRequestBody;
 
-function isCompletePeerRow(row: unknown): row is Record<string, any> {
-  if (!row || typeof row !== "object") return false;
-  const r = row as Record<string, any>;
-  return typeof r.id === "string" && r.id.length > 0
-    && typeof r.publicKey === "string" && r.publicKey.length > 0;
-}
-
 /**
  * Persist last-contact on the local Peer row after confirmed hub contact.
  *
- * Callers must invoke this only after a FederationSync 200 (sendBatch or
- * the no-change liveness ping). lastSyncAt is the value HealthDetail counts
- * as `connected` (flair#1499 / flair#1146). A failed ping must leave the
- * stamp untouched so the answer stays `unknown`.
+ * Callers must invoke this only after a FederationSync 200 (sendBatch or the
+ * no-change liveness ping). lastSyncAt is the value HealthDetail counts as
+ * `connected` (flair#1499 / flair#1146) AND the spoke's OUTBOUND sync cursor
+ * (`federation sync` re-sends from it) — so a frozen value re-sends from the
+ * frozen point forever and goes stale on the hub dashboard.
  *
- * Why a full-row upsert rather than the `{id, lastSyncAt}` `update` that
- * has shipped since #426: Kern probed that partial update on Harper 5.2.8
- * and 5.1.22 — it already lands, `publicKey` intact. We keep read-then-upsert
- * to harden against a future Harper that treats an incomplete upsert as
- * replace. On search-miss we refuse to write rather than depend on merge.
+ * SEMANTICS (flair#1835): `connected` means RECENT CONTACT. It does not mean a
+ * verified hub identity or pull readiness. Inbound federation separately
+ * verifies the pinned key (resources/Federation.ts post — verifyBodySignatureFresh),
+ * so a keyless row reading `connected` is correct under that definition. The
+ * missing key is repaired by #1837, not here.
+ *
+ * WHY A FIELD-ONLY UPDATE (flair#1835, was flair#1146): the 0.55.0 write was a
+ * read + FULL-row upsert gated on `isCompletePeerRow` (id + non-empty
+ * `publicKey`). A legacy pairing's local hub row has `publicKey: ""`, so the
+ * gate refused on every poll and the cursor froze. The read + full upsert also
+ * races: a key repair or a revocation written between the read and the upsert
+ * is reverted, and a row deleted in that window is recreated. The field-only
+ * `update` carries only {id, lastSyncAt, updatedAt}, so it cannot revert
+ * `publicKey`/`status`, and it never inserts.
+ *
+ * HTTP 200 is NOT success: an update that matched no row (deleted or missing)
+ * is a REFUSAL, never an insert. Harper reports which ids matched in
+ * `update_hashes`; we require ours there.
  */
 export async function persistLocalPeerLastSyncAt(args: {
   opsEndpoint: string;
@@ -240,53 +247,36 @@ export async function persistLocalPeerLastSyncAt(args: {
   lastSyncAt: string;
 }): Promise<{ ok: boolean; status: number; error?: string }> {
   const headers = { "Content-Type": "application/json", Authorization: args.auth };
-  let existing: Record<string, any> | null = null;
-  try {
-    const searchRes = await fetch(`${args.opsEndpoint}/`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        operation: "search_by_value",
-        schema: "flair",
-        table: "Peer",
-        search_attribute: "id",
-        search_type: "equals",
-        search_value: args.peerId,
-        get_attributes: ["*"],
-      }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (searchRes.ok) {
-      const rows = await searchRes.json() as any;
-      const row = Array.isArray(rows) ? rows[0] : rows;
-      if (isCompletePeerRow(row) && row.id === args.peerId) existing = row;
-    }
-  } catch {
-    // Search miss — refuse to upsert an incomplete Peer.
-  }
-  if (!existing) {
-    return { ok: false, status: 0, error: "peer row missing or incomplete — refused to upsert a partial Peer" };
-  }
-
-  const upsertRes = await fetch(`${args.opsEndpoint}/`, {
+  const updateRes = await fetch(`${args.opsEndpoint}/`, {
     method: "POST",
     headers,
     body: JSON.stringify({
-      operation: "upsert",
+      operation: "update",
       database: "flair",
       table: "Peer",
-      records: [{
-        ...existing,
-        id: args.peerId,
-        lastSyncAt: args.lastSyncAt,
-        updatedAt: args.lastSyncAt,
-      }],
+      records: [{ id: args.peerId, lastSyncAt: args.lastSyncAt, updatedAt: args.lastSyncAt }],
     }),
     signal: AbortSignal.timeout(10_000),
   });
-  if (upsertRes.ok) return { ok: true, status: upsertRes.status };
-  const txt = await upsertRes.text().catch(() => "");
-  return { ok: false, status: upsertRes.status, error: txt.slice(0, 200) };
+  if (!updateRes.ok) {
+    const txt = await updateRes.text().catch(() => "");
+    return { ok: false, status: updateRes.status, error: txt.slice(0, 200) };
+  }
+  // The result check — HTTP 200 alone is not success. A miss (deleted/missing
+  // row) is reported in skipped_hashes with an empty update_hashes; refuse and
+  // never insert.
+  const parsed = (await updateRes.json().catch(() => null)) as { update_hashes?: unknown } | null;
+  const matched = !!parsed && Array.isArray(parsed.update_hashes) && parsed.update_hashes.includes(args.peerId);
+  if (!matched) {
+    return {
+      ok: false,
+      status: updateRes.status,
+      error:
+        `Peer row ${args.peerId} was not matched by the cursor update (deleted or missing) — ` +
+        `the sync cursor stays frozen; re-pair the hub. Not inserting a Peer row.`,
+    };
+  }
+  return { ok: true, status: updateRes.status };
 }
 
 /**
