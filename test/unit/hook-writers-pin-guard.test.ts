@@ -172,7 +172,7 @@ describe("installHook — the SessionStart pin is never lowered", () => {
 // ── repinSessionStartHook (the EXPORTED raw writer) ─────────────────────────
 
 describe("repinSessionStartHook — the raw writer guards itself", () => {
-  it("AHEAD → skip + a held line, bytes UNCHANGED", () => {
+  it("AHEAD → hold + a held line, bytes UNCHANGED", () => {
     const path = writeHook(AHEAD_SPEC);
     expect(readFileSync(path, "utf-8")).toContain(AHEAD_SPEC);
     const before = readFileSync(path, "utf-8");
@@ -180,7 +180,8 @@ describe("repinSessionStartHook — the raw writer guards itself", () => {
     const res = repinSessionStartHook(isoHome, HARNESS);
 
     expect(res.ok).toBe(true);
-    expect(res.action).toBe("skip");
+    // flair#1834 PR-H: a hold is its own action, not a quiet skip.
+    expect(res.action).toBe("hold");
     expect(res.message).toContain("holding");
     expect(readFileSync(path, "utf-8")).toBe(before);
   });

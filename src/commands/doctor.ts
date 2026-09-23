@@ -1118,7 +1118,10 @@ program
                 console.log(`     ${render.wrap(render.c.dim, "Would re-pin the SessionStart hook in")} ${hook.path}`);
               } else {
                 const repin = repinSessionStartHookGuarded(homedir(), "claude-code");
-                console.log(`     ${repin.ok ? render.icons.ok : render.icons.warn} ${repin.message}`);
+                // flair#1834 A1 round 3 + PR-H: the SAME icon rule as the MCP
+                // re-pin line — a hold (or a failed write) renders ⚠, never a
+                // false ✓ for an attempted-but-held fix.
+                console.log(`     ${render.icons[mcpRepinIcon(repin.action, repin.ok)]} ${repin.message}`);
               }
             } else {
               console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair hook install ${render.wrap(render.c.dim, "(re-pins the hook to the installed CLI version)")}`);
@@ -1278,7 +1281,10 @@ program
                 console.log(`     ${render.wrap(render.c.dim, "Would re-pin the SessionStart hook in")} ${hook.path}`);
               } else {
                 const repin = repinSessionStartHookGuarded(homedir(), "codex");
-                console.log(`     ${repin.ok ? render.icons.ok : render.icons.warn} ${repin.message}`);
+                // flair#1834 A1 round 3 + PR-H: the SAME icon rule as the MCP
+                // re-pin line — a hold (or a failed write) renders ⚠, never a
+                // false ✓ for an attempted-but-held fix.
+                console.log(`     ${render.icons[mcpRepinIcon(repin.action, repin.ok)]} ${repin.message}`);
               }
             } else {
               console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair hook install --harness codex ${render.wrap(render.c.dim, "(re-pins the hook to the installed CLI version)")}`);

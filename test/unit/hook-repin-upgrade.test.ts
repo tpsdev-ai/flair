@@ -118,14 +118,15 @@ describe("flair#1516 — repinSessionStartHook re-pins a wired hook to the curre
     expect(existsSync(hookSettingsPath(isoHome, "claude-code"))).toBe(false);
   });
 
-  it("hand-edited / legacy (no -p) command → skip: left untouched", () => {
+  it("hand-edited / legacy (no -p) command → hold: left untouched", () => {
     // The pre-#1143 legacy form has no `-p`; a version bump must not silently
     // rewrite it (doctor owns the legacy→current upgrade, with its own consent).
+    // flair#1834 PR-H: a HOLD (visible), not a quiet skip.
     const legacy = `sh -c 'FLAIR_AGENT_ID=x npx -y ${FLAIR_MCP_PACKAGE} flair-session-start'`;
     const path = writeClaudeHook(isoHome, legacy);
     const before = readFileSync(path, "utf-8");
     const res = repinSessionStartHook(isoHome, "claude-code");
-    expect(res.action).toBe("skip");
+    expect(res.action).toBe("hold");
     expect(readFileSync(path, "utf-8")).toBe(before);
   });
 });
