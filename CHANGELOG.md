@@ -22,6 +22,16 @@ so a hand-written entry here is lost.
 
 ### Fixed
 
+- **Upgrading from 0.55.1 or earlier: install with `npm i -g`, not `flair upgrade`.** (#1834)
+
+  `flair upgrade` runs the refresh code of the version you are upgrading *from*,
+  and the refresh in 0.55.1 and earlier can overwrite `FLAIR_AGENT_ID` in your
+  MCP client configs. This release fixes that refresh, but it cannot fix its own
+  installation: the old code runs one last time during `flair upgrade`.
+
+  > **Heads-up:** upgrading from 0.55.1 or earlier, run `npm i -g @tpsdev-ai/flair@0.55.2`, then `flair restart`, then `flair doctor --fix`; the new code then refreshes the pins and changes only the pin.
+  > If you already ran `flair upgrade` to reach 0.55.2, check `FLAIR_AGENT_ID` in each MCP client config (for example `~/.claude.json` and `~/.codex/config.toml`) and in your SessionStart hook commands, and restore any that changed. 0.55.2 cannot recover a value an earlier refresh already overwrote.
+
 - **Codex's `~/.codex/config.toml` writers are now one locked, atomic critical section.**
 
   `_wireCodex` and `_unwireCodex` (reached by `flair init` codex,
