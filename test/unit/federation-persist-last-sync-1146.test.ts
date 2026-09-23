@@ -23,10 +23,11 @@
  */
 
 import { describe, expect, test, mock, afterEach, beforeEach, spyOn } from "bun:test";
+import nacl from "tweetnacl";
 import { persistLocalPeerLastSyncAt } from "../../src/commands/federation.ts";
 import { classifyPeerLiveness } from "../../resources/federation-peer-liveness.ts";
 import { classifyMissingAfterWindow } from "../../src/federation-verify.ts";
-import { verifyBodySignatureFresh } from "../../resources/federation-crypto.ts";
+import { signBodyFresh, verifyBodySignatureFresh } from "../../resources/federation-crypto.ts";
 
 const origFetch = globalThis.fetch;
 afterEach(() => {
@@ -220,10 +221,16 @@ describe("T16 — connected means recent contact, not a verified identity", () =
     expect(classifyPeerLiveness({ status: "paired", lastSyncAt: "" }, now)).toBe("unknown");
   });
 
-  test("signature verification still rejects a request from a keyless peer", () => {
-    const body = { instanceId: "peer-x", records: [], lamportClock: 1, _ts: Date.now(), _nonce: "n" };
-    const result = verifyBodySignatureFresh(body as any, "", { windowMs: 30_000 });
-    expect(result.ok).toBe(false);
+  test("signature verification rejects a keyless peer and accepts the pinned key", () => {
+    // Sign a REAL request: an unsigned body returns invalid_signature at field
+    // presence, so it never reaches the key check — a check that cannot fire.
+    const kp = nacl.sign.keyPair();
+    const pinnedKey = Buffer.from(kp.publicKey).toString("base64url");
+    const signed = signBodyFresh({ instanceId: "peer-x", records: [], lamportClock: 1 }, kp.secretKey);
+    // Known-absent: an EMPTY pinned key must NOT verify a correctly-signed request.
+    expect(verifyBodySignatureFresh(signed, "", { windowMs: 30_000 }).ok).toBe(false);
+    // Known-present: the CORRECT pinned key accepts the same request.
+    expect(verifyBodySignatureFresh(signed, pinnedKey, { windowMs: 30_000 }).ok).toBe(true);
   });
 
   test("a canary with fresh contact but a failed injection stays unverifiable", () => {

@@ -273,7 +273,7 @@ export async function persistLocalPeerLastSyncAt(args: {
       status: updateRes.status,
       error:
         `Peer row ${args.peerId} was not matched by the cursor update (deleted or missing) — ` +
-        `the sync cursor stays frozen; re-pair the hub, or run the key repair (#1837). Not inserting a Peer row.`,
+        `the sync cursor stays frozen; re-pair the hub. Not inserting a Peer row.`,
     };
   }
   return { ok: true, status: updateRes.status };
