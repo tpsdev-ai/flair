@@ -407,11 +407,14 @@ fi
 echo "direct-spawned pid before adoption: ${DIRECT_PID}"
 # doctor --fix exits non-zero whenever ANY catalog check is still failing (e.g.
 # the missing keys dir on an agentless init) even when the launchd adopt itself
-# succeeded. The assertion is the adopted state below, not doctor's exit code.
-set +e
-flair doctor --fix --port "$PORT" 2>&1 | tee "$DIAG_DIR/doctor-fix.log"
-DOCTOR_STATUS="${PIPESTATUS[0]}"
-set -e
+# succeeded. The verdict is the adopted state asserted below, not doctor's exit
+# code. Tolerate it WITHOUT tripping the ERR trap: a bash ERR trap fires on a
+# failing pipeline even under `set +e`, so wrapping this line in set +e / set -e
+# let on_error kill the lane before assert_launchd_serving (which waits up to
+# 120s and proves the launchd pid owns the port) ever ran. `|| DOCTOR_STATUS=$?`
+# puts the pipeline in a `||` list, which the ERR trap does not fire on.
+DOCTOR_STATUS=0
+flair doctor --fix --port "$PORT" 2>&1 | tee "$DIAG_DIR/doctor-fix.log" || DOCTOR_STATUS=$?
 echo "flair doctor --fix exit: ${DOCTOR_STATUS}"
 
 # Resolve the instance-scoped label from the plist doctor --fix just wrote.
@@ -527,9 +530,12 @@ INSTALLED_VERSION="$(flair --version 2>&1 | tail -n1 | tr -d '[:space:]')"
 echo "flair --version: ${INSTALLED_VERSION} (expected ${PR_VERSION})"
 
 PKG_FLOOR="$(node -p "require('${WORKSPACE}/.github/install-weight-budget.json').minPackages")"
-set +e
-PKG_COUNT="$(npm ls -g --all --parseable 2>/dev/null | wc -l | tr -d ' ')"
-set -e
+# Tolerate a non-zero npm ls (it can fail on a partially-installed global
+# tree) without tripping the ERR trap — same reason as the adopt step above:
+# `set +e` alone does not stop the ERR trap. The count still comes from the
+# pipeline's own output.
+PKG_COUNT=0
+PKG_COUNT="$(npm ls -g --all --parseable 2>/dev/null | wc -l | tr -d ' ')" || true
 echo "global tree packages (npm ls -g --all --parseable): ${PKG_COUNT} (floor ${PKG_FLOOR})"
 
 find "$NPM_LOG_DIR" -maxdepth 1 -name '*.log' -print > "$DIAG_DIR/npm-logs-after.txt" 2>/dev/null || true
@@ -542,10 +548,9 @@ while IFS= read -r npm_log; do
 done < "$DIAG_DIR/npm-logs-after.txt"
 echo "invalid or damaged lockfile warnings in the upgrade's npm logs: ${LOCKFILE_WARNINGS}"
 
-set +e
-HARPER_OUT="$(node "$HARPER_JS" version 2>&1)"
-HARPER_STATUS=$?
-set -e
+# Tolerate a non-zero harper.js version probe without tripping the ERR trap.
+HARPER_STATUS=0
+HARPER_OUT="$(node "$HARPER_JS" version 2>&1)" || HARPER_STATUS=$?
 echo "node harper.js version exit: ${HARPER_STATUS}; output: $(printf '%s' "$HARPER_OUT" | tail -n1)"
 
 if [ "$INSTALLED_VERSION" != "$PR_VERSION" ]; then
