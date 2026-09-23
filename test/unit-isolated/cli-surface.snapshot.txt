@@ -2482,10 +2482,10 @@ flair orgevent
       attr: targetUrl
 
 flair attention
-  description: What's touching entity E in the last N days? Grouped view across memory/relationship/workspace/presence/orgevent (POST /AttentionQuery)
-  usage: [options] <entity>
+  description: What's touching this entity in the last N days? Argument is a vocabulary string (type:value from a closed set, e.g. repo:owner/name). Grouped view across memory/relationship/workspace/presence/orgevent (POST /AttentionQuery)
+  usage: [options] <type:value>
   arguments:
-    entity (required)
+    type:value (required)
   options:
     --days <n>
       description: Window size in days (default 7)
@@ -2561,7 +2561,7 @@ Commands:
   presence                                  Manage agent presence (The Office Space)
   workspace                                 Manage agent workspace state (The Office Space)
   orgevent [options]                        Publish an org-wide coordination event attributed to your agent (PUT /OrgEvent/{id})
-  attention [options] <entity>              What's touching entity E in the last N days? Grouped view across memory/relationship/workspace/presence/orgevent (POST /AttentionQuery)
+  attention [options] <type:value>          What's touching this entity in the last N days? Argument is a vocabulary string (type:value from a closed set, e.g. repo:owner/name). Grouped view across memory/relationship/workspace/presence/orgevent (POST /AttentionQuery)
   help [command]                            display help for command
 
 ----- flair init -----
@@ -5224,9 +5224,10 @@ Global Options:
   -v, --version       output the version number
 
 ----- flair attention -----
-Usage: flair attention [options] <entity>
+Usage: flair attention [options] <type:value>
 
-What's touching entity E in the last N days? Grouped view across
+What's touching this entity in the last N days? Argument is a vocabulary string
+(type:value from a closed set, e.g. repo:owner/name). Grouped view across
 memory/relationship/workspace/presence/orgevent (POST /AttentionQuery)
 
 Options:
