@@ -500,7 +500,7 @@ so a hand-written entry here is lost.
   the rest of the entry deep-equal. Ambiguous shapes (a duplicated `flair` key or
   `FLAIR_AGENT_ID`, a bare-plus-pinned package, no identifiable package) and a pin
   the never-lower guard cannot prove safe are HELD with the bytes untouched. Codex
-  (TOML) keeps its stale pin until its own pin-only writer lands.
+  (TOML) gets its own pin-only writer in this same release (see the Codex entry).
 
   > **Heads-up:** a release that installs this fix runs the PREVIOUS version's
   > refresh one last time when upgraded with `flair upgrade`. Prefer
