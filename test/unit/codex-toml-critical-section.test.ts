@@ -90,13 +90,10 @@ describe("T3 — the Codex writers are on the critical section; the rest are Cod
     const sites = rawWriteSites(clientsSrc);
     expect(sites).not.toContain("_wireCodex");
     expect(sites).not.toContain("_unwireCodex");
-    // This base has NOT merged #1829: the JSON client writers are still raw and
-    // are that slice's to migrate; the only OTHERS allowed are the pi writers
-    // (2c-i-d3). A brand-new raw writeFileSync outside this set is a failure.
-    const allowed = new Set(["wireJsonMcp", "unwireJsonMcp", "_wirePi", "_unwirePi"]);
-    for (const s of sites) expect(allowed.has(s), `unexpected raw writer: ${s}`).toBe(true);
-    expect(sites).toContain("_wirePi");
-    expect(sites).toContain("_unwirePi");
+    // This base includes #1829 (the JSON client writers moved onto the critical
+    // section), so the ONLY raw writeFileSync left in clients.ts are the pi
+    // writers (2c-i-d3), pinned BY NAME. A brand-new raw site is a failure.
+    expect([...sites].sort()).toEqual(["_unwirePi", "_wirePi"]);
   });
 
   it("hook-install.ts's readCodexConfigToml stays READ-ONLY (no writeFileSync anywhere in the module)", () => {

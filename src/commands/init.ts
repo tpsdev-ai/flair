@@ -9,7 +9,7 @@
 import { Command } from "commander";
 import { applyOrReportClaudeMdBootstrap, applyOrReportSessionStartHook } from "../doctor-client.js";
 import { hookSettingsPath } from "../hook-install.js";
-import { ClientId, detectClients, renderWiringSummary, wireAntigravity, wireCodex, wireCursor, wireGemini, wirePi } from "../install/clients.js";
+import { ClientId, claudeCodeMcpEntry, detectClients, renderWiringSummary, wireAntigravity, wireClaudeCodeJson, wireCodex, wireCursor, wireGemini, wirePi } from "../install/clients.js";
 import { DEFAULT_ADMIN_USER, authFetch, defaultAdminPassPath, defaultKeysDir, readAdminPassFileSecure, resolveAdminUser } from "../lib/auth-resolve.js";
 import {
   detectPersistedAdminUser,
@@ -18,8 +18,7 @@ import {
   resolveInitAdminPasswordRefuseReason,
   resolveInitAdminPasswordSource,
 } from "../lib/init-admin-pass.js";
-import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
-import { decidePinWrite } from "../lib/pin-write-guard.js";
+import { mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
 import * as render from "../render.js";
 import { execSync, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -1155,85 +1154,61 @@ program
             // Claude Code gets real auto-wiring into ~/.claude.json (zero-install
             // npx form; matches the snippets everywhere else). Other clients only
             // get printed instructions — the CLI can't safely edit their configs.
-            const claudeJsonPath = join(homedir(), ".claude.json");
-            const flairMcpConfig = {
-              type: "stdio" as const,
-              command: "npx",
-              args: ["-y", mcpServerSpec()] as string[],
-              // flair#718 authorship-provenance: each client's wired env block
-              // gets its OWN FLAIR_CLIENT label (never the shared mcpEnv
-              // object directly — that would stamp the same label into every
-              // client's config) so writes from THIS client's proxy stamp
-              // provenance.claimed.client = "claude-code".
-              env: { ...mcpEnv, FLAIR_CLIENT: "claude-code" },
-            };
-            // ~/.claude.json exists once Claude Code has been RUN, not once it
-            // is installed — so gating the write on it skipped every user who
-            // installed Claude Code and Flair in the same sitting (flair#906).
-            // The file is Claude Code's own and creating it with a single
-            // `mcpServers` key is exactly what `claude mcp add` does, so an
-            // absent file is created rather than turned into a printed snippet
-            // the user has to notice and act on.
-            try {
-              const claudeJsonExisted = existsSync(claudeJsonPath);
-              const claudeJson = claudeJsonExisted
-                ? JSON.parse(readFileSync(claudeJsonPath, "utf-8"))
-                : {};
-              const existing = claudeJson.mcpServers?.flair;
-              const currentSpec = mcpServerSpec();
-              const existingArgs = existing?.args;
-              const argsMatch = Array.isArray(existingArgs) && existingArgs.includes(currentSpec);
-              const urlAgentMatch = existing && existing.env?.FLAIR_URL === httpUrl && existing.env?.FLAIR_AGENT_ID === agentId;
-              // flair#1135: the pin in `args` must match the current mcpServerSpec().
-              // A matching pin stays a no-op (idempotent); only a stale pin triggers a re-write.
-              if (urlAgentMatch && argsMatch) {
-                console.log(`   ✓ Claude Code already wired in ~/.claude.json`);
-                wiringResults.push({ client: "claude-code", message: "already wired", wired: true });
-              } else {
-                // flair#1778 slice 2c-i-a2: a pin mismatch is NOT automatically a
-                // re-write — never LOWER the pin already in ~/.claude.json (and
-                // never overwrite a range/tag/unsupported spec, nor write when
-                // this CLI cannot read its own version).
-                const decision = decidePinWrite({
-                  pkg: FLAIR_MCP_PACKAGE,
-                  entry: "Claude Code config ~/.claude.json",
-                  existingText: existing ? JSON.stringify(existing) : null,
-                  runningVersion: flairCliVersion(),
-                });
-                if (decision.action !== "write") {
-                  console.log(`   ${render.icons.warn} ${decision.line}`);
-                  wiringResults.push({
-                    client: "claude-code",
-                    message: decision.action === "hold"
-                      ? "held the existing pin in ~/.claude.json"
-                      : "refused to write ~/.claude.json (unreadable CLI version)",
-                    wired: !!existing,
-                  });
-                } else {
-                claudeJson.mcpServers = claudeJson.mcpServers || {};
-                claudeJson.mcpServers.flair = flairMcpConfig;
-                writeFileSync(claudeJsonPath, JSON.stringify(claudeJson, null, 2));
-                const action = urlAgentMatch ? "refreshed pin in ~/.claude.json"
-                  : claudeJsonExisted ? "wired in ~/.claude.json"
-                  : "wired in ~/.claude.json (created)";
-                console.log(`   ✓ Claude Code ${action} (restart Claude Code to pick it up)`);
-                wiringResults.push({
-                  client: "claude-code",
-                  message: urlAgentMatch ? "refreshed pin in ~/.claude.json"
-                    : claudeJsonExisted ? "wired ~/.claude.json"
-                    : "created and wired ~/.claude.json",
-                  wired: true,
-                });
-                }
-              }
-            } catch (err: unknown) {
-              // Only a genuine read/parse/write failure lands here now (bad
-              // permissions, malformed existing JSON) — never merely "the file
-              // does not exist yet".
-              const reason = err instanceof Error ? err.message : String(err);
+            //
+            // flair#1778 2c-i-d1: init no longer writes ~/.claude.json itself. It
+            // DELEGATES to the shared clients.ts writer (wireClaudeCodeJson) — the
+            // SAME critical section, resolveHome() and entry builder that doctor
+            // --fix and the owned-pin refresh use — and renders its own lines from
+            // the STRUCTURED outcome. Both writers of this file now emit ONE shape
+            // (`type: "stdio"` KEPT, a trailing newline added); an empty file now
+            // reads as {} instead of throwing. resolveHome() (not os.homedir(),
+            // which is fixed at LAUNCH under Bun) is what makes an in-process HOME
+            // override take effect — os.homedir() would still write the REAL
+            // ~/.claude.json.
+            // flair#718 authorship-provenance: the Claude Code env block gets its
+            // OWN FLAIR_CLIENT label (never the shared mcpEnv object directly —
+            // that would stamp the same label into every client's config) so
+            // writes from THIS client's proxy stamp
+            // provenance.claimed.client = "claude-code".
+            const claudeEnv = { ...mcpEnv, FLAIR_CLIENT: "claude-code" };
+            const wireOutcome = wireClaudeCodeJson(claudeEnv);
+            if (wireOutcome.kind === "already") {
+              console.log(`   ✓ Claude Code already wired in ~/.claude.json`);
+              wiringResults.push({ client: "claude-code", message: "already wired", wired: true });
+            } else if (wireOutcome.kind === "held") {
+              console.log(`   ${render.icons.warn} ${wireOutcome.line}`);
+              wiringResults.push({
+                client: "claude-code",
+                message: "held the existing pin in ~/.claude.json",
+                wired: wireOutcome.entryPresent,
+              });
+            } else if (wireOutcome.kind === "refused") {
+              console.log(`   ${render.icons.warn} ${wireOutcome.line}`);
+              wiringResults.push({
+                client: "claude-code",
+                message: "refused to write ~/.claude.json (unreadable CLI version)",
+                wired: wireOutcome.entryPresent,
+              });
+            } else if (wireOutcome.kind === "written") {
+              const action = wireOutcome.refreshed ? "refreshed pin in ~/.claude.json"
+                : wireOutcome.existed ? "wired in ~/.claude.json"
+                : "wired in ~/.claude.json (created)";
+              console.log(`   ✓ Claude Code ${action} (restart Claude Code to pick it up)`);
+              wiringResults.push({
+                client: "claude-code",
+                message: wireOutcome.refreshed ? "refreshed pin in ~/.claude.json"
+                  : wireOutcome.existed ? "wired ~/.claude.json"
+                  : "created and wired ~/.claude.json",
+                wired: true,
+              });
+            } else {
+              // A genuine read/parse/write/lock failure (bad permissions,
+              // malformed existing JSON, a held lock) — never merely "the file
+              // does not exist yet" (an absent file is created).
+              const reason = wireOutcome.reason ?? "unknown error";
               console.log(`   ${render.icons.warn} Claude Code: could not write ~/.claude.json (${reason})`);
               console.log(`   MCP config (add manually to ~/.claude.json):`);
-              console.log(`     { "mcpServers": { "flair": ${JSON.stringify(flairMcpConfig)} } }`);
+              console.log(`     { "mcpServers": { "flair": ${JSON.stringify(claudeCodeMcpEntry(claudeEnv))} } }`);
               wiringResults.push({ client: "claude-code", message: `snippet printed (${reason})`, wired: false });
             }
 
