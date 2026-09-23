@@ -32,9 +32,21 @@ import { parseSemverCore } from "../../src/fabric-upgrade.ts";
 
 const INSTALLED = flairCliVersion();
 const CURRENT_SPEC = mcpServerSpec();
+/** The stale version just below a parsed core: decrement the patch; else the
+ *  minor (patch 0); else the major (minor and patch 0). Throws on 0.0.0, which
+ *  has no stale predecessor. (flair#1834 A2 round 4 — the old inline helper
+ *  mapped 1.0.0 to the invalid "1.-1.0".) */
+function staleVersion(core: [number, number, number]): string {
+  const [major, minor, patch] = core;
+  if (patch > 0) return `${major}.${minor}.${patch - 1}`;
+  if (minor > 0) return `${major}.${minor - 1}.0`;
+  if (major > 0) return `${major - 1}.0.0`;
+  throw new Error("cannot derive a stale version below 0.0.0");
+}
+
 const core = parseSemverCore(INSTALLED);
 if (!core) throw new Error(`CLI version is not semver: ${INSTALLED}`);
-const STALE_VER = core[2] > 0 ? `${core[0]}.${core[1]}.${core[2] - 1}` : `${core[0]}.${core[1] - 1}.0`;
+const STALE_VER = staleVersion(core);
 const STALE_SPEC = `${FLAIR_MCP_PACKAGE}@${STALE_VER}`;
 
 let isoHome: string;
@@ -113,6 +125,26 @@ describe("T13-codex — a sibling table is not swallowed into the section", () =
     expect(readCodex()).toBe(before.replace(STALE_SPEC, CURRENT_SPEC));
     expect(readCodex()).toContain(`[mcp_servers.flair.env]`);
     expect(readCodex()).toContain(`FLAIR_AGENT_ID = "c"`);
+  });
+});
+
+// ── the fixture's stale-version helper ──────────────────────────────────────
+
+describe("staleVersion — the fixture's stale-version helper", () => {
+  it("1.2.3 → decrements the patch", () => {
+    expect(staleVersion([1, 2, 3])).toBe("1.2.2");
+  });
+
+  it("1.2.0 → falls back to the minor, patch 0", () => {
+    expect(staleVersion([1, 2, 0])).toBe("1.1.0");
+  });
+
+  it("1.0.0 → falls back to the major, minor and patch 0", () => {
+    expect(staleVersion([1, 0, 0])).toBe("0.0.0");
+  });
+
+  it("0.0.0 → throws (there is no stale version below it)", () => {
+    expect(() => staleVersion([0, 0, 0])).toThrow();
   });
 });
 

@@ -788,6 +788,16 @@ export function decideCodexPinOnly(raw: string, label: string): PinOnlyDecision 
     consumed += line.length + 1;
   }
   const section = raw.slice(headerIdx, sectionEnd);
+  // 3b. No multiline-string fence ANYWHERE between the header and the section
+  //     end (flair#1834 A2 round 4). A `"""` / `'''` string that opens AND
+  //     closes inside the section can carry a line that looks like a flair
+  //     sub-table header and an `args` line; the scan above accepts that fake
+  //     sub-table as part of the section and the args match then rewrites the
+  //     STRING's content — a wrong-span write. The editor never interprets a
+  //     line that could be inside a multiline string, so any such fence HOLDs
+  //     with the bytes untouched (the reason names the fence).
+  if (countText(section, '"""') > 0) return hold('a """ multiline string appears in [mcp_servers.flair] — refusing to rewrite it');
+  if (countText(section, "'''") > 0) return hold("a ''' multiline string appears in [mcp_servers.flair] — refusing to rewrite it");
   // 4. Exactly one package token, and it is the args element.
   const tokens = countFlairPackageTokens(section);
   if (tokens === 0) return hold("no identifiable package argument in [mcp_servers.flair]");
