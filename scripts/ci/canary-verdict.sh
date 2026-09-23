@@ -27,8 +27,13 @@
 #
 #   <pkg>=<sha256> may be repeated; one binding per lockstep package, and a
 #   duplicate binding for the same package is rejected. PASS requires a binding
-#   for EVERY package (missing => DID NOT RUN). Output is Markdown, suitable for
-#   `tee -a "$GITHUB_STEP_SUMMARY"`.
+#   for EVERY package (missing => DID NOT RUN), and every binding must be a
+#   64-char hex sha256 (flair#1856 R2) — anything else, empty included, is DID
+#   NOT RUN. Output is Markdown, suitable for `tee -a "$GITHUB_STEP_SUMMARY"`.
+#
+# flair#1856 R2: the emitted preflight pipes each re-hash through the SAME
+#   64-hex check before comparing it to its binding, so an unmeasurable tarball
+#   (a re-hash of "") is a REFUSAL, never a match.
 #
 # The promote guard hashes the PUBLISHED tarball, not `dist.shasum` (a SHA-1 that
 # could never equal a sha256). It runs from the repo checkout because
@@ -161,7 +166,12 @@ set -e
 EOF
   for ((i = 0; i < ${#PACKAGES[@]}; i++)); do
     p="${PACKAGES[$i]}"
-    printf 'test "$(node scripts/ci/registry-tarball-sha256.mjs %s %s)" = "%s"\n' "$VERSION" "$p" "$(sha_for "$p")"
+    # flair#1856 R2: pipe the re-hash through the SAME 64-hex check before the
+    # comparison. An empty re-hash (the helper exited 0 with no output) then
+    # yields an empty substitution and the `test` fails — a refusal, never a
+    # match against a binding.
+    printf 'test "$(node scripts/ci/registry-tarball-sha256.mjs %s %s | grep -E %s)" = "%s"\n' \
+      "$VERSION" "$p" "'^[0-9a-f]{64}$'" "$(sha_for "$p")"
   done
   cat <<EOF
 

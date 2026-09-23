@@ -23,7 +23,7 @@
  *   0 — printed (one or more packages)
  *   2 — DID NOT RUN (no readable manifests, or none publishable) — never green
  */
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -82,7 +82,18 @@ export function lockstepPackages(root = ROOT) {
   return unique.includes(FLAIR_ROOT_PACKAGE) ? [...rest, FLAIR_ROOT_PACKAGE] : rest;
 }
 
-const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+// flair#1856 R2: the SAME realpath comparison as registry-tarball-sha256.mjs.
+// `resolve()` does not follow symlinks, so a checkout reached through a symlink
+// made this false: the script printed NOTHING and exited 0, and an empty list
+// reads as "nothing to promote" rather than "the derivation did not run".
+function sameFile(a, b) {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return false;
+  }
+}
+const invokedDirectly = process.argv[1] !== undefined && sameFile(process.argv[1], fileURLToPath(import.meta.url));
 if (invokedDirectly) {
   let packages;
   try {

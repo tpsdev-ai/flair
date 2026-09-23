@@ -32,7 +32,7 @@
 
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { resolve } from "node:path";
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 export const DEFAULT_PACKAGE = "@tpsdev-ai/flair";
@@ -98,7 +98,22 @@ async function main(argv) {
   return 0;
 }
 
-const isDirect = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+// flair#1856 R2: compare REAL paths, not resolved strings. `resolve()` only
+// makes a path absolute — it does NOT follow symlinks — while Node builds
+// `import.meta.url` for the entry module from the module's REAL path. When the
+// checkout (or this script) is reached through a symlink the old comparison was
+// false, so the module loaded, `main()` never ran, and the process exited 0 with
+// NO output: an unmeasured tarball read as a pass. Follow symlinks on both sides,
+// and treat an unresolvable path as "not the entry point" (fail closed — skip
+// main rather than pretend to have measured).
+function sameFile(a, b) {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return false;
+  }
+}
+const isDirect = process.argv[1] !== undefined && sameFile(process.argv[1], fileURLToPath(import.meta.url));
 if (isDirect) {
   main(process.argv.slice(2)).then((code) => process.exit(code), (err) => {
     console.error(`DID NOT RUN: ${err instanceof Error ? err.message : err}`);

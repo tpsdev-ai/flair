@@ -127,6 +127,19 @@ jobs:
               missing=1
               continue
             fi
+            # flair#1856 R2: a NON-ZERO EXIT is not the only way to fail. The
+            # hasher can exit 0 with NO output — a symlinked entry point used to
+            # skip its main() and print nothing. An exit code alone cannot tell
+            # "hashed" from "did not hash", so require the sha ITSELF to be 64
+            # hex chars. Anything else (empty included) is unmeasurable, and an
+            # unmeasurable tarball is FAIL. Without this an empty sha flowed into
+            # LOCKSTEP_SHAS, and the line-count check below counts lines, not
+            # values. `expected_count` is 0 here only if the derivation failed.
+            if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{64}$'; then
+              echo "::error::could not hash ${pkg}@${VERSION} — is it approved and public? (unmeasurable is FAIL)"
+              missing=1
+              continue
+            fi
             echo "${pkg}=${sha}" >> canary-logs/lockstep-sha256.txt
             if [ "$pkg" = "@tpsdev-ai/flair" ]; then
               echo "expected sha256: ${EXPECTED}"
