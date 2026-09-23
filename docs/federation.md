@@ -4,7 +4,7 @@ Hub-and-spoke sync between Flair instances. A hub instance coordinates sync for 
 
 ## Overview
 
-Federation lets multiple Flair instances share memories, relationships, and agent records **in one direction per call**. Each instance maintains its own Ed25519 identity. Sync requests are signed and verified against pinned peer public keys.
+Federation lets multiple Flair instances share memories, relationships, and agent records **in one direction per call**. Each instance maintains its own Ed25519 identity. Sync requests are signed and verified against pinned peer public keys. A push omits private memories — see [What a push sends](#what-a-push-sends).
 
 ```
 Spoke A ──[POST /FederationSync]──▶ Hub
@@ -76,21 +76,22 @@ Earlier designs relied on `allowCreate=true` combined with body-only authenticat
 
 ## Fabric Pairing Example
 
-When the hub runs on Harper Fabric, adapt the hub URL to the Fabric pattern:
+A managed Harper Fabric hub has no shell. Mint the triple from any machine that can reach it, then pair from the spoke. The full bring-up, including why `--ops-target` names port 9925, is [spoke-bringup.md §5a](spoke-bringup.md#harper-fabric-hub-no-shell). <!-- docs-freshness-allow: Fabric ops API port, not legacy data port -->
 
 ```bash
-# 1. Hub admin generates the triple (on the Fabric host)
-ssh hub-host
-flair federation token --admin-pass <hub-admin-password> > /tmp/pair-triple.json
+# 1. On any machine (the spoke itself is fine) — no ssh, no scp
+flair federation token \
+  --target https://<hub>.<org>.harperfabric.com \
+  --admin-pass <hub-admin-password> \
+  --ttl 60 \
+  --ops-target https://<hub>.<org>.harperfabric.com:9925 > ./pair-triple.json  # docs-freshness-allow: Fabric ops API port, not legacy data port
 
-# 2. Transfer the triple to the spoke admin (out-of-band)
-scp hub-host:/tmp/pair-triple.json ./pair-triple.json
-
-# 3. Spoke admin pairs using the Fabric URL
-flair federation pair https://<fabric-node>:19926/<instance-name> --token-from ./pair-triple.json
+# 2. On the spoke
+flair federation pair https://<hub>.<org>.harperfabric.com \
+  --token-from ./pair-triple.json
 ```
 
-Replace `<fabric-node>`, `<instance-name>`, and `<hub-admin-password>` with your actual values.
+Replace `<hub>`, `<org>`, and `<hub-admin-password>` with your actual values.
 
 Running the hub on Fabric has its own considerations — port derivation against a managed
 `443` endpoint, why the sync driver can only be installed on a machine you control, and
@@ -105,6 +106,18 @@ Push local changes to the hub, once:
 flair federation sync --admin-pass <password>
 # Output: ✅ Synced 12 records (0 skipped) in 145ms
 ```
+
+### What a push sends
+
+Each sync pushes rows changed since the cursor from four tables: `Memory`, `Soul`, `Agent`, and `Relationship`. `Presence` is not in that set.
+
+**Memory rows with `visibility` exactly `"private"` are left behind.** Durability is not the filter. `null`, a missing `visibility` (rows written before the field existed), `"shared"`, and any other value are included. Soul, Agent, and Relationship have no `visibility` field, so this rule does not apply to them.
+
+Private means owner-only on this instance — the same predicate as cross-agent read. A peer that received the row would hold a copy other agents on that instance could read. Holding the row back is the point of `private`.
+
+Durability still explains a count gap that is entirely `standard` rows. When a write omits `visibility`, the server defaults it from durability: `permanent` and `persistent` become `shared`; `standard`, `ephemeral`, and an omitted durability become `private`. A standard memory therefore stays on the spoke unless the writer set `visibility` to `shared`. Ephemeral memories are private-only at write time, so they never federate. That is the default and the ephemeral constraint, not a second filter and not loss of memories that were stored as shared.
+
+`flair federation verify` writes its canary as `durability: "standard"` and `visibility: "shared"` for this reason. When every changed Memory row was withheld, sync says they were held back for private visibility instead of reporting that nothing changed.
 
 ### Keeping it synced
 

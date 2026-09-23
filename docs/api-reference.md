@@ -107,8 +107,8 @@ is `GET /Name/<id>` unless noted.
 | POST | `/Agent` | Admin Basic | Create principal. Also `POST /AgentSeed` (operator/internal only — not an admin-agent key). |
 | PUT / PATCH | `/Agent/<id>` | Ed25519 | An agent updates **only its own** record. |
 | DELETE | `/Agent/<id>` | Admin Basic | Deprovision. |
-| GET | `/Presence` | Public | Roster, field-allowlisted. `currentTask` is null for anonymous callers; verified agents see the text. |
-| POST | `/Presence` | Ed25519 | Heartbeat. Agent writes only its own row (403 cross-agent). Stamps `flairVersion` / `harperVersion`. |
+| GET | `/Presence` | Public | Roster, field-allowlisted. Unverified readers get `currentTask`, `flairVersion`, and `harperVersion` as null. Thresholds: [Presence for API consumers](#presence-for-api-consumers). |
+| POST | `/Presence` | Ed25519 | Heartbeat. Agent writes only its own row (403 cross-agent). Stamps `flairVersion` / `harperVersion` on the row. |
 | PUT / DELETE | `/Presence/<id>` | Ed25519 | Own row only. Collection PUT is not a public bypass. |
 | GET | `/Soul`, `/Soul/<id>` | Ed25519 | Any verified agent; unscoped (identity/discovery). |
 | POST / PUT / PATCH / DELETE | `/Soul` | **Operator / internal** | Not Ed25519. Learned Memory text cannot be copied in as Soul. See [docs/auth.md](auth.md#soul-authorship). |
@@ -295,8 +295,28 @@ client-writable even if a client sends them. Full comments live in
 | `currentTask` | String | Free text; verified-agent read only |
 | `activity` | String | `coding` \| `reviewing` \| `planning` \| `debugging` \| `idle` |
 | `activityUpdatedAt` | BigInt | When activity/task were asserted |
-| `flairVersion` | String | Serving `@tpsdev-ai/flair` version |
-| `harperVersion` | String | Serving Harper version |
+| `flairVersion` | String | Serving `@tpsdev-ai/flair` version. Null when redacted or never stamped — see below. |
+| `harperVersion` | String | Serving Harper version. Same redaction. Also null when the server could not resolve Harper's version. |
+
+### Presence for API consumers
+
+`GET /Presence` is public. The roster (id, display name, role, runtime, activity fields, `presenceStatus`, `lastHeartbeatAt`) is world-readable. Three fields are redacted unless the request carries a valid `TPS-Ed25519` agent signature: `currentTask`, `flairVersion`, and `harperVersion`. Anonymous callers, unsigned loopback, Basic admin, and in-process calls without that signature are unverified readers. They receive those three keys as `null`. The nulls are intentional. Version strings are withheld so a public roster cannot fingerprint the instance (the same split as public `/Health` versus Ed25519 `/HealthDetail`). A null `flairVersion` on an unverified read does not mean the peer lacks a version, and it does not mean the peer cannot accept a directed handoff.
+
+A verified reader still sees `null` for a version the row never stored. Heartbeats stamp the running server's versions; a row written before that stamp, and not heartbeated since, has no value to return. `harperVersion` is also null when this process could not resolve Harper's package version. That null means unknown, not redacted.
+
+`presenceStatus` is liveness of `lastHeartbeatAt`. Defaults are 90 seconds idle and 10 minutes offline (`PRESENCE_IDLE_THRESHOLD_MS`, `PRESENCE_OFFLINE_THRESHOLD_MS`). An unset, empty, zero, or non-numeric value falls back to that default:
+
+| Age of `lastHeartbeatAt` | `presenceStatus` |
+|---|---|
+| Missing, or not a finite number | `offline` |
+| Negative (stamp ahead of the server clock) | `active` |
+| Younger than the idle threshold (default 90s) | `active` |
+| Younger than the offline threshold (default 10 min) | `idle` |
+| Older than the offline threshold | `offline` |
+
+`activityFresh` uses a different stamp: `activityUpdatedAt` when that is a finite number, otherwise `lastHeartbeatAt`. It is true while that stamp is younger than the **offline** threshold (default 10 minutes), including when the stamp is in the future. While it is true, `activity` is the stored label (`coding`, `reviewing`, `planning`, `debugging`, or `idle`). When it is false, `activity` is reported as `idle`, `lastActivity` keeps the stored label, and `currentTask` is null even for a verified reader. `activityAgeMs` is how old that stamp is.
+
+A peer can therefore show `presenceStatus: "offline"`, `activity: "idle"`, `lastActivity: "coding"`, and `activityFresh: false` at once: the heartbeat is past the offline threshold, and the live activity label has lapsed. Gate "is this agent doing this now" on `activityFresh` (and `activityAgeMs`). Read `presenceStatus` for heartbeat liveness. Read `lastActivity` as what they were doing, not what they are doing.
 
 ### Memory (`schemas/memory.graphql`)
 

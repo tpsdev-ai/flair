@@ -97,15 +97,9 @@ At this point you'll see your instance ID, public key, and role: `spoke`. The pe
 
 ## 5. Pair with the Hub
 
-### 5a. Generate a pairing token on the hub
+### 5a. Generate a pairing token
 
-On the **hub host**, an admin runs:
-
-```bash
-flair federation token --admin-pass <hub-admin-pass> > pair-triple.json
-```
-
-Output (a single JSON object):
+The command prints one JSON object. Tokens expire after **60 minutes** by default. Use `--ttl <minutes>` to extend.
 
 ```json
 {
@@ -116,13 +110,37 @@ Output (a single JSON object):
 }
 ```
 
-Tokens expire after **60 minutes** by default. Use `--ttl <minutes>` to extend.
+#### Hub you can shell into
+
+On the **hub host**, an admin runs:
+
+```bash
+flair federation token --admin-pass <hub-admin-pass> > pair-triple.json
+```
+
+#### Harper Fabric hub (no shell)
+
+A Fabric-deployed hub is a Harper component on a managed cluster. There is no host to shell into. Mint the triple from any machine that can reach the hub — for a personal spoke, that machine is the spoke — and name both the data URL and the ops URL:
+
+```bash
+flair federation token \
+  --target https://<hub>.<org>.harperfabric.com \
+  --admin-pass <cluster-admin-pass> \
+  --ttl 60 \
+  --ops-target https://<hub>.<org>.harperfabric.com:9925 > pair-triple.json  # docs-freshness-allow: Fabric ops API port, not legacy data port
+```
+
+`--ops-target` is the Harper operations API on the same hostname at port 9925. <!-- docs-freshness-allow: Fabric ops API port, not legacy data port --> A portless `https://` `--target` derives that same port. Pass `--ops-target` so the URL is the one you chose. An explicit port other than 443 still derives as REST port minus one, which is not this ops port. `federation token` reads the admin password from `--admin-pass` (or `FLAIR_ADMIN_PASS`).
 
 ### 5b. Transfer the triple to the spoke
+
+When the triple was minted **on the hub host**, copy it to the spoke:
 
 ```bash
 scp hub-host:/path/to/pair-triple.json ./pair-triple.json
 ```
+
+When it was minted with `--target` against a Fabric hub, the file is already on the machine that ran the command. If that machine is the spoke, this step is done. The file holds a one-time credential — delete it after pairing.
 
 ### 5c. Pair from the spoke
 
@@ -267,15 +285,17 @@ grep port ~/.flair/config.yaml
 export FLAIR_URL=http://127.0.0.1:9926
 ```
 
-### 🔸 Fabric hosts split REST and ops ports
+### 🔸 Harper Fabric hub vs a self-hosted explicit port
 
-Fabric deployments split the REST API and the Harper operations API onto adjacent ports. The derivation rule is **ops = REST − 1**. When pointing a CLI at a remote Fabric instance, pass the REST URL and the ops URL is derived automatically — substitute the hub's actual REST port (19926 for a fresh deployment, or whatever it was provisioned with):
+A managed Harper Fabric hub (`https://<hub>.<org>.harperfabric.com`, HTTPS on 443) serves the operations API on port 9925 of the same hostname. <!-- docs-freshness-allow: Fabric ops API port, not legacy data port --> Mint the pairing token with `--target` and `--ops-target` as in [§5a](#harper-fabric-hub-no-shell). Pairing from the spoke still uses the public hub URL:
 
 ```bash
-flair federation pair https://fabric-node.example.com:19926/<instance> --token-from triple.json
+flair federation pair https://<hub>.<org>.harperfabric.com \
+  --token-from ./pair-triple.json \
+  --admin-pass "$FLAIR_ADMIN_PASS"
 ```
 
-For explicit ops control:
+A self-hosted instance that publishes an explicit REST port still uses ops = REST − 1 (a fresh local install is 19926 → 19925). Pass that ops URL with `--ops-target` when you are not on the box:
 
 ```bash
 flair federation pair https://fabric-node.example.com:19926/<instance> \
@@ -292,7 +312,7 @@ flair federation pair https://fabric-node.example.com:19926/<instance> \
 | Install | `npm install -g @tpsdev-ai/flair` |
 | Init spoke | `flair init --agent-id <id> --data-dir /data/flair --skip-soul` |
 | Check status | `flair status` / `flair federation status` |
-| Hub: mint token | `flair federation token --admin-pass <pass> > triple.json` |
+| Hub: mint token | On the hub host: `flair federation token --admin-pass <pass> > triple.json`. Harper Fabric hub (no shell): §5a `--target` + `--ops-target` |
 | Spoke: pair | `flair federation pair <hub-url> --token-from ./triple.json --admin-pass <pass>` |
 | Spoke: sync | `flair federation sync --admin-pass <pass>` |
 | Spoke: verify | `flair federation verify --admin-pass <pass>` then `flair federation reachability` |
