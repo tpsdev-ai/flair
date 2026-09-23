@@ -74,7 +74,7 @@ import {
 } from "./doctor-client.js";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec } from "./lib/mcp-spec.js";
 import { decidePinWrite, type PinWriteDecision } from "./lib/pin-write-guard.js";
-import { withConfigCriticalSection } from "./lib/config-critical-section.js";
+import { withConfigCriticalSection, type ConfigSectionOptions } from "./lib/config-critical-section.js";
 import {
   backupBytesTo,
   encodeConfig,
@@ -543,17 +543,20 @@ function findHookMatches(config: any): Array<{ groupIndex: number; hookIndex: nu
  * CAPTURED `<ver>` span — never the first substring occurrence (round 2).
  *
  * `<ver>` is a SEMVER, not "anything up to the next delimiter": digits and
- * dots with an optional `-`/`+` pre-release/build suffix of letters, digits,
- * dots and hyphens. The looser `[^\s"')]+` admitted `;` and `$`, so
- * `…@0.55.0;<cmd>` and `…@0.55.0$X` passed the FORM and were held only by the
- * never-lower guard (round 2).
+ * dots with an OPTIONAL pre-release suffix AND an OPTIONAL build suffix
+ * (separate groups, flair#1834 PR-H round 4 — one `[-+]` group admitted only
+ * ONE of the two, so `0.54.0-rc.1+build.5` matched no form and a stale hook was
+ * HELD instead of updated). Each suffix is letters, digits, dots and hyphens.
+ * The looser `[^\s"')]+` admitted `;` and `$`, so `…@0.55.0;<cmd>` and
+ * `…@0.55.0$X` passed the FORM and were held only by the never-lower guard
+ * (round 2).
  */
 const HOOK_BARE_FORM_RE =
-  /^FLAIR_AGENT_ID=([^\s'"$();|&<>]+)(?: FLAIR_URL=([^\s'"$();|&<>]+))? npx -y -p (@tpsdev-ai\/flair-mcp@\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?) flair-session-start$/d;
+  /^FLAIR_AGENT_ID=([^\s'"$();|&<>]+)(?: FLAIR_URL=([^\s'"$();|&<>]+))? npx -y -p (@tpsdev-ai\/flair-mcp@\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?) flair-session-start$/d;
 const HOOK_CLAUDE_FORM_RE =
-  /^sh -c 'out=\$\(FLAIR_AGENT_ID=([^\s'"$();|&<>]+)(?: FLAIR_URL=([^\s'"$();|&<>]+))? npx -y -p (@tpsdev-ai\/flair-mcp@\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?) flair-session-start 2>\/dev\/null\) && printf %s "\$out" \|\| true'$/d;
+  /^sh -c 'out=\$\(FLAIR_AGENT_ID=([^\s'"$();|&<>]+)(?: FLAIR_URL=([^\s'"$();|&<>]+))? npx -y -p (@tpsdev-ai\/flair-mcp@\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?) flair-session-start 2>\/dev\/null\) && printf %s "\$out" \|\| true'$/d;
 const HOOK_CODEX_FORM_RE =
-  /^sh -c 'out=\$\(FLAIR_HOOK_HARNESS=codex FLAIR_AGENT_ID=([^\s'"$();|&<>]+)(?: FLAIR_URL=([^\s'"$();|&<>]+))? npx -y -p (@tpsdev-ai\/flair-mcp@\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?) flair-session-start\) && printf %s "\$out" \|\| true'$/d;
+  /^sh -c 'out=\$\(FLAIR_HOOK_HARNESS=codex FLAIR_AGENT_ID=([^\s'"$();|&<>]+)(?: FLAIR_URL=([^\s'"$();|&<>]+))? npx -y -p (@tpsdev-ai\/flair-mcp@\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?) flair-session-start\) && printf %s "\$out" \|\| true'$/d;
 
 export interface InstallerHookForm {
   /** The form's harness (the bare form is harness-agnostic). */
@@ -628,7 +631,11 @@ function guardedPinSpan(command: string | null): string | null {
  * real write — the same Sherlock conditions installHook implements. Idempotent:
  * a second call is a `noop`.
  */
-export function repinSessionStartHook(homeDir: string, harness: Harness): HookRepinResult {
+export function repinSessionStartHook(
+  homeDir: string,
+  harness: Harness,
+  testHooks?: ConfigSectionOptions["testHooks"],
+): HookRepinResult {
   const path = hookSettingsPath(homeDir, harness);
   const skip = (ok: boolean, message: string): HookRepinResult => ({ ok, path, harness, action: "skip", message, backupPath: null });
 
@@ -717,22 +724,38 @@ export function repinSessionStartHook(homeDir: string, harness: Harness): HookRe
       outcome = { action: "update", message: `re-pinned the SessionStart hook in ${path} to ${mcpServerSpec()}` };
       return { write: encodeConfig(newConfig) };
     },
-    { backup: (bytes) => backupBytesTo(path, bytes) },
+    { backup: (bytes) => backupBytesTo(path, bytes), testHooks },
   );
 
-  if (result.status === "written") {
-    const oc = outcome as { action: HookRepinResult["action"]; message: string } | null;
-    return {
-      ok: true, path, harness, action: "update",
-      message: oc?.message ?? `re-pinned the SessionStart hook in ${path} to ${mcpServerSpec()}`,
-      backupPath: result.backupPath ?? null,
-    };
-  }
+  // flair#1834 PR-H round 4 (CodeRabbit MAJOR): map result.status FIRST. A decided
+  // outcome is truthful ONLY for the status decide produced — the recorded
+  // "update" is set BEFORE the write, so it must never surface for a status that
+  // did not commit it. A refused atomicReplace (nothing written) is a FAILURE,
+  // never the stale "re-pinned".
   const oc = outcome as { action: HookRepinResult["action"]; message: string } | null;
-  if (result.status === "noop") {
-    return { ok: true, path, harness, action: "noop", message: oc?.message ?? result.message, backupPath: result.backupPath ?? null };
+  switch (result.status) {
+    case "written":
+      // decide returned `write` and the rename committed — the recorded update.
+      return {
+        ok: true, path, harness, action: "update",
+        message: oc?.message ?? `re-pinned the SessionStart hook in ${path} to ${mcpServerSpec()}`,
+        backupPath: result.backupPath ?? null,
+      };
+    case "noop":
+      // decide returned `noop`; use only that recorded outcome.
+      return { ok: true, path, harness, action: "noop", message: oc?.message ?? result.message, backupPath: result.backupPath ?? null };
+    case "held":
+      // decide returned a hold/skip (the recorded outcome) — OR the primitive
+      // held on its own before decide ran (an observation change, an unreadable
+      // destination), in which case there is no recorded outcome to use. A parse
+      // error is recorded as `refused` and stays a failure (`ok: false`).
+      return { ok: !refused, path, harness, action: oc?.action ?? "skip", message: oc?.message ?? result.message, backupPath: result.backupPath ?? null };
+    default:
+      // "refused" — a lock / backup / atomicReplace refusal: NOTHING was written.
+      // Never report the pre-write "update"; report a failure with the
+      // primitive's own message.
+      return { ok: false, path, harness, action: "skip", message: result.message, backupPath: result.backupPath ?? null };
   }
-  return { ok: !refused, path, harness, action: oc?.action ?? "skip", message: oc?.message ?? result.message, backupPath: result.backupPath ?? null };
 }
 
 export interface UninstallHookOptions {
