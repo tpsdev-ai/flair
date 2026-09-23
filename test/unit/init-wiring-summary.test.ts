@@ -28,12 +28,18 @@ import {
 let isoHome: string;
 let prevHome: string | undefined;
 let prevPath: string | undefined;
+let prevPiDir: string | undefined;
 
 beforeEach(() => {
   isoHome = mkdtempSync(join(tmpdir(), "flair-summary-home-"));
   prevHome = process.env.HOME;
   prevPath = process.env.PATH;
+  prevPiDir = process.env.PI_CODING_AGENT_DIR;
   process.env.HOME = isoHome;
+  // pi's config path resolves $PI_CODING_AGENT_DIR first (flair#1853 sets it to
+  // the harness sandbox). Point it at this case's isolated home so a sibling
+  // case cannot make `pi` look installed here.
+  process.env.PI_CODING_AGENT_DIR = isoHome;
 });
 
 afterEach(() => {
@@ -41,6 +47,8 @@ afterEach(() => {
   else delete process.env.HOME;
   if (prevPath !== undefined) process.env.PATH = prevPath;
   else delete process.env.PATH;
+  if (prevPiDir !== undefined) process.env.PI_CODING_AGENT_DIR = prevPiDir;
+  else delete process.env.PI_CODING_AGENT_DIR;
   rmSync(isoHome, { recursive: true, force: true });
 });
 

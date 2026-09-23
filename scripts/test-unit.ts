@@ -2,6 +2,12 @@ import { existsSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+// Sandbox HOME for every child step, and the guard that fails the lane if a
+// real client config changed anyway (flair#1853). Importing sandbox-home also
+// installs its sandbox in THIS process — harmless: the guard resolves the real
+// home from os.userInfo().homedir, never from HOME.
+import { createSandboxHome } from "../test/helpers/sandbox-home.ts";
+import { changedConfigs, realHomeDir, snapshotClientConfigs } from "./home-isolation-guard.ts";
 
 export interface UnitStep {
   name: string;
@@ -80,16 +86,46 @@ export function unitPlan(root: string): UnitStep[] {
 }
 
 export function runUnitSteps(steps: UnitStep[], executable = process.execPath): number {
+  // Fingerprint the REAL client configs before the lane and compare after it.
+  // realHomeDir() reads the passwd database, not HOME, so neither the sandbox
+  // this module installs nor the per-step HOME below can hide a real write.
+  const realHome = realHomeDir();
+  const before = snapshotClientConfigs(realHome);
+  const guardPassed = (): boolean => {
+    const changed = changedConfigs(before, snapshotClientConfigs(realHome));
+    if (!changed.length) return true;
+    console.error(
+      `Home-isolation guard FAILED: a real client config changed during the lane: ${changed.join(", ")}. ` +
+        `A test reached around the sandbox — make it use the sandbox HOME (flair#1853).`,
+    );
+    return false;
+  };
   let completed = 0;
   for (const step of steps) {
     console.log(`\n${step.name}${step.files.length ? ` (${step.files.length} files)` : ""}`);
-    const result = spawnSync(executable, step.args, { cwd: step.cwd, stdio: "inherit", env: unitEnvironment(process.env) });
+    // A fresh sandbox HOME per step: even if one step's child wrote a config,
+    // the next step cannot read it back, and the real home is never the target.
+    // The bunfig preload covers `bun test` children too; this also covers the
+    // non-test steps (typechecks, builds) that preload does not reach.
+    const sandbox = createSandboxHome();
+    let result;
+    try {
+      result = spawnSync(executable, step.args, {
+        cwd: step.cwd,
+        stdio: "inherit",
+        env: { ...unitEnvironment(process.env), ...sandbox.env },
+      });
+    } finally {
+      sandbox.cleanup();
+    }
     if (result.error || result.status !== 0) {
+      guardPassed();
       console.error(`Unit lane failed: ${step.name} (${result.error?.message ?? result.signal ?? `exit ${result.status}`}). ${completed}/${steps.length} steps completed.`);
       return 1;
     }
     completed++;
   }
+  if (!guardPassed()) return 1;
   console.log(`\nUnit lane passed: ${completed} steps, ${steps.reduce((n, step) => n + step.files.length, 0)} test files. Test pass/skip counts are reported by Bun above.`);
   return 0;
 }
@@ -108,7 +144,7 @@ if (import.meta.main) {
       }
       const node = spawnSync("node", ["--version"], { encoding: "utf8" });
       if (node.error || node.status !== 0) throw new Error("Node.js is required on PATH for builds and subprocess tests (see package.json engines).");
-      console.log(`Unit lane: Bun ${Bun.version}; Node ${node.stdout.trim()}; ${steps.length} steps. Ambient FLAIR_/HARPER_/HDB_/FABRIC_ settings are removed from child environments. Integration, heavy, Python and Playwright suites are separate.`);
+      console.log(`Unit lane: Bun ${Bun.version}; Node ${node.stdout.trim()}; ${steps.length} steps. Ambient FLAIR_/HARPER_/HDB_/FABRIC_ settings are removed from child environments; each step runs under a sandbox HOME. A guard fails the lane if a real client config changed. Integration, heavy, Python and Playwright suites are separate.`);
       process.exitCode = runUnitSteps(steps);
     }
   } catch (error) {

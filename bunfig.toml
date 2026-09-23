@@ -1,0 +1,4 @@
+[test]
+# Sandbox every `bun test` process in a throwaway HOME before any test module
+# loads (flair#1853). See test/helpers/sandbox-home.ts.
+preload = ["./test/helpers/sandbox-home.ts"]

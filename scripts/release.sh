@@ -500,13 +500,20 @@ if ! (cd "$ROOT" && bun run test:unit); then
   fi
   exit 1
 fi
-(cd "$ROOT" && bun test $(find test/integration -name '*.test.ts' | sort)) || { echo "❌ Tests failed (integration)"; exit 1; }
+# Integration suites run with the same throwaway HOME the unit lane gives every
+# step (flair#1853). The root bunfig preload already covers `bun test` run from
+# $ROOT; the explicit env keeps the isolation independent of the caller's cwd.
+# Scoped to these commands only — later release steps need the real HOME for git
+# and npm auth.
+INTEGRATION_HOME="$(mktemp -d)"
+(cd "$ROOT" && HOME="$INTEGRATION_HOME" USERPROFILE="$INTEGRATION_HOME" PI_CODING_AGENT_DIR="$INTEGRATION_HOME" bun test $(find test/integration -name '*.test.ts' | sort)) || { rm -rf "$INTEGRATION_HOME"; echo "❌ Tests failed (integration)"; exit 1; }
 # test/integration-isolated/: structurally excluded from the `find test/integration`
 # glob above; each file runs in its own process to prevent env cross-contamination
 # (flair#691, flair#1061).
 for f in "$ROOT"/test/integration-isolated/*.test.ts; do
-  (cd "$ROOT" && bun test "$f") || { echo "❌ Tests failed ($f)"; exit 1; }
+  (cd "$ROOT" && HOME="$INTEGRATION_HOME" USERPROFILE="$INTEGRATION_HOME" PI_CODING_AGENT_DIR="$INTEGRATION_HOME" bun test "$f") || { rm -rf "$INTEGRATION_HOME"; echo "❌ Tests failed ($f)"; exit 1; }
 done
+rm -rf "$INTEGRATION_HOME"
 echo "  ✓ Tests passed"
 
 # 6. Commit version bump (explicit paths — no -A)

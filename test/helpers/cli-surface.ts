@@ -83,6 +83,31 @@ function formatDefault(value: unknown): string {
   }
 }
 
+/**
+ * Replace the running user's home in every option/argument DEFAULT VALUE.
+ *
+ * This runs BEFORE commander renders help, because commander WRAPS help to
+ * `helpWidth` while it renders: a default like
+ * `"/home/<user>/.flair/keys"` is wrapped using the real home's length, and
+ * post-hoc stabilization (home → `~`) cannot undo a wrap point it never saw.
+ * Normalizing first makes the wrap land identically under any $HOME
+ * (flair#1853) — the same reason `stabilizeCliSurfaceText` exists for the rest
+ * of the dump.
+ */
+export function normalizeHomeInDefaults(root: Command, home: string): void {
+  if (!home) return;
+  const normalize = (value: unknown): unknown =>
+    typeof value === "string" ? value.split(home).join("~") : value;
+  for (const { cmd } of walkCliCommands(root)) {
+    for (const opt of cmd.options) {
+      if (opt.defaultValue !== undefined) opt.defaultValue = normalize(opt.defaultValue) as string;
+    }
+    for (const arg of cmd.registeredArguments) {
+      if (arg.defaultValue !== undefined) arg.defaultValue = normalize(arg.defaultValue) as string;
+    }
+  }
+}
+
 function formatOption(opt: Option): string[] {
   const lines = [`    ${opt.flags}`];
   if (opt.description) lines.push(`      description: ${opt.description}`);
@@ -179,6 +204,11 @@ export function captureCommandHelp(
 }
 
 export function renderCliSurfaceSnapshot(root: Command): string {
+  const home = homedir();
+  // Normalize the home out of option/argument defaults BEFORE commander wraps
+  // the help text; stabilizing only afterwards would leave a wrap point that
+  // depended on the real $HOME length (flair#1853).
+  normalizeHomeInDefaults(root, home);
   const nodes = walkCliCommands(root);
   const counts = countCliSurface(root);
   const version = root.version();
@@ -212,6 +242,6 @@ export function renderCliSurfaceSnapshot(root: Command): string {
     help,
   ].join("\n");
 
-  const stabilized = stabilizeCliSurfaceText(body, { version });
+  const stabilized = stabilizeCliSurfaceText(body, { home, version });
   return stabilized.endsWith("\n") ? stabilized : `${stabilized}\n`;
 }

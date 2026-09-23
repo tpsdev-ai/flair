@@ -40,16 +40,24 @@ const ENV: WireEnv = { FLAIR_AGENT_ID: "pinbot", FLAIR_URL: "http://127.0.0.1:19
 
 let isoHome: string;
 let prevHome: string | undefined;
+let prevPiDir: string | undefined;
 
 beforeEach(() => {
   isoHome = mkdtempSync(join(tmpdir(), "flair-pin-guard-"));
   prevHome = process.env.HOME;
+  prevPiDir = process.env.PI_CODING_AGENT_DIR;
   process.env.HOME = isoHome;
+  // Point pi's config dir at the isolated home too. The test harness sets
+  // PI_CODING_AGENT_DIR to its shared sandbox (flair#1853); leaving it there
+  // would write settings.json into a directory sibling cases read.
+  process.env.PI_CODING_AGENT_DIR = isoHome;
 });
 
 afterEach(() => {
   if (prevHome !== undefined) process.env.HOME = prevHome;
   else delete process.env.HOME;
+  if (prevPiDir !== undefined) process.env.PI_CODING_AGENT_DIR = prevPiDir;
+  else delete process.env.PI_CODING_AGENT_DIR;
   rmSync(isoHome, { recursive: true, force: true });
 });
 
