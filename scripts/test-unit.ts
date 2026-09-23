@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 // Sandbox HOME for every child step, and the guard that fails the lane if a
 // real client config changed anyway (flair#1853). Importing sandbox-home also
 // installs its sandbox in THIS process — harmless: the guard resolves the real
-// home from os.userInfo().homedir, never from HOME.
+// home from the passwd entry for the current uid, never from HOME.
 import { createSandboxHome } from "../test/helpers/sandbox-home.ts";
 import { changedConfigs, realHomeDir, snapshotClientConfigs } from "./home-isolation-guard.ts";
 
@@ -87,11 +87,11 @@ export function unitPlan(root: string): UnitStep[] {
 
 export function runUnitSteps(steps: UnitStep[], executable = process.execPath, guardHome = realHomeDir()): number {
   // Fingerprint the REAL client configs before the lane and compare after it.
-  // `guardHome` defaults to the real home (realHomeDir() reads the passwd
-  // database, not HOME, so neither the sandbox this module installs nor the
-  // per-step HOME below can hide a real write); the parameter lets a test point
-  // the guard at a fixture home and prove the boundary without ever touching the
-  // real one (flair#1853 round 3).
+  // `guardHome` defaults to the real home (realHomeDir() resolves the passwd
+  // entry for the current uid, not HOME, so neither the sandbox this module
+  // installs nor the per-step HOME below can hide a real write); the parameter
+  // lets a test point the guard at a fixture home and prove the boundary without
+  // ever touching the real one (flair#1853 round 3).
   const before = snapshotClientConfigs(guardHome);
   const guardPassed = (): boolean => {
     const changed = changedConfigs(before, snapshotClientConfigs(guardHome));

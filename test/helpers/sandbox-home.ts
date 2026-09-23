@@ -18,7 +18,7 @@
  * point of a preload). `scripts/test-unit.ts` reuses `createSandboxHome` for the
  * HOME it hands to each child step, and the runner is sandboxed by the same
  * import — which is harmless, since the lane guard resolves the REAL home from
- * `os.userInfo().homedir`, never from `HOME`.
+ * the passwd entry for the current uid, never from `HOME`.
  */
 
 import { mkdtempSync, rmSync } from "node:fs";

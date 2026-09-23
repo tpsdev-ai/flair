@@ -9,6 +9,7 @@ import { describe, expect, it, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   CLAUDE_JSON_SUBTREE,
   REAL_CLIENT_CONFIGS,
@@ -16,6 +17,8 @@ import {
   runGuarded,
   snapshotClientConfigs,
 } from "../../scripts/home-isolation-guard.ts";
+
+const GUARD = join(import.meta.dir, "..", "..", "scripts", "home-isolation-guard.ts");
 
 const fixtures: string[] = [];
 afterAll(() => {
@@ -116,5 +119,34 @@ describe("real-config guard (flair#1853)", () => {
     plant(home, target, "before\n");
     const changed = runGuarded(home, () => plant(home, target, "after\n"));
     expect(changed).toContain(target);
+  });
+});
+
+describe("realHomeDir ignores a swapped HOME (flair#1854 follow-up)", () => {
+  it("resolves the real home even when the process STARTS with HOME pointed elsewhere", () => {
+    // The lane runs under Bun, and Bun's os.userInfo().homedir follows the HOME
+    // the process STARTED with — so a lane launched with a sandbox HOME would
+    // fingerprint the sandbox and miss a real write. Start a child process with a
+    // swapped HOME and assert the guard still names the passwd home.
+    const sandbox = fakeHome();
+    const probe = join(sandbox, "probe-real-home.ts");
+    writeFileSync(probe, `import { realHomeDir } from ${JSON.stringify(GUARD)};\nprocess.stdout.write(realHomeDir());\n`);
+    const swapped = { ...process.env, HOME: sandbox, USERPROFILE: sandbox, PI_CODING_AGENT_DIR: sandbox };
+
+    const viaBun = spawnSync("bun", [probe], { encoding: "utf8", env: swapped });
+    expect(viaBun.status).toBe(0);
+    const got = viaBun.stdout.trim();
+
+    // The passwd answer: node ignores HOME entirely.
+    const refEnv: NodeJS.ProcessEnv = { ...swapped };
+    delete refEnv.HOME;
+    delete refEnv.USERPROFILE;
+    const realHome = execFileSync("node", ["-p", "require('node:os').userInfo().homedir"], {
+      encoding: "utf8",
+      env: refEnv,
+    }).trim();
+
+    expect(got).toBe(realHome);
+    expect(got).not.toBe(sandbox);
   });
 });
