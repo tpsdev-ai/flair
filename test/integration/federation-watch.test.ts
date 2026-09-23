@@ -2,6 +2,36 @@ import { describe, expect, test, mock, beforeEach, afterEach } from "bun:test";
 import { runFederationSyncOnce, runFederationWatch } from "../../src/cli.js";
 
 /**
+ * Await `p`, but fail with a CLEAR message if it has not settled within `ms`.
+ *
+ * The watch loop is a daemon: it stops only when it observes a stop signal. If
+ * the signal is swallowed (or never observed) the old bare `await watchPromise`
+ * waited forever and the lane hung until the job timeout — a missing keystore
+ * key turning "no key to sign the liveness ping" into a hung Integration Tests
+ * job (flair#1853 round 2). A bounded wait turns that into a named failure.
+ */
+async function bounded<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `${what} did not stop within ${ms}ms — the watch loop is unbounded and never observed the stop signal. ` +
+              `HOME=${process.env.HOME} (a missing keystore key makes the liveness ping fail, but must not hang the test).`,
+          ),
+        ),
+      ms,
+    );
+  });
+  try {
+    return await Promise.race([p, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Fast-fetch mock that makes runFederationSyncOnce execute quickly with
  * no records to push.  This lets us test runFederationWatch without
  * relying on mock.module (which is global and leaks across test files).
@@ -68,15 +98,18 @@ describe("federation watch", () => {
     const watchPromise = runFederationWatch({ interval: "5" });
     await new Promise((r) => setTimeout(r, 100));
     process.kill(process.pid, "SIGTERM");
-    await watchPromise;
+    await bounded(watchPromise, 3000, "runFederationWatch (interval 5)");
   });
 
   // Note: This sends SIGTERM to the test-runner process itself. It works
-  // today because Bun handles the signal gracefully, but it couples the test
-  // to runner internals. Mocking signal delivery cleanly would require
-  // either injecting a signal mock into runFederationWatch or using a
-  // child-process wrapper — both are disproportionate rework for a test that
-  // already passes, so we leave it as-is.
+  // because runFederationWatch owns a SIGTERM listener for the duration of the
+  // watch, and the test-process preload deliberately installs NO signal
+  // handlers (an unconditional process.exit() there killed the whole run with
+  // exit 143 — flair#1853 round 2). The bounded() wait above is the safety net:
+  // if the signal is ever swallowed again, the test fails with a named message
+  // instead of hanging the lane until the job timeout. Mocking signal delivery
+  // cleanly would require either injecting a signal mock into runFederationWatch
+  // or a child-process wrapper — both disproportionate for a test that passes.
   test("watch exits on SIGTERM", async () => {
     setupFastFetch();
 
@@ -85,7 +118,7 @@ describe("federation watch", () => {
     await new Promise((r) => setTimeout(r, 150));
     process.kill(process.pid, "SIGTERM");
 
-    await watchPromise;
+    await bounded(watchPromise, 3000, "runFederationWatch (interval 10)");
     const elapsed = Date.now() - start;
 
     expect(elapsed).toBeLessThan(2000);
@@ -140,7 +173,7 @@ describe("federation watch", () => {
     const watchPromise = runFederationWatch({ interval: "-5" });
     await new Promise((r) => setTimeout(r, 500));
     process.kill(process.pid, "SIGTERM");
-    await watchPromise;
+    await bounded(watchPromise, 3000, "runFederationWatch (interval -5)");
     const elapsed = Date.now() - start;
 
     // With interval clamped to 5s, we should only see 1 sync run in 500ms.

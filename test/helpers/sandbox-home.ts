@@ -65,13 +65,24 @@ export function installSandboxHome(): SandboxHome {
   process.env.HOME = sandbox.dir;
   process.env.USERPROFILE = sandbox.dir;
   process.env.PI_CODING_AGENT_DIR = sandbox.dir;
+  // ── Exit hook only. NO SIGNAL HANDLERS. ───────────────────────────────────
+  //
+  // A signal handler that calls process.exit() looked obviously right — clean up
+  // the temp dir even on an interrupt. It is wrong here. This preload is loaded
+  // into the IN-PROCESS `bun test` runner, and
+  // test/integration/federation-watch.test.ts SIGTERMs its own process as its
+  // fixture. An unconditional exit intercepts that SIGTERM and kills the WHOLE
+  // run mid-file with exit 143 — measured in CI (flair#1853 round 2): the
+  // Integration Tests job died in federation-watch right after the first sync,
+  // the remaining files never ran. This is the same death harper-lifecycle.ts
+  // already documents for the signal handler it deliberately does NOT install:
+  // "this harness cannot own a process-wide signal handler: its own tests use
+  // signals as data."
+  //
+  // The exit hook covers a clean exit (a suite that finishes with the sandbox
+  // still present). An interrupted run leaves its temp home behind — the accepted
+  // cost, and harmless: the dir is under the OS temp dir, never a real home.
   process.on("exit", sandbox.cleanup);
-  for (const signal of ["SIGINT", "SIGTERM"] as const) {
-    process.on(signal, () => {
-      sandbox.cleanup();
-      process.exit(signal === "SIGINT" ? 130 : 143);
-    });
-  }
   return sandbox;
 }
 
