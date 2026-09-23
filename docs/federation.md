@@ -111,9 +111,11 @@ flair federation sync --admin-pass <password>
 
 Each sync pushes rows changed since the cursor from four tables: `Memory`, `Soul`, `Agent`, and `Relationship`. `Presence` is not in that set.
 
-**Memory rows with `visibility` exactly `"private"` are left behind.** Durability is not the filter. `null`, a missing `visibility` (rows written before the field existed), `"shared"`, and any other value are included. Soul, Agent, and Relationship have no `visibility` field, so this rule does not apply to them.
+**Memory rows with `visibility` exactly `"private"` are left behind.** Durability is not the filter. `"shared"` and any other present value are included. Soul, Agent, and Relationship have no `visibility` field, so this rule does not apply to them.
 
-Private means owner-only on this instance — the same predicate as cross-agent read. A peer that received the row would hold a copy other agents on that instance could read. Holding the row back is the point of `private`.
+A Memory row with **no `visibility` field still syncs, on purpose.** Those rows were written before the field existed. The push uses the same predicate as cross-agent read (`resolveReadScope` in `resources/memory-read-scope.ts`): only the literal string `"private"` is private. Missing, `null`, and anything else stay non-private so pre-field rows keep replicating exactly as they did. That is the migration rule, not a hole in the filter.
+
+Private means owner-only on this instance. A peer that received the row would hold a copy other agents on that instance could read. Holding the row back is the point of `private`.
 
 Durability still explains a count gap that is entirely `standard` rows. When a write omits `visibility`, the server defaults it from durability: `permanent` and `persistent` become `shared`; `standard`, `ephemeral`, and an omitted durability become `private`. A standard memory therefore stays on the spoke unless the writer set `visibility` to `shared`. Ephemeral memories are private-only at write time, so they never federate. That is the default and the ephemeral constraint, not a second filter and not loss of memories that were stored as shared.
 

@@ -304,17 +304,17 @@ client-writable even if a client sends them. Full comments live in
 
 A verified reader still sees `null` for a version the row never stored. Heartbeats stamp the running server's versions; a row written before that stamp, and not heartbeated since, has no value to return. `harperVersion` is also null when this process could not resolve Harper's package version. That null means unknown, not redacted.
 
-`presenceStatus` is liveness of `lastHeartbeatAt`. Defaults are 90 seconds idle and 10 minutes offline (`PRESENCE_IDLE_THRESHOLD_MS`, `PRESENCE_OFFLINE_THRESHOLD_MS`). An unset, empty, zero, or non-numeric value falls back to that default:
+`presenceStatus` is liveness of `lastHeartbeatAt`. The idle threshold defaults to 90 seconds and the offline threshold defaults to 10 minutes. A tuned instance overrides those numbers with `PRESENCE_IDLE_THRESHOLD_MS` and `PRESENCE_OFFLINE_THRESHOLD_MS` (milliseconds). Read the live values from those variables; the 90s and 10m figures below are only what an unset process uses. An unset, empty, zero, or non-numeric value falls back to that default:
 
 | Age of `lastHeartbeatAt` | `presenceStatus` |
 |---|---|
 | Missing, or not a finite number | `offline` |
 | Negative (stamp ahead of the server clock) | `active` |
-| Younger than the idle threshold (default 90s) | `active` |
-| Younger than the offline threshold (default 10 min) | `idle` |
+| Younger than the idle threshold (`PRESENCE_IDLE_THRESHOLD_MS`, default 90s) | `active` |
+| Younger than the offline threshold (`PRESENCE_OFFLINE_THRESHOLD_MS`, default 10 min) | `idle` |
 | Older than the offline threshold | `offline` |
 
-`activityFresh` uses a different stamp: `activityUpdatedAt` when that is a finite number, otherwise `lastHeartbeatAt`. It is true while that stamp is younger than the **offline** threshold (default 10 minutes), including when the stamp is in the future. While it is true, `activity` is the stored label (`coding`, `reviewing`, `planning`, `debugging`, or `idle`). When it is false, `activity` is reported as `idle`, `lastActivity` keeps the stored label, and `currentTask` is null even for a verified reader. `activityAgeMs` is how old that stamp is.
+`activityFresh` uses a different stamp: `activityUpdatedAt` when that is a finite number, otherwise `lastHeartbeatAt`. It is true while that stamp is younger than the **offline** threshold (`PRESENCE_OFFLINE_THRESHOLD_MS`, default 10 minutes), including when the stamp is in the future. While it is true, `activity` is the stored label (`coding`, `reviewing`, `planning`, `debugging`, or `idle`). When it is false, `activity` is reported as `idle`, `lastActivity` keeps the stored label, and `currentTask` is null even for a verified reader. `activityAgeMs` is how old that stamp is.
 
 A peer can therefore show `presenceStatus: "offline"`, `activity: "idle"`, `lastActivity: "coding"`, and `activityFresh: false` at once: the heartbeat is past the offline threshold, and the live activity label has lapsed. Gate "is this agent doing this now" on `activityFresh` (and `activityAgeMs`). Read `presenceStatus` for heartbeat liveness. Read `lastActivity` as what they were doing, not what they are doing.
 
