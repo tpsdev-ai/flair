@@ -530,24 +530,24 @@ function findHookMatches(config: any): Array<{ groupIndex: number; hookIndex: nu
  * and `<ver>` are the only free variables; everything else — quoting, the
  * wrapper, `2>/dev/null`, ordering — is the shape Flair itself wrote.
  *
- * The unanchored SESSION_START_HOOK_INVOCATION_RE stays only for status display.
- */
-/**
- * The three EXACT installer forms `buildSessionStartHookCommand` emits
- * (flair#1834 PR-H), anchored so the FULL command must match. `<id>`, `<url>`
- * and `<ver>` are the only free variables; everything else — quoting, the
- * wrapper, `2>/dev/null`, ordering — is the shape Flair itself wrote.
- *
  * Literal regexes (no composed pattern): each form is a constant. The
  * unanchored SESSION_START_HOOK_INVOCATION_RE stays only for status display.
  * Capture groups: 1 = agent id, 2 = optional URL, 3 = the pinned package span.
+ * The `d` flag exposes each group's OFFSET so the re-pin can substitute the
+ * CAPTURED `<ver>` span — never the first substring occurrence (round 2).
+ *
+ * `<ver>` is a SEMVER, not "anything up to the next delimiter": digits and
+ * dots with an optional `-`/`+` pre-release/build suffix of letters, digits,
+ * dots and hyphens. The looser `[^\s"')]+` admitted `;` and `$`, so
+ * `…@0.55.0;<cmd>` and `…@0.55.0$X` passed the FORM and were held only by the
+ * never-lower guard (round 2).
  */
 const HOOK_BARE_FORM_RE =
-  /^FLAIR_AGENT_ID=([^\s'"$();|&<>]+)(?: FLAIR_URL=([^\s'"$();|&<>]+))? npx -y -p (@tpsdev-ai\/flair-mcp@[^\s"')]+) flair-session-start$/;
+  /^FLAIR_AGENT_ID=([^\s'"$();|&<>]+)(?: FLAIR_URL=([^\s'"$();|&<>]+))? npx -y -p (@tpsdev-ai\/flair-mcp@\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?) flair-session-start$/d;
 const HOOK_CLAUDE_FORM_RE =
-  /^sh -c 'out=\$\(FLAIR_AGENT_ID=([^\s'"$();|&<>]+)(?: FLAIR_URL=([^\s'"$();|&<>]+))? npx -y -p (@tpsdev-ai\/flair-mcp@[^\s"')]+) flair-session-start 2>\/dev\/null\) && printf %s "\$out" \|\| true'$/;
+  /^sh -c 'out=\$\(FLAIR_AGENT_ID=([^\s'"$();|&<>]+)(?: FLAIR_URL=([^\s'"$();|&<>]+))? npx -y -p (@tpsdev-ai\/flair-mcp@\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?) flair-session-start 2>\/dev\/null\) && printf %s "\$out" \|\| true'$/d;
 const HOOK_CODEX_FORM_RE =
-  /^sh -c 'out=\$\(FLAIR_HOOK_HARNESS=codex FLAIR_AGENT_ID=([^\s'"$();|&<>]+)(?: FLAIR_URL=([^\s'"$();|&<>]+))? npx -y -p (@tpsdev-ai\/flair-mcp@[^\s"')]+) flair-session-start\) && printf %s "\$out" \|\| true'$/;
+  /^sh -c 'out=\$\(FLAIR_HOOK_HARNESS=codex FLAIR_AGENT_ID=([^\s'"$();|&<>]+)(?: FLAIR_URL=([^\s'"$();|&<>]+))? npx -y -p (@tpsdev-ai\/flair-mcp@\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?) flair-session-start\) && printf %s "\$out" \|\| true'$/d;
 
 export interface InstallerHookForm {
   /** The form's harness (the bare form is harness-agnostic). */
@@ -556,6 +556,15 @@ export interface InstallerHookForm {
   flairUrl?: string;
   /** The exact `@tpsdev-ai/flair-mcp@<ver>` span (the only part re-pinned). */
   pkgSpec: string;
+  /** [start, end) offset of `pkgSpec` within the FULL command (the re-pin span). */
+  pkgSpecStart: number;
+  pkgSpecEnd: number;
+}
+
+function formFromMatch(harness: "claude-code" | "codex", m: RegExpMatchArray): InstallerHookForm {
+  const span = m.indices?.[3];
+  if (!span) throw new Error("installer hook form matched without group indices");
+  return { harness, agentId: m[1]!, flairUrl: m[2], pkgSpec: m[3]!, pkgSpecStart: span[0], pkgSpecEnd: span[1] };
 }
 
 /**
@@ -567,11 +576,11 @@ export interface InstallerHookForm {
 export function parseInstallerHookForm(command: string): InstallerHookForm | null {
   if (typeof command !== "string") return null;
   let m = command.match(HOOK_CLAUDE_FORM_RE);
-  if (m) return { harness: "claude-code", agentId: m[1]!, flairUrl: m[2], pkgSpec: m[3]! };
+  if (m) return formFromMatch("claude-code", m);
   m = command.match(HOOK_CODEX_FORM_RE);
-  if (m) return { harness: "codex", agentId: m[1]!, flairUrl: m[2], pkgSpec: m[3]! };
+  if (m) return formFromMatch("codex", m);
   m = command.match(HOOK_BARE_FORM_RE);
-  if (m) return { harness: "claude-code", agentId: m[1]!, flairUrl: m[2], pkgSpec: m[3]! };
+  if (m) return formFromMatch("claude-code", m);
   return null;
 }
 
@@ -652,9 +661,12 @@ export function repinSessionStartHook(homeDir: string, harness: Harness): HookRe
         outcome = { action: "hold", message: `SessionStart hook in ${path} is not one of the installer forms Flair writes — left untouched` };
         return { hold: outcome.message };
       }
-      // Rebuild by substituting ONLY the pinned version — identity, URL and the
-      // wire format are preserved by construction.
-      const next = current.replace(form.pkgSpec, mcpServerSpec());
+      // Rebuild by substituting ONLY the CAPTURED `<ver>` span — identity, URL
+      // and the wire format are preserved by construction. Substituting the
+      // captured OFFSET (not the first substring match) is what keeps a
+      // hand-edited id or URL that CONTAINS the package-spec string from being
+      // rewritten INSTEAD of the pin (flair#1834 PR-H round 2).
+      const next = current.slice(0, form.pkgSpecStart) + mcpServerSpec() + current.slice(form.pkgSpecEnd);
       if (next === current) {
         outcome = { action: "noop", message: `SessionStart hook in ${path} already pinned to ${mcpServerSpec()}` };
         return { noop: outcome.message };
