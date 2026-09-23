@@ -136,43 +136,33 @@ Then set `FLAIR_URL=http://localhost:19926` on the client.
 
 ### Direct network access
 
-Flair reads the HTTP bind host from three places — the first one set wins:
+On `flair start`, `flair restart`, and `flair upgrade` the HTTP bind host is resolved in this order. The first one set wins. None of those commands take an `--http-bind` flag:
 
-1. `flair init --http-bind <host>`
-2. `FLAIR_HTTP_BIND` in the Flair process environment
-3. a **top-level** `httpBind:` key in `~/.flair/config.yaml`
+1. `FLAIR_HTTP_BIND` in the Flair process environment
+2. a **top-level** `httpBind:` key in `~/.flair/config.yaml`
+3. `127.0.0.1`
 
-`127.0.0.1` is the default when none is set. **Only hosts that include IPv4
-loopback are accepted** — `127.0.0.1` itself, or a wildcard (`0.0.0.0` / `::`).
-Every credentialed self-call Flair makes hardcodes `127.0.0.1`, so a bind that
-excludes it is refused: it would leave those calls pointing at a dead port
-while every bind check still passed.
+`flair init --http-bind <host>` is how that `httpBind` key gets written. During `init` the flag wins over `FLAIR_HTTP_BIND`, and the host that won is persisted. A later start still follows the list above, so an env var set on the service overrides the file.
 
-To widen deliberately, pass the flag — or record it in config so the choice
-survives `flair restart` / `flair upgrade`, neither of which takes the flag:
+**Only hosts that include IPv4 loopback are accepted** — `127.0.0.1` itself, or a wildcard (`0.0.0.0` / `::`). Every credentialed self-call Flair makes hardcodes `127.0.0.1`. A bind that excludes that address is refused: those calls would point at a dead port while every bind check still passed. A specific LAN address is not accepted. Loopback is the default so a single-host install does not expose the HTTP surface, including unauthenticated `/Health`, on every interface.
+
+To widen deliberately, record a wildcard so the choice survives restart and upgrade:
 
 ```bash
 flair init --http-bind 0.0.0.0
 ```
 
 ```yaml
-# ~/.flair/config.yaml — top-level, NOT nested under `http:`
+# ~/.flair/config.yaml — top-level key. There is no nested `http:` block.
 httpBind: 0.0.0.0
 ```
 
-> **`http.host` is not read.** Earlier versions of this page told you to widen
-> the bind with a nested `http.host:` key. **Flair never read that key**, and
-> from 0.55.0 it is ignored outright: an install that was only ever wide
-> because the old default bound every interface will narrow to `127.0.0.1` on
-> the next `flair restart` or `flair upgrade`. The block below is kept so this
-> section stays findable from a snippet you may already have — **do not copy
-> it**; use `httpBind:` (or `--http-bind` / `FLAIR_HTTP_BIND`) instead.
+A nested `http.host` (or `http.port`) is not read. An install that was only wide because an older default bound every interface narrows to `127.0.0.1` on the next `flair restart` or `flair upgrade` unless `FLAIR_HTTP_BIND` or `httpBind` names a wildcard.
 
-```yaml
-# OLD — ignored by Flair. Replace with `httpBind:` as above.
-http:
-  port: 19926
-  host: 0.0.0.0  # listen on all interfaces
+**Confirm the bind.** `flair status` prints the URL the CLI dials. That URL stays on loopback even when the listener is widened, so it is not the bind. After a Flair-managed start, Harper records the listener it was given as `http.port` in the instance data directory (default `~/.flair/data/harper-config.yaml`, legacy name `harperdb-config.yaml`). The value is host-qualified, for example `127.0.0.1:19926`, `0.0.0.0:19926`, or `[::]:19926`. The live socket shows the same address:
+
+```bash
+lsof -nP -iTCP:19926 -sTCP:LISTEN
 ```
 
 **Security:** Flair uses Ed25519 authentication. Agents must present a valid signature to read or write. However, the `/Health` endpoint is unauthenticated. For internet-facing deployments, put Flair behind a reverse proxy with TLS.
@@ -185,26 +175,25 @@ All configuration lives in `~/.flair/`:
 
 ```
 ~/.flair/
-├── config.yaml          # port, bind host, embedding model
-├── data/                # Harper database
+├── config.yaml          # port, opsPort, opsBind, httpBind
+├── data/                # Harper database (harper-config.yaml lives here)
 ├── keys/                # Ed25519 keypairs per agent
 └── backups/             # flair backup output
 ```
 
 ### Key config options (`~/.flair/config.yaml`)
 
+Flair reads four top-level keys from this file: `port`, `opsPort`, `opsBind`, and `httpBind`. `flair init` rewrites the file with those keys and drops anything else, including a `clustering:` or `logging:` block and any embedding-model key. Embedding threads, GPU layers, and the model directory are environment variables in the table below, not keys in this file.
+
+`clustering` and `logging` are not read from `~/.flair/config.yaml` or from `<dataDir>/harper-config.yaml` by anything in this repository, so they are not given a home here. Harper's generative `models:` block, when REM needs one, does belong in `<dataDir>/harper-config.yaml`. See [rem.md](rem.md).
+
 ```yaml
-# Top-level keys — Flair's config has no nested `http:` block, and no
-# `http.host`.
-port: 19926            # API port (ops port = this - 1)
+# ~/.flair/config.yaml — only these keys are read. A later `flair init`
+# rewrites the file and drops every other key.
+port: 19926
+opsPort: 19925         # Harper operations API port
+opsBind: 127.0.0.1     # operations API bind host
 httpBind: 127.0.0.1    # HTTP bind host (see "Direct network access" above)
-
-clustering:
-  nodeName: flair
-
-logging:
-  level: warn
-  stdStreams: true
 ```
 
 ### Environment variables
@@ -217,7 +206,7 @@ Set these in the Flair process environment (`~/Library/LaunchAgents/ai.tpsdev.fl
 | `HDB_ADMIN_PASSWORD` | Bootstrap password for the embedded Harper. After first start, the persisted user record is the source of truth; rotate via the Harper ops API, not by changing this env var. | Set at install time. See [secrets-and-keys.md](secrets-and-keys.md) for rotation. |
 | `FLAIR_KEY_PASSPHRASE` | Passphrase used to derive the AES-256-GCM key that wraps federation private-key seeds at rest. Auto-generated to `~/.flair/keys/.passphrase` if unset. | Set explicitly for production federation deployments so the passphrase isn't auto-generated and lost on disk wipe. |
 | `HTTP_PORT` | Override the Harper HTTP port. Useful for sandboxes; production deployments should configure the port in `config.yaml` instead. | Rare. |
-| `FLAIR_HTTP_BIND` | Bind address for the Harper **HTTP API**. Resolution order: `flair init --http-bind` > this variable > the top-level `httpBind` key `flair init` persists in `~/.flair/config.yaml` > `127.0.0.1`. Only `127.0.0.1` or a wildcard (`0.0.0.0` / `::`) is accepted — the listener must include IPv4 loopback for Flair's own `127.0.0.1` self-calls. Every Flair-managed Harper start re-asserts the resolved value, so the persisted key is what survives `flair restart` / `flair upgrade`. | Only for deployments that need the HTTP API reachable off-host — set it to `0.0.0.0`, or record it once with `flair init --http-bind 0.0.0.0`. Single-host installs want the loopback default. |
+| `FLAIR_HTTP_BIND` | Bind address for the Harper **HTTP API**. On start, restart, and upgrade the order is this variable, then the top-level `httpBind` key in `~/.flair/config.yaml`, then `127.0.0.1`. `flair init --http-bind` writes that key (the flag wins over this variable during init). Only `127.0.0.1` or a wildcard (`0.0.0.0` / `::`) is accepted — the listener must include IPv4 loopback for Flair's own `127.0.0.1` self-calls. See [Direct network access](#direct-network-access). | Only for deployments that need the HTTP API reachable off-host — set it to `0.0.0.0`, or record it once with `flair init --http-bind 0.0.0.0`. Single-host installs want the loopback default. |
 | `FLAIR_OPS_BIND` | Bind address for the Harper **ops API**. Resolution order: `flair init --ops-bind` > this variable > the `opsBind` key `flair init` persists in `~/.flair/config.yaml` > `127.0.0.1`. Every Flair-managed Harper start re-asserts the resolved value, so the persisted key is what makes a choice survive `flair restart` / `flair upgrade`. | Only for deployments that genuinely need remote ops admin (multi-host / Fabric) — set it to `0.0.0.0`, or record it once with `flair init --ops-bind 0.0.0.0`. Single-host installs want the loopback default. |
 
 ### Performance-related environment variables

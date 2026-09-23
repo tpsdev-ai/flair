@@ -79,27 +79,21 @@ All configuration lives in `~/.flair/`:
 
 ```
 ~/.flair/
-├── config.yaml          # port, bind host, embedding model
-├── data/                # Harper database (RocksDB)
+├── config.yaml          # port, opsPort, opsBind, httpBind
+├── data/                # Harper database (RocksDB); harper-config.yaml lives here
 ├── keys/                # Ed25519 keypairs per agent (mode 0600)
 └── backups/             # flair backup output
 ```
 
 ### Key config options (`~/.flair/config.yaml`)
 
-Flair's own config file uses **top-level** keys — there is no nested `http:`
-block, and no `http.host` (see [`deployment.md` — Direct network access](deployment.md#direct-network-access) for widening):
+Flair reads four top-level keys from this file: `port`, `opsPort`, `opsBind`, and `httpBind`. There is no nested `http:` block and no `http.host`. `flair init` rewrites the file and drops every other key, so a `clustering:` or `logging:` block placed here does not survive and is not read. Embedding settings are the environment variables below, not keys in this file. Widening the HTTP listener is covered in [`deployment.md` — Direct network access](deployment.md#direct-network-access).
 
 ```yaml
-port: 19926            # API port (ops port = this - 1)
+port: 19926
+opsPort: 19925         # Harper operations API port
+opsBind: 127.0.0.1     # operations API bind host
 httpBind: 127.0.0.1    # HTTP bind host; 0.0.0.0 widens (must include IPv4 loopback)
-
-clustering:
-  nodeName: flair
-
-logging:
-  level: warn
-  stdStreams: true
 ```
 
 ### Environment variables
@@ -110,7 +104,7 @@ logging:
 | `HDB_ADMIN_PASSWORD` | Bootstrap password for the embedded Harper. After first start, the persisted user record is the source of truth. | Set at install time. See [secrets-and-keys.md](secrets-and-keys.md) for rotation. |
 | `FLAIR_KEY_PASSPHRASE` | Passphrase for AES-256-GCM encryption of federation private-key seeds. | Set explicitly for production federation deployments. |
 | `FLAIR_URL` | Override the Flair base URL for CLI commands (points to a remote instance). | When connecting from a different machine. |
-| `FLAIR_HTTP_BIND` | HTTP API bind host. Resolution order: `flair init --http-bind` > this variable > top-level `httpBind` in `~/.flair/config.yaml` > `127.0.0.1`. Only `127.0.0.1` or a wildcard (`0.0.0.0` / `::`) is accepted. | When the HTTP API must be reachable off-host; prefer recording it once with `flair init --http-bind 0.0.0.0`. See [deployment.md](deployment.md#direct-network-access). |
+| `FLAIR_HTTP_BIND` | HTTP API bind host. On start, restart, and upgrade: this variable, then top-level `httpBind` in `~/.flair/config.yaml`, then `127.0.0.1`. `flair init --http-bind` writes that key. Only `127.0.0.1` or a wildcard (`0.0.0.0` / `::`) is accepted. | When the HTTP API must be reachable off-host; prefer recording it once with `flair init --http-bind 0.0.0.0`. See [deployment.md](deployment.md#direct-network-access). |
 | `FLAIR_EMBED_THREADS` | CPU threads for in-process embedding. Default is `max(1, availableParallelism() − 1)` — host-aware, one core left for Harper. | Pin a positive integer on a dedicated ingest host, or when the default leaves cores idle / oversubscribed. See [deployment.md](deployment.md#performance-related-environment-variables). |
 | `FLAIR_EMBED_GPU_LAYERS` | GPU layers to offload. Unset derives Metal (`99`) on Apple Silicon with a usable Metal prebuilt, else CPU (`0`). Stated on `/Health`. | Pin CPU with `0` on a Metal Mac, or force a layer count. See [deployment.md](deployment.md#performance-related-environment-variables). |
 | `FLAIR_HYBRID_RETRIEVAL` | Hybrid BM25 + vector retrieval (default on). | Set `false` to revert to HNSW-only. |

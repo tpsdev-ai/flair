@@ -273,11 +273,23 @@ flair idp add \
 
 ### JIT Provisioning
 
-First-time IdP users are automatically created as `unverified` principals. An admin can promote them to `verified` or `admin` via:
+First-time IdP users are automatically created as `unverified` principals.
+
+Trust tier and admin are different fields. `flair principal promote` changes only `defaultTrustTier`. It takes the principal id and a tier:
 
 ```bash
-flair principal promote <principal-id>
+flair principal promote <principal-id> <tier>
 ```
+
+`<tier>` is one of `endorsed`, `corroborated`, or `unverified`. There is no `verified` tier and no `admin` tier. The command writes `defaultTrustTier` and does not write `role` or `admin`, so it cannot grant admin.
+
+Admin authority is `role: admin` on the Agent record. `admin: true` is the mirror the server keeps in step with that role; setting the mirror alone does not grant admin. The CLI that writes both is:
+
+```bash
+flair principal add <principal-id> --admin
+```
+
+`add` upserts the Agent row. If `~/.flair/keys/<principal-id>.key` already exists, that key is reused and is not regenerated. The upsert writes the record this command builds, including `role: admin` and `admin: true` when `--admin` is set. With `--admin` and no `--trust`, the trust tier written is `endorsed`.
 
 ### CLI Reference
 

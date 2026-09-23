@@ -255,13 +255,16 @@ Federation uses record-level last-write-wins (LWW) with ISO timestamp comparison
 
 ## Troubleshooting
 
-### config.yaml port drift
+### Listen port drift
 
-If the hub's configured port in `config.yaml` differs from the port the spoke is targeting, federation requests fail with a connection error. Verify the port matches between the spoke's pair URL and the hub's `config.yaml` (`federation.port` or the instance's listen port).
+There is no `federation.port` key. Federation uses the hub's HTTP listen port. The spoke's pair URL has to use that port.
+
+On the hub, the listen port Harper last bound is `http.port` in the instance data directory (default `~/.flair/data/harper-config.yaml`). A default install also records a top-level `port:` in `~/.flair/config.yaml`. That file's port keys are `port` and `opsPort` only.
 
 ```bash
-# On the hub, confirm the listening port
-grep -E 'port|federation' ~/.flair/config.yaml
+# On the hub. `http.port` is host-qualified, for example 127.0.0.1:19926.
+grep -A2 '^http:' ~/.flair/data/harper-config.yaml
+grep -E '^(port|opsPort):' ~/.flair/config.yaml
 ```
 
 ### Local FederationInstance fetch needs auth
