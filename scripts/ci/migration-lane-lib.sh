@@ -66,6 +66,34 @@ wait_for_http_down() {
   return 1
 }
 
+# ─── Bounded-retry wait for the process in a pid file to EXIT ─────────────
+# `flair stop` sends SIGTERM and returns immediately, and wait_for_http_down
+# proves only that the port stopped answering — the process can still be
+# flushing/compacting the store. Before tarring the data dir (flair#1611) we
+# wait on the pid recorded in hdb.pid, so the tar reads a QUIET directory. A
+# missing/empty/unreadable pid file is treated as "already exited". Bounded,
+# with a NAMED failure that refuses to hand a live directory to tar.
+wait_for_pid_exit() {
+  local pid_file="$1" timeout_s="${2:-30}" label="${3:-$pid_file}"
+  local deadline=$((SECONDS + timeout_s))
+  local attempt=0 pid=""
+  while (( SECONDS < deadline )); do
+    attempt=$((attempt + 1))
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    if [[ -z "$pid" ]]; then
+      echo "[wait_for_pid_exit] ${label}: no pid in ${pid_file} (already exited) after ${attempt} attempt(s)"
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "[wait_for_pid_exit] ${label}: pid ${pid} exited after ${attempt} attempt(s)"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "::error::[wait_for_pid_exit] ${label}: pid ${pid:-<none>} still alive after ${timeout_s}s (${pid_file}) — refusing to tar a live data dir"
+  return 1
+}
+
 # ─── Bounded-retry `flair status` check ────────────────────────────────────
 # THE #691 FIX SHAPE: `$1` is the flair invocation (e.g. "node dist/cli.js"),
 # `$2` the port, `$3` the timeout in seconds. Polls until `status` reports

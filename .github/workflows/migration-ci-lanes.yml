@@ -262,9 +262,20 @@ jobs:
           [[ "$SEEDED_COUNT" == "$ROW_COUNT" ]] || { echo "::error::seeded ${SEEDED_COUNT} rows, expected ${ROW_COUNT} — setup broken, not a downgrade regression"; exit 1; }
           echo "Confirmed ${SEEDED_COUNT} seeded rows readable on baseline before the swap."
 
+          # ── 3. Stop baseline FIRST, and confirm the PROCESS actually
+          # exited — `flair stop` sends SIGTERM and returns immediately (see
+          # src/cli.ts's own comment on this race), and wait_for_http_down
+          # proves only that the port stopped answering, not that the process
+          # has stopped writing. wait_for_pid_exit waits on the pid in hdb.pid,
+          # so the snapshot below reads a QUIET directory (flair#1611). ──
+          $BASE_FLAIR stop --port $PORT || true
+          wait_for_http_down "${BASE_URL}/Health" 30 "baseline Harper (post-stop)"
+          wait_for_pid_exit "${HOME}/.flair/data/hdb.pid" 30 "baseline Harper (post-stop, process exit)"
+
           # ── 2a. Take a pre-upgrade snapshot (flair#1050) — the recovery
-          # path the backwards-boot refusal names. Taken BEFORE the PR build
-          # boots, while the store is still in the pre-migration state the
+          # path the backwards-boot refusal names. Taken AFTER the baseline has
+          # stopped (the directory is quiet — see step 3) and BEFORE the PR
+          # build boots, while the store is still in the pre-migration state the
           # baseline can read.
           #
           # Raw tar, not `flair snapshot create`: that command stops Flair,
@@ -280,12 +291,6 @@ jobs:
           tar -czf "$SNAPSHOT_PATH" -C "${HOME}/.flair" data
           chmod 600 "$SNAPSHOT_PATH"
           echo "Snapshot: ${SNAPSHOT_PATH}"
-
-          # ── 3. Stop baseline. Confirm it actually exited (flair stop sends
-          # SIGTERM and returns immediately — see src/cli.ts's own comment on
-          # this race) before touching the data dir with a different binary. ──
-          $BASE_FLAIR stop --port $PORT || true
-          wait_for_http_down "${BASE_URL}/Health" 30 "baseline Harper (post-stop)"
 
           # ── 4. Install the PR build fresh, in its own directory (never
           # overwrite baseline's node_modules in place — the exact npm
