@@ -11,7 +11,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { resolveHome } from "./lib/home.js";
 import {
   randomBytes,
   createCipheriv,
@@ -29,20 +29,15 @@ export interface KeyStore {
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /**
- * Resolve the home dir at CALL time, preferring the live HOME/USERPROFILE env
- * over os.homedir(). The runtime caches `homedir()` at process start, so a HOME
- * set after start (the test harness in test/helpers/sandbox-home.ts) is
- * invisible to it and the keystore would reach the REAL ~/.flair/keys — the
- * exact leak that made the federation-watch lane resolve /home/runner in CI
- * (flair#1853 round 2). Production is unchanged: HOME is set before the process
- * starts on every OS. Same convention as resolveHome() in install/clients.ts.
+ * The keystore's home comes from the ONE shared resolver (src/lib/home.ts,
+ * flair#1853 round 3): resolved at CALL time, with the platform rule (Windows
+ * uses USERPROFILE, everywhere else HOME). The runtime caches `os.homedir()` at
+ * process start, so a HOME set after start — the test harness in
+ * test/helpers/sandbox-home.ts — would otherwise be invisible and the keystore
+ * would reach the REAL ~/.flair/keys.
  */
-function resolveHomeDir(): string {
-  return process.env.HOME || process.env.USERPROFILE || homedir();
-}
-
 function keysDir(): string {
-  return join(resolveHomeDir(), ".flair", "keys");
+  return join(resolveHome(), ".flair", "keys");
 }
 
 function keyPath(instanceId: string): string {

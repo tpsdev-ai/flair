@@ -1,9 +1,11 @@
-- **The keystore now resolves the home from HOME at call time, not a value cached at process start.**
+- **Home resolution follows the platform rule: Windows uses `USERPROFILE`,
+  everywhere else `HOME`.**
 
-  `~/.flair/keys` (the Ed25519 keystore) previously joined `os.homedir()`, which
-  the runtime caches before any application code runs. A HOME set later in the
-  same process was ignored, so the keystore could read or write keys under a
-  home other than the one the rest of the process was using. It now prefers
-  HOME/USERPROFILE and falls back to `os.homedir()`, the same convention
-  `install/clients.ts` already uses. Production behaviour is unchanged: HOME is
-  set before the process starts on every OS.
+  `~/.flair/keys` and the MCP client config writers now resolve the home through
+  ONE shared `resolveHome()` (`src/lib/home.ts`), called at call time. On Windows
+  it prefers `USERPROFILE` — what Node's `os.homedir()` uses — because a
+  POSIX-style shell (Git Bash, MSYS, Cygwin) may set `HOME` to a different path;
+  preferring `HOME` there moved the key dir away from where the keys actually
+  live, so an existing key read as missing. Everywhere else `HOME` stays
+  authoritative, so an in-process HOME redirect is still honoured. Production
+  behaviour is unchanged: the home is set before the process starts on every OS.

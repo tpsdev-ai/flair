@@ -83,8 +83,8 @@ export interface UnwireResult {
 // ---- Detection helpers ----------------------------------------------------------
 
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { resolveHome } from "../lib/home.js";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, isResolvedVersion, mcpServerSpec } from "../lib/mcp-spec.js";
 import { decodeWiringSpec, wiringPinString } from "../lib/wiring-spec.js";
 import { decidePinWrite, type PinWriteDecision } from "../lib/pin-write-guard.js";
@@ -112,15 +112,10 @@ function manualWireMessage(label: string, display: string, reason: string, env: 
   );
 }
 
-/**
- * Resolve the user's home dir. Prefer the live HOME/USERPROFILE env over
- * os.homedir(), which caches the value at process start and so ignores a
- * runtime HOME override — same convention as src/cli.ts ("so tests can
- * override"). Production behavior is unchanged (HOME is set on every OS).
- */
-export function resolveHome(): string {
-  return process.env.HOME || process.env.USERPROFILE || homedir();
-}
+// The shared home resolver (src/lib/home.ts, flair#1853 round 3): resolved at
+// call time, with the platform rule (Windows -> USERPROFILE, elsewhere -> HOME).
+// Re-exported so importers of this module keep their existing entry point.
+export { resolveHome };
 
 /**
  * Check if a command exists in PATH (cross-platform alternative to `which`).
