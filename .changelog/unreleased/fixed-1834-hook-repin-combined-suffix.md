@@ -1,4 +1,4 @@
-- **A hook pinned with both a pre-release and a build suffix is re-pinned, not held.**
+- **A stale hook pinned with both a pre-release and a build suffix is re-pinned, not held.**
 
   The installer-form matcher admitted a pre-release OR a build suffix but not
   both at once, so a pin such as `0.54.0-rc.1+build.5` matched no form: a stale

@@ -7,6 +7,7 @@
   `flair doctor` rendered a success for a write that never happened. The result
   now follows what the write actually did: a committed write reports the update,
   and a refusal reports a failure (`ok: false`, action "skip") carrying the write
-  layer's own message. The settings file is left byte-identical either way.
+  layer's own message. The settings file is left byte-identical when the write
+  is refused.
 
   (Refs #1834)
