@@ -451,6 +451,12 @@ export function installHook(opts: InstallHookOptions): HookMutationResult {
       // flair#1778 2c-i-a3: the SessionStart command carries <pkg>@<spec> (the
       // pin from buildHookCommand), so the write consults the ONE never-lower
       // guard — on the IN-LOCK bytes, inside the critical section.
+      // flair#1834 PR-H round 2: hand the guard the SPAN it must prove safe —
+      // the captured `-p <pkg>@<ver>` span when the existing command is one of
+      // the installer forms, never the WHOLE command. The whole command can
+      // carry a DECOY `<pkg>@<ver>` inside a hand-edited id or URL; reading the
+      // first occurrence there proved a version the rebuild does not write,
+      // and the real pin was lowered (Kern BLOCKING).
       const existingCommand =
         action === "update"
           ? (before?.hooks?.find(
@@ -460,7 +466,7 @@ export function installHook(opts: InstallHookOptions): HookMutationResult {
       const decision = decidePinWrite({
         pkg: FLAIR_MCP_PACKAGE,
         entry: `SessionStart hook in ${path}`,
-        existingText: existingCommand,
+        existingText: guardedPinSpan(existingCommand),
         runningVersion: flairCliVersion(),
       });
       if (decision.action !== "write") return { hold: decision.line! };
@@ -585,6 +591,23 @@ export function parseInstallerHookForm(command: string): InstallerHookForm | nul
 }
 
 /**
+ * The span of an existing hook command whose VERSION the never-lower guard
+ * must prove safe — the exact text a rebuild would replace.
+ *
+ * When the command is one of the installer forms, that is the CAPTURED
+ * `-p <pkg>@<ver>` span (`form.pkgSpec`); the id and URL charsets can CONTAIN
+ * a `<pkg>@<ver>` string, so decoding the WHOLE command reads the FIRST
+ * occurrence — a possible decoy — while the rebuild writes the real pin
+ * (flair#1834 PR-H round 2, Kern BLOCKING). A command that is not a form keeps
+ * today's whole-command read: there is no captured span to narrow to, and its
+ * shape is handled by each writer's own fail-closed path.
+ */
+function guardedPinSpan(command: string | null): string | null {
+  if (command === null) return null;
+  return parseInstallerHookForm(command)?.pkgSpec ?? command;
+}
+
+/**
  * Re-pin an ALREADY-WIRED Flair SessionStart hook to the current
  * mcpServerSpec(), preserving the agent id and Flair URL the entry already
  * carries.
@@ -674,10 +697,15 @@ export function repinSessionStartHook(homeDir: string, harness: Harness): HookRe
       // flair#1778 2c-i-a3: this EXPORTED raw writer consults the ONE
       // never-lower guard itself, so no caller can bypass it — on the in-lock
       // bytes, inside the critical section.
+      // flair#1834 PR-H round 2 (Kern BLOCKING): hand the guard the CAPTURED
+      // span (form.pkgSpec), the exact version the substitution below writes.
+      // Passing the FULL command let a DECOY `<pkg>@<ver>` embedded in the id
+      // or URL be read as the pin: the guard proved the decoy safe while the
+      // substitution lowered the real (AHEAD) pin.
       const decision = decidePinWrite({
         pkg: FLAIR_MCP_PACKAGE,
         entry: `SessionStart hook in ${path}`,
-        existingText: current,
+        existingText: form.pkgSpec,
         runningVersion: flairCliVersion(),
       });
       if (decision.action !== "write") {
