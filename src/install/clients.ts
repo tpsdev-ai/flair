@@ -462,6 +462,14 @@ function indent(s: string): string {
   return s.split("\n").map((l) => `     ${l}`).join("\n");
 }
 
+/** The pre-migration pi manual-wiring line (kept byte-identical). */
+function piManualMessage(display: string, reason: string, envHint: string): string {
+  return (
+    `pi: manual wiring needed (could not update ${display}: ${reason}).\n` +
+    `   Add this to ${display} (${envHint}):\n${indent(piJsonSnippet())}`
+  );
+}
+
 /** Decode the primitive's IN-LOCK bytes as UTF-8 TEXT (flair#1778 2c-i-d2):
  *  Codex's config.toml is not JSON, so it is read as text — never parsed with
  *  parseSettingsBytes. `null` (an absent destination) decodes to "". */
@@ -688,154 +696,160 @@ function piJsonSnippet(): string {
  * wiring carried them.
  */
 function _wirePi(env: WireEnv): { ok: boolean; message: string } {
+  // pi's settings.json `packages` entry (the @tpsdev-ai/pi-flair native
+  // extension — pi has no MCP client support). flair#1778 2c-i-d3: ONE critical
+  // section — observe → decide on the IN-LOCK bytes (parseSettingsBytes) →
+  // decidePinWrite for the pi-flair pin inside decide → write via temp + fsync +
+  // atomic rename, with a 0600 `.bak` of the in-lock bytes. The pure helpers are
+  // unchanged, so the bytes written are exactly today's.
   const path = piSettingsPath();
   const home = resolveHome();
-  const display = path.startsWith(home) ? "~" + path.slice(home.length) : path;
+  const display = displayUnderHome(path);
   const spec = piFlairSpec();
   const envHint = `pi settings carry no env — export FLAIR_AGENT_ID=${env.FLAIR_AGENT_ID} in the shell that launches pi`;
   try {
-    let config: any = {};
-    if (existsSync(path)) {
-      const raw = readFileSync(path, "utf-8").trim();
-      if (raw) config = JSON.parse(raw);
-    }
-    if (!config || typeof config !== "object" || Array.isArray(config)) {
-      throw new Error("settings.json is not a JSON object");
-    }
-    if (config.packages !== undefined && !Array.isArray(config.packages)) {
-      throw new Error(`"packages" exists but is not an array — not rewriting it`);
-    }
-    if (config.extensions !== undefined && !Array.isArray(config.extensions)) {
-      throw new Error(`"extensions" exists but is not an array — not rewriting it`);
-    }
-
-    // The #1346 trap: npm: pi-flair specs under `extensions`. pi treats an
-    // `npm:` entry there as a PATH, fails existsSync, and drops it silently —
-    // so a wired pi must MOVE it to `packages`. Collect WITHOUT mutating: the
-    // move rewrites the pin on record, so (flair#1778 2c-i-a2, fix round) it
-    // goes through the same guard as every other write, and a hold/refuse
-    // leaves BOTH arrays exactly as read.
-    let keptExtensions: unknown[] | null = null;
-    const movedSources: string[] = [];
-    if (Array.isArray(config.extensions)) {
-      const kept: unknown[] = config.extensions.filter(
-        (e: unknown) => !(typeof e === "string" && isPiFlairNpmSource(e)),
-      );
-      keptExtensions = kept;
-      if (kept.length !== config.extensions.length) {
-        for (const e of config.extensions) {
-          if (typeof e === "string" && isPiFlairNpmSource(e)) movedSources.push(e);
-        }
-      }
-    }
-    const movedFromExtensions = movedSources.length > 0;
-
-    // Existing packages entry?
-    let entryIndex = -1;
-    let entrySource: string | null = null;
-    if (Array.isArray(config.packages)) {
-      for (let i = 0; i < config.packages.length; i++) {
-        const source = piPackageEntrySource(config.packages[i]);
-        if (source && isPiFlairNpmSource(source)) {
-          entryIndex = i;
-          entrySource = source;
-          break;
-        }
-      }
-    }
-
-    if (!movedFromExtensions && entrySource === spec) {
-      return { ok: true, message: `pi: already wired in ${display} (${spec})` };
-    }
-
-    if (!movedFromExtensions && entryIndex === -1) {
-      // No packages entry and nothing misplaced — honor a working file-path
-      // extensions entry (pre-0.49 workaround) instead of double-wiring.
-      const scan = scanPiSettings(JSON.stringify(config));
-      const workingPath = scan.extensionFilePaths.find((p) =>
-        existsSync(resolvePiExtensionPath(p, home, piAgentDir())),
-      );
-      if (workingPath) {
-        return {
-          ok: true,
-          message:
-            `pi: already wired via a file-path extension in ${display} (${workingPath}) — ` +
-            `the pre-0.49 workaround; the canonical form is a "packages" entry: ${spec}`,
-        };
-      }
-    }
-
-    // flair#1778 slice 2c-i-a2 (fix round): the ONE guard, on EVERY write this
-    // function makes — the `packages` refresh, the #1346 MOVE, and the
-    // create-when-absent push. What is "the pin on record"?
-    //   • a `packages` entry exists → that entry (unchanged behaviour);
-    //   • none, but misplaced `extensions` sources are being MOVED → those
-    //     sources: the HIGHEST comparable one governs and any non-comparable
-    //     one holds, so a single hold/refuse wins the group;
-    //   • neither → ABSENT (null): an unreadable version REFUSES rather than
-    //     creating an unpinned entry.
-    const pinTexts: Array<{ text: string | null; entry: string }> = [];
-    if (entrySource !== null) pinTexts.push({ text: entrySource, entry: `pi packages entry in ${display}` });
-    // flair#1778 2c-i-a3 (pi decoy, noted by both a2 reviewers): when a packages
-    // entry EXISTS *and* a misplaced `npm:` source sits under extensions, the
-    // old shape consulted only the packages entry and DROPPED the extension
-    // pin. Decide on BOTH — the highest comparable governs and any
-    // non-comparable holds — so the move can never lower a misplaced pin.
-    for (const text of movedSources) {
-      pinTexts.push({ text, entry: `pi "extensions" entry in ${display}` });
-    }
-    if (pinTexts.length === 0) pinTexts.push({ text: null, entry: `pi packages entry in ${display}` });
-    let held: PinWriteDecision | null = null;
-    for (const { text, entry } of pinTexts) {
-      const decision = decidePinWrite({
-        pkg: PI_FLAIR_PACKAGE,
-        entry,
-        existingText: text,
-        runningVersion: flairCliVersion(),
-      });
-      if (decision.action !== "write" && (held === null || decision.action === "refuse")) {
-        held = decision;
-      }
-    }
-    if (held) {
-      return { ok: true, message: held.line! };
-    }
-
-    // Only a `write` decision reaches here: apply the (deferred) move, then pin.
-    if (keptExtensions !== null) config.extensions = keptExtensions;
-    config.packages = Array.isArray(config.packages) ? config.packages : [];
-    let action: string;
-    if (entryIndex >= 0) {
-      const entry = config.packages[entryIndex];
-      if (typeof entry === "string") config.packages[entryIndex] = spec;
-      else entry.source = spec; // object entry: refresh source, keep filters
-      action = movedFromExtensions
-        ? `moved ${PI_FLAIR_PACKAGE} out of "extensions" and refreshed the "packages" pin in`
-        : "refreshed pin in";
-    } else if (movedFromExtensions) {
-      config.packages.push(spec);
-      action = `moved ${PI_FLAIR_PACKAGE} from "extensions" to "packages" in`;
-    } else {
-      config.packages.push(spec);
-      action = "wired";
-    }
-
+    // Parent creation stays OUTSIDE the primitive (it needs the resolved parent
+    // to observe an absent destination).
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify(config, null, 2) + "\n");
-    const trapNote = movedFromExtensions
-      ? ` — pi silently ignores npm: specs under "extensions" (flair#1346)`
-      : "";
-    return {
-      ok: true,
-      message: `pi: ${action} ${display} (${spec} — pi installs the package on next launch; ${envHint})${trapNote}`,
-    };
+    let settled: { ok: boolean; message: string } | null = null;
+    let success: string | null = null;
+    const result = withConfigCriticalSection(
+      path,
+      (bytes) => {
+        const read = parseSettingsBytes(bytes, path);
+        if (read.parseError) {
+          settled = { ok: false, message: piManualMessage(display, jsonFailureReason(path, read.parseError), envHint) };
+          return { hold: settled.message };
+        }
+        const config: any = read.parsed ?? {};
+        if (!config || typeof config !== "object" || Array.isArray(config)) {
+          settled = { ok: false, message: piManualMessage(display, "settings.json is not a JSON object", envHint) };
+          return { hold: settled.message };
+        }
+        if (config.packages !== undefined && !Array.isArray(config.packages)) {
+          settled = { ok: false, message: piManualMessage(display, `"packages" exists but is not an array — not rewriting it`, envHint) };
+          return { hold: settled.message };
+        }
+        if (config.extensions !== undefined && !Array.isArray(config.extensions)) {
+          settled = { ok: false, message: piManualMessage(display, `"extensions" exists but is not an array — not rewriting it`, envHint) };
+          return { hold: settled.message };
+        }
+
+        // The #1346 trap: npm: pi-flair specs under `extensions`. pi treats an
+        // `npm:` entry there as a PATH, fails existsSync, and drops it silently —
+        // so a wired pi must MOVE it to `packages`. Collect WITHOUT mutating: the
+        // move rewrites the pin on record, so it goes through the same guard as
+        // every other write, and a hold/refuse leaves BOTH arrays exactly as read.
+        let keptExtensions: unknown[] | null = null;
+        const movedSources: string[] = [];
+        if (Array.isArray(config.extensions)) {
+          const kept: unknown[] = config.extensions.filter(
+            (e: unknown) => !(typeof e === "string" && isPiFlairNpmSource(e)),
+          );
+          keptExtensions = kept;
+          if (kept.length !== config.extensions.length) {
+            for (const e of config.extensions) {
+              if (typeof e === "string" && isPiFlairNpmSource(e)) movedSources.push(e);
+            }
+          }
+        }
+        const movedFromExtensions = movedSources.length > 0;
+
+        let entryIndex = -1;
+        let entrySource: string | null = null;
+        if (Array.isArray(config.packages)) {
+          for (let i = 0; i < config.packages.length; i++) {
+            const source = piPackageEntrySource(config.packages[i]);
+            if (source && isPiFlairNpmSource(source)) {
+              entryIndex = i;
+              entrySource = source;
+              break;
+            }
+          }
+        }
+
+        if (!movedFromExtensions && entrySource === spec) {
+          settled = { ok: true, message: `pi: already wired in ${display} (${spec})` };
+          return { noop: settled.message };
+        }
+
+        if (!movedFromExtensions && entryIndex === -1) {
+          const scan = scanPiSettings(JSON.stringify(config));
+          const workingPath = scan.extensionFilePaths.find((p) =>
+            existsSync(resolvePiExtensionPath(p, home, piAgentDir())),
+          );
+          if (workingPath) {
+            settled = {
+              ok: true,
+              message:
+                `pi: already wired via a file-path extension in ${display} (${workingPath}) — ` +
+                `the pre-0.49 workaround; the canonical form is a "packages" entry: ${spec}`,
+            };
+            return { noop: settled.message };
+          }
+        }
+
+        // The ONE guard, on EVERY write this function makes (the packages
+        // refresh, the #1346 MOVE, the create-when-absent push) — on the IN-LOCK
+        // parse. A packages entry governs; else the misplaced extensions sources
+        // (the highest comparable governs, any non-comparable holds); else ABSENT
+        // (null → an unreadable version REFUSES rather than creating unpinned).
+        const pinTexts: Array<{ text: string | null; entry: string }> = [];
+        if (entrySource !== null) pinTexts.push({ text: entrySource, entry: `pi packages entry in ${display}` });
+        for (const text of movedSources) {
+          pinTexts.push({ text, entry: `pi "extensions" entry in ${display}` });
+        }
+        if (pinTexts.length === 0) pinTexts.push({ text: null, entry: `pi packages entry in ${display}` });
+        let held: PinWriteDecision | null = null;
+        for (const { text, entry } of pinTexts) {
+          const decision = decidePinWrite({
+            pkg: PI_FLAIR_PACKAGE,
+            entry,
+            existingText: text,
+            runningVersion: flairCliVersion(),
+          });
+          if (decision.action !== "write" && (held === null || decision.action === "refuse")) {
+            held = decision;
+          }
+        }
+        if (held) {
+          settled = { ok: true, message: held.line! };
+          return { hold: held.line! };
+        }
+
+        if (keptExtensions !== null) config.extensions = keptExtensions;
+        config.packages = Array.isArray(config.packages) ? config.packages : [];
+        let action: string;
+        if (entryIndex >= 0) {
+          const entry = config.packages[entryIndex];
+          if (typeof entry === "string") config.packages[entryIndex] = spec;
+          else entry.source = spec; // object entry: refresh source, keep filters
+          action = movedFromExtensions
+            ? `moved ${PI_FLAIR_PACKAGE} out of "extensions" and refreshed the "packages" pin in`
+            : "refreshed pin in";
+        } else if (movedFromExtensions) {
+          config.packages.push(spec);
+          action = `moved ${PI_FLAIR_PACKAGE} from "extensions" to "packages" in`;
+        } else {
+          config.packages.push(spec);
+          action = "wired";
+        }
+
+        const trapNote = movedFromExtensions
+          ? ` — pi silently ignores npm: specs under "extensions" (flair#1346)`
+          : "";
+        success = `pi: ${action} ${display} (${spec} — pi installs the package on next launch; ${envHint})${trapNote}`;
+        return { write: encodeConfig(config) };
+      },
+      { backup: (bytes) => backupBytesTo(path, bytes) },
+    );
+    if (result.status === "written") return { ok: true, message: success! };
+    const s = settled as { ok: boolean; message: string } | null;
+    if (s) return s;
+    return { ok: false, message: piManualMessage(display, result.message, envHint) };
   } catch (err: unknown) {
     const reason = err instanceof Error ? err.message : String(err);
-    return {
-      ok: false,
-      message: `pi: manual wiring needed (could not update ${display}: ${reason}).\n` +
-        `   Add this to ${display} (${envHint}):\n${indent(piJsonSnippet())}`,
-    };
+    return { ok: false, message: piManualMessage(display, reason, envHint) };
   }
 }
 
@@ -1128,48 +1142,68 @@ function _unwireAntigravity(): UnwireResult {
 }
 
 function _unwirePi(): UnwireResult {
+  // flair#1778 2c-i-d3: ONE critical section — observe → decide on the IN-LOCK
+  // bytes → write via temp + fsync + rename, with a 0600 `.bak`. The absent-file
+  // short-circuit stays OUTSIDE (no lock for a file that does not exist).
   const path = piSettingsPath();
   const display = displayUnderHome(path);
   if (!existsSync(path)) {
     return { ok: true, removed: false, message: `pi: no config at ${display}` };
   }
   try {
-    const raw = readFileSync(path, "utf-8").trim();
-    if (!raw) {
-      return { ok: true, removed: false, message: `pi: no Flair extension in ${display}` };
-    }
-    const config = JSON.parse(raw);
-    if (!config || typeof config !== "object" || Array.isArray(config)) {
-      return { ok: false, removed: false, message: `pi: refusing to modify a non-object config at ${display}` };
-    }
-    let changed = false;
-    if (Array.isArray(config.packages)) {
-      const kept = config.packages.filter((entry: unknown) => {
-        const source = piPackageEntrySource(entry);
-        return !(source && isPiFlairNpmSource(source));
-      });
-      if (kept.length !== config.packages.length) {
-        config.packages = kept;
-        changed = true;
-      }
-    }
-    if (Array.isArray(config.extensions)) {
-      const kept = config.extensions.filter((entry: unknown) => {
-        if (typeof entry === "string" && (isPiFlairNpmSource(entry) || isPiFlairExtensionPath(entry))) {
-          return false;
+    let settled: UnwireResult | null = null;
+    const result = withConfigCriticalSection(
+      path,
+      (bytes) => {
+        if (bytes === null) {
+          settled = { ok: true, removed: false, message: `pi: no config at ${display}` };
+          return { noop: settled.message };
         }
-        return true;
-      });
-      if (kept.length !== config.extensions.length) {
-        config.extensions = kept;
-        changed = true;
-      }
-    }
-    if (!changed) {
-      return { ok: true, removed: false, message: `pi: no Flair extension in ${display}` };
-    }
-    writeFileSync(path, JSON.stringify(config, null, 2) + "\n");
-    return { ok: true, removed: true, message: `pi: unwired ${display}` };
+        const read = parseSettingsBytes(bytes, path);
+        if (read.parseError) {
+          settled = { ok: false, removed: false, message: `pi: could not unwire ${display}: ${jsonFailureReason(path, read.parseError)}` };
+          return { hold: settled.message };
+        }
+        const config: any = read.parsed ?? {};
+        if (!config || typeof config !== "object" || Array.isArray(config)) {
+          settled = { ok: false, removed: false, message: `pi: refusing to modify a non-object config at ${display}` };
+          return { hold: settled.message };
+        }
+        let changed = false;
+        if (Array.isArray(config.packages)) {
+          const kept = config.packages.filter((entry: unknown) => {
+            const source = piPackageEntrySource(entry);
+            return !(source && isPiFlairNpmSource(source));
+          });
+          if (kept.length !== config.packages.length) {
+            config.packages = kept;
+            changed = true;
+          }
+        }
+        if (Array.isArray(config.extensions)) {
+          const kept = config.extensions.filter((entry: unknown) => {
+            if (typeof entry === "string" && (isPiFlairNpmSource(entry) || isPiFlairExtensionPath(entry))) {
+              return false;
+            }
+            return true;
+          });
+          if (kept.length !== config.extensions.length) {
+            config.extensions = kept;
+            changed = true;
+          }
+        }
+        if (!changed) {
+          settled = { ok: true, removed: false, message: `pi: no Flair extension in ${display}` };
+          return { noop: settled.message };
+        }
+        return { write: encodeConfig(config) };
+      },
+      { backup: (bytes) => backupBytesTo(path, bytes) },
+    );
+    if (result.status === "written") return { ok: true, removed: true, message: `pi: unwired ${display}` };
+    const s = settled as UnwireResult | null;
+    if (s) return s;
+    return { ok: false, removed: false, message: `pi: could not unwire ${display}: ${result.message}` };
   } catch (err: unknown) {
     const reason = err instanceof Error ? err.message : String(err);
     return { ok: false, removed: false, message: `pi: could not unwire ${display}: ${reason}` };
