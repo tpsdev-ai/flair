@@ -1,4 +1,4 @@
-- **flair-client now requires an explicit identity for every action, and the last hardcoded `flint` signer is gone.**
+- **flair-client refuses every action without an explicit identity, and the hardcoded `flint` signer is gone from `scripts/repro-resource-busy.mjs`.**
 
   The signing guard no longer keys on a list of the actions that sign
   (`SIGNING_ACTIONS`), which failed open: an action added to the dispatch switch
@@ -11,4 +11,4 @@
   `flint` from one fixed key path: it takes the same explicit identity and shares
   the client's key resolution and signing (`scripts/lib/flair-signing.mjs`).
 
-  (Closes #1855)
+  (Refs #1855)
