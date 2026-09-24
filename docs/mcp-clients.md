@@ -290,7 +290,7 @@ Clients on this page talk to the stdio server `@tpsdev-ai/flair-mcp`. Its `tools
 
 | Tool | What it does |
 |---|---|
-| `memory_search` | Semantic search across the caller's own and granted memories |
+| `memory_search` | Semantic search across the caller's own and other agents' non-private memories |
 | `memory_store` | Save a memory (type, durability, tags, visibility), attributed to the authenticated agent. Optional `usedMemoryIds` cites memories that informed the write |
 | `skill_store` | Write a skill-tagged memory. `trigger` is the recall text; `content` is the procedure. Durability is forced to persistent, and SkillScan rejects a dangerous payload before embed |
 | `skill_search` | Rank skills by their trigger against a task. Returns a catalog (id, name, trigger, description, tags, agentId), not the procedure |
