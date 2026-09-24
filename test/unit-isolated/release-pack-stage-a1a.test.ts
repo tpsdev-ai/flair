@@ -1357,8 +1357,10 @@ describe("A1b — dispatch, recency and the reservation marker", () => {
   });
 
   test("(h) a second WORKFLOW granting deployments: write goes red", () => {
-    const entries = realWorkflows().concat([{ path: ".github/workflows/evil.yml", text: yaml.dump({ jobs: { x: { permissions: { deployments: "write" }, steps: [] } } }) }]);
-    expect(inspectRepoWide(entries).problems.join("\n")).toContain("evil.yml");
+    // The injected workflow declares an explicit top-level block, so the round-2
+    // absence check cannot name evil.yml — the only problem left is the grant.
+    const entries = realWorkflows().concat([{ path: ".github/workflows/evil.yml", text: yaml.dump({ permissions: {}, jobs: { x: { permissions: { deployments: "write" }, steps: [] } } }) }]);
+    expect(inspectRepoWide(entries).problems.join("\n")).toContain('evil.yml: job "x" grants deployments: write');
   });
 
   test("(h) a workflow-level deployments: write goes red", () => {
@@ -1367,8 +1369,10 @@ describe("A1b — dispatch, recency and the reservation marker", () => {
   });
 
   test("(h) a job-level write-all goes red", () => {
-    const entries = realWorkflows().concat([{ path: ".github/workflows/evil.yml", text: yaml.dump({ jobs: { x: { permissions: "write-all", steps: [] } } }) }]);
-    expect(inspectRepoWide(entries).problems.join("\n")).toContain("evil.yml");
+    // Same as above: with an explicit top-level block the absence check is silent,
+    // so write-all must be caught by the deployment-grant detection itself.
+    const entries = realWorkflows().concat([{ path: ".github/workflows/evil.yml", text: yaml.dump({ permissions: {}, jobs: { x: { permissions: "write-all", steps: [] } } }) }]);
+    expect(inspectRepoWide(entries).problems.join("\n")).toContain('evil.yml: job "x" grants deployments: write');
   });
 
   test("(F2) a second WORKFLOW declaring the release environments goes red — string AND object form, for BOTH names, case-insensitively", () => {
