@@ -259,8 +259,7 @@ try {
 // without them, substitutions are inert and the F2 tests go red.
 const CAPTURE_BOUNDS_DEFAULTS = {
   idleRunRetireMs: 30 * 60_000,
-  runStateCap: 10_000,
-  tombstoneCap: 10_000,
+  capacityCap: 10_000,
   tombstoneMinAgeMs: 60 * 60_000,
   logOnceCap: 10_000,
   sweepIntervalMs: 30_000,
@@ -1231,8 +1230,8 @@ describe("slice 2 round 2 — tombstone, bounds and failed primary writes", () =
     expect(api._warnText()).toMatch(/dropped a callback for retired run r0/);
   }, 30000);
 
-  test("F2: the run-state map never exceeds its cap, and each eviction names the run", async () => {
-    captureBounds.runStateCap = 8;
+  test("F2/round 4: the budget cap refuses new runs and never evicts a live state", async () => {
+    captureBounds.capacityCap = 8;
     const plugin = await loadPlugin();
     const api = apiForCapture(plugin);
     installFetchStub();
@@ -1240,24 +1239,19 @@ describe("slice 2 round 2 — tombstone, bounds and failed primary writes", () =
     for (let i = 0; i < 20; i++) {
       await llmOut({ runId: `r${i}`, assistantTexts: [`plain note number ${i}`] }, { agentId: "A" });
     }
-    expect(captureInternals.stateCount()).toBeLessThanOrEqual(8);
-    expect(api._warnText()).toMatch(/evicted capture state for run r0 \(agent A\)/);
-    await llmOut({ runId: "r0", assistantTexts: ["another plain note"] }, { agentId: "A" });
-    expect(captureInternals.stateCount()).toBeLessThanOrEqual(8);
+    // Round 4: the ONE budget (live + retired) is capped; the surplus runs are
+    // refused, and no live state is ever evicted.
+    expect(captureInternals.stateCount()).toBe(8);
+    expect(captureInternals.budgetUsed()).toBeLessThanOrEqual(8);
+    expect(api._warnText()).toMatch(/capture-capacity: full/);
+    expect(api._warnText()).not.toMatch(/evicted capture state/);
   });
 
-  test("F2: the one-time-log set is bounded; young tombstones are NEVER evicted (round 3)", async () => {
-    captureBounds.tombstoneCap = 3;
+  test("F2: the one-time-log set is bounded", async () => {
     captureBounds.logOnceCap = 2;
     const plugin = await loadPlugin();
     const api = apiForCapture(plugin);
     installFetchStub();
-    for (let i = 0; i < 6; i++) {
-      await api._fire("agent_end", { runId: `r${i}`, success: false, messages: [] }, { agentId: "A" });
-    }
-    // Round 3 item 1: a cap may never break the guarantee, so it does NOT evict
-    // tombstones younger than the minimum age — the set may exceed the cap.
-    expect(captureInternals.tombstoneCount()).toBe(6);
     const llmOut = api._handler("llm_output");
     for (let i = 0; i < 6; i++) {
       // A key per agent, so `clientFor` resolves and the no-runId gate actually
@@ -1334,8 +1328,8 @@ describe("slice 2 round 2 — tombstone, bounds and failed primary writes", () =
 describe("slice 2 round 3 — at capacity, capture fails closed", () => {
   const TRIGGER3 = "remember this: the round three capacity target is staging";
 
-  test("item 1: a full tombstone of YOUNG entries refuses a new run; old retired runs are not re-admitted", async () => {
-    captureBounds.tombstoneCap = 3;
+  test("item 1 (round 4): a full budget of YOUNG tombstones refuses a new run; old retired runs are not re-admitted", async () => {
+    captureBounds.capacityCap = 3;
     const plugin = await loadPlugin();
     const api = apiForCapture(plugin);
     const base = 10_000_000;
@@ -1351,7 +1345,7 @@ describe("slice 2 round 3 — at capacity, capture fails closed", () => {
     // A NEW run is REFUSED (fail closed), not admitted by evicting a tombstone.
     await llmOut({ runId: "new", assistantTexts: [TRIGGER3] }, { agentId: "A" });
     expect(puts(calls).length).toBe(0);
-    expect(api._warnText()).toMatch(/capture-capacity: tombstones/);
+    expect(api._warnText()).toMatch(/capture-capacity: full/);
     expect(captureInternals.stateCount()).toBe(0);
     // A previously retired run is STILL not re-admitted.
     await llmOut({ runId: "old0", assistantTexts: [TRIGGER3] }, { agentId: "A" });
@@ -1366,8 +1360,8 @@ describe("slice 2 round 3 — at capacity, capture fails closed", () => {
     expect(captureInternals.tombstoneCount()).toBe(2);
   });
 
-  test("item 2: the state cap never evicts an in-flight state; a new run is refused instead", async () => {
-    captureBounds.runStateCap = 2;
+  test("item 2 (round 4): the budget cap never evicts an in-flight state; a new run is refused instead", async () => {
+    captureBounds.capacityCap = 2;
     const plugin = await loadPlugin();
     const api = apiForCapture(plugin);
     const d = defer();
@@ -1382,7 +1376,7 @@ describe("slice 2 round 3 — at capacity, capture fails closed", () => {
     await llmOut({ runId: "r3", assistantTexts: [TRIGGER3] }, { agentId: "A" });
     expect(captureInternals.stateCount()).toBe(2);
     expect(puts(calls).length).toBe(2); // no third write
-    expect(api._warnText()).toMatch(/capture-capacity: live-states/);
+    expect(api._warnText()).toMatch(/capture-capacity: full/);
 
     // The in-flight writes still COMPLETE (nothing was dropped to make room).
     d.release();
@@ -1415,5 +1409,103 @@ describe("slice 2 round 3 — at capacity, capture fails closed", () => {
     await p; // the late result is discarded — nothing captured
     expect(api._warnText()).toMatch(/discarded a capture for run r/);
     expect(api._statusLine()).not.toMatch(/auto-captured/);
+  });
+});
+
+// ── round 4 — ONE combined capacity budget (live states + tombstones) ────────
+
+describe("slice 2 round 4 — one combined capacity budget", () => {
+  const PLAIN = "a plain note";
+
+  test("(a) repeated aborts of NEVER-admitted runs never exceed the cap", async () => {
+    captureBounds.capacityCap = 3;
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    installFetchStub();
+    for (let i = 0; i < 6; i++) {
+      await api._fire("agent_end", { runId: `n${i}`, success: false, messages: [] }, { agentId: "A" });
+    }
+    // Only the first three (the free slots) are remembered; the rest add
+    // nothing rather than push young tombstones past the cap.
+    expect(captureInternals.tombstoneCount()).toBe(3);
+    expect(captureInternals.budgetUsed()).toBeLessThanOrEqual(3);
+  });
+
+  test("(b) at a full budget of live states AND young tombstones, a new run is refused and NOTHING is evicted or tombstoned", async () => {
+    captureBounds.capacityCap = 4;
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    installFetchStub();
+    const llmOut = api._handler("llm_output");
+    // Two live states …
+    await llmOut({ runId: "live1", assistantTexts: [PLAIN] }, { agentId: "A" });
+    await llmOut({ runId: "live2", assistantTexts: [PLAIN] }, { agentId: "A" });
+    // … plus two young tombstones (never-admitted aborts) → budget 4 = full.
+    await api._fire("agent_end", { runId: "ab1", success: false, messages: [] }, { agentId: "A" });
+    await api._fire("agent_end", { runId: "ab2", success: false, messages: [] }, { agentId: "A" });
+    expect(captureInternals.stateCount()).toBe(2);
+    expect(captureInternals.tombstoneCount()).toBe(2);
+    expect(captureInternals.budgetUsed()).toBe(4);
+
+    await llmOut({ runId: "new", assistantTexts: [PLAIN] }, { agentId: "A" });
+    // Refused, and NOTHING was mutated: no live state evicted, no tombstone added.
+    expect(api._warnText()).toMatch(/capture-capacity: full/);
+    expect(captureInternals.stateCount()).toBe(2);
+    expect(captureInternals.tombstoneCount()).toBe(2);
+    expect(captureInternals.budgetUsed()).toBe(4);
+    expect(api._warnText()).not.toMatch(/evicted capture state/);
+  });
+
+  test("(c) retire or abort of an ADMITTED run at a full budget converts IN PLACE, without eviction", async () => {
+    captureBounds.capacityCap = 2;
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    installFetchStub();
+    const base = 30_000_000;
+    captureClock.now = () => base;
+    const llmOut = api._handler("llm_output");
+    await llmOut({ runId: "r1", assistantTexts: [PLAIN] }, { agentId: "A" });
+    await llmOut({ runId: "r2", assistantTexts: [PLAIN] }, { agentId: "A" });
+    expect(captureInternals.budgetUsed()).toBe(2); // full
+
+    // Retire r1 (a successful agent_end) IN PLACE — triggered by the next sweep.
+    await api._fire("agent_end", { runId: "r1", success: true, messages: [] }, { agentId: "A" });
+    captureClock.now = () => base + 31_000;
+    await llmOut({ runId: "r2", assistantTexts: [PLAIN] }, { agentId: "A" }); // runs the sweep
+    expect(captureInternals.budgetUsed()).toBe(2);
+    expect(captureInternals.stateCount()).toBe(1);
+    expect(captureInternals.tombstoneCount()).toBe(1);
+
+    // Abort r2 IN PLACE too: the same slot becomes its tombstone.
+    await api._fire("agent_end", { runId: "r2", success: false, messages: [] }, { agentId: "A" });
+    expect(captureInternals.budgetUsed()).toBe(2);
+    expect(captureInternals.stateCount()).toBe(0);
+    expect(captureInternals.tombstoneCount()).toBe(2);
+    expect(api._warnText()).not.toMatch(/evicted capture state/);
+  });
+
+  test("(d) once tombstones age past the minimum, admission frees exactly ONE aged tombstone and admits", async () => {
+    captureBounds.capacityCap = 2;
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    installFetchStub();
+    const base = 40_000_000;
+    captureClock.now = () => base;
+    for (let i = 0; i < 2; i++) {
+      await api._fire("agent_end", { runId: `old${i}`, success: false, messages: [] }, { agentId: "A" });
+    }
+    expect(captureInternals.budgetUsed()).toBe(2); // full of YOUNG tombstones
+
+    const llmOut = api._handler("llm_output");
+    await llmOut({ runId: "x", assistantTexts: [PLAIN] }, { agentId: "A" });
+    expect(api._warnText()).toMatch(/capture-capacity: full/);
+    expect(captureInternals.stateCount()).toBe(0);
+
+    // Past the minimum age: exactly ONE aged tombstone is freed, then admit.
+    captureClock.now = () => base + captureBounds.tombstoneMinAgeMs + 1;
+    await llmOut({ runId: "y", assistantTexts: [PLAIN] }, { agentId: "A" });
+    expect(captureInternals.stateCount()).toBe(1);
+    expect(captureInternals.tombstoneCount()).toBe(1);
+    expect(captureInternals.budgetUsed()).toBe(2);
   });
 });
