@@ -35,7 +35,7 @@ Pairing connects a spoke to a hub with mutual key pinning and an auth-aware hand
 On the hub machine, the admin runs `flair federation token`. The command emits a JSON triple containing a one-time bootstrap credential:
 
 ```bash
-flair federation token --admin-pass <hub-admin-password>
+FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation token
 ```
 
 Output (a single JSON object):
@@ -76,15 +76,14 @@ Earlier designs relied on `allowCreate=true` combined with body-only authenticat
 
 ## Fabric Pairing Example
 
-A managed Harper Fabric hub has no shell. Mint the triple from any machine that can reach it, then pair from the spoke. The full bring-up, including why `--ops-target` names port 9925, is [spoke-bringup.md §5a](spoke-bringup.md#harper-fabric-hub-no-shell). <!-- docs-freshness-allow: Fabric ops API port, not legacy data port -->
+A managed Harper Fabric hub has no shell. Mint the triple from any machine that can reach it, then pair from the spoke. `--admin-pass` is also accepted but puts the password in shell history and process listings; prefer the environment form below (or a secret manager). The full bring-up, including why `--ops-target` names port 9925, is [spoke-bringup.md §5a](spoke-bringup.md#harper-fabric-hub-no-shell). <!-- docs-freshness-allow: Fabric ops API port, not legacy data port -->
 
 ```bash
 # 1. On any machine (the spoke itself is fine) — no ssh, no scp.
 # umask 077 sets the mode of a file the redirect CREATES; set -C makes the redirect
 # refuse to overwrite an existing one, so a retry cannot truncate-and-reuse a looser file.
-(umask 077; set -C; flair federation token \
+(umask 077; set -C; FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation token \
   --target https://<hub>.<org>.harperfabric.com \
-  --admin-pass <hub-admin-password> \
   --ttl 60 \
   --ops-target https://<hub>.<org>.harperfabric.com:9925 > ./pair-triple.json)  # docs-freshness-allow: Fabric ops API port, not legacy data port
 
