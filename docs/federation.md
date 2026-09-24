@@ -56,10 +56,10 @@ On the spoke machine:
 
 ```bash
 # From a file
-flair federation pair <hub-url> --token-from /path/to/triple.json
+FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation pair <hub-url> --token-from /path/to/triple.json
 
 # From stdin
-cat triple.json | flair federation pair <hub-url> --token-from -
+cat triple.json | FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation pair <hub-url> --token-from -
 ```
 
 **4. Behind the scenes**
@@ -82,16 +82,15 @@ A managed Harper Fabric hub has no shell. Mint the triple from any machine that 
 # 1. On any machine (the spoke itself is fine) — no ssh, no scp.
 # umask 077 sets the mode of a file the redirect CREATES; set -C makes the redirect
 # refuse to overwrite an existing one, so a retry cannot truncate-and-reuse a looser file.
-# <cluster-admin-pass> is the hub admin, not ~/.flair/admin-pass on this machine.
-(umask 077; set -C; FLAIR_ADMIN_PASS="<cluster-admin-pass>" flair federation token \
+# /path/to/hub-admin-pass is a 0600 file holding the HUB admin password, not ~/.flair/admin-pass on this machine; a literal here would land in shell history.
+(umask 077; set -C; FLAIR_ADMIN_PASS="$(cat /path/to/hub-admin-pass)" flair federation token \
   --target https://<hub>.<org>.harperfabric.com \
   --ttl 60 \
   --ops-target https://<hub>.<org>.harperfabric.com:9925 > ./pair-triple.json)  # docs-freshness-allow: Fabric ops API port, not legacy data port
 
-# 2. On the spoke — admin auth writes the local Peer row
-flair federation pair https://<hub>.<org>.harperfabric.com \
-  --token-from ./pair-triple.json \
-  --admin-pass "$FLAIR_ADMIN_PASS"
+# 2. On the spoke — the SPOKE admin password (its own ~/.flair/admin-pass) writes the local Peer row; the mint above used the hub admin
+FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation pair https://<hub>.<org>.harperfabric.com \
+  --token-from ./pair-triple.json
 ```
 
 Replace `<hub>`, `<org>`, and `<cluster-admin-pass>` with your actual values. The pair step's admin password is the spoke's, used to write the local Peer row.

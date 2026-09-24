@@ -273,7 +273,7 @@ Federation, which has no in-process equivalent:
 
 ```bash
 (umask 077; set -C; FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation token > triple.json)
-flair federation pair <hub-url> --token-from ./triple.json
+FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation pair <hub-url> --token-from ./triple.json
 flair federation sync enable --interval 300
 flair federation status
 ```

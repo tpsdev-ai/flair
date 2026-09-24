@@ -164,12 +164,12 @@ No shell on the hub, so mint the token remotely rather than over `ssh`:
 
 ```bash
 # On any machine — note --ops-target, this hits the ops API
-(umask 077; set -C; FLAIR_ADMIN_PASS=<hub-admin-password> flair federation token \
+(umask 077; set -C; FLAIR_ADMIN_PASS="$(cat /path/to/hub-admin-pass)" flair federation token \
   --target https://<cluster>.<org>.harperfabric.com \
   --ops-target <ops-url> > ./pair-triple.json)
 
 # On the spoke
-flair federation pair https://<cluster>.<org>.harperfabric.com \
+FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation pair https://<cluster>.<org>.harperfabric.com \
   --token-from ./pair-triple.json
 ```
 

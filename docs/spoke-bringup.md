@@ -125,13 +125,13 @@ On the **hub host**, an admin runs:
 A Fabric-deployed hub is a Harper component on a managed cluster. There is no host to shell into. Mint the triple from any machine that can reach the hub — for a personal spoke, that machine is the spoke — and name both the data URL and the ops URL:
 
 ```bash
-(umask 077; set -C; FLAIR_ADMIN_PASS="<cluster-admin-pass>" flair federation token \
+(umask 077; set -C; FLAIR_ADMIN_PASS="$(cat /path/to/hub-admin-pass)" flair federation token \
   --target https://<hub>.<org>.harperfabric.com \
   --ttl 60 \
   --ops-target https://<hub>.<org>.harperfabric.com:9925 > pair-triple.json)  # docs-freshness-allow: Fabric ops API port, not legacy data port
 ```
 
-`<cluster-admin-pass>` is the **hub** admin password — the admin file on the hub host, or a secret manager — not the spoke's `~/.flair/admin-pass`. That local file authenticates only the spoke. `--ops-target` is the Harper operations API on the same hostname at port 9925. <!-- docs-freshness-allow: Fabric ops API port, not legacy data port --> A portless `https://` `--target` derives that same port. Pass `--ops-target` so the URL is the one you chose. An explicit port other than 443 still derives as REST port minus one, which is not this ops port. `federation token` reads the admin password from `FLAIR_ADMIN_PASS` (or from `--admin-pass`). `--admin-pass` is also accepted but puts the password in shell history and process listings; prefer the environment form above (or a secret manager).
+`/path/to/hub-admin-pass` is a 0600 file holding the **HUB** admin password on the minting machine, not the spoke's `~/.flair/admin-pass`, which authenticates only the spoke. A literal on the command line would land in shell history, so read it from the file (or a secret manager). `--ops-target` is the Harper operations API on the same hostname at port 9925. <!-- docs-freshness-allow: Fabric ops API port, not legacy data port --> A portless `https://` `--target` derives that same port. Pass `--ops-target` so the URL is the one you chose. An explicit port other than 443 still derives as REST port minus one, which is not this ops port. `federation token` reads the admin password from `FLAIR_ADMIN_PASS` (or from `--admin-pass`). `--admin-pass` is also accepted but puts the password in shell history and process listings; prefer the file form above (or a secret manager).
 
 ### 5b. Transfer the triple to the spoke
 
@@ -146,9 +146,8 @@ When it was minted with `--target` against a Fabric hub, the file is already on 
 ### 5c. Pair from the spoke
 
 ```bash
-flair federation pair https://<hub-url> \
-  --token-from ./pair-triple.json \
-  --admin-pass "$FLAIR_ADMIN_PASS"
+FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation pair https://<hub-url> \
+  --token-from ./pair-triple.json
 ```
 
 The `--admin-pass` is required so the CLI can write the hub as a local `Peer` record. Without it, pairing succeeds on the hub side but the spoke never records its peer, and `flair federation sync` reports "No hub peer configured."
@@ -291,15 +290,14 @@ export FLAIR_URL=http://127.0.0.1:9926
 A managed Harper Fabric hub (`https://<hub>.<org>.harperfabric.com`, HTTPS on 443) serves the operations API on port 9925 of the same hostname. <!-- docs-freshness-allow: Fabric ops API port, not legacy data port --> Mint the pairing token with `--target` and `--ops-target` as in [§5a](#harper-fabric-hub-no-shell). Pairing from the spoke still uses the public hub URL:
 
 ```bash
-flair federation pair https://<hub>.<org>.harperfabric.com \
-  --token-from ./pair-triple.json \
-  --admin-pass "$FLAIR_ADMIN_PASS"
+FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation pair https://<hub>.<org>.harperfabric.com \
+  --token-from ./pair-triple.json
 ```
 
 A self-hosted instance that publishes an explicit REST port still uses ops = REST − 1 (a fresh local install is 19926 → 19925). Pass that ops URL with `--ops-target` when you are not on the box:
 
 ```bash
-flair federation pair https://fabric-node.example.com:19926/<instance> \
+FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation pair https://fabric-node.example.com:19926/<instance> \
   --token-from triple.json \
   --ops-target https://fabric-node.example.com:19925
 ```

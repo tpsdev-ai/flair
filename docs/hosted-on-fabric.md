@@ -213,13 +213,13 @@ See [upgrade.md](upgrade.md#upgrading-a-fabric-deployed-instance) for the full w
 Available. Pair a local spoke to a Fabric-hosted hub:
 
 ```bash
-# On any machine (no shell on the hub) — generate a pairing token triple
-(umask 077; set -C; FLAIR_ADMIN_PASS=<hub-admin-password> flair federation token \
+# On any machine (no shell on the hub) — generate a pairing token triple. /path/to/hub-admin-pass is a 0600 file holding the HUB admin password (never a literal on the command line: it would land in shell history)
+(umask 077; set -C; FLAIR_ADMIN_PASS="$(cat /path/to/hub-admin-pass)" flair federation token \
   --target https://<cluster>.<org>.harperfabric.com \
   --ops-target <ops-url> > ./pair-triple.json)
 
-# On the spoke — pair to the Fabric hub
-flair federation pair https://<cluster>.<org>.harperfabric.com \
+# On the spoke — the SPOKE admin password (its own ~/.flair/admin-pass) writes the local Peer row
+FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation pair https://<cluster>.<org>.harperfabric.com \
   --token-from ./pair-triple.json
 ```
 
