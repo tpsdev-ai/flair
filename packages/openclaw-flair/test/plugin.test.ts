@@ -28,7 +28,8 @@ type ToolCtx = { agentId?: string };
 function createMockApi(opts: {
   pluginConfig?: Record<string, unknown>;
   config?: Record<string, unknown>;
-  hostVersion?: string;
+  /** Host version exposed as api.runtime.version; null = field absent. */
+  hostVersion?: string | null;
 } = {}) {
   const tools = new Map<string, unknown>();
   const hooks = new Map<string, Function[]>();
@@ -39,8 +40,9 @@ function createMockApi(opts: {
     name: "openclaw-flair",
     version: "0.55.2",
     registrationMode: "full",
-    config: opts.config ?? {},
+    config: opts.config ?? { agents: { entries: { A: {} } } },
     pluginConfig: { url: "http://127.0.0.1:19926", ...(opts.pluginConfig ?? {}) },
+    runtime: opts.hostVersion === null ? {} : { version: opts.hostVersion ?? "2026.8.1" },
     logger: {
       info: mock(() => {}),
       warn: mock(() => {}),
@@ -131,8 +133,10 @@ beforeEach(() => {
   };
   process.env.HOME = home;
   process.env.FLAIR_KEY_DIR = keyDir;
+  // Env vars must NOT be a host-version source: set one that would pass the
+  // gate if env were consulted, and prove the plugin ignores it.
   process.env.OPENCLAW_VERSION = "2026.8.1";
-  delete process.env.OPENCLAW_COMPATIBILITY_HOST_VERSION;
+  process.env.OPENCLAW_COMPATIBILITY_HOST_VERSION = "2026.8.1";
   delete process.env.FLAIR_AGENT_ID; // env identity must be ignored entirely
 });
 
@@ -150,27 +154,45 @@ async function loadPlugin() {
 
 // ── A. host version gate ─────────────────────────────────────────────────────
 
-describe("host version gate", () => {
-  test("out-of-set host: registers NOTHING and reports the line", async () => {
-    process.env.OPENCLAW_VERSION = "2026.5.7";
+describe("host version gate (runtime.version is the ONLY source)", () => {
+  test("runtime.version in the tested set registers", async () => {
     const plugin = await loadPlugin();
     installFetchStub();
-    const api = createMockApi();
+    const api = createMockApi({ hostVersion: "2026.9.6" });
+    plugin.register(api);
+    expect(api._tools.size).toBe(3);
+  });
+
+  test("runtime.version absent: registers nothing with the disabled line", async () => {
+    const plugin = await loadPlugin();
+    installFetchStub();
+    const api = createMockApi({ hostVersion: null });
     plugin.register(api);
     expect(api._tools.size).toBe(0);
     expect(api._hooks.size).toBe(0);
     expect(api._contextEngines.size).toBe(0);
-    expect(api._warnText()).toMatch(/openclaw-flair disabled: host 2026\.5\.7 not in tested set/);
+    expect(api._warnText()).toMatch(/openclaw-flair disabled: host unknown not in tested set/);
   });
 
-  test("undetermined host version: registers nothing (fail closed)", async () => {
-    delete process.env.OPENCLAW_VERSION;
+  test("an env var cannot satisfy the gate: OPENCLAW_VERSION set, runtime.version absent -> registers nothing", async () => {
+    process.env.OPENCLAW_VERSION = "2026.8.1";
+    process.env.OPENCLAW_COMPATIBILITY_HOST_VERSION = "2026.8.1";
     const plugin = await loadPlugin();
     installFetchStub();
-    const api = createMockApi();
+    const api = createMockApi({ hostVersion: null });
     plugin.register(api);
     expect(api._tools.size).toBe(0);
     expect(api._warnText()).toMatch(/not in tested set/);
+  });
+
+  test("out-of-set host: registers NOTHING and reports the line", async () => {
+    const plugin = await loadPlugin();
+    installFetchStub();
+    const api = createMockApi({ hostVersion: "2026.5.7" });
+    plugin.register(api);
+    expect(api._tools.size).toBe(0);
+    expect(api._hooks.size).toBe(0);
+    expect(api._warnText()).toMatch(/openclaw-flair disabled: host 2026\.5\.7 not in tested set/);
   });
 
   test("in-set host: registers the three factory tools", async () => {
@@ -181,7 +203,6 @@ describe("host version gate", () => {
     expect(api._tools.has("memory_search")).toBe(true);
     expect(api._tools.has("memory_store")).toBe(true);
     expect(api._tools.has("memory_get")).toBe(true);
-    // Every tool is a FACTORY, not a prebuilt object.
     expect(typeof api._tools.get("memory_store")).toBe("function");
   });
 
@@ -197,8 +218,19 @@ describe("host version gate", () => {
 
 // ── B. shared-OS-user detection ──────────────────────────────────────────────
 
-describe("shared-OS-user detection (fail closed)", () => {
-  test("more than one agent under one OS user: registers nothing", async () => {
+describe("shared-OS-user detection + agent-set shape (fail closed)", () => {
+  test("entries-shaped config, two agents under one uid: registers nothing", async () => {
+    writeKey("a");
+    writeKey("b");
+    const plugin = await loadPlugin();
+    installFetchStub();
+    const api = createMockApi({ config: { agents: { entries: { a: {}, b: {} } } } });
+    plugin.register(api);
+    expect(api._tools.size).toBe(0);
+    expect(api._warnText()).toMatch(/agents share an OS user; identity cannot be guaranteed/);
+  });
+
+  test("list-shaped config, two agents under one uid: registers nothing", async () => {
     writeKey("a");
     writeKey("b");
     const plugin = await loadPlugin();
@@ -209,13 +241,32 @@ describe("shared-OS-user detection (fail closed)", () => {
     expect(api._warnText()).toMatch(/agents share an OS user; identity cannot be guaranteed/);
   });
 
-  test("a single agent on the gateway is served", async () => {
+  test("single agent in entries shape registers", async () => {
+    writeKey("a");
+    const plugin = await loadPlugin();
+    installFetchStub();
+    const api = createMockApi({ config: { agents: { entries: { a: {} } } } });
+    plugin.register(api);
+    expect(api._tools.size).toBe(3);
+  });
+
+  test("single agent in list shape registers", async () => {
     writeKey("a");
     const plugin = await loadPlugin();
     installFetchStub();
     const api = createMockApi({ config: { agents: { list: [{ id: "a" }] } } });
     plugin.register(api);
     expect(api._tools.size).toBe(3);
+  });
+
+  test("unreadable/neither-shape config registers nothing", async () => {
+    writeKey("a");
+    const plugin = await loadPlugin();
+    installFetchStub();
+    const api = createMockApi({ config: {} });
+    plugin.register(api);
+    expect(api._tools.size).toBe(0);
+    expect(api._warnText()).toMatch(/identity cannot be guaranteed/);
   });
 });
 
@@ -349,7 +400,7 @@ describe("permission matrix", () => {
     writeKey("A");
     const plugin = await loadPlugin();
     const calls = installFetchStub();
-    const api = createMockApi({ pluginConfig: { agentId: "A", autoCapture: true }, config: {} });
+    const api = createMockApi({ pluginConfig: { agentId: "A", autoCapture: true }, config: { agents: { entries: { A: {} } } } });
     plugin.register(api);
     expect(api._warnText()).toMatch(/capture disabled \(permission\)/);
     expect(api._hooks.has("agent_end")).toBe(false);
@@ -362,7 +413,7 @@ describe("permission matrix", () => {
     writeKey("A");
     const plugin = await loadPlugin();
     installFetchStub();
-    const api = createMockApi({ pluginConfig: { agentId: "A", autoRecall: true }, config: {} });
+    const api = createMockApi({ pluginConfig: { agentId: "A", autoRecall: true }, config: { agents: { entries: { A: {} } } } });
     plugin.register(api);
     expect(api._warnText()).toMatch(/prompt context disabled: policy/);
     expect(api._hooks.has("before_prompt_build")).toBe(false);
@@ -383,7 +434,10 @@ describe("permission matrix", () => {
 
 describe("prompt contract (host-shaped events, no injectContext)", () => {
   function configWith(hooks: Record<string, boolean>, agentId = "A") {
-    return { plugins: { entries: { "openclaw-flair": { hooks } } }, agents: { list: [{ id: agentId }] } };
+    return {
+      plugins: { entries: { "openclaw-flair": { hooks } } },
+      agents: { entries: { [agentId]: {} } },
+    };
   }
 
   test("returns prependContext via before_prompt_build, never injectContext", async () => {

@@ -36,16 +36,20 @@ type ToolContext = { agentId?: string };
 // re-runs the real-host drills.
 export const TESTED_HOST_VERSIONS = ["2026.8.1", "2026.9.6"] as const;
 
-/** The running host version, or null when it cannot be determined. */
+/**
+ * The running host version, or null when it cannot be determined.
+ *
+ * The ONLY source is the host API — `api.runtime.version` (`PluginRuntimeCore`,
+ * "Core runtime helpers exposed to trusted native plugins"). Environment
+ * variables are deliberately NOT consulted: any process can set
+ * OPENCLAW_VERSION, so an env-sourced gate is an override anyone could use to
+ * fake the tested set. If the runtime version is missing or not a string the
+ * host is unknown and the plugin registers nothing.
+ */
 function hostVersionOf(api: OpenClawPluginApi): string | null {
-  const env = process.env;
-  const raw = env.OPENCLAW_COMPATIBILITY_HOST_VERSION ?? env.OPENCLAW_VERSION ?? null;
+  const raw = (api as any)?.runtime?.version;
   if (typeof raw !== "string") return null;
-  const v = raw.trim();
-  if (!v) return null;
-  // Accept an optional leading "v" and any pre-release/build suffix; compare the
-  // numeric release triple against the tested set exactly.
-  const m = v.match(/^v?(\d+\.\d+\.\d+)/);
+  const m = raw.trim().match(/^v?(\d+\.\d+\.\d+)/);
   return m ? m[1] : null;
 }
 
@@ -237,14 +241,30 @@ function detectEntities(text: string): DetectedEntity[] {
 
 // ─── Plugin export ────────────────────────────────────────────────────────────
 
-/** The ids of every agent this gateway serves, best-effort from host config. */
-function gatewayAgentIds(api: OpenClawPluginApi): string[] {
-  const list = (api.config as any)?.agents?.list;
-  if (!Array.isArray(list)) return [];
-  const ids = list
-    .map((a: any) => (typeof a === "string" ? a : a?.id ?? a?.agentId))
-    .filter((id: any): id is string => typeof id === "string" && id.length > 0);
-  return [...new Set(ids)];
+/**
+ * The ids of every agent this gateway serves, or null when the agent set
+ * cannot be determined (fail closed — identity cannot be guaranteed).
+ *
+ * Older hosts keyed agents by an OBJECT (`agents.entries`, keyed by agent id);
+ * others by an ARRAY (`agents.list`, `{ id }`). Either shape is accepted; if
+ * neither is present the answer is "unknown", which refuses registration.
+ */
+function gatewayAgentIds(api: OpenClawPluginApi): string[] | null {
+  const agents = (api.config as any)?.agents;
+  if (!agents || typeof agents !== "object") return null;
+  const entries = (agents as any).entries;
+  if (entries && typeof entries === "object" && !Array.isArray(entries)) {
+    const ids = Object.keys(entries).filter((k) => typeof k === "string" && k.length > 0);
+    return [...new Set(ids)];
+  }
+  const list = (agents as any).list;
+  if (Array.isArray(list)) {
+    const ids = list
+      .map((a: any) => (typeof a === "string" ? a : a?.id))
+      .filter((id: any): id is string => typeof id === "string" && id.length > 0);
+    return [...new Set(ids)];
+  }
+  return null;
 }
 
 /**
@@ -290,7 +310,15 @@ export default {
     // If the gateway serves more than one agent and their key directories
     // resolve under a single OS user, the same uid can read every key file, so
     // identity cannot be guaranteed. Register nothing; there is no override.
+    // If the agent set cannot be determined at all, also register nothing — an
+    // unknown gateway is not a guaranteed one.
     const agentIds = gatewayAgentIds(api);
+    if (agentIds === null || agentIds.length === 0) {
+      api.logger.warn(
+        "openclaw-flair disabled: cannot determine the gateway agent set; identity cannot be guaranteed",
+      );
+      return;
+    }
     if (agentIds.length > 1) {
       const owners = keyDirOwners(agentIds, cfg.keyPath);
       const known = owners.filter((u): u is number => u !== null);

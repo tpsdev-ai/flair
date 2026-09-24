@@ -5,10 +5,12 @@ are not an in-memory mock: the unit mock replays what these drills record.
 
 ## Host this is written for
 
-- **Host version: `2026.8.1`** (the K&S VMs). It is also run on `2026.9.6`
-  (npm `latest`) — both are in the plugin's tested set.
-- The runner refuses to run unless `OPENCLAW_VERSION` is one of the tested
-  versions, because the point of the drill is the host contract.
+- **Tested host versions: `2026.8.1`** (the K&S VMs) and **`2026.9.6`** (npm
+  `latest`). The runner reads the host version from the host itself
+  (`openclaw --version`) and **refuses to run unless it is one of the tested
+  versions** — the point of the drill is the host contract. It never sets a
+  version environment variable; the plugin's version source is the host API
+  (`api.runtime.version`), which an env var cannot influence.
 
 ## The config it loads
 
@@ -47,14 +49,17 @@ The runner writes a throwaway `HOME` with:
 ## Running
 
 ```bash
-# on the 2026.8.1 host, with a reachable Flair instance:
-HOME=/tmp/ocf-drill OPENCLAW_VERSION=2026.8.1 \
-  node packages/openclaw-flair/scripts/drill/run.mjs
+# on a tested-version host, with a reachable Flair instance:
+HOME=/tmp/ocf-drill node packages/openclaw-flair/scripts/drill/run.mjs
 ```
 
-The runner shells out to the host CLI (`OPENCLAW_BIN`, default `openclaw`); the
-exact invocation is isolated in `HOST_INVOKE` in `run.mjs` so a host that needs
-different flags only touches one line.
+The runner shells out to the host CLI (`OPENCLAW_BIN`, default `openclaw`) —
+`openclaw --version` to learn the host version, and `openclaw agent run` for a
+one-shot turn; the exact invocation is isolated in `HOST_INVOKE` in `run.mjs` so
+a host that needs different flags only touches one line. Drill 2 (decline)
+builds a falsified copy of the plugin's built entry whose tested set excludes the
+real host version — that is the only way to force the out-of-set branch now that
+the version comes from the host API.
 
 ## Status
 
