@@ -291,7 +291,8 @@ ${scopeTokens.map((s: string) => `<div class="scope">${esc(s)}</div>`).join("")}
         // No script is needed by this page; an inline <style> is the only
         // non-default allowance. The form posts back here and the POST answers
         // with a 302 to the pinned callback, so that origin must be allowed too.
-        "content-security-policy": `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${ALLOWED_REDIRECT_ORIGIN}`,
+        // Nothing may frame the consent page.
+        "content-security-policy": `default-src 'none'; frame-ancestors 'none'; style-src 'unsafe-inline'; form-action 'self' ${ALLOWED_REDIRECT_ORIGIN}`,
         "x-content-type-options": "nosniff",
       },
     });

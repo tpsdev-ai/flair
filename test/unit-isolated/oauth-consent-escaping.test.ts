@@ -119,6 +119,7 @@ describe("OAuth consent page — escaping and validation", () => {
     const res = await authorize(q({}));
     const csp = res.headers.get("content-security-policy") ?? "";
     expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("frame-ancestors 'none'");
     expect(csp).toContain("style-src 'unsafe-inline'");
     // The consent form's POST answers with a 302 to the pinned callback, and
     // `form-action` is enforced across redirects — so the directive allows
