@@ -22,10 +22,12 @@ cannot influence.
    branch), one turn completes and reaches the provider, there are no `[plugins]`
    warnings, and the line `openclaw-flair disabled: host <v> not in tested set <s>`
    appears.
-3. **two agents** — on one real gateway, A's turn never signs as B and vice versa.
-   The two agents must be under **separate OS users** (or run on separate
-   gateways): the shared-OS-user gate refuses a same-user pair **by design**, so a
-   single-user host cannot pass this drill.
+3. **two agents** — A's turn never signs as B and vice versa. The gate is
+   per gateway **process** (it refuses when the process can read more than one
+   agent's key), so this drill needs **two gateway processes, each under its own
+   OS user, each serving one agent**, both pointed at the same Flair; the
+   assertion is made across both from the Flair request log. A single gateway
+   process cannot pass this drill **by design**.
 4. **gates** — capture permission withheld → `capture disabled (permission)` and
    zero capture writes; prompt policy withheld → `prompt context disabled: policy`.
 5. **transcript** — record what the host accepted (hooks, permission-gate
