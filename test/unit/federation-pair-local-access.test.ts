@@ -188,7 +188,7 @@ describe("wiring — pair identity GET uses the named rewriter", () => {
     expect(pairSrc.split("rewriteFederationPairLocalAccessError").length - 1).toBe(1);
     expect(pairSrc).toContain("identityUrl");
     expect(pairSrc).toContain("{ baseUrl: identityUrl }");
-    expect(pairSrc).toContain("url: identityUrl");
+    expect(pairSrc).toContain("url: redactUrl(identityUrl)");
   });
 });
 
