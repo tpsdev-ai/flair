@@ -742,6 +742,29 @@ describe("federation pair — spoke credential checked before the hub (flair#187
     expect(stderr.join("\n")).toContain("The pairing token has been consumed");
   });
 
+  test("(Q4) a rejected hub fetch names the OS code and is UNCERTAIN about the token", async () => {
+    seedKey();
+    responder = (call) => {
+      if (call.url.includes("/FederationPair")) {
+        const err = new TypeError("fetch failed") as TypeError & { cause?: { code: string } };
+        err.cause = { code: "ECONNREFUSED" };
+        throw err;
+      }
+      if (call.body?.operation === "user_info") return jsonResponse(200, superUserInfo);
+      return jsonResponse(200, []);
+    };
+    const { exit, stderr } = await runPair(["--admin-pass", "right-pass"]);
+    expect(exit).toBe("process.exit(1)");
+    const text = stderr.join("\n");
+    // The hub-fetch line specifically (the test's process.exit override makes the
+    // outer catch re-enter after the dedicated catch, which does not happen in
+    // production where process.exit terminates immediately).
+    const hubLine = text.split("\n").find((l) => l.includes("could not reach the hub")) ?? "";
+    expect(hubLine).toContain("ECONNREFUSED");
+    expect(hubLine).toContain("may not have reached the hub");
+    expect(hubLine).not.toContain("has been consumed");
+  });
+
   test("(Q3) a user_info reply with no role information is named as such", async () => {
     responder = () => jsonResponse(200, { username: "admin" });
     const { exit, stderr } = await runPair(["--admin-pass", "right-pass"]);

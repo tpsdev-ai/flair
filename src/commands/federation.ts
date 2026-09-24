@@ -160,6 +160,9 @@ const NOTHING_SENT_TO_HUB = "Nothing was sent to the hub; the pairing token is s
 /** The post-hub failure sentence: the token is already spent. */
 const PAIR_TOKEN_CONSUMED =
   "The pairing token has been consumed; mint a new one with 'flair federation token' on the hub and re-run pair.";
+/** A rejected hub fetch may or may not have reached the hub, so be uncertain. */
+const PAIR_TOKEN_MAYBE_CONSUMED =
+  "The request may not have reached the hub; verify the pairing token there before re-minting one with 'flair federation token'.";
 
 /**
  * Strip any userinfo (user:password) and query string from a URL before printing
@@ -185,10 +188,13 @@ export function redactUrl(u: string): string {
  * in err.message, so the message must never reach an error line.
  */
 function fetchErrorLabel(err: unknown): string {
-  const e = err as { code?: unknown; name?: unknown };
+  // Node's fetch wraps the OS error: the useful code (ECONNREFUSED, ENOTFOUND,
+  // …) is on err.cause.code, so prefer it over the wrapper's code/name.
+  const e = err as { code?: unknown; name?: unknown; cause?: { code?: unknown } };
+  const causeCode = typeof e?.cause?.code === "string" && e.cause.code ? e.cause.code : undefined;
   const code = typeof e?.code === "string" && e.code ? e.code : undefined;
   const name = typeof e?.name === "string" && e.name ? e.name : undefined;
-  return code ?? name ?? "request failed";
+  return causeCode ?? code ?? name ?? "request failed";
 }
 
 /** Strip any userinfo from URLs embedded in a message before printing it. */
@@ -1395,7 +1401,7 @@ export function register(program: Command): void {
           // print its message (it can carry the URL). The request was sent, so
           // the token may already be consumed.
           console.error(
-            `Error: could not reach the hub at ${redactUrl(hubUrl)} (${fetchErrorLabel(err)}). ${PAIR_TOKEN_CONSUMED}`
+            `Error: could not reach the hub at ${redactUrl(hubUrl)} (${fetchErrorLabel(err)}). ${PAIR_TOKEN_MAYBE_CONSUMED}`
           );
           process.exit(1);
         }
