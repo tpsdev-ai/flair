@@ -120,7 +120,15 @@ describe("OAuth consent page — escaping and validation", () => {
     const csp = res.headers.get("content-security-policy") ?? "";
     expect(csp).toContain("default-src 'none'");
     expect(csp).toContain("style-src 'unsafe-inline'");
-    expect(csp).toContain("form-action 'self'");
+    // The consent form's POST answers with a 302 to the pinned callback, and
+    // `form-action` is enforced across redirects — so the directive allows
+    // 'self' AND exactly the callback's origin (derived from the same constant).
+    expect(csp).toContain(`form-action 'self' ${new URL(ALLOWED_REDIRECT_URI).origin}`);
+    const formAction = csp
+      .split(";")
+      .map((part) => part.trim())
+      .find((part) => part.startsWith("form-action"));
+    expect(formAction).toBe(`form-action 'self' ${new URL(ALLOWED_REDIRECT_URI).origin}`);
     expect(csp).not.toContain("script-src");
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
   });

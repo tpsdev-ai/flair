@@ -25,6 +25,11 @@ import { esc } from "./admin-layout.js";
  */
 
 const ALLOWED_REDIRECT_URI = "https://claude.com/api/mcp/auth_callback";
+// The callback's ORIGIN, derived from the SAME constant the redirect_uri check
+// uses — never a second literal. The consent form's POST answers with a 302 to
+// this origin, and `form-action` is enforced across redirects, so it must be an
+// allowed form-action target.
+const ALLOWED_REDIRECT_ORIGIN = new URL(ALLOWED_REDIRECT_URI).origin;
 const ACCESS_TOKEN_TTL_MS = 3600_000;        // 1 hour
 const REFRESH_TOKEN_TTL_MS = 7 * 86400_000;  // 7 days
 const AUTH_CODE_TTL_MS = 600_000;            // 10 minutes
@@ -284,8 +289,9 @@ ${scopeTokens.map((s: string) => `<div class="scope">${esc(s)}</div>`).join("")}
       headers: {
         "content-type": "text/html; charset=utf-8",
         // No script is needed by this page; an inline <style> is the only
-        // non-default allowance, and the form posts back to this origin.
-        "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
+        // non-default allowance. The form posts back here and the POST answers
+        // with a 302 to the pinned callback, so that origin must be allowed too.
+        "content-security-policy": `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${ALLOWED_REDIRECT_ORIGIN}`,
         "x-content-type-options": "nosniff",
       },
     });
