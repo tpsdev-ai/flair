@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, readdirSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+// F4: use the REAL helper, not an inline copy. The limit source is one place.
+import { socketPathLimit, socketPathTooLongMessage } from "../../src/lib/socket-path-limit.ts";
 
 /**
  * flair#916 — `flair init --data-dir <long>` previously died with a bare
@@ -19,12 +21,8 @@ import { spawn } from "node:child_process";
 
 const CHILD_DEADLINE_MS = 60_000;
 
-// The OS sun_path cap, NUL-excluded: darwin and freebsd 103, linux (and any unknown
-// platform) 107. Inlined here so this behavioural test runs against the current
-// CLI without depending on the not-yet-shipped helper — a red that proves the
-// real bug, not just a missing import.
-const socketPathLimit = (platform: string): number =>
-  platform === "darwin" || platform === "freebsd" ? 103 : 107;
+/** Absolute path to the CLI, so the child can run from any cwd. */
+const CLI_PATH = resolve(import.meta.dir, "..", "..", "src", "cli.ts");
 
 let isoHome: string;
 let baseDir: string;
@@ -72,6 +70,24 @@ function runInit(dataDir: string): Promise<{ code: number | null; stdout: string
     });
 }
 
+/** Like runInit, but from an explicit cwd (for the relative --data-dir case). */
+function runInitFrom(cwd: string, dataDir: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolveDone) => {
+    const child = spawn("bun", [
+        CLI_PATH, "init",
+        "--skip-start", "--no-mcp", "--skip-soul",
+        "--data-dir", dataDir,
+        "--admin-pass", "test-admin-916",
+       ], { cwd, env: { ...process.env, HOME: isoHome }, timeout: CHILD_DEADLINE_MS });
+    let out = "";
+    let err = "";
+    child.stdout?.on("data", (d) => (out += d.toString()));
+    child.stderr?.on("data", (d) => (err += d.toString()));
+    child.on("close", (code) => resolveDone({ code, stdout: out, stderr: err }));
+    child.on("error", (e) => resolveDone({ code: 1, stdout: out, stderr: err + String(e) }));
+    });
+}
+
 describe("flair init — refuse a data dir whose ops socket path exceeds the OS limit (flair#916)", () => {
   it("the fixture is actually too long", () => {
     const socketPath = join(longDataDir(), "operations-server");
@@ -109,4 +125,43 @@ describe("flair init — refuse a data dir whose ops socket path exceeds the OS 
     expect(existsSync(dataDir)).toBe(false);
     expect(readdirSync(baseDir).sort()).toEqual(before);
     }, CHILD_DEADLINE_MS + 20_000);
+
+  it("a RELATIVE --data-dir is measured RESOLVED: from a deep cwd it refuses", async () => {
+    // Harper binds the socket relative to ITS cwd (the flair package dir), which
+    // the CLI runs under — so the real socket path is <cwd>/r/operations-server.
+    // A guard that measures the raw argument sees only "r/operations-server" and
+    // passes. From a deep cwd the resolved path overflows, so it must refuse.
+    const deep = join(baseDir, "d".repeat(120));
+    mkdirSync(deep, { recursive: true });
+    const relDataDir = "r";
+    const resolvedSocket = join(deep, relDataDir, "operations-server");
+    expect(Buffer.byteLength(resolvedSocket, "utf8")).toBeGreaterThan(socketPathLimit(process.platform));
+
+    const before = readdirSync(baseDir).sort();
+    const { code, stdout, stderr } = await runInitFrom(deep, relDataDir);
+    const output = stdout + stderr;
+
+    expect(code).not.toBe(0);
+    expect(/too long/i.test(output)).toBe(true);
+    // The message names the RESOLVED path, not the raw relative argument.
+    expect(output).toContain(resolvedSocket);
+    // Nothing was written: the relative data dir under the deep cwd never appeared.
+    expect(existsSync(join(deep, relDataDir))).toBe(false);
+    expect(readdirSync(baseDir).sort()).toEqual(before);
+   }, CHILD_DEADLINE_MS + 20_000);
+});
+
+describe("flair#916 F2 — the refusal cannot be made to forge log lines", () => {
+  it("a path containing a newline is printed on one line (escaped, not raw)", () => {
+    const evilSocket = "/tmp/x\nFORGED: everything is fine/operations-server";
+    const evilDir = "/tmp/x\nFORGED: everything is fine";
+    const check = { ok: false as const, bytes: 200, limit: 107, over: 93 };
+    const msg = socketPathTooLongMessage(evilSocket, evilDir, check);
+    // The path is rendered via JSON.stringify, so its newline is escaped and the
+    // message keeps its fixed line count — nothing the path contains can start a
+    // new line.
+    expect(msg).toContain(JSON.stringify(evilSocket));
+    expect(msg.split("\n").length).toBe(10);
+    expect(msg.split("\n").some((l) => l.startsWith("FORGED"))).toBe(false);
+  });
 });

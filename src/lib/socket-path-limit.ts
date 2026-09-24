@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 /**
  * socket-path-limit.ts — the OS cap on a Unix domain socket's path.
@@ -101,10 +101,10 @@ export function socketPathTooLongMessage(
     "Error: the Harper operations socket path is too long for this OS — Harper",
     "would die with a bare `listen EINVAL` instead. Refusing before touching disk.",
     "",
-    `  Operations socket: ${socketPath}`,
+    `  Operations socket: ${JSON.stringify(socketPath)}`,
     `  Path length:      ${check.bytes} bytes`,
     `  OS limit:         ${check.limit} bytes (Unix-domain-socket sun_path, counting the trailing NUL)`,
-    `  Data directory:   ${dataDir}`,
+    `  Data directory:   ${JSON.stringify(dataDir)}`,
     "",
     "The socket is always <data-dir>/operations-server, so that suffix is fixed.",
     "Choose a --data-dir that is at least " +
@@ -121,11 +121,18 @@ export function socketPathTooLongMessage(
  * unless it fits the platform's `sun_path` limit, returns the actionable refusal
  * message. Returns `null` when the path fits.
  *
- * This is the single gate every command that could bind the socket runs —
- * `flair init` (which accepts `--data-dir` and is the only command whose data
- * dir a user can make long today), and `flair start` / `flair restart` (whose
- * `defaultDataDir()` is always the short `~/.flair/data`, so this is defensive
- * there: a future `--data-dir` or a lengthened default would be caught too).
+ * The data dir is resolved to an ABSOLUTE path BEFORE measuring, because Harper
+ * binds the socket relative to its own cwd (the flair package directory), not
+ * ours — a relative `--data-dir r` would otherwise be measured as the short
+ * `r/operations-server` while Harper binds a much longer path. The refusal
+ * message prints the RESOLVED path and the resolved data dir.
+ *
+ * Callers that run it: `flair init` (which accepts `--data-dir`) and
+ * `flair start` / `flair restart` (defensive — the default data dir is short).
+ * NOT covered here: `flair snapshot create` and the launchd repair path, which
+ * hand Harper a socket path without this check; an over-long data dir cannot
+ * boot in either case, so it is not a live bug.
+ *
  * Pure — it only builds and formats; the caller decides whether to print and
  * exit, so it is unit-testable without `process.exit`.
  */
@@ -133,10 +140,11 @@ export function opsSocketPathRefusal(
   dataDir: string,
   platform: string,
 ): string | null {
-  const socketPath = join(dataDir, "operations-server");
+  const resolvedDataDir = resolve(dataDir);
+  const socketPath = join(resolvedDataDir, OPS_SOCKET_SUFFIX);
   const check = checkSocketPathLength(socketPath, platform);
   if (isSocketPathRefusal(check)) {
-      return socketPathTooLongMessage(socketPath, dataDir, check);
-      }
-   return null;
+    return socketPathTooLongMessage(socketPath, resolvedDataDir, check);
+  }
+  return null;
 }
