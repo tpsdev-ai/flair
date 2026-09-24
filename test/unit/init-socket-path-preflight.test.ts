@@ -19,12 +19,12 @@ import { spawn } from "node:child_process";
 
 const CHILD_DEADLINE_MS = 60_000;
 
-// The OS sun_path cap, NUL-excluded: darwin 103, linux (and any unknown
+// The OS sun_path cap, NUL-excluded: darwin and freebsd 103, linux (and any unknown
 // platform) 107. Inlined here so this behavioural test runs against the current
 // CLI without depending on the not-yet-shipped helper — a red that proves the
 // real bug, not just a missing import.
 const socketPathLimit = (platform: string): number =>
-  platform === "darwin" ? 103 : 107;
+  platform === "darwin" || platform === "freebsd" ? 103 : 107;
 
 let isoHome: string;
 let baseDir: string;
@@ -46,7 +46,7 @@ afterEach(() => {
 });
 
 // A data dir long enough to push `<dataDir>/operations-server` (a 18-byte
-// suffix) well past the platform limit (103 darwin / 107 linux). ~200 bytes is
+// suffix) well past the platform limit (103 darwin/freebsd / 107 linux). ~200 bytes is
 // safely over both, and far inside the OS path-length limit (4096) so the
 // unmodified code can actually create it during the red case. Computed from the
 // current case's `baseDir` (set in beforeEach) so the module never evaluates it

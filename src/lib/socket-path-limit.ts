@@ -12,7 +12,7 @@ import { join } from "node:path";
  *    - macOS (darwin):  `sun_path` is 104 bytes  -> 103 usable
  *    - Linux:          `sun_path` is 108 bytes  -> 107 usable
  *
- * (darwin: <sys/un.h>'s `SUNPATH_MAX`; linux: un(7) / the 108-byte
+ * (darwin and freebsd: <sys/un.h>'s `SUNPATH_MAX`; linux: un(7) / the 108-byte
  * `sa_data` minus the NUL. See also the macOS `listen()  EINVAL` behaviour
  * for a path that overflows the buffer.)
  *
@@ -33,13 +33,14 @@ export const OPS_SOCKET_SUFFIX = "/operations-server";
 
 /**
  * The usable (NUL-excluded) maximum length of a Unix socket path, in BYTES,
- * for a platform. darwin is 103 (104-byte sun_path); every other platform,
- * including any unknown one, takes the Linux limit of 107 (108-byte sun_path).
+ * for a platform. macOS (darwin) and FreeBSD both have a 104-byte sun_path,
+ * so 103 usable; Linux has a 108-byte sun_path, so 107 usable. Any unknown
+ * platform takes the Linux limit of 107.
  * Unknown platforms fall back to 107 because no real platform is looser than
  * Linux's — falling back lower would refuse a path that is actually legal.
  */
 export function socketPathLimit(platform: string): number {
-  return platform === "darwin" ? 103 : 107;
+  return platform === "darwin" || platform === "freebsd" ? 103 : 107;
 }
 
 /**

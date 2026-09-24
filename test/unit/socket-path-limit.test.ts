@@ -13,13 +13,14 @@ import {
  * operator-facing preflight must make BEFORE anything is written to disk.
  *
  * The cap is fixed per OS and INCLUDES the trailing NUL, so the USABLE length
- * is one byte less: darwin sun_path 104 → 103 usable; linux sun_path 108 → 107
+ * is one byte less: darwin and freebsd sun_path 104 → 103 usable; linux sun_path 108 → 107
  * usable. Unknown platforms fall back to the Linux value (107).
  */
 
 describe("socketPathLimit (flair#916 — sun_path, NUL-excluded)", () => {
-  it("darwin is 103 usable bytes; linux is 107", () => {
+  it("darwin and freebsd are 103 usable bytes; linux is 107", () => {
     expect(socketPathLimit("darwin")).toBe(103);
+    expect(socketPathLimit("freebsd")).toBe(103);
     expect(socketPathLimit("linux")).toBe(107);
   });
 
@@ -27,7 +28,6 @@ describe("socketPathLimit (flair#916 — sun_path, NUL-excluded)", () => {
     // A wrong cap is a false refusal, so the conservative fallback must be the
     // one real platforms report — and none are looser than linux.
     expect(socketPathLimit("win32")).toBe(107);
-    expect(socketPathLimit("freebsd")).toBe(107);
     expect(socketPathLimit("")).toBe(107);
     expect(socketPathLimit("some-future-os")).toBe(107);
   });
@@ -70,6 +70,22 @@ describe("checkSocketPathLength (flair#916)", () => {
       expect(over.over).toBe(1);
     }
   });
+
+  it("exactly at the FreeBSD limit is ok; one byte over refuses with correct numbers", () => {
+    const at = checkSocketPathLength("a".repeat(103), "freebsd");
+    expect(at.ok).toBe(true);
+    if (at.ok) {
+      expect(at.bytes).toBe(103);
+      expect(at.limit).toBe(103);
+      }
+    const over = checkSocketPathLength("a".repeat(104), "freebsd");
+    expect(over.ok).toBe(false);
+    if (!over.ok) {
+      expect(over.bytes).toBe(104);
+      expect(over.limit).toBe(103);
+      expect(over.over).toBe(1);
+      }
+    });
 
   it("counts multibyte paths in BYTES, not characters", () => {
     // U+20AC (€) is 3 bytes in UTF-8. 40 of them is 40 chars but 120 bytes —
