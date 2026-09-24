@@ -18,6 +18,312 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.56.0] - 2026-09-24
+
+### Changed
+
+- **Release staging is dispatched on the tag, reserves each version once, and refuses stale release machinery.**
+
+  `release: vX.Y.Z` is now the only version source: `workflow_dispatch` takes no
+  inputs and the run must be on the `refs/tags/vX.Y.Z` ref (a dispatch on `main`
+  fails before anything is packed). Immediately before the first stage request,
+  `stage-publish` writes a durable `release-attempt` deployment marker for the
+  version and refuses if one already exists — so a version that entered staging
+  is burned and the next patch is the only path — while `pack` performs the same
+  check read-only as an early fail-fast. The stage job also refuses to run unless
+  its own workflow file is byte-identical to `origin/main`'s, as defence in depth
+  against a tag that points at stale release machinery; the marker itself can be
+  deactivated and deleted by the same token, so the burn is enforced by the stage
+  job's allowlist and branch protection, not by GitHub.
+
+  (Refs #1671)
+
+- **The release pack set must name every package, the environment check sees both GitHub forms, and every workflow declares explicit permissions.**
+
+  An explicitly empty `--dirs` is a declared set, not an omitted one: it now
+  refuses before any package is packed, naming the members it skipped. The
+  repo-wide check normalises a job's `environment:` to its name, so the
+  `{ name, url }` form is seen as well as the string form. And every workflow
+  under `.github/workflows` now declares a top-level `permissions:` block with
+  the least privilege its steps need — an absent block inherits the repository
+  default, which is not "no write" — with a check that refuses any workflow
+  without one and any job outside the release stage that grants
+  `deployments: write`.
+
+  (Refs #1671)
+
+- **The release packs every publishable package once and stages the exact tarballs, not the source tree.**
+
+  The release workflow now builds in a single `pack` job, packs one tarball per
+  package with `npm pack --ignore-scripts`, and writes a manifest binding each
+  tarball's sha256, the canonical package-set digest and the run identity
+  (repo, tag, commit, run id/attempt, node/npm versions). A separate
+  `stage-publish` job downloads that artifact by id, re-derives the manifest and
+  package-set digests and requires them to agree with both the manifest and
+  pack's outputs, then stages those exact tarballs — re-hashing each file
+  immediately before its own `npm stage publish`, under a throwaway
+  `--userconfig` and never a directory. A failed or unconfirmed publish is
+  reported as INCOMPLETE (APPROVE NOTHING) with the digests and the staged /
+  failed / not-attempted sets, never as "nothing staged". It also enforces that
+  every dependency on a lockstep member is pinned to the exact release version,
+  keeps the tag-commit-on-main ancestry check, and refuses an artifact holding
+  anything but the manifest and the tarballs it lists. Stable versions stage
+  under `staged`; prereleases under `next`. Nothing is live until an operator
+  approves the staged entries on npmjs.com, as before.
+
+  (Refs #1671)
+
+- **`GET /Presence` now requires a verified reader by default; the public roster
+  is an explicit opt-in.** An anonymous caller gets 401, not a redacted roster.
+
+  On an internet-exposed instance the roster was a who-is-working-when feed:
+  names, roles, activity class and last-alive time of every member, to anyone.
+  It is org-visible data, not public data, so the default now requires a valid
+  `TPS-Ed25519` agent signature from a registered agent, or the admin
+  credential. Set `PRESENCE_PUBLIC_ROSTER=true` to restore the previous
+  anonymous, field-allowlisted roster — it publishes your roster to the
+  internet. The allowlist and the `currentTask`/version content gate are
+  unchanged for verified readers.
+
+  > **Heads-up:** an instance that relied on the public roster (for example a
+  > status page) must set `PRESENCE_PUBLIC_ROSTER=true` on the Flair process.
+
+  (Closes #1880)
+
+### Fixed
+
+- **Excerpts of long source memories end on a complete character, not a mangled
+  one.**
+
+  When the reflection feature trims a long source memory down to fit the
+  per-source budget, the cut could fall between the two halves of a single
+  character — any character outside the Basic Multilingual Plane (emoji and
+  similar are stored as two code units) — leaving the excerpt ending in a
+  broken fragment that serializes as a replacement character (U+FFFD) in the
+  distillation prompt. The trim now cuts on whole-character boundaries, so a
+  truncated excerpt always ends on a complete character.
+
+  (Closes #1772)
+
+- **`flair doctor --fix` adoption no longer accepts a foreign listener when the launchd job reports no pid.**
+
+   After a `flair doctor --fix` launchd adopt, the tool proves the adopted job —
+   not the old direct process — owns the port. That ownership check was skipped
+   whenever launchd reported no pid for the adopted label. If the job crashed
+   after load and a different process bound the port before the old process died,
+   adoption passed for the wrong process. A missing launchd pid now fails the
+   proof: without a live pid the job's identity cannot be confirmed, so its
+   listener cannot be attributed to it.
+
+  > **Heads-up:** if a `flair doctor --fix` adopt now reports "the launchd job
+  > reports no pid after load", the adopted service did not come up as expected;
+  > confirm the label is loaded, then re-run `flair doctor --fix`.
+
+  (Closes #1841)
+
+- **`flair-client.mjs` now requires an explicit identity for reads too — `list`,
+  `get` and `search` refuse instead of signing as the shipped `flint` default.**
+
+  Every action the script supports signs its request, so every action now
+  resolves its identity from `FLAIR_AGENT_ID` or `--agent <id>` and exits
+  non-zero naming both when neither is set. #1816 made mutations refuse but
+  left reads on the `flint` default, so an identity-less `search` or `get` could
+  return that principal's non-shared records to a caller who never chose it.
+  A refused read makes no network request at all.
+
+  > **Heads-up:** scripted reads that relied on the default identity now fail
+  > closed — set `FLAIR_AGENT_ID` or pass `--agent <id>` at those call sites.
+
+  (Closes #1851)
+
+- **The post-publish canary no longer needs repo dependencies — its tarball
+  hasher validates versions with a built-in SemVer 2.0.0 regex.**
+
+  `scripts/ci/registry-tarball-sha256.mjs` imported `semver`, but the canary runs
+  on a clean, credential-less runner that installs nothing, so it crashed before
+  hashing a single tarball and refused to promote a partial set. The script is
+  now dependency-free, and a new unit test guards the class: no script the canary
+  runs may import a bare package specifier.
+
+  The canary's sha256 helpers also FAIL CLOSED now (round 2).
+  `registry-tarball-sha256.mjs` and `lockstep-packages.mjs` decided "am I the
+  entry point?" with `resolve()`, which does NOT follow symlinks, so a checkout
+  reached through one made them load, skip `main()`, print nothing and exit 0 — an
+  unmeasurable tarball read as a pass. Both compare REAL paths now. The workflow
+  additionally requires each sha to be 64 hex chars before it may enter
+  `LOCKSTEP_SHAS` (a count of lines is not a count of values), the verdict refuses
+  any binding that is not a 64-hex sha256, and the emitted promote preflight
+  refuses an empty re-hash rather than matching it.
+
+  (Closes #1856)
+
+- **`flair init --data-dir <long>` now refuses with a clear message instead of Harper's bare `listen EINVAL`.**
+
+  A Unix domain socket's path is capped by `sun_path` — 104 bytes on macOS and
+  108 on Linux, both counting the trailing NUL — so the usable length is 103 /
+  107 bytes. The operations API socket lives at `<data-dir>/operations-server`,
+  and a data directory long enough to push that socket past the cap made Harper
+  die on `listen` with a code-level error that named neither the socket nor the
+  limit — at first run, with no working install to compare against.
+
+  init now measures the computed socket path in bytes and refuses **before**
+  touching disk, naming the path, its byte length, the platform limit, and how
+  many bytes shorter the `--data-dir` must be. `flair start` and `flair restart`
+  run the same (defensive) preflight, in case a future flag or a lengthened
+  default ever makes the limit reachable there.
+
+  (Closes #916)
+
+- **flair-client refuses every action without an explicit identity, and the hardcoded `flint` signer is gone from `scripts/repro-resource-busy.mjs`.**
+
+  The signing guard no longer keys on a list of the actions that sign
+  (`SIGNING_ACTIONS`), which failed open: an action added to the dispatch switch
+  but not to that list would have signed with no identity at all. It is now
+  deny-by-default — every action needs `FLAIR_AGENT_ID` or `--agent <id>` unless
+  it is listed in an explicit `UNSIGNED` allow-list, which is empty. A test
+  enumerates every action the dispatcher accepts (derived from the switch) and
+  runs each one, so a new case that is neither refused nor declared unsigned
+  fails the lane. `scripts/repro-resource-busy.mjs` no longer signs as a hardcoded
+  `flint` from one fixed key path: it takes the same explicit identity and shares
+  the client's key resolution and signing (`scripts/lib/flair-signing.mjs`).
+
+  (Refs #1855)
+
+- **Docs now match the admin grant, the config file Flair actually reads, the HTTP bind, and the MCP tool list.**
+
+  `flair principal promote` changes trust tier only (`endorsed`, `corroborated`,
+  `unverified`). Admin is `flair principal add <id> --admin`. `~/.flair/config.yaml`
+  examples list `port`, `opsPort`, `opsBind`, and `httpBind`. The HTTP listener
+  follows `FLAIR_HTTP_BIND`, then `httpBind`, then loopback; on Linux that is
+  resolved on every start, while on macOS the resolved bind is stored in the
+  launchd job and a launchd-initiated restart reuses it without re-reading
+  either. The MCP client page lists the sixteen tools `tools/list` advertises,
+  including skills and `flair_catchup`.
+
+  (Closes #1715, #1766, #1760; Refs #1780)
+
+- **Spoke bring-up, presence, attention help, MCP paths, and federation sync now match the code.**
+  A Harper Fabric hub has no shell: mint the pairing token with `--target` and `--ops-target` on the Fabric ops port ([#840](https://github.com/tpsdev-ai/flair/issues/840)).
+  `GET /Presence` returns `flairVersion` and `harperVersion` as null for unverified readers on purpose, and the `presenceStatus` thresholds are written down ([#932](https://github.com/tpsdev-ai/flair/issues/932)).
+  `flair attention --help` requires a `type:value` vocabulary string ([#995](https://github.com/tpsdev-ai/flair/issues/995)).
+  A local MCP client uses the `npx` stdio adapter; native `/mcp` is the remote OAuth path ([#998](https://github.com/tpsdev-ai/flair/issues/998)).
+  Federation push skips Memory rows whose visibility is exactly `private` ([#1149](https://github.com/tpsdev-ai/flair/issues/1149)).
+
+- **federation pair checks the spoke admin credential before it contacts the hub, so a missing credential no longer burns the pairing token.**
+
+  `flair federation pair` posts to the hub's `FederationPair`, which consumes the
+  one-time pairing token, and the local hub-peer record then needs the SPOKE
+  admin credential to write. On a missing or refused credential the token was
+  already spent, leaving the caller paired on the hub with no local Peer record
+  and only a re-mint available. The credential is now resolved and preflighted
+  before the hub request: with no credential it exits with "Nothing was sent to
+  the hub; the pairing token is still valid", and so does a refused credential
+  (401/403), an unreachable ops API, or a credential that cannot WRITE the Peer
+  table. The preflight uses the ops API's `user_info` and requires a super_user
+  or an explicit `flair.Peer` insert+update grant — a read-only credential can
+  search but would be refused by the upsert itself, by which time the token is
+  gone. A super_user is the supported credential; for any other role the check
+  is at TABLE level only (insert+update on `flair.Peer`, plus the operations
+  allowlist) — attribute-level grants are not visible to the preflight, so a
+  role with table access but restricted attributes still passes here and the
+  consumed-token path reports any later refusal. Endpoints printed in these
+  errors have any userinfo and query string redacted, and no fetch's own error
+  message (which can embed the user-supplied URL) is printed — only its code or
+  name. The DB key fallback uses the same credential sources and ops endpoint
+  as the preflight, and a genuine local Peer write failure after a successful
+  pair still errors, now naming that the token has been consumed and how to
+  mint a new one.
+
+  (Closes #1875)
+
+- **The unit-test lane's home-isolation guard now ends a stuck helper probe on its 10-second bound instead of waiting on it.**
+
+  Before every test run, the lane fingerprints a developer's real client config
+  files to prove a sandboxed test stays inside its throwaway HOME, and resolves
+  that real home through a short helper probe. When the probe stalled - for
+  example a child that ignored the timeout's TERM signal - the guard could sit
+  past its 10-second bound and stall the whole run. The timeout now forces the
+  kill with SIGKILL, which no process can swallow, and the probe no longer leaves
+  its pipes open to a lingering child, so a stuck probe ends on schedule and the
+  run keeps going.
+
+   (Refs #1865)
+
+- **Home resolution follows the platform rule: Windows uses `USERPROFILE`,
+  everywhere else `HOME`.**
+
+  `~/.flair/keys` and the MCP client config writers now resolve the home through
+  ONE shared `resolveHome()` (`src/lib/home.ts`), called at call time. On Windows
+  it prefers `USERPROFILE` — what Node's `os.homedir()` uses — because a
+  POSIX-style shell (Git Bash, MSYS, Cygwin) may set `HOME` to a different path;
+  preferring `HOME` there moved the key dir away from where the keys actually
+  live, so an existing key read as missing. Everywhere else `HOME` stays
+  authoritative, so an in-process HOME redirect is still honoured. macOS and
+  Linux behaviour is unchanged.
+
+  > **Heads-up:** on Windows, when `HOME` and `USERPROFILE` point to different directories (common under Git Bash, MSYS or Cygwin), Flair now reads and writes MCP client configs under `USERPROFILE`, which is what Node's `os.homedir()` returns, instead of `HOME`. Keys do not move — the keystore now resolves its home through the shared `resolveHome()` (`src/keystore.ts`), which on Windows is `USERPROFILE || homedir()` — so existing keys keep working. If an earlier `flair init` wired clients under `HOME`, run `flair doctor --fix` to wire them under `USERPROFILE`.
+
+- **The OAuth consent page escapes every value it renders and validates state and scope.**
+
+- **Every home lookup in `src/` now goes through one resolver, so doctor and the writers agree on where `~` is.**
+
+  Only the keystore and the client-config writers used `resolveHome()`; the rest of
+  `src/` resolved home three other ways — `os.homedir()`, `process.env.HOME ?? homedir()`,
+  and a private copy in `src/lib/uninstall-purge.ts`. `os.homedir()` selects home from a different variable than the writers did — `HOME`
+  on non-Windows, `USERPROFILE` on Windows, both read at call time — so a `HOME` set
+  later in the process, which the writers honoured, was invisible to it: in one process
+  doctor could inspect a different home from the one the writers used.
+  Every lookup now calls `resolveHome()` (an explicit `homeDir` override is kept where a
+  function already took one), and a guard test fails if `src/` calls `homedir()` or reads
+  `process.env.HOME` / `USERPROFILE` outside `src/lib/home.ts`. The `withHome()`
+  override now lives there too: it sets BOTH `HOME` and `USERPROFILE`, so an
+  explicit home is honoured on Windows as well — the three private copies set only
+  `HOME`, which `resolveHome()` ignores on win32, so doctor, the pin refresh and
+  uninstall's unwire() acted on the real profile instead of the caller's home.
+  The allow-list is empty.
+
+  (Closes #1858)
+
+- **The OpenClaw memory plugin now makes every agent act only as itself, and refuses rather than guess.**
+
+  Identity comes only from immutable host context (the tool/hook `ctx.agentId`). A
+  configured `agentId` is an optional allow-list, never a fallback; env- and
+  config-derived identity is gone. A missing or mismatched identity, a missing or
+  unusable per-agent key, or a host version outside the tested set refuses — with zero
+  outgoing requests, and never a Basic, unsigned, or inherited identity. Runtime
+  workspace→Soul sync is removed; the plugin no longer takes the context-engine slot and
+  no longer suppresses the host's native memory section; bootstrap is returned through
+  `before_prompt_build` (never a non-existent `injectContext`); auto-capture is off by
+  default and reads conversation content only through the permission-gated hooks.
+  Registration is gated to the exact tested host versions (2026.8.1, 2026.9.6) and refuses
+  when a gateway serves more than one agent under a single OS user.
+
+- **openclaw-flair no longer mistakes an explicit keyPath for a shared OS user on a multi-agent gateway.**
+
+  With an explicit `keyPath` and a single allowed agent, every other roster agent
+  was resolved against that same key, so the shared-OS-user gate refused a
+  configuration the design sanctions — and reported the wrong reason. Each agent
+  now resolves its OWN key (the explicit `keyPath` applies only to the allowed
+  agent), and the "keyPath needs a single allowed agent" refusal is reported
+  before the readability check. The out-of-set-host and shared-user refusals now
+  also pin services and context engines to zero, so "registers nothing" covers
+  every registration surface.
+
+  (Refs #1751)
+
+- **Signed per-agent `GET /Presence/<id>` reads no longer 401, and the read gate reuses the verdict the auth middleware already established.**
+
+  The verified-reader gate re-ran `verifyAgentRequest()` on every read; on a
+  by-id read the auth middleware has already verified the signature and
+  consumed its nonce, so the second verification read as a replay and denied a
+  legitimate agent. The gate now resolves the verdict the middleware
+  established (`resolveAgentAuth`), so a signed by-id read returns the roster
+  with its gated fields present, while a replayed header is still refused (the
+  shared nonce store is unchanged). The admin-credential read path is unchanged
+  and still redacts `currentTask` / `flairVersion` / `harperVersion`.
+
+  (Refs #1880)
+
 ## [0.55.2] - 2026-09-23
 
 ### Fixed

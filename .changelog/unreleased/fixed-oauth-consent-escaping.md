@@ -1,1 +1,0 @@
-- **The OAuth consent page escapes every value it renders and validates state and scope.**
