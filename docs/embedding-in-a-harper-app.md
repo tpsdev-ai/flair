@@ -272,11 +272,13 @@ flair memory search "deploy schedule" --agent mybot
 Federation, which has no in-process equivalent:
 
 ```bash
-flair federation token --admin-pass <hub-admin-pass> > triple.json
+(umask 077; set -C; flair federation token --admin-pass <hub-admin-pass> > triple.json)
 flair federation pair <hub-url> --token-from ./triple.json
 flair federation sync enable --interval 300
 flair federation status
 ```
+
+`set -C` makes the redirect refuse an existing `triple.json` (and `umask 077` only modes a file it creates); remove an old one first (`rm triple.json`).
 
 `sync enable` landed **after 0.30.0**; on an older install, schedule the one-shot yourself.
 

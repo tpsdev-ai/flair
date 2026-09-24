@@ -214,14 +214,16 @@ Available. Pair a local spoke to a Fabric-hosted hub:
 
 ```bash
 # On any machine (no shell on the hub) — generate a pairing token triple
-FLAIR_ADMIN_PASS=<hub-admin-password> flair federation token \
+(umask 077; set -C; FLAIR_ADMIN_PASS=<hub-admin-password> flair federation token \
   --target https://<cluster>.<org>.harperfabric.com \
-  --ops-target <ops-url> > ./pair-triple.json
+  --ops-target <ops-url> > ./pair-triple.json)
 
 # On the spoke — pair to the Fabric hub
 flair federation pair https://<cluster>.<org>.harperfabric.com \
   --token-from ./pair-triple.json
 ```
+
+`set -C` refuses an existing `./pair-triple.json`; remove an old one first (`rm ./pair-triple.json`).
 
 ### Pairing limitation
 

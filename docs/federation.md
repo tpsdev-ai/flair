@@ -80,8 +80,9 @@ A managed Harper Fabric hub has no shell. Mint the triple from any machine that 
 
 ```bash
 # 1. On any machine (the spoke itself is fine) — no ssh, no scp.
-# umask 077 before the redirect so the one-time password is owner-only.
-(umask 077 && flair federation token \
+# umask 077 sets the mode of a file the redirect CREATES; set -C makes the redirect
+# refuse to overwrite an existing one, so a retry cannot truncate-and-reuse a looser file.
+(umask 077; set -C; flair federation token \
   --target https://<hub>.<org>.harperfabric.com \
   --admin-pass <hub-admin-password> \
   --ttl 60 \

@@ -312,9 +312,9 @@ A verified reader still sees `null` for a version the row never stored. Heartbea
 | Negative (stamp ahead of the server clock) | `active` |
 | Younger than the idle threshold (`PRESENCE_IDLE_THRESHOLD_MS`, default 90s) | `active` |
 | Younger than the offline threshold (`PRESENCE_OFFLINE_THRESHOLD_MS`, default 10 min) | `idle` |
-| At or beyond the offline threshold | `offline` |
+| At or beyond the offline threshold, when the idle threshold is at or below it | `offline` |
 
-The rows are checked in that order and the first match wins. `derivePresenceStatus` (`resources/Presence.ts`) returns `active` while the age is strictly below `PRESENCE_IDLE_THRESHOLD_MS`, even when that age is already at or past `PRESENCE_OFFLINE_THRESHOLD_MS`. The ordering these rows describe is an idle threshold strictly below the offline threshold. An age equal to the offline threshold is `offline`.
+The rows are checked in that order and the first match wins. `derivePresenceStatus` (`resources/Presence.ts`) returns `active` while the age is strictly below `PRESENCE_IDLE_THRESHOLD_MS`, even when that age is already at or past `PRESENCE_OFFLINE_THRESHOLD_MS`. The ordering these rows describe is an idle threshold strictly below the offline threshold. An age equal to the offline threshold is `offline` only when the idle threshold is at or below the offline threshold; when the idle threshold is above it, the `active` row matches first and the status is `active`.
 
 `activityFresh` uses a different stamp: `activityUpdatedAt` when that is a finite number, otherwise `lastHeartbeatAt`. It is true while that stamp is younger than the **offline** threshold (`PRESENCE_OFFLINE_THRESHOLD_MS`, default 10 minutes), including when the stamp is in the future. While it is true, `activity` is the stored label (`coding`, `reviewing`, `planning`, `debugging`, or `idle`). When it is false, `activity` is reported as `idle`, `lastActivity` keeps the stored label, and `currentTask` is null even for a verified reader. `activityAgeMs` is how old that stamp is.
 

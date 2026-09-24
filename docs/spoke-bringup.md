@@ -115,15 +115,17 @@ The command prints one JSON object. Tokens expire after **60 minutes** by defaul
 On the **hub host**, an admin runs:
 
 ```bash
-(umask 077 && flair federation token --admin-pass <hub-admin-pass> > pair-triple.json)
+(umask 077; set -C; flair federation token --admin-pass <hub-admin-pass> > pair-triple.json)
 ```
+
+`umask 077` sets the mode of a file the redirect CREATES; an existing file keeps its mode, so `set -C` (noclobber) makes the redirect refuse to overwrite it. Remove an old `pair-triple.json` first (`rm pair-triple.json`).
 
 #### Harper Fabric hub (no shell)
 
 A Fabric-deployed hub is a Harper component on a managed cluster. There is no host to shell into. Mint the triple from any machine that can reach the hub — for a personal spoke, that machine is the spoke — and name both the data URL and the ops URL:
 
 ```bash
-(umask 077 && flair federation token \
+(umask 077; set -C; flair federation token \
   --target https://<hub>.<org>.harperfabric.com \
   --admin-pass <cluster-admin-pass> \
   --ttl 60 \
