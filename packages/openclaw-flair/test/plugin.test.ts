@@ -1738,7 +1738,8 @@ describe("slice 2 round 5 — one run map, one removal predicate", () => {
 // Three leftovers from round 5, each a place where the code asked a question and
 // did the wrong thing with the answer:
 //   (e) the abort path asks "is there room" without purging first, so a map full
-//       of AGED removable records refuses an abort that must be recorded — and
+//       at cap + overflow — nothing removable at the abort's instant, the aged
+//       records one age-tick later — refuses an abort that must be recorded, and
 //       the run's next callback is then admitted by admission's own purge;
 //   (f) the entity scan sits between the reservation and the `try` that releases
 //       it, so a throw strands `inFlight` above 0 and the record is never
@@ -1749,29 +1750,40 @@ describe("slice 2 round 6 — purge before the room check, no stranded reservati
   const TRIGGER6 = "remember this: the round six abort target is staging";
   const PLAIN6 = "a plain note";
 
-  test("(e) a never-admitted abort in a map full of AGED records is RECORDED, and its callback is dropped with zero writes", async () => {
+  test("(e) a never-admitted abort in a map full at cap + overflow is RECORDED, and its callback is dropped with zero writes", async () => {
     captureBounds.capacityCap = 3;
     captureBounds.abortOverflowCap = 1;
     const plugin = await loadPlugin();
     const api = apiForCapture(plugin);
     const calls = installFetchStub();
     const base = 90_000_000;
+
+    // t0: three never-admitted aborts fill the budget. They are young here.
     captureClock.now = () => base;
-    // Three never-admitted aborts — then AGE them: they are removable now, but
-    // nothing has asked for room since.
     for (let i = 0; i < 3; i++) {
       await api._fire("agent_end", { runId: `aged${i}`, success: false, messages: [] }, { agentId: "A" });
     }
-    expect(captureInternals.runCount()).toBe(3);
-    captureClock.now = () => base + captureBounds.tombstoneMinAgeMs + 1;
-    // One more never-admitted abort fills the overflow above the budget.
+    expect(captureInternals.runCount()).toBe(captureBounds.capacityCap);
+
+    // D — the abort that takes the overflow — arrives one tick BEFORE the three
+    // reach the minimum age. At this instant the map is full at cap + overflow
+    // with NOTHING removable: A-C are a tick short of the age, D is young.
+    captureClock.now = () => base + captureBounds.tombstoneMinAgeMs - 1;
     await api._fire("agent_end", { runId: "young", success: false, messages: [] }, { agentId: "A" });
     expect(captureInternals.recordOf("A", "young")).toBeTruthy();
+    expect(captureInternals.runCount()).toBe(captureBounds.capacityCap + captureBounds.abortOverflowCap);
 
-    // The abort path ASKS FOR ROOM, so it purges the aged records FIRST: there
-    // IS room and the abort IS recorded. Without the purge the overflow reads as
-    // full, the abort records nothing, and the run's next callback is admitted
-    // by admission's own purge — a capture write starting AFTER the abort.
+    // The clock passes A-C's minimum age; D is still young (its age is 2 ms), so
+    // the map is STILL full at cap + overflow. This is the state the next abort
+    // must find room in: full, and full of records that are only just removable.
+    captureClock.now = () => base + captureBounds.tombstoneMinAgeMs + 1;
+    expect(captureInternals.runCount()).toBe(captureBounds.capacityCap + captureBounds.abortOverflowCap);
+
+    // The abort path ASKS FOR ROOM and purges FIRST: A-C qualify now, so the
+    // purge frees three slots, there IS room, and the abort IS recorded. A path
+    // that asks WITHOUT purging reads the full map, records nothing, and the
+    // run's next callback is then admitted by admission's own purge — a capture
+    // write starting AFTER the abort.
     await api._fire("agent_end", { runId: "unknown", success: false, messages: [] }, { agentId: "A" });
     const rec = captureInternals.recordOf("A", "unknown");
     expect(rec).toBeTruthy();
