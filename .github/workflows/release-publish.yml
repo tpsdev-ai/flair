@@ -466,6 +466,11 @@ jobs:
             echo ""
             echo "$PUBLISHED package(s) submitted to npm **staging** with provenance under the **$TAG_LINE** tag. They are **not live at latest** yet."
             echo ""
+            echo "flair tarball sha256 (the canary's expected_sha256):"
+            while IFS=$'\t' read -r name version basename sha; do
+              if [ "$name" = "@tpsdev-ai/flair" ]; then echo "  $sha"; break; fi
+            done < "$LIST"
+            echo ""
             echo "**To release:** open npmjs.com -> Settings -> Staged Packages, review each tarball, and approve with 2FA. Then dispatch the post-publish canary (Actions -> \"Post-publish canary — install + boot a published version\") with this version and the flair tarball's sha256. Only a canary PASS prints the sha256-bound promote command; run that line to move latest. On a canary FAIL, run the emitted npm deprecate line and re-cut the next patch — a staged tag is immutable, so a version is never refreshed in place."
           } >> "$GITHUB_STEP_SUMMARY"
 

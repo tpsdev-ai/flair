@@ -259,8 +259,9 @@ function runBodyProblems(runBody: string): string[] {
     }
   }
   // The staging tag is a variable; it may only ever be given the two allowed values.
-  for (const m of runBody.matchAll(/\btag=([A-Za-z0-9_.-]+)/g)) {
-    if (m[1] !== "staged" && m[1] !== "next") problems.push(`tag must be staged or next, got tag=${m[1]}`);
+  // Quoted values are matched too, so `tag="latest"` cannot slip past.
+  for (const m of runBody.matchAll(/\btag=(["']?)([^"'\s;]*)\1/g)) {
+    if (m[2] !== "staged" && m[2] !== "next") problems.push(`tag must be staged or next, got tag=${m[2]}`);
   }
   return problems;
 }
@@ -399,6 +400,14 @@ describe("the stage job is an allowlisted shape (flair#1671 A1a)", () => {
     steps[steps.length - 1]!.run += "\ngit push origin main\n";
     const { problems } = inspectStageJob(yaml.dump(doc));
     expect(problems.join("\n")).toContain("unexpected git invocation");
+  });
+
+  test("(F5) a QUOTED tag value outside the set goes red", () => {
+    const doc = yaml.load(realWorkflow()) as WorkflowDoc;
+    const steps = doc.jobs!["stage-publish"]!.steps!;
+    steps[steps.length - 1]!.run = steps[steps.length - 1]!.run!.replace("tag=staged", 'tag="latest"');
+    const { problems } = inspectStageJob(yaml.dump(doc));
+    expect(problems.join("\n")).toContain("tag must be staged or next");
   });
 
   test("workflow-level permissions are {} and github-release keeps contents: write", () => {
@@ -705,9 +714,9 @@ describe("stage-publish stages the exact tarballs it re-derives (flair#1671 A1a)
     expect(r.log.filter((l) => l.argv[0] === "stage").length).toBe(0);
   });
 
-  test("(F2) the success summary carries the canary / promote / deprecate operator instructions", () => {
+  test("(F2) the success summary carries the canary / promote / deprecate operator instructions and the flair sha", () => {
     const dir = mkdtempSync(join(SCRATCH, "summary-"));
-    const artifact = buildArtifact(dir, VERSION, FIXTURE_NAMES);
+    const artifact = buildArtifact(dir, VERSION, PACKAGES);
     const r = runStageShell(artifact, dir);
     expect(r.status).toBe(0);
     const summary = readFileSync(join(r.scratch, "summary.md"), "utf8");
@@ -716,6 +725,10 @@ describe("stage-publish stages the exact tarballs it re-derives (flair#1671 A1a)
     expect(summary).toContain("promote command");
     expect(summary).toContain("deprecate");
     expect(summary).toContain("2FA");
+    const flair = artifact.packages.find((p) => p.name === "@tpsdev-ai/flair");
+    expect(flair).toBeTruthy();
+    expect(summary).toContain("flair tarball sha256");
+    expect(summary).toContain(flair!.sha256);
   });
 });
 
