@@ -38,7 +38,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { resolveAgentAuth, verifyAgentRequest, isPrincipalDeactivated, hasCredentialEvidence } from "./agent-auth.js";
+import { resolveAgentAuth, isPrincipalDeactivated } from "./agent-auth.js";
 import { agentRecordIsAdmin } from "./agent-admin.js";
 import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 
@@ -83,32 +83,41 @@ export function publicRosterEnabled(): boolean {
 }
 
 /**
- * Is this reader VERIFIED — a valid TPS-Ed25519 signature from an agent
- * registered on this instance, or the admin credential? (flair#1880)
+/**
+ * Resolve the GET /Presence read verdict from the verdict the AUTH MIDDLEWARE
+ * already established, rather than re-verifying the request here (flair#1880
+ * F2; exactly the collision resources/AttentionQuery.ts documents).
  *
- * Reuses the SAME verification path `includeVerifiedFields` already relies on
- * (#592/#639) — `verifyAgentRequest()`, memoized per request, so calling it
- * here and again in get() is one crypto verify, not two. It is NOT a second
- * verifier.
+ * GET /Presence/<id> is NOT on auth-middleware.ts's short-circuit list (only
+ * the exact "/Presence" collection GET is). The middleware verifies the
+ * TPS-Ed25519 signature and records the nonce in the ONE shared nonce store,
+ * annotating request.tpsAgent but NOT verifyAgentRequest's per-request memo.
+ * Calling verifyAgentRequest() again would re-consume that same nonce, read as
+ * a replay (isNonceReplay) and deny a legitimate agent. resolveAgentAuth()
+ * consults the middleware's tpsAgent/tpsAnonymous annotations FIRST, and only
+ * falls back to a header verify when the middleware never ran (the
+ * short-circuited collection GET) — so it reuses the established verdict
+ * instead of re-running a doomed second signature check. It is the repo's ONE
+ * resolver, not a second verifier.
  *
- * The admin credential (Harper Basic) is a separate, reviewed predicate: Harper
- * authorizes it and injects a super_user, but per flair#610 that identity is
- * trusted ONLY when the request actually carried a credential header
- * (`hasCredentialEvidence`) — an `authorizeLocal`-forged, credential-less
- * loopback `super_user` must NOT count as verified. That is exactly the
- * evidence gate `resolveAgentAuth()` applies before trusting `context.user`.
- *
- * An in-process call (presence-internal.ts) seeds `_flairAgentAuth`, so
- * verifyAgentRequest() resolves it and it reads as verified; a genuine
- * anonymous HTTP request resolves to neither and reads as unverified.
+ *   verifiedReader        — kind !== "anonymous": a signature-verified agent,
+ *                           the admin credential, or a trusted in-process call
+ *                           (kind "internal").
+ *   includeVerifiedFields — the #592/#639 content gate, UNCHANGED: only a
+ *                           request presenting a TPS-Ed25519 SIGNATURE sees
+ *                           currentTask/flairVersion/harperVersion. The admin
+ *                           credential authorizes the read but is not a
+ *                           signature, so it stays redacted. An in-process
+ *                           caller's seeded `_flairAgentAuth` memo counts.
  */
-async function isVerifiedReader(context: any): Promise<boolean> {
-  const request = context?.request ?? context;
-  if (request && (await verifyAgentRequest(request)) !== null) return true;
-  const c = context?.request ?? context;
-  const user = context?.user ?? c?.user;
-  if (hasCredentialEvidence(c) && user?.role?.permission?.super_user === true) return true;
-  return false;
+async function presenceReaderVerdict(ctx: any): Promise<{ verifiedReader: boolean; includeVerifiedFields: boolean }> {
+  const auth = await resolveAgentAuth(ctx);
+  const verifiedReader = auth.kind !== "anonymous";
+  const request = ctx?.request ?? ctx;
+  const header = request?.headers?.get?.("authorization") ?? request?.headers?.asObject?.authorization ?? "";
+  const includeVerifiedFields =
+    verifiedReader && (parseTpsEd25519Header(header) !== null || request?._flairAgentAuth != null);
+  return { verifiedReader, includeVerifiedFields };
 }
 
 // ─── Version stamping (flair#639) ──────────────────────────────────────────────
@@ -366,7 +375,7 @@ export class Presence extends (databases as any).flair.Presence {
   }
 
   /**
-   * GET /Presence — public-safe presence roster.
+   * GET /Presence — verified-reader roster (see presenceReaderVerdict()).
    *
    * Joins Presence records with Agent metadata and derives presenceStatus.
    * Only allowlisted fields are returned (no secrets, no admin data).
@@ -378,26 +387,25 @@ export class Presence extends (databases as any).flair.Presence {
    * array), so gating once here, before the loop, covers every read path with
    * no separate return site to miss.
    *
-   * The gate keys off a valid TPS-Ed25519 SIGNATURE (verifyAgentRequest),
-   * NOT resolveAgentAuth()/allowVerified — and that distinction is the whole
-   * fix. /Presence is a public-passthrough in auth-middleware.ts: the
-   * middleware early-returns WITHOUT annotating tpsAgent/tpsAnonymous, so a
-   * resource-level resolver never sees a gate annotation for this path. Worse,
-   * Harper's `authorizeLocal` (config default true) auto-authorizes any
-   * *credential-less* loopback request as super_user — it injects request.user
-   * ONLY "when there is no Authorization header" (node .../server/http.js). So a
-   * bare, unauthenticated `GET /Presence` from loopback (exactly the anonymous
-   * caller the issue is about, and what the integration test exercises against
-   * a real spawned Harper) arrives with request.user = super_user and NO
-   * signature. resolveAgentAuth() would classify that as `kind:"agent"` (its
-   * super_user branch) and leak currentTask — which it did, against real
-   * Harper, even though mocked unit tests using tpsAgent annotations passed.
-   * A TPS-Ed25519 signature, by contrast, cannot be manufactured by
-   * authorizeLocal (it requires the Authorization header, which suppresses the
-   * super_user injection), so verifyAgentRequest() cleanly separates a real
-   * in-org agent from an anonymous/loopback/Basic-admin caller. Only a valid
-   * agent signature gets currentTask; everything else (anonymous, loopback
-   * super_user, Basic-admin, internal in-process) gets currentTask=null.
+   * The CONTENT gate (#592/#639) keys off whether the request presents a
+   * TPS-Ed25519 SIGNATURE (`includeVerifiedFields`, see presenceReaderVerdict()):
+   * only a signature-verified agent sees currentTask/flairVersion/harperVersion.
+   * An admin credential verifies the READER but is not a signature, so it still
+   * gets those three as null, exactly as before; anonymous/loopback/internal
+   * without that signal likewise.
+   *
+   * The READER decision is resolved from the auth MIDDLEWARE's already-
+   * established verdict via resolveAgentAuth() — NOT by re-verifying the header
+   * here (flair#1880 F2). /Presence is a public-passthrough in
+   * auth-middleware.ts, and GET /Presence/<id> is not: on a by-id read the
+   * middleware has ALREADY verified the signature and consumed its nonce in the
+   * one shared nonce store, so a second verifyAgentRequest() would read as a
+   * replay and deny a legitimate agent. resolveAgentAuth() checks the
+   * middleware's tpsAgent/tpsAnonymous annotations first and only falls back to
+   * a header verify for the short-circuited collection GET. The old
+   * authorizeLocal-forged-super_user vector (#610) stays closed: the middleware
+   * marks a credential-less request tpsAnonymous (checked first), and
+   * resolveAgentAuth never trusts a `context.user` without a credential header.
    * allowRead() is UNCHANGED (still `true`): the read gate lives in get() so it
    * can return 401 (allowRead()=false would return 403 — see that method).
    *
@@ -420,25 +428,16 @@ export class Presence extends (databases as any).flair.Presence {
     // Extract the raw request the same way post() does (getContext().request
     // is populated for GET; fall back to the context itself).
     const ctx = (this as any).getContext?.();
-    const request = ctx?.request ?? ctx;
 
-    // READ GATE (flair#1880). isVerifiedReader() reuses verifyAgentRequest()
-    // (memoized — the SAME verification includeVerifiedFields relies on) plus
-    // the credential-evidence-gated admin path; it writes no second verifier.
-    const verifiedReader = await isVerifiedReader(ctx);
+    // READ GATE (flair#1880) + content gate, both resolved from the verdict the
+    // auth middleware already established — see presenceReaderVerdict().
+    const { verifiedReader, includeVerifiedFields } = await presenceReaderVerdict(ctx);
     if (!verifiedReader && !publicRosterEnabled()) {
       return new Response(
         JSON.stringify({ error: "authentication required" }),
         { status: 401, headers: { "Content-Type": "application/json" } },
       );
     }
-
-    // Content gate for verified readers — UNCHANGED (#592/#639): only a valid
-    // TPS-Ed25519 signature sees currentTask/flairVersion/harperVersion. The
-    // admin credential authorizes a read but is NOT a signature, so it stays a
-    // redacted-content reader exactly as before.
-    const agentAuth = request ? await verifyAgentRequest(request) : null;
-    const includeVerifiedFields = agentAuth !== null;
 
     const now = Date.now();
     const idleThreshold = idleThresholdMs();

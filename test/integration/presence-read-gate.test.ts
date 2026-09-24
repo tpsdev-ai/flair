@@ -136,6 +136,36 @@ describe("Presence read gate — default (PRESENCE_PUBLIC_ROSTER absent)", () =>
     expect(row).toBeDefined();
     expect(row.displayName).toBe(`${agent.id} display`);
   });
+
+  // (f) flair#1880 F2 — an ordinary agent's SIGNED by-id read. GET /Presence/<id>
+  // is NOT short-circuited by the middleware, which verifies the signature and
+  // records the nonce, so the read gate must resolve THAT verdict rather than
+  // re-verifying (which would read as a replay). Red on the PR head (401) and on
+  // origin/main (200 with null gated fields).
+  test("(f) ordinary agent GET /Presence/<id> → 200 with currentTask/flairVersion/harperVersion present", async () => {
+    const path = `/Presence/${agent.id}`;
+    const auth = buildAuthHeader(agent.id, "GET", path, agent.privateKey);
+    const res = await fetch(`${harper.httpURL}${path}`, { headers: { Authorization: auth } });
+    expect(res.status, `signed by-id GET returned ${res.status}`).toBe(200);
+    const roster = await res.json();
+    expect(Array.isArray(roster)).toBe(true);
+    const row = roster.find((r: any) => r.id === agent.id);
+    expect(row).toBeDefined();
+    expect(row.currentTask).toBe("gate test: default verified reader");
+    expect(typeof row.flairVersion).toBe("string");
+    expect(row.flairVersion.length).toBeGreaterThan(0);
+  });
+
+  // (g) replay of the same signed header is still refused (the nonce store the
+  // middleware consumes from is unchanged).
+  test("(g) the same signed by-id header sent twice → the second is refused (nonce replay)", async () => {
+    const path = `/Presence/${agent.id}`;
+    const auth = buildAuthHeader(agent.id, "GET", path, agent.privateKey);
+    const first = await fetch(`${harper.httpURL}${path}`, { headers: { Authorization: auth } });
+    expect(first.status).toBe(200);
+    const second = await fetch(`${harper.httpURL}${path}`, { headers: { Authorization: auth } });
+    expect(second.status).toBe(401);
+  });
 });
 
 // ─── (b): explicitly false ───────────────────────────────────────────────────

@@ -290,7 +290,14 @@ describe("flair#941 — one meaning, one answer, on every surface", () => {
       });
       expect(seedPresence.status, `Presence seed returned ${seedPresence.status}`).toBe(200);
 
-      const res = await fetch(`${harper.httpURL}/Presence`);
+      // flair#1880: GET /Presence requires a verified reader by default, so
+      // this read uses the harness's Harper admin credential (Basic) — a
+      // verified reader. The assertion needs no gated field (it checks the
+      // roster's `role` presentation), so an admin read is sufficient and no
+      // PRESENCE_PUBLIC_ROSTER opt-in is set.
+      const res = await fetch(`${harper.httpURL}/Presence`, {
+        headers: { Authorization: operatorAuth(harper) },
+      });
       expect(res.status).toBe(200);
       const body = await res.text();
 
