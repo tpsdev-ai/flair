@@ -1,5 +1,11 @@
 name: CI
 
+# Explicit least privilege: an absent top-level block inherits the repository
+# default, which is not "no write". Every job here reads the repo; the one job
+# that needs more (sast-codeql → security-events: write) declares it locally.
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]

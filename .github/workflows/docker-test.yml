@@ -5,6 +5,12 @@
 # is enabled in repo Settings → Actions → General to prevent abuse from fork PRs.
 name: Docker From-Scratch Test
 
+# Explicit least privilege: an absent top-level block inherits the repository
+# default, which is not "no write". This lane only reads the repo + builds
+# images locally, so `contents: read` is the whole grant.
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]

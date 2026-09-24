@@ -32,6 +32,11 @@
 # accounts for.
 name: Federation Mixed-Version Compat
 
+# Explicit least privilege: reads the repo and installs published packages from
+# the public npm registry; nothing writes to GitHub.
+permissions:
+  contents: read
+
 on:
   schedule:
     # Nightly, independent of any PR activity — catches drift between

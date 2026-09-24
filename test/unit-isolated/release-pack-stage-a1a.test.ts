@@ -325,9 +325,22 @@ interface StageStep {
   with?: Record<string, unknown>;
   id?: string;
 }
+
+/**
+ * The `name` of a job's `environment:` value. GitHub accepts EITHER a string
+ * (`environment: release`) OR the object form (`environment: { name: release,
+ * url: ... }`); a string-only comparison is blind to the second form (F2).
+ */
+function environmentName(env: unknown): string | undefined {
+  if (typeof env === "string") return env;
+  if (env && typeof env === "object" && typeof (env as { name?: unknown }).name === "string") {
+    return (env as { name: string }).name;
+  }
+  return undefined;
+}
 interface WorkflowDoc {
   permissions?: unknown;
-  jobs?: Record<string, { permissions?: Record<string, string>; environment?: string; steps?: StageStep[] }>;
+  jobs?: Record<string, { permissions?: Record<string, string>; environment?: unknown; steps?: StageStep[] }>;
 }
 
 /** The full stage-job contract. Returns human-readable problems ([] is good). */
@@ -350,7 +363,7 @@ export function inspectStageJob(text: string): { problems: string[] } {
   if (JSON.stringify(permPairs) !== JSON.stringify(want)) {
     problems.push(`stage-publish permissions must be exactly contents: read + deployments: write + id-token: write, got ${JSON.stringify(perms)}`);
   }
-  if (stage.environment !== "release") problems.push("stage-publish must keep environment: release (OIDC scoping)");
+  if (environmentName(stage.environment) !== "release") problems.push("stage-publish must keep environment: release (OIDC scoping)");
 
   const packPerms = doc.jobs?.pack?.permissions ?? {};
   if (packPerms.contents !== "read" || packPerms.deployments !== "read" || Object.keys(packPerms).length !== 2) {
@@ -466,8 +479,16 @@ export function inspectRepoWide(entries: WorkflowEntry[]): { problems: string[] 
     }
     if (!doc || typeof doc !== "object") continue;
     const wfPerm = doc.permissions as unknown;
+    // F3: an ABSENT top-level block is not "no write" — GitHub falls back to the
+    // repository default, which this proof cannot see. Require an explicit,
+    // least-privilege mapping so the repository default is irrelevant here.
+    if (wfPerm === undefined || wfPerm === null) {
+      problems.push(`${path}: no top-level permissions: block (an absent block inherits the repository default)`);
+    } else if (typeof wfPerm !== "object") {
+      problems.push(`${path}: top-level permissions must be an explicit least-privilege mapping, got ${JSON.stringify(wfPerm)}`);
+    }
     for (const [jobName, job] of Object.entries(doc.jobs ?? {})) {
-      const j = job as { permissions?: unknown; environment?: string };
+      const j = job as { permissions?: unknown; environment?: unknown };
       // A job-level block OVERRIDES the workflow-level one (including `{}`).
       const effective = j.permissions !== undefined ? j.permissions : wfPerm;
       const grantsDeploymentsWrite =
@@ -479,9 +500,10 @@ export function inspectRepoWide(entries: WorkflowEntry[]): { problems: string[] 
           problems.push(`${path}: job "${jobName}" grants deployments: write (only release-publish.yml stage-publish may)`);
         }
       }
-      if (j.environment === "release" || j.environment === "release-attempt") {
+      const env = environmentName(j.environment);
+      if (env === "release" || env === "release-attempt") {
         if (path !== RELEASE_WORKFLOW_REL) {
-          problems.push(`${path}: job "${jobName}" declares environment "${j.environment}" (only release-publish.yml may)`);
+          problems.push(`${path}: job "${jobName}" declares environment "${env}" (only release-publish.yml may)`);
         }
       }
     }
@@ -1100,6 +1122,19 @@ describe("the pack script enforces the exact-pin invariant and the tarball set",
     expect(r.packCalls).toBe(0);
   });
 
+  test("(0b) an explicitly EMPTY --dirs list is a declared set, refused with ZERO pack invocations", () => {
+    // An omitted --dirs means "use the derived set"; an --dirs present with zero
+    // entries is a DECLARED set that names no members — the opposite of the
+    // derived set it must match. It must refuse before any pack, naming the
+    // missing members, not silently substitute the canonical set.
+    const fixture = makePackFixture({ version: "1.2.3", packages: { a: {}, b: {} } });
+    const out = mkdtempSync(join(SCRATCH, "out-"));
+    const r = runPackScript(fixture, out, []);
+    expect(r.status).not.toBe(0);
+    expect(`${r.stdout}${r.stderr}`).toContain("missing");
+    expect(r.packCalls).toBe(0);
+  });
+
   test("(d) packing a package twice (a duplicated directory) fails the pack", () => {
     const fixture = makePackFixture({ version: "1.2.3", packages: { a: {}, b: {} } });
     const out = mkdtempSync(join(SCRATCH, "out-"));
@@ -1326,9 +1361,41 @@ describe("A1b — dispatch, recency and the reservation marker", () => {
     expect(inspectRepoWide(entries).problems.join("\n")).toContain("evil.yml");
   });
 
-  test("(i) a second workflow declaring environment release-attempt goes red", () => {
-    const entries = realWorkflows().concat([{ path: ".github/workflows/evil.yml", text: yaml.dump({ jobs: { x: { environment: "release-attempt", steps: [] } } }) }]);
-    expect(inspectRepoWide(entries).problems.join("\n")).toContain("release-attempt");
+  test("(F2) a second WORKFLOW declaring the release environments goes red — string AND object form, for BOTH names", () => {
+    const combos: Array<{ label: string; environment: unknown }> = [
+      { label: "release (string)", environment: "release" },
+      { label: "release-attempt (string)", environment: "release-attempt" },
+      { label: "release (object)", environment: { name: "release" } },
+      { label: "release-attempt (object)", environment: { name: "release-attempt", url: "https://example.invalid/" } },
+    ];
+    for (const c of combos) {
+      const entries = realWorkflows().concat([
+        {
+          path: ".github/workflows/evil.yml",
+          text: yaml.dump({ permissions: { contents: "read" }, jobs: { x: { environment: c.environment, steps: [] } } }),
+        },
+      ]);
+      const problems = inspectRepoWide(entries).problems.join("\n");
+      expect(problems, `mutant: ${c.label}`).toContain("declares environment");
+    }
+  });
+
+  test("(F3) a workflow with NO top-level permissions: block goes red", () => {
+    const entries = realWorkflows();
+    const target = entries.find((e) => e.path === ".github/workflows/docker-test.yml")!;
+    const doc = yaml.load(target.text) as any;
+    delete doc.permissions; // the pre-fix shape: no top-level block
+    const patched = entries.map((e) => (e.path === target.path ? { path: e.path, text: yaml.dump(doc) } : e));
+    expect(inspectRepoWide(patched).problems.join("\n")).toContain("no top-level permissions");
+  });
+
+  test("(F3) a job in ANOTHER workflow granting deployments: write goes red", () => {
+    const entries = realWorkflows();
+    const target = entries.find((e) => e.path === ".github/workflows/test.yml")!;
+    const doc = yaml.load(target.text) as any;
+    doc.jobs["test-unit"].permissions = { contents: "read", deployments: "write" };
+    const patched = entries.map((e) => (e.path === target.path ? { path: e.path, text: yaml.dump(doc) } : e));
+    expect(inspectRepoWide(patched).problems.join("\n")).toContain("grants deployments: write");
   });
 
   test("(g) a DELETE /deployments line in the stage shell goes red", () => {

@@ -125,22 +125,19 @@ export function exactPinViolations(manifests, version, members) {
 /**
  * Resolve the ordered pack list. When `dirs` is supplied it is the workflow's
  * declared publish set and must name exactly the derived `lockstepPackages()`
- * set — no missing, extra or duplicated directory (a package packed twice).
- * Without `dirs`, the derived set is used.
- */
-/**
- * Resolve the ordered pack list. When `dirs` is supplied it is the workflow's
- * declared publish set and must name exactly the derived `lockstepPackages()`
  * set: a missing, extra or duplicated directory (a package packed twice) is
  * refused HERE — before any `npm pack` runs — as well as by the post-pack set
- * check in `packAll`. Without `dirs`, the derived set is used.
+ * check in `packAll`. An explicitly EMPTY `dirs` (a declared set of zero
+ * members) is NOT the same as an omitted one: it names none of the derived
+ * members and is refused, naming them. Without `dirs` (`null`/`undefined`),
+ * the derived set is used.
  */
 export function resolvePackOrder(root, dirs) {
   const manifests = publishableManifests(root);
   const byDir = new Map(manifests.map((m) => [m.dir, m.name]));
   const canonical = lockstepPackages(root);
 
-  if (!dirs || dirs.length === 0) {
+  if (dirs == null) {
     const byName = new Map(manifests.map((m) => [m.name, m.dir]));
     return canonical.map((n) => byName.get(n));
   }
@@ -280,13 +277,16 @@ export function packAll({ root, out, version, dirs }) {
 }
 
 export function parseArgs(argv) {
-  const out = { root: ROOT, out: null, version: null, dirs: [] };
+  const out = { root: ROOT, out: null, version: null, dirs: null };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--root") out.root = argv[++i];
     else if (arg === "--out") out.out = argv[++i];
     else if (arg === "--version") out.version = argv[++i];
     else if (arg === "--dirs") {
+      // `--dirs` present with zero entries is a DECLARED, empty set ([]) — not
+      // an omitted one (null). resolvePackOrder treats those differently.
+      if (out.dirs === null) out.dirs = [];
       while (i + 1 < argv.length && !argv[i + 1].startsWith("--")) out.dirs.push(argv[++i]);
     } else throw new PackError(`unknown argument: ${arg}`);
   }
