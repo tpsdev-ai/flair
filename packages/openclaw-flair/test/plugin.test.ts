@@ -1257,9 +1257,12 @@ describe("slice 2 round 2 — tombstone, bounds and failed primary writes", () =
     expect(captureInternals.tombstoneCount()).toBe(3);
     const llmOut = api._handler("llm_output");
     for (let i = 0; i < 6; i++) {
+      // A key per agent, so `clientFor` resolves and the no-runId gate actually
+      // runs `logOnce` (without it `captureGate` is never reached).
+      writeKey(`agent${i}`);
       await llmOut({ assistantTexts: ["plain note"] }, { agentId: `agent${i}` });
     }
-    expect(captureInternals.logOnceCount()).toBeLessThanOrEqual(2);
+    expect(captureInternals.logOnceCount()).toBe(2);
   });
 
   test("F2: the sweep timer is unref'd and cleared on gateway_stop", async () => {
