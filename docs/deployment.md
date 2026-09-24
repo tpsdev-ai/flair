@@ -142,7 +142,7 @@ On `flair start`, `flair restart`, and `flair upgrade` the HTTP bind host is res
 2. a **top-level** `httpBind:` key in `~/.flair/config.yaml`
 3. `127.0.0.1`
 
-`flair init --http-bind <host>` is how that `httpBind` key gets written. During `init` the flag wins over `FLAIR_HTTP_BIND`, and the host that won is persisted. A later start still follows the list above, so an env var set on the service overrides the file.
+`flair init --http-bind <host>` is how that `httpBind` key gets written. During `init` the flag wins over `FLAIR_HTTP_BIND`, and the host that won is persisted. On Linux the CLI starts Harper directly and resolves the bind on every start, so a later start follows the list above and an env var in the service's environment overrides the file. On macOS the resolved bind is stored in the launchd job instead of being re-read at each start: a restart started by launchd itself — a reboot, a crash, KeepAlive — reuses that stored value and does not re-read `FLAIR_HTTP_BIND` or `config.yaml`, so changing either has no effect on such a restart — the stored job has to be rewritten.
 
 **Only hosts that include IPv4 loopback are accepted** — `127.0.0.1` itself, or a wildcard (`0.0.0.0` / `::`). Every credentialed self-call Flair makes hardcodes `127.0.0.1`. A bind that excludes that address is refused: those calls would point at a dead port while every bind check still passed. A specific LAN address is not accepted. Loopback is the default so a single-host install does not expose the HTTP surface, including unauthenticated `/Health`, on every interface.
 
