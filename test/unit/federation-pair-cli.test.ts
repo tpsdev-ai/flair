@@ -12,13 +12,14 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
-import { writeFileSync, unlinkSync, existsSync, readFileSync as origReadFileSync } from "node:fs";
+import { writeFileSync, unlinkSync, existsSync, readFileSync as origReadFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 
 // Import the function under test
 import { parseTokenFromFile, program } from "../../src/cli.js";
+import { keystore } from "../../src/keystore.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -430,5 +431,170 @@ describe("federation pair — password safety", () => {
     expect(combined).not.toContain(triple.password);
 
     unlinkSync(filePath);
+  });
+});
+
+// ─── pair: the spoke credential is checked BEFORE the hub burns the token ───────
+//
+// flair#1875. `flair federation pair` POSTs ${hub}/FederationPair, which consumes
+// the hub's one-time pairing token. The local Peer upsert needs the SPOKE admin
+// credential. On main the credential was only resolved AFTER the hub request, so a
+// missing/refused credential left the caller paired on the hub with no local peer
+// record and a dead token. These tests drive the real pair action through the
+// program with a scripted fetch, and assert the ordering.
+//
+// The stub answers the identity GET (`/FederationInstance`, a LOCAL call) itself —
+// it is not one of the "requests" under test — and records every other call.
+
+const INSTANCE_ID = "spoke-pair-1875";
+const INSTANCE_PUBLIC_KEY = "spoke-public-key-1875";
+const HUB_URL = "http://hub.example.invalid:9927";
+const OPS_URL = "http://127.0.0.1:19999";
+
+interface RecordedCall { url: string; method: string; body: any }
+
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+}
+
+describe("federation pair — spoke credential checked before the hub (flair#1875)", () => {
+  let origFetch: typeof globalThis.fetch;
+  let origHome: string | undefined;
+  let origToken: string | undefined;
+  let origAdminPass: string | undefined;
+  let origHdb: string | undefined;
+  let home: string;
+  let calls: RecordedCall[];
+  let responder: (call: RecordedCall) => Response;
+  let tokenFile: string;
+
+  function installFetch(): void {
+    calls = [];
+    globalThis.fetch = (async (url: any, opts: any) => {
+      const u = String(url);
+      let body: any;
+      try { body = opts?.body ? JSON.parse(String(opts.body)) : undefined; } catch { body = undefined; }
+      // The local identity GET is answered here and is NOT recorded: it runs on
+      // every pair invocation and predates the credential check.
+      if (u.endsWith("/FederationInstance")) {
+        return jsonResponse(200, { id: INSTANCE_ID, role: "spoke", publicKey: INSTANCE_PUBLIC_KEY });
+      }
+      const call: RecordedCall = { url: u, method: String(opts?.method ?? "GET"), body };
+      calls.push(call);
+      return responder(call);
+    }) as unknown as typeof fetch;
+  }
+
+  async function runPair(extraArgs: string[]): Promise<{ exit: string | null; stderr: string[] }> {
+    const stderr: string[] = [];
+    const origErr = console.error;
+    const origLog = console.log;
+    console.error = (...a: any[]) => { stderr.push(a.map((x) => String(x)).join(" ")); };
+    console.log = () => {};
+    const origExit = process.exit;
+    let exitMsg: string | null = null;
+    process.exit = ((code?: number) => {
+      exitMsg = `process.exit(${code ?? 0})`;
+      throw new Error(exitMsg);
+    }) as typeof process.exit;
+    try {
+      await program.parseAsync([
+        "node", "flair", "federation", "pair", HUB_URL,
+        "--token-from", tokenFile, "--ops-target", OPS_URL, ...extraArgs,
+      ]);
+    } catch (e: any) {
+      if (!String(e?.message ?? "").includes("process.exit")) throw e;
+    } finally {
+      process.exit = origExit;
+      console.error = origErr;
+      console.log = origLog;
+    }
+    return { exit: exitMsg, stderr };
+  }
+
+  beforeEach(() => {
+    origFetch = globalThis.fetch;
+    origHome = process.env.HOME;
+    origToken = process.env.FLAIR_TOKEN;
+    origAdminPass = process.env.FLAIR_ADMIN_PASS;
+    origHdb = process.env.HDB_ADMIN_PASSWORD;
+    // A fresh HOME so the keystore never touches a real ~/.flair/keys.
+    home = mkdtempSync(join(tmpdir(), "flair-1875-"));
+    process.env.HOME = home;
+    // A bearer token satisfies the LOCAL identity GET's auth floor without being
+    // one of the three spoke-admin credential sources under test.
+    process.env.FLAIR_TOKEN = "test-bearer-1875";
+    delete process.env.FLAIR_ADMIN_PASS;
+    delete process.env.HDB_ADMIN_PASSWORD;
+    // Seed the keystore so loadInstanceSecretKey returns WITHOUT an ops fetch,
+    // keeping the call list to the requests under test.
+    keystore.setPrivateKeySeed(INSTANCE_ID, randomBytes(32));
+    installFetch();
+    responder = () => jsonResponse(200, {});
+    tokenFile = writeTripleFile(buildTriple());
+  });
+
+  afterEach(() => {
+    globalThis.fetch = origFetch;
+    if (origHome === undefined) delete process.env.HOME; else process.env.HOME = origHome;
+    if (origToken === undefined) delete process.env.FLAIR_TOKEN; else process.env.FLAIR_TOKEN = origToken;
+    if (origAdminPass === undefined) delete process.env.FLAIR_ADMIN_PASS; else process.env.FLAIR_ADMIN_PASS = origAdminPass;
+    if (origHdb === undefined) delete process.env.HDB_ADMIN_PASSWORD; else process.env.HDB_ADMIN_PASSWORD = origHdb;
+    if (existsSync(tokenFile)) unlinkSync(tokenFile);
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("(a) no spoke credential anywhere → exit 1, 'Nothing was sent', ZERO recorded calls", async () => {
+    const { exit, stderr } = await runPair([]);
+    expect(exit).toBe("process.exit(1)");
+    const text = stderr.join("\n");
+    expect(text).toContain("Nothing was sent; the pairing token is still valid");
+    expect(text).toContain("refusing to contact the hub");
+    // The hub/ops were never contacted.
+    expect(calls).toEqual([]);
+  });
+
+  test("(b) a credential refused by the ops preflight (401) → exit 1, ops only, never the hub", async () => {
+    responder = () => jsonResponse(401, { error: "unauthorized" });
+    const { exit, stderr } = await runPair(["--admin-pass", "wrong-pass"]);
+    expect(exit).toBe("process.exit(1)");
+    const text = stderr.join("\n");
+    expect(text).toContain("refused by the local ops API (401)");
+    expect(text).toContain("nothing was sent to the hub");
+    expect(calls.length).toBe(1);
+    expect(calls[0]!.url.startsWith(OPS_URL)).toBe(true);
+    expect(calls.some((c) => c.url.includes("/FederationPair"))).toBe(false);
+  });
+
+  test("(c) a credential accepted → ops preflight, hub FederationPair, ops Peer upsert, in that order; exit 0", async () => {
+    responder = (call) => {
+      if (call.url.includes("/FederationPair")) {
+        return jsonResponse(200, { instance: { id: "hub-peer", publicKey: "hub-public-key-1875" } });
+      }
+      return jsonResponse(200, []);
+    };
+    const { exit } = await runPair(["--admin-pass", "right-pass"]);
+    expect(exit).toBeNull();
+    expect(calls.length).toBe(3);
+    expect(calls[0]!.url.startsWith(OPS_URL)).toBe(true);
+    expect(calls[0]!.body?.operation).toBe("search_by_value");
+    expect(calls[1]!.url.includes("/FederationPair")).toBe(true);
+    expect(calls[2]!.url.startsWith(OPS_URL)).toBe(true);
+    expect(calls[2]!.body?.operation).toBe("upsert");
+  });
+
+  test("(d) a Peer upsert 500 after a hub 200 → exit 1, and the message names the consumed token", async () => {
+    responder = (call) => {
+      if (call.url.includes("/FederationPair")) {
+        return jsonResponse(200, { instance: { id: "hub-peer", publicKey: "hub-public-key-1875" } });
+      }
+      if (call.body?.operation === "upsert") return jsonResponse(500, { error: "boom" });
+      return jsonResponse(200, []);
+    };
+    const { exit, stderr } = await runPair(["--admin-pass", "right-pass"]);
+    expect(exit).toBe("process.exit(1)");
+    const text = stderr.join("\n");
+    expect(text).toContain("writing the local hub-peer record failed (500");
+    expect(text).toContain("The pairing token has been consumed");
   });
 });
