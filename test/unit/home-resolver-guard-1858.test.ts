@@ -11,9 +11,11 @@
  * This test walks every `src/**\/*.ts` with the TypeScript parser (so comments
  * and strings do not count) and flags:
  *   - a call to `homedir(...)` (with or without the `os.` qualifier); and
- *   - a READ of `process.env.HOME` / `process.env.USERPROFILE`
- * outside `src/lib/home.ts`. An assignment TARGET (`process.env.HOME = x`) or a
- * `delete` is not a lookup and is not flagged.
+ *   - a READ of `process.env.HOME` / `process.env.USERPROFILE`, in either the
+ *     property (`process.env.HOME`) or element (`process.env["HOME"]`) spelling,
+ * outside `src/lib/home.ts`. Only a plain-assignment TARGET
+ * (`process.env.HOME = x`) or a `delete` is not a lookup and is not flagged;
+ * `??`, `||`, `&&` and comparisons still READ the variable on the left.
  *
  * A hit is allowed only if its FILE is on the ALLOW list below, each with a
  * reason. The list is a ratchet: it names the sites that are genuinely not
@@ -61,15 +63,40 @@ function scan(file: string, text: string): Hit[] {
   const hits: Hit[] = [];
   const at = (node: ts.Node): number => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
 
+  /**
+   * `process.env.HOME` / `process.env.USERPROFILE` and their element-access
+   * spellings, `process.env["HOME"]` / `process.env["USERPROFILE"]` — all four
+   * read the same two variables (T3).
+   */
+  const isProcessEnvName = (node: ts.Node): boolean => {
+    if (ts.isPropertyAccessExpression(node)) {
+      return node.name.text === "HOME" || node.name.text === "USERPROFILE";
+    }
+    if (ts.isElementAccessExpression(node)) {
+      const arg = node.argumentExpression;
+      return ts.isStringLiteral(arg) && (arg.text === "HOME" || arg.text === "USERPROFILE");
+    }
+    return false;
+  };
+
   const isProcessEnvRead = (node: ts.Node, parent: ts.Node | undefined): boolean => {
-    if (!ts.isPropertyAccessExpression(node)) return false;
-    if (node.name.text !== "HOME" && node.name.text !== "USERPROFILE") return false;
-    const env = node.expression;
+    if (!isProcessEnvName(node)) return false;
+    const env = (node as ts.PropertyAccessExpression | ts.ElementAccessExpression).expression;
     if (!ts.isPropertyAccessExpression(env) || env.name.text !== "env") return false;
     if (!ts.isIdentifier(env.expression) || env.expression.text !== "process") return false;
-    // An assignment target or a delete is a WRITE/harness, not a home lookup.
-    if (parent && ts.isBinaryExpression(parent) && parent.left === node) return false;
+    // A `delete` is a WRITE/harness, not a home lookup — and so is the target of a
+    // PLAIN assignment (`process.env.HOME = x`). Only the left side of a plain `=`
+    // is a write target: `process.env.HOME ?? x`, `... || x`, `... && x` and
+    // comparisons (`... === x`) all READ the variable on the left (T4).
     if (parent && ts.isDeleteExpression(parent)) return false;
+    if (
+      parent &&
+      ts.isBinaryExpression(parent) &&
+      parent.left === node &&
+      parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
+    ) {
+      return false;
+    }
     return true;
   };
 
@@ -91,6 +118,14 @@ function scan(file: string, text: string): Hit[] {
   return hits;
 }
 
+/**
+ * Scan a source string with the SAME scanner the whole-tree test uses, so a
+ * positive control exercises the real logic rather than a copy of it.
+ */
+function scanSource(text: string): Hit[] {
+  return scan("snippet.ts", text);
+}
+
 describe("home resolver guard — src/ resolves home only via src/lib/home.ts (flair#1858)", () => {
   const files = tsFiles(SRC_DIR).map((abs) => relative(REPO, abs));
 
@@ -105,6 +140,20 @@ describe("home resolver guard — src/ resolves home only via src/lib/home.ts (f
       "os.homedir()",
       "process.env.HOME/USERPROFILE read",
     ].sort());
+  });
+
+  it("reports every read spelling and still allows a plain assignment (T3/T4 controls)", () => {
+    // Four READ forms the scanner must report, then one WRITE it must not.
+    const source = [
+      'process.env["HOME"];',
+      'process.env["USERPROFILE"];',
+      "process.env.HOME ?? x;",
+      "process.env.HOME || x;",
+      "process.env.HOME = x;",
+    ].join("\n");
+    const found = scanSource(source);
+    expect(found.map((h) => h.line)).toEqual([1, 2, 3, 4]);
+    expect(found.every((h) => h.kind === "process.env.HOME/USERPROFILE read")).toBe(true);
   });
 
   it("every home lookup in src/ is routed through src/lib/home.ts or allow-listed", () => {
