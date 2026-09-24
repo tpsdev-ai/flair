@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, readdirSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -23,6 +23,15 @@ const CHILD_DEADLINE_MS = 60_000;
 
 /** Absolute path to the CLI, so the child can run from any cwd. */
 const CLI_PATH = resolve(import.meta.dir, "..", "..", "src", "cli.ts");
+
+function stripComments(s: string): string {
+  return s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+}
+
+// Source-level seam (the repo uses the same shape in mqtt-disable-complete):
+// the spawn env cannot be observed without starting Harper, and init is spawned
+// as a real CLI child here, so the pass-through is asserted from the source.
+const initSrc = stripComments(readFileSync(join(import.meta.dir, "..", "..", "src", "commands", "init.ts"), "utf8"));
 
 let isoHome: string;
 let baseDir: string;
@@ -163,5 +172,23 @@ describe("flair#916 F2 — the refusal cannot be made to forge log lines", () =>
     expect(msg).toContain(JSON.stringify(evilSocket));
     expect(msg.split("\n").length).toBe(10);
     expect(msg.split("\n").some((l) => l.startsWith("FORGED"))).toBe(false);
+  });
+});
+
+describe("flair#916 F1 (round 4) — init resolves --data-dir once and uses the resolved value", () => {
+  it("resolves opts.dataDir to an absolute path at the top of local init", () => {
+    expect(initSrc).toMatch(/const dataDir: string = opts\.dataDir \? resolve\(opts\.dataDir\) : defaultDataDir\(\);/);
+  });
+
+  it("does NOT pass the raw argument (no `opts.dataDir ?? defaultDataDir()`)", () => {
+    expect(initSrc).not.toMatch(/opts\.dataDir \?\? defaultDataDir\(\)/);
+  });
+
+  it("the Harper spawn payload and the written config use the resolved dataDir", () => {
+    expect(initSrc).toMatch(/ROOTPATH: dataDir/);
+    expect(initSrc).toMatch(/rootPath: dataDir/);
+    // …and never the raw argument.
+    expect(initSrc).not.toMatch(/ROOTPATH: opts\.dataDir/);
+    expect(initSrc).not.toMatch(/rootPath: opts\.dataDir/);
   });
 });

@@ -458,7 +458,13 @@ program
 
     // ── Local init (full one-command setup) ──
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
-    const dataDir: string = opts.dataDir ?? defaultDataDir();
+    // Resolve ONCE, here: the operator means "relative to my shell's cwd", but
+    // Harper is spawned with cwd = the flair package directory, so a raw
+    // relative `--data-dir r` would make Harper bind
+    // <flairPackageDir>/r/operations-server — a different path from the one the
+    // preflight measured. Every downstream use (preflight, config/plist,
+    // ROOTPATH / HARPER_SET_CONFIG, messages) takes this resolved value.
+    const dataDir: string = opts.dataDir ? resolve(opts.dataDir) : defaultDataDir();
 
     // flair#916: the Harper operations API is a Unix domain socket at
     // `<data-dir>/operations-server`, and Unix socket paths are capped by
