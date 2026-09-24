@@ -314,7 +314,7 @@ flair federation pair https://fabric-node.example.com:19926/<instance> \
 | Install | `npm install -g @tpsdev-ai/flair` |
 | Init spoke | `flair init --agent-id <id> --data-dir /data/flair --skip-soul` |
 | Check status | `flair status` / `flair federation status` |
-| Hub: mint token | On the hub host: `flair federation token --admin-pass <pass> > triple.json`. Harper Fabric hub (no shell): §5a `--target` + `--ops-target` |
+| Hub: mint token | On the hub host: `(umask 077; set -C; flair federation token --admin-pass <pass> > triple.json)`. Harper Fabric hub (no shell): §5a `--target` + `--ops-target` |
 | Spoke: pair | `flair federation pair <hub-url> --token-from ./triple.json --admin-pass <pass>` |
 | Spoke: sync | `flair federation sync --admin-pass <pass>` |
 | Spoke: verify | `flair federation verify --admin-pass <pass>` then `flair federation reachability` |
