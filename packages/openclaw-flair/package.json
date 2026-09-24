@@ -43,15 +43,18 @@
     "runtimeExtensions": [
       "./dist/index.js"
     ],
+    "install": {
+      "minHostVersion": ">=2026.8.1"
+    },
     "compat": {
-      "pluginApi": ">=2026.5.7"
+      "pluginApi": ">=2026.8.1"
     }
   },
   "publishConfig": {
     "access": "public"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.3.7"
+    "openclaw": ">=2026.8.1"
   },
   "engines": {
     "node": ">=22"
