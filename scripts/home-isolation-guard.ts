@@ -71,6 +71,10 @@ export function realHomeDir(): string {
     out = execFileSync("node", ["-p", "require('node:os').userInfo().homedir"], {
       encoding: "utf8",
       env,
+        // A hung `node` would hang the whole unit lane. Bound the probe so it
+        // throws the same fail-closed "cannot resolve" error instead — never
+        // fall back to the in-process value (flair#1865).
+      timeout: 10_000,
     }).trim();
   } catch (err) {
     throw new Error(

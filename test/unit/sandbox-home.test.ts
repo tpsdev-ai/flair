@@ -9,7 +9,7 @@ import { describe, expect, it, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   CLAUDE_JSON_SUBTREE,
   REAL_CLIENT_CONFIGS,
@@ -165,4 +165,93 @@ describe("realHomeDir ignores a swapped HOME (flair#1854 follow-up)", () => {
     expect(r.stdout).not.toContain(sandbox);
     expect(`${r.stderr}${r.stdout}`).toContain("cannot resolve the real home directory");
   });
+});
+
+// ── flair#1865: the node probe is bounded, and its refusal branches are
+// exercised directly ───────────────────────────────────────────────────────
+//
+// Neither the "node returned an empty home" branch nor a hung `node` (the
+// timeout case) can be triggered with the real node, so each test puts a shim
+// `node` first on PATH and points HOME/USERPROFILE/PI_CODING_AGENT_DIR at a
+// throwaway dir BEFORE the probe starts. The swapped HOME must never reach
+// stdout: it is the value the guard refuses to return.
+
+/** A temp dir whose only binary is a shim `node`, executable, behaving as `kind`. */
+function nodeShimBin(kind: "empty" | "hang"): string {
+  const dir = mkdtempSync(join(tmpdir(), "flair-guard-node-shim-"));
+  fixtures.push(dir);
+  const shimPath = join(dir, "node");
+  const body =
+     kind === "empty"
+        ? "#!/bin/sh\nexit 0\n"
+         : "#!/bin/sh\nsleep 30\nexit 0\n";
+  writeFileSync(shimPath, body, { mode: 0o755 });
+  return dir;
+}
+
+/**
+ * Run the `realHomeDir()` probe as a detached child, with a swapped HOME and a
+ * shim `node` first on PATH. Returns its exit status and captured output. The
+ * probe is detached so a hung shim can be reaped by killing the whole group.
+ */
+function runRealHomeProbe(
+  swappedHome: string,
+  shimDir: string,
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  const probe = join(swappedHome, "probe-real-home.ts");
+  writeFileSync(probe, `import { realHomeDir } from ${JSON.stringify(GUARD)};\nprocess.stdout.write(realHomeDir());\n`);
+  const env: NodeJS.ProcessEnv = {
+     ...process.env,
+    HOME: swappedHome,
+    USERPROFILE: swappedHome,
+    PI_CODING_AGENT_DIR: swappedHome,
+    PATH: `${shimDir}:${process.env.PATH ?? ""}`,
+   };
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [probe], { env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    child.stdout?.on("data", (d) => (out += d.toString()));
+    child.stderr?.on("data", (d) => (err += d.toString()));
+     // A hung shim leaves an orphaned `sleep` in the group; kill the whole group
+     // when either the probe closes or the safety-net deadline fires.
+    const sweepGroup = (): void => {
+      if (child.pid) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          /* already gone */
+        }
+      }
+    };
+    const guard = setTimeout(sweepGroup, 22_000);
+    child.on("close", (code) => {
+      sweepGroup();
+      clearTimeout(guard);
+      resolve({ status: code, stdout: out, stderr: err });
+    });
+   });
+}
+
+describe("realHomeDir fails closed against a shim node (flair#1865)", () => {
+  it("refuses when the shim node returns an empty home (exits 0, no output)", async () => {
+    const home = fakeHome();
+    const shim = nodeShimBin("empty");
+    const r = await runRealHomeProbe(home, shim);
+    expect(r.status).not.toBe(0);
+     // The swapped HOME was never resolved, so it cannot appear on stdout.
+    expect(r.stdout).not.toContain(home);
+    expect(`${r.stderr}${r.stdout}`).toContain("returned an empty home directory");
+   });
+
+  it("fails closed (not a hang) when the shim node sleeps past the probe timeout", async () => {
+    const home = fakeHome();
+    const shim = nodeShimBin("hang");
+     // With the fix the probe times out at ~10 s, well under the 20 s deadline.
+     // Without it, execFileSync has no timeout: the probe blocks for the full 30 s
+     // sleep and this test TIMES OUT at 20 s — that timeout IS the red.
+    const r = await runRealHomeProbe(home, shim);
+    expect(r.status).not.toBe(0);
+    expect(`${r.stderr}${r.stdout}`).toContain("cannot resolve the real home directory");
+   }, 20_000);
 });
