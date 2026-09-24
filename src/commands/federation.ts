@@ -176,11 +176,17 @@ export function redactUrl(u: string): string {
 
 /**
  * Whether a Harper permission object can WRITE the Peer table: a super_user, or
- * an explicit flair.Peer insert+update grant. A read-only credential can search
- * but not upsert, so the preflight must check this, not readability.
+ * an explicit flair.Peer insert+update grant. A restrictive `operations`
+ * allowlist additionally gates the operation itself, so `upsert` must be
+ * permitted for any Peer write to reach the table. A read-only credential can
+ * search but not upsert, so the preflight must check this, not readability.
  */
 export function canWritePeerPermission(permission: any): boolean {
   if (permission?.super_user === true) return true;
+  const operations = permission?.operations;
+  if (Array.isArray(operations) && !operations.includes("upsert") && !operations.includes("standard_user")) {
+    return false;
+  }
   const peer = permission?.flair?.tables?.Peer;
   return peer?.insert === true && peer?.update === true;
 }

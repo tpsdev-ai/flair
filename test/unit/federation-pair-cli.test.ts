@@ -460,6 +460,7 @@ function jsonResponse(status: number, body: unknown): Response {
 describe("federation pair — spoke credential checked before the hub (flair#1875)", () => {
   let origFetch: typeof globalThis.fetch;
   let origHome: string | undefined;
+  let origUserProfile: string | undefined;
   let origToken: string | undefined;
   let origAdminPass: string | undefined;
   let origHdb: string | undefined;
@@ -522,12 +523,16 @@ describe("federation pair — spoke credential checked before the hub (flair#187
   beforeEach(() => {
     origFetch = globalThis.fetch;
     origHome = process.env.HOME;
+    origUserProfile = process.env.USERPROFILE;
     origToken = process.env.FLAIR_TOKEN;
     origAdminPass = process.env.FLAIR_ADMIN_PASS;
     origHdb = process.env.HDB_ADMIN_PASSWORD;
     // A fresh HOME so the keystore never touches a real ~/.flair/keys.
     home = mkdtempSync(join(tmpdir(), "flair-1875-"));
     process.env.HOME = home;
+    // resolveHome() reads USERPROFILE on Windows, so isolate it too — otherwise
+    // the keystore would write to the real profile.
+    process.env.USERPROFILE = home;
     // A bearer token satisfies the LOCAL identity GET's auth floor without being
     // one of the three spoke-admin credential sources under test.
     process.env.FLAIR_TOKEN = "test-bearer-1875";
@@ -550,6 +555,7 @@ describe("federation pair — spoke credential checked before the hub (flair#187
   afterEach(() => {
     globalThis.fetch = origFetch;
     if (origHome === undefined) delete process.env.HOME; else process.env.HOME = origHome;
+    if (origUserProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = origUserProfile;
     if (origToken === undefined) delete process.env.FLAIR_TOKEN; else process.env.FLAIR_TOKEN = origToken;
     if (origAdminPass === undefined) delete process.env.FLAIR_ADMIN_PASS; else process.env.FLAIR_ADMIN_PASS = origAdminPass;
     if (origHdb === undefined) delete process.env.HDB_ADMIN_PASSWORD; else process.env.HDB_ADMIN_PASSWORD = origHdb;
@@ -639,6 +645,21 @@ describe("federation pair — spoke credential checked before the hub (flair#187
     const { exit } = await runPair(["--admin-pass", "peer-writer"]);
     expect(exit).toBeNull();
     expect(calls.some((c) => c.url.includes("/FederationPair"))).toBe(true);
+  });
+
+  test("(P2) a Peer grant under a restrictive operations allowlist → exit 1 before the hub", async () => {
+    seedKey();
+    responder = () =>
+      jsonResponse(200, {
+        role: {
+          role: "flair_pair_initiator",
+          permission: { operations: ["search_by_value"], flair: { tables: { Peer: { insert: true, update: true } } } },
+        },
+      });
+    const { exit, stderr } = await runPair(["--admin-pass", "allowlisted"]);
+    expect(exit).toBe("process.exit(1)");
+    expect(stderr.join("\n")).toContain("cannot write the Peer table");
+    expect(calls.some((c) => c.url.includes("/FederationPair"))).toBe(false);
   });
 
   test("(P3) a THROWN Peer upsert after a hub 200 names the consumed token", async () => {
