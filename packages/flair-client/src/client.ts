@@ -28,6 +28,29 @@ import type {
 const DEFAULT_URL = "http://localhost:19926";
 const DEFAULT_TIMEOUT = 30_000;
 
+/**
+ * Combine two abort signals, safe on the OLDEST Node this package allows.
+ *
+ * `AbortSignal.any` landed in Node 20.3, but `engines.node` floors this package
+ * at 18, so a caller passing `opts.signal` on Node 18 / 20.0–20.2 would throw
+ * `TypeError: AbortSignal.any is not a function` BEFORE the fetch. Use it when
+ * present, else link the two signals by hand — honouring an already-aborted
+ * input and forwarding the abort reason.
+ */
+function anySignal(a: AbortSignal, b: AbortSignal): AbortSignal {
+  const any = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
+  if (typeof any === "function") return any.call(AbortSignal, [a, b]);
+  const linked = new AbortController();
+  for (const s of [a, b]) {
+    if (s.aborted) {
+      linked.abort(s.reason);
+      return linked.signal;
+    }
+    s.addEventListener("abort", () => linked.abort(s.reason), { once: true });
+  }
+  return linked.signal;
+}
+
 export class FlairClient {
   readonly url: string;
   readonly agentId: string;
@@ -150,7 +173,7 @@ export class FlairClient {
       };
     }
     const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
-    const signal = opts.signal ? AbortSignal.any([timeoutSignal, opts.signal]) : timeoutSignal;
+    const signal = opts.signal ? anySignal(timeoutSignal, opts.signal) : timeoutSignal;
     const res = await fetch(`${this.url}${path}`, {
       method,
       headers,

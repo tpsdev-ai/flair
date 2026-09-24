@@ -6,10 +6,12 @@
   reach a memory). `memory_store` no longer hand-builds a `Date.now()` id — it
   uses the client's canonical UUID path, so two writes in one millisecond can
   no longer overwrite each other — and returns a machine-readable outcome
-  (`written`, `id`, `supersedeClosed`, `errors`): `written` is true only after
+  (`written`, `id`, `supersedeClosed`, `errors`, `deduplicated`, plus
+  `matchedId` when a near-duplicate was found): `written` is true only after
   the primary write succeeded, a partial success (memory written,
-  supersede-close failed) is reported as exactly that, and an unresolved
-  identity returns `{ written: false, reason: "no-identity" }` instead of
-  silently returning.
+  supersede-close failed) is reported as exactly that, a deduplicated write
+  reports `deduplicated: true` with the `matchedId` it collided with, and an
+  unresolved identity returns `{ written: false, reason: "no-identity" }`
+  instead of silently returning.
 
   (Refs #1751)
