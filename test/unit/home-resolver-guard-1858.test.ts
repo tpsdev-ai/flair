@@ -100,6 +100,24 @@ function scan(file: string, text: string): Hit[] {
     return true;
   };
 
+  /**
+   * Object-binding reads: `const { HOME } = process.env;` and
+   * `const { USERPROFILE: home } = process.env;` bind the same two variables,
+   * so they are home reads too.
+   */
+  const isProcessEnvDestructure = (node: ts.BindingElement): boolean => {
+    const propName = node.propertyName ?? node.name;
+    if (!ts.isIdentifier(propName)) return false;
+    if (propName.text !== "HOME" && propName.text !== "USERPROFILE") return false;
+    const pattern = node.parent;
+    if (!ts.isObjectBindingPattern(pattern)) return false;
+    const decl = pattern.parent;
+    if (!ts.isVariableDeclaration(decl)) return false;
+    const init = decl.initializer;
+    if (!init || !ts.isPropertyAccessExpression(init) || init.name.text !== "env") return false;
+    return ts.isIdentifier(init.expression) && init.expression.text === "process";
+  };
+
   const walk = (node: ts.Node, parent: ts.Node | undefined): void => {
     if (ts.isCallExpression(node)) {
       const callee = node.expression;
@@ -110,6 +128,9 @@ function scan(file: string, text: string): Hit[] {
       }
     }
     if (isProcessEnvRead(node, parent)) {
+      hits.push({ file, line: at(node), kind: "process.env.HOME/USERPROFILE read" });
+    }
+    if (ts.isBindingElement(node) && isProcessEnvDestructure(node)) {
       hits.push({ file, line: at(node), kind: "process.env.HOME/USERPROFILE read" });
     }
     ts.forEachChild(node, (child) => walk(child, node));
@@ -143,16 +164,19 @@ describe("home resolver guard — src/ resolves home only via src/lib/home.ts (f
   });
 
   it("reports every read spelling and still allows a plain assignment (T3/T4 controls)", () => {
-    // Four READ forms the scanner must report, then one WRITE it must not.
+    // Four property/element READ forms, one WRITE (must stay allowed), then two
+    // object-BINDING reads — all six reads must be reported.
     const source = [
       'process.env["HOME"];',
       'process.env["USERPROFILE"];',
       "process.env.HOME ?? x;",
       "process.env.HOME || x;",
       "process.env.HOME = x;",
+      "const { HOME } = process.env;",
+      "const { USERPROFILE: home } = process.env;",
     ].join("\n");
     const found = scanSource(source);
-    expect(found.map((h) => h.line)).toEqual([1, 2, 3, 4]);
+    expect(found.map((h) => h.line)).toEqual([1, 2, 3, 4, 6, 7]);
     expect(found.every((h) => h.kind === "process.env.HOME/USERPROFILE read")).toBe(true);
   });
 
