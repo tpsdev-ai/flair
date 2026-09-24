@@ -161,8 +161,34 @@ export const captureClock: { now: () => number } = { now: () => Date.now() };
 /** A successful run retires this long after its `agent_end`. */
 export const RUN_RETIRE_AFTER_MS = 30_000;
 
-/** A retired run's state is swept from the pool this long after retirement. */
-const RUN_SWEEP_AFTER_MS = 30_000;
+/**
+ * Bounds that keep the capture bookkeeping finite on a long-lived gateway
+ * (flair#1884 round 2, F2). Exported so a test can drive them small; production
+ * uses these values.
+ */
+export const captureBounds = {
+  /** Retire a run that has seen NO `agent_end` after this much inactivity. */
+  idleRunRetireMs: 30 * 60_000,
+  /** Max live run states; the oldest are evicted (and tombstoned) past this. */
+  runStateCap: 10_000,
+  /** Max retired/aborted run ids remembered; the oldest are evicted. */
+  tombstoneCap: 10_000,
+  /** Max distinct one-time log keys remembered; the oldest are evicted. */
+  logOnceCap: 10_000,
+  /** How often the unref'd sweep timer runs. */
+  sweepIntervalMs: 30_000,
+};
+
+/** Test introspection into the live store sizes (see `captureBounds`). */
+export const captureInternals: {
+  stateCount: () => number;
+  tombstoneCount: () => number;
+  logOnceCount: () => number;
+} = {
+  stateCount: () => 0,
+  tombstoneCount: () => 0,
+  logOnceCount: () => 0,
+};
 
 /**
  * Per-run capture state (D10). Keyed by agent + runId — never by agent alone,
@@ -192,6 +218,8 @@ interface RunState extends CaptureState {
   retiredAt: number | null;
   /** Aborted: a failed `agent_end`, an aborted model call, or `gateway_stop`. */
   aborted: boolean;
+  /** `captureClock.now()` of the last callback for this run (idle-retire clock). */
+  lastActivityAt: number;
   /** One AbortController per run, owned by the plugin (agent hooks carry none). */
   controller: AbortController;
 }
@@ -208,6 +236,7 @@ function createRunState(agentId: string, runId: string): RunState {
     retired: false,
     retiredAt: null,
     aborted: false,
+    lastActivityAt: 0,
     controller: new AbortController(),
   };
 }
@@ -586,13 +615,42 @@ export default {
     // runs share a budget and a dedup set and collide. The run's AbortController
     // is created with the state.
     const runStates = new Map<string, RunState>();
+    /** Bounded tombstone of retired/aborted run keys (F1): insertion-ordered. */
+    const retiredIds = new Set<string>();
     const loggedOnce = new Set<string>();
     const runKeyOf = (agentId: string, runId: string): string => `${agentId}\u0000${runId}`;
+
+    // Wire the test introspection once this registration owns its stores.
+    captureInternals.stateCount = () => runStates.size;
+    captureInternals.tombstoneCount = () => retiredIds.size;
+    captureInternals.logOnceCount = () => loggedOnce.size;
+
+    /** Evict the oldest entries of an insertion-ordered Set down to `cap`. */
+    function capSet(set: Set<string>, cap: number): void {
+      while (set.size > cap) {
+        const oldest = set.values().next().value as string | undefined;
+        if (oldest === undefined) break;
+        set.delete(oldest);
+      }
+    }
 
     function logOnce(key: string, line: string): void {
       if (loggedOnce.has(key)) return;
       loggedOnce.add(key);
+      if (loggedOnce.size > captureBounds.logOnceCap) capSet(loggedOnce, captureBounds.logOnceCap);
       api.logger.warn(line);
+    }
+
+    /**
+     * Remember a retired/aborted run id (F1) so a LATER callback is dropped
+     * rather than re-admitted as a fresh run. Bounded: the oldest ids are
+     * evicted — the documented trade-off between never re-admitting a retired
+     * run and never growing without limit.
+     */
+    function tombstone(key: string): void {
+      if (retiredIds.has(key)) return;
+      retiredIds.add(key);
+      if (retiredIds.size > captureBounds.tombstoneCap) capSet(retiredIds, captureBounds.tombstoneCap);
     }
 
     /** The run id for a callback, from the event or the hook context. */
@@ -601,33 +659,61 @@ export default {
       return typeof raw === "string" && raw.length > 0 ? raw : null;
     }
 
-    function retireIfDue(state: RunState): void {
-      if (state.retired) return;
-      if (
-        state.ended &&
-        state.inFlight === 0 &&
-        state.endedAt !== null &&
-        captureClock.now() - state.endedAt >= RUN_RETIRE_AFTER_MS
-      ) {
-        state.retired = true;
-        state.retiredAt = captureClock.now();
+    function retireState(state: RunState, now: number): void {
+      state.retired = true;
+      state.retiredAt = now;
+      tombstone(runKeyOf(state.agentId, state.runId));
+    }
+
+    /** Remove a retired/aborted state once its last write has settled (F1). */
+    function finalizeIfSettled(key: string, state: RunState): void {
+      if ((state.retired || state.aborted) && state.inFlight === 0) {
+        tombstone(key);
+        runStates.delete(key);
       }
     }
 
-    /** Drop retired state the pool no longer needs to recognise. */
-    function sweepRetired(): void {
+    /**
+     * F2: ONE sweep evaluates EVERY state. It runs on each callback and on the
+     * unref'd interval timer. It (a) retires ended runs by the 30 s rule,
+     * (b) retires runs that have seen NO `agent_end` after the idle bound, and
+     * (c) evicts the oldest states past the map cap. A retired/aborted state
+     * leaves the map only when no write is in flight.
+     */
+    function sweep(): void {
       const now = captureClock.now();
       for (const [key, state] of runStates) {
-        if (state.retired && state.retiredAt !== null && now - state.retiredAt > RUN_SWEEP_AFTER_MS) {
+        if (!state.retired && state.ended && state.inFlight === 0 && state.endedAt !== null && now - state.endedAt >= RUN_RETIRE_AFTER_MS) {
+          retireState(state, now);
+        }
+        if (!state.retired && !state.ended && now - state.lastActivityAt >= captureBounds.idleRunRetireMs) {
+          retireState(state, now);
+        }
+        if ((state.retired || state.aborted) && state.inFlight === 0) {
           runStates.delete(key);
         }
+      }
+      enforceStateCap();
+    }
+
+    /** Evict the oldest live states past the cap, naming each in a log line. */
+    function enforceStateCap(): void {
+      while (runStates.size > captureBounds.runStateCap) {
+        const oldestKey = runStates.keys().next().value as string | undefined;
+        if (oldestKey === undefined) break;
+        const evicted = runStates.get(oldestKey)!;
+        runStates.delete(oldestKey);
+        tombstone(oldestKey);
+        api.logger.warn(
+          `openclaw-flair: evicted capture state for run ${evicted.runId} (agent ${evicted.agentId}) — run-state cap ${captureBounds.runStateCap}`,
+        );
       }
     }
 
     /**
      * The run state a callback should use, or null when the callback must not
-     * capture: a missing runId is refused (one-time log), and a retired or
-     * aborted run is dropped (one-time log naming the run id).
+     * capture. The tombstone is consulted FIRST (F1): a retired/aborted run is
+     * dropped with the one-time log and NEVER re-admitted (no fresh state).
      */
     function captureGate(agentId: string, runId: string | null): RunState | null {
       if (!runId) {
@@ -637,11 +723,21 @@ export default {
         );
         return null;
       }
-      sweepRetired();
       const key = runKeyOf(agentId, runId);
+      if (retiredIds.has(key)) {
+        logOnce(`dropped:${key}`, `openclaw-flair: dropped a callback for retired run ${runId} (agent ${agentId})`);
+        return null;
+      }
+      sweep();
+      // The sweep may have retired THIS run; re-check the tombstone.
+      if (retiredIds.has(key)) {
+        logOnce(`dropped:${key}`, `openclaw-flair: dropped a callback for retired run ${runId} (agent ${agentId})`);
+        return null;
+      }
+      const now = captureClock.now();
       let state = runStates.get(key);
       if (state) {
-        retireIfDue(state);
+        state.lastActivityAt = now;
         if (state.retired || state.aborted) {
           logOnce(`dropped:${key}`, `openclaw-flair: dropped a callback for retired run ${runId} (agent ${agentId})`);
           return null;
@@ -649,11 +745,17 @@ export default {
         return state;
       }
       state = createRunState(agentId, runId);
+      state.lastActivityAt = now;
       runStates.set(key, state);
+      enforceStateCap();
       return state;
     }
 
-    /** Abort a run: cancel its in-flight capture fetches and retire it now. */
+    /**
+     * Abort a run: cancel its in-flight capture fetches and retire it now. The
+     * id is tombstoned so a later callback cannot recreate the run; the state
+     * itself leaves the map only once its last write settles (F1).
+     */
     function abortRun(agentId: string, runId: string | null, why: string): void {
       if (!runId) {
         logOnce(
@@ -663,18 +765,23 @@ export default {
         return;
       }
       const key = runKeyOf(agentId, runId);
+      if (retiredIds.has(key)) return; // already retired or aborted
       let state = runStates.get(key);
       if (!state) {
         state = createRunState(agentId, runId);
+        state.lastActivityAt = captureClock.now();
         runStates.set(key, state);
       }
       if (state.aborted) return;
       state.aborted = true;
       state.retired = true;
       state.retiredAt = captureClock.now();
+      tombstone(key);
       try {
         state.controller.abort(why);
       } catch { /* an abort listener must not break the hook */ }
+      finalizeIfSettled(key, state);
+      enforceStateCap();
     }
 
     async function tryAutoCapture(client: FlairClient, agentId: string, runId: string | null, text: string): Promise<boolean> {
@@ -704,20 +811,25 @@ export default {
         state.inFlight--;
         state.count--;
         state.hashes.delete(decision.hash);
+        finalizeIfSettled(runKeyOf(agentId, runId as string), state);
         throw err;
       }
       state.inFlight--;
+      const captureKey = runKeyOf(agentId, runId as string);
       if (state.aborted) {
         // Item 5: a result that resolves after the abort is DISCARDED — release
-        // the reservation and never report it as a capture.
+        // the reservation and never report it as a capture. This cannot UNWRITE
+        // a request Flair already received (see the README's abort guarantee).
         state.count--;
         state.hashes.delete(decision.hash);
         logOnce(
-          `discarded:${runKeyOf(agentId, runId as string)}`,
+          `discarded:${captureKey}`,
           `openclaw-flair: discarded a capture for run ${runId} (agent ${agentId}) that completed after the run was aborted`,
         );
+        finalizeIfSettled(captureKey, state);
         return false;
       }
+      finalizeIfSettled(captureKey, state);
       return true;
     }
 
@@ -925,6 +1037,15 @@ export default {
       // capture is enabled.
       api.logger.warn("openclaw-flair: capture disabled (permission)");
     } else if (autoCapture) {
+        // F2: an unref'd interval sweeps ALL states even when no callback is
+        // arriving — an idle run that never saw `agent_end` would otherwise
+        // live forever. unref() so the timer never keeps the process alive; it
+        // is cleared on gateway_stop.
+        const sweepTimer = setInterval(() => {
+          try { sweep(); } catch { /* a timer callback must never throw */ }
+        }, captureBounds.sweepIntervalMs);
+        (sweepTimer as any).unref?.();
+
         api.on("agent_end", async (event: any, ctx: any) => {
           const agentId = ctx?.agentId;
           if (!agentId) {
@@ -998,8 +1119,10 @@ export default {
           }
         });
 
-        // Item 5(b): gateway_stop aborts every in-flight run.
+        // Item 5(b): gateway_stop aborts every in-flight run and stops the
+        // sweep timer (F2).
         api.on("gateway_stop", async () => {
+          try { clearInterval(sweepTimer); } catch { /* already cleared */ }
           for (const state of [...runStates.values()]) {
             abortRun(state.agentId, state.runId, "gateway_stop");
           }

@@ -213,6 +213,7 @@ beforeEach(() => {
   signingKeyProbe.resolve = (a, kp) => resolveKeyPath(a, kp);
   signingKeyProbe.load = (f) => loadPrivateKey(f);
   captureClock.now = () => Date.now();
+  Object.assign(captureBounds, CAPTURE_BOUNDS_DEFAULTS);
 });
 
 afterEach(() => {
@@ -252,6 +253,30 @@ try {
   captureClock = (await import("../index.ts") as any).captureClock ?? { now: () => Date.now() };
 } catch {
   captureClock = { now: () => Date.now() };
+}
+
+// The bounds and the size introspection added in round 2 (F1/F2). On a build
+// without them, substitutions are inert and the F2 tests go red.
+const CAPTURE_BOUNDS_DEFAULTS = {
+  idleRunRetireMs: 30 * 60_000,
+  runStateCap: 10_000,
+  tombstoneCap: 10_000,
+  logOnceCap: 10_000,
+  sweepIntervalMs: 30_000,
+};
+let captureBounds: typeof CAPTURE_BOUNDS_DEFAULTS;
+try {
+  captureBounds = (await import("../index.ts") as any).captureBounds ?? { ...CAPTURE_BOUNDS_DEFAULTS };
+} catch {
+  captureBounds = { ...CAPTURE_BOUNDS_DEFAULTS };
+}
+let captureInternals: { stateCount: () => number; tombstoneCount: () => number; logOnceCount: () => number };
+try {
+  captureInternals =
+    (await import("../index.ts") as any).captureInternals ??
+    { stateCount: () => 0, tombstoneCount: () => 0, logOnceCount: () => 0 };
+} catch {
+  captureInternals = { stateCount: () => 0, tombstoneCount: () => 0, logOnceCount: () => 0 };
 }
 
 // ── host version gate (R1) ───────────────────────────────────────────────────
@@ -997,33 +1022,33 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
 
 // ── slice 2 — per-run state, reservation, retirement and abort (D10 / item 5) ──
 
-describe("slice 2 — per-run capture state, retirement and abort", () => {
-  /** Capture-enabled host: conversation permission granted, autoCapture on. */
-  const cfgCapture = () => ({
-    agents: { entries: { A: {} } },
-    plugins: {
-      slots: { memory: "openclaw-flair" },
-      entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } },
-    },
-  });
-  const apiForCapture = (plugin: any) => {
-    writeKey("A");
-    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: cfgCapture() });
-    plugin.register(api as any);
-    return api;
-  };
-  const puts = (calls: Call[]) => calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
-  const TRIGGER = "remember this: the per-run capture target is staging";
-  const waitFor = async (cond: () => boolean, ms = 1000): Promise<void> => {
-    const start = Date.now();
-    while (!cond() && Date.now() - start < ms) await new Promise((r) => setTimeout(r, 1));
-  };
-  const defer = () => {
-    let release!: () => void;
-    const gate = new Promise<void>((r) => { release = () => r(); });
-    return { gate, release: () => release() };
-  };
+/** Capture-enabled host: conversation permission granted, autoCapture on. */
+const cfgCapture = () => ({
+  agents: { entries: { A: {} } },
+  plugins: {
+    slots: { memory: "openclaw-flair" },
+    entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } },
+  },
+});
+const apiForCapture = (plugin: any) => {
+  writeKey("A");
+  const api = createMockApi({ pluginConfig: { autoCapture: true }, config: cfgCapture() });
+  plugin.register(api as any);
+  return api;
+};
+const puts = (calls: Call[]) => calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+const TRIGGER = "remember this: the per-run capture target is staging";
+const waitFor = async (cond: () => boolean, ms = 1000): Promise<void> => {
+  const start = Date.now();
+  while (!cond() && Date.now() - start < ms) await new Promise((r) => setTimeout(r, 1));
+};
+const defer = () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = () => r(); });
+  return { gate, release: () => release() };
+};
 
+describe("slice 2 — per-run capture state, retirement and abort", () => {
   test("D10 (mutation: reservation removed): a reservation taken before the await prevents a double write", async () => {
     const plugin = await loadPlugin();
     const d = defer();
@@ -1087,7 +1112,7 @@ describe("slice 2 — per-run capture state, retirement and abort", () => {
     expect(lines.length).toBe(1);
   });
 
-  test("item 5 (mutation: abort dropped): a failed agent_end aborts the in-flight write and its late result is discarded", async () => {
+  test("item 5 (mutation: abort dropped): a failed agent_end starts no new write and discards a late result", async () => {
     const plugin = await loadPlugin();
     const d = defer();
     const calls = installFetchStub(undefined, { deferUntil: d.gate });
@@ -1105,7 +1130,7 @@ describe("slice 2 — per-run capture state, retirement and abort", () => {
     await inFlight; // the result resolves AFTER the abort — it must be discarded
     const before = calls.length;
     await llmOut({ runId: "r", assistantTexts: [TRIGGER] }, { agentId: "A" });
-    expect(calls.length).toBe(before); // nothing lands after the abort
+    expect(calls.length).toBe(before); // no NEW write starts after the abort (a receipt already received may land)
     expect(api._warnText()).toMatch(/discarded a capture for run r/);
     expect(api._warnText()).toMatch(/dropped a callback for retired run r/);
   });
@@ -1143,5 +1168,157 @@ describe("slice 2 — per-run capture state, retirement and abort", () => {
     d.release();
     await inFlight;
     expect(api._warnText()).toMatch(/discarded a capture for run r/);
+  });
+});
+
+// ── round 2 — tombstone (F1), bounds (F2) and failed primary writes (F4) ──────
+
+describe("slice 2 round 2 — tombstone, bounds and failed primary writes", () => {
+  const TRIGGER2 = "remember this: the round two bound test target is staging";
+
+  test("F1: a callback 31 s after a successful agent_end is dropped (tombstoned), never recreating the run", async () => {
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    const base = 2_000_000;
+    captureClock.now = () => base;
+    await api._fire("agent_end", { runId: "r", success: true, messages: [] }, { agentId: "A" });
+    expect(captureInternals.stateCount()).toBe(1);
+    captureClock.now = () => base + 31_000;
+    const calls = installFetchStub();
+    await api._handler("llm_output")({ runId: "r", assistantTexts: [TRIGGER2] }, { agentId: "A" });
+    expect(puts(calls).length).toBe(0);
+    expect(api._warnText()).toMatch(/dropped a callback for retired run r/);
+    expect(captureInternals.stateCount()).toBe(0);
+    expect(captureInternals.tombstoneCount()).toBe(1);
+  });
+
+  test("F1: a callback after an abort is dropped even after a later sweep", async () => {
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const llmOut = api._handler("llm_output");
+    const inFlight = llmOut({ runId: "r", assistantTexts: [TRIGGER2] }, { agentId: "A" });
+    await waitFor(() => puts(calls).length === 1);
+    await api._fire("agent_end", { runId: "r", success: false, messages: [] }, { agentId: "A" });
+    d.release();
+    await inFlight;
+    // A later sweep — the idle bound is reached and another run's callback runs it.
+    const t = captureClock.now();
+    captureClock.now = () => t + captureBounds.idleRunRetireMs + 1;
+    await llmOut({ runId: "other", assistantTexts: ["a plain note"] }, { agentId: "A" });
+    await llmOut({ runId: "r", assistantTexts: [TRIGGER2] }, { agentId: "A" });
+    expect(puts(calls).length).toBe(1); // the aborted run starts no NEW write
+    expect(api._warnText()).toMatch(/dropped a callback for retired run r/);
+  });
+
+  test("F2: 1,000 runs that never send agent_end are all retired after the idle bound", async () => {
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    installFetchStub();
+    const base = 5_000_000;
+    captureClock.now = () => base;
+    const llmOut = api._handler("llm_output");
+    for (let i = 0; i < 1000; i++) {
+      await llmOut({ runId: `r${i}`, assistantTexts: [`plain note number ${i}`] }, { agentId: "A" });
+    }
+    expect(captureInternals.stateCount()).toBe(1000);
+    captureClock.now = () => base + captureBounds.idleRunRetireMs + 1;
+    await llmOut({ runId: "fresh", assistantTexts: ["another plain note"] }, { agentId: "A" });
+    expect(captureInternals.stateCount()).toBe(1); // all 1,000 idle-retired; only "fresh" lives
+    await llmOut({ runId: "r0", assistantTexts: ["another plain note"] }, { agentId: "A" });
+    expect(api._warnText()).toMatch(/dropped a callback for retired run r0/);
+  }, 30000);
+
+  test("F2: the run-state map never exceeds its cap, and each eviction names the run", async () => {
+    captureBounds.runStateCap = 8;
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    installFetchStub();
+    const llmOut = api._handler("llm_output");
+    for (let i = 0; i < 20; i++) {
+      await llmOut({ runId: `r${i}`, assistantTexts: [`plain note number ${i}`] }, { agentId: "A" });
+    }
+    expect(captureInternals.stateCount()).toBeLessThanOrEqual(8);
+    expect(api._warnText()).toMatch(/evicted capture state for run r0 \(agent A\)/);
+    await llmOut({ runId: "r0", assistantTexts: ["another plain note"] }, { agentId: "A" });
+    expect(captureInternals.stateCount()).toBeLessThanOrEqual(8);
+  });
+
+  test("F2: the tombstone and the one-time-log set are bounded", async () => {
+    captureBounds.tombstoneCap = 3;
+    captureBounds.logOnceCap = 2;
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    installFetchStub();
+    for (let i = 0; i < 6; i++) {
+      await api._fire("agent_end", { runId: `r${i}`, success: false, messages: [] }, { agentId: "A" });
+    }
+    expect(captureInternals.tombstoneCount()).toBe(3);
+    const llmOut = api._handler("llm_output");
+    for (let i = 0; i < 6; i++) {
+      await llmOut({ assistantTexts: ["plain note"] }, { agentId: `agent${i}` });
+    }
+    expect(captureInternals.logOnceCount()).toBeLessThanOrEqual(2);
+  });
+
+  test("F2: the sweep timer is unref'd and cleared on gateway_stop", async () => {
+    const timers: any[] = [];
+    const cleared: any[] = [];
+    const origSI = globalThis.setInterval;
+    const origCI = globalThis.clearInterval;
+    (globalThis as any).setInterval = (fn: any, ms: any) => {
+      const t: any = { fn, ms, unref: mock(() => {}) };
+      timers.push(t);
+      return t;
+    };
+    (globalThis as any).clearInterval = (t: any) => {
+      cleared.push(t);
+    };
+    try {
+      const plugin = await loadPlugin();
+      const api = apiForCapture(plugin);
+      const sweepTimer = timers.find((t) => t.ms === captureBounds.sweepIntervalMs);
+      expect(sweepTimer).toBeTruthy();
+      expect(sweepTimer.unref).toHaveBeenCalled();
+      await api._fire("gateway_stop", { reason: "shutdown" }, {});
+      expect(cleared).toContain(sweepTimer);
+    } finally {
+      (globalThis as any).setInterval = origSI;
+      (globalThis as any).clearInterval = origCI;
+    }
+  });
+
+  test("F4: a non-2xx primary write reports written:false and never attempts a supersede-close", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub((call) => {
+      if (call.method === "PUT" && /\/Memory\//.test(call.url)) return { status: 500, body: { error: "boom" } };
+      return { status: 200, body: { id: "old-target", content: "old", agentId: "A" } };
+    });
+    const api = createMockApi();
+    plugin.register(api as any);
+    const store = api._resolveTool("memory_store", { agentId: "A" });
+    const res = await store.execute("1", { text: "remember this", supersedes: "old-target" });
+    expect(res.details.written).toBe(false);
+    expect(res.details.errors.length).toBe(1);
+    expect(res.details.supersedeClosed).toBe(false);
+    expect(calls.filter((c) => c.method === "PUT" && c.url.includes("/Memory/old-target")).length).toBe(0);
+  });
+
+  test("F4: a THROWING primary write reports written:false with the error, and no supersede-close", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub((call) => {
+      if (call.method === "PUT" && /\/Memory\//.test(call.url)) throw new Error("network down");
+      return { status: 200, body: { id: "old-target", content: "old", agentId: "A" } };
+    });
+    const api = createMockApi();
+    plugin.register(api as any);
+    const store = api._resolveTool("memory_store", { agentId: "A" });
+    const res = await store.execute("1", { text: "remember this", supersedes: "old-target" });
+    expect(res.details.written).toBe(false);
+    expect(res.details.errors.join(" ")).toMatch(/network down/);
+    expect(calls.filter((c) => c.method === "PUT" && c.url.includes("/Memory/old-target")).length).toBe(0);
   });
 });

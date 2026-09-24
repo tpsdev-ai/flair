@@ -139,14 +139,22 @@ What this slice guarantees:
 - **Retirement.** A successful `agent_end` ends a run but keeps its state (the
   host can dispatch `agent_end` before `llm_output` for the same run). The state
   retires only when the run has ended, has no in-flight writes, and 30 s have
-  passed since `agent_end`; a callback for a retired run is dropped with a
-  one-time log naming the run.
+  passed since `agent_end`; a run that has seen no `agent_end` retires after
+  30 min idle. A retired or aborted run id goes into a bounded tombstone, which
+  is consulted first, so a late callback is dropped with a one-time log naming
+  the run and can never recreate it.
+- **Bounded bookkeeping.** One sweep evaluates every run — on each callback and
+  on an unref'd interval timer (cleared on `gateway_stop`). The live-state map,
+  the tombstone and the one-time-log set are each capped; the oldest entries are
+  evicted, and each state eviction is logged with the run id.
 - **Abort.** The plugin owns one `AbortController` per run. A run is aborted by
   a failed `agent_end` (`success === false`), by `gateway_stop` (every run), or
   by `model_call_ended` with `failureKind: "aborted"`. On abort the run's signal
-  reaches every in-flight capture fetch, a result that resolves after the abort
-  is discarded, reservations are released, the state is retired immediately, and
-  nothing is written after the abort. A successful `agent_end` never aborts.
+  reaches every in-flight capture fetch, **no new capture write starts**, a
+  result that resolves after the abort is discarded, and reservations are
+  released. Aborting cannot **undo** a write Flair has already received — a
+  request already in flight may still land. A successful `agent_end` never
+  aborts.
 
 What this slice does **not** cover: slot selection and anchor re-injection are
 **slice 3**; the plugin still takes no context-engine slot and leaves the host's
