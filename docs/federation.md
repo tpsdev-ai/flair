@@ -93,7 +93,7 @@ FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation pair https://<hub
   --token-from ./pair-triple.json
 ```
 
-Replace `<hub>`, `<org>`, and `<cluster-admin-pass>` with your actual values. The pair step's admin password is the spoke's, used to write the local Peer row.
+Replace `<hub>` and `<org>` with your actual values, and point `/path/to/hub-admin-pass` at a 0600 file holding the hub admin password on the minting machine. The pair step's admin password is the spoke's, used to write the local Peer row.
 
 Running the hub on Fabric has its own considerations — port derivation against a managed
 `443` endpoint, why the sync driver can only be installed on a machine you control, and
