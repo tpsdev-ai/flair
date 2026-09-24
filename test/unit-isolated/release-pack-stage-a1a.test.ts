@@ -61,7 +61,7 @@ const SHA40 = /^[0-9a-f]{40}$/;
 /** Simple-command words the stage job's run bodies may use. */
 const ALLOWED = new Set([
   "set", "cd", "mkdir", "printf", "echo", "exit", "npm", "jq", "sha256sum",
-  "sort", "cmp", "chmod", "git", "while", "read", "do", "done", "for", "in", "if", "then",
+  "sort", "cmp", "chmod", "git", "find", "while", "read", "do", "done", "for", "in", "if", "then",
   "else", "fi", "[", ":", "continue", "break",
 ]);
 /** Leading words that are structural, not commands. */
@@ -160,7 +160,7 @@ function leadingCommand(fragment: string): string | null {
 }
 
 /** Allowed npm invocations: exact shapes only, every one carrying --userconfig. */
-function npmInvocationProblem(stmt: string): string | null {
+function npmInvocationProblem(stmt: string, raw: string): string | null {
   if (/^npm install -g npm@\d+\.\d+\.\d+\b/.test(stmt)) {
     return /\s--userconfig\b/.test(stmt) ? null : "npm install must carry --userconfig";
   }
@@ -168,7 +168,11 @@ function npmInvocationProblem(stmt: string): string | null {
     return /\s--userconfig\b/.test(stmt) ? null : "npm --version must carry --userconfig";
   }
   if (/^npm stage publish\s/.test(stmt)) {
-    if (!/\s--tag\s\S+/.test(stmt)) return "npm stage publish must carry --tag";
+    // The tag value may only enter as the quoted variable the tag= scan already
+    // constrains to staged|next — never a literal.
+    if (!/--tag\s+"\$[A-Za-z_][A-Za-z0-9_]*"/.test(raw)) {
+      return 'npm stage publish must carry --tag as a quoted variable, e.g. --tag "$tag"';
+    }
     if (!/\s--ignore-scripts\b/.test(stmt)) return "npm stage publish must carry --ignore-scripts";
     if (!/\s--userconfig\b/.test(stmt)) return "npm stage publish must carry --userconfig";
     return null;
@@ -249,7 +253,7 @@ function runBodyProblems(runBody: string): string[] {
         problems.push(`command outside the set: ${cs.cmd}`);
       }
       if (cs.cmd === "npm") {
-        const p = npmInvocationProblem(unquoteStatement(frag));
+        const p = npmInvocationProblem(unquoteStatement(frag), frag);
         if (p) problems.push(p);
       }
       if (cs.cmd === "git") {
@@ -408,6 +412,14 @@ describe("the stage job is an allowlisted shape (flair#1671 A1a)", () => {
     steps[steps.length - 1]!.run = steps[steps.length - 1]!.run!.replace("tag=staged", 'tag="latest"');
     const { problems } = inspectStageJob(yaml.dump(doc));
     expect(problems.join("\n")).toContain("tag must be staged or next");
+  });
+
+  test("(G2) a literal --tag on the publish line goes red", () => {
+    const doc = yaml.load(realWorkflow()) as WorkflowDoc;
+    const steps = doc.jobs!["stage-publish"]!.steps!;
+    steps[steps.length - 1]!.run = steps[steps.length - 1]!.run!.replace('--tag "$tag"', "--tag latest");
+    const { problems } = inspectStageJob(yaml.dump(doc));
+    expect(problems.join("\n")).toContain("quoted variable");
   });
 
   test("workflow-level permissions are {} and github-release keeps contents: write", () => {
@@ -682,6 +694,28 @@ describe("stage-publish stages the exact tarballs it re-derives (flair#1671 A1a)
     const r = runStageShell(artifact, dir);
     expect(r.status).not.toBe(0);
     expect(r.out).toContain("does not hold exactly manifest.json");
+    expect(r.log.filter((l) => l.argv[0] === "stage").length).toBe(0);
+  });
+
+  test("(G1) an entry named ..hidden is refused before any stage request", () => {
+    const dir = mkdtempSync(join(SCRATCH, "dotdot-"));
+    const artifact = buildArtifact(dir, VERSION, FIXTURE_NAMES);
+    writeFileSync(join(dir, "..hidden"), "x");
+    const r = runStageShell(artifact, dir);
+    expect(r.status).not.toBe(0);
+    expect(r.out).toContain("does not hold exactly manifest.json");
+    expect(r.log.filter((l) => l.argv[0] === "stage").length).toBe(0);
+  });
+
+  test("(G1) a DANGLING symlink is refused before any stage request", () => {
+    const dir = mkdtempSync(join(SCRATCH, "dangling-"));
+    const artifact = buildArtifact(dir, VERSION, FIXTURE_NAMES);
+    symlinkSync(join(dir, "no-such-target"), join(dir, "dangling.tgz"));
+    expect(lstatSync(join(dir, "dangling.tgz")).isSymbolicLink()).toBe(true);
+    const r = runStageShell(artifact, dir);
+    expect(r.status).not.toBe(0);
+    // The artifact hygiene check names it, before any digest/chmod work.
+    expect(r.out).toContain("release artifact contains a symlink");
     expect(r.log.filter((l) => l.argv[0] === "stage").length).toBe(0);
   });
 

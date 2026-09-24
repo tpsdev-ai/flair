@@ -321,17 +321,6 @@ jobs:
           # below compares the artifact's contents, so a helper file written into
           # it would read as an unexpected entry.
           mkdir -p "$WORK_DIR"
-          # Artifact hygiene: reject symlinks and path-escaping entries first.
-          for entry in * .[!.]*; do
-            if [ -e "$entry" ]; then
-              if [ -L "$entry" ]; then
-                echo "::error::release artifact contains a symlink: $entry"; exit 1
-              fi
-              if [ "$entry" != "${entry//..}" ]; then
-                echo "::error::release artifact entry contains a path escape: $entry"; exit 1
-              fi
-            fi
-          done
           if [ ! -f manifest.json ]; then
             echo "::error::release artifact has no manifest.json"; exit 1
           fi
@@ -339,7 +328,8 @@ jobs:
           LIST="$WORK_DIR/release-packages.tsv"
           jq -r '.packages[] | "\(.name)\t\(.version)\t\(.basename)\t\(.sha256)"' manifest.json > "$LIST"
 
-          # Basenames must be plain filenames (no separator, no path escape).
+          # Expected: the manifest plus the tarballs it names. Every basename must
+          # be a plain filename (no separator, no path escape).
           EXPECTED="$WORK_DIR/release-expected.txt"
           : > "$EXPECTED"
           printf 'manifest.json\n' >> "$EXPECTED"
@@ -351,14 +341,22 @@ jobs:
             printf '%s\n' "$basename" >> "$EXPECTED"
           done < "$LIST"
 
-          # The artifact holds EXACTLY the manifest plus the tarballs it lists,
-          # nothing else: an extra file (a stray tarball, a shipped .npmrc) is a
-          # refusal here, before any request.
+          # Enumerate EVERY directory entry regardless of name. A glob cannot see
+          # a two-dot name (..foo) and the -e test skips a DANGLING symlink, so
+          # both would slip past the set compare; find(1) lists them. Reject any
+          # symlink (dangling or not) and any directory, then compare the sorted
+          # listing to the manifest set.
           FOUND="$WORK_DIR/release-found.txt"
-          : > "$FOUND"
-          for entry in * .[!.]*; do
-            if [ -e "$entry" ]; then printf '%s\n' "$entry" >> "$FOUND"; fi
-          done
+          find . -mindepth 1 -maxdepth 1 -printf '%P\n' > "$FOUND"
+          while IFS= read -r entry; do
+            if [ -z "$entry" ]; then continue; fi
+            if [ -L "$entry" ]; then
+              echo "::error::release artifact contains a symlink: $entry"; exit 1
+            fi
+            if [ -d "$entry" ]; then
+              echo "::error::release artifact contains a directory: $entry"; exit 1
+            fi
+          done < "$FOUND"
           LC_ALL=C sort -o "$EXPECTED" "$EXPECTED"
           LC_ALL=C sort -o "$FOUND" "$FOUND"
           if ! cmp -s "$EXPECTED" "$FOUND"; then
