@@ -58,9 +58,12 @@ function byteCompare(a, b) {
  * lockstep `version`. Throws (caught by the CLI) on an empty input or a
  * non-64-hex sha — a refusal, never a match.
  */
-export function computePackageSetDigest(pairs, version) {
+export function computePackageSetDigest(pairs, version, options = {}) {
   if (!Array.isArray(pairs) || pairs.length === 0) {
     throw new Error("no package=sha256 lines");
+   }
+  if (options?.expected != null) {
+    assertExactSetOfNames(pairs.map((p) => p[0]), [...options.expected], "the package set");
    }
   const lines = [];
   for (const [name, sha] of pairs) {
@@ -74,6 +77,30 @@ export function computePackageSetDigest(pairs, version) {
    }
   lines.sort(byteCompare);
   return createHash("sha256").update(lines.join("\n") + "\n", "utf8").digest("hex");
+}
+
+/**
+ * Refuse unless `names` and `expected` describe the same SET of package names:
+ * every expected name present exactly once, no name that is not expected, and no
+ * name that appears more than once. When they differ, throw naming every
+ * offending member as "missing ", "extra " or "duplicated " (the label names the
+ * set). `release-pack.mjs` drives this with `expected = lockstepPackages(root)`
+ * so a package-set digest is never recorded for a set that is not exactly the
+ * derived lockstep set — a missing, extra or duplicated member is a refusal.
+ */
+export function assertExactSetOfNames(names, expected, label = "the package set") {
+  const want = new Set(expected);
+  const counts = new Map();
+  for (const n of names) counts.set(n, (counts.get(n) ?? 0) + 1);
+  const missing = [...want].filter((n) => !counts.has(n));
+  const extra = [...counts.keys()].filter((n) => !want.has(n));
+  const duplicated = [...counts.keys()].filter((n) => (counts.get(n) ?? 0) > 1);
+  if (missing.length === 0 && extra.length === 0 && duplicated.length === 0) return;
+  const parts = [];
+  if (missing.length > 0) parts.push(`missing [${missing.join(", ")}]`);
+  if (extra.length > 0) parts.push(`extra [${extra.join(", ")}]`);
+  if (duplicated.length > 0) parts.push(`duplicated [${duplicated.join(", ")}]`);
+  throw new Error(`${label} is not exactly the lockstep set: ${parts.join("; ")}`);
 }
 
 /** Parse `<name>=<sha256>` stdin into `[[name, sha], ...]` (throws on malformed). */
