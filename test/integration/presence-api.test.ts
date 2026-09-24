@@ -102,6 +102,15 @@ describe("Presence API integration", () => {
   const agent1 = { id: "presence-test-agent-1", ...makeKeypair() };
   const agent2 = { id: "presence-test-agent-2", ...makeKeypair() };
 
+  // flair#1880: GET /Presence requires a verified reader by default, so the
+  // roster assertions in this suite sign as a registered agent (agent1) — the
+  // signed-client path production tooling uses. Anonymous-read denial and the
+  // `PRESENCE_PUBLIC_ROSTER` opt-in live in
+  // test/integration/presence-read-gate.test.ts.
+  const signedGet = () => ({
+    headers: { Authorization: buildAuthHeader(agent1.id, "GET", "/Presence", agent1.privateKey) },
+  });
+
   beforeAll(async () => {
     await seedAgent(harper.opsURL, adminAuth(), agent1.id, agent1.publicKey, "Agent One");
     await seedAgent(harper.opsURL, adminAuth(), agent2.id, agent2.publicKey, "Agent Two");
@@ -173,7 +182,7 @@ describe("Presence API integration", () => {
   // ── 3. Read returns correct derived status ─────────────────────────────────
 
   test("GET /Presence returns presence roster", async () => {
-    const res = await fetch(`${harper.httpURL}/Presence`);
+    const res = await fetch(`${harper.httpURL}/Presence`, signedGet());
     expect(res.status).toBe(200);
     const roster = await res.json();
     expect(Array.isArray(roster)).toBe(true);
@@ -181,7 +190,7 @@ describe("Presence API integration", () => {
   });
 
   test("GET /Presence includes derived presenceStatus", async () => {
-    const res = await fetch(`${harper.httpURL}/Presence`);
+    const res = await fetch(`${harper.httpURL}/Presence`, signedGet());
     const roster = await res.json();
     const a1 = roster.find((r: any) => r.id === agent1.id);
     expect(a1).toBeDefined();
@@ -190,7 +199,7 @@ describe("Presence API integration", () => {
   });
 
   test("GET /Presence merges agent display fields", async () => {
-    const res = await fetch(`${harper.httpURL}/Presence`);
+    const res = await fetch(`${harper.httpURL}/Presence`, signedGet());
     const roster = await res.json();
     const a1 = roster.find((r: any) => r.id === agent1.id);
     expect(a1.displayName).toBe("Agent One");
@@ -200,7 +209,7 @@ describe("Presence API integration", () => {
   // ── 4. Read field-allowlist enforced ───────────────────────────────────────
 
   test("GET /Presence does not leak non-allowlisted fields", async () => {
-    const res = await fetch(`${harper.httpURL}/Presence`);
+    const res = await fetch(`${harper.httpURL}/Presence`, signedGet());
     const roster = await res.json();
 
     const FORBIDDEN_FIELDS = [
@@ -226,7 +235,7 @@ describe("Presence API integration", () => {
   });
 
   test("GET /Presence only returns allowlisted fields", async () => {
-    const res = await fetch(`${harper.httpURL}/Presence`);
+    const res = await fetch(`${harper.httpURL}/Presence`, signedGet());
     const roster = await res.json();
 
     const ALLOWED = new Set([
@@ -261,7 +270,11 @@ describe("Presence API integration", () => {
   // raw-header-verify fallback — the actual paths a production Fabric
   // deployment hits, not a simulated one.
 
-  test("GET /Presence WITHOUT auth: currentTask is null for every entry, other fields present", async () => {
+  // flair#1880 replaced the old "WITHOUT auth → currentTask is null (redacted
+  // roster)" contract: an unverified reader no longer gets a redacted roster,
+  // it gets 401. The old anonymous-content-gate assertions now live in
+  // presence-read-gate.test.ts, under the publicRoster opt-in.
+  test("GET /Presence WITHOUT auth → 401 (verified-reader default, not a redacted roster)", async () => {
     const auth = buildAuthHeader(agent1.id, "POST", "/Presence", agent1.privateKey);
     await fetch(`${harper.httpURL}/Presence`, {
       method: "POST",
@@ -270,16 +283,9 @@ describe("Presence API integration", () => {
     });
 
     const res = await fetch(`${harper.httpURL}/Presence`);
-    expect(res.status).toBe(200);
-    const roster = await res.json();
-    expect(roster.length).toBeGreaterThanOrEqual(1);
-
-    const a1 = roster.find((r: any) => r.id === agent1.id);
-    expect(a1).toBeDefined();
-    expect(a1.currentTask).toBeNull();
-    // roster metadata is unaffected by the gate
-    expect(typeof a1.displayName).toBe("string");
-    expect(typeof a1.presenceStatus).toBe("string");
+    expect(res.status).toBe(401);
+    const text = await res.text();
+    expect(text).not.toContain("preprod-db-3");
   });
 
   test("GET /Presence WITH valid Ed25519 auth: currentTask IS present, full text", async () => {
@@ -337,7 +343,7 @@ describe("Presence API integration", () => {
     expect(a1.harperVersion).toBe(expectedHarperVersion);
   });
 
-  test("GET /Presence WITHOUT auth: flairVersion/harperVersion are null (same gate as currentTask)", async () => {
+  test("GET /Presence with a verified agent: flairVersion/harperVersion are present (not null)", async () => {
     const auth = buildAuthHeader(agent1.id, "POST", "/Presence", agent1.privateKey);
     await fetch(`${harper.httpURL}/Presence`, {
       method: "POST",
@@ -345,14 +351,14 @@ describe("Presence API integration", () => {
       body: JSON.stringify({ activity: "coding" }),
     });
 
-    const res = await fetch(`${harper.httpURL}/Presence`);
+    const res = await fetch(`${harper.httpURL}/Presence`, signedGet());
     expect(res.status).toBe(200);
     const roster = await res.json();
     const a1 = roster.find((r: any) => r.id === agent1.id);
-    expect(a1.flairVersion).toBeNull();
-    expect(a1.harperVersion).toBeNull();
-    // roster metadata is unaffected by the gate, same as the currentTask case
-    expect(typeof a1.presenceStatus).toBe("string");
+    // A verified signature sees the stamped versions (the gate that nulls them
+    // for anonymous readers is asserted in presence-read-gate.test.ts).
+    expect(a1.flairVersion).toBe(expectedFlairVersion);
+    expect(a1.harperVersion).toBe(expectedHarperVersion);
   });
 
   test("reader tolerance: a legacy presence record with no flairVersion/harperVersion doesn't crash GET", async () => {
@@ -539,7 +545,7 @@ describe("Presence API integration", () => {
     expect(row.activity).toBe("reviewing");
   });
 
-  test("stale record: anonymous reader also gets currentTask=null, and lastActivity stays public", async () => {
+  test("stale record: a verified reader also gets currentTask=null (decay is not only the read gate), lastActivity stays public", async () => {
     const id = "presence-natural-stale-anon";
     const staleAt = Date.now() - STALE_MS;
     await fetch(harper.opsURL, {
@@ -553,10 +559,10 @@ describe("Presence API integration", () => {
       }),
     });
 
-    const res = await fetch(`${harper.httpURL}/Presence`); // anonymous
+    const res = await fetch(`${harper.httpURL}/Presence`, signedGet());
     const roster = await res.json();
     const row = roster.find((r: any) => r.id === id);
-    expect(row.currentTask).toBeNull();     // gated AND stale
+    expect(row.currentTask).toBeNull();     // decayed, even for a verified reader
     expect(row.lastActivity).toBe("coding"); // public-safe label survives
     expect(row.activity).toBe("idle");
     expect(row.activityFresh).toBe(false);

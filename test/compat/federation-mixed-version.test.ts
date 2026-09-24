@@ -143,6 +143,21 @@ function resolveInstanceEnv(inst: Instance): Record<string, string> {
   };
 }
 
+/**
+ * flair#1880: GET /Presence requires a verified reader by default. Sign the
+ * roster read as the instance's own agent — the HEAD build enforces the gate
+ * and the npm baseline simply ignores the auth header on this path, so one
+ * signed read covers both. The signer is the HEAD build's own auth-resolve
+ * (this worktree's dist), pointed at the instance's key file.
+ */
+async function signedPresenceGet(inst: Instance): Promise<RequestInit> {
+  const { buildEd25519Auth } = await import(
+    pathToFileURL(join(process.cwd(), "dist", "lib", "auth-resolve.js")).href
+  );
+  const keyPath = join(inst.home, ".flair", "keys", `${inst.agentId}.key`);
+  return { headers: { Authorization: buildEd25519Auth(inst.agentId, "GET", "/Presence", keyPath) } };
+}
+
 /** Spawn `node <cliPath> ...args` and wait for it to exit. Rejects (with the
  * full captured stdout/stderr in the error message) on a non-zero exit code
  * or timeout — a silent/partial failure here must not be swallowed, since
@@ -725,7 +740,7 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
           "--port", String(new URL(inst.harper.httpURL).port)],
         resolveInstanceEnv(inst),
       );
-      const res = await fetch(`${inst.harper.httpURL}/Presence`);
+      const res = await fetch(`${inst.harper.httpURL}/Presence`, await signedPresenceGet(inst));
       expect(res.status).toBe(200);
       const roster = await res.json() as any[];
       const entry = roster.find((r) => r.id === inst.agentId);

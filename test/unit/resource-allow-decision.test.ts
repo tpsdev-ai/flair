@@ -227,7 +227,7 @@ const EARLY_RETURN_ENDPOINTS: Array<{ path: string; file: string; className: str
   { path: "/OAuthToken", file: "OAuth.ts", className: "OAuthToken", note: "authenticates via PKCE verifier / client_secret in the body, not agent identity" },
   { path: "/OAuthRevoke", file: "OAuth.ts", className: "OAuthRevoke", note: "OAuth 2.1 revocation — token itself is the credential" },
   { path: "/.well-known/oauth-authorization-server, /OAuthMetadata", file: "OAuth.ts", className: "OAuthMetadata", note: "static, non-secret discovery document" },
-  { path: "GET /Presence", file: "Presence.ts", className: "Presence", note: "#592 fix: get()'s currentTask field gates on verifyAgentRequest (a real Ed25519 signature), NOT resolveAgentAuth/context.user — authorizeLocal can forge the latter but not the former" },
+  { path: "GET /Presence", file: "Presence.ts", className: "Presence", note: "#592/#1880: get()'s content gate keys off a real TPS-Ed25519 signature; the read verdict is resolved via resolveAgentAuth (the middleware's tpsAgent/tpsAnonymous annotation first, per #1880 F2) so a by-id read does not re-verify and replay-collide" },
 ];
 
 /**
@@ -301,8 +301,16 @@ describe("auth-middleware's public early-return allowlist doesn't read raw conte
     expect(body.includes("resolveAgentAuth(")).toBe(true);
   });
 
-  it("Presence.get() gates currentTask on verifyAgentRequest, not resolveAgentAuth (#592 regression guard)", () => {
+  it("Presence.get() resolves the middleware verdict via resolveAgentAuth (no second verifier) and keys the content gate off a TPS-Ed25519 signature (#592 / #1880-F2 guard)", () => {
     const body = stripComments(SRC("Presence.ts"));
-    expect(body.includes("verifyAgentRequest(")).toBe(true);
+    // flair#1880 F2: get() must NOT re-run verifyAgentRequest() as a second
+    // verifier — on a by-id read the middleware has already consumed the
+    // nonce, so a second verify would read as a replay and 401 a real agent.
+    // The verdict is resolved via resolveAgentAuth() (the middleware's
+    // tpsAgent/tpsAnonymous annotations first), and the #592 content gate keys
+    // off a real TPS-Ed25519 signature, not merely a verified verdict.
+    expect(body.includes("resolveAgentAuth(")).toBe(true);
+    expect(body.includes("verifyAgentRequest(")).toBe(false);
+    expect(body.includes("presenceReaderVerdict(")).toBe(true);
   });
 });

@@ -1,5 +1,11 @@
 name: Socket Security
 
+# Explicit least privilege: this placeholder job only prints a note. It reads
+# nothing, but a top-level `contents: read` keeps it off the repository default
+# and matches the read-only floor every workflow here declares.
+permissions:
+  contents: read
+
 on:
   pull_request:
     branches: [main]

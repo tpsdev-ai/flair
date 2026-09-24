@@ -168,21 +168,25 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     expect(out).not.toContain("Pass --agent");
   }, CASE_BUDGET_MS);
 
-  test("doctor without --agent, zero local keys: fleet identities still show, but versions are hidden (verified-reader gate)", async () => {
+  test("doctor without --agent, zero local keys: roster read is refused (verified-reader default) and NAMED, not silently blank", async () => {
     // A totally separate, empty HOME (no `agent add` ever ran here) —
     // exercises the flair#722 zero-keys fallback: planAgentIterations()
-    // returns an empty list, so doctor falls back to exactly the pre-#722
-    // single unauthenticated read.
+    // returns an empty list, so doctor makes an unauthenticated read.
+    // flair#1880: that read now gets 401 (GET /Presence requires a verified
+    // reader), and there is no key here to sign with — so doctor must NAME the
+    // condition rather than render an empty/hidden roster. The pre-#1880
+    // "identities still show, versions hidden" contract is deliberately gone:
+    // identity is no longer served anonymously by default.
     const emptyHome = await mkdtemp(join(tmpdir(), "flair-fleet-doctor-empty-home-"));
     try {
       const doctor = await runCli(["doctor", "--port", httpPort()], { HOME: emptyHome });
       const out = `${doctor.stdout}${doctor.stderr}`;
       expect(out).toContain("Fleet presence");
-      // Roster identity (agentId) is public regardless of the gate.
-      expect(out).toContain(AGENT_A);
-      expect(out).toContain("hidden");
+      expect(out).toContain("verified reader");
       expect(out).toContain("Pass --agent");
-      expect(out).not.toContain("Agent: ");
+      // No roster rows: identity is not served to an anonymous reader.
+      expect(out).not.toContain(`Agent: ${AGENT_A}`);
+      expect(out).not.toContain("hidden");
     } finally {
       await rm(emptyHome, { recursive: true, force: true, maxRetries: 4 });
     }

@@ -35,6 +35,13 @@
 # Settings → Actions → General to prevent abuse from fork PRs.
 name: First-Run-Hostile Lane
 
+# Explicit least privilege. This lane runs arbitrary PR code (Dockerfile + test
+# script) with no secrets; it reads the repo, builds an image and downloads a
+# public model. `contents: read` is the whole grant — see the Security note
+# above ("public npm install + public GITHUB_TOKEN-default only").
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
