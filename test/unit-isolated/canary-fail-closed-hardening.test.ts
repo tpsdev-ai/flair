@@ -1,21 +1,28 @@
 /**
- * canary-fail-closed-hardening.test.ts — flair#1856 round 2.
+ * canary-fail-closed-hardening.test.ts — flair#1856 round 2, flair#1671 (A1c).
  *
- * The post-publish canary is the last gate before `latest` moves. Its sha256
- * helpers had a FAIL-OPEN: they decided "am I the entry point?" with
- * `resolve(process.argv[1]) === fileURLToPath(import.meta.url)`. `resolve()` does
- * not follow symlinks, but Node builds `import.meta.url` for the entry module
- * from the REAL path — so a checkout reached through a symlink made that
- * comparison false. The script then loaded, skipped `main()`, printed NOTHING and
- * exited 0. In the workflow a zero exit counted as success, so an empty sha could
- * reach `LOCKSTEP_SHAS`, and the line-count check counts LINES, not VALUES. An
- * unmeasurable tarball must never read as a pass.
+ * The post-publish canary is the last gate before `latest` moves. A1c rebinds the
+ * PASS block from "one sha256 test per package" to a SINGLE package-set-digest
+ * preflight, and the sha step now re-derives the canonical package-set digest from
+ * the per-package shas it verified and requires it to equal the dispatched
+ * `package_set_digest` BEFORE any verdict (A1a, #1877 certified the same digest).
  *
- * These tests exercise the fail-closed contract end to end, with no network and
- * no real npm: a stub `npm` resolves tarballs to a local HTTP server, and a stub
- * `node` can simulate "the helper printed nothing". Every case is run the way the
- * gate runs it — through a SYMLINKED path — so a regression to `resolve()` turns
- * this file red.
+ * This file exercises the fail-closed contract end to end, with no network and no
+ * real npm: a stub `node` synthesizes per-package shas (or simulates "the helper
+ * printed nothing"), and a stub `npm` records every `dist-tag add` so the tests can
+ * prove that a refusal aborts the whole preflight BEFORE the first tag could move.
+ *
+ *   (a) a SemVer prerelease PASS prints no promote block (in the unit test file).
+ *   (b) the promote block is bound to the single set digest, no per-package tests.
+ *   (c) a sha-step `package_set_digest` mismatch is a FAIL verdict (the step
+ *       fails, names both digests, and writes no LOCKSTEP_SHAS — so the verdict
+ *       is FAIL, never a promote).
+ *   (d) a paste-time re-hash with ONE package's registry hash changed aborts the
+ *       preflight before any dist-tag line.
+ *   (e) an empty re-hash refuses the whole preflight (unmeasurable is never a match).
+ *
+ * A regression here (a per-package sha test, a match on an unmeasured set, a
+ * promote on a mismatch) turns these red.
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -26,15 +33,18 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import yaml from "js-yaml";
 
+import { lockstepPackages } from "../../scripts/ci/lockstep-packages.mjs";
+import { computePackageSetDigest } from "../../scripts/ci/package-set-digest.mjs";
+
 const REPO = join(import.meta.dir, "..", "..");
 const CANARY_YML = join(REPO, ".github", "workflows", "canary.yml");
 const SHA_SCRIPT = join(REPO, "scripts", "ci", "registry-tarball-sha256.mjs");
 const LOCKSTEP_SCRIPT = join(REPO, "scripts", "ci", "lockstep-packages.mjs");
 const VERDICT_SCRIPT = join(REPO, "scripts", "ci", "canary-verdict.sh");
-const { lockstepPackages } = await import("../../scripts/ci/lockstep-packages.mjs");
 
 const RUN_URL = "https://github.com/tpsdev-ai/flair/actions/runs/42";
 const PACKAGES: string[] = lockstepPackages();
+const VER = "0.55.1";
 
 const SCRATCH = mkdtempSync(join(tmpdir(), "flair-1856-r2-"));
 const BIN = join(SCRATCH, "bin");
@@ -48,13 +58,10 @@ mkdirSync(SHIM, { recursive: true });
 // shim exists).
 const REAL_NODE = execFileSync("node", ["-p", "process.execPath"], { encoding: "utf8" }).trim();
 
-/** A distinct, valid 64-hex sha per package, so a mis-bound line is detectable. */
-function shaFor(pkg: string): string {
-  return createHash("sha256").update(`sha:${pkg}`).digest("hex");
-}
-/** The stub "hashed" sha for `<pkg>` in ok/flair-only modes. */
-function stubSha(pkg: string): string {
-  return createHash("sha256").update(`stub:${pkg}`).digest("hex");
+const sha256Hex = (s: string) => createHash("sha256").update(s).digest("hex");
+/** The digest the canary would re-derive if every package hashed to sha256(seed+pkg). */
+function rederivedDigest(seed: string): string {
+  return computePackageSetDigest(PACKAGES.map((p) => [p, sha256Hex(seed + p)]), VER);
 }
 
 // ── the local registry: one HTTP server + a stub npm ────────────────────────
@@ -79,57 +86,72 @@ function mockRegistry(): Server {
     const body = TARBALL_BODIES.get(req.url ?? "");
     res.writeHead(body ? 200 : 404, { "Content-Type": "application/octet-stream" });
     res.end(body ?? NOT_FOUND_BODY);
-  });
+   });
 }
 
+// The stub npm ALSO logs every `dist-tag add` to $DISTTAG_LOG, so the block
+// tests can prove a refusal aborts BEFORE the first tag could move.
 const npmStub = [
-  "#!/usr/bin/env bash",
-  "set -uo pipefail",
-  'if [ "${1:-}" = "view" ] && [ "${3:-}" = "dist.tarball" ]; then',
-  '  base="$(cat "$FIXTURES")"; spec="$2"',
-  '  printf \'%s/%s@%s.tgz\\n\' "$base" "${spec%@*}" "${spec##*@}"',
-  "fi",
-  "exit 0",
+   "#!/usr/bin/env bash",
+   "if [ \"${1:-}\" = \"view\" ] && [ \"${3:-}\" = \"dist.tarball\" ]; then",
+   "  base=\"$(cat \"$FIXTURES\")\"; spec=\"$2\"",
+   "  printf '%s/%s@%s.tgz\\n' \"$base\" \"${spec%@*}\" \"${spec##*@}\"",
+   "fi",
+   "if [ \"${1:-}\" = \"dist-tag\" ]; then printf 'dist-tag %s %s\\n' \"${2:-}\" \"${3:-}\" >> \"${DISTTAG_LOG:-/dev/null}\"; fi",
+   "exit 0",
 ].join("\n");
 
-// ── the stub `node`: it can simulate "the helper printed nothing" ───────────
+// ── the stub `node`: it can synthesize per-package shas or "print nothing" ────
 // Modes (env STUB_SHA_MODE):
-//   ok         — a distinct 64-hex sha per package (the happy path)
-//   flair-only — @tpsdev-ai/flair hashes; every OTHER package prints NOTHING
-//   bindings   — sha256("sha:" + pkg), matching the bindings this test emits
-//   empty      — prints nothing for every package
+//   ok          — sha256("stub:"+pkg) per package (the happy path)
+//   bindings     — sha256("sha:"+pkg) per package
+//   empty        — prints nothing for every package (unmeasurable)
+//   flair-only   — @tpsdev-ai/flair hashes; every OTHER package prints NOTHING
+//   one-changed  — STUB_CHANGED_PKG hashes sha256("changed:"+pkg); the rest "sha:"
+// `package-set-digest.mjs` is delegated to REAL node so the digest is computed for
+// real over the (stubbed) per-package shas.
 const nodeStub = [
-  "#!/usr/bin/env node",
-  "import { createHash } from 'node:crypto';",
-  "import { spawnSync } from 'node:child_process';",
-  "import { join as require_join } from 'node:path';",
-  "const args = process.argv.slice(2);",
-  "const joined = args.join(' ');",
-  "if (joined.includes('lockstep-packages.mjs')) {",
-  "  const abs = args.map((a, i) => (i === 0 ? require_join(process.env.REPO_ROOT, a) : a));",
-  "  const r = spawnSync(process.env.REAL_NODE, abs, { cwd: process.env.REPO_ROOT, encoding: 'utf8' });",
-  "  if (r.stdout) process.stdout.write(r.stdout);",
-  "  if (r.stderr) process.stderr.write(r.stderr);",
-  "  process.exit(r.status ?? 1);",
-  "}",
-  "if (joined.includes('registry-tarball-sha256.mjs')) {",
-  "  const mode = process.env.STUB_SHA_MODE || 'ok';",
-  "  const pkg = args[args.length - 1];",
-  "  if (mode === 'empty') process.exit(0);",
-  "  if (mode === 'flair-only' && pkg !== '@tpsdev-ai/flair') process.exit(0);",
-  "  const seed = mode === 'bindings' ? 'sha:' : 'stub:';",
-  "  process.stdout.write(createHash('sha256').update(seed + pkg).digest('hex') + '\\n');",
-  "  process.exit(0);",
-  "}",
-  "// Any other node script the gate runs (registry-latest-skew) is a no-op here.",
-  "process.exit(0);",
+   "#!/usr/bin/env node",
+   "import { createHash } from 'node:crypto';",
+   "import { spawnSync } from 'node:child_process';",
+   "import { join as require_join } from 'node:path';",
+   "const args = process.argv.slice(2);",
+   "const joined = args.join(' ');",
+   "if (joined.includes('lockstep-packages.mjs')) {",
+   "  const abs = args.map((a, i) => (i === 0 ? require_join(process.env.REPO_ROOT, a) : a));",
+   "  const r = spawnSync(process.env.REAL_NODE, abs, { cwd: process.env.REPO_ROOT, encoding: 'utf8', stdio: ['inherit', 'pipe', 'pipe'] });",
+   "  if (r.stdout) process.stdout.write(r.stdout);",
+   "  if (r.stderr) process.stderr.write(r.stderr);",
+   "  process.exit(r.status ?? 1);",
+   "}",
+   "if (joined.includes('package-set-digest.mjs')) {",
+   "  const abs = args.map((a, i) => (i === 0 ? require_join(process.env.REPO_ROOT, a) : a));",
+   "  const r = spawnSync(process.env.REAL_NODE, abs, { cwd: process.env.REPO_ROOT, encoding: 'utf8', stdio: ['inherit', 'pipe', 'pipe'] });",
+   "  if (r.stdout) process.stdout.write(r.stdout);",
+   "  if (r.stderr) process.stderr.write(r.stderr);",
+   "  process.exit(r.status ?? 1);",
+   "}",
+   "if (joined.includes('registry-tarball-sha256.mjs')) {",
+   "  const mode = process.env.STUB_SHA_MODE || 'ok';",
+   "  const pk = args[args.length - 1];",
+   "  if (mode === 'empty') process.exit(0);",
+   "  if (mode === 'flair-only' && pk !== '@tpsdev-ai/flair') process.exit(0);",
+   "  if (mode === 'one-changed' && pk === process.env.STUB_CHANGED_PKG) { process.stdout.write(createHash('sha256').update('changed:' + pk).digest('hex') + '\\n'); process.exit(0); }",
+   "  const seed = (mode === 'bindings') ? 'sha:' : 'stub:';",
+   "  process.stdout.write(createHash('sha256').update(seed + pk).digest('hex') + '\\n');",
+   "  process.exit(0);",
+   "}",
+   "// Any other node script the gate runs (registry-latest-skew) is a no-op here.",
+   "process.exit(0);",
 ].join("\n");
+
+const nodeStdin = { stdin: "inherit" as const }; // ensure child scripts see the caller's stdin
 
 writeFileSync(join(BIN, "npm"), npmStub);
 writeFileSync(join(SCRATCH, "node-stub.mjs"), nodeStub);
-// A `node` shim on the PATH can simulate "the helper printed nothing" for the
-// workflow step. It lives in its OWN dir so the direct-helper tests keep real
-// node.
+// A `node` shim on the PATH can synthesize per-package shas for the workflow step
+// and the emitted block. It lives in its OWN dir so the direct-helper tests keep
+// real node.
 writeFileSync(join(SHIM, "node"), ["#!/usr/bin/env bash", 'exec "$REAL_NODE" "$NODE_STUB" "$@"', ""].join("\n"));
 chmodSync(join(BIN, "npm"), 0o755);
 chmodSync(join(SHIM, "node"), 0o755);
@@ -150,14 +172,15 @@ async function runNode(cwd: string, args: string[], extraEnv: Record<string, str
     env: { ...process.env, PATH: `${BIN}:${process.env.PATH}`, FIXTURES, REPO_ROOT: REPO, ...extraEnv },
     stdout: "pipe",
     stderr: "pipe",
-  });
+   });
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
-  ]);
+   ]);
   return { stdout, stderr, status: await proc.exited };
 }
 
+// ── the direct helpers are recognised through a symlinked checkout ───────────
 describe("the canary's sha256 helpers are recognised through a symlinked path (flair#1856 R2)", () => {
   test("registry-tarball-sha256.mjs prints a 64-hex sha and exits 0 (was: empty output, exit 0)", async () => {
     const srv = mockRegistry();
@@ -165,31 +188,31 @@ describe("the canary's sha256 helpers are recognised through a symlinked path (f
     writeFileSync(FIXTURES, `http://127.0.0.1:${port}`);
     const expected = createHash("sha256").update(TARBALL_BODIES.get(PI_FLAIR_TARBALL_PATH)!).digest("hex");
 
-    // cwd is the SYMLINKED checkout; argv[1] carries the symlinked path.
+     // cwd is the SYMLINKED checkout; argv[1] carries the symlinked path.
     const r = await runNode(LINKREPO, ["scripts/ci/registry-tarball-sha256.mjs", "0.55.1", "@tpsdev-ai/pi-flair"]);
     expect(r.status).toBe(0);
     expect(r.stdout.trim()).toBe(expected);
     expect(r.stdout.trim()).toMatch(/^[0-9a-f]{64}$/);
-  });
+   });
 
   test("lockstep-packages.mjs prints the full set and exits 0 (was: empty output, exit 0)", async () => {
     const r = await runNode(LINKREPO, ["scripts/ci/lockstep-packages.mjs"]);
     expect(r.status).toBe(0);
     expect(r.stdout.trim().split("\n")).toEqual(PACKAGES);
-  });
+   });
 });
 
-// ── the workflow step: an unmeasurable sha must not become a partial set ─────
+// ── the sha step: the package-set digest must match before any verdict ───────
 function shaStepScript(): string {
   const wf = yaml.load(readFileSync(CANARY_YML, "utf8")) as {
     jobs: { canary: { steps: { id?: string; run?: string }[] } };
-  };
+   };
   const step = wf.jobs.canary.steps.find((s) => s.id === "sha");
   if (!step?.run) throw new Error("canary.yml has no step id 'sha' with a run: block");
   return step.run;
 }
 
-function runShaStep(mode: string): { status: number | null; stdout: string; envFile: string } {
+function runShaStep(mode: string, certDigest: string): { status: number | null; stdout: string; envFile: string } {
   const cwd = mkdtempSync(join(SCRATCH, "step-"));
   const stepFile = join(cwd, "step.sh");
   const genv = join(cwd, "github_env.txt");
@@ -199,107 +222,179 @@ function runShaStep(mode: string): { status: number | null; stdout: string; envF
     cwd,
     encoding: "utf8",
     env: {
-      ...process.env,
+       ...process.env,
       PATH: `${SHIM}:${BIN}:${process.env.PATH}`,
       REAL_NODE,
       NODE_STUB: join(SCRATCH, "node-stub.mjs"),
       REPO_ROOT: REPO,
       STUB_SHA_MODE: mode,
       GITHUB_ENV: genv,
-      VERSION: "0.55.1",
-      EXPECTED: stubSha("@tpsdev-ai/flair"),
-    },
-  });
+      VERSION: VER,
+      EXPECTED: sha256Hex("stub:@tpsdev-ai/flair"),
+      PKG_SET_DIGEST: certDigest,
+      RUNNER_TEMP: join(cwd, "temp"),
+     },
+   });
   return { status: r.status, stdout: `${r.stdout}${r.stderr}`, envFile: readFileSync(genv, "utf8") };
 }
 
-describe("the workflow's sha guard rejects an unmeasurable sha (flair#1856 R2)", () => {
-  test("a helper that exits 0 with NO output does NOT reach LOCKSTEP_SHAS", () => {
-    // flair + a correct sha, but every OTHER package prints nothing. Before the
-    // guard the step exited 0 and wrote eight `pkg=` (empty) bindings: the count
-    // check counted lines, not values.
-    const r = runShaStep("flair-only");
-    expect(r.status).not.toBe(0);
-    expect(r.stdout).toContain("unmeasurable is FAIL");
-    expect(r.envFile).not.toContain("LOCKSTEP_SHAS");
-    // No `pkg=` line with an empty value ever leaves the step.
-    expect(/(^|\n)[^\n=]+=\n/.test(r.envFile)).toBe(false);
-  });
-
-  test("positive control: every sha is 64-hex => the step passes and writes all bindings", () => {
-    const r = runShaStep("ok");
+describe("the sha step binds the verdict to the package-set digest (A1c of #1671)", () => {
+  test("positive control: every sha 64-hex and the digest matches => step passes, writes all bindings", () => {
+    const cert = rederivedDigest("stub:"); // the "ok" mode hashes seed "stub:"
+    const r = runShaStep("ok", cert);
     expect(r.status).toBe(0);
+    expect(r.stdout).toContain("package-set digest verified");
     expect(r.envFile).toContain("LOCKSTEP_SHAS<<EOF");
     const lines = r.envFile.split("\n").filter((l) => /^@/.test(l));
     expect(lines.length).toBe(PACKAGES.length);
     for (const line of lines) expect(line).toMatch(/^@[^=]+=[0-9a-f]{64}$/);
-  });
+   });
+
+  test("(c) a package_set_digest mismatch => FAIL: step fails, names both digests, no LOCKSTEP_SHAS", () => {
+    const wrong = "0000000000000000000000000000000000000000000000000000000000000000";
+    const r = runShaStep("ok", wrong);
+    expect(r.status).not.toBe(0);
+    // Both digests are named: the re-derived one and the dispatched (wrong) one.
+    expect(r.stdout).toContain("differs from the dispatched " + wrong);
+    // The re-derived digest (from the "ok" seed) is the real one, so it is named too.
+    expect(r.stdout).toContain(rederivedDigest("stub:"));
+    expect(r.stdout).toContain("do not promote");
+     // A FAIL canary writes no promote bindings: no digest could move `latest`.
+    expect(r.envFile).not.toContain("LOCKSTEP_SHAS");
+   });
+
+  test("(c-2) a non-hex package_set_digest => FAIL before any verdict", () => {
+    const r = runShaStep("ok", "not-a-hex-digest");
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).toContain("64-char hex");
+    expect(r.envFile).not.toContain("LOCKSTEP_SHAS");
+   });
+
+  test("a 40-hex (SHA-1) package_set_digest => FAIL before any verdict", () => {
+    const r = runShaStep("ok", "0123456789abcdef0123456789abcdef01234567");
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).toContain("64-char hex");
+   });
+
+  test("(unmeasurable) a helper that exits 0 with NO output does NOT reach the verdict", () => {
+     // flair + a correct sha, but every OTHER package prints nothing. The 64-hex
+     // guard aborts the step (before the digest is even computed), so no
+     // LOCKSTEP_SHAS is written — the canary is FAIL, never a promote.
+    const r = runShaStep("flair-only", rederivedDigest("stub:"));
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).toContain("unmeasurable is FAIL");
+    expect(r.envFile).not.toContain("LOCKSTEP_SHAS");
+     // No `pkg=` line with an empty value ever leaves the step.
+    expect(/(^|\n)[^\n=]+=\n/.test(r.envFile)).toBe(false);
+   });
 });
 
-// ── canary-verdict: a malformed binding is DID NOT RUN, naming the package ───
+// ── the emitted promote block: digest-bound, refuses on any unmeasured set ────
+function emittedBlock(): string {
+   // The certified digest the block re-derives to is the "bindings" (seed "sha:") digest;
+   // the block is emitted with that digest so the "bindings"-mode run matches it.
+  const cert = rederivedDigest("sha:");
+  const r = runVerdict(["pass", VER, RUN_URL, "--os", "ubuntu-latest", "--package-set-digest", cert]);
+  expect(r.status).toBe(0);
+  expect(r.stderr).toBe("");
+  const m = r.stdout.match(/```\n([\s\S]*?)\n```/);
+  if (!m?.[1]) throw new Error("no fenced promote block in the PASS output");
+  return m[1]!;
+}
+
 function runVerdict(args: string[]) {
   return spawnSync("bash", [VERDICT_SCRIPT, ...args], { encoding: "utf8", cwd: REPO });
 }
-function bindings(): string[] {
-  return PACKAGES.map((p) => `${p}=${shaFor(p)}`);
-}
 
-describe("canary-verdict refuses a malformed binding, naming the package (flair#1856 R2)", () => {
-  test("an empty binding is DID NOT RUN", () => {
-    const bad = bindings().map((b) => (b.startsWith("@tpsdev-ai/flair-client=") ? "@tpsdev-ai/flair-client=" : b));
-    const r = runVerdict(["pass", "1.2.3", RUN_URL, ...bad]);
-    expect(r.status).toBe(2);
-    expect(r.stderr).toContain("DID NOT RUN");
-    expect(r.stderr).toContain("@tpsdev-ai/flair-client");
-    expect(r.stdout).not.toContain("npm dist-tag add");
-  });
-
-  test("a 40-hex (SHA-1) binding is DID NOT RUN", () => {
-    const bad = bindings().map((b) =>
-      b.startsWith("@tpsdev-ai/flair-client=") ? "@tpsdev-ai/flair-client=0123456789abcdef0123456789abcdef01234567" : b,
-    );
-    const r = runVerdict(["pass", "1.2.3", RUN_URL, ...bad]);
-    expect(r.status).toBe(2);
-    expect(r.stderr).toContain("@tpsdev-ai/flair-client");
-    expect(r.stderr).toContain("64-char hex");
-    expect(r.stdout).not.toContain("npm dist-tag add");
-  });
-});
-
-// ── the emitted preflight: an unmeasurable re-hash is a refusal ─────────────
-function emittedBlock(): string {
-  const r = runVerdict(["pass", "1.2.3", RUN_URL, ...bindings()]);
-  expect(r.status).toBe(0);
-  const m = r.stdout.match(/```\n([\s\S]*?)\n```/);
-  if (!m?.[1]) throw new Error("no fenced promote block in the PASS output");
-  return m[1];
-}
-
-function runBlock(mode: string): number | null {
+/** Run an emitted block with a given STUB_SHA_MODE; returns status + dist-tag log. */
+function runBlock(mode: string): { status: number | null; dt: string } {
   const cwd = mkdtempSync(join(SCRATCH, "block-"));
   const f = join(cwd, "block.sh");
+  const dt = join(cwd, "disttag.log");
   writeFileSync(f, emittedBlock());
+  writeFileSync(dt, "");
   const r = spawnSync("bash", [f], {
-    cwd,
+    cwd: REPO,
     encoding: "utf8",
     env: {
-      ...process.env,
+       ...process.env,
       PATH: `${SHIM}:${BIN}:${process.env.PATH}`,
       REAL_NODE,
       NODE_STUB: join(SCRATCH, "node-stub.mjs"),
       REPO_ROOT: REPO,
       STUB_SHA_MODE: mode,
-    },
-  });
-  return r.status;
+      DISTTAG_LOG: dt,
+     },
+   });
+  return { status: r.status, dt: readFileSync(dt, "utf8") };
 }
 
-describe("the emitted promote preflight never matches an unmeasured bytes set (flair#1856 R2)", () => {
-  test("an empty re-hash refuses the whole preflight (no tag moves)", () => {
-    expect(runBlock("empty")).not.toBe(0);
+describe("the emitted promote preflight aborts before any tag (A1c of #1671)", () => {
+  test("(e) an empty re-hash refuses the whole preflight and moves no tag", () => {
+    const r = runBlock("empty");
+    expect(r.status).not.toBe(0);
+    expect(r.dt).toBe(""); // no `dist-tag add` was ever reached
+   });
+
+  test("(d) one package's registry hash changed => the preflight aborts before any tag", () => {
+    const cwd = mkdtempSync(join(SCRATCH, "block-d-"));
+    const f = join(cwd, "block.sh");
+    const dt = join(cwd, "disttag.log");
+    const cert = rederivedDigest("sha:"); // certified for the all-matching "sha:" set
+    const verdict = runVerdict(["pass", VER, RUN_URL, "--os", "ubuntu-latest", "--package-set-digest", cert]);
+    writeFileSync(f, verdict.stdout.match(/```\n([\s\S]*?)\n```/)![1]!);
+    writeFileSync(dt, "");
+    const r = spawnSync("bash", [f], {
+      cwd: REPO,
+      encoding: "utf8",
+      env: {
+         ...process.env,
+        PATH: `${SHIM}:${BIN}:${process.env.PATH}`,
+        REAL_NODE,
+        NODE_STUB: join(SCRATCH, "node-stub.mjs"),
+        REPO_ROOT: REPO,
+        STUB_SHA_MODE: "one-changed",
+        STUB_CHANGED_PKG: "@tpsdev-ai/flair-bench",
+        DISTTAG_LOG: dt,
+      },
+     });
+    expect(r.status).not.toBe(0);
+    expect(readFileSync(dt, "utf8")).toBe(""); // the mismatch was caught at the digest preflight, before any tag
+    expect(r.stderr).toContain("differs from the release run");
+   });
+
+  test("positive control: a re-derivation matching the certified digest moves every tag", () => {
+    const r = runBlock("bindings"); // seed "sha:" matches the certified "sha:" digest
+    expect(r.status).toBe(0);
+    expect(r.dt.split("\n").filter((l) => l.startsWith("dist-tag")).length).toBe(PACKAGES.length);
+   });
+});
+
+// ── the emitted block is the single-digest form, not per-package sha tests ─────
+describe("A1c: the promote block is the single package-set-digest preflight", () => {
+  test("(b) no per-package sha tests; exactly one digest comparison; dist-tags after it", () => {
+    const cert = rederivedDigest("sha:");
+    const r = runVerdict(["pass", VER, RUN_URL, "--os", "ubuntu-latest", "--package-set-digest", cert]);
+    expect(r.status).toBe(0);
+    const lines = r.stdout.split("\n");
+    const oldPerPkg = lines.filter((l) => l.startsWith('test "$(node scripts/ci/registry-tarball-sha256.mjs'));
+    expect(oldPerPkg).toEqual([]);
+    const digestChecks = lines.filter((l) => l.includes('if [ "$_rehash" != "'));
+    expect(digestChecks.length).toBe(1);
+    const firstDigest = lines.findIndex((l) => l.includes('if [ "$_rehash" != "'));
+    const firstPromote = lines.findIndex((l) => l.startsWith("npm dist-tag add "));
+    expect(firstDigest).toBeLessThan(firstPromote);
   });
 
-  test("positive control: a re-hash that equals its binding lets the block run", () => {
-    expect(runBlock("bindings")).toBe(0);
-  });
+  test("a missing --package-set-digest => DID NOT RUN, no dist-tag add", () => {
+    const r = runVerdict(["pass", VER, RUN_URL, "--os", "ubuntu-latest"]);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("DID NOT RUN");
+    expect(r.stdout).not.toContain("npm dist-tag add");
+   });
 });
+
+/** The stub node can drive the direct-helper path (used above) too. */
+void nodeStdin;
+void SHA_SCRIPT;
+void LOCKSTEP_SCRIPT;
