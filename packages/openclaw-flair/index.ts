@@ -170,83 +170,106 @@ export const captureBounds = {
   /** Retire a run that has seen NO `agent_end` after this much inactivity. */
   idleRunRetireMs: 30 * 60_000,
   /**
-   * The ONE capacity budget (round 4): the number of runs holding a slot — live
-   * states PLUS tombstones. A run holds one slot from admission until its
-   * tombstone ages out past `tombstoneMinAgeMs`.
+   * The ONE capacity budget (round 4): the number of records in the run map.
+   * Round 5: a record holds its slot from admission until `removable()` is true
+   * — it is retired or aborted, has no write in flight, and has aged past
+   * `tombstoneMinAgeMs`.
    */
   capacityCap: 10_000,
   /**
-   * A tombstone is kept at least this long — the longest plausible callback
-   * delay. Admission may evict ONLY tombstones older than this; otherwise it
-   * refuses.
+   * A retired/aborted record is kept at least this long — the longest plausible
+   * callback delay — so a late callback is dropped, never re-admitted. Only
+   * `removable()` frees a slot, and it is the same predicate for the sweep and
+   * for admission.
    */
   tombstoneMinAgeMs: 60 * 60_000,
+  /**
+   * Round 5: an abort for a run that was NEVER admitted must still be recorded,
+   * or its next callback is admitted and captured (the failed-run re-admission
+   * the round-4 review found). The abort path may therefore exceed
+   * `capacityCap` by at most this many records. When even that overflow is
+   * full, the abort records nothing and logs once — the documented residual.
+   */
+  abortOverflowCap: 1_000,
   /** Max distinct one-time log keys remembered; the oldest are evicted. */
   logOnceCap: 10_000,
   /** How often the unref'd sweep timer runs. */
   sweepIntervalMs: 30_000,
 };
 
-/** Test introspection into the live store sizes (see `captureBounds`). */
+/** Test introspection into the ONE run map (see `captureBounds`). */
 export const captureInternals: {
-  stateCount: () => number;
-  tombstoneCount: () => number;
+  /** Records in the map. The budget IS the map's size (round 5). */
+  runCount: () => number;
+  /** Alias of `runCount`, kept for the round-4 budget assertions. */
   budgetUsed: () => number;
+  /** Records that can still capture: phase `live` or `ended`. */
+  stateCount: () => number;
+  /** Records waiting out `tombstoneMinAgeMs`: phase `retired` or `aborted`. */
+  tombstoneCount: () => number;
   logOnceCount: () => number;
+  /** The record for a run BY IDENTITY, or undefined (round-5 tests). */
+  recordOf: (agentId: string, runId: string) => RunRecord | undefined;
 } = {
+  runCount: () => 0,
+  budgetUsed: () => 0,
   stateCount: () => 0,
   tombstoneCount: () => 0,
-  budgetUsed: () => 0,
   logOnceCount: () => 0,
+  recordOf: () => undefined,
 };
 
+/** Round 5: a run's phase in the ONE run map. */
+export type RunPhase = "live" | "ended" | "aborted" | "retired";
+
 /**
- * Per-run capture state (D10). Keyed by agent + runId — never by agent alone,
- * or two concurrent runs of one agent would share a budget and a dedup set and
- * collide. Holds the run's own AbortController (item 5) and the retirement
- * bookkeeping that decides when the state may be dropped.
+ * ONE record per run (round 5). The capture state, the retired/aborted
+ * tombstone and the capacity accounting are the SAME structure — the budget is
+ * the size of the run map. A record holds its slot from admission until
+ * `removable()` is true, so retiring or aborting a run changes its phase IN
+ * PLACE and never adds an entry.
  *
- * Retirement: a SUCCESSFUL `agent_end` marks the run `ended` but does NOT
- * delete the state — the host can dispatch `agent_end` BEFORE `llm_output` for
- * the same run, and that later capture must still land. The state retires only
- * when it is ended AND has no in-flight writes AND 30 s have passed since
- * `agent_end`; a callback for a retired run is dropped with a one-time log
- * naming the run id.
+ * Keyed by agent + runId — never by agent alone, or two concurrent runs of one
+ * agent would share a budget and a dedup set and collide. The record carries
+ * the run's AbortController (item 5) and the reservation: the per-session cap
+ * slot (`count`) and the dedup set (`hashes`).
+ *
+ * Lifecycle: a SUCCESSFUL `agent_end` moves the run to `ended` but does NOT
+ * delete it — the host can dispatch `agent_end` BEFORE `llm_output` for the
+ * same run, and that later capture must still land. An `ended` run retires
+ * after `RUN_RETIRE_AFTER_MS` with no in-flight writes; a run that never saw
+ * `agent_end` retires after `idleRunRetireMs` idle. Phase `retired` or
+ * `aborted` is terminal: a callback for such a record is dropped with a
+ * one-time log naming the run id, and the record leaves the map only through
+ * `removable()`.
  */
-interface RunState extends CaptureState {
+export interface RunRecord extends CaptureState {
   agentId: string;
   runId: string;
+  phase: RunPhase;
   /** In-flight capture writes for this run. */
   inFlight: number;
-  /** A successful `agent_end` was seen; the run has ended but is not retired. */
-  ended: boolean;
-  /** `captureClock.now()` at that successful `agent_end`. */
-  endedAt: number | null;
-  /** No further callback for this run may capture. */
-  retired: boolean;
-  /** `captureClock.now()` at retirement (used only to bound the pool). */
-  retiredAt: number | null;
-  /** Aborted: a failed `agent_end`, an aborted model call, or `gateway_stop`. */
-  aborted: boolean;
   /** `captureClock.now()` of the last callback for this run (idle-retire clock). */
   lastActivityAt: number;
+  /** `captureClock.now()` of the successful `agent_end`, or null. */
+  endedAt: number | null;
+  /** `captureClock.now()` at retirement/abort — the age clock for `removable()`. */
+  retiredAt: number | null;
   /** One AbortController per run, owned by the plugin (agent hooks carry none). */
   controller: AbortController;
 }
 
-function createRunState(agentId: string, runId: string): RunState {
+function createRunRecord(agentId: string, runId: string, now: number): RunRecord {
   return {
     agentId,
     runId,
     count: 0,
     hashes: new Set(),
+    phase: "live",
     inFlight: 0,
-    ended: false,
+    lastActivityAt: now,
     endedAt: null,
-    retired: false,
     retiredAt: null,
-    aborted: false,
-    lastActivityAt: 0,
     controller: new AbortController(),
   };
 }
@@ -620,26 +643,30 @@ export default {
       cfg.autoCaptureMaxPerSession ?? DEFAULT_AUTO_CAPTURE_MAX_PER_SESSION,
     );
 
-    // ── Per-run capture state (D10) + one AbortController per run (item 5) ──
+    // ── Round 5: ONE record per run; the budget IS the map's size ─────────
+    // Four rounds of fixes kept leaking at the boundary between the live-state
+    // map, the tombstone set and the budget counters, so they are now ONE map.
+    // A run holds a slot from admission until `removable()` is true.
     // State is keyed by agent + runId: keying by agent alone made two concurrent
     // runs share a budget and a dedup set and collide. The run's AbortController
-    // is created with the state.
-    const runStates = new Map<string, RunState>();
-    /**
-     * Bounded tombstone of retired/aborted run keys (F1): key → time added,
-     * insertion-ordered. Round 3 item 1: only entries older than
-     * `tombstoneMinAgeMs` may be evicted; a full set of young entries refuses
-     * new runs instead.
-     */
-    const retiredIds = new Map<string, number>();
+    // is created with the record.
+    const runs = new Map<string, RunRecord>();
     const loggedOnce = new Set<string>();
     const runKeyOf = (agentId: string, runId: string): string => `${agentId}\u0000${runId}`;
 
-    // Wire the test introspection once this registration owns its stores.
-    captureInternals.stateCount = () => runStates.size;
-    captureInternals.tombstoneCount = () => retiredIds.size;
-    captureInternals.budgetUsed = () => budgetUsed();
+    function countWhere(p: (r: RunRecord) => boolean): number {
+      let n = 0;
+      for (const r of runs.values()) if (p(r)) n++;
+      return n;
+    }
+
+    // Wire the test introspection once this registration owns the map.
+    captureInternals.runCount = () => runs.size;
+    captureInternals.budgetUsed = () => runs.size;
+    captureInternals.stateCount = () => countWhere((r) => r.phase === "live" || r.phase === "ended");
+    captureInternals.tombstoneCount = () => countWhere((r) => r.phase === "retired" || r.phase === "aborted");
     captureInternals.logOnceCount = () => loggedOnce.size;
+    captureInternals.recordOf = (agentId, runId) => runs.get(runKeyOf(agentId, runId));
 
     /** Evict the oldest entries of an insertion-ordered Set down to `cap`. */
     function capSet(set: Set<string>, cap: number): void {
@@ -658,39 +685,24 @@ export default {
     }
 
     /**
-     * Remember a retired/aborted run id (F1) so a LATER callback is dropped
-     * rather than re-admitted as a fresh run. Round 4: a run holds ONE capacity
-     * slot from admission until its tombstone ages out, so this only remembers
-     * the id — it never evicts and never needs new room (a retire or abort
-     * converts the run's state into its tombstone IN PLACE).
+     * THE removal predicate (round 5) — the ONLY thing that frees a slot, used
+     * by the sweep and by admission alike: a record may be removed when it is
+     * retired or aborted, has NO write in flight, and has aged past
+     * `tombstoneMinAgeMs`. A record with a write still in flight is never
+     * removed, so a later abort can still discard its late result.
      */
-    function tombstone(key: string): void {
-      if (!retiredIds.has(key)) retiredIds.set(key, captureClock.now());
+    function removable(r: RunRecord, now: number): boolean {
+      return (
+        (r.phase === "retired" || r.phase === "aborted") &&
+        r.inFlight === 0 &&
+        r.retiredAt !== null &&
+        now - r.retiredAt >= captureBounds.tombstoneMinAgeMs
+      );
     }
 
-    /**
-     * The ONE capacity budget (round 4): the number of runs holding a slot —
-     * every key with a live state OR a tombstone, counted once when a retired
-     * run keeps its state while a write is still in flight.
-     */
-    function budgetUsed(): number {
-      let used = runStates.size;
-      for (const key of retiredIds.keys()) if (!runStates.has(key)) used++;
-      return used;
-    }
-
-    /**
-     * Free ONE slot by dropping the oldest tombstone ONLY IF it is past the
-     * minimum age. Returns false — mutating nothing — otherwise, so a caller
-     * must refuse rather than evict something whose eviction breaks a guarantee.
-     */
-    function evictOneAgedTombstone(now: number): boolean {
-      for (const [key, addedAt] of retiredIds) {
-        if (now - addedAt < captureBounds.tombstoneMinAgeMs) return false; // insertion order: the oldest is first
-        retiredIds.delete(key);
-        return true;
-      }
-      return false;
+    /** Drop every removable record — the sweep's and admission's shared step. */
+    function purgeRemovable(now: number): void {
+      for (const [key, r] of runs) if (removable(r, now)) runs.delete(key);
     }
 
     /** The run id for a callback, from the event or the hook context. */
@@ -700,60 +712,50 @@ export default {
     }
 
     /**
-     * Retire a run: convert its state into its tombstone IN PLACE — the run
-     * keeps the SAME capacity slot, so retirement never needs new room. The
-     * state is dropped only once no write is in flight.
+     * Retire a run IN PLACE (round 5): the SAME record keeps the SAME slot, so
+     * retirement never adds an entry and never needs new room.
      */
-    function retireState(state: RunState, now: number): void {
-      if (state.retired) return;
-      state.retired = true;
-      state.retiredAt = now;
-      const key = runKeyOf(state.agentId, state.runId);
-      tombstone(key);
-      if (state.inFlight === 0) runStates.delete(key);
-    }
-
-    /** Drop a retired/aborted state once its last write has settled — its
-     *  tombstone already holds the slot. */
-    function finalizeIfSettled(key: string, state: RunState): void {
-      if ((state.retired || state.aborted) && state.inFlight === 0) {
-        runStates.delete(key);
-      }
+    function retire(r: RunRecord, now: number): void {
+      if (r.phase === "retired" || r.phase === "aborted") return;
+      r.phase = "retired";
+      r.retiredAt = now;
     }
 
     /**
-     * F2/round 4: ONE sweep evaluates EVERY state. It runs on each callback and
-     * on the unref'd interval timer. It retires (a) ended runs by the 30 s rule
-     * and (b) runs that have seen NO `agent_end` after the idle bound — both IN
-     * PLACE. It NEVER evicts a live state: the one budget is enforced at
-     * admission, and a merely-idle run is retired here rather than dropped.
+     * The time-based sweep, unchanged in its rules (round 4 adjudicated the
+     * "refusal mutates state" finding NOT a defect: retirement that is due is
+     * not eviction to make room). It runs on each callback and on the unref'd
+     * interval timer, retires (a) ended runs by the 30 s rule and (b) runs that
+     * have seen NO `agent_end` after the idle bound — both IN PLACE — and then
+     * drops whatever `removable()` allows. It NEVER evicts a live record to
+     * make room: the budget is enforced at admission.
      */
     function sweep(): void {
       const now = captureClock.now();
-      for (const [key, state] of runStates) {
-        if (!state.retired && state.ended && state.inFlight === 0 && state.endedAt !== null && now - state.endedAt >= RUN_RETIRE_AFTER_MS) {
-          retireState(state, now);
+      for (const [key, r] of runs) {
+        if (r.phase === "ended" && r.inFlight === 0 && r.endedAt !== null && now - r.endedAt >= RUN_RETIRE_AFTER_MS) {
+          retire(r, now);
         }
-        if (!state.retired && !state.ended && now - state.lastActivityAt >= captureBounds.idleRunRetireMs) {
-          retireState(state, now);
+        if (r.phase === "live" && now - r.lastActivityAt >= captureBounds.idleRunRetireMs) {
+          retire(r, now);
         }
-        if ((state.retired || state.aborted) && state.inFlight === 0) {
-          runStates.delete(key); // its tombstone already holds the slot
-        }
+        if (removable(r, now)) runs.delete(key);
       }
     }
 
     /**
-     * The run state a callback should use, or null when the callback must not
-     * capture. The tombstone is consulted FIRST (F1): a retired/aborted run is
-     * dropped with the one-time log and NEVER re-admitted.
-     *
-     * Round 4: admission computes feasibility BEFORE any mutation — a free slot
-     * exists, or ONE can be made by evicting a tombstone past the minimum age.
-     * It NEVER evicts a live state, and when no slot is available it refuses and
-     * mutates nothing.
+     * The record a callback should use, or null when it must not capture. A
+     * record is ADDED only here:
+     *   1. a record for the key exists: serve it (phase `live`/`ended`) or drop
+     *      the callback (phase `retired`/`aborted`) with the one-time log — a
+     *      retired or aborted run is NEVER re-admitted;
+     *   2. a key with NO record: purge what is removable, then admit ONLY when
+     *      the map is below `capacityCap` — the abort overflow is never counted
+     *      as room;
+     *   3. otherwise refuse (`capture-capacity: full`, logged once) and change
+     *      nothing else.
      */
-    function captureGate(agentId: string, runId: string | null): RunState | null {
+    function captureGate(agentId: string, runId: string | null): RunRecord | null {
       if (!runId) {
         logOnce(
           `no-run-id:${agentId}`,
@@ -762,50 +764,48 @@ export default {
         return null;
       }
       const key = runKeyOf(agentId, runId);
-      if (retiredIds.has(key)) {
-        logOnce(`dropped:${key}`, `openclaw-flair: dropped a callback for retired run ${runId} (agent ${agentId})`);
-        return null;
-      }
-      sweep();
-      // The sweep may have retired THIS run; re-check the tombstone.
-      if (retiredIds.has(key)) {
-        logOnce(`dropped:${key}`, `openclaw-flair: dropped a callback for retired run ${runId} (agent ${agentId})`);
-        return null;
-      }
       const now = captureClock.now();
-      const state = runStates.get(key);
-      if (state) {
-        state.lastActivityAt = now;
-        if (state.retired || state.aborted) {
+
+      // The time-based sweep runs on every callback, so a retirement that is due
+      // happens before this callback decides (the timer covers the callbacks
+      // that return early).
+      sweep();
+
+      const existing = runs.get(key);
+      if (existing) {
+        if (existing.phase === "aborted" || existing.phase === "retired") {
           logOnce(`dropped:${key}`, `openclaw-flair: dropped a callback for retired run ${runId} (agent ${agentId})`);
           return null;
         }
-        return state;
+        existing.lastActivityAt = now;
+        return existing;
       }
 
-      // A NEW run: feasibility FIRST. The only eviction allowed is an aged
-      // tombstone; a live state is never evicted (an idle run retires in sweep).
-      if (budgetUsed() >= captureBounds.capacityCap && !evictOneAgedTombstone(now)) {
+      purgeRemovable(now);
+      if (runs.size >= captureBounds.capacityCap) {
         logOnce(
           "capacity-full",
-          `openclaw-flair: capture skipped: capture-capacity: full — ${budgetUsed()} runs (live + retired) hold the whole budget of ${captureBounds.capacityCap}; refusing new run ${runId} (agent ${agentId})`,
+          `openclaw-flair: capture skipped: capture-capacity: full — ${runs.size} runs hold the whole budget of ${captureBounds.capacityCap}; refusing new run ${runId} (agent ${agentId})`,
         );
         return null;
       }
 
-      const fresh = createRunState(agentId, runId);
-      fresh.lastActivityAt = now;
-      runStates.set(key, fresh);
+      const fresh = createRunRecord(agentId, runId, now);
+      runs.set(key, fresh);
       return fresh;
     }
 
     /**
      * Abort a run: cancel its in-flight capture fetches, discard late results
-     * and retire it. Round 3: the tombstone gates ADMISSION only — an abort acts
-     * on ANY state still in the map. Round 4: an admitted run converts IN PLACE
-     * (its slot becomes the tombstone's); an abort for a run that was never
-     * admitted adds a tombstone ONLY if a slot is free, otherwise nothing (safe:
-     * admission is refused while the budget is full).
+     * and make every later callback for the run a no-op. An ADMITTED run changes
+     * phase IN PLACE — its slot becomes its own tombstone, so an abort never
+     * needs room. A run that was NEVER admitted ALWAYS gets an aborted record
+     * (round 5), even at the cap, using an overflow of at most
+     * `abortOverflowCap`: recording nothing there would let the run's next
+     * callback be admitted and captured — exactly the failed-run re-admission
+     * the round-4 review found. If even the overflow is full the record is not
+     * inserted and the line is logged once (the documented residual); it is safe
+     * because admission is refused while the budget AND its overflow are full.
      */
     function abortRun(agentId: string, runId: string | null, why: string): void {
       if (!runId) {
@@ -816,22 +816,32 @@ export default {
         return;
       }
       const key = runKeyOf(agentId, runId);
-      const state = runStates.get(key);
-      if (!state) {
-        if (retiredIds.has(key)) return; // already retired or aborted
-        // Never admitted: remember it only if a slot is free.
-        if (budgetUsed() < captureBounds.capacityCap) tombstone(key);
+      const now = captureClock.now();
+      const existing = runs.get(key);
+      if (existing) {
+        if (existing.phase === "aborted") return; // already aborted (idempotent)
+        // An abort acts on ANY record still in the map, retired or not: a run
+        // idle-retired with a write in flight is still aborted here, so its late
+        // result is discarded. The phase changes IN PLACE — no new entry.
+        existing.phase = "aborted";
+        existing.retiredAt = now;
+        try {
+          existing.controller.abort(why);
+        } catch { /* an abort listener must not break the hook */ }
         return;
       }
-      if (state.aborted) return;
-      state.aborted = true;
-      state.retired = true;
-      state.retiredAt = captureClock.now();
-      tombstone(key); // in place: the state's slot becomes the tombstone's
-      try {
-        state.controller.abort(why);
-      } catch { /* an abort listener must not break the hook */ }
-      finalizeIfSettled(key, state);
+      // Never admitted: record the abort so no later callback can re-admit it.
+      if (runs.size >= captureBounds.capacityCap + captureBounds.abortOverflowCap) {
+        logOnce(
+          "abort-overflow",
+          `openclaw-flair: capture skipped: capture-capacity: abort-overflow — the abort overflow of ${captureBounds.abortOverflowCap} above the budget of ${captureBounds.capacityCap} is full; aborted run ${runId} (agent ${agentId}) is not recorded`,
+        );
+        return;
+      }
+      const aborted = createRunRecord(agentId, runId, now);
+      aborted.phase = "aborted";
+      aborted.retiredAt = now;
+      runs.set(key, aborted);
     }
 
     async function tryAutoCapture(client: FlairClient, agentId: string, runId: string | null, text: string): Promise<boolean> {
@@ -861,25 +871,23 @@ export default {
         state.inFlight--;
         state.count--;
         state.hashes.delete(decision.hash);
-        finalizeIfSettled(runKeyOf(agentId, runId as string), state);
         throw err;
       }
       state.inFlight--;
-      const captureKey = runKeyOf(agentId, runId as string);
-      if (state.aborted) {
+      if (state.phase === "aborted") {
         // Item 5: a result that resolves after the abort is DISCARDED — release
         // the reservation and never report it as a capture. This cannot UNWRITE
         // a request Flair already received (see the README's abort guarantee).
         state.count--;
         state.hashes.delete(decision.hash);
         logOnce(
-          `discarded:${captureKey}`,
+          `discarded:${runKeyOf(agentId, runId as string)}`,
           `openclaw-flair: discarded a capture for run ${runId} (agent ${agentId}) that completed after the run was aborted`,
         );
-        finalizeIfSettled(captureKey, state);
         return false;
       }
-      finalizeIfSettled(captureKey, state);
+      // Round 5: nothing to finalize — a settled write leaves the record in
+      // place, and only `removable()` frees its slot.
       return true;
     }
 
@@ -1112,11 +1120,11 @@ export default {
           }
           const state = captureGate(agentId, runId);
           if (!state) return;
-          // A successful agent_end ENDS the run but does NOT delete its state:
+          // A successful agent_end ENDS the run but does NOT delete its record:
           // the host can dispatch agent_end BEFORE llm_output for this run, and
-          // that later capture must still land. The state retires (30 s, no
-          // in-flight writes) via captureGate on a later callback.
-          state.ended = true;
+          // that later capture must still land. An `ended` record retires (30 s,
+          // no in-flight writes) via the sweep on a later callback.
+          state.phase = "ended";
           state.endedAt = captureClock.now();
           try {
             const client = clientFor(agentId);
@@ -1176,8 +1184,8 @@ export default {
         // sweep timer (F2).
         api.on("gateway_stop", async () => {
           try { clearInterval(sweepTimer); } catch { /* already cleared */ }
-          for (const state of [...runStates.values()]) {
-            abortRun(state.agentId, state.runId, "gateway_stop");
+          for (const record of [...runs.values()]) {
+            abortRun(record.agentId, record.runId, "gateway_stop");
           }
         });
 

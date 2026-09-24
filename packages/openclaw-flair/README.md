@@ -136,25 +136,34 @@ What this slice guarantees:
   outcome — `written` is true only after the primary write succeeded, a partial
   success is reported as such, and an unresolved identity reports
   `{ written: false, reason: "no-identity" }`.
-- **Retirement.** A successful `agent_end` ends a run but keeps its state (the
-  host can dispatch `agent_end` before `llm_output` for the same run). The state
-  retires only when the run has ended, has no in-flight writes, and 30 s have
-  passed since `agent_end`; a run that has seen no `agent_end` retires after
-  30 min idle. A retired or aborted run id goes into a bounded tombstone, which
-  is consulted first, so a late callback is dropped with a one-time log naming
-  the run and can never recreate it.
-- **Bounded bookkeeping.** One sweep evaluates every run — on each callback and
-  on an unref'd interval timer (cleared on `gateway_stop`). The live-state map,
-  the tombstone and the one-time-log set are each capped; the oldest entries are
-  evicted, and each state eviction is logged with the run id.
+- **Retirement, one record per run.** Capture state is ONE record per run whose
+  phase is `live`, `ended`, `aborted` or `retired`, and the capacity budget IS
+  the number of records. A successful `agent_end` moves the run to `ended` but
+  keeps its record (the host can dispatch `agent_end` before `llm_output` for
+  the same run); it retires once the run has ended with no in-flight writes and
+  30 s have passed since `agent_end`, and a run that has seen no `agent_end`
+  retires after 30 min idle. Retiring or aborting changes the phase IN PLACE —
+  it never adds a record — and a late callback for a `retired`/`aborted` run is
+  dropped with a one-time log naming the run, so it can never capture again.
+- **Bounded bookkeeping, one removal rule.** A record leaves the map only when
+  it is retired or aborted, has no write in flight, and has aged past 1 h — one
+  predicate, used by the sweep and by admission alike. Admission removes what
+  qualifies, then admits only below the cap (default 10,000); otherwise it
+  refuses (`capture-capacity: full`, logged once) and changes nothing else, and
+  the abort overflow is never counted as room. One sweep evaluates every record —
+  on each callback and on an unref'd interval timer (cleared on `gateway_stop`)
+  — and the one-time-log set is capped.
 - **Abort.** The plugin owns one `AbortController` per run. A run is aborted by
   a failed `agent_end` (`success === false`), by `gateway_stop` (every run), or
   by `model_call_ended` with `failureKind: "aborted"`. On abort the run's signal
   reaches every in-flight capture fetch, **no new capture write starts**, a
   result that resolves after the abort is discarded, and reservations are
-  released. Aborting cannot **undo** a write Flair has already received — a
-  request already in flight may still land. A successful `agent_end` never
-  aborts.
+  released. Aborting a run that was never admitted still records it as aborted,
+  so its next callback is dropped instead of admitted; that path may exceed the
+  budget by at most `abortOverflowCap` (1,000) records, and when even that is
+  full the abort records nothing and logs once — a documented residual.
+  Aborting cannot **undo** a write Flair has already received — a request already
+  in flight may still land. A successful `agent_end` never aborts.
 
 What this slice does **not** cover: slot selection and anchor re-injection are
 **slice 3**; the plugin still takes no context-engine slot and leaves the host's

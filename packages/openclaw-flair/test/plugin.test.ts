@@ -261,6 +261,7 @@ const CAPTURE_BOUNDS_DEFAULTS = {
   idleRunRetireMs: 30 * 60_000,
   capacityCap: 10_000,
   tombstoneMinAgeMs: 60 * 60_000,
+  abortOverflowCap: 1_000,
   logOnceCap: 10_000,
   sweepIntervalMs: 30_000,
 };
@@ -270,13 +271,37 @@ try {
 } catch {
   captureBounds = { ...CAPTURE_BOUNDS_DEFAULTS };
 }
-let captureInternals: { stateCount: () => number; tombstoneCount: () => number; logOnceCount: () => number };
+// Round 5: the ONE run map's introspection. Every member is declared and given
+// a fallback, so a build without it fails the round-5 assertions rather than a
+// TypeError (and the fallbacks stay type-correct).
+type RunRecordLike = {
+  agentId: string;
+  runId: string;
+  phase: string;
+  inFlight: number;
+  endedAt: number | null;
+  retiredAt: number | null;
+};
+let captureInternals: {
+  runCount: () => number;
+  budgetUsed: () => number;
+  stateCount: () => number;
+  tombstoneCount: () => number;
+  logOnceCount: () => number;
+  recordOf: (agentId: string, runId: string) => RunRecordLike | undefined;
+};
+const CAPTURE_INTERNALS_FALLBACK = {
+  runCount: () => 0,
+  budgetUsed: () => 0,
+  stateCount: () => 0,
+  tombstoneCount: () => 0,
+  logOnceCount: () => 0,
+  recordOf: () => undefined as RunRecordLike | undefined,
+};
 try {
-  captureInternals =
-    (await import("../index.ts") as any).captureInternals ??
-    { stateCount: () => 0, tombstoneCount: () => 0, logOnceCount: () => 0 };
+  captureInternals = (await import("../index.ts") as any).captureInternals ?? CAPTURE_INTERNALS_FALLBACK;
 } catch {
-  captureInternals = { stateCount: () => 0, tombstoneCount: () => 0, logOnceCount: () => 0 };
+  captureInternals = CAPTURE_INTERNALS_FALLBACK;
 }
 
 // ── host version gate (R1) ───────────────────────────────────────────────────
@@ -1230,21 +1255,35 @@ describe("slice 2 round 2 — tombstone, bounds and failed primary writes", () =
     expect(api._warnText()).toMatch(/dropped a callback for retired run r0/);
   }, 30000);
 
-  test("F2/round 4: the budget cap refuses new runs and never evicts a live state", async () => {
+  test("F2/round 4/round 5: the budget cap refuses new runs and never evicts a live record", async () => {
     captureBounds.capacityCap = 8;
     const plugin = await loadPlugin();
     const api = apiForCapture(plugin);
     installFetchStub();
     const llmOut = api._handler("llm_output");
-    for (let i = 0; i < 20; i++) {
+    const admitted: Array<unknown> = [];
+    for (let i = 0; i < 8; i++) {
+      await llmOut({ runId: `r${i}`, assistantTexts: [`plain note number ${i}`] }, { agentId: "A" });
+      admitted.push(captureInternals.recordOf("A", `r${i}`));
+    }
+    for (let i = 8; i < 20; i++) {
       await llmOut({ runId: `r${i}`, assistantTexts: [`plain note number ${i}`] }, { agentId: "A" });
     }
-    // Round 4: the ONE budget (live + retired) is capped; the surplus runs are
-    // refused, and no live state is ever evicted.
+    // Round 5: the ONE budget (the map's size) is capped; the surplus runs are
+    // refused, and no live record is ever evicted.
     expect(captureInternals.stateCount()).toBe(8);
-    expect(captureInternals.budgetUsed()).toBeLessThanOrEqual(8);
+    expect(captureInternals.budgetUsed()).toBe(8);
     expect(api._warnText()).toMatch(/capture-capacity: full/);
     expect(api._warnText()).not.toMatch(/evicted capture state/);
+    // BY IDENTITY, not counts (round 5 (d)): a refused admission leaves the
+    // ORIGINAL live runs intact — the SAME records, still live, none replaced —
+    // and the refused run has no record at all.
+    for (let i = 0; i < 8; i++) {
+      const kept = captureInternals.recordOf("A", `r${i}`);
+      expect(kept).toBe(admitted[i]);
+      expect(kept!.phase).toBe("live");
+    }
+    expect(captureInternals.recordOf("A", "r19")).toBeUndefined();
   });
 
   test("F2: the one-time-log set is bounded", async () => {
@@ -1353,11 +1392,13 @@ describe("slice 2 round 3 — at capacity, capture fails closed", () => {
     expect(api._warnText()).toMatch(/dropped a callback for retired run old0/);
     expect(captureInternals.tombstoneCount()).toBe(3);
 
-    // Past the minimum age, eviction works and a new run is admitted again.
+    // Past the minimum age every aged record is removable, so admission purges
+    // them and admits (round 5: ONE predicate, shared with the sweep).
     captureClock.now = () => base + captureBounds.tombstoneMinAgeMs + 1;
     await llmOut({ runId: "new2", assistantTexts: ["a plain note"] }, { agentId: "A" });
     expect(captureInternals.stateCount()).toBe(1);
-    expect(captureInternals.tombstoneCount()).toBe(2);
+    expect(captureInternals.tombstoneCount()).toBe(0);
+    expect(captureInternals.budgetUsed()).toBe(1);
   });
 
   test("item 2 (round 4): the budget cap never evicts an in-flight state; a new run is refused instead", async () => {
@@ -1395,12 +1436,14 @@ describe("slice 2 round 3 — at capacity, capture fails closed", () => {
     await waitFor(() => puts(calls).length === 1);
 
     // Idle-retire r while its write is in flight (another run's callback runs
-    // the sweep). r is tombstoned (admission-gated) but KEPT, with inFlight 1.
+    // the sweep). Round 5: r is retired IN PLACE and KEPT — the SAME record, with
+    // inFlight 1 — so it still holds its slot.
     const t = captureClock.now();
     captureClock.now = () => t + captureBounds.idleRunRetireMs + 1;
     await llmOut({ runId: "other", assistantTexts: ["a plain note"] }, { agentId: "A" });
     expect(captureInternals.tombstoneCount()).toBe(1);
-    expect(captureInternals.stateCount()).toBe(2); // r kept (in flight) + other
+    expect(captureInternals.stateCount()).toBe(1); // only `other` can still capture
+    expect(captureInternals.budgetUsed()).toBe(2); // r holds its slot while in flight
 
     // The tombstone gates ADMISSION only: the failed agent_end still ABORTS r.
     await api._fire("agent_end", { runId: "r", success: false, messages: [] }, { agentId: "A" });
@@ -1417,18 +1460,22 @@ describe("slice 2 round 3 — at capacity, capture fails closed", () => {
 describe("slice 2 round 4 — one combined capacity budget", () => {
   const PLAIN = "a plain note";
 
-  test("(a) repeated aborts of NEVER-admitted runs never exceed the cap", async () => {
+  test("(a) repeated aborts of NEVER-admitted runs are bounded by the cap PLUS the abort overflow", async () => {
     captureBounds.capacityCap = 3;
+    captureBounds.abortOverflowCap = 1;
     const plugin = await loadPlugin();
     const api = apiForCapture(plugin);
     installFetchStub();
     for (let i = 0; i < 6; i++) {
       await api._fire("agent_end", { runId: `n${i}`, success: false, messages: [] }, { agentId: "A" });
     }
-    // Only the first three (the free slots) are remembered; the rest add
-    // nothing rather than push young tombstones past the cap.
-    expect(captureInternals.tombstoneCount()).toBe(3);
-    expect(captureInternals.budgetUsed()).toBeLessThanOrEqual(3);
+    // Round 5: an abort for a run with no record IS recorded (so no later
+    // callback can re-admit the failed run), but only within the small overflow
+    // above the cap; the rest record nothing and say so ONCE.
+    expect(captureInternals.tombstoneCount()).toBe(4); // 3 in the budget + 1 overflow
+    expect(captureInternals.budgetUsed()).toBe(4);
+    const lines = api._warnText().split("\n").filter((l) => /capture-capacity: abort-overflow/.test(l));
+    expect(lines.length).toBe(1);
   });
 
   test("(b) at a full budget of live states AND young tombstones, a new run is refused and NOTHING is evicted or tombstoned", async () => {
@@ -1501,11 +1548,170 @@ describe("slice 2 round 4 — one combined capacity budget", () => {
     expect(api._warnText()).toMatch(/capture-capacity: full/);
     expect(captureInternals.stateCount()).toBe(0);
 
-    // Past the minimum age: exactly ONE aged tombstone is freed, then admit.
+    // Past the minimum age every aged record is removable, so admission purges
+    // both and admits (round 5's ONE predicate, shared with the sweep).
     captureClock.now = () => base + captureBounds.tombstoneMinAgeMs + 1;
     await llmOut({ runId: "y", assistantTexts: [PLAIN] }, { agentId: "A" });
     expect(captureInternals.stateCount()).toBe(1);
-    expect(captureInternals.tombstoneCount()).toBe(1);
-    expect(captureInternals.budgetUsed()).toBe(2);
+    expect(captureInternals.tombstoneCount()).toBe(0);
+    expect(captureInternals.budgetUsed()).toBe(1);
+  });
+});
+
+// ── round 5 — ONE run map, ONE removal predicate ─────────────────────────────
+//
+// The shape is the fix: one record per run, the budget is the map's size, and
+// one predicate (`removable`) is the only thing that frees a slot. These four
+// tests assert the law, not the patch:
+//   (a) an aged record with a write in flight is NOT removable and frees nothing;
+//   (b) a full budget with an aged record cannot re-admit a failed run — the
+//       abort is recorded (overflow) and its later callback is dropped;
+//   (c) when even the abort overflow is full, the abort records nothing ONCE;
+//   (d) the earlier capacity tests re-expressed on the single map: a refused
+//       admission leaves the ORIGINAL runs intact, by identity, not counts.
+
+describe("slice 2 round 5 — one run map, one removal predicate", () => {
+  const PLAIN5 = "a plain note";
+  const TRIGGER5 = "remember this: the round five capacity target is staging";
+
+  test("(a) an aged record with a write in flight is NOT removed and does not free admission", async () => {
+    captureBounds.capacityCap = 1;
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const base = 50_000_000;
+    captureClock.now = () => base;
+    const llmOut = api._handler("llm_output");
+    const inFlight = llmOut({ runId: "r", assistantTexts: [TRIGGER5] }, { agentId: "A" });
+    await waitFor(() => puts(calls).length === 1);
+    const held = captureInternals.recordOf("A", "r");
+    expect(held).toBeTruthy();
+    expect(held!.inFlight).toBe(1);
+
+    // Retire r IN PLACE (the idle rule, run by another callback), then age it
+    // past `tombstoneMinAgeMs`: with no write in flight it would be removable
+    // now, so ONLY `inFlight` keeps it in the map.
+    const t1 = base + captureBounds.idleRunRetireMs + 1;
+    captureClock.now = () => t1;
+    await llmOut({ runId: "primer", assistantTexts: [PLAIN5] }, { agentId: "A" });
+    expect(held!.phase).toBe("retired");
+    expect(captureInternals.runCount()).toBe(1);
+
+    captureClock.now = () => t1 + captureBounds.tombstoneMinAgeMs + 1;
+    const pNew = llmOut({ runId: "new", assistantTexts: [TRIGGER5] }, { agentId: "A" });
+    // Give a SECOND write every chance to start before asserting it did not.
+    await waitFor(() => puts(calls).length > 1, 250);
+
+    // The record survived BY IDENTITY and still holds the whole budget, so the
+    // new run was refused: an in-flight write never frees a slot.
+    expect(captureInternals.recordOf("A", "r")).toBe(held);
+    expect(captureInternals.recordOf("A", "new")).toBeUndefined();
+    expect(captureInternals.runCount()).toBe(1);
+    expect(puts(calls).length).toBe(1); // and no new write started
+    expect(api._warnText()).toMatch(/capture-capacity: full/);
+
+    d.release();
+    await pNew;
+    await inFlight;
+  });
+
+  test("(b) a full budget with an aged record: an abort for a never-seen run IS recorded (overflow) and its later callback is dropped", async () => {
+    captureBounds.capacityCap = 1;
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    const base = 60_000_000;
+    captureClock.now = () => base;
+    // Fill the ONE budget with a never-admitted abort, then age it past the
+    // minimum: it IS removable, but nothing has purged it yet.
+    await api._fire("agent_end", { runId: "old", success: false, messages: [] }, { agentId: "A" });
+    expect(captureInternals.runCount()).toBe(1);
+    captureClock.now = () => base + captureBounds.tombstoneMinAgeMs + 1;
+
+    // A failed run that was never seen still gets a record, using the overflow —
+    // otherwise its next callback evicts `old` and is admitted, and a failed run
+    // captures again (the round-4 finding). Assert THAT first: the law is the
+    // drop, not the record.
+    await api._fire("agent_end", { runId: "ghost", success: false, messages: [] }, { agentId: "A" });
+
+    const calls = installFetchStub();
+    await api._handler("llm_output")({ runId: "ghost", assistantTexts: [TRIGGER5] }, { agentId: "A" });
+    expect(puts(calls).length).toBe(0); // dropped, never re-admitted
+    expect(api._warnText()).toMatch(/dropped a callback for retired run ghost/);
+
+    // And the drop is structural: the callback's own sweep purged the now-aged
+    // `old`, so the ONLY record left is the one the abort inserted.
+    const ghost = captureInternals.recordOf("A", "ghost");
+    expect(ghost).toBeTruthy();
+    expect(ghost!.phase).toBe("aborted");
+    expect(captureInternals.recordOf("A", "old")).toBeUndefined();
+    expect(captureInternals.runCount()).toBe(1);
+  });
+
+  test("(c) with the budget AND its abort overflow full, an abort records nothing and logs once", async () => {
+    captureBounds.capacityCap = 1;
+    captureBounds.abortOverflowCap = 1;
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    const base = 70_000_000;
+    captureClock.now = () => base;
+    await api._fire("agent_end", { runId: "a", success: false, messages: [] }, { agentId: "A" }); // the budget
+    captureClock.now = () => base + captureBounds.tombstoneMinAgeMs + 1;
+    await api._fire("agent_end", { runId: "ghost", success: false, messages: [] }, { agentId: "A" }); // the overflow
+    await api._fire("agent_end", { runId: "ghost2", success: false, messages: [] }, { agentId: "A" }); // nothing left
+    await api._fire("agent_end", { runId: "ghost3", success: false, messages: [] }, { agentId: "A" });
+
+    // The residual is a ONE-TIME line, and the assertion that matters most is
+    // that the line exists at all (a build without the overflow says nothing).
+    const lines = api._warnText().split("\n").filter((l) => /capture-capacity: abort-overflow/.test(l));
+    expect(lines.length).toBe(1); // logged ONCE, however many aborts arrive
+    expect(captureInternals.runCount()).toBe(2); // the budget (1) + the overflow (1)
+    expect(captureInternals.recordOf("A", "ghost")).toBeTruthy();
+    expect(captureInternals.recordOf("A", "ghost2")).toBeUndefined();
+    expect(captureInternals.recordOf("A", "ghost3")).toBeUndefined();
+  });
+
+  test("(d) re-expressed on the single map: a refused admission leaves the original records intact, by identity", async () => {
+    captureBounds.capacityCap = 3;
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    installFetchStub();
+    const llmOut = api._handler("llm_output");
+    const base = 80_000_000;
+    captureClock.now = () => base;
+    const admitted: Array<unknown> = [];
+    for (let i = 0; i < 3; i++) {
+      await llmOut({ runId: `r${i}`, assistantTexts: [PLAIN5] }, { agentId: "A" });
+      admitted.push(captureInternals.recordOf("A", `r${i}`));
+    }
+    // A fourth run is refused: nothing evicted, nothing replaced, nothing added.
+    await llmOut({ runId: "r3", assistantTexts: [PLAIN5] }, { agentId: "A" });
+    expect(api._warnText()).toMatch(/capture-capacity: full/);
+    expect(captureInternals.runCount()).toBe(3);
+    expect(captureInternals.recordOf("A", "r3")).toBeUndefined();
+    for (let i = 0; i < 3; i++) {
+      const kept = captureInternals.recordOf("A", `r${i}`);
+      expect(kept).toBe(admitted[i]); // the SAME record, by identity
+      expect(kept!.phase).toBe("live");
+    }
+
+    // Retire them IN PLACE (a successful agent_end + the 30 s rule): the records
+    // are the SAME ones, and the budget is unchanged because the phase changed.
+    for (let i = 0; i < 3; i++) {
+      await api._fire("agent_end", { runId: `r${i}`, success: true, messages: [] }, { agentId: "A" });
+    }
+    captureClock.now = () => base + 31_000;
+    await llmOut({ runId: "warm", assistantTexts: [PLAIN5] }, { agentId: "A" }); // runs the sweep
+    expect(captureInternals.runCount()).toBe(3);
+    expect(captureInternals.stateCount()).toBe(0);
+    expect(captureInternals.tombstoneCount()).toBe(3);
+    expect(captureInternals.recordOf("A", "r0")).toBe(admitted[0]); // still the same record
+
+    // Age them: now the ONE predicate frees all three, and a new run is admitted.
+    captureClock.now = () => base + 31_000 + captureBounds.tombstoneMinAgeMs + 1;
+    await llmOut({ runId: "r4", assistantTexts: [PLAIN5] }, { agentId: "A" });
+    expect(captureInternals.stateCount()).toBe(1);
+    expect(captureInternals.tombstoneCount()).toBe(0);
+    expect(captureInternals.runCount()).toBe(1);
   });
 });
