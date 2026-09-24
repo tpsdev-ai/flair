@@ -71,6 +71,14 @@ export function realHomeDir(): string {
     out = execFileSync("node", ["-p", "require('node:os').userInfo().homedir"], {
       encoding: "utf8",
       env,
+        // A hung `node` would hang the whole unit lane. Bound the probe so it
+        // throws the same fail-closed "cannot resolve" error instead — never
+        // fall back to the in-process value (flair#1865).
+      timeout: 10_000,
+         // A node child (or a preload) that traps/ignores SIGTERM would outlive the
+         // default SIGTERM kill and keep the call blocked past the 10 s bound. SIGKILL
+         // cannot be trapped, so the 10 s timeout is a real bound (flair#1865).
+      killSignal: "SIGKILL",
     }).trim();
   } catch (err) {
     throw new Error(
