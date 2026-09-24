@@ -465,9 +465,15 @@ export function inspectRepoWide(entries: WorkflowEntry[]): { problems: string[] 
       continue;
     }
     if (!doc || typeof doc !== "object") continue;
+    const wfPerm = doc.permissions as unknown;
     for (const [jobName, job] of Object.entries(doc.jobs ?? {})) {
-      const j = job as { permissions?: Record<string, string>; environment?: string };
-      if (j.permissions?.deployments === "write") {
+      const j = job as { permissions?: unknown; environment?: string };
+      // A job-level block OVERRIDES the workflow-level one (including `{}`).
+      const effective = j.permissions !== undefined ? j.permissions : wfPerm;
+      const grantsDeploymentsWrite =
+        effective === "write-all" ||
+        (!!effective && typeof effective === "object" && (effective as Record<string, string>).deployments === "write");
+      if (grantsDeploymentsWrite) {
         writeJobs++;
         if (path !== RELEASE_WORKFLOW_REL || jobName !== "stage-publish") {
           problems.push(`${path}: job "${jobName}" grants deployments: write (only release-publish.yml stage-publish may)`);
@@ -1307,6 +1313,16 @@ describe("A1b — dispatch, recency and the reservation marker", () => {
 
   test("(h) a second WORKFLOW granting deployments: write goes red", () => {
     const entries = realWorkflows().concat([{ path: ".github/workflows/evil.yml", text: yaml.dump({ jobs: { x: { permissions: { deployments: "write" }, steps: [] } } }) }]);
+    expect(inspectRepoWide(entries).problems.join("\n")).toContain("evil.yml");
+  });
+
+  test("(h) a workflow-level deployments: write goes red", () => {
+    const entries = realWorkflows().concat([{ path: ".github/workflows/evil.yml", text: yaml.dump({ permissions: { deployments: "write" }, jobs: { x: { steps: [] } } }) }]);
+    expect(inspectRepoWide(entries).problems.join("\n")).toContain("evil.yml");
+  });
+
+  test("(h) a job-level write-all goes red", () => {
+    const entries = realWorkflows().concat([{ path: ".github/workflows/evil.yml", text: yaml.dump({ jobs: { x: { permissions: "write-all", steps: [] } } }) }]);
     expect(inspectRepoWide(entries).problems.join("\n")).toContain("evil.yml");
   });
 
