@@ -13,7 +13,7 @@
  * non-strict entry into the strict check.
  */
 import { Command } from "commander";
-import { homedir } from "node:os";
+
 import * as render from "../render.js";
 import { unpinnedSpecWarning } from "../lib/mcp-spec.js";
 import { probeSessionStartHookDelivery, readClientMcpBlock } from "../doctor-client.js";
@@ -35,6 +35,7 @@ import {
   resolveHookAgentId,
   type Harness,
 } from "../hook-install.js";
+import { resolveHome } from "../lib/home.js";
 
 export type HookCli = {
   resolveBaseUrl: (opts: { target?: string; url?: string; port?: string | number }) => string;
@@ -97,7 +98,7 @@ export function register(program: Command): void {
     .option("--continuity", "Wire the continuity capture hooks instead (PostToolUse + Stop — flair#1257; installing them IS the opt-in)")
     .action((opts) => {
       const harness = requireSupportedHarness(opts.harness);
-      const home = homedir();
+      const home = resolveHome();
       const agentId = resolveHookAgentId(opts, home, harness);
       if (!agentId) {
         console.error(
@@ -147,7 +148,7 @@ export function register(program: Command): void {
     .option("--continuity", "Remove the continuity capture hooks instead (PostToolUse + Stop — flair#1257)")
     .action((opts) => {
       const harness = requireSupportedHarness(opts.harness);
-      const home = homedir();
+      const home = resolveHome();
       const dryRun = !!opts.dryRun;
 
       if (opts.continuity) {
@@ -183,7 +184,7 @@ export function register(program: Command): void {
     .option("--harness <name>", `Target harness (${SUPPORTED_HARNESSES.join(", ")})`, "claude-code")
     .action((opts) => {
       const harness = requireSupportedHarness(opts.harness);
-      const home = homedir();
+      const home = resolveHome();
       const status = hookStatus(home, harness, {
         deliveryProbe: (command) => probeSessionStartHookDelivery(command),
       });

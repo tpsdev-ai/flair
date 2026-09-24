@@ -19,14 +19,15 @@
 
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { homedir } from "node:os";
+
 import { fetchDeclaredDependencies } from "./lib/npm-registry.js";
+import { resolveHome } from "./lib/home.js";
 
 /** Filename of the engine-version stamp inside the data directory. */
 export const ENGINE_VERSION_STAMP = "engine-version.txt";
 
 /** Root directory for pre-upgrade snapshots (~/.flair/upgrade-snapshots). */
-export const UPGRADE_SNAPSHOT_ROOT = resolve(homedir(), ".flair", "upgrade-snapshots");
+export const UPGRADE_SNAPSHOT_ROOT = resolve(resolveHome(), ".flair", "upgrade-snapshots");
 
 /** Read the Harper version installed alongside this flair package. */
 export function readInstalledHarperVersion(packageRoot: string): string | null {

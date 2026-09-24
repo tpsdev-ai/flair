@@ -38,9 +38,10 @@
 import { promises as fsp } from "node:fs";
 import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
+
 import { createHash } from "node:crypto";
 import type { DiscoveredBridge } from "../types.js";
+import { resolveHome } from "../../lib/home.js";
 
 export interface AllowEntry {
   name: string;
@@ -68,7 +69,7 @@ export type VerifyResult =
   | { ok: false; reason: "package-missing"; entry?: AllowEntry };
 
 function resolvePath(opts: AllowListOptions | undefined): string {
-  return opts?.path ?? join(homedir(), ".flair", "bridges-allowed.json");
+  return opts?.path ?? join(resolveHome(), ".flair", "bridges-allowed.json");
 }
 
 function hasEntryFields(e: any): e is AllowEntry {

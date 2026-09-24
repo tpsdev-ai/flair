@@ -17,11 +17,12 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+
+import { resolveHome } from "./lib/home.js";
 
 export const DEFAULT_HANDSHAKE_TTL_MS = 60_000;
 export const DEFAULT_HANDSHAKE_TIMEOUT_MS = 1500; // within the spec's 1-2s budget
-export const DEFAULT_HANDSHAKE_CACHE_DIR = join(homedir(), ".flair", ".version-handshake-cache");
+export const DEFAULT_HANDSHAKE_CACHE_DIR = join(resolveHome(), ".flair", ".version-handshake-cache");
 
 interface CacheEntry {
   runningVersion: string | null;

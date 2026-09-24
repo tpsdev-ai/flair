@@ -26,7 +26,7 @@ import * as render from "../render.js";
 import { FLAIR_PKG_NAME, primeVersionCheckCache } from "../version-check.js";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+
 import { join, resolve, sep } from "node:path";
 import { create as tarCreate } from "tar";
 
@@ -35,6 +35,7 @@ import { create as tarCreate } from "tar";
 // cannot live there.
 import type { UpgradeStatus } from "../lib/upgrade-status.js";
 import { classifyInstalledVersion, formatUpgradeStatusLine } from "../lib/upgrade-status.js";
+import { resolveHome } from "../lib/home.js";
 
 export type UpgradeCli = {
   decideAfterRollbackVerify: (...args: any[]) => any;
@@ -1124,7 +1125,7 @@ program
           // the NORMAL state, not "missing". Resolve it from its actual wiring
           // (the pin in a client MCP config / the SessionStart hook) so the
           // listing is truthful and the remedy actually works (flair#1208).
-          const home = process.env.HOME ?? homedir();
+          const home = resolveHome();
           ({ installed, status } = resolveFlairMcpFinding(globalProbe, latest, detectWiredFlairMcp(home)));
         } else {
           installed = globalProbe;
@@ -1250,7 +1251,7 @@ program
       // client's env — rewriting each client's FLAIR_AGENT_ID to whichever key
       // happened to sort first. The writer preserves each entry's own identity
       // and changes only the pinned package argument.
-      const homeDir = process.env.HOME || process.env.USERPROFILE || homedir();
+      const homeDir = resolveHome();
       const results = refreshOwnedPins({ homeDir });
       const noteworthy = results.filter(ownedPinRefreshShouldReport);
       if (noteworthy.length === 0) return;

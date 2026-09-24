@@ -459,9 +459,28 @@ function sourceMemoryElement(m: ReflectMemoryInput): string {
   // until its escaped form fits the room the marker leaves.
   const limit = Math.max(0, SOURCE_EXCERPT_BUDGET - SOURCE_EXCERPT_MARKER.length);
   let kept = content.slice(0, limit);
+    // The initial budget cut can land between the two code units of an astral
+  // character, leaving kept ending in a lone high surrogate (flair#1772). Drop
+  // any trailing lone high surrogate so this cut lands on a code-point boundary.
+  while (
+    kept.length >= 1 &&
+    kept.charCodeAt(kept.length - 1) >= 0xd800 &&
+    kept.charCodeAt(kept.length - 1) <= 0xdbff
+   ) {
+    kept = kept.slice(0, kept.length - 1);
+   }
   let keptEscaped = escapeElementText(kept);
   while (keptEscaped.length > limit && kept.length > 0) {
-    kept = kept.slice(0, -1);
+    // Drop one whole code point: a complete surrogate pair (two code units) when
+    // the tail is a pair, otherwise a single BMP code unit (flair#1772).
+    const n = kept.length;
+    const tailIsPair =
+      n >= 2 &&
+      kept.charCodeAt(n - 1) >= 0xdc00 &&
+      kept.charCodeAt(n - 1) <= 0xdfff &&
+      kept.charCodeAt(n - 2) >= 0xd800 &&
+      kept.charCodeAt(n - 2) <= 0xdbff;
+    kept = kept.slice(0, n - (tailIsPair ? 2 : 1));
     keptEscaped = escapeElementText(kept);
   }
   return `<memory id="${id}" date="${date}" excerpt="true">${keptEscaped}${SOURCE_EXCERPT_MARKER}</memory>`;

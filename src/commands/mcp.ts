@@ -14,7 +14,7 @@
  */
 import { Command } from "commander";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+
 import { dirname, join } from "node:path";
 import nacl from "tweetnacl";
 import * as render from "../render.js";
@@ -41,6 +41,7 @@ import {
   type EnableMcpResult,
   type SecretsMechanism,
 } from "../lib/mcp-enable.js";
+import { resolveHome } from "../lib/home.js";
 
 export type McpCli = {
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
@@ -132,7 +133,7 @@ export interface McpClientManifestEntry {
  *  admin-pass/config.yaml — independent of --keys-dir (a custom keys dir
  *  doesn't imply a custom manifest location, and vice versa). */
 export function defaultMcpClientManifestPath(): string {
-  return join(homedir(), ".flair", "mcp-clients.json");
+  return join(resolveHome(), ".flair", "mcp-clients.json");
 }
 
 /** Read the manifest; a missing file is "no clients granted yet", not an

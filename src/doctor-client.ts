@@ -23,6 +23,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { withHome } from "./lib/home.js";
 import {
   ALL_CLIENTS,
   clientConfigPath,
@@ -709,26 +710,10 @@ export function removeContinuityCaptureHooks(homeDir: string): { ok: boolean; pa
 
 // ── shared helpers ──────────────────────────────────────────────────────────
 
-/**
- * Run `fn` with process.env.HOME temporarily pointed at `homeDir`, then
- * restore it. clientConfigPath() (src/install/clients.ts) resolves the home
- * dir via HOME/USERPROFILE at call time (not cached), so this lets us reuse
- * that single source of truth for per-client config paths while keeping
- * doctor-client's own functions parameterized by an explicit homeDir for
- * tests — no test ever touches the real ~/.claude.json etc. The override is
- * synchronous and restored before this function returns, so it's safe even
- * though process.env is process-global.
- */
-function withHome<T>(homeDir: string, fn: () => T): T {
-  const prev = process.env.HOME;
-  process.env.HOME = homeDir;
-  try {
-    return fn();
-  } finally {
-    if (prev === undefined) delete process.env.HOME;
-    else process.env.HOME = prev;
-  }
-}
+// `withHome()` (src/lib/home.ts) points HOME and USERPROFILE at an explicit
+// homeDir for a synchronous callback; clientConfigPath() (src/install/clients.ts)
+// resolves the home at call time, so doctor-client's explicit-homeDir functions
+// reuse that single source of truth and no test touches the real ~/.claude.json.
 
 function readTextFile(path: string): string | null {
   try {

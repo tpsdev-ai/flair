@@ -7,10 +7,13 @@
  * fails if any of them changed, so a test that reaches around the sandbox is
  * caught rather than silently rewriting a developer's real config.
  *
- * The real home is resolved ONCE from `os.userInfo().homedir`, NOT from
+ * The real home is resolved from the PASSWD entry for the current uid, NOT from
  * `process.env.HOME` — the lane deliberately sets HOME to a sandbox, so reading
- * home out of the environment is exactly the mistake this guard exists to
- * catch.
+ * home out of the environment is exactly the mistake this guard exists to catch.
+ * Node's `os.userInfo()` reads the passwd database and ignores HOME, but BUN's
+ * `os.userInfo().homedir` follows the HOME the process STARTED with, so the guard
+ * asks a `node` child (HOME/USERPROFILE removed) rather than reading it
+ * in-process. See realHomeDir().
  *
  * `~/.claude.json` is fingerprinted on its `mcpServers` subtree only: Claude
  * Code rewrites the rest of that file constantly, so a whole-file hash would
@@ -22,8 +25,8 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { userInfo } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 
 /** Client config files the guard fingerprints, relative to the home dir. */
 export const REAL_CLIENT_CONFIGS = [
@@ -46,9 +49,41 @@ export interface ConfigFingerprint {
   hash: string | null;
 }
 
-/** The real user's home directory, resolved from the passwd database. */
+/**
+ * The real user's home directory, resolved from the passwd entry for the current
+ * uid — never from `process.env.HOME`.
+ *
+ * In-process would not be enough: Node's `os.userInfo()` reads the passwd
+ * database and ignores HOME, but Bun's `os.userInfo().homedir` follows the HOME
+ * the process STARTED with, and the lane runs under Bun with a swapped HOME — so
+ * reading it here could return the SANDBOX and fingerprint nothing at all. Ask a
+ * `node` child with HOME/USERPROFILE removed instead. NEVER falls back to the
+ * in-process `os.userInfo()`: under Bun that is exactly the value that can be the
+ * sandbox, and a guard that silently fingerprints the sandbox passes after a real
+ * config change. If node cannot answer, throw, so the lane fails loudly (fail closed).
+ */
 export function realHomeDir(): string {
-  return userInfo().homedir;
+  const env = { ...process.env };
+  delete env.HOME;
+  delete env.USERPROFILE;
+  let out: string;
+  try {
+    out = execFileSync("node", ["-p", "require('node:os').userInfo().homedir"], {
+      encoding: "utf8",
+      env,
+    }).trim();
+  } catch (err) {
+    throw new Error(
+      `home-isolation guard: cannot resolve the real home directory — running \`node\` to read the passwd entry failed (${(err as Error).message.split("\n")[0]}). ` +
+        "Refusing to fall back to os.userInfo(), which follows HOME under Bun and would make this guard check the sandbox instead of the real client configs. Put node on PATH and re-run.",
+    );
+  }
+  if (!out) {
+    throw new Error(
+      "home-isolation guard: `node` returned an empty home directory for the current user — refusing to guess. Check the passwd entry for this uid.",
+    );
+  }
+  return out;
 }
 
 function sha256(bytes: string | Buffer): string {

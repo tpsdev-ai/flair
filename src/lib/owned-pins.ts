@@ -16,6 +16,7 @@
 
 import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { withHome } from "./home.js";
 import {
   ALL_CLIENTS,
   clientConfigPath,
@@ -95,17 +96,6 @@ export interface RefreshOwnedPinsOptions {
    * that must inject a refused write after the decision.
    */
   testHooks?: ConfigSectionOptions["testHooks"];
-}
-
-function withHome<T>(homeDir: string, fn: () => T): T {
-  const prev = process.env.HOME;
-  process.env.HOME = homeDir;
-  try {
-    return fn();
-  } finally {
-    if (prev === undefined) delete process.env.HOME;
-    else process.env.HOME = prev;
-  }
 }
 
 function displayHomePath(homeDir: string, path: string): string {

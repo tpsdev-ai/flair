@@ -28,8 +28,9 @@ import { checkVersion, formatVersionNudge, probeInstanceVersion, FLAIR_PKG_NAME 
 import { resolveRegistryNotice } from "../lib/npm-registry.js";
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
-import { homedir } from "node:os";
+
 import { dirname, join, resolve } from "node:path";
+import { resolveHome } from "../lib/home.js";
 
 export type DoctorCli = {
   api: (...args: any[]) => any;
@@ -550,7 +551,7 @@ program
     // component dirs whose real config is ~/agents/flair/config.yaml.
     const configLookup = {
       cwd: process.cwd(),
-      homeDir: homedir(),
+      homeDir: resolveHome(),
       componentDir: flairPackageDir(),
     };
     const cfgPath = resolveFlairConfigYaml(configLookup);
@@ -821,7 +822,7 @@ program
       console.log(`  ${render.icons.ok} Data directory: ${render.wrap(render.c.dim, dataDir)}`);
     } else {
       // Check ~/harper/ (common alternative)
-      const altDir = join(homedir(), "harper");
+      const altDir = join(resolveHome(), "harper");
       if (existsSync(altDir)) {
         console.log(`  ${render.icons.warn} Data at ${render.wrap(render.c.dim, "~/harper/")} (not ${render.wrap(render.c.dim, "~/.flair/data")}) — old install location`);
       } else {
@@ -870,7 +871,7 @@ program
     // drift (catalog "detached" fail + repair "regenerate"/"adopt"/"refuse").
     const doctorCatalogIds = DOCTOR_CHECK_IDS.filter((id) => id !== "launchd-management");
     const doctorCtx = {
-      homeDir: homedir(),
+      homeDir: resolveHome(),
       cwd: process.cwd(),
       detectedClientIds: detectedClients.map((c) => c.id),
       keysDir,
@@ -887,8 +888,8 @@ program
     // detected") and a HOLD on that wired hook was silently missed. Presence-only
     // here (probe:false); the arms below run the bounded execution probe.
     const anyWiredSessionStartHook =
-      inspectSessionStartHook(homedir(), { settingsPath: hookSettingsPath(homedir(), "claude-code"), probe: false }).present ||
-      inspectSessionStartHook(homedir(), { settingsPath: hookSettingsPath(homedir(), "codex"), probe: false }).present;
+      inspectSessionStartHook(resolveHome(), { settingsPath: hookSettingsPath(resolveHome(), "claude-code"), probe: false }).present ||
+      inspectSessionStartHook(resolveHome(), { settingsPath: hookSettingsPath(resolveHome(), "codex"), probe: false }).present;
     if (detectedClients.length === 0 && !anyWiredSessionStartHook) {
       console.log(`  ${render.icons.info} No MCP client detected — skipping client-integration checks`);
     } else {
@@ -914,7 +915,7 @@ program
         // more. Doctor now diagnoses only MCP clients the user wired (below).
         if (client.kind !== "mcp") continue;
 
-        const block = readClientMcpBlock(client.id, homedir());
+        const block = readClientMcpBlock(client.id, resolveHome());
         if (client.id === "claude-code" && block.agentId) claudeCodeAgentId = block.agentId;
         if (client.id === "codex" && block.agentId) codexAgentId = block.agentId;
         if (block.agentId) anyKnownAgentId = anyKnownAgentId ?? block.agentId;
@@ -1027,7 +1028,7 @@ program
       // and FLAIR_URL. ahead/unknown are HELD (already a pass/warn), so only
       // `behind` is written; the catalog delta below counts the fix.
       if (autoFix) {
-        const behindMcp = mcpClientPinFindings(homedir(), flairCliVersion())
+        const behindMcp = mcpClientPinFindings(resolveHome(), flairCliVersion())
           .filter((f) => f.direction === "behind")
           // flair#1834 A1: key off STRUCTURAL presence (entryExists), not
           // `present` (= agent id set). A behind entry without an identity is
@@ -1068,7 +1069,7 @@ program
               const id = f.reading.target.id as ClientId;
               return { kind: "mcp-client" as const, id };
             });
-            const results = refreshOwnedPins({ homeDir: homedir(), targets: overrides });
+            const results = refreshOwnedPins({ homeDir: resolveHome(), targets: overrides });
             for (const r of results) {
               if (r.target.kind !== "mcp-client") continue;
               // flair#1834 round 3: an attempted-but-skipped fix (e.g. a behind
@@ -1087,9 +1088,9 @@ program
       // wired the client during the loop above is reflected here.
       const claudeCodeDetected = detectedClients.some((c) => c.id === "claude-code");
       const claudeCodeConfigured =
-        claudeCodeDetected && readClientMcpBlock("claude-code", homedir()).present;
+        claudeCodeDetected && readClientMcpBlock("claude-code", resolveHome()).present;
       const codexConfigured =
-        detectedClients.some((c) => c.id === "codex") && readClientMcpBlock("codex", homedir()).present;
+        detectedClients.some((c) => c.id === "codex") && readClientMcpBlock("codex", resolveHome()).present;
 
       // Claude-Code-specific: CLAUDE.md + SessionStart hook + continuity.
       // Codex has a SessionStart hook too (checked below); CLAUDE.md and
@@ -1101,11 +1102,11 @@ program
       // opt-in that renders "not enabled" as info and never a failure, so it
       // stays gated on mere detection (flair#1324/#1257).
       if (claudeCodeConfigured) {
-        const claudeMd = checkClaudeMdBootstrap(process.cwd(), homedir());
+        const claudeMd = checkClaudeMdBootstrap(process.cwd(), resolveHome());
         if (claudeMd.present) {
           console.log(`  ${render.icons.ok} CLAUDE.md: bootstrap instruction present (${render.wrap(render.c.dim, claudeMd.path!)})`);
         } else {
-          console.log(`  ${render.icons.error} CLAUDE.md: bootstrap instruction not found (checked ${render.wrap(render.c.dim, join(process.cwd(), "CLAUDE.md"))} and ${render.wrap(render.c.dim, join(homedir(), ".claude", "CLAUDE.md"))})`);
+          console.log(`  ${render.icons.error} CLAUDE.md: bootstrap instruction not found (checked ${render.wrap(render.c.dim, join(process.cwd(), "CLAUDE.md"))} and ${render.wrap(render.c.dim, join(resolveHome(), ".claude", "CLAUDE.md"))})`);
           if (autoFix) {
             if (dryRun) {
               console.log(`     ${render.wrap(render.c.dim, "Would append bootstrap instruction to")} ${join(process.cwd(), "CLAUDE.md")}`);
@@ -1133,7 +1134,7 @@ program
       // Claude Code hook whenever one is PRESENT on disk; a
       // `claudeCodeConfigured` box with NO hook still falls through to the
       // "not found / add" report below.
-      const claudeHook = inspectSessionStartHook(homedir(), { settingsPath: hookSettingsPath(homedir(), "claude-code") });
+      const claudeHook = inspectSessionStartHook(resolveHome(), { settingsPath: hookSettingsPath(resolveHome(), "claude-code") });
       if (claudeCodeConfigured || claudeHook.present) {
         const hook = claudeHook;
         // flair#1007: presence was never the problem — the failing entry was
@@ -1147,7 +1148,7 @@ program
           // flair#1485: pin ≠ installed CLI version is a failure, never a
           // ✓ "still runs". Check freshness first so a stale pin cannot
           // hide behind the execution probe. Catalog owns the issue count.
-          const claudeStale = sessionStartHookPinFindings(homedir()).find((f) => f.reading.target.id === "claude-code");
+          const claudeStale = sessionStartHookPinFindings(resolveHome()).find((f) => f.reading.target.id === "claude-code");
           if (claudeStale && claudeStale.direction === "unknown") {
             // flair#1778: a pin we cannot compare is its OWN finding — a warn,
             // never the stale "old adapter" error, and NOT re-pinned (the
@@ -1164,7 +1165,7 @@ program
               if (dryRun) {
                 console.log(`     ${render.wrap(render.c.dim, "Would re-pin the SessionStart hook in")} ${hook.path}`);
               } else {
-                const repin = repinSessionStartHookGuarded(homedir(), "claude-code");
+                const repin = repinSessionStartHookGuarded(resolveHome(), "claude-code");
                 // flair#1834 A1 round 3 + PR-H: the SAME icon rule as the MCP
                 // re-pin line — a hold (or a failed write) renders ⚠, never a
                 // false ✓ for an attempted-but-held fix.
@@ -1224,7 +1225,7 @@ program
                   if (!proceed) {
                     console.log(`     Skipped.`);
                   } else {
-                    const upgrade = upgradeSessionStartHookCommand(homedir());
+                    const upgrade = upgradeSessionStartHookCommand(resolveHome());
                     console.log(`     ${upgrade.ok ? render.icons.ok : render.icons.warn} ${upgrade.message}`);
                   }
                 }
@@ -1246,7 +1247,7 @@ program
                 console.log(`     Skipped.`);
               } else {
                 const fixAgentId = claudeCodeAgentId || opts.agent || process.env.FLAIR_AGENT_ID;
-                const fixRes = fixSessionStartHook(homedir(), fixAgentId);
+                const fixRes = fixSessionStartHook(resolveHome(), fixAgentId);
                 console.log(`     ${fixRes.ok ? render.icons.ok : render.icons.warn} ${fixRes.message}`);
               }
             }
@@ -1271,7 +1272,7 @@ program
         // --continuity` only). A partial or stale pair IS evidence of a prior
         // opt-in, so repairing it to the complete current form remains a
         // legitimate --fix.
-        const continuity = checkContinuityCaptureHooks(homedir());
+        const continuity = checkContinuityCaptureHooks(resolveHome());
         if (continuity.state === "installed") {
           console.log(`  ${render.icons.ok} Continuity capture hooks: PostToolUse + Stop wired in ${render.wrap(render.c.dim, continuity.path)}`);
         } else if (continuity.state === "absent") {
@@ -1295,7 +1296,7 @@ program
                 // different instance.
                 const existingCommand = continuity.postToolUse.command || continuity.stop.command || "";
                 const existingUrl = existingCommand.match(/FLAIR_URL=(\S+)/)?.[1];
-                const fixRes = fixContinuityCaptureHooks(homedir(), fixAgentId, existingUrl);
+                const fixRes = fixContinuityCaptureHooks(resolveHome(), fixAgentId, existingUrl);
                 console.log(`     ${fixRes.ok ? render.icons.ok : render.icons.warn} ${fixRes.message}`);
                 if (fixRes.ok && fixRes.changed) fixed++;
               }
@@ -1319,11 +1320,11 @@ program
       // was not installed — exactly the quiet skip PR-H exists to prevent (a
       // HOLD must be printed). A `codexConfigured` box with NO hook still falls
       // through to the "not found / add" report below.
-      const codexHook = inspectSessionStartHook(homedir(), { settingsPath: hookSettingsPath(homedir(), "codex") });
+      const codexHook = inspectSessionStartHook(resolveHome(), { settingsPath: hookSettingsPath(resolveHome(), "codex") });
       if (codexConfigured || codexHook.present) {
         const hook = codexHook;
         if (hook.present) {
-          const codexStale = sessionStartHookPinFindings(homedir()).find((f) => f.reading.target.id === "codex");
+          const codexStale = sessionStartHookPinFindings(resolveHome()).find((f) => f.reading.target.id === "codex");
           if (codexStale && codexStale.direction === "unknown") {
             // flair#1778: same direction rule as Claude Code above.
             console.log(`  ${render.icons.warn} SessionStart hook (codex): pin is not a version I can compare: ${codexStale.reading.pin} — not re-pinned; re-run flair init or edit the hook if this is unintended`);
@@ -1336,7 +1337,7 @@ program
               if (dryRun) {
                 console.log(`     ${render.wrap(render.c.dim, "Would re-pin the SessionStart hook in")} ${hook.path}`);
               } else {
-                const repin = repinSessionStartHookGuarded(homedir(), "codex");
+                const repin = repinSessionStartHookGuarded(resolveHome(), "codex");
                 // flair#1834 A1 round 3 + PR-H: the SAME icon rule as the MCP
                 // re-pin line — a hold (or a failed write) renders ⚠, never a
                 // false ✓ for an attempted-but-held fix.
@@ -1376,7 +1377,7 @@ program
                   if (!proceed) {
                     console.log(`     Skipped.`);
                   } else {
-                    const upgrade = upgradeSessionStartHookCommand(homedir(), hook.path);
+                    const upgrade = upgradeSessionStartHookCommand(resolveHome(), hook.path);
                     console.log(`     ${upgrade.ok ? render.icons.ok : render.icons.warn} ${upgrade.message}`);
                   }
                 }
@@ -1397,8 +1398,8 @@ program
               if (!proceed) {
                 console.log(`     Skipped.`);
               } else {
-                const fixAgentId = resolveHookAgentId({ agent: opts.agent }, homedir(), "codex");
-                const fixRes = fixSessionStartHook(homedir(), fixAgentId, hook.path);
+                const fixAgentId = resolveHookAgentId({ agent: opts.agent }, resolveHome(), "codex");
+                const fixRes = fixSessionStartHook(resolveHome(), fixAgentId, hook.path);
                 console.log(`     ${fixRes.ok ? render.icons.ok : render.icons.warn} ${fixRes.message}`);
               }
             }
@@ -1814,7 +1815,7 @@ program
           statusCommand: "flair federation sync status",
           darwinTarget: `${guiDomain}/${fedSched.LAUNCHD_LABEL}`,
           linuxServiceUnit: fedSched.SYSTEMD_SERVICE_UNIT,
-          stderrLogPath: join(homedir(), ".flair", "logs", "federation-sync.stderr.log"),
+          stderrLogPath: join(resolveHome(), ".flair", "logs", "federation-sync.stderr.log"),
         },
         {
           kind: "rem" as const,
@@ -1824,7 +1825,7 @@ program
           statusCommand: "flair rem nightly status",
           darwinTarget: `${guiDomain}/${remSched.LAUNCHD_LABEL}`,
           linuxServiceUnit: remSched.SYSTEMD_SERVICE_UNIT,
-          stderrLogPath: join(homedir(), ".flair", "logs", "rem-nightly.stderr.log"),
+          stderrLogPath: join(resolveHome(), ".flair", "logs", "rem-nightly.stderr.log"),
         },
       ];
       for (const d of drivers) {

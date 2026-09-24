@@ -13,7 +13,7 @@
  */
 import { Command } from "commander";
 import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+
 import { dirname, resolve } from "node:path";
 import * as render from "../render.js";
 import { isLocalBase, resolveAdminUser, resolveLocalAdminPass } from "../lib/auth-resolve.js";
@@ -28,6 +28,7 @@ import {
   hasTerminalPunctuation,
   type SourceMemoryFetch,
 } from "../rem/promote-policy.js";
+import { resolveHome } from "../lib/home.js";
 
 export {
   validatePromoteOpts,
@@ -179,7 +180,7 @@ export function describeReflectError(message: string): { kind: "no-backend" | "d
   return { kind: "other", text: message };
 }
 
-const REM_PAUSE_FLAG = resolve(homedir(), ".flair", "rem.paused");
+const REM_PAUSE_FLAG = resolve(resolveHome(), ".flair", "rem.paused");
 
 function writeRemPauseSentinel(): void {
   const dir = dirname(REM_PAUSE_FLAG);

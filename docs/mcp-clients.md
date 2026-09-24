@@ -286,22 +286,26 @@ If you see (a) the agent calling the `bootstrap` tool returning soul + recent me
 
 ## What the MCP server exposes
 
-Twelve tools, kept deliberately small:
+Clients on this page talk to the stdio server `@tpsdev-ai/flair-mcp`. Its `tools/list` advertises these sixteen tools, in this order. The embedded HTTP `/mcp` handler is a different set: it also advertises `memory_basement`, `memory_restore`, and `attention`, and it does not advertise `relationship_store` or `flair_catchup`.
 
 | Tool | What it does |
 |---|---|
-| `memory_search` | Semantic search across your agent's memories |
-| `memory_store` | Save a memory with type, durability, tags, visibility. Auto-dedups near-duplicates. Optional `usedMemoryIds` cites memories that informed the write |
-| `memory_update` | Update an existing memory by ID — overwrite in place, or version it with `preserveHistory`. Optional `usedMemoryIds` for citation-on-write |
+| `memory_search` | Semantic search across the caller's own and other agents' non-private memories |
+| `memory_store` | Save a memory (type, durability, tags, visibility), attributed to the authenticated agent. Optional `usedMemoryIds` cites memories that informed the write |
+| `skill_store` | Write a skill-tagged memory. `trigger` is the recall text; `content` is the procedure. Durability is forced to persistent, and SkillScan rejects a dangerous payload before embed |
+| `skill_search` | Rank skills by their trigger against a task. Returns a catalog (id, name, trigger, description, tags, agentId), not the procedure |
+| `skill_get` | Fetch one skill's full procedure by id. Own skills and shared skills only; a private skill owned by someone else is not returned |
+| `memory_update` | Update a memory by id. Overwrites in place, or pass `preserveHistory` to write a superseding version. Optional `usedMemoryIds` |
 | `memory_get` | Fetch a specific memory by ID |
-| `memory_delete` | Remove a memory |
-| `relationship_store` | Record a subject-predicate-object relationship triple (e.g. "nathan manages flair") |
-| `bootstrap` | Get session-start context: soul + recent memories + predicted-relevant context |
-| `soul_set` | Runtime writes are refused; use operator credentials through `flair soul set` |
+| `memory_delete` | Delete one of your own memories |
+| `relationship_store` | Assert a subject-predicate-object triple (for example "nathan manages flair"). Asserting the same triple again updates that row |
+| `bootstrap` | Session-start context: soul, memories, and predicted context. Pass `subjects` for predictive loading |
+| `soul_set` | Advertised as setting a soul entry. The server refuses runtime Soul writes, including this tool's Ed25519 call; operators use `flair soul set` |
 | `soul_get` | Get a soul entry |
-| `flair_workspace_set` | Set your agent's current workspace state (ref/branch, phase, task) in the Office Space |
-| `flair_orgevent` | Publish an org-wide coordination event (claim/release/status) to the Office Space |
-| `record_usage` | Report that recalled memories were actually used (id + optional one-line how-it-was-used). Drives `usageCount` / `usageBoost` |
+| `flair_workspace_set` | Set this agent's workspace state (ref, label, provider, task, phase, summary) in the Office Space |
+| `flair_orgevent` | Publish an org-wide coordination event (claim, release, or status), attributed to the caller |
+| `flair_catchup` | Drain this agent's own org-event catch-up feed. Page with `after`; advance the watermark with `ack` |
+| `record_usage` | Report that recalled memories were actually used (`memoryId` or `memoryIds`, plus optional `attribution`). Drives `usageCount` / `usageBoost` |
 
 Writes are scoped per-agent (your `FLAIR_AGENT_ID`) and enforced by Flair's server, not by client convention — you can't write as another agent. Reads are more open by design: any agent on the same Flair instance can read any other agent's **non-private** memories, with no grant to set up (open-within-org read; see [SECURITY.md](../SECURITY.md)).
 

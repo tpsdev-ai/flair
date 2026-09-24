@@ -30,13 +30,14 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+
 import { dirname, join } from "node:path";
 import { parseSemverCore } from "./fabric-upgrade.js";
 import { fetchLatestVersion } from "./lib/npm-registry.js";
+import { resolveHome } from "./lib/home.js";
 
 export const FLAIR_PKG_NAME = "@tpsdev-ai/flair";
-export const DEFAULT_CACHE_PATH = join(homedir(), ".flair", ".version-check-cache.json");
+export const DEFAULT_CACHE_PATH = join(resolveHome(), ".flair", ".version-check-cache.json");
 /** How long a cached "latest" answer is trusted before we re-hit the registry. */
 export const DEFAULT_TTL_MS = 12 * 60 * 60 * 1000; // 12h
 /** Registry fetch timeout — this runs on every status/doctor call, so it must stay short. */

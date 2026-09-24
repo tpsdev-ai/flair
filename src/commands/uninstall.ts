@@ -10,8 +10,9 @@ import { Command } from "commander";
 import { formatPurgeReport, purgeFlairInstall, purgeHadFailures } from "../lib/uninstall-purge.js";
 import { execSync } from "node:child_process";
 import { existsSync, unlinkSync } from "node:fs";
-import { homedir } from "node:os";
+
 import { join } from "node:path";
+import { resolveHome } from "../lib/home.js";
 
 export type UninstallCli = {
   configPath: (...args: any[]) => any;
@@ -160,7 +161,7 @@ program
         console.log("\n⚠️  Skipping purge: could not attribute the process on port — data preserved.");
         console.log("Stop the process manually, then re-run: flair uninstall --purge");
       } else {
-        const home = process.env.HOME ?? homedir();
+        const home = resolveHome();
         const result = purgeFlairInstall({ homeDir: home });
         const report = formatPurgeReport(result);
         console.log(report.lines.join("\n"));

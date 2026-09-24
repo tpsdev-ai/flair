@@ -387,6 +387,13 @@ export function verifyAdoptServing(input: AdoptServingEvidence): AdoptServingPro
       detail: `the serving process is still pid ${servingPid}, the pre-adopt process — adoption did not bounce the live instance`,
     };
   }
+  if (managedPid === null) {
+    return {
+      detail:
+        "the launchd job reports no pid after load - the adopted job's identity cannot be confirmed, " +
+        "so the listener cannot be attributed to it",
+      };
+    }
   if (managedPid !== null && servingPid !== managedPid) {
     return {
       detail:

@@ -10,7 +10,7 @@
  * bump or a different $HOME does not fail the gate — those are not CLI-surface
  * changes. A dropped/renamed command or changed flag still fails.
  */
-import { homedir } from "node:os";
+import { resolveHome } from "../../src/lib/home.js";
 import type { Argument, Command, Option } from "commander";
 
 /** Pinned help wrap. Matches commander's non-TTY default and CI. */
@@ -60,7 +60,7 @@ export function stabilizeCliSurfaceText(
   text: string,
   opts: { home?: string; version?: string; nodeVersion?: string } = {},
 ): string {
-  const home = opts.home ?? homedir();
+  const home = opts.home ?? resolveHome();
   const nodeVersion = opts.nodeVersion ?? process.version;
   let out = text;
   if (home) out = out.split(home).join("~");
@@ -204,7 +204,11 @@ export function captureCommandHelp(
 }
 
 export function renderCliSurfaceSnapshot(root: Command): string {
-  const home = homedir();
+  // The SAME resolver src/ uses (flair#1858): the option defaults are derived
+  // from `resolveHome()`, so the home must be normalized with it too — otherwise
+  // a default is left absolute while the resolver's home is stripped, and the
+  // wrap point depends on the home's length.
+  const home = resolveHome();
   // Normalize the home out of option/argument defaults BEFORE commander wraps
   // the help text; stabilizing only afterwards would leave a wrap point that
   // depended on the real $HOME length (flair#1853).

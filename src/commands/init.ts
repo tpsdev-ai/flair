@@ -24,10 +24,11 @@ import * as render from "../render.js";
 import { execSync, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+
 import { join, resolve } from "node:path";
 import nacl from "tweetnacl";
 import { httpCorsAccessList } from "../lib/http-bind.js";
+import { resolveHome } from "../lib/home.js";
 
 export type InitCli = {
   api: (...args: any[]) => any;
@@ -304,7 +305,7 @@ program
         }
 
         // Write the flair admin pass to secrets directory
-        const secretsDir = join(homedir(), ".tps", "secrets");
+        const secretsDir = join(resolveHome(), ".tps", "secrets");
         mkdirSync(secretsDir, { recursive: true });
         const secretPath = join(secretsDir, "flair-fabric-hdb");
         writeFileSync(secretPath, flairAdminPass + "\n", { mode: 0o600 });
@@ -442,7 +443,7 @@ program
         const displayTarget = target || opsTarget;
         console.log(`\n✓ Flair hub deployed to ${displayTarget}`);
         console.log(`  Component: flair@${flavor}`);
-        console.log(`  Admin user: ${adminUser} (pass written to ${join(homedir(), ".tps", "secrets", "flair-fabric-hdb")})`);
+        console.log(`  Admin user: ${adminUser} (pass written to ${join(resolveHome(), ".tps", "secrets", "flair-fabric-hdb")})`);
         if (instanceId) console.log(`  Instance: ${instanceId} (role=${role})`);
         console.log(`  Federation: ready — run \`flair federation token\` to mint a pairing token`);
       } else {
@@ -1242,7 +1243,7 @@ program
             // automatically here (same "just do it" shape as the MCP block
             // above); --skip-claude-md opts out and prints the exact line to
             // add by hand instead.
-            const claudeMdResult = applyOrReportClaudeMdBootstrap(process.cwd(), homedir(), !!opts.skipClaudeMd);
+            const claudeMdResult = applyOrReportClaudeMdBootstrap(process.cwd(), resolveHome(), !!opts.skipClaudeMd);
             console.log(`   ${claudeMdResult.ok ? "✓" : "•"} ${claudeMdResult.message}`);
             if (claudeMdResult.hint) {
               for (const line of claudeMdResult.hint.split("\n")) console.log(`   ${line}`);
@@ -1253,7 +1254,7 @@ program
             // ~/.claude/settings.json — without it, mcp__flair__bootstrap only
             // ever runs if the agent remembers to call it itself.
             // --skip-hook opts out and prints the exact JSON to add by hand.
-            const hookResult = applyOrReportSessionStartHook(homedir(), agentId, !!opts.skipHook);
+            const hookResult = applyOrReportSessionStartHook(resolveHome(), agentId, !!opts.skipHook);
             console.log(`   ${hookResult.ok ? "✓" : "•"} ${hookResult.message}`);
             if (hookResult.hint) {
               for (const line of hookResult.hint.split("\n")) console.log(`   ${line}`);
@@ -1283,10 +1284,10 @@ program
             // applied above. --skip-hook opts out and prints the JSON.
             if (clientId === "codex" && result.ok) {
               const hookResult = applyOrReportSessionStartHook(
-                homedir(),
+                resolveHome(),
                 agentId,
                 !!opts.skipHook,
-                hookSettingsPath(homedir(), "codex"),
+                hookSettingsPath(resolveHome(), "codex"),
               );
               console.log(`   ${hookResult.ok ? "✓" : "•"} ${hookResult.message}`);
               if (hookResult.hint) {

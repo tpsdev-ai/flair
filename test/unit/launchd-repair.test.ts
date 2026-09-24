@@ -31,7 +31,9 @@ import {
   mapRepairThrow,
   decideAdoptStop,
   verifyAdoptServing,
+  verifyAdoptServingWithWait,
   type AdminPassAvailability,
+  type AdoptServingEvidence,
   type PlistDisposition,
 } from "../../src/lib/launchd-repair.ts";
 import type { LaunchdManagement } from "../../src/lib/launchd-management.ts";
@@ -466,4 +468,61 @@ describe("planLaunchdRepair — unsupported bind values refuse WITHOUT an adopt 
     expect(cliSrc).toMatch(/configBindValues:\s*config\s*\?/);
     expect(cliSrc).toMatch(/httpPort:\s*config\.http\?\.port/);
   });
+});
+
+// ─── verifyAdoptServing: a missing launchd pid fails the identity proof (flair#1841) ──
+
+describe("verifyAdoptServing — a missing launchd pid fails the identity proof (flair#1841)", () => {
+  test("fails adoption when the launchd job reports no pid (managedPid null), a foreign serving pid, and the predecessor is dead — and names the missing launchd pid", () => {
+    const proof = verifyAdoptServing({
+      directPid: 100,
+      managedPid: null,
+      servingPid: 300,
+      directPidAlive: false,
+    });
+    expect(proof).not.toBeNull();
+    expect(proof!.detail).toContain("reports no pid");
+    expect(proof!.detail).toContain("no pid");
+   });
+
+  test("a managed pid equal to the serving pid with a dead predecessor still proves adoption (unchanged behaviour)", () => {
+    expect(
+      verifyAdoptServing({
+        directPid: 100,
+        managedPid: 200,
+        servingPid: 200,
+        directPidAlive: false,
+      }),
+    ).toBeNull();
+   });
+
+  test("a present managed pid that differs from the serving pid still fails with the existing ownership message (unchanged behaviour)", () => {
+    const proof = verifyAdoptServing({
+      directPid: 100,
+      managedPid: 200,
+      servingPid: 300,
+      directPidAlive: false,
+    });
+    expect(proof).not.toBeNull();
+    expect(proof!.detail).toContain("does not own the listener");
+   });
+
+  test("the wait helper ends a null-managedPid observation in the failure (not a spin to the deadline), naming the missing launchd pid", async () => {
+    let t = 0;
+    const observe = () =>
+       ({ directPid: 100, managedPid: null, servingPid: 300, directPidAlive: false }) as AdoptServingEvidence;
+    const r = await verifyAdoptServingWithWait({
+      observe,
+      deadlineMs: 5000,
+      intervalMs: 250,
+      now: () => t,
+      sleep: async (ms: number) => { t += ms; },
+    });
+    expect(r.proof).not.toBeNull();
+    expect(r.proof!.detail).toContain("reports no pid");
+    // The predicate (servingPid present + predecessor dead) holds on the first
+    // observation, so the poll must stop immediately — timedOut === false proves
+    // it did not spin to the deadline waiting on a null managedPid.
+    expect(r.timedOut).toBe(false);
+   });
 });

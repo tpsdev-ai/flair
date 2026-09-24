@@ -3,11 +3,7 @@
  * Flair CLI client with Ed25519 TPS auth.
  * All embeddings are handled server-side (in-process in Harper).
  */
-import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
-import { webcrypto } from 'node:crypto';
-const { subtle } = webcrypto;
+import { signedFetch } from './lib/flair-signing.mjs';
 
 const FLAIR_URL = process.env.FLAIR_URL || 'http://127.0.0.1:9926';
 // The signing identity. `FLAIR_AGENT_ID` or `--agent <id>` is explicit; a shipped
@@ -17,93 +13,22 @@ const FLAIR_URL = process.env.FLAIR_URL || 'http://127.0.0.1:9926';
 // records to a caller who never chose it. EVERY action this script supports goes
 // through flairFetch, which always sets an Authorization header, so every action
 // refuses without an explicit identity — resolved in the argv section below once
-// the action is known. There is no genuinely-unsigned action here; if one is ever
-// added (one that sends no Authorization header) it may run identity-less, so
-// exempt it from this set and test that it sends no header.
-const SIGNING_ACTIONS = new Set(['list', 'get', 'write', 'set', 'delete', 'search']);
+// the action is known.
+//
+// DENY BY DEFAULT (flair#1855). The guard is keyed on UNSIGNED, not on a list of
+// the actions that sign. The old `SIGNING_ACTIONS` set failed OPEN: a case added
+// to the dispatch switch below but forgotten from that set would sign with no
+// identity at all. Now the only actions that may run identity-less are the ones
+// explicitly listed in UNSIGNED — and it is EMPTY. A genuinely-unsigned action
+// (one that sends no Authorization header) belongs here; the enumeration test
+// runs every switch case and fails if one is neither unsigned nor refused.
+const UNSIGNED = new Set([]);
 let AGENT_ID;
 
-// RFC 8410 PKCS8 prefix for an Ed25519 private key carrying a bare 32-byte seed.
-// `flair agent add` writes that bare seed; wrapping it here means no operator ever
-// has to hand-construct this DER again (flair#1736).
-const PKCS8_SEED_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
-
-/**
- * Candidate private-key files for `agentId`, in probe order (flair#1736).
- *
- * `flair agent add` writes a raw 32-byte seed to ~/.flair/keys/<agent>.key; the
- * legacy TPS layout is ~/.tps/secrets/flair/<agent>-priv.key (base64 PKCS8).
- * FLAIR_PRIV_KEY is an explicit override and wins outright. The order mirrors the
- * CLI's own resolveKeyPath() so the script and the CLI agree on where to look.
- */
-function keyPathCandidates(agentId) {
-  if (process.env.FLAIR_PRIV_KEY) return [process.env.FLAIR_PRIV_KEY];
-  const homes = [...new Set([homedir(), process.env.HOME].filter(Boolean))];
-  const out = [];
-  if (process.env.FLAIR_KEY_DIR) out.push(join(process.env.FLAIR_KEY_DIR, `${agentId}.key`));
-  for (const home of homes) {
-    out.push(join(home, '.flair', 'keys', `${agentId}.key`));
-    out.push(join(home, '.tps', 'secrets', 'flair', `${agentId}-priv.key`));
-  }
-  return out;
-}
-
-/** First candidate that exists, or null. */
-function resolveKeyPath(agentId) {
-  return keyPathCandidates(agentId).find((p) => existsSync(p)) ?? null;
-}
-
-/**
- * Load an Ed25519 signing key from `path`, accepting every shape Flair writes:
- *   - a raw 32-byte seed (what `flair agent add` writes to ~/.flair/keys/*.key)
- *   - base64 of that raw seed
- *   - base64 PKCS8 DER (the legacy ~/.tps/secrets/flair/*-priv.key shape)
- *
- * A bare seed is wrapped in the fixed PKCS8 prefix above. Anything unrecognised
- * throws an error that names the ENCODING problem (path + byte length), never the
- * key bytes — so a malformed key cannot masquerade as an authentication failure.
- */
-async function loadPrivateKeyFromFile(path) {
-  const raw = readFileSync(path);
-  const asPkcs8 = (der) => subtle.importKey('pkcs8', der, { name: 'Ed25519' }, false, ['sign']);
-  try {
-    if (raw.length === 32) return await asPkcs8(Buffer.concat([PKCS8_SEED_PREFIX, raw]));
-    const decoded = Buffer.from(raw.toString('utf8').trim(), 'base64');
-    if (decoded.length === 32) return await asPkcs8(Buffer.concat([PKCS8_SEED_PREFIX, decoded]));
-    if (decoded.length > 0) return await asPkcs8(decoded);
-    throw new Error('no bytes after base64 decode');
-  } catch (err) {
-    throw new Error(
-      `cannot load private key at ${path} (${raw.length} bytes): not a recognised Ed25519 key encoding. ` +
-        `Expected a raw 32-byte seed (what 'flair agent add' writes) or base64/DER PKCS8. ` +
-        `This is a key ENCODING problem, not an authentication failure. (${err.message})`,
-    );
-  }
-}
-
-async function loadPrivateKey() {
-  const path = resolveKeyPath(AGENT_ID);
-  if (!path) {
-    throw new Error(
-      `no private key found for agent '${AGENT_ID}'. Looked in:\n  ` +
-        keyPathCandidates(AGENT_ID).join('\n  ') +
-        `\nRegister one with 'flair agent add ${AGENT_ID}', or point FLAIR_PRIV_KEY at its path.`,
-    );
-  }
-  return loadPrivateKeyFromFile(path);
-}
-
+// Key resolution and signing live in scripts/lib/flair-signing.mjs, shared with
+// the other scripts that sign against a running instance (flair#1855).
 async function flairFetch(method, path, body = null) {
-  const privKey = await loadPrivateKey();
-  const ts = Date.now().toString();
-  const nonce = webcrypto.randomUUID();
-  const payload = `${AGENT_ID}:${ts}:${nonce}:${method}:${path}`;
-  const sig = await subtle.sign('Ed25519', privKey, new TextEncoder().encode(payload));
-  const headers = { 'Authorization': `TPS-Ed25519 ${AGENT_ID}:${ts}:${nonce}:${Buffer.from(sig).toString('base64')}` };
-  if (body) headers['Content-Type'] = 'application/json';
-  const res = await fetch(`${FLAIR_URL}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
-  const text = await res.text();
-  try { return JSON.parse(text); } catch { return text; }
+  return signedFetch({ agentId: AGENT_ID, url: FLAIR_URL, method, path, body });
 }
 
 const [,, resource, action, ...rest] = process.argv;
@@ -113,12 +38,13 @@ if (!resource || !action) {
   process.exit(1);
 }
 
-// Signing identity (flair#1816, flair#1851): FLAIR_AGENT_ID wins, then an
-// explicit `--agent <id>`. Any SIGNING action without either refuses instead of
-// defaulting — the old shipped default signed every forgotten caller as 'flint',
-// and ownership-scoped operations then bound to an identity nobody chose. Reads
-// were no exception: the same default made an identity-less `search`/`get`/`list`
-// return that principal's records to a caller who never chose them.
+// Signing identity (flair#1816, flair#1851, flair#1855): FLAIR_AGENT_ID wins, then
+// an explicit `--agent <id>`. Any action NOT in UNSIGNED refuses without either,
+// instead of defaulting — the old shipped default signed every forgotten caller
+// as 'flint', and ownership-scoped operations then bound to an identity nobody
+// chose. Reads were no exception: the same default made an identity-less
+// `search`/`get`/`list` return that principal's records to a caller who never
+// chose them.
 const agentFlagIndex = rest.indexOf('--agent');
 const agentFromFlag = agentFlagIndex === -1 ? undefined : rest[agentFlagIndex + 1];
 if (agentFlagIndex !== -1) {
@@ -135,7 +61,7 @@ if (agentFlagIndex !== -1) {
     process.exit(1);
   }
 }
-if (SIGNING_ACTIONS.has(action) && !process.env.FLAIR_AGENT_ID && !agentFromFlag) {
+if (!UNSIGNED.has(action) && !process.env.FLAIR_AGENT_ID && !agentFromFlag) {
   console.error(
     `refusing to ${action}: no agent identity. Set FLAIR_AGENT_ID or pass --agent <id>. ` +
       `A default identity would sign as a principal the caller did not choose (flair#1816).`,

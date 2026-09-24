@@ -989,3 +989,98 @@ describe("oldest-unreflected gather cap (#1515)", () => {
     expect(isRemAbortRequested({}, () => { throw new Error("enoent"); }, "/tmp/paused")).toBe(false);
   });
 });
+
+// ─── Source excerpt trims on code-point boundaries (flair#1772) ───────────────
+//
+// An over-budget source is trimmed until its ESCAPED form fits the per-source
+// budget. `String.slice` operates on UTF-16 code units, so a cut can land
+// between the two code units of an astral character and leave the excerpt
+// ending in a lone high surrogate — a mangled final character in the rendered
+// body, and a string that throws on any downstream UTF-16/UTF-8 encoding pass
+// (encodeURIComponent is one). The trim must land on code-point boundaries.
+describe("source excerpt trims on code-point boundaries (flair#1772)", () => {
+  const date = "2026-07-01T00:00:00.000Z";
+  const marker = "\u2026[excerpt truncated]";
+
+   /** Render the first <memory> element's body (keptEscaped + marker) from a
+    *  source content, the same way the existing per-source budget tests do. */
+  function excerptBody(content: string): string {
+    const prompt = buildReflectionPrompt(
+       promptParams({ memories: [{ id: "m1", createdAt: date, content }] }),
+    );
+    const start = prompt.indexOf('<memory id="m1"');
+    const close = prompt.indexOf("</memory>", start);
+    const element = prompt.slice(start, close);
+    return element.slice(element.indexOf(">") + 1);
+  }
+
+   /** The excerpt text: the kept content, with the trailing marker removed. */
+  function excerptText(body: string): string {
+    return body.slice(0, body.indexOf(marker));
+  }
+
+   /** Escape the way escapeElementText does: & < >. */
+  function esc(t: string): string {
+    return t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  test("an astral-plane source over budget renders a body ending on a complete code point", () => {
+    // One BMP char, then 200 four-byte emoji (the reported repro). The trim must
+    // able to back off a trailing lone high surrogate so the excerpt ends on a
+    // whole code point, never a half of a surrogate pair.
+    const content = "x" + "😂".repeat(200);
+    const body = excerptBody(content);
+    const text = excerptText(body);
+
+    // (1) The final code unit of the kept excerpt is NOT a high surrogate
+    //     (D800-DBFF) — a lone high surrogate means the cut split a pair.
+    const last = text.charCodeAt(text.length - 1);
+    expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
+
+    // (2) No lone high surrogate anywhere in the rendered body.
+    for (let i = 0; i < body.length; i++) {
+      const c = body.charCodeAt(i);
+      if (c >= 0xd800 && c <= 0xdbff) {
+        const next = body.charCodeAt(i + 1);
+        expect(next >= 0xdc00 && next <= 0xdfff).toBe(true);
+       }
+    }
+
+    // (3) The rendered body round-trips through encodeURIComponent without throwing.
+    expect(() => encodeURIComponent(body)).not.toThrow();
+  });
+
+  test("the excerpted body still respects the per-source budget", () => {
+    // Reuse the same measurement the existing per-source budget test uses: the
+    // rendered <memory> body (kept + marker) must never exceed the budget.
+    const content = "x" + "😂".repeat(200);
+    const body = excerptBody(content);
+    expect(body.length).toBeLessThanOrEqual(SOURCE_EXCERPT_BUDGET);
+     expect(body).toContain("excerpt truncated"); // still explicitly marked, never a silent prefix
+  });
+
+  test("an ordinary BMP source over budget renders exactly as before the change", () => {
+    // A pure-BMP source with escapable content over budget. Compute the expected
+    // body with the OLD code-unit trim (slice(0, -1) per step) inline: for BMP
+    // text there are no surrogate pairs, so code-unit and code-point trimming are
+    // identical, and the fix must not change the rendered body.
+    const content = "A" + "&".repeat(400);
+    const limit = SOURCE_EXCERPT_BUDGET - marker.length;
+    let kept = content.slice(0, limit);
+    let keptEscaped = esc(kept);
+    while (keptEscaped.length > limit && kept.length > 0) {
+      kept = kept.slice(0, -1);
+      keptEscaped = esc(kept);
+     }
+    const expectedBody = keptEscaped + marker;
+
+    const body = excerptBody(content);
+    expect(body).toEqual(expectedBody);
+
+    // Belt and suspenders: nothing in the body is a high surrogate (there are
+    // none, since the content is pure BMP).
+    for (let i = 0; i < body.length; i++) {
+      expect(body.charCodeAt(i) >= 0xd800 && body.charCodeAt(i) <= 0xdbff).toBe(false);
+     }
+  });
+});

@@ -11,8 +11,9 @@ import { authFetch, resolveAdminUser } from "../lib/auth-resolve.js";
 import { load as parseYaml } from "js-yaml";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync } from "node:fs";
-import { homedir } from "node:os";
+
 import { join, resolve, sep } from "node:path";
+import { resolveHome } from "../lib/home.js";
 
 export type MigrateHarnessMemoryCli = {
   resolveHttpPort: (...args: any[]) => any;
@@ -34,9 +35,9 @@ function resolveMemoryDir(target: string, agentId: string): string {
     case "claude-code": {
       const cwd = process.cwd();
       const encodedCwd = encodeURIComponent(cwd).replace(/%2F/g, "/");
-      const memoryDir = join(homedir(), ".claude", "projects", encodedCwd, "memory");
+      const memoryDir = join(resolveHome(), ".claude", "projects", encodedCwd, "memory");
       const resolved = resolve(memoryDir);
-      const expectedRoot = join(homedir(), ".claude", "projects");
+      const expectedRoot = join(resolveHome(), ".claude", "projects");
       if (!resolved.startsWith(expectedRoot + sep)) {
         throw new Error(`Memory dir must be within ${expectedRoot}, got ${resolved}`);
       }
@@ -45,9 +46,9 @@ function resolveMemoryDir(target: string, agentId: string): string {
     case "openclaw": {
       const cwd = process.cwd();
       const encodedCwd = encodeURIComponent(cwd).replace(/%2F/g, "/");
-      const memoryDir = join(homedir(), ".openclaw", "projects", encodedCwd, "memory");
+      const memoryDir = join(resolveHome(), ".openclaw", "projects", encodedCwd, "memory");
       const resolved = resolve(memoryDir);
-      const expectedRoot = join(homedir(), ".openclaw", "projects");
+      const expectedRoot = join(resolveHome(), ".openclaw", "projects");
       if (!resolved.startsWith(expectedRoot + sep)) {
         throw new Error(`Memory dir must be within ${expectedRoot}, got ${resolved}`);
       }
@@ -56,9 +57,9 @@ function resolveMemoryDir(target: string, agentId: string): string {
     case "pi": {
       const cwd = process.cwd();
       const encodedCwd = encodeURIComponent(cwd).replace(/%2F/g, "/");
-      const memoryDir = join(homedir(), ".pi", "projects", encodedCwd, "memory");
+      const memoryDir = join(resolveHome(), ".pi", "projects", encodedCwd, "memory");
       const resolved = resolve(memoryDir);
-      const expectedRoot = join(homedir(), ".pi", "projects");
+      const expectedRoot = join(resolveHome(), ".pi", "projects");
       if (!resolved.startsWith(expectedRoot + sep)) {
         throw new Error(`Memory dir must be within ${expectedRoot}, got ${resolved}`);
       }
@@ -234,7 +235,7 @@ program
         try {
           const httpUrl = `http://127.0.0.1:${resolveHttpPort({})}`;
           const agentKeyId = `${agentId}.key`;
-          const keysDir = join(homedir(), ".flair", "keys");
+          const keysDir = join(resolveHome(), ".flair", "keys");
           const keyPath = join(keysDir, agentKeyId);
           
           let authSuccess = false;

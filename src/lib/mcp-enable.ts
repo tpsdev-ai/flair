@@ -142,10 +142,11 @@
 
 import { probeSecretsCapability, pushSecrets, PROCESS_ENV_TIER } from "./secrets-push.js";
 import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+
 import { join, dirname } from "node:path";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import yaml from "js-yaml";
+import { resolveHome } from "./home.js";
 
 // ─── CIMD constants ──────────────────────────────────────────────────────────
 
@@ -272,7 +273,7 @@ export function generateRsaSigningKeyPair(): RsaKeyPairPem {
 }
 
 export function defaultSigningKeyFilePath(): string {
-  return join(homedir(), ".flair", "mcp-signing-key.pem");
+  return join(resolveHome(), ".flair", "mcp-signing-key.pem");
 }
 
 /** Write the RS256 private key PEM to a 0600 file (idempotent — reuses an
@@ -409,7 +410,7 @@ export function updateLocalConfigMcpEnabled(
 ): { ok: boolean; detail: string } {
   const candidates = explicitPath
     ? [explicitPath]
-    : ["config.yaml", join(homedir(), ".flair", "config.yaml")];
+    : ["config.yaml", join(resolveHome(), ".flair", "config.yaml")];
 
   let configPath: string | null = null;
   for (const p of candidates) {
@@ -534,7 +535,7 @@ export function defaultSecretsStagingPath(issuer: string): string {
     /* fall through to the generic name */
   }
   const safe = host.replace(/[^a-zA-Z0-9.-]/g, "_");
-  return join(homedir(), ".flair", `mcp-enable-secrets-${safe}.env`);
+  return join(resolveHome(), ".flair", `mcp-enable-secrets-${safe}.env`);
 }
 
 /** Write the secrets bundle to a 0600 staging file, `KEY=VALUE` per line.
