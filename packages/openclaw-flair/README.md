@@ -144,7 +144,11 @@ What this slice guarantees:
   30 s have passed since `agent_end`, and a run that has seen no `agent_end`
   retires after 30 min idle. Retiring or aborting changes the phase IN PLACE —
   it never adds a record — and a late callback for a `retired`/`aborted` run is
-  dropped with a one-time log naming the run, so it can never capture again.
+  dropped with a one-time log naming the run, so it cannot capture again while
+  its record is retained. The record is retained until the removal rule below
+  lets it go — retired or aborted, nothing in flight, aged past 1 h — and only
+  then is the run id free again for a later callback to be admitted, the same
+  window the Abort paragraph leaves open.
 - **Bounded bookkeeping, one removal rule.** A record leaves the map only when
   it is retired or aborted, has no write in flight, and has aged past 1 h — one
   predicate, used by the sweep and by admission alike. Admission removes what
