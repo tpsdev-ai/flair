@@ -451,7 +451,7 @@ const INSTANCE_PUBLIC_KEY = "spoke-public-key-1875";
 const HUB_URL = "http://hub.example.invalid:9927";
 const OPS_URL = "http://127.0.0.1:19999";
 
-interface RecordedCall { url: string; method: string; body: any }
+interface RecordedCall { url: string; method: string; body: any; authorization?: string }
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -474,12 +474,19 @@ describe("federation pair — spoke credential checked before the hub (flair#187
       const u = String(url);
       let body: any;
       try { body = opts?.body ? JSON.parse(String(opts.body)) : undefined; } catch { body = undefined; }
-      // The local identity GET is answered here and is NOT recorded: it runs on
-      // every pair invocation and predates the credential check.
+      // The local identity GET goes to the SPOKE (resolveBaseUrl: local, or
+      // --target), never the hub, so it can never consume the one-time token. It
+      // is answered here and NOT recorded: the zero-request assertions below are
+      // about the hub/ops calls, and this GET predates the credential check.
       if (u.endsWith("/FederationInstance")) {
         return jsonResponse(200, { id: INSTANCE_ID, role: "spoke", publicKey: INSTANCE_PUBLIC_KEY });
       }
-      const call: RecordedCall = { url: u, method: String(opts?.method ?? "GET"), body };
+      const call: RecordedCall = {
+        url: u,
+        method: String(opts?.method ?? "GET"),
+        body,
+        authorization: opts?.headers?.Authorization ?? opts?.headers?.authorization,
+      };
       calls.push(call);
       return responder(call);
     }) as unknown as typeof fetch;
@@ -526,13 +533,19 @@ describe("federation pair — spoke credential checked before the hub (flair#187
     process.env.FLAIR_TOKEN = "test-bearer-1875";
     delete process.env.FLAIR_ADMIN_PASS;
     delete process.env.HDB_ADMIN_PASSWORD;
-    // Seed the keystore so loadInstanceSecretKey returns WITHOUT an ops fetch,
-    // keeping the call list to the requests under test.
-    keystore.setPrivateKeySeed(INSTANCE_ID, randomBytes(32));
     installFetch();
     responder = () => jsonResponse(200, {});
     tokenFile = writeTripleFile(buildTriple());
   });
+
+  /** Seed the keystore so loadInstanceSecretKey returns WITHOUT an ops fetch. */
+  function seedKey(): void {
+    keystore.setPrivateKeySeed(INSTANCE_ID, randomBytes(32));
+  }
+
+  const superUserInfo = { role: { role: "super_user", permission: { super_user: true } } };
+  const readOnlyInfo = { role: { role: "read_only", permission: { flair: { tables: { Peer: { insert: false, update: false } } } } } };
+  const peerWriterInfo = { role: { role: "flair_pair_initiator", permission: { flair: { tables: { Peer: { insert: true, update: true } } } } } };
 
   afterEach(() => {
     globalThis.fetch = origFetch;
@@ -548,7 +561,7 @@ describe("federation pair — spoke credential checked before the hub (flair#187
     const { exit, stderr } = await runPair([]);
     expect(exit).toBe("process.exit(1)");
     const text = stderr.join("\n");
-    expect(text).toContain("Nothing was sent; the pairing token is still valid");
+    expect(text).toContain("Nothing was sent to the hub; the pairing token is still valid");
     expect(text).toContain("refusing to contact the hub");
     // The hub/ops were never contacted.
     expect(calls).toEqual([]);
@@ -560,34 +573,38 @@ describe("federation pair — spoke credential checked before the hub (flair#187
     expect(exit).toBe("process.exit(1)");
     const text = stderr.join("\n");
     expect(text).toContain("refused by the local ops API (401)");
-    expect(text).toContain("nothing was sent to the hub");
+    expect(text).toContain("Nothing was sent to the hub");
     expect(calls.length).toBe(1);
     expect(calls[0]!.url.startsWith(OPS_URL)).toBe(true);
     expect(calls.some((c) => c.url.includes("/FederationPair"))).toBe(false);
   });
 
   test("(c) a credential accepted → ops preflight, hub FederationPair, ops Peer upsert, in that order; exit 0", async () => {
+    seedKey();
     responder = (call) => {
       if (call.url.includes("/FederationPair")) {
         return jsonResponse(200, { instance: { id: "hub-peer", publicKey: "hub-public-key-1875" } });
       }
+      if (call.body?.operation === "user_info") return jsonResponse(200, superUserInfo);
       return jsonResponse(200, []);
     };
     const { exit } = await runPair(["--admin-pass", "right-pass"]);
     expect(exit).toBeNull();
     expect(calls.length).toBe(3);
     expect(calls[0]!.url.startsWith(OPS_URL)).toBe(true);
-    expect(calls[0]!.body?.operation).toBe("search_by_value");
+    expect(calls[0]!.body?.operation).toBe("user_info");
     expect(calls[1]!.url.includes("/FederationPair")).toBe(true);
     expect(calls[2]!.url.startsWith(OPS_URL)).toBe(true);
     expect(calls[2]!.body?.operation).toBe("upsert");
   });
 
   test("(d) a Peer upsert 500 after a hub 200 → exit 1, and the message names the consumed token", async () => {
+    seedKey();
     responder = (call) => {
       if (call.url.includes("/FederationPair")) {
         return jsonResponse(200, { instance: { id: "hub-peer", publicKey: "hub-public-key-1875" } });
       }
+      if (call.body?.operation === "user_info") return jsonResponse(200, superUserInfo);
       if (call.body?.operation === "upsert") return jsonResponse(500, { error: "boom" });
       return jsonResponse(200, []);
     };
@@ -596,5 +613,77 @@ describe("federation pair — spoke credential checked before the hub (flair#187
     const text = stderr.join("\n");
     expect(text).toContain("writing the local hub-peer record failed (500");
     expect(text).toContain("The pairing token has been consumed");
+  });
+
+  test("(P2) a read-only credential → exit 1 BEFORE the hub (no Peer write permission)", async () => {
+    seedKey();
+    responder = () => jsonResponse(200, readOnlyInfo);
+    const { exit, stderr } = await runPair(["--admin-pass", "readonly-pass"]);
+    expect(exit).toBe("process.exit(1)");
+    const text = stderr.join("\n");
+    expect(text).toContain("cannot write the Peer table");
+    expect(text).toContain("read_only");
+    expect(text).toContain("Nothing was sent to the hub");
+    expect(calls.some((c) => c.url.includes("/FederationPair"))).toBe(false);
+  });
+
+  test("(P2) an explicit flair.Peer insert+update grant proceeds to the hub", async () => {
+    seedKey();
+    responder = (call) => {
+      if (call.url.includes("/FederationPair")) {
+        return jsonResponse(200, { instance: { id: "hub-peer", publicKey: "hub-public-key-1875" } });
+      }
+      if (call.body?.operation === "user_info") return jsonResponse(200, peerWriterInfo);
+      return jsonResponse(200, []);
+    };
+    const { exit } = await runPair(["--admin-pass", "peer-writer"]);
+    expect(exit).toBeNull();
+    expect(calls.some((c) => c.url.includes("/FederationPair"))).toBe(true);
+  });
+
+  test("(P3) a THROWN Peer upsert after a hub 200 names the consumed token", async () => {
+    seedKey();
+    responder = (call) => {
+      if (call.url.includes("/FederationPair")) {
+        return jsonResponse(200, { instance: { id: "hub-peer", publicKey: "hub-public-key-1875" } });
+      }
+      if (call.body?.operation === "user_info") return jsonResponse(200, superUserInfo);
+      throw new Error("socket hang up");
+    };
+    const { exit, stderr } = await runPair(["--admin-pass", "right-pass"]);
+    expect(exit).toBe("process.exit(1)");
+    const text = stderr.join("\n");
+    expect(text).toContain("writing the local hub-peer record failed");
+    expect(text).toContain("The pairing token has been consumed");
+  });
+
+  test("(P4) an ops target with userinfo is redacted from the error line", async () => {
+    responder = () => jsonResponse(500, { error: "boom" });
+    const { exit, stderr } = await runPair([
+      "--admin-pass", "right-pass",
+      "--ops-target", "https://sekret-user:sekret-pass@127.0.0.1:19999",
+    ]);
+    expect(exit).toBe("process.exit(1)");
+    const text = stderr.join("\n");
+    expect(text).toContain("spoke admin credential preflight");
+    expect(text).not.toContain("sekret-user");
+    expect(text).not.toContain("sekret-pass");
+  });
+
+  test("(P5) with no keystore key the DB fallback sends the HDB_ADMIN_PASSWORD credential", async () => {
+    // No seedKey(): the keystore is empty, so loadInstanceSecretKey falls back.
+    process.env.HDB_ADMIN_PASSWORD = "hdb-pass-1875";
+    responder = (call) => {
+      if (call.body?.operation === "user_info") return jsonResponse(200, superUserInfo);
+      // The fallback search finds no _keySeed → loadInstanceSecretKey throws.
+      return jsonResponse(200, []);
+    };
+    const { exit } = await runPair([]);
+    expect(exit).toBe("process.exit(1)");
+    const fallback = calls.find((c) => c.body?.operation === "search_by_value");
+    expect(fallback).toBeTruthy();
+    expect(fallback!.authorization).toBe(
+      `Basic ${Buffer.from("admin:hdb-pass-1875").toString("base64")}`,
+    );
   });
 });

@@ -155,18 +155,51 @@ function isFederationPrivateVisibility(visibility: string | null | undefined): b
   return visibility === FEDERATION_PRIVATE_VISIBILITY;
 }
 
-async function loadInstanceSecretKey(instanceId: string, opts: { adminPass?: string; adminUser?: string; opsPort?: string | number; port?: string | number }): Promise<Uint8Array> {
+/** The exact refusal sentence when nothing has reached the hub yet. */
+const NOTHING_SENT_TO_HUB = "Nothing was sent to the hub; the pairing token is still valid.";
+
+/**
+ * Strip any userinfo (user:password) from a URL before printing it, so an
+ * --ops-target like https://user:pass@host never puts credentials on stderr.
+ */
+export function redactUrl(u: string): string {
+  try {
+    const url = new URL(u);
+    url.username = "";
+    url.password = "";
+    return url.toString();
+  } catch {
+    // Not a parseable absolute URL: strip a userinfo-looking prefix anyway.
+    return u.replace(/\/\/[^/@]*@/, "//");
+  }
+}
+
+/**
+ * Whether a Harper permission object can WRITE the Peer table: a super_user, or
+ * an explicit flair.Peer insert+update grant. A read-only credential can search
+ * but not upsert, so the preflight must check this, not readability.
+ */
+export function canWritePeerPermission(permission: any): boolean {
+  if (permission?.super_user === true) return true;
+  const peer = permission?.flair?.tables?.Peer;
+  return peer?.insert === true && peer?.update === true;
+}
+
+async function loadInstanceSecretKey(instanceId: string, opts: { adminPass?: string; adminUser?: string; opsPort?: string | number; port?: string | number; target?: string; opsTarget?: string }): Promise<Uint8Array> {
   // Try keystore first
   const seed = keystore.getPrivateKeySeed(instanceId);
   if (seed) {
     return nacl.sign.keyPair.fromSeed(seed).secretKey;
   }
 
-  // Fallback: check DB for legacy _keySeed
-  const opsPort = resolveOpsPort(opts);
-  const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+  // Fallback: check DB for legacy _keySeed. Use the SAME three-source
+  // credential and the SAME resolved ops endpoint as the pair preflight, so a
+  // legacy-key spoke cannot pass preflight and then fail here for a different
+  // endpoint or a credential the fallback would not send.
+  const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
+  const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
   const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
-  const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+  const res = await fetch(`${opsEndpoint}/`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: auth },
     body: JSON.stringify({ operation: "search_by_value", schema: "flair", table: "Instance", search_attribute: "id", search_type: "equals", search_value: instanceId, get_attributes: ["*"] }),
@@ -1243,50 +1276,53 @@ export function register(program: Command): void {
           console.error(
             "Error: refusing to contact the hub: the local hub-peer record needs admin auth to write — " +
             "pass --admin-pass, or set FLAIR_ADMIN_PASS / HDB_ADMIN_PASSWORD (the SPOKE admin password), then re-run pair. " +
-            "Nothing was sent; the pairing token is still valid."
+            NOTHING_SENT_TO_HUB
           );
           process.exit(1);
         }
         const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
         const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
+        const safeOps = redactUrl(opsEndpoint);
 
         // Preflight the credential against the LOCAL ops API before the hub
-        // request, in the same shape loadInstanceSecretKey already uses for its
-        // fallback. A refused credential exits here; the token is untouched.
+        // request. user_info reports the credential's own role/permissions, so
+        // this proves it can WRITE flair.Peer — a read-only credential can search
+        // but is refused by the upsert, and by then the hub has burned the token.
         let preflightRes: Awaited<ReturnType<typeof fetch>>;
         try {
           preflightRes = await fetch(`${opsEndpoint}/`, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: auth },
-            body: JSON.stringify({
-              operation: "search_by_value", schema: "flair", table: "Instance",
-              search_attribute: "id", search_type: "equals", search_value: instance.id,
-              get_attributes: ["*"],
-            }),
+            body: JSON.stringify({ operation: "user_info" }),
             signal: AbortSignal.timeout(10_000),
           });
         } catch (err) {
           console.error(
-            `Error: could not reach the local ops API at ${opsEndpoint} to preflight the spoke admin credential ` +
-            `(${err instanceof Error ? err.message : String(err)}); nothing was sent to the hub, the pairing token is still valid.`
+            `Error: could not reach the local ops API at ${safeOps} to preflight the spoke admin credential ` +
+            `(${err instanceof Error ? err.message : String(err)}). ${NOTHING_SENT_TO_HUB}`
           );
           process.exit(1);
         }
         if (preflightRes.status === 401 || preflightRes.status === 403) {
           console.error(
-            `Error: the spoke admin credential was refused by the local ops API (${preflightRes.status}); ` +
-            `nothing was sent to the hub, the pairing token is still valid.`
+            `Error: the spoke admin credential was refused by the local ops API (${preflightRes.status}). ${NOTHING_SENT_TO_HUB}`
           );
           process.exit(1);
         }
         if (!preflightRes.ok) {
           console.error(
-            `Error: the local ops API at ${opsEndpoint} answered ${preflightRes.status} for the spoke admin credential preflight; ` +
-            `nothing was sent to the hub, the pairing token is still valid.`
+            `Error: the local ops API at ${safeOps} answered ${preflightRes.status} for the spoke admin credential preflight. ${NOTHING_SENT_TO_HUB}`
           );
           process.exit(1);
         }
-        await preflightRes.text().catch(() => "");
+        const userInfo = (await preflightRes.json().catch(() => null)) as any;
+        if (!canWritePeerPermission(userInfo?.role?.permission)) {
+          const roleName = userInfo?.role?.role ?? userInfo?.role?.name ?? "(unknown)";
+          console.error(
+            `Error: the spoke admin credential cannot write the Peer table (role ${roleName}). ${NOTHING_SENT_TO_HUB}`
+          );
+          process.exit(1);
+        }
 
         // Load secret key and sign the pairing request.
         const secretKey = await loadInstanceSecretKey(instance.id, opts);
@@ -1344,22 +1380,34 @@ export function register(program: Command): void {
         // flair#1875: the admin credential was resolved and preflighted BEFORE the
         // hub request, so reaching here means it was accepted. A rejected write
         // (or a failed upsert) is a genuine post-pair failure: the token is gone.
-        const peerRes = await fetch(`${opsEndpoint}/`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: auth },
-          body: JSON.stringify({
-            operation: "upsert", database: "flair", table: "Peer",
-            records: [{
-              id: resolvedHub.peer.id,
-              publicKey: resolvedHub.peer.publicKey,
-              role: "hub", endpoint: hubUrl, status: "paired",
-              pairedAt: new Date().toISOString(),
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-            }],
-          }),
-          signal: AbortSignal.timeout(10_000),
-        });
+        let peerRes: Awaited<ReturnType<typeof fetch>>;
+        try {
+          peerRes = await fetch(`${opsEndpoint}/`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: auth },
+            body: JSON.stringify({
+              operation: "upsert", database: "flair", table: "Peer",
+              records: [{
+                id: resolvedHub.peer.id,
+                publicKey: resolvedHub.peer.publicKey,
+                role: "hub", endpoint: hubUrl, status: "paired",
+                pairedAt: new Date().toISOString(),
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+              }],
+            }),
+            signal: AbortSignal.timeout(10_000),
+          });
+        } catch (err) {
+          // A THROWN upsert (network error) after the hub returned 200 is the same
+          // post-pair failure as an HTTP error: the token is already consumed.
+          console.error(
+            `Error: paired on the hub, but writing the local hub-peer record failed ` +
+            `(${err instanceof Error ? err.message : String(err)}). The pairing token has been consumed; ` +
+            `mint a new one with 'flair federation token' on the hub and re-run pair.`
+          );
+          process.exit(1);
+        }
         if (!peerRes.ok) {
           const text = await peerRes.text().catch(() => "");
           console.error(
