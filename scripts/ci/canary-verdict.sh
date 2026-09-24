@@ -105,12 +105,15 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# Prerelease detection: a canonical `<major>.<minor>.<patch>` followed by a
-# `-<prerelease>` part. Build metadata (`+...`) is NOT a prerelease. This mirrors
-# the strict SemVer 2.0.0 regex the sha helper uses, restricted to the part that
-# decides "is there a prerelease label".
-is_prerelease() {
-  printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z]'
+# Promotability is a WHITELIST (F2 of #1671, A1c): the promote block is
+# emitted ONLY for a version that is exactly `<major>.<minor>.<patch>`.
+# Everything else — a SemVer prerelease (`1.2.3-rc.1`, the bare `1.2.3-0`
+# or `1.2.3--`), build metadata (`1.2.3+build`), or any other label — is NOT
+# a release and is never promoted to `latest` (it lives on `next`). A blacklist
+# (matching a `-<prerelease>` part) misses `1.2.3--`, whose first `-` is a valid
+# SemVer prerelease token, and would wrongly promote it; the whitelist cannot.
+is_release() {
+  printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
 }
 
 # The ONE source for the lockstep set (never a second list here).
@@ -135,9 +138,10 @@ EOF
 }
 
 if [ "$VERDICT" = "pass" ]; then
-  # Prereleases are never promoted: print the note and stop. No promote block, no
-  # dist-tag lines — even a stray one — is what keeps a prerelease off `latest`.
-  if is_prerelease "$VERSION"; then
+   # Only an exact `<major>.<minor>.<patch>` is promoted. Anything else
+   # (a prerelease, build metadata, or any other label) prints the note and
+   # stops: no promote block, no dist-tag line — a prerelease never moves `latest`.
+  if ! is_release "$VERSION"; then
     emit_prerelease_note
     exit 0
   fi
@@ -183,9 +187,31 @@ for _p in ${PACKAGES[*]}; do
   fi
   printf '%s=%s\n' "\$_p" "\$_s" >> "\$PSD_LINES"
 done
+# F4 (A1c of #1671): the producer's stdout and its exit status are captured
+# SEPARATELY. A non-zero producer exit (even with a valid-looking first line)
+# is a refusal, and the re-derived digest must be exactly ONE 64-hex line; a
+# second line or trailing garbage is a refusal too. Wrapping the producer in
+# set +e / set -e makes the capture robust under any shell, not only where
+# set -e happens to catch a bad command substitution.
+set +e
 _rehash="\$(node scripts/ci/package-set-digest.mjs --version ${VERSION} < "\$PSD_LINES")"
-if ! printf '%s' "\$_rehash" | grep -Eq '^[0-9a-f]{64}\$'; then
-  echo "canary promote preflight: refused — the package-set digest could not be re-derived from the registry (unmeasurable is FAIL)" >&2
+_rehash_status=\$?
+set -e
+if [ "\$_rehash_status" -ne 0 ]; then
+  echo "canary promote preflight: refused — the package-set digest producer exited \$_rehash_status (a non-zero producer is unmeasurable, so FAIL)" >&2
+  exit 1
+fi
+if [ -z "\$_rehash" ]; then
+  echo "canary promote preflight: refused — the package-set digest could not be re-derived from the registry (empty output; unmeasurable is FAIL)" >&2
+  exit 1
+fi
+_rehash_lines=\$(printf '%s\n' "\$_rehash" | wc -l | tr -d '[:space:]')
+if [ "\$_rehash_lines" -ne 1 ]; then
+  echo "canary promote preflight: refused — the package-set digest producer emitted \$_rehash_lines lines (exactly one 64-hex line is required; unmeasurable is FAIL)" >&2
+  exit 1
+fi
+if ! printf '%s' "\$_rehash" | grep -Eqx '^[0-9a-f]{64}\$'; then
+  echo "canary promote preflight: refused — the re-derived package-set digest is not a 64-char hex sha256 (unmeasurable is FAIL)" >&2
   exit 1
 fi
 if [ "\$_rehash" != "${PKG_SET_DIGEST}" ]; then

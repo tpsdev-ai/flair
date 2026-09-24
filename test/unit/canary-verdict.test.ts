@@ -126,10 +126,26 @@ describe("canary-verdict — a SemVer prerelease is never promoted (A1c, #1671)"
     expect(r.stdout.toLowerCase()).toContain("never");
   });
 
-  test("a build-metadata-only version is NOT a prerelease and still promotes", () => {
-    const r = run(["pass", "1.2.3+build.7", RUN_URL, "--os", "ubuntu-latest", "--package-set-digest", CERTIFIED_DIGEST]);
-    expect(r.status).toBe(0);
-    expect(r.stdout).toContain("npm dist-tag add @tpsdev-ai/flair@1.2.3+build.7 latest");
+  test("F2: only an exact <major>.<minor>.<patch> is promoted; every other label prints the note, no dist-tag", () => {
+    // A whitelist (F2 of #1671, A1c): is_release matches ONLY <major>.<minor>.<patch>.
+    // A blacklist (matching a -<prerelease> part) misses 1.2.3-- (whose first - is a valid
+    // SemVer prerelease token) and build metadata (1.2.3+build) — both would wrongly promote.
+    const rel = run(["pass", "1.2.3", RUN_URL, "--os", "ubuntu-latest", "--package-set-digest", CERTIFIED_DIGEST]);
+    expect(rel.status).toBe(0);
+    expect(rel.stderr).toBe("");
+    expect(rel.stdout).toContain("npm dist-tag add @tpsdev-ai/flair@1.2.3 latest");
+    // Everything that is NOT an exact <major>.<minor>.<patch> prints the note and NO dist-tag line.
+    const nonReleases = ["1.2.3-rc.1", "1.2.3-0", "1.2.3--", "1.2.3+build", "totally-not-a-version"];
+    for (const v of nonReleases) {
+      const r = run(["pass", v, RUN_URL, "--os", "ubuntu-latest", "--package-set-digest", CERTIFIED_DIGEST]);
+      expect(r.status).toBe(0, `status for ${v}`);
+      expect(r.stderr).toBe("", `stderr for ${v}`);
+      expect(r.stdout, `stdout for ${v}`).not.toContain("npm dist-tag add");
+      expect(r.stdout, `dist-tag for ${v}`).not.toContain("dist-tag add");
+      expect(r.stdout.toLowerCase(), `prerelease for ${v}`).toContain("prerelease");
+      expect(r.stdout.toLowerCase(), `next for ${v}`).toContain("next");
+      expect(r.stdout.toLowerCase(), `never for ${v}`).toContain("never");
+    }
   });
 
   test("a prerelease FAIL still deprecates (the FAIL path is unchanged)", () => {

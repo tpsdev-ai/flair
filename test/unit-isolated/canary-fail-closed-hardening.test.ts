@@ -244,10 +244,10 @@ describe("the sha step binds the verdict to the package-set digest (A1c of #1671
     const r = runShaStep("ok", cert);
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("package-set digest verified");
-    expect(r.envFile).toContain("LOCKSTEP_SHAS<<EOF");
-    const lines = r.envFile.split("\n").filter((l) => /^@/.test(l));
-    expect(lines.length).toBe(PACKAGES.length);
-    for (const line of lines) expect(line).toMatch(/^@[^=]+=[0-9a-f]{64}$/);
+    // A1c/F1: the sha step no longer emits a LOCKSTEP_SHAS GITHUB_ENV binding —
+    // the verdict is bound to the package_set_digest input (and the emitted
+    // preflight re-derives it), not a GITHUB_ENV hand-off.
+    expect(r.envFile).not.toContain("LOCKSTEP_SHAS");
    });
 
   test("(c) a package_set_digest mismatch => FAIL: step fails, names both digests, no LOCKSTEP_SHAS", () => {
@@ -394,6 +394,173 @@ describe("A1c: the promote block is the single package-set-digest preflight", ()
    });
 });
 
+
+// ── the verdict step (F0/F1/F4 of A1c #1671) ────────────────────────────────
+// F0: the digest is a workflow input carried as an ENV VAR (never an unquoted
+//     ${{ inputs... }} in the shell), and a 64-hex guard refuses a bad value
+//     before any verdict.  F1: the step is fail-closed (set -euo pipefail, no
+//     LOCKSTEP_SHAS) — a non-zero canary-verdict.sh makes the step's shell exit
+//     non-zero.  F4: the digest producer's stdout and its exit status are
+//     captured SEPARATELY, so a producer that exits non-zero (even with a valid
+//     first line), that emits more than one line, or that is empty is a refusal.
+function verdictStep() {
+  const wf = yaml.load(readFileSync(CANARY_YML, "utf8")) as {
+    jobs: { canary: { steps: { name?: string; run?: string; env?: Record<string, string> }[] } };
+  };
+  const step = wf.jobs.canary.steps.find((s) => typeof s.name === "string" && /canary verdict/i.test(s.name));
+  if (!step?.run) throw new Error("canary.yml has no 'Canary verdict' step with a run: block");
+  return { run: step.run, env: step.env ?? {} };
+}
+
+// A dedicated `node` stub for the F4 producer scenarios: it intercepts the three
+// scripts the emitted block calls, and (via the F4_MODE env var) controls the
+// package-set-digest producer's stdout and exit status INDEPENDENTLY.
+const F4_STUB = join(SCRATCH, "f4-node-stub.mjs");
+const F4_SHIM = join(SCRATCH, "f4-shim");
+mkdirSync(F4_SHIM, { recursive: true });
+const f4NodeStub = [
+   "#!/usr/bin/env node",
+   "const args = process.argv.slice(2);",
+   "const a0 = args[0] || '';",
+   "if (a0.includes('registry-tarball-sha256.mjs')) { process.stdout.write((process.env.F4_PKG_SHA || 'a'.repeat(64)) + '\\n'); process.exit(0); }",
+   "if (a0.includes('package-set-digest.mjs')) {",
+   "  const mode = process.env.F4_MODE || 'valid';",
+   "  if (mode === 'exit1') { process.stdout.write('b'.repeat(64) + '\\ngarbage\\n'); process.exit(1); }",
+   "  if (mode === 'twolines') { process.stdout.write('c'.repeat(64) + '\\n' + 'd'.repeat(64) + '\\n'); process.exit(0); }",
+   "  if (mode === 'empty') { process.stdout.write(''); process.exit(0); }",
+   "  process.stdout.write((process.env.F4_CERT || 'e'.repeat(64)) + '\\n'); process.exit(0);",
+   "}",
+   "if (a0.includes('registry-latest-skew.mjs')) { process.exit(0); }",
+   "process.exit(0);",
+].join("\n");
+writeFileSync(F4_STUB, f4NodeStub);
+writeFileSync(join(F4_SHIM, "node"), ["#!/usr/bin/env bash", 'exec "$REAL_NODE" "$F4_STUB" "$@"', ""].join("\n"));
+chmodSync(join(F4_SHIM, "node"), 0o755);
+
+/** Emit the PASS block with any valid 64-hex certified digest, then run the
+    fenced block under the F4 producer stub (mode controls the digest producer). */
+function runF4Block(mode: string): { status: number | null; stderr: string; stdout: string } {
+  const cert = "e".repeat(64); // the F4 refusal fires before (or independent of) the digest compare
+  const emitted = runVerdict(["pass", VER, RUN_URL, "--os", "ubuntu-latest", "--package-set-digest", cert]);
+  if (emitted.status !== 0) throw new Error("F4: canary-verdict.sh did not emit a PASS block (status " + emitted.status + "): " + emitted.stderr);
+  const m = emitted.stdout.match(/```\n([\s\S]*?)\n```/);
+  if (!m?.[1]) throw new Error("F4: no fenced promote block in the PASS output");
+  const block = m[1]!;
+  const cwd = mkdtempSync(join(SCRATCH, "f4block-"));
+  const f = join(cwd, "block.sh");
+  writeFileSync(f, block);
+  const r = spawnSync("bash", [f], {
+    cwd: REPO,
+    encoding: "utf8",
+    env: {
+       ...process.env,
+      PATH: `${F4_SHIM}:${process.env.PATH}`,
+      REAL_NODE,
+      F4_STUB,
+      F4_MODE: mode,
+      F4_PKG_SHA: "a".repeat(64),
+     },
+   });
+  return { status: r.status, stderr: r.stderr, stdout: r.stdout };
+}
+
+/** Run the CURRENT verdict step's run text with a supplied env; returns status+output. */
+function runVerdictStepText(extra: Record<string, string>): { status: number | null; stdout: string; stderr: string } {
+  const { run } = verdictStep();
+  const cwd = mkdtempSync(join(SCRATCH, "vs-"));
+  const stepFile = join(cwd, "verdict-step.sh");
+  writeFileSync(stepFile, run);
+  const summary = join(cwd, "summary.txt");
+  writeFileSync(summary, "");
+  const r = spawnSync("bash", [stepFile], {
+    cwd,
+    encoding: "utf8",
+    env: {
+       ...process.env, ...extra,
+      VERSION: VER,
+      EXPECTED: "0".repeat(64),
+      SHA_OUTCOME: "success",
+      INSTALL_OUTCOME: "success",
+      BOOT_OUTCOME: "success",
+      PLUGIN_OUTCOME: "success",
+      OS_NAME: "ubuntu-latest",
+      RUN_URL,
+      GITHUB_STEP_SUMMARY: summary,
+      },
+    });
+  return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+}
+
+describe("F0: the verdict step carries the package-set digest as an env var (A1c of #1671)", () => {
+  test("the verdict step's env carries PACKAGE_SET_DIGEST from the package_set_digest input", () => {
+    expect(verdictStep().env.PACKAGE_SET_DIGEST).toBe("${{ inputs.package_set_digest }}");
+   });
+  test("the verdict step's run text contains no ${{ inputs. interpolation (env var, never unquoted)", () => {
+    expect(verdictStep().run).not.toContain("${{ inputs.");
+   });
+  test("a non-64-hex package-set digest is refused before any verdict (the guard runs first)", () => {
+    const r = runVerdictStepText({ PACKAGE_SET_DIGEST: "not-a-64-hex-digest" });
+    expect(r.status).not.toBe(0);
+    expect(r.stdout + r.stderr).toContain("64-char hex");
+    });
+});
+
+describe("F1: the verdict step is fail-closed (A1c of #1671)", () => {
+  test("the verdict step's run text starts with 'set -euo pipefail' and references no LOCKSTEP_SHAS", () => {
+    const { run } = verdictStep();
+    expect(run.trimStart().startsWith("set -euo pipefail")).toBe(true);
+    expect(run).not.toContain("LOCKSTEP_SHAS");
+    });
+  test("with canary-verdict.sh forced to exit non-zero, the verdict step's shell exits non-zero (set -e in force)", () => {
+    const { run } = verdictStep();
+    const repoRoot = mkdtempSync(join(SCRATCH, "f1root-"));
+    mkdirSync(join(repoRoot, "scripts", "ci"), { recursive: true });
+    const stub = join(repoRoot, "scripts", "ci", "canary-verdict.sh");
+    writeFileSync(stub, "#!/usr/bin/env bash\necho 'forced non-zero verdict' >&2\nexit 2\n");
+    chmodSync(stub, 0o755);
+    const stepFile = join(repoRoot, "verdict-step.sh");
+    writeFileSync(stepFile, run);
+    const summary = join(repoRoot, "summary.txt");
+    writeFileSync(summary, "");
+    const r = spawnSync("bash", [stepFile], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: {
+          ...process.env,
+        VERSION: VER,
+        EXPECTED: "0".repeat(64),
+        SHA_OUTCOME: "success",
+        INSTALL_OUTCOME: "success",
+        BOOT_OUTCOME: "success",
+        PLUGIN_OUTCOME: "success",
+        OS_NAME: "ubuntu-latest",
+        RUN_URL,
+        PACKAGE_SET_DIGEST: "0".repeat(64),
+        GITHUB_STEP_SUMMARY: summary,
+        },
+      });
+    expect(r.status).not.toBe(0);
+    expect(r.status).toBe(2);
+    });
+});
+
+describe("F4: the producer's stdout and its exit status are captured SEPARATELY (A1c of #1671)", () => {
+  test("a producer that prints a valid hash then garbage and exits 1 is refused (its status is a veto)", () => {
+    const r = runF4Block("exit1");
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("producer exited");
+    });
+  test("a producer that emits two 64-hex lines is refused (exactly one line is required)", () => {
+    const r = runF4Block("twolines");
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("emitted");
+    });
+  test("an empty producer is refused (unmeasurable is never a match)", () => {
+    const r = runF4Block("empty");
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("empty output");
+    });
+});
 /** The stub node can drive the direct-helper path (used above) too. */
 void nodeStdin;
 void SHA_SCRIPT;

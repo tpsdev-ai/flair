@@ -147,9 +147,9 @@ jobs:
             # skip its main() and print nothing. An exit code alone cannot tell
             # "hashed" from "did not hash", so require the sha ITSELF to be 64
             # hex chars. Anything else (empty included) is unmeasurable, and an
-            # unmeasurable tarball is FAIL. Without this an empty sha flowed into
-            # LOCKSTEP_SHAS, and the line-count check below counts lines, not
-            # values. `expected_count` is 0 here only if the derivation failed.
+                 # unmeasurable tarball is FAIL. Without this an empty sha would
+                 # change the re-derived digest, and the line-count check below counts
+                 # lines, not values. `expected_count` is 0 only if the derivation failed.
             if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{64}$'; then
               echo "::error::could not hash ${pkg}@${VERSION} — is it approved and public? (unmeasurable is FAIL)"
               missing=1
@@ -199,7 +199,6 @@ jobs:
             exit 1
           fi
           echo "package-set digest verified: $COMPUTED_DIGEST"
-          { echo "LOCKSTEP_SHAS<<EOF"; cat canary-logs/lockstep-sha256.txt; echo "EOF"; } >> "$GITHUB_ENV"
 
       - name: Install from the registry and run the four install-tree assertions
         id: install
@@ -371,19 +370,31 @@ jobs:
           PLUGIN_OUTCOME: ${{ steps.plugin.outcome }}
           OS_NAME: ${{ matrix.os }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+             # F0 (A1c of #1671): the package-set digest is a workflow_dispatch input,
+             # carried as an env var (never interpolated unquoted into the run: shell), so
+             # a malformed or garbage value cannot inject metacharacters into the promoted
+             # command; the 64-hex guard in the run block also refuses it before it reaches
+             # canary-verdict.sh.
+          PACKAGE_SET_DIGEST: ${{ inputs.package_set_digest }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
           mkdir -p canary-logs
-          # The command text is defined once, in scripts/ci/canary-verdict.sh, so
-          # the emitted promote/deprecate block is the same thing the fails-first
-          # proof exercises. (A1c of #1671) PASS is bound to the package-set
-          # digest the release run's pack job certified: the emitted preflight
-          # re-derives it from the registry at paste time and refuses a mismatch
-          # before any tag moves. LOCKSTEP_SHAS is still passed (all-or-none).
+             # F0 (A1c of #1671): refuse early unless the package-set digest input is
+             # 64 lowercase hex. Carried to canary-verdict.sh as "$PACKAGE_SET_DIGEST"
+             # (an env var, never an unquoted interpolation), naming the input on failure.
+          if ! printf '%s' "$PACKAGE_SET_DIGEST" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "::error::package-set-digest input is not a 64-char hex sha256: '$PACKAGE_SET_DIGEST' (refused at dispatch; name the digest)" >&2
+            exit 1
+          fi
+             # The command text is defined once, in scripts/ci/canary-verdict.sh, so
+             # the emitted promote/deprecate block is the same thing the fails-first
+             # proof exercises. (A1c of #1671) PASS is bound to the package-set digest
+             # the release run's pack job certified: the emitted preflight re-derives it
+             # from the registry at paste time and refuses a mismatch before any tag moves.
           if [ "$SHA_OUTCOME" = "success" ] && [ "$INSTALL_OUTCOME" = "success" ] && [ "$BOOT_OUTCOME" = "success" ] && [ "$PLUGIN_OUTCOME" = "success" ]; then
-            scripts/ci/canary-verdict.sh pass "$VERSION" "$RUN_URL" --os "$OS_NAME" --package-set-digest "${{ inputs.package_set_digest }}" ${LOCKSTEP_SHAS:-} | tee canary-logs/verdict.txt
+            scripts/ci/canary-verdict.sh pass "$VERSION" "$RUN_URL" --os "$OS_NAME" --package-set-digest "$PACKAGE_SET_DIGEST" | tee canary-logs/verdict.txt
           else
-            scripts/ci/canary-verdict.sh fail "$VERSION" "$RUN_URL" --os "$OS_NAME" ${LOCKSTEP_SHAS:-} | tee canary-logs/verdict.txt
+            scripts/ci/canary-verdict.sh fail "$VERSION" "$RUN_URL" --os "$OS_NAME" | tee canary-logs/verdict.txt
           fi
           cat canary-logs/verdict.txt >> "$GITHUB_STEP_SUMMARY"
 
