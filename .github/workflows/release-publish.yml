@@ -44,11 +44,9 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Fallback only: version to stage (a vX.Y.Z tag must already exist on a merged commit)"
-        required: true
-        type: string
+    # Manual fallback. It takes NO inputs on purpose: the run must be dispatched
+    # ON the v* tag ref, so the ref (and the tag's commit) is the only version
+    # source. A dispatch on main cannot pack main's HEAD under a tag's version.
 
 # Default to NOTHING. Every job below opts into exactly what it needs, so a
 # future job cannot inherit a grant by accident.
@@ -63,7 +61,8 @@ jobs:
     name: Pack publishable packages
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: read       # checkout + git fetch for the version-sync check
+      deployments: read    # read-only reservation fail-fast (pack never writes the marker)
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       package-set-digest: ${{ steps.pack.outputs.package-set-digest }}
@@ -74,25 +73,44 @@ jobs:
           fetch-depth: 0
 
       - name: Resolve version
+        # The TAG is the only version source. This asserts the run is on a
+        # refs/tags/vX.Y.Z ref (both trigger paths: a tag push and a dispatch
+        # made ON the tag), so VERSION, GITHUB_SHA and npm provenance all name
+        # the tag's commit. A dispatch on main (or any other ref) fails here.
         id: ver
         env:
-          EVENT: ${{ github.event_name }}
-          REF_NAME: ${{ github.ref_name }}
-          INPUT_VERSION: ${{ inputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF: ${{ github.ref }}
         run: |
           set -euo pipefail
-          if [ "$EVENT" = "workflow_dispatch" ]; then
-            VERSION="$INPUT_VERSION"
-          else
-            # tag push: github.ref_name is the tag (vX.Y.Z)
-            VERSION="${REF_NAME#v}"
-          fi
-          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
-            echo "::error::Invalid version '$VERSION'. Expected semver (e.g. 0.11.0 or 1.0.0-rc.1)."
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::This workflow must run on a v* tag ref (got type '$REF_TYPE' for '$REF'). Dispatch it on the tag, not on a branch."
             exit 1
           fi
+          if ! [[ "$REF" =~ ^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?)$ ]]; then
+            echo "::error::Ref '$REF' is not a refs/tags/vX.Y.Z tag."
+            exit 1
+          fi
+          VERSION="${BASH_REMATCH[1]}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: $VERSION"
+          echo "Resolved version from tag $REF: $VERSION"
+
+      - name: Reservation preflight (read-only)
+        # Invariant 8: an early, READ-ONLY fail-fast. pack never writes the
+        # marker; stage-publish does, immediately before its first stage request.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          DEPLOYMENTS_FILE="$RUNNER_TEMP/release-attempts.json"
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/deployments?environment=release-attempt&ref=v${VERSION}" > "$DEPLOYMENTS_FILE"
+          COUNT="$(jq -s 'map(length) | add' "$DEPLOYMENTS_FILE")"
+          if [ "$COUNT" -gt 0 ]; then
+            echo "::error::version v${VERSION} is burned: a release-attempt deployment already exists for it; the next patch is the only path"
+            exit 1
+          fi
+          echo "  ok no release-attempt record for v${VERSION}"
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -246,18 +264,27 @@ jobs:
     # staging approval (2FA), not a GitHub reviewer.
     environment: release
     permissions:
-      id-token: write   # mint the short-lived OIDC token for npm trusted publishing
-      contents: read    # checkout, for the ancestry check (the tag commit must be on main)
+      id-token: write      # mint the short-lived OIDC token for npm trusted publishing
+      contents: read       # checkout, for the ancestry + recency checks
+      deployments: write   # write the release-attempt reservation marker (this job runs no candidate code)
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           persist-credentials: false
 
-      - name: Verify tagged commit is on main
+      - name: Verify tagged commit is on main and the workflow file is current
         # A tag can point at any commit; require it to be merged to main so a tag
-        # can never ship un-reviewed code past the npm staging gate. Kept from
-        # origin/main's stage job (flair#1671 slice A1a keeps every existing
-        # check); the fetch is scoped to THIS step.
+        # can never ship un-reviewed code past the npm staging gate. The fetch is
+        # scoped to THIS step (the only git fetch in the job).
+        #
+        # Machinery recency (defence in depth). Both trigger paths may run the
+        # workflow file from the TAG commit, and the trusted-publisher pin names
+        # the workflow FILE, not its content. A tag on a pre-hardening commit
+        # would run that commit's workflow (old permissions, no reservation, no
+        # gate) under the same OIDC identity. The real control is a v* tag
+        # ruleset restricting tag creation to maintainers (a repository setting);
+        # this inline guard can only fire when GitHub loads the definition from
+        # the default branch, so it is defence in depth, not the boundary.
         run: |
           set -euo pipefail
           git fetch --no-tags origin main
@@ -265,7 +292,11 @@ jobs:
             echo "::error::Commit ${GITHUB_SHA} is not an ancestor of origin/main. Tag a merged release commit."
             exit 1
           fi
-          echo "  ok ${GITHUB_SHA} is on main"
+          if ! git diff --quiet origin/main -- .github/workflows/release-publish.yml; then
+            echo "::error::.github/workflows/release-publish.yml at the tag differs from origin/main; refusing to stage from stale release machinery."
+            exit 1
+          fi
+          echo "  ok ${GITHUB_SHA} is on main and the workflow file matches origin/main"
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -312,6 +343,7 @@ jobs:
           ART_DIR: ${{ runner.temp }}/stage
           NPM_USERCONFIG: ${{ runner.temp }}/npm-userconfig
           WORK_DIR: ${{ runner.temp }}/stage-work
+          GH_TOKEN: ${{ github.token }}
           PACK_PACKAGE_SET_DIGEST: ${{ needs.pack.outputs.package-set-digest }}
           PACK_MANIFEST_DIGEST: ${{ needs.pack.outputs.manifest-digest }}
         run: |
@@ -395,6 +427,31 @@ jobs:
           # Tarballs are read-only in this job: nothing rewrites them before staging.
           chmod a-w ./*.tgz
 
+          VERSION_TOP="$(jq -r '.version' manifest.json)"
+
+          # ── One attempt per version (Invariant 8). The reservation is an
+          # explicit marker this job writes ITSELF, so a failed-jobs re-run (which
+          # re-runs this job) sees attempt 1's marker. The GET is paginated; ANY
+          # record means the version is burned. A non-2xx GET, or a failed/non-2xx
+          # POST, aborts BEFORE any stage request (no || true). The same token can
+          # deactivate and delete the marker, so the burn is enforced by this job's
+          # allowlist and branch protection, not by GitHub. This runs after the npm
+          # self-upgrade and the pre-stage digest assertions, before the first
+          # stage request.
+          DEPLOYMENTS_FILE="$WORK_DIR/release-attempts.json"
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/deployments?environment=release-attempt&ref=v${VERSION_TOP}" > "$DEPLOYMENTS_FILE"
+          EXISTING="$(jq -s 'map(length) | add' "$DEPLOYMENTS_FILE")"
+          if [ "$EXISTING" -gt 0 ]; then
+            echo "::error::version v${VERSION_TOP} is burned: a release-attempt deployment already exists for it; the next patch is the only path"
+            exit 1
+          fi
+          MARKER_BODY="$(jq -n --arg ref "v${VERSION_TOP}" '{ref:$ref, environment:"release-attempt", task:"stage-attempt", auto_merge:false, required_contexts:[]}')"
+          if ! printf '%s' "$MARKER_BODY" | gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments" --input - > /dev/null; then
+            echo "::error::could not write the release-attempt marker for v${VERSION_TOP}; nothing was staged"
+            exit 1
+          fi
+          echo "  reserved v${VERSION_TOP} (release-attempt marker written)"
+
           # Stage each tarball, re-hashing it immediately before its own request.
           PUBLISHED=0
           STAGED=""
@@ -456,7 +513,6 @@ jobs:
             exit 1
           fi
 
-          VERSION_TOP="$(jq -r '.version' manifest.json)"
           TAG_LINE=staged
           if [ "$VERSION_TOP" != "${VERSION_TOP%%-*}" ]; then TAG_LINE=next; fi
           {
