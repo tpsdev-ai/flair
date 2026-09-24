@@ -31,6 +31,27 @@ const REPO = join(import.meta.dirname, "..", "..");
 // Each case spawns the real CLI as a child; bun's 5s default is too tight.
 setDefaultTimeout(60_000);
 
+/** This repo's OWN version: `mcpServerSpec()` pins wired clients to it, so it is
+ *  the "running CLI" every pin comparison is measured against. Read at test
+ *  time so a release bump moves it too. */
+function repoVersion(): string {
+  const pkg = JSON.parse(readFileSync(join(REPO, "package.json"), "utf-8")) as { version?: string };
+  if (typeof pkg.version !== "string" || !pkg.version) {
+    throw new Error(`root package.json has no version: ${pkg.version}`);
+  }
+  return pkg.version;
+}
+
+/** The NEXT MINOR, strictly greater than the version it is derived from
+ *  (0.55.2 → 0.56.0, 0.56.0 → 0.57.0). "Ahead of the running CLI" must survive
+ *  a release bump; a literal near the current version does not — the bump
+ *  overtakes it and the fixture stops meaning "ahead" at all. */
+function nextMinor(version: string): string {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
+  if (!m) throw new Error(`repo version is not semver: ${version}`);
+  return `${m[1]}.${Number(m[2]) + 1}.0`;
+}
+
 const HOME = mkdtempSync(join(tmpdir(), "flair-1778-home-"));
 const SCRATCH = mkdtempSync(join(tmpdir(), "flair-1778-scratch-"));
 const BIN = join(SCRATCH, "bin");
@@ -238,7 +259,9 @@ describe("flair#1778 — an install AHEAD of registry latest is never downgraded
     setInstalled("0.55.0");
     // A wired MCP pin AHEAD of the running CLI: the post-install pin refresh
     // must HOLD it (never lower a pin), so this file stays byte-identical.
-    const ahead = "0.55.6";
+    // Derived from the CLI's own version — a literal near the current version
+    // is overtaken by the next release bump (flair#1778 N3 follow-up).
+    const ahead = nextMinor(repoVersion());
     const claudeBefore = JSON.stringify({
       mcpServers: {
         flair: {
@@ -273,7 +296,7 @@ describe("flair#1778 — an install AHEAD of registry latest is never downgraded
     // The owned-pin refresh HOLDS: the wired pin file is byte-identical, and
     // the printed line names both pins.
     expect(readFileSync(CLAUDE_JSON, "utf-8")).toBe(claudeBefore);
-    expect(stdout).toContain("keeping pinned 0.55.6");
+    expect(stdout).toContain(`keeping pinned ${ahead}`);
     expect(stdout).toContain("a pin is never lowered");
 
     // Post-install verification expects the RUNNING flair version (0.55.0),
