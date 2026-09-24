@@ -61,8 +61,8 @@ const SHA40 = /^[0-9a-f]{40}$/;
 /** Simple-command words the stage job's run bodies may use. */
 const ALLOWED = new Set([
   "set", "cd", "mkdir", "printf", "echo", "exit", "npm", "jq", "sha256sum",
-  "sort", "chmod", "while", "read", "do", "done", "for", "in", "if", "then",
-  "else", "fi", "[", ":", "continue",
+  "sort", "cmp", "chmod", "git", "while", "read", "do", "done", "for", "in", "if", "then",
+  "else", "fi", "[", ":", "continue", "break",
 ]);
 /** Leading words that are structural, not commands. */
 const KEYWORD_STRIP = ["if", "then", "else", "elif", "while", "for", "until", "do", "!"];
@@ -111,8 +111,8 @@ function extractSubstitutions(s: string): { text: string; subs: string[] } {
   return { text: out, subs };
 }
 
-/** The first command word of a shell fragment, or null when it is not a command. */
-function leadingCommand(fragment: string): string | null {
+/** The command word AND the remaining quote-stripped statement, or null. */
+function commandStatement(fragment: string): { cmd: string; stmt: string } | null {
   let s = fragment.trim();
   if (!s || s.startsWith("#")) return null;
   if (s.startsWith("}")) return null; // closing brace of a step-summary group
@@ -122,7 +122,7 @@ function leadingCommand(fragment: string): string | null {
   while (changed) {
     changed = false;
     for (const kw of KEYWORD_STRIP) {
-      const re = new RegExp(`^${kw.replace("!", "\\!")}\\b\\s*`);
+      const re = kw === "!" ? /^!\s*/ : new RegExp(`^${kw}\\b\\s*`);
       if (re.test(s)) {
         s = s.replace(re, "");
         changed = true;
@@ -152,11 +152,79 @@ function leadingCommand(fragment: string): string | null {
   if (!s) return null;
   const token = s.split(/\s+/)[0];
   if (token.startsWith("$") || token === "SUBST" || token === "ARITH") return null;
-  return token;
+  return { cmd: token, stmt: s };
+}
+
+function leadingCommand(fragment: string): string | null {
+  return commandStatement(fragment)?.cmd ?? null;
+}
+
+/** Allowed npm invocations: exact shapes only, every one carrying --userconfig. */
+function npmInvocationProblem(stmt: string): string | null {
+  if (/^npm install -g npm@\d+\.\d+\.\d+\b/.test(stmt)) {
+    return /\s--userconfig\b/.test(stmt) ? null : "npm install must carry --userconfig";
+  }
+  if (/^npm --version\b/.test(stmt)) {
+    return /\s--userconfig\b/.test(stmt) ? null : "npm --version must carry --userconfig";
+  }
+  if (/^npm stage publish\s/.test(stmt)) {
+    if (!/\s--tag\s\S+/.test(stmt)) return "npm stage publish must carry --tag";
+    if (!/\s--ignore-scripts\b/.test(stmt)) return "npm stage publish must carry --ignore-scripts";
+    if (!/\s--userconfig\b/.test(stmt)) return "npm stage publish must carry --userconfig";
+    return null;
+  }
+  return `unexpected npm invocation: ${stmt.split(/\s+/).slice(0, 3).join(" ")}`;
+}
+
+/** Allowed git invocations: the ancestry check, and nothing else. */
+function gitInvocationProblem(stmt: string): string | null {
+  if (/^git fetch --no-tags origin main\b/.test(stmt)) return null;
+  if (/^git merge-base --is-ancestor \S+ origin\/main\b/.test(stmt)) return null;
+  return `unexpected git invocation: ${stmt.split(/\s+/).slice(0, 3).join(" ")}`;
 }
 
 function splitStatements(line: string): string[] {
   return line.split(/\|\||&&|;|\|/);
+}
+
+/** Split on unquoted `;`, `&&`, `||`, `|` — quotes (and any `|` inside them) are preserved. */
+function splitStatementsQuoted(line: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let quote: string | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (quote) {
+      cur += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      cur += ch;
+      continue;
+    }
+    const two = line.slice(i, i + 2);
+    if (two === "&&" || two === "||") {
+      out.push(cur);
+      cur = "";
+      i++;
+      continue;
+    }
+    if (ch === ";" || ch === "|") {
+      out.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+/** The statement with quote CHARACTERS removed but their content kept. */
+function unquoteStatement(fragment: string): string {
+  return commandStatement(fragment.replace(/['"]/g, ""))?.stmt ?? "";
 }
 
 /** Problems in one run body: eval, backticks, repository code, commands off the set. */
@@ -173,14 +241,26 @@ function runBodyProblems(runBody: string): string[] {
     if (cmd && !ALLOWED.has(cmd)) problems.push(`command substitution outside the set: $(${cmd} …)`);
   }
   for (const rawLine of text.split("\n")) {
-    const line = stripQuoted(rawLine);
-    if (/^\s*#/.test(line)) continue;
-    for (const frag of splitStatements(line)) {
-      const cmd = leadingCommand(frag);
-      if (cmd && !ALLOWED.has(cmd) && !BARE_KEYWORDS.has(cmd)) {
-        problems.push(`command outside the set: ${cmd}`);
+    if (/^\s*#/.test(rawLine)) continue;
+    for (const frag of splitStatementsQuoted(rawLine)) {
+      const cs = commandStatement(stripQuoted(frag));
+      if (!cs) continue;
+      if (!ALLOWED.has(cs.cmd) && !BARE_KEYWORDS.has(cs.cmd)) {
+        problems.push(`command outside the set: ${cs.cmd}`);
+      }
+      if (cs.cmd === "npm") {
+        const p = npmInvocationProblem(unquoteStatement(frag));
+        if (p) problems.push(p);
+      }
+      if (cs.cmd === "git") {
+        const p = gitInvocationProblem(unquoteStatement(frag));
+        if (p) problems.push(p);
       }
     }
+  }
+  // The staging tag is a variable; it may only ever be given the two allowed values.
+  for (const m of runBody.matchAll(/\btag=([A-Za-z0-9_.-]+)/g)) {
+    if (m[1] !== "staged" && m[1] !== "next") problems.push(`tag must be staged or next, got tag=${m[1]}`);
   }
   return problems;
 }
@@ -220,8 +300,8 @@ export function inspectStageJob(text: string): { problems: string[] } {
   if (stage.environment !== "release") problems.push("stage-publish must keep environment: release (OIDC scoping)");
 
   const steps = stage.steps ?? [];
-  if (steps.length !== 5) problems.push(`stage-publish must have exactly 5 allowlisted steps, got ${steps.length}`);
-  const [checkout, setupNode, upgrade, download, stageStep] = steps;
+  if (steps.length !== 6) problems.push(`stage-publish must have exactly 6 allowlisted steps, got ${steps.length}`);
+  const [checkout, ancestry, setupNode, upgrade, download, stageStep] = steps;
 
   if (!checkout || !/^actions\/checkout@[0-9a-f]{40}$/.test(checkout.uses ?? "")) {
     problems.push("step 1 must be a SHA-pinned actions/checkout");
@@ -229,26 +309,36 @@ export function inspectStageJob(text: string): { problems: string[] } {
     problems.push("the stage checkout must set persist-credentials: false");
   }
 
+  if (
+    !ancestry?.run ||
+    !/git fetch --no-tags origin main/.test(ancestry.run) ||
+    !/git merge-base --is-ancestor/.test(ancestry.run)
+  ) {
+    problems.push("step 2 must be the ancestry check (git fetch --no-tags origin main; git merge-base --is-ancestor)");
+  }
+
   if (!setupNode || !/^actions\/setup-node@[0-9a-f]{40}$/.test(setupNode.uses ?? "")) {
-    problems.push("step 2 must be a SHA-pinned actions/setup-node");
+    problems.push("step 3 must be a SHA-pinned actions/setup-node");
   } else if (setupNode.with && "registry-url" in setupNode.with) {
     problems.push("setup-node must NOT set registry-url");
   }
 
   if (!upgrade?.run || !/npm install -g npm@\d+\.\d+\.\d+/.test(upgrade.run)) {
-    problems.push("step 3 must self-upgrade npm to an EXACT version (npm install -g npm@X.Y.Z)");
+    problems.push("step 4 must self-upgrade npm to an EXACT version (npm install -g npm@X.Y.Z)");
   } else if (/npm@[\^~]/.test(upgrade.run)) {
     problems.push("the npm self-upgrade must not use a range");
   }
 
   if (!download || !/^actions\/download-artifact@[0-9a-f]{40}$/.test(download.uses ?? "")) {
-    problems.push("step 4 must be a SHA-pinned actions/download-artifact");
+    problems.push("step 5 must be a SHA-pinned actions/download-artifact");
   } else if (!download.with || !("artifact-ids" in download.with)) {
     problems.push("download-artifact must be driven by artifact-ids");
+  } else if (download.with["merge-multiple"] !== true) {
+    problems.push("download-artifact must set merge-multiple: true (else it nests and manifest.json is not found)");
   }
 
   if (!stageStep?.run || !stageStep.run.includes("npm stage publish")) {
-    problems.push("step 5 must be the inline digest/re-hash/stage shell");
+    problems.push("step 6 must be the inline digest/re-hash/stage shell");
   }
 
   for (const step of steps) {
@@ -293,6 +383,22 @@ describe("the stage job is an allowlisted shape (flair#1671 A1a)", () => {
     doc.jobs!["stage-publish"]!.steps![0]!.uses = "actions/checkout@v4";
     const { problems } = inspectStageJob(yaml.dump(doc));
     expect(problems.join("\n")).toContain("40-hex");
+  });
+
+  test("(F5) an npm subcommand outside the set goes red", () => {
+    const doc = yaml.load(realWorkflow()) as WorkflowDoc;
+    const steps = doc.jobs!["stage-publish"]!.steps!;
+    steps[steps.length - 1]!.run += "\nnpm exec some-tool\n";
+    const { problems } = inspectStageJob(yaml.dump(doc));
+    expect(problems.join("\n")).toContain("unexpected npm invocation");
+  });
+
+  test("(F5) a git subcommand outside the ancestry check goes red", () => {
+    const doc = yaml.load(realWorkflow()) as WorkflowDoc;
+    const steps = doc.jobs!["stage-publish"]!.steps!;
+    steps[steps.length - 1]!.run += "\ngit push origin main\n";
+    const { problems } = inspectStageJob(yaml.dump(doc));
+    expect(problems.join("\n")).toContain("unexpected git invocation");
   });
 
   test("workflow-level permissions are {} and github-release keeps contents: write", () => {
@@ -393,6 +499,7 @@ function runStageShell(
   artifact: Artifact,
   artDir: string,
   envExtra: Record<string, string> = {},
+  scratchFiles: Record<string, string> = {},
 ): RunResult {
   installFakeNpm();
   const scratch = mkdtempSync(join(SCRATCH, "run-"));
@@ -402,6 +509,9 @@ function runStageShell(
   writeFileSync(summary, "");
   const userconfig = join(scratch, "npm-userconfig");
   writeFileSync(userconfig, "registry=https://registry.npmjs.org/\n");
+  const workDir = join(scratch, "work");
+  mkdirSync(workDir, { recursive: true });
+  for (const [rel, content] of Object.entries(scratchFiles)) writeFileSync(join(scratch, rel), content);
   const log = join(scratch, "npm.log");
   writeFileSync(log, "");
   const r = spawnSync("bash", [sh], {
@@ -412,6 +522,7 @@ function runStageShell(
       PATH: `${BIN}:${process.env.PATH}`,
       ART_DIR: artDir,
       NPM_USERCONFIG: userconfig,
+      WORK_DIR: workDir,
       PACK_PACKAGE_SET_DIGEST: artifact.packageSetDigest,
       PACK_MANIFEST_DIGEST: artifact.manifestDigest,
       GITHUB_STEP_SUMMARY: summary,
@@ -461,14 +572,23 @@ describe("stage-publish stages the exact tarballs it re-derives (flair#1671 A1a)
     }
   });
 
-  test("(i) a staging error is NOT swallowed (a failing npm fails the job)", () => {
+  test("(i) a staging error is NOT swallowed, and a sent request is INCOMPLETE, never 'nothing staged'", () => {
     const dir = mkdtempSync(join(SCRATCH, "fail-"));
     const artifact = buildArtifact(dir, VERSION, FIXTURE_NAMES);
     const r = runStageShell(artifact, dir, { NPM_FAIL_ON: artifact.packages[0]!.basename });
     expect(r.status).not.toBe(0);
-    expect(r.out).toContain("nothing staged");
+    // A request was SENT, so its outcome is unknown: INCOMPLETE, APPROVE NOTHING.
+    expect(r.out).toContain("INCOMPLETE");
+    expect(r.out).toContain("APPROVE NOTHING");
+    expect(r.out).not.toContain("nothing staged");
     // Only the failing call was attempted; nothing after it.
     expect(r.log.filter((l) => l.argv[0] === "stage").length).toBe(1);
+    // The INCOMPLETE summary lands in the job summary too.
+    const summary = readFileSync(join(r.scratch, "summary.md"), "utf8");
+    expect(summary).toContain("INCOMPLETE: APPROVE NOTHING");
+    expect(summary).toContain("package-set digest:");
+    expect(summary).toContain("manifest digest:");
+    expect(summary).toContain("not attempted:");
   });
 
   test("(b) a tarball mutated after the digest check is refused on the per-file re-hash", () => {
@@ -523,29 +643,79 @@ describe("stage-publish stages the exact tarballs it re-derives (flair#1671 A1a)
     expect(r.log.filter((l) => l.argv[0] === "stage").length).toBe(0);
   });
 
-  test("(g) a candidate workspace .npmrc in the artifact is inert — the job userconfig is used", () => {
+  test("(g) a candidate workspace .npmrc is inert — the job userconfig is used for every npm call", () => {
     const dir = mkdtempSync(join(SCRATCH, "npmrc-"));
     const artifact = buildArtifact(dir, VERSION, FIXTURE_NAMES);
-    // A registry remap shipped inside the artifact, where npm would read it upward.
-    writeFileSync(join(dir, ".npmrc"), "registry=http://evil.example/\n");
-    const r = runStageShell(artifact, dir);
+    // A registry remap in the working directory the job starts from.
+    const r = runStageShell(artifact, dir, {}, { ".npmrc": "registry=http://evil.example/\n" });
     expect(r.status).toBe(0);
     const publishes = r.log.filter((l) => l.argv[0] === "stage");
     expect(publishes.length).toBe(FIXTURE_NAMES.length);
     for (const p of publishes) {
       const idx = p.argv.indexOf("--userconfig");
       expect(idx).toBeGreaterThan(-1);
-      expect(p.argv[idx + 1]).not.toContain(dir); // not the artifact's .npmrc
+      expect(p.argv[idx + 1]).toBe(r.userconfig); // the job userconfig, not the workspace .npmrc
     }
-    // And the userconfig itself resolves to the public registry, not the remap.
-    const cfgLog = join(r.scratch, "cfg.log");
+    // And that userconfig resolves to the public registry, not the remap.
     const cfg = spawnSync(
       join(BIN, "npm"),
       ["config", "get", "registry", "--userconfig", r.userconfig],
-      { encoding: "utf8", env: { ...process.env, NPM_LOG: cfgLog } },
+      { encoding: "utf8", env: { ...process.env, NPM_LOG: join(r.scratch, "cfg.log") } },
     );
     expect(cfg.status).toBe(0);
     expect(cfg.stdout.trim()).toBe("https://registry.npmjs.org/");
+  });
+
+  test("(F4) an unexpected file in the artifact (a shipped .npmrc) is refused before any stage request", () => {
+    const dir = mkdtempSync(join(SCRATCH, "extra-"));
+    const artifact = buildArtifact(dir, VERSION, FIXTURE_NAMES);
+    writeFileSync(join(dir, ".npmrc"), "registry=http://evil.example/\n");
+    const r = runStageShell(artifact, dir);
+    expect(r.status).not.toBe(0);
+    expect(r.out).toContain("does not hold exactly manifest.json");
+    expect(r.log.filter((l) => l.argv[0] === "stage").length).toBe(0);
+  });
+
+  test("(F7) the download step merges into one directory; a nested artifact is refused", () => {
+    const doc = yaml.load(realWorkflow()) as WorkflowDoc;
+    const step = doc.jobs!["stage-publish"]!.steps!.find((s) => /download-artifact/.test(s.uses ?? ""));
+    expect(step?.with?.["merge-multiple"]).toBe(true);
+    // Without merge-multiple the real action nests the files under the artifact
+    // name; the shell then cannot find manifest.json and refuses.
+    const parent = mkdtempSync(join(SCRATCH, "nested-"));
+    const artifact = buildArtifact(join(parent, "release-tarballs"), VERSION, FIXTURE_NAMES);
+    const r = runStageShell(artifact, parent);
+    expect(r.status).not.toBe(0);
+    expect(r.out).toContain("manifest.json");
+    expect(r.log.filter((l) => l.argv[0] === "stage").length).toBe(0);
+  });
+
+  test("(F3c) the recomputed package-set digest must equal the manifest's own field as well as pack's", () => {
+    const dir = mkdtempSync(join(SCRATCH, "setfield-"));
+    const artifact = buildArtifact(dir, VERSION, FIXTURE_NAMES);
+    const manifestPath = join(dir, "manifest.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { packageSetDigest: string };
+    manifest.packageSetDigest = "0".repeat(64);
+    const bytes = Buffer.from(JSON.stringify(manifest, null, 2) + "\n");
+    writeFileSync(manifestPath, bytes);
+    artifact.manifestDigest = sha256Hex(bytes); // pass the manifest-digest gate, fail the field check
+    const r = runStageShell(artifact, dir);
+    expect(r.status).not.toBe(0);
+    expect(r.out).toContain("differs from the manifest field");
+    expect(r.log.filter((l) => l.argv[0] === "stage").length).toBe(0);
+  });
+
+  test("(F2) the success summary carries the canary / promote / deprecate operator instructions", () => {
+    const dir = mkdtempSync(join(SCRATCH, "summary-"));
+    const artifact = buildArtifact(dir, VERSION, FIXTURE_NAMES);
+    const r = runStageShell(artifact, dir);
+    expect(r.status).toBe(0);
+    const summary = readFileSync(join(r.scratch, "summary.md"), "utf8");
+    expect(summary).toContain("post-publish canary");
+    expect(summary).toContain("sha256");
+    expect(summary).toContain("promote command");
+    expect(summary).toContain("deprecate");
+    expect(summary).toContain("2FA");
   });
 });
 
@@ -556,6 +726,7 @@ function writeFakePackNpm(): void {
 const fs = require("node:fs");
 const path = require("node:path");
 const args = process.argv.slice(2);
+if (args[0] === "--version") { process.stdout.write("11.20.0\\n"); process.exit(0); }
 const dest = args[args.indexOf("--pack-destination") + 1];
 const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8"));
 const stem = pkg.name.startsWith("@") ? pkg.name.slice(1).replace("/", "-") : pkg.name;
@@ -581,7 +752,7 @@ interface PackFixture {
 /** A minimal publishable workspace: root + packages/<name>. */
 function makePackFixture(opts: {
   version: string;
-  packages: Record<string, { private?: boolean; deps?: Record<string, string> }>;
+  packages: Record<string, { private?: boolean; deps?: Record<string, string>; name?: string }>;
   rootVersion?: string;
 }): PackFixture {
   const dir = mkdtempSync(join(SCRATCH, "pack-"));
@@ -593,7 +764,7 @@ function makePackFixture(opts: {
   for (const [pkg, meta] of Object.entries(opts.packages)) {
     const pdir = join(dir, "packages", pkg);
     mkdirSync(pdir, { recursive: true });
-    const manifest: Record<string, unknown> = { name: `@tpsdev-ai/${pkg}`, version: opts.version };
+    const manifest: Record<string, unknown> = { name: meta.name ?? `@tpsdev-ai/${pkg}`, version: opts.version };
     if (meta.private) manifest.private = true;
     if (meta.deps) manifest.dependencies = meta.deps;
     writeFileSync(join(pdir, "package.json"), JSON.stringify(manifest, null, 2));
@@ -608,7 +779,18 @@ function runPackScript(fixture: PackFixture, out: string, extraDirs?: string[]) 
   return spawnSync(
     process.execPath,
     [PACK_SCRIPT, "--root", fixture.dir, "--out", out, "--version", "1.2.3", "--dirs", ...dirs],
-    { encoding: "utf8", env: { ...process.env, PATH: `${BIN}:${process.env.PATH}` } },
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${BIN}:${process.env.PATH}`,
+        GITHUB_REPOSITORY: "tpsdev-ai/flair",
+        GITHUB_REF_NAME: "v1.2.3",
+        GITHUB_SHA: "abcdef0123456789abcdef0123456789abcdef01",
+        GITHUB_RUN_ID: "123456789",
+        GITHUB_RUN_ATTEMPT: "1",
+      },
+    },
   );
 }
 
@@ -624,7 +806,27 @@ describe("the pack script enforces the exact-pin invariant and the tarball set",
     const manifest = JSON.parse(readFileSync(join(out, "manifest.json"), "utf8"));
     expect(manifest.packages.map((p: { name: string }) => p.name)).toEqual(["@tpsdev-ai/a", "@tpsdev-ai/b", "@tpsdev-ai/root"]);
     expect(manifest.packageSetDigest).toMatch(/^[0-9a-f]{64}$/);
+    // F6: the manifest carries the run identity and tool versions.
+    expect(manifest.repo).toBe("tpsdev-ai/flair");
+    expect(manifest.tag).toBe("v1.2.3");
+    expect(manifest.commit).toBe("abcdef0123456789abcdef0123456789abcdef01");
+    expect(manifest.runId).toBe("123456789");
+    expect(manifest.runAttempt).toBe("1");
+    expect(manifest.tools.node).toBeTruthy();
+    expect(manifest.tools.npm).toBeTruthy();
     expect(r.stdout).toContain("package-set-digest=");
+  });
+
+  test("(F8) a caret on an UNSCOPED lockstep member also fails the pack", () => {
+    const fixture = makePackFixture({
+      version: "1.2.3",
+      packages: { a: { name: "plain-a" }, b: { deps: { "plain-a": "^1.2.3" } } },
+    });
+    const out = mkdtempSync(join(SCRATCH, "out-"));
+    const r = runPackScript(fixture, out);
+    expect(r.status).not.toBe(0);
+    expect(`${r.stdout}${r.stderr}`).toContain("exact-pin");
+    expect(readdirSync(out).filter((f) => f.endsWith(".tgz")).length).toBe(0);
   });
 
   test("(c) one caret @tpsdev-ai/* pin fails the pack before any tarball is built", () => {
@@ -667,5 +869,68 @@ describe("the pack script enforces the exact-pin invariant and the tarball set",
     const r2 = runPackScript(fixture, out2);
     expect(r2.status).not.toBe(0);
     expect(`${r2.stdout}${r2.stderr}`).toContain("unexpected");
+  });
+});
+
+// ── the restored ancestry check (F1) ──────────────────────────────────────────
+
+function ancestryShell(text: string): string {
+  const doc = yaml.load(text) as WorkflowDoc;
+  const step = (doc.jobs!["stage-publish"]!.steps ?? []).find(
+    (s) => typeof s.run === "string" && s.run.includes("merge-base --is-ancestor"),
+  );
+  if (!step?.run) throw new Error("release-publish.yml has no ancestry step");
+  return step.run;
+}
+
+function gitAt(args: string[], cwd: string) {
+  return spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "fixture",
+      GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+      GIT_COMMITTER_NAME: "fixture",
+      GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+    },
+  });
+}
+
+describe("the restored ancestry check refuses a tag commit not on main (F1)", () => {
+  test("a commit on main passes; a side-branch commit is refused before any stage request", () => {
+    const root = mkdtempSync(join(SCRATCH, "anc-"));
+    const bare = join(root, "origin.git");
+    const work = join(root, "work");
+    mkdirSync(bare);
+    mkdirSync(work);
+    expect(gitAt(["init", "-q", "--bare", "--initial-branch=main"], bare).status).toBe(0);
+    expect(gitAt(["init", "-q", "--initial-branch=main"], work).status).toBe(0);
+    writeFileSync(join(work, "a.txt"), "a");
+    gitAt(["add", "-A"], work);
+    expect(gitAt(["commit", "-q", "-m", "base"], work).status).toBe(0);
+    gitAt(["remote", "add", "origin", bare], work);
+    expect(gitAt(["push", "-q", "origin", "main"], work).status).toBe(0);
+    const onMain = gitAt(["rev-parse", "HEAD"], work).stdout.trim();
+
+    expect(gitAt(["checkout", "-q", "-b", "side"], work).status).toBe(0);
+    writeFileSync(join(work, "b.txt"), "b");
+    gitAt(["add", "-A"], work);
+    expect(gitAt(["commit", "-q", "-m", "side"], work).status).toBe(0);
+    const side = gitAt(["rev-parse", "HEAD"], work).stdout.trim();
+    gitAt(["checkout", "-q", "main"], work);
+
+    const sh = join(root, "ancestry.sh");
+    writeFileSync(sh, ancestryShell(realWorkflow()));
+    const run = (sha: string) =>
+      spawnSync("bash", [sh], { cwd: work, encoding: "utf8", env: { ...process.env, GITHUB_SHA: sha } });
+
+    const ok = run(onMain);
+    expect(ok.status).toBe(0);
+    expect(`${ok.stdout}${ok.stderr}`).toContain("is on main");
+
+    const bad = run(side);
+    expect(bad.status).not.toBe(0);
+    expect(`${bad.stdout}${bad.stderr}`).toContain("not an ancestor of origin/main");
   });
 });

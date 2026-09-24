@@ -247,11 +247,25 @@ jobs:
     environment: release
     permissions:
       id-token: write   # mint the short-lived OIDC token for npm trusted publishing
-      contents: read    # checkout (used by the tag/ancestry checks added in a later slice)
+      contents: read    # checkout, for the ancestry check (the tag commit must be on main)
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           persist-credentials: false
+
+      - name: Verify tagged commit is on main
+        # A tag can point at any commit; require it to be merged to main so a tag
+        # can never ship un-reviewed code past the npm staging gate. Kept from
+        # origin/main's stage job (flair#1671 slice A1a keeps every existing
+        # check); the fetch is scoped to THIS step.
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Commit ${GITHUB_SHA} is not an ancestor of origin/main. Tag a merged release commit."
+            exit 1
+          fi
+          echo "  ok ${GITHUB_SHA} is on main"
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -274,12 +288,16 @@ jobs:
           printf 'registry=https://registry.npmjs.org/\n' > "$NPM_USERCONFIG"
           cd "$ART_DIR"
           npm install -g npm@11.20.0 --userconfig "$NPM_USERCONFIG"
-          npm --version
+          npm --version --userconfig "$NPM_USERCONFIG"
 
       - name: Download packed tarballs
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           artifact-ids: ${{ needs.pack.outputs.artifact-id }}
+          # merge-multiple: true lays the artifact's files FLAT in `path`; without
+          # it, v4 nests them under a directory named after the artifact and the
+          # stage shell would not find manifest.json.
+          merge-multiple: true
           path: ${{ runner.temp }}/stage
 
       - name: Stage-publish all packages
@@ -293,12 +311,16 @@ jobs:
         env:
           ART_DIR: ${{ runner.temp }}/stage
           NPM_USERCONFIG: ${{ runner.temp }}/npm-userconfig
+          WORK_DIR: ${{ runner.temp }}/stage-work
           PACK_PACKAGE_SET_DIGEST: ${{ needs.pack.outputs.package-set-digest }}
           PACK_MANIFEST_DIGEST: ${{ needs.pack.outputs.manifest-digest }}
         run: |
           set -euo pipefail
           cd "$ART_DIR"
-
+          # Scratch files live OUTSIDE the artifact directory: the exact-set check
+          # below compares the artifact's contents, so a helper file written into
+          # it would read as an unexpected entry.
+          mkdir -p "$WORK_DIR"
           # Artifact hygiene: reject symlinks and path-escaping entries first.
           for entry in * .[!.]*; do
             if [ -e "$entry" ]; then
@@ -314,11 +336,33 @@ jobs:
             echo "::error::release artifact has no manifest.json"; exit 1
           fi
 
-          # Exactly one tarball per package the manifest names.
-          EXPECTED_COUNT="$(jq -r '.packages | length' manifest.json)"
-          set -- *.tgz
-          if [ "$#" -ne "$EXPECTED_COUNT" ]; then
-            echo "::error::release artifact holds $# tarball(s); the manifest names $EXPECTED_COUNT"; exit 1
+          LIST="$WORK_DIR/release-packages.tsv"
+          jq -r '.packages[] | "\(.name)\t\(.version)\t\(.basename)\t\(.sha256)"' manifest.json > "$LIST"
+
+          # Basenames must be plain filenames (no separator, no path escape).
+          EXPECTED="$WORK_DIR/release-expected.txt"
+          : > "$EXPECTED"
+          printf 'manifest.json\n' >> "$EXPECTED"
+          while IFS=$'\t' read -r name version basename sha; do
+            if [ -z "$basename" ]; then continue; fi
+            if [ "$basename" != "${basename##*/}" ] || [ "$basename" != "${basename//..}" ]; then
+              echo "::error::manifest names an unsafe basename: $basename"; exit 1
+            fi
+            printf '%s\n' "$basename" >> "$EXPECTED"
+          done < "$LIST"
+
+          # The artifact holds EXACTLY the manifest plus the tarballs it lists,
+          # nothing else: an extra file (a stray tarball, a shipped .npmrc) is a
+          # refusal here, before any request.
+          FOUND="$WORK_DIR/release-found.txt"
+          : > "$FOUND"
+          for entry in * .[!.]*; do
+            if [ -e "$entry" ]; then printf '%s\n' "$entry" >> "$FOUND"; fi
+          done
+          LC_ALL=C sort -o "$EXPECTED" "$EXPECTED"
+          LC_ALL=C sort -o "$FOUND" "$FOUND"
+          if ! cmp -s "$EXPECTED" "$FOUND"; then
+            echo "::error::release artifact does not hold exactly manifest.json and the tarballs it lists; unexpected or missing entries"; exit 1
           fi
 
           # Manifest digest: the manifest is byte-identical to the packed one.
@@ -327,16 +371,14 @@ jobs:
             echo "::error::manifest digest $MANIFEST_DIGEST differs from pack's $PACK_MANIFEST_DIGEST"; exit 1
           fi
 
-          # Package-set digest: recompute the canonical sorted list from the files.
-          LIST="release-packages.tsv"
-          jq -r '.packages[] | "\(.name)\t\(.version)\t\(.basename)\t\(.sha256)"' manifest.json > "$LIST"
-          CANON="release-canonical.txt"
+          # Package-set digest: recompute the canonical sorted list from the files
+          # and require it to agree with BOTH the manifest's own field AND pack's
+          # job output, before the first request.
+          MANIFEST_SET_DIGEST="$(jq -r '.packageSetDigest' manifest.json)"
+          CANON="$WORK_DIR/release-canonical.txt"
           : > "$CANON"
           while IFS=$'\t' read -r name version basename sha; do
             if [ -z "$basename" ]; then continue; fi
-            if [ "$basename" != "${basename##*/}" ] || [ "$basename" != "${basename//..}" ]; then
-              echo "::error::manifest names an unsafe basename: $basename"; exit 1
-            fi
             actual="$(sha256sum "$basename")"; actual="${actual%% *}"
             if [ "$actual" != "$sha" ]; then
               echo "::error::pre-stage failure: $basename is $actual, the manifest says $sha; nothing staged"; exit 1
@@ -348,32 +390,73 @@ jobs:
           if [ "$PACKAGE_SET_DIGEST" != "$PACK_PACKAGE_SET_DIGEST" ]; then
             echo "::error::package-set digest $PACKAGE_SET_DIGEST differs from pack's $PACK_PACKAGE_SET_DIGEST"; exit 1
           fi
+          if [ "$PACKAGE_SET_DIGEST" != "$MANIFEST_SET_DIGEST" ]; then
+            echo "::error::package-set digest $PACKAGE_SET_DIGEST differs from the manifest field $MANIFEST_SET_DIGEST"; exit 1
+          fi
 
           # Tarballs are read-only in this job: nothing rewrites them before staging.
           chmod a-w ./*.tgz
 
           # Stage each tarball, re-hashing it immediately before its own request.
           PUBLISHED=0
+          STAGED=""
+          FAILURE=""
+          FAILED_PKG=""
+          REASON=""
           while IFS=$'\t' read -r name version basename sha; do
             if [ -z "$basename" ]; then continue; fi
             actual="$(sha256sum "$basename")"; actual="${actual%% *}"
             if [ "$actual" != "$sha" ]; then
-              if [ "$PUBLISHED" -gt 0 ]; then
-                echo "::error::INCOMPLETE: APPROVE NOTHING - $name failed its re-hash after $PUBLISHED package(s) staged"; exit 1
-              fi
-              echo "::error::pre-stage failure: $basename failed its re-hash before any publish; nothing staged"; exit 1
+              FAILED_PKG="$name"; REASON="failed its re-hash"
+              if [ "$PUBLISHED" -gt 0 ]; then FAILURE="incomplete"; else FAILURE="prestage"; fi
+              break
             fi
             tag=staged
             if [ "$version" != "${version%%-*}" ]; then tag=next; fi
             if npm stage publish "$ART_DIR/$basename" --tag "$tag" --ignore-scripts --userconfig "$NPM_USERCONFIG"; then
               PUBLISHED=$((PUBLISHED + 1))
+              STAGED="$STAGED$name@$version"$'\n'
             else
-              if [ "$PUBLISHED" -gt 0 ]; then
-                echo "::error::INCOMPLETE: APPROVE NOTHING - npm failed at $name after $PUBLISHED package(s) staged"; exit 1
-              fi
-              echo "::error::npm stage publish failed at $name; nothing staged"; exit 1
+              FAILED_PKG="$name"; REASON="failed its npm stage publish request"
+              FAILURE="incomplete"
+              break
             fi
           done < "$LIST"
+
+          if [ "$FAILURE" = "prestage" ]; then
+            echo "::error::pre-stage failure: $FAILED_PKG $REASON before any publish; nothing staged"
+            exit 1
+          fi
+
+          if [ "$FAILURE" = "incomplete" ]; then
+            # A request was sent, so its outcome is unknown: this is INCOMPLETE,
+            # never "nothing staged". List the digest evidence and the exact
+            # package sets so a maintainer can reconcile on npmjs.com.
+            NOT_ATTEMPTED=""
+            seen=0
+            while IFS=$'\t' read -r name version basename sha; do
+              if [ "$seen" -eq 1 ]; then NOT_ATTEMPTED="$NOT_ATTEMPTED$name@$version"$'\n'; fi
+              if [ "$name" = "$FAILED_PKG" ]; then seen=1; fi
+            done < "$LIST"
+            echo "::error::INCOMPLETE: APPROVE NOTHING - $FAILED_PKG $REASON; a request that was sent may have staged"
+            {
+              echo "## INCOMPLETE: APPROVE NOTHING"
+              echo ""
+              echo "A stage request was sent and its outcome is not confirmed. Inspect each entry on npmjs.com before approving ANY; do not approve a partial set."
+              echo ""
+              echo "package-set digest: $PACKAGE_SET_DIGEST"
+              echo "manifest digest: $MANIFEST_DIGEST"
+              echo ""
+              echo "confirmed staged so far:"
+              if [ -n "$STAGED" ]; then echo "$STAGED"; else echo "(none confirmed)"; fi
+              echo ""
+              echo "failed or unknown: $FAILED_PKG"
+              echo ""
+              echo "not attempted:"
+              if [ -n "$NOT_ATTEMPTED" ]; then echo "$NOT_ATTEMPTED"; else echo "(none)"; fi
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
           VERSION_TOP="$(jq -r '.version' manifest.json)"
           TAG_LINE=staged
@@ -381,8 +464,9 @@ jobs:
           {
             echo "### v$VERSION_TOP staged for release (tag: $TAG_LINE)"
             echo ""
-            echo "$PUBLISHED package(s) submitted to npm staging with provenance under the $TAG_LINE tag."
-            echo "Approve them on npmjs.com with 2FA to go live. A staged tag is immutable; a bad stage is rejected, never refreshed."
+            echo "$PUBLISHED package(s) submitted to npm **staging** with provenance under the **$TAG_LINE** tag. They are **not live at latest** yet."
+            echo ""
+            echo "**To release:** open npmjs.com -> Settings -> Staged Packages, review each tarball, and approve with 2FA. Then dispatch the post-publish canary (Actions -> \"Post-publish canary — install + boot a published version\") with this version and the flair tarball's sha256. Only a canary PASS prints the sha256-bound promote command; run that line to move latest. On a canary FAIL, run the emitted npm deprecate line and re-cut the next patch — a staged tag is immutable, so a version is never refreshed in place."
           } >> "$GITHUB_STEP_SUMMARY"
 
   github-release:

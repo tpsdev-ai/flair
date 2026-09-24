@@ -100,17 +100,19 @@ export function publishableManifests(root) {
 
 /**
  * The exact-pin invariant. Returns a list of human-readable violations; empty
- * means every `@tpsdev-ai/*` dependency of every published package is pinned to
- * exactly `version`.
+ * means every dependency that names a LOCKSTEP MEMBER is pinned to exactly
+ * `version`. Membership — not the `@tpsdev-ai/` scope — is the test: an
+ * unscoped sibling (or one that later loses its scope) must not slip through.
  */
-export function exactPinViolations(manifests, version) {
+export function exactPinViolations(manifests, version, members) {
+  const set = members instanceof Set ? members : new Set(members ?? []);
   const problems = [];
   for (const { name, path, pkg } of manifests) {
     for (const section of PIN_SECTIONS) {
       const deps = pkg[section];
       if (!deps || typeof deps !== "object") continue;
       for (const [dep, spec] of Object.entries(deps)) {
-        if (!dep.startsWith(OUR_SCOPE)) continue;
+        if (!set.has(dep)) continue;
         if (spec !== version) {
           problems.push(`${path}: ${section}["${dep}"] is "${spec}", expected the exact release version "${version}"`);
         }
@@ -173,6 +175,15 @@ function packOne(root, dir, outAbs) {
   return filename;
 }
 
+/** A tool's version string, or "unknown" when the tool cannot be run (best effort). */
+function toolVersion(cmd, args) {
+  try {
+    return execFileSync(cmd, args, { encoding: "utf8" }).trim();
+  } catch {
+    return "unknown";
+  }
+}
+
 /** Pack every directory once, then assert the output directory is the expected set. */
 export function packAll({ root, out, version, dirs }) {
   const order = resolvePackOrder(root, dirs);
@@ -180,8 +191,10 @@ export function packAll({ root, out, version, dirs }) {
   const outAbs = resolve(out);
   mkdirSync(outAbs, { recursive: true });
 
-  // ── The exact-pin invariant, BEFORE any tarball is built. ──────────────────
-  const pinProblems = exactPinViolations(publishableManifests(root), version);
+  // ── The exact-pin invariant, BEFORE any tarball is built. Membership is
+  //    lockstepPackages(), so an unscoped sibling cannot slip through. ───────
+  const members = lockstepPackages(root);
+  const pinProblems = exactPinViolations(publishableManifests(root), version, members);
   if (pinProblems.length > 0) {
     throw new PackError(`exact-pin invariant violated:\n  ${pinProblems.join("\n  ")}`);
   }
@@ -223,7 +236,18 @@ export function packAll({ root, out, version, dirs }) {
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
   const packageSetDigest = sha256Hex(packageSetLines(packages));
-  const manifest = { schema: 1, version, packages, packageSetDigest };
+  const manifest = {
+    schema: 1,
+    version,
+    repo: process.env.GITHUB_REPOSITORY ?? "",
+    tag: process.env.GITHUB_REF_NAME ?? "",
+    commit: process.env.GITHUB_SHA ?? "",
+    runId: process.env.GITHUB_RUN_ID ?? "",
+    runAttempt: process.env.GITHUB_RUN_ATTEMPT ?? "",
+    tools: { node: toolVersion("node", ["--version"]), npm: toolVersion("npm", ["--version"]) },
+    packages,
+    packageSetDigest,
+  };
   const bytes = Buffer.from(JSON.stringify(manifest, null, 2) + "\n", "utf8");
   writeFileSync(join(outAbs, "manifest.json"), bytes);
   const manifestDigest = sha256Hex(bytes);
