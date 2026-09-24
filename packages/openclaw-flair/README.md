@@ -167,8 +167,9 @@ What this slice guarantees:
   AFTER that purge, i.e. every record is young or has a write in flight; in that
   case a later callback for the run can be admitted only once more than
   `abortOverflowCap` records age out, so it must arrive later than
-  `tombstoneMinAgeMs` into a flood of that size. That narrow condition — not an
-  unconditional "no new capture write starts" — is the residual.
+  `tombstoneMinAgeMs` into a flood of that size. That narrow condition IS the
+  residual: there is no unconditional guarantee that no capture write starts
+  after an abort.
   Aborting cannot **undo** a write Flair has already received — a request already
   in flight may still land. A successful `agent_end` never aborts.
 
