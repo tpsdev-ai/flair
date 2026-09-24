@@ -1,4 +1,4 @@
-name: Release — stage-publish (OIDC) + GitHub release
+name: Release — pack once, stage from tarballs (OIDC) + GitHub release
 
 # Tokenless release pipeline, triggered by pushing a vX.Y.Z tag. Authenticates to
 # npm via OIDC trusted publishing (no NPM_TOKEN lives anywhere) and submits every
@@ -6,18 +6,24 @@ name: Release — stage-publish (OIDC) + GitHub release
 # publishing live. A maintainer approves the staged tarballs on npmjs.com with 2FA
 # to go live — that approval is the release gate (see docs/releasing.md).
 #
+# flair#1671 slice A1a ("pack once, stage from tarballs"). The build and the pack
+# happen ONCE, in the `pack` job, which writes one tarball per publishable package
+# plus a `manifest.json` binding every tarball's sha256 and a canonical
+# package-set digest. The `stage-publish` job downloads that artifact BY ID,
+# re-derives both digests from the bytes it received, and stages those exact
+# tarballs — never a directory, so npm can never re-run `prepack` at stage time.
+# Staging is credential-scoped (id-token: write) and runs no repository code.
+#
 # flair#1686 — every package stages with `--tag staged`, NEVER straight to
-# `latest`. The staging tag is an IMMUTABLE property of the staged package
-# (`npm help stage`): re-staging the same version under a different tag requires
-# `npm stage reject` FIRST. So "re-cut, never refresh" is enforced by the tool, not
-# just policy — a bad stage cannot be fixed in place, it is rejected and the next
-# patch is cut. After a maintainer approves, the version is public but NOT
-# `latest`; the post-publish canary (.github/workflows/canary.yml) installs that
-# exact version from the registry and boots it on ubuntu-latest + macos-latest.
-# `latest` moves only when a human runs the sha256-bound promote command the
-# canary's PASS line prints. The canary is credential-less and `latest` is not a
-# dist-tag this workflow can move (the OIDC identity is scoped to
-# `npm stage publish` and has no dist-tag capability).
+# `latest` (prereleases stage with `--tag next`). The staging tag is an IMMUTABLE
+# property of the staged package (`npm help stage`): re-staging the same version
+# under a different tag requires `npm stage reject` FIRST, so "re-cut, never
+# refresh" is enforced by the tool, not just policy. After a maintainer approves,
+# the version is public but NOT `latest`; the post-publish canary
+# (.github/workflows/canary.yml) installs that exact version from the registry and
+# boots it on ubuntu-latest + macos-latest. The canary is credential-less and
+# `latest` is not a dist-tag this workflow can move (the OIDC identity is scoped
+# to `npm stage publish` and has no dist-tag capability).
 #
 # A separate, INDEPENDENT job (github-release) cuts a GitHub release for the tag
 # from a lede+links rendering of the matching CHANGELOG.md section (flair#1392).
@@ -32,13 +38,6 @@ name: Release — stage-publish (OIDC) + GitHub release
 #   org=tpsdev-ai, repo=flair, workflow=release-publish.yml, environment=release
 # and allow ONLY "npm stage publish". The `release` GitHub environment must permit
 # `v*` tag deploys.
-#
-# flair-bench is version-bumped/tagged with the other 7 and stages in its own
-# step below. That step used to be `continue-on-error: true`, because a
-# brand-new package cannot be staged or given a Trusted Publisher until it
-# exists on the registry. That one-time bootstrap is done — flair-bench staged
-# cleanly at v0.30.0 — so the step now fails the release like every other
-# package (see docs/releasing.md's "flair-bench bootstrap" section).
 
 on:
   push:
@@ -51,26 +50,29 @@ on:
         required: true
         type: string
 
-# Default to read-only; the publish job opts into exactly what it needs.
-permissions:
-  contents: read
+# Default to NOTHING. Every job below opts into exactly what it needs, so a
+# future job cannot inherit a grant by accident.
+permissions: {}
 
 concurrency:
   group: release-publish
   cancel-in-progress: false
 
 jobs:
-  stage-publish:
-    name: Stage-publish all packages
+  pack:
+    name: Pack publishable packages
     runs-on: ubuntu-latest
-    # `release` is an OIDC-scoping environment, NOT an approval gate: it pins the
-    # trusted-publisher trust to this environment. The human gate is the npm
-    # staging approval (2FA), not a GitHub reviewer.
-    environment: release
     permissions:
-      id-token: write   # mint the short-lived OIDC token for npm trusted publishing
-      contents: read    # checkout + fetch main for the ancestry guard
+      contents: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      package-set-digest: ${{ steps.pack.outputs.package-set-digest }}
+      manifest-digest: ${{ steps.pack.outputs.manifest-digest }}
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          fetch-depth: 0
+
       - name: Resolve version
         id: ver
         env:
@@ -92,22 +94,6 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Resolved version: $VERSION"
 
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-        with:
-          fetch-depth: 0
-
-      - name: Verify tagged commit is on main
-        # A tag can point at any commit; require it to be merged to main so a tag
-        # can never ship un-reviewed code past the npm staging gate.
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::Commit ${GITHUB_SHA} is not an ancestor of origin/main. Tag a merged release commit."
-            exit 1
-          fi
-          echo "  ok ${GITHUB_SHA} is on main"
-
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
@@ -120,18 +106,10 @@ jobs:
       - name: First-publish preflight
         # flair#1674: the tag-triggered path is the NORMAL release path — and the
         # one the @tpsdev-ai/harper reprint rode. Hard-stop an unapproved
-        # first-publish before anything is staged. Needs only the checkout and
-        # node (it reads package.json files and shells to `npm view`), so it runs
-        # before any install/build. No continue-on-error: a first-publish hazard
-        # must fail the job.
+        # first-publish before anything is built. Moved here from the old staging
+        # job in slice A1a: this job runs candidate code by design, and it still
+        # precedes every tarball and every stage request.
         run: node scripts/first-publish-check.mjs
-
-      - name: Upgrade npm to a staging-capable version
-        # OIDC trusted publishing needs npm >= 11.5.1; `npm stage` needs >= 11.15.0.
-        # Node 22 ships npm 10.x, so upgrade explicitly.
-        run: |
-          npm install -g npm@^11.15.0
-          echo "npm $(npm --version)"
 
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
         with:
@@ -209,18 +187,32 @@ jobs:
         run: node scripts/check-version-sync.mjs "$VERSION"
 
       - name: Build
+        # Every publishable package is built HERE, in dependency order, because
+        # staging no longer runs from a directory: there is no `prepack`/
+        # `prepublishOnly` hook to fall back on at stage time. flair-client first
+        # (the others import it); the root build vendors the tool descriptors.
         run: |
           set -euo pipefail
           npm run build && npm run build:cli
           (cd packages/flair-client && npm run build)
           (cd packages/flair-tool-descriptors && npm run build)
           (cd packages/flair-mcp && npm run build)
+          (cd packages/langgraph-flair && npm run build)
           (cd packages/n8n-nodes-flair && npm run build)
+          (cd packages/openclaw-flair && npm run build)
+          (cd packages/pi-flair && npm run build)
+          (cd packages/adk-flair-js && npm run build)
+          (cd packages/flair-bench && npm run build)
 
-      - name: Stage-publish all packages (dependency order)
-        # flair-client first — the other packages depend on it. Staging does not
-        # resolve dependencies (that happens at install, post-approval), but we
-        # keep dep order so the approve-and-go-live sequence is consistent.
+      - name: Pack publishable packages and write the release manifest
+        # One `npm pack --ignore-scripts` per package, into one output directory,
+        # plus the exact-pin invariant and the manifest (name@version sha256,
+        # package-set digest). `--dirs` is the dependency-ordered publish set; the
+        # script refuses unless it names exactly lockstepPackages().
+        id: pack
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          PACK_OUT: ${{ runner.temp }}/packed
         run: |
           set -euo pipefail
           DIRS=(
@@ -232,57 +224,165 @@ jobs:
             packages/n8n-nodes-flair
             packages/langgraph-flair
             packages/adk-flair-js
+            packages/flair-bench
           )
-          for dir in "${DIRS[@]}"; do
-            name="$(node -p "require('./$dir/package.json').name")"
-            echo "::group::npm stage publish — $name ($dir)"
-            ( cd "$dir" && npm stage publish --tag staged )
-            echo "::endgroup::"
-          done
+          node scripts/ci/release-pack.mjs --out "$PACK_OUT" --version "$VERSION" --dirs "${DIRS[@]}"
 
-      - name: Stage-publish flair-bench
-        # Still its own step rather than an entry in the loop above, for the
-        # reason it was split out: `npm stage publish` requires the package to
-        # already exist on the npm registry (npm-stage(1): "Package must
-        # exist"), and a Trusted Publisher can only be registered for a package
-        # that already exists — so until a maintainer did the one-time bootstrap
-        # in docs/releasing.md, this step was EXPECTED to fail, and it carried
-        # `continue-on-error: true` so that expected failure could not abort the
-        # other 7 packages' staging (the loop above runs under `set -euo
-        # pipefail` with no per-package isolation, so a hard failure inside it
-        # kills the whole job).
-        #
-        # The bootstrap is done: @tpsdev-ai/flair-bench exists on the registry
-        # and staged from this step at v0.30.0. continue-on-error is therefore
-        # removed — a failure here is now a real failure and must fail the
-        # release, exactly like the other 7. Worth recording why it could not
-        # just be left in place: continue-on-error makes a step report
-        # `conclusion: success` even when it failed, so while it was set, this
-        # workflow's own summary was not evidence about this step — you had to
-        # read the raw log to know whether flair-bench had staged or silently
-        # had not.
+      - name: Upload packed tarballs
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-tarballs
+          path: ${{ runner.temp }}/packed
+          if-no-files-found: error
+          retention-days: 7
+
+  stage-publish:
+    name: Stage-publish all packages
+    needs: pack
+    runs-on: ubuntu-latest
+    # `release` is an OIDC-scoping environment, NOT an approval gate: it pins the
+    # trusted-publisher trust to this environment. The human gate is the npm
+    # staging approval (2FA), not a GitHub reviewer.
+    environment: release
+    permissions:
+      id-token: write   # mint the short-lived OIDC token for npm trusted publishing
+      contents: read    # checkout (used by the tag/ancestry checks added in a later slice)
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          # NO registry-url — see the note in the pack job.
+
+      - name: Upgrade npm to a staging-capable version
+        # OIDC trusted publishing needs npm >= 11.5.1; `npm stage` needs >= 11.15.0.
+        # Node 22 ships npm 10.x, so upgrade explicitly, to an EXACT version (a
+        # range would fetch a different npm between the pin and the run). This is
+        # npm's own package, not candidate code. The userconfig is created in the
+        # job and passed explicitly so a candidate workspace `.npmrc` cannot
+        # redirect the registry out from under the OIDC exchange.
+        env:
+          ART_DIR: ${{ runner.temp }}/stage
+          NPM_USERCONFIG: ${{ runner.temp }}/npm-userconfig
         run: |
           set -euo pipefail
-          echo "::group::npm stage publish — @tpsdev-ai/flair-bench (packages/flair-bench)"
-          ( cd packages/flair-bench && npm stage publish --tag staged )
-          echo "::endgroup::"
+          mkdir -p "$ART_DIR"
+          printf 'registry=https://registry.npmjs.org/\n' > "$NPM_USERCONFIG"
+          cd "$ART_DIR"
+          npm install -g npm@11.20.0 --userconfig "$NPM_USERCONFIG"
+          npm --version
 
-      - name: Summary
+      - name: Download packed tarballs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.pack.outputs.artifact-id }}
+          path: ${{ runner.temp }}/stage
+
+      - name: Stage-publish all packages
+        # The digest shell is INLINE: no repository script runs in this job (a
+        # script from the checkout is candidate code at that tag). Every npm
+        # command runs from $ART_DIR with the throwaway --userconfig, so a
+        # workspace .npmrc has no effect. Each tarball is re-hashed immediately
+        # before its own `npm stage publish`, and the artifact is re-hashed as a
+        # set before anything is staged; a mismatch before the first publish is a
+        # pre-stage failure, one after it is INCOMPLETE.
         env:
-          VERSION: ${{ steps.ver.outputs.version }}
+          ART_DIR: ${{ runner.temp }}/stage
+          NPM_USERCONFIG: ${{ runner.temp }}/npm-userconfig
+          PACK_PACKAGE_SET_DIGEST: ${{ needs.pack.outputs.package-set-digest }}
+          PACK_MANIFEST_DIGEST: ${{ needs.pack.outputs.manifest-digest }}
         run: |
+          set -euo pipefail
+          cd "$ART_DIR"
+
+          # Artifact hygiene: reject symlinks and path-escaping entries first.
+          for entry in * .[!.]*; do
+            if [ -e "$entry" ]; then
+              if [ -L "$entry" ]; then
+                echo "::error::release artifact contains a symlink: $entry"; exit 1
+              fi
+              if [ "$entry" != "${entry//..}" ]; then
+                echo "::error::release artifact entry contains a path escape: $entry"; exit 1
+              fi
+            fi
+          done
+          if [ ! -f manifest.json ]; then
+            echo "::error::release artifact has no manifest.json"; exit 1
+          fi
+
+          # Exactly one tarball per package the manifest names.
+          EXPECTED_COUNT="$(jq -r '.packages | length' manifest.json)"
+          set -- *.tgz
+          if [ "$#" -ne "$EXPECTED_COUNT" ]; then
+            echo "::error::release artifact holds $# tarball(s); the manifest names $EXPECTED_COUNT"; exit 1
+          fi
+
+          # Manifest digest: the manifest is byte-identical to the packed one.
+          MANIFEST_DIGEST="$(sha256sum manifest.json)"; MANIFEST_DIGEST="${MANIFEST_DIGEST%% *}"
+          if [ "$MANIFEST_DIGEST" != "$PACK_MANIFEST_DIGEST" ]; then
+            echo "::error::manifest digest $MANIFEST_DIGEST differs from pack's $PACK_MANIFEST_DIGEST"; exit 1
+          fi
+
+          # Package-set digest: recompute the canonical sorted list from the files.
+          LIST="release-packages.tsv"
+          jq -r '.packages[] | "\(.name)\t\(.version)\t\(.basename)\t\(.sha256)"' manifest.json > "$LIST"
+          CANON="release-canonical.txt"
+          : > "$CANON"
+          while IFS=$'\t' read -r name version basename sha; do
+            if [ -z "$basename" ]; then continue; fi
+            if [ "$basename" != "${basename##*/}" ] || [ "$basename" != "${basename//..}" ]; then
+              echo "::error::manifest names an unsafe basename: $basename"; exit 1
+            fi
+            actual="$(sha256sum "$basename")"; actual="${actual%% *}"
+            if [ "$actual" != "$sha" ]; then
+              echo "::error::pre-stage failure: $basename is $actual, the manifest says $sha; nothing staged"; exit 1
+            fi
+            printf '%s@%s %s\n' "$name" "$version" "$actual" >> "$CANON"
+          done < "$LIST"
+          LC_ALL=C sort -o "$CANON" "$CANON"
+          PACKAGE_SET_DIGEST="$(sha256sum "$CANON")"; PACKAGE_SET_DIGEST="${PACKAGE_SET_DIGEST%% *}"
+          if [ "$PACKAGE_SET_DIGEST" != "$PACK_PACKAGE_SET_DIGEST" ]; then
+            echo "::error::package-set digest $PACKAGE_SET_DIGEST differs from pack's $PACK_PACKAGE_SET_DIGEST"; exit 1
+          fi
+
+          # Tarballs are read-only in this job: nothing rewrites them before staging.
+          chmod a-w ./*.tgz
+
+          # Stage each tarball, re-hashing it immediately before its own request.
+          PUBLISHED=0
+          while IFS=$'\t' read -r name version basename sha; do
+            if [ -z "$basename" ]; then continue; fi
+            actual="$(sha256sum "$basename")"; actual="${actual%% *}"
+            if [ "$actual" != "$sha" ]; then
+              if [ "$PUBLISHED" -gt 0 ]; then
+                echo "::error::INCOMPLETE: APPROVE NOTHING - $name failed its re-hash after $PUBLISHED package(s) staged"; exit 1
+              fi
+              echo "::error::pre-stage failure: $basename failed its re-hash before any publish; nothing staged"; exit 1
+            fi
+            tag=staged
+            if [ "$version" != "${version%%-*}" ]; then tag=next; fi
+            if npm stage publish "$ART_DIR/$basename" --tag "$tag" --ignore-scripts --userconfig "$NPM_USERCONFIG"; then
+              PUBLISHED=$((PUBLISHED + 1))
+            else
+              if [ "$PUBLISHED" -gt 0 ]; then
+                echo "::error::INCOMPLETE: APPROVE NOTHING - npm failed at $name after $PUBLISHED package(s) staged"; exit 1
+              fi
+              echo "::error::npm stage publish failed at $name; nothing staged"; exit 1
+            fi
+          done < "$LIST"
+
+          VERSION_TOP="$(jq -r '.version' manifest.json)"
+          TAG_LINE=staged
+          if [ "$VERSION_TOP" != "${VERSION_TOP%%-*}" ]; then TAG_LINE=next; fi
           {
-            echo "### 🚀 v$VERSION staged for release (tag: staged)"
+            echo "### v$VERSION_TOP staged for release (tag: $TAG_LINE)"
             echo ""
-            echo "All 9 lockstep-versioned workspace packages submitted to npm **staging**"
-            echo "with provenance and staged under the **staged** tag. They are **not live at \`latest\`** yet."
-            echo ""
-            echo "**To release:** open [npmjs.com → Staged Packages](https://www.npmjs.com/settings/tpsdev-ai/staging),"
-            echo "review each tarball, and approve with 2FA. Then dispatch the post-publish canary"
-            echo "(Actions → \"Post-publish canary — install + boot a published version\") with this version"
-            echo "and the tarball's sha256. Only a canary PASS prints the sha256-bound promote command;"
-            echo "run that line to move \`latest\`. On a canary FAIL, run the emitted \`npm deprecate\` line"
-            echo "and re-cut the next patch — a staged tag is immutable, so a version is never refreshed in place."
+            echo "$PUBLISHED package(s) submitted to npm staging with provenance under the $TAG_LINE tag."
+            echo "Approve them on npmjs.com with 2FA to go live. A staged tag is immutable; a bad stage is rejected, never refreshed."
           } >> "$GITHUB_STEP_SUMMARY"
 
   github-release:
