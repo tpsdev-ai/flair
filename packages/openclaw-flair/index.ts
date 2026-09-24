@@ -12,8 +12,9 @@
  * never substitutes for one. Missing or mismatched identity refuses, and a
  * refusal makes zero outgoing requests. Runtime workspace→Soul sync is removed.
  *
- * Hooks used: `before_prompt_build` (bootstrap, returned via `prependContext`)
- * and `agent_end` / `llm_input` / `llm_output` (optional auto-capture). The
+ * Hooks used: `before_prompt_build` (bootstrap, returned via `prependContext`),
+ * `agent_end` / `llm_input` / `llm_output` (optional auto-capture), and
+ * `gateway_stop` / `model_call_ended` (abort of an in-flight capture). The
  * deprecated `before_agent_start` hook is not used and no context-engine slot
  * is selected — the host's own native memory section is left intact.
  */
@@ -150,8 +151,65 @@ interface CaptureState {
   hashes: Set<string>;
 }
 
-function createCaptureState(): CaptureState {
-  return { count: 0, hashes: new Set() };
+/**
+ * Injectable clock for the run-state retirement rule (D10). Production reads
+ * `Date.now`; a test substitutes a fake so the 30 s window is exercised without
+ * sleeping.
+ */
+export const captureClock: { now: () => number } = { now: () => Date.now() };
+
+/** A successful run retires this long after its `agent_end`. */
+export const RUN_RETIRE_AFTER_MS = 30_000;
+
+/** A retired run's state is swept from the pool this long after retirement. */
+const RUN_SWEEP_AFTER_MS = 30_000;
+
+/**
+ * Per-run capture state (D10). Keyed by agent + runId — never by agent alone,
+ * or two concurrent runs of one agent would share a budget and a dedup set and
+ * collide. Holds the run's own AbortController (item 5) and the retirement
+ * bookkeeping that decides when the state may be dropped.
+ *
+ * Retirement: a SUCCESSFUL `agent_end` marks the run `ended` but does NOT
+ * delete the state — the host can dispatch `agent_end` BEFORE `llm_output` for
+ * the same run, and that later capture must still land. The state retires only
+ * when it is ended AND has no in-flight writes AND 30 s have passed since
+ * `agent_end`; a callback for a retired run is dropped with a one-time log
+ * naming the run id.
+ */
+interface RunState extends CaptureState {
+  agentId: string;
+  runId: string;
+  /** In-flight capture writes for this run. */
+  inFlight: number;
+  /** A successful `agent_end` was seen; the run has ended but is not retired. */
+  ended: boolean;
+  /** `captureClock.now()` at that successful `agent_end`. */
+  endedAt: number | null;
+  /** No further callback for this run may capture. */
+  retired: boolean;
+  /** `captureClock.now()` at retirement (used only to bound the pool). */
+  retiredAt: number | null;
+  /** Aborted: a failed `agent_end`, an aborted model call, or `gateway_stop`. */
+  aborted: boolean;
+  /** One AbortController per run, owned by the plugin (agent hooks carry none). */
+  controller: AbortController;
+}
+
+function createRunState(agentId: string, runId: string): RunState {
+  return {
+    agentId,
+    runId,
+    count: 0,
+    hashes: new Set(),
+    inFlight: 0,
+    ended: false,
+    endedAt: null,
+    retired: false,
+    retiredAt: null,
+    aborted: false,
+    controller: new AbortController(),
+  };
 }
 
 /**
@@ -172,11 +230,6 @@ export function evaluateAutoCapture(
   const hash = hashContent(excerpt);
   if (state.hashes.has(hash)) return null;
   return { excerpt, hash };
-}
-
-function recordCapture(state: CaptureState, hash: string): void {
-  state.count++;
-  state.hashes.add(hash);
 }
 
 // ─── Entity detection ────────────────────────────────────────────────────────
@@ -494,7 +547,7 @@ export default {
         adminPassword: "",
       });
       const original = client.request.bind(client) as typeof client.request;
-      (client as any).request = async (method: string, path: string, body?: unknown) => {
+      (client as any).request = async (method: string, path: string, body?: unknown, opts?: { signal?: AbortSignal }) => {
         const current = signingKeyProbe.resolve(agentId, keyPath);
         if (!current) {
           throw new IdentityRefusal(
@@ -514,7 +567,7 @@ export default {
             `the private key for agent "${agentId}" changed while running — refusing until the gateway is restarted so identity is re-established`,
           );
         }
-        return original(method, path, body);
+        return original(method, path, body, opts);
       };
       return client;
     }
@@ -528,31 +581,143 @@ export default {
       cfg.autoCaptureMaxPerSession ?? DEFAULT_AUTO_CAPTURE_MAX_PER_SESSION,
     );
 
-    const captureStatePool = new Map<string, CaptureState>();
-    function getCaptureState(agentId: string): CaptureState {
-      let state = captureStatePool.get(agentId);
-      if (!state) {
-        state = createCaptureState();
-        captureStatePool.set(agentId, state);
-      }
-      return state;
-    }
-    function resetCaptureState(agentId: string): void {
-      captureStatePool.delete(agentId);
+    // ── Per-run capture state (D10) + one AbortController per run (item 5) ──
+    // State is keyed by agent + runId: keying by agent alone made two concurrent
+    // runs share a budget and a dedup set and collide. The run's AbortController
+    // is created with the state.
+    const runStates = new Map<string, RunState>();
+    const loggedOnce = new Set<string>();
+    const runKeyOf = (agentId: string, runId: string): string => `${agentId}\u0000${runId}`;
+
+    function logOnce(key: string, line: string): void {
+      if (loggedOnce.has(key)) return;
+      loggedOnce.add(key);
+      api.logger.warn(line);
     }
 
-    async function tryAutoCapture(client: FlairClient, agentId: string, text: string): Promise<boolean> {
-      const state = getCaptureState(agentId);
+    /** The run id for a callback, from the event or the hook context. */
+    function runIdOf(event: any, ctx: any): string | null {
+      const raw = event?.runId ?? ctx?.runId;
+      return typeof raw === "string" && raw.length > 0 ? raw : null;
+    }
+
+    function retireIfDue(state: RunState): void {
+      if (state.retired) return;
+      if (
+        state.ended &&
+        state.inFlight === 0 &&
+        state.endedAt !== null &&
+        captureClock.now() - state.endedAt >= RUN_RETIRE_AFTER_MS
+      ) {
+        state.retired = true;
+        state.retiredAt = captureClock.now();
+      }
+    }
+
+    /** Drop retired state the pool no longer needs to recognise. */
+    function sweepRetired(): void {
+      const now = captureClock.now();
+      for (const [key, state] of runStates) {
+        if (state.retired && state.retiredAt !== null && now - state.retiredAt > RUN_SWEEP_AFTER_MS) {
+          runStates.delete(key);
+        }
+      }
+    }
+
+    /**
+     * The run state a callback should use, or null when the callback must not
+     * capture: a missing runId is refused (one-time log), and a retired or
+     * aborted run is dropped (one-time log naming the run id).
+     */
+    function captureGate(agentId: string, runId: string | null): RunState | null {
+      if (!runId) {
+        logOnce(
+          `no-run-id:${agentId}`,
+          `openclaw-flair: refused capture for agent ${agentId}: the host hook carried no runId (capture state is per run)`,
+        );
+        return null;
+      }
+      sweepRetired();
+      const key = runKeyOf(agentId, runId);
+      let state = runStates.get(key);
+      if (state) {
+        retireIfDue(state);
+        if (state.retired || state.aborted) {
+          logOnce(`dropped:${key}`, `openclaw-flair: dropped a callback for retired run ${runId} (agent ${agentId})`);
+          return null;
+        }
+        return state;
+      }
+      state = createRunState(agentId, runId);
+      runStates.set(key, state);
+      return state;
+    }
+
+    /** Abort a run: cancel its in-flight capture fetches and retire it now. */
+    function abortRun(agentId: string, runId: string | null, why: string): void {
+      if (!runId) {
+        logOnce(
+          `no-run-id-abort:${agentId}`,
+          `openclaw-flair: could not abort a run for agent ${agentId}: the host hook carried no runId`,
+        );
+        return;
+      }
+      const key = runKeyOf(agentId, runId);
+      let state = runStates.get(key);
+      if (!state) {
+        state = createRunState(agentId, runId);
+        runStates.set(key, state);
+      }
+      if (state.aborted) return;
+      state.aborted = true;
+      state.retired = true;
+      state.retiredAt = captureClock.now();
+      try {
+        state.controller.abort(why);
+      } catch { /* an abort listener must not break the hook */ }
+    }
+
+    async function tryAutoCapture(client: FlairClient, agentId: string, runId: string | null, text: string): Promise<boolean> {
+      const state = captureGate(agentId, runId);
+      if (!state) return false;
       const decision = evaluateAutoCapture(text, state, autoCaptureMaxPerSession);
       if (!decision) return false;
+      // D10: take the cap slot and claim the excerpt SYNCHRONOUSLY, before any
+      // await, so a concurrent callback (or the agent_end rescan) that sees the
+      // same excerpt dedups against the reservation instead of writing twice.
+      state.count++;
+      state.hashes.add(decision.hash);
+      state.inFlight++;
       const entities = detectEntities(text);
       const subject = entities.length > 0 ? entities[0].name.toLowerCase() : undefined;
-      await client.memory.write(decision.excerpt, {
-        type: "session",
-        tags: ["auto-captured"],
-        subject,
-      });
-      recordCapture(state, decision.hash);
+      try {
+        await client.memory.write(decision.excerpt, {
+          type: "session",
+          tags: ["auto-captured"],
+          subject,
+          // Item 5: the run's signal reaches the fetch, so an abort cancels an
+          // in-flight capture rather than letting it finish.
+          signal: state.controller.signal,
+        });
+      } catch (err) {
+        // The write failed: release the reservation so a later rescan may retry.
+        state.inFlight--;
+        state.count--;
+        state.hashes.delete(decision.hash);
+        throw err;
+      }
+      state.inFlight--;
+      if (state.aborted) {
+        // Item 5: a result that resolves after the abort is DISCARDED — release
+        // the reservation and never report it as a capture.
+        state.count--;
+        state.hashes.delete(decision.hash);
+        logOnce(
+          `discarded:${runKeyOf(agentId, runId as string)}`,
+          `openclaw-flair: discarded a capture for run ${runId} (agent ${agentId}) that completed after the run was aborted`,
+        );
+        return false;
+      }
       return true;
     }
 
@@ -766,6 +931,22 @@ export default {
             api.logger.warn("openclaw-flair: agent_end refused: no agent identity in host context — refusing rather than inheriting one");
             return;
           }
+          const runId = runIdOf(event, ctx);
+          // Item 5(a): a failed run is ABORTED — no capture, and every in-flight
+          // capture for the run is cancelled and discarded. A successful
+          // agent_end never aborts.
+          if (event?.success === false) {
+            abortRun(agentId, runId, "agent_end reported the run failed");
+            return;
+          }
+          const state = captureGate(agentId, runId);
+          if (!state) return;
+          // A successful agent_end ENDS the run but does NOT delete its state:
+          // the host can dispatch agent_end BEFORE llm_output for this run, and
+          // that later capture must still land. The state retires (30 s, no
+          // in-flight writes) via captureGate on a later callback.
+          state.ended = true;
+          state.endedAt = captureClock.now();
           try {
             const client = clientFor(agentId);
             const messages = (event?.messages ?? []) as Array<{ role: string; content?: unknown }>;
@@ -774,13 +955,11 @@ export default {
               if (msg.role !== "user" && msg.role !== "assistant") continue;
               const text = captureText(msg.content);
               if (!text) continue;
-              if (await tryAutoCapture(client, agentId, text)) stored++;
+              if (await tryAutoCapture(client, agentId, runId, text)) stored++;
             }
             if (stored > 0) api.logger.info(`openclaw-flair: auto-captured ${stored} memories`);
           } catch (err: any) {
             api.logger.warn(`openclaw-flair: auto-capture refused/failed: ${err.message}`);
-          } finally {
-            resetCaptureState(agentId);
           }
         });
 
@@ -794,7 +973,7 @@ export default {
           if (!text) return;
           try {
             const client = clientFor(agentId);
-            const captured = await tryAutoCapture(client, agentId, text);
+            const captured = await tryAutoCapture(client, agentId, runIdOf(event, ctx), text);
             if (captured) api.logger.info("openclaw-flair: auto-captured 1 memory from live turn (llm_input)");
           } catch (err: any) {
             api.logger.warn(`openclaw-flair: live auto-capture (llm_input) refused/failed: ${err.message}`);
@@ -812,11 +991,28 @@ export default {
           if (!text) return;
           try {
             const client = clientFor(agentId);
-            const captured = await tryAutoCapture(client, agentId, text);
+            const captured = await tryAutoCapture(client, agentId, runIdOf(event, ctx), text);
             if (captured) api.logger.info("openclaw-flair: auto-captured 1 memory from live turn (llm_output)");
           } catch (err: any) {
             api.logger.warn(`openclaw-flair: live auto-capture (llm_output) refused/failed: ${err.message}`);
           }
+        });
+
+        // Item 5(b): gateway_stop aborts every in-flight run.
+        api.on("gateway_stop", async () => {
+          for (const state of [...runStates.values()]) {
+            abortRun(state.agentId, state.runId, "gateway_stop");
+          }
+        });
+
+        // Item 5(c): model_call_ended with failureKind "aborted". Used only
+        // because PluginHookModelCallBaseEvent carries `runId`; the SDK type for
+        // that base event includes it, so the abort can be correlated to a run.
+        api.on("model_call_ended", async (event: any, ctx: any) => {
+          if (event?.failureKind !== "aborted") return;
+          const agentId = ctx?.agentId;
+          if (!agentId) return;
+          abortRun(agentId, runIdOf(event, ctx), "model_call_ended reported the call was aborted");
         });
     }
 

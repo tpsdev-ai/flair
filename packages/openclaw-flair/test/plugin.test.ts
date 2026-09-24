@@ -48,10 +48,11 @@ type MockApi = Partial<OpenClawPluginApi> & {
   _contextEngines: Map<string, Function>;
   _services: Map<string, { id: string; start: (ctx: any) => any }>;
   _resolveTool: (name: string, ctx: ToolCtx) => any;
+  _handler: (hook: string) => MockFn;
   _warnText: () => string;
   _statusLine: () => string;
   _fire: (hook: string, event: any, ctx: ToolCtx) => Promise<string[]>;
-  _runTurn: (ctx: ToolCtx, payload: { messages?: any[]; prompt?: string; assistantTexts?: string[] }) => Promise<void>;
+  _runTurn: (ctx: ToolCtx, payload: { runId?: string; success?: boolean; messages?: any[]; prompt?: string; assistantTexts?: string[] }) => Promise<void>;
 };
 
 function createMockApi(opts: {
@@ -113,6 +114,12 @@ function createMockApi(opts: {
       if (entry === undefined) return null;
       return typeof entry === "function" ? (entry as any)(ctx) : entry;
     },
+    /** The first registered handler for a hook (for firing it directly). */
+    _handler(hook: string): MockFn {
+      const list = hooks.get(hook);
+      if (!list || list.length === 0) throw new Error(`no handler registered for ${hook}`);
+      return list[0];
+    },
     _warnText(): string {
       return (api.logger.warn as any).mock.calls.map((c: any[]) => String(c[0])).join("\n");
     },
@@ -130,10 +137,11 @@ function createMockApi(opts: {
       return delivered;
     },
     /** One host turn: the real delivery order (agent_end before llm_output). */
-    async _runTurn(ctx: ToolCtx, payload: { messages?: any[]; prompt?: string; assistantTexts?: string[] }) {
-      await this._fire("llm_input", { runId: "r", sessionId: "s", provider: "p", model: "m", prompt: payload.prompt ?? "" }, ctx);
-      await this._fire("agent_end", { messages: payload.messages ?? [] }, ctx);
-      await this._fire("llm_output", { runId: "r", sessionId: "s", provider: "p", model: "m", assistantTexts: payload.assistantTexts ?? [] }, ctx);
+    async _runTurn(ctx: ToolCtx, payload: { runId?: string; success?: boolean; messages?: any[]; prompt?: string; assistantTexts?: string[] }) {
+      const runId = payload.runId ?? "r";
+      await this._fire("llm_input", { runId, sessionId: "s", provider: "p", model: "m", prompt: payload.prompt ?? "" }, ctx);
+      await this._fire("agent_end", { runId, messages: payload.messages ?? [], success: payload.success ?? true }, ctx);
+      await this._fire("llm_output", { runId, sessionId: "s", provider: "p", model: "m", assistantTexts: payload.assistantTexts ?? [] }, ctx);
     },
   };
   return api as unknown as MockApi;
@@ -141,15 +149,27 @@ function createMockApi(opts: {
 
 // ── network stub ─────────────────────────────────────────────────────────────
 
-interface Call { url: string; method: string; authorization: string | null }
+interface Call { url: string; method: string; authorization: string | null; signal: AbortSignal | null }
 
-function installFetchStub(handler?: (call: Call) => { status?: number; body?: unknown }) {
+function installFetchStub(
+  handler?: (call: Call) => { status?: number; body?: unknown },
+  opts: { deferUntil?: Promise<unknown> } = {},
+) {
   const calls: Call[] = [];
   globalThis.fetch = (async (url: string, init: any = {}) => {
     const headers = (init.headers ?? {}) as Record<string, string>;
-    const call: Call = { url: String(url), method: init.method ?? "GET", authorization: headers["Authorization"] ?? null };
+    const call: Call = {
+      url: String(url),
+      method: init.method ?? "GET",
+      authorization: headers["Authorization"] ?? null,
+      signal: (init.signal as AbortSignal | undefined) ?? null,
+    };
     calls.push(call);
     const out = handler ? handler(call) : {};
+    // A deferred stub holds the response open so a test can observe/act on a
+    // write that is genuinely IN FLIGHT (and, if it ignores the signal, one
+    // whose result resolves after an abort).
+    if (opts.deferUntil) await opts.deferUntil;
     const body = out.body === undefined ? { results: [] } : out.body;
     return new Response(JSON.stringify(body), { status: out.status ?? 200, headers: { "content-type": "application/json" } });
   }) as unknown as typeof fetch;
@@ -188,9 +208,11 @@ beforeEach(() => {
   process.env.OPENCLAW_VERSION = "2026.8.1"; // must be ignored
   process.env.OPENCLAW_COMPATIBILITY_HOST_VERSION = "2026.8.1";
   delete process.env.FLAIR_AGENT_ID; // env identity must be ignored entirely
-  // Restore the injectable key probes (a prior test may have substituted them).
+  // Restore the injectable key probes and clock (a prior test may have
+  // substituted them).
   signingKeyProbe.resolve = (a, kp) => resolveKeyPath(a, kp);
   signingKeyProbe.load = (f) => loadPrivateKey(f);
+  captureClock.now = () => Date.now();
 });
 
 afterEach(() => {
@@ -221,6 +243,15 @@ try {
   };
 } catch {
   signingKeyProbe = { resolve: (a, kp) => resolveKeyPath(a, kp), load: (f) => loadPrivateKey(f) };
+}
+
+// The injectable clock for the per-run retirement rule (D10). On a build without
+// it, substitutions below are inert (which is how the retirement test goes red).
+let captureClock: { now: () => number };
+try {
+  captureClock = (await import("../index.ts") as any).captureClock ?? { now: () => Date.now() };
+} catch {
+  captureClock = { now: () => Date.now() };
 }
 
 // ── host version gate (R1) ───────────────────────────────────────────────────
@@ -880,6 +911,8 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
     const calls = installFetchStub();
     plugin.register(api as any);
     await api._fire("agent_end", {
+      runId: "r",
+      success: true,
       messages: [{
         role: "user",
         content: [
@@ -959,5 +992,156 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
     expect(res.details.written).toBe(true);
     expect(res.details.supersedeClosed).toBe(false);
     expect(res.details.errors.length).toBe(1);
+  });
+});
+
+// ── slice 2 — per-run state, reservation, retirement and abort (D10 / item 5) ──
+
+describe("slice 2 — per-run capture state, retirement and abort", () => {
+  /** Capture-enabled host: conversation permission granted, autoCapture on. */
+  const cfgCapture = () => ({
+    agents: { entries: { A: {} } },
+    plugins: {
+      slots: { memory: "openclaw-flair" },
+      entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } },
+    },
+  });
+  const apiForCapture = (plugin: any) => {
+    writeKey("A");
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: cfgCapture() });
+    plugin.register(api as any);
+    return api;
+  };
+  const puts = (calls: Call[]) => calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+  const TRIGGER = "remember this: the per-run capture target is staging";
+  const waitFor = async (cond: () => boolean, ms = 1000): Promise<void> => {
+    const start = Date.now();
+    while (!cond() && Date.now() - start < ms) await new Promise((r) => setTimeout(r, 1));
+  };
+  const defer = () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = () => r(); });
+    return { gate, release: () => release() };
+  };
+
+  test("D10 (mutation: reservation removed): a reservation taken before the await prevents a double write", async () => {
+    const plugin = await loadPlugin();
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const api = apiForCapture(plugin);
+    const llmOut = api._handler("llm_output");
+    const first = llmOut({ runId: "r", assistantTexts: [TRIGGER] }, { agentId: "A" });
+    // A second callback for the SAME run and text while the first write is still
+    // in flight: the synchronously-taken reservation must dedup it.
+    const second = llmOut({ runId: "r", assistantTexts: [TRIGGER] }, { agentId: "A" });
+    d.release();
+    await Promise.all([first, second]);
+    expect(puts(calls).length).toBe(1);
+  });
+
+  test("D10 (mutation: state keyed by agent only): two runs of one agent do not share a budget or dedup set", async () => {
+    const plugin = await loadPlugin();
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const api = apiForCapture(plugin);
+    const llmOut = api._handler("llm_output");
+    const first = llmOut({ runId: "run-1", assistantTexts: [TRIGGER] }, { agentId: "A" });
+    const second = llmOut({ runId: "run-2", assistantTexts: [TRIGGER] }, { agentId: "A" });
+    d.release();
+    await Promise.all([first, second]);
+    expect(puts(calls).length).toBe(2);
+  });
+
+  test("D10: a successful agent_end before llm_output does not retire the run — the llm_output capture still lands", async () => {
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = apiForCapture(plugin);
+    await api._fire("agent_end", { runId: "r", success: true, messages: [] }, { agentId: "A" });
+    await api._handler("llm_output")({ runId: "r", assistantTexts: [TRIGGER] }, { agentId: "A" });
+    expect(puts(calls).length).toBe(1);
+    expect(api._statusLine()).toMatch(/auto-captured 1 memory from live turn \(llm_output\)/);
+  });
+
+  test("D10: a callback 31 s after agent_end, with no in-flight writes, is dropped with a log naming the run", async () => {
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = apiForCapture(plugin);
+    const base = 1_000_000;
+    captureClock.now = () => base;
+    await api._fire("agent_end", { runId: "r", success: true, messages: [] }, { agentId: "A" });
+    captureClock.now = () => base + 31_000;
+    await api._handler("llm_output")({ runId: "r", assistantTexts: [TRIGGER] }, { agentId: "A" });
+    expect(puts(calls).length).toBe(0);
+    expect(api._warnText()).toMatch(/dropped a callback for retired run r/);
+  });
+
+  test("D10: a callback that carries no runId is refused, with a ONE-TIME log", async () => {
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = apiForCapture(plugin);
+    const llmOut = api._handler("llm_output");
+    await llmOut({ assistantTexts: [TRIGGER] }, { agentId: "A" });
+    await llmOut({ assistantTexts: [TRIGGER] }, { agentId: "A" });
+    expect(puts(calls).length).toBe(0);
+    const lines = api._warnText().split("\n").filter((l) => /no runId/.test(l));
+    expect(lines.length).toBe(1);
+  });
+
+  test("item 5 (mutation: abort dropped): a failed agent_end aborts the in-flight write and its late result is discarded", async () => {
+    const plugin = await loadPlugin();
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const api = apiForCapture(plugin);
+    const llmOut = api._handler("llm_output");
+    const inFlight = llmOut({ runId: "r", assistantTexts: [TRIGGER] }, { agentId: "A" });
+    await waitFor(() => puts(calls).length === 1);
+    const fetchCall = puts(calls)[0]!;
+    expect(fetchCall.signal).not.toBeNull();
+    expect(fetchCall.signal!.aborted).toBe(false);
+    // A FAILED agent_end for the run aborts it (item 5a).
+    await api._fire("agent_end", { runId: "r", success: false, messages: [] }, { agentId: "A" });
+    expect(fetchCall.signal!.aborted).toBe(true); // the run's signal reached the fetch
+    d.release();
+    await inFlight; // the result resolves AFTER the abort — it must be discarded
+    const before = calls.length;
+    await llmOut({ runId: "r", assistantTexts: [TRIGGER] }, { agentId: "A" });
+    expect(calls.length).toBe(before); // nothing lands after the abort
+    expect(api._warnText()).toMatch(/discarded a capture for run r/);
+    expect(api._warnText()).toMatch(/dropped a callback for retired run r/);
+  });
+
+  test("item 5(b): gateway_stop aborts an in-flight capture", async () => {
+    const plugin = await loadPlugin();
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const api = apiForCapture(plugin);
+    const inFlight = api._handler("llm_output")({ runId: "r", assistantTexts: [TRIGGER] }, { agentId: "A" });
+    await waitFor(() => puts(calls).length === 1);
+    const fetchCall = puts(calls)[0]!;
+    await api._fire("gateway_stop", { reason: "shutdown" }, {});
+    expect(fetchCall.signal!.aborted).toBe(true);
+    d.release();
+    await inFlight;
+    expect(puts(calls).length).toBe(1); // no second write; the late result is discarded
+    expect(api._warnText()).toMatch(/discarded a capture for run r/);
+  });
+
+  test("item 5(c): model_call_ended with failureKind 'aborted' aborts the run", async () => {
+    const plugin = await loadPlugin();
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const api = apiForCapture(plugin);
+    const inFlight = api._handler("llm_output")({ runId: "r", assistantTexts: [TRIGGER] }, { agentId: "A" });
+    await waitFor(() => puts(calls).length === 1);
+    const fetchCall = puts(calls)[0]!;
+    await api._fire(
+      "model_call_ended",
+      { runId: "r", callId: "c", provider: "p", model: "m", durationMs: 1, outcome: "error", failureKind: "aborted" },
+      { agentId: "A" },
+    );
+    expect(fetchCall.signal!.aborted).toBe(true);
+    d.release();
+    await inFlight;
+    expect(api._warnText()).toMatch(/discarded a capture for run r/);
   });
 });

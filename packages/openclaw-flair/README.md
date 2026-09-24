@@ -89,7 +89,7 @@ load each agent's `SOUL.md` / `AGENTS.md`.
 | `autoCapture` | boolean | `false` | Auto-capture trigger phrases from conversation. **Off by default**; requires `allowConversationAccess`. |
 | `maxRecallResults` | number | `5` | Max results for `memory_search`. |
 | `maxBootstrapTokens` | number | `4000` | Max tokens for the returned bootstrap context. |
-| `autoCaptureMaxPerSession` | number | `3` | Cap on trigger-based auto-captures per session. |
+| `autoCaptureMaxPerSession` | number | `3` | Cap on trigger-based auto-captures **per run**. |
 
 ### Required permissions
 
@@ -111,15 +111,46 @@ preserved. Logs say "returned", never "injected".
 
 ### Auto-capture
 
-> **Auto-capture is not production-ready until slice 2.** Slice 1 keeps it
-> available but **off by default**. Do not enable it in production yet.
+> **Auto-capture remains OFF by default.** Enable it only with
+> `hooks.allowConversationAccess: true`; without it the plugin contributes
+> nothing and logs `openclaw-flair: capture disabled (permission)`.
 
 Auto-capture scans conversation text for conservative trigger phrases (e.g.
 "remember this", "we decided") and writes a matching excerpt to Flair. It runs
 on `agent_end` (full-session scan) and `llm_input` / `llm_output` (live turns,
 which also covers long-lived persistent gateway sessions where `agent_end` never
-fires). Both share one per-session budget (`autoCaptureMaxPerSession`) and dedup
-by content hash.
+fires).
+
+What this slice guarantees:
+
+- **Per-run state.** Capture state is keyed by agent **and run id**, never by
+  agent alone — two concurrent runs of one agent do not share a budget or a
+  dedup set. A callback whose hook carries no run id is refused with a one-time
+  log.
+- **Reserve before the write.** The excerpt and the cap slot
+  (`autoCaptureMaxPerSession`) are reserved synchronously, before any `await`, so
+  a concurrent callback or the `agent_end` rescan dedups against the reservation
+  instead of writing twice; the reservation is released if the write fails.
+- **Honest outcomes and ids.** `memory_store` uses the client's canonical UUID
+  id (never a hand-built `Date.now()` id) and returns a machine-readable
+  outcome — `written` is true only after the primary write succeeded, a partial
+  success is reported as such, and an unresolved identity reports
+  `{ written: false, reason: "no-identity" }`.
+- **Retirement.** A successful `agent_end` ends a run but keeps its state (the
+  host can dispatch `agent_end` before `llm_output` for the same run). The state
+  retires only when the run has ended, has no in-flight writes, and 30 s have
+  passed since `agent_end`; a callback for a retired run is dropped with a
+  one-time log naming the run.
+- **Abort.** The plugin owns one `AbortController` per run. A run is aborted by
+  a failed `agent_end` (`success === false`), by `gateway_stop` (every run), or
+  by `model_call_ended` with `failureKind: "aborted"`. On abort the run's signal
+  reaches every in-flight capture fetch, a result that resolves after the abort
+  is discarded, reservations are released, the state is retired immediately, and
+  nothing is written after the abort. A successful `agent_end` never aborts.
+
+What this slice does **not** cover: slot selection and anchor re-injection are
+**slice 3**; the plugin still takes no context-engine slot and leaves the host's
+native memory section in place.
 
 ## Auth
 

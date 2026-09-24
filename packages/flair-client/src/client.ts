@@ -111,8 +111,21 @@ export class FlairClient {
     return this.privateKey;
   }
 
-  /** Make an authenticated request to Flair. */
-  async request<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
+  /**
+   * Make an authenticated request to Flair.
+   *
+   * `opts.signal` is an optional caller-owned abort signal (e.g. a plugin's
+   * per-run AbortController). It is combined with this client's per-request
+   * timeout so EITHER can cancel the underlying fetch. The timeout already
+   * exists per request; the caller signal is what lets an in-flight write be
+   * aborted when the work that requested it is cancelled.
+   */
+  async request<T = unknown>(
+    method: string,
+    path: string,
+    body?: unknown,
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<T> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       // flair#1383: the server refuses clients older than 0.18.0 on write paths.
@@ -136,11 +149,13 @@ export class FlairClient {
         authMethod: "basic",
       };
     }
+    const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
+    const signal = opts.signal ? AbortSignal.any([timeoutSignal, opts.signal]) : timeoutSignal;
     const res = await fetch(`${this.url}${path}`, {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(this.timeoutMs),
+      signal,
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
@@ -216,6 +231,9 @@ class MemoryApi {
      *  the server credits each id through the same usage ledger as
      *  POST /RecordUsage and strips the field before persisting. */
     usedMemoryIds?: string[];
+    /** Optional caller-owned abort signal, forwarded to
+     *  `FlairClient.request` so an in-flight write can be cancelled. */
+    signal?: AbortSignal;
   } = {}): Promise<Memory> {
     const id = opts.id ?? `${this.client.agentId}-${crypto.randomUUID()}`;
     const record: Record<string, unknown> = {
@@ -248,7 +266,9 @@ class MemoryApi {
     // row (resources/Memory.ts). Absent = omitted, zero behavior change.
     if (this.client.claimedClient) record.claimedClient = this.client.claimedClient;
 
-    const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${id}`, record);
+    const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${id}`, record, {
+      signal: opts.signal,
+    });
     // Merge the server response (deduplicated/matchedId/matchConfidence/
     // written, plus any echoed fields) over the locally-constructed record —
     // the write always happens, so `record` always reflects what was sent,
