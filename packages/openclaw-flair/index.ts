@@ -20,8 +20,9 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { dirname } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { FlairClient, resolveKeyPath } from "@tpsdev-ai/flair-client";
+import { FlairClient, loadPrivateKey, resolveKeyPath } from "@tpsdev-ai/flair-client";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 
 /** The host tool-context fields this plugin reads. `agentId` is the identity. */
@@ -43,14 +44,16 @@ export const TESTED_HOST_VERSIONS = ["2026.8.1", "2026.9.6"] as const;
  * "Core runtime helpers exposed to trusted native plugins"). Environment
  * variables are deliberately NOT consulted: any process can set
  * OPENCLAW_VERSION, so an env-sourced gate is an override anyone could use to
- * fake the tested set. If the runtime version is missing or not a string the
- * host is unknown and the plugin registers nothing.
+ * fake the tested set. The comparison is EXACT string equality against the
+ * tested set (no prefix/range match: `2026.8.1-dev` is not `2026.8.1`). If the
+ * runtime version is missing or not a string the host is unknown and the plugin
+ * registers nothing.
  */
 function hostVersionOf(api: OpenClawPluginApi): string | null {
   const raw = (api as any)?.runtime?.version;
   if (typeof raw !== "string") return null;
-  const m = raw.trim().match(/^v?(\d+\.\d+\.\d+)/);
-  return m ? m[1] : null;
+  const v = raw.trim();
+  return v || null;
 }
 
 // ─── Defense-in-depth: agentId path-traversal guard ──────────────────────────
@@ -242,50 +245,63 @@ function detectEntities(text: string): DetectedEntity[] {
 // ─── Plugin export ────────────────────────────────────────────────────────────
 
 /**
- * The ids of every agent this gateway serves, or null when the agent set
- * cannot be determined (fail closed — identity cannot be guaranteed).
+ * The gateway's agent set, from host config.
  *
- * Older hosts keyed agents by an OBJECT (`agents.entries`, keyed by agent id);
- * others by an ARRAY (`agents.list`, `{ id }`). Either shape is accepted; if
- * neither is present the answer is "unknown", which refuses registration.
+ * - `implicit` — no roster property at all: a valid config with no
+ *   `agents.entries` and no `agents.list` means the host's IMPLICIT SOLE AGENT,
+ *   so registration proceeds.
+ * - `ids` — a present, non-empty roster (entries keyed by agent id, or a list of
+ *   `{ id }`).
+ * - `unknown` — the config is unreadable, or a roster property is present but
+ *   empty or malformed: identity cannot be guaranteed, so register nothing.
  */
-function gatewayAgentIds(api: OpenClawPluginApi): string[] | null {
-  const agents = (api.config as any)?.agents;
-  if (!agents || typeof agents !== "object") return null;
+type AgentSet =
+  | { kind: "implicit" }
+  | { kind: "ids"; ids: string[] }
+  | { kind: "unknown" };
+
+function gatewayAgentSet(api: OpenClawPluginApi): AgentSet {
+  const config = api.config as any;
+  if (!config || typeof config !== "object") return { kind: "unknown" };
+  const agents = config.agents;
+  if (agents === undefined || agents === null) return { kind: "implicit" };
+  if (typeof agents !== "object") return { kind: "unknown" };
   const entries = (agents as any).entries;
-  if (entries && typeof entries === "object" && !Array.isArray(entries)) {
+  if (entries !== undefined) {
+    if (!entries || typeof entries !== "object" || Array.isArray(entries)) return { kind: "unknown" };
     const ids = Object.keys(entries).filter((k) => typeof k === "string" && k.length > 0);
-    return [...new Set(ids)];
+    if (ids.length === 0) return { kind: "unknown" };
+    return { kind: "ids", ids: [...new Set(ids)] };
   }
   const list = (agents as any).list;
-  if (Array.isArray(list)) {
+  if (list !== undefined) {
+    if (!Array.isArray(list)) return { kind: "unknown" };
     const ids = list
       .map((a: any) => (typeof a === "string" ? a : a?.id))
       .filter((id: any): id is string => typeof id === "string" && id.length > 0);
-    return [...new Set(ids)];
+    if (ids.length === 0) return { kind: "unknown" };
+    return { kind: "ids", ids: [...new Set(ids)] };
   }
-  return null;
+  return { kind: "implicit" };
 }
 
 /**
- * The OS users the agents' key directories resolve under. `null` entries mean
- * "could not be determined" (the directory does not exist yet).
+ * Whether THIS process can read an agent's key. `true` when the key file
+ * resolves and its directory is owned by this process's uid; `false` when it
+ * resolves but the directory belongs to another user; `null` when it cannot be
+ * determined (the key does not resolve, the uid is unavailable, or the stat
+ * fails) — which is treated as "cannot guarantee".
  */
-function keyDirOwners(agentIds: string[], keyPath?: string): Array<number | null> {
-  const out: Array<number | null> = [];
-  for (const id of agentIds) {
-    const dir = resolveKeyPath(id, keyPath);
-    if (!dir) {
-      out.push(null);
-      continue;
-    }
-    try {
-      out.push(statSync(dir).uid);
-    } catch {
-      out.push(null);
-    }
+function keyReadableByThisProcess(agentId: string, keyPath?: string): boolean | null {
+  const keyFile = resolveKeyPath(agentId, keyPath);
+  if (!keyFile) return null;
+  const uid = process.getuid?.();
+  if (typeof uid !== "number") return null;
+  try {
+    return statSync(dirname(keyFile)).uid === uid;
+  } catch {
+    return null;
   }
-  return out;
 }
 
 export default {
@@ -307,23 +323,28 @@ export default {
     const cfg = (api.pluginConfig ?? {}) as unknown as FlairMemoryConfig;
 
     // ── 2. Shared-OS-user detection, fail closed. ───────────────────────────
-    // If the gateway serves more than one agent and their key directories
-    // resolve under a single OS user, the same uid can read every key file, so
-    // identity cannot be guaranteed. Register nothing; there is no override.
-    // If the agent set cannot be determined at all, also register nothing — an
-    // unknown gateway is not a guaranteed one.
-    const agentIds = gatewayAgentIds(api);
-    if (agentIds === null || agentIds.length === 0) {
+    // The property that matters is whether THIS gateway process can read every
+    // agent's key. An implicit sole agent is fine. An unreadable/empty roster,
+    // or a roster where any agent's key owner cannot be determined, is refused.
+    // When every agent's key directory is owned by this process's uid, the
+    // process can read them all, so identity cannot be guaranteed.
+    const agentSet = gatewayAgentSet(api);
+    if (agentSet.kind === "unknown") {
       api.logger.warn(
         "openclaw-flair disabled: cannot determine the gateway agent set; identity cannot be guaranteed",
       );
       return;
     }
+    const agentIds = agentSet.kind === "ids" ? agentSet.ids : ["(implicit)"];
     if (agentIds.length > 1) {
-      const owners = keyDirOwners(agentIds, cfg.keyPath);
-      const known = owners.filter((u): u is number => u !== null);
-      const distinct = new Set(known);
-      if (distinct.size <= 1) {
+      const readable = agentIds.map((id) => keyReadableByThisProcess(id, cfg.keyPath));
+      if (readable.some((r) => r === null)) {
+        api.logger.warn(
+          "openclaw-flair disabled: cannot determine whether this process can read every agent key; identity cannot be guaranteed",
+        );
+        return;
+      }
+      if (readable.every((r) => r === true)) {
         api.logger.warn(
           "openclaw-flair disabled: agents share an OS user; identity cannot be guaranteed",
         );
@@ -380,9 +401,56 @@ export default {
       }
       let client = clients.get(agentId);
       if (!client) {
-        client = new FlairClient({ url: cfg.url ?? DEFAULT_URL, agentId, keyPath });
+        client = makeSigningOnlyClient(agentId, keyPath);
         clients.set(agentId, client);
       }
+      return client;
+    }
+
+    /**
+     * A FlairClient whose request() verifies the signer IMMEDIATELY before the
+     * fetch. FlairClient falls back to an unauthenticated request when no key
+     * resolves at request time, so a key removed or rotated after the precheck
+     * could otherwise reach that fallback. This wrapper makes a missing,
+     * changed, or unusable signer throw BEFORE any fetch — the precheck is not
+     * the only guard, and the error names the agent, never key bytes.
+     */
+    function makeSigningOnlyClient(agentId: string, keyPath?: string): FlairClient {
+      const client = new FlairClient({ url: cfg.url ?? DEFAULT_URL, agentId, keyPath });
+      const original = client.request.bind(client) as typeof client.request;
+      let seenKeyHash: string | null = null;
+      (client as any).request = async (method: string, path: string, body?: unknown) => {
+        const keyFile = resolveKeyPath(agentId, keyPath);
+        if (!keyFile) {
+          throw new IdentityRefusal(
+            `no private key for agent "${agentId}" at request time — refusing (no Basic/unsigned fallback)`,
+          );
+        }
+        let raw: Buffer;
+        try {
+          raw = readFileSync(keyFile);
+        } catch (err: any) {
+          throw new IdentityRefusal(
+            `private key for agent "${agentId}" is unreadable — refusing (no Basic/unsigned fallback)`,
+          );
+        }
+        const hash = createHash("sha256").update(raw).digest("hex");
+        if (seenKeyHash === null) seenKeyHash = hash;
+        else if (seenKeyHash !== hash) {
+          throw new IdentityRefusal(
+            `the private key for agent "${agentId}" changed while running — refusing until the gateway is restarted so identity is re-established`,
+          );
+        }
+        try {
+          loadPrivateKey(keyFile);
+        } catch {
+          throw new IdentityRefusal(
+            `private key for agent "${agentId}" is unusable — refusing (no Basic/unsigned fallback)`,
+          );
+        }
+        (client as any).privateKey = undefined; // re-read from disk each request
+        return original(method, path, body);
+      };
       return client;
     }
 
@@ -564,6 +632,7 @@ export default {
             if (!mem) return { content: [{ type: "text", text: `Memory ${id} not found.` }], details: {} };
             return { content: [{ type: "text", text: mem.content }], details: mem };
           } catch (err: any) {
+            api.logger.warn(`openclaw-flair: memory_get refused/failed: ${err.message}`);
             return { content: [{ type: "text", text: `Memory get failed: ${err.message}` }], details: {} };
           }
         },
@@ -600,13 +669,17 @@ export default {
     // ── 8. Capture — permission-gated, OFF by default. ─────────────────────
     // Capture reads conversation content ONLY through the permission-gated
     // hooks; a missing permission produces a visible status line and no reads.
-    if (autoCapture) {
-      if (!allowConversationAccess) {
-        api.logger.warn("openclaw-flair: capture disabled (permission)");
-      } else {
+    if (!allowConversationAccess) {
+      // R8: reported whenever the permission is withheld, whether or not
+      // capture is enabled.
+      api.logger.warn("openclaw-flair: capture disabled (permission)");
+    } else if (autoCapture) {
         api.on("agent_end", async (event: any, ctx: any) => {
           const agentId = ctx?.agentId;
-          if (!agentId) return;
+          if (!agentId) {
+            api.logger.warn("openclaw-flair: agent_end refused: no agent identity in host context — refusing rather than inheriting one");
+            return;
+          }
           try {
             const client = clientFor(agentId);
             const messages = (event?.messages ?? []) as Array<{ role: string; content?: string }>;
@@ -627,7 +700,10 @@ export default {
 
         api.on("llm_input", async (event: any, ctx: any) => {
           const agentId = ctx?.agentId;
-          if (!agentId) return;
+          if (!agentId) {
+            api.logger.warn("openclaw-flair: llm_input refused: no agent identity in host context — refusing rather than inheriting one");
+            return;
+          }
           const text = typeof event?.prompt === "string" ? event.prompt : "";
           if (!text) return;
           try {
@@ -641,7 +717,10 @@ export default {
 
         api.on("llm_output", async (event: any, ctx: any) => {
           const agentId = ctx?.agentId;
-          if (!agentId) return;
+          if (!agentId) {
+            api.logger.warn("openclaw-flair: llm_output refused: no agent identity in host context — refusing rather than inheriting one");
+            return;
+          }
           const texts = Array.isArray(event?.assistantTexts) ? event.assistantTexts : [];
           const text = texts.filter((t: unknown) => typeof t === "string").join("\n");
           if (!text) return;
@@ -653,12 +732,33 @@ export default {
             api.logger.warn(`openclaw-flair: live auto-capture (llm_output) refused/failed: ${err.message}`);
           }
         });
-      }
     }
 
     // ── 9. Slot safety. ────────────────────────────────────────────────────
     // Slice 1 does NOT select a context-engine slot and does not suppress the
     // host's native memory section; anchors stay off until slice 3. The host's
     // own workspace files already load each agent's SOUL/AGENTS.
+
+    // ── 10. Status surface (R5). ───────────────────────────────────────────
+    // The 2026.7.1 plugin SDK offers `registerService` (plus `internalDiagnostics`
+    // on the service context) but no dedicated status-line hook, so the enabled
+    // plugin exposes its state through a registered service; each gate's refusal
+    // is its startup log line (a gate that refuses must register nothing, and the
+    // version gate must stay the first statement).
+    api.registerService({
+      id: "openclaw-flair-status",
+      start: (ctx: any) => {
+        const line =
+          "openclaw-flair status: " +
+          `host=${hostVersion} prompt=${allowPromptInjection ? "allowed" : "withheld"} ` +
+          `capture=${allowConversationAccess ? "allowed" : "withheld"} ` +
+          `agents=${agentIds.length > 1 ? "multiple" : "sole"} ` +
+          `mode=${allowAgentId ? "allow-list" : "host-identity"}`;
+        (ctx?.logger ?? api.logger).info(line);
+        try {
+          ctx?.internalDiagnostics?.emit?.({ kind: "openclaw-flair-status", detail: line });
+        } catch { /* diagnostics are best-effort */ }
+      },
+    });
   },
 };

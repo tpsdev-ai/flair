@@ -2,29 +2,27 @@
 /**
  * openclaw-flair — real-host drills (slice 1).
  *
- * Run this ON a host that runs OpenClaw, with a reachable Flair instance. It
- * learns the host version from the host CLI itself, sets up a throwaway HOME
- * (config + per-agent keys), drives one agent turn per drill, and asserts the
- * drill's expected outcome from the host's own output.
+ * STATUS: this runner is NOT a working drill suite yet. It sets up an isolated
+ * HOME, learns the host version, and drives ONE embedded agent turn per step,
+ * but it does not yet assert the properties the spec's drills require. The
+ * numbered TODO in README.md lists what a real run must add. It is delivered so
+ * a tested host can finish it.
  *
- * It is deliberately NOT run against a live gateway: HOME is redirected to a
- * scratch tree so no real ~/.flair (which may be production) is touched.
+ * SAFETY: the scratch HOME is ALWAYS a fresh private mkdtemp directory — a
+ * caller-supplied HOME is never accepted (a symlink planted at a predictable
+ * path could make the runner overwrite a real ~/.openclaw / ~/.flair/keys). The
+ * runner refuses to run unless invoked with an explicit --local/--embedded flag
+ * and with no OPENCLAW_GATEWAY_* in the environment, so it cannot reach a live
+ * gateway. The scratch HOME is removed on exit.
  *
  * Usage:
- *   HOME=/tmp/ocf-drill node packages/openclaw-flair/scripts/drill/run.mjs
+ *   node packages/openclaw-flair/scripts/drill/run.mjs --local
  *
- * Env:
- *   OPENCLAW_BIN   host CLI (default: openclaw)
- *   FLAIR_URL      Flair base URL (default: http://127.0.0.1:19926)
- *   HOME           scratch dir (default: a fresh mkdtemp)
- *
- * The plugin's host-version source is the host API (`api.runtime.version`), not
- * an environment variable, so this runner never sets a version env var — it
- * reads the version the host reports.
+ * Env: OPENCLAW_BIN (default: openclaw), FLAIR_URL (default: http://127.0.0.1:19926)
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, cpSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, cpSync, realpathSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
@@ -41,13 +39,25 @@ function resolveHostVersion() {
   return m ? m[1] : null;
 }
 
-/** One agent turn with a prompt, over the scratch HOME. */
-function HOST_INVOKE(home, prompt, extra = {}) {
-  return spawnSync(HOST_BIN, ["agent", "run", "--prompt", prompt], {
-    env: { ...process.env, ...extra, HOME: home },
-    encoding: "utf8",
-    timeout: 120_000,
-  });
+/**
+ * One embedded agent turn. The documented invocation is
+ * `openclaw agent --agent <id> --message <text>` (gateway by default; `--local`
+ * runs the embedded agent). The child environment is filtered — no ambient
+ * OPENCLAW_* / FLAIR_* settings cross into it.
+ */
+function hostInvoke(home, agentId, message) {
+  const env = {
+    HOME: home,
+    PATH: process.env.PATH ?? "",
+    FLAIR_URL: process.env.FLAIR_URL || "http://127.0.0.1:19926",
+  };
+  const args = localArgs(["agent", "--local", "--agent", agentId, "--message", message]);
+  return spawnSync(HOST_BIN, args, { env, encoding: "utf8", timeout: 120_000 });
+}
+
+/** `--local` is the flag that selects an embedded run. */
+function localArgs(base) {
+  return base;
 }
 
 const results = [];
@@ -61,10 +71,9 @@ function pluginPackageDir() {
 }
 
 /**
- * Drill 2 needs the out-of-set branch. Since the host version comes from the
- * host API, the only way to force that branch is a plugin whose tested set does
- * not contain the real host version — so we build a falsified COPY of the
- * plugin's built entry and load that copy.
+ * Build a FALSIFIED COPY of the plugin's built entry whose tested set excludes
+ * the real host version. The host version comes from the host API, so this is
+ * the only way to force the out-of-set branch.
  */
 function falsifiedPluginDir() {
   const src = join(pluginPackageDir(), "dist");
@@ -72,23 +81,21 @@ function falsifiedPluginDir() {
   cpSync(src, dst, { recursive: true });
   const entry = join(dst, "index.js");
   const text = readFileSync(entry, "utf8");
-  const falsified = text.replace(
-    /\["2026\.8\.1",\s*"2026\.9\.6"\]/,
-    '["0.0.0"]',
-  );
-  if (falsified === text) {
-    throw new Error("could not falsify the tested set in dist/index.js (pattern not found)");
-  }
+  const falsified = text.replace(/\["2026\.8\.1",\s*"2026\.9\.6"\]/, '["0.0.0"]');
+  if (falsified === text) throw new Error("could not falsify the tested set in dist/index.js (pattern not found)");
   writeFileSync(entry, falsified);
-  // The package's manifest is needed next to the entry.
   cpSync(join(pluginPackageDir(), "openclaw.plugin.json"), join(dst, "openclaw.plugin.json"));
   return dst;
 }
 
+let scratchHomes = [];
+
+/** A FRESH private scratch HOME. A caller-supplied HOME is never accepted. */
 function setupHome(hooks, extraPluginPath) {
-  const home = process.env.HOME && process.env.HOME.startsWith("/tmp")
-    ? process.env.HOME
-    : mkdtempSync(join(tmpdir(), "ocf-drill-"));
+  const home = mkdtempSync(join(tmpdir(), "ocf-drill-"));
+  scratchHomes.push(home);
+  // The scratch HOME must be a real directory: realpath() is the same string.
+  if (realpathSync(home) !== home) throw new Error("scratch HOME resolved through a symlink — refusing");
   mkdirSync(join(home, ".openclaw"), { recursive: true });
   mkdirSync(join(home, ".flair", "keys"), { recursive: true });
   for (const id of ["agent-a", "agent-b"]) {
@@ -105,26 +112,42 @@ function setupHome(hooks, extraPluginPath) {
         "openclaw-flair": {
           enabled: true,
           hooks,
-          config: {
-            url: process.env.FLAIR_URL || "http://127.0.0.1:19926",
-            autoRecall: true,
-            autoCapture: hooks.allowConversationAccess === true,
-          },
+          config: { url: process.env.FLAIR_URL || "http://127.0.0.1:19926", autoRecall: true, autoCapture: hooks.allowConversationAccess === true },
         },
       },
     },
-    agents: { entries: { "agent-a": {} } },
+    // BOTH agents are declared (the two-agent drill needs two). NOTE: on a host
+    // where both agents share one OS user the plugin refuses to register — the
+    // two-agent drill requires per-agent OS users (the cutover).
+    agents: { entries: { "agent-a": {}, "agent-b": {} } },
   };
   writeFileSync(join(home, ".openclaw", "openclaw.json"), JSON.stringify(config, null, 2));
   return home;
 }
 
+function cleanup() {
+  for (const h of scratchHomes) {
+    try { rmSync(h, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+  scratchHomes = [];
+}
+
 function main() {
+  // Safety gate 1: embedded only.
+  if (!process.argv.includes("--local") && !process.argv.includes("--embedded")) {
+    console.error("refusing to run drills: pass --local (embedded agent run); this runner must never touch a live gateway");
+    process.exit(2);
+  }
+  // Safety gate 2: no gateway environment.
+  const gatewayVars = Object.keys(process.env).filter((k) => k.startsWith("OPENCLAW_GATEWAY_"));
+  if (gatewayVars.length > 0) {
+    console.error(`refusing to run drills: OPENCLAW_GATEWAY_* is set (${gatewayVars.join(", ")}) — unset it and retry`);
+    process.exit(2);
+  }
+
   const hostVersion = resolveHostVersion();
   if (!hostVersion || !TESTED_HOST_VERSIONS.includes(hostVersion)) {
-    console.error(
-      `refusing to run drills: host reports "${hostVersion ?? "(unknown)"}", not in the tested set ${TESTED_HOST_VERSIONS.join(", ")}`,
-    );
+    console.error(`refusing to run drills: host reports "${hostVersion ?? "(unknown)"}", not in the tested set ${TESTED_HOST_VERSIONS.join(", ")}`);
     process.exit(2);
   }
   console.log(`host version: ${hostVersion}`);
@@ -133,53 +156,47 @@ function main() {
   const noConv = { allowPromptInjection: true, allowConversationAccess: false };
   const noPrompt = { allowPromptInjection: false, allowConversationAccess: true };
 
-  // 1. happy path -----------------------------------------------------------
+  // 1. happy path — one embedded turn completes; the plugin does not report itself disabled.
   {
     const home = setupHome(full);
-    const r = HOST_INVOKE(home, "Store: remember this — the drill marker is happy-path.");
+    const r = hostInvoke(home, "agent-a", "remember this: the drill marker is happy-path");
     const out = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
-    const reachedProvider = r.status === 0 || /provider|model|assistant/i.test(out);
-    const hasDisabled = /openclaw-flair disabled/.test(out);
-    record("happy", reachedProvider && !hasDisabled, `exit=${r.status}`);
+    record("happy", r.status === 0 && !/openclaw-flair disabled/.test(out), `exit=${r.status}`);
   }
 
-  // 2. decline (falsified tested set) --------------------------------------
+  // 2. decline — falsified tested set -> the disabled line, no [plugins] warnings.
   {
     const falsified = falsifiedPluginDir();
     const home = setupHome(full, falsified);
-    const r = HOST_INVOKE(home, "say hello");
+    const r = hostInvoke(home, "agent-a", "say hello");
     const out = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
-    const declined = /openclaw-flair disabled: host .* not in tested set/.test(out);
-    const clean = !/\[plugins\]/.test(out);
-    record("decline", declined && clean, `exit=${r.status}`);
+    record("decline", /openclaw-flair disabled: host .* not in tested set/.test(out) && !/\[plugins\]/.test(out), `exit=${r.status}`);
     rmSync(falsified, { recursive: true, force: true });
   }
 
-  // 3. two agents ----------------------------------------------------------
+  // 3. two agents — requires per-agent OS users; on a shared user the plugin declines.
   {
     const home = setupHome(full);
-    const r = HOST_INVOKE(home, "as agent-a: remember this — marker two-agents");
+    const r = hostInvoke(home, "agent-a", "as agent-a: remember this: marker two-agents");
     const out = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
-    record("two-agents", r.status === 0, `exit=${r.status} (verify signer id in the Flair request log)`);
+    record("two-agents", r.status === 0, `exit=${r.status} (verify signer id in the Flair request log; requires per-agent OS users)`);
   }
 
-  // 4. gates ---------------------------------------------------------------
+  // 4. gates.
   {
     const homeNoConv = setupHome(noConv);
-    const r1 = HOST_INVOKE(homeNoConv, "say hello");
-    const out1 = `${r1.stdout ?? ""}\n${r1.stderr ?? ""}`;
-    record("gates-capture", /capture disabled \(permission\)/.test(out1), `exit=${r1.status}`);
+    const r1 = hostInvoke(homeNoConv, "agent-a", "say hello");
+    record("gates-capture", /capture disabled \(permission\)/.test(`${r1.stdout ?? ""}\n${r1.stderr ?? ""}`), `exit=${r1.status}`);
 
     const homeNoPrompt = setupHome(noPrompt);
-    const r2 = HOST_INVOKE(homeNoPrompt, "say hello");
-    const out2 = `${r2.stdout ?? ""}\n${r2.stderr ?? ""}`;
-    record("gates-prompt", /prompt context disabled: policy/.test(out2), `exit=${r2.status}`);
+    const r2 = hostInvoke(homeNoPrompt, "agent-a", "say hello");
+    record("gates-prompt", /prompt context disabled: policy/.test(`${r2.stdout ?? ""}\n${r2.stderr ?? ""}`), `exit=${r2.status}`);
   }
 
-  // 5. transcript ----------------------------------------------------------
+  // 5. transcript — record the raw host output for the mock to replay.
   {
     const home = setupHome(full);
-    const r = HOST_INVOKE(home, "say hello");
+    const r = hostInvoke(home, "agent-a", "say hello");
     const here = dirname(fileURLToPath(import.meta.url));
     const outPath = join(here, `transcript-${hostVersion}.json`);
     writeFileSync(outPath, JSON.stringify({ hostVersion, exit: r.status, stdout: r.stdout, stderr: r.stderr }, null, 2));
@@ -187,8 +204,13 @@ function main() {
   }
 
   const failed = results.filter((r) => !r.ok);
-  console.log(`\n${results.length - failed.length}/${results.length} drills passed.`);
+  console.log(`\n${results.length - failed.length}/${results.length} steps passed (see README TODO — these are scaffolding, not the spec's drills).`);
+  cleanup();
   process.exit(failed.length ? 1 : 0);
 }
 
-main();
+try {
+  main();
+} finally {
+  cleanup();
+}

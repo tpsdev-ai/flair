@@ -1,69 +1,65 @@
-# openclaw-flair — real-host drills (slice 1)
+# openclaw-flair — drill scaffolding (slice 1)
 
-These drills exercise the identity core against a **real OpenClaw host**. They
-are not an in-memory mock: the unit mock replays what these drills record.
+**This is not a working drill suite.** `run.mjs` sets up an isolated scratch
+HOME, learns the host version from the host CLI, and drives **one embedded agent
+turn per step**, recording the host's output. It does **not** assert the
+properties the spec's drills require. It is scaffolding for a tested host to
+finish; see the TODO.
 
-## Host this is written for
+## What `run.mjs` actually does
 
-- **Tested host versions: `2026.8.1`** (the K&S VMs) and **`2026.9.6`** (npm
-  `latest`). The runner reads the host version from the host itself
-  (`openclaw --version`) and **refuses to run unless it is one of the tested
-  versions** — the point of the drill is the host contract. It never sets a
-  version environment variable; the plugin's version source is the host API
-  (`api.runtime.version`), which an env var cannot influence.
+For each step it:
 
-## The config it loads
+- mkdtemps a **fresh private** scratch HOME (a caller-supplied HOME is never
+  accepted — a symlink planted at a predictable path could otherwise make the
+  runner overwrite a real `~/.openclaw` / `~/.flair/keys`);
+- writes `openclaw.json` with the plugin at id `openclaw-flair` in the **memory**
+  slot (no `contextEngine` slot) and two agents, `agent-a` and `agent-b`;
+- writes a 32-byte Ed25519 seed at `.flair/keys/<agent>.key` (mode `0600`) — **not
+  registered with any Flair instance**;
+- runs `openclaw agent --local --agent <id> --message <text>` with a **filtered**
+  environment (no ambient `OPENCLAW_*` / `FLAIR_*`);
+- records PASS/FAIL for a single substring check on the host output (see the
+  table below);
+- removes every scratch HOME on exit.
 
-The runner writes a throwaway `HOME` with:
+It refuses to run unless invoked with `--local` (or `--embedded`), with no
+`OPENCLAW_GATEWAY_*` in the environment, and on a host whose version is in the
+tested set.
 
-- `openclaw.json` — the plugin at id `openclaw-flair` in the **memory** slot
-  (`plugins.slots.memory = "openclaw-flair"`, **no** `contextEngine` slot), one
-  agent, and `hooks.allowPromptInjection` / `hooks.allowConversationAccess` set
-  per drill (drill 4 flips them **off**).
-- `keys/<agent>.key` — a 32-byte Ed25519 seed per agent,
-  `~/.flair/keys/<agent>.key` layout, mode `0600`.
-- A Flair base URL from `FLAIR_URL` (or `http://127.0.0.1:19926`); a Flair
-  instance must be reachable and have the agents registered.
+| Step | The ONE thing it checks today |
+|---|---|
+| happy | exit is 0 and the output does not say `openclaw-flair disabled` |
+| decline | (falsified built entry) the output says `not in tested set` and has no `[plugins]` warnings |
+| two-agents | exit is 0 (requires per-agent OS users; on a shared user the plugin declines) |
+| gates-capture | `capture disabled (permission)` appears |
+| gates-prompt | `prompt context disabled: policy` appears |
+| transcript | writes `transcript-<hostVersion>.json` (raw stdout/stderr) |
 
-`HOME` isolation is mandatory: the runner sets `HOME` to the temp dir so no real
-`~/.flair` (which on some hosts is production) is touched.
+## TODO — what a real-host run must add (numbered)
 
-## What each drill asserts
-
-1. **happy** — with the plugin enabled, one agent turn completes and reaches the
-   provider; the returned prompt context is present in what the model received;
-   a `memory_store` is recorded under the **serving** agent; zero Soul writes.
-2. **decline** — with a deliberately falsified tested set (forcing the
-   out-of-set branch), one turn completes and reaches the provider, there are no
-   `[plugins]` warnings, and the line
-   `openclaw-flair disabled: host <v> not in tested set <s>` appears.
-3. **two-agents** — on one real gateway, A's turn never signs as B and vice
-   versa (asserted from the signer id in the Flair request log).
-4. **gates** — capture permission withheld → `capture disabled (permission)` and
-   zero capture writes; prompt policy withheld → `prompt context disabled: policy`.
-5. **transcript** — the raw host output (hooks accepted, permission-gate
-   behaviour, event order, including whether `agent_end` still precedes
-   `llm_output`) is recorded to `transcript-<hostVersion>.json` for the mock to
-   replay.
+1. **Register the keys with Flair** (`flair agent add` per agent) so the plugin
+   can actually sign; today the seeds are never registered.
+2. **Happy path:** assert the returned prompt context is present in what the
+   model received, that a `memory_store` was recorded under the **serving**
+   agent, and that the turn made **zero Soul writes**.
+3. **Decline:** assert no `[plugins]` warnings AND the exact disabled line, and
+   that the turn still completes and reaches the provider.
+4. **Two agents:** assert A's turn never signs as B and vice versa, read from the
+   signer id in the Flair request log — on a host with per-agent OS users.
+5. **Gates:** assert zero capture writes when capture is withheld (not just the
+   status line).
+6. **Transcript:** capture the hook order the host actually used (including
+   whether `agent_end` precedes `llm_output`), the hooks the host accepted, and
+   the permission-gate behaviour, then replay that transcript in the unit mock.
+7. **Re-capture the transcript on every host-version bump**, and add the version
+   to `TESTED_HOST_VERSIONS` only with a deliberate change that re-runs these.
 
 ## Running
 
 ```bash
-# on a tested-version host, with a reachable Flair instance:
-HOME=/tmp/ocf-drill node packages/openclaw-flair/scripts/drill/run.mjs
+node packages/openclaw-flair/scripts/drill/run.mjs --local
 ```
 
-The runner shells out to the host CLI (`OPENCLAW_BIN`, default `openclaw`) —
-`openclaw --version` to learn the host version, and `openclaw agent run` for a
-one-shot turn; the exact invocation is isolated in `HOST_INVOKE` in `run.mjs` so
-a host that needs different flags only touches one line. Drill 2 (decline)
-builds a falsified copy of the plugin's built entry whose tested set excludes the
-real host version — that is the only way to force the out-of-set branch now that
-the version comes from the host API.
-
-## Status
-
-These drills are **unvalidated in the authoring environment** (no
-`2026.8.1`/`2026.9.6` host was available). They are delivered for the K&S host to
-run after the PR is up, per the slice-1 plan. The `contracts.tools` warning on
-`2026.8.1` (spec §2) is a known open item: a minimal repro is in the PR body.
+Requires a host in the tested set and a reachable Flair instance
+(`FLAIR_URL`). Not to be run against a live gateway.
