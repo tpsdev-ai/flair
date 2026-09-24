@@ -23,10 +23,15 @@
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync } from "node:fs";
+import * as realFs from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
+import { loadPrivateKey, resolveKeyPath } from "@tpsdev-ai/flair-client";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+
+/** The one file the A1 regression test plants under a root-owned directory. */
+const A1_TMP_KEY = "/tmp/ocf-a1-916.key";
 
 // ── mock host api, typed against the SDK's plugin API ────────────────────────
 
@@ -183,6 +188,9 @@ beforeEach(() => {
   process.env.OPENCLAW_VERSION = "2026.8.1"; // must be ignored
   process.env.OPENCLAW_COMPATIBILITY_HOST_VERSION = "2026.8.1";
   delete process.env.FLAIR_AGENT_ID; // env identity must be ignored entirely
+  // Restore the injectable key probes (a prior test may have substituted them).
+  signingKeyProbe.resolve = (a, kp) => resolveKeyPath(a, kp);
+  signingKeyProbe.load = (f) => loadPrivateKey(f);
 });
 
 afterEach(() => {
@@ -191,10 +199,28 @@ afterEach(() => {
     else (process.env as any)[k] = v;
   }
   rmSync(home, { recursive: true, force: true });
+  rmSync(A1_TMP_KEY, { force: true });
 });
 
 async function loadPlugin() {
   return (await import("../index.ts")).default;
+}
+
+/** The module namespace (for the probe + helpers). */
+async function loadModule(): Promise<any> {
+  return await import("../index.ts");
+}
+
+// The probe object the plugin's re-verification uses. On a build without it,
+// substitutions below are inert (which is how these tests go red there).
+let signingKeyProbe: { resolve: (a: string, kp?: string) => string | null; load: (f: string) => any };
+try {
+  signingKeyProbe = (await import("../index.ts") as any).signingKeyProbe ?? {
+    resolve: (a: string, kp?: string) => resolveKeyPath(a, kp),
+    load: (f: string) => loadPrivateKey(f),
+  };
+} catch {
+  signingKeyProbe = { resolve: (a, kp) => resolveKeyPath(a, kp), load: (f) => loadPrivateKey(f) };
 }
 
 // ── host version gate (R1) ───────────────────────────────────────────────────
@@ -282,17 +308,6 @@ describe("agent set and shared-OS-user detection (fail closed)", () => {
     expect(api._warnText()).toMatch(/agents share an OS user; identity cannot be guaranteed/);
   });
 
-  test("R2: an unknown key owner -> registers nothing", async () => {
-    // No key resolves for the second agent, so its owner cannot be determined.
-    writeKey("a");
-    const plugin = await loadPlugin();
-    installFetchStub();
-    const api = createMockApi({ config: { agents: { entries: { a: {}, b: {} } } } });
-    plugin.register(api as any);
-    expect(api._tools.size).toBe(0);
-    expect(api._warnText()).toMatch(/identity cannot be guaranteed/);
-  });
-
   test("R2: one agent registers", async () => {
     writeKey("a");
     const plugin = await loadPlugin();
@@ -300,6 +315,47 @@ describe("agent set and shared-OS-user detection (fail closed)", () => {
     const api = createMockApi({ config: { agents: { entries: { a: {} } } } });
     plugin.register(api as any);
     expect(api._tools.size).toBe(3);
+  });
+
+  test("A1: two agents both READABLE while their key dirs have DIFFERENT owners -> nothing registers", async () => {
+    // A's key under a ROOT-owned directory (/tmp, uid 0), B's under this user's
+    // home. Both files are readable by this process; an ownership-based check
+    // would call the dirs "different" and register. Readability says otherwise.
+    realFs.writeFileSync(A1_TMP_KEY, randomBytes(32));
+    realFs.chmodSync(A1_TMP_KEY, 0o600);
+    process.env.FLAIR_KEY_DIR = "/tmp";
+    mkdirSync(join(home, ".flair", "keys"), { recursive: true });
+    realFs.writeFileSync(join(home, ".flair", "keys", "ocf-a1-b.key"), randomBytes(32));
+    realFs.chmodSync(join(home, ".flair", "keys", "ocf-a1-b.key"), 0o600);
+    const plugin = await loadPlugin();
+    installFetchStub();
+    const api = createMockApi({ config: { agents: { entries: { "ocf-a1-916": {}, "ocf-a1-b": {} } } } });
+    plugin.register(api as any);
+    expect(api._tools.size).toBe(0);
+    expect(api._warnText()).toMatch(/agents share an OS user; identity cannot be guaranteed/);
+  });
+
+  test("A1: a key this process cannot READ counts as not ours (2 agents, 1 readable -> registers)", async () => {
+    writeKey("a");
+    const plugin = await loadPlugin();
+    installFetchStub();
+    const api = createMockApi({ config: { agents: { entries: { a: {}, b: {} } } } });
+    plugin.register(api as any);
+    expect(api._tools.size).toBe(3);
+  });
+
+  test("A1: an INDETERMINATE readability -> nothing registers", async () => {
+    writeKey("a");
+    writeKey("b");
+    const mod = await loadModule();
+    const other = mod.keyReadableByThisProcess("b", undefined, () => {
+      const e: any = new Error("EIO");
+      e.code = "EIO";
+      throw e;
+    });
+    expect(other).toBeNull();
+    const readable = mod.keyReadableByThisProcess("a");
+    expect(readable).toBe(true);
   });
 
   test("R2b: no roster property at all -> implicit sole agent -> registers", async () => {
@@ -492,6 +548,63 @@ describe("credential matrix — no Basic/unsigned fallback", () => {
     expect(calls.length).toBe(1);
     expect(calls[0].authorization).toMatch(/^TPS-Ed25519 A:/);
     expect(calls[0].authorization).not.toMatch(/^Basic /i);
+  });
+});
+
+// ── A2 — key loaded once, in memory; no admin fallback ───────────────────────
+
+describe("A2 — the client signs only with the key it loaded, in memory", () => {
+  test("a key REMOVED between the build and the fetch -> refusal, ZERO requests", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const api = createMockApi();
+    plugin.register(api as any);
+    const store = api._resolveTool("memory_store", { agentId: "A" });
+    const calls = installFetchStub();
+    // Simulate the file vanishing after the client was built: the pre-fetch
+    // re-verification (which a re-read of the file would bypass) sees no key.
+    signingKeyProbe.resolve = () => null;
+    const res = await store.execute("1", { text: "hello" });
+    expect(calls.length).toBe(0);
+    expect(res.content[0].text).toContain("unavailable");
+  });
+
+  test("a key ROTATED between the build and the fetch -> refusal, ZERO requests (never the new key)", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const api = createMockApi();
+    plugin.register(api as any);
+    const store = api._resolveTool("memory_store", { agentId: "A" });
+    const calls = installFetchStub();
+    // A DIFFERENT key appears in the window: the re-verification compares its
+    // fingerprint to the in-memory key's, so the request is refused rather than
+    // signed with the new key.
+    const rotated = join(home, "rotated.key");
+    realFs.writeFileSync(rotated, randomBytes(32));
+    signingKeyProbe.load = () => loadPrivateKey(rotated);
+    const res = await store.execute("1", { text: "hello" });
+    expect(calls.length).toBe(0);
+    expect(res.content[0].text).toContain("unavailable");
+  });
+
+  test("the client has NO admin credentials: env Basic auth cannot be used", async () => {
+    process.env.FLAIR_ADMIN_USER = "admin";
+    process.env.FLAIR_ADMIN_PASSWORD = "pw";
+    try {
+      writeKey("A");
+      const plugin = await loadPlugin();
+      const calls = installFetchStub();
+      const api = createMockApi();
+      plugin.register(api as any);
+      const store = api._resolveTool("memory_store", { agentId: "A" });
+      await store.execute("1", { text: "hello" });
+      expect(calls.length).toBe(1);
+      expect(calls[0].authorization).toMatch(/^TPS-Ed25519 A:/);
+      expect(calls[0].authorization).not.toMatch(/^Basic /i);
+    } finally {
+      delete process.env.FLAIR_ADMIN_USER;
+      delete process.env.FLAIR_ADMIN_PASSWORD;
+    }
   });
 });
 

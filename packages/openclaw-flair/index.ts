@@ -18,8 +18,8 @@
  * is selected — the host's own native memory section is left intact.
  */
 
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { createHash, type KeyObject } from "node:crypto";
+import { accessSync, constants as fsConstants } from "node:fs";
 import { dirname } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { FlairClient, loadPrivateKey, resolveKeyPath } from "@tpsdev-ai/flair-client";
@@ -244,6 +244,25 @@ function detectEntities(text: string): DetectedEntity[] {
 
 // ─── Plugin export ────────────────────────────────────────────────────────────
 
+/** A stable fingerprint of a loaded private key (never the raw seed). */
+function keyFingerprint(key: KeyObject): string {
+  return createHash("sha256").update(key.export({ type: "pkcs8", format: "der" })).digest("hex");
+}
+
+/**
+ * Injectable key probes for the pre-fetch re-verification. Production uses the
+ * real functions; a test substitutes them to simulate a key file that changes
+ * AFTER the client was built but BEFORE the fetch (the window a re-read would
+ * otherwise paper over).
+ */
+export const signingKeyProbe: {
+  resolve: (agentId: string, keyPath?: string) => string | null;
+  load: (keyFile: string) => KeyObject;
+} = {
+  resolve: (agentId, keyPath) => resolveKeyPath(agentId, keyPath),
+  load: (keyFile) => loadPrivateKey(keyFile),
+};
+
 /**
  * The gateway's agent set, from host config.
  *
@@ -286,20 +305,25 @@ function gatewayAgentSet(api: OpenClawPluginApi): AgentSet {
 }
 
 /**
- * Whether THIS process can read an agent's key. `true` when the key file
- * resolves and its directory is owned by this process's uid; `false` when it
- * resolves but the directory belongs to another user; `null` when it cannot be
- * determined (the key does not resolve, the uid is unavailable, or the stat
- * fails) — which is treated as "cannot guarantee".
+ * Whether THIS process can READ an agent's key file. Ownership of the
+ * containing directory does not establish readability, so the check is the file
+ * itself: `true` when `accessSync(path, R_OK)` succeeds; `false` when the key
+ * does not resolve or cannot be read (EACCES/ENOENT — not ours); `null` for any
+ * other error (readability cannot be determined — "cannot guarantee").
  */
-function keyReadableByThisProcess(agentId: string, keyPath?: string): boolean | null {
+export function keyReadableByThisProcess(
+  agentId: string,
+  keyPath?: string,
+  access: (path: string) => void = (p) => accessSync(p, fsConstants.R_OK),
+): boolean | null {
   const keyFile = resolveKeyPath(agentId, keyPath);
-  if (!keyFile) return null;
-  const uid = process.getuid?.();
-  if (typeof uid !== "number") return null;
+  if (!keyFile) return false;
   try {
-    return statSync(dirname(keyFile)).uid === uid;
-  } catch {
+    access(keyFile);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === "EACCES" || code === "ENOENT") return false;
     return null;
   }
 }
@@ -344,7 +368,9 @@ export default {
         );
         return;
       }
-      if (readable.every((r) => r === true)) {
+      // Readability, not ownership: if this process can read MORE THAN ONE
+      // agent's key, they share an OS user and identity cannot be guaranteed.
+      if (readable.filter((r) => r === true).length > 1) {
         api.logger.warn(
           "openclaw-flair disabled: agents share an OS user; identity cannot be guaranteed",
         );
@@ -408,47 +434,58 @@ export default {
     }
 
     /**
-     * A FlairClient whose request() verifies the signer IMMEDIATELY before the
-     * fetch. FlairClient falls back to an unauthenticated request when no key
-     * resolves at request time, so a key removed or rotated after the precheck
-     * could otherwise reach that fallback. This wrapper makes a missing,
-     * changed, or unusable signer throw BEFORE any fetch — the precheck is not
-     * the only guard, and the error names the agent, never key bytes.
+     * A FlairClient that signs with a key LOADED ONCE, in memory. The client is
+     * constructed with that KeyObject and with EMPTY admin credentials, so
+     * request() never reads the key file and Basic auth is impossible by
+     * construction. A pre-fetch re-verification still refuses if the file has
+     * disappeared or drifted from the in-memory key — but the request can only
+     * ever be signed with the key this wrapper loaded, never a later one, and
+     * never unauthenticated. Errors name the agent, never key bytes.
      */
     function makeSigningOnlyClient(agentId: string, keyPath?: string): FlairClient {
-      const client = new FlairClient({ url: cfg.url ?? DEFAULT_URL, agentId, keyPath });
+      const keyFile = resolveKeyPath(agentId, keyPath);
+      if (!keyFile) {
+        throw new IdentityRefusal(
+          `no private key for agent "${agentId}" — refusing (no Basic/unsigned fallback)`,
+        );
+      }
+      let keyObject: KeyObject;
+      try {
+        keyObject = loadPrivateKey(keyFile);
+      } catch {
+        throw new IdentityRefusal(
+          `private key for agent "${agentId}" is unusable — refusing (no Basic/unsigned fallback)`,
+        );
+      }
+      const fingerprint = keyFingerprint(keyObject);
+      const client = new FlairClient({
+        url: cfg.url ?? DEFAULT_URL,
+        agentId,
+        privateKey: keyObject,
+        adminUser: "",
+        adminPassword: "",
+      });
       const original = client.request.bind(client) as typeof client.request;
-      let seenKeyHash: string | null = null;
       (client as any).request = async (method: string, path: string, body?: unknown) => {
-        const keyFile = resolveKeyPath(agentId, keyPath);
-        if (!keyFile) {
+        const current = signingKeyProbe.resolve(agentId, keyPath);
+        if (!current) {
           throw new IdentityRefusal(
-            `no private key for agent "${agentId}" at request time — refusing (no Basic/unsigned fallback)`,
+            `the private key for agent "${agentId}" disappeared before the request — refusing (no Basic/unsigned fallback)`,
           );
         }
-        let raw: Buffer;
+        let nowFingerprint: string;
         try {
-          raw = readFileSync(keyFile);
-        } catch (err: any) {
+          nowFingerprint = keyFingerprint(signingKeyProbe.load(current));
+        } catch {
           throw new IdentityRefusal(
-            `private key for agent "${agentId}" is unreadable — refusing (no Basic/unsigned fallback)`,
+            `the private key for agent "${agentId}" is unusable — refusing (no Basic/unsigned fallback)`,
           );
         }
-        const hash = createHash("sha256").update(raw).digest("hex");
-        if (seenKeyHash === null) seenKeyHash = hash;
-        else if (seenKeyHash !== hash) {
+        if (nowFingerprint !== fingerprint) {
           throw new IdentityRefusal(
             `the private key for agent "${agentId}" changed while running — refusing until the gateway is restarted so identity is re-established`,
           );
         }
-        try {
-          loadPrivateKey(keyFile);
-        } catch {
-          throw new IdentityRefusal(
-            `private key for agent "${agentId}" is unusable — refusing (no Basic/unsigned fallback)`,
-          );
-        }
-        (client as any).privateKey = undefined; // re-read from disk each request
         return original(method, path, body);
       };
       return client;
