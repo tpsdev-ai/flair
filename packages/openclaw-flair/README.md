@@ -151,17 +151,24 @@ What this slice guarantees:
   qualifies, then admits only below the cap (default 10,000); otherwise it
   refuses (`capture-capacity: full`, logged once) and changes nothing else, and
   the abort overflow is never counted as room. One sweep evaluates every record —
-  on each callback and on an unref'd interval timer (cleared on `gateway_stop`)
-  — and the one-time-log set is capped.
+  on each callback and on an unref'd interval timer — and the one-time-log set is
+  capped; `gateway_stop` clears the timer, aborts every run's controller and
+  drops the map.
 - **Abort.** The plugin owns one `AbortController` per run. A run is aborted by
   a failed `agent_end` (`success === false`), by `gateway_stop` (every run), or
   by `model_call_ended` with `failureKind: "aborted"`. On abort the run's signal
-  reaches every in-flight capture fetch, **no new capture write starts**, a
-  result that resolves after the abort is discarded, and reservations are
-  released. Aborting a run that was never admitted still records it as aborted,
-  so its next callback is dropped instead of admitted; that path may exceed the
-  budget by at most `abortOverflowCap` (1,000) records, and when even that is
-  full the abort records nothing and logs once — a documented residual.
+  reaches every in-flight capture fetch, a result that resolves after the abort
+  is discarded, and reservations are released. Aborting a run that was never
+  admitted still records it as aborted, so its next callback is dropped instead
+  of admitted; that path may exceed the budget by at most `abortOverflowCap`
+  (1,000) records, and it purges the records that already qualify for removal
+  before it asks for room — the same rule as admission. The abort is left
+  unrecorded only when the map is still at `capacityCap + abortOverflowCap`
+  AFTER that purge, i.e. every record is young or has a write in flight; in that
+  case a later callback for the run can be admitted only once more than
+  `abortOverflowCap` records age out, so it must arrive later than
+  `tombstoneMinAgeMs` into a flood of that size. That narrow condition — not an
+  unconditional "no new capture write starts" — is the residual.
   Aborting cannot **undo** a write Flair has already received — a request already
   in flight may still land. A successful `agent_end` never aborts.
 

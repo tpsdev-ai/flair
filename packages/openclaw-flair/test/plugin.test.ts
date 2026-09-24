@@ -214,6 +214,7 @@ beforeEach(() => {
   signingKeyProbe.load = (f) => loadPrivateKey(f);
   captureClock.now = () => Date.now();
   Object.assign(captureBounds, CAPTURE_BOUNDS_DEFAULTS);
+  captureProbe.detectEntities = REAL_DETECT_ENTITIES;
 });
 
 afterEach(() => {
@@ -303,6 +304,20 @@ try {
 } catch {
   captureInternals = CAPTURE_INTERNALS_FALLBACK;
 }
+
+// Round 6: the injectable entity scan. A build without it leaves the
+// substitution below inert — the round-6 (f) test then fails on its "the throw
+// was injected" and "no write started" assertions instead of passing silently.
+type CaptureProbe = { detectEntities: (text: string) => unknown[] };
+let captureProbe: CaptureProbe;
+const CAPTURE_PROBE_FALLBACK: CaptureProbe = { detectEntities: (_text: string) => [] as unknown[] };
+try {
+  captureProbe = (await import("../index.ts") as any).captureProbe ?? CAPTURE_PROBE_FALLBACK;
+} catch {
+  captureProbe = CAPTURE_PROBE_FALLBACK;
+}
+// The real scan, saved at import time so `beforeEach` can restore it.
+const REAL_DETECT_ENTITIES = captureProbe.detectEntities;
 
 // ── host version gate (R1) ───────────────────────────────────────────────────
 
@@ -1656,7 +1671,9 @@ describe("slice 2 round 5 — one run map, one removal predicate", () => {
     const base = 70_000_000;
     captureClock.now = () => base;
     await api._fire("agent_end", { runId: "a", success: false, messages: [] }, { agentId: "A" }); // the budget
-    captureClock.now = () => base + captureBounds.tombstoneMinAgeMs + 1;
+    // Round 6: both fills must be UNREMOVABLE. The abort path now purges aged
+    // records before it asks for room, so an aged fill would free a slot instead
+    // of holding one; the aged case is (e) in the round-6 block.
     await api._fire("agent_end", { runId: "ghost", success: false, messages: [] }, { agentId: "A" }); // the overflow
     await api._fire("agent_end", { runId: "ghost2", success: false, messages: [] }, { agentId: "A" }); // nothing left
     await api._fire("agent_end", { runId: "ghost3", success: false, messages: [] }, { agentId: "A" });
@@ -1713,5 +1730,115 @@ describe("slice 2 round 5 — one run map, one removal predicate", () => {
     expect(captureInternals.stateCount()).toBe(1);
     expect(captureInternals.tombstoneCount()).toBe(0);
     expect(captureInternals.runCount()).toBe(1);
+  });
+});
+
+// ── round 6 — every room-asking path purges, no throw strands a reservation, stop clears the map ──
+//
+// Three leftovers from round 5, each a place where the code asked a question and
+// did the wrong thing with the answer:
+//   (e) the abort path asks "is there room" without purging first, so a map full
+//       of AGED removable records refuses an abort that must be recorded — and
+//       the run's next callback is then admitted by admission's own purge;
+//   (f) the entity scan sits between the reservation and the `try` that releases
+//       it, so a throw strands `inFlight` above 0 and the record is never
+//       removable (a slot held for the life of the process);
+//   (g) `gateway_stop` aborts the records but never clears the map.
+
+describe("slice 2 round 6 — purge before the room check, no stranded reservation, stop clears the map", () => {
+  const TRIGGER6 = "remember this: the round six abort target is staging";
+  const PLAIN6 = "a plain note";
+
+  test("(e) a never-admitted abort in a map full of AGED records is RECORDED, and its callback is dropped with zero writes", async () => {
+    captureBounds.capacityCap = 3;
+    captureBounds.abortOverflowCap = 1;
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    const calls = installFetchStub();
+    const base = 90_000_000;
+    captureClock.now = () => base;
+    // Three never-admitted aborts — then AGE them: they are removable now, but
+    // nothing has asked for room since.
+    for (let i = 0; i < 3; i++) {
+      await api._fire("agent_end", { runId: `aged${i}`, success: false, messages: [] }, { agentId: "A" });
+    }
+    expect(captureInternals.runCount()).toBe(3);
+    captureClock.now = () => base + captureBounds.tombstoneMinAgeMs + 1;
+    // One more never-admitted abort fills the overflow above the budget.
+    await api._fire("agent_end", { runId: "young", success: false, messages: [] }, { agentId: "A" });
+    expect(captureInternals.recordOf("A", "young")).toBeTruthy();
+
+    // The abort path ASKS FOR ROOM, so it purges the aged records FIRST: there
+    // IS room and the abort IS recorded. Without the purge the overflow reads as
+    // full, the abort records nothing, and the run's next callback is admitted
+    // by admission's own purge — a capture write starting AFTER the abort.
+    await api._fire("agent_end", { runId: "unknown", success: false, messages: [] }, { agentId: "A" });
+    const rec = captureInternals.recordOf("A", "unknown");
+    expect(rec).toBeTruthy();
+    expect(rec!.phase).toBe("aborted");
+
+    // And that record is what makes the run's next callback a no-op: zero writes.
+    await api._handler("llm_output")({ runId: "unknown", assistantTexts: [TRIGGER6] }, { agentId: "A" });
+    expect(puts(calls).length).toBe(0);
+    expect(api._warnText()).toMatch(/dropped a callback for retired run unknown/);
+  });
+
+  test("(f) a THROW from the entity scan leaves inFlight at 0 and its record removable", async () => {
+    captureBounds.capacityCap = 1;
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    const calls = installFetchStub();
+    const base = 100_000_000;
+    captureClock.now = () => base;
+    const real = captureProbe.detectEntities;
+    captureProbe.detectEntities = () => {
+      throw new Error("entity scan exploded");
+    };
+    try {
+      await api._handler("llm_output")({ runId: "r", assistantTexts: [TRIGGER6] }, { agentId: "A" });
+    } finally {
+      captureProbe.detectEntities = real;
+    }
+    // The throw was injected AND reported, and no write started.
+    expect(api._warnText()).toMatch(/entity scan exploded/);
+    expect(puts(calls).length).toBe(0);
+    // Nothing may sit between the reservation and the `try` that releases it, so
+    // the record carries NO in-flight write.
+    const rec = captureInternals.recordOf("A", "r");
+    expect(rec).toBeTruthy();
+    expect(rec!.inFlight).toBe(0);
+
+    // So the record IS removable: abort it, age it, and let admission purge it.
+    // A stranded `inFlight` would hold the whole budget instead.
+    captureClock.now = () => base + 1;
+    await api._fire("agent_end", { runId: "r", success: false, messages: [] }, { agentId: "A" });
+    captureClock.now = () => base + 1 + captureBounds.tombstoneMinAgeMs + 1;
+    await api._handler("llm_output")({ runId: "next", assistantTexts: [PLAIN6] }, { agentId: "A" });
+    expect(captureInternals.recordOf("A", "r")).toBeUndefined();
+    expect(captureInternals.recordOf("A", "next")).toBeTruthy();
+  });
+
+  test("(g) gateway_stop clears the run map (after aborting the live controllers)", async () => {
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const llmOut = api._handler("llm_output");
+    const inFlight = llmOut({ runId: "r1", assistantTexts: [TRIGGER6] }, { agentId: "A" });
+    await waitFor(() => puts(calls).length === 1);
+    const settled = llmOut({ runId: "r2", assistantTexts: [PLAIN6] }, { agentId: "A" });
+    await waitFor(() => puts(calls).length === 2);
+    expect(captureInternals.runCount()).toBe(2);
+
+    await api._fire("gateway_stop", { reason: "shutdown" }, {});
+    // The controllers were aborted on the way out AND the map is empty — the
+    // records are not left reachable until the next registration.
+    expect(puts(calls)[0]!.signal!.aborted).toBe(true);
+    expect(captureInternals.runCount()).toBe(0);
+    expect(captureInternals.stateCount()).toBe(0);
+    expect(captureInternals.tombstoneCount()).toBe(0);
+
+    d.release();
+    await Promise.all([inFlight, settled]);
   });
 });

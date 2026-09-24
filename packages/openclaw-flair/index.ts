@@ -375,6 +375,19 @@ function detectEntities(text: string): DetectedEntity[] {
   return [...entities.values()];
 }
 
+/**
+ * Injectable entity scan (round 6). Production uses the real `detectEntities`;
+ * a test substitutes it to make the scan THROW. That throw must leave the run's
+ * reservation untouched: nothing that can throw may sit between taking the
+ * reservation and the `try` whose failure path releases it, or `inFlight`
+ * strands above 0 and the record is never removable.
+ */
+export const captureProbe: {
+  detectEntities: (text: string) => Array<{ name: string; kind: string; confidence: number }>;
+} = {
+  detectEntities: (text) => detectEntities(text),
+};
+
 // ─── Plugin export ────────────────────────────────────────────────────────────
 
 /** A stable fingerprint of a loaded private key (never the raw seed). */
@@ -831,6 +844,12 @@ export default {
         return;
       }
       // Never admitted: record the abort so no later callback can re-admit it.
+      // Round 6: this path ASKS FOR ROOM, so it purges first — the same rule as
+      // admission. Without the purge, a map full of AGED aborted records reads
+      // as full and the abort records nothing; the run's next callback is then
+      // admitted by admission's own purge, so a capture write starts AFTER the
+      // abort.
+      purgeRemovable(now);
       if (runs.size >= captureBounds.capacityCap + captureBounds.abortOverflowCap) {
         logOnce(
           "abort-overflow",
@@ -849,14 +868,20 @@ export default {
       if (!state) return false;
       const decision = evaluateAutoCapture(text, state, autoCaptureMaxPerSession);
       if (!decision) return false;
+      // Round 6: the entity scan is COMPUTED BEFORE the reservation. It must not
+      // sit between the reservation and the `try` below — a throw there would
+      // strand `inFlight` above 0, and the record would never become removable
+      // again (a slot held for the life of the process). Nothing that can throw
+      // may sit between taking the reservation and the block that releases it.
+      // The scan is synchronous, so the reservation stays synchronous too.
+      const entities = captureProbe.detectEntities(text);
+      const subject = entities.length > 0 ? entities[0].name.toLowerCase() : undefined;
       // D10: take the cap slot and claim the excerpt SYNCHRONOUSLY, before any
       // await, so a concurrent callback (or the agent_end rescan) that sees the
       // same excerpt dedups against the reservation instead of writing twice.
       state.count++;
       state.hashes.add(decision.hash);
       state.inFlight++;
-      const entities = detectEntities(text);
-      const subject = entities.length > 0 ? entities[0].name.toLowerCase() : undefined;
       try {
         await client.memory.write(decision.excerpt, {
           type: "session",
@@ -1187,6 +1212,10 @@ export default {
           for (const record of [...runs.values()]) {
             abortRun(record.agentId, record.runId, "gateway_stop");
           }
+          // Round 6: stopping the gateway drops the map as well. The aborts above
+          // cancel every live controller; clearing the records stops them being
+          // reachable through `captureInternals` until the next registration.
+          runs.clear();
         });
 
         // Item 5(c): model_call_ended with failureKind "aborted". Used only
