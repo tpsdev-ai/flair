@@ -330,6 +330,10 @@ interface StageStep {
  * The `name` of a job's `environment:` value. GitHub accepts EITHER a string
  * (`environment: release`) OR the object form (`environment: { name: release,
  * url: ... }`); a string-only comparison is blind to the second form (F2).
+ *
+ * The name is returned UNCHANGED — callers normalise case, because GitHub
+ * environment names are NOT case-sensitive (so `Release` must be treated as
+ * `release`).
  */
 function environmentName(env: unknown): string | undefined {
   if (typeof env === "string") return env;
@@ -363,7 +367,7 @@ export function inspectStageJob(text: string): { problems: string[] } {
   if (JSON.stringify(permPairs) !== JSON.stringify(want)) {
     problems.push(`stage-publish permissions must be exactly contents: read + deployments: write + id-token: write, got ${JSON.stringify(perms)}`);
   }
-  if (environmentName(stage.environment) !== "release") problems.push("stage-publish must keep environment: release (OIDC scoping)");
+  if ((environmentName(stage.environment) ?? "").toLowerCase() !== "release") problems.push("stage-publish must keep environment: release (OIDC scoping)");
 
   const packPerms = doc.jobs?.pack?.permissions ?? {};
   if (packPerms.contents !== "read" || packPerms.deployments !== "read" || Object.keys(packPerms).length !== 2) {
@@ -500,11 +504,17 @@ export function inspectRepoWide(entries: WorkflowEntry[]): { problems: string[] 
           problems.push(`${path}: job "${jobName}" grants deployments: write (only release-publish.yml stage-publish may)`);
         }
       }
-      const env = environmentName(j.environment);
+      const envName = environmentName(j.environment);
+      const env = envName?.toLowerCase();
       if (env === "release" || env === "release-attempt") {
         if (path !== RELEASE_WORKFLOW_REL) {
-          problems.push(`${path}: job "${jobName}" declares environment "${env}" (only release-publish.yml may)`);
+          problems.push(`${path}: job "${jobName}" declares environment "${envName}" (only release-publish.yml may)`);
         }
+      } else if (envName !== undefined && envName.includes("${{") && path !== RELEASE_WORKFLOW_REL) {
+        // An expression-valued environment (e.g. `${{ inputs.target }}`) can
+        // resolve to a release environment without matching either literal, so
+        // it cannot be proven safe — reject it outside release-publish.yml.
+        problems.push(`${path}: job "${jobName}" uses an expression for environment (cannot prove it is not a release environment)`);
       }
     }
   }
@@ -1361,12 +1371,15 @@ describe("A1b — dispatch, recency and the reservation marker", () => {
     expect(inspectRepoWide(entries).problems.join("\n")).toContain("evil.yml");
   });
 
-  test("(F2) a second WORKFLOW declaring the release environments goes red — string AND object form, for BOTH names", () => {
+  test("(F2) a second WORKFLOW declaring the release environments goes red — string AND object form, for BOTH names, case-insensitively", () => {
     const combos: Array<{ label: string; environment: unknown }> = [
       { label: "release (string)", environment: "release" },
       { label: "release-attempt (string)", environment: "release-attempt" },
       { label: "release (object)", environment: { name: "release" } },
       { label: "release-attempt (object)", environment: { name: "release-attempt", url: "https://example.invalid/" } },
+      // GitHub environment names are NOT case-sensitive.
+      { label: "Release (string)", environment: "Release" },
+      { label: "RELEASE-ATTEMPT (object)", environment: { name: "RELEASE-ATTEMPT" } },
     ];
     for (const c of combos) {
       const entries = realWorkflows().concat([
@@ -1378,6 +1391,16 @@ describe("A1b — dispatch, recency and the reservation marker", () => {
       const problems = inspectRepoWide(entries).problems.join("\n");
       expect(problems, `mutant: ${c.label}`).toContain("declares environment");
     }
+  });
+
+  test("(F2) a second WORKFLOW using an expression for its environment goes red", () => {
+    const entries = realWorkflows().concat([
+      {
+        path: ".github/workflows/evil.yml",
+        text: yaml.dump({ permissions: { contents: "read" }, jobs: { x: { environment: "${{ inputs.target }}", steps: [] } } }),
+      },
+    ]);
+    expect(inspectRepoWide(entries).problems.join("\n")).toContain("uses an expression for environment");
   });
 
   test("(F3) a workflow with NO top-level permissions: block goes red", () => {
