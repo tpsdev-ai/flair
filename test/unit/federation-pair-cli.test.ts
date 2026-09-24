@@ -467,6 +467,7 @@ describe("federation pair — spoke credential checked before the hub (flair#187
   let home: string;
   let calls: RecordedCall[];
   let responder: (call: RecordedCall) => Response;
+  let identityHandler: () => Response;
   let tokenFile: string;
 
   function installFetch(): void {
@@ -480,7 +481,7 @@ describe("federation pair — spoke credential checked before the hub (flair#187
       // is answered here and NOT recorded: the zero-request assertions below are
       // about the hub/ops calls, and this GET predates the credential check.
       if (u.endsWith("/FederationInstance")) {
-        return jsonResponse(200, { id: INSTANCE_ID, role: "spoke", publicKey: INSTANCE_PUBLIC_KEY });
+        return identityHandler();
       }
       const call: RecordedCall = {
         url: u,
@@ -539,6 +540,7 @@ describe("federation pair — spoke credential checked before the hub (flair#187
     delete process.env.FLAIR_ADMIN_PASS;
     delete process.env.HDB_ADMIN_PASSWORD;
     installFetch();
+    identityHandler = () => jsonResponse(200, { id: INSTANCE_ID, role: "spoke", publicKey: INSTANCE_PUBLIC_KEY });
     responder = () => jsonResponse(200, {});
     tokenFile = writeTripleFile(buildTriple());
   });
@@ -686,9 +688,65 @@ describe("federation pair — spoke credential checked before the hub (flair#187
     ]);
     expect(exit).toBe("process.exit(1)");
     const text = stderr.join("\n");
-    expect(text).toContain("spoke admin credential preflight");
+    expect(text).toContain("answered 500 to user_info");
     expect(text).not.toContain("sekret-user");
     expect(text).not.toContain("sekret-pass");
+  });
+
+  test("(Q1) a rejected preflight fetch never prints the URL or its message", async () => {
+    responder = () => {
+      throw new Error("Failed to reach https://sekret-user:sekret-pass@127.0.0.1:19999/?token=abc");
+    };
+    const { exit, stderr } = await runPair(["--admin-pass", "right-pass"]);
+    expect(exit).toBe("process.exit(1)");
+    const text = stderr.join("\n");
+    expect(text).toContain("could not reach the local ops API");
+    expect(text).not.toContain("sekret-pass");
+    expect(text).not.toContain("Failed to reach");
+  });
+
+  test("(Q1) an ops target query string is not printed", async () => {
+    responder = () => jsonResponse(500, { error: "boom" });
+    const { exit, stderr } = await runPair([
+      "--admin-pass", "right-pass", "--ops-target", "http://127.0.0.1:19999/?token=abc",
+    ]);
+    expect(exit).toBe("process.exit(1)");
+    const text = stderr.join("\n");
+    expect(text).toContain("answered 500 to user_info");
+    expect(text).not.toContain("token=abc");
+  });
+
+  test("(Q2) a failing identity GET says nothing was sent to the hub", async () => {
+    identityHandler = () => {
+      throw new TypeError("fetch failed: https://sekret-user:sekret-pass@127.0.0.1:19999");
+    };
+    const { exit, stderr } = await runPair([
+      "--admin-pass", "right-pass", "--target", "https://sekret-user:sekret-pass@127.0.0.1:19999",
+    ]);
+    expect(exit).toBe("process.exit(1)");
+    const text = stderr.join("\n");
+    expect(text).toContain("Nothing was sent to the hub");
+    expect(text).not.toContain("sekret-pass");
+    expect(calls.some((c) => c.url.includes("/FederationPair"))).toBe(false);
+  });
+
+  test("(Q2) a throw after the hub 200 says the token was consumed", async () => {
+    seedKey();
+    responder = (call) => {
+      if (call.url.includes("/FederationPair")) return new Response("not json", { status: 200 });
+      if (call.body?.operation === "user_info") return jsonResponse(200, superUserInfo);
+      return jsonResponse(200, []);
+    };
+    const { exit, stderr } = await runPair(["--admin-pass", "right-pass"]);
+    expect(exit).toBe("process.exit(1)");
+    expect(stderr.join("\n")).toContain("The pairing token has been consumed");
+  });
+
+  test("(Q3) a user_info reply with no role information is named as such", async () => {
+    responder = () => jsonResponse(200, { username: "admin" });
+    const { exit, stderr } = await runPair(["--admin-pass", "right-pass"]);
+    expect(exit).toBe("process.exit(1)");
+    expect(stderr.join("\n")).toContain("user_info returned no role information");
   });
 
   test("(P5) with no keystore key the DB fallback sends the HDB_ADMIN_PASSWORD credential", async () => {

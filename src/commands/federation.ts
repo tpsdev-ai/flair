@@ -157,21 +157,43 @@ function isFederationPrivateVisibility(visibility: string | null | undefined): b
 
 /** The exact refusal sentence when nothing has reached the hub yet. */
 const NOTHING_SENT_TO_HUB = "Nothing was sent to the hub; the pairing token is still valid.";
+/** The post-hub failure sentence: the token is already spent. */
+const PAIR_TOKEN_CONSUMED =
+  "The pairing token has been consumed; mint a new one with 'flair federation token' on the hub and re-run pair.";
 
 /**
- * Strip any userinfo (user:password) from a URL before printing it, so an
- * --ops-target like https://user:pass@host never puts credentials on stderr.
+ * Strip any userinfo (user:password) and query string from a URL before printing
+ * it. An --ops-target like https://user:pass@host/?token=... must never put the
+ * credential or the query token on stderr.
  */
 export function redactUrl(u: string): string {
   try {
     const url = new URL(u);
     url.username = "";
     url.password = "";
+    url.search = "";
     return url.toString();
   } catch {
-    // Not a parseable absolute URL: strip a userinfo-looking prefix anyway.
-    return u.replace(/\/\/[^/@]*@/, "//");
+    // Not a parseable absolute URL: strip a userinfo-looking prefix and any query.
+    return u.replace(/\/\/[^/@]*@/, "//").replace(/\?.*$/, "");
   }
+}
+
+/**
+ * A fetch error's code or name — NEVER its message. Under Node a rejected
+ * fetch to a user-supplied URL can carry the full URL (credentials included)
+ * in err.message, so the message must never reach an error line.
+ */
+function fetchErrorLabel(err: unknown): string {
+  const e = err as { code?: unknown; name?: unknown };
+  const code = typeof e?.code === "string" && e.code ? e.code : undefined;
+  const name = typeof e?.name === "string" && e.name ? e.name : undefined;
+  return code ?? name ?? "request failed";
+}
+
+/** Strip any userinfo from URLs embedded in a message before printing it. */
+function redactMessage(text: string): string {
+  return text.replace(/\/\/[^/@\s]+@/g, "//");
 }
 
 /**
@@ -1224,6 +1246,9 @@ export function register(program: Command): void {
       // the GET actually probes (do not cite resolveBaseUrl only in the
       // rewriter while api() falls through to resolveHttpPort({})).
       const identityUrl = resolveBaseUrl(opts).replace(/\/$/, "");
+      // Set immediately before the hub's FederationPair request, so the outer
+      // catch can say whether the one-time token may already be consumed.
+      let hubContacted = false;
       try {
         // flair#820: the identity GET is pair's first step and is allowAdmin.
         // A 403 here is LOCAL (or --target REMOTE), never the hub handshake.
@@ -1233,7 +1258,7 @@ export function register(program: Command): void {
           instance = await api("GET", "/FederationInstance", undefined, { baseUrl: identityUrl });
         } catch (err: unknown) {
           throw rewriteFederationPairLocalAccessError(err, {
-            url: identityUrl,
+            url: redactUrl(identityUrl),
             side: target ? "REMOTE" : "LOCAL",
             agentId: process.env.FLAIR_AGENT_ID,
           });
@@ -1303,9 +1328,11 @@ export function register(program: Command): void {
             signal: AbortSignal.timeout(10_000),
           });
         } catch (err) {
+          // Never print err.message: a rejected fetch to the user-supplied ops
+          // URL can carry the full URL (credentials included) in its message.
           console.error(
             `Error: could not reach the local ops API at ${safeOps} to preflight the spoke admin credential ` +
-            `(${err instanceof Error ? err.message : String(err)}). ${NOTHING_SENT_TO_HUB}`
+            `(${fetchErrorLabel(err)}). ${NOTHING_SENT_TO_HUB}`
           );
           process.exit(1);
         }
@@ -1317,12 +1344,22 @@ export function register(program: Command): void {
         }
         if (!preflightRes.ok) {
           console.error(
-            `Error: the local ops API at ${safeOps} answered ${preflightRes.status} for the spoke admin credential preflight. ${NOTHING_SENT_TO_HUB}`
+            `Error: the local ops API at ${safeOps} answered ${preflightRes.status} to user_info. ${NOTHING_SENT_TO_HUB}`
           );
           process.exit(1);
         }
         const userInfo = (await preflightRes.json().catch(() => null)) as any;
-        if (!canWritePeerPermission(userInfo?.role?.permission)) {
+        const rolePermission = userInfo?.role?.permission;
+        if (rolePermission === undefined || rolePermission === null) {
+          console.error(`Error: user_info returned no role information. ${NOTHING_SENT_TO_HUB}`);
+          process.exit(1);
+        }
+        // super_user is the supported credential. For a non-super_user role this
+        // checks TABLE-level grants only (flair.Peer insert+update) plus the
+        // operations allowlist; it cannot see attribute-level grants, so a role
+        // with table access but restricted attributes still passes here and the
+        // upsert may fail later (reported on the consumed-token path).
+        if (!canWritePeerPermission(rolePermission)) {
           const roleName = userInfo?.role?.role ?? userInfo?.role?.name ?? "(unknown)";
           console.error(
             `Error: the spoke admin credential cannot write the Peer table (role ${roleName}). ${NOTHING_SENT_TO_HUB}`
@@ -1345,15 +1382,27 @@ export function register(program: Command): void {
           fetchHeaders.Authorization = authHeader;
         }
 
-        const res = await fetch(`${hubUrl}/FederationPair`, {
-          method: "POST",
-          headers: fetchHeaders,
-          body: JSON.stringify(signedBody),
-        });
+        let res: Awaited<ReturnType<typeof fetch>>;
+        try {
+          hubContacted = true;
+          res = await fetch(`${hubUrl}/FederationPair`, {
+            method: "POST",
+            headers: fetchHeaders,
+            body: JSON.stringify(signedBody),
+          });
+        } catch (err) {
+          // A rejected fetch to the user-supplied hub URL: name the error, never
+          // print its message (it can carry the URL). The request was sent, so
+          // the token may already be consumed.
+          console.error(
+            `Error: could not reach the hub at ${redactUrl(hubUrl)} (${fetchErrorLabel(err)}). ${PAIR_TOKEN_CONSUMED}`
+          );
+          process.exit(1);
+        }
 
         if (!res.ok) {
           const text = await res.text().catch(() => "");
-          const hubDenial = rewriteFederationPairHubAccessError(res.status, hubUrl, text);
+          const hubDenial = rewriteFederationPairHubAccessError(res.status, redactUrl(hubUrl), text);
           if (hubDenial) {
             console.error(`Error: ${hubDenial.message}`);
             process.exit(1);
@@ -1407,10 +1456,10 @@ export function register(program: Command): void {
         } catch (err) {
           // A THROWN upsert (network error) after the hub returned 200 is the same
           // post-pair failure as an HTTP error: the token is already consumed.
+          // Name the error, never print its message (the ops URL is user-supplied).
           console.error(
             `Error: paired on the hub, but writing the local hub-peer record failed ` +
-            `(${err instanceof Error ? err.message : String(err)}). The pairing token has been consumed; ` +
-            `mint a new one with 'flair federation token' on the hub and re-run pair.`
+            `(${fetchErrorLabel(err)}). ${PAIR_TOKEN_CONSUMED}`
           );
           process.exit(1);
         }
@@ -1418,14 +1467,21 @@ export function register(program: Command): void {
           const text = await peerRes.text().catch(() => "");
           console.error(
             `Error: paired on the hub, but writing the local hub-peer record failed ` +
-            `(${peerRes.status} ${text.slice(0, 200)}). The pairing token has been consumed; ` +
-            `mint a new one with 'flair federation token' on the hub and re-run pair.`
+            `(${peerRes.status} ${text.slice(0, 200)}). ${PAIR_TOKEN_CONSUMED}`
           );
           process.exit(1);
         }
         console.log(`✅ Recorded hub as local peer: ${resolvedHub.peer.id} → ${hubUrl}`);
       } catch (err: any) {
-        console.error(`Error: ${err.message}`);
+        // A rejected fetch to a user-supplied URL can carry the full URL —
+        // credentials included — in err.message, so for fetch-shaped errors
+        // print the code/name instead. Append whether the hub was contacted: if
+        // the identity GET (or anything before the hub fetch) failed, nothing
+        // reached the hub and the token is untouched.
+        const tail = hubContacted ? PAIR_TOKEN_CONSUMED : NOTHING_SENT_TO_HUB;
+        const name = typeof err?.name === "string" ? err.name : "";
+        const fetchShaped = name === "TypeError" || name === "AbortError" || name === "TimeoutError";
+        console.error(`Error: ${fetchShaped ? fetchErrorLabel(err) : redactMessage(String(err?.message ?? err))}. ${tail}`);
         process.exit(1);
       }
     });
