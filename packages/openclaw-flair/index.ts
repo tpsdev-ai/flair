@@ -346,12 +346,31 @@ export default {
 
     const cfg = (api.pluginConfig ?? {}) as unknown as FlairMemoryConfig;
 
-    // ── 2. Shared-OS-user detection, fail closed. ───────────────────────────
+    // ── 2. Identity config: optional allow-list, never a fallback. ──────────
+    // Parsed BEFORE the shared-OS-user check: an explicit keyPath is only valid
+    // together with a single allowed agent, and that refusal must be the reason
+    // reported — not a readability verdict the keyPath itself would distort.
+    const allowAgentId = cfg.agentId && cfg.agentId !== "auto" ? cfg.agentId : null;
+    if (allowAgentId) assertValidAgentId(allowAgentId);
+    if (cfg.keyPath && !allowAgentId) {
+      // One explicit key cannot bind every agent on the gateway.
+      api.logger.warn(
+        "openclaw-flair disabled: keyPath is only valid with a single allowed agent (set agentId); refusing to bind one key to every agent",
+      );
+      return;
+    }
+
+    // ── 3. Shared-OS-user detection, fail closed. ───────────────────────────
     // The property that matters is whether THIS gateway process can read every
     // agent's key. An implicit sole agent is fine. An unreadable/empty roster,
     // or a roster where any agent's key owner cannot be determined, is refused.
     // When every agent's key directory is owned by this process's uid, the
     // process can read them all, so identity cannot be guaranteed.
+    //
+    // Each agent's OWN key decides. An explicit keyPath applies ONLY to the
+    // allowed agent; it must never make a second roster agent "resolve" to the
+    // allowed agent's key and read as if it shared this process's key. Every
+    // other roster agent resolves its own keys/<id>.key.
     const agentSet = gatewayAgentSet(api);
     if (agentSet.kind === "unknown") {
       api.logger.warn(
@@ -361,7 +380,9 @@ export default {
     }
     const agentIds = agentSet.kind === "ids" ? agentSet.ids : ["(implicit)"];
     if (agentIds.length > 1) {
-      const readable = agentIds.map((id) => keyReadableByThisProcess(id, cfg.keyPath));
+      const readable = agentIds.map((id) =>
+        keyReadableByThisProcess(id, id === allowAgentId ? cfg.keyPath : undefined),
+      );
       if (readable.some((r) => r === null)) {
         api.logger.warn(
           "openclaw-flair disabled: cannot determine whether this process can read every agent key; identity cannot be guaranteed",
@@ -376,17 +397,6 @@ export default {
         );
         return;
       }
-    }
-
-    // ── 3. Identity config: optional allow-list, never a fallback. ──────────
-    const allowAgentId = cfg.agentId && cfg.agentId !== "auto" ? cfg.agentId : null;
-    if (allowAgentId) assertValidAgentId(allowAgentId);
-    if (cfg.keyPath && !allowAgentId) {
-      // One explicit key cannot bind every agent on the gateway.
-      api.logger.warn(
-        "openclaw-flair disabled: keyPath is only valid with a single allowed agent (set agentId); refusing to bind one key to every agent",
-      );
-      return;
     }
 
     // ── 4. Permission gates (host policy). ─────────────────────────────────

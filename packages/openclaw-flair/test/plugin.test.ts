@@ -270,6 +270,8 @@ describe("host version gate (runtime.version is the ONLY source, exact match)", 
     plugin.register(api as any);
     expect(api._tools.size).toBe(0);
     expect(api._hooks.size).toBe(0);
+    expect(api._services.size).toBe(0);
+    expect(api._contextEngines.size).toBe(0);
     expect(api._warnText()).toMatch(/openclaw-flair disabled: host 2026\.5\.7 not in tested set/);
   });
 
@@ -294,6 +296,8 @@ describe("agent set and shared-OS-user detection (fail closed)", () => {
     const api = createMockApi({ config: { agents: { entries: { a: {}, b: {} } } } });
     plugin.register(api as any);
     expect(api._tools.size).toBe(0);
+    expect(api._services.size).toBe(0);
+    expect(api._contextEngines.size).toBe(0);
     expect(api._warnText()).toMatch(/agents share an OS user; identity cannot be guaranteed/);
   });
 
@@ -305,6 +309,8 @@ describe("agent set and shared-OS-user detection (fail closed)", () => {
     const api = createMockApi({ config: { agents: { list: [{ id: "a" }, { id: "b" }] } } });
     plugin.register(api as any);
     expect(api._tools.size).toBe(0);
+    expect(api._services.size).toBe(0);
+    expect(api._contextEngines.size).toBe(0);
     expect(api._warnText()).toMatch(/agents share an OS user; identity cannot be guaranteed/);
   });
 
@@ -332,6 +338,8 @@ describe("agent set and shared-OS-user detection (fail closed)", () => {
     const api = createMockApi({ config: { agents: { entries: { "ocf-a1-916": {}, "ocf-a1-b": {} } } } });
     plugin.register(api as any);
     expect(api._tools.size).toBe(0);
+    expect(api._services.size).toBe(0);
+    expect(api._contextEngines.size).toBe(0);
     expect(api._warnText()).toMatch(/agents share an OS user; identity cannot be guaranteed/);
   });
 
@@ -374,6 +382,8 @@ describe("agent set and shared-OS-user detection (fail closed)", () => {
     const api = createMockApi({ config: { agents: { entries: {} } } });
     plugin.register(api as any);
     expect(api._tools.size).toBe(0);
+    expect(api._services.size).toBe(0);
+    expect(api._contextEngines.size).toBe(0);
     expect(api._warnText()).toMatch(/identity cannot be guaranteed/);
   });
 
@@ -384,7 +394,55 @@ describe("agent set and shared-OS-user detection (fail closed)", () => {
     const api = createMockApi({ config: null as unknown as Record<string, unknown> });
     plugin.register(api as any);
     expect(api._tools.size).toBe(0);
+    expect(api._services.size).toBe(0);
+    expect(api._contextEngines.size).toBe(0);
     expect(api._warnText()).toMatch(/identity cannot be guaranteed/);
+  });
+
+  test("S1: explicit keyPath binds ONLY the allowed agent — a second roster agent with no key of its own does not read as shared", async () => {
+    // The design sanctions an explicit keyPath together with a single ALLOWED
+    // agent. Applying that keyPath to EVERY roster agent made a second agent
+    // "resolve" to the allowed agent's key, both read as readable, and the gate
+    // refused with the SHARED-USER reason. Each agent's OWN key must decide.
+    writeKey("A");
+    // B has NO key of its own.
+    const plugin = await loadPlugin();
+    installFetchStub();
+    const api = createMockApi({
+      config: { agents: { entries: { A: {}, B: {} } } },
+      pluginConfig: { agentId: "A", keyPath: join(keyDir, "A.key") },
+    });
+    plugin.register(api as any);
+    expect(api._tools.size).toBe(3);
+    expect(api._warnText()).not.toMatch(/agents share an OS user/);
+  });
+
+  test("S1: same roster, but the second agent's OWN key is readable -> still refuses (two readable keys)", async () => {
+    writeKey("A");
+    writeKey("B");
+    const plugin = await loadPlugin();
+    installFetchStub();
+    const api = createMockApi({
+      config: { agents: { entries: { A: {}, B: {} } } },
+      pluginConfig: { agentId: "A", keyPath: join(keyDir, "A.key") },
+    });
+    plugin.register(api as any);
+    expect(api._tools.size).toBe(0);
+    expect(api._warnText()).toMatch(/agents share an OS user; identity cannot be guaranteed/);
+  });
+
+  test("S1: keyPath without an allowed agent is refused for THAT reason, before the readability check", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    installFetchStub();
+    const api = createMockApi({
+      config: { agents: { entries: { A: {}, B: {} } } },
+      pluginConfig: { keyPath: join(keyDir, "A.key") },
+    });
+    plugin.register(api as any);
+    expect(api._tools.size).toBe(0);
+    expect(api._warnText()).toMatch(/keyPath is only valid with a single allowed agent/);
+    expect(api._warnText()).not.toMatch(/agents share an OS user/);
   });
 });
 
