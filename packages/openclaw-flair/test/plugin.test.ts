@@ -843,3 +843,121 @@ describe("evaluateAutoCapture", () => {
     expect(evaluateAutoCapture("please remember this: the deploy target is staging", { count: 3, hashes: new Set() }, 3)).toBeNull();
   });
 });
+
+// ── slice 2 — capture done right (D5 / D11 / D14) ─────────────────────────────
+
+describe("slice 2 — capture normalisation, ids and outcomes", () => {
+  test("D5: a string and an equivalent text-block array normalise to the same capture text", async () => {
+    const { captureText } = await loadModule();
+    expect(captureText("hello world")).toBe("hello world");
+    expect(captureText([{ type: "text", text: "hello world" }])).toBe("hello world");
+    expect(captureText([{ type: "text", text: "a" }, { type: "text", text: "b" }])).toBe("ab");
+    expect(captureText([{ type: "text", text: "hello " }, { type: "text", text: "world" }])).toBe(captureText("hello world"));
+  });
+
+  test("D5: image, thinking and tool blocks contribute nothing and never leak their contents", async () => {
+    const { captureText } = await loadModule();
+    const text = captureText([
+      { type: "text", text: "keep me" },
+      { type: "image", image_url: "https://x/secret.png", text: "LEAK-IMAGE" },
+      { type: "thinking", thinking: "LEAK-THINK" },
+      { type: "tool_use", input: { secret: "LEAK-TOOL" }, text: "LEAK-TOOL-TEXT" },
+      { type: "tool_result", content: "LEAK-RESULT" },
+    ]);
+    expect(text).toBe("keep me");
+    for (const leak of ["LEAK-IMAGE", "LEAK-THINK", "LEAK-TOOL", "LEAK-RESULT"]) {
+      expect(text).not.toContain(leak);
+    }
+  });
+
+  test("D5: a block-shaped agent_end message is captured (mixed blocks contribute nothing)", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true },
+      config: { plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+    });
+    const calls = installFetchStub();
+    plugin.register(api as any);
+    await api._fire("agent_end", {
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "remember this: the block message is captured" },
+          { type: "image", image_url: "https://x/secret.png" },
+          { type: "thinking", thinking: "LEAKTHINK" },
+        ],
+      }],
+    }, { agentId: "A" });
+    const memPuts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+    expect(memPuts.length).toBe(1);
+  });
+
+  test("D11: 100 stores in a tight loop produce 100 distinct ids and 100 records", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi();
+    plugin.register(api as any);
+    const store = api._resolveTool("memory_store", { agentId: "A" });
+    const ids = new Set<string>();
+    for (let i = 0; i < 100; i++) {
+      const res = await store.execute(String(i), { text: `memory ${i}` });
+      expect(res.details.written).toBe(true);
+      ids.add(String(res.details.id));
+    }
+    expect(ids.size).toBe(100);
+    const memPuts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+    expect(memPuts.length).toBe(100);
+    expect(new Set(memPuts.map((c) => c.url)).size).toBe(100);
+  });
+
+  test("D14: a successful store reports written/id/supersedeClosed/errors", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    installFetchStub();
+    const api = createMockApi();
+    plugin.register(api as any);
+    const store = api._resolveTool("memory_store", { agentId: "A" });
+    const res = await store.execute("1", { text: "remember this" });
+    expect(res.details.written).toBe(true);
+    expect(typeof res.details.id).toBe("string");
+    expect(res.details.supersedeClosed).toBe(false);
+    expect(res.details.errors).toEqual([]);
+  });
+
+  test("D14: an unresolved identity returns a refusal outcome, never written:true", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi();
+    plugin.register(api as any);
+    const store = api._resolveTool("memory_store", {});
+    const res = await store.execute("1", { text: "remember this" });
+    expect(calls.length).toBe(0);
+    expect(res.details.written).toBe(false);
+    expect(res.details.reason).toBe("no-identity");
+  });
+
+  test("D14: a partial success (memory written, supersede-close failed) is reported as exactly that", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const oldId = "A-old-target";
+    installFetchStub((call) => {
+      if (call.method === "GET" && call.url.includes(`/Memory/${oldId}`)) {
+        return { status: 200, body: { id: oldId, content: "old", agentId: "A" } };
+      }
+      if (call.method === "PUT" && call.url.includes(`/Memory/${oldId}`)) {
+        return { status: 500, body: { error: "boom" } };
+      }
+      return { status: 200, body: {} };
+    });
+    const api = createMockApi();
+    plugin.register(api as any);
+    const store = api._resolveTool("memory_store", { agentId: "A" });
+    const res = await store.execute("1", { text: "remember this", supersedes: oldId });
+    expect(res.details.written).toBe(true);
+    expect(res.details.supersedeClosed).toBe(false);
+    expect(res.details.errors.length).toBe(1);
+  });
+});

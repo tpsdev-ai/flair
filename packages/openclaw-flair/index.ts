@@ -127,6 +127,24 @@ function excerptForCapture(text: string, maxChars = 500): string {
   return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
 }
 
+/**
+ * D5: the capture text of a host message `content` — a string, or an array of
+ * content blocks. Text blocks are concatenated IN ORDER; image, thinking and
+ * tool blocks contribute NOTHING (their contents are never read into a memory);
+ * anything else returns "". Every capture path goes through this.
+ */
+export function captureText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const parts: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    const b = block as { type?: unknown; text?: unknown };
+    if (b.type === "text" && typeof b.text === "string" && b.text.length > 0) parts.push(b.text);
+  }
+  return parts.join("");
+}
+
 interface CaptureState {
   count: number;
   hashes: Set<string>;
@@ -606,17 +624,22 @@ export default {
         }),
         async execute(_id: string, params: any) {
           const { text, tags, durability, type, supersedes } = params;
+          let memId: string | null = null;
           try {
             const client = clientFor(ctx.agentId);
-            const memId = `${client.agentId}-${Date.now()}`;
+            // D11: no hand-built id. The client's canonical UUID path owns
+            // memory ids (`agentId-<uuid>`), so two writes in the same
+            // millisecond never address the same record.
             const result = await client.memory.write(text, {
-              id: memId,
               tags,
               durability,
               type,
               dedup: !supersedes,
               dedupThreshold: 0.7,
             });
+            memId = typeof (result as any).id === "string" ? (result as any).id : null;
+            const errors: string[] = [];
+            let supersedeClosed: true | false | "not-found" = false;
             if (supersedes) {
               try {
                 const old = await client.memory.get(supersedes);
@@ -627,12 +650,15 @@ export default {
                     archivedAt: new Date().toISOString(),
                     supersededBy: memId,
                   });
+                  supersedeClosed = true;
                 } else {
+                  supersedeClosed = "not-found";
                   api.logger.warn(
                     `openclaw-flair: supersede target ${supersedes} not found — new memory ${memId} written; nothing to close`,
                   );
                 }
               } catch (closeErr: any) {
+                errors.push(`supersede-close failed for ${supersedes}: ${closeErr.message}`);
                 api.logger.warn(
                   `openclaw-flair: failed to close superseded memory ${supersedes} after writing ${memId}: ${closeErr.message} ` +
                   `(not lost — new record is safely written; old record remains active until retried)`,
@@ -647,16 +673,29 @@ export default {
                   ? `Memory stored (id: ${memId}) — similar to existing memory id=${(result as any).matchedId}: ${result.content?.slice(0, 200)}`
                   : `Memory stored (id: ${memId})`,
               }],
+              // D14: machine-readable and honest. `written` is true only after the
+              // PRIMARY write succeeded; a partial success (memory written,
+              // supersede-close failed) is reported as exactly that via `errors`.
               details: {
-                id: result.id,
-                deduplicated: wasDeduplicated,
                 written: true,
+                id: memId,
+                supersedeClosed,
+                errors,
+                deduplicated: wasDeduplicated,
                 ...(wasDeduplicated ? { matchedId: (result as any).matchedId } : {}),
               },
             };
           } catch (err: any) {
             api.logger.warn(`openclaw-flair: store refused/failed: ${err.message}`);
-            return { content: [{ type: "text", text: `Memory store unavailable: ${err.message}` }], details: {} };
+            // D14: an unresolved identity is its own outcome, never a silent
+            // return and never written:true.
+            const noIdentity = /no agent identity|invalid agent identity|not in the configured allow-list/i.test(String(err?.message ?? ""));
+            return {
+              content: [{ type: "text", text: `Memory store unavailable: ${err.message}` }],
+              details: noIdentity
+                ? { written: false, reason: "no-identity", id: null, supersedeClosed: false, errors: [err.message] }
+                : { written: false, id: null, supersedeClosed: false, errors: [err.message] },
+            };
           }
         },
       }),
@@ -729,11 +768,11 @@ export default {
           }
           try {
             const client = clientFor(agentId);
-            const messages = (event?.messages ?? []) as Array<{ role: string; content?: string }>;
+            const messages = (event?.messages ?? []) as Array<{ role: string; content?: unknown }>;
             let stored = 0;
             for (const msg of messages) {
               if (msg.role !== "user" && msg.role !== "assistant") continue;
-              const text = typeof msg.content === "string" ? msg.content : "";
+              const text = captureText(msg.content);
               if (!text) continue;
               if (await tryAutoCapture(client, agentId, text)) stored++;
             }
@@ -751,7 +790,7 @@ export default {
             api.logger.warn("openclaw-flair: llm_input refused: no agent identity in host context — refusing rather than inheriting one");
             return;
           }
-          const text = typeof event?.prompt === "string" ? event.prompt : "";
+          const text = captureText(event?.prompt);
           if (!text) return;
           try {
             const client = clientFor(agentId);
@@ -769,7 +808,7 @@ export default {
             return;
           }
           const texts = Array.isArray(event?.assistantTexts) ? event.assistantTexts : [];
-          const text = texts.filter((t: unknown) => typeof t === "string").join("\n");
+          const text = captureText(texts.map((t: unknown) => (typeof t === "string" ? { type: "text", text: t } : t)));
           if (!text) return;
           try {
             const client = clientFor(agentId);
