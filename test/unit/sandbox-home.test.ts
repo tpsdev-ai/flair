@@ -184,7 +184,11 @@ function nodeShimBin(kind: "empty" | "hang"): string {
   const body =
      kind === "empty"
         ? "#!/bin/sh\nexit 0\n"
-         : "#!/bin/sh\nsleep 30\nexit 0\n";
+         // The hang shim traps and ignores SIGTERM, so it survives execFileSync's
+         // default SIGTERM-on-timeout, and redirects the descendant's standard streams
+         // so the orphaned `sleep` cannot keep execFileSync's stdout/stderr pipe open
+         // (and the probe pending past the 20 s deadline) - flaky on slower hosts.
+         : "#!/bin/sh\ntrap '' TERM\nsleep 30 >/dev/null 2>&1 </dev/null\nexit 0\n";
   writeFileSync(shimPath, body, { mode: 0o755 });
   return dir;
 }
@@ -244,14 +248,21 @@ describe("realHomeDir fails closed against a shim node (flair#1865)", () => {
     expect(`${r.stderr}${r.stdout}`).toContain("returned an empty home directory");
    });
 
-  it("fails closed (not a hang) when the shim node sleeps past the probe timeout", async () => {
+  it("fails closed (not a hang) when the shim node ignores SIGTERM and sleeps past the probe timeout", async () => {
     const home = fakeHome();
     const shim = nodeShimBin("hang");
-     // With the fix the probe times out at ~10 s, well under the 20 s deadline.
-     // Without it, execFileSync has no timeout: the probe blocks for the full 30 s
-     // sleep and this test TIMES OUT at 20 s — that timeout IS the red.
+     // The shim traps and ignores SIGTERM. execFileSync times out at ~10 s and,
+     // with killSignal:"SIGKILL", ends the shell there; the probe fails closed well under
+     // the 20 s deadline. Without the SIGKILL kill the shell keeps ignoring SIGTERM and
+     // the probe blocks for the full 30 s sleep — this test then TIMES OUT at 20 s,
+     // and that timeout IS the red.
+    const t0 = Date.now();
     const r = await runRealHomeProbe(home, shim);
+    const elapsed = Date.now() - t0;
+    expect(elapsed).toBeLessThan(15_000);
     expect(r.status).not.toBe(0);
+     // The swapped HOME was never resolved, so it cannot appear on stdout.
+    expect(r.stdout).not.toContain(home);
     expect(`${r.stderr}${r.stdout}`).toContain("cannot resolve the real home directory");
    }, 20_000);
 });
