@@ -313,6 +313,7 @@ A verified reader still sees `null` for a version the row never stored. Heartbea
 | Younger than the idle threshold (`PRESENCE_IDLE_THRESHOLD_MS`, default 90s) | `active` |
 | Younger than the offline threshold (`PRESENCE_OFFLINE_THRESHOLD_MS`, default 10 min) | `idle` |
 | At or beyond the offline threshold, when the idle threshold is at or below it | `offline` |
+| At or beyond the idle threshold, when the idle threshold is above the offline threshold (the idle status never occurs then) | `offline` |
 
 The rows are checked in that order and the first match wins. `derivePresenceStatus` (`resources/Presence.ts`) returns `active` while the age is strictly below `PRESENCE_IDLE_THRESHOLD_MS`, even when that age is already at or past `PRESENCE_OFFLINE_THRESHOLD_MS`. The ordering these rows describe is an idle threshold strictly below the offline threshold. An age equal to the offline threshold is `offline` only when the idle threshold is at or below the offline threshold; when the idle threshold is above it, the `active` row matches first and the status is `active`.
 
