@@ -150,7 +150,7 @@ FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation pair https://<hub
   --token-from ./pair-triple.json
 ```
 
-The `--admin-pass` is required so the CLI can write the hub as a local `Peer` record. Without it, pairing succeeds on the hub side but the spoke never records its peer, and `flair federation sync` reports "No hub peer configured."
+The spoke admin credential (`FLAIR_ADMIN_PASS` as above, or `--admin-pass`) is required so the CLI can write the hub as a local `Peer` record. Without it, pairing succeeds on the hub side but the spoke never records its peer, and `flair federation sync` reports "No hub peer configured."
 
 ### 5d. What pairing does
 
