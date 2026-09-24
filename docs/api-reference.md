@@ -44,14 +44,14 @@ the schema section so the catalog is complete.
 
 | Class | Credential | Typical grant |
 |-------|------------|---------------|
-| **Public** | none | Discovery, health, OAuth well-known, Presence roster (field-allowlisted) |
+| **Public** | none | Discovery, health, OAuth well-known. `GET /Presence` is public only when the instance opts in to a public roster (`PRESENCE_PUBLIC_ROSTER=true`) — by default it needs a verified reader. See [Presence for API consumers](#presence-for-api-consumers). |
 | **Ed25519 agent** | `TPS-Ed25519` header | Default agent path. Writes as self only. Reads follow the resource's read-scope (below). |
 | **Admin Basic** | Harper `HDB_ADMIN_PASSWORD` / `FLAIR_ADMIN_PASSWORD` | Whole-instance operator. Bypasses agent scoping, including `private` memory. Used by the web admin and `n8n-nodes-flair`. |
 | **Operator / internal** | Admin Basic, or a deliberate `internalContext()` call inside the process | Soul mutations and `AgentSeed`. Agent Ed25519 keys — including admin-agent keys — cannot author Soul. |
 | **Federation body-sig** | Ed25519 over the request body + timestamp/nonce; pairing uses a one-time token | `/FederationPair`, `/FederationSync`. Harper role gate is open; the handler is the auth boundary. |
 | **OAuth bearer** | Access token from Flair's AS or `@harperfast/oauth` | `/mcp` only, and only when `FLAIR_MCP_OAUTH=true` plus a public issuer. Off by default (path 404s). |
 
-Anonymous HTTP is denied on every agent-facing table. A by-id miss and a
+Anonymous HTTP is denied on every agent-facing table (and on `GET /Presence`, which needs a verified reader unless the instance enables the public-roster opt-in). A by-id miss and a
 by-id deny both return **404**, never 403, so ids are not an existence oracle.
 
 ### Read-scope vocabulary
@@ -107,7 +107,7 @@ is `GET /Name/<id>` unless noted.
 | POST | `/Agent` | Admin Basic | Create principal. Also `POST /AgentSeed` (operator/internal only — not an admin-agent key). |
 | PUT / PATCH | `/Agent/<id>` | Ed25519 | An agent updates **only its own** record. |
 | DELETE | `/Agent/<id>` | Admin Basic | Deprovision. |
-| GET | `/Presence` | Public | Roster, field-allowlisted. Unverified readers get `currentTask`, `flairVersion`, and `harperVersion` as null. Thresholds: [Presence for API consumers](#presence-for-api-consumers). |
+| GET | `/Presence` | Verified reader | Roster. Requires a valid `TPS-Ed25519` agent signature or the admin credential; an anonymous request gets 401. An instance may opt in to a public roster with `PRESENCE_PUBLIC_ROSTER=true`, in which case an unverified reader gets the allowlisted roster with `currentTask`, `flairVersion`, and `harperVersion` as null. Thresholds: [Presence for API consumers](#presence-for-api-consumers). |
 | POST | `/Presence` | Ed25519 | Heartbeat. Agent writes only its own row (403 cross-agent). Stamps `flairVersion` / `harperVersion` on the row. |
 | PUT / DELETE | `/Presence/<id>` | Ed25519 | Own row only. Collection PUT is not a public bypass. |
 | GET | `/Soul`, `/Soul/<id>` | Ed25519 | Any verified agent; unscoped (identity/discovery). |
@@ -300,7 +300,9 @@ client-writable even if a client sends them. Full comments live in
 
 ### Presence for API consumers
 
-`GET /Presence` is public. The roster (id, display name, role, runtime, activity fields, `presenceStatus`, `lastHeartbeatAt`) is world-readable. Three fields are redacted unless the request carries a valid `TPS-Ed25519` agent signature: `currentTask`, `flairVersion`, and `harperVersion`. Anonymous callers, unsigned loopback, Basic admin, and in-process calls without that signature are unverified readers. They receive those three keys as `null`. The nulls are intentional. Version strings are withheld so a public roster cannot fingerprint the instance (the same split as public `/Health` versus Ed25519 `/HealthDetail`). A null `flairVersion` on an unverified read does not mean the peer lacks a version, and it does not mean the peer cannot accept a directed handoff.
+`GET /Presence` requires a **verified reader** by default. A verified reader is a request carrying a valid `TPS-Ed25519` agent signature from an agent registered on this instance, or the admin credential. An anonymous — or otherwise unverified — request gets **401**, not a redacted roster. The roster is org-visible data (who is working, on what class of activity, and how recently) and is not published by default.
+
+An instance that runs a public status page opts back in with the presence config key `PRESENCE_PUBLIC_ROSTER=true` (the same env-var channel as the thresholds below); it is **off by default** and is documented as *publishes your roster to the internet*. With it on the behaviour is exactly as it was before: an anonymous caller gets the field-allowlisted roster (id, display name, role, runtime, activity fields, `presenceStatus`, `lastHeartbeatAt`), and three fields are redacted to `null` unless the request carries a valid `TPS-Ed25519` agent signature: `currentTask`, `flairVersion`, and `harperVersion`. Anonymous callers, unsigned loopback, Basic admin, and in-process calls without that signature are unverified readers of the content gate. The nulls are intentional. Version strings are withheld so a public roster cannot fingerprint the instance (the same split as public `/Health` versus Ed25519 `/HealthDetail`). A null `flairVersion` on an unverified read does not mean the peer lacks a version, and it does not mean the peer cannot accept a directed handoff.
 
 A verified reader still sees `null` for a version the row never stored. Heartbeats stamp the running server's versions; a row written before that stamp, and not heartbeated since, has no value to return. `harperVersion` is also null when this process could not resolve Harper's package version. That null means unknown, not redacted.
 

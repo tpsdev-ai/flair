@@ -1,30 +1,36 @@
 /**
  * POST /Presence — agent heartbeat writes its own presence.
- * GET  /Presence — public-safe presence roster for The Office Space.
+ * GET  /Presence — verified-reader roster for The Office Space (public roster
+ *                    is an explicit opt-in, flair#1880).
  *
  * Extends the auto-generated Presence table resource (from schema.graphql).
  * Overrides get() for public-safe roster and post() for Ed25519-authed
  * heartbeat writes.
  *
  * Auth:
- *   GET  — public (returns only allowlisted fields; safe for public renderer).
- *          currentTask is additionally content-gated to verified agents only
- *          (#592) — anonymous callers get the roster with currentTask=null.
+ *   GET  — requires a VERIFIED reader by default (flair#1880): a valid
+ *          TPS-Ed25519 signature from an agent registered on this instance, or
+ *          the admin credential. An anonymous caller gets 401. Set
+ *          `PRESENCE_PUBLIC_ROSTER=true` (publicRosterEnabled()) to opt in to
+ *          the pre-#1880 anonymous, field-allowlisted roster. For a verified
+ *          reader, currentTask/flairVersion/harperVersion stay content-gated
+ *          to a valid TPS-Ed25519 signature (#592/#639).
  *   POST — Ed25519 agent credential (TPS-Ed25519 header). Agent writes only its
  *          own record; cross-agent writes are rejected (403).
  *
  * Security (Sherlock):
  *   - Write: per-agent Ed25519 auth. Cross-agent → 403.
- *   - Read: field-allowlisted to public-safe set. No secrets, no admin data.
+ *   - Read: verified reader by default (401 for anonymous); when the
+ *     publicRoster opt-in is on, the roster is field-allowlisted to a
+ *     public-safe set. No secrets, no admin data.
  *   - currentTask is agent-authored free text → cap length, escape on render.
- *   - currentTask CONTENT gate (#592): the roster (id/displayName/role/
- *     runtime/activity/presenceStatus/lastHeartbeatAt) is genuinely
- *     public-safe and stays world-readable, but currentTask is free text that
- *     the coordination convention (`presence set --task "investigating
- *     <host>: <symptom>"`) has put customer names and preprod hostnames in.
- *     sanitizeCurrentTask() only trims/caps length — it does not redact
- *     content. get() additionally gates currentTask itself to verified
- *     in-org agents only; see get()'s inline comment.
+ *   - currentTask CONTENT gate (#592): for a verified reader the roster
+ *     (id/displayName/role/runtime/activity/presenceStatus/lastHeartbeatAt) is
+ *     public-safe, but currentTask is free text that the coordination
+ *     convention (`presence set --task "investigating <host>: <symptom>"`) has
+ *     put customer names and preprod hostnames in. sanitizeCurrentTask() only
+ *     trims/caps length — it does not redact content. get() gates currentTask
+ *     (and the versions) to a valid signature; see get()'s inline comment.
  */
 
 import { databases } from "harper";
@@ -32,7 +38,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { resolveAgentAuth, verifyAgentRequest, isPrincipalDeactivated } from "./agent-auth.js";
+import { resolveAgentAuth, verifyAgentRequest, isPrincipalDeactivated, hasCredentialEvidence } from "./agent-auth.js";
 import { agentRecordIsAdmin } from "./agent-admin.js";
 import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 
@@ -49,6 +55,60 @@ function idleThresholdMs(): number {
 function offlineThresholdMs(): number {
   const env = process.env.PRESENCE_OFFLINE_THRESHOLD_MS;
   return env ? Number(env) || 600_000 : 600_000;
+}
+
+/**
+ * Is the PUBLIC roster opt-in enabled? (flair#1880) Default OFF.
+ *
+ * Read from `PRESENCE_PUBLIC_ROSTER` — the same env-var channel the two
+ * presence config keys above use (`PRESENCE_IDLE_THRESHOLD_MS` /
+ * `PRESENCE_OFFLINE_THRESHOLD_MS`); this is the file where presence config is
+ * read. Truthy: `1` / `true` / `yes` / `on` (case-insensitive), matching the
+ * repo-wide boolean-env vocabulary (mcp-oauth-flag.ts, mcp-handler.ts,
+ * rate-limit.ts). Anything else — unset, empty, `false`, `0`, garbage — is OFF,
+ * so the DEFAULT is a verified reader.
+ *
+ * OFF  → GET /Presence requires a verified reader (a valid TPS-Ed25519
+ *        signature from a registered agent, or the admin credential); an
+ *        anonymous caller gets 401 (see get()).
+ * ON   → today's behaviour exactly: an anonymous caller gets the
+ *        field-allowlisted roster with currentTask / flairVersion /
+ *        harperVersion null.
+ *
+ * Documented as "publishes your roster to the internet".
+ */
+export function publicRosterEnabled(): boolean {
+  const raw = (process.env.PRESENCE_PUBLIC_ROSTER ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+/**
+ * Is this reader VERIFIED — a valid TPS-Ed25519 signature from an agent
+ * registered on this instance, or the admin credential? (flair#1880)
+ *
+ * Reuses the SAME verification path `includeVerifiedFields` already relies on
+ * (#592/#639) — `verifyAgentRequest()`, memoized per request, so calling it
+ * here and again in get() is one crypto verify, not two. It is NOT a second
+ * verifier.
+ *
+ * The admin credential (Harper Basic) is a separate, reviewed predicate: Harper
+ * authorizes it and injects a super_user, but per flair#610 that identity is
+ * trusted ONLY when the request actually carried a credential header
+ * (`hasCredentialEvidence`) — an `authorizeLocal`-forged, credential-less
+ * loopback `super_user` must NOT count as verified. That is exactly the
+ * evidence gate `resolveAgentAuth()` applies before trusting `context.user`.
+ *
+ * An in-process call (presence-internal.ts) seeds `_flairAgentAuth`, so
+ * verifyAgentRequest() resolves it and it reads as verified; a genuine
+ * anonymous HTTP request resolves to neither and reads as unverified.
+ */
+async function isVerifiedReader(context: any): Promise<boolean> {
+  const request = context?.request ?? context;
+  if (request && (await verifyAgentRequest(request)) !== null) return true;
+  const c = context?.request ?? context;
+  const user = context?.user ?? c?.user;
+  if (hasCredentialEvidence(c) && user?.role?.permission?.super_user === true) return true;
+  return false;
 }
 
 // ─── Version stamping (flair#639) ──────────────────────────────────────────────
@@ -283,7 +343,19 @@ function pickAllowlisted(record: Record<string, unknown>): Record<string, unknow
  * public-safe roster view and post() for Ed25519-authed heartbeat writes.
  */
 export class Presence extends (databases as any).flair.Presence {
-  /** Bypass Harper's role gate for GET (public-safe data only). */
+  /**
+   * GET /Presence read authorization is enforced in get(), NOT here (flair#1880).
+   *
+   * Returning `false` from allowRead() makes Harper throw AccessViolation and
+   * reply **403** — MEASURED on the harness Harper: with allowRead() → false, an
+   * anonymous GET /Presence returned 403 (context.user is truthy, so
+   * AccessViolation picks its 403 branch). The issue requires **401** for an
+   * anonymous reader, and a resource can only choose a status by returning a
+   * Response from get(). So the verified-reader gate lives in get(), and
+   * allowRead() stays `true` so the request reaches it and gets the correct 401
+   * instead of a 403. (The currentTask content gate has likewise always lived in
+   * get(), never here.)
+   */
   allowRead() {
     return true;
   }
@@ -326,21 +398,45 @@ export class Presence extends (databases as any).flair.Presence {
    * in-org agent from an anonymous/loopback/Basic-admin caller. Only a valid
    * agent signature gets currentTask; everything else (anonymous, loopback
    * super_user, Basic-admin, internal in-process) gets currentTask=null.
-   * allowRead() is UNCHANGED (still `true`) — the roster itself stays public;
-   * only the free-text field is gated, per the issue's field-level option.
+   * allowRead() is UNCHANGED (still `true`): the read gate lives in get() so it
+   * can return 401 (allowRead()=false would return 403 — see that method).
    *
    * flairVersion/harperVersion (flair#639) ride the SAME gate, renamed to
    * includeVerifiedFields since it now covers more than currentTask — see the
    * ROSTER_ALLOWLIST comment above for why version numbers are gated too.
+   *
+   * READ gate (flair#1880): the roster ITSELF now requires a verified reader by
+   * default — a valid TPS-Ed25519 signature from an agent registered on this
+   * instance, or the admin credential. An anonymous/unverified caller gets 401
+   * (the same method emits it, so the status is ours to choose; see allowRead()).
+   * `PRESENCE_PUBLIC_ROSTER` (publicRosterEnabled(), default false) is the
+   * explicit opt-in that restores the pre-#1880 anonymous, field-allowlisted
+   * roster (gated fields null). The gate runs BEFORE the loop, so `GET /Presence`
+   * and `GET /Presence/<id>` are both covered by the one return site. The
+   * allowlist and the includeVerifiedFields content gate are UNCHANGED for
+   * verified readers.
    */
   async get() {
     // Extract the raw request the same way post() does (getContext().request
-    // is populated for GET; fall back to the context itself). verifyAgentRequest
-    // returns the agent for a valid TPS-Ed25519 signature, else null — see the
-    // gate rationale above. Memoized per-request, so this is a no-op if any
-    // other path already verified the same request.
+    // is populated for GET; fall back to the context itself).
     const ctx = (this as any).getContext?.();
     const request = ctx?.request ?? ctx;
+
+    // READ GATE (flair#1880). isVerifiedReader() reuses verifyAgentRequest()
+    // (memoized — the SAME verification includeVerifiedFields relies on) plus
+    // the credential-evidence-gated admin path; it writes no second verifier.
+    const verifiedReader = await isVerifiedReader(ctx);
+    if (!verifiedReader && !publicRosterEnabled()) {
+      return new Response(
+        JSON.stringify({ error: "authentication required" }),
+        { status: 401, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    // Content gate for verified readers — UNCHANGED (#592/#639): only a valid
+    // TPS-Ed25519 signature sees currentTask/flairVersion/harperVersion. The
+    // admin credential authorizes a read but is NOT a signature, so it stays a
+    // redacted-content reader exactly as before.
     const agentAuth = request ? await verifyAgentRequest(request) : null;
     const includeVerifiedFields = agentAuth !== null;
 
@@ -385,8 +481,8 @@ export class Presence extends (databases as any).flair.Presence {
         const entry: Record<string, unknown> = {
           id: agentId,
           displayName: agent?.displayName ?? agent?.name ?? agentId,
-          // `role` is a human label on a PUBLIC roster (allowRead() is `true`),
-          // and it is also the field that decides administrator status
+          // `role` is a human label on a PUBLIC roster (the publicRoster
+          // opt-in serves it anonymously), and it is also the field that decides administrator status
           // (resources/agent-admin.ts). Publishing the admin sentinel would
           // hand an unauthenticated reader the list of privileged principals —
           // so the roster reports admins as ordinary agents. It is a display

@@ -1599,6 +1599,19 @@ program
       try {
         const presRes = await fetch(`${baseUrl}/Presence`, { headers, signal: AbortSignal.timeout(5000) });
         if (!presRes.ok) {
+          // flair#1880: GET /Presence requires a verified reader by default, so
+          // a keyless (unsigned) read now gets 401. Say so plainly instead of a
+          // bare HTTP code — there is no agent to sign as here, so the fix is
+          // either to pass one (--agent) or to opt the instance into a public
+          // roster. Never silent: the flip must not blind our own tooling.
+          if (presRes.status === 401 && !canSign) {
+            console.log(
+              `${indent}${render.icons.info} Presence roster requires a verified reader (HTTP 401). ` +
+              `Pass --agent <id> (with a matching key in ~/.flair/keys) to read it, or set ` +
+              `PRESENCE_PUBLIC_ROSTER=true on the instance to publish a public roster.`,
+            );
+            return;
+          }
           console.log(`${indent}${render.icons.warn} Could not fetch presence roster (HTTP ${presRes.status})`);
           return;
         }
