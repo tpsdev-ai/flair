@@ -76,13 +76,14 @@ Earlier designs relied on `allowCreate=true` combined with body-only authenticat
 
 ## Fabric Pairing Example
 
-A managed Harper Fabric hub has no shell. Mint the triple from any machine that can reach it, then pair from the spoke. `--admin-pass` is also accepted but puts the password in shell history and process listings; prefer the environment form below (or a secret manager). The full bring-up, including why `--ops-target` names port 9925, is [spoke-bringup.md §5a](spoke-bringup.md#harper-fabric-hub-no-shell). <!-- docs-freshness-allow: Fabric ops API port, not legacy data port -->
+A managed Harper Fabric hub has no shell. Mint the triple from any machine that can reach it, then pair from the spoke. `FLAIR_ADMIN_PASS` on that mint is the **hub/cluster** admin (the admin file on the hub host, or a secret manager), not the spoke's `~/.flair/admin-pass`. `--admin-pass` is also accepted but puts the password in shell history and process listings; prefer the environment form below. The full bring-up, including why `--ops-target` names port 9925, is [spoke-bringup.md §5a](spoke-bringup.md#harper-fabric-hub-no-shell). <!-- docs-freshness-allow: Fabric ops API port, not legacy data port -->
 
 ```bash
 # 1. On any machine (the spoke itself is fine) — no ssh, no scp.
 # umask 077 sets the mode of a file the redirect CREATES; set -C makes the redirect
 # refuse to overwrite an existing one, so a retry cannot truncate-and-reuse a looser file.
-(umask 077; set -C; FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation token \
+# <cluster-admin-pass> is the hub admin, not ~/.flair/admin-pass on this machine.
+(umask 077; set -C; FLAIR_ADMIN_PASS="<cluster-admin-pass>" flair federation token \
   --target https://<hub>.<org>.harperfabric.com \
   --ttl 60 \
   --ops-target https://<hub>.<org>.harperfabric.com:9925 > ./pair-triple.json)  # docs-freshness-allow: Fabric ops API port, not legacy data port
@@ -93,7 +94,7 @@ flair federation pair https://<hub>.<org>.harperfabric.com \
   --admin-pass "$FLAIR_ADMIN_PASS"
 ```
 
-Replace `<hub>`, `<org>`, and `<hub-admin-password>` with your actual values.
+Replace `<hub>`, `<org>`, and `<cluster-admin-pass>` with your actual values. The pair step's admin password is the spoke's, used to write the local Peer row.
 
 Running the hub on Fabric has its own considerations — port derivation against a managed
 `443` endpoint, why the sync driver can only be installed on a machine you control, and

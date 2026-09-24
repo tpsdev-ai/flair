@@ -125,13 +125,13 @@ On the **hub host**, an admin runs:
 A Fabric-deployed hub is a Harper component on a managed cluster. There is no host to shell into. Mint the triple from any machine that can reach the hub — for a personal spoke, that machine is the spoke — and name both the data URL and the ops URL:
 
 ```bash
-(umask 077; set -C; FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation token \
+(umask 077; set -C; FLAIR_ADMIN_PASS="<cluster-admin-pass>" flair federation token \
   --target https://<hub>.<org>.harperfabric.com \
   --ttl 60 \
   --ops-target https://<hub>.<org>.harperfabric.com:9925 > pair-triple.json)  # docs-freshness-allow: Fabric ops API port, not legacy data port
 ```
 
-`--ops-target` is the Harper operations API on the same hostname at port 9925. <!-- docs-freshness-allow: Fabric ops API port, not legacy data port --> A portless `https://` `--target` derives that same port. Pass `--ops-target` so the URL is the one you chose. An explicit port other than 443 still derives as REST port minus one, which is not this ops port. `federation token` reads the admin password from `FLAIR_ADMIN_PASS` (or from `--admin-pass`). `--admin-pass` is also accepted but puts the password in shell history and process listings; prefer the environment form above (or a secret manager).
+`<cluster-admin-pass>` is the **hub** admin password — the admin file on the hub host, or a secret manager — not the spoke's `~/.flair/admin-pass`. That local file authenticates only the spoke. `--ops-target` is the Harper operations API on the same hostname at port 9925. <!-- docs-freshness-allow: Fabric ops API port, not legacy data port --> A portless `https://` `--target` derives that same port. Pass `--ops-target` so the URL is the one you chose. An explicit port other than 443 still derives as REST port minus one, which is not this ops port. `federation token` reads the admin password from `FLAIR_ADMIN_PASS` (or from `--admin-pass`). `--admin-pass` is also accepted but puts the password in shell history and process listings; prefer the environment form above (or a secret manager).
 
 ### 5b. Transfer the triple to the spoke
 
