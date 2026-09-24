@@ -168,10 +168,10 @@ function npmInvocationProblem(stmt: string, raw: string): string | null {
     return /\s--userconfig\b/.test(stmt) ? null : "npm --version must carry --userconfig";
   }
   if (/^npm stage publish\s/.test(stmt)) {
-    // The tag value may only enter as the quoted variable the tag= scan already
-    // constrains to staged|next — never a literal.
-    if (!/--tag\s+"\$[A-Za-z_][A-Za-z0-9_]*"/.test(raw)) {
-      return 'npm stage publish must carry --tag as a quoted variable, e.g. --tag "$tag"';
+    // The tag value may only enter as the quoted variable "$tag" the tag= scan
+    // already constrains to staged|next — never a literal, and never another variable.
+    if (!/--tag\s+"\$tag"(?=\s|$)/.test(raw)) {
+      return 'npm stage publish must carry --tag as the quoted variable "$tag"';
     }
     if (!/\s--ignore-scripts\b/.test(stmt)) return "npm stage publish must carry --ignore-scripts";
     if (!/\s--userconfig\b/.test(stmt)) return "npm stage publish must carry --userconfig";
@@ -185,6 +185,13 @@ function gitInvocationProblem(stmt: string): string | null {
   if (/^git fetch --no-tags origin main\b/.test(stmt)) return null;
   if (/^git merge-base --is-ancestor \S+ origin\/main\b/.test(stmt)) return null;
   return `unexpected git invocation: ${stmt.split(/\s+/).slice(0, 3).join(" ")}`;
+}
+
+/** Allowed find invocation: the flat artifact enumeration, and nothing else. */
+function findInvocationProblem(stmt: string): string | null {
+  const head = stmt.replace(/\s*>.*$/, "").trim();
+  if (head === "find . -mindepth 1 -maxdepth 1 -printf %P\\n") return null;
+  return `unexpected find invocation: ${stmt.split(/\s+/).slice(0, 4).join(" ")}`;
 }
 
 function splitStatements(line: string): string[] {
@@ -258,6 +265,10 @@ function runBodyProblems(runBody: string): string[] {
       }
       if (cs.cmd === "git") {
         const p = gitInvocationProblem(unquoteStatement(frag));
+        if (p) problems.push(p);
+      }
+      if (cs.cmd === "find") {
+        const p = findInvocationProblem(unquoteStatement(frag));
         if (p) problems.push(p);
       }
     }
@@ -420,6 +431,25 @@ describe("the stage job is an allowlisted shape (flair#1671 A1a)", () => {
     steps[steps.length - 1]!.run = steps[steps.length - 1]!.run!.replace('--tag "$tag"', "--tag latest");
     const { problems } = inspectStageJob(yaml.dump(doc));
     expect(problems.join("\n")).toContain("quoted variable");
+  });
+
+  test("(G2) a DIFFERENT quoted variable after --tag goes red", () => {
+    const doc = yaml.load(realWorkflow()) as WorkflowDoc;
+    const steps = doc.jobs!["stage-publish"]!.steps!;
+    steps[steps.length - 1]!.run = steps[steps.length - 1]!.run!.replace('--tag "$tag"', '--tag "$REL"');
+    const { problems } = inspectStageJob(yaml.dump(doc));
+    expect(problems.join("\n")).toContain("quoted variable");
+  });
+
+  test("(G4) a find invocation outside the enumeration form goes red", () => {
+    const doc = yaml.load(realWorkflow()) as WorkflowDoc;
+    const steps = doc.jobs!["stage-publish"]!.steps!;
+    steps[steps.length - 1]!.run = steps[steps.length - 1]!.run!.replace(
+      "find . -mindepth 1 -maxdepth 1 -printf '%P\\n'",
+      "find . -mindepth 1 -maxdepth 1 -exec sh -c true ;",
+    );
+    const { problems } = inspectStageJob(yaml.dump(doc));
+    expect(problems.join("\n")).toContain("unexpected find invocation");
   });
 
   test("workflow-level permissions are {} and github-release keeps contents: write", () => {
