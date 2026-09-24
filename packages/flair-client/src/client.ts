@@ -45,8 +45,14 @@ function anySignal(a: AbortSignal, b: AbortSignal): { signal: AbortSignal; clean
     linked.abort(a.aborted ? a.reason : b.reason);
     return { signal: linked.signal, cleanup: () => {} };
   }
-  const onA = () => linked.abort(a.reason);
-  const onB = () => linked.abort(b.reason);
+  const onA = () => {
+    linked.abort(a.reason);
+    b.removeEventListener("abort", onB); // either input aborting removes BOTH
+  };
+  const onB = () => {
+    linked.abort(b.reason);
+    a.removeEventListener("abort", onA);
+  };
   a.addEventListener("abort", onA, { once: true });
   b.addEventListener("abort", onB, { once: true });
   // The caller's signal is long-lived; the caller MUST remove BOTH listeners
@@ -185,24 +191,24 @@ export class FlairClient {
     const combined = opts.signal
       ? anySignal(timeoutSignal, opts.signal)
       : { signal: timeoutSignal, cleanup: () => {} };
-    let res: Response;
     try {
-      res = await fetch(`${this.url}${path}`, {
+      const res = await fetch(`${this.url}${path}`, {
         method,
         headers,
         body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: combined.signal,
       });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new FlairError(method, path, res.status, text.slice(0, 500), this.lastKeyLookup);
+      }
+      const text = await res.text();
+      return text ? JSON.parse(text) : ({} as T);
     } finally {
-      // Remove any listeners on the caller's long-lived signal on EVERY path.
+      // Remove any listeners on the caller's long-lived signal on EVERY path —
+      // success, timeout, response error or a JSON error.
       combined.cleanup();
     }
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new FlairError(method, path, res.status, text.slice(0, 500), this.lastKeyLookup);
-    }
-    const text = await res.text();
-    return text ? JSON.parse(text) : ({} as T);
   }
 
   /** Cold-start bootstrap — get soul + recent memories as a formatted context block. */
