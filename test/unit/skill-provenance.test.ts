@@ -33,7 +33,18 @@ import { refuseSkillWriteSource } from "../../resources/skill-write.ts";
 
 const INSPECT_PATH = "/tmp/harperfast-skills-inspect/package/harper-best-practices/SKILL.md";
 const NPM_SOURCE = "npm:@harperfast/skills@1.4.2@1.4.2";
-const DURABLE_FS = join(process.cwd(), "skills", "harper-best-practices", "SKILL.md");
+// #1844 — the durable fixture must classify as durable regardless of BOTH where
+// the checkout (cwd) lives AND what HOME resolves to. The test:unit lane
+// (scripts/test-unit.ts) sandboxes HOME to a per-step mkdtemp dir under
+// tmpdir() (flair#1853), so a HOME/homedir()-rooted fixture classifies as
+// non-durable under the lane even though it is durable elsewhere — a false
+// failure. The provenance classifier (isNonDurableFilesystemPath) marks a path
+// non-durable only when it resolves under a temp root (tmpdir / /tmp /
+// /private/tmp / /var/tmp / TMP* env). This absolute fixture lives at /, outside
+// every temp root, so its classification is independent of cwd and HOME. The
+// registration path is pure string parsing (no filesystem read), so the path need
+// not exist on disk.
+const DURABLE_FS = join("/flair-durable-skills", "harper-best-practices", "SKILL.md");
 
 function meta(source: string): string {
   return JSON.stringify({ source });
@@ -47,6 +58,16 @@ function assignment(name: string, source: string | undefined, priority = "standa
     metadata: source ? meta(source) : undefined,
   };
 }
+
+// #1844 — guard: assert the durable fixture classifies as durable, so a change
+// to the classification rule fails here with a clear name (independent of cwd
+// and the test:unit sandbox HOME) instead of surfacing as two unrelated
+// failures in the tests that use DURABLE_FS below.
+describe("fixture guard — DURABLE_FS classifies as durable (independent of cwd and sandboxed HOME)", () => {
+  test("the durable fixture classifies as durable (#1844)", () => {
+    expect(isDurableSkillSource(DURABLE_FS)).toBe(true);
+   });
+});
 
 describe("defect 1 — refuse non-durable skill sources at registration", () => {
   test("known-answer: /tmp/harperfast-skills-inspect/... fails and names the path", async () => {
