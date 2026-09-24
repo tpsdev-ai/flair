@@ -37,18 +37,27 @@ const DEFAULT_TIMEOUT = 30_000;
  * present, else link the two signals by hand — honouring an already-aborted
  * input and forwarding the abort reason.
  */
-function anySignal(a: AbortSignal, b: AbortSignal): AbortSignal {
+function anySignal(a: AbortSignal, b: AbortSignal): { signal: AbortSignal; cleanup: () => void } {
   const any = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
-  if (typeof any === "function") return any.call(AbortSignal, [a, b]);
+  if (typeof any === "function") return { signal: any.call(AbortSignal, [a, b]), cleanup: () => {} };
   const linked = new AbortController();
-  for (const s of [a, b]) {
-    if (s.aborted) {
-      linked.abort(s.reason);
-      return linked.signal;
-    }
-    s.addEventListener("abort", () => linked.abort(s.reason), { once: true });
+  if (a.aborted || b.aborted) {
+    linked.abort(a.aborted ? a.reason : b.reason);
+    return { signal: linked.signal, cleanup: () => {} };
   }
-  return linked.signal;
+  const onA = () => linked.abort(a.reason);
+  const onB = () => linked.abort(b.reason);
+  a.addEventListener("abort", onA, { once: true });
+  b.addEventListener("abort", onB, { once: true });
+  // The caller's signal is long-lived; the caller MUST remove BOTH listeners
+  // when the request settles, or a listener leaks per request (flair#1884 r3).
+  return {
+    signal: linked.signal,
+    cleanup: () => {
+      a.removeEventListener("abort", onA);
+      b.removeEventListener("abort", onB);
+    },
+  };
 }
 
 export class FlairClient {
@@ -173,13 +182,21 @@ export class FlairClient {
       };
     }
     const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
-    const signal = opts.signal ? anySignal(timeoutSignal, opts.signal) : timeoutSignal;
-    const res = await fetch(`${this.url}${path}`, {
-      method,
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal,
-    });
+    const combined = opts.signal
+      ? anySignal(timeoutSignal, opts.signal)
+      : { signal: timeoutSignal, cleanup: () => {} };
+    let res: Response;
+    try {
+      res = await fetch(`${this.url}${path}`, {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: combined.signal,
+      });
+    } finally {
+      // Remove any listeners on the caller's long-lived signal on EVERY path.
+      combined.cleanup();
+    }
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       throw new FlairError(method, path, res.status, text.slice(0, 500), this.lastKeyLookup);

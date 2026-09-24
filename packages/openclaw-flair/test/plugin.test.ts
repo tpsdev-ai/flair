@@ -261,6 +261,7 @@ const CAPTURE_BOUNDS_DEFAULTS = {
   idleRunRetireMs: 30 * 60_000,
   runStateCap: 10_000,
   tombstoneCap: 10_000,
+  tombstoneMinAgeMs: 60 * 60_000,
   logOnceCap: 10_000,
   sweepIntervalMs: 30_000,
 };
@@ -1245,7 +1246,7 @@ describe("slice 2 round 2 — tombstone, bounds and failed primary writes", () =
     expect(captureInternals.stateCount()).toBeLessThanOrEqual(8);
   });
 
-  test("F2: the tombstone and the one-time-log set are bounded", async () => {
+  test("F2: the one-time-log set is bounded; young tombstones are NEVER evicted (round 3)", async () => {
     captureBounds.tombstoneCap = 3;
     captureBounds.logOnceCap = 2;
     const plugin = await loadPlugin();
@@ -1254,7 +1255,9 @@ describe("slice 2 round 2 — tombstone, bounds and failed primary writes", () =
     for (let i = 0; i < 6; i++) {
       await api._fire("agent_end", { runId: `r${i}`, success: false, messages: [] }, { agentId: "A" });
     }
-    expect(captureInternals.tombstoneCount()).toBe(3);
+    // Round 3 item 1: a cap may never break the guarantee, so it does NOT evict
+    // tombstones younger than the minimum age — the set may exceed the cap.
+    expect(captureInternals.tombstoneCount()).toBe(6);
     const llmOut = api._handler("llm_output");
     for (let i = 0; i < 6; i++) {
       // A key per agent, so `clientFor` resolves and the no-runId gate actually
@@ -1323,5 +1326,94 @@ describe("slice 2 round 2 — tombstone, bounds and failed primary writes", () =
     expect(res.details.written).toBe(false);
     expect(res.details.errors.join(" ")).toMatch(/network down/);
     expect(calls.filter((c) => c.method === "PUT" && c.url.includes("/Memory/old-target")).length).toBe(0);
+  });
+});
+
+// ── round 3 — caps FAIL CLOSED; they never break a guarantee ─────────────────
+
+describe("slice 2 round 3 — at capacity, capture fails closed", () => {
+  const TRIGGER3 = "remember this: the round three capacity target is staging";
+
+  test("item 1: a full tombstone of YOUNG entries refuses a new run; old retired runs are not re-admitted", async () => {
+    captureBounds.tombstoneCap = 3;
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    const base = 10_000_000;
+    captureClock.now = () => base;
+    // Fill the tombstone with three YOUNG entries.
+    for (let i = 0; i < 3; i++) {
+      await api._fire("agent_end", { runId: `old${i}`, success: false, messages: [] }, { agentId: "A" });
+    }
+    expect(captureInternals.tombstoneCount()).toBe(3);
+
+    const calls = installFetchStub();
+    const llmOut = api._handler("llm_output");
+    // A NEW run is REFUSED (fail closed), not admitted by evicting a tombstone.
+    await llmOut({ runId: "new", assistantTexts: [TRIGGER3] }, { agentId: "A" });
+    expect(puts(calls).length).toBe(0);
+    expect(api._warnText()).toMatch(/capture-capacity: tombstones/);
+    expect(captureInternals.stateCount()).toBe(0);
+    // A previously retired run is STILL not re-admitted.
+    await llmOut({ runId: "old0", assistantTexts: [TRIGGER3] }, { agentId: "A" });
+    expect(puts(calls).length).toBe(0);
+    expect(api._warnText()).toMatch(/dropped a callback for retired run old0/);
+    expect(captureInternals.tombstoneCount()).toBe(3);
+
+    // Past the minimum age, eviction works and a new run is admitted again.
+    captureClock.now = () => base + captureBounds.tombstoneMinAgeMs + 1;
+    await llmOut({ runId: "new2", assistantTexts: ["a plain note"] }, { agentId: "A" });
+    expect(captureInternals.stateCount()).toBe(1);
+    expect(captureInternals.tombstoneCount()).toBe(2);
+  });
+
+  test("item 2: the state cap never evicts an in-flight state; a new run is refused instead", async () => {
+    captureBounds.runStateCap = 2;
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const llmOut = api._handler("llm_output");
+    const p1 = llmOut({ runId: "r1", assistantTexts: [TRIGGER3] }, { agentId: "A" });
+    const p2 = llmOut({ runId: "r2", assistantTexts: [TRIGGER3] }, { agentId: "A" });
+    await waitFor(() => puts(calls).length === 2);
+    expect(captureInternals.stateCount()).toBe(2);
+
+    // Both states have a write in flight → a THIRD run is refused.
+    await llmOut({ runId: "r3", assistantTexts: [TRIGGER3] }, { agentId: "A" });
+    expect(captureInternals.stateCount()).toBe(2);
+    expect(puts(calls).length).toBe(2); // no third write
+    expect(api._warnText()).toMatch(/capture-capacity: live-states/);
+
+    // The in-flight writes still COMPLETE (nothing was dropped to make room).
+    d.release();
+    await Promise.all([p1, p2]);
+    expect(puts(calls).length).toBe(2);
+    expect(captureInternals.stateCount()).toBe(2);
+  });
+
+  test("item 3: a failed agent_end ABORTS a run that was idle-retired with a write in flight", async () => {
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const llmOut = api._handler("llm_output");
+    const p = llmOut({ runId: "r", assistantTexts: [TRIGGER3] }, { agentId: "A" });
+    await waitFor(() => puts(calls).length === 1);
+
+    // Idle-retire r while its write is in flight (another run's callback runs
+    // the sweep). r is tombstoned (admission-gated) but KEPT, with inFlight 1.
+    const t = captureClock.now();
+    captureClock.now = () => t + captureBounds.idleRunRetireMs + 1;
+    await llmOut({ runId: "other", assistantTexts: ["a plain note"] }, { agentId: "A" });
+    expect(captureInternals.tombstoneCount()).toBe(1);
+    expect(captureInternals.stateCount()).toBe(2); // r kept (in flight) + other
+
+    // The tombstone gates ADMISSION only: the failed agent_end still ABORTS r.
+    await api._fire("agent_end", { runId: "r", success: false, messages: [] }, { agentId: "A" });
+    expect(puts(calls)[0]!.signal!.aborted).toBe(true);
+    d.release();
+    await p; // the late result is discarded — nothing captured
+    expect(api._warnText()).toMatch(/discarded a capture for run r/);
+    expect(api._statusLine()).not.toMatch(/auto-captured/);
   });
 });

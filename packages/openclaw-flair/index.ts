@@ -169,10 +169,16 @@ export const RUN_RETIRE_AFTER_MS = 30_000;
 export const captureBounds = {
   /** Retire a run that has seen NO `agent_end` after this much inactivity. */
   idleRunRetireMs: 30 * 60_000,
-  /** Max live run states; the oldest are evicted (and tombstoned) past this. */
+  /** Max live run states; the oldest IDLE states are evicted (and tombstoned). */
   runStateCap: 10_000,
-  /** Max retired/aborted run ids remembered; the oldest are evicted. */
+  /** Max retired/aborted run ids remembered. */
   tombstoneCap: 10_000,
+  /**
+   * A tombstone is kept at least this long — the longest plausible callback
+   * delay. The cap may evict ONLY tombstones older than this; a set full of
+   * younger entries refuses NEW runs instead (capture fails closed).
+   */
+  tombstoneMinAgeMs: 60 * 60_000,
   /** Max distinct one-time log keys remembered; the oldest are evicted. */
   logOnceCap: 10_000,
   /** How often the unref'd sweep timer runs. */
@@ -615,8 +621,13 @@ export default {
     // runs share a budget and a dedup set and collide. The run's AbortController
     // is created with the state.
     const runStates = new Map<string, RunState>();
-    /** Bounded tombstone of retired/aborted run keys (F1): insertion-ordered. */
-    const retiredIds = new Set<string>();
+    /**
+     * Bounded tombstone of retired/aborted run keys (F1): key → time added,
+     * insertion-ordered. Round 3 item 1: only entries older than
+     * `tombstoneMinAgeMs` may be evicted; a full set of young entries refuses
+     * new runs instead.
+     */
+    const retiredIds = new Map<string, number>();
     const loggedOnce = new Set<string>();
     const runKeyOf = (agentId: string, runId: string): string => `${agentId}\u0000${runId}`;
 
@@ -643,14 +654,34 @@ export default {
 
     /**
      * Remember a retired/aborted run id (F1) so a LATER callback is dropped
-     * rather than re-admitted as a fresh run. Bounded: the oldest ids are
-     * evicted — the documented trade-off between never re-admitting a retired
-     * run and never growing without limit.
+     * rather than re-admitted as a fresh run. Round 3 item 1: a cap may never
+     * break that guarantee — eviction touches ONLY tombstones older than
+     * `tombstoneMinAgeMs`, and a new run is refused instead when the set is full
+     * of younger entries (`tombstoneHasRoom`).
      */
     function tombstone(key: string): void {
       if (retiredIds.has(key)) return;
-      retiredIds.add(key);
-      if (retiredIds.size > captureBounds.tombstoneCap) capSet(retiredIds, captureBounds.tombstoneCap);
+      retiredIds.set(key, captureClock.now());
+      // Keep the set at the cap when possible (cap + 1 → cap), evicting ONLY
+      // entries older than the minimum age; if the oldest is younger, the set
+      // temporarily exceeds the cap rather than break the guarantee.
+      evictOldTombstones(captureClock.now(), captureBounds.tombstoneCap + 1);
+    }
+
+    /** Evict tombstones older than the minimum age while `size` is at/above `target`. */
+    function evictOldTombstones(now: number, target: number): void {
+      for (const [key, addedAt] of retiredIds) {
+        if (retiredIds.size < target) break;
+        if (now - addedAt < captureBounds.tombstoneMinAgeMs) break; // insertion order: the rest are younger
+        retiredIds.delete(key);
+      }
+    }
+
+    /** Is there room to remember one more tombstone without breaking the cap? */
+    function tombstoneHasRoom(now: number): boolean {
+      if (retiredIds.size < captureBounds.tombstoneCap) return true;
+      evictOldTombstones(now, captureBounds.tombstoneCap); // evict until below the cap
+      return retiredIds.size < captureBounds.tombstoneCap;
     }
 
     /** The run id for a callback, from the event or the hook context. */
@@ -677,8 +708,8 @@ export default {
      * F2: ONE sweep evaluates EVERY state. It runs on each callback and on the
      * unref'd interval timer. It (a) retires ended runs by the 30 s rule,
      * (b) retires runs that have seen NO `agent_end` after the idle bound, and
-     * (c) evicts the oldest states past the map cap. A retired/aborted state
-     * leaves the map only when no write is in flight.
+     * (c) frees IDLE states past the map cap. A retired/aborted state leaves
+     * the map only when no write is in flight.
      */
     function sweep(): void {
       const now = captureClock.now();
@@ -696,24 +727,41 @@ export default {
       enforceStateCap();
     }
 
-    /** Evict the oldest live states past the cap, naming each in a log line. */
+    /** The oldest state with NO write in flight, or null — only those evictable. */
+    function evictableStateKey(): string | null {
+      for (const [key, state] of runStates) {
+        if (state.inFlight === 0) return key;
+      }
+      return null;
+    }
+
+    /** Free ONE state slot by evicting an idle state; false when none is idle. */
+    function freeStateSlot(): boolean {
+      const key = evictableStateKey();
+      if (key === null) return false;
+      const evicted = runStates.get(key)!;
+      runStates.delete(key);
+      tombstone(key);
+      api.logger.warn(
+        `openclaw-flair: evicted capture state for run ${evicted.runId} (agent ${evicted.agentId}) — run-state cap ${captureBounds.runStateCap}`,
+      );
+      return true;
+    }
+
+    /** Enforce the live-state cap: never evict a state with a write in flight. */
     function enforceStateCap(): void {
       while (runStates.size > captureBounds.runStateCap) {
-        const oldestKey = runStates.keys().next().value as string | undefined;
-        if (oldestKey === undefined) break;
-        const evicted = runStates.get(oldestKey)!;
-        runStates.delete(oldestKey);
-        tombstone(oldestKey);
-        api.logger.warn(
-          `openclaw-flair: evicted capture state for run ${evicted.runId} (agent ${evicted.agentId}) — run-state cap ${captureBounds.runStateCap}`,
-        );
+        if (!freeStateSlot()) break; // every state has a write in flight — stop
       }
     }
 
     /**
      * The run state a callback should use, or null when the callback must not
      * capture. The tombstone is consulted FIRST (F1): a retired/aborted run is
-     * dropped with the one-time log and NEVER re-admitted (no fresh state).
+     * dropped with the one-time log and NEVER re-admitted. Round 3: at capacity
+     * capture FAILS CLOSED — a new run is refused rather than evicting a
+     * tombstone (breaking retirement) or a state with a write in flight
+     * (breaking abort).
      */
     function captureGate(agentId: string, runId: string | null): RunState | null {
       if (!runId) {
@@ -744,17 +792,34 @@ export default {
         }
         return state;
       }
+
+      // A NEW run must fit: a slot in the state map AND room for its future
+      // tombstone. Refuse (skip capture) rather than break a guarantee.
+      if (runStates.size >= captureBounds.runStateCap && !freeStateSlot()) {
+        logOnce(
+          "capacity-live-states",
+          `openclaw-flair: capture skipped: capture-capacity: live-states — ${runStates.size} runs all have a write in flight; refusing new run ${runId} (agent ${agentId}) rather than evict one`,
+        );
+        return null;
+      }
+      if (!tombstoneHasRoom(now)) {
+        logOnce(
+          "capacity-tombstones",
+          `openclaw-flair: capture skipped: capture-capacity: tombstones — the retired-run tombstone is full of recent entries; refusing new run ${runId} (agent ${agentId}) rather than evict one that could be re-admitted`,
+        );
+        return null;
+      }
+
       state = createRunState(agentId, runId);
       state.lastActivityAt = now;
       runStates.set(key, state);
-      enforceStateCap();
       return state;
     }
 
     /**
-     * Abort a run: cancel its in-flight capture fetches and retire it now. The
-     * id is tombstoned so a later callback cannot recreate the run; the state
-     * itself leaves the map only once its last write settles (F1).
+     * Abort a run: cancel its in-flight capture fetches, discard late results
+     * and retire it. Round 3 item 3: the tombstone gates ADMISSION only — an
+     * abort acts on ANY state still in the map, tombstoned or not.
      */
     function abortRun(agentId: string, runId: string | null, why: string): void {
       if (!runId) {
@@ -765,12 +830,11 @@ export default {
         return;
       }
       const key = runKeyOf(agentId, runId);
-      if (retiredIds.has(key)) return; // already retired or aborted
-      let state = runStates.get(key);
+      const state = runStates.get(key);
       if (!state) {
-        state = createRunState(agentId, runId);
-        state.lastActivityAt = captureClock.now();
-        runStates.set(key, state);
+        // Nothing to abort; make sure a late callback cannot be admitted.
+        if (!retiredIds.has(key)) tombstone(key);
+        return;
       }
       if (state.aborted) return;
       state.aborted = true;
@@ -1091,6 +1155,8 @@ export default {
             return;
           }
           const text = captureText(event?.prompt);
+          // No text → no capture, and no sweep here either; the unref'd sweep
+          // timer covers these early returns.
           if (!text) return;
           try {
             const client = clientFor(agentId);
@@ -1109,6 +1175,7 @@ export default {
           }
           const texts = Array.isArray(event?.assistantTexts) ? event.assistantTexts : [];
           const text = captureText(texts.map((t: unknown) => (typeof t === "string" ? { type: "text", text: t } : t)));
+          // No text → no capture (the unref'd sweep timer covers the sweep here).
           if (!text) return;
           try {
             const client = clientFor(agentId);
