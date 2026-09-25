@@ -15,9 +15,9 @@ import {
   decideInstanceAnswer,
   INSTANCE_ROW_PRUNE_REMEDY,
   multipleInstanceRowsMessage,
-  readableInstanceRows,
   type InstanceIdentityRow,
 } from "../src/lib/instance-identity-row.js";
+import { readAllInstanceRows } from "./instance-identity-rows.js";
 import { isSkillWrite } from "./skill-write.js";
 import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
@@ -183,7 +183,9 @@ export function noteFederationMergedMemory(
 // ─── Instance identity ───────────────────────────────────────────────────────
 
 /**
- * Every `flair.Instance` row on this instance, or a THROWN error.
+ * Every `flair.Instance` row on this instance, or a THROWN error — the ONE
+ * strict reader (resources/instance-identity-rows.ts), re-exported here so
+ * existing consumers keep importing it from the Federation resource.
  *
  * The readers used to take the first row `search()` yielded. `search()` order is
  * not a fact about an identity: on a table with two rows one reader reported one
@@ -201,19 +203,7 @@ export function noteFederationMergedMemory(
  * saw the table. `readableInstanceRows` throws instead, which the callers map to
  * 5xx and no write.
  */
-async function readAllInstanceRows(): Promise<InstanceIdentityRow[]> {
-  const raw: unknown[] = [];
-  for await (const i of (databases as any).flair.Instance.search()) raw.push(i);
-  // Throws on the first entry without a usable id — before anything is
-  // normalized or reported.
-  return readableInstanceRows(raw).map((i) => ({
-    id: i.id,
-    role: i.role ?? null,
-    publicKey: i.publicKey ?? null,
-    status: i.status ?? null,
-    createdAt: i.createdAt ?? null,
-  }));
-}
+export { readAllInstanceRows };
 
 /**
  * GET /FederationInstance — return this instance's identity.
