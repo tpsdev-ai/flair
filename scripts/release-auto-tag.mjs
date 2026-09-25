@@ -164,15 +164,18 @@ export function createClient({ repo, token, fetchImpl = globalThis.fetch, apiBas
     return res.json();
   }
 
-  /** Follow `Link: rel="next"` so a paginated read never truncates. */
-  async function getPaged(basePath) {
+  /**
+   * Follow `Link: rel="next"` so a paginated read never truncates. `pick`
+   * unwraps endpoints that answer with an object envelope instead of an array.
+   */
+  async function getPaged(basePath, pick = (page) => page) {
     const out = [];
     let path = basePath;
     for (let i = 0; i < 50 && path; i++) {
       const res = await call("GET", path);
       if (res.status === 404) return out;
       if (!res.ok) throw new ApiError(`GET ${path} -> ${res.status}`, res.status, path);
-      const page = await res.json();
+      const page = pick(await res.json());
       if (Array.isArray(page)) out.push(...page);
       path = nextLink(res.headers?.get?.("link") ?? null);
     }
@@ -203,9 +206,13 @@ export function createClient({ repo, token, fetchImpl = globalThis.fetch, apiBas
     async listReviews(prNumber) {
       return getPaged(`/repos/${repo}/pulls/${prNumber}/reviews?per_page=100`);
     },
-    /** `commits/<sha>/check-runs` — latest runs only. */
+    /**
+     * `commits/<sha>/check-runs` — latest runs only. This endpoint answers with an
+     * OBJECT (`{ total_count, check_runs }`), not an array: unwrap it, or every
+     * decision sees zero check runs and cheerfully tags a commit with failing CI.
+     */
     async listCheckRuns(sha) {
-      return getPaged(`/repos/${repo}/commits/${sha}/check-runs?per_page=100&filter=latest`);
+      return getPaged(`/repos/${repo}/commits/${sha}/check-runs?per_page=100&filter=latest`, (page) => page?.check_runs);
     },
     /** `actions/workflows/<file>` — the workflow's own name, for the CI check.
      * The API wants the FILE name (test.yml), not the path.
@@ -239,7 +246,13 @@ function nextLink(linkHeader) {
   if (!linkHeader) return null;
   for (const part of linkHeader.split(",")) {
     const m = part.match(/<([^>]+)>;\s*rel="next"/);
-    if (m) return m[1].replace(/^https?:\/\/[^/]+\/repos\/[^/]+\/[^/]+/, "").replace(/^https?:\/\/api\.github\.com/, "");
+    if (m) {
+      // Strip only the ORIGIN. The path — including its /repos/<owner>/<name>
+      // prefix — must survive: dropping it 404s the next request, and `getPaged`
+      // treats a 404 as the end of the list, so page 2 onward would vanish.
+      const url = new URL(m[1]);
+      return `${url.pathname}${url.search}`;
+    }
   }
   return null;
 }

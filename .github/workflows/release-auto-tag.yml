@@ -40,10 +40,16 @@ name: Release auto-tag
 # of margin, which covers the observed maximum with headroom. Re-measure when CI
 # gets materially slower: too small a deadline refuses good releases.
 #
-# INVARIANTS (both asserted by test/unit/release-auto-tag-workflow.test.ts):
+# INVARIANTS (all asserted by test/unit/release-auto-tag-workflow.test.ts):
 #   - the decide step's environment holds no App token. The App token is minted
 #     in a LATER step than the decision, so nothing the release commit contains
 #     ever runs with the App credential in its environment;
+#   - the workspace is RESTORED to the default branch's tree between the decision
+#     and the mint. Condition 6 runs the release commit's own version-sync script
+#     in this workspace, and a later step executes scripts/release-auto-tag.mjs
+#     holding the App token — so without the restore, candidate code could have
+#     rewritten that file (or anything else in the tree) first. Step order alone
+#     is not isolation; the tree has to be the default branch's too;
 #   - condition 10 re-checks only conditions 3, 4 and 8. Ancestry, version sync
 #     and PR identity are stable, and re-running condition 6 would execute the
 #     release commit's code next to the App token.
@@ -180,6 +186,21 @@ jobs:
           if [ -n "$TARGET_SHA" ]; then args+=(--sha "$TARGET_SHA"); else args+=(--nightly); fi
           node scripts/release-auto-tag.mjs "${args[@]}"
 
+      - name: Restore the default branch's tree before the credential is minted
+        # The decision script always runs from the DEFAULT BRANCH's tree — and so
+        # must every step that runs once the credential exists. Condition 6
+        # executed the release commit's own version-sync script in this
+        # workspace, which could have rewritten anything in it, including the
+        # decision script itself. Restoring the tracked tree and dropping
+        # untracked files here means the App-token steps run default-branch code,
+        # not candidate code. No build is needed: this script imports node
+        # builtins only.
+        if: always() && steps.decide.outputs.verdict == 'TAG' && github.event_name != 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          git checkout -- .
+          git clean -ffdqx
+
       - name: Mint the release-tag App token
         # Minted in a LATER step than the decision, so nothing <sha> contains ever
         # runs with the App credential in its environment. Skipped on a dry run.
@@ -210,6 +231,11 @@ jobs:
           RELEASE_TAG_APP_KEY_PRESENT: ${{ secrets.RELEASE_TAG_APP_PRIVATE_KEY != '' }}
         run: |
           set -euo pipefail
+          # Condition 10 re-checks release intent against origin/main, and the
+          # check-run wait above can be half an hour long: re-read main here, or a
+          # release that merged during the wait is tagged anyway (the local
+          # origin/main is the one the decide step fetched).
+          git fetch --no-tags --prune origin +refs/heads/main:refs/remotes/origin/main
           node scripts/release-auto-tag.mjs tag \
             --repo "$REPO" \
             --sha "$TARGET_SHA" \
@@ -258,8 +284,13 @@ jobs:
         run: |
           set -euo pipefail
           title="release auto-tag refused v${VERSION}: ${CONDITION}"
+          # `gh api --paginate` prints ONE JSON ARRAY PER PAGE. Slurp them (`jq -s`)
+          # before counting: with two pages the old count was "0\n0", which is not
+          # "0", so every refusal would be silently swallowed once the repository
+          # had more than 100 open issues — exactly the failure this workflow
+          # exists to fix.
           open_count=$(gh api --paginate "repos/${REPO}/issues?state=open&per_page=100" \
-            | jq --arg t "$title" '[.[] | select(.title == $t and (.pull_request | not))] | length')
+            | jq -s --arg t "$title" '[.[][] | select(.title == $t and (.pull_request | not))] | length')
           if [ "$open_count" != "0" ]; then
             echo "an open issue with this title already exists (${open_count}); adding nothing (idempotent by title, so the nightly does not re-open a known refusal)"
             exit 0

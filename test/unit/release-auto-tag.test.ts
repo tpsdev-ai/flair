@@ -29,6 +29,7 @@ import {
   VERDICT,
   WRITE_VERDICT,
   compareVersions,
+  createClient,
   decide,
   main,
   nightlyTarget,
@@ -784,6 +785,91 @@ describe("release auto-tag — the nightly target", () => {
     });
     const target = await nightlyTarget(deps, { limit: 1 });
     expect(target).toBeNull();
+  });
+});
+
+// ── the client, against the API's REAL response shapes ─────────────────────────
+// The fixtures everywhere else stub the semantic methods, so they cannot see a
+// wrong envelope or a broken `Link` parser. These four tests drive createClient
+// itself with a mocked fetch and the shapes GitHub actually returns.
+
+describe("release auto-tag — the GitHub client", () => {
+  const BASE = "https://api.github.com";
+
+  function mockFetch(routes: Record<string, { status?: number; body?: unknown; link?: string | null }>) {
+    const calls: string[] = [];
+    const impl = async (url: string | URL | Request): Promise<Response> => {
+      const target = String(url);
+      calls.push(target);
+      const route = routes[target];
+      if (!route) throw new Error(`unmocked fetch: ${target}`);
+      const status = route.status ?? 200;
+      return {
+        ok: status >= 200 && status < 300,
+        status,
+        headers: { get: (name: string) => (name.toLowerCase() === "link" ? (route.link ?? null) : null) },
+        json: async () => route.body ?? null,
+      } as unknown as Response;
+    };
+    return { impl: impl as unknown as typeof fetch, calls };
+  }
+
+  test("check-runs: the { total_count, check_runs } envelope is unwrapped, not dropped", async () => {
+    const run: CheckRunShape = { name: "Unit Tests", status: "completed", conclusion: "success" };
+    const mock = mockFetch({
+      [`${BASE}/repos/${REPO}/commits/${SHA}/check-runs?per_page=100&filter=latest`]: {
+        body: { total_count: 1, check_runs: [run] },
+      },
+    });
+    const client = createClient({ repo: REPO, token: "t", fetchImpl: mock.impl });
+    expect(await client.listCheckRuns(SHA)).toEqual([run]);
+  });
+
+  test("pagination: the next link keeps the full path (a stripped /repos/ prefix would 404 and truncate)", async () => {
+    const page1: CheckRunShape = { name: "page-1", status: "completed", conclusion: "success" };
+    const page2: CheckRunShape = { name: "page-2", status: "completed", conclusion: "failure" };
+    const first = `${BASE}/repos/${REPO}/commits/${SHA}/check-runs?per_page=100&filter=latest`;
+    const second = `${BASE}/repos/${REPO}/commits/${SHA}/check-runs?per_page=100&filter=latest&page=2`;
+    const mock = mockFetch({
+      [first]: {
+        body: { total_count: 2, check_runs: [page1] },
+        link: `<${second}>; rel="next", <${second}>; rel="last"`,
+      },
+      [second]: { body: { total_count: 2, check_runs: [page2] } },
+    });
+    const client = createClient({ repo: REPO, token: "t", fetchImpl: mock.impl });
+    expect(await client.listCheckRuns(SHA)).toEqual([page1, page2]);
+    expect(mock.calls).toEqual([first, second]);
+    expect(mock.calls[1]).toContain(`/repos/${REPO}/`);
+  });
+
+  test("readTagRef: a 404 is a null ref, not a thrown error", async () => {
+    const mock = mockFetch({ [`${BASE}/repos/${REPO}/git/ref/tags/v0.57.0`]: { status: 404 } });
+    const client = createClient({ repo: REPO, token: "t", fetchImpl: mock.impl });
+    expect(await client.readTagRef("v0.57.0")).toBeNull();
+  });
+
+  test("createTagRef: a rejected POST surfaces its status instead of throwing", async () => {
+    const mock = mockFetch({
+      [`${BASE}/repos/${REPO}/git/refs`]: { status: 422, body: { message: "Reference already exists" } },
+    });
+    const client = createClient({ repo: REPO, token: "t", fetchImpl: mock.impl });
+    const result = await client.createTagRef("refs/tags/v0.57.0", SHA);
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe(422);
+  });
+
+  test("the client builds every read from the repo it was given", async () => {
+    const mock = mockFetch({ [`${BASE}/repos/${REPO}/commits/${SHA}/pulls`]: { body: [] } });
+    const client = createClient({ repo: REPO, token: "t", fetchImpl: mock.impl });
+    expect(await client.listPullsForCommit(SHA)).toEqual([]);
+    expect(mock.calls[0]).toBe(`${BASE}/repos/${REPO}/commits/${SHA}/pulls`);
+  });
+
+  test("a non-404 failure is thrown, never silently read as 'nothing there'", async () => {
+    const mock = mockFetch({ [`${BASE}/repos/${REPO}/git/ref/tags/v0.57.0`]: { status: 500, body: {} } });
+    const client = createClient({ repo: REPO, token: "t", fetchImpl: mock.impl });
+    await expect(client.readTagRef("v0.57.0")).rejects.toThrow();
   });
 });
 

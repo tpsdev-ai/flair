@@ -13,8 +13,10 @@
  * before the decision runs with the App credential in its environment.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import yaml from "js-yaml";
 
 interface Step {
@@ -244,5 +246,89 @@ describe("release-auto-tag workflow — the coupling and the allowlist file", ()
   test("the allowlist seed is exactly the check main declares advisory", () => {
     const parsed = yaml.load(readFileSync(ADVISORY_PATH, "utf8")) as unknown as { allow: string[] };
     expect(parsed.allow).toEqual(["launchd adopt-then-upgrade (macOS, advisory)"]);
+  });
+});
+
+describe("release-auto-tag workflow — credential isolation and the reporter's shell", () => {
+  test("the workspace is restored to the default branch's tree between the decision and the mint", () => {
+    // Step order alone is not isolation: condition 6 runs the release commit's
+    // own script in this workspace, and the write step runs this repo's script
+    // holding the App token. The tree in between must be the default branch's.
+    const steps = job("decide").steps ?? [];
+    const indexOf = (id: string) => steps.findIndex((s) => s.id === id);
+    const restoreIndex = steps.findIndex((s) => (s.run ?? "").includes("git clean -ffdqx"));
+    expect(restoreIndex).toBeGreaterThan(indexOf("decide"));
+    expect(restoreIndex).toBeLessThan(indexOf("app-token"));
+    const restore = steps[restoreIndex];
+    expect(restore.run).toContain("git checkout -- .");
+    expect(restore.if).toContain("always()");
+    expect(restore.if).toContain("github.event_name != 'workflow_dispatch'");
+  });
+
+  test("the write step re-reads main, so condition 4 sees a release that merged during the wait", () => {
+    const run = step("decide", "write").run ?? "";
+    expect(run).toContain("git fetch --no-tags --prune origin +refs/heads/main:refs/remotes/origin/main");
+    expect(run.indexOf("git fetch")).toBeLessThan(run.indexOf("release-auto-tag.mjs tag"));
+  });
+
+  test("the reporter's shell: opens an issue when no page holds the title, and does nothing when one does", () => {
+    // Behavioural, with a fake `gh` that emulates `--paginate` (one JSON array
+    // per page) and a real `jq` — the old count of a two-page result was "0\n0",
+    // which is not "0", so the reporter silently stopped reporting.
+    const script = (job("report").steps ?? [])[0].run;
+    expect(typeof script).toBe("string");
+    const dir = mkdtempSync(join(tmpdir(), "release-auto-tag-report-"));
+    try {
+      const bin = join(dir, "bin");
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(
+        join(bin, "gh"),
+        [
+          "#!/usr/bin/env bash",
+          "set -euo pipefail",
+          'case "$1" in',
+          "  api)",
+          "    printf '%s\\n' '[{\"number\":1,\"title\":\"unrelated\"},{\"number\":2,\"title\":\"another\"}]'",
+          "    printf '%s\\n' '[{\"number\":3,\"title\":\"'\"$FAKE_TITLE\"'\"}]'",
+          "    ;;",
+          "  issue)",
+          '    printf "%s\\n" "$*" >> "$FAKE_RECORD"',
+          "    ;;",
+          '  *) echo "unexpected gh call: $*" >&2; exit 9 ;;',
+          "esac",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      const title = "release auto-tag refused v0.57.0: reviews";
+      const runReport = (fakeTitle: string, record: string) =>
+        spawnSync("bash", ["-c", script as string], {
+          env: {
+            PATH: `${bin}:${process.env.PATH}`,
+            GH_TOKEN: "test-token",
+            REPO: "tpsdev-ai/flair",
+            CONDITION: "reviews",
+            VERSION: "0.57.0",
+            RUN_URL: "https://example.invalid/actions/runs/1",
+            FAKE_TITLE: fakeTitle,
+            FAKE_RECORD: record,
+          },
+          encoding: "utf8",
+        });
+
+      const openRecord = join(dir, "opened");
+      const opened = runReport("no such issue", openRecord);
+      expect(opened.status).toBe(0);
+      expect(readFileSync(openRecord, "utf8")).toContain("issue create");
+      expect(readFileSync(openRecord, "utf8")).toContain(title);
+
+      const quietRecord = join(dir, "quiet");
+      const quiet = runReport(title, quietRecord);
+      expect(quiet.status).toBe(0);
+      expect(quiet.stdout).toContain("already exists");
+      expect(existsSync(quietRecord)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
