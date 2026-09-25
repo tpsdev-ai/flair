@@ -698,6 +698,20 @@ export default {
     }
 
     /**
+     * Round 10 (guarantee 6): a callback that carried no agent identity used to
+     * warn on EVERY occurrence — an unbounded run of identical lines. It goes
+     * through the bounded one-time path now. On this path there is no agent
+     * identity to key by, so the key is the callback source: at most one line per
+     * hook, however many identity-less callbacks the host delivers.
+     */
+    function refuseIdentity(hook: string): void {
+      logOnce(
+        `no-identity:${hook}`,
+        `openclaw-flair: ${hook} refused: no agent identity in host context — refusing rather than inheriting one`,
+      );
+    }
+
+    /**
      * THE removal predicate (round 5) — the ONLY thing that frees a slot, used
      * by the sweep and by admission alike: a record may be removed when it is
      * retired or aborted, has NO write in flight, and has aged past
@@ -1139,7 +1153,7 @@ export default {
         api.on("agent_end", async (event: any, ctx: any) => {
           const agentId = ctx?.agentId;
           if (!agentId) {
-            api.logger.warn("openclaw-flair: agent_end refused: no agent identity in host context — refusing rather than inheriting one");
+            refuseIdentity("agent_end");
             return;
           }
           const runId = runIdOf(event, ctx);
@@ -1177,7 +1191,7 @@ export default {
         api.on("llm_input", async (event: any, ctx: any) => {
           const agentId = ctx?.agentId;
           if (!agentId) {
-            api.logger.warn("openclaw-flair: llm_input refused: no agent identity in host context — refusing rather than inheriting one");
+            refuseIdentity("llm_input");
             return;
           }
           const text = captureText(event?.prompt);
@@ -1196,7 +1210,7 @@ export default {
         api.on("llm_output", async (event: any, ctx: any) => {
           const agentId = ctx?.agentId;
           if (!agentId) {
-            api.logger.warn("openclaw-flair: llm_output refused: no agent identity in host context — refusing rather than inheriting one");
+            refuseIdentity("llm_output");
             return;
           }
           const texts = Array.isArray(event?.assistantTexts) ? event.assistantTexts : [];

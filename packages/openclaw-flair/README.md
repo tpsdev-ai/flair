@@ -121,10 +121,11 @@ are the guarantees it keeps, each with the test that proves it in
   made unless `autoCapture` is set — `capture is OFF by default: permission
   granted, no autoCapture config -> no capture hooks and zero reads`.
 - **Captures are keyed per agent and per run.** Two concurrent runs of one agent
-  share neither budget nor dedup set, and a capture is signed as the agent whose
-  callback produced it — `D10 (mutation: state keyed by agent only): two runs of
-  one agent do not share a budget or dedup set`; `R10: interleaved agents, driven
-  through the host's turn order, sign as themselves`.
+  share neither the session cap nor the dedup set, and every write is signed as
+  the agent whose callback produced it — `D10 (mutation: state keyed by agent
+  only): two concurrent runs of one agent share neither the session cap nor the
+  dedup set`; `R10: interleaved agents, driven through the host's turn order,
+  sign as themselves`.
 - **Memory is bounded.** The run map holds at most `capacityCap` records, plus at
   most `abortOverflowCap` records for aborted runs that were never admitted, and a
   new run is refused rather than evicting a live record — `(a) repeated aborts of
@@ -132,17 +133,20 @@ are the guarantees it keeps, each with the test that proves it in
   `F2/round 4/round 5: the budget cap refuses new runs and never evicts a live
   record`.
 - **A failed or aborted run does not capture again while its record is retained**,
-  for at least `tombstoneMinAgeMs`: a late callback is dropped, never re-admitted
-  — `F1: a callback after an abort is dropped even after a later sweep`. Past the
-  overflow bound this is best effort: with the budget and its abort overflow both
-  full, the abort of a never-admitted run records nothing —
-  `(c) with the budget AND its abort overflow full, an abort records nothing and
-  logs once`.
-- **A write already in flight when a run aborts may still land; no new write
-  starts after the abort** — `item 5 (mutation: abort dropped): a failed agent_end
-  starts no new write and discards a late result`.
+  for at least `tombstoneMinAgeMs`: a late callback is dropped, never re-admitted,
+  and no new write starts after the abort — one already in flight may still land —
+  `F1 (round 10): a callback just before tombstoneMinAgeMs after the abort is
+  still dropped`; `F1: a callback after an abort is dropped even after a later
+  sweep`; `item 5 (mutation: abort dropped): a failed agent_end starts no new
+  write and discards a late result`. Past the overflow bound this is best effort:
+  with the budget and its abort overflow both full, the abort of a never-admitted
+  run records nothing, so that run's next callback can capture again and start a
+  write — `(c) with the budget AND its abort overflow full, an abort records
+  nothing and logs once`.
 - **Log lines about refused or dropped callbacks are rate-limited, not guaranteed
-  to appear exactly once** — `F2: the one-time-log set is bounded`.
+  to appear exactly once** — `R3 (round 10): a missing-identity callback is
+  rate-limited — ONE line per key, however many callbacks arrive`; `F2: the
+  one-time-log set is bounded`.
 
 The mechanics behind these bounds — which callbacks capture and sweep, the
 one-time-log set, the record phases, the removal predicate and the admission

@@ -587,7 +587,7 @@ describe("identity is taken from host context only", () => {
     writeKey("A");
     writeKey("B");
     const plugin = await loadPlugin();
-    const calls = installFetchStub();
+    let calls = installFetchStub();
     const api = createMockApi({
       pluginConfig: { autoCapture: true },
       config: {
@@ -597,25 +597,30 @@ describe("identity is taken from host context only", () => {
     });
     plugin.register(api as any);
     // One turn per agent, in both orders — hooks delivered in the host's order,
-    // then the agent's tool call.
+    // then the agent's tool call. EVERY request a turn produces — the capture
+    // write from its hooks and its own tool store — must carry THAT turn's agent
+    // as its signer: the signer is tied to the callback that produced the
+    // request, not to whichever agent the host happened to touch last.
     const turn = async (id: string, text: string) => {
+      const before = calls.length;
       await api._runTurn({ agentId: id }, { prompt: text, messages: [{ role: "user", content: text }] });
-      const store = api._resolveTool("memory_store", { agentId: id });
-      await store.execute("1", { text });
+      // A READ-ONLY tool call, so the only write this turn produces is the
+      // capture the hooks make.
+      const search = api._resolveTool("memory_search", { agentId: id });
+      await search.execute("1", { query: text });
+      const own = calls.slice(before);
+      expect(own.length).toBeGreaterThanOrEqual(2); // the capture write + the tool read
+      expect(own.map(signerOf)).toEqual(own.map(() => id));
+      const captured = puts(own);
+      expect(captured.length).toBe(1);
+      expect(signerOf(captured[0]!)).toBe(id);
     };
     await turn("A", "remember this: A says interleave-one");
     await turn("B", "remember this: B says interleave-one");
-    const first = calls.map(signerOf).filter(Boolean);
-    expect(first).toContain("A");
-    expect(first).toContain("B");
-    expect(first.includes("A") && first.includes("B")).toBe(true);
 
-    const calls2 = installFetchStub();
+    calls = installFetchStub();
     await turn("B", "remember this: B says interleave-two");
     await turn("A", "remember this: A says interleave-two");
-    const second = calls2.map(signerOf).filter(Boolean);
-    expect(second).toContain("A");
-    expect(second).toContain("B");
   });
 });
 
@@ -906,6 +911,28 @@ describe("refusal logging and status surface", () => {
     expect(api._warnText()).toMatch(/agent_end refused: no agent identity/);
   });
 
+  test("R3 (round 10): a missing-identity callback is rate-limited — ONE line per key, however many callbacks arrive", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    installFetchStub();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true },
+      config: { agents: { entries: { A: {} } }, plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+    });
+    plugin.register(api as any);
+    const hooks = ["agent_end", "llm_input", "llm_output"];
+    for (let i = 0; i < 5; i++) {
+      for (const hook of hooks) await api._fire(hook, {}, {});
+    }
+    const warned = api._warnText().split("\n");
+    // 15 identity-less callbacks, three keys, ONE line per key.
+    for (const hook of hooks) {
+      const named = warned.filter((l) => l.includes(`${hook} refused: no agent identity`));
+      expect(named.length).toBe(1);
+    }
+    expect(warned.filter((l) => /no agent identity in host context/.test(l)).length).toBe(3);
+  });
+
   test("R5: a status service is registered and reports the plugin state", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
@@ -1116,17 +1143,31 @@ describe("slice 2 — per-run capture state, retirement and abort", () => {
     expect(puts(calls).length).toBe(1);
   });
 
-  test("D10 (mutation: state keyed by agent only): two runs of one agent do not share a budget or dedup set", async () => {
+  test("D10 (mutation: state keyed by agent only): two concurrent runs of one agent share neither the session cap nor the dedup set", async () => {
     const plugin = await loadPlugin();
     const d = defer();
     const calls = installFetchStub(undefined, { deferUntil: d.gate });
-    const api = apiForCapture(plugin);
+    writeKey("A");
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true, autoCaptureMaxPerSession: 2 },
+      config: cfgCapture(),
+    });
+    plugin.register(api as any);
     const llmOut = api._handler("llm_output");
-    const first = llmOut({ runId: "run-1", assistantTexts: [TRIGGER] }, { agentId: "A" });
-    const second = llmOut({ runId: "run-2", assistantTexts: [TRIGGER] }, { agentId: "A" });
+    // Each run fills the WHOLE per-run session cap, with the SAME excerpts. A cap
+    // or dedup set keyed by agent alone would serve both runs from one set: the
+    // second run's first excerpt would meet `count >= cap` and its second would
+    // dedup, so only two writes would land instead of four.
+    const texts = [
+      "remember this: the run-scoped cap target is staging one",
+      "remember this: the run-scoped cap target is staging two",
+    ];
+    const pending: Array<Promise<unknown>> = [];
+    for (const t of texts) pending.push(llmOut({ runId: "run-1", assistantTexts: [t] }, { agentId: "A" }));
+    for (const t of texts) pending.push(llmOut({ runId: "run-2", assistantTexts: [t] }, { agentId: "A" }));
     d.release();
-    await Promise.all([first, second]);
-    expect(puts(calls).length).toBe(2);
+    await Promise.all(pending);
+    expect(puts(calls).length).toBe(4);
   });
 
   test("D10: a successful agent_end before llm_output does not retire the run — the llm_output capture still lands", async () => {
@@ -1262,6 +1303,32 @@ describe("slice 2 round 2 — tombstone, bounds and failed primary writes", () =
     await llmOut({ runId: "r", assistantTexts: [TRIGGER2] }, { agentId: "A" });
     expect(puts(calls).length).toBe(1); // the aborted run starts no NEW write
     expect(api._warnText()).toMatch(/dropped a callback for retired run r/);
+  });
+
+  test("F1 (round 10): a callback just before tombstoneMinAgeMs after the abort is still dropped", async () => {
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const llmOut = api._handler("llm_output");
+    const base = 3_000_000;
+    captureClock.now = () => base;
+    const inFlight = llmOut({ runId: "r", assistantTexts: [TRIGGER2] }, { agentId: "A" });
+    await waitFor(() => puts(calls).length === 1);
+    await api._fire("agent_end", { runId: "r", success: false, messages: [] }, { agentId: "A" });
+    d.release();
+    await inFlight;
+    expect(puts(calls).length).toBe(1);
+    // ONE millisecond before the retention minimum the record is STILL retained.
+    // The guarantee is "while its record is retained", for at least
+    // `tombstoneMinAgeMs` — not "for a while": at that point the run's callback
+    // is still dropped and starts no write of its own.
+    captureClock.now = () => base + captureBounds.tombstoneMinAgeMs - 1;
+    await llmOut({ runId: "r", assistantTexts: [TRIGGER2] }, { agentId: "A" });
+    expect(puts(calls).length).toBe(1);
+    expect(api._warnText()).toMatch(/dropped a callback for retired run r/);
+    expect(captureInternals.tombstoneCount()).toBe(1);
+    expect(captureInternals.stateCount()).toBe(0);
   });
 
   test("F2: 1,000 runs that never send agent_end are all retired after the idle bound", async () => {
