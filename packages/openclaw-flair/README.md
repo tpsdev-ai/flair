@@ -133,7 +133,9 @@ are the guarantees it keeps, each with the test that proves it in
   new run is refused rather than evicting a live record — `(a) repeated aborts of
   NEVER-admitted runs are bounded by the cap PLUS the abort overflow`;
   `F2/round 4/round 5: the budget cap refuses new runs and never evicts a live
-  record`.
+  record`; `best effort residual: with the budget and its abort overflow full, an
+  abort records nothing and evicts no live record; its next callback is admitted
+  once room frees`.
 - **A failed or aborted run does not capture again while its record is retained**,
   for at least `tombstoneMinAgeMs`: a late callback is dropped, never re-admitted,
   and no new write starts after the abort — one already in flight may still land,
@@ -141,13 +143,19 @@ are the guarantees it keeps, each with the test that proves it in
   `F1 (round 10): a callback just before tombstoneMinAgeMs after the abort is
   still dropped`; `F1: a callback after an abort is dropped even after a later
   sweep`; `item 5 (mutation: abort dropped): a failed agent_end starts no new
-  write and discards a late result`; `round 13 (mutation: stop flag not checked):
-  after gateway_stop a late llm_output for an aborted run admits no record and
-  starts no write`. Past the overflow bound this is best effort:
+  write and discards a late result`; `item 5(a2): a later callback after a
+  model_call_ended abort is dropped, with no new write`; `item 5(b2): a later
+  callback after gateway_stop is dropped, with no new write`; `round 13
+  (mutation: stop flag not checked): after gateway_stop a late llm_output for an
+  aborted run admits no record and starts no write`; `round 13 guard: after
+  gateway_stop an abort for a run the registry never saw inserts no record`.
+  Past the overflow bound this is best effort:
   with the budget and its abort overflow both full, the abort of a never-admitted
   run records nothing, so that run's next callback can capture again and start a
   write — `(c) with the budget AND its abort overflow full, an abort records
-  nothing and logs once`.
+  nothing and logs once`; `best effort residual: with the budget and its abort
+  overflow full, an abort records nothing and evicts no live record; its next
+  callback is admitted once room frees`.
 - **Log lines about refused or dropped callbacks are rate-limited, not guaranteed
   to appear exactly once** — `R3 (round 10, extended round 11): refusal lines are
   rate-limited — ONE line per key, however many callbacks arrive`; `F2: the

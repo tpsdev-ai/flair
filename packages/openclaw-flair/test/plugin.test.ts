@@ -596,31 +596,44 @@ describe("identity is taken from host context only", () => {
       },
     });
     plugin.register(api as any);
-    // One turn per agent, in both orders — hooks delivered in the host's order,
-    // then the agent's tool call. EVERY request a turn produces — the capture
-    // write from its hooks and its own tool store — must carry THAT turn's agent
-    // as its signer: the signer is tied to the callback that produced the
-    // request, not to whichever agent the host happened to touch last.
-    const turn = async (id: string, text: string) => {
+    // One turn per agent, in both orders, driving ALL THREE capture callbacks
+    // (llm_input, agent_end, llm_output) with a DISTINCT text each — so a turn
+    // produces a capture write FROM EACH callback, not just llm_input. EVERY
+    // request a turn produces — the three capture writes and its own tool read —
+    // must carry THAT turn's agent as its signer: the signer is tied to the
+    // callback (and the tool context) that produced the request, not to whichever
+    // agent the host happened to touch last, and never to env identity.
+    let turnNo = 0;
+    const turn = async (id: string, tag: string) => {
       const before = calls.length;
-      await api._runTurn({ agentId: id }, { prompt: text, messages: [{ role: "user", content: text }] });
-      // A READ-ONLY tool call, so the only write this turn produces is the
-      // capture the hooks make.
+      await api._runTurn(
+        { agentId: id },
+        {
+          // One run per turn, so a turn's capture budget is its own.
+          runId: `${id}-run-${++turnNo}`,
+          prompt: `remember this: ${tag} via llm_input`,
+          messages: [{ role: "user", content: `remember this: ${tag} via agent_end` }],
+          assistantTexts: [`remember this: ${tag} via llm_output`],
+        },
+      );
+      // A READ-ONLY tool call, so the only writes this turn produces are the
+      // captures its hooks make.
       const search = api._resolveTool("memory_search", { agentId: id });
-      await search.execute("1", { query: text });
+      await search.execute("1", { query: tag });
       const own = calls.slice(before);
-      expect(own.length).toBeGreaterThanOrEqual(2); // the capture write + the tool read
+      expect(own.length).toBeGreaterThanOrEqual(4); // the three capture writes + the tool read
       expect(own.map(signerOf)).toEqual(own.map(() => id));
       const captured = puts(own);
-      expect(captured.length).toBe(1);
-      expect(signerOf(captured[0]!)).toBe(id);
+      // One write per capture callback, in the host's delivery order.
+      expect(captured.length).toBe(3);
+      expect(captured.map(signerOf)).toEqual([id, id, id]);
     };
-    await turn("A", "remember this: A says interleave-one");
-    await turn("B", "remember this: B says interleave-one");
+    await turn("A", "A says interleave-one");
+    await turn("B", "B says interleave-one");
 
     calls = installFetchStub();
-    await turn("B", "remember this: B says interleave-two");
-    await turn("A", "remember this: A says interleave-two");
+    await turn("B", "B says interleave-two");
+    await turn("A", "A says interleave-two");
   });
 });
 
@@ -1358,6 +1371,48 @@ describe("slice 2 — per-run capture state, retirement and abort", () => {
     await inFlight;
     expect(api._warnText()).toMatch(/discarded a capture for run r/);
   });
+
+  test("item 5(a2): a later callback after a model_call_ended abort is dropped, with no new write", async () => {
+    const plugin = await loadPlugin();
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const api = apiForCapture(plugin);
+    const llmOut = api._handler("llm_output");
+    const inFlight = llmOut({ runId: "r", assistantTexts: [TRIGGER] }, { agentId: "A" });
+    await waitFor(() => puts(calls).length === 1);
+    // model_call_ended (failureKind "aborted") aborts the run.
+    await api._fire(
+      "model_call_ended",
+      { runId: "r", callId: "c", provider: "p", model: "m", durationMs: 1, outcome: "error", failureKind: "aborted" },
+      { agentId: "A" },
+    );
+    d.release();
+    await inFlight;
+    // A LATER callback for the run is dropped: it admits no record and starts no
+    // write. The abort, not a failed agent_end, is what makes it a no-op.
+    const before = calls.length;
+    await llmOut({ runId: "r", assistantTexts: [TRIGGER] }, { agentId: "A" });
+    expect(calls.length).toBe(before);
+    expect(puts(calls).length).toBe(1);
+    expect(api._warnText()).toMatch(/dropped a callback for retired run r/);
+  });
+
+  test("item 5(b2): a later callback after gateway_stop is dropped, with no new write", async () => {
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = apiForCapture(plugin);
+    const llmOut = api._handler("llm_output");
+    await llmOut({ runId: "r", assistantTexts: [TRIGGER] }, { agentId: "A" });
+    expect(puts(calls).length).toBe(1);
+    await api._fire("gateway_stop", { reason: "shutdown" }, {});
+    // A LATER callback after the stop finds no record (the map is cleared) and
+    // must NOT be re-admitted: no write starts and the gate says so.
+    const before = calls.length;
+    await llmOut({ runId: "r", assistantTexts: [TRIGGER] }, { agentId: "A" });
+    expect(calls.length).toBe(before);
+    expect(captureInternals.recordOf("A", "r")).toBeUndefined();
+    expect(api._warnText()).toMatch(/refused capture: the gateway is stopping/);
+  });
 });
 
 // ── round 2 — tombstone (F1), bounds (F2) and failed primary writes (F4) ──────
@@ -1863,6 +1918,44 @@ describe("slice 2 round 5 — one run map, one removal predicate", () => {
     expect(captureInternals.recordOf("A", "ghost3")).toBeUndefined();
   });
 
+  test("best effort residual: with the budget and its abort overflow full, an abort records nothing and evicts no live record; its next callback is admitted once room frees", async () => {
+    captureBounds.capacityCap = 1;
+    captureBounds.abortOverflowCap = 1;
+    const plugin = await loadPlugin();
+    const api = apiForCapture(plugin);
+    const calls = installFetchStub();
+    const llmOut = api._handler("llm_output");
+    const base = 110_000_000;
+    captureClock.now = () => base;
+
+    // One LIVE record fills the budget; a never-admitted abort takes the
+    // overflow. With both young, neither is removable — the map is full.
+    await llmOut({ runId: "live", assistantTexts: [TRIGGER5] }, { agentId: "A" });
+    const liveRec = captureInternals.recordOf("A", "live");
+    expect(liveRec!.phase).toBe("live");
+    await api._fire("agent_end", { runId: "b1", success: false, messages: [] }, { agentId: "A" });
+    expect(captureInternals.runCount()).toBe(2);
+
+    // The documented residual: an abort for a never-admitted run finds no room
+    // and records NOTHING — and NOT by evicting the live record to make room.
+    await api._fire("agent_end", { runId: "ghost", success: false, messages: [] }, { agentId: "A" });
+    expect(captureInternals.runCount()).toBe(2);
+    expect(captureInternals.recordOf("A", "live")).toBe(liveRec); // the SAME live record, by identity
+    expect(captureInternals.recordOf("A", "ghost")).toBeUndefined();
+    expect(api._warnText()).toMatch(/abort-overflow/);
+    expect(api._warnText()).not.toMatch(/evicted/);
+
+    // Room frees once the records age past the retention minimum: the SAME run's
+    // next callback is admitted and starts a write.
+    captureClock.now = () => base + captureBounds.idleRunRetireMs + 1;
+    await llmOut({ runId: "primer", assistantTexts: [PLAIN5] }, { agentId: "A" }); // retires `live`; still full
+    captureClock.now = () => base + captureBounds.idleRunRetireMs + captureBounds.tombstoneMinAgeMs + 2;
+    const before = puts(calls).length;
+    await llmOut({ runId: "ghost", assistantTexts: [TRIGGER5] }, { agentId: "A" });
+    expect(puts(calls).length).toBe(before + 1);
+    expect(captureInternals.recordOf("A", "ghost")).toBeTruthy();
+  });
+
   test("(d) re-expressed on the single map: a refused admission leaves the original records intact, by identity", async () => {
     captureBounds.capacityCap = 3;
     const plugin = await loadPlugin();
@@ -2061,5 +2154,21 @@ describe("slice 2 round 13 — gateway_stop refuses admission until the next reg
     expect(captureInternals.recordOf("A", "r")).toBeUndefined();
     expect(captureInternals.runCount()).toBe(0);
     expect(api._warnText()).toMatch(/refused capture: the gateway is stopping/);
+  });
+
+  test("round 13 guard: after gateway_stop an abort for a run the registry never saw inserts no record", async () => {
+    const plugin = await loadPlugin();
+    installFetchStub();
+    const api = apiForCapture(plugin);
+    await api._fire("gateway_stop", { reason: "shutdown" }, {});
+    expect(captureInternals.runCount()).toBe(0);
+
+    // A failed agent_end for a run the registry never saw must NOT insert an
+    // aborted record into the stopped registration: there is no live map to
+    // record into, and the line is rate-limited like the others.
+    await api._fire("agent_end", { runId: "never-seen", success: false, messages: [] }, { agentId: "A" });
+    expect(captureInternals.runCount()).toBe(0);
+    expect(captureInternals.recordOf("A", "never-seen")).toBeUndefined();
+    expect(api._warnText()).toMatch(/the gateway is stopping/);
   });
 });

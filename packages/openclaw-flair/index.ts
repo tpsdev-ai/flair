@@ -894,6 +894,12 @@ export default {
      * the round-4 review found. If even the overflow is full the record is not
      * inserted and the line is logged once (the documented residual); it is safe
      * because admission is refused while the budget AND its overflow are full.
+     *
+     * Round 13 guard: while `captureStopped` is set there is no registration to
+     * record into — `gateway_stop` has cleared the map and nothing more is
+     * admitted — so an abort for a run the registry never saw inserts NOTHING and
+     * returns after the rate-limited line. An abort that still inserted would
+     * leave the stopped registration holding a record no later callback can use.
      */
     function abortRun(agentId: string, runId: string | null, why: string): void {
       if (!runId) {
@@ -916,6 +922,16 @@ export default {
         try {
           existing.controller.abort(why);
         } catch { /* an abort listener must not break the hook */ }
+        return;
+      }
+      // Never admitted, and the gateway is stopping: there is no live
+      // registration left to record into, so this abort inserts nothing. It is
+      // rate-limited like the other refusal lines (round 13).
+      if (captureStopped) {
+        logOnce(
+          "abort-stopped",
+          `openclaw-flair: refused to record an abort: the gateway is stopping (gateway_stop) — aborted run ${runId} (agent ${agentId}) is not recorded`,
+        );
         return;
       }
       // Never admitted: record the abort so no later callback can re-admit it.
