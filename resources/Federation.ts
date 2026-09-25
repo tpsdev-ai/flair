@@ -231,10 +231,14 @@ export class FederationInstance extends Resource {
       const id = `flair_${randomBytes(4).toString("hex")}`;
       const publicKey = Buffer.from(kp.publicKey).toString("base64url");
 
+      // A fresh identity is a SPOKE. `flair init --remote` does not create a
+      // second row for a hub: it reads this row and sets ROLE to "hub", keeping
+      // this id and publicKey (flair#1883) — the identity peers learn is the one
+      // this GET created.
       instance = {
         id,
         publicKey,
-        role: "spoke", // default; hub is set during `flair init --remote`
+        role: "spoke",
         status: "active",
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
