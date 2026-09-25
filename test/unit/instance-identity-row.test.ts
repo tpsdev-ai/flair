@@ -27,6 +27,7 @@ import {
   probeInstanceIdentity,
   prunePeerWarningLines,
   pruneInstanceRows,
+  readableInstanceRows,
   readInstanceRows,
   readRoleNames,
   updateInstanceRole,
@@ -311,10 +312,11 @@ describe("instanceIdentitySummary", () => {
 
 describe("readInstanceRows", () => {
   it("reads EVERY row: one unconditional statement, no condition a row can fall outside of", async () => {
-    // flair#1883 round 2: the read used to carry `createdAt > "1970-01-01"`, so a
-    // row dated before 1970, or one whose createdAt is not a date, was invisible
-    // — and init then inserted a SECOND identity. (`createdAt` is REQUIRED by the
-    // schema — `createdAt: String! @indexed` — so no legal row omits it.)
+    // flair#1883 round 2: the read used to carry `createdAt > "1970-01-01"`, so
+    // every row whose createdAt compares BELOW that string (a date before 1970,
+    // an empty string) was invisible — and init then inserted a SECOND identity.
+    // (`createdAt` is REQUIRED by the schema — `createdAt: String! @indexed` — so
+    // no legal row omits it.)
     const { endpoint, calls } = opsEndpointMock(() => jsonResponse([SPOKE_ROW, HUB_ROW]));
 
     const rows = await readInstanceRows(endpoint);
@@ -346,7 +348,8 @@ describe("readInstanceRows", () => {
 
   it("reads a row whose id is the only thing it carries (a row the old filter hid)", async () => {
     // The row shapes the filter used to hide, in the rawest form the reader can
-    // see them: no createdAt at all, and a value that is not a date.
+    // see them: no createdAt at all, and an EMPTY string (which compares below
+    // "1970-01-01").
     const { endpoint } = opsEndpointMock(() =>
       jsonResponse([{ id: "flair_bare", role: "spoke" }, { id: "flair_blank", createdAt: "" }]),
     );
@@ -394,6 +397,56 @@ describe("readInstanceRows", () => {
   it("throws when the envelope carries no results array either", async () => {
     const { endpoint } = opsEndpointMock(() => jsonResponse({ results: null }));
     await expect(readInstanceRows(endpoint)).rejects.toThrow("UNREADABLE");
+  });
+
+  // ─── a malformed row is not a missing row (flair#1883 round 4) ──────
+  //
+  // `usableInstanceRows` DROPS an entry without a usable id, so a body like
+  // `[{}]` or `{results: [null]}` came back as `[]` — the same value a
+  // successful read of zero rows returns. `flair init --remote` then created an
+  // identity on a read that never established the table, and `flair doctor`
+  // printed "no rows" for a table it only part saw. The read is UNREADABLE
+  // instead: the failed-read path.
+  const MALFORMED_BODIES: Array<[label: string, body: unknown]> = [
+    ["an entry that is an empty object", [{}]],
+    ["a null entry inside the results envelope", { results: [null] }],
+    ["a good row followed by an unnameable one", [HUB_ROW, {}]],
+    ["an unnameable row followed by a good one", [{}, HUB_ROW]],
+    ["an entry whose id is empty", [{ id: "" }]],
+    ["an entry whose id is not a string", [{ id: 42 }]],
+  ];
+
+  for (const [label, body] of MALFORMED_BODIES) {
+    it(`refuses a 200 carrying ${label} — UNREADABLE, never the rows it could name`, async () => {
+      const { endpoint } = opsEndpointMock(() => jsonResponse(body));
+
+      await expect(readInstanceRows(endpoint)).rejects.toThrow("UNREADABLE");
+    });
+  }
+
+  it("names the position of the first row it cannot use", async () => {
+    const { endpoint } = opsEndpointMock(() => jsonResponse([HUB_ROW, {}, SPOKE_ROW]));
+    await expect(readInstanceRows(endpoint)).rejects.toThrow("row 2 of 3");
+  });
+
+  it("a successful 200 of zero rows is still zero rows — the one state that may create", async () => {
+    const { endpoint } = opsEndpointMock(() => jsonResponse([]));
+    expect(await readInstanceRows(endpoint)).toEqual([]);
+  });
+});
+
+describe("readableInstanceRows — every entry of a completed read, or an unreadable read", () => {
+  it("returns every nameable entry, in order, untouched", () => {
+    const rows = readableInstanceRows([HUB_ROW, { id: "flair_bare", role: "spoke" }]);
+    expect(rows.map((r) => r.id)).toEqual([HUB_ROW.id, "flair_bare"]);
+  });
+
+  it("throws — naming the position — for the first entry without a usable id", () => {
+    expect(() => readableInstanceRows([HUB_ROW, null, SPOKE_ROW])).toThrow("row 2 of 3");
+  });
+
+  it("an empty read is a successful read of zero rows, not a refusal", () => {
+    expect(readableInstanceRows([])).toEqual([]);
   });
 });
 
@@ -465,6 +518,21 @@ describe("probeInstanceIdentity", () => {
     expect(probe.roleNames).toEqual([]);
     expect(calls.map((c) => c.body.operation)).toEqual(["sql", "list_roles"]);
   });
+
+  it("reports rows:null for a 200 with an unnameable row — doctor renders UNVERIFIED, not 'no rows'", async () => {
+    // `flair doctor` branches on `probe.rows === null` and prints "Instance
+    // identity: UNVERIFIED (could not read the Instance table via the ops API)".
+    // A malformed row must land THERE, not in the "no rows" summary line a
+    // successful read of zero rows produces (flair#1883 round 4).
+    const { endpoint } = opsEndpointMock((body) =>
+      body.operation === "sql" ? jsonResponse([{ id: "" }]) : jsonResponse([]),
+    );
+
+    const probe = await probeInstanceIdentity(endpoint);
+
+    expect(probe.rows).toBeNull();
+    expect(probe.roleNames).toEqual([]);
+  });
 });
 
 describe("pruneInstanceRows", () => {
@@ -517,6 +585,11 @@ describe("prunePeerWarningLines", () => {
     expect(joined).toContain("POST /FederationPair");
     expect(joined).toContain("Any of the 2 row(s) being deleted may be the identity a paired peer pinned");
     expect(joined).toContain("must re-pair");
+    // HISTORICAL, not present tense (flair#1883 round 4): with several rows the
+    // pair response is a 409 now, so the warning is about peers that paired
+    // BEFORE the fix, while the response still was the first row of the search.
+    expect(joined).toContain("While the table held more than one Instance row, that response was whichever row");
+    expect(joined).not.toMatch(/that response is whichever/);
   });
 
   it("never names a row as the one a peer pinned, and never claims to know", () => {

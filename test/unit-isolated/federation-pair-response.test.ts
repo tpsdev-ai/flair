@@ -149,7 +149,7 @@ describe("FederationPair.post — existing instance.{id,publicKey} shape (flair#
   });
 });
 
-describe("FederationPair.post — several Instance rows refuse BEFORE anything is consumed (flair#1883 round 3)", () => {
+describe("FederationPair.post — several Instance rows refuse BEFORE the token, the peer read and every peer write (flair#1883 round 3)", () => {
   const ROW_A = { id: "flair_pair_row_a", publicKey: "key-a", role: "spoke", status: "active" };
   const ROW_B = { id: "flair_pair_row_b", publicKey: "key-b", role: "hub", status: "active" };
 
@@ -220,5 +220,28 @@ describe("FederationPair.post — several Instance rows refuse BEFORE anything i
     // The happy path still consumes the token — proof the refusal above is the
     // thing that skips it, not a change to pairing itself.
     expect(tokens.get(token)?.consumedBy).toBeTruthy();
+  });
+
+  it("answers 5xx for a table serving an unnameable row — consumes NO token and writes NO peer", async () => {
+    // flair#1883 round 4: a malformed row is not a missing row. The reader used to
+    // SKIP an entry without a usable id, so a table of [{}] (or a good row beside
+    // it) read as "the rows I could name" and this endpoint could answer a peer
+    // with an identity it never read — or pair against none at all.
+    instanceRows = [{}, { id: "flair_good", role: "hub" }];
+    const token = "pair-token-unnameable-row";
+    tokens.set(token, { id: token, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+
+    const result = await makePair().post(spokeSignedBody(token));
+
+    expect(result).toBeInstanceOf(Response);
+    const res = result as Response;
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(res.status).toBeLessThan(600);
+    const json = await res.json();
+    expect(json.error).toBe("instance_identity_unreadable");
+    // The pairing did not happen: the one-time token is unused and no peer was
+    // recorded.
+    expect(tokens.get(token)?.consumedBy).toBeUndefined();
+    expect(peers.size).toBe(0);
   });
 });

@@ -76,6 +76,34 @@ describe("FederationInstance.get() — a failed read is an error, not first boot
     expect(puts).toHaveLength(0);
   });
 
+  it("answers 5xx and creates NOTHING when a row has no usable id — a malformed row is not a missing row", async () => {
+    // flair#1883 round 4. The reader used to SKIP an entry without a usable id,
+    // so a table serving one bad entry (or a good one beside it) read as "the
+    // rows I could name" — possibly zero — and this GET's create branch could
+    // mint a SECOND identity from a read that never saw the table.
+    readBehaviour = "rows";
+
+    for (const rows of [
+      [{}],
+      [{ id: "" }],
+      [{ id: "flair_good", role: "hub" }, {}],
+      [{}, { id: "flair_good", role: "hub" }],
+    ]) {
+      rowsToServe = rows as any[];
+
+      const res = await makeInstance().get();
+
+      expect(res).toBeInstanceOf(Response);
+      expect(res.status).toBeGreaterThanOrEqual(500);
+      expect(res.status).toBeLessThan(600);
+      const body = await res.json();
+      expect(body.error).toBe("instance_identity_unreadable");
+    }
+
+    // Not one of those reads minted an identity.
+    expect(puts).toHaveLength(0);
+  });
+
   it("creates exactly one spoke row when a successful read finds no rows", async () => {
     readBehaviour = "empty";
 

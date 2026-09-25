@@ -323,9 +323,9 @@ describe("init --remote identity reconcile (live Harper)", () => {
   test("a row the old date filter HID is read now — and reconciled, not duplicated", async () => {
     // The ops read used to carry `createdAt > "1970-01-01"` (a
     // search_by_conditions needs a condition, so the module had to name one).
-    // That condition hides every row whose createdAt is not after 1970 — a date
-    // before it, or a value that is not a date at all — and a row init cannot see
-    // is a row init inserts a second identity beside. This is the live proof of
+    // That condition hides every row whose createdAt compares BELOW that string
+    // — a date before 1970, an empty string — and a row init cannot see is a row
+    // init inserts a second identity beside. This is the live proof of
     // both halves: the old read returns nothing, the new read returns the row,
     // and the reconcile adopts that row instead of minting another.
     await clearInstanceRows();
