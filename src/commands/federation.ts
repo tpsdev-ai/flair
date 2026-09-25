@@ -36,6 +36,7 @@ import {
   prunePeerWarningLines,
   readInstanceRows,
   pruneInstanceRows,
+  writeConfirmed,
   type InstanceIdentityRow,
   type InstancePruneDecision,
   type OpsEndpoint,
@@ -211,6 +212,83 @@ function fetchErrorLabel(err: unknown): string {
 /** Strip any userinfo from URLs embedded in a message before printing it. */
 function redactMessage(text: string): string {
   return text.replace(/\/\/[^/@\s]+@/g, "//");
+}
+
+/**
+ * `message` with every occurrence of `tokenId` cut to its 8-character prefix —
+ * the same redaction the federation cleanup sweep applies to a pairing-token id
+ * (resources/federation-cleanup.ts). The pairing-token id IS the credential a
+ * spoke redeems, so only its prefix may ever be printed, and any occurrence of
+ * the full id inside a message (Harper errors can echo the request) is cut too.
+ */
+export function redactPairingTokenId(message: string, tokenId: string): string {
+  return tokenId ? message.split(tokenId).join(`${tokenId.slice(0, 8)}…`) : message;
+}
+
+/**
+ * The one line `flair federation token` prints about its PairingToken rollback.
+ *
+ * A rollback is only real if Harper CONFIRMS the delete. A `delete` answers 200
+ * even when it removes nothing, naming what it removed in `deleted_hashes` and a
+ * record it did NOT remove in `skipped_hashes`; a body that names no ids at all
+ * is also not a confirmation. One rule, shared with the identity-row writes and
+ * the cleanup sweep — `writeConfirmed` (flair#1899). A confirmed rollback is
+ * reported as such; anything else is reported as a FAILED rollback that names
+ * the token by its 8-character prefix only.
+ */
+export function pairingTokenRollbackLine(result: unknown, tokenId: string): string {
+  const prefix = tokenId.slice(0, 8);
+  if (writeConfirmed(result, "deleted_hashes", tokenId)) {
+    return (
+      `Rolled back pairing token ${prefix}…: Harper confirmed it was deleted, ` +
+      `so it cannot outlive the bootstrap user that was never created.`
+    );
+  }
+  const body = (result ?? {}) as Record<string, unknown>;
+  const why =
+    body.error !== undefined && body.error !== null
+      ? `Harper reported: ${redactPairingTokenId(String(body.error), tokenId)}`
+      : Array.isArray(body.skipped_hashes) && body.skipped_hashes.map(String).includes(tokenId)
+        ? "Harper named it in skipped_hashes"
+        : "Harper's result did not confirm the delete";
+  return (
+    `Pairing token rollback FAILED: token ${prefix}… was NOT deleted — ${why}. ` +
+    `It may still be redeemable; check the PairingToken table.`
+  );
+}
+
+/**
+ * Delete the PairingToken a failed `flair federation token` persisted, and
+ * return the one-line outcome for the caller to print.
+ *
+ * Never throws: the caller is already failing, and its ORIGINAL error is what
+ * must reach the exit code, so a rollback that itself fails is reported, not
+ * raised. Sends `hash_values` (a list) — the field Harper's delete schema
+ * REQUIRES; the singular `hash_value` is refused with a 400, which left the
+ * token in the table so it outlived the user it was minted for (flair#1895).
+ */
+export async function rollbackPairingToken(
+  opsEndpoint: string,
+  auth: string,
+  tokenId: string,
+): Promise<string> {
+  try {
+    const res = await fetch(`${opsEndpoint}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({
+        operation: "delete",
+        database: "flair",
+        table: "PairingToken",
+        hash_values: [tokenId],
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const result = await res.json().catch(() => null);
+    return pairingTokenRollbackLine(result, tokenId);
+  } catch (err: any) {
+    return pairingTokenRollbackLine({ error: String(err?.message ?? err) }, tokenId);
+  }
 }
 
 /**
@@ -1564,34 +1642,18 @@ export function register(program: Command): void {
             signal: AbortSignal.timeout(10_000),
           });
         } catch (err: any) {
-          // Network failure creating bootstrap user — roll back PairingToken
-          await fetch(`${opsEndpoint}/`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: auth },
-            body: JSON.stringify({
-              operation: "delete",
-              database: "flair",
-              table: "PairingToken",
-              hash_value: token,
-            }),
-            signal: AbortSignal.timeout(10_000),
-          }).catch(() => {});
+          // Network failure creating bootstrap user — roll back PairingToken. The
+          // rollback outcome is an ADDITIONAL line; the command still exits on the
+          // original (network) failure below.
+          console.error(await rollbackPairingToken(opsEndpoint, auth, token));
           throw new Error(`Failed to create bootstrap user (network): ${err.message}`);
         }
 
         if (!addUserRes.ok) {
-          // add_user failed — roll back PairingToken so the two stay in sync
-          await fetch(`${opsEndpoint}/`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: auth },
-            body: JSON.stringify({
-              operation: "delete",
-              database: "flair",
-              table: "PairingToken",
-              hash_value: token,
-            }),
-            signal: AbortSignal.timeout(10_000),
-          }).catch(() => {});
+          // add_user failed — roll back PairingToken so the two stay in sync. The
+          // rollback outcome is an ADDITIONAL line; the command still exits on the
+          // original add_user failure below.
+          console.error(await rollbackPairingToken(opsEndpoint, auth, token));
           const detail = await addUserRes.text().catch(() => "");
           throw new Error(`Failed to create bootstrap user (${addUserRes.status}): ${detail || "no body"}`);
         }
