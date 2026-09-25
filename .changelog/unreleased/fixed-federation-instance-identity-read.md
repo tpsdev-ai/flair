@@ -5,8 +5,8 @@
 
   **The read is unconditional.** `flair init --remote` and the doctor probe read
   `flair.Instance` through an ops-API `search_by_conditions` carrying
-  `createdAt > "1970-01-01"` — so a row dated before 1970, and a row whose
-  `createdAt` is present but is not a date, were both invisible, and init then
+  `createdAt > "1970-01-01"` — so every row whose `createdAt` compares below that
+  string (a date before 1970, an empty string) was invisible, and init then
   inserted a second identity next to the one it could not see. (`createdAt` is
   REQUIRED by the schema — `createdAt: String! @indexed` — so no legal row omits
   it; the date-shaped filter was the wrong instrument all the same, because it

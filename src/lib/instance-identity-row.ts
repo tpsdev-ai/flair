@@ -29,16 +29,23 @@
  *
  * The read is unconditional (flair#1883 round 2): an ops-API
  * `search_by_conditions` needs at least one condition, and the
- * `createdAt > "1970-01-01"` one this module used to send EXCLUDED rows — a row
- * dated before 1970, and one whose `createdAt` is present but is not a date. The
- * column is REQUIRED (`createdAt: String! @indexed`, schemas/federation.graphql),
- * so a row cannot legally omit it; the date-shaped filter was the wrong
- * instrument regardless, because it could hide a row the table is allowed to
- * hold. A row no reader can see is a row `init --remote` does not know about,
- * and the second identity it then inserts is the defect this module exists to
- * end. A read that FAILS is also not an answer: `null` is its own state (see
- * `decideSweepMode`, `probeInstanceIdentity`), and only a SUCCESSFUL read of
- * zero rows may create.
+ * `createdAt > "1970-01-01"` one this module used to send EXCLUDED every row
+ * whose `createdAt` compares BELOW that string — a date before 1970, an empty
+ * string. The column is REQUIRED (`createdAt: String! @indexed`,
+ * schemas/federation.graphql), so no legal row omits it; the date-shaped filter
+ * was the wrong instrument regardless, because it could hide a row the table is
+ * allowed to hold. A row no reader can see is a row `init --remote` does not
+ * know about, and the second identity it then inserts is the defect this module
+ * exists to end.
+ *
+ * A read must also ESTABLISH something to be an answer (flair#1883 rounds 3-4).
+ * A read that FAILS is not an answer — `null` is its own state (see
+ * `decideSweepMode`, `probeInstanceIdentity`). A 200 whose body is not a row
+ * list is not a read of zero rows (`readInstanceRows` throws). And a row the
+ * reader cannot NAME — an entry with no usable id — makes the whole read
+ * unreadable (`readableInstanceRows`): such an entry may be one of several
+ * identity rows, and a reader that drops it cannot tell a table it saw from a
+ * table it only saw part of. Only a SUCCESSFUL read of zero rows may create.
  */
 
 /** One `flair.Instance` row, as read from the table or the ops API. */
@@ -80,10 +87,57 @@ export function normalizeRole(role: unknown): string {
   return typeof role === "string" ? role.trim().toLowerCase() : "";
 }
 
-/** Rows that carry a usable id, in the order they were read. */
+/**
+ * Whether a reader can NAME this entry: a non-null object with a non-empty
+ * string id. The ONE definition of "usable", shared by the pure decisions below
+ * (which filter rows already in hand) and by the readers (which refuse a read
+ * that returned an entry it cannot name — flair#1883 round 4).
+ */
+export function isUsableInstanceRow(entry: unknown): boolean {
+  if (!entry || typeof entry !== "object") return false;
+  const id = (entry as { id?: unknown }).id;
+  return typeof id === "string" && id.length > 0;
+}
+
+/**
+ * Rows that carry a usable id, in the order they were read.
+ *
+ * This DROPS an entry it cannot name, which is right for a decision over rows
+ * already in hand and WRONG for a read: `[{}]`, `{results: [null]}` and a good
+ * row beside a bad one would all become "the rows I could name". The readers use
+ * `readableInstanceRows` instead (flair#1883 round 4).
+ */
 export function usableInstanceRows(rows: readonly InstanceIdentityRow[] | null | undefined): InstanceIdentityRow[] {
   if (!Array.isArray(rows)) return [];
-  return rows.filter((r) => !!r && typeof r.id === "string" && r.id.length > 0);
+  return rows.filter((r) => isUsableInstanceRow(r));
+}
+
+/**
+ * Every entry of a COMPLETED read, in order — or a thrown error naming the first
+ * entry the reader cannot name (flair#1883 round 4).
+ *
+ * A malformed row is not a missing row. Dropping it makes `[{}]`, or a good row
+ * beside a bad one, read as "the rows I could name" — a read that established
+ * nothing still looks like a read of one row (or none), and `flair init
+ * --remote` creates an identity on the strength of it while `flair doctor`
+ * prints "no rows" for a table it only part saw. An entry without a usable id
+ * may be one of several identity rows, so the read is UNREADABLE — the same
+ * outcome as a failed read: the callers answer 5xx / report the probe as
+ * unreadable, and NOTHING is created, changed or deleted on the strength of it.
+ */
+export function readableInstanceRows(entries: readonly unknown[]): InstanceIdentityRow[] {
+  const out: InstanceIdentityRow[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    if (!isUsableInstanceRow(entries[i])) {
+      throw new Error(
+        `Instance read: row ${i + 1} of ${entries.length} carries no usable id — treating the read as UNREADABLE. ` +
+          "An entry a reader cannot name may be one of several identity rows, and a read that cannot name every row it " +
+          "returned is not a read that found no rows: it must not license creating an identity.",
+      );
+    }
+    out.push(entries[i] as InstanceIdentityRow);
+  }
+  return out;
 }
 
 /** `id=… role=… createdAt=…` — every field named, never positionally. */
@@ -352,7 +406,10 @@ export async function readInstanceRows(endpoint: OpsEndpoint): Promise<InstanceI
         "must not license creating an identity.",
     );
   }
-  return usableInstanceRows(rows as InstanceIdentityRow[]);
+  // Every entry must be nameable (flair#1883 round 4): a body carrying an entry
+  // without a usable id established nothing about the table, and it follows the
+  // failed-read path rather than reporting the rows it could name.
+  return readableInstanceRows(rows);
 }
 
 /** Role names on this instance, or null when the read did not happen. */
@@ -437,10 +494,11 @@ export async function probeInstanceIdentity(
  *
  * A peer PINS this instance's identity when it pairs: it is handed `{ id,
  * publicKey, role }` in the `POST /FederationPair` response and stores it as its
- * hub peer. That response is read from the Instance table, and with several rows
- * present it is whichever row the search yielded first — which is precisely the
- * state a prune exists to resolve. So "which row did a peer pin" is NOT
- * determinable here, and this helper does not pretend otherwise.
+ * hub peer. That response was read from the Instance table and — while the table
+ * held more than one row — it was whichever row the search yielded first, which
+ * is precisely the state a prune exists to resolve. A peer that paired in that
+ * state therefore pinned one of the rows, and WHICH one is not determinable
+ * here; this helper does not pretend otherwise.
  *
  * Round 2 named the row the hub answered `GET /FederationInstance` with. That
  * was a guess dressed as a fact: with several rows the GET now refuses (409)
@@ -453,9 +511,9 @@ export function prunePeerWarningLines(input: { drop: readonly InstanceIdentityRo
   const drop = usableInstanceRows(input.drop);
   if (drop.length === 0) return [];
   return [
-    "Paired peers pinned this instance's identity from the POST /FederationPair response, and with more than " +
-      "one Instance row that response is whichever row the search yielded first — so which row a given peer " +
-      "pinned cannot be determined here.",
+    "Paired peers pinned this instance's identity from the POST /FederationPair response. While the table held " +
+      "more than one Instance row, that response was whichever row the search yielded first — so which row a " +
+      "given peer pinned cannot be determined here.",
     `Any of the ${drop.length} row(s) being deleted may be the identity a paired peer pinned. ` +
       "A peer paired with a deleted identity must re-pair.",
   ];

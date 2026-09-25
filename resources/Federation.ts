@@ -14,6 +14,7 @@ import { reconcileState } from "./relay-lib.js";
 import {
   decideInstanceAnswer,
   multipleInstanceRowsMessage,
+  readableInstanceRows,
   type InstanceIdentityRow,
 } from "../src/lib/instance-identity-row.js";
 import { isSkillWrite } from "./skill-write.js";
@@ -191,21 +192,26 @@ export function noteFederationMergedMemory(
  * A read that FAILS must not look like a table with no rows: the callers answer
  * 5xx and write nothing, because only a SUCCESSFUL read of zero rows may mint an
  * identity.
+ *
+ * And neither must a row the reader cannot NAME (flair#1883 round 4): an entry
+ * without a usable id used to be skipped here, so a table serving one bad entry
+ * (or a good one beside it) read as "the rows I could name" — possibly zero — and
+ * the GET's create branch could mint a second identity from a read that never
+ * saw the table. `readableInstanceRows` throws instead, which the callers map to
+ * 5xx and no write.
  */
 async function readAllInstanceRows(): Promise<InstanceIdentityRow[]> {
-  const rows: InstanceIdentityRow[] = [];
-  for await (const i of (databases as any).flair.Instance.search()) {
-    if (i && typeof i.id === "string" && i.id.length > 0) {
-      rows.push({
-        id: i.id,
-        role: i.role ?? null,
-        publicKey: i.publicKey ?? null,
-        status: i.status ?? null,
-        createdAt: i.createdAt ?? null,
-      });
-    }
-  }
-  return rows;
+  const raw: unknown[] = [];
+  for await (const i of (databases as any).flair.Instance.search()) raw.push(i);
+  // Throws on the first entry without a usable id — before anything is
+  // normalized or reported.
+  return readableInstanceRows(raw).map((i) => ({
+    id: i.id,
+    role: i.role ?? null,
+    publicKey: i.publicKey ?? null,
+    status: i.status ?? null,
+    createdAt: i.createdAt ?? null,
+  }));
 }
 
 /**
@@ -420,8 +426,15 @@ export class FederationPair extends Resource {
       });
     }
 
-    // ── The identity this response hands the peer, decided BEFORE anything is
-    // consumed or written (flair#1883 round 3). ───────────────────────────────
+    // ── The identity this response hands the peer, decided BEFORE the pairing
+    // token is consumed, BEFORE the peer is read and before ANY peer is written
+    // (flair#1883 round 3). ──────────────────────────────────────────────────
+    //
+    // NOT "before anything": the signature check above has already run and
+    // RECORDED ITS NONCE (verifyBodySignatureFresh → NonceStore.set(), see
+    // federation-nonce-store.ts). That is deliberate anti-replay state, not a
+    // pairing effect — but it is written, and the refusal is precise about what
+    // it precedes.
     //
     // A spoke PINS what it is handed here as its hub peer, so this value is the
     // identity a pairing outcome depends on. It used to be "the first row of an

@@ -1968,12 +1968,15 @@ export function register(program: Command): void {
         return;
       }
 
-      // What a prune must tell the operator (flair#1883 round 3): a paired peer
-      // pinned this instance's identity from the `POST /FederationPair` response,
-      // which is whichever row the search yielded first when several exist — so
-      // which row a given peer pinned is NOT determinable here, and the warning
-      // does not name one. Any row being deleted may be the identity a peer
-      // pinned; a peer paired with a deleted identity must re-pair.
+      // What a prune must tell the operator (flair#1883 round 3; tense
+      // corrected in round 4): a paired peer pinned this instance's identity from
+      // the `POST /FederationPair` response, which — while the table held several
+      // rows — was whichever row the search yielded first. A peer that paired in
+      // that state may have pinned ANY of the rows being deleted, and which one
+      // it pinned is NOT determinable here, so the warning does not name one. (The
+      // response is a 409 now, so this is history, not the current behaviour — but
+      // those peers are still out there.) A peer paired with a deleted identity
+      // must re-pair.
       const peerWarnings = prunePeerWarningLines({ drop: decision.drop });
 
       if (!opts.apply) {
