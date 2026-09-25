@@ -14,12 +14,11 @@
   table unchanged. (Two other server readers still take the first
   row of the table; that is a separate defect, tracked as flair#1896.)
 
-  The prune's warning no longer names "the row the hub has been answering with"
-  as the identity peers pinned — it cannot know which row a peer pinned. That
-  value came from the `POST /FederationPair` response, which WAS the first row of
-  the search while several rows existed (it is a 409 now), so any row being
-  deleted may be the identity a peer paired before this fix pinned, and such
-  peers must re-pair.
+  The prune's warning says that any row being deleted may be the identity a
+  paired peer pinned, and that such peers must re-pair. It cannot know which row
+  a peer pinned: while several rows existed, `POST /FederationPair` answered
+  with the first row of an unordered search (it is a 409 now), so a peer that
+  paired in that state may have pinned any of them.
 
   A 200 from the ops API whose body is not a row list — invalid JSON, or a shape
   the reader does not know — was read as zero rows, so `flair init --remote` could

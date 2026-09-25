@@ -35,6 +35,7 @@ import {
   usableInstanceRows,
   type InstanceIdentityRow,
   type OpsEndpoint,
+  writeConfirmed,
 } from "../../src/lib/instance-identity-row.js";
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -575,6 +576,23 @@ describe("pruneInstanceRows", () => {
     const { dropped } = await pruneInstanceRows(endpoint, HUB_ROW.id);
     expect(dropped).toEqual([]);
     expect(calls.some((c) => c.body.operation === "delete")).toBe(false);
+  });
+});
+
+describe("writeConfirmed — one rule for every verified write (flair#1898)", () => {
+  it("confirms an id named in the changed field and not skipped", () => {
+    expect(writeConfirmed({ deleted_hashes: ["a"], skipped_hashes: [] }, "deleted_hashes", "a")).toBe(true);
+    expect(writeConfirmed({ update_hashes: ["a"] }, "update_hashes", "a")).toBe(true);
+  });
+  it("does not confirm an id that is absent, only skipped, or named as both", () => {
+    expect(writeConfirmed({ deleted_hashes: [], skipped_hashes: ["a"] }, "deleted_hashes", "a")).toBe(false);
+    expect(writeConfirmed({ deleted_hashes: ["b"] }, "deleted_hashes", "a")).toBe(false);
+    expect(writeConfirmed({ deleted_hashes: ["a"], skipped_hashes: ["a"] }, "deleted_hashes", "a")).toBe(false);
+  });
+  it("does not confirm a result with no ids, an error, or no body", () => {
+    expect(writeConfirmed({ message: "ok" }, "deleted_hashes", "a")).toBe(false);
+    expect(writeConfirmed({ deleted_hashes: ["a"], error: "failed" }, "deleted_hashes", "a")).toBe(false);
+    expect(writeConfirmed(null, "deleted_hashes", "a")).toBe(false);
   });
 });
 

@@ -200,7 +200,9 @@ describe("federation-cleanup sweep", () => {
       const db = createMockDb(tokens);
       const { fn: serverOp, captured } = createMockServerOp([
         { ok: true, data: { message: "user dropped" } },  // drop_user
-        { ok: true, data: { message: "deleted 1 record" } },  // delete token record
+        // Harper's real delete result shape (flair#1898): a 200 names what it
+        // removed in deleted_hashes and what it skipped in skipped_hashes.
+        { ok: true, data: { deleted_hashes: [tId], skipped_hashes: [] } },  // delete token record
       ]);
 
       await runCleanupTick({ serverOp, db: db as any, now });
@@ -341,7 +343,7 @@ describe("federation-cleanup sweep", () => {
       const { fn: serverOp, captured } = createMockServerOp([
         { ok: true }, // drop tok_X1
         { ok: true }, // drop tok_X2
-        { ok: true }, // delete tok_X2
+        { ok: true, data: { deleted_hashes: ["tok_X2_expired__BBBB"] } }, // delete tok_X2
         { ok: true }, // drop tok_X4
       ]);
 
@@ -377,7 +379,7 @@ describe("federation-cleanup sweep", () => {
         { ok: true },           // drop tok_Y1
         { ok: false, error: deleteErr }, // delete tok_Y1 fails
         { ok: true },           // drop tok_Y2
-        { ok: true },           // delete tok_Y2 succeeds
+        { ok: true, data: { deleted_hashes: ["tok_Y2_expired"] } },           // delete tok_Y2 succeeds
       ]);
 
       await runCleanupTick({ serverOp, db: db as any, now });
@@ -406,6 +408,161 @@ describe("federation-cleanup sweep", () => {
       ).resolves.toBeUndefined();
 
       expect(captured).toHaveLength(0);
+    });
+  });
+
+  // ── flair#1898: the expired-token delete is verified, not trusted ──────────
+  //
+  // runCleanupTick logs through the console directly, so these cases capture it.
+  // The second argument of each sweep log line is an OBJECT, which a naive
+  // String() capture flattens to "[object Object]" — so the capture serialises
+  // it, which is what lets a case assert the token id is NAMED.
+  describe("runCleanupTick — the expired-token delete verifies its result (flair#1898)", () => {
+    const now = new Date("2026-05-05T22:00:00Z");
+    const expired = (id: string) =>
+      makeToken(id, { expiresAt: new Date("2026-05-05T21:00:00Z").toISOString() });
+
+    /** What Harper reports: a 200 names what it removed and what it skipped. */
+    const DELETE_CONFIRMED = (id: string) => ({
+      ok: true as const,
+      data: { deleted_hashes: [id], skipped_hashes: [] },
+    });
+    const DELETE_SKIPPED = (id: string) => ({
+      ok: true as const,
+      data: { deleted_hashes: [], skipped_hashes: [id] },
+    });
+    /** A 200 whose body reports no ids at all — a write that cannot be confirmed. */
+    const DELETE_NO_IDS = { ok: true as const, data: { message: "ok" } };
+
+    function captureConsole(): { lines: string[]; errors: string[]; restore: () => void } {
+      const lines: string[] = [];
+      const errors: string[] = [];
+      const fmt = (args: any[]) =>
+        args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
+      const logSpy = jest.spyOn(console, "log").mockImplementation((...a: any[]) => {
+        lines.push(fmt(a));
+      });
+      const errSpy = jest.spyOn(console, "error").mockImplementation((...a: any[]) => {
+        errors.push(fmt(a));
+      });
+      return {
+        lines,
+        errors,
+        restore: () => {
+          logSpy.mockRestore();
+          errSpy.mockRestore();
+        },
+      };
+    }
+
+    it("a confirmed delete is logged as deleted", async () => {
+      const tId = "token_verify_ok_AAAA";
+      const db = createMockDb([expired(tId)]);
+      const { fn: serverOp } = createMockServerOp([{ ok: true }, DELETE_CONFIRMED(tId)]);
+      const { lines, errors, restore } = captureConsole();
+      try {
+        await runCleanupTick({ serverOp, db: db as any, now });
+      } finally {
+        restore();
+      }
+
+      expect(lines.join("\n")).toContain("deleted expired token");
+      expect(errors.join("\n")).not.toContain("NOT confirmed");
+    });
+
+    it("a delete Harper SKIPS is logged as NOT confirmed, naming the token's prefix and never the whole id", async () => {
+      const tId = "token_verify_skip_BBBB";
+      const db = createMockDb([expired(tId)]);
+      const { fn: serverOp } = createMockServerOp([{ ok: true }, DELETE_SKIPPED(tId)]);
+      const { lines, errors, restore } = captureConsole();
+      try {
+        await runCleanupTick({ serverOp, db: db as any, now });
+      } finally {
+        restore();
+      }
+
+      // The record is still in the table, so this tick did NOT delete it — and
+      // the log must not say it did.
+      expect(lines.join("\n")).not.toContain("deleted expired token");
+      const text = errors.join("\n");
+      expect(text).toContain("NOT confirmed");
+      // The token id IS the pairing credential: the log carries its prefix only.
+      expect(text).toContain(tId.slice(0, 8));
+      expect(text).not.toContain(tId);
+    });
+
+    it("a result naming the token as both deleted and skipped is NOT a confirmed delete", async () => {
+      const tId = "token_verify_both_DDDD";
+      const db = createMockDb([expired(tId)]);
+      const { fn: serverOp } = createMockServerOp([
+        { ok: true },
+        { ok: true, data: { deleted_hashes: [tId], skipped_hashes: [tId] } },
+      ]);
+      const { lines, errors, restore } = captureConsole();
+      try {
+        await runCleanupTick({ serverOp, db: db as any, now });
+      } finally {
+        restore();
+      }
+
+      expect(lines.join("\n")).not.toContain("deleted expired token");
+      expect(errors.join("\n")).toContain("NOT confirmed");
+      expect(errors.join("\n")).not.toContain(tId);
+    });
+
+    it("a delete that throws logs the error with the token id cut to its prefix", async () => {
+      const tId = "token_verify_err_EEEEEEEE";
+      const db = createMockDb([expired(tId)]);
+      // A Harper error can echo the request body, token id included.
+      const { fn: serverOp } = createMockServerOp([
+        { ok: true },
+        { ok: false, error: new Error(`delete failed for hash_values ["${tId}"]`) },
+      ]);
+      const { lines, errors, restore } = captureConsole();
+      try {
+        await runCleanupTick({ serverOp, db: db as any, now });
+      } finally {
+        restore();
+      }
+
+      const text = errors.join("\n");
+      expect(text).toContain("delete token error");
+      expect(text).toContain(tId.slice(0, 8));
+      expect(text).not.toContain(tId);
+      expect(lines.join("\n")).not.toContain("deleted expired token");
+    });
+
+    it("the consumed-token audit line cuts the token id to its prefix, even inside a caller-supplied consumedBy", async () => {
+      // consumedBy is the pairing caller's instanceId, so it is whatever that
+      // caller sent, including the token id itself.
+      const tId = "token_audit_consumed_FFFFFFFF";
+      const db = createMockDb([makeToken(tId, { consumedBy: `instance-${tId}-x` })]);
+      const { fn: serverOp } = createMockServerOp([{ ok: true }]);
+      const { lines, errors, restore } = captureConsole();
+      try {
+        await runCleanupTick({ serverOp, db: db as any, now });
+      } finally {
+        restore();
+      }
+      const all = [...lines, ...errors].join("\n");
+      expect(all).toContain("keeping audit record");
+      expect(all).toContain(tId.slice(0, 8));
+      expect(all).not.toContain(tId);
+    });
+
+    it("a 200 whose body reports no deleted_hashes is not logged as deleted either", async () => {
+      const tId = "token_verify_no_ids_CCCC";
+      const db = createMockDb([expired(tId)]);
+      const { fn: serverOp } = createMockServerOp([{ ok: true }, DELETE_NO_IDS]);
+      const { lines, errors, restore } = captureConsole();
+      try {
+        await runCleanupTick({ serverOp, db: db as any, now });
+      } finally {
+        restore();
+      }
+
+      expect(lines.join("\n")).not.toContain("deleted expired token");
+      expect(errors.join("\n")).toContain("NOT confirmed");
     });
   });
 
@@ -668,6 +825,32 @@ describe("federation-cleanup sweep", () => {
       expect(captured[0].body.username).toBe(`${BOOTSTRAP_USER_PREFIX}deadbeef`);
     });
 
+    it("a hand-made bootstrap user with a long suffix is logged by its first 8 characters only", async () => {
+      // Real bootstrap users are pair-bootstrap- plus 8 characters; a hand-made
+      // one can carry a whole token id, and Harper's error can echo the name.
+      const longSuffix = "feedfacefeedface_whole_token_id";
+      const username = `${BOOTSTRAP_USER_PREFIX}${longSuffix}`;
+      const errs: string[] = [];
+      const logs: string[] = [];
+      const fmt = (a: any[]) => a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ");
+      const logSpy = jest.spyOn(console, "log").mockImplementation((...a: any[]) => { logs.push(fmt(a)); });
+      const errSpy = jest.spyOn(console, "error").mockImplementation((...a: any[]) => { errs.push(fmt(a)); });
+      try {
+        const ok = createMockServerOp([{ ok: true }]);
+        await runCleanupTick({ serverOp: ok.fn, db: createMockDb([]) as any, now, users: [username] });
+        const failing = createMockServerOp([{ ok: false, error: new Error(`drop_user failed for ${username}`) }]);
+        await runCleanupTick({ serverOp: failing.fn, db: createMockDb([]) as any, now, users: [username] });
+      } finally {
+        logSpy.mockRestore();
+        errSpy.mockRestore();
+      }
+      const all = [...logs, ...errs].join("\n");
+      expect(all).toContain("dropped user");
+      expect(all).toContain("drop_user error");
+      expect(all).toContain(longSuffix.slice(0, 8));
+      expect(all).not.toContain(longSuffix);
+    });
+
     it("leaves a user whose token is live and unexpired", async () => {
       const db = createMockDb([
         makeToken("cafebabe_live_token", { expiresAt: new Date("2026-05-05T23:00:00Z").toISOString() }),
@@ -694,7 +877,10 @@ describe("federation-cleanup sweep", () => {
       const db = createMockDb([
         makeToken("feedface_expired_token", { expiresAt: new Date("2026-05-05T21:00:00Z").toISOString() }),
       ]);
-      const { fn: serverOp, captured } = createMockServerOp([{ ok: true }, { ok: true }]);
+      const { fn: serverOp, captured } = createMockServerOp([
+        { ok: true },
+        { ok: true, data: { deleted_hashes: ["feedface_expired_token"] } },
+      ]);
 
       await runCleanupTick({ serverOp, db: db as any, now, users: [`${BOOTSTRAP_USER_PREFIX}feedface`] });
 

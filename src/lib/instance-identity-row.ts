@@ -520,6 +520,48 @@ export async function readRoleNames(endpoint: OpsEndpoint): Promise<string[] | n
 }
 
 /**
+ * What a Harper write result says actually happened, in ONE place.
+ *
+ * A `delete` answers 200 with the removed ids in `deleted_hashes`; an `update`
+ * reports the ids it changed as `update_hashes`. Both name an id they did NOT
+ * touch in `skipped_hashes`. HTTP status alone is not the contract (flair#1883):
+ * a skipped id is a write that did not happen. `changed` is null when the result
+ * body reports no ids at all — also a write that cannot be confirmed.
+ */
+export function readWriteResult(
+  result: unknown,
+  changedField: "deleted_hashes" | "update_hashes",
+): { changed: string[] | null; skipped: string } {
+  const body = (result ?? {}) as Record<string, unknown>;
+  const raw = body[changedField];
+  const skippedRaw = body.skipped_hashes;
+  return {
+    changed: Array.isArray(raw) ? (raw as string[]) : null,
+    skipped: Array.isArray(skippedRaw) ? skippedRaw.map(String).join(", ") : "unknown",
+  };
+}
+
+/**
+ * Whether a Harper write result CONFIRMS that `id` was written: the result names
+ * it in the changed field, does not also name it in `skipped_hashes`, and carries
+ * no `error`. Anything else, including a contradictory result that names the id
+ * as both changed and skipped, is not a confirmation. One rule for every write
+ * this module and the cleanup sweep verify.
+ */
+export function writeConfirmed(
+  result: unknown,
+  changedField: "deleted_hashes" | "update_hashes",
+  id: string,
+): boolean {
+  const body = (result ?? {}) as Record<string, unknown>;
+  if (body.error !== undefined && body.error !== null) return false;
+  const changed = body[changedField];
+  if (!Array.isArray(changed) || !changed.map(String).includes(id)) return false;
+  const skipped = body.skipped_hashes;
+  return !(Array.isArray(skipped) && skipped.map(String).includes(id));
+}
+
+/**
  * Set the canonical row's role, keeping its id and key. Verified against the
  * result body: a Harper `update` answers 200 with the changed hashes in
  * `update_hashes` and names a miss in `skipped_hashes`, so HTTP status alone
@@ -536,9 +578,8 @@ export async function updateInstanceRole(endpoint: OpsEndpoint, id: string, role
     },
     `Instance role update for ${id}`,
   );
-  const updated = Array.isArray(parsed?.update_hashes) ? parsed.update_hashes : null;
-  if (updated === null || !updated.includes(id)) {
-    const skipped = Array.isArray(parsed?.skipped_hashes) ? parsed.skipped_hashes.join(", ") : "unknown";
+  const { skipped } = readWriteResult(parsed, "update_hashes");
+  if (!writeConfirmed(parsed, "update_hashes", id)) {
     throw new Error(
       `Instance role update for ${id} changed no row (skipped: ${skipped}). ` +
         `The row was deleted or replaced between the read and the write — re-run and check ${INSTANCE_ROW_PRUNE_COMMAND} for a second row.`,
@@ -564,9 +605,8 @@ export async function deleteInstanceRow(endpoint: OpsEndpoint, id: string): Prom
     { operation: "delete", database: "flair", table: "Instance", hash_values: [id] },
     `Instance delete for ${id}`,
   );
-  const deleted = Array.isArray(parsed?.deleted_hashes) ? parsed.deleted_hashes : null;
-  if (deleted === null || !deleted.includes(id)) {
-    const skipped = Array.isArray(parsed?.skipped_hashes) ? parsed.skipped_hashes.join(", ") : "unknown";
+  const { skipped } = readWriteResult(parsed, "deleted_hashes");
+  if (!writeConfirmed(parsed, "deleted_hashes", id)) {
     throw new Error(
       `Instance delete for ${id} removed no row (skipped: ${skipped}). ` +
         `The row is still there — re-run ${INSTANCE_ROW_PRUNE_COMMAND} and check the rows it names.`,
