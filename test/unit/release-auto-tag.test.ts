@@ -1237,7 +1237,11 @@ describe("release auto-tag — the nightly target", () => {
     const target = nightlyTarget(deps, { mainRef: "main" });
     expect(target?.sha).toBe(releaseSha);
     expect(target?.version).toBe("0.2.0");
-  });
+    // 253 `git` subprocesses: ~1.2s here and ~1.8s on CI, but a CI run on
+    // 2026-09-25 took 5.7s and hit bun's 5s per-test default, turning a working
+    // walk into a red lane. The work is subprocess-bound, so this test carries
+    // its own (generous) deadline rather than the default.
+  }, 30_000);
 
   test("round 3 (CodeRabbit): a two-parent release MERGE is preserved by the walk (--first-parent)", () => {
     // Condition 7 accepts only the PR's `merge_commit_sha`. Default path-history
