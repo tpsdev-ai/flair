@@ -91,6 +91,7 @@ export interface GitReads {
   isAncestor(sha: string, ref: string): boolean;
   revParse(ref: string): string;
   logFileHistory(rev: string, path: string): string[];
+  changedFiles(rev: string): string[];
 }
 
 export interface Deps {
@@ -101,6 +102,7 @@ export interface Deps {
   readTextFile(path: string): string;
   git: GitReads;
   listVersionFiles(): string[] | null;
+  rootLockfiles(): string[] | null;
   runVersionSync(sha: string, version: string): { ok: boolean; code: number; output: string };
 }
 
@@ -191,9 +193,9 @@ export function conditionReviews(
   args: { pr: PullRequestShape; reviewers: readonly string[] },
 ): Promise<{ ok: boolean; condition?: string; summary?: string[] }>;
 export function conditionReleasePrShape(
-  api: GitHubClient,
-  args: { pr: PullRequestShape; versionFiles: string[] | null },
-): Promise<{ ok: boolean; condition?: string; summary?: string[] }>;
+  deps: Deps,
+  args: { sha: string; pr: PullRequestShape; versionFiles: string[] | null },
+): { ok: boolean; condition?: string; summary?: string[] };
 export function conditionChecks(
   deps: Deps,
   args: {

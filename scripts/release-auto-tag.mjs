@@ -123,11 +123,18 @@ export const DEFAULT_ADVISORY_ALLOWLIST = ".github/release-auto-tag-advisories.j
 export const DEFAULT_POLL_SECONDS = 60;
 // Condition 7b's allowed surface beyond the version-bearing files: the changelog
 // (the release's own edit), the unreleased fragments (prose about shipped
-// versions) and the lockfile (resolved dependency versions, not a declaration).
-// The lockfile is matched by its exact root-level name: a lockfile-looking path
-// in a subdirectory is not the lockfile.
+// versions) and the repo's OWN lockfile (resolved dependency versions, not a
+// declaration). The lockfile is matched by its exact root-level name: a
+// lockfile-looking path in a subdirectory is not the lockfile.
 export const RELEASE_PR_EXTRA_FILES = Object.freeze(["CHANGELOG.md"]);
 export const RELEASE_PR_EXTRA_PREFIXES = Object.freeze([".changelog/unreleased/"]);
+/**
+ * The names a lockfile can have — a CANDIDATE list only (round 5, item 2).
+ * Condition 7b allows a path from here only when THIS REPO tracks it at its own
+ * root (`deps.rootLockfiles()`, which today is exactly `bun.lock`): allowing the
+ * names in general would let a release swap in a lockfile the repo does not use
+ * (a `package-lock.json` in a bun repo) and still pass the shape check.
+ */
 export const LOCKFILE_NAMES = Object.freeze([
   "bun.lock",
   "bun.lockb",
@@ -253,7 +260,12 @@ export function createClient({ repo, token, fetchImpl = globalThis.fetch, apiBas
     async listReviews(prNumber) {
       return getPaged(`/repos/${repo}/pulls/${prNumber}/reviews?per_page=100`);
     },
-    /** `pulls/<n>/files` — the PR's changed files, for condition 7b's shape check. */
+    /**
+     * `pulls/<n>/files` — the PR's changed files. Condition 7b no longer reads
+     * this (round 5, item 1: its 3,000-file cap, and a first-page 404 answered as
+     * an empty list, made the subset check pass vacuously) — the release commit's
+     * local diff is the source. Kept as part of the read client.
+     */
     async listPullFiles(prNumber) {
       return getPaged(`/repos/${repo}/pulls/${prNumber}/files?per_page=100`);
     },
@@ -372,6 +384,27 @@ export function createDeps({ overrides = {}, root = process.cwd(), log, api } = 
         if (r.status !== 0) throw new Error(`git log ${rev} -- ${path} failed`);
         return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
       },
+      /**
+       * `git diff --name-status -M <rev>^1 <rev>` — the release commit's changed
+       * files, computed LOCALLY (round 5, item 1). The PR-files API caps at 3,000
+       * files and answers a first-page 404 with an empty list, which the subset
+       * check then PASSED; this diff is complete, needs no API, and reports a
+       * rename with BOTH of its paths. `^1` is the FIRST PARENT: this repo's
+       * releases are squash merges onto main, so the diff against the first
+       * parent is exactly the PR's change.
+       */
+      changedFiles(rev) {
+        const r = spawnSync("git", ["diff", "--name-status", "-M", `${rev}^1`, rev], { cwd: root, encoding: "utf8" });
+        if (r.status !== 0) throw new Error(`git diff --name-status -M ${rev}^1 ${rev} failed (exit ${r.status})`);
+        const paths = [];
+        for (const line of String(r.stdout ?? "").split("\n")) {
+          if (line.length === 0) continue;
+          // `<status>\t<path>` for A/M/D/T; `<status>\t<old>\t<new>` for R/C.
+          const columns = line.split("\t");
+          for (const path of columns.slice(1)) if (path.length > 0) paths.push(path);
+        }
+        return paths;
+      },
     },
     /**
      * The default branch's checker's INVENTORY (`--list`): the files a release
@@ -383,6 +416,24 @@ export function createDeps({ overrides = {}, root = process.cwd(), log, api } = 
       const checker = join(root, "scripts", "check-version-sync.mjs");
       if (!existsSync(checker)) return null;
       const r = spawnSync(process.execPath, [checker, "--list"], { cwd: root, encoding: "utf8" });
+      if (r.status !== 0) return null;
+      const paths = String(r.stdout ?? "")
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      return paths.length > 0 ? paths : null;
+    },
+    /**
+     * The lockfile(s) THIS repo tracks at its own root (round 5, item 2): the
+     * candidate lockfile names (`LOCKFILE_NAMES`) that `git ls-files` reports at
+     * the root — today exactly `bun.lock`. `git ls-files -- <name>` matches the
+     * root-level path only, so a lockfile-looking path in a subdirectory is not
+     * the lockfile, and a lockfile this repo does not use is not allowed. `null`
+     * when git cannot answer — the caller REFUSEs rather than allowing a
+     * lockfile it cannot name.
+     */
+    rootLockfiles() {
+      const r = spawnSync("git", ["ls-files", "--", ...LOCKFILE_NAMES], { cwd: root, encoding: "utf8" });
       if (r.status !== 0) return null;
       const paths = String(r.stdout ?? "")
         .split("\n")
@@ -591,14 +642,19 @@ export async function conditionReleasePr(api, { sha, version, repo }) {
 }
 
 /**
- * Condition 7b (round 4, item 1): the release PR's changed files are a SUBSET of
- * the version-bearing files (the checker's inventory), `CHANGELOG.md`,
- * `.changelog/unreleased/*` and the lockfile. Anything else REFUSEs
- * `release-pr-shape`, so a release can never carry a change to the tagger, its
- * checker, its workflow or the advisory allowlist — those move only through a
- * normal, reviewed PR against the trust root (#1890).
+ * Condition 7b (round 4, item 1; round 5, items 1-2): the release commit's
+ * changed files are a SUBSET of the version-bearing files (the checker's
+ * inventory), `CHANGELOG.md`, `.changelog/unreleased/*` and the repo's OWN root
+ * lockfile. Anything else REFUSEs `release-pr-shape`, so a release can never
+ * carry a change to the tagger, its checker, its workflow or the advisory
+ * allowlist — those move only through a normal, reviewed PR against the trust
+ * root (#1890).
+ *
+ * The change list is the release commit's LOCAL diff (round 5, item 1), not the
+ * PR-files API; an EMPTY diff REFUSEs, because a release changes at least its
+ * version-bearing files.
  */
-export async function conditionReleasePrShape(api, { pr, versionFiles }) {
+export function conditionReleasePrShape(deps, { sha, pr, versionFiles }) {
   if (!Array.isArray(versionFiles) || versionFiles.length === 0) {
     return {
       ok: false,
@@ -608,27 +664,49 @@ export async function conditionReleasePrShape(api, { pr, versionFiles }) {
       ],
     };
   }
-  const files = await api.listPullFiles(pr.number);
-  if (!Array.isArray(files)) {
+  // Round 5, item 2: only the lockfile(s) THIS repo tracks at its own root.
+  const lockfiles = deps?.rootLockfiles?.();
+  if (!Array.isArray(lockfiles) || lockfiles.length === 0) {
     return {
       ok: false,
       condition: CONDITION.RELEASE_PR_SHAPE,
-      summary: [`could not read the changed files of PR #${pr.number}`],
+      summary: [
+        "could not read the lockfile(s) this repo tracks at its root — refusing rather than allowing a lockfile the repo does not use",
+      ],
+    };
+  }
+  // Round 5, item 1: the changed files come from the release commit's OWN local
+  // diff. The PR-files API capped at 3,000 files and turned a first-page 404 into
+  // an empty list, which this subset check then passed vacuously.
+  let files;
+  try {
+    files = deps.git.changedFiles(sha);
+  } catch (err) {
+    return {
+      ok: false,
+      condition: CONDITION.RELEASE_PR_SHAPE,
+      summary: [`could not compute the changed files of ${sha} locally: ${err?.message ?? err}`],
+    };
+  }
+  if (!Array.isArray(files) || files.length === 0) {
+    return {
+      ok: false,
+      condition: CONDITION.RELEASE_PR_SHAPE,
+      summary: [`${sha} changes no file against its first parent — a release changes at least its version-bearing files`],
     };
   }
   const allowed = new Set(versionFiles);
   const outside = new Set();
-  for (const file of files) {
-    // `previous_filename` too: a RENAME out of the trust root into an allowed
-    // path would otherwise pass while deleting the file it moved.
-    for (const path of [file?.filename, file?.previous_filename]) {
-      if (typeof path !== "string" || path.length === 0) continue;
-      if (allowed.has(path)) continue;
-      if (RELEASE_PR_EXTRA_FILES.includes(path)) continue;
-      if (RELEASE_PR_EXTRA_PREFIXES.some((prefix) => path.startsWith(prefix))) continue;
-      if (LOCKFILE_NAMES.includes(path)) continue;
-      outside.add(path);
-    }
+  // `changedFiles` flattens `git diff --name-status -M`, so a rename contributes
+  // BOTH of its paths: a rename out of the trust root into an allowed path is
+  // still seen (and deleted files are seen too).
+  for (const path of files) {
+    if (typeof path !== "string" || path.length === 0) continue;
+    if (allowed.has(path)) continue;
+    if (RELEASE_PR_EXTRA_FILES.includes(path)) continue;
+    if (RELEASE_PR_EXTRA_PREFIXES.some((prefix) => path.startsWith(prefix))) continue;
+    if (lockfiles.includes(path)) continue;
+    outside.add(path);
   }
   if (outside.size > 0) {
     const paths = [...outside];
@@ -636,7 +714,7 @@ export async function conditionReleasePrShape(api, { pr, versionFiles }) {
       ok: false,
       condition: CONDITION.RELEASE_PR_SHAPE,
       summary: [
-        `PR #${pr.number} changes ${paths.length} file(s) outside the release surface (version-bearing files, CHANGELOG.md, .changelog/unreleased/*, the lockfile): ${paths.slice(0, 5).join(", ")}`,
+        `PR #${pr?.number} changes ${paths.length} file(s) outside the release surface (version-bearing files, CHANGELOG.md, .changelog/unreleased/*, the repo's own root lockfile): ${paths.slice(0, 5).join(", ")}`,
       ],
     };
   }
@@ -813,7 +891,8 @@ export async function decide({ sha, deps, options = {} }) {
 
   // 7b — the release PR's SHAPE: its changed files stay inside the release
   // surface (round 4, item 1). After 7, which established the PR exists.
-  const step7b = await conditionReleasePrShape(deps.api, {
+  const step7b = conditionReleasePrShape(deps, {
+    sha,
     pr: step7.pr,
     versionFiles: deps.listVersionFiles?.(),
   });
@@ -894,7 +973,8 @@ export async function writeTag({ sha, version, deps, options = {} }) {
   if (!step7.ok) return refuse(step7.condition, { summary: [...summary, ...(step7.summary ?? [])] });
   // 7b at the write boundary too: `write` trusts nothing from `decide`, and the
   // release PR's shape is part of what makes the tag safe to create.
-  const step7b = await conditionReleasePrShape(reads, {
+  const step7b = conditionReleasePrShape(deps, {
+    sha,
     pr: step7.pr,
     versionFiles: deps.listVersionFiles?.(),
   });

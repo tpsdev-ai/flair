@@ -100,8 +100,10 @@ function fixtureApi(over: Partial<GitHubClient> = {}): GitHubClient {
     listVersionTags: async () => [],
     listPullsForCommit: async () => [pull()],
     listReviews: async () => reviews(),
-    // No changed files by default: condition 7b's subset check passes vacuously
-    // unless a test shapes the release PR.
+    // The PR-files API. Condition 7b no longer READS it (round 5, item 1: the
+    // release commit's LOCAL diff is the source). Kept so a test can shape what an
+    // API-based reader WOULD have seen — the round-5 truncation test does that,
+    // and the "fall back to the API list" mutation turns it red.
     listPullFiles: async () => [],
     listCheckRuns: async () => checks(),
     readWorkflowMeta: async () => ({ name: "CI" }),
@@ -131,15 +133,43 @@ interface HarnessOptions {
    * that cannot be read; omit for the default inventory.
    */
   versionFiles?: string[] | null;
+  /**
+   * The release commit's LOCAL changed-file list (condition 7b, round 5, item 1).
+   * Omit for a well-shaped release; `[]` models an empty diff (a REFUSE).
+   */
+  changedFiles?: string[];
+  /**
+   * The lockfile(s) the repo tracks at its own root (condition 7b, round 5, item
+   * 2). `null` models an answer git could not give, which REFUSEs.
+   */
+  rootLockfiles?: string[] | null;
 }
 
 /** The inventory a fixture's checker would list. */
 const DEFAULT_VERSION_FILES = ["package.json", "packages/flair-client/package.json"];
 
+/**
+ * A well-shaped release's local diff: the version-bearing files, the changelog
+ * and THIS repo's tracked root lockfile (condition 7b, round 5). The default is
+ * the well-shaped list, so every test that expects 7b to pass is explicit about
+ * what the release changes.
+ */
+const DEFAULT_CHANGED_FILES = ["package.json", "packages/flair-client/package.json", "CHANGELOG.md", "bun.lock"];
+
+/**
+ * The lockfile(s) this repo tracks at its own root — `git ls-files` reports
+ * exactly `bun.lock` at the worktree. Asserted against the real repo below, so
+ * this fixture default cannot drift from the repository silently.
+ */
+const DEFAULT_ROOT_LOCKFILES = ["bun.lock"];
+
 function harness(opts: HarnessOptions = {}) {
   const versionSyncCalls: string[] = [];
   const sleeps: number[] = [];
   const showCalls: string[] = [];
+  // Every `pulls/<n>/files` read. Condition 7b must make NONE (round 5, item 1):
+  // the release commit's local diff is the only source of its file list.
+  const pullFileCalls: number[] = [];
   const allowlistList = opts.allowlist ?? [];
   const allowlist = new Set(allowlistList);
   let nowMs = 0;
@@ -149,8 +179,14 @@ function harness(opts: HarnessOptions = {}) {
     [`${SHA}^`]: manifest(PREVIOUS),
     ...opts.versions,
   };
+  const api = fixtureApi(opts.api);
+  const listPullFiles = api.listPullFiles.bind(api);
+  api.listPullFiles = async (prNumber: number) => {
+    pullFileCalls.push(prNumber);
+    return listPullFiles(prNumber);
+  };
   const deps = {
-    api: fixtureApi(opts.api),
+    api,
     log: { info: () => {}, warn: () => {} },
     now: () => nowMs,
     sleep: async (ms: number) => {
@@ -166,6 +202,7 @@ function harness(opts: HarnessOptions = {}) {
       isAncestor: () => opts.ancestor ?? true,
       revParse: (ref: string) => opts.parents?.[ref] ?? ref,
       logFileHistory: () => opts.fileHistory ?? [],
+      changedFiles: () => opts.changedFiles ?? DEFAULT_CHANGED_FILES,
     },
     runVersionSync: async (sha: string, version: string) => {
       versionSyncCalls.push(`${sha}@${version}`);
@@ -173,8 +210,9 @@ function harness(opts: HarnessOptions = {}) {
       return { ok, code: ok ? 0 : 1, output: "" };
     },
     listVersionFiles: () => ("versionFiles" in opts ? opts.versionFiles : DEFAULT_VERSION_FILES),
+    rootLockfiles: () => ("rootLockfiles" in opts ? opts.rootLockfiles : DEFAULT_ROOT_LOCKFILES),
   };
-  return { deps: deps as unknown as Deps, versionSyncCalls, sleeps, showCalls, allowlist };
+  return { deps: deps as unknown as Deps, versionSyncCalls, sleeps, showCalls, allowlist, pullFileCalls };
 }
 
 // ── condition 1 and 2 ──────────────────────────────────────────────────────────
@@ -521,20 +559,20 @@ describe("release auto-tag — condition 7", () => {
 // ── condition 7b (the release PR's shape) ─────────────────────────────────────
 
 describe("release auto-tag — condition 7b (the release PR stays inside the release surface)", () => {
+  // A well-shaped release's diff: the version-bearing files, the changelog, a
+  // fragment and THIS repo's tracked root lockfile.
+  const IN_SURFACE = [
+    "package.json",
+    "packages/flair-client/package.json",
+    "CHANGELOG.md",
+    ".changelog/unreleased/fixed-x.md",
+    "bun.lock",
+  ];
+
   test("round 4, item 1: a release PR that ALSO touches the tagger REFUSEs release-pr-shape", async () => {
     // The failure the shape check exists for: a release that carries a change to
     // the code that runs on the release, inside the release itself.
-    const { deps } = harness({
-      api: {
-        listPullFiles: async () => [
-          { filename: "package.json" },
-          { filename: "CHANGELOG.md" },
-          { filename: ".changelog/unreleased/fixed-x.md" },
-          { filename: "bun.lock" },
-          { filename: "scripts/release-auto-tag.mjs" },
-        ],
-      },
-    });
+    const { deps } = harness({ changedFiles: [...IN_SURFACE, "scripts/release-auto-tag.mjs"] });
     const result = await decide({ sha: SHA, deps });
     expect(result.verdict).toBe(VERDICT.REFUSE);
     expect(result.condition).toBe(CONDITION.RELEASE_PR_SHAPE);
@@ -542,29 +580,17 @@ describe("release auto-tag — condition 7b (the release PR stays inside the rel
   });
 
   test("round 4, item 1: a release PR inside the release surface passes 7b", async () => {
-    const { deps } = harness({
-      api: {
-        listPullFiles: async () => [
-          { filename: "package.json" },
-          { filename: "packages/flair-client/package.json" },
-          { filename: "CHANGELOG.md" },
-          { filename: ".changelog/unreleased/fixed-x.md" },
-          { filename: "bun.lock" },
-        ],
-      },
-    });
+    const { deps } = harness({ changedFiles: IN_SURFACE });
     const result = await decide({ sha: SHA, deps });
     expect(result.verdict).toBe(VERDICT.TAG);
   });
 
-  test("round 4, item 1: a RENAME out of the trust root REFUSEs (previous_filename is checked too)", async () => {
-    const { deps } = harness({
-      api: {
-        listPullFiles: async () => [
-          { filename: "CHANGELOG.md", previous_filename: "scripts/release-auto-tag.mjs" },
-        ],
-      },
-    });
+  test("round 4, item 1: a RENAME out of the trust root REFUSEs (both paths are checked)", async () => {
+    // `git diff --name-status -M` reports a rename with BOTH of its paths and
+    // `changedFiles` flattens them, so a release that MOVES the tagger into an
+    // allowed path is still seen — it cannot pass by deletion. The helper's own
+    // parse of a real rename is exercised at the end of this block.
+    const { deps } = harness({ changedFiles: ["CHANGELOG.md", "scripts/release-auto-tag.mjs"] });
     const result = await decide({ sha: SHA, deps });
     expect(result.verdict).toBe(VERDICT.REFUSE);
     expect(result.condition).toBe(CONDITION.RELEASE_PR_SHAPE);
@@ -572,9 +598,7 @@ describe("release auto-tag — condition 7b (the release PR stays inside the rel
   });
 
   test("round 4, item 1: a lockfile-LOOKALIKE in a subdirectory is not the lockfile", async () => {
-    const { deps } = harness({
-      api: { listPullFiles: async () => [{ filename: "docs/bun.lock" }] },
-    });
+    const { deps } = harness({ changedFiles: ["docs/bun.lock"] });
     const result = await decide({ sha: SHA, deps });
     expect(result.verdict).toBe(VERDICT.REFUSE);
     expect(result.condition).toBe(CONDITION.RELEASE_PR_SHAPE);
@@ -585,6 +609,145 @@ describe("release auto-tag — condition 7b (the release PR stays inside the rel
     const result = await decide({ sha: SHA, deps });
     expect(result.verdict).toBe(VERDICT.REFUSE);
     expect(result.condition).toBe(CONDITION.RELEASE_PR_SHAPE);
+  });
+
+  // ── round 5, item 1: the changed-file list is computed LOCALLY ──────────────
+
+  test("round 5, item 1: condition 7b reads NO PR-files API — the local diff is the only source", async () => {
+    const { deps, pullFileCalls } = harness({ changedFiles: IN_SURFACE });
+    const result = await decide({ sha: SHA, deps });
+    expect(result.verdict).toBe(VERDICT.TAG);
+    expect(pullFileCalls, "no pulls/<n>/files read").toEqual([]);
+  });
+
+  test("round 5, item 1: an EMPTY change list REFUSEs release-pr-shape", async () => {
+    // A release changes at least its version-bearing files, so an empty diff is
+    // not a release. It is also the shape a first-page 404 from the PR-files API
+    // used to take — and that PASSED the subset check vacuously.
+    const { deps } = harness({ changedFiles: [] });
+    const result = await decide({ sha: SHA, deps });
+    expect(result.verdict).toBe(VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.RELEASE_PR_SHAPE);
+    expect(result.summary.join(" "), "the empty diff is named").toContain("changes no file");
+  });
+
+  test("round 5, item 1: a change list the PR-files API would TRUNCATE is still fully checked", async () => {
+    // The API caps a PR's file list at 3,000 files. The 3,001st file is what a
+    // truncating reader never sees; the local diff is the source, so it IS seen.
+    const files = [
+      ...IN_SURFACE,
+      ...Array.from({ length: 3000 }, (_, i) => `.changelog/unreleased/bulk-${i}.md`),
+      "scripts/release-auto-tag.mjs",
+    ];
+    const { deps, pullFileCalls } = harness({
+      changedFiles: files,
+      // What an API-based reader would have received: the first page only, which
+      // does not contain the offender.
+      api: { listPullFiles: async () => files.slice(0, 100).map((filename) => ({ filename })) },
+    });
+    const result = await decide({ sha: SHA, deps });
+    expect(result.verdict).toBe(VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.RELEASE_PR_SHAPE);
+    expect(result.summary.join(" ")).toContain("scripts/release-auto-tag.mjs");
+    expect(pullFileCalls, "still no API read").toEqual([]);
+  });
+
+  // ── round 5, item 2: only the lockfile(s) THIS repo tracks at its root ─────
+
+  test("round 5, item 2: a release changing package-lock.json REFUSEs — this repo tracks bun.lock", async () => {
+    const { deps } = harness({ changedFiles: ["package.json", "bun.lock", "package-lock.json"] });
+    const result = await decide({ sha: SHA, deps });
+    expect(result.verdict).toBe(VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.RELEASE_PR_SHAPE);
+    expect(result.summary.join(" ")).toContain("package-lock.json");
+  });
+
+  test("round 5, item 2: the repo's OWN tracked root lockfile is allowed (bun.lock)", async () => {
+    const { deps } = harness({ changedFiles: ["package.json", "bun.lock"] });
+    const result = await decide({ sha: SHA, deps });
+    expect(result.verdict).toBe(VERDICT.TAG);
+  });
+
+  test("round 5, item 2: the allowed lockfile is whatever the repo TRACKS, not a fixed name", async () => {
+    // A repo tracking package-lock.json allows it and refuses bun.lock: the set
+    // comes from the repo, so it cannot be a hard-coded list of lockfile names.
+    const pkgLockRepo = harness({
+      rootLockfiles: ["package-lock.json"],
+      changedFiles: ["package.json", "package-lock.json"],
+    });
+    expect((await decide({ sha: SHA, deps: pkgLockRepo.deps })).verdict).toBe(VERDICT.TAG);
+    const bunLockRepo = harness({ rootLockfiles: ["package-lock.json"], changedFiles: ["package.json", "bun.lock"] });
+    const refused = await decide({ sha: SHA, deps: bunLockRepo.deps });
+    expect(refused.verdict).toBe(VERDICT.REFUSE);
+    expect(refused.condition).toBe(CONDITION.RELEASE_PR_SHAPE);
+  });
+
+  test("round 5, item 2: an unreadable tracked-lockfile answer REFUSEs", async () => {
+    const { deps } = harness({ rootLockfiles: null });
+    const result = await decide({ sha: SHA, deps });
+    expect(result.verdict).toBe(VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.RELEASE_PR_SHAPE);
+  });
+
+  // ── the real-git readers behind both items ────────────────────────────────
+
+  test("round 5, item 1: the local diff reports a RENAME with both paths, and an empty commit as empty (real git)", () => {
+    const repo = scratchDir();
+    const git = (...args: string[]): string => {
+      const r = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+      if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr?.trim() ?? r.status}`);
+      return r.stdout.trim();
+    };
+    git("init", "-q");
+    git("symbolic-ref", "HEAD", "refs/heads/main");
+    git("config", "user.email", "t@example.invalid");
+    git("config", "user.name", "t");
+    mkdirSync(join(repo, "scripts"), { recursive: true });
+    writeFileSync(join(repo, "scripts", "release-auto-tag.mjs"), "// the tagger\n");
+    git("add", "-A");
+    git("commit", "-q", "-m", "base");
+    // The release commit: the tagger MOVED into an allowed path, plus a bump.
+    git("mv", "scripts/release-auto-tag.mjs", "CHANGELOG.md");
+    writeFileSync(join(repo, "package.json"), manifest(VERSION));
+    git("add", "-A");
+    git("commit", "-q", "-m", "release");
+    const deps = createDeps({ root: repo });
+    const paths = deps.git.changedFiles(git("rev-parse", "HEAD"));
+    expect(paths).toContain("scripts/release-auto-tag.mjs");
+    expect(paths).toContain("CHANGELOG.md");
+    expect(paths).toContain("package.json");
+    // A commit that changes nothing has an EMPTY diff (condition 7b REFUSEs it).
+    git("commit", "-q", "--allow-empty", "-m", "empty");
+    expect(deps.git.changedFiles(git("rev-parse", "HEAD"))).toEqual([]);
+  });
+
+  test("round 5, item 2: the tracked root lockfile is read FROM the repo (real git)", () => {
+    const repo = scratchDir();
+    const git = (...args: string[]): string => {
+      const r = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+      if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr?.trim() ?? r.status}`);
+      return r.stdout.trim();
+    };
+    git("init", "-q");
+    git("symbolic-ref", "HEAD", "refs/heads/main");
+    git("config", "user.email", "t@example.invalid");
+    git("config", "user.name", "t");
+    writeFileSync(join(repo, "package.json"), manifest("0.1.0"));
+    writeFileSync(join(repo, "package-lock.json"), "{}");
+    mkdirSync(join(repo, "docs"), { recursive: true });
+    writeFileSync(join(repo, "docs", "bun.lock"), "");
+    git("add", "-A");
+    git("commit", "-q", "-m", "base");
+    // The tracked ROOT lockfile and nothing else: the subdirectory lookalike is
+    // not a lockfile.
+    expect(createDeps({ root: repo }).rootLockfiles()).toEqual(["package-lock.json"]);
+  });
+
+  test("round 5, item 2: this repo's tracked root lockfile is exactly bun.lock", () => {
+    // The fixture default, tied to the repository it models.
+    const real = createDeps({ root: resolve(import.meta.dir, "../..") }).rootLockfiles();
+    expect(real).toEqual(["bun.lock"]);
+    expect(DEFAULT_ROOT_LOCKFILES, "the fixture default matches the repo it models").toEqual(["bun.lock"]);
   });
 });
 
