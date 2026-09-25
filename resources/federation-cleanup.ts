@@ -219,6 +219,14 @@ export async function listUsernamesOrNull(
 }
 
 /**
+ * `message` with every occurrence of `tokenId` cut to its 8-character prefix.
+ * A pairing token's id IS the credential, so no log line carries it whole.
+ */
+export function redactTokenId(message: string, tokenId: string): string {
+  return tokenId ? message.split(tokenId).join(`${tokenId.slice(0, 8)}…`) : message;
+}
+
+/**
  * Core cleanup logic — exposed for unit testing.
  *
  * - Finds PairingToken records that are:
@@ -333,7 +341,7 @@ export async function runCleanupTick(
           );
         } else {
           console.error(
-            "[federation-cleanup] expired token NOT deleted — Harper kept the record, so it is still in the table and the next tick will retry it",
+            "[federation-cleanup] expired token delete NOT confirmed — Harper's result does not confirm the record was removed; if it is still in the table, the next tick retries it",
             // The token id IS the pairing credential, and skipped_hashes holds
             // token ids: log the prefix, as every other line in this sweep does,
             // and whether Harper named this token as skipped, never the values.
@@ -348,7 +356,9 @@ export async function runCleanupTick(
       } catch (err: any) {
         console.error(
           "[federation-cleanup] delete token error",
-          { tid: tokenId.slice(0, 8), err: String(err?.message ?? err) },
+          // A Harper error can echo the request, and the token id is the
+          // pairing credential: cut every occurrence of it to its prefix.
+          { tid: tokenId.slice(0, 8), err: redactTokenId(String(err?.message ?? err), tokenId) },
         );
       }
     }
