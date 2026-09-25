@@ -30,7 +30,9 @@
  *     original text, longest secret first. Sequential replaces let a short secret
  *     that is a prefix of a longer one match first and strand the longer id's
  *     suffix — and let a later secret match inside text a previous replacement
- *     just inserted. A single alternation pass avoids both.
+ *     just inserted. A single left-to-right scan avoids both, and it deliberately
+ *     does NOT build a RegExp: a pattern assembled from the secrets would run on
+ *     caller-supplied text, and a ReDoS there is a worse failure than the leak.
  *
  * `createTokenRedactor(secrets)` compiles the matcher once; the sweep reuses one
  * per tick rather than rebuilding the replacement rules (or copying the id list)
@@ -56,10 +58,6 @@ function replacementFor(secret: string): string {
   return secret.length < MIN_SECRET_LENGTH
     ? FULLY_REDACTED
     : `${secret.slice(0, TOKEN_ID_PREFIX_LENGTH)}…`;
-}
-
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /** Non-empty, de-duplicated secrets paired with their replacement, longest first. */
@@ -88,18 +86,40 @@ export interface TokenRedactor {
  * Compile `secrets` into a redactor. Build it ONCE for a batch of lines and reuse
  * it — the sweep logs many lines per tick, and recompiling per line is the
  * quadratic cost this avoids.
+ *
+ * The scan walks the ORIGINAL text once: at each position it takes the longest
+ * secret that starts there (the list is longest-first), emits that secret's
+ * replacement, and advances past it; otherwise it copies one character. Text a
+ * replacement inserts is never re-scanned, and no RegExp is built from the
+ * secrets (so a token id can never become a pattern).
  */
 export function createTokenRedactor(secrets: readonly string[]): TokenRedactor {
   const replacements = secretReplacements(secrets);
-  const map = new Map(replacements);
-  const pattern = replacements.length > 0
-    ? new RegExp(replacements.map(([secret]) => escapeRegExp(secret)).join("|"), "g")
-    : null;
-  const redactMessage = (message: string): string =>
-    pattern ? message.replace(pattern, (match) => map.get(match) ?? match) : message;
+  const redactMessage = (message: string): string => {
+    if (replacements.length === 0 || message.length === 0) return message;
+    let out = "";
+    let i = 0;
+    while (i < message.length) {
+      let matched: readonly [string, string] | undefined;
+      for (const pair of replacements) {
+        if (message.startsWith(pair[0], i)) {
+          matched = pair;
+          break;
+        }
+      }
+      if (matched) {
+        out += matched[1];
+        i += matched[0].length;
+      } else {
+        out += message[i];
+        i += 1;
+      }
+    }
+    return out;
+  };
   return {
     redactMessage,
-    redactValue: (value: unknown): unknown => (pattern ? walk(value, redactMessage) : value),
+    redactValue: (value: unknown): unknown => (replacements.length === 0 ? value : walk(value, redactMessage)),
   };
 }
 
