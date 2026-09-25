@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=129 options=560
+# commands=132 options=575
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -760,7 +760,7 @@ flair federation
   description: Manage federation (hub-and-spoke sync)
   usage: [options] [command]
   options: (none)
-  subcommands: status, reachability, pair, token, sync, watch, prune, verify
+  subcommands: status, reachability, pair, token, sync, watch, prune, instance, verify
 
 flair federation status
   description: Show federation status and peer connections
@@ -970,6 +970,67 @@ flair federation prune
       attr: target
     --ops-target <url>
       description: Explicit ops API URL
+      attr: opsTarget
+
+flair federation instance
+  description: Inspect and repair this instance's federation identity row
+  usage: [options] [command]
+  options: (none)
+  subcommands: list, prune
+
+flair federation instance list
+  description: List every Instance row on this instance (a hub should have exactly one)
+  usage: [options]
+  options:
+    --port <port>
+      description: Harper HTTP port
+      attr: port
+    --admin-pass <pass>
+      description: Admin password
+      attr: adminPass
+    --admin-user <name>
+      description: Admin username (default: admin)
+      attr: adminUser
+    --ops-port <port>
+      description: Harper operations API port
+      attr: opsPort
+    --target <url>
+      description: Remote Flair URL (env: FLAIR_TARGET)
+      attr: target
+    --ops-target <url>
+      description: Explicit ops API URL (env: FLAIR_OPS_TARGET)
+      attr: opsTarget
+    --json
+      description: Emit JSON
+      attr: json
+
+flair federation instance prune
+  description: Delete every Instance row except --keep <id> (dry-run by default)
+  usage: [options]
+  options:
+    --keep <id>
+      description: The Instance row to keep; the rest are deleted
+      attr: keep
+    --apply
+      description: Actually delete (default is dry-run)
+      attr: apply
+    --port <port>
+      description: Harper HTTP port
+      attr: port
+    --admin-pass <pass>
+      description: Admin password
+      attr: adminPass
+    --admin-user <name>
+      description: Admin username (default: admin)
+      attr: adminUser
+    --ops-port <port>
+      description: Harper operations API port
+      attr: opsPort
+    --target <url>
+      description: Remote Flair URL (env: FLAIR_TARGET)
+      attr: target
+    --ops-target <url>
+      description: Explicit ops API URL (env: FLAIR_OPS_TARGET)
       attr: opsTarget
 
 flair federation verify
@@ -3290,6 +3351,8 @@ Commands:
   watch [options]           Run federation sync in a loop (foreground daemon)
   prune [options]           Remove stale spoke peers (older than --older-than).
                             Hub is never pruned. Default dry-run.
+  instance                  Inspect and repair this instance's federation
+                            identity row
   verify [options]          End-to-end check: write a tagged memory, push it,
                             and verify it shows up on each peer
   help [command]            display help for command
@@ -3524,6 +3587,61 @@ Options:
 
 Global Options:
   -v, --version            output the version number
+
+----- flair federation instance -----
+Usage: flair federation instance [options] [command]
+
+Inspect and repair this instance's federation identity row
+
+Options:
+  -h, --help       display help for command
+
+Global Options:
+  -v, --version    output the version number
+
+Commands:
+  list [options]   List every Instance row on this instance (a hub should have
+                   exactly one)
+  prune [options]  Delete every Instance row except --keep <id> (dry-run by
+                   default)
+  help [command]   display help for command
+
+----- flair federation instance list -----
+Usage: flair federation instance list [options]
+
+List every Instance row on this instance (a hub should have exactly one)
+
+Options:
+  --port <port>        Harper HTTP port
+  --admin-pass <pass>  Admin password
+  --admin-user <name>  Admin username (default: admin)
+  --ops-port <port>    Harper operations API port
+  --target <url>       Remote Flair URL (env: FLAIR_TARGET)
+  --ops-target <url>   Explicit ops API URL (env: FLAIR_OPS_TARGET)
+  --json               Emit JSON
+  -h, --help           display help for command
+
+Global Options:
+  -v, --version        output the version number
+
+----- flair federation instance prune -----
+Usage: flair federation instance prune [options]
+
+Delete every Instance row except --keep <id> (dry-run by default)
+
+Options:
+  --keep <id>          The Instance row to keep; the rest are deleted
+  --apply              Actually delete (default is dry-run)
+  --port <port>        Harper HTTP port
+  --admin-pass <pass>  Admin password
+  --admin-user <name>  Admin username (default: admin)
+  --ops-port <port>    Harper operations API port
+  --target <url>       Remote Flair URL (env: FLAIR_TARGET)
+  --ops-target <url>   Explicit ops API URL (env: FLAIR_OPS_TARGET)
+  -h, --help           display help for command
+
+Global Options:
+  -v, --version        output the version number
 
 ----- flair federation verify -----
 Usage: flair federation verify [options]

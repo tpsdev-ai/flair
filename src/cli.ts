@@ -285,6 +285,13 @@ import {
 } from "./commands/workspace.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "./lib/doctor-config-path.js";
 import {
+  decideHubReconcile,
+  multipleInstanceRowsMessage,
+  readInstanceRows,
+  updateInstanceRole,
+  type OpsEndpoint,
+} from "./lib/instance-identity-row.js";
+import {
   collectFederationEnv,
   describeFederationDriverFinding,
   federationPeersConfigured,
@@ -3317,6 +3324,65 @@ export async function seedFederationInstanceViaOpsApi(
   });
 }
 
+// ─── Federation instance identity (flair#1883) ───────────────────────────────
+//
+// A hub's identity is ONE `flair.Instance` row. `GET /FederationInstance`
+// find-or-creates it (`role: "spoke"`); `flair init --remote` used to INSERT a
+// second row under a fresh id, so a hub could hold a spoke row and a hub row and
+// every reader that took "the first row" answered from whichever the table
+// yielded first. `reconcileFederationInstanceViaOpsApi` is init's writer: it
+// reads the rows and decides (create / set the ONE row's role to hub / no-op /
+// refuse), never inserting over an existing identity. The decisions themselves
+// live in src/lib/instance-identity.ts, shared with the cleanup sweep and doctor.
+
+/** The ops endpoint trio (URL, user, optional pass) as the identity helpers want it. */
+function federationInstanceEndpoint(
+  opsPortOrUrl: number | string,
+  adminUser: string,
+  adminPass?: string,
+  fetchImpl?: typeof fetch,
+): OpsEndpoint {
+  const opsUrl = typeof opsPortOrUrl === "number" ? `http://127.0.0.1:${opsPortOrUrl}` : opsPortOrUrl;
+  return {
+    opsUrl,
+    // A caller without a pass sends no Authorization header — same posture as
+    // seedFederationInstanceViaOpsApi (loopback authorizeLocal).
+    ...(adminPass !== undefined ? { credentials: { user: adminUser, pass: adminPass } } : {}),
+    ...(fetchImpl ? { fetchImpl } : {}),
+  };
+}
+
+/**
+ * Reconcile the hub identity row for `flair init --remote`.
+ *
+ * Returns what actually happened so the caller's log line can name it: an
+ * `already-hub` re-run must not claim it wrote anything.
+ */
+export async function reconcileFederationInstanceViaOpsApi(
+  opsPortOrUrl: number | string,
+  create: { instanceId: string; publicKey: string },
+  adminUser: string,
+  adminPass?: string,
+  opts?: { fetchImpl?: typeof fetch },
+): Promise<{ action: "created" | "updated" | "already-hub"; id: string }> {
+  const endpoint = federationInstanceEndpoint(opsPortOrUrl, adminUser, adminPass, opts?.fetchImpl);
+  const rows = await readInstanceRows(endpoint);
+  const decision = decideHubReconcile(rows);
+  switch (decision.kind) {
+    case "refuse-multiple":
+      throw new Error(multipleInstanceRowsMessage(decision.rows));
+    case "already-hub":
+      return { action: "already-hub", id: decision.id };
+    case "update-role":
+      await updateInstanceRole(endpoint, decision.id, "hub");
+      return { action: "updated", id: decision.id };
+    default:
+      // The create path keeps the insert (and its retry/401 guidance) unchanged.
+      await seedFederationInstanceViaOpsApi(opsPortOrUrl, create.instanceId, create.publicKey, "hub", adminUser, adminPass);
+      return { action: "created", id: create.instanceId };
+  }
+}
+
 // ─── Provision Flair on Harper Fabric ──────────────────────────────────────
 //
 // Atomic provisioning for a fresh Harper Fabric cluster: builds a deploy
@@ -4331,6 +4397,7 @@ bindInitCli({
   provisionFabric,
   pubKeyPath,
   readyOpsSocketPosture,
+  reconcileFederationInstanceViaOpsApi,
   resolveHttpPort,
   writeAdminPassFile,
   resolveOpsBindHost,

@@ -29,6 +29,16 @@ import {
   resolveAdminUser,
 } from "../lib/auth-resolve.js";
 import { DEFAULT_INTERVAL_SECONDS as FEDERATION_SYNC_DEFAULT_INTERVAL } from "../federation/scheduler.js";
+import {
+  decideInstancePrune,
+  formatInstanceRow,
+  INSTANCE_ROW_PRUNE_COMMAND,
+  readInstanceRows,
+  pruneInstanceRows,
+  type InstanceIdentityRow,
+  type InstancePruneDecision,
+  type OpsEndpoint,
+} from "../lib/instance-identity-row.js";
 
 export type FederationCli = {
   api: (...args: any[]) => Promise<any>;
@@ -1854,6 +1864,125 @@ export function register(program: Command): void {
       }
       console.log(`${deleted} peer(s) deleted; ${errors} error(s).`);
       if (errors > 0) process.exit(1);
+    });
+
+  // ── flair federation instance — the identity row (flair#1883) ────────────
+  //
+  // A hub's identity is ONE `flair.Instance` row and the pairing-cleanup sweep
+  // reads its role. `GET /FederationInstance` find-or-creates one, `flair init
+  // --remote` used to insert a SECOND, and everything downstream that took "the
+  // first row" then read whichever row the table yielded first. `list` shows the
+  // rows; `prune` gets back to one.
+  const instanceCmd = federation
+    .command("instance")
+    .description("Inspect and repair this instance's federation identity row");
+
+  /** The ops endpoint these two subcommands read and write. */
+  const instanceOpsEndpoint = (opts: any): OpsEndpoint => {
+    const opsUrl = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    return { opsUrl, credentials: { user: resolveAdminUser(opts.adminUser), pass: adminPass } };
+  };
+
+  instanceCmd
+    .command("list")
+    .description("List every Instance row on this instance (a hub should have exactly one)")
+    .option("--port <port>", "Harper HTTP port")
+    .option("--admin-pass <pass>", "Admin password")
+    .option("--admin-user <name>", "Admin username (default: admin)")
+    .option("--ops-port <port>", "Harper operations API port")
+    .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
+    .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET)")
+    .option("--json", "Emit JSON")
+    .action(async (opts: any) => {
+      let rows: InstanceIdentityRow[];
+      try {
+        rows = await readInstanceRows(instanceOpsEndpoint(opts));
+      } catch (err: any) {
+        console.error(`Error: ${err?.message ?? err}`);
+        process.exit(1);
+      }
+      if (opts.json) {
+        console.log(JSON.stringify({ rows }, null, 2));
+        return;
+      }
+      if (rows.length === 0) {
+        console.log("No Instance rows. This instance has no federation identity yet (it is created on the first `GET /FederationInstance`, or by `flair init --remote`).");
+        return;
+      }
+      console.log(`${rows.length} Instance row(s):`);
+      for (const row of rows) console.log(`  ${formatInstanceRow(row)}`);
+      if (rows.length > 1) {
+        console.log(`\nMore than one row means there is no canonical identity. Keep one and delete the rest:`);
+        console.log(`  ${INSTANCE_ROW_PRUNE_COMMAND} --keep <id>`);
+      }
+    });
+
+  instanceCmd
+    .command("prune")
+    .description("Delete every Instance row except --keep <id> (dry-run by default)")
+    .option("--keep <id>", "The Instance row to keep; the rest are deleted")
+    .option("--apply", "Actually delete (default is dry-run)")
+    .option("--port <port>", "Harper HTTP port")
+    .option("--admin-pass <pass>", "Admin password")
+    .option("--admin-user <name>", "Admin username (default: admin)")
+    .option("--ops-port <port>", "Harper operations API port")
+    .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
+    .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET)")
+    .action(async (opts: any) => {
+      const endpoint = instanceOpsEndpoint(opts);
+      if (!opts.keep) {
+        // No --keep: show what is there. Never guess which row is the identity —
+        // the id and key peers know is the operator's fact, not this command's.
+        try {
+          const rows = await readInstanceRows(endpoint);
+          if (rows.length === 0) {
+            console.log("No Instance rows — nothing to prune.");
+            return;
+          }
+          console.log(`${rows.length} Instance row(s):`);
+          for (const row of rows) console.log(`  ${formatInstanceRow(row)}`);
+          console.error(`\nError: --keep <id> is required: name the row to keep.`);
+        } catch (err: any) {
+          console.error(`Error: ${err?.message ?? err}`);
+        }
+        process.exit(1);
+      }
+
+      let decision: InstancePruneDecision;
+      try {
+        decision = decideInstancePrune(await readInstanceRows(endpoint), opts.keep);
+      } catch (err: any) {
+        console.error(`Error: ${err?.message ?? err}`);
+        process.exit(1);
+      }
+
+      if (decision.kind === "unknown-id") {
+        console.error(`Error: --keep ${opts.keep} names no Instance row on this instance. Rows present:`);
+        for (const row of decision.rows) console.error(`  ${formatInstanceRow(row)}`);
+        process.exit(1);
+      }
+      if (decision.kind === "nothing") {
+        console.log("Nothing to prune — this instance has at most one Instance row.");
+        return;
+      }
+
+      if (!opts.apply) {
+        console.log(`── flair federation instance prune — dry-run (use --apply to delete) ──`);
+        console.log(`Keeping ${formatInstanceRow(decision.keep)}`);
+        console.log(`Would delete ${decision.drop.length} row(s):`);
+        for (const row of decision.drop) console.log(`  ${formatInstanceRow(row)}`);
+        return;
+      }
+
+      try {
+        const { dropped } = await pruneInstanceRows(endpoint, opts.keep);
+        console.log(`Kept ${decision.keep.id}; deleted ${dropped.length} row(s): ${dropped.join(", ")}`);
+        console.log("Re-run `flair init --remote` to set the kept row's role to hub.");
+      } catch (err: any) {
+        console.error(`Error: ${err?.message ?? err}`);
+        process.exit(1);
+      }
     });
 
   // `flair federation verify` — end-to-end roundtrip: write a tagged memory
