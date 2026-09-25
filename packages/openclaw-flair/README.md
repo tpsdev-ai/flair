@@ -117,9 +117,11 @@ carries a conservative trigger phrase ("remember this", "we decided", …). Thes
 are the guarantees it keeps, each with the test that proves it in
 `packages/openclaw-flair/test/plugin.test.ts`:
 
-- **Capture is off by default.** No capture hook is registered and no request is
-  made unless `autoCapture` is set — `capture is OFF by default: permission
-  granted, no autoCapture config -> no capture hooks and zero reads`.
+- **Capture is off by default.** With `autoCapture` unset no capture hook is
+  registered and no capture write happens, however the turn runs — recall is a
+  separate feature, and its own hook may still make a bootstrap read —
+  `capture is OFF by default: permission granted, no autoCapture config -> no
+  capture hooks and no capture writes`.
 - **Captures are keyed per agent and per run.** Two concurrent runs of one agent
   share neither the session cap nor the dedup set, and every write is signed as
   the agent whose callback produced it — `D10 (mutation: state keyed by agent
@@ -144,7 +146,7 @@ are the guarantees it keeps, each with the test that proves it in
   write — `(c) with the budget AND its abort overflow full, an abort records
   nothing and logs once`.
 - **Log lines about refused or dropped callbacks are rate-limited, not guaranteed
-  to appear exactly once** — `R3 (round 10): a missing-identity callback is
+  to appear exactly once** — `R3 (round 10, extended round 11): refusal lines are
   rate-limited — ONE line per key, however many callbacks arrive`; `F2: the
   one-time-log set is bounded`.
 

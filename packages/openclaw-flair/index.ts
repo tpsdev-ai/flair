@@ -712,6 +712,22 @@ export default {
     }
 
     /**
+     * Round 11 (guarantee 6): a callback that carried a VALID identity but no
+     * usable key refuses on EVERY occurrence — the same line, unbounded. Those
+     * refusals go through the bounded one-time path too, keyed by the agent they
+     * refused, so one agent's missing key is ONE line however many callbacks
+     * arrive. With no identity to key by (the prompt hook can be delivered
+     * without one) the key is the callback source.
+     */
+    function refuseKey(agentId: string | undefined, site: string, err: unknown): void {
+      const who = typeof agentId === "string" && agentId.length > 0 ? agentId : `no-identity:${site}`;
+      logOnce(
+        `refused-callback:${who}`,
+        `openclaw-flair: ${site} refused/failed: ${(err as any)?.message ?? String(err)}`,
+      );
+    }
+
+    /**
      * THE removal predicate (round 5) — the ONLY thing that frees a slot, used
      * by the sweep and by admission alike: a record may be removed when it is
      * retired or aborted, has NO write in flight, and has aged past
@@ -1119,7 +1135,7 @@ export default {
               return { prependContext: `\n## Memory Context (from Flair)\n\n${truncated}\n` };
             }
           } catch (err: any) {
-            api.logger.warn(`openclaw-flair: bootstrap recall refused/failed: ${err.message}`);
+            refuseKey(agentId, "bootstrap recall", err);
           }
           return;
         });
@@ -1184,7 +1200,7 @@ export default {
             }
             if (stored > 0) api.logger.info(`openclaw-flair: auto-captured ${stored} memories`);
           } catch (err: any) {
-            api.logger.warn(`openclaw-flair: auto-capture refused/failed: ${err.message}`);
+            refuseKey(agentId, "auto-capture", err);
           }
         });
 
@@ -1203,7 +1219,7 @@ export default {
             const captured = await tryAutoCapture(client, agentId, runIdOf(event, ctx), text);
             if (captured) api.logger.info("openclaw-flair: auto-captured 1 memory from live turn (llm_input)");
           } catch (err: any) {
-            api.logger.warn(`openclaw-flair: live auto-capture (llm_input) refused/failed: ${err.message}`);
+            refuseKey(agentId, "live auto-capture (llm_input)", err);
           }
         });
 
@@ -1222,7 +1238,7 @@ export default {
             const captured = await tryAutoCapture(client, agentId, runIdOf(event, ctx), text);
             if (captured) api.logger.info("openclaw-flair: auto-captured 1 memory from live turn (llm_output)");
           } catch (err: any) {
-            api.logger.warn(`openclaw-flair: live auto-capture (llm_output) refused/failed: ${err.message}`);
+            refuseKey(agentId, "live auto-capture (llm_output)", err);
           }
         });
 

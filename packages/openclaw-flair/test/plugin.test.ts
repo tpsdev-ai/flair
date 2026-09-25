@@ -785,7 +785,7 @@ describe("permission matrix", () => {
     expect(calls.length).toBe(0);
   });
 
-  test("capture withheld with capture ON: no capture hooks, zero reads", async () => {
+  test("capture withheld with capture ON: no capture hooks, no capture writes", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
     const calls = installFetchStub();
@@ -798,16 +798,28 @@ describe("permission matrix", () => {
     expect(calls.length).toBe(0);
   });
 
-  test("capture is OFF by default: permission granted, no autoCapture config -> no capture hooks and zero reads", async () => {
+  test("capture is OFF by default: permission granted, no autoCapture config -> no capture hooks and no capture writes", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
-    const calls = installFetchStub();
-    const api = createMockApi({ config: cfgWith({ allowConversationAccess: true }) });
+    const calls = installFetchStub((c) => (c.url.includes("/BootstrapMemories") ? { body: { context: "ctx" } } : {}));
+    const api = createMockApi({ config: cfgWith({ allowPromptInjection: true, allowConversationAccess: true }) });
     plugin.register(api as any);
+    // No capture hook is registered without `autoCapture`...
     expect(api._hooks.has("agent_end")).toBe(false);
     expect(api._hooks.has("llm_input")).toBe(false);
     expect(api._hooks.has("llm_output")).toBe(false);
-    expect(calls.length).toBe(0);
+    // ...and no capture WRITE happens, however the turn runs, even though the
+    // turn carries a trigger phrase every capture would fire on.
+    await api._runTurn(
+      { agentId: "A" },
+      { runId: "r-off", messages: [{ role: "user", content: [{ type: "text", text: TRIGGER }] }] },
+    );
+    await api._fire("llm_output", { runId: "r-off", assistantTexts: [TRIGGER] }, { agentId: "A" });
+    expect(puts(calls).length).toBe(0);
+    // Recall is a DIFFERENT feature: its own hook IS registered and may read.
+    const delivered = await api._fire("before_prompt_build", { prompt: "hi", messages: [] }, { agentId: "A" });
+    expect(delivered).toContain("before_prompt_build");
+    expect(calls.filter((c) => c.url.includes("/BootstrapMemories")).length).toBe(1);
   });
 
   test("prompt policy withheld: status line, no before_prompt_build hook", async () => {
@@ -911,26 +923,53 @@ describe("refusal logging and status surface", () => {
     expect(api._warnText()).toMatch(/agent_end refused: no agent identity/);
   });
 
-  test("R3 (round 10): a missing-identity callback is rate-limited — ONE line per key, however many callbacks arrive", async () => {
+  test("R3 (round 10, extended round 11): refusal lines are rate-limited — ONE line per key, however many callbacks arrive", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
-    installFetchStub();
+    const calls = installFetchStub();
     const api = createMockApi({
       pluginConfig: { autoCapture: true },
-      config: { agents: { entries: { A: {} } }, plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } } },
+      config: {
+        agents: { entries: { A: {}, nokey: {} } },
+        plugins: {
+          slots: { memory: "openclaw-flair" },
+          entries: { "openclaw-flair": { hooks: { allowConversationAccess: true, allowPromptInjection: true } } },
+        },
+      },
     });
     plugin.register(api as any);
+
+    // (a) Identity-less callbacks: at most one line per HOOK.
     const hooks = ["agent_end", "llm_input", "llm_output"];
     for (let i = 0; i < 5; i++) {
       for (const hook of hooks) await api._fire(hook, {}, {});
+      await api._fire("before_prompt_build", {}, {});
     }
     const warned = api._warnText().split("\n");
-    // 15 identity-less callbacks, three keys, ONE line per key.
+    // 15 identity-less capture callbacks, three keys, ONE line per key.
     for (const hook of hooks) {
       const named = warned.filter((l) => l.includes(`${hook} refused: no agent identity`));
       expect(named.length).toBe(1);
     }
-    expect(warned.filter((l) => /no agent identity in host context/.test(l)).length).toBe(3);
+    // Plus the prompt hook, which has no identity guard: its own key.
+    expect(warned.filter((l) => /no agent identity in host context/.test(l)).length).toBe(4);
+
+    // (b) A VALID identity whose key is missing: `nokey` is in the roster but
+    // has no key file, so `clientFor` refuses on EVERY one of these callbacks —
+    // and every one of them used to log the same line. ONE line per agent now,
+    // naming the agent and the cause.
+    const runId = "r-nokey";
+    for (let i = 0; i < 5; i++) {
+      await api._fire("agent_end", { runId, messages: [] }, { agentId: "nokey" });
+      await api._fire("llm_input", { runId, prompt: TRIGGER }, { agentId: "nokey" });
+      await api._fire("llm_output", { runId, assistantTexts: [TRIGGER] }, { agentId: "nokey" });
+      await api._fire("before_prompt_build", { prompt: "hi", messages: [] }, { agentId: "nokey" });
+    }
+    const noKey = api._warnText().split("\n").filter((l) => l.includes('no private key for agent "nokey"'));
+    expect(noKey.length).toBe(1);
+    expect(noKey[0]).toMatch(/refused\/failed: no private key for agent "nokey"/);
+    // Every one of those refusals made ZERO outgoing requests.
+    expect(calls.length).toBe(0);
   });
 
   test("R5: a status service is registered and reports the plugin state", async () => {
