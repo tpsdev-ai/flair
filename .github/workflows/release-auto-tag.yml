@@ -191,14 +191,14 @@ jobs:
         # must every step that runs once the credential exists. Condition 6
         # executed the release commit's own version-sync script in this
         # workspace, which could have rewritten anything in it, including the
-        # decision script itself. Restoring the tracked tree and dropping
-        # untracked files here means the App-token steps run default-branch code,
-        # not candidate code. No build is needed: this script imports node
-        # builtins only.
+        # decision script itself. `reset --hard` and not `checkout -- .`: the
+        # INDEX is candidate-writable too, and `checkout -- .` restores from it
+        # (a staged rewrite would survive). Dropping untracked files as well.
+        # No build is needed: this script imports node builtins only.
         if: always() && steps.decide.outputs.verdict == 'TAG' && github.event_name != 'workflow_dispatch'
         run: |
           set -euo pipefail
-          git checkout -- .
+          git reset --hard HEAD
           git clean -ffdqx
 
       - name: Mint the release-tag App token

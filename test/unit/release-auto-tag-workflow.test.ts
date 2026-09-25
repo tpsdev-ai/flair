@@ -254,13 +254,16 @@ describe("release-auto-tag workflow — credential isolation and the reporter's 
     // Step order alone is not isolation: condition 6 runs the release commit's
     // own script in this workspace, and the write step runs this repo's script
     // holding the App token. The tree in between must be the default branch's.
+    // `reset --hard` and not `checkout -- .`: the index is candidate-writable
+    // too, so a staged rewrite of the decision script would survive a checkout.
     const steps = job("decide").steps ?? [];
     const indexOf = (id: string) => steps.findIndex((s) => s.id === id);
     const restoreIndex = steps.findIndex((s) => (s.run ?? "").includes("git clean -ffdqx"));
     expect(restoreIndex).toBeGreaterThan(indexOf("decide"));
     expect(restoreIndex).toBeLessThan(indexOf("app-token"));
     const restore = steps[restoreIndex];
-    expect(restore.run).toContain("git checkout -- .");
+    expect(restore.run).toContain("git reset --hard HEAD");
+    expect(restore.run).not.toContain("git checkout -- .");
     expect(restore.if).toContain("always()");
     expect(restore.if).toContain("github.event_name != 'workflow_dispatch'");
   });
