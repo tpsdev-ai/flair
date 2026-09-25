@@ -2,17 +2,17 @@
 
   Four items from review of the automatic release tagger.
 
-  **The decision and the tag write are separate jobs.** Condition 6 executes the
-  release commit's own version-sync script. In one job that script shared a
+  **The decision and the tag write are separate jobs.** The candidate's own
+  version-sync script used to run in the job that decided, which shared a
   workspace with the step that mints the GitHub App token, so a merged commit
   could plant a git hook or re-point `.git` and have a later git command run it
-  with the token in reach — restoring the working tree never covered that.
-  `decide` (conditions 1-9) is now the only place candidate code runs and holds
-  no App credential at all; `write` is a separate job on a fresh runner with a
-  fresh default-branch checkout, and it alone mints the token, re-checks
-  condition 10 and creates the tag. Every checkout sets
-  `persist-credentials: false`, and the refusal reporter reads the write job's
-  outputs before the decide job's.
+  with the token in reach — restoring the working tree never covered that. No
+  candidate code runs at all now: condition 6 extracts the candidate's tree as
+  data. `decide` (conditions 1-9) holds no App credential at all; `write` is a
+  separate job on a fresh runner with a fresh default-branch checkout, and it
+  alone mints the token, re-checks condition 10 and creates the tag. Every
+  checkout sets `persist-credentials: false`, and the refusal reporter reads the
+  write job's outputs before the decide job's.
 
   **The trigger's path guard tolerates the `@<ref>` suffix** that GitHub reports
   in `workflow_run.path`, so the exact comparison no longer fails on every normal

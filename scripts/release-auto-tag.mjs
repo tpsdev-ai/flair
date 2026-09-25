@@ -27,16 +27,18 @@
  *
  * NO CANDIDATE CODE RUNS AT ALL, AND `write` TRUSTS NOTHING FROM `decide`
  * (round 3, per the #1890 amendment). Condition 6 reads the candidate as DATA
- * (`git show <sha>:<path>` into a scratch dir, then the DEFAULT branch's
- * `scripts/check-version-sync.mjs`), so a candidate's own script is never
- * executed and cannot forge a verdict or a sha. And `write` binds its target
+ * (`git archive <sha>` of the whole tree, extracted into a scratch dir, then the
+ * DEFAULT branch's `scripts/check-version-sync.mjs`), so a candidate's own
+ * script is never executed and cannot forge a verdict or a sha. And `write`
+ * binds its target
  * commit INDEPENDENTLY (the triggering event's `workflow_run.head_sha`, or its
  * own nightly recomputation) and re-runs conditions 1-9 for that commit before
  * it mints — `decide`'s outputs only gate whether `write` starts and feed the
  * report; they never choose what gets tagged.
  *
- * `tag` is the write boundary: it re-runs conditions 3, 4 and 8 (tag state,
- * release intent, both reviews) immediately before the POST, then creates
+ * `tag` is the write boundary: it re-runs conditions 3, 4, 7, 7b, 7c and 8 (tag
+ * state, release intent, the release PR, its shape and its commit count, both
+ * reviews) immediately before the POST, then creates
  * `refs/tags/v<version>` at `<sha>` and reads it back. Runs are serialized by the
  * workflow's `concurrency: release-auto-tag` (no cancel), so two taggers never
  * interleave; the residual window between the re-check and the POST is one API
@@ -90,6 +92,13 @@ export const CONDITION = Object.freeze({
   // change to the tagger, its checker, its workflow or the advisory allowlist:
   // those move only through a normal reviewed PR to the trust root (#1890).
   RELEASE_PR_SHAPE: "release-pr-shape",
+  // The release PR is not a SINGLE commit (condition 7c, round 7, item 1).
+  // Condition 7b diffs the tag target against its FIRST PARENT, and that diff
+  // is the whole PR only under a squash merge; this repo also allows rebase
+  // merges, where the PR's earlier commits land before the tip and 7b sees only
+  // the tip's change. The release script produces a single-commit PR, so any
+  // other count refuses.
+  RELEASE_PR_NOT_SINGLE_COMMIT: "release-pr-not-single-commit",
   TAG_CONFLICT: "tag-conflict",
   CHECKS_FAILED: "checks-failed",
   CHECKS_PENDING: "checks-pending",
@@ -142,9 +151,8 @@ export const LOCKFILE_NAMES = Object.freeze([
   "pnpm-lock.yaml",
   "yarn.lock",
 ]);
-// Measured before this landed, 2026-09-25; the workflow comment carries the
-// measurement. 30 min = the 24.37 min P95 of the slowest workflow on main (this
-// repo's CI) rounded up with ~5 min of margin.
+// 30 min = the P95 of the slowest workflow on main (this repo's CI) rounded up
+// with margin; the workflow header carries the measurement and its method.
 export const DEFAULT_DEADLINE_MINUTES = 30;
 export const INVALID_VERSION = "invalid";
 
@@ -255,6 +263,15 @@ export function createClient({ repo, token, fetchImpl = globalThis.fetch, apiBas
     /** `commits/<sha>/pulls` — the PRs associated with a commit. */
     async listPullsForCommit(sha) {
       return getPaged(`/repos/${repo}/commits/${sha}/pulls`);
+    },
+    /**
+     * `pulls/<n>` — the pull request ITSELF, which is where its commit COUNT
+     * lives (`commits`). The associated-commit list above does NOT carry that
+     * field (round 7, item 1), and `commits_url` would need a second paginated
+     * read to answer the same question. Null when the PR is gone.
+     */
+    async readPull(prNumber) {
+      return getJson(`/repos/${repo}/pulls/${prNumber}`);
     },
     /** `pulls/<n>/reviews`, paginated. */
     async listReviews(prNumber) {
@@ -721,6 +738,35 @@ export function conditionReleasePrShape(deps, { sha, pr, versionFiles }) {
   return { ok: true };
 }
 
+/**
+ * Condition 7c (round 7, item 1): the release PR is a SINGLE commit. 7b diffs
+ * the tag target against its first parent, and that diff is the whole PR only
+ * for a SQUASH merge; this repo also allows rebase merges, where the PR's
+ * earlier commits are landed before the tip, so an earlier commit of the same
+ * PR could move a trust-root file while 7b sees only the tip's change. The
+ * release script produces a single-commit PR, so a count other than exactly 1
+ * REFUSEs.
+ *
+ * The count comes from `pulls/<n>`: `commits/<sha>/pulls` (the list condition 7
+ * reads) does not carry a `commits` field. A count that cannot be READ — the PR
+ * is gone (404), or the field is absent — REFUSEs rather than being assumed to
+ * be 1.
+ */
+export async function conditionReleasePrSingleCommit(api, { pr }) {
+  const full = await api.readPull(pr?.number);
+  const commits = full?.commits;
+  if (commits !== 1) {
+    return {
+      ok: false,
+      condition: CONDITION.RELEASE_PR_NOT_SINGLE_COMMIT,
+      summary: [
+        `release PR #${pr?.number} carries ${Number.isInteger(commits) ? `${commits} commit(s)` : "an unreadable number of commits"}; a release PR must be exactly one commit, because condition 7b's first-parent diff is the whole PR only under a squash merge`,
+      ],
+    };
+  }
+  return { ok: true };
+}
+
 /** Condition 8: both reviewers' LATEST review on the PR's final head is APPROVED. */
 export async function conditionReviews(api, { pr, reviewers }) {
   const reviews = await api.listReviews(pr.number);
@@ -898,6 +944,12 @@ export async function decide({ sha, deps, options = {} }) {
   });
   if (!step7b.ok) return refuse(step7b);
 
+  // 7c — the release PR is a SINGLE commit (round 7, item 1). After 7b: 7b's
+  // first-parent diff is the whole PR only under a squash merge, and the repo
+  // also allows rebase merges.
+  const step7c = await conditionReleasePrSingleCommit(deps.api, { pr: step7.pr });
+  if (!step7c.ok) return refuse(step7c);
+
   // 8 — both reviewers approved the PR's final head
   const step8 = await conditionReviews(deps.api, { pr: step7.pr, reviewers: opts.reviewers });
   if (!step8.ok) return refuse(step8);
@@ -920,10 +972,11 @@ export async function decide({ sha, deps, options = {} }) {
 // ── the write boundary (condition 10) ─────────────────────────────────────────
 
 /**
- * Condition 10: re-check tag state (3), release intent (4) and both reviews (8),
- * then POST the lightweight tag and read it back. The re-derivation of the PR is
- * a READ for condition 8's benefit; PR identity itself (condition 7) is stable
- * and is not re-checked.
+ * Condition 10: re-check tag state (3), release intent (4), the release PR and
+ * its shape and commit count (7, 7b, 7c) and both reviews (8), then POST the
+ * lightweight tag and read it back. The PR is re-derived HERE and each of those
+ * checks refuses at the POST boundary; nothing about the PR is taken from
+ * `decide`.
  */
 export async function writeTag({ sha, version, deps, options = {} }) {
   const opts = {
@@ -979,6 +1032,10 @@ export async function writeTag({ sha, version, deps, options = {} }) {
     versionFiles: deps.listVersionFiles?.(),
   });
   if (!step7b.ok) return refuse(step7b.condition, { summary: [...summary, ...(step7b.summary ?? [])] });
+  // 7c at the write boundary too, and through the READ client: the count comes
+  // from `pulls/<n>`, which the App token cannot read.
+  const step7c = await conditionReleasePrSingleCommit(reads, { pr: step7.pr });
+  if (!step7c.ok) return refuse(step7c.condition, { summary: [...summary, ...(step7c.summary ?? [])] });
   const step8 = await conditionReviews(reads, { pr: step7.pr, reviewers: opts.reviewers });
   if (!step8.ok) return refuse(step8.condition, { summary: [...summary, ...(step8.summary ?? [])] });
 

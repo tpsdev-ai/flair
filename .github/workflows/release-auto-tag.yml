@@ -36,9 +36,10 @@ name: Release auto-tag
 # for every workflow, taking each one's last 30 completed runs on main and its
 # duration as `updated_at - run_started_at`, with P95 as the nearest-rank 29th of
 # 30 ascending values. The slowest workflow on main is this repository's CI
-# (test.yml): P50 18.8 min, P95 24.4 min, max 25.2 min. 30 = ceil(24.4) + ~5 min
-# of margin, which covers the observed maximum with headroom. Re-measure when CI
-# gets materially slower: too small a deadline refuses good releases.
+# (test.yml): P50 15.7 min, P95 22.1 min, max 22.5 min. 30 = ceil(22.1) + ~7 min
+# of margin, which covers the observed maximum with headroom. The window slides
+# as runs land, so these numbers move; re-measure when CI gets materially slower,
+# because too small a deadline refuses good releases.
 #
 # INVARIANTS (all asserted by test/unit/release-auto-tag-workflow.test.ts):
 #   - no candidate code runs at all (rounds 3 and 4). Condition 6 extracts the
@@ -62,10 +63,10 @@ name: Release auto-tag
 #   - every checkout sets `persist-credentials: false`, so no token is left in
 #     `.git/config` for a later git command to pick up;
 #   - condition 10 re-checks only the conditions that can have MOVED between
-#     `decide` and the POST — tag state, release intent, the PR and its shape,
-#     and the reviews (3, 4, 7, 7b, 8). Ancestry and the check-run list are
-#     stable, and condition 6 executes nothing, so re-running it would only
-#     re-extract the same tree;
+#     `decide` and the POST — tag state, release intent, the PR and its shape and
+#     commit count, and the reviews (3, 4, 7, 7b, 7c, 8). Ancestry and the
+#     check-run list are stable, and condition 6 executes nothing, so re-running
+#     it would only re-extract the same tree;
 #   - the reporter reads `needs.write.outputs` BEFORE `needs.decide.outputs`, so
 #     a REFUSE found in `write` (its own re-derivation or condition 10) reaches it.
 #
@@ -102,7 +103,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # ── decide: conditions 1-9, and the ONLY place candidate code runs ──────────
+  # ── decide: conditions 1-9, and no candidate code runs anywhere at all ──────
   decide:
     name: Decide
     # A dependent job is skipped by default once a needed job has failed, which is
@@ -414,10 +415,10 @@ jobs:
     steps:
       - name: Open (or leave alone) the refusal issue
         # Title and body come from a fixed template filled with three values: the
-        # condition id from the script's fixed enum, the version output (already
-        # re-validated as \d+.\d+.\d+, or the literal `invalid`) and the run URL
-        # built from github.run_id. No PR title, branch name or unvalidated field
-        # reaches here.
+        # condition id from the script's fixed enum, the version output (a
+        # validated \d+.\d+.\d+, the literal `invalid`, or EMPTY on the REFUSEs
+        # that carry no version) and the run URL built from github.run_id. No PR
+        # title, branch name or unvalidated field reaches here.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
