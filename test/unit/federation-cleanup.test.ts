@@ -1,5 +1,13 @@
 import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
-import { runCleanupTick, initFederationCleanup } from "../../resources/federation-cleanup.js";
+import {
+  runCleanupTick,
+  initFederationCleanup,
+  runSweepTick,
+  stopFederationCleanup,
+  listUsernamesOrNull,
+  BOOTSTRAP_USER_PREFIX,
+  type SweepLogState,
+} from "../../resources/federation-cleanup.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -44,7 +52,7 @@ function createMockServerOp(
   return { fn, captured };
 }
 
-function createMockDb(tokens: any[]) {
+function createMockDb(tokens: any[], instanceRows: any[] = []) {
   // async iterable from an array
   function fromArray<T>(items: T[]): AsyncIterable<T> {
     return {
@@ -65,7 +73,60 @@ function createMockDb(tokens: any[]) {
       PairingToken: {
         search: () => fromArray(tokens),
       },
+      Instance: {
+        search: () => fromArray(instanceRows),
+      },
     },
+  };
+}
+
+/** A db whose Instance table is read fresh on every search (role can change). */
+function createLiveDb(getInstanceRows: () => any[], tokens: any[] = []) {
+  function fromArray<T>(items: T[]): AsyncIterable<T> {
+    return {
+      [Symbol.asyncIterator]() {
+        let i = 0;
+        return {
+          async next() {
+            if (i < items.length) return { value: items[i++], done: false };
+            return { value: undefined as any, done: true };
+          },
+        };
+      },
+    };
+  }
+  return {
+    flair: {
+      PairingToken: { search: () => fromArray(tokens) },
+      Instance: { search: () => fromArray(getInstanceRows()) },
+    },
+  };
+}
+
+/** A serverOp stub that answers every call and records it. */
+function recordingServerOp(opts?: { users?: string[]; fail?: Error }) {
+  const captured: any[] = [];
+  const fn = mock(async (body: any) => {
+    captured.push(body);
+    if (opts?.fail) throw opts.fail;
+    if (body.operation === "list_users") {
+      return (opts?.users ?? []).map((username) => ({ username }));
+    }
+    return { ok: true };
+  });
+  return { fn, captured };
+}
+
+function captureLog(): { lines: string[]; errors: string[]; log: Pick<Console, "log" | "error"> } {
+  const lines: string[] = [];
+  const errors: string[] = [];
+  return {
+    lines,
+    errors,
+    log: {
+      log: (...args: any[]) => lines.push(args.map(String).join(" ")),
+      error: (...args: any[]) => errors.push(args.map(String).join(" ")),
+    } as unknown as Pick<Console, "log" | "error">,
   };
 }
 
@@ -341,6 +402,10 @@ describe("federation-cleanup sweep", () => {
   // ── Hub-vs-spoke guard ─────────────────────────────────────────────────────
 
   describe("initFederationCleanup hub guard", () => {
+    afterEach(() => {
+      stopFederationCleanup();
+    });
+
     it("spoke role → cleanup is a no-op", async () => {
       const db = createMockDb([]);
       const { fn: serverOp, captured } = createMockServerOp([]);
@@ -362,21 +427,21 @@ describe("federation-cleanup sweep", () => {
 
     it("hub role → cleanup starts", async () => {
       const db = createMockDb([]);
-      const { fn: serverOp, captured } = createMockServerOp([]);
+      // A hub tick lists the bootstrap users, then sweeps (flair#1883): with an
+      // empty token table and no bootstrap users there is nothing to drop, but
+      // the read happens — that read is what makes the sweep user-driven.
+      const { fn: serverOp, captured } = createMockServerOp([{ ok: true, data: [] }]);
 
-      initFederationCleanup({
+      await initFederationCleanup({
         instanceRole: "hub",
         serverOp,
         db: db as any,
         immediateTick: true,
       });
 
-      // Let the async rolePromise + immediate tick run
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      // immediateTick should have called runCleanupTick, which queries the
-      // empty table → 0 ops calls, but tick completed (no rejection)
-      expect(captured).toHaveLength(0);
+      // immediateTick should have called runSweepTick, which lists users and
+      // then queries the empty token table → 0 drop/delete ops calls.
+      expect(captured.map((c) => c.body.operation)).toEqual(["list_users"]);
     });
 
     it("no instance record → treated as no-op (role is null)", async () => {
@@ -393,6 +458,251 @@ describe("federation-cleanup sweep", () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
 
       expect(captured).toHaveLength(0);
+    });
+  });
+
+  // ── flair#1883: the sweep follows the role, not the startup moment ─────────
+
+  describe("runSweepTick — the role is re-read every tick", () => {
+    it("a hub row written AFTER startup starts the sweep, with no restart", async () => {
+      let instanceRows: any[] = [];
+      const db = createLiveDb(
+        () => instanceRows,
+        [makeToken("tok_after_hub_AA", { consumedBy: "instance-x" })],
+      );
+      const { fn: serverOp, captured } = recordingServerOp();
+
+      const first = await runSweepTick({ serverOp, db: db as any, state: { last: null } });
+      expect(first).toBe("not-hub");
+      expect(captured).toHaveLength(0);
+
+      // The identity row appears after the process started — the seed runs after
+      // the server is up, which is exactly when the old one-time read missed it.
+      instanceRows = [{ id: "flair_hub_after", role: "hub", createdAt: "2026-09-25T00:00:00Z" }];
+
+      const second = await runSweepTick({ serverOp, db: db as any, state: { last: null } });
+      expect(second).toBe("hub");
+      expect(captured.map((c) => c.operation)).toEqual(["list_users", "drop_user"]);
+      expect(captured[1].username).toBe(`${BOOTSTRAP_USER_PREFIX}tok_afte`);
+    });
+
+    it("two Instance rows is a logged error naming the remedy, and no sweep", async () => {
+      const db = createMockDb(
+        [makeToken("tok_two_rows_A", { consumedBy: "instance-x" })],
+        [{ id: "flair_a", role: "hub" }, { id: "flair_b", role: "spoke" }],
+      );
+      const { fn: serverOp, captured } = recordingServerOp();
+      const { errors, log } = captureLog();
+
+      const mode = await runSweepTick({ serverOp, db: db as any, state: { last: null }, log });
+
+      expect(mode).toBe("multiple");
+      expect(captured).toHaveLength(0);
+      const text = errors.join("\n");
+      expect(text).toContain("more than one Instance row");
+      expect(text).toContain("flair federation instance prune --keep <id>");
+    });
+
+    it("a failed Instance read is unreadable, not a spoke — and no sweep", async () => {
+      const db = {
+        flair: {
+          PairingToken: { search: () => [] as any },
+          Instance: {
+            search: () => {
+              throw new Error("table does not exist");
+            },
+          },
+        },
+      };
+      const { fn: serverOp, captured } = recordingServerOp();
+      const { lines, log } = captureLog();
+
+      const mode = await runSweepTick({ serverOp, db: db as any, state: { last: null }, log });
+
+      expect(mode).toBe("unreadable");
+      expect(captured).toHaveLength(0);
+      expect(lines.join("\n")).toContain("could not read the Instance table");
+    });
+
+    it("a steady mode is logged once, not on every tick", async () => {
+      const db = createMockDb([], [{ id: "flair_spoke_only", role: "spoke" }]);
+      const { fn: serverOp } = recordingServerOp();
+      const { lines, log } = captureLog();
+      const state: SweepLogState = { last: null };
+
+      await runSweepTick({ serverOp, db: db as any, state, log });
+      await runSweepTick({ serverOp, db: db as any, state, log });
+      await runSweepTick({ serverOp, db: db as any, state, log });
+
+      expect(lines).toHaveLength(1);
+    });
+
+    it("lists users once and passes them to the sweep", async () => {
+      const db = createMockDb([], [{ id: "flair_hub_users", role: "hub" }]);
+      const { fn: serverOp, captured } = recordingServerOp({
+        users: [`${BOOTSTRAP_USER_PREFIX}deadbeef`],
+      });
+
+      await runSweepTick({ serverOp, db: db as any, state: { last: null } });
+
+      expect(captured.map((c) => c.operation)).toEqual(["list_users", "drop_user"]);
+      expect(captured[1].username).toBe(`${BOOTSTRAP_USER_PREFIX}deadbeef`);
+    });
+
+    it("a failed user list does not stop the token-driven sweep", async () => {
+      const db = createMockDb(
+        [makeToken("tok_tokensonly_A", { consumedBy: "instance-x" })],
+        [{ id: "flair_hub_z", role: "hub" }],
+      );
+      let calls = 0;
+      const captured: any[] = [];
+      const serverOp = mock(async (body: any) => {
+        calls++;
+        captured.push(body);
+        if (body.operation === "list_users") throw new Error("list_users refused");
+        return { ok: true };
+      });
+
+      await runSweepTick({ serverOp, db: db as any, state: { last: null } });
+
+      expect(calls).toBe(2);
+      expect(captured.map((c) => c.operation)).toEqual(["list_users", "drop_user"]);
+      expect(captured[1].username).toBe(`${BOOTSTRAP_USER_PREFIX}tok_toke`);
+    });
+  });
+
+  describe("initFederationCleanup — installed on every instance", () => {
+    afterEach(() => {
+      stopFederationCleanup();
+    });
+
+    it("re-reads the role on a later tick: a hub row appearing after startup begins sweeping", async () => {
+      let instanceRows: any[] = [];
+      const db = createLiveDb(
+        () => instanceRows,
+        [makeToken("tok_timer_hub_AA", { consumedBy: "instance-y" })],
+      );
+      const { fn: serverOp, captured } = recordingServerOp();
+
+      await initFederationCleanup({ serverOp, db: db as any, intervalMs: 20, immediateTick: true });
+      try {
+        // First tick saw no row: nothing swept.
+        expect(captured).toHaveLength(0);
+
+        instanceRows = [{ id: "flair_hub_timer", role: "hub" }];
+        await new Promise((resolve) => setTimeout(resolve, 120));
+
+        expect(captured.map((c) => c.operation)).toContain("list_users");
+        expect(captured.map((c) => c.operation)).toContain("drop_user");
+      } finally {
+        stopFederationCleanup();
+      }
+    });
+
+    it("an explicit spoke role installs the sweep but never runs it", async () => {
+      const db = createMockDb([]);
+      const { fn: serverOp, captured } = recordingServerOp();
+
+      await initFederationCleanup({ instanceRole: "spoke", serverOp, db: db as any, intervalMs: 20 });
+      await new Promise((resolve) => setTimeout(resolve, 80));
+
+      expect(captured).toHaveLength(0);
+      stopFederationCleanup();
+      const afterStop = captured.length;
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(captured.length).toBe(afterStop);
+    });
+  });
+
+  // ── flair#1883: the sweep is user-driven too ───────────────────────────────
+
+  describe("runCleanupTick — user-driven pass", () => {
+    const now = new Date("2026-05-05T22:00:00Z");
+
+    it("drops a pair-bootstrap user whose token record is gone", async () => {
+      const db = createMockDb([]); // no tokens at all
+      const { fn: serverOp, captured } = createMockServerOp([{ ok: true }]);
+
+      await runCleanupTick({ serverOp, db: db as any, now, users: [`${BOOTSTRAP_USER_PREFIX}deadbeef`] });
+
+      expect(captured).toHaveLength(1);
+      expect(captured[0].body.operation).toBe("drop_user");
+      expect(captured[0].body.username).toBe(`${BOOTSTRAP_USER_PREFIX}deadbeef`);
+    });
+
+    it("leaves a user whose token is live and unexpired", async () => {
+      const db = createMockDb([
+        makeToken("cafebabe_live_token", { expiresAt: new Date("2026-05-05T23:00:00Z").toISOString() }),
+      ]);
+      const { fn: serverOp, captured } = createMockServerOp([]);
+
+      await runCleanupTick({ serverOp, db: db as any, now, users: [`${BOOTSTRAP_USER_PREFIX}cafebabe`] });
+
+      expect(captured).toHaveLength(0);
+    });
+
+    it("drops a user once when its consumed token is also a token candidate", async () => {
+      const db = createMockDb([makeToken("cafebabe_consumed_token", { consumedBy: "instance-z" })]);
+      const { fn: serverOp, captured } = createMockServerOp([{ ok: true }]);
+
+      await runCleanupTick({ serverOp, db: db as any, now, users: [`${BOOTSTRAP_USER_PREFIX}cafebabe`] });
+
+      const drops = captured.filter((c) => c.body.operation === "drop_user");
+      expect(drops).toHaveLength(1);
+      expect(drops[0].body.username).toBe(`${BOOTSTRAP_USER_PREFIX}cafebabe`);
+    });
+
+    it("drops a user whose token is expired, and still deletes that token", async () => {
+      const db = createMockDb([
+        makeToken("feedface_expired_token", { expiresAt: new Date("2026-05-05T21:00:00Z").toISOString() }),
+      ]);
+      const { fn: serverOp, captured } = createMockServerOp([{ ok: true }, { ok: true }]);
+
+      await runCleanupTick({ serverOp, db: db as any, now, users: [`${BOOTSTRAP_USER_PREFIX}feedface`] });
+
+      expect(captured.map((c) => c.body.operation)).toEqual(["drop_user", "delete"]);
+      expect(captured[1].body.hash_value).toBe("feedface_expired_token");
+    });
+
+    it("never drops a non-bootstrap user, even if one is handed to it", async () => {
+      const db = createMockDb([]);
+      const { fn: serverOp, captured } = createMockServerOp([]);
+
+      await runCleanupTick({ serverOp, db: db as any, now, users: ["admin", "flair-agent"] });
+
+      expect(captured).toHaveLength(0);
+    });
+
+    it("null users (the list did not read) skips only the user pass", async () => {
+      const db = createMockDb([makeToken("tok_null_users_A", { consumedBy: "instance-n" })]);
+      const { fn: serverOp, captured } = createMockServerOp([{ ok: true }]);
+
+      await runCleanupTick({ serverOp, db: db as any, now, users: null });
+
+      expect(captured).toHaveLength(1);
+      expect(captured[0].body.operation).toBe("drop_user");
+    });
+  });
+
+  describe("listUsernamesOrNull", () => {
+    it("keeps only the pair-bootstrap names", async () => {
+      const svr = mock(async () => [
+        { username: "admin" },
+        { username: `${BOOTSTRAP_USER_PREFIX}aaaaaaaa` },
+        { user: { username: `${BOOTSTRAP_USER_PREFIX}bbbbbbbb` } },
+      ]);
+      expect(await listUsernamesOrNull(svr)).toEqual([
+        `${BOOTSTRAP_USER_PREFIX}aaaaaaaa`,
+        `${BOOTSTRAP_USER_PREFIX}bbbbbbbb`,
+      ]);
+    });
+
+    it("returns null when the list fails", async () => {
+      const svr = mock(async () => {
+        throw new Error("list_users refused");
+      });
+      const { log } = captureLog();
+      expect(await listUsernamesOrNull(svr, log)).toBeNull();
     });
   });
 });
