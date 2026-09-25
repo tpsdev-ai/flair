@@ -2,7 +2,7 @@ import {
   decideSweepMode,
   INSTANCE_ROW_PRUNE_REMEDY,
   readableInstanceRows,
-  readWriteResult,
+  writeConfirmed,
   type InstanceIdentityRow,
   type SweepMode,
 } from "../src/lib/instance-identity-row.js";
@@ -326,8 +326,7 @@ export async function runCleanupTick(
         // `skipped_hashes`. Status alone would let a skipped record be logged as
         // deleted — a cleanup that did not happen. A skipped record is left in the
         // table, so the next tick sees it as a candidate again and retries it.
-        const outcome = readWriteResult(result, "deleted_hashes");
-        if (outcome.changed !== null && outcome.changed.includes(tokenId)) {
+        if (writeConfirmed(result, "deleted_hashes", tokenId)) {
           console.log(
             "[federation-cleanup] deleted expired token",
             { tid: tokenId.slice(0, 8) },
@@ -335,7 +334,15 @@ export async function runCleanupTick(
         } else {
           console.error(
             "[federation-cleanup] expired token NOT deleted — Harper kept the record, so it is still in the table and the next tick will retry it",
-            { id: tokenId, skipped: outcome.skipped },
+            // The token id IS the pairing credential, and skipped_hashes holds
+            // token ids: log the prefix, as every other line in this sweep does,
+            // and whether Harper named this token as skipped, never the values.
+            {
+              tid: tokenId.slice(0, 8),
+              namedSkipped: Array.isArray((result as any)?.skipped_hashes)
+                ? (result as any).skipped_hashes.map(String).includes(tokenId)
+                : "no skipped_hashes in the result",
+            },
           );
         }
       } catch (err: any) {

@@ -3,11 +3,14 @@
   Four ways the instance could still end up with two identity rows, or with a
   reader reporting an identity it does not have (flair#1883).
 
-  **The read is unconditional.** Every instance-identity reader reads
-  `flair.Instance` with one unconditional statement — `SELECT id, role,
-  publicKey, status, createdAt FROM flair.Instance` — because a
-  `search_by_conditions` needs at least one condition, and a condition is
-  exactly what hides a row. (`createdAt` is REQUIRED by the schema —
+  **The read is unconditional.** The CLI's readers (`flair init --remote`,
+  `flair doctor`, `flair federation instance list` and `prune`) read
+  `flair.Instance` over the ops API with one unconditional statement —
+  `SELECT id, role, publicKey, status, createdAt FROM flair.Instance` — because
+  a `search_by_conditions` needs at least one condition, and a condition is
+  exactly what hides a row. The server's readers (`GET /FederationInstance`,
+  `POST /FederationPair` and the cleanup sweep) read every row with an
+  unfiltered search. (`createdAt` is REQUIRED by the schema —
   `createdAt: String! @indexed` — so no legal row omits it; the date-shaped
   `createdAt > "1970-01-01"` "select all" is the pattern the Agent and Memory
   readers carry (`src/commands/agent.ts`, `src/commands/memory.ts`), and a row

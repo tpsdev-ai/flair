@@ -470,7 +470,7 @@ describe("federation-cleanup sweep", () => {
       expect(errors.join("\n")).not.toContain("NOT deleted");
     });
 
-    it("a delete Harper SKIPS is logged as NOT deleted, naming the token id", async () => {
+    it("a delete Harper SKIPS is logged as NOT deleted, naming the token's prefix and never the whole id", async () => {
       const tId = "token_verify_skip_BBBB";
       const db = createMockDb([expired(tId)]);
       const { fn: serverOp } = createMockServerOp([{ ok: true }, DELETE_SKIPPED(tId)]);
@@ -486,7 +486,28 @@ describe("federation-cleanup sweep", () => {
       expect(lines.join("\n")).not.toContain("deleted expired token");
       const text = errors.join("\n");
       expect(text).toContain("NOT deleted");
-      expect(text).toContain(tId);
+      // The token id IS the pairing credential: the log carries its prefix only.
+      expect(text).toContain(tId.slice(0, 8));
+      expect(text).not.toContain(tId);
+    });
+
+    it("a result naming the token as both deleted and skipped is NOT a confirmed delete", async () => {
+      const tId = "token_verify_both_DDDD";
+      const db = createMockDb([expired(tId)]);
+      const { fn: serverOp } = createMockServerOp([
+        { ok: true },
+        { ok: true, data: { deleted_hashes: [tId], skipped_hashes: [tId] } },
+      ]);
+      const { lines, errors, restore } = captureConsole();
+      try {
+        await runCleanupTick({ serverOp, db: db as any, now });
+      } finally {
+        restore();
+      }
+
+      expect(lines.join("\n")).not.toContain("deleted expired token");
+      expect(errors.join("\n")).toContain("NOT deleted");
+      expect(errors.join("\n")).not.toContain(tId);
     });
 
     it("a 200 whose body reports no deleted_hashes is not logged as deleted either", async () => {
