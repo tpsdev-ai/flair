@@ -239,10 +239,9 @@ export function redactPairingTokenId(message: string, tokenId: string): string {
 export function pairingTokenRollbackLine(result: unknown, tokenId: string): string {
   const prefix = tokenId.slice(0, 8);
   if (writeConfirmed(result, "deleted_hashes", tokenId)) {
-    return (
-      `Rolled back pairing token ${prefix}…: Harper confirmed it was deleted, ` +
-      `so it cannot outlive the bootstrap user that was never created.`
-    );
+    // Only the delete is claimed. A LOST add_user response does not establish
+    // that the user was not created, so the line says nothing about it.
+    return `Rolled back pairing token ${prefix}…: Harper confirmed it was deleted.`;
   }
   const body = (result ?? {}) as Record<string, unknown>;
   const why =
@@ -250,10 +249,13 @@ export function pairingTokenRollbackLine(result: unknown, tokenId: string): stri
       ? `Harper reported: ${redactPairingTokenId(String(body.error), tokenId)}`
       : Array.isArray(body.skipped_hashes) && body.skipped_hashes.map(String).includes(tokenId)
         ? "Harper named it in skipped_hashes"
-        : "Harper's result did not confirm the delete";
+        : "Harper's result did not name it as deleted";
+  // An unconfirmed delete is NOT proof the row survived: the response may have
+  // been lost. Report what is known (the delete is unconfirmed), not the state
+  // we cannot see.
   return (
-    `Pairing token rollback FAILED: token ${prefix}… was NOT deleted — ${why}. ` +
-    `It may still be redeemable; check the PairingToken table.`
+    `Pairing token rollback FAILED: Harper did not confirm that token ${prefix}… was deleted — ${why}. ` +
+    `A lost response does not mean the row survived; check the PairingToken table.`
   );
 }
 

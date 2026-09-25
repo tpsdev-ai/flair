@@ -74,9 +74,14 @@ async function runCli(args: string[], home: string): Promise<{ code: number | nu
     child.on("error", reject);
     child.on("close", (code, signal) => {
       if (signal) {
+        // Never echo the CLI's own args verbatim: `--admin-pass <value>` would
+        // put a real credential into the failure output.
+        const printable = args
+          .map((a, i) => (args[i - 1] === "--admin-pass" ? "<redacted>" : a))
+          .join(" ");
         reject(
           new Error(
-            `cli ${args.join(" ")} was killed by ${signal} at the ${CHILD_DEADLINE_MS}ms deadline. Output so far:\n${out}`,
+            `cli ${printable} was killed by ${signal} at the ${CHILD_DEADLINE_MS}ms deadline. Output so far:\n${out}`,
           ),
         );
         return;
@@ -105,10 +110,10 @@ describe("federation token rollback (live Harper)", () => {
     expect(Array.isArray(roles)).toBe(true);
     expect(roles.map((r: any) => r.role ?? r.name)).not.toContain("flair_pair_initiator");
 
-    // Start from an empty PairingToken table.
-    for (const id of await tokenIds()) {
-      await ops({ operation: "delete", database: "flair", table: "PairingToken", hash_values: [id] });
-    }
+    // Do NOT clear rows this test did not create: when `startHarper()` connects
+    // to an external instance, its PairingToken rows are not ours to delete. A
+    // sponsored instance starts empty, so a non-empty table here is a setup
+    // failure, not something to clear away.
     expect(await tokenIds()).toEqual([]);
 
     const home = await mkdtemp(join(tmpdir(), "flair-1895-"));
