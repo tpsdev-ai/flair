@@ -21,6 +21,12 @@ import { DOCTOR_CHECK_IDS, catalogIssueDelta, mcpRepinIcon, renderCatalogDoctorL
 import { describeEmbedGpuDoctorFinding } from "../lib/embed-gpu-doctor.js";
 import { adminPassDesyncFinding, detectPersistedAdminUser } from "../lib/init-admin-pass.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
+import {
+  canonicalInstanceRole,
+  instanceIdentityFindingLines,
+  instanceIdentityFindings,
+  probeInstanceIdentity,
+} from "../lib/instance-identity-row.js";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
 import { mcpClientPinFindings, refreshOwnedPins, repinSessionStartHookGuarded, sessionStartHookPinFindings } from "../lib/owned-pins.js";
 import * as render from "../render.js";
@@ -786,6 +792,52 @@ program
           // credential on this box).
           console.log(`  ${render.icons.warn} Audit log: UNVERIFIED (could not probe — ${auditStatus.detail})`);
           break;
+      }
+    }
+
+    // 4c. Instance identity (flair#1883). A hub's identity is ONE
+    // `flair.Instance` row, and the pairing-cleanup sweep reads its role from
+    // that row. More than one row means there is no canonical identity — the
+    // state a hub lands in when `GET /FederationInstance` find-or-creates a
+    // spoke row and `flair init --remote` inserted a second one (which is why
+    // the sweep could find no hub role and never clean up). A
+    // `flair_pair_initiator` role on an instance whose identity row is not a
+    // hub is the same debris seen from the other side. Both are read from the
+    // instance itself, so they need the ops API — same admin credential as the
+    // audit check above. A read that does not happen is UNVERIFIED: never a
+    // pass, and never a fabricated finding.
+    if (harperResponding) {
+      let identityAdminPass: string | undefined;
+      let identityCredIssue: string | null = null;
+      try {
+        identityAdminPass = resolveLocalAdminPass(undefined);
+      } catch (err: unknown) {
+        identityCredIssue = err instanceof Error ? err.message : String(err);
+      }
+      if (identityCredIssue) {
+        console.log(`  ${render.icons.warn} Instance identity: UNVERIFIED (could not probe — ${identityCredIssue})`);
+      } else {
+        const probe = await probeInstanceIdentity({
+          opsUrl: `http://127.0.0.1:${resolveOpsPort(opts)}`,
+          credentials: { user: resolveAdminUser(undefined), pass: identityAdminPass ?? "" },
+        });
+        if (probe.rows === null) {
+          console.log(`  ${render.icons.warn} Instance identity: UNVERIFIED (could not read the Instance table via the ops API)`);
+        } else {
+          const identityFindings = instanceIdentityFindings({ rows: probe.rows, roleNames: probe.roleNames });
+          if (identityFindings.length === 0) {
+            const canonical = canonicalInstanceRole(probe.rows);
+            const described = probe.rows.length === 0 ? "no rows" : `one row, role=${canonical ?? "(none)"}`;
+            console.log(`  ${render.icons.ok} Instance identity: ${render.wrap(render.c.dim, described)}`);
+          } else {
+            for (const finding of identityFindings) {
+              const [headline, remedy] = instanceIdentityFindingLines(finding);
+              console.log(`  ${render.icons.error} ${headline}`);
+              console.log(`     ${render.wrap(render.c.dim, remedy)}`);
+              issues++;
+            }
+          }
+        }
       }
     }
 
