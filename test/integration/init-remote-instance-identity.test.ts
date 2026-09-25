@@ -36,6 +36,16 @@ let harper: HarperInstance;
 let endpoint: OpsEndpoint;
 /** The shipped CLI (`dist/cli.js`), so the prune's printed output is the real one. */
 const CLI = join(process.cwd(), "dist", "cli.js");
+// The CLI child's OWN deadline (the spawn's `timeout:`), so a hung child is
+// killed and reported BY NAME, with its output — not as a bare bun "timed out
+// after 5000ms" that names neither the leg nor what it printed (flair#1807's
+// class; scripts/ci/check-cli-spawn-budgets.mjs is the line).
+const CHILD_DEADLINE_MS = 20_000;
+// One budget for the prune case, not one per leg: it runs TWO CLI legs (dry run,
+// then --apply) plus the live reads around them, so it needs 2 x the deadline
+// plus margin — a shorter budget would kill the CASE before a leg's own deadline
+// could fire and produce the named message.
+const PRUNE_CASE_BUDGET_MS = 2 * CHILD_DEADLINE_MS + 15_000;
 
 async function ops(body: Record<string, unknown>): Promise<any> {
   const res = await fetch(`${harper.opsURL.replace(/\/$/, "")}/`, {
@@ -76,17 +86,21 @@ async function runCli(args: string[], home: string): Promise<{ code: number | nu
         FLAIR_TOKEN: "",
         FLAIR_ADMIN_PASS: "",
       },
+      timeout: CHILD_DEADLINE_MS,
     });
     let out = "";
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error(`cli ${args.join(" ")} overran 20s. Output so far:\n${out}`));
-    }, 20_000);
     child.stdout.on("data", (d) => (out += d.toString()));
     child.stderr.on("data", (d) => (out += d.toString()));
     child.on("error", reject);
-    child.on("close", (code) => {
-      clearTimeout(timer);
+    child.on("close", (code, signal) => {
+      if (signal) {
+        reject(
+          new Error(
+            `cli ${args.join(" ")} was killed by ${signal} at the ${CHILD_DEADLINE_MS}ms deadline. Output so far:\n${out}`,
+          ),
+        );
+        return;
+      }
       resolve({ code, out });
     });
   });
@@ -436,5 +450,5 @@ describe("init --remote identity reconcile (live Harper)", () => {
       await rm(home, { recursive: true, force: true });
     }
     await clearInstanceRows();
-  }, 120_000);
+  }, PRUNE_CASE_BUDGET_MS);
 });
