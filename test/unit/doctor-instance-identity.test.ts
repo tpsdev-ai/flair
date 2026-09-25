@@ -16,6 +16,7 @@ import {
   PAIR_INITIATOR_ROLE,
   instanceIdentityFindingLines,
   instanceIdentityFindings,
+  instanceIdentityLines,
   type InstanceIdentityRow,
 } from "../../src/lib/instance-identity-row.js";
 
@@ -120,5 +121,66 @@ describe("instanceIdentityFindingLines", () => {
     const [headline, remedy] = instanceIdentityFindingLines(finding);
     expect(headline).toBe(`Instance identity: ${finding.detail}`);
     expect(remedy).toBe(`Fix: ${INSTANCE_ROW_PRUNE_REMEDY}`);
+  });
+});
+
+describe("instanceIdentityLines — what doctor prints: the findings AND the state", () => {
+  it("prints the row finding AND the pairing-role UNVERIFIED status when the roles were unreadable", () => {
+    // flair#1883 round 5: doctor printed the summary only when there was NO
+    // finding, so several rows AND an unreadable role list reported the rows and
+    // said nothing about the pairing-role check that never ran.
+    const lines = instanceIdentityLines({ rows: [SPOKE_ROW, HUB_ROW], roleNames: null });
+
+    expect(lines.map((l) => l.level)).toEqual(["fail", "warn"]);
+    expect(lines[0].text).toContain("Instance identity: ");
+    expect(lines[0].text).toContain(SPOKE_ROW.id);
+    expect(lines[0].text).toContain(HUB_ROW.id);
+    expect(lines[0].fix).toContain("Fix: ");
+    expect(lines[1].text).toContain(PAIR_INITIATOR_ROLE);
+    expect(lines[1].text).toContain("UNVERIFIED");
+    expect(lines[1].text).toContain("pairing-role check");
+  });
+
+  it("prints one ok line for a consistent hub, and makes no UNVERIFIED claim", () => {
+    const lines = instanceIdentityLines({ rows: [HUB_ROW], roleNames: [PAIR_INITIATOR_ROLE] });
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0].level).toBe("ok");
+    expect(lines[0].text).toBe("Instance identity: one row, role=hub");
+    expect(lines[0].fix).toBeUndefined();
+  });
+
+  it("keeps the row facts with the UNVERIFIED status when there is no finding", () => {
+    const lines = instanceIdentityLines({ rows: [HUB_ROW], roleNames: null });
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0].level).toBe("warn");
+    expect(lines[0].text).toContain("one row, role=hub");
+    expect(lines[0].text).toContain("UNVERIFIED");
+  });
+
+  it("carries the finding and its fix, and no UNVERIFIED line, when the roles WERE read", () => {
+    const lines = instanceIdentityLines({ rows: [SPOKE_ROW, HUB_ROW], roleNames: [] });
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0].level).toBe("fail");
+    expect(lines[0].fix).toContain("--apply");
+    expect(lines.some((l) => l.text.includes("UNVERIFIED"))).toBe(false);
+  });
+
+  it("prints the pair-role finding and no UNVERIFIED line when the roles were read", () => {
+    const lines = instanceIdentityLines({ rows: [SPOKE_ROW], roleNames: [PAIR_INITIATOR_ROLE] });
+
+    expect(lines.map((l) => l.level)).toEqual(["fail"]);
+    expect(lines[0].text).toContain("not a hub");
+    expect(lines.some((l) => l.text.includes("UNVERIFIED"))).toBe(false);
+  });
+
+  it("prints one line per finding when both mismatches are present, the row finding first", () => {
+    const lines = instanceIdentityLines({ rows: [SPOKE_ROW, HUB_ROW], roleNames: [PAIR_INITIATOR_ROLE] });
+
+    expect(lines.map((l) => l.level)).toEqual(["fail", "fail"]);
+    expect(lines[0].text).toContain("Instance rows");
+    expect(lines[1].text).toContain("not a hub");
   });
 });

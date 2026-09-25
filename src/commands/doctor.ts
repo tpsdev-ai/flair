@@ -22,9 +22,7 @@ import { describeEmbedGpuDoctorFinding } from "../lib/embed-gpu-doctor.js";
 import { adminPassDesyncFinding, detectPersistedAdminUser } from "../lib/init-admin-pass.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
 import {
-  instanceIdentityFindingLines,
-  instanceIdentityFindings,
-  instanceIdentitySummary,
+  instanceIdentityLines,
   probeInstanceIdentity,
 } from "../lib/instance-identity-row.js";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
@@ -827,18 +825,17 @@ program
         if (probe.rows === null) {
           console.log(`  ${render.icons.warn} Instance identity: UNVERIFIED (could not read the Instance table via the ops API)`);
         } else {
-          const identityFindings = instanceIdentityFindings({ rows: probe.rows, roleNames: probe.roleNames });
-          if (identityFindings.length === 0) {
-            const summary = instanceIdentitySummary({ rows: probe.rows, roleNames: probe.roleNames });
-            const icon = summary.level === "ok" ? render.icons.ok : render.icons.warn;
-            console.log(`  ${icon} Instance identity: ${render.wrap(render.c.dim, summary.text)}`);
-          } else {
-            for (const finding of identityFindings) {
-              const [headline, remedy] = instanceIdentityFindingLines(finding);
-              console.log(`  ${render.icons.error} ${headline}`);
-              console.log(`     ${render.wrap(render.c.dim, remedy)}`);
-              issues++;
-            }
+          // The lines — and therefore the pairing-role state — are built in
+          // `instanceIdentityLines`, so "an unread pairing-role check is never
+          // silent" is a property of the lines and not of this call site: a row
+          // finding and the pairing-role UNVERIFIED status print as two lines
+          // from one call (flair#1883 round 5).
+          for (const line of instanceIdentityLines({ rows: probe.rows, roleNames: probe.roleNames })) {
+            const icon =
+              line.level === "ok" ? render.icons.ok : line.level === "warn" ? render.icons.warn : render.icons.error;
+            console.log(`  ${icon} ${line.level === "fail" ? line.text : render.wrap(render.c.dim, line.text)}`);
+            if (line.fix) console.log(`     ${render.wrap(render.c.dim, line.fix)}`);
+            if (line.level === "fail") issues++;
           }
         }
       }
