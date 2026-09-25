@@ -4,10 +4,14 @@
   identity in the `POST /FederationPair` response that a pairing spoke PINS as
   its hub peer — still reported the first row of an unordered search, so which
   identity they answered with depended on the table's own ordering. Both now
-  answer a 409 that names every row and the prune that resolves them, and the
-  pairing refusal happens BEFORE the one-time token is consumed, before the peer
-  is read and before any peer is written: a refused pairing leaves the token
-  usable and the table unchanged. (Two other server readers still take the first
+  answer a 409 naming the prune that resolves them. `GET /FederationInstance`
+  (admin only) also names every row. `POST /FederationPair` is public and
+  refuses before the pairing token or a re-pairing peer's key is checked, so
+  its answer names no row, and the hub's log carries each row's id, role and
+  created time. The pairing refusal
+  happens BEFORE the one-time token is consumed, before the peer is read and
+  before any peer is written: a refused pairing leaves the token usable and the
+  table unchanged. (Two other server readers still take the first
   row of the table; that is a separate defect, tracked as flair#1896.)
 
   The prune's warning no longer names "the row the hub has been answering with"

@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=132 options=575
+# commands=132 options=577
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -982,15 +982,18 @@ flair federation instance list
   description: List every Instance row on this instance (a hub should have exactly one)
   usage: [options]
   options:
+    --admin-pass <pass>
+      description: Admin password (or set FLAIR_ADMIN_PASS env, or use --admin-pass-file)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read admin password from a file (e.g., ~/.flair/admin-pass). Preferred over --admin-pass for launchd/cron — keeps the secret out of ps and shell history.
+      attr: adminPassFile
+    --admin-user <name>
+      description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
+      attr: adminUser
     --port <port>
       description: Harper HTTP port
       attr: port
-    --admin-pass <pass>
-      description: Admin password
-      attr: adminPass
-    --admin-user <name>
-      description: Admin username (default: admin)
-      attr: adminUser
     --ops-port <port>
       description: Harper operations API port
       attr: opsPort
@@ -1008,6 +1011,15 @@ flair federation instance prune
   description: Delete every Instance row except --keep <id> (dry-run by default)
   usage: [options]
   options:
+    --admin-pass <pass>
+      description: Admin password (or set FLAIR_ADMIN_PASS env, or use --admin-pass-file)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read admin password from a file (e.g., ~/.flair/admin-pass). Preferred over --admin-pass for launchd/cron — keeps the secret out of ps and shell history.
+      attr: adminPassFile
+    --admin-user <name>
+      description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
+      attr: adminUser
     --keep <id>
       description: The Instance row to keep; the rest are deleted
       attr: keep
@@ -1017,12 +1029,6 @@ flair federation instance prune
     --port <port>
       description: Harper HTTP port
       attr: port
-    --admin-pass <pass>
-      description: Admin password
-      attr: adminPass
-    --admin-user <name>
-      description: Admin username (default: admin)
-      attr: adminUser
     --ops-port <port>
       description: Harper operations API port
       attr: opsPort
@@ -3612,17 +3618,23 @@ Usage: flair federation instance list [options]
 List every Instance row on this instance (a hub should have exactly one)
 
 Options:
-  --port <port>        Harper HTTP port
-  --admin-pass <pass>  Admin password
-  --admin-user <name>  Admin username (default: admin)
-  --ops-port <port>    Harper operations API port
-  --target <url>       Remote Flair URL (env: FLAIR_TARGET)
-  --ops-target <url>   Explicit ops API URL (env: FLAIR_OPS_TARGET)
-  --json               Emit JSON
-  -h, --help           display help for command
+  --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env, or use
+                            --admin-pass-file)
+  --admin-pass-file <path>  Read admin password from a file (e.g.,
+                            ~/.flair/admin-pass). Preferred over --admin-pass
+                            for launchd/cron — keeps the secret out of ps and
+                            shell history.
+  --admin-user <name>       Admin username for Basic auth (env:
+                            FLAIR_ADMIN_USER; default: admin)
+  --port <port>             Harper HTTP port
+  --ops-port <port>         Harper operations API port
+  --target <url>            Remote Flair URL (env: FLAIR_TARGET)
+  --ops-target <url>        Explicit ops API URL (env: FLAIR_OPS_TARGET)
+  --json                    Emit JSON
+  -h, --help                display help for command
 
 Global Options:
-  -v, --version        output the version number
+  -v, --version             output the version number
 
 ----- flair federation instance prune -----
 Usage: flair federation instance prune [options]
@@ -3630,18 +3642,24 @@ Usage: flair federation instance prune [options]
 Delete every Instance row except --keep <id> (dry-run by default)
 
 Options:
-  --keep <id>          The Instance row to keep; the rest are deleted
-  --apply              Actually delete (default is dry-run)
-  --port <port>        Harper HTTP port
-  --admin-pass <pass>  Admin password
-  --admin-user <name>  Admin username (default: admin)
-  --ops-port <port>    Harper operations API port
-  --target <url>       Remote Flair URL (env: FLAIR_TARGET)
-  --ops-target <url>   Explicit ops API URL (env: FLAIR_OPS_TARGET)
-  -h, --help           display help for command
+  --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env, or use
+                            --admin-pass-file)
+  --admin-pass-file <path>  Read admin password from a file (e.g.,
+                            ~/.flair/admin-pass). Preferred over --admin-pass
+                            for launchd/cron — keeps the secret out of ps and
+                            shell history.
+  --admin-user <name>       Admin username for Basic auth (env:
+                            FLAIR_ADMIN_USER; default: admin)
+  --keep <id>               The Instance row to keep; the rest are deleted
+  --apply                   Actually delete (default is dry-run)
+  --port <port>             Harper HTTP port
+  --ops-port <port>         Harper operations API port
+  --target <url>            Remote Flair URL (env: FLAIR_TARGET)
+  --ops-target <url>        Explicit ops API URL (env: FLAIR_OPS_TARGET)
+  -h, --help                display help for command
 
 Global Options:
-  -v, --version        output the version number
+  -v, --version             output the version number
 
 ----- flair federation verify -----
 Usage: flair federation verify [options]

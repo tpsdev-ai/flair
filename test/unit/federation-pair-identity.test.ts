@@ -108,8 +108,13 @@ describe("wiring — spoke fail-closed; no FederationInstance fetch", () => {
     // The order is the fix: a check that runs after the consumption has already
     // burned the token and written the peer (flair#1883 round 3).
     const src = readFileSync(join(root, "resources/Federation.ts"), "utf8");
-    const refusal = src.indexOf('error: "multiple_instance_rows"');
-    const consume = src.indexOf("flair.PairingToken.put(");
+    // Search from FederationPair's own class: GET /FederationInstance has the
+    // same refusal earlier in the file, and a search from the top finds that
+    // one, which precedes the consume however FederationPair is ordered.
+    const pairClass = src.indexOf("class FederationPair");
+    expect(pairClass).toBeGreaterThan(-1);
+    const refusal = src.indexOf('error: "multiple_instance_rows"', pairClass);
+    const consume = src.indexOf("flair.PairingToken.put(", pairClass);
     expect(refusal).toBeGreaterThan(-1);
     expect(consume).toBeGreaterThan(-1);
     expect(consume).toBeGreaterThan(refusal);

@@ -6,7 +6,7 @@
  * This file guards that existing response shape so #822 stays a spoke
  * fail-closed chip, not a hub-row provision.
  */
-import { describe, it, expect, mock, beforeEach } from "bun:test";
+import { describe, it, expect, mock, beforeEach, spyOn } from "bun:test";
 import nacl from "tweetnacl";
 import { signBodyFresh } from "../../resources/federation-crypto.ts";
 
@@ -159,23 +159,41 @@ describe("FederationPair.post — several Instance rows refuse BEFORE the token,
     ["row A first", [ROW_A, ROW_B]],
     ["row B first", [ROW_B, ROW_A]],
   ] as const) {
-    it(`${label}: answers 409 naming both rows and the prune, consumes NO token and writes NO peer`, async () => {
+    it(`${label}: answers 409 with the prune and NO row, logs both rows, consumes NO token and writes NO peer`, async () => {
       instanceRows = [...order];
       const token = `pair-token-multiple-${label.replace(/ /g, "-")}`;
       tokens.set(token, { id: token, expiresAt: new Date(Date.now() + 60_000).toISOString() });
 
-      const result = await makePair().post(spokeSignedBody(token));
+      const errs: string[] = [];
+      const logged = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+        errs.push(args.map((a) => String(a)).join(" "));
+      });
+      let result: unknown;
+      try {
+        result = await makePair().post(spokeSignedBody(token));
+      } finally {
+        logged.mockRestore();
+      }
 
       expect(result).toBeInstanceOf(Response);
       const res = result as Response;
       expect(res.status).toBe(409);
-      const json = await res.json();
+      const text = await res.text();
+      const json = JSON.parse(text);
       expect(json.error).toBe("multiple_instance_rows");
-      expect(json.detail).toContain(ROW_A.id);
-      expect(json.detail).toContain(ROW_B.id);
       expect(json.detail).toContain("flair federation instance prune");
       expect(json.detail).toContain("--apply");
-      expect(json.rows.map((r: any) => r.id)).toEqual(order.map((r: any) => r.id));
+      // The route is public and this refusal runs before the token or key check,
+      // so the answer names no row: exactly two keys, and no id or key anywhere.
+      expect(Object.keys(json).sort()).toEqual(["detail", "error"]);
+      for (const row of order) {
+        expect(text).not.toContain(row.id);
+        expect(text).not.toContain(row.publicKey);
+      }
+      // The hub's operator still gets every row, in the hub's own log.
+      const log = errs.join("\n");
+      expect(log).toContain(ROW_A.id);
+      expect(log).toContain(ROW_B.id);
 
       // The check ran FIRST: the one-time token is still usable...
       expect(tokens.get(token)?.consumedBy).toBeUndefined();

@@ -525,11 +525,14 @@ describe("init --remote identity reconcile (live Harper)", () => {
       const res = await postPair(spokePairBody(token));
 
       expect(res.status).toBe(409);
-      const body: any = await res.json();
+      const text = await res.text();
+      const body: any = JSON.parse(text);
       expect(body.error).toBe("multiple_instance_rows");
-      expect(body.detail).toContain("flair_live_pair_a");
-      expect(body.detail).toContain("flair_live_pair_b");
       expect(body.detail).toContain(INSTANCE_ROW_PRUNE_COMMAND);
+      // A public route, refusing before the token or key check: no row in the answer.
+      expect(Object.keys(body).sort()).toEqual(["detail", "error"]);
+      expect(text).not.toContain("flair_live_pair_a");
+      expect(text).not.toContain("flair_live_pair_b");
 
       // The refusal ran BEFORE the token was consumed...
       const tokenRow = (await sqlRows("SELECT id, consumedBy FROM flair.PairingToken")).find((r) => r.id === token);

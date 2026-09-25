@@ -1880,17 +1880,17 @@ export function register(program: Command): void {
 
   /** The ops endpoint these two subcommands read and write. */
   const instanceOpsEndpoint = (opts: any): OpsEndpoint => {
+    // --admin-pass-file resolves into the same `adminPass` slot the inline flag
+    // uses (the shared idiom: the secret stays out of ps and shell history).
+    applyAdminPassFile(opts);
     const opsUrl = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     return { opsUrl, credentials: { user: resolveAdminUser(opts.adminUser), pass: adminPass } };
   };
 
-  instanceCmd
-    .command("list")
+  addSharedCredentialOptions(instanceCmd.command("list"))
     .description("List every Instance row on this instance (a hub should have exactly one)")
     .option("--port <port>", "Harper HTTP port")
-    .option("--admin-pass <pass>", "Admin password")
-    .option("--admin-user <name>", "Admin username (default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
     .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET)")
@@ -1919,14 +1919,11 @@ export function register(program: Command): void {
       }
     });
 
-  instanceCmd
-    .command("prune")
+  addSharedCredentialOptions(instanceCmd.command("prune"))
     .description("Delete every Instance row except --keep <id> (dry-run by default)")
     .option("--keep <id>", "The Instance row to keep; the rest are deleted")
     .option("--apply", "Actually delete (default is dry-run)")
     .option("--port <port>", "Harper HTTP port")
-    .option("--admin-pass <pass>", "Admin password")
-    .option("--admin-user <name>", "Admin username (default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
     .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET)")

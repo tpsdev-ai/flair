@@ -14,4 +14,7 @@
 
   Re-running is a no-op. `flair federation instance list` shows the rows and
   `flair federation instance prune --keep <id>` deletes the rest (dry-run by
-  default; `--apply` to act).
+  default; `--apply` to act). Both take the admin password the way the other
+  admin commands do, including `--admin-pass-file`, which reads it from an
+  owner-only file so it stays out of `ps` and shell history.
+  (`test/unit/federation-instance-admin-pass-file.test.ts`)

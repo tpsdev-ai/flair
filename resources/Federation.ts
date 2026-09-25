@@ -13,6 +13,7 @@ import {
 import { reconcileState } from "./relay-lib.js";
 import {
   decideInstanceAnswer,
+  INSTANCE_ROW_PRUNE_REMEDY,
   multipleInstanceRowsMessage,
   readableInstanceRows,
   type InstanceIdentityRow,
@@ -465,16 +466,25 @@ export class FederationPair extends Resource {
     if (identity.kind === "refuse-multiple") {
       // 409: with several rows there is no identity this hub can hand a peer
       // without picking one, and the peer would pin the pick. Refuse before the
-      // token is consumed and before any Peer row is written, naming the rows
-      // and the prune that resolves them.
+      // token is consumed and before any Peer row is written.
+      //
+      // This route is PUBLIC, and this refusal runs before the pairing token or
+      // a re-pairing peer's key is checked: any caller with a self-signed body
+      // reaches it. So the answer names no row. Each row's id, role and
+      // createdAt go to this hub's log; the caller learns only what it can act
+      // on: pairing is blocked on the hub side, and the hub's operator resolves
+      // it with the prune, which needs admin credentials.
       console.error(
-        `[federation] POST /FederationPair found ${identity.rows.length} Instance rows — answering 409, consuming NO token and writing NO peer.`,
+        `[federation] POST /FederationPair answering 409, consuming NO token and writing NO peer. ` +
+          multipleInstanceRowsMessage(identity.rows, "POST /FederationPair"),
       );
       return new Response(
         JSON.stringify({
           error: "multiple_instance_rows",
-          detail: multipleInstanceRowsMessage(identity.rows, "POST /FederationPair"),
-          rows: identity.rows,
+          detail:
+            "This hub has more than one Instance row, so it has no single identity to hand a peer. Nothing was paired: " +
+            "the pairing token is unconsumed and no peer was written. The hub's operator must keep one row and delete the rest with: " +
+            INSTANCE_ROW_PRUNE_REMEDY,
         }),
         { status: 409, headers: { "content-type": "application/json" } },
       );
