@@ -11,6 +11,11 @@ import {
   generateNonce,
 } from "./federation-crypto.js";
 import { reconcileState } from "./relay-lib.js";
+import {
+  decideInstanceAnswer,
+  multipleInstanceRowsMessage,
+  type InstanceIdentityRow,
+} from "../src/lib/instance-identity-row.js";
 import { isSkillWrite } from "./skill-write.js";
 import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
@@ -176,20 +181,52 @@ export function noteFederationMergedMemory(
 // ─── Instance identity ───────────────────────────────────────────────────────
 
 /**
+ * Every `flair.Instance` row on this instance, or a THROWN error.
+ *
+ * The readers used to take the first row `search()` yielded. `search()` order is
+ * not a fact about an identity: on a table with two rows one reader reported one
+ * identity and a pairing peer was handed the other, and which was which depended
+ * on the table's internal ordering (flair#1883 round 3).
+ *
+ * A read that FAILS must not look like a table with no rows: the callers answer
+ * 5xx and write nothing, because only a SUCCESSFUL read of zero rows may mint an
+ * identity.
+ */
+async function readAllInstanceRows(): Promise<InstanceIdentityRow[]> {
+  const rows: InstanceIdentityRow[] = [];
+  for await (const i of (databases as any).flair.Instance.search()) {
+    if (i && typeof i.id === "string" && i.id.length > 0) {
+      rows.push({
+        id: i.id,
+        role: i.role ?? null,
+        publicKey: i.publicKey ?? null,
+        status: i.status ?? null,
+        createdAt: i.createdAt ?? null,
+      });
+    }
+  }
+  return rows;
+}
+
+/**
  * GET /FederationInstance — return this instance's identity.
- * Used by peers during pairing and by the admin UI.
+ *
+ * The admin UI and CLI tooling read it. Peers do NOT read it while pairing: a
+ * spoke is handed this instance's identity in the `POST /FederationPair`
+ * response, which FederationPair.post() builds server-side by reading the
+ * Instance table directly. (The pair CLI must not GET this path to fill a missing
+ * pair publicKey either — flair#822: allowRead is allowAdmin, and get() creates an
+ * identity when it finds none, which would invent a hub row; #839.)
  *
  * allowRead()=allowAdmin (defense-in-depth, authorizeLocal-escalation-class
  * follow-up to #601/#604/#609/#612 — flair#614's backstop found this one had
  * NO allow* at all, so Harper's own default — `user?.role.permission.
  * super_user`, satisfiable only by a genuine admin OR authorizeLocal's forged
- * loopback super_user — was silently standing in). Same idiom as
- * AdminInstance.ts/AdminDashboard.ts: this is an admin-view endpoint (peers
- * never call it during pairing — FederationPair.post() reads the Instance
- * table directly server-side to hand a peer our identity; this HTTP GET is
- * CLI tooling only). The spoke pair CLI must not GET this path to fill a
- * missing pair publicKey (flair#822): allowRead is allowAdmin, and get()
- * find-or-creates an Instance (that would invent a hub row; #839).
+ * loopback super_user — was silently standing in).
+ *
+ * With SEVERAL rows there is no single identity to report, so this answers 409
+ * naming every row and the prune. It never reports the row the search happened
+ * to yield first (flair#1883 round 3).
  */
 export class FederationInstance extends Resource {
   async allowRead(): Promise<boolean> {
@@ -205,13 +242,13 @@ export class FederationInstance extends Resource {
     // every call, and which identity this instance reported depended on which row
     // `search()` yielded first. Only a SUCCESSFUL read that returns zero rows may
     // create.
-    let instance: any = null;
+    // Every row, not the first one (flair#1883 round 3): with several rows the
+    // first is a coin toss, and reporting one identity here while a peer is
+    // handed another is how the two writers disagreed in the first place.
+    let rows: InstanceIdentityRow[] | null = null;
     let readError: any = null;
     try {
-      for await (const i of (databases as any).flair.Instance.search()) {
-        instance = i;
-        break;
-      }
+      rows = await readAllInstanceRows();
     } catch (err: any) {
       readError = err;
     }
@@ -234,6 +271,29 @@ export class FederationInstance extends Resource {
       );
     }
 
+    const decision = decideInstanceAnswer(rows);
+
+    if (decision.kind === "refuse-multiple") {
+      // 409: several rows means there is no canonical identity, and reporting
+      // one of them would be exactly the coin toss #1883 exists to end — a peer
+      // could go on to pin it. Nothing is created and nothing is deleted; the
+      // operator resolves the table with the prune this names.
+      console.error(
+        `[federation] GET /FederationInstance found ${decision.rows.length} Instance rows — answering 409 and creating NOTHING. ` +
+          "Which row this instance reports must not depend on which row the search yields first.",
+      );
+      return new Response(
+        JSON.stringify({
+          error: "multiple_instance_rows",
+          detail: multipleInstanceRowsMessage(decision.rows, "GET /FederationInstance"),
+          rows: decision.rows,
+        }),
+        { status: 409, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    let instance: any = decision.kind === "answer" ? decision.row : null;
+
     // Runtime-only signal (flair#1233): whether this instance's private key
     // seed is present in the keystore, i.e. whether it can SIGN (pair/sync).
     // Deliberately NOT persisted — the Instance.status enum is
@@ -241,7 +301,7 @@ export class FederationInstance extends Resource {
     // every GET.
     let signingKeyAvailable = false;
 
-    if (!instance) {
+    if (decision.kind === "none") {
       // No row on a successful read — the one state that may create.
       const kp = nacl.sign.keyPair();
       const id = `flair_${randomBytes(4).toString("hex")}`;
@@ -360,6 +420,53 @@ export class FederationPair extends Resource {
       });
     }
 
+    // ── The identity this response hands the peer, decided BEFORE anything is
+    // consumed or written (flair#1883 round 3). ───────────────────────────────
+    //
+    // A spoke PINS what it is handed here as its hub peer, so this value is the
+    // identity a pairing outcome depends on. It used to be "the first row of an
+    // unordered search", read AFTER the pairing token was consumed and the peer
+    // written — so a hub holding two rows could burn a one-time token, record the
+    // new peer, and only then answer with whichever row the table yielded first.
+    // The read now comes first, and an unreadable table or several rows refuse
+    // with the token still unused and NO peer written.
+    let identityRows: InstanceIdentityRow[] | null = null;
+    try {
+      identityRows = await readAllInstanceRows();
+    } catch (err: any) {
+      console.error(
+        "[federation] POST /FederationPair could not read the Instance table — answering 503, consuming NO token and writing NO peer. " +
+          `${err?.constructor?.name ?? "Error"}: ${err?.message ?? err}`,
+      );
+      return new Response(
+        JSON.stringify({
+          error: "instance_identity_unreadable",
+          detail:
+            "The Instance table could not be read, so this hub's identity is unknown. Nothing was paired: the pairing token is unconsumed and no peer was written.",
+        }),
+        { status: 503, headers: { "content-type": "application/json" } },
+      );
+    }
+    const identity = decideInstanceAnswer(identityRows);
+
+    if (identity.kind === "refuse-multiple") {
+      // 409: with several rows there is no identity this hub can hand a peer
+      // without picking one, and the peer would pin the pick. Refuse before the
+      // token is consumed and before any Peer row is written, naming the rows
+      // and the prune that resolves them.
+      console.error(
+        `[federation] POST /FederationPair found ${identity.rows.length} Instance rows — answering 409, consuming NO token and writing NO peer.`,
+      );
+      return new Response(
+        JSON.stringify({
+          error: "multiple_instance_rows",
+          detail: multipleInstanceRowsMessage(identity.rows, "POST /FederationPair"),
+          rows: identity.rows,
+        }),
+        { status: 409, headers: { "content-type": "application/json" } },
+      );
+    }
+
     // Check if already paired (re-pairing doesn't need a token)
     const existing = await (databases as any).flair.Peer.get(instanceId);
     if (existing) {
@@ -450,25 +557,17 @@ export class FederationPair extends Resource {
       }
     }
 
-    // Return our own identity for the peer to record. Already
-    // `{ id, publicKey, role }` when an Instance row exists (flair#213).
-    // `instance: null` means the hub has no FederationInstance — that is
-    // #839, not a pair-response-shape bug. The spoke must ERROR, never
+    // Return our own identity for the peer to record — `{ id, publicKey, role }`,
+    // decided BEFORE the token was consumed (above; flair#1883 round 3). An
+    // `instance` of `null` means a SUCCESSFUL read found no FederationInstance:
+    // that is #839, not a pair-response-shape bug. The spoke must ERROR, never
     // store publicKey:"" (flair#822).
-    let ourInstance: any = null;
-    try {
-      for await (const i of (databases as any).flair.Instance.search()) {
-        ourInstance = i;
-        break;
-      }
-    } catch {}
-
     return {
       paired: true,
-      instance: ourInstance ? {
-        id: ourInstance.id,
-        publicKey: ourInstance.publicKey,
-        role: ourInstance.role,
+      instance: identity.kind === "answer" ? {
+        id: identity.row.id,
+        publicKey: identity.row.publicKey,
+        role: identity.row.role,
       } : null,
     };
   }

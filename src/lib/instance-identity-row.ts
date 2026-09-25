@@ -19,18 +19,26 @@
  *                         `hub` and keeps its id and key (peers know it).
  *   - no row            → `--remote` creates one, `role: "hub"`.
  *   - more than one row → a REFUSAL naming every row, never a silent pick.
+ *                         The READERS obey this too (flair#1883 round 3):
+ *                         `GET /FederationInstance` and `POST /FederationPair`
+ *                         answer a 409 that names the prune, rather than report
+ *                         whichever row the search happened to yield first.
  *
  * Nothing here reads "the first row". `search()` order is not a fact about an
  * identity, and a decision built on it is a coin toss that reports as an answer.
  *
  * The read is unconditional (flair#1883 round 2): an ops-API
  * `search_by_conditions` needs at least one condition, and the
- * `createdAt > "1970-01-01"` one this module used to send HID every row without a
- * createdAt at all — which the schema does not forbid. A row that is invisible is
- * a row `init --remote` does not know about, and the second identity it then
- * inserts is the defect this module exists to end. A read that FAILS is also not
- * an answer: `null` is its own state (see `decideSweepMode`,
- * `probeInstanceIdentity`), and only a SUCCESSFUL read of zero rows may create.
+ * `createdAt > "1970-01-01"` one this module used to send EXCLUDED rows — a row
+ * dated before 1970, and one whose `createdAt` is present but is not a date. The
+ * column is REQUIRED (`createdAt: String! @indexed`, schemas/federation.graphql),
+ * so a row cannot legally omit it; the date-shaped filter was the wrong
+ * instrument regardless, because it could hide a row the table is allowed to
+ * hold. A row no reader can see is a row `init --remote` does not know about,
+ * and the second identity it then inserts is the defect this module exists to
+ * end. A read that FAILS is also not an answer: `null` is its own state (see
+ * `decideSweepMode`, `probeInstanceIdentity`), and only a SUCCESSFUL read of
+ * zero rows may create.
  */
 
 /** One `flair.Instance` row, as read from the table or the ops API. */
@@ -113,6 +121,41 @@ export function decideHubReconcile(rows: readonly InstanceIdentityRow[] | null |
   if (usable.length > 1) return { kind: "refuse-multiple", rows: usable };
   const row = usable[0];
   return normalizeRole(row.role) === HUB_ROLE ? { kind: "already-hub", id: row.id } : { kind: "update-role", id: row.id };
+}
+
+// ─── answering with one identity (flair#1883 round 3) ───────────────────────
+
+export type InstanceAnswerDecision =
+  | { kind: "answer"; row: InstanceIdentityRow }
+  | { kind: "none" }
+  | { kind: "refuse-multiple"; rows: InstanceIdentityRow[] };
+
+/**
+ * What a READER answers with, given every Instance row it could read.
+ *
+ * This is the server side of the same rule the writers follow, and it exists
+ * because two readers still answered with the first row of an unordered search:
+ * `GET /FederationInstance` (`resources/Federation.ts`) and the hub identity in
+ * the `POST /FederationPair` response, which a spoke PINS as its hub peer
+ * (`src/commands/federation.ts`) — so a coin toss there becomes the identity a
+ * peer keeps. More than one row is therefore a refusal, not a pick.
+ *
+ * `none` is a real outcome and is the caller's to interpret: `GET` creates its
+ * first identity from it, and `POST /FederationPair` reports `instance: null`
+ * (flair#839 — the spoke must error rather than store an empty key).
+ *
+ * A count of zero here means the read SUCCEEDED and found nothing. A read that
+ * failed never reaches this function (the caller answers 503 and writes
+ * nothing); a read that returned an unparseable body is a failure too (see
+ * `readInstanceRows`) — never a zero.
+ */
+export function decideInstanceAnswer(
+  rows: readonly InstanceIdentityRow[] | null | undefined,
+): InstanceAnswerDecision {
+  const usable = usableInstanceRows(rows);
+  if (usable.length === 0) return { kind: "none" };
+  if (usable.length > 1) return { kind: "refuse-multiple", rows: usable };
+  return { kind: "answer", row: usable[0] };
 }
 
 /** The refusal for a multi-row Instance table: every row, then the remedy. */
@@ -293,7 +336,22 @@ export async function readInstanceRows(endpoint: OpsEndpoint): Promise<InstanceI
     { operation: "sql", sql: INSTANCE_ROWS_SQL },
     "Instance read",
   );
-  const rows = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.results) ? parsed.results : [];
+  // A 200 whose body is not a row list is a read that established NOTHING
+  // (flair#1883 round 3). It used to become `[]`, which is the same value a
+  // successful read of zero rows returns — so `flair init --remote` would create
+  // an identity on the strength of a read it never made, and `flair doctor`
+  // would print "no rows" for a table it never saw. Unreadable is its own state
+  // and follows the failed-read path: throw. `opsPost` returns null for a body
+  // that does not parse at all, so both the invalid-JSON and the
+  // unexpected-shape case land here.
+  const rows = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.results) ? parsed.results : null;
+  if (rows === null) {
+    throw new Error(
+      "Instance read via ops API answered 200 with a body that is neither a row array nor { results: [...] } — " +
+        "treating the read as UNREADABLE. A read that established nothing is not a read that found no rows, and it " +
+        "must not license creating an identity.",
+    );
+  }
   return usableInstanceRows(rows as InstanceIdentityRow[]);
 }
 
@@ -375,93 +433,32 @@ export async function probeInstanceIdentity(
 }
 
 /**
- * The identity this instance answers `GET /FederationInstance` with. This is the
- * id (and key) a peer is handed at pairing time.
- */
-export interface AdvertisedInstanceIdentity {
-  id: string;
-  publicKey?: string | null;
-  role?: string | null;
-}
-
-/**
- * Read the identity this hub is currently answering `GET /FederationInstance`
- * with — "the row peers may have pinned".
+ * What a prune prints when it is about to delete rows (flair#1883 round 3).
  *
- * A REST read, not an ops-API one: the REST GET is what a pairing peer actually
- * calls, and it reports the row Harper's find yields first, which is exactly the
- * row a prune can still delete. Throws when the read fails (`status`); returns
- * `null` when the body carries no id. The caller must tell those apart from "the
- * identity is X" — this helper never guesses.
- */
-export async function readAdvertisedInstanceIdentity(
-  baseUrl: string,
-  credentials?: { user: string; pass: string },
-  fetchImpl?: typeof fetch,
-): Promise<AdvertisedInstanceIdentity | null> {
-  const fetchFn = fetchImpl ?? fetch;
-  const auth = credentials
-    ? `Basic ${Buffer.from(`${credentials.user}:${credentials.pass}`).toString("base64")}`
-    : undefined;
-  const res = await fetchFn(`${baseUrl.replace(/\/$/, "")}/FederationInstance`, {
-    headers: auth ? { Authorization: auth } : {},
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`GET /FederationInstance failed (${res.status})${text ? `: ${text.slice(0, 200)}` : ""}`);
-  }
-  const parsed = await res.json().catch(() => null);
-  if (!parsed || typeof parsed.id !== "string" || parsed.id.length === 0) return null;
-  return {
-    id: parsed.id,
-    publicKey: typeof parsed.publicKey === "string" ? parsed.publicKey : null,
-    role: typeof parsed.role === "string" ? parsed.role : null,
-  };
-}
-
-/** `id=… publicKey=…` — the two facts a peer pins, named. */
-export function formatAdvertisedIdentity(identity: AdvertisedInstanceIdentity): string {
-  const key = typeof identity.publicKey === "string" && identity.publicKey.length > 0 ? identity.publicKey : "(unknown)";
-  return `id=${identity.id} publicKey=${key}`;
-}
-
-/**
- * What a prune prints when it is about to delete rows: which identity peers may
- * have pinned, and that a peer paired with a deleted identity must re-pair
- * (flair#1883 round 2).
+ * A peer PINS this instance's identity when it pairs: it is handed `{ id,
+ * publicKey, role }` in the `POST /FederationPair` response and stores it as its
+ * hub peer. That response is read from the Instance table, and with several rows
+ * present it is whichever row the search yielded first — which is precisely the
+ * state a prune exists to resolve. So "which row did a peer pin" is NOT
+ * determinable here, and this helper does not pretend otherwise.
  *
- * The identity named is the row the hub ANSWERS `GET /FederationInstance` with,
- * because that is the row a pairing peer was handed — not "the first row", which
- * this module never treats as a fact. When that read did not happen, the warning
- * says so and says which id and key peers pinned is NOT determinable here; it
- * never falls back to naming a row anyway.
+ * Round 2 named the row the hub answered `GET /FederationInstance` with. That
+ * was a guess dressed as a fact: with several rows the GET now refuses (409)
+ * rather than answer one, and a peer was never handed the GET's answer anyway.
+ * What is true, and what the operator needs, is simpler: every row being deleted
+ * is a row a paired peer MAY have pinned, and a peer paired with a deleted
+ * identity must re-pair.
  */
-export function prunePeerWarningLines(input: {
-  advertised: AdvertisedInstanceIdentity | null;
-  advertisedFailure: string | null;
-  drop: readonly InstanceIdentityRow[];
-}): string[] {
+export function prunePeerWarningLines(input: { drop: readonly InstanceIdentityRow[] }): string[] {
   const drop = usableInstanceRows(input.drop);
   if (drop.length === 0) return [];
-  const advertised = input.advertised;
-  const lines: string[] = [];
-  if (advertised) {
-    lines.push(
-      `Paired peers may have pinned this instance's identity as ${formatAdvertisedIdentity(advertised)} — the row this hub answers GET /FederationInstance with.`,
-    );
-    lines.push(
-      drop.some((r) => r.id === advertised.id)
-        ? "That row is one of the rows being deleted: every peer paired with it must re-pair."
-        : "That row is not being deleted, so the peers that pinned it keep the identity they know; a peer that pinned a deleted row must re-pair.",
-    );
-    return lines;
-  }
-  lines.push(
-    `Could not read the identity this hub answers GET /FederationInstance with (${input.advertisedFailure ?? "no reason reported"}), so which id and key paired peers pinned is not determinable here.`,
-  );
-  lines.push("A peer paired with a deleted identity must re-pair.");
-  return lines;
+  return [
+    "Paired peers pinned this instance's identity from the POST /FederationPair response, and with more than " +
+      "one Instance row that response is whichever row the search yielded first — so which row a given peer " +
+      "pinned cannot be determined here.",
+    `Any of the ${drop.length} row(s) being deleted may be the identity a paired peer pinned. ` +
+      "A peer paired with a deleted identity must re-pair.",
+  ];
 }
 
 /**

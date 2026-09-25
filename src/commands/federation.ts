@@ -34,10 +34,8 @@ import {
   formatInstanceRow,
   INSTANCE_ROW_PRUNE_REMEDY,
   prunePeerWarningLines,
-  readAdvertisedInstanceIdentity,
   readInstanceRows,
   pruneInstanceRows,
-  type AdvertisedInstanceIdentity,
   type InstanceIdentityRow,
   type InstancePruneDecision,
   type OpsEndpoint,
@@ -1970,19 +1968,13 @@ export function register(program: Command): void {
         return;
       }
 
-      // Which identity paired peers may have pinned (flair#1883 round 2). A REST
-      // read of `GET /FederationInstance`, because that is the endpoint a pairing
-      // peer actually called: the row it answers with is the row peers learned.
-      // A read that fails is reported as NOT determinable — never guessed at.
-      let advertised: AdvertisedInstanceIdentity | null = null;
-      let advertisedFailure: string | null = null;
-      try {
-        advertised = await readAdvertisedInstanceIdentity(resolveBaseUrl(opts), endpoint.credentials);
-        if (advertised === null) advertisedFailure = "the response carried no id";
-      } catch (err: any) {
-        advertisedFailure = err?.message ?? String(err);
-      }
-      const peerWarnings = prunePeerWarningLines({ advertised, advertisedFailure, drop: decision.drop });
+      // What a prune must tell the operator (flair#1883 round 3): a paired peer
+      // pinned this instance's identity from the `POST /FederationPair` response,
+      // which is whichever row the search yielded first when several exist — so
+      // which row a given peer pinned is NOT determinable here, and the warning
+      // does not name one. Any row being deleted may be the identity a peer
+      // pinned; a peer paired with a deleted identity must re-pair.
+      const peerWarnings = prunePeerWarningLines({ drop: decision.drop });
 
       if (!opts.apply) {
         console.log(`── flair federation instance prune — dry-run (use --apply to delete) ──`);
