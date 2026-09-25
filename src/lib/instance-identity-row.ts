@@ -222,6 +222,49 @@ export function multipleInstanceRowsMessage(rows: readonly InstanceIdentityRow[]
   ].join("\n");
 }
 
+// ─── init --remote: the write is verified against the row it wrote ──────────
+
+/**
+ * Whether the re-read after init's write confirms THAT write (flair#1883 round 6).
+ *
+ * Round 2 caught the raced table here (`refuse-multiple`) and nothing else, so an
+ * EMPTY re-read (the insert never landed) or one OTHER row (the update went
+ * elsewhere) verified as success, and init adopted `reconciled.id` — an absent or
+ * wrong hub identity reported as a completed init. There is exactly one
+ * verifying outcome: the table holds the ONE row that was written, as a hub row.
+ */
+export type InstanceWriteVerification =
+  | { kind: "verified" }
+  | { kind: "refuse-multiple"; rows: InstanceIdentityRow[] }
+  | { kind: "not-verified"; found: InstanceIdentityRow[] };
+
+export function verifyInstanceWrite(
+  rows: readonly InstanceIdentityRow[] | null | undefined,
+  expectedId: string,
+): InstanceWriteVerification {
+  const decision = decideHubReconcile(rows);
+  if (decision.kind === "refuse-multiple") return { kind: "refuse-multiple", rows: decision.rows };
+  if (decision.kind === "already-hub" && decision.id === expectedId) return { kind: "verified" };
+  return { kind: "not-verified", found: usableInstanceRows(rows) };
+}
+
+/**
+ * The refusal for a write the re-read did not confirm. It names the row(s) the
+ * re-read found, because an empty table ("the write did not land") and one other
+ * row ("the write landed elsewhere") are different operator problems.
+ */
+export function instanceWriteNotVerifiedMessage(expectedId: string, found: readonly InstanceIdentityRow[]): string {
+  const rows =
+    found.length === 0
+      ? "the re-read found no rows at all"
+      : `the re-read found ${found.length === 1 ? "one row" : `${found.length} rows`}: ${found.map(formatInstanceRow).join("; ")}`;
+  return [
+    `flair init --remote refused: the write is not confirmed — expected one row, id=${expectedId} role=${HUB_ROLE}, and ${rows}.`,
+    "An absent or different identity is not a successful init, so this instance's identity is NOT being reported as reconciled.",
+    `Re-run \`flair init --remote\`. If the table holds rows that disagree, resolve them with: ${INSTANCE_ROW_PRUNE_REMEDY}`,
+  ].join("\n");
+}
+
 // ─── the cleanup sweep: follow the role, not the startup moment ─────────────
 
 export type SweepMode = "hub" | "not-hub" | "multiple" | "unreadable";

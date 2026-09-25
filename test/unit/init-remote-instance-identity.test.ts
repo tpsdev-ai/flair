@@ -11,6 +11,12 @@
  * window is real, and a `GET /FederationInstance` landing in it leaves two rows.
  * That must be reported with the prune remedy, never returned as `created`.
  *
+ * Round 6 adds the other half of "verify, don't assume": the re-read must hold the
+ * row that was just WRITTEN. An empty re-read (the insert never landed) and a
+ * re-read holding one different row (the update went elsewhere) both returned
+ * success before, and init adopted `reconciled.id` — an absent or wrong hub
+ * identity reported as a completed init.
+ *
  * The behaviour this replaces INSERTed a fresh-id hub row on every run, so a hub
  * that had already answered `GET /FederationInstance` (which find-or-creates a
  * `spoke` row) carried two rows and no canonical identity.
@@ -34,6 +40,8 @@ let table: any[] = [];
 let reads = 0;
 /** A row that appears between the decision and the write — a racing GET. */
 let raceOnSecondRead: any[] | null = null;
+/** Rewrites the table before the re-read: a write that did not land, or one that landed elsewhere. */
+let rewriteOnSecondRead: ((table: any[]) => any[]) | null = null;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -46,6 +54,7 @@ beforeEach(() => {
   calls = [];
   reads = 0;
   raceOnSecondRead = null;
+  rewriteOnSecondRead = null;
   origFetch = globalThis.fetch;
 });
 
@@ -65,6 +74,9 @@ function mockOps(rows: unknown, opts: { searchStatus?: number } = {}) {
           return new Response("read refused", { status: opts.searchStatus });
         }
         if (raceOnSecondRead && reads === 2) table = [...table, ...raceOnSecondRead];
+        // The write the table does NOT hold afterwards: a create that never
+        // landed, or an update that went to a different row.
+        if (rewriteOnSecondRead && reads === 2) table = rewriteOnSecondRead(table);
         return json(table);
       case "insert": {
         const record = body.records[0];
@@ -184,6 +196,59 @@ describe("reconcileFederationInstanceViaOpsApi", () => {
     expect(error?.message).toContain("flair_existing");
     expect(error?.message).toContain("flair_raced_update");
     expect(opsOf("insert")).toHaveLength(0);
+  });
+
+  it("a create whose row did not land (the re-read is empty) is refused, not reported as created", async () => {
+    mockOps([]);
+    // The insert is acknowledged, and the table does not hold it afterwards.
+    rewriteOnSecondRead = () => [];
+
+    const error = await reconcileFederationInstanceViaOpsApi(OPS_URL, CREATE, "admin", "test-pass").then(
+      () => null,
+      (err: unknown) => err as Error,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error?.message).toContain("the re-read found no rows at all");
+    expect(error?.message).toContain(CREATE.instanceId);
+    // The write was attempted, and the re-read is what refused the result.
+    expect(opsOf("insert")).toHaveLength(1);
+    expect(opsOf("sql")).toHaveLength(2);
+  });
+
+  it("an update whose re-read holds one DIFFERENT row is refused", async () => {
+    mockOps([{ id: "flair_existing", role: "spoke", publicKey: "peer-known-key" }]);
+    // The update is acknowledged; the table holds one row, but not that one.
+    rewriteOnSecondRead = () => [{ id: "flair_other", role: "hub", createdAt: "2026-09-25T00:00:00Z" }];
+
+    const error = await reconcileFederationInstanceViaOpsApi(OPS_URL, CREATE, "admin", "test-pass").then(
+      () => null,
+      (err: unknown) => err as Error,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    // It names the row it found, and the row it expected.
+    expect(error?.message).toContain("flair_other");
+    expect(error?.message).toContain("flair_existing");
+    expect(error?.message).toContain("role=hub");
+    expect(opsOf("update")).toHaveLength(1);
+  });
+
+  it("the expected id with a non-hub role is refused", async () => {
+    mockOps([{ id: "flair_existing", role: "spoke", publicKey: "peer-known-key" }]);
+    // The role update did not take: the row is the one we wrote, still not a hub.
+    rewriteOnSecondRead = () => [{ id: "flair_existing", role: "spoke", createdAt: "2026-09-25T00:00:00Z" }];
+
+    const error = await reconcileFederationInstanceViaOpsApi(OPS_URL, CREATE, "admin", "test-pass").then(
+      () => null,
+      (err: unknown) => err as Error,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error?.message).toContain("flair_existing");
+    expect(error?.message).toContain("role=spoke");
+    expect(error?.message).toContain("role=hub");
+    expect(opsOf("update")).toHaveLength(1);
   });
 
   it("an unreadable Instance table fails the command rather than guessing", async () => {
