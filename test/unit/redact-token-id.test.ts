@@ -12,6 +12,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  createTokenRedactor,
   FULLY_REDACTED,
   MIN_SECRET_LENGTH,
   redactTokenIds,
@@ -76,5 +77,26 @@ describe("redactTokenIds — deep token-id redaction (flair#1902)", () => {
   test("returns the value unchanged when there are no secrets", () => {
     const value = { a: "b" };
     expect(redactTokenIds(value, [])).toBe(value);
+  });
+
+  test("with an overlapping short secret, the LONGER id is redacted and its suffix does not survive", () => {
+    const long = "abcdefghijklmnopqrstuvwx"; // 24 chars
+    const short = long.slice(0, 8); // an 8-char prefix of `long`, under the minimum
+    const out = redactTokenMessage(`id ${long}`, [short, long]);
+    expect(out).toContain(long.slice(0, 8));
+    expect(out).not.toContain(long);
+    // The characters after the prefix must not survive: a shorter secret that
+    // matched first would have left them exposed.
+    expect(out).not.toContain(long.slice(8));
+  });
+
+  test("a compiled redactor can be reused across values and messages", () => {
+    const redactor = createTokenRedactor([TOKEN]);
+    expect(redactor.redactMessage(`a ${TOKEN}`)).toBe(`a ${PREFIX}…`);
+    expect(redactor.redactMessage(`b ${TOKEN}`)).toBe(`b ${PREFIX}…`);
+    expect(redactor.redactValue({ k: TOKEN, list: [TOKEN] })).toEqual({
+      k: `${PREFIX}…`,
+      list: [`${PREFIX}…`],
+    });
   });
 });

@@ -18,11 +18,23 @@
  * Object keys are redacted too — a `{ "<token-id>": ... }` map is exactly as much
  * a leak as one in a value.
  *
- * LENGTH GUARD: a secret shorter than MIN_SECRET_LENGTH characters is replaced by
- * "[redacted]" in full. Cutting an 11-character id to its 8-character prefix
- * leaves most of the id visible, which is not a redaction. Empty secrets are
- * ignored (never a replacement of "" that would splice the replacement between
- * every character).
+ * Two properties the naive `split(secret).join(prefix)` gets wrong, and this
+ * module gets right:
+ *
+ *   - LENGTH GUARD: a secret shorter than MIN_SECRET_LENGTH characters is
+ *     replaced by "[redacted]" in full. Cutting an 11-character id to its
+ *     8-character prefix leaves most of the id visible, which is not a redaction.
+ *     Empty secrets are ignored (never a replacement of "" that would splice the
+ *     replacement between every character).
+ *   - ONE PASS, LONGEST FIRST: the secrets are matched in a SINGLE pass over the
+ *     original text, longest secret first. Sequential replaces let a short secret
+ *     that is a prefix of a longer one match first and strand the longer id's
+ *     suffix — and let a later secret match inside text a previous replacement
+ *     just inserted. A single alternation pass avoids both.
+ *
+ * `createTokenRedactor(secrets)` compiles the matcher once; the sweep reuses one
+ * per tick rather than rebuilding the replacement rules (or copying the id list)
+ * for every line it logs.
  */
 
 /** How many leading characters of a long secret are kept. */
@@ -46,33 +58,59 @@ function replacementFor(secret: string): string {
     : `${secret.slice(0, TOKEN_ID_PREFIX_LENGTH)}…`;
 }
 
-/** Non-empty, non-short string secrets paired with their replacement, in order. */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Non-empty, de-duplicated secrets paired with their replacement, longest first. */
 function secretReplacements(secrets: readonly string[]): Array<readonly [string, string]> {
+  const seen = new Set<string>();
   const out: Array<readonly [string, string]> = [];
   for (const secret of secrets) {
-    if (typeof secret === "string" && secret.length > 0) {
-      out.push([secret, replacementFor(secret)] as const);
-    }
+    if (typeof secret !== "string" || secret.length === 0) continue;
+    if (seen.has(secret)) continue;
+    seen.add(secret);
+    out.push([secret, replacementFor(secret)] as const);
   }
+  // Longest-first: the alternation tries alternatives left to right at each
+  // position, so the longest secret wins where two overlap.
+  out.sort((a, b) => b[0].length - a[0].length);
   return out;
 }
 
-function redactString(text: string, replacements: ReadonlyArray<readonly [string, string]>): string {
-  let out = text;
-  for (const [secret, replacement] of replacements) {
-    if (out.includes(secret)) out = out.split(secret).join(replacement);
-  }
-  return out;
+/** A compiled redactor: replace every secret in one pass, in any string. */
+export interface TokenRedactor {
+  redactMessage(message: string): string;
+  redactValue(value: unknown): unknown;
 }
 
-function walk(value: unknown, replacements: ReadonlyArray<readonly [string, string]>): unknown {
-  if (typeof value === "string") return redactString(value, replacements);
-  if (Array.isArray(value)) return value.map((v) => walk(v, replacements));
+/**
+ * Compile `secrets` into a redactor. Build it ONCE for a batch of lines and reuse
+ * it — the sweep logs many lines per tick, and recompiling per line is the
+ * quadratic cost this avoids.
+ */
+export function createTokenRedactor(secrets: readonly string[]): TokenRedactor {
+  const replacements = secretReplacements(secrets);
+  const map = new Map(replacements);
+  const pattern = replacements.length > 0
+    ? new RegExp(replacements.map(([secret]) => escapeRegExp(secret)).join("|"), "g")
+    : null;
+  const redactMessage = (message: string): string =>
+    pattern ? message.replace(pattern, (match) => map.get(match) ?? match) : message;
+  return {
+    redactMessage,
+    redactValue: (value: unknown): unknown => (pattern ? walk(value, redactMessage) : value),
+  };
+}
+
+function walk(value: unknown, redact: (text: string) => string): unknown {
+  if (typeof value === "string") return redact(value);
+  if (Array.isArray(value)) return value.map((v) => walk(v, redact));
   if (value && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>).map(([key, v]) => [
-        redactString(key, replacements),
-        walk(v, replacements),
+        redact(key),
+        walk(v, redact),
       ]),
     );
   }
@@ -86,7 +124,7 @@ function walk(value: unknown, replacements: ReadonlyArray<readonly [string, stri
  * implementation the deep redactor uses.
  */
 export function redactTokenMessage(message: string, secrets: readonly string[]): string {
-  return redactString(message, secretReplacements(secrets));
+  return createTokenRedactor(secrets).redactMessage(message);
 }
 
 /**
@@ -95,7 +133,5 @@ export function redactTokenMessage(message: string, secrets: readonly string[]):
  * are both redacted. Non-string scalars pass through untouched.
  */
 export function redactTokenIds(value: unknown, secrets: readonly string[]): unknown {
-  const replacements = secretReplacements(secrets);
-  if (replacements.length === 0) return value;
-  return walk(value, replacements);
+  return createTokenRedactor(secrets).redactValue(value);
 }
