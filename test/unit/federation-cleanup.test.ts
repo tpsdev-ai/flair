@@ -532,6 +532,24 @@ describe("federation-cleanup sweep", () => {
       expect(lines.join("\n")).not.toContain("deleted expired token");
     });
 
+    it("the consumed-token audit line cuts the token id to its prefix, even inside a caller-supplied consumedBy", async () => {
+      // consumedBy is the pairing caller's instanceId, so it is whatever that
+      // caller sent, including the token id itself.
+      const tId = "token_audit_consumed_FFFFFFFF";
+      const db = createMockDb([makeToken(tId, { consumedBy: `instance-${tId}-x` })]);
+      const { fn: serverOp } = createMockServerOp([{ ok: true }]);
+      const { lines, errors, restore } = captureConsole();
+      try {
+        await runCleanupTick({ serverOp, db: db as any, now });
+      } finally {
+        restore();
+      }
+      const all = [...lines, ...errors].join("\n");
+      expect(all).toContain("keeping audit record");
+      expect(all).toContain(tId.slice(0, 8));
+      expect(all).not.toContain(tId);
+    });
+
     it("a 200 whose body reports no deleted_hashes is not logged as deleted either", async () => {
       const tId = "token_verify_no_ids_CCCC";
       const db = createMockDb([expired(tId)]);

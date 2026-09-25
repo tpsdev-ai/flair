@@ -218,13 +218,35 @@ export async function listUsernamesOrNull(
   }
 }
 
-/**
- * `message` with every occurrence of `tokenId` cut to its 8-character prefix.
- * A pairing token's id IS the credential: the sweep's token and bootstrap-user
- * lines log at most its first 8 characters.
- */
+/** `message` with every occurrence of `tokenId` cut to its 8-character prefix. */
 export function redactTokenId(message: string, tokenId: string): string {
   return tokenId ? message.split(tokenId).join(`${tokenId.slice(0, 8)}…`) : message;
+}
+
+/** `value` with `secret` cut to its prefix in every string, at any depth. */
+function redactDeep(value: unknown, secret: string): unknown {
+  if (typeof value === "string") return redactTokenId(value, secret);
+  if (Array.isArray(value)) return value.map((v) => redactDeep(v, secret));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redactDeep(v, secret)]));
+  }
+  return value;
+}
+
+/**
+ * Log one line about one pairing token, or about the bootstrap user named for
+ * it. A token's id IS the pairing credential, and the fields can carry it from
+ * anywhere (Harper's error text, a caller-supplied consumedBy), so every
+ * occurrence of `secret` in the message and in every field is cut to its
+ * 8-character prefix. Every per-token line in this sweep goes through here.
+ */
+function tokenLog(
+  level: "log" | "error",
+  message: string,
+  fields: Record<string, unknown>,
+  secret: string,
+): void {
+  console[level](redactTokenId(message, secret), redactDeep(fields, secret));
 }
 
 /**
@@ -336,12 +358,10 @@ export async function runCleanupTick(
         // deleted — a cleanup that did not happen. A skipped record is left in the
         // table, so the next tick sees it as a candidate again and retries it.
         if (writeConfirmed(result, "deleted_hashes", tokenId)) {
-          console.log(
-            "[federation-cleanup] deleted expired token",
-            { tid: tokenId.slice(0, 8) },
-          );
+          tokenLog("log", "[federation-cleanup] deleted expired token", { tid: tokenId.slice(0, 8) }, tokenId);
         } else {
-          console.error(
+          tokenLog(
+            "error",
             "[federation-cleanup] expired token delete NOT confirmed — Harper's result does not confirm the record was removed; if it is still in the table, the next tick retries it",
             // The token id IS the pairing credential, and skipped_hashes holds
             // token ids: log the prefix, as every other line in this sweep does,
@@ -352,23 +372,28 @@ export async function runCleanupTick(
                 ? (result as any).skipped_hashes.map(String).includes(tokenId)
                 : "no skipped_hashes in the result",
             },
+            tokenId,
           );
         }
       } catch (err: any) {
-        console.error(
+        tokenLog(
+          "error",
           "[federation-cleanup] delete token error",
           // A Harper error can echo the request, and the token id is the
           // pairing credential: cut every occurrence of it to its prefix.
-          { tid: tokenId.slice(0, 8), err: redactTokenId(String(err?.message ?? err), tokenId) },
+          { tid: tokenId.slice(0, 8), err: String(err?.message ?? err) },
+          tokenId,
         );
       }
     }
 
     // Consumed tokens: keep record for audit trail
     if (consumed) {
-      console.log(
+      tokenLog(
+        "log",
         "[federation-cleanup] keeping audit record",
         { tid: tokenId.slice(0, 8), consumedBy: token.consumedBy },
+        tokenId,
       );
     }
   }
@@ -409,10 +434,7 @@ async function dropBootstrapUser(
       { user: null },
       false, // bypass Harper permission checks
     );
-    console.log(
-      "[federation-cleanup] dropped user",
-      { tid: tid.slice(0, 8) },
-    );
+    tokenLog("log", "[federation-cleanup] dropped user", { tid: tid.slice(0, 8) }, tid);
   } catch (err: any) {
     const msg = err?.message ?? "";
     const isNotFound =
@@ -423,12 +445,14 @@ async function dropBootstrapUser(
     if (isNotFound) {
       // Idempotent — user already gone, no action needed
     } else {
-      console.error(
+      tokenLog(
+        "error",
         "[federation-cleanup] drop_user error",
         // A bootstrap username is pair-bootstrap- plus the token's first 8
         // characters, but a hand-made one can carry more, and Harper's error can
         // echo it: bound the suffix and cut it out of the message.
-        { tid: tid.slice(0, 8), err: redactTokenId(String(err?.message ?? err), tid) },
+        { tid: tid.slice(0, 8), err: String(err?.message ?? err) },
+        tid,
       );
     }
   }
