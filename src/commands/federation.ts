@@ -32,9 +32,12 @@ import { DEFAULT_INTERVAL_SECONDS as FEDERATION_SYNC_DEFAULT_INTERVAL } from "..
 import {
   decideInstancePrune,
   formatInstanceRow,
-  INSTANCE_ROW_PRUNE_COMMAND,
+  INSTANCE_ROW_PRUNE_REMEDY,
+  prunePeerWarningLines,
+  readAdvertisedInstanceIdentity,
   readInstanceRows,
   pruneInstanceRows,
+  type AdvertisedInstanceIdentity,
   type InstanceIdentityRow,
   type InstancePruneDecision,
   type OpsEndpoint,
@@ -1914,7 +1917,7 @@ export function register(program: Command): void {
       for (const row of rows) console.log(`  ${formatInstanceRow(row)}`);
       if (rows.length > 1) {
         console.log(`\nMore than one row means there is no canonical identity. Keep one and delete the rest:`);
-        console.log(`  ${INSTANCE_ROW_PRUNE_COMMAND} --keep <id>`);
+        console.log(`  ${INSTANCE_ROW_PRUNE_REMEDY}`);
       }
     });
 
@@ -1963,21 +1966,37 @@ export function register(program: Command): void {
         process.exit(1);
       }
       if (decision.kind === "nothing") {
-        console.log("Nothing to prune — this instance has at most one Instance row.");
+        console.log(`Nothing to prune — --keep names the only Instance row this instance has.`);
         return;
       }
+
+      // Which identity paired peers may have pinned (flair#1883 round 2). A REST
+      // read of `GET /FederationInstance`, because that is the endpoint a pairing
+      // peer actually called: the row it answers with is the row peers learned.
+      // A read that fails is reported as NOT determinable — never guessed at.
+      let advertised: AdvertisedInstanceIdentity | null = null;
+      let advertisedFailure: string | null = null;
+      try {
+        advertised = await readAdvertisedInstanceIdentity(resolveBaseUrl(opts), endpoint.credentials);
+        if (advertised === null) advertisedFailure = "the response carried no id";
+      } catch (err: any) {
+        advertisedFailure = err?.message ?? String(err);
+      }
+      const peerWarnings = prunePeerWarningLines({ advertised, advertisedFailure, drop: decision.drop });
 
       if (!opts.apply) {
         console.log(`── flair federation instance prune — dry-run (use --apply to delete) ──`);
         console.log(`Keeping ${formatInstanceRow(decision.keep)}`);
         console.log(`Would delete ${decision.drop.length} row(s):`);
         for (const row of decision.drop) console.log(`  ${formatInstanceRow(row)}`);
+        for (const line of peerWarnings) console.log(line);
         return;
       }
 
       try {
         const { dropped } = await pruneInstanceRows(endpoint, opts.keep);
         console.log(`Kept ${decision.keep.id}; deleted ${dropped.length} row(s): ${dropped.join(", ")}`);
+        for (const line of peerWarnings) console.log(line);
         console.log("Re-run `flair init --remote` to set the kept row's role to hub.");
       } catch (err: any) {
         console.error(`Error: ${err?.message ?? err}`);

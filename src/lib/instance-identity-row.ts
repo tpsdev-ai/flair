@@ -22,6 +22,15 @@
  *
  * Nothing here reads "the first row". `search()` order is not a fact about an
  * identity, and a decision built on it is a coin toss that reports as an answer.
+ *
+ * The read is unconditional (flair#1883 round 2): an ops-API
+ * `search_by_conditions` needs at least one condition, and the
+ * `createdAt > "1970-01-01"` one this module used to send HID every row without a
+ * createdAt at all — which the schema does not forbid. A row that is invisible is
+ * a row `init --remote` does not know about, and the second identity it then
+ * inserts is the defect this module exists to end. A read that FAILS is also not
+ * an answer: `null` is its own state (see `decideSweepMode`,
+ * `probeInstanceIdentity`), and only a SUCCESSFUL read of zero rows may create.
  */
 
 /** One `flair.Instance` row, as read from the table or the ops API. */
@@ -45,6 +54,14 @@ export const PAIR_INITIATOR_ROLE = "flair_pair_initiator";
  * `--keep <id>` is the row to keep; the rest are deleted (dry-run by default).
  */
 export const INSTANCE_ROW_PRUNE_COMMAND = "flair federation instance prune";
+
+/**
+ * The prune invocation to hand an operator, naming BOTH forms: the dry run is
+ * the command with no `--apply`, and only `--apply` deletes. A remedy that shows
+ * the bare command deletes nothing (flair#1883 round 2) — it prints what it
+ * WOULD delete and exits 0, which reads as a successful prune.
+ */
+export const INSTANCE_ROW_PRUNE_REMEDY = `${INSTANCE_ROW_PRUNE_COMMAND} --keep <id> (dry run; add --apply to delete)`;
 
 /**
  * Role comparison is case/space-insensitive: the value round-trips through
@@ -104,7 +121,7 @@ export function multipleInstanceRowsMessage(rows: readonly InstanceIdentityRow[]
   return [
     `${context} refused: this instance has ${usable.length} Instance rows, so it has no single canonical identity.`,
     ...usable.map((r) => `  ${formatInstanceRow(r)}`),
-    `Keep one row and delete the rest with: ${INSTANCE_ROW_PRUNE_COMMAND} --keep <id>`,
+    `Keep one row and delete the rest with: ${INSTANCE_ROW_PRUNE_REMEDY}`,
   ].join("\n");
 }
 
@@ -137,6 +154,31 @@ export interface InstanceIdentityFinding {
 }
 
 /**
+ * What doctor prints when there is NO finding: the row facts, and — when the
+ * role list could not be read — that the pairing-role check is UNVERIFIED.
+ *
+ * A finding list that is empty because a read FAILED must not render like a
+ * finding list that is empty because the instance is consistent (flair#1883
+ * round 2): the rows were read, so the row facts are facts, but the pairing-role
+ * half of the check did not run.
+ */
+export function instanceIdentitySummary(input: {
+  rows: readonly InstanceIdentityRow[];
+  roleNames: readonly string[] | null;
+}): { level: "ok" | "unverified"; text: string } {
+  const usable = usableInstanceRows(input.rows);
+  const described =
+    usable.length === 0 ? "no rows" : `one row, role=${canonicalInstanceRole(usable) ?? "(none)"}`;
+  if (input.roleNames === null) {
+    return {
+      level: "unverified",
+      text: `${described}; the ${PAIR_INITIATOR_ROLE} pairing-role check is UNVERIFIED (the role list could not be read)`,
+    };
+  }
+  return { level: "ok", text: described };
+}
+
+/**
  * The findings `flair doctor` reports about this instance's identity.
  *
  * `rows: null` or `roleNames: null` means the read did not happen — every
@@ -152,12 +194,13 @@ export function instanceIdentityFindings(input: {
   const findings: InstanceIdentityFinding[] = [];
   const usable = usableInstanceRows(rows);
 
-  if (usable.length > 1) {
+  const multiple = usable.length > 1;
+  if (multiple) {
     findings.push({
       code: "instance-multiple-rows",
       status: "fail",
       detail: `${usable.length} Instance rows (${usable.map((r) => formatInstanceRow(r)).join("; ")})`,
-      remedy: `${INSTANCE_ROW_PRUNE_COMMAND} --keep <id>`,
+      remedy: INSTANCE_ROW_PRUNE_REMEDY,
     });
   }
 
@@ -169,8 +212,13 @@ export function instanceIdentityFindings(input: {
       findings.push({
         code: "pair-role-not-hub",
         status: "fail",
+        // With several rows present, `init --remote` refuses until the table is
+        // back to one row (its own refusal names the prune). The remedies are
+        // printed in the order they WORK: prune first, then init.
         detail: `the ${PAIR_INITIATOR_ROLE} role exists while this instance is not a hub (${described})`,
-        remedy: "flair init --remote",
+        remedy: multiple
+          ? `${INSTANCE_ROW_PRUNE_REMEDY}, then flair init --remote`
+          : "flair init --remote",
       });
     }
   }
@@ -228,23 +276,22 @@ async function opsPost(endpoint: OpsEndpoint, body: Record<string, unknown>, wha
 }
 
 /**
- * Every Instance row on this instance. Never "the first one" — the caller
- * decides, and a decision needs the whole set.
+ * Every Instance row on this instance, UNCONDITIONALLY — no WHERE clause, no
+ * comparator over a column a row may not carry. Never "the first one", and never
+ * "the ones that happen to have a createdAt": the caller decides, and a decision
+ * needs the whole set (flair#1883 round 2).
+ *
+ * SQL is the ops operation that can say "all": `search_by_conditions` requires at
+ * least one condition (Harper's searchValidator: `conditions` is `.min(1)`), and
+ * any single condition can hide a row.
  */
+export const INSTANCE_ROWS_SQL = "SELECT id, role, publicKey, status, createdAt FROM flair.Instance";
+
 export async function readInstanceRows(endpoint: OpsEndpoint): Promise<InstanceIdentityRow[]> {
   const parsed = await opsPost(
     endpoint,
-    {
-      operation: "search_by_conditions",
-      schema: "flair",
-      table: "Instance",
-      operator: "and",
-      conditions: [
-        { search_attribute: "createdAt", search_type: "greater_than", search_value: "1970-01-01" },
-      ],
-      get_attributes: ["id", "role", "publicKey", "status", "createdAt"],
-    },
-    "Instance search",
+    { operation: "sql", sql: INSTANCE_ROWS_SQL },
+    "Instance read",
   );
   const rows = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.results) ? parsed.results : [];
   return usableInstanceRows(rows as InstanceIdentityRow[]);
@@ -328,6 +375,96 @@ export async function probeInstanceIdentity(
 }
 
 /**
+ * The identity this instance answers `GET /FederationInstance` with. This is the
+ * id (and key) a peer is handed at pairing time.
+ */
+export interface AdvertisedInstanceIdentity {
+  id: string;
+  publicKey?: string | null;
+  role?: string | null;
+}
+
+/**
+ * Read the identity this hub is currently answering `GET /FederationInstance`
+ * with — "the row peers may have pinned".
+ *
+ * A REST read, not an ops-API one: the REST GET is what a pairing peer actually
+ * calls, and it reports the row Harper's find yields first, which is exactly the
+ * row a prune can still delete. Throws when the read fails (`status`); returns
+ * `null` when the body carries no id. The caller must tell those apart from "the
+ * identity is X" — this helper never guesses.
+ */
+export async function readAdvertisedInstanceIdentity(
+  baseUrl: string,
+  credentials?: { user: string; pass: string },
+  fetchImpl?: typeof fetch,
+): Promise<AdvertisedInstanceIdentity | null> {
+  const fetchFn = fetchImpl ?? fetch;
+  const auth = credentials
+    ? `Basic ${Buffer.from(`${credentials.user}:${credentials.pass}`).toString("base64")}`
+    : undefined;
+  const res = await fetchFn(`${baseUrl.replace(/\/$/, "")}/FederationInstance`, {
+    headers: auth ? { Authorization: auth } : {},
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`GET /FederationInstance failed (${res.status})${text ? `: ${text.slice(0, 200)}` : ""}`);
+  }
+  const parsed = await res.json().catch(() => null);
+  if (!parsed || typeof parsed.id !== "string" || parsed.id.length === 0) return null;
+  return {
+    id: parsed.id,
+    publicKey: typeof parsed.publicKey === "string" ? parsed.publicKey : null,
+    role: typeof parsed.role === "string" ? parsed.role : null,
+  };
+}
+
+/** `id=… publicKey=…` — the two facts a peer pins, named. */
+export function formatAdvertisedIdentity(identity: AdvertisedInstanceIdentity): string {
+  const key = typeof identity.publicKey === "string" && identity.publicKey.length > 0 ? identity.publicKey : "(unknown)";
+  return `id=${identity.id} publicKey=${key}`;
+}
+
+/**
+ * What a prune prints when it is about to delete rows: which identity peers may
+ * have pinned, and that a peer paired with a deleted identity must re-pair
+ * (flair#1883 round 2).
+ *
+ * The identity named is the row the hub ANSWERS `GET /FederationInstance` with,
+ * because that is the row a pairing peer was handed — not "the first row", which
+ * this module never treats as a fact. When that read did not happen, the warning
+ * says so and says which id and key peers pinned is NOT determinable here; it
+ * never falls back to naming a row anyway.
+ */
+export function prunePeerWarningLines(input: {
+  advertised: AdvertisedInstanceIdentity | null;
+  advertisedFailure: string | null;
+  drop: readonly InstanceIdentityRow[];
+}): string[] {
+  const drop = usableInstanceRows(input.drop);
+  if (drop.length === 0) return [];
+  const advertised = input.advertised;
+  const lines: string[] = [];
+  if (advertised) {
+    lines.push(
+      `Paired peers may have pinned this instance's identity as ${formatAdvertisedIdentity(advertised)} — the row this hub answers GET /FederationInstance with.`,
+    );
+    lines.push(
+      drop.some((r) => r.id === advertised.id)
+        ? "That row is one of the rows being deleted: every peer paired with it must re-pair."
+        : "That row is not being deleted, so the peers that pinned it keep the identity they know; a peer that pinned a deleted row must re-pair.",
+    );
+    return lines;
+  }
+  lines.push(
+    `Could not read the identity this hub answers GET /FederationInstance with (${input.advertisedFailure ?? "no reason reported"}), so which id and key paired peers pinned is not determinable here.`,
+  );
+  lines.push("A peer paired with a deleted identity must re-pair.");
+  return lines;
+}
+
+/**
  * `flair federation instance prune --keep <id>` — delete every OTHER Instance
  * row, so the instance is back to one canonical identity. The kept row is never
  * touched: its id and key are what peers know.
@@ -362,8 +499,9 @@ export type InstancePruneDecision =
 /**
  * Which rows `prune --keep <id>` deletes.
  *
- * An id that names no row is `unknown-id`, not `nothing`: "nothing to do" after
- * a typo reads as a successful prune of the row the operator meant to keep.
+ * An id that names no row is `unknown-id`, not `nothing`, at EVERY row count:
+ * "nothing to do" after a typo reads as a successful prune of the row the
+ * operator meant to keep.
  */
 export function decideInstancePrune(
   rows: readonly InstanceIdentityRow[] | null | undefined,
@@ -372,7 +510,10 @@ export function decideInstancePrune(
   const usable = usableInstanceRows(rows);
   const keep = usable.find((r) => r.id === keepId);
   if (!keep) {
-    if (usable.length <= 1) return { kind: "nothing" };
+    // Refused whatever the row count (flair#1883 round 2). With zero or one row
+    // there is nothing to delete either, but an id that names no row is a TYPO
+    // until proven otherwise, and "nothing to do" after a typo reads as a
+    // successful prune of the row the operator meant to keep.
     return { kind: "unknown-id", rows: usable };
   }
   const drop = usable.filter((r) => r.id !== keepId);

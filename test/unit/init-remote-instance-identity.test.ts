@@ -7,6 +7,10 @@
  * more than one row → refuse, naming every row and the command that resolves it,
  * and write nothing at all.
  *
+ * Once it has written, it RE-READS (flair#1883 round 2): the read-then-write
+ * window is real, and a `GET /FederationInstance` landing in it leaves two rows.
+ * That must be reported with the prune remedy, never returned as `created`.
+ *
  * The behaviour this replaces INSERTed a fresh-id hub row on every run, so a hub
  * that had already answered `GET /FederationInstance` (which find-or-creates a
  * `spoke` row) carried two rows and no canonical identity.
@@ -25,6 +29,11 @@ const CREATE = { instanceId: "flair_newidentity", publicKey: "new-public-key" };
 
 let calls: any[] = [];
 let origFetch: typeof fetch;
+/** The Instance table the mock serves; writes mutate it, so a re-read sees them. */
+let table: any[] = [];
+let reads = 0;
+/** A row that appears between the decision and the write — a racing GET. */
+let raceOnSecondRead: any[] | null = null;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -35,6 +44,8 @@ function json(body: unknown, status = 200): Response {
 
 beforeEach(() => {
   calls = [];
+  reads = 0;
+  raceOnSecondRead = null;
   origFetch = globalThis.fetch;
 });
 
@@ -43,18 +54,28 @@ afterEach(() => {
 });
 
 function mockOps(rows: unknown, opts: { searchStatus?: number } = {}) {
+  table = Array.isArray(rows) ? [...(rows as any[])] : [];
   globalThis.fetch = mock(async (_url: string, init: any) => {
     const body = JSON.parse(init.body);
     calls.push(body);
     switch (body.operation) {
-      case "search_by_conditions":
-        return opts.searchStatus && opts.searchStatus !== 200
-          ? new Response("search refused", { status: opts.searchStatus })
-          : json(rows);
-      case "insert":
-        return json({ inserted_hashes: [body.records[0].id] });
-      case "update":
-        return json({ update_hashes: [body.records[0].id], skipped_hashes: [] });
+      case "sql":
+        reads++;
+        if (opts.searchStatus && opts.searchStatus !== 200) {
+          return new Response("read refused", { status: opts.searchStatus });
+        }
+        if (raceOnSecondRead && reads === 2) table = [...table, ...raceOnSecondRead];
+        return json(table);
+      case "insert": {
+        const record = body.records[0];
+        table = [...table, record];
+        return json({ inserted_hashes: [record.id] });
+      }
+      case "update": {
+        const record = body.records[0];
+        table = table.map((r) => (r.id === record.id ? { ...r, ...record } : r));
+        return json({ update_hashes: [record.id], skipped_hashes: [] });
+      }
       case "list_roles":
         return json([]);
       default:
@@ -81,7 +102,9 @@ describe("reconcileFederationInstanceViaOpsApi", () => {
       role: "hub",
     });
     // The row is not written before the rows were read.
-    expect(calls[0].operation).toBe("search_by_conditions");
+    expect(calls[0].operation).toBe("sql");
+    // ...and the write is verified by re-reading, not assumed.
+    expect(opsOf("sql")).toHaveLength(2);
   });
 
   it("one spoke row → sets THAT row's role to hub, keeping its id and key", async () => {
@@ -130,12 +153,45 @@ describe("reconcileFederationInstanceViaOpsApi", () => {
     expect(opsOf("update")).toHaveLength(0);
   });
 
+  it("a row that appears while the insert is in flight is REPORTED, not claimed as success", async () => {
+    // The read-then-insert window is real: `GET /FederationInstance`
+    // find-or-creates a row. The re-read must name both rows and the remedy
+    // instead of returning `created`.
+    mockOps([]);
+    raceOnSecondRead = [{ id: "flair_raced", role: "spoke", createdAt: "2026-09-24T00:00:00Z" }];
+
+    const error = await reconcileFederationInstanceViaOpsApi(OPS_URL, CREATE, "admin", "test-pass").then(
+      () => null,
+      (err: unknown) => err as Error,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error?.message).toContain(CREATE.instanceId);
+    expect(error?.message).toContain("flair_raced");
+    expect(error?.message).toContain(INSTANCE_ROW_PRUNE_COMMAND);
+  });
+
+  it("a row that appears while the role update is in flight is reported too", async () => {
+    mockOps([{ id: "flair_existing", role: "spoke", publicKey: "peer-known-key" }]);
+    raceOnSecondRead = [{ id: "flair_raced_update", role: "hub", createdAt: "2026-09-24T00:00:00Z" }];
+
+    const error = await reconcileFederationInstanceViaOpsApi(OPS_URL, CREATE, "admin", "test-pass").then(
+      () => null,
+      (err: unknown) => err as Error,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error?.message).toContain("flair_existing");
+    expect(error?.message).toContain("flair_raced_update");
+    expect(opsOf("insert")).toHaveLength(0);
+  });
+
   it("an unreadable Instance table fails the command rather than guessing", async () => {
     mockOps([], { searchStatus: 500 });
 
     await expect(
       reconcileFederationInstanceViaOpsApi(OPS_URL, CREATE, "admin", "test-pass"),
-    ).rejects.toThrow("Instance search via ops API failed (500)");
+    ).rejects.toThrow("Instance read via ops API failed (500)");
     expect(opsOf("insert")).toHaveLength(0);
   });
 });

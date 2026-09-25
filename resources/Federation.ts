@@ -197,24 +197,40 @@ export class FederationInstance extends Resource {
   }
 
   async get() {
-    // Find or create instance identity
+    // Find or create instance identity.
+    //
+    // A read that did not happen is an ERROR, never "no row" (flair#1883 round 2).
+    // This used to log and fall through to the create branch: on a persistent
+    // storage or permission failure the GET then MINTED A SECOND identity row on
+    // every call, and which identity this instance reported depended on which row
+    // `search()` yielded first. Only a SUCCESSFUL read that returns zero rows may
+    // create.
     let instance: any = null;
+    let readError: any = null;
     try {
       for await (const i of (databases as any).flair.Instance.search()) {
         instance = i;
         break;
       }
     } catch (err: any) {
-      // Expected on genuine first boot: the Instance table doesn't exist yet,
-      // and the create branch below handles that. But a bare swallow here also
-      // hid every OTHER read failure (storage, permissions), making a
-      // persistently failing read indistinguishable from first boot
-      // (flair#1233). Log the error class so the two are tellable apart in
-      // server logs; behavior is unchanged — fall through to create.
-      console.warn(
-        "[federation] Instance read failed — proceeding as first boot (create branch will run). " +
-          "If this instance already has an identity, this is a real read error, not an absent table. " +
-          `${err?.constructor?.name ?? "Error"}: ${err?.message ?? err}`,
+      readError = err;
+    }
+
+    if (readError) {
+      // 5xx: the caller retries, and a retry that finally reads is the only thing
+      // that creates. flair#1233's warn stays — the error class belongs in the
+      // server log — but it is no longer a licence to write.
+      console.error(
+        "[federation] GET /FederationInstance could not read the Instance table — answering 503 and creating NOTHING. " +
+          "A read error is not first boot; minting an identity here would add a second row to an instance that already has one. " +
+          `${readError?.constructor?.name ?? "Error"}: ${readError?.message ?? readError}`,
+      );
+      return new Response(
+        JSON.stringify({
+          error: "instance_identity_unreadable",
+          detail: "The Instance table could not be read, so this instance's identity is unknown. Nothing was created.",
+        }),
+        { status: 503, headers: { "content-type": "application/json" } },
       );
     }
 
@@ -226,15 +242,19 @@ export class FederationInstance extends Resource {
     let signingKeyAvailable = false;
 
     if (!instance) {
-      // First boot — generate instance identity
+      // No row on a successful read — the one state that may create.
       const kp = nacl.sign.keyPair();
       const id = `flair_${randomBytes(4).toString("hex")}`;
       const publicKey = Buffer.from(kp.publicKey).toString("base64url");
 
-      // A fresh identity is a SPOKE. `flair init --remote` does not create a
-      // second row for a hub: it reads this row and sets ROLE to "hub", keeping
-      // this id and publicKey (flair#1883) — the identity peers learn is the one
-      // this GET created.
+      // A fresh identity is a SPOKE. `flair init --remote` does not insert over
+      // a row it can read: it reconciles the ONE row it finds and sets ROLE to
+      // "hub", keeping that id and publicKey (flair#1883) — so the identity
+      // peers learn is the one this GET created. That is the only guarantee the
+      // reconcile gives: it creates only when its own read found no row, and if
+      // a row appears in that read-then-insert window (a concurrent GET here)
+      // it re-reads and REFUSES, naming both rows and the prune that resolves
+      // them, rather than reporting success.
       instance = {
         id,
         publicKey,

@@ -7,5 +7,8 @@
   `flair federation instance prune` deletes rows with the list form, confirmed
   against a live Harper.
 
-  > **Heads-up:** two call sites outside this change — `flair federation token`'s
-  > rollback delete and its explicit token delete — still send the singular key.
+  > **Heads-up:** two rollback deletes in `flair federation token` — the two that
+  > undo the `PairingToken` insert when the bootstrap (`add_user`) fails, on the
+  > network path and on the non-OK path — still send the singular key, and their
+  > failure is swallowed, so the row they were meant to remove survives. Neither
+  > is fixed here (flair#1895).

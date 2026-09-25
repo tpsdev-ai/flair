@@ -3333,7 +3333,10 @@ export async function seedFederationInstanceViaOpsApi(
 // yielded first. `reconcileFederationInstanceViaOpsApi` is init's writer: it
 // reads the rows and decides (create / set the ONE row's role to hub / no-op /
 // refuse), never inserting over an existing identity. The decisions themselves
-// live in src/lib/instance-identity.ts, shared with the cleanup sweep and doctor.
+// live in src/lib/instance-identity-row.ts, shared with the cleanup sweep and
+// doctor. After it writes, it RE-READS: a row that appeared in its read-then-
+// insert window (a concurrent `GET /FederationInstance` find-or-creates one) is
+// reported with the prune remedy rather than counted as a successful init.
 
 /** The ops endpoint trio (URL, user, optional pass) as the identity helpers want it. */
 function federationInstanceEndpoint(
@@ -3357,6 +3360,11 @@ function federationInstanceEndpoint(
  *
  * Returns what actually happened so the caller's log line can name it: an
  * `already-hub` re-run must not claim it wrote anything.
+ *
+ * The write is verified by re-reading, not assumed (flair#1883 round 2): the
+ * read-then-write window is real, and a `GET /FederationInstance` landing in it
+ * leaves two rows. Reporting that as `created` would claim an identity this
+ * instance does not have.
  */
 export async function reconcileFederationInstanceViaOpsApi(
   opsPortOrUrl: number | string,
@@ -3375,12 +3383,25 @@ export async function reconcileFederationInstanceViaOpsApi(
       return { action: "already-hub", id: decision.id };
     case "update-role":
       await updateInstanceRole(endpoint, decision.id, "hub");
+      await assertSingleInstanceRowAfterWrite(endpoint);
       return { action: "updated", id: decision.id };
     default:
       // The create path keeps the insert (and its retry/401 guidance) unchanged.
       await seedFederationInstanceViaOpsApi(opsPortOrUrl, create.instanceId, create.publicKey, "hub", adminUser, adminPass);
+      await assertSingleInstanceRowAfterWrite(endpoint);
       return { action: "created", id: create.instanceId };
   }
+}
+
+/**
+ * Re-read after a write: more than one row now means the write raced another
+ * writer (`GET /FederationInstance` creates one), and the caller must hear the
+ * refusal — with the prune remedy — instead of a success line.
+ */
+async function assertSingleInstanceRowAfterWrite(endpoint: OpsEndpoint): Promise<void> {
+  const rows = await readInstanceRows(endpoint);
+  const decision = decideHubReconcile(rows);
+  if (decision.kind === "refuse-multiple") throw new Error(multipleInstanceRowsMessage(decision.rows));
 }
 
 // ─── Provision Flair on Harper Fabric ──────────────────────────────────────

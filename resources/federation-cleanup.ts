@@ -1,4 +1,4 @@
-import { decideSweepMode, normalizeRole, type InstanceIdentityRow, type SweepMode } from "../src/lib/instance-identity-row.js";
+import { decideSweepMode, INSTANCE_ROW_PRUNE_REMEDY, normalizeRole, type InstanceIdentityRow, type SweepMode } from "../src/lib/instance-identity-row.js";
 
 const CLEANUP_INTERVAL_MS = 300_000; // 5 minutes
 
@@ -160,7 +160,7 @@ export function noteSweepMode(
           "and the sweep cannot know whether it is a hub. No cleanup will run.",
       );
       log.error(
-        `[federation-cleanup] Fix: keep one row and delete the rest — flair federation instance prune --keep <id> ` +
+        `[federation-cleanup] Fix: keep one row and delete the rest — ${INSTANCE_ROW_PRUNE_REMEDY} ` +
           `(see \`flair doctor\`, which lists the rows)`,
       );
       return;

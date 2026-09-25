@@ -17,11 +17,17 @@ import {
   decideHubReconcile,
   decideInstancePrune,
   decideSweepMode,
+  formatAdvertisedIdentity,
   formatInstanceRow,
+  INSTANCE_ROWS_SQL,
   INSTANCE_ROW_PRUNE_COMMAND,
+  INSTANCE_ROW_PRUNE_REMEDY,
+  instanceIdentitySummary,
   multipleInstanceRowsMessage,
   probeInstanceIdentity,
+  prunePeerWarningLines,
   pruneInstanceRows,
+  readAdvertisedInstanceIdentity,
   readInstanceRows,
   readRoleNames,
   updateInstanceRole,
@@ -154,6 +160,15 @@ describe("decideHubReconcile", () => {
   });
 });
 
+describe("INSTANCE_ROW_PRUNE_REMEDY", () => {
+  it("names the command, the placeholder and BOTH forms — a dry run deletes nothing", () => {
+    expect(INSTANCE_ROW_PRUNE_REMEDY).toContain(INSTANCE_ROW_PRUNE_COMMAND);
+    expect(INSTANCE_ROW_PRUNE_REMEDY).toContain("--keep <id>");
+    expect(INSTANCE_ROW_PRUNE_REMEDY).toContain("dry run");
+    expect(INSTANCE_ROW_PRUNE_REMEDY).toContain("--apply");
+  });
+});
+
 describe("multipleInstanceRowsMessage", () => {
   it("names each row's id, role and creation time, and the resolving command", () => {
     const message = multipleInstanceRowsMessage([SPOKE_ROW, HUB_ROW]);
@@ -163,6 +178,8 @@ describe("multipleInstanceRowsMessage", () => {
     expect(message).toContain("role=spoke");
     expect(message).toContain(INSTANCE_ROW_PRUNE_COMMAND);
     expect(message).toContain("--keep <id>");
+    // The remedy must be the form that DELETES, or name the one that does.
+    expect(message).toContain("--apply");
   });
 });
 
@@ -217,16 +234,49 @@ describe("decideInstancePrune", () => {
     expect(decideInstancePrune([HUB_ROW], HUB_ROW.id)).toEqual({ kind: "nothing" });
   });
 
-  it("an id naming no row when there is at most one row is nothing to do", () => {
-    expect(decideInstancePrune([HUB_ROW], "flair_typo")).toEqual({ kind: "nothing" });
-    expect(decideInstancePrune([], "flair_typo")).toEqual({ kind: "nothing" });
+  it("an id naming no row is refused at EVERY row count — one row, or none", () => {
+    // A typo must not read as a successful prune of the row the operator meant
+    // to keep, and "there is only one row anyway" is not a reason to accept it.
+    expect(decideInstancePrune([HUB_ROW], "flair_typo")).toEqual({
+      kind: "unknown-id",
+      rows: [HUB_ROW],
+    });
+    expect(decideInstancePrune([], "flair_typo")).toEqual({ kind: "unknown-id", rows: [] });
+  });
+});
+
+// ─── doctor's summary line ──────────────────────────────────────────────────
+
+describe("instanceIdentitySummary", () => {
+  it("describes a consistent instance as one row with its role", () => {
+    expect(instanceIdentitySummary({ rows: [HUB_ROW], roleNames: [] })).toEqual({
+      level: "ok",
+      text: "one row, role=hub",
+    });
+  });
+
+  it("describes an instance with no identity row", () => {
+    expect(instanceIdentitySummary({ rows: [], roleNames: [] })).toEqual({ level: "ok", text: "no rows" });
+  });
+
+  it("an unreadable role list is UNVERIFIED, not a pass, and keeps the row facts", () => {
+    // The rows were read, so they are reported; the pairing-role check did not
+    // run, so it must not read as green.
+    const summary = instanceIdentitySummary({ rows: [HUB_ROW], roleNames: null });
+    expect(summary.level).toBe("unverified");
+    expect(summary.text).toContain("one row, role=hub");
+    expect(summary.text).toContain("UNVERIFIED");
+    expect(summary.text).toContain("pairing-role check");
   });
 });
 
 // ─── ops-API helpers ─────────────────────────────────────────────────────────
 
 describe("readInstanceRows", () => {
-  it("asks for every Instance row and returns them all", async () => {
+  it("reads EVERY row: one unconditional statement, no condition a row can fall outside of", async () => {
+    // flair#1883 round 2: the read used to carry `createdAt > "1970-01-01"`, so a
+    // row with no createdAt (the schema does not require one) or one dated before
+    // 1970 was invisible — and init then inserted a SECOND identity.
     const { endpoint, calls } = opsEndpointMock(() => jsonResponse([SPOKE_ROW, HUB_ROW]));
 
     const rows = await readInstanceRows(endpoint);
@@ -234,11 +284,26 @@ describe("readInstanceRows", () => {
     expect(rows.map((r) => r.id)).toEqual([SPOKE_ROW.id, HUB_ROW.id]);
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("http://127.0.0.1:19925/");
-    expect(calls[0].body.operation).toBe("search_by_conditions");
-    expect(calls[0].body.schema).toBe("flair");
-    expect(calls[0].body.table).toBe("Instance");
-    expect(calls[0].body.get_attributes).toContain("role");
-    expect(calls[0].body.get_attributes).toContain("createdAt");
+    expect(calls[0].body.operation).toBe("sql");
+    expect(calls[0].body.sql).toBe(INSTANCE_ROWS_SQL);
+    expect(calls[0].body.sql).not.toMatch(/where/i);
+    expect(calls[0].body.sql).toContain("flair.Instance");
+    for (const attribute of ["id", "role", "publicKey", "status", "createdAt"]) {
+      expect(calls[0].body.sql).toContain(attribute);
+    }
+    // No condition object at all — the search_by_conditions shape is gone.
+    expect(calls[0].body.conditions).toBeUndefined();
+  });
+
+  it("keeps a row that carries no createdAt, and one dated before 1970", async () => {
+    const noCreatedAt = { id: "flair_nodate", role: "hub" };
+    const oldRow = { id: "flair_1969", role: "spoke", createdAt: "1969-12-31T23:59:59.000Z" };
+    const { endpoint } = opsEndpointMock(() => jsonResponse([noCreatedAt, oldRow]));
+
+    const rows = await readInstanceRows(endpoint);
+
+    expect(rows.map((r) => r.id)).toEqual(["flair_nodate", "flair_1969"]);
+    expect(rows[0].createdAt).toBeUndefined();
   });
 
   it("sends Basic auth when credentials are configured", async () => {
@@ -262,7 +327,7 @@ describe("readInstanceRows", () => {
 
   it("throws on a non-ok response rather than reporting zero rows", async () => {
     const { endpoint } = opsEndpointMock(() => new Response("nope", { status: 403 }));
-    await expect(readInstanceRows(endpoint)).rejects.toThrow("Instance search via ops API failed (403)");
+    await expect(readInstanceRows(endpoint)).rejects.toThrow("Instance read via ops API failed (403)");
   });
 
   it("a body that is not a list reports no rows, never a fabricated one", async () => {
@@ -317,7 +382,7 @@ describe("updateInstanceRole", () => {
 describe("probeInstanceIdentity", () => {
   it("returns rows and role names on a healthy instance", async () => {
     const { endpoint } = opsEndpointMock((body) =>
-      body.operation === "search_by_conditions"
+      body.operation === "sql"
         ? jsonResponse([HUB_ROW])
         : jsonResponse([{ role: "flair_pair_initiator" }]),
     );
@@ -330,21 +395,21 @@ describe("probeInstanceIdentity", () => {
 
   it("reports rows:null when the table read fails, and still tries the roles read", async () => {
     const { endpoint, calls } = opsEndpointMock((body) =>
-      body.operation === "search_by_conditions" ? new Response("no", { status: 500 }) : jsonResponse([]),
+      body.operation === "sql" ? new Response("no", { status: 500 }) : jsonResponse([]),
     );
 
     const probe = await probeInstanceIdentity(endpoint);
 
     expect(probe.rows).toBeNull();
     expect(probe.roleNames).toEqual([]);
-    expect(calls.map((c) => c.body.operation)).toEqual(["search_by_conditions", "list_roles"]);
+    expect(calls.map((c) => c.body.operation)).toEqual(["sql", "list_roles"]);
   });
 });
 
 describe("pruneInstanceRows", () => {
   it("deletes every row except the kept one and reports what went", async () => {
     const { endpoint, calls } = opsEndpointMock((body) =>
-      body.operation === "search_by_conditions"
+      body.operation === "sql"
         ? jsonResponse([HUB_ROW, SPOKE_ROW, SECOND_HUB_ROW])
         : jsonResponse({ deleted_hashes: body.hash_values }),
     );
@@ -367,10 +432,89 @@ describe("pruneInstanceRows", () => {
     expect(calls.some((c) => c.body.operation === "delete")).toBe(false);
   });
 
-  it("does nothing when there is at most one row", async () => {
+  it("refuses an unknown --keep id even when there is at most one row", async () => {
+    const { endpoint, calls } = opsEndpointMock(() => jsonResponse([HUB_ROW]));
+
+    await expect(pruneInstanceRows(endpoint, "flair_typo")).rejects.toThrow("names no Instance row");
+
+    expect(calls.some((c) => c.body.operation === "delete")).toBe(false);
+  });
+
+  it("does nothing when the only row IS the kept row", async () => {
     const { endpoint, calls } = opsEndpointMock(() => jsonResponse([HUB_ROW]));
     const { dropped } = await pruneInstanceRows(endpoint, HUB_ROW.id);
     expect(dropped).toEqual([]);
     expect(calls.some((c) => c.body.operation === "delete")).toBe(false);
+  });
+});
+
+// ─── the identity peers may have pinned (prune's warning) ────────────────────
+
+describe("readAdvertisedInstanceIdentity", () => {
+  it("reads GET /FederationInstance with admin auth and names the row it answers with", async () => {
+    const calls: any[] = [];
+    const fetchImpl = mock(async (url: string, init: any) => {
+      calls.push({ url, init });
+      return jsonResponse({ id: "flair_advertised", publicKey: "pinned-key", role: "hub" });
+    }) as unknown as typeof fetch;
+
+    const identity = await readAdvertisedInstanceIdentity("http://127.0.0.1:19925/", { user: "admin", pass: "pw" }, fetchImpl);
+
+    expect(identity).toEqual({ id: "flair_advertised", publicKey: "pinned-key", role: "hub" });
+    expect(calls[0].url).toBe("http://127.0.0.1:19925/FederationInstance");
+    expect(calls[0].init.headers.Authorization).toBe("Basic " + Buffer.from("admin:pw").toString("base64"));
+  });
+
+  it("throws with the status when the read fails — never reports an identity it did not read", async () => {
+    const fetchImpl = mock(async () => new Response("nope", { status: 503 })) as unknown as typeof fetch;
+    await expect(
+      readAdvertisedInstanceIdentity("http://127.0.0.1:19925", { user: "admin", pass: "pw" }, fetchImpl),
+    ).rejects.toThrow("GET /FederationInstance failed (503)");
+  });
+
+  it("returns null when the response carries no id", async () => {
+    const fetchImpl = mock(async () => jsonResponse({ role: "hub" })) as unknown as typeof fetch;
+    expect(
+      await readAdvertisedInstanceIdentity("http://127.0.0.1:19925", { user: "admin", pass: "pw" }, fetchImpl),
+    ).toBeNull();
+  });
+});
+
+describe("prunePeerWarningLines", () => {
+  const advertised = { id: SPOKE_ROW.id, publicKey: "pinned-key", role: "spoke" };
+
+  it("names the id and key peers may have pinned, and that they must re-pair when it is deleted", () => {
+    const lines = prunePeerWarningLines({ advertised, advertisedFailure: null, drop: [SPOKE_ROW, HUB_ROW] });
+    const joined = lines.join("\n");
+    expect(joined).toContain(`id=${SPOKE_ROW.id}`);
+    expect(joined).toContain("publicKey=pinned-key");
+    expect(joined).toContain("GET /FederationInstance");
+    expect(joined).toContain("must re-pair");
+  });
+
+  it("says the pinned row is kept when the deleted rows are not it", () => {
+    const lines = prunePeerWarningLines({ advertised, advertisedFailure: null, drop: [HUB_ROW] });
+    const joined = lines.join("\n");
+    expect(joined).toContain(`id=${SPOKE_ROW.id}`);
+    expect(joined).toContain("is not being deleted");
+  });
+
+  it("reports an unreadable identity as NOT determinable, and still warns", () => {
+    const lines = prunePeerWarningLines({ advertised: null, advertisedFailure: "GET /FederationInstance failed (503)", drop: [HUB_ROW] });
+    const joined = lines.join("\n");
+    expect(joined).toContain("not determinable");
+    expect(joined).toContain("503");
+    expect(joined).toContain("must re-pair");
+  });
+
+  it("says nothing when nothing is dropped", () => {
+    expect(prunePeerWarningLines({ advertised, advertisedFailure: null, drop: [] })).toEqual([]);
+  });
+});
+
+describe("formatAdvertisedIdentity", () => {
+  it("names the id and the key, and says (unknown) rather than printing a blank key", () => {
+    expect(formatAdvertisedIdentity({ id: "flair_x", publicKey: "k" })).toBe("id=flair_x publicKey=k");
+    expect(formatAdvertisedIdentity({ id: "flair_x", publicKey: null })).toBe("id=flair_x publicKey=(unknown)");
   });
 });
