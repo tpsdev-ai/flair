@@ -22,9 +22,9 @@ import { describeEmbedGpuDoctorFinding } from "../lib/embed-gpu-doctor.js";
 import { adminPassDesyncFinding, detectPersistedAdminUser } from "../lib/init-admin-pass.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
 import {
-  canonicalInstanceRole,
   instanceIdentityFindingLines,
   instanceIdentityFindings,
+  instanceIdentitySummary,
   probeInstanceIdentity,
 } from "../lib/instance-identity-row.js";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
@@ -805,7 +805,10 @@ program
     // hub is the same debris seen from the other side. Both are read from the
     // instance itself, so they need the ops API — same admin credential as the
     // audit check above. A read that does not happen is UNVERIFIED: never a
-    // pass, and never a fabricated finding.
+    // pass, and never a fabricated finding. The two reads are separate, so the
+    // states are separate too (flair#1883 round 2): rows read but list_roles
+    // unreadable leaves the pairing-role check UNVERIFIED while the row facts
+    // are still reported — a green line would claim a check that did not run.
     if (harperResponding) {
       let identityAdminPass: string | undefined;
       let identityCredIssue: string | null = null;
@@ -826,9 +829,9 @@ program
         } else {
           const identityFindings = instanceIdentityFindings({ rows: probe.rows, roleNames: probe.roleNames });
           if (identityFindings.length === 0) {
-            const canonical = canonicalInstanceRole(probe.rows);
-            const described = probe.rows.length === 0 ? "no rows" : `one row, role=${canonical ?? "(none)"}`;
-            console.log(`  ${render.icons.ok} Instance identity: ${render.wrap(render.c.dim, described)}`);
+            const summary = instanceIdentitySummary({ rows: probe.rows, roleNames: probe.roleNames });
+            const icon = summary.level === "ok" ? render.icons.ok : render.icons.warn;
+            console.log(`  ${icon} Instance identity: ${render.wrap(render.c.dim, summary.text)}`);
           } else {
             for (const finding of identityFindings) {
               const [headline, remedy] = instanceIdentityFindingLines(finding);

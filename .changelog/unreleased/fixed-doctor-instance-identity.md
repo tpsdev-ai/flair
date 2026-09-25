@@ -5,5 +5,5 @@
   instance whose identity row is not a hub.
 
   Both are read from the instance itself. If that read does not happen the check
-  reports UNVERIFIED rather than passing, and a consistent instance reports
-  nothing.
+  reports UNVERIFIED rather than passing, and a consistent instance prints one
+  green line naming its identity.
