@@ -1,8 +1,8 @@
 /**
- * `flair federation instance list` / `prune` take the admin password the way
- * every other admin command does (flair#1883, Sherlock's review of #1894):
- * `--admin-pass-file` reads it in-process from an owner-only file, so the
- * secret for a destructive remote prune need not sit in argv or the env.
+ * `flair federation instance list` / `prune` accept `--admin-pass-file`
+ * (flair#1883, Sherlock's review of #1894): it reads the admin password
+ * in-process from an owner-only file, so the secret for a destructive remote
+ * prune need not sit in argv or the env.
  *
  * Each test drives the real CLI against a stand-in ops API that records the
  * Basic credentials it was sent.
