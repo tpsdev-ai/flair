@@ -1,4 +1,11 @@
-import { decideSweepMode, INSTANCE_ROW_PRUNE_REMEDY, normalizeRole, type InstanceIdentityRow, type SweepMode } from "../src/lib/instance-identity-row.js";
+import {
+  decideSweepMode,
+  INSTANCE_ROW_PRUNE_REMEDY,
+  normalizeRole,
+  readableInstanceRows,
+  type InstanceIdentityRow,
+  type SweepMode,
+} from "../src/lib/instance-identity-row.js";
 
 const CLEANUP_INTERVAL_MS = 300_000; // 5 minutes
 
@@ -172,17 +179,18 @@ export function noteSweepMode(
 
 /**
  * All Instance rows, or null when the read failed. Null is its own answer: a
- * failed read is not a spoke, and must not be reported as one.
+ * failed read is not a spoke, and must not be reported as one. An entry with no
+ * usable id makes the whole read unreadable (the same strict reader init and the
+ * server use): a row the sweep cannot name may be a second identity, so the
+ * sweep pauses rather than treating the rest as the whole table.
  */
 async function readInstanceRowsOrNull(db: any): Promise<InstanceIdentityRow[] | null> {
   try {
-    const rows: InstanceIdentityRow[] = [];
+    const entries: unknown[] = [];
     for await (const inst of (db as any).flair.Instance.search()) {
-      if (inst && typeof inst.id === "string") {
-        rows.push({ id: inst.id, role: inst.role ?? null, createdAt: inst.createdAt ?? null });
-      }
+      entries.push(inst);
     }
-    return rows;
+    return readableInstanceRows(entries);
   } catch {
     /* table may not exist yet */
     return null;

@@ -513,6 +513,23 @@ describe("federation-cleanup sweep", () => {
       expect(text).toContain("flair federation instance prune --keep <id>");
     });
 
+    it("a hub row beside an entry with no usable id is unreadable — and no sweep (the strict reader)", async () => {
+      for (const bad of [{}, { role: "spoke" }, { id: "" }, null]) {
+        const db = createMockDb(
+          [makeToken("tok_malformed", { consumedBy: "instance-x" })],
+          [{ id: "flair_hub", role: "hub" }, bad],
+        );
+        const { fn: serverOp, captured } = recordingServerOp();
+        const { lines, log } = captureLog();
+
+        const mode = await runSweepTick({ serverOp, db: db as any, state: { last: null }, log });
+
+        expect(mode, JSON.stringify(bad)).toBe("unreadable");
+        expect(captured, JSON.stringify(bad)).toHaveLength(0);
+        expect(lines.join("\n")).toContain("could not read the Instance table");
+      }
+    });
+
     it("a failed Instance read is unreadable, not a spoke — and no sweep", async () => {
       const db = {
         flair: {
