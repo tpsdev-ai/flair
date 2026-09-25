@@ -235,10 +235,11 @@ function redactDeep(value: unknown, secret: string): unknown {
 
 /**
  * Log one line about one pairing token, or about the bootstrap user named for
- * it. A token's id IS the pairing credential, and the fields can carry it from
- * anywhere (Harper's error text, a caller-supplied consumedBy), so every
- * occurrence of `secret` in the message and in every field is cut to its
- * 8-character prefix. Every per-token line in this sweep goes through here.
+ * it: `secret` is cut to its 8-character prefix in the message and in every
+ * STRING value of the fields, at any depth. Object keys and non-string values
+ * pass through unchanged; the callers here use literal keys and string values.
+ * Hygiene, not a boundary: this log is the operator's, and the sweep touches
+ * only expired or consumed tokens, which cannot pair.
  */
 function tokenLog(
   level: "log" | "error",
