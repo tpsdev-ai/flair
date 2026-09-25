@@ -731,6 +731,34 @@ describe("release auto-tag — the write boundary (condition 10)", () => {
     expect(created).toEqual([{ ref: `refs/tags/v${VERSION}`, sha: SHA }]);
   });
 
+  test("round 3 (CodeRabbit): condition 10's READS use the read client, and the POST stays on the App token", async () => {
+    // The App holds Contents read/write + Metadata read and NO pull-requests
+    // permission, so a reviews read on the App token 403s. `writeTag` must do its
+    // reads with the read-only client the job supplies (GITHUB_TOKEN) and keep
+    // the POST + read-back on the App client.
+    const restricted = async () => {
+      throw new Error("403: Resource not accessible by integration");
+    };
+    let posted = 0;
+    const { deps } = harness({
+      api: {
+        // The "App token" client: the pull-request reads are refused…
+        listPullsForCommit: restricted,
+        listReviews: restricted,
+        // …but the ref write and its read-back work.
+        createTagRef: async () => {
+          posted += 1;
+          return { ok: true, status: 201, body: {} };
+        },
+        readTagRef: async () => (posted ? { object: { type: "commit", sha: SHA } } : null),
+      },
+    });
+    const readApi = fixtureApi(); // the read-only client the job passes as GH_READ_TOKEN
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: { ...appOptions, readApi } });
+    expect(result.verdict).toBe(WRITE_VERDICT.TAGGED);
+    expect(posted).toBe(1);
+  });
+
   test("acceptance 11: decide says TAG, then condition 10 finds a dismissed review → verdict REFUSE", async () => {
     const { deps } = harness({
       api: {
@@ -909,6 +937,47 @@ describe("release auto-tag — the nightly target", () => {
     const deps = createDeps({ root: dir });
     const target = nightlyTarget(deps, { mainRef: "main" });
     expect(target?.sha).toBe(releaseSha);
+    expect(target?.version).toBe("0.2.0");
+  });
+
+  test("round 3 (CodeRabbit): a two-parent release MERGE is preserved by the walk (--first-parent)", () => {
+    // Condition 7 accepts only the PR's `merge_commit_sha`. Default path-history
+    // simplification drops a merge whose file content matches the merged-in
+    // branch (it is TREESAME to that parent), listing the BRANCH commit instead —
+    // which condition 7 rejects, so the nightly could not tag the release.
+    const dir = scratchDir();
+    const git = (...args: string[]): string => {
+      const r = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
+      if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr?.trim() ?? r.status}`);
+      return r.stdout.trim();
+    };
+    git("init", "-q");
+    git("symbolic-ref", "HEAD", "refs/heads/main");
+    git("config", "user.email", "t@example.invalid");
+    git("config", "user.name", "t");
+    writeFileSync(join(dir, "package.json"), manifest("0.1.0"));
+    writeFileSync(join(dir, "a.txt"), "a\n");
+    git("add", "-A");
+    git("commit", "-q", "-m", "initial");
+    // The release branch bumps the version…
+    git("checkout", "-q", "-b", "release/v0.2.0");
+    writeFileSync(join(dir, "package.json"), manifest("0.2.0"));
+    git("add", "-A");
+    git("commit", "-q", "-m", "release 0.2.0");
+    const branchSha = git("rev-parse", "HEAD");
+    // …main moves on independently, then MERGES the release
+    git("checkout", "-q", "main");
+    writeFileSync(join(dir, "b.txt"), "b\n");
+    git("add", "-A");
+    git("commit", "-q", "-m", "unrelated");
+    git("merge", "-q", "--no-ff", "-m", "Merge release/v0.2.0", "release/v0.2.0");
+    const mergeSha = git("rev-parse", "HEAD");
+    const parents = git("rev-list", "--parents", "-n", "1", "HEAD").split(" ");
+    expect(parents.length, "the release landed as a real two-parent merge").toBe(3);
+    expect(mergeSha).not.toBe(branchSha);
+
+    const target = nightlyTarget(createDeps({ root: dir }), { mainRef: "main" });
+    expect(target?.sha, "the walk selects the MERGE commit, not the branch commit").toBe(mergeSha);
     expect(target?.version).toBe("0.2.0");
   });
 });

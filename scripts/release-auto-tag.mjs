@@ -328,13 +328,23 @@ export function createDeps({ overrides = {}, root = process.cwd(), log, api } = 
         return r.stdout.trim();
       },
       /**
-       * `git log --format=%H <rev> -- <path>` — the commits that touched <path>,
-       * newest first. The nightly walks THIS (round 2, item 4) rather than a
-       * fixed number of commits: only file-touching commits are listed, so the
-       * version change is found however far back it is.
+       * `git log --first-parent --format=%H <rev> -- <path>` — the commits on
+       * <rev>'s OWN chain that touched <path>, newest first. The nightly walks
+       * THIS (round 2, item 4) rather than a fixed number of commits: only
+       * file-touching commits are listed, so the version change is found however
+       * far back it is.
+       *
+       * `--first-parent` (round 3, CodeRabbit): a RELEASE MERGE commit on main
+       * must be kept. Default history simplification can drop a merge whose tree
+       * matches one parent and attribute the change to the merged-in branch
+       * commit — which `conditionReleasePr` would then reject (it is not the PR's
+       * `merge_commit_sha`), so the nightly could not tag the release.
        */
       logFileHistory(rev, path) {
-        const r = spawnSync("git", ["log", "--format=%H", rev, "--", path], { cwd: root, encoding: "utf8" });
+        const r = spawnSync("git", ["log", "--first-parent", "--format=%H", rev, "--", path], {
+          cwd: root,
+          encoding: "utf8",
+        });
         if (r.status !== 0) throw new Error(`git log ${rev} -- ${path} failed`);
         return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
       },
@@ -733,10 +743,19 @@ export async function writeTag({ sha, version, deps, options = {} }) {
     token: "",
     appId: "",
     appKeyPresent: "",
+    readApi: null,
     ...options,
   };
   const summary = [];
   const refuse = (condition, extra = {}) => ({ verdict: WRITE_VERDICT.REFUSE, condition, version, summary, ...extra });
+
+  // The re-check's READS (tag state, release intent, the PR and its reviews) go
+  // through the job's read-only GITHUB_TOKEN when the caller supplies one. The
+  // App holds Contents read/write + Metadata read and NO pull-requests
+  // permission, so a reviews read on the App token would 403 before the POST
+  // and the eligible release would never be tagged. The WRITE (the POST) and its
+  // read-back stay on the App token (`deps.api`).
+  const reads = opts.readApi ?? deps.api;
 
   // The App is installed after this lands: refuse loudly rather than POST unauthenticated.
   const missingBits = [];
@@ -749,19 +768,19 @@ export async function writeTag({ sha, version, deps, options = {} }) {
     });
   }
 
-  const step3 = await conditionTagState(deps.api, { sha, version });
+  const step3 = await conditionTagState(reads, { sha, version });
   if (!step3.ok) {
     return step3.skip
       ? { verdict: WRITE_VERDICT.SKIP, condition: "", version, reason: "already tagged at this commit", summary }
       : refuse(step3.condition, { summary: [...summary, ...(step3.summary ?? [])] });
   }
 
-  const step4 = await conditionReleaseIntent(deps.api, deps, { version, versionFile: opts.versionFile, mainRef: opts.mainRef });
+  const step4 = await conditionReleaseIntent(reads, deps, { version, versionFile: opts.versionFile, mainRef: opts.mainRef });
   if (!step4.ok) return refuse(step4.condition, { summary: [...summary, ...(step4.summary ?? [])] });
 
-  const step7 = await conditionReleasePr(deps.api, { sha, version, repo: opts.repo });
+  const step7 = await conditionReleasePr(reads, { sha, version, repo: opts.repo });
   if (!step7.ok) return refuse(step7.condition, { summary: [...summary, ...(step7.summary ?? [])] });
-  const step8 = await conditionReviews(deps.api, { pr: step7.pr, reviewers: opts.reviewers });
+  const step8 = await conditionReviews(reads, { pr: step7.pr, reviewers: opts.reviewers });
   if (!step8.ok) return refuse(step8.condition, { summary: [...summary, ...(step8.summary ?? [])] });
 
   const ref = `refs/tags/v${version}`;
@@ -967,6 +986,10 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
 
   if (command === "tag") {
     if (!args.sha || !args.version) throw new Error("tag needs --sha and --version");
+    // The re-check's READS run on the job's read-only GITHUB_TOKEN (GH_READ_TOKEN)
+    // when it is provided; the app's `token` is used only for the ref WRITE. The
+    // App holds no pull-requests permission, so its token cannot read reviews.
+    const readToken = process.env.GH_READ_TOKEN ?? "";
     const result = await writeTag({
       sha: args.sha,
       version: args.version,
@@ -979,6 +1002,7 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
         token,
         appId: process.env.RELEASE_TAG_APP_ID ?? "",
         appKeyPresent: process.env.RELEASE_TAG_APP_KEY_PRESENT ?? "",
+        readApi: readToken ? createClient({ repo, token: readToken }) : null,
       },
     });
     console.log(`${result.verdict} v${result.version} ${args.sha}${result.condition ? ` (${result.condition})` : ""}`);

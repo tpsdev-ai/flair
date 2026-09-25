@@ -123,6 +123,14 @@ describe("release-auto-tag workflow — least privilege and custody", () => {
     expect(rawKeyUsers.map((s) => s.id ?? s.name)).toEqual(["app-token", "write"]);
   });
 
+  test("round 3 (CodeRabbit): the write step READS with GITHUB_TOKEN and WRITES with the App token", () => {
+    // The App holds no pull-requests permission, so condition 10's reviews read
+    // must run on the read-only token; only the ref write uses the App token.
+    const env = step("write", "write").env ?? {};
+    expect(String(env.GH_READ_TOKEN)).toBe("${{ secrets.GITHUB_TOKEN }}");
+    expect(String(env.GH_TOKEN)).toBe("${{ steps.app-token.outputs.token }}");
+  });
+
   test("every checkout sets persist-credentials: false (round 1/2)", () => {
     const checkouts = allSteps().filter(({ step: s }) => typeof s.uses === "string" && s.uses.startsWith("actions/checkout@"));
     expect(checkouts.length, "positive control: both job checkouts found").toBe(2);

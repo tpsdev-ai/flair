@@ -340,6 +340,12 @@ jobs:
         if: always() && steps.redecide.outputs.verdict == 'TAG'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # The re-check's READS (tag state, release intent, the PR and its reviews)
+          # run on this read-only token: the App holds Contents read/write +
+          # Metadata read and NO pull-requests permission, so a reviews read on the
+          # App token would 403 before the POST. The App token is used only for
+          # the ref WRITE and its read-back.
+          GH_READ_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           TARGET_SHA: ${{ steps.redecide.outputs.sha }}
           VERSION: ${{ steps.redecide.outputs.version }}

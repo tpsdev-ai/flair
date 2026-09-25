@@ -133,6 +133,9 @@ export interface WriteOptions {
   token: string;
   appId: string;
   appKeyPresent: string;
+  /** A read-only client for the re-check's reads (the App token cannot read
+   *  pull requests). Null/absent → `deps.api` is used for the reads too. */
+  readApi?: GitHubClient | null;
 }
 
 export function compareVersions(a: string, b: string): number;
