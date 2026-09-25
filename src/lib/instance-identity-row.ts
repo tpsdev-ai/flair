@@ -293,9 +293,12 @@ export async function updateInstanceRole(endpoint: OpsEndpoint, id: string, role
 
 /** Delete one Instance row. Used only by `flair federation instance prune`. */
 export async function deleteInstanceRow(endpoint: OpsEndpoint, id: string): Promise<void> {
+  // `hash_values` is the field Harper's delete schema REQUIRES (a list); the
+  // singular `hash_value` is refused with a 400. Verified against a live Harper
+  // in test/integration/init-remote-instance-identity.test.ts.
   await opsPost(
     endpoint,
-    { operation: "delete", database: "flair", table: "Instance", hash_value: id },
+    { operation: "delete", database: "flair", table: "Instance", hash_values: [id] },
     `Instance delete for ${id}`,
   );
 }

@@ -346,17 +346,17 @@ describe("pruneInstanceRows", () => {
     const { endpoint, calls } = opsEndpointMock((body) =>
       body.operation === "search_by_conditions"
         ? jsonResponse([HUB_ROW, SPOKE_ROW, SECOND_HUB_ROW])
-        : jsonResponse({ deleted_hashes: [body.hash_value] }),
+        : jsonResponse({ deleted_hashes: body.hash_values }),
     );
 
     const { dropped } = await pruneInstanceRows(endpoint, HUB_ROW.id);
 
     expect(dropped).toEqual([SPOKE_ROW.id, SECOND_HUB_ROW.id]);
     const deletes = calls.filter((c) => c.body.operation === "delete");
-    expect(deletes.map((c) => c.body.hash_value)).toEqual([SPOKE_ROW.id, SECOND_HUB_ROW.id]);
+    expect(deletes.map((c) => c.body.hash_values)).toEqual([[SPOKE_ROW.id], [SECOND_HUB_ROW.id]]);
     expect(deletes.every((c) => c.body.table === "Instance")).toBe(true);
     // The kept row is never deleted.
-    expect(deletes.some((c) => c.body.hash_value === HUB_ROW.id)).toBe(false);
+    expect(deletes.some((c) => c.body.hash_values.includes(HUB_ROW.id))).toBe(false);
   });
 
   it("refuses an unknown --keep id and writes nothing", async () => {

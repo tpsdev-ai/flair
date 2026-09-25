@@ -318,7 +318,13 @@ export async function runCleanupTick(
             operation: "delete",
             database: "flair",
             table: "PairingToken",
-            hash_value: tokenId,
+            // `hash_values` is the field Harper's delete schema REQUIRES. The
+            // singular `hash_value` this used to send is refused with a 400 on
+            // Harper 5.2.8, so an expired token record was never actually
+            // deleted: every tick retried the same delete and logged the same
+            // error. Found by the live-Harper test
+            // (test/integration/init-remote-instance-identity.test.ts).
+            hash_values: [tokenId],
           },
           { user: null },
           false,

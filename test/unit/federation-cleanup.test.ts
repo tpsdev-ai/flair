@@ -205,7 +205,7 @@ describe("federation-cleanup sweep", () => {
       expect(captured[1].body.operation).toBe("delete");
       expect(captured[1].body.database).toBe("flair");
       expect(captured[1].body.table).toBe("PairingToken");
-      expect(captured[1].body.hash_value).toBe(tId);
+      expect(captured[1].body.hash_values).toEqual([tId]);
     });
 
     it("sweep keeps record (just deletes user) for consumed token", async () => {
@@ -347,7 +347,7 @@ describe("federation-cleanup sweep", () => {
 
       const deleteCalls = captured.filter((c) => c.body.operation === "delete");
       expect(deleteCalls).toHaveLength(1);
-      expect(deleteCalls[0].body.hash_value).toBe("tok_X2_expired__BBBB");
+      expect(deleteCalls[0].body.hash_values).toEqual(["tok_X2_expired__BBBB"]);
     });
 
     it("delete token record error does not prevent processing other tokens", async () => {
@@ -375,7 +375,7 @@ describe("federation-cleanup sweep", () => {
       expect(captured).toHaveLength(4);
       expect(captured[2].body.operation).toBe("drop_user");
       expect(captured[3].body.operation).toBe("delete");
-      expect(captured[3].body.hash_value).toBe("tok_Y2_expired");
+      expect(captured[3].body.hash_values).toEqual(["tok_Y2_expired"]);
     });
 
     it("handles search failure gracefully (returns without throwing)", async () => {
@@ -661,7 +661,7 @@ describe("federation-cleanup sweep", () => {
       await runCleanupTick({ serverOp, db: db as any, now, users: [`${BOOTSTRAP_USER_PREFIX}feedface`] });
 
       expect(captured.map((c) => c.body.operation)).toEqual(["drop_user", "delete"]);
-      expect(captured[1].body.hash_value).toBe("feedface_expired_token");
+      expect(captured[1].body.hash_values).toEqual(["feedface_expired_token"]);
     });
 
     it("never drops a non-bootstrap user, even if one is handed to it", async () => {
