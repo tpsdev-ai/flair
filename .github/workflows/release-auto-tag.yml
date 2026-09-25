@@ -28,7 +28,7 @@ name: Release auto-tag
 # are real: this repository has two workflows registered under the name `CI`,
 # and only `.github/workflows/test.yml` is in the tree.
 #
-# THE CHECKS-PENDING DEADLINE: 30 minutes. Measured 2026-09-25 with
+# THE CHECKS-PENDING DEADLINE: 30 minutes. Measured 2026-09-25 10:08Z with
 #
 #   GET /repos/tpsdev-ai/flair/actions/workflows
 #   GET /repos/tpsdev-ai/flair/actions/workflows/<id>/runs?branch=main&status=completed&per_page=30
@@ -36,8 +36,8 @@ name: Release auto-tag
 # for every workflow, taking each one's last 30 completed runs on main and its
 # duration as `updated_at - run_started_at`, with P95 as the nearest-rank 29th of
 # 30 ascending values. The slowest workflow on main is this repository's CI
-# (test.yml): P50 15.7 min, P95 22.1 min, max 22.5 min. 30 = ceil(22.1) + ~7 min
-# of margin, which covers the observed maximum with headroom. The window slides
+# (test.yml): P50 18.8 min, P95 24.4 min, max 25.2 min. 30 = ceil(24.4) + ~5 min
+# of margin, which clears the observed maximum by about 5 minutes. The window slides
 # as runs land, so these numbers move; re-measure when CI gets materially slower,
 # because too small a deadline refuses good releases.
 #
