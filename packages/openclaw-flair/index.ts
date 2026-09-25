@@ -687,6 +687,16 @@ export default {
     // is created with the record.
     const runs = new Map<string, RunRecord>();
     const loggedOnce = new Set<string>();
+    /**
+     * Round 13: set by `gateway_stop` BEFORE it aborts anything or clears the
+     * map, and never cleared here — a later registration builds a new map and
+     * its own gate. `gateway_stop` clears the map, so without this flag a late
+     * callback that finds no record is re-admitted as a NEW run and starts a
+     * write after the abort, with the sweep timer already stopped and nothing
+     * left to retire it. `captureGate` refuses while it is set, which is what
+     * makes clearing the map safe.
+     */
+    let captureStopped = false;
     const runKeyOf = (agentId: string, runId: string): string => `${agentId}\u0000${runId}`;
 
     function countWhere(p: (r: RunRecord) => boolean): number {
@@ -814,6 +824,9 @@ export default {
     /**
      * The record a callback should use, or null when it must not capture. A
      * record is ADDED only here:
+     *   0. `gateway_stop` has run: NOTHING is admitted (round 13) — the map it
+     *      cleared is gone, so a record-less callback would otherwise be
+     *      re-admitted as a new run and start a write after the abort;
      *   1. a record for the key exists: serve it (phase `live`/`ended`) or drop
      *      the callback (phase `retired`/`aborted`) with the one-time log — a
      *      retired or aborted run is NEVER re-admitted;
@@ -824,6 +837,13 @@ export default {
      *      nothing else.
      */
     function captureGate(agentId: string, runId: string | null): RunRecord | null {
+      if (captureStopped) {
+        logOnce(
+          "capture-stopped",
+          `openclaw-flair: refused capture: the gateway is stopping (gateway_stop) — no new run is admitted and no write starts for agent ${agentId}`,
+        );
+        return null;
+      }
       if (!runId) {
         logOnce(
           `no-run-id:${agentId}`,
@@ -1270,6 +1290,13 @@ export default {
         // Item 5(b): gateway_stop aborts every in-flight run and stops the
         // sweep timer (F2).
         api.on("gateway_stop", async () => {
+          // Round 13: the stop flag goes FIRST — before the aborts and before the
+          // clear. While it is set `captureGate` admits nothing, and that is
+          // what makes `runs.clear()` safe: a late callback that finds no record
+          // is refused instead of being admitted as a NEW run (the failed-run
+          // re-admission the abort tombstones exist to prevent), which would
+          // start a write after the abort with the sweep timer stopped.
+          captureStopped = true;
           try { clearInterval(sweepTimer); } catch { /* already cleared */ }
           for (const record of [...runs.values()]) {
             abortRun(record.agentId, record.runId, "gateway_stop");

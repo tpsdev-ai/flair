@@ -2029,3 +2029,37 @@ describe("slice 2 round 6 — purge before the room check, no stranded reservati
     await Promise.all([inFlight, settled]);
   });
 });
+
+// ── round 13 — a late callback during shutdown is refused, not re-admitted ────
+
+describe("slice 2 round 13 — gateway_stop refuses admission until the next registration", () => {
+  const TRIGGER13 = "remember this: the shutdown refusal target is staging";
+
+  test("round 13 (mutation: stop flag not checked): after gateway_stop a late llm_output for an aborted run admits no record and starts no write", async () => {
+    const plugin = await loadPlugin();
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const api = apiForCapture(plugin);
+    const llmOut = api._handler("llm_output");
+    // One live run with a write in flight, so the stop has a record and a
+    // controller to abort on the way out.
+    const inFlight = llmOut({ runId: "r", assistantTexts: [TRIGGER13] }, { agentId: "A" });
+    await waitFor(() => puts(calls).length === 1);
+    expect(captureInternals.runCount()).toBe(1);
+
+    await api._fire("gateway_stop", { reason: "shutdown" }, {});
+    d.release();
+    await inFlight; // the aborted write's late result is discarded
+    const before = puts(calls).length;
+
+    // The LATE callback shutdown must refuse. `gateway_stop` cleared the map, so
+    // with no stop flag this run finds no record, is re-admitted as a NEW run,
+    // and starts a write after the abort. Nothing is admitted and no write
+    // starts instead — and the gate says so, once.
+    await llmOut({ runId: "r", assistantTexts: [TRIGGER13] }, { agentId: "A" });
+    expect(puts(calls).length).toBe(before);
+    expect(captureInternals.recordOf("A", "r")).toBeUndefined();
+    expect(captureInternals.runCount()).toBe(0);
+    expect(api._warnText()).toMatch(/refused capture: the gateway is stopping/);
+  });
+});

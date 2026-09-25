@@ -136,11 +136,14 @@ are the guarantees it keeps, each with the test that proves it in
   record`.
 - **A failed or aborted run does not capture again while its record is retained**,
   for at least `tombstoneMinAgeMs`: a late callback is dropped, never re-admitted,
-  and no new write starts after the abort — one already in flight may still land —
+  and no new write starts after the abort — one already in flight may still land,
+  and once `gateway_stop` has run nothing is admitted at all —
   `F1 (round 10): a callback just before tombstoneMinAgeMs after the abort is
   still dropped`; `F1: a callback after an abort is dropped even after a later
   sweep`; `item 5 (mutation: abort dropped): a failed agent_end starts no new
-  write and discards a late result`. Past the overflow bound this is best effort:
+  write and discards a late result`; `round 13 (mutation: stop flag not checked):
+  after gateway_stop a late llm_output for an aborted run admits no record and
+  starts no write`. Past the overflow bound this is best effort:
   with the budget and its abort overflow both full, the abort of a never-admitted
   run records nothing, so that run's next callback can capture again and start a
   write — `(c) with the budget AND its abort overflow full, an abort records
