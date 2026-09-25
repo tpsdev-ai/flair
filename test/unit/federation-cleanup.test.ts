@@ -200,7 +200,9 @@ describe("federation-cleanup sweep", () => {
       const db = createMockDb(tokens);
       const { fn: serverOp, captured } = createMockServerOp([
         { ok: true, data: { message: "user dropped" } },  // drop_user
-        { ok: true, data: { message: "deleted 1 record" } },  // delete token record
+        // Harper's real delete result shape (flair#1898): a 200 names what it
+        // removed in deleted_hashes and what it skipped in skipped_hashes.
+        { ok: true, data: { deleted_hashes: [tId], skipped_hashes: [] } },  // delete token record
       ]);
 
       await runCleanupTick({ serverOp, db: db as any, now });
@@ -341,7 +343,7 @@ describe("federation-cleanup sweep", () => {
       const { fn: serverOp, captured } = createMockServerOp([
         { ok: true }, // drop tok_X1
         { ok: true }, // drop tok_X2
-        { ok: true }, // delete tok_X2
+        { ok: true, data: { deleted_hashes: ["tok_X2_expired__BBBB"] } }, // delete tok_X2
         { ok: true }, // drop tok_X4
       ]);
 
@@ -377,7 +379,7 @@ describe("federation-cleanup sweep", () => {
         { ok: true },           // drop tok_Y1
         { ok: false, error: deleteErr }, // delete tok_Y1 fails
         { ok: true },           // drop tok_Y2
-        { ok: true },           // delete tok_Y2 succeeds
+        { ok: true, data: { deleted_hashes: ["tok_Y2_expired"] } },           // delete tok_Y2 succeeds
       ]);
 
       await runCleanupTick({ serverOp, db: db as any, now });
@@ -406,6 +408,100 @@ describe("federation-cleanup sweep", () => {
       ).resolves.toBeUndefined();
 
       expect(captured).toHaveLength(0);
+    });
+  });
+
+  // ── flair#1898: the expired-token delete is verified, not trusted ──────────
+  //
+  // runCleanupTick logs through the console directly, so these cases capture it.
+  // The second argument of each sweep log line is an OBJECT, which a naive
+  // String() capture flattens to "[object Object]" — so the capture serialises
+  // it, which is what lets a case assert the token id is NAMED.
+  describe("runCleanupTick — the expired-token delete verifies its result (flair#1898)", () => {
+    const now = new Date("2026-05-05T22:00:00Z");
+    const expired = (id: string) =>
+      makeToken(id, { expiresAt: new Date("2026-05-05T21:00:00Z").toISOString() });
+
+    /** What Harper reports: a 200 names what it removed and what it skipped. */
+    const DELETE_CONFIRMED = (id: string) => ({
+      ok: true as const,
+      data: { deleted_hashes: [id], skipped_hashes: [] },
+    });
+    const DELETE_SKIPPED = (id: string) => ({
+      ok: true as const,
+      data: { deleted_hashes: [], skipped_hashes: [id] },
+    });
+    /** A 200 whose body reports no ids at all — a write that cannot be confirmed. */
+    const DELETE_NO_IDS = { ok: true as const, data: { message: "ok" } };
+
+    function captureConsole(): { lines: string[]; errors: string[]; restore: () => void } {
+      const lines: string[] = [];
+      const errors: string[] = [];
+      const fmt = (args: any[]) =>
+        args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
+      const logSpy = jest.spyOn(console, "log").mockImplementation((...a: any[]) => {
+        lines.push(fmt(a));
+      });
+      const errSpy = jest.spyOn(console, "error").mockImplementation((...a: any[]) => {
+        errors.push(fmt(a));
+      });
+      return {
+        lines,
+        errors,
+        restore: () => {
+          logSpy.mockRestore();
+          errSpy.mockRestore();
+        },
+      };
+    }
+
+    it("a confirmed delete is logged as deleted", async () => {
+      const tId = "token_verify_ok_AAAA";
+      const db = createMockDb([expired(tId)]);
+      const { fn: serverOp } = createMockServerOp([{ ok: true }, DELETE_CONFIRMED(tId)]);
+      const { lines, errors, restore } = captureConsole();
+      try {
+        await runCleanupTick({ serverOp, db: db as any, now });
+      } finally {
+        restore();
+      }
+
+      expect(lines.join("\n")).toContain("deleted expired token");
+      expect(errors.join("\n")).not.toContain("NOT deleted");
+    });
+
+    it("a delete Harper SKIPS is logged as NOT deleted, naming the token id", async () => {
+      const tId = "token_verify_skip_BBBB";
+      const db = createMockDb([expired(tId)]);
+      const { fn: serverOp } = createMockServerOp([{ ok: true }, DELETE_SKIPPED(tId)]);
+      const { lines, errors, restore } = captureConsole();
+      try {
+        await runCleanupTick({ serverOp, db: db as any, now });
+      } finally {
+        restore();
+      }
+
+      // The record is still in the table, so this tick did NOT delete it — and
+      // the log must not say it did.
+      expect(lines.join("\n")).not.toContain("deleted expired token");
+      const text = errors.join("\n");
+      expect(text).toContain("NOT deleted");
+      expect(text).toContain(tId);
+    });
+
+    it("a 200 whose body reports no deleted_hashes is not logged as deleted either", async () => {
+      const tId = "token_verify_no_ids_CCCC";
+      const db = createMockDb([expired(tId)]);
+      const { fn: serverOp } = createMockServerOp([{ ok: true }, DELETE_NO_IDS]);
+      const { lines, errors, restore } = captureConsole();
+      try {
+        await runCleanupTick({ serverOp, db: db as any, now });
+      } finally {
+        restore();
+      }
+
+      expect(lines.join("\n")).not.toContain("deleted expired token");
+      expect(errors.join("\n")).toContain("NOT deleted");
     });
   });
 
@@ -694,7 +790,10 @@ describe("federation-cleanup sweep", () => {
       const db = createMockDb([
         makeToken("feedface_expired_token", { expiresAt: new Date("2026-05-05T21:00:00Z").toISOString() }),
       ]);
-      const { fn: serverOp, captured } = createMockServerOp([{ ok: true }, { ok: true }]);
+      const { fn: serverOp, captured } = createMockServerOp([
+        { ok: true },
+        { ok: true, data: { deleted_hashes: ["feedface_expired_token"] } },
+      ]);
 
       await runCleanupTick({ serverOp, db: db as any, now, users: [`${BOOTSTRAP_USER_PREFIX}feedface`] });
 

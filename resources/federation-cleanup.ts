@@ -1,8 +1,8 @@
 import {
   decideSweepMode,
   INSTANCE_ROW_PRUNE_REMEDY,
-  normalizeRole,
   readableInstanceRows,
+  readWriteResult,
   type InstanceIdentityRow,
   type SweepMode,
 } from "../src/lib/instance-identity-row.js";
@@ -219,24 +219,6 @@ export async function listUsernamesOrNull(
 }
 
 /**
- * Look up the instance role from the Instance table.
- *
- * Retained for callers that only want the role; the sweep itself uses
- * `runSweepTick`, because a single read cannot tell a spoke from a hub whose row
- * has not been written yet. Returns null when the role is not knowable — no row,
- * more than one row, or a failed read.
- */
-async function getInstanceRole(db: any): Promise<string | null> {
-  const rows = await readInstanceRowsOrNull(db);
-  const mode = decideSweepMode(rows);
-  if (mode !== "hub") {
-    const single = rows && rows.length === 1 ? normalizeRole(rows[0].role) : "";
-    return mode === "not-hub" && single.length > 0 && single !== "hub" ? single : null;
-  }
-  return "hub";
-}
-
-/**
  * Core cleanup logic — exposed for unit testing.
  *
  * - Finds PairingToken records that are:
@@ -321,7 +303,7 @@ export async function runCleanupTick(
     if (expired && !consumed) {
       // Delete the expired, unconsumed token record itself
       try {
-        await svr(
+        const result = await svr(
           {
             operation: "delete",
             database: "flair",
@@ -337,10 +319,25 @@ export async function runCleanupTick(
           { user: null },
           false,
         );
-        console.log(
-          "[federation-cleanup] deleted expired token",
-          { tid: tokenId.slice(0, 8) },
-        );
+        // Verified against the RESULT, the way `deleteInstanceRow` and
+        // `updateInstanceRole` verify their writes (flair#1898): Harper answers a
+        // delete with 200 even when it removes nothing, reporting what it removed
+        // in `deleted_hashes` and naming a record it did NOT remove in
+        // `skipped_hashes`. Status alone would let a skipped record be logged as
+        // deleted — a cleanup that did not happen. A skipped record is left in the
+        // table, so the next tick sees it as a candidate again and retries it.
+        const outcome = readWriteResult(result, "deleted_hashes");
+        if (outcome.changed !== null && outcome.changed.includes(tokenId)) {
+          console.log(
+            "[federation-cleanup] deleted expired token",
+            { tid: tokenId.slice(0, 8) },
+          );
+        } else {
+          console.error(
+            "[federation-cleanup] expired token NOT deleted — Harper kept the record, so it is still in the table and the next tick will retry it",
+            { id: tokenId, skipped: outcome.skipped },
+          );
+        }
       } catch (err: any) {
         console.error(
           "[federation-cleanup] delete token error",

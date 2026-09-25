@@ -29,6 +29,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+// The CLI this file drives is BUILT here (flair#1898): `bun run build` does not
+// emit dist/cli.js — `bun run build:cli` does — so a file that assumes a
+// pre-built dist/cli.js fails as though the product were broken. `ensureCliBuild`
+// is the same helper the CLI-spawning unit files use (`test/unit/workspace-set.test.ts`
+// and its siblings): one bounded build per process, skipped when dist/cli.js is
+// already fresh.
+import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { reconcileFederationInstanceViaOpsApi } from "../../src/cli";
 import {
   INSTANCE_ROW_PRUNE_COMMAND,
@@ -41,7 +48,12 @@ import {
 
 let harper: HarperInstance;
 let endpoint: OpsEndpoint;
-/** The shipped CLI (`dist/cli.js`), so the prune's printed output is the real one. */
+/**
+ * The shipped CLI (`dist/cli.js`), so the prune's printed output is the real one.
+ * Built by this file's own `beforeAll` (`ensureCliBuild`) — the file is
+ * self-sufficient and does not depend on a build a prior test lane happened to
+ * run.
+ */
 const CLI = join(process.cwd(), "dist", "cli.js");
 // The CLI child's OWN deadline (the spawn's `timeout:`), so a hung child is
 // killed and reported BY NAME, with its output — not as a bare bun "timed out
@@ -170,6 +182,11 @@ async function runCli(args: string[], home: string): Promise<{ code: number | nu
 
 describe("init --remote identity reconcile (live Harper)", () => {
   beforeAll(async () => {
+    // dist/cli.js is a build INPUT of this file's own cases (the prune cases spawn
+    // it), so build it here rather than inheriting a dist/ that `bun run build`
+    // alone does not produce. The build budget is the helper's own (90 s), inside
+    // this hook's 240 s.
+    ensureCliBuild();
     harper = await startHarper();
     endpoint = {
       opsUrl: harper.opsURL,
