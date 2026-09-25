@@ -201,7 +201,7 @@ export function noteFederationMergedMemory(
  * saw the table. `readableInstanceRows` throws instead, which the callers map to
  * 5xx and no write.
  */
-async function readAllInstanceRows(): Promise<InstanceIdentityRow[]> {
+export async function readAllInstanceRows(): Promise<InstanceIdentityRow[]> {
   const raw: unknown[] = [];
   for await (const i of (databases as any).flair.Instance.search()) raw.push(i);
   // Throws on the first entry without a usable id — before anything is
