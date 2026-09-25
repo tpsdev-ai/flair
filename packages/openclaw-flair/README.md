@@ -124,9 +124,9 @@ fires).
 What this slice guarantees:
 
 - **Per-run state.** Capture state is keyed by agent **and run id**, never by
-  agent alone — two concurrent runs of one agent do not share a budget or a
-  dedup set. A callback whose hook carries no run id is refused with a one-time
-  log.
+  agent alone — two concurrent runs of one agent do not share their per-run
+  budget or their dedup set. A callback whose hook carries no run id is refused
+  with a one-time log.
 - **Reserve before the write.** The excerpt and the cap slot
   (`autoCaptureMaxPerSession`) are reserved synchronously, before any `await`, so
   a concurrent callback or the `agent_end` rescan dedups against the reservation
@@ -140,22 +140,27 @@ What this slice guarantees:
   phase is `live`, `ended`, `aborted` or `retired`, and the capacity budget IS
   the number of records. A successful `agent_end` moves the run to `ended` but
   keeps its record (the host can dispatch `agent_end` before `llm_output` for
-  the same run); it retires once the run has ended with no in-flight writes and
-  30 s have passed since `agent_end`, and a run that has seen no `agent_end`
-  retires after 30 min idle. Retiring or aborting changes the phase IN PLACE —
-  it never adds a record — and a late callback for a `retired`/`aborted` run is
-  dropped with a one-time log naming the run, so it cannot capture again while
-  its record is retained. The record is retained until the removal rule below
-  lets it go — retired or aborted, nothing in flight, aged past 1 h — and only
-  then is the run id free again for a later callback to be admitted, the same
-  window the Abort paragraph leaves open.
-- **Bounded bookkeeping, one removal rule.** A record leaves the map only when
-  it is retired or aborted, has no write in flight, and has aged past 1 h — one
-  predicate, used by the sweep and by admission alike. Admission removes what
-  qualifies, then admits only below the cap (default 10,000); otherwise it
-  refuses (`capture-capacity: full`, logged once) and changes nothing else, and
-  the abort overflow is never counted as room. One sweep evaluates every record —
-  on each callback and on an unref'd interval timer — and the one-time-log set is
+  the same run); a run whose callbacks were never admitted has no record, so
+  there is nothing to move — admission below. It retires once the run has ended
+  with no in-flight writes and 30 s have passed since `agent_end`, and a run
+  that has seen no `agent_end` retires after 30 min idle. Retiring a record, and
+  aborting a run that already has one, change the phase IN PLACE — neither adds
+  an entry; only the abort of a run that has NO record adds one, in the abort
+  overflow below. A late callback for a `retired`/`aborted` run is dropped with
+  a one-time log naming the run, so it cannot capture again while its record is
+  retained. The record is retained until the removal rule below lets it go —
+  retired or aborted, nothing in flight, aged past 1 h — and only then is the
+  run id free again for a later callback to be admitted, the same window the
+  Abort paragraph leaves open; nothing else frees the id first, short of a
+  `gateway_stop`, which drops the whole map below.
+- **Bounded bookkeeping, one removal rule.** Short of a `gateway_stop`
+  (below), a record leaves the map only when it is retired or aborted, has no
+  write in flight, and has aged past 1 h — one predicate, used by the sweep and
+  by admission alike. Admission removes what qualifies, then admits only below
+  the cap (default 10,000); otherwise it refuses (`capture-capacity: full`,
+  logged once) and changes nothing else, and the abort overflow is never counted
+  as room. One sweep evaluates every record — on each callback that reaches the
+  capture gate, and on an unref'd interval timer — and the one-time-log set is
   capped; `gateway_stop` clears the timer, aborts every run's controller and
   drops the map.
 - **Abort.** The plugin owns one `AbortController` per run. A run is aborted by
@@ -163,17 +168,19 @@ What this slice guarantees:
   by `model_call_ended` with `failureKind: "aborted"`. On abort the run's signal
   reaches every in-flight capture fetch, a result that resolves after the abort
   is discarded, and reservations are released. Aborting a run that was never
-  admitted still records it as aborted, so its next callback is dropped instead
-  of admitted; that path may exceed the budget by at most `abortOverflowCap`
-  (1,000) records, and it purges the records that already qualify for removal
-  before it asks for room — the same rule as admission. The abort is left
-  unrecorded only when the map is still at `capacityCap + abortOverflowCap`
-  AFTER that purge, i.e. every record is young or has a write in flight; in that
-  case a later callback for the run can be admitted only once more than
-  `abortOverflowCap` records age out, so it must arrive later than
-  `tombstoneMinAgeMs` into a flood of that size. That narrow condition IS the
-  residual: there is no unconditional guarantee that no capture write starts
-  after an abort.
+  admitted records it as aborted — so its next callback is dropped instead of
+  admitted — UNLESS the map is still at `capacityCap + abortOverflowCap` after
+  the purge the abort path itself performs; the abort is then left unrecorded
+  (logged once) and that run's later callback can be admitted. The recording
+  path may exceed the budget by at most `abortOverflowCap` (1,000) records, and
+  it purges the records that already qualify for removal before it asks for
+  room — the same rule as admission. The map is still that full only when
+  nothing in it is removable yet: every record is live or ended, or has a write
+  in flight, or has not aged past `tombstoneMinAgeMs`. In that case a later
+  callback for the run can be admitted only once more than `abortOverflowCap`
+  records age out, so it must arrive later than `tombstoneMinAgeMs` into a flood
+  of that size. That narrow condition IS the residual: there is no
+  unconditional guarantee that no capture write starts after an abort.
   Aborting cannot **undo** a write Flair has already received — a request already
   in flight may still land. A successful `agent_end` never aborts.
 
