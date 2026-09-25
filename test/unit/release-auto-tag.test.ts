@@ -19,7 +19,7 @@
  * release-auto-tag-workflow.test.ts, where the workflow is parsed).
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -312,26 +312,89 @@ describe("release auto-tag — conditions 3 and 4", () => {
   });
 });
 
-// ── condition 5 (ancestry) — the first invariant ────────────────────────────────
+// ── conditions 5 and 6 — the candidate is read as DATA ──────────────────────────
 
-describe("release auto-tag — condition 5 and the script-execution invariant", () => {
-  test("invariant: a <sha> that is not a main ancestor never reaches the script execution", async () => {
-    const { deps, versionSyncCalls } = harness({ ancestor: false });
-    const result = await decide({ sha: SHA, deps });
-    expect(result.verdict).toBe(VERDICT.REFUSE);
-    expect(result.condition).toBe(CONDITION.NOT_MAIN_ANCESTOR);
-    // THE INVARIANT: condition 6 executes <sha>'s own merged code, so it must not
-    // run for a commit that is not main's. A refactor that reorders 5 and 6 turns
-    // this red.
-    expect(versionSyncCalls.length).toBe(0);
-  });
-
+describe("release auto-tag — conditions 5 and 6 (the candidate is read as data)", () => {
   test("condition 6: a failing version sync REFUSEs version-sync", async () => {
     const { deps, versionSyncCalls } = harness({ versionSyncOk: false });
     const result = await decide({ sha: SHA, deps });
     expect(result.verdict).toBe(VERDICT.REFUSE);
     expect(result.condition).toBe(CONDITION.VERSION_SYNC);
     expect(versionSyncCalls).toEqual([`${SHA}@${VERSION}`]);
+  });
+
+  test("round 3: condition 6 executes NO file from the candidate — a candidate whose checker would write GITHUB_OUTPUT changes nothing", () => {
+    // A real repo. The DEFAULT branch's checker (at HEAD) is benign; the CANDIDATE
+    // commit carries a MALICIOUS scripts/check-version-sync.mjs plus agreeing
+    // version files. Condition 6 must materialise the candidate's version-bearing
+    // files as data and run HEAD's checker — so the candidate's script never runs
+    // and can neither forge this step's output nor touch the workspace.
+    const repo = scratchDir();
+    const git = (...args: string[]): string => {
+      const r = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+      if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr?.trim() ?? r.status}`);
+      return r.stdout.trim();
+    };
+    git("init", "-q");
+    git("symbolic-ref", "HEAD", "refs/heads/main");
+    git("config", "user.email", "t@example.invalid");
+    git("config", "user.name", "t");
+    mkdirSync(join(repo, "scripts"), { recursive: true });
+    // The DEFAULT branch's checker: a benign stub implementing the tiny
+    // `--list` / `--root <dir> <version>` protocol the tagger drives.
+    writeFileSync(
+      join(repo, "scripts", "check-version-sync.mjs"),
+      [
+        'import { readFileSync } from "node:fs";',
+        'import { join } from "node:path";',
+        "const argv = process.argv.slice(2);",
+        'if (argv.includes("--list")) { console.log("package.json"); process.exit(0); }',
+        'const root = argv[argv.indexOf("--root") + 1];',
+        "const version = argv[argv.length - 1];",
+        'const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));',
+        "process.exit(pkg.version === version ? 0 : 1);",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(join(repo, "package.json"), manifest(VERSION));
+    git("add", "-A");
+    git("commit", "-q", "-m", "default branch");
+
+    // The candidate commit: a checker that WOULD announce itself on stdout and
+    // forge the output if anything ever executed it. Its own version files agree.
+    git("checkout", "-q", "-b", "candidate");
+    writeFileSync(
+      join(repo, "scripts", "check-version-sync.mjs"),
+      [
+        'import { appendFileSync } from "node:fs";',
+        'if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, "verdict=TAG\\n");',
+        'console.log("MALICIOUS-CHECKER-RAN");',
+        "process.exit(0);",
+        "",
+      ].join("\n"),
+    );
+    git("add", "-A");
+    git("commit", "-q", "-m", "candidate");
+    const candidateSha = git("rev-parse", "HEAD");
+    git("checkout", "-q", "main");
+
+    const ghOutput = join(repo, "gh-output.txt");
+    writeFileSync(ghOutput, "");
+    const prev = process.env.GITHUB_OUTPUT;
+    process.env.GITHUB_OUTPUT = ghOutput;
+    try {
+      const result = createDeps({ root: repo }).runVersionSync(candidateSha, VERSION);
+      expect(result.ok, "the candidate's version-bearing files agree").toBe(true);
+      // The runtime-independent proof: the candidate's script never runs, so its
+      // stdout banner never appears (the default branch's checker's output does).
+      expect(result.output, "the candidate's checker did not execute").not.toContain("MALICIOUS-CHECKER-RAN");
+      // And it cannot have touched the step output it would have forged.
+      expect(readFileSync(ghOutput, "utf8"), "GITHUB_OUTPUT is untouched — the candidate's script never ran").toBe("");
+      expect(existsSync(join(repo, "CANDIDATE-EXECUTED")), "no side effect in the workspace").toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.GITHUB_OUTPUT;
+      else process.env.GITHUB_OUTPUT = prev;
+    }
   });
 });
 

@@ -80,9 +80,10 @@ describe("release-auto-tag workflow — least privilege and custody", () => {
     expect(wf.permissions).toEqual({});
     expect(Object.keys(job("decide").permissions ?? {}).sort()).toEqual(["actions", "checks", "contents", "pull-requests"]);
     for (const grant of Object.values(job("decide").permissions ?? {})) expect(grant).toBe("read");
-    // `write` reads the default branch's tree and condition 10's reviews; the ref
-    // write itself is the App token, not GITHUB_TOKEN.
-    expect(Object.keys(job("write").permissions ?? {}).sort()).toEqual(["contents", "pull-requests"]);
+    // `write` re-runs conditions 1-9 (it trusts nothing from `decide`), so it
+    // needs the SAME read grants as `decide`; the ref write itself is the App
+    // token, not GITHUB_TOKEN.
+    expect(Object.keys(job("write").permissions ?? {}).sort()).toEqual(["actions", "checks", "contents", "pull-requests"]);
     for (const grant of Object.values(job("write").permissions ?? {})) expect(grant).toBe("read");
     expect(job("report").permissions).toEqual({ issues: "write" });
   });
@@ -269,14 +270,45 @@ describe("release-auto-tag workflow — the reporter (acceptance 9, YAML half)",
     expect(decide.verdict).toBe("${{ steps.decide.outputs.verdict }}");
     expect(decide.condition).toBe("${{ steps.decide.outputs.condition }}");
     expect(decide.version).toBe("${{ steps.decide.outputs.version }}");
-    // The EFFECTIVE commit, so `write` tags what `decide` actually decided on
-    // (for the nightly, the commit the walk found — not the empty target output).
+    // The commit `decide` decided on — INFORMATIONAL: `write` re-derives its own
+    // (round 3), so this output gates nothing.
     expect(decide.sha).toBe("${{ steps.decide.outputs.sha }}");
 
     const write = job("write").outputs ?? {};
-    expect(write.verdict).toBe("${{ steps.write.outputs.verdict }}");
-    expect(write.condition).toBe("${{ steps.write.outputs.condition }}");
-    expect(write.version).toBe("${{ steps.write.outputs.version }}");
+    // `write`'s own verdict wins; its re-derivation is the fallback.
+    expect(write.verdict).toBe("${{ steps.write.outputs.verdict || steps.redecide.outputs.verdict }}");
+    expect(write.condition).toBe("${{ steps.write.outputs.condition || steps.redecide.outputs.condition }}");
+    expect(write.version).toBe("${{ steps.write.outputs.version || steps.redecide.outputs.version }}");
+  });
+
+  test("round 3: `write` trusts nothing from `decide` — it binds its own target and re-derives the decision", () => {
+    const steps = job("write").steps ?? [];
+    const indexOf = (fn: (s: Step) => boolean) => steps.findIndex(fn);
+    const bindIndex = indexOf((s) => s.id === "bind");
+    const redecideIndex = indexOf((s) => s.id === "redecide");
+    const mintIndex = indexOf((s) => s.id === "app-token");
+    expect(bindIndex).toBeGreaterThan(-1);
+    expect(redecideIndex).toBeGreaterThan(bindIndex);
+    expect(mintIndex).toBeGreaterThan(redecideIndex);
+
+    // It binds the target from the EVENT, never from `needs.decide.outputs`.
+    const bind = step("write", "bind");
+    expect(String(bind.env?.WORKFLOW_RUN_SHA)).toBe("${{ github.event.workflow_run.head_sha }}");
+    expect(JSON.stringify(bind)).not.toContain("needs.decide.outputs");
+
+    // It re-runs the WHOLE decision (conditions 1-9) for its own bound commit.
+    expect(step("write", "redecide").run).toContain("release-auto-tag.mjs");
+    expect(step("write", "redecide").run).toContain("--nightly");
+    expect(String(step("write", "redecide").env?.TARGET_SHA)).toBe("${{ steps.bind.outputs.sha }}");
+
+    // The mint and the POST happen only after the re-derivation said TAG, and the
+    // sha/version they use are the re-derivation's own — never decide's.
+    expect(String(step("write", "app-token").if)).toContain("steps.redecide.outputs.verdict == 'TAG'");
+    expect(String(step("write", "write").if)).toContain("steps.redecide.outputs.verdict == 'TAG'");
+    expect(String(step("write", "write").env?.TARGET_SHA)).toBe("${{ steps.redecide.outputs.sha }}");
+    expect(String(step("write", "write").env?.VERSION)).toBe("${{ steps.redecide.outputs.version }}");
+    // decide's outputs reach the write job's START GATE only.
+    expect(job("write").if).toContain("needs.decide.outputs.verdict == 'TAG'");
   });
 });
 
@@ -321,14 +353,16 @@ describe("release-auto-tag workflow — credential isolation and the reporter's 
     expect((job("decide").steps ?? []).some((s) => s.id === "app-token")).toBe(false);
   });
 
-  test("the write job re-reads main before condition 10, so a release that merged during the wait is seen", () => {
+  test("the write job re-reads main before its re-derivation and the POST, so a release that merged during the wait is seen", () => {
     const steps = job("write").steps ?? [];
     const indexOf = (fn: (s: Step) => boolean) => steps.findIndex(fn);
     const fetchIndex = indexOf((s) => (s.run ?? "").includes("git fetch") && (s.run ?? "").includes("refs/heads/main"));
+    const redecideIndex = indexOf((s) => s.id === "redecide");
     const mintIndex = indexOf((s) => s.id === "app-token");
     const writeIndex = indexOf((s) => s.id === "write");
     expect(fetchIndex).toBeGreaterThan(-1);
-    expect(fetchIndex).toBeLessThan(writeIndex);
+    expect(fetchIndex).toBeLessThan(redecideIndex);
+    expect(redecideIndex).toBeLessThan(mintIndex);
     expect(mintIndex).toBeLessThan(writeIndex);
     expect(step("write", "write").run).toContain("release-auto-tag.mjs tag");
   });

@@ -41,21 +41,28 @@ name: Release auto-tag
 # gets materially slower: too small a deadline refuses good releases.
 #
 # INVARIANTS (all asserted by test/unit/release-auto-tag-workflow.test.ts):
-#   - TWO JOBS, NOT ONE (round 2, item 1). `decide` (conditions 1-9) is the only
-#     place candidate code runs, and it holds NO App secret at all: no
-#     environment, and `GH_TOKEN` is the read-only GITHUB_TOKEN. `write` is a
-#     SEPARATE job on a fresh runner with a fresh default-branch checkout; only
-#     it references the `release-tag` environment and mints the App token. The
-#     JOB BOUNDARY, not a tree restore, is the credential isolation: a merged
-#     commit can plant a git hook or re-point `.git`, and restoring the working
-#     tree never covered that;
+#   - no candidate code runs at all (round 3). Condition 6 reads the candidate's
+#     version-bearing files as DATA (`git show <sha>:<path>`) and checks them
+#     with the DEFAULT branch's `scripts/check-version-sync.mjs`; a candidate's
+#     own script is never executed, in any job, so it cannot forge a verdict or
+#     a sha. `decide` holds NO App secret (no environment; `GH_TOKEN` is the
+#     read-only GITHUB_TOKEN); `write` is a SEPARATE job on a fresh runner with a
+#     fresh default-branch checkout, and only it references the `release-tag`
+#     environment. The JOB BOUNDARY, not a tree restore, is the credential
+#     isolation: a merged commit can plant a git hook or re-point `.git`, and
+#     restoring the working tree never covered that;
+#   - `write` TRUSTS NOTHING FROM `decide` (round 3). It binds its target commit
+#     independently (the event's `workflow_run.head_sha`, or its own nightly
+#     recomputation) and RE-RUNS conditions 1-9 for that commit before it mints.
+#     `decide`'s outputs only gate whether `write` starts and feed the report;
+#     they never choose what gets tagged;
 #   - every checkout sets `persist-credentials: false`, so no token is left in
 #     `.git/config` for a later git command to pick up;
 #   - condition 10 re-checks only conditions 3, 4 and 8. Ancestry, version sync
-#     and PR identity are stable, and re-running condition 6 would execute the
-#     release commit's code next to the App token;
+#     and PR identity are stable, and re-running condition 6 is unnecessary now
+#     that it executes nothing;
 #   - the reporter reads `needs.write.outputs` BEFORE `needs.decide.outputs`, so
-#     a REFUSE found at the write boundary (condition 10) reaches it.
+#     a REFUSE found in `write` (its own re-derivation or condition 10) reaches it.
 #
 # Token custody: `permissions: {}` here and per-job grants below. GITHUB_TOKEN
 # reads only (contents, pull-requests, checks, actions). The App token is used
@@ -118,14 +125,15 @@ jobs:
       verdict: ${{ steps.decide.outputs.verdict }}
       condition: ${{ steps.decide.outputs.condition }}
       version: ${{ steps.decide.outputs.version }}
-      # The EFFECTIVE commit decided on: for the nightly, the commit the walk
-      # found (the `target` step's output is empty for a schedule run). `write`
-      # tags exactly this commit.
+      # The commit `decide` decided on — INFORMATIONAL: it gates nothing. `write`
+      # binds its own target and re-derives its own verdict (round 3), so a
+      # forged value here changes nothing.
       sha: ${{ steps.decide.outputs.sha }}
     steps:
       - name: Check out the default branch's tree
         # The decision script always runs from the default branch's tree. <sha> is
-        # consulted only as data, with one deliberate exception (condition 6).
+        # consulted only as DATA: condition 6 materialises its version-bearing
+        # files with `git show` and checks them with THIS tree's checker.
         # `persist-credentials: false`: the token must not survive in .git/config.
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
@@ -224,22 +232,29 @@ jobs:
   write:
     name: Write the tag
     needs: decide
-    # Only when the decision was TAG (a REFUSE/SKIP never reaches the mint), and
-    # never on a dry dispatch.
+    # `decide`'s verdict is ONLY the start gate: a REFUSE/SKIP never reaches this
+    # job, and a dry dispatch never does. Everything `write` ACTS on below it
+    # re-derives itself, so a forged `decide` output cannot choose what is tagged.
     if: needs.decide.outputs.verdict == 'TAG' && github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     # The ONLY job that references the release-tag environment: the App id
     # (environment variable) and private key (environment secret) live there, with
-    # a deployment branch policy of main only and no required reviewers. This job
-    # runs NO candidate code: condition 6 ran in `decide`, on a different runner.
+    # a deployment branch policy of main only and no required reviewers.
     environment: release-tag
+    # The same READ-ONLY grants as `decide`: this job re-runs conditions 1-9 (it
+    # trusts nothing from decide), so it needs the same reads. The ref WRITE is
+    # the App token, minted below only after the re-derivation says TAG.
     permissions:
-      contents: read # the default-branch checkout; the git fetch of main
+      contents: read # the checkout, git fetch, git/ref, git/tags, matching-refs
       pull-requests: read # condition 10's review re-check (pulls/<n>/reviews)
+      checks: read # condition 9's re-derivation (commits/<sha>/check-runs)
+      actions: read # the CI check-suite lookup for condition 9
     outputs:
-      verdict: ${{ steps.write.outputs.verdict }}
-      condition: ${{ steps.write.outputs.condition }}
-      version: ${{ steps.write.outputs.version }}
+      # `write`'s own verdict wins; the re-derivation is the fallback, so a
+      # REFUSE it finds reaches the reporter.
+      verdict: ${{ steps.write.outputs.verdict || steps.redecide.outputs.verdict }}
+      condition: ${{ steps.write.outputs.condition || steps.redecide.outputs.condition }}
+      version: ${{ steps.write.outputs.version || steps.redecide.outputs.version }}
     steps:
       - name: Check out the default branch's tree
         # A FRESH workspace, and the default branch's tree: the credential
@@ -251,17 +266,63 @@ jobs:
           persist-credentials: false
 
       - name: Fetch the real main
-        # Condition 10 re-checks release intent against origin/main, and the
+        # The re-derivation re-checks release intent against origin/main, and the
         # check-run wait in `decide` can be half an hour long: re-read main here,
         # or a release that merged during the wait is tagged anyway.
         run: git fetch --no-tags --prune origin +refs/heads/main:refs/remotes/origin/main
 
+      - name: Bind the target commit INDEPENDENTLY
+        # Round 3: NOT from decide's outputs. The fast path's target is the
+        # triggering run's own head_sha; a schedule run has none, so the script
+        # recomputes the nightly target itself below.
+        id: bind
+        env:
+          EVENT: ${{ github.event_name }}
+          WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          sha=""
+          if [ "$EVENT" = "workflow_run" ]; then sha="$WORKFLOW_RUN_SHA"; fi
+          if [ -n "$sha" ] && ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "REFUSING: '${sha}' is not a full 40-character commit sha" >&2
+            exit 1
+          fi
+          printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Re-derive the decision (conditions 1-9) for the bound commit
+        # The forge-proof half: this job trusts NOTHING from `decide`. Same
+        # decision, its OWN target, the read-only GITHUB_TOKEN, and no App secret
+        # needed. Only a TAG here lets the mint and the POST run.
+        id: redecide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TARGET_SHA: ${{ steps.bind.outputs.sha }}
+          SELF_RUN_ID: ${{ github.run_id }}
+          TRIGGER_CHECK_SUITE_ID: ${{ github.event.workflow_run.check_suite_id }}
+        run: |
+          set -euo pipefail
+          args=(decide
+            --repo "$REPO"
+            --self-run-id "$SELF_RUN_ID"
+            --version-file package.json
+            --main-ref origin/main
+            --output "$GITHUB_OUTPUT"
+            --advisory-allowlist .github/release-auto-tag-advisories.json
+            --deadline-minutes 30
+            --workflow-path .github/workflows/test.yml
+            --workflow-name CI)
+          if [ -n "$TARGET_SHA" ]; then args+=(--sha "$TARGET_SHA"); else args+=(--nightly); fi
+          if [ -n "$TRIGGER_CHECK_SUITE_ID" ]; then args+=(--trigger-check-suite-id "$TRIGGER_CHECK_SUITE_ID"); fi
+          node scripts/release-auto-tag.mjs "${args[@]}"
+
       - name: Mint the release-tag App token
-        # Minted on a runner that never ran candidate code, and skipped on a dry
-        # run. If the App is not configured yet (it is installed after this lands)
-        # this step fails; the write step still runs and REFUSES
-        # `app-not-configured`.
+        # Minted only AFTER this job's own re-derivation said TAG for its OWN
+        # bound commit — and on a runner that runs no candidate code. If the App
+        # is not configured yet (it is installed after this lands) this step
+        # fails; the tag step still runs and REFUSES `app-not-configured`.
         id: app-token
+        if: steps.redecide.outputs.verdict == 'TAG'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         with:
           app-id: ${{ vars.RELEASE_TAG_APP_ID }}
@@ -271,16 +332,17 @@ jobs:
           permission-contents: write
 
       - name: Tag (condition 10 re-check, then the POST)
-        # `always()` so this runs even when the mint step failed (unconfigured
-        # App) and can REFUSE `app-not-configured`. Condition 10 re-runs 3, 4 and 8
-        # only; the POST is the race-breaker.
+        # `always()` so this runs even when the mint failed (unconfigured App) and
+        # can REFUSE `app-not-configured` — but only when the re-derivation said
+        # TAG. Condition 10 re-runs 3, 4 and 8; the POST is the race-breaker. The
+        # sha and version are THIS job's own, never decide's.
         id: write
-        if: always()
+        if: always() && steps.redecide.outputs.verdict == 'TAG'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}
-          TARGET_SHA: ${{ needs.decide.outputs.sha }}
-          VERSION: ${{ needs.decide.outputs.version }}
+          TARGET_SHA: ${{ steps.redecide.outputs.sha }}
+          VERSION: ${{ steps.redecide.outputs.version }}
           RELEASE_TAG_APP_ID: ${{ vars.RELEASE_TAG_APP_ID }}
           RELEASE_TAG_APP_KEY_PRESENT: ${{ secrets.RELEASE_TAG_APP_PRIVATE_KEY != '' }}
         run: |
@@ -293,13 +355,13 @@ jobs:
             --output "$GITHUB_OUTPUT"
 
       - name: Enforce (the write job goes red on REFUSE)
-        # A REFUSE found at the write boundary (condition 10) must be red too, and
-        # it reaches the reporter through this job's outputs.
-        if: always() && steps.write.outputs.verdict == 'REFUSE'
+        # A REFUSE found by this job's re-derivation OR at the write boundary must
+        # be red, and it reaches the reporter through this job's outputs.
+        if: always() && (steps.write.outputs.verdict == 'REFUSE' || steps.redecide.outputs.verdict == 'REFUSE')
         env:
-          VERDICT: ${{ steps.write.outputs.verdict }}
-          CONDITION: ${{ steps.write.outputs.condition }}
-          VERSION: ${{ steps.write.outputs.version }}
+          VERDICT: ${{ steps.write.outputs.verdict || steps.redecide.outputs.verdict }}
+          CONDITION: ${{ steps.write.outputs.condition || steps.redecide.outputs.condition }}
+          VERSION: ${{ steps.write.outputs.version || steps.redecide.outputs.version }}
         run: |
           set -euo pipefail
           echo "release-auto-tag REFUSE: condition=${CONDITION} version=${VERSION} verdict=${VERDICT}" >&2

@@ -18,13 +18,22 @@
  * produced by a step that SUCCEEDED and a dependent job can read it. Condition
  * ids come from the fixed enum below, never free text; SKIP's reason is prose.
  *
- * TWO JOBS, NOT ONE (round 2, item 1). `decide` (conditions 1-9) is the only
- * place candidate code runs; `tag` runs in a SEPARATE job on a fresh runner with
- * a fresh default-branch checkout, holding the App credential. The job boundary —
- * not a tree restore — is what isolates the credential from candidate code: a
- * merged commit can plant a git hook or re-point `.git`, and restoring the
- * working tree never covered that. Every checkout sets `persist-credentials:
- * false`.
+ * TWO JOBS, NOT ONE (round 2, item 1). `decide` (conditions 1-9) and `write`
+ * run in SEPARATE jobs; `write` gets a fresh runner with a fresh
+ * default-branch checkout and is the only place the App credential exists. The
+ * job boundary — not a tree restore — is what isolates the credential: a merged
+ * commit can plant a git hook or re-point `.git`, and restoring the working tree
+ * never covered that. Every checkout sets `persist-credentials: false`.
+ *
+ * NO CANDIDATE CODE RUNS AT ALL, AND `write` TRUSTS NOTHING FROM `decide`
+ * (round 3, per the #1890 amendment). Condition 6 reads the candidate as DATA
+ * (`git show <sha>:<path>` into a scratch dir, then the DEFAULT branch's
+ * `scripts/check-version-sync.mjs`), so a candidate's own script is never
+ * executed and cannot forge a verdict or a sha. And `write` binds its target
+ * commit INDEPENDENTLY (the triggering event's `workflow_run.head_sha`, or its
+ * own nightly recomputation) and re-runs conditions 1-9 for that commit before
+ * it mints — `decide`'s outputs only gate whether `write` starts and feed the
+ * report; they never choose what gets tagged.
  *
  * `tag` is the write boundary: it re-runs conditions 3, 4 and 8 (tag state,
  * release intent, both reviews) immediately before the POST, then creates
@@ -58,10 +67,10 @@
  * Environment: GH_TOKEN (read) for `decide`; the App token for `tag`.
  */
 
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 // ── the fixed enum ─────────────────────────────────────────────────────────────
@@ -331,27 +340,58 @@ export function createDeps({ overrides = {}, root = process.cwd(), log, api } = 
       },
     },
     /**
-     * Condition 6: run `<sha>`'s OWN version-sync script, from a detached
-     * worktree of `<sha>`. This is the one place `<sha>`'s code executes, and it
-     * runs in the decide step — never next to the App token. Injectable so a test
-     * can assert it is NOT reached for a non-ancestor.
+     * Condition 6: verify `<sha>`'s version-bearing files AGREE, reading the
+     * candidate as DATA. Round 3 (#1890 "No candidate code runs at all"): the
+     * candidate's files are materialised with `git show <sha>:<path>` and the
+     * DEFAULT BRANCH's `scripts/check-version-sync.mjs` checks them. No file
+     * from `<sha>` is ever executed — a candidate's own version-sync script is
+     * never run, so it cannot write this step's GITHUB_OUTPUT. Injectable so a
+     * test can assert the candidate's script is not run.
      */
     runVersionSync(sha, version) {
-      const tmp = mkdtempSync(join(tmpdir(), "release-auto-tag-"));
+      const scratch = mkdtempSync(join(tmpdir(), "release-auto-tag-vsync-"));
       try {
-        const add = spawnSync("git", ["worktree", "add", "--detach", tmp, sha], { cwd: root, encoding: "utf8" });
-        if (add.status !== 0) {
-          throw new Error(`cannot check out ${sha} for version-sync: ${add.stderr?.trim() || add.status}`);
+        // The DEFAULT branch's checker (this checkout), never <sha>'s copy.
+        const checker = join(root, "scripts", "check-version-sync.mjs");
+        if (!existsSync(checker)) {
+          return {
+            ok: false,
+            code: 127,
+            output: "the default branch's scripts/check-version-sync.mjs is not present in this checkout",
+          };
         }
-        const script = join(tmp, "scripts", "check-version-sync.mjs");
-        if (!existsSync(script)) {
-          return { ok: false, code: 127, output: `scripts/check-version-sync.mjs is not present at ${sha}` };
+        // Which files to materialise — the checker owns that list.
+        const listed = spawnSync(process.execPath, [checker, "--list"], { cwd: root, encoding: "utf8" });
+        if (listed.status !== 0) {
+          return {
+            ok: false,
+            code: listed.status ?? 1,
+            output: `could not list the version-bearing files: ${`${listed.stdout ?? ""}${listed.stderr ?? ""}`.trim()}`,
+          };
         }
-        const r = spawnSync(process.execPath, [script, version], { cwd: tmp, encoding: "utf8" });
+        const paths = String(listed.stdout ?? "")
+          .split("\n")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (paths.length === 0) {
+          return { ok: false, code: 127, output: "the default branch's checker listed no version-bearing files" };
+        }
+        for (const path of paths) {
+          const shown = spawnSync("git", ["show", `${sha}:${path}`], { cwd: root, encoding: "utf8" });
+          if (shown.status !== 0) {
+            return { ok: false, code: 127, output: `${path} is not present at ${sha}` };
+          }
+          const dest = join(scratch, path);
+          mkdirSync(dirname(dest), { recursive: true });
+          writeFileSync(dest, String(shown.stdout ?? ""));
+        }
+        const r = spawnSync(process.execPath, [checker, "--root", scratch, version], {
+          cwd: root,
+          encoding: "utf8",
+        });
         return { ok: r.status === 0, code: r.status, output: `${r.stdout ?? ""}${r.stderr ?? ""}`.trim() };
       } finally {
-        spawnSync("git", ["worktree", "remove", "--force", tmp], { cwd: root, encoding: "utf8" });
-        rmSync(tmp, { recursive: true, force: true });
+        rmSync(scratch, { recursive: true, force: true });
       }
     },
   };
@@ -450,7 +490,8 @@ export function conditionMainAncestor(deps, { sha, mainRef }) {
   return { ok: true };
 }
 
-/** Condition 6: <sha>'s own version-sync check passes. */
+/** Condition 6: <sha>'s version-bearing files agree (read as data, checked by
+ *  the default branch's checker — no file from <sha> is executed). */
 export async function conditionVersionSync(deps, { sha, version }) {
   const r = await deps.runVersionSync(sha, version);
   if (!r?.ok) {
@@ -648,7 +689,7 @@ export async function decide({ sha, deps, options = {} }) {
   const step5 = conditionMainAncestor(deps, { sha, mainRef: opts.mainRef });
   if (!step5.ok) return refuse(step5);
 
-  // 6 — version sync, running <sha>'s own merged, ruleset-reviewed script
+  // 6 — version sync over <sha>'s files AS DATA, with the DEFAULT branch's checker
   const step6 = await conditionVersionSync(deps, { sha, version });
   if (!step6.ok) return refuse(step6);
 
