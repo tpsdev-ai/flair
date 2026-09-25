@@ -793,6 +793,18 @@ describe("permission matrix", () => {
     expect(calls.length).toBe(0);
   });
 
+  test("capture is OFF by default: permission granted, no autoCapture config -> no capture hooks and zero reads", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({ config: cfgWith({ allowConversationAccess: true }) });
+    plugin.register(api as any);
+    expect(api._hooks.has("agent_end")).toBe(false);
+    expect(api._hooks.has("llm_input")).toBe(false);
+    expect(api._hooks.has("llm_output")).toBe(false);
+    expect(calls.length).toBe(0);
+  });
+
   test("prompt policy withheld: status line, no before_prompt_build hook", async () => {
     writeKey("A");
     const plugin = await loadPlugin();

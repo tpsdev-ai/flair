@@ -1115,6 +1115,13 @@ export default {
     // ── 8. Capture — permission-gated, OFF by default. ─────────────────────
     // Capture reads conversation content ONLY through the permission-gated
     // hooks; a missing permission produces a visible status line and no reads.
+    //
+    // Which callbacks capture, and why BOTH shapes are needed: `agent_end` is
+    // the full-session rescan for a discrete run, and `llm_input` / `llm_output`
+    // cover a live turn — the only shape that fires in a long-lived persistent
+    // gateway session, where a run never ends and `agent_end` never arrives.
+    // Both feed the same per-run record and the same gate; the unref'd sweep
+    // timer below covers the callbacks that return early.
     if (!allowConversationAccess) {
       // R8: reported whenever the permission is withheld, whether or not
       // capture is enabled.
