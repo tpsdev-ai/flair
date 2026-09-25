@@ -13,6 +13,7 @@ export interface ConditionIds {
   NO_RELEASE_PR: string;
   REVIEWS: string;
   RELEASE_PR_SHAPE: string;
+  RELEASE_PR_NOT_SINGLE_COMMIT: string;
   TAG_CONFLICT: string;
   CHECKS_FAILED: string;
   CHECKS_PENDING: string;
@@ -44,6 +45,9 @@ export interface PullRequestShape {
   number: number;
   merged_at?: string | null;
   merge_commit_sha?: string | null;
+  /** The commit count (condition 7c). Carried by `pulls/<n>`; the
+   *  `commits/<sha>/pulls` list does not include this field. */
+  commits?: number;
   base?: { ref?: string } | null;
   head?: { sha?: string; ref?: string; repo?: { full_name?: string } | null } | null;
 }
@@ -77,6 +81,7 @@ export interface GitHubClient {
   readTagObject(sha: string): Promise<TagRefShape | null>;
   listVersionTags(): Promise<Array<{ ref?: string }>>;
   listPullsForCommit(sha: string): Promise<PullRequestShape[]>;
+  readPull(prNumber: number): Promise<PullRequestShape | null>;
   listReviews(prNumber: number): Promise<ReviewShape[]>;
   listPullFiles(prNumber: number): Promise<PullFileShape[]>;
   listCheckRuns(sha: string): Promise<CheckRunShape[]>;
@@ -196,6 +201,10 @@ export function conditionReleasePrShape(
   deps: Deps,
   args: { sha: string; pr: PullRequestShape; versionFiles: string[] | null },
 ): { ok: boolean; condition?: string; summary?: string[] };
+export function conditionReleasePrSingleCommit(
+  api: GitHubClient,
+  args: { pr: PullRequestShape },
+): Promise<{ ok: boolean; condition?: string; summary?: string[] }>;
 export function conditionChecks(
   deps: Deps,
   args: {

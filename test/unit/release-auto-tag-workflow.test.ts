@@ -95,9 +95,9 @@ describe("release-auto-tag workflow — least privilege and custody", () => {
   });
 
   test("invariant: the App credential lives ONLY in the `write` job (round 2, item 1)", () => {
-    // `decide` is where candidate code runs (condition 6). It must hold no App
-    // secret at all: no environment, and no step naming the App id/key or the
-    // mint action.
+    // `decide` reads the candidate as data (condition 6) and runs no candidate
+    // code. It must hold no App secret at all: no environment, and no step naming
+    // the App id/key or the mint action.
     expect(job("decide").environment).toBeUndefined();
     const decideText = JSON.stringify(job("decide"));
     expect(decideText).not.toContain("RELEASE_TAG_APP_PRIVATE_KEY");
@@ -388,7 +388,7 @@ describe("release-auto-tag workflow — credential isolation and the reporter's 
   test("isolation is the JOB BOUNDARY: `write` has a fresh default-branch checkout, and no step restores a shared tree", () => {
     // The single-job design restored the workspace between the decision and the
     // mint. That is GONE: `write` is a different job on a fresh runner with a
-    // fresh checkout, so the tree `decide` ran candidate code in is never reused
+    // fresh checkout, so the tree `decide` read the candidate in is never reused
     // for a privileged step — a tree restore could not cover `.git` anyway.
     const writeCheckout = (job("write").steps ?? [])[0];
     expect(writeCheckout.uses).toContain("actions/checkout@");
@@ -397,7 +397,7 @@ describe("release-auto-tag workflow — credential isolation and the reporter's 
     const runs = allSteps().map(({ step: s }) => s.run ?? "");
     expect(runs.some((r) => r.includes("git clean -ffdqx"))).toBe(false);
     expect(runs.some((r) => r.includes("git reset --hard HEAD"))).toBe(false);
-    // And the mint is not in the job that ran candidate code.
+    // And the mint is not in the deciding job.
     expect((job("decide").steps ?? []).some((s) => s.id === "app-token")).toBe(false);
   });
 

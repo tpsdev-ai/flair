@@ -99,6 +99,10 @@ function fixtureApi(over: Partial<GitHubClient> = {}): GitHubClient {
     readTagObject: async () => null,
     listVersionTags: async () => [],
     listPullsForCommit: async () => [pull()],
+    // `pulls/<n>` — the PR itself, which is where the commit COUNT lives
+    // (condition 7c, round 7, item 1): the associated-commit list does not carry
+    // a `commits` field. One commit is a well-shaped release PR.
+    readPull: async () => ({ ...pull(), commits: 1 }),
     listReviews: async () => reviews(),
     // The PR-files API. Condition 7b no longer READS it (round 5, item 1: the
     // release commit's LOCAL diff is the source). Kept so a test can shape what an
@@ -748,6 +752,87 @@ describe("release auto-tag — condition 7b (the release PR stays inside the rel
     const real = createDeps({ root: resolve(import.meta.dir, "../..") }).rootLockfiles();
     expect(real).toEqual(["bun.lock"]);
     expect(DEFAULT_ROOT_LOCKFILES, "the fixture default matches the repo it models").toEqual(["bun.lock"]);
+  });
+});
+
+// ── condition 7c (the release PR is a single commit) ───────────────────────────
+
+describe("release auto-tag — condition 7c (the release PR is a single commit)", () => {
+  test("round 7, item 1: a TWO-commit release PR REFUSEs release-pr-not-single-commit", async () => {
+    // 7b diffs the tag target against its first parent, and that is the whole PR
+    // only under a squash merge; under a rebase merge an earlier commit of the
+    // same PR lands before the tip and 7b never sees it. The count closes that.
+    const { deps } = harness({ api: { readPull: async () => ({ ...pull(), commits: 2 }) } });
+    const result = await decide({ sha: SHA, deps });
+    expect(result.verdict).toBe(VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.RELEASE_PR_NOT_SINGLE_COMMIT);
+    expect(result.summary.join(" ")).toContain("2 commit(s)");
+  });
+
+  test("round 7, item 1: a single-commit release PR passes 7c", async () => {
+    const { deps } = harness();
+    const result = await decide({ sha: SHA, deps });
+    expect(result.verdict).toBe(VERDICT.TAG);
+  });
+
+  test("round 7, item 1: an UNREADABLE commit count REFUSEs (it is not assumed to be 1)", async () => {
+    const { deps } = harness({ api: { readPull: async () => null } });
+    const result = await decide({ sha: SHA, deps });
+    expect(result.verdict).toBe(VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.RELEASE_PR_NOT_SINGLE_COMMIT);
+    expect(result.summary.join(" ")).toContain("an unreadable number of commits");
+  });
+
+  test("round 7, item 1: the count is read from the pulls API (`pulls/<n>`), by PR number", async () => {
+    // The associated-commit list condition 7 reads carries no `commits` field, so
+    // the count comes from the PR itself.
+    const asked: number[] = [];
+    const { deps } = harness({
+      api: {
+        readPull: async (n) => {
+          asked.push(n);
+          return { ...pull(), commits: 1 };
+        },
+      },
+    });
+    const result = await decide({ sha: SHA, deps });
+    expect(result.verdict).toBe(VERDICT.TAG);
+    expect(asked).toEqual([pull().number]);
+  });
+
+  test("round 7, item 1: a two-commit release PR also REFUSEs at the WRITE boundary", async () => {
+    const { deps } = harness({ api: { readPull: async () => ({ ...pull(), commits: 2 }) } });
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(result.verdict).toBe(WRITE_VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.RELEASE_PR_NOT_SINGLE_COMMIT);
+    expect((result.summary ?? []).join(" ")).toContain("2 commit(s)");
+  });
+
+  test("round 7, item 1: the write boundary's count read goes through the READ client", async () => {
+    // Same custody rule as 7 and 8's reads: the App holds Contents + Metadata and
+    // NO pull-requests permission, so a `pulls/<n>` read on the App token 403s
+    // and an eligible release would never be tagged.
+    const asked: number[] = [];
+    let tagged = false;
+    // The READ client answers `pulls/<n>`; the App client only POSTs the ref.
+    const readApi = fixtureApi({
+      readPull: async (n) => {
+        asked.push(n);
+        return { ...pull(), commits: 1 };
+      },
+    });
+    const { deps } = harness({
+      api: {
+        createTagRef: async () => {
+          tagged = true;
+          return { ok: true, status: 201, body: {} };
+        },
+        readTagRef: async () => (tagged ? { object: { type: "commit", sha: SHA } } : null),
+      },
+    });
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: { ...appOptions, readApi } });
+    expect(result.verdict).toBe(WRITE_VERDICT.TAGGED);
+    expect(asked).toEqual([pull().number]);
   });
 });
 
