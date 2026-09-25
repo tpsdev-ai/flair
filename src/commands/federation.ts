@@ -19,6 +19,7 @@ import { keystore, keyPath as keystoreKeyPath } from "../keystore.js";
 import * as render from "../render.js";
 import { runFederationVerify } from "../federation-verify.js";
 import { resolveHubPeerIdentity } from "../lib/federation-pair-identity.js";
+import { redactTokenMessage } from "../lib/redact-token-id.js";
 import {
   rewriteFederationPairHubAccessError,
   rewriteFederationPairLocalAccessError,
@@ -215,17 +216,6 @@ function redactMessage(text: string): string {
 }
 
 /**
- * `message` with every occurrence of `tokenId` cut to its 8-character prefix —
- * the same redaction the federation cleanup sweep applies to a pairing-token id
- * (resources/federation-cleanup.ts). The pairing-token id IS the credential a
- * spoke redeems, so only its prefix may ever be printed, and any occurrence of
- * the full id inside a message (Harper errors can echo the request) is cut too.
- */
-export function redactPairingTokenId(message: string, tokenId: string): string {
-  return tokenId ? message.split(tokenId).join(`${tokenId.slice(0, 8)}…`) : message;
-}
-
-/**
  * The one line `flair federation token` prints about its PairingToken rollback.
  *
  * A rollback is only real if Harper CONFIRMS the delete. A `delete` answers 200
@@ -246,7 +236,7 @@ export function pairingTokenRollbackLine(result: unknown, tokenId: string): stri
   const body = (result ?? {}) as Record<string, unknown>;
   const why =
     body.error !== undefined && body.error !== null
-      ? `Harper reported: ${redactPairingTokenId(String(body.error), tokenId)}`
+      ? `Harper reported: ${redactTokenMessage(String(body.error), [tokenId])}`
       : Array.isArray(body.skipped_hashes) && body.skipped_hashes.map(String).includes(tokenId)
         ? "Harper named it in skipped_hashes"
         : "Harper's result did not name it as deleted";

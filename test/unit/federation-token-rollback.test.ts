@@ -11,11 +11,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import {
-  pairingTokenRollbackLine,
-  redactPairingTokenId,
-  rollbackPairingToken,
-} from "../../src/commands/federation.js";
+import { pairingTokenRollbackLine, rollbackPairingToken } from "../../src/commands/federation.js";
+import { redactTokenMessage } from "../../src/lib/redact-token-id.js";
 
 // Long enough that its 8-character prefix is a strict prefix — a shorter id
 // would make "the whole id never appears" vacuous.
@@ -62,8 +59,8 @@ describe("pairing token rollback reporting (flair#1895)", () => {
     expect(line).toContain("rollback FAILED");
   });
 
-  test("redactPairingTokenId cuts every occurrence of the id to its prefix", () => {
-    expect(redactPairingTokenId(`a ${TOKEN} b ${TOKEN}`, TOKEN)).toBe(`a ${PREFIX}… b ${PREFIX}…`);
+  test("the shared redactor cuts every occurrence of the id to its prefix", () => {
+    expect(redactTokenMessage(`a ${TOKEN} b ${TOKEN}`, [TOKEN])).toBe(`a ${PREFIX}… b ${PREFIX}…`);
   });
 
   test("the rollback sends hash_values (the field Harper requires) and reports the confirmation", async () => {

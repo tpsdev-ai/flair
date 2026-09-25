@@ -6,6 +6,7 @@ import {
   type InstanceIdentityRow,
   type SweepMode,
 } from "../src/lib/instance-identity-row.js";
+import { redactTokenIds, redactTokenMessage } from "../src/lib/redact-token-id.js";
 
 const CLEANUP_INTERVAL_MS = 300_000; // 5 minutes
 
@@ -204,6 +205,7 @@ async function readInstanceRowsOrNull(db: any): Promise<InstanceIdentityRow[] | 
 export async function listUsernamesOrNull(
   svr: (op: any, ctx?: any, authorize?: boolean) => Promise<any>,
   log: Pick<Console, "log" | "error"> = console,
+  secrets: readonly string[] = [],
 ): Promise<string[] | null> {
   try {
     const result = await svr({ operation: "list_users" }, { user: null }, false);
@@ -213,41 +215,38 @@ export async function listUsernamesOrNull(
       .map((u: any) => (typeof u === "string" ? u : u?.username ?? u?.user?.username))
       .filter((name: unknown): name is string => typeof name === "string" && name.startsWith(BOOTSTRAP_USER_PREFIX));
   } catch (err: any) {
-    log.error("[federation-cleanup] failed to list users:", err?.message ?? err);
+    // A table-level line: routed through the same redactor, with the ids read so
+    // far (none by default — list_users runs before the token scan; a caller may
+    // pass any it already holds) (flair#1902).
+    log.error(
+      redactTokenMessage("[federation-cleanup] failed to list users:", secrets),
+      redactTokenMessage(String(err?.message ?? err), secrets),
+    );
     return null;
   }
 }
 
-/** `message` with every occurrence of `tokenId` cut to its 8-character prefix. */
-export function redactTokenId(message: string, tokenId: string): string {
-  return tokenId ? message.split(tokenId).join(`${tokenId.slice(0, 8)}…`) : message;
-}
-
-/** `value` with `secret` cut to its prefix in every string, at any depth. */
-function redactDeep(value: unknown, secret: string): unknown {
-  if (typeof value === "string") return redactTokenId(value, secret);
-  if (Array.isArray(value)) return value.map((v) => redactDeep(v, secret));
-  if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redactDeep(v, secret)]));
-  }
-  return value;
-}
-
 /**
  * Log one line about one pairing token, or about the bootstrap user named for
- * it: `secret` is cut to its 8-character prefix in the message and in every
- * STRING value of the fields, at any depth. Object keys and non-string values
- * pass through unchanged; the callers here use literal keys and string or boolean values.
- * Hygiene, not a boundary: this log is the operator's, and the sweep touches
- * only expired or consumed tokens, which cannot pair.
+ * it, through the ONE shared token-id redactor
+ * (src/lib/redact-token-id.ts, flair#1902): every `secret` is cut to its
+ * 8-character prefix in the message and in every string of the fields at any
+ * depth — string values, array elements, and object KEYS. Non-string values
+ * pass through untouched.
+ *
+ * `secrets` is the current token id PLUS every token id the sweep has read this
+ * pass, so a caller-supplied value that embeds a DIFFERENT token id (e.g. a
+ * `consumedBy` naming another token) is cut too. Hygiene, not a boundary: this
+ * log is the operator's, and the sweep touches only expired or consumed tokens,
+ * which cannot pair.
  */
 function tokenLog(
   level: "log" | "error",
   message: string,
   fields: Record<string, unknown>,
-  secret: string,
+  secrets: readonly string[],
 ): void {
-  console[level](redactTokenId(message, secret), redactDeep(fields, secret));
+  console[level](redactTokenMessage(message, secrets), redactTokenIds(fields, secrets));
 }
 
 /**
@@ -297,12 +296,19 @@ export async function runCleanupTick(
 
   // ── Query candidates ──────────────────────────────────────────────────
   const candidates: any[] = [];
+  // Every token id READ this pass. The redactor's secrets are the current token
+  // id plus these, so a value that embeds a DIFFERENT token id (a consumedBy
+  // naming another token, a Harper error echoing one) is cut too (flair#1902).
+  const seenTokenIds: string[] = [];
   // Token-id prefixes that are still LIVE (unconsumed and unexpired). A live
   // token still needs its bootstrap user, so the user-driven pass (below) must
   // not collect that user. Built in the same scan: one pass over the table.
   const liveTokenPrefixes = new Set<string>();
   try {
     for await (const token of (db as any).flair.PairingToken.search()) {
+      if (token && token.id !== undefined && token.id !== null) {
+        seenTokenIds.push(String(token.id));
+      }
       const consumed = !!token.consumedBy;
       const expired = token.expiresAt && new Date(token.expiresAt) < now;
       if (consumed || expired) {
@@ -312,9 +318,14 @@ export async function runCleanupTick(
       }
     }
   } catch (err: any) {
-    console.error(
-      "[federation-cleanup] failed to query PairingToken records:",
-      err?.message ?? err,
+    // A table-level line: routed through the same redactor, with the ids read so
+    // far (which may be none). A mid-scan failure can still echo an id already
+    // read, so this is not a no-op path (flair#1902).
+    tokenLog(
+      "error",
+      "[federation-cleanup] failed to query PairingToken records",
+      { err: String(err?.message ?? err) },
+      seenTokenIds,
     );
     return;
   }
@@ -327,9 +338,11 @@ export async function runCleanupTick(
     const expired =
       token.expiresAt && new Date(token.expiresAt) < now;
     const bootstrapUsername = `${BOOTSTRAP_USER_PREFIX}${tokenId.slice(0, 8)}`;
+    // This token id, plus every id the sweep read this pass.
+    const secrets: readonly string[] = [tokenId, ...seenTokenIds];
 
     // Drop the bootstrap user
-    await dropBootstrapUser(svr, bootstrapUsername, tokenId.slice(0, 8), droppedUsers);
+    await dropBootstrapUser(svr, bootstrapUsername, tokenId.slice(0, 8), droppedUsers, secrets);
 
     // ── Housekeeping ────────────────────────────────────────────────────
     if (expired && !consumed) {
@@ -359,7 +372,7 @@ export async function runCleanupTick(
         // deleted — a cleanup that did not happen. A skipped record is left in the
         // table, so the next tick sees it as a candidate again and retries it.
         if (writeConfirmed(result, "deleted_hashes", tokenId)) {
-          tokenLog("log", "[federation-cleanup] deleted expired token", { tid: tokenId.slice(0, 8) }, tokenId);
+          tokenLog("log", "[federation-cleanup] deleted expired token", { tid: tokenId.slice(0, 8) }, secrets);
         } else {
           tokenLog(
             "error",
@@ -373,7 +386,7 @@ export async function runCleanupTick(
                 ? (result as any).skipped_hashes.map(String).includes(tokenId)
                 : "no skipped_hashes in the result",
             },
-            tokenId,
+            secrets,
           );
         }
       } catch (err: any) {
@@ -383,7 +396,7 @@ export async function runCleanupTick(
           // A Harper error can echo the request, and the token id is the
           // pairing credential: cut every occurrence of it to its prefix.
           { tid: tokenId.slice(0, 8), err: String(err?.message ?? err) },
-          tokenId,
+          secrets,
         );
       }
     }
@@ -394,7 +407,7 @@ export async function runCleanupTick(
         "log",
         "[federation-cleanup] keeping audit record",
         { tid: tokenId.slice(0, 8), consumedBy: token.consumedBy },
-        tokenId,
+        secrets,
       );
     }
   }
@@ -409,9 +422,14 @@ export async function runCleanupTick(
       // write-side guard: a caller that hands this function an `admin` must not
       // be able to get it dropped.
       if (!username.startsWith(BOOTSTRAP_USER_PREFIX)) continue;
+      // The username suffix IS the token's first 8 characters for a real
+      // bootstrap user, but a hand-made one can carry a whole token id (or
+      // more), and Harper's error can echo the name: pass it as a secret so a
+      // long suffix is cut like any other token id.
       const tid = username.slice(BOOTSTRAP_USER_PREFIX.length);
       if (liveTokenPrefixes.has(tid)) continue;
-      await dropBootstrapUser(svr, username, tid, droppedUsers);
+      const userSecrets: readonly string[] = tid ? [tid, ...seenTokenIds] : seenTokenIds;
+      await dropBootstrapUser(svr, username, tid, droppedUsers, userSecrets);
     }
   }
 }
@@ -426,6 +444,7 @@ async function dropBootstrapUser(
   username: string,
   tid: string,
   droppedUsers: Set<string>,
+  secrets: readonly string[],
 ): Promise<void> {
   if (droppedUsers.has(username)) return;
   droppedUsers.add(username);
@@ -435,7 +454,7 @@ async function dropBootstrapUser(
       { user: null },
       false, // bypass Harper permission checks
     );
-    tokenLog("log", "[federation-cleanup] dropped user", { tid: tid.slice(0, 8) }, tid);
+    tokenLog("log", "[federation-cleanup] dropped user", { tid: tid.slice(0, 8) }, secrets);
   } catch (err: any) {
     const msg = err?.message ?? "";
     const isNotFound =
@@ -453,7 +472,7 @@ async function dropBootstrapUser(
         // characters, but a hand-made one can carry more, and Harper's error can
         // echo it: bound the suffix and cut it out of the message.
         { tid: tid.slice(0, 8), err: String(err?.message ?? err) },
-        tid,
+        secrets,
       );
     }
   }

@@ -930,3 +930,103 @@ describe("federation-cleanup sweep", () => {
     });
   });
 });
+
+// ── flair#1902 — one shared token-id redactor ─────────────────────────────────
+//
+// Every sweep log line goes through src/lib/redact-token-id.ts. The redactor's
+// own behaviour is unit-tested in redact-token-id.test.ts; these cases prove the
+// SWEEP applies it, including its two table-level lines.
+
+describe("federation-cleanup — shared token-id redaction (flair#1902)", () => {
+  const now = new Date("2026-05-05T22:00:00Z");
+
+  function captureConsole(): { lines: string[]; errors: string[]; restore: () => void } {
+    const lines: string[] = [];
+    const errors: string[] = [];
+    const fmt = (args: any[]) =>
+      args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
+    const logSpy = jest.spyOn(console, "log").mockImplementation((...a: any[]) => {
+      lines.push(fmt(a));
+    });
+    const errSpy = jest.spyOn(console, "error").mockImplementation((...a: any[]) => {
+      errors.push(fmt(a));
+    });
+    return {
+      lines,
+      errors,
+      restore: () => {
+        logSpy.mockRestore();
+        errSpy.mockRestore();
+      },
+    };
+  }
+
+  it("a foreign token id inside a consumedBy is cut when that token is in the batch", async () => {
+    const foreign = "feedface_foreign_token_0000000000";
+    const tId = "token_audit_multi_ABCDEFGHIJKL";
+    // The consumed token's consumedBy embeds the OTHER token's id; that other
+    // token is read in the same pass, so it is a secret for this line too.
+    const db = createMockDb([
+      makeToken(tId, { consumedBy: `instance-${foreign}-x` }),
+      makeToken(foreign, { consumedBy: "instance-z" }),
+    ]);
+    const { fn: serverOp } = createMockServerOp([{ ok: true }]);
+    const { lines, errors, restore } = captureConsole();
+    try {
+      await runCleanupTick({ serverOp, db: db as any, now });
+    } finally {
+      restore();
+    }
+    const all = [...lines, ...errors].join("\n");
+    expect(all).toContain("keeping audit record");
+    expect(all).toContain(foreign.slice(0, 8));
+    expect(all).not.toContain(foreign);
+  });
+
+  it("a PairingToken read that fails mid-scan redacts the id it echoed", async () => {
+    const tId = "token_query_fail_GGGGGGGGGGGG";
+    // search() yields one token, then the iterator throws an error that echoes
+    // that id — the id was read this pass, so the table-level error line cuts it.
+    const failingDb = {
+      flair: {
+        PairingToken: {
+          search: () => ({
+            [Symbol.asyncIterator]() {
+              let i = 0;
+              return {
+                async next() {
+                  if (i++ === 0) return { value: { id: tId }, done: false };
+                  throw new Error(`query failed for hash_values ["${tId}"]`);
+                },
+              };
+            },
+          }),
+        },
+      },
+    };
+    const { fn: serverOp } = createMockServerOp([]);
+    const { lines, errors, restore } = captureConsole();
+    try {
+      await runCleanupTick({ serverOp, db: failingDb as any, now });
+    } finally {
+      restore();
+    }
+    const text = errors.join("\n");
+    expect(text).toContain("failed to query PairingToken records");
+    expect(text).toContain(tId.slice(0, 8));
+    expect(text).not.toContain(tId);
+  });
+
+  it("the list_users failure line is routed through the redactor", async () => {
+    const tId = "token_list_users_HHHHHHHHHHHH";
+    const svr = mock(async () => {
+      throw new Error(`list_users refused for ${tId}`);
+    });
+    const { lines, errors, log } = captureLog();
+    expect(await listUsernamesOrNull(svr, log, [tId])).toBeNull();
+    const text = [...lines, ...errors].join("\n");
+    expect(text).toContain("failed to list users");
+    expect(text).toContain(tId.slice(0, 8));
+    expect(text).not.toContain(tId);
+  });
+});
