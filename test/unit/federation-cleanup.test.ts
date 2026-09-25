@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, mock, beforeEach, afterEach, jest } from "bun:test";
 import {
   runCleanupTick,
   initFederationCleanup,
@@ -128,6 +128,16 @@ function captureLog(): { lines: string[]; errors: string[]; log: Pick<Console, "
       error: (...args: any[]) => errors.push(args.map(String).join(" ")),
     } as unknown as Pick<Console, "log" | "error">,
   };
+}
+
+/**
+ * Let a faked-out interval callback finish. bun has no
+ * `advanceTimersByTimeAsync`, so after `jest.advanceTimersByTime(...)` the tick's
+ * promise chain is drained by yielding to the microtask queue — the sweep awaits
+ * no real timer (only the db and serverOp mocks), so microtasks are all it needs.
+ */
+async function settleTicks(rounds = 100): Promise<void> {
+  for (let i = 0; i < rounds; i++) await Promise.resolve();
 }
 
 // ─── Tests: runCleanupTick ───────────────────────────────────────────────────
@@ -574,9 +584,14 @@ describe("federation-cleanup sweep", () => {
   describe("initFederationCleanup — installed on every instance", () => {
     afterEach(() => {
       stopFederationCleanup();
+      jest.useRealTimers();
     });
 
     it("re-reads the role on a later tick: a hub row appearing after startup begins sweeping", async () => {
+      // The tick is driven by the INSTALLED interval (not by calling runSweepTick),
+      // and the clock is advanced explicitly: a 20 ms cadence plus a real 120 ms
+      // wait flaked under CI load, when the callback ran late (flair#1883 round 5).
+      jest.useFakeTimers();
       let instanceRows: any[] = [];
       const db = createLiveDb(
         () => instanceRows,
@@ -590,7 +605,8 @@ describe("federation-cleanup sweep", () => {
         expect(captured).toHaveLength(0);
 
         instanceRows = [{ id: "flair_hub_timer", role: "hub" }];
-        await new Promise((resolve) => setTimeout(resolve, 120));
+        jest.advanceTimersByTime(120);
+        await settleTicks();
 
         expect(captured.map((c) => c.operation)).toContain("list_users");
         expect(captured.map((c) => c.operation)).toContain("drop_user");
@@ -600,16 +616,21 @@ describe("federation-cleanup sweep", () => {
     });
 
     it("an explicit spoke role installs the sweep but never runs it", async () => {
+      // Same discipline: the interval IS installed (that is what this case
+      // covers), and time passing on the faked clock must produce no call.
+      jest.useFakeTimers();
       const db = createMockDb([]);
       const { fn: serverOp, captured } = recordingServerOp();
 
       await initFederationCleanup({ instanceRole: "spoke", serverOp, db: db as any, intervalMs: 20 });
-      await new Promise((resolve) => setTimeout(resolve, 80));
+      jest.advanceTimersByTime(80);
+      await settleTicks();
 
       expect(captured).toHaveLength(0);
       stopFederationCleanup();
       const afterStop = captured.length;
-      await new Promise((resolve) => setTimeout(resolve, 60));
+      jest.advanceTimersByTime(60);
+      await settleTicks();
       expect(captured.length).toBe(afterStop);
     });
   });
