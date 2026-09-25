@@ -18,6 +18,14 @@
  * produced by a step that SUCCEEDED and a dependent job can read it. Condition
  * ids come from the fixed enum below, never free text; SKIP's reason is prose.
  *
+ * TWO JOBS, NOT ONE (round 2, item 1). `decide` (conditions 1-9) is the only
+ * place candidate code runs; `tag` runs in a SEPARATE job on a fresh runner with
+ * a fresh default-branch checkout, holding the App credential. The job boundary —
+ * not a tree restore — is what isolates the credential from candidate code: a
+ * merged commit can plant a git hook or re-point `.git`, and restoring the
+ * working tree never covered that. Every checkout sets `persist-credentials:
+ * false`.
+ *
  * `tag` is the write boundary: it re-runs conditions 3, 4 and 8 (tag state,
  * release intent, both reviews) immediately before the POST, then creates
  * `refs/tags/v<version>` at `<sha>` and reads it back. Runs are serialized by the
@@ -70,7 +78,17 @@ export const CONDITION = Object.freeze({
   TAG_CONFLICT: "tag-conflict",
   CHECKS_FAILED: "checks-failed",
   CHECKS_PENDING: "checks-pending",
+  // Not one of the ten numbered conditions either: the commit carries no check
+  // runs at all, or none of them belongs to the CI workflow's check suite. An
+  // empty list is NOT "all checks green" — a commit CI never ran on must never
+  // tag itself just because there is nothing to contradict it (round 2, item 3).
+  CHECKS_MISSING: "checks-missing",
   CI_RENAMED: "ci-renamed",
+  // The nightly could not find, in the version file's own git history, the
+  // commit that introduced the version main's HEAD declares. Refused LOUDLY
+  // rather than skipped: a silent SKIP is how a missed release disappears
+  // (round 2, item 4).
+  VERSION_ORIGIN_NOT_FOUND: "version-origin-not-found",
   // Not one of the ten conditions: the App is installed AFTER this lands, so the
   // write step must refuse loudly rather than proceed unauthenticated.
   APP_NOT_CONFIGURED: "app-not-configured",
@@ -224,9 +242,18 @@ export function createClient({ repo, token, fetchImpl = globalThis.fetch, apiBas
     async readWorkflowRun(runId) {
       return getJson(`/repos/${repo}/actions/runs/${runId}`);
     },
-    /** `commits?sha=main&per_page=100` — the nightly walk's candidates. */
-    async listCommitsOnMain(limit = 100) {
-      return getPaged(`/repos/${repo}/commits?sha=main&per_page=${limit}`);
+    /**
+     * `actions/workflows/<file>/runs?head_sha=<sha>&status=completed` — the
+     * completed runs of the `CI` workflow for one commit. Each run carries the
+     * `check_suite_id` whose check runs appear under `commits/<sha>/check-runs`,
+     * which is how condition 9 proves CI actually ran on this commit rather than
+     * trusting an empty list (round 2, item 3).
+     */
+    async listCompletedWorkflowRunsForSha(fileName, sha) {
+      return getPaged(
+        `/repos/${repo}/actions/workflows/${fileName}/runs?head_sha=${sha}&status=completed&per_page=100`,
+        (page) => page?.workflow_runs,
+      );
     },
     /** POST `git/refs` — the write boundary. Never retried: the POST is the race-breaker. */
     async createTagRef(ref, sha) {
@@ -290,6 +317,17 @@ export function createDeps({ overrides = {}, root = process.cwd(), log, api } = 
         const r = spawnSync("git", ["rev-parse", ref], { cwd: root, encoding: "utf8" });
         if (r.status !== 0) throw new Error(`git rev-parse ${ref} failed`);
         return r.stdout.trim();
+      },
+      /**
+       * `git log --format=%H <rev> -- <path>` — the commits that touched <path>,
+       * newest first. The nightly walks THIS (round 2, item 4) rather than a
+       * fixed number of commits: only file-touching commits are listed, so the
+       * version change is found however far back it is.
+       */
+      logFileHistory(rev, path) {
+        const r = spawnSync("git", ["log", "--format=%H", rev, "--", path], { cwd: root, encoding: "utf8" });
+        if (r.status !== 0) throw new Error(`git log ${rev} -- ${path} failed`);
+        return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
       },
     },
     /**
@@ -478,7 +516,7 @@ export async function conditionReviews(api, { pr, reviewers }) {
  * id: without that exclusion the job waits on itself whenever the release merge
  * is still main's HEAD, which is the common case.
  */
-export async function conditionChecks(deps, { sha, selfCheckSuiteId, allowlist, deadlineMs, pollMs }) {
+export async function conditionChecks(deps, { sha, selfCheckSuiteId, allowlist, deadlineMs, pollMs, ciCheckSuiteIds = null }) {
   const started = deps.now();
   let runs = [];
   for (;;) {
@@ -498,6 +536,44 @@ export async function conditionChecks(deps, { sha, selfCheckSuiteId, allowlist, 
     deps.log.info(`release-auto-tag: ${pending.length} check run(s) pending; polling again in ${Math.round(pollMs / 1000)}s`);
     await deps.sleep(pollMs);
   }
+
+  // round 2, item 3. An EMPTY list is not "all checks green": a commit CI never
+  // ran on has nothing to contradict the whitelist, so `filter=latest` alone
+  // would let it tag itself. Required: at least one check run, and — when the
+  // caller names them — at least one that belongs to the CI workflow's check
+  // suite (the suite that woke the tagger, or a completed CI suite on the
+  // commit for the nightly). Either miss REFUSEs `checks-missing` rather than
+  // passing on an absence of evidence.
+  if (!runs.length) {
+    return {
+      ok: false,
+      condition: CONDITION.CHECKS_MISSING,
+      summary: [`no check runs on ${sha}: CI never ran on this commit (an empty list is not a green list)`],
+      waitedMs: deps.now() - started,
+    };
+  }
+  if (ciCheckSuiteIds !== null) {
+    const suiteIds = new Set(ciCheckSuiteIds);
+    if (!suiteIds.size) {
+      return {
+        ok: false,
+        condition: CONDITION.CHECKS_MISSING,
+        summary: [`no completed CI check suite on ${sha}: CI has not finished on this commit`],
+        waitedMs: deps.now() - started,
+      };
+    }
+    if (!runs.some((r) => suiteIds.has(r?.check_suite?.id))) {
+      return {
+        ok: false,
+        condition: CONDITION.CHECKS_MISSING,
+        summary: [
+          `none of the ${runs.length} check run(s) on ${sha} belongs to the CI workflow's check suite (suite id(s) ${[...suiteIds].join(", ")})`,
+        ],
+        waitedMs: deps.now() - started,
+      };
+    }
+  }
+
   const tolerated = [];
   const blocking = [];
   for (const run of runs) {
@@ -530,6 +606,10 @@ export async function decide({ sha, deps, options = {} }) {
     deadlineMs: DEFAULT_DEADLINE_MINUTES * 60_000,
     pollMs: DEFAULT_POLL_SECONDS * 1000,
     selfCheckSuiteId: null,
+    // round 2, item 3: the CI workflow's check-suite id(s) for this commit. A
+    // provided array is ENFORCED (empty or non-matching → checks-missing); null
+    // leaves only the non-empty-list requirement (a direct unit call).
+    ciCheckSuiteIds: null,
     repo: deps?.api?.repo ?? "",
     ...options,
   };
@@ -587,6 +667,7 @@ export async function decide({ sha, deps, options = {} }) {
     allowlist: opts.allowlist,
     deadlineMs: opts.deadlineMs,
     pollMs: opts.pollMs,
+    ciCheckSuiteIds: opts.ciCheckSuiteIds,
   });
   if (!step9.ok) return refuse(step9);
   if (step9.tolerated?.length) summary.push(`allowlisted non-success checks (do not refuse): ${step9.tolerated.join(", ")}`);
@@ -670,24 +751,27 @@ export async function writeTag({ sha, version, deps, options = {} }) {
 // ── the nightly target ────────────────────────────────────────────────────────
 
 /**
- * The one commit the nightly decides on: the LAST commit on main where the
- * PARSED version differs from its parent's. Not the last commit that touched the
- * file — a later dependency or script edit to package.json leaves the version
- * unchanged, and selecting it would SKIP at condition 1 and silently miss the
- * release.
+ * The one commit the nightly decides on: the commit that INTRODUCED the version
+ * main's HEAD declares — the newest commit on main where the PARSED version value
+ * differs from its parent's. Not the last commit that touched the file: a later
+ * dependency or script edit to package.json leaves the version unchanged, and
+ * selecting it would SKIP at condition 1 and silently miss the release.
+ *
+ * round 2, item 4: the walk is over the VERSION FILE's OWN history (`git log --
+ * <version file>`), not a fixed number of commits up from HEAD. Only file-touching
+ * commits are listed, so the version change is found however far back it is — the
+ * old 200-commit linear window could walk straight past it. Returns null when the
+ * walk finds no version change; the caller REFUSEs `version-origin-not-found`,
+ * never SKIPs.
  */
-export async function nightlyTarget(deps, { versionFile = DEFAULT_VERSION_FILE, mainRef = "origin/main", limit = 200 } = {}) {
-  const head = deps.git.revParse(mainRef);
-  let cursor = head;
-  for (let i = 0; i < limit; i++) {
-    const version = versionAt(deps, cursor, versionFile);
-    const parentText = deps.git.show(`${cursor}^`, versionFile);
-    if (parentText === null) return { sha: cursor, version, atMergeBase: true };
-    const parentVersion = readVersionFromManifest(parentText);
-    if (version && parentVersion !== version) return { sha: cursor, version };
-    const next = deps.git.revParse(`${cursor}^`);
-    if (!next || next === cursor) break;
-    cursor = next;
+export function nightlyTarget(deps, { versionFile = DEFAULT_VERSION_FILE, mainRef = "origin/main" } = {}) {
+  const history = deps.git.logFileHistory(mainRef, versionFile);
+  for (const commit of history) {
+    const version = versionAt(deps, commit, versionFile);
+    if (!version) continue; // unreadable at this revision: keep walking
+    const parentText = deps.git.show(`${commit}^`, versionFile);
+    if (parentText === null) continue; // a root commit has no parent to differ from
+    if (readVersionFromManifest(parentText) !== version) return { sha: commit, version };
   }
   return null;
 }
@@ -705,6 +789,23 @@ export async function conditionCiName(api, { workflowPath, workflowName }) {
     };
   }
   return { ok: true };
+}
+
+/**
+ * round 2, item 3: the check-suite ids of the CI workflow's COMPLETED runs on
+ * <sha>. A workflow run creates one check suite, and that suite's id is what
+ * `commits/<sha>/check-runs` reports per run — so this is how condition 9 knows
+ * whether the CI workflow actually ran on the commit. An empty list is a
+ * REFUSE (`checks-missing`), never a pass.
+ */
+async function resolveCompletedCiSuiteIds(deps, workflowPath, sha) {
+  const fileName = basename(workflowPath);
+  const runs = await deps.api.listCompletedWorkflowRunsForSha(fileName, sha);
+  const ids = new Set();
+  for (const run of runs ?? []) {
+    if (typeof run?.check_suite_id === "number") ids.add(run.check_suite_id);
+  }
+  return [...ids];
 }
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
@@ -728,8 +829,15 @@ export function renderVerdict(decision, sha) {
   return `SKIP ${decision.reason ?? "nothing to do"}`;
 }
 
-function writeOutputs(target, decision) {
-  const lines = [`verdict=${decision.verdict}`, `condition=${decision.condition ?? ""}`, `version=${decision.version ?? ""}`];
+function writeOutputs(target, decision, sha = "") {
+  // `sha` is the EFFECTIVE commit the decision was made on: for the nightly it is
+  // what the walk found, which the `write` job must tag (round 2, item 1).
+  const lines = [
+    `verdict=${decision.verdict}`,
+    `condition=${decision.condition ?? ""}`,
+    `version=${decision.version ?? ""}`,
+    `sha=${sha}`,
+  ];
   if (!target || target === "-") {
     for (const line of lines) console.log(line);
     return;
@@ -771,6 +879,11 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
       repo,
     };
     let sha = args.sha ?? null;
+    // round 2, item 3: condition 9 needs to know which check suites count as the
+    // `CI` workflow for this commit. The workflow_run trigger carries its suite
+    // id; the nightly and a dry dispatch resolve the completed CI runs on the
+    // commit instead.
+    const triggerSuiteId = args["trigger-check-suite-id"] ? Number(args["trigger-check-suite-id"]) : null;
     if (!sha) {
       // Nightly: the rename check first (a renamed CI never fires the trigger,
       // so this run is the only place that can see it), then one decision on the
@@ -783,19 +896,31 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
         writeOutputs(output, decision);
         return 0;
       }
-      const target = await nightlyTarget(deps, { versionFile: options.versionFile, mainRef: options.mainRef });
+      const target = nightlyTarget(deps, { versionFile: options.versionFile, mainRef: options.mainRef });
       if (!target) {
-        const decision = { verdict: VERDICT.SKIP, condition: "", version: "", reason: "no release commit found on main" };
+        // round 2, item 4: the walk could not find the version change. REFUSE
+        // loudly — a silent SKIP is how a missed release disappears.
+        const decision = {
+          verdict: VERDICT.REFUSE,
+          condition: CONDITION.VERSION_ORIGIN_NOT_FOUND,
+          version: "",
+          summary: [
+            `could not find, in ${options.versionFile}'s own history on ${options.mainRef}, the commit that introduced the current version`,
+          ],
+        };
         console.log(renderVerdict(decision, ""));
+        console.log(decision.summary.join("\n"));
         writeOutputs(output, decision);
         return 0;
       }
       sha = target.sha;
     }
+    options.ciCheckSuiteIds =
+      triggerSuiteId !== null ? [triggerSuiteId] : await resolveCompletedCiSuiteIds(deps, options.workflowPath, sha);
     const decision = await decide({ sha, deps, options });
     console.log(renderVerdict(decision, sha));
     for (const line of decision.summary ?? []) console.log(`  ${line}`);
-    writeOutputs(output, decision);
+    writeOutputs(output, decision, sha);
     return 0; // ALWAYS 0: the verdict is the output, not the exit code.
   }
 
@@ -817,7 +942,7 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
     });
     console.log(`${result.verdict} v${result.version} ${args.sha}${result.condition ? ` (${result.condition})` : ""}`);
     for (const line of result.summary ?? []) console.log(`  ${line}`);
-    writeOutputs(output, result);
+    writeOutputs(output, result, args.sha);
     return 0;
   }
 

@@ -2,15 +2,18 @@
  * release-auto-tag-workflow.test.ts — flair#1890, `.github/workflows/release-auto-tag.yml`.
  *
  * The unit tests next door drive the decision script; THIS file is about the
- * wiring the script cannot see: which job holds which permission, which step gets
+ * wiring the script cannot see: which job holds which permission, which JOB gets
  * the App credential, whether the reporter is guarded and idempotent, and whether
  * a dry run can write. It is a detective, not a boundary — a PR can edit the
  * workflow and this test together; the boundary is review of the diff.
  *
- * Acceptance item 9's YAML half lives here (the report job's guard, its
- * permissions, the absence of a checkout, and the decide job's
- * verdict/condition/version mapping), and so does the second INVARIANT: no step
- * before the decision runs with the App credential in its environment.
+ * Round 2 split `decide` and `write` into SEPARATE jobs (the amendment in #1890,
+ * "Two jobs, not one"): the credential isolation is the JOB BOUNDARY, not a
+ * restore of a shared workspace. Acceptance item 9's YAML half lives here (the
+ * report job's guard, its permissions, the absence of a checkout, and the
+ * decide/write job-output mapping and the write-before-decide read), and so do
+ * the invariants: `decide` holds no App credential at all, and every checkout
+ * sets `persist-credentials: false`.
  */
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -32,7 +35,7 @@ interface Step {
 interface Job {
   name?: string;
   if?: string;
-  needs?: string;
+  needs?: string | string[];
   permissions?: Record<string, string>;
   environment?: string;
   outputs?: Record<string, string>;
@@ -68,48 +71,71 @@ function step(name: string, id: string): Step {
   return found as Step;
 }
 
+function allSteps(): Array<{ job: string; step: Step }> {
+  return Object.entries(wf.jobs ?? {}).flatMap(([name, j]) => (j.steps ?? []).map((s) => ({ job: name, step: s })));
+}
+
 describe("release-auto-tag workflow — least privilege and custody", () => {
   test("permissions: {} at the top, and the issue's exact per-job grants", () => {
     expect(wf.permissions).toEqual({});
     expect(Object.keys(job("decide").permissions ?? {}).sort()).toEqual(["actions", "checks", "contents", "pull-requests"]);
     for (const grant of Object.values(job("decide").permissions ?? {})) expect(grant).toBe("read");
+    // `write` reads the default branch's tree and condition 10's reviews; the ref
+    // write itself is the App token, not GITHUB_TOKEN.
+    expect(Object.keys(job("write").permissions ?? {}).sort()).toEqual(["contents", "pull-requests"]);
+    for (const grant of Object.values(job("write").permissions ?? {})) expect(grant).toBe("read");
     expect(job("report").permissions).toEqual({ issues: "write" });
   });
 
-  test("the release-tag environment is referenced by exactly one job", () => {
+  test("the release-tag environment is referenced by exactly one job — `write`", () => {
     const referencing = Object.entries(wf.jobs ?? {}).filter(([, j]) => j.environment !== undefined);
-    expect(referencing.map(([name]) => name)).toEqual(["decide"]);
-    expect(job("decide").environment).toBe("release-tag");
+    expect(referencing.map(([name]) => name)).toEqual(["write"]);
+    expect(job("write").environment).toBe("release-tag");
   });
 
-  test("invariant: nothing runs with the App credential before the decision", () => {
-    const steps = job("decide").steps ?? [];
-    const decideIndex = steps.findIndex((s) => s.id === "decide");
-    const mintIndex = steps.findIndex((s) => s.id === "app-token");
-    const writeIndex = steps.findIndex((s) => s.id === "write");
-    expect(decideIndex).toBeGreaterThanOrEqual(0);
-    expect(mintIndex).toBeGreaterThan(decideIndex);
-    expect(writeIndex).toBeGreaterThan(mintIndex);
+  test("invariant: the App credential lives ONLY in the `write` job (round 2, item 1)", () => {
+    // `decide` is where candidate code runs (condition 6). It must hold no App
+    // secret at all: no environment, and no step naming the App id/key or the
+    // mint action.
+    expect(job("decide").environment).toBeUndefined();
+    const decideText = JSON.stringify(job("decide"));
+    expect(decideText).not.toContain("RELEASE_TAG_APP_PRIVATE_KEY");
+    expect(decideText).not.toContain("RELEASE_TAG_APP_ID");
+    expect(decideText).not.toContain("create-github-app-token");
 
-    // The decision's environment is the read-only set, and nothing in it points
-    // at the token mint, the App id or the App private key.
+    // The decision's environment is the read-only set and nothing else.
     const decideEnv = step("decide", "decide").env ?? {};
-    expect(Object.keys(decideEnv).sort()).toEqual(["GH_TOKEN", "REPO", "SELF_RUN_ID", "TARGET_SHA"]);
+    expect(Object.keys(decideEnv).sort()).toEqual([
+      "GH_TOKEN",
+      "REPO",
+      "SELF_RUN_ID",
+      "TARGET_SHA",
+      "TRIGGER_CHECK_SUITE_ID",
+    ]);
     expect(String(decideEnv.GH_TOKEN)).toBe("${{ secrets.GITHUB_TOKEN }}");
-    const joined = JSON.stringify(decideEnv);
-    expect(joined).not.toContain("app-token");
-    expect(joined).not.toContain("APP_ID");
-    expect(joined).not.toContain("PRIVATE_KEY");
 
-    // The private key is never interpolated into an env: — only read by the mint
-    // step's `with:` and tested for PRESENCE (a boolean) in the write step.
-    const rawKeyUsers = (job("decide").steps ?? []).filter((s) => JSON.stringify(s).includes("secrets.RELEASE_TAG_APP_PRIVATE_KEY"));
+    // `write` holds it, on a fresh runner, and the private key is never
+    // interpolated into an env — only the mint's `with:` and a PRESENCE boolean.
+    expect(step("write", "app-token")).toBeDefined();
+    expect(String(step("write", "write").env?.RELEASE_TAG_APP_KEY_PRESENT)).toContain("!= ''");
+    const rawKeyUsers = (job("write").steps ?? []).filter((s) => JSON.stringify(s).includes("secrets.RELEASE_TAG_APP_PRIVATE_KEY"));
     expect(rawKeyUsers.map((s) => s.id ?? s.name)).toEqual(["app-token", "write"]);
-    expect(String(step("decide", "write").env?.RELEASE_TAG_APP_KEY_PRESENT)).toContain("!= ''");
+  });
+
+  test("every checkout sets persist-credentials: false (round 1/2)", () => {
+    const checkouts = allSteps().filter(({ step: s }) => typeof s.uses === "string" && s.uses.startsWith("actions/checkout@"));
+    expect(checkouts.length, "positive control: both job checkouts found").toBe(2);
+    expect(checkouts.map(({ job: j }) => j).sort()).toEqual(["decide", "write"]);
+    for (const { job: j, step: s } of checkouts) {
+      expect(s.with?.["persist-credentials"], `${j} checkout`).toBe(false);
+      expect(s.with?.["fetch-depth"], `${j} checkout`).toBe(0);
+    }
   });
 
   test("every action is pinned by a full commit SHA", () => {
-    const uses = (job("decide").steps ?? []).map((s) => s.uses).filter((u): u is string => typeof u === "string");
+    const uses = allSteps()
+      .map(({ step: s }) => s.uses)
+      .filter((u): u is string => typeof u === "string");
     expect(uses.length).toBeGreaterThan(0); // positive control: the search found actions
     for (const use of uses) expect(use).toMatch(/^[^@]+@[0-9a-f]{40}$/);
     for (const use of uses) expect(use).not.toMatch(/@(v|main|master)/);
@@ -117,7 +143,7 @@ describe("release-auto-tag workflow — least privilege and custody", () => {
   });
 
   test("the App token is minted with contents-write on this repo only", () => {
-    const withArgs = step("decide", "app-token").with ?? {};
+    const withArgs = step("write", "app-token").with ?? {};
     expect(withArgs["permission-contents"]).toBe("write");
     expect(withArgs.repositories).toBe("flair");
     expect(Object.keys(withArgs).filter((k) => k.startsWith("permission-"))).toEqual(["permission-contents"]);
@@ -141,11 +167,26 @@ describe("release-auto-tag workflow — triggers and guards", () => {
     expect(guard).toContain("github.event.workflow_run.conclusion == 'success'");
   });
 
-  test("a second workflow named CI fails the run loudly on the path assertion", () => {
+  test("the path guard strips the @<ref> suffix, and still refuses a different workflow (round 2, item 2)", () => {
     const assertStep = (job("decide").steps ?? []).find((s) => (s.run ?? "").includes(".github/workflows/test.yml"));
     expect(assertStep).toBeDefined();
     expect(assertStep?.if).toContain("workflow_run");
-    expect(assertStep?.run).toContain("exit 1");
+    // GitHub reports workflow_run.path as "<path>@<ref>", so the exact comparison
+    // must run on the suffix-stripped value.
+    expect(assertStep?.run).toContain("%%@*");
+
+    const runAssert = (triggerPath: string) =>
+      spawnSync("bash", ["-c", assertStep?.run as string], {
+        env: { PATH: process.env.PATH, TRIGGER_NAME: "CI", TRIGGER_PATH: triggerPath },
+        encoding: "utf8",
+      });
+    // BOTH forms of the real path pass — the suffixed one is what GitHub reports.
+    expect(runAssert(".github/workflows/test.yml@main").status).toBe(0);
+    expect(runAssert(".github/workflows/test.yml").status).toBe(0);
+    // A different workflow, with or without a suffix, still fails loudly.
+    const other = runAssert(".github/workflows/other.yml@main");
+    expect(other.status).not.toBe(0);
+    expect(other.stderr).toContain("REFUSING");
   });
 
   test("concurrency: release-auto-tag, and it never cancels", () => {
@@ -153,23 +194,23 @@ describe("release-auto-tag workflow — triggers and guards", () => {
     expect(wf.concurrency?.["cancel-in-progress"]).toBe(false);
   });
 
-  test("a dry run cannot write: the mint and the POST are both excluded on dispatch", () => {
-    expect(step("decide", "app-token").if).toContain("github.event_name != 'workflow_dispatch'");
-    expect(step("decide", "write").if).toContain("github.event_name != 'workflow_dispatch'");
-    // The write step still runs after a failed mint so it can REFUSE
+  test("a dry run cannot write: the write job is excluded on dispatch, and its POST still runs after a failed mint", () => {
+    const writeJob = job("write");
+    expect(writeJob.needs).toBe("decide");
+    expect(writeJob.if).toContain("github.event_name != 'workflow_dispatch'");
+    expect(writeJob.if).toContain("needs.decide.outputs.verdict == 'TAG'");
+    // The POST step still runs after a failed mint so it can REFUSE
     // `app-not-configured` rather than silently doing nothing.
-    expect(step("decide", "write").if).toContain("always()");
+    expect(step("write", "write").if).toContain("always()");
   });
 
   test("no run: block interpolates a value with ${{ }} — everything goes through env:", () => {
-    for (const [name, j] of Object.entries(wf.jobs ?? {})) {
-      for (const s of j.steps ?? []) {
-        if (typeof s.run === "string") expect(s.run, `${name}/${s.id ?? s.name} run: must not interpolate`).not.toContain("${{");
-      }
+    for (const { job: name, step: s } of allSteps()) {
+      if (typeof s.run === "string") expect(s.run, `${name}/${s.id ?? s.name} run: must not interpolate`).not.toContain("${{");
     }
   });
 
-  test("the decide step runs the script from the default branch and asks for the nightly when there is no sha", () => {
+  test("the decide step runs the script from the default branch, asks for the nightly without a sha, and names the trigger's check suite", () => {
     const checkout = (job("decide").steps ?? [])[0];
     expect(checkout.uses).toContain("actions/checkout@");
     expect(String(checkout.with?.ref)).toContain("github.event.repository.default_branch");
@@ -178,6 +219,8 @@ describe("release-auto-tag workflow — triggers and guards", () => {
     expect(run).toContain("--nightly");
     expect(run).toContain('--sha "$TARGET_SHA"');
     expect(run).toContain("--self-run-id");
+    expect(run).toContain("--trigger-check-suite-id");
+    expect(String(step("decide", "decide").env?.TRIGGER_CHECK_SUITE_ID)).toBe("${{ github.event.workflow_run.check_suite_id }}");
   });
 
   test("the checks-pending deadline in the workflow is the measured one, with its method", () => {
@@ -191,12 +234,16 @@ describe("release-auto-tag workflow — triggers and guards", () => {
 });
 
 describe("release-auto-tag workflow — the reporter (acceptance 9, YAML half)", () => {
-  test("the report job's guard: always(), REFUSE, never dispatch", () => {
+  test("the report job's guard: always(), REFUSE read from write BEFORE decide, never dispatch", () => {
     const report = job("report");
-    expect(report.needs).toBe("decide");
+    expect(report.needs).toEqual(["decide", "write"]);
     expect(report.if).toContain("always()");
-    expect(report.if).toContain("needs.decide.outputs.verdict == 'REFUSE'");
+    expect(report.if).toContain("needs.write.outputs.verdict || needs.decide.outputs.verdict");
     expect(report.if).toContain("github.event_name != 'workflow_dispatch'");
+    // The condition and version it renders read write's before decide's too.
+    const env = (report.steps ?? [])[0].env ?? {};
+    expect(String(env.CONDITION)).toBe("${{ needs.write.outputs.condition || needs.decide.outputs.condition }}");
+    expect(String(env.VERSION)).toBe("${{ needs.write.outputs.version || needs.decide.outputs.version }}");
   });
 
   test("the report job: issues: write only, and it checks out nothing", () => {
@@ -217,11 +264,19 @@ describe("release-auto-tag workflow — the reporter (acceptance 9, YAML half)",
     expect(run).toContain("gh issue create");
   });
 
-  test("the decide job maps verdict, condition and version from the step to the job output", () => {
-    const outputs = job("decide").outputs ?? {};
-    expect(outputs.verdict).toBe("${{ steps.write.outputs.verdict || steps.decide.outputs.verdict }}");
-    expect(outputs.condition).toBe("${{ steps.write.outputs.condition || steps.decide.outputs.condition }}");
-    expect(outputs.version).toBe("${{ steps.write.outputs.version || steps.decide.outputs.version }}");
+  test("decide and write each map verdict, condition and version to their JOB outputs", () => {
+    const decide = job("decide").outputs ?? {};
+    expect(decide.verdict).toBe("${{ steps.decide.outputs.verdict }}");
+    expect(decide.condition).toBe("${{ steps.decide.outputs.condition }}");
+    expect(decide.version).toBe("${{ steps.decide.outputs.version }}");
+    // The EFFECTIVE commit, so `write` tags what `decide` actually decided on
+    // (for the nightly, the commit the walk found — not the empty target output).
+    expect(decide.sha).toBe("${{ steps.decide.outputs.sha }}");
+
+    const write = job("write").outputs ?? {};
+    expect(write.verdict).toBe("${{ steps.write.outputs.verdict }}");
+    expect(write.condition).toBe("${{ steps.write.outputs.condition }}");
+    expect(write.version).toBe("${{ steps.write.outputs.version }}");
   });
 });
 
@@ -250,28 +305,32 @@ describe("release-auto-tag workflow — the coupling and the allowlist file", ()
 });
 
 describe("release-auto-tag workflow — credential isolation and the reporter's shell", () => {
-  test("the workspace is restored to the default branch's tree between the decision and the mint", () => {
-    // Step order alone is not isolation: condition 6 runs the release commit's
-    // own script in this workspace, and the write step runs this repo's script
-    // holding the App token. The tree in between must be the default branch's.
-    // `reset --hard` and not `checkout -- .`: the index is candidate-writable
-    // too, so a staged rewrite of the decision script would survive a checkout.
-    const steps = job("decide").steps ?? [];
-    const indexOf = (id: string) => steps.findIndex((s) => s.id === id);
-    const restoreIndex = steps.findIndex((s) => (s.run ?? "").includes("git clean -ffdqx"));
-    expect(restoreIndex).toBeGreaterThan(indexOf("decide"));
-    expect(restoreIndex).toBeLessThan(indexOf("app-token"));
-    const restore = steps[restoreIndex];
-    expect(restore.run).toContain("git reset --hard HEAD");
-    expect(restore.run).not.toContain("git checkout -- .");
-    expect(restore.if).toContain("always()");
-    expect(restore.if).toContain("github.event_name != 'workflow_dispatch'");
+  test("isolation is the JOB BOUNDARY: `write` has a fresh default-branch checkout, and no step restores a shared tree", () => {
+    // The single-job design restored the workspace between the decision and the
+    // mint. That is GONE: `write` is a different job on a fresh runner with a
+    // fresh checkout, so the tree `decide` ran candidate code in is never reused
+    // for a privileged step — a tree restore could not cover `.git` anyway.
+    const writeCheckout = (job("write").steps ?? [])[0];
+    expect(writeCheckout.uses).toContain("actions/checkout@");
+    expect(String(writeCheckout.with?.ref)).toContain("github.event.repository.default_branch");
+
+    const runs = allSteps().map(({ step: s }) => s.run ?? "");
+    expect(runs.some((r) => r.includes("git clean -ffdqx"))).toBe(false);
+    expect(runs.some((r) => r.includes("git reset --hard HEAD"))).toBe(false);
+    // And the mint is not in the job that ran candidate code.
+    expect((job("decide").steps ?? []).some((s) => s.id === "app-token")).toBe(false);
   });
 
-  test("the write step re-reads main, so condition 4 sees a release that merged during the wait", () => {
-    const run = step("decide", "write").run ?? "";
-    expect(run).toContain("git fetch --no-tags --prune origin +refs/heads/main:refs/remotes/origin/main");
-    expect(run.indexOf("git fetch")).toBeLessThan(run.indexOf("release-auto-tag.mjs tag"));
+  test("the write job re-reads main before condition 10, so a release that merged during the wait is seen", () => {
+    const steps = job("write").steps ?? [];
+    const indexOf = (fn: (s: Step) => boolean) => steps.findIndex(fn);
+    const fetchIndex = indexOf((s) => (s.run ?? "").includes("git fetch") && (s.run ?? "").includes("refs/heads/main"));
+    const mintIndex = indexOf((s) => s.id === "app-token");
+    const writeIndex = indexOf((s) => s.id === "write");
+    expect(fetchIndex).toBeGreaterThan(-1);
+    expect(fetchIndex).toBeLessThan(writeIndex);
+    expect(mintIndex).toBeLessThan(writeIndex);
+    expect(step("write", "write").run).toContain("release-auto-tag.mjs tag");
   });
 
   test("the reporter's shell: opens an issue when no page holds the title, and does nothing when one does", () => {

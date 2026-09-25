@@ -19,9 +19,10 @@
  * release-auto-tag-workflow.test.ts, where the workflow is parsed).
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 
 import {
   CONDITION,
@@ -30,6 +31,7 @@ import {
   WRITE_VERDICT,
   compareVersions,
   createClient,
+  createDeps,
   decide,
   main,
   nightlyTarget,
@@ -101,7 +103,10 @@ function fixtureApi(over: Partial<GitHubClient> = {}): GitHubClient {
     listCheckRuns: async () => checks(),
     readWorkflowMeta: async () => ({ name: "CI" }),
     readWorkflowRun: async () => ({ check_suite_id: 999 }),
-    listCommitsOnMain: async () => [],
+    // The CI workflow's completed runs on the commit. `checks()` above carries
+    // check_suite id 1, so the default suite list makes condition 9's
+    // CI-suite guard pass for a fixture that does not override it.
+    listCompletedWorkflowRunsForSha: async () => [{ check_suite_id: 1 }],
     createTagRef: async () => ({ ok: true, status: 201, body: {} }),
     ...over,
   };
@@ -116,6 +121,8 @@ interface HarnessOptions {
   allowlist?: string[];
   /** Overrides git revParse, for the nightly walk. */
   parents?: Record<string, string>;
+  /** The version file's own commit history (newest first), for the nightly. */
+  fileHistory?: string[];
 }
 
 function harness(opts: HarnessOptions = {}) {
@@ -147,6 +154,7 @@ function harness(opts: HarnessOptions = {}) {
       },
       isAncestor: () => opts.ancestor ?? true,
       revParse: (ref: string) => opts.parents?.[ref] ?? ref,
+      logFileHistory: () => opts.fileHistory ?? [],
     },
     runVersionSync: async (sha: string, version: string) => {
       versionSyncCalls.push(`${sha}@${version}`);
@@ -506,6 +514,36 @@ describe("release auto-tag — condition 9", () => {
     expect(result.verdict).toBe(VERDICT.TAG);
   });
 
+  test("round 2, item 3: no check runs at all REFUSEs checks-missing (an empty list is not green)", async () => {
+    const { deps } = harness({ api: { listCheckRuns: async () => [] } });
+    const result = await decide({ sha: SHA, deps });
+    expect(result.verdict).toBe(VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.CHECKS_MISSING);
+    expect((result.summary ?? []).join(" ")).toContain("no check runs");
+  });
+
+  test("round 2, item 3: check runs, but none from the CI workflow's suite, REFUSEs checks-missing", async () => {
+    const { deps } = harness({
+      api: { listCheckRuns: async () => checks() }, // default run carries check_suite id 1
+    });
+    const result = await decide({ sha: SHA, deps, options: { ciCheckSuiteIds: [2] } });
+    expect(result.verdict).toBe(VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.CHECKS_MISSING);
+  });
+
+  test("round 2, item 3: an empty CI-suite list (no completed CI suite on the commit) REFUSEs checks-missing", async () => {
+    const { deps } = harness({ api: { listCheckRuns: async () => checks() } });
+    const result = await decide({ sha: SHA, deps, options: { ciCheckSuiteIds: [] } });
+    expect(result.verdict).toBe(VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.CHECKS_MISSING);
+  });
+
+  test("round 2, item 3: a check run from the CI workflow's suite satisfies the guard", async () => {
+    const { deps } = harness({ api: { listCheckRuns: async () => checks() } });
+    const result = await decide({ sha: SHA, deps, options: { ciCheckSuiteIds: [1] } });
+    expect(result.verdict).toBe(VERDICT.TAG);
+  });
+
   test("condition 9: an allowlisted failure is tolerated, listed, and does not refuse", async () => {
     const h = harness({
       allowlist: ["launchd adopt-then-upgrade (macOS, advisory)"],
@@ -726,26 +764,21 @@ describe("release auto-tag — the nightly target", () => {
   const MID = "1".repeat(40);
   const REL = "2".repeat(40);
   const PARENT = "3".repeat(40);
-  const olderParents = {
-    "origin/main": MID,
-    [`${MID}^`]: REL,
-    [`${REL}^`]: PARENT,
-    [`${PARENT}^`]: ROOT,
+  // The version file's OWN history, newest first: MID touched the file without
+  // changing the version; REL is where 0.56.0 became 0.57.0.
+  const fileHistory = [MID, REL, PARENT];
+  const versions = {
+    [MID]: manifest(VERSION),
+    [`${MID}^`]: manifest(VERSION), // edited the file, version unchanged
+    [REL]: manifest(VERSION),
+    [`${REL}^`]: manifest(PREVIOUS), // the change the nightly is looking for
+    [PARENT]: manifest(PREVIOUS),
+    [`${PARENT}^`]: manifest("0.55.0"),
   };
 
-  test("acceptance 13: a later commit that edits package.json without changing the version is skipped", async () => {
-    const { deps, showCalls } = harness({
-      parents: olderParents,
-      versions: {
-        [MID]: manifest(VERSION),
-        [`${MID}^`]: manifest(VERSION), // the release commit's version …
-        [REL]: manifest(VERSION),
-        [`${REL}^`]: manifest(PREVIOUS), // … differs from its parent's
-        [PARENT]: manifest(PREVIOUS),
-        [`${PARENT}^`]: manifest("0.55.0"),
-      },
-    });
-    const target = await nightlyTarget(deps);
+  test("acceptance 13: a later commit that edits package.json without changing the version is skipped", () => {
+    const { deps, showCalls } = harness({ fileHistory, versions });
+    const target = nightlyTarget(deps);
     expect(target?.sha).toBe(REL);
     expect(target?.version).toBe(VERSION);
     // "One run, one decision": the walk stops at the release commit, so the older
@@ -755,17 +788,11 @@ describe("release auto-tag — the nightly target", () => {
 
   test("acceptance 8: the missed release commit is selected, and the decision ON that commit tags it", async () => {
     const { deps } = harness({
-      parents: olderParents,
-      versions: {
-        [MID]: manifest(VERSION),
-        [`${MID}^`]: manifest(VERSION),
-        [REL]: manifest(VERSION),
-        [`${REL}^`]: manifest(PREVIOUS),
-        [PARENT]: manifest(PREVIOUS),
-      },
+      fileHistory,
+      versions,
       api: { listPullsForCommit: async () => [pull({ merge_commit_sha: REL })] },
     });
-    const target = await nightlyTarget(deps);
+    const target = nightlyTarget(deps);
     expect(target?.sha).toBe(REL);
     // The nightly decides on that ONE commit — untagged here, so it tags itself.
     const result = await decide({ sha: target?.sha ?? "", deps });
@@ -773,9 +800,9 @@ describe("release auto-tag — the nightly target", () => {
     expect(result.version).toBe(VERSION);
   });
 
-  test("nightly: no version change anywhere in the walk window SKIPs", async () => {
+  test("round 2, item 4: no version change in the file's history → null (the caller REFUSEs, never SKIPs)", () => {
     const { deps } = harness({
-      parents: { "origin/main": REL, [`${REL}^`]: PARENT },
+      fileHistory: [REL, PARENT],
       versions: {
         [REL]: manifest(VERSION),
         [`${REL}^`]: manifest(VERSION),
@@ -783,8 +810,43 @@ describe("release auto-tag — the nightly target", () => {
         [`${PARENT}^`]: manifest(VERSION),
       },
     });
-    const target = await nightlyTarget(deps, { limit: 1 });
-    expect(target).toBeNull();
+    expect(nightlyTarget(deps)).toBeNull();
+  });
+
+  test("round 2, item 4: a version change more than 200 commits back is still found (the file's own history)", () => {
+    // The old walk went at most 200 commits up from HEAD, so a release buried
+    // under 250 later (non-version) commits was walked straight past and the run
+    // SKIPped. The walk now follows git log -- <version file>, which lists only
+    // the commits that touched it.
+    const dir = scratchDir();
+    const git = (...args: string[]): string => {
+      const r = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
+      if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr?.trim() ?? r.status}`);
+      return r.stdout.trim();
+    };
+    git("init", "-q");
+    git("symbolic-ref", "HEAD", "refs/heads/main");
+    git("config", "user.email", "test@example.invalid");
+    git("config", "user.name", "release-auto-tag test");
+    writeFileSync(join(dir, "package.json"), manifest("0.1.0"));
+    git("add", "-A");
+    git("commit", "-q", "-m", "initial");
+    // The release commit, then 250 commits that never touch package.json.
+    writeFileSync(join(dir, "package.json"), manifest("0.2.0"));
+    git("add", "-A");
+    git("commit", "-q", "-m", "release 0.2.0");
+    const releaseSha = git("rev-parse", "HEAD");
+    for (let i = 0; i < 250; i++) {
+      writeFileSync(join(dir, `filler-${i}.txt`), String(i));
+      git("add", "-A");
+      git("commit", "-q", "-m", `filler ${i}`);
+    }
+    expect(git("rev-list", "--count", `HEAD`), "the release commit is more than 200 commits back").toBe("252");
+
+    const deps = createDeps({ root: dir });
+    const target = nightlyTarget(deps, { mainRef: "main" });
+    expect(target?.sha).toBe(releaseSha);
+    expect(target?.version).toBe("0.2.0");
   });
 });
 
@@ -823,6 +885,17 @@ describe("release auto-tag — the GitHub client", () => {
     });
     const client = createClient({ repo: REPO, token: "t", fetchImpl: mock.impl });
     expect(await client.listCheckRuns(SHA)).toEqual([run]);
+  });
+
+  test("completed workflow runs: the { workflow_runs } envelope is unwrapped (round 2, item 3)", async () => {
+    const run = { id: 7, check_suite_id: 42 };
+    const mock = mockFetch({
+      [`${BASE}/repos/${REPO}/actions/workflows/test.yml/runs?head_sha=${SHA}&status=completed&per_page=100`]: {
+        body: { total_count: 1, workflow_runs: [run] },
+      },
+    });
+    const client = createClient({ repo: REPO, token: "t", fetchImpl: mock.impl });
+    expect(await client.listCompletedWorkflowRunsForSha("test.yml", SHA)).toEqual([run]);
   });
 
   test("pagination: the next link keeps the full path (a stripped /repos/ prefix would 404 and truncate)", async () => {
@@ -912,16 +985,17 @@ describe("release auto-tag — the CLI surface", () => {
     expect(text).toContain(`condition=${CONDITION.CI_RENAMED}`);
   });
 
-  test("the CLI's nightly path SKIPs when there is no release commit to examine", async () => {
+  test("round 2, item 4: the CLI's nightly path REFUSEs version-origin-not-found when the walk finds no change", async () => {
     const dir = scratchDir();
     const out = join(dir, "out.txt");
-    const { deps } = harness({
-      parents: { "origin/main": SHA, [`${SHA}^`]: SHA },
-      versions: { [SHA]: manifest(VERSION), [`${SHA}^`]: manifest(VERSION) },
-    });
+    // No version-file history to walk → the origin cannot be found. This used to
+    // be a silent SKIP, which is how a missed release disappears.
+    const { deps } = harness();
     const code = await main(["decide", "--repo", REPO, "--nightly", "--output", out], { deps });
     expect(code).toBe(0);
-    expect(readFileSync(out, "utf8")).toContain("verdict=SKIP");
+    const text = readFileSync(out, "utf8");
+    expect(text).toContain("verdict=REFUSE");
+    expect(text).toContain(`condition=${CONDITION.VERSION_ORIGIN_NOT_FOUND}`);
   });
 
   test("the CLI rejects a tag invocation without --version", async () => {

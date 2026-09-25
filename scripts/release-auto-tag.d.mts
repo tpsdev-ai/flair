@@ -15,7 +15,9 @@ export interface ConditionIds {
   TAG_CONFLICT: string;
   CHECKS_FAILED: string;
   CHECKS_PENDING: string;
+  CHECKS_MISSING: string;
   CI_RENAMED: string;
+  VERSION_ORIGIN_NOT_FOUND: string;
   APP_NOT_CONFIGURED: string;
 }
 
@@ -70,7 +72,7 @@ export interface GitHubClient {
   listCheckRuns(sha: string): Promise<CheckRunShape[]>;
   readWorkflowMeta(path: string): Promise<{ name?: string } | null>;
   readWorkflowRun(runId: string | number): Promise<{ check_suite_id?: number } | null>;
-  listCommitsOnMain(limit?: number): Promise<unknown[]>;
+  listCompletedWorkflowRunsForSha(fileName: string, sha: string): Promise<Array<{ check_suite_id?: number }>>;
   createTagRef(ref: string, sha: string): Promise<{ ok: boolean; status: number; body: unknown }>;
 }
 
@@ -78,6 +80,7 @@ export interface GitReads {
   show(rev: string, path: string): string | null;
   isAncestor(sha: string, ref: string): boolean;
   revParse(ref: string): string;
+  logFileHistory(rev: string, path: string): string[];
 }
 
 export interface Deps {
@@ -100,6 +103,7 @@ export interface DecideOptions {
   deadlineMs: number;
   pollMs: number;
   selfCheckSuiteId: number | null;
+  ciCheckSuiteIds: number[] | null;
   repo: string;
 }
 
@@ -174,7 +178,14 @@ export function conditionReviews(
 ): Promise<{ ok: boolean; condition?: string; summary?: string[] }>;
 export function conditionChecks(
   deps: Deps,
-  args: { sha: string; selfCheckSuiteId: number | null; allowlist: Set<string>; deadlineMs: number; pollMs: number },
+  args: {
+    sha: string;
+    selfCheckSuiteId: number | null;
+    allowlist: Set<string>;
+    deadlineMs: number;
+    pollMs: number;
+    ciCheckSuiteIds?: number[] | null;
+  },
 ): Promise<{ ok: boolean; condition?: string; summary?: string[]; tolerated?: string[]; waitedMs?: number }>;
 export function conditionCiName(
   api: GitHubClient,
@@ -189,7 +200,7 @@ export function writeTag(args: {
 }): Promise<WriteResult>;
 export function nightlyTarget(
   deps: Deps,
-  options?: { versionFile?: string; mainRef?: string; limit?: number },
-): Promise<{ sha: string; version: string | null; atMergeBase?: boolean } | null>;
+  options?: { versionFile?: string; mainRef?: string },
+): { sha: string; version: string | null } | null;
 export function renderVerdict(decision: Decision, sha: string): string;
 export function main(argv?: string[], overrides?: { api?: GitHubClient; deps?: Deps }): Promise<number>;
