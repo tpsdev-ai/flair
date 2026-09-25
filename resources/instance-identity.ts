@@ -46,8 +46,8 @@ import { readAllInstanceRows } from "./instance-identity-rows.js";
  * The refusal is cached for at most LOCAL_INSTANCE_REFUSAL_TTL_MS so a write
  * in that state does not re-read the table on every call, and a prune takes
  * effect within the window without a restart. ONE error naming the row count
- * and the prune remedy is logged per process — a bounded line, not one per
- * write.
+ * and the prune remedy is logged per refusal window — a bounded line, one per
+ * window rather than one per write.
  *
  * The read goes through the SAME strict reader the GET uses
  * (`readAllInstanceRows`, resources/Federation.ts): an entry a reader cannot
@@ -59,8 +59,13 @@ let cachedInstanceId: string | null = null;
 /** While `Date.now() < refusalUntilMs` a several-rows refusal is cached. 0 = none. */
 let refusalUntilMs = 0;
 
-/** Whether the several-rows refusal has already been logged in this process. */
+/** Whether the several-rows refusal has already been logged in the current
+ * refusal window. Re-armed when a window expires, so a table that stays
+ * multi-row logs again once per window rather than once per process. */
 let refusalLogged = false;
+
+/** The row count of the current refusal window, for the log line. */
+let refusalRowCount = 0;
 
 /**
  * How long a several-rows refusal is remembered before the table is re-read.
@@ -69,11 +74,35 @@ let refusalLogged = false;
  */
 const LOCAL_INSTANCE_REFUSAL_TTL_MS = 60_000;
 
+/**
+ * Emit the several-rows refusal line ONCE per refusal window. Called wherever
+ * the refusal is observed — the fresh read that arms the window and every
+ * cached answer inside it — so the once-per-window invariant holds on EVERY
+ * path, not just the first. A no-op after the window's first line.
+ */
+function logRefusalOnce(): void {
+  if (refusalLogged) return;
+  refusalLogged = true;
+  console.error(
+    `[identity] this instance has ${refusalRowCount} Instance rows, so it has no single canonical identity to stamp on local writes — ` +
+      "records are written with no originatorInstanceId (the local-origin state) until the table is resolved. " +
+      `Keep one row and delete the rest with: ${INSTANCE_ROW_PRUNE_REMEDY}`,
+  );
+}
+
 export async function localInstanceId(): Promise<string | null> {
   if (cachedInstanceId) return cachedInstanceId;
 
   const now = Date.now();
-  if (refusalUntilMs > now) return null; // cached refusal — no read this call
+  if (refusalUntilMs > now) {
+    // Cached refusal — no read this call. Still go through the guarded log:
+    // within a window it is a no-op, but the invariant is enforced here too.
+    logRefusalOnce();
+    return null;
+  }
+  // Past the window (or never armed): re-arm the once-per-window log line, so a
+  // table that is STILL multi-row after the window logs again exactly once.
+  refusalLogged = false;
 
   let rows;
   try {
@@ -95,14 +124,8 @@ export async function localInstanceId(): Promise<string | null> {
   }
 
   if (decision.kind === "refuse-multiple") {
-    if (!refusalLogged) {
-      refusalLogged = true;
-      console.error(
-        `[identity] this instance has ${decision.rows.length} Instance rows, so it has no single canonical identity to stamp on local writes — ` +
-          "records are written with no originatorInstanceId (the local-origin state) until the table is resolved. " +
-          `Keep one row and delete the rest with: ${INSTANCE_ROW_PRUNE_REMEDY}`,
-      );
-    }
+    refusalRowCount = decision.rows.length;
+    logRefusalOnce();
     refusalUntilMs = now + LOCAL_INSTANCE_REFUSAL_TTL_MS;
     return null;
   }
@@ -116,11 +139,12 @@ export async function localInstanceId(): Promise<string | null> {
  * module-level cache otherwise persists across test files that share the
  * same `bun test` process (same collision class documented in
  * memory-integrity.test.ts re: the Memory class singleton). Also clears the
- * cached several-rows refusal and its one-per-process log, so a test can
+ * cached several-rows refusal and its one-per-window log, so a test can
  * exercise each scenario from a clean slate.
  */
 export function _resetLocalInstanceIdCacheForTests(): void {
   cachedInstanceId = null;
   refusalUntilMs = 0;
   refusalLogged = false;
+  refusalRowCount = 0;
 }

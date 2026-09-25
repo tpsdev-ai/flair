@@ -131,7 +131,7 @@ describe("localInstanceId() — several rows stamp nothing (flair#1896)", () => 
     errSpy.mockRestore();
   });
 
-  it("logs once per process even across BOTH row orders (reset = new process-equivalent slate)", async () => {
+  it("logs once per window even across BOTH row orders (reset = fresh window/process-equivalent slate)", async () => {
     const errSpy = spyOn(console, "error");
     const rowA = { id: "flair_row_a" };
     const rowB = { id: "flair_row_b" };
@@ -145,6 +145,31 @@ describe("localInstanceId() — several rows stamp nothing (flair#1896)", () => 
       expect(errSpy).toHaveBeenCalledTimes(1);
       expect(String(errSpy.mock.calls[0][0])).toContain("flair federation instance prune");
     }
+
+    errSpy.mockRestore();
+  });
+
+  it("after the refusal window expires, a second refusal logs again exactly once (once per window)", async () => {
+    const errSpy = spyOn(console, "error");
+    rowsToServe = [{ id: "flair_row_a" }, { id: "flair_row_b" }];
+
+    // First refusal: arms the window and logs once.
+    expect(await localInstanceId()).toBeNull();
+    expect(errSpy).toHaveBeenCalledTimes(1);
+
+    // Still several rows, but inside the window: silent, no second read.
+    expect(await localInstanceId()).toBeNull();
+    expect(errSpy).toHaveBeenCalledTimes(1);
+
+    // Past the window the table is re-read; it is STILL several rows, so the
+    // refusal logs again — exactly once for the new window.
+    nowValue += 61_000;
+    expect(await localInstanceId()).toBeNull();
+    expect(errSpy).toHaveBeenCalledTimes(2);
+
+    // And silent again inside the new window.
+    expect(await localInstanceId()).toBeNull();
+    expect(errSpy).toHaveBeenCalledTimes(2);
 
     errSpy.mockRestore();
   });
@@ -182,6 +207,17 @@ describe("localInstanceId() — a read that established nothing (flair#1896)", (
     // dropping it would read the table as "the rows I could name" — here, the
     // good row — and stamp it.
     rowsToServe = [{}, { id: "flair_good" }];
+    expect(await localInstanceId()).toBeNull();
+
+    rowsToServe = [{ id: "flair_good" }];
+    expect(await localInstanceId()).toBe("flair_good");
+  });
+
+  it("an entry with no usable id, GOOD row FIRST, is UNREADABLE too: the refusal does not depend on order", async () => {
+    // The bad entry may sit anywhere. A reader that stopped at the first usable
+    // id would stamp `flair_good` here and only reject the bad-first order, so
+    // the refusal must hold with the good row first as well.
+    rowsToServe = [{ id: "flair_good" }, {}];
     expect(await localInstanceId()).toBeNull();
 
     rowsToServe = [{ id: "flair_good" }];
