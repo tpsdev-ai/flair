@@ -220,7 +220,8 @@ export async function listUsernamesOrNull(
 
 /**
  * `message` with every occurrence of `tokenId` cut to its 8-character prefix.
- * A pairing token's id IS the credential, so no log line carries it whole.
+ * A pairing token's id IS the credential: the sweep's token and bootstrap-user
+ * lines log at most its first 8 characters.
  */
 export function redactTokenId(message: string, tokenId: string): string {
   return tokenId ? message.split(tokenId).join(`${tokenId.slice(0, 8)}…`) : message;
@@ -410,7 +411,7 @@ async function dropBootstrapUser(
     );
     console.log(
       "[federation-cleanup] dropped user",
-      { tid },
+      { tid: tid.slice(0, 8) },
     );
   } catch (err: any) {
     const msg = err?.message ?? "";
@@ -424,7 +425,10 @@ async function dropBootstrapUser(
     } else {
       console.error(
         "[federation-cleanup] drop_user error",
-        { tid, err: String(err?.message ?? err) },
+        // A bootstrap username is pair-bootstrap- plus the token's first 8
+        // characters, but a hand-made one can carry more, and Harper's error can
+        // echo it: bound the suffix and cut it out of the message.
+        { tid: tid.slice(0, 8), err: redactTokenId(String(err?.message ?? err), tid) },
       );
     }
   }

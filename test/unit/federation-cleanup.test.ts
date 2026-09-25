@@ -807,6 +807,32 @@ describe("federation-cleanup sweep", () => {
       expect(captured[0].body.username).toBe(`${BOOTSTRAP_USER_PREFIX}deadbeef`);
     });
 
+    it("a hand-made bootstrap user with a long suffix is logged by its first 8 characters only", async () => {
+      // Real bootstrap users are pair-bootstrap- plus 8 characters; a hand-made
+      // one can carry a whole token id, and Harper's error can echo the name.
+      const longSuffix = "feedfacefeedface_whole_token_id";
+      const username = `${BOOTSTRAP_USER_PREFIX}${longSuffix}`;
+      const errs: string[] = [];
+      const logs: string[] = [];
+      const fmt = (a: any[]) => a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ");
+      const logSpy = jest.spyOn(console, "log").mockImplementation((...a: any[]) => { logs.push(fmt(a)); });
+      const errSpy = jest.spyOn(console, "error").mockImplementation((...a: any[]) => { errs.push(fmt(a)); });
+      try {
+        const ok = createMockServerOp([{ ok: true }]);
+        await runCleanupTick({ serverOp: ok.fn, db: createMockDb([]) as any, now, users: [username] });
+        const failing = createMockServerOp([{ ok: false, error: new Error(`drop_user failed for ${username}`) }]);
+        await runCleanupTick({ serverOp: failing.fn, db: createMockDb([]) as any, now, users: [username] });
+      } finally {
+        logSpy.mockRestore();
+        errSpy.mockRestore();
+      }
+      const all = [...logs, ...errs].join("\n");
+      expect(all).toContain("dropped user");
+      expect(all).toContain("drop_user error");
+      expect(all).toContain(longSuffix.slice(0, 8));
+      expect(all).not.toContain(longSuffix);
+    });
+
     it("leaves a user whose token is live and unexpired", async () => {
       const db = createMockDb([
         makeToken("cafebabe_live_token", { expiresAt: new Date("2026-05-05T23:00:00Z").toISOString() }),
