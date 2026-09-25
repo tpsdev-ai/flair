@@ -347,7 +347,7 @@ describe("release-auto-tag workflow — the coupling and the allowlist file", ()
 // ── CODEOWNERS: the trust root (#1890, round 4 item 2) ────────────────────────
 
 describe("release-auto-tag workflow — the trust root is owned by the repo admin", () => {
-  test("round 4, item 2: CODEOWNERS gives the tagger, its workflow, the checker and the allowlist one owner", () => {
+  test("round 4, item 2 (round 6, item 1): CODEOWNERS gives the trust root — the tagger, its workflow, the checker, the allowlist and this file — one owner", () => {
     const rules = readFileSync(join(REPO, ".github", "CODEOWNERS"), "utf8")
       .split("\n")
       .map((line) => line.trim())
@@ -357,16 +357,28 @@ describe("release-auto-tag workflow — the trust root is owned by the repo admi
         return { pattern: pattern ?? "", owners: owners.join(" ") };
       });
     const ownerOf = (pattern: string) => rules.find((r) => r.pattern === pattern)?.owners ?? null;
+    const indexOf = (pattern: string) => rules.findIndex((r) => r.pattern === pattern);
     // A release PR cannot change what the tagger does (condition 7b), and a
-    // change to the tagger itself needs the repo admin — not a release.
+    // change to the tagger itself needs the repo admin — not a release. The LAST
+    // matching pattern wins in CODEOWNERS, so each specific rule must sit BELOW
+    // the catch-all for it to be the one that applies.
     for (const pattern of [
       "/.github/workflows/release-*.yml",
       "/scripts/release-auto-tag.mjs",
       "/scripts/check-version-sync.mjs",
       "/.github/release-auto-tag-advisories.json",
+      "/.github/CODEOWNERS",
     ]) {
       expect(ownerOf(pattern), `${pattern} is owned`).toBe("@heskew");
+      expect(indexOf(pattern), `${pattern} is below the catch-all`).toBeGreaterThan(indexOf("*"));
     }
+    // The ownership map ITSELF (round 6, item 1): without the entry above the
+    // catch-all makes the reviewers team the owner of this file, so a
+    // collaborator with merge access and that team's approval could delete the
+    // trust-root entries and then change the tagger in a later pull request.
+    expect(ownerOf("/.github/CODEOWNERS"), ".github/CODEOWNERS is not left to the catch-all").not.toBe(
+      ownerOf("*"),
+    );
     // …and the existing catch-all still covers everything else, unchanged.
     expect(ownerOf("*")).toBe("@tpsdev-ai/reviewers");
   });
@@ -410,6 +422,29 @@ describe("release-auto-tag workflow — credential isolation and the reporter's 
     expect(refetchIndex, "main is fetched again after the re-derivation").toBeGreaterThan(redecideIndex);
     expect(refetchIndex).toBeLessThan(writeIndex);
     expect(step("write", "write").run).toContain("release-auto-tag.mjs tag");
+  });
+
+  test("round 6, item 2: the tag step requires the re-fetch's success, and the fetch still runs after a failed mint", () => {
+    const steps = job("write").steps ?? [];
+    const isFetch = (s: Step) => (s.run ?? "").includes("git fetch") && (s.run ?? "").includes("refs/heads/main");
+    const fetches = steps.filter(isFetch);
+    expect(fetches.length, "main is fetched twice in `write`").toBe(2);
+    const refetch = fetches[1] as Step;
+    // The re-fetch is addressable by the tag step…
+    expect(typeof refetch.id, "the re-fetch has an id").toBe("string");
+    // …it runs even when the App-token mint failed, so the SEPARATE
+    // `app-not-configured` REFUSE below still fires…
+    expect(String(refetch.if)).toContain("always()");
+    // …and the tag step REQUIRES that fetch to have succeeded. With `always()`
+    // alone a failed fetch left `origin/main` at its older value while the tag
+    // step still ran, so condition 10 tagged the release that the wait had
+    // superseded (round 6, item 2).
+    const tagIf = String(step("write", "write").if);
+    expect(tagIf).toContain(`steps.${refetch.id as string}.outcome == 'success'`);
+    // The mint-failure path is intact: still `always()`, still gated on TAG.
+    expect(tagIf).toContain("always()");
+    expect(tagIf).toContain("steps.redecide.outputs.verdict == 'TAG'");
+    expect(String(step("write", "app-token").if)).toContain("steps.redecide.outputs.verdict == 'TAG'");
   });
 
   test("the reporter's shell: opens an issue when no page holds the title, and does nothing when one does", () => {

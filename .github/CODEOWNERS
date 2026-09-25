@@ -11,3 +11,10 @@
 /scripts/release-auto-tag.mjs @heskew
 /scripts/check-version-sync.mjs @heskew
 /.github/release-auto-tag-advisories.json @heskew
+
+# …and the ownership map itself. Without this line the catch-all rule above
+# makes the reviewers team the owner of CODEOWNERS, so a collaborator with merge
+# access and that team's approval could delete the entries just above, then
+# change the tagger in a later pull request. Changing who owns the trust root
+# takes the same human as changing the trust root.
+/.github/CODEOWNERS @heskew

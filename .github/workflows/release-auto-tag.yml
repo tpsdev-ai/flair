@@ -341,15 +341,25 @@ jobs:
         # check-run wait), so main is fetched AGAIN here, immediately before the
         # tag: the tag step's release-intent re-check must read the main of NOW,
         # or a release that merged during the wait is tagged as superseded.
+        #
+        # `always()` and an id the tag step REQUIRES (round 6): `always()` keeps
+        # this fetch running after a failed mint, so the separate
+        # `app-not-configured` path below still reports it; the id lets the tag
+        # step require this fetch's SUCCESS, because when the fetch fails
+        # `origin/main` keeps its older value and condition 10 would then tag the
+        # release that was superseded during the wait.
+        id: refetch
+        if: always()
         run: git fetch --no-tags --prune origin +refs/heads/main:refs/remotes/origin/main
 
       - name: Tag (condition 10 re-check, then the POST)
         # `always()` so this runs even when the mint failed (unconfigured App) and
         # can REFUSE `app-not-configured` — but only when the re-derivation said
-        # TAG. Condition 10 re-runs 3, 4 and 8; the POST is the race-breaker. The
-        # sha and version are THIS job's own, never decide's.
+        # TAG and the re-fetch above SUCCEEDED: a tag is never written from a
+        # stale `origin/main`. Condition 10 re-runs 3, 4 and 8; the POST is the
+        # race-breaker. The sha and version are THIS job's own, never decide's.
         id: write
-        if: always() && steps.redecide.outputs.verdict == 'TAG'
+        if: always() && steps.refetch.outcome == 'success' && steps.redecide.outputs.verdict == 'TAG'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           # The re-check's READS (tag state, release intent, the PR and its reviews)
