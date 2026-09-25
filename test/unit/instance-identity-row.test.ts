@@ -15,9 +15,9 @@ import { describe, it, expect, mock } from "bun:test";
 import {
   canonicalInstanceRole,
   decideHubReconcile,
+  decideInstanceAnswer,
   decideInstancePrune,
   decideSweepMode,
-  formatAdvertisedIdentity,
   formatInstanceRow,
   INSTANCE_ROWS_SQL,
   INSTANCE_ROW_PRUNE_COMMAND,
@@ -27,7 +27,6 @@ import {
   probeInstanceIdentity,
   prunePeerWarningLines,
   pruneInstanceRows,
-  readAdvertisedInstanceIdentity,
   readInstanceRows,
   readRoleNames,
   updateInstanceRole,
@@ -160,6 +159,44 @@ describe("decideHubReconcile", () => {
   });
 });
 
+// ─── answering with one identity (the readers) ───────────────────────────────
+
+describe("decideInstanceAnswer", () => {
+  it("no rows → none: the one state a reader may create an identity from", () => {
+    expect(decideInstanceAnswer([])).toEqual({ kind: "none" });
+    expect(decideInstanceAnswer(null)).toEqual({ kind: "none" });
+  });
+
+  it("exactly one row → that row, whatever its role", () => {
+    expect(decideInstanceAnswer([HUB_ROW])).toEqual({ kind: "answer", row: HUB_ROW });
+    expect(decideInstanceAnswer([SPOKE_ROW])).toEqual({ kind: "answer", row: SPOKE_ROW });
+  });
+
+  it("two rows → a refusal naming BOTH, in either table order", () => {
+    // The defect was order-dependence, so the same two rows are fed both ways.
+    for (const order of [[HUB_ROW, SPOKE_ROW], [SPOKE_ROW, HUB_ROW]] as const) {
+      const decision = decideInstanceAnswer([...order]);
+      expect(decision.kind).toBe("refuse-multiple");
+      if (decision.kind !== "refuse-multiple") throw new Error("unreachable");
+      expect(decision.rows.map((r) => r.id)).toEqual(order.map((r) => r.id));
+    }
+  });
+
+  it("never picks one row when three exist", () => {
+    const decision = decideInstanceAnswer([HUB_ROW, SPOKE_ROW, SECOND_HUB_ROW]);
+    expect(decision.kind).toBe("refuse-multiple");
+    if (decision.kind !== "refuse-multiple") throw new Error("unreachable");
+    expect(decision.rows).toHaveLength(3);
+  });
+
+  it("ignores rows with no usable id, so a blank row cannot fake a refusal", () => {
+    expect(decideInstanceAnswer([HUB_ROW, { id: "" } as InstanceIdentityRow])).toEqual({
+      kind: "answer",
+      row: HUB_ROW,
+    });
+  });
+});
+
 describe("INSTANCE_ROW_PRUNE_REMEDY", () => {
   it("names the command, the placeholder and BOTH forms — a dry run deletes nothing", () => {
     expect(INSTANCE_ROW_PRUNE_REMEDY).toContain(INSTANCE_ROW_PRUNE_COMMAND);
@@ -275,8 +312,9 @@ describe("instanceIdentitySummary", () => {
 describe("readInstanceRows", () => {
   it("reads EVERY row: one unconditional statement, no condition a row can fall outside of", async () => {
     // flair#1883 round 2: the read used to carry `createdAt > "1970-01-01"`, so a
-    // row with no createdAt (the schema does not require one) or one dated before
-    // 1970 was invisible — and init then inserted a SECOND identity.
+    // row dated before 1970, or one whose createdAt is not a date, was invisible
+    // — and init then inserted a SECOND identity. (`createdAt` is REQUIRED by the
+    // schema — `createdAt: String! @indexed` — so no legal row omits it.)
     const { endpoint, calls } = opsEndpointMock(() => jsonResponse([SPOKE_ROW, HUB_ROW]));
 
     const rows = await readInstanceRows(endpoint);
@@ -306,6 +344,15 @@ describe("readInstanceRows", () => {
     expect(rows[0].createdAt).toBeUndefined();
   });
 
+  it("reads a row whose id is the only thing it carries (a row the old filter hid)", async () => {
+    // The row shapes the filter used to hide, in the rawest form the reader can
+    // see them: no createdAt at all, and a value that is not a date.
+    const { endpoint } = opsEndpointMock(() =>
+      jsonResponse([{ id: "flair_bare", role: "spoke" }, { id: "flair_blank", createdAt: "" }]),
+    );
+    expect((await readInstanceRows(endpoint)).map((r) => r.id)).toEqual(["flair_bare", "flair_blank"]);
+  });
+
   it("sends Basic auth when credentials are configured", async () => {
     const { endpoint, calls } = opsEndpointMock(() => jsonResponse([]));
     await readInstanceRows(endpoint);
@@ -330,9 +377,23 @@ describe("readInstanceRows", () => {
     await expect(readInstanceRows(endpoint)).rejects.toThrow("Instance read via ops API failed (403)");
   });
 
-  it("a body that is not a list reports no rows, never a fabricated one", async () => {
+  it("throws on an unparseable 200 rather than reporting zero rows (flair#1883 round 3)", async () => {
+    // The old contract: `[].` A read that established nothing then licensed
+    // creating an identity, which is the whole defect.
+    const { endpoint } = opsEndpointMock(() => new Response("<html>gateway</html>", { status: 200 }));
+    await expect(readInstanceRows(endpoint)).rejects.toThrow("UNREADABLE");
+  });
+
+  it("throws on a 200 whose body is not a row list, never reports no rows", async () => {
+    // This test used to codify `[]` — the fallback that made a malformed read
+    // look like an instance with no identity. It now codifies the refusal.
     const { endpoint } = opsEndpointMock(() => jsonResponse({ ok: true }));
-    expect(await readInstanceRows(endpoint)).toEqual([]);
+    await expect(readInstanceRows(endpoint)).rejects.toThrow("Instance read via ops API answered 200");
+  });
+
+  it("throws when the envelope carries no results array either", async () => {
+    const { endpoint } = opsEndpointMock(() => jsonResponse({ results: null }));
+    await expect(readInstanceRows(endpoint)).rejects.toThrow("UNREADABLE");
   });
 });
 
@@ -448,73 +509,35 @@ describe("pruneInstanceRows", () => {
   });
 });
 
-// ─── the identity peers may have pinned (prune's warning) ────────────────────
-
-describe("readAdvertisedInstanceIdentity", () => {
-  it("reads GET /FederationInstance with admin auth and names the row it answers with", async () => {
-    const calls: any[] = [];
-    const fetchImpl = mock(async (url: string, init: any) => {
-      calls.push({ url, init });
-      return jsonResponse({ id: "flair_advertised", publicKey: "pinned-key", role: "hub" });
-    }) as unknown as typeof fetch;
-
-    const identity = await readAdvertisedInstanceIdentity("http://127.0.0.1:19925/", { user: "admin", pass: "pw" }, fetchImpl);
-
-    expect(identity).toEqual({ id: "flair_advertised", publicKey: "pinned-key", role: "hub" });
-    expect(calls[0].url).toBe("http://127.0.0.1:19925/FederationInstance");
-    expect(calls[0].init.headers.Authorization).toBe("Basic " + Buffer.from("admin:pw").toString("base64"));
-  });
-
-  it("throws with the status when the read fails — never reports an identity it did not read", async () => {
-    const fetchImpl = mock(async () => new Response("nope", { status: 503 })) as unknown as typeof fetch;
-    await expect(
-      readAdvertisedInstanceIdentity("http://127.0.0.1:19925", { user: "admin", pass: "pw" }, fetchImpl),
-    ).rejects.toThrow("GET /FederationInstance failed (503)");
-  });
-
-  it("returns null when the response carries no id", async () => {
-    const fetchImpl = mock(async () => jsonResponse({ role: "hub" })) as unknown as typeof fetch;
-    expect(
-      await readAdvertisedInstanceIdentity("http://127.0.0.1:19925", { user: "admin", pass: "pw" }, fetchImpl),
-    ).toBeNull();
-  });
-});
+// ─── the prune's warning (a peer's identity may be one of the deleted rows) ───
 
 describe("prunePeerWarningLines", () => {
-  const advertised = { id: SPOKE_ROW.id, publicKey: "pinned-key", role: "spoke" };
-
-  it("names the id and key peers may have pinned, and that they must re-pair when it is deleted", () => {
-    const lines = prunePeerWarningLines({ advertised, advertisedFailure: null, drop: [SPOKE_ROW, HUB_ROW] });
-    const joined = lines.join("\n");
-    expect(joined).toContain(`id=${SPOKE_ROW.id}`);
-    expect(joined).toContain("publicKey=pinned-key");
-    expect(joined).toContain("GET /FederationInstance");
+  it("says plainly that ANY deleted row may be the identity a peer pinned, and that those peers must re-pair", () => {
+    const joined = prunePeerWarningLines({ drop: [SPOKE_ROW, HUB_ROW] }).join("\n");
+    expect(joined).toContain("POST /FederationPair");
+    expect(joined).toContain("Any of the 2 row(s) being deleted may be the identity a paired peer pinned");
     expect(joined).toContain("must re-pair");
   });
 
-  it("says the pinned row is kept when the deleted rows are not it", () => {
-    const lines = prunePeerWarningLines({ advertised, advertisedFailure: null, drop: [HUB_ROW] });
-    const joined = lines.join("\n");
-    expect(joined).toContain(`id=${SPOKE_ROW.id}`);
-    expect(joined).toContain("is not being deleted");
+  it("never names a row as the one a peer pinned, and never claims to know", () => {
+    // Round 2 named "the row this hub answers GET /FederationInstance with" as the
+    // identity peers pinned. That is the guess this warning must not make: with
+    // several rows the GET refuses, and a peer was handed the PAIR response.
+    const joined = prunePeerWarningLines({ drop: [SPOKE_ROW, HUB_ROW] }).join("\n");
+    expect(joined).not.toContain("GET /FederationInstance");
+    expect(joined).not.toContain("pinned this instance's identity as");
+    expect(joined).not.toContain("is not being deleted");
+    expect(joined).toContain("cannot be determined here");
   });
 
-  it("reports an unreadable identity as NOT determinable, and still warns", () => {
-    const lines = prunePeerWarningLines({ advertised: null, advertisedFailure: "GET /FederationInstance failed (503)", drop: [HUB_ROW] });
-    const joined = lines.join("\n");
-    expect(joined).toContain("not determinable");
-    expect(joined).toContain("503");
-    expect(joined).toContain("must re-pair");
+  it("counts the rows it is about to delete", () => {
+    expect(prunePeerWarningLines({ drop: [HUB_ROW] }).join("\n")).toContain("Any of the 1 row(s)");
+    expect(prunePeerWarningLines({ drop: [HUB_ROW, SPOKE_ROW, SECOND_HUB_ROW] }).join("\n")).toContain(
+      "Any of the 3 row(s)",
+    );
   });
 
   it("says nothing when nothing is dropped", () => {
-    expect(prunePeerWarningLines({ advertised, advertisedFailure: null, drop: [] })).toEqual([]);
-  });
-});
-
-describe("formatAdvertisedIdentity", () => {
-  it("names the id and the key, and says (unknown) rather than printing a blank key", () => {
-    expect(formatAdvertisedIdentity({ id: "flair_x", publicKey: "k" })).toBe("id=flair_x publicKey=k");
-    expect(formatAdvertisedIdentity({ id: "flair_x", publicKey: null })).toBe("id=flair_x publicKey=(unknown)");
+    expect(prunePeerWarningLines({ drop: [] })).toEqual([]);
   });
 });

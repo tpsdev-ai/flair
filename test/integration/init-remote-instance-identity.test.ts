@@ -13,9 +13,17 @@
  *   - an existing spoke row → the SAME row becomes the hub (id and key kept)
  *   - two rows         → refused, naming both, and nothing written
  *   - prune --keep     → the other row goes, one row left
+ *
+ * Round 3 adds the two READERS, which still answered with the first row of an
+ * unordered search: `GET /FederationInstance`, and the hub identity in the
+ * `POST /FederationPair` response that a spoke pins. Both must REFUSE with two
+ * rows, in either table order, and the pairing refusal must leave the one-time
+ * token unconsumed and write no peer.
  */
 
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
+import nacl from "tweetnacl";
+import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -26,7 +34,6 @@ import {
   INSTANCE_ROW_PRUNE_COMMAND,
   INSTANCE_ROWS_SQL,
   pruneInstanceRows,
-  readAdvertisedInstanceIdentity,
   readInstanceRows,
   type InstanceIdentityRow,
   type OpsEndpoint,
@@ -73,6 +80,61 @@ async function clearInstanceRows(): Promise<void> {
 
 async function insertRow(row: Record<string, unknown>): Promise<void> {
   await ops({ operation: "insert", database: "flair", table: "Instance", records: [row] });
+}
+
+/** Every row a table holds, from the one ops read that can say "all". */
+async function sqlRows(sql: string): Promise<any[]> {
+  const parsed = await ops({ operation: "sql", sql });
+  const rows = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.results) ? parsed.results : null;
+  if (rows === null) throw new Error(`sql read returned no row array: ${JSON.stringify(parsed)}`);
+  return rows;
+}
+
+async function clearTable(table: string): Promise<void> {
+  for (const row of await sqlRows(`SELECT id FROM flair.${table}`)) {
+    await ops({ operation: "delete", database: "flair", table, hash_values: [row.id] });
+  }
+}
+
+/** A one-time pairing token, minted the way `flair federation token` mints one. */
+async function mintPairingToken(id: string): Promise<void> {
+  await ops({
+    operation: "insert",
+    database: "flair",
+    table: "PairingToken",
+    records: [
+      {
+        id,
+        createdBy: "admin",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        createdAt: new Date().toISOString(),
+      },
+    ],
+  });
+}
+
+/** A signed pairing request from a fresh spoke keypair — what a spoke sends. */
+function spokePairBody(pairingToken: string): Record<string, unknown> {
+  const kp = nacl.sign.keyPair();
+  return signBodyFresh(
+    {
+      instanceId: `flair_live_spoke_${Buffer.from(nacl.randomBytes(4)).toString("hex")}`,
+      publicKey: Buffer.from(kp.publicKey).toString("base64url"),
+      role: "spoke",
+      endpoint: "http://127.0.0.1:19999",
+      pairingToken,
+    },
+    kp.secretKey,
+  );
+}
+
+/** POST /FederationPair as a spoke: public endpoint, signed body, no auth header. */
+async function postPair(body: Record<string, unknown>): Promise<Response> {
+  return await fetch(`${harper.httpURL.replace(/\/$/, "")}/FederationPair`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 /** Run the shipped CLI with an isolated HOME; returns stdout+stderr+code. */
@@ -383,8 +445,107 @@ describe("init --remote identity reconcile (live Harper)", () => {
     expect((await rows()).map((r) => r.id)).toEqual(["flair_live_get"]);
   }, 60_000);
 
-  test("prune names the identity peers may have pinned, and the printed --apply form really deletes", async () => {
-    // Two rows: the hub's identity (which the GET answers with) and a stray one.
+  test("GET /FederationInstance REFUSES with two rows — both insertion orders — instead of answering one (flair#1883 round 3)", async () => {
+    // Two writers can still leave two rows (an old install, or the
+    // read-then-insert window). This GET used to report the first row
+    // `search()` yielded, so the identity the instance ADVERTISED depended on the
+    // table's own ordering. Both orderings are exercised live.
+    const rowA = {
+      id: "flair_live_get_a",
+      publicKey: "key-a",
+      role: "spoke",
+      status: "active",
+      createdAt: "2026-09-20T00:00:00.000Z",
+      updatedAt: "2026-09-20T00:00:00.000Z",
+    };
+    const rowB = {
+      id: "flair_live_get_b",
+      publicKey: "key-b",
+      role: "hub",
+      status: "active",
+      createdAt: "2026-09-21T00:00:00.000Z",
+      updatedAt: "2026-09-21T00:00:00.000Z",
+    };
+
+    for (const order of [[rowA, rowB], [rowB, rowA]]) {
+      await clearInstanceRows();
+      for (const row of order) await insertRow(row);
+
+      const res = await fetch(`${harper.httpURL.replace(/\/$/, "")}/FederationInstance`, {
+        headers: { Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`) },
+      });
+
+      expect(res.status).toBe(409);
+      const body: any = await res.json();
+      expect(body.error).toBe("multiple_instance_rows");
+      // Every row is named, and the command that resolves them.
+      expect(body.detail).toContain("flair_live_get_a");
+      expect(body.detail).toContain("flair_live_get_b");
+      expect(body.detail).toContain(INSTANCE_ROW_PRUNE_COMMAND);
+      expect(body.detail).toContain("--apply");
+      // Both rows survive: a refusal writes nothing.
+      expect((await rows()).map((r) => r.id).sort()).toEqual(["flair_live_get_a", "flair_live_get_b"]);
+    }
+
+    await clearInstanceRows();
+  }, 60_000);
+
+  test("POST /FederationPair REFUSES with two rows: the token stays unconsumed and NO peer is written (flair#1883 round 3)", async () => {
+    // A spoke PINS what this response hands it. The response used to be read
+    // AFTER the token was consumed and the peer written, so a hub with two rows
+    // burned a one-time token, recorded the peer, and then answered with
+    // whichever row the search yielded first. The check now comes first.
+    const rowA = {
+      id: "flair_live_pair_a",
+      publicKey: "key-a",
+      role: "spoke",
+      status: "active",
+      createdAt: "2026-09-20T00:00:00.000Z",
+      updatedAt: "2026-09-20T00:00:00.000Z",
+    };
+    const rowB = {
+      id: "flair_live_pair_b",
+      publicKey: "key-b",
+      role: "hub",
+      status: "active",
+      createdAt: "2026-09-21T00:00:00.000Z",
+      updatedAt: "2026-09-21T00:00:00.000Z",
+    };
+
+    await clearTable("Peer");
+    await clearTable("PairingToken");
+
+    for (const order of [[rowA, rowB], [rowB, rowA]]) {
+      await clearInstanceRows();
+      for (const row of order) await insertRow(row);
+
+      const token = `pair-token-live-${order[0].id.slice(-1)}`;
+      await mintPairingToken(token);
+
+      const res = await postPair(spokePairBody(token));
+
+      expect(res.status).toBe(409);
+      const body: any = await res.json();
+      expect(body.error).toBe("multiple_instance_rows");
+      expect(body.detail).toContain("flair_live_pair_a");
+      expect(body.detail).toContain("flair_live_pair_b");
+      expect(body.detail).toContain(INSTANCE_ROW_PRUNE_COMMAND);
+
+      // The refusal ran BEFORE the token was consumed...
+      const tokenRow = (await sqlRows("SELECT id, consumedBy FROM flair.PairingToken")).find((r) => r.id === token);
+      expect(tokenRow).toBeTruthy();
+      expect(tokenRow.consumedBy ?? null).toBeNull();
+      // ...and before any peer was recorded from a pairing that did not happen.
+      expect(await sqlRows("SELECT id FROM flair.Peer")).toEqual([]);
+
+      await ops({ operation: "delete", database: "flair", table: "PairingToken", hash_values: [token] });
+    }
+
+    await clearInstanceRows();
+  }, 60_000);
+
+  test("prune warns that ANY deleted row may be the identity a peer pinned, and the printed --apply form really deletes", async () => {
+    // Two rows: the kept identity and a stray one.
     await clearInstanceRows();
     await insertRow({
       id: "flair_live_keep",
@@ -403,15 +564,6 @@ describe("init --remote identity reconcile (live Harper)", () => {
       updatedAt: "2026-09-21T00:00:00.000Z",
     });
 
-    // Which row the hub answers GET /FederationInstance with is what a peer was
-    // handed — read it the same way a peer does.
-    const advertised = await readAdvertisedInstanceIdentity(harper.httpURL, {
-      user: harper.admin.username,
-      pass: harper.admin.password,
-    });
-    expect(advertised).not.toBeNull();
-    expect(["flair_live_keep", "flair_live_stray"]).toContain(advertised!.id);
-
     const home = await mkdtemp(join(tmpdir(), "flair-1883-cli-"));
     try {
       const dry = await runCli(
@@ -426,10 +578,13 @@ describe("init --remote identity reconcile (live Harper)", () => {
       );
       expect(dry.out).toContain("dry-run");
       expect(dry.out).toContain("flair_live_stray");
-      // The pinned identity and the re-pair obligation, named.
-      expect(dry.out).toContain(`id=${advertised!.id}`);
-      expect(dry.out).toContain("GET /FederationInstance");
+      // The pinned identity is the POST /FederationPair response — a row it cannot
+      // know which of — so the warning says exactly that, and does NOT name one row
+      // as "the identity peers pinned" (flair#1883 round 3).
+      expect(dry.out).toContain("POST /FederationPair");
+      expect(dry.out).toContain("Any of the 1 row(s) being deleted may be the identity a paired peer pinned");
       expect(dry.out).toContain("re-pair");
+      expect(dry.out).not.toContain("GET /FederationInstance");
       // A dry run deletes nothing.
       expect((await rows()).map((r) => r.id).sort()).toEqual(["flair_live_keep", "flair_live_stray"]);
 
@@ -444,7 +599,7 @@ describe("init --remote identity reconcile (live Harper)", () => {
         home,
       );
       expect(applied.out).toContain("deleted 1 row(s)");
-      expect(applied.out).toContain(`id=${advertised!.id}`);
+      expect(applied.out).toContain("Any of the 1 row(s) being deleted may be the identity a paired peer pinned");
       expect((await rows()).map((r) => r.id)).toEqual(["flair_live_keep"]);
     } finally {
       await rm(home, { recursive: true, force: true });

@@ -100,4 +100,35 @@ describe("FederationInstance.get() — a failed read is an error, not first boot
     expect(identity.role).toBe("hub");
     expect(puts).toHaveLength(0);
   });
+
+  it("answers 409 naming EVERY row and the prune when the table holds several — in either order", async () => {
+    // flair#1883 round 3. Two writers can still leave two rows (an old install, or
+    // the read-then-insert window), and this GET used to report the first row
+    // `search()` yielded: which identity the instance answered with depended on
+    // the table's own ordering. Both orders are asserted, because order is the
+    // thing the old code was answering from.
+    readBehaviour = "rows";
+    const rowA = { id: "flair_row_a", publicKey: "key-a", role: "spoke", status: "active" };
+    const rowB = { id: "flair_row_b", publicKey: "key-b", role: "hub", status: "active" };
+
+    for (const order of [[rowA, rowB], [rowB, rowA]]) {
+      rowsToServe = order;
+
+      const res = await makeInstance().get();
+
+      expect(res).toBeInstanceOf(Response);
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toBe("multiple_instance_rows");
+      // Every row is named, and the remedy that resolves them.
+      expect(body.detail).toContain("flair_row_a");
+      expect(body.detail).toContain("flair_row_b");
+      expect(body.detail).toContain("flair federation instance prune");
+      expect(body.detail).toContain("--apply");
+      expect(body.rows.map((r: any) => r.id)).toEqual(order.map((r: any) => r.id));
+    }
+
+    // A refusal creates nothing and deletes nothing.
+    expect(puts).toHaveLength(0);
+  });
 });

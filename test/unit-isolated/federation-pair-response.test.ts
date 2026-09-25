@@ -15,12 +15,14 @@ process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 const HUB_ID = "flair_hubpair822";
 const HUB_KEY = Buffer.from("hub-public-key-32-bytes-pad!!!!").toString("base64url");
 
-let instanceRow: Record<string, unknown> | null = {
-  id: HUB_ID,
-  publicKey: HUB_KEY,
-  role: "hub",
-  status: "active",
-};
+let instanceRows: Record<string, unknown>[] = [
+  {
+    id: HUB_ID,
+    publicKey: HUB_KEY,
+    role: "hub",
+    status: "active",
+  },
+];
 const peers = new Map<string, Record<string, unknown>>();
 const tokens = new Map<string, Record<string, unknown>>();
 
@@ -35,7 +37,7 @@ function asyncRows<T>(items: T[]) {
 const databasesMock = {
   flair: {
     Instance: {
-      search: () => asyncRows(instanceRow ? [instanceRow] : []),
+      search: () => asyncRows(instanceRows),
     },
     Peer: {
       get: async (id: string) => peers.get(id) ?? null,
@@ -71,12 +73,15 @@ mock.module("harper", () => ({
 
 const { FederationPair } = await import("../../resources/Federation.ts");
 
-function spokeSignedBody(pairingToken: string) {
-  const kp = nacl.sign.keyPair();
+function spokeSignedBody(
+  pairingToken: string,
+  opts: { instanceId?: string; keyPair?: nacl.SignKeyPair } = {},
+) {
+  const kp = opts.keyPair ?? nacl.sign.keyPair();
   const publicKey = Buffer.from(kp.publicKey).toString("base64url");
   return signBodyFresh(
     {
-      instanceId: `flair_spoke_${Buffer.from(nacl.randomBytes(4)).toString("hex")}`,
+      instanceId: opts.instanceId ?? `flair_spoke_${Buffer.from(nacl.randomBytes(4)).toString("hex")}`,
       publicKey,
       role: "spoke",
       pairingToken,
@@ -97,12 +102,14 @@ async function readBody(result: unknown): Promise<any> {
 }
 
 beforeEach(() => {
-  instanceRow = {
-    id: HUB_ID,
-    publicKey: HUB_KEY,
-    role: "hub",
-    status: "active",
-  };
+  instanceRows = [
+    {
+      id: HUB_ID,
+      publicKey: HUB_KEY,
+      role: "hub",
+      status: "active",
+    },
+  ];
   peers.clear();
   tokens.clear();
 });
@@ -128,7 +135,7 @@ describe("FederationPair.post — existing instance.{id,publicKey} shape (flair#
   });
 
   it("returns instance:null when the hub has no FederationInstance — does not invent a key (#839)", async () => {
-    instanceRow = null;
+    instanceRows = [];
     const token = "pair-token-no-hub-instance";
     tokens.set(token, {
       id: token,
@@ -139,5 +146,79 @@ describe("FederationPair.post — existing instance.{id,publicKey} shape (flair#
     const json = await readBody(result);
     expect(json.paired).toBe(true);
     expect(json.instance).toBeNull();
+  });
+});
+
+describe("FederationPair.post — several Instance rows refuse BEFORE anything is consumed (flair#1883 round 3)", () => {
+  const ROW_A = { id: "flair_pair_row_a", publicKey: "key-a", role: "spoke", status: "active" };
+  const ROW_B = { id: "flair_pair_row_b", publicKey: "key-b", role: "hub", status: "active" };
+
+  // Both table orders: the defect was that the response depended on which row the
+  // search yielded first, so the same two rows are fed both ways.
+  for (const [label, order] of [
+    ["row A first", [ROW_A, ROW_B]],
+    ["row B first", [ROW_B, ROW_A]],
+  ] as const) {
+    it(`${label}: answers 409 naming both rows and the prune, consumes NO token and writes NO peer`, async () => {
+      instanceRows = [...order];
+      const token = `pair-token-multiple-${label.replace(/ /g, "-")}`;
+      tokens.set(token, { id: token, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+
+      const result = await makePair().post(spokeSignedBody(token));
+
+      expect(result).toBeInstanceOf(Response);
+      const res = result as Response;
+      expect(res.status).toBe(409);
+      const json = await res.json();
+      expect(json.error).toBe("multiple_instance_rows");
+      expect(json.detail).toContain(ROW_A.id);
+      expect(json.detail).toContain(ROW_B.id);
+      expect(json.detail).toContain("flair federation instance prune");
+      expect(json.detail).toContain("--apply");
+      expect(json.rows.map((r: any) => r.id)).toEqual(order.map((r: any) => r.id));
+
+      // The check ran FIRST: the one-time token is still usable...
+      expect(tokens.get(token)?.consumedBy).toBeUndefined();
+      expect(tokens.get(token)?.consumedAt).toBeUndefined();
+      // ...and no peer was recorded from a pairing that did not happen.
+      expect(peers.size).toBe(0);
+    });
+  }
+
+  it("refuses a RE-PAIR the same way, leaving the existing peer row untouched", async () => {
+    // A re-pair needs no token and WRITES the existing peer row (endpoint/status)
+    // — so the refusal has to come before that write too.
+    instanceRows = [ROW_A, ROW_B];
+    const instanceId = "flair_spoke_already_paired";
+    const kp = nacl.sign.keyPair();
+    const publicKey = Buffer.from(kp.publicKey).toString("base64url");
+    const before = {
+      id: instanceId,
+      publicKey,
+      role: "spoke",
+      endpoint: "http://spoke.example:9926",
+      status: "paired",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    peers.set(instanceId, { ...before });
+
+    const result = await makePair().post(
+      spokeSignedBody("unused-for-a-repair", { instanceId, keyPair: kp }),
+    );
+
+    expect(result).toBeInstanceOf(Response);
+    expect((result as Response).status).toBe(409);
+    expect(peers.get(instanceId)).toEqual(before);
+  });
+
+  it("still pairs normally with exactly one row — the refusal is about several", async () => {
+    const token = "pair-token-one-row";
+    tokens.set(token, { id: token, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+    const json = await readBody(await makePair().post(spokeSignedBody(token)));
+    expect(json.paired).toBe(true);
+    expect(json.instance).toEqual({ id: HUB_ID, publicKey: HUB_KEY, role: "hub" });
+    // The happy path still consumes the token — proof the refusal above is the
+    // thing that skips it, not a change to pairing itself.
+    expect(tokens.get(token)?.consumedBy).toBeTruthy();
   });
 });
