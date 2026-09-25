@@ -160,6 +160,29 @@ describe("flair#1896 — /HealthDetail federation.instance reports every Instanc
     ]);
    });
 
+  test("two rows (admin) in the other order: the same refusal, rows listed in read order", async () => {
+    setInstanceRead("rows", [ROW_B, ROW_A]);
+    const stats: any = await makeDetail({ agent: "admin-agent", isAdmin: true }).get();
+
+    const inst = stats.federation.instance;
+    expect(inst.multiple).toBe(true);
+    expect(inst.count).toBe(2);
+    expect(inst.remedy).toBe(INSTANCE_ROW_PRUNE_REMEDY);
+    expect("id" in inst).toBe(false);
+    expect(inst.rows).toEqual([
+      { id: ROW_B.id, role: ROW_B.role, createdAt: ROW_B.createdAt },
+      { id: ROW_A.id, role: ROW_A.role, createdAt: ROW_A.createdAt },
+    ]);
+   });
+
+  test("a row the reader cannot name: federation.instance is { unreadable: true }, not a smaller list", async () => {
+    setInstanceRead("rows", [ROW_A, { role: "spoke", status: "active" }]);
+    const stats: any = await makeDetail({ agent: "admin-agent", isAdmin: true }).get();
+
+    expect(stats.federation).not.toBeNull();
+    expect(stats.federation.instance).toEqual({ unreadable: true });
+   });
+
   test("two rows as non-admin: count + remedy, and NO ids are disclosed", async () => {
     setInstanceRead("rows", [ROW_A, ROW_B]);
     const stats: any = await makeDetail({ agent: "agent-x", isAdmin: false }).get();
