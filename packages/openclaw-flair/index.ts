@@ -102,6 +102,28 @@ const DEFAULT_URL = "http://127.0.0.1:19926";
 const DEFAULT_MAX_RECALL = 5;
 const DEFAULT_MAX_BOOTSTRAP_TOKENS = 4000;
 const DEFAULT_AUTO_CAPTURE_MAX_PER_SESSION = 3;
+
+/**
+ * Round 12: how much of an error's message is used when its class falls back to
+ * the message (guarantee 6). The one-time-log set is already capped by
+ * `logOnceCap`, so this is not a second bound — it only keeps the keys readable.
+ */
+const REFUSE_KEY_CLASS_MAX = 120;
+
+/**
+ * The CLASS of an error, not its instance (round 12, guarantee 6). A Flair HTTP
+ * failure is classed by its status: its message embeds the client-assigned
+ * memory id, so keying on the message would make every retry of one failure look
+ * like a new failure. Everything else is classed by its name and as much of its
+ * message as fits — a missing key reads the same on every callback.
+ */
+function errorClass(err: unknown): string {
+  const e = err as { name?: unknown; message?: unknown; status?: unknown } | null | undefined;
+  const name = typeof e?.name === "string" && e.name.length > 0 ? e.name : "Error";
+  if (typeof e?.status === "number") return `${name}:${e.status}`;
+  const message = typeof e?.message === "string" ? e.message : String(err);
+  return `${name}:${message.slice(0, REFUSE_KEY_CLASS_MAX)}`;
+}
 /** Capture is OFF by default in slice 1 and turns on with slice 2. */
 const DEFAULT_AUTO_CAPTURE = false;
 
@@ -714,17 +736,20 @@ export default {
     /**
      * Round 11 (guarantee 6): a callback that carried a VALID identity but no
      * usable key refuses on EVERY occurrence — the same line, unbounded. Those
-     * refusals go through the bounded one-time path too, keyed by the agent they
-     * refused, so one agent's missing key is ONE line however many callbacks
-     * arrive. With no identity to key by (the prompt hook can be delivered
-     * without one) the key is the callback source.
+     * refusals go through the bounded one-time path too. With no identity to key
+     * by (the prompt hook can be delivered without one) the key says so.
+     *
+     * Round 12 (guarantee 6): the key is the agent AND the site AND the error
+     * CLASS (`errorClass`, above) — a failure's KIND, not its instance. Keying by
+     * agent ALONE silenced a LATER, DIFFERENT failure for the same agent: a
+     * missing key at 10:00 hid an HTTP 500 on a capture write at 11:00, which is
+     * exactly the line an operator needs. Now every distinct failure logs once,
+     * and repeats of it do not. The key set stays bounded by `logOnceCap`.
      */
     function refuseKey(agentId: string | undefined, site: string, err: unknown): void {
-      const who = typeof agentId === "string" && agentId.length > 0 ? agentId : `no-identity:${site}`;
-      logOnce(
-        `refused-callback:${who}`,
-        `openclaw-flair: ${site} refused/failed: ${(err as any)?.message ?? String(err)}`,
-      );
+      const who = typeof agentId === "string" && agentId.length > 0 ? agentId : "no-identity";
+      const message = (err as any)?.message ?? String(err);
+      logOnce(`refused-callback:${who}:${site}:${errorClass(err)}`, `openclaw-flair: ${site} refused/failed: ${message}`);
     }
 
     /**

@@ -966,10 +966,67 @@ describe("refusal logging and status surface", () => {
       await api._fire("before_prompt_build", { prompt: "hi", messages: [] }, { agentId: "nokey" });
     }
     const noKey = api._warnText().split("\n").filter((l) => l.includes('no private key for agent "nokey"'));
-    expect(noKey.length).toBe(1);
-    expect(noKey[0]).toMatch(/refused\/failed: no private key for agent "nokey"/);
+    // Round 12: the key is agent + SITE + error class, so this is ONE line per
+    // SITE — four sites, four lines — and never one line per callback (the five
+    // callbacks each site saw collapse to one).
+    expect(noKey.length).toBe(4);
+    for (const site of ["bootstrap recall", "auto-capture", "live auto-capture (llm_input)", "live auto-capture (llm_output)"]) {
+      expect(
+        noKey.filter((l) => l.includes(`${site} refused/failed: no private key for agent "nokey"`)).length,
+        `exactly one line for ${site}`,
+      ).toBe(1);
+    }
     // Every one of those refusals made ZERO outgoing requests.
     expect(calls.length).toBe(0);
+  });
+
+  test("R12: two DIFFERENT failures for one agent at one site each log once; repeats of one do not", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const api = createMockApi({
+      pluginConfig: { autoCapture: true, autoCaptureMaxPerSession: 10 },
+      config: {
+        agents: { entries: { A: {} } },
+        plugins: {
+          slots: { memory: "openclaw-flair" },
+          entries: { "openclaw-flair": { hooks: { allowConversationAccess: true, allowPromptInjection: true } } },
+        },
+      },
+    });
+    plugin.register(api as any);
+
+    // Round 11 keyed these lines by agent alone, so the FIRST failure silenced
+    // every later one for that agent: a missing key at 10:00 hid an HTTP 500 on
+    // a capture write at 11:00 — and that second, new failure is exactly the
+    // line an operator needs. Round 12 keys by agent, site AND error class.
+    let status = 500;
+    const failed = installFetchStub(() => ({ status, body: { error: "capture write refused by the server" } }));
+    const capture = async (tag: string) => {
+      // A distinct excerpt and a distinct run each time, so neither dedup nor
+      // the per-session cap can stand between the callback and the write.
+      await api._fire(
+        "llm_input",
+        { runId: `r-fail-${tag}`, prompt: `remember this: the round twelve write target is region ${tag}` },
+        { agentId: "A" },
+      );
+    };
+    const lines = () =>
+      api._warnText().split("\n").filter((l) => l.includes("live auto-capture (llm_input) refused/failed: Flair PUT"));
+    await capture("a");
+    await capture("b");
+    await capture("c"); // three callbacks, one failure → ONE line
+    expect(lines().filter((l) => l.includes("→ 500:")).length, "the 500 logs once, not once per callback").toBe(1);
+    expect(lines().length, "no other line for this site").toBe(1);
+
+    status = 503; // a DIFFERENT failure, same agent, same site
+    await capture("d");
+    await capture("e"); // two callbacks, one failure → ONE line of its own
+    expect(lines().filter((l) => l.includes("→ 500:")).length, "the earlier 500 is still one line").toBe(1);
+    expect(lines().filter((l) => l.includes("→ 503:")).length, "the 503 is a different failure: it logs too").toBe(1);
+    expect(lines().length, "two distinct failures, two lines").toBe(2);
+    // Every one of those five callbacks reached the network: the lines above are
+    // refusals of writes that were actually attempted, not skipped ones.
+    expect(failed.filter((c) => c.method === "PUT").length).toBe(5);
   });
 
   test("R5: a status service is registered and reports the plugin state", async () => {
