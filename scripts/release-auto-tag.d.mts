@@ -12,6 +12,7 @@ export interface ConditionIds {
   VERSION_SYNC: string;
   NO_RELEASE_PR: string;
   REVIEWS: string;
+  RELEASE_PR_SHAPE: string;
   TAG_CONFLICT: string;
   CHECKS_FAILED: string;
   CHECKS_PENDING: string;
@@ -33,6 +34,9 @@ export const DEFAULT_WORKFLOW_PATH: string;
 export const DEFAULT_WORKFLOW_NAME: string;
 export const DEFAULT_ADVISORY_ALLOWLIST: string;
 export const DEFAULT_POLL_SECONDS: number;
+export const RELEASE_PR_EXTRA_FILES: readonly string[];
+export const RELEASE_PR_EXTRA_PREFIXES: readonly string[];
+export const LOCKFILE_NAMES: readonly string[];
 export const DEFAULT_DEADLINE_MINUTES: number;
 export const INVALID_VERSION: string;
 
@@ -62,6 +66,11 @@ export interface TagRefShape {
   object?: { type?: string; sha?: string } | null;
 }
 
+export interface PullFileShape {
+  filename?: string;
+  previous_filename?: string;
+}
+
 export interface GitHubClient {
   repo: string;
   readTagRef(tag: string): Promise<TagRefShape | null>;
@@ -69,6 +78,7 @@ export interface GitHubClient {
   listVersionTags(): Promise<Array<{ ref?: string }>>;
   listPullsForCommit(sha: string): Promise<PullRequestShape[]>;
   listReviews(prNumber: number): Promise<ReviewShape[]>;
+  listPullFiles(prNumber: number): Promise<PullFileShape[]>;
   listCheckRuns(sha: string): Promise<CheckRunShape[]>;
   readWorkflowMeta(path: string): Promise<{ name?: string } | null>;
   readWorkflowRun(runId: string | number): Promise<{ check_suite_id?: number } | null>;
@@ -90,6 +100,7 @@ export interface Deps {
   sleep(ms: number): Promise<void>;
   readTextFile(path: string): string;
   git: GitReads;
+  listVersionFiles(): string[] | null;
   runVersionSync(sha: string, version: string): { ok: boolean; code: number; output: string };
 }
 
@@ -178,6 +189,10 @@ export function conditionReleasePr(
 export function conditionReviews(
   api: GitHubClient,
   args: { pr: PullRequestShape; reviewers: readonly string[] },
+): Promise<{ ok: boolean; condition?: string; summary?: string[] }>;
+export function conditionReleasePrShape(
+  api: GitHubClient,
+  args: { pr: PullRequestShape; versionFiles: string[] | null },
 ): Promise<{ ok: boolean; condition?: string; summary?: string[] }>;
 export function conditionChecks(
   deps: Deps,

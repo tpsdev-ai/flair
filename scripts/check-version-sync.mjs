@@ -58,13 +58,15 @@ import { join, dirname, resolve, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 
-// cli#1890 condition 6: the release tagger materialises the candidate commit's
-// version-bearing files AS DATA and runs THIS file — the default branch's
-// checker — over that materialised tree. `--root <dir>` (or VERSION_SYNC_ROOT)
-// points the checker at it; `--list` prints the inventory so the tagger knows
-// which files to materialise without keeping a second copy of the list. A
-// materialised tree has no `.git`, so the discovery file list falls back to a
-// recursive walk of the root (the only files there are the ones materialised).
+// cli#1890 condition 6: the release tagger extracts the WHOLE candidate commit
+// as DATA (`git archive <sha>` into a scratch dir) and runs THIS file — the
+// default branch's checker — over that tree. `--root <dir>` (or
+// VERSION_SYNC_ROOT) points the checker at it, and because the tree carries
+// every file of the candidate, the discovery scan keeps its full scope: a
+// version declaration the inventory does not list is still found. `--list`
+// prints the inventory (the release PR's shape check, condition 7b, uses it as
+// the allowed set). An extracted tree has no `.git`, so the discovery file list
+// falls back to a recursive walk of the root — every file of the candidate.
 const ARGV = process.argv.slice(2);
 function argValue(name) {
   const i = ARGV.indexOf(name);
@@ -360,8 +362,9 @@ for (let i = 0; i < ARGV.length; i++) {
 }
 
 if (LIST_ONLY) {
-  // The inventory, one path per line — what the tagger materialises via
-  // `git show <sha>:<path>` before running this checker over the result.
+  // The inventory, one path per line. Condition 7b uses it as the allowed set
+  // for the release PR's changed files; condition 6 no longer materialises from
+  // it — the whole candidate tree is extracted as data and walked.
   for (const path of [...PACKAGE_JSONS, ...SOURCE_VERSION_FILES.map((f) => f.path)]) console.log(path);
   process.exit(0);
 } else if (argv[0] === "--write") {

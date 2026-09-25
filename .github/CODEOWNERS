@@ -2,3 +2,12 @@
 # Currently: heskew (Nathan) and tps-sherlock (Sherlock).
 # One approval from either satisfies branch protection.
 * @tpsdev-ai/reviewers
+
+# The release trust root (#1890). The tagger, its workflow, the version checker
+# and the advisory allowlist all execute from the default branch, so changing
+# what the tagger does is a repo-admin decision — never something a release PR
+# carries (condition 7b keeps a release PR inside the release surface).
+/.github/workflows/release-*.yml @heskew
+/scripts/release-auto-tag.mjs @heskew
+/scripts/check-version-sync.mjs @heskew
+/.github/release-auto-tag-advisories.json @heskew

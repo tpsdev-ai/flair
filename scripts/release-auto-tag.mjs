@@ -84,6 +84,12 @@ export const CONDITION = Object.freeze({
   VERSION_SYNC: "version-sync",
   NO_RELEASE_PR: "no-release-pr",
   REVIEWS: "reviews",
+  // The release PR's changed files were not a SUBSET of the release surface —
+  // the version-bearing files, CHANGELOG.md, .changelog/unreleased/* and the
+  // lockfile (condition 7b, round 4, item 1). A release must never carry a
+  // change to the tagger, its checker, its workflow or the advisory allowlist:
+  // those move only through a normal reviewed PR to the trust root (#1890).
+  RELEASE_PR_SHAPE: "release-pr-shape",
   TAG_CONFLICT: "tag-conflict",
   CHECKS_FAILED: "checks-failed",
   CHECKS_PENDING: "checks-pending",
@@ -115,6 +121,20 @@ export const DEFAULT_WORKFLOW_PATH = ".github/workflows/test.yml";
 export const DEFAULT_WORKFLOW_NAME = "CI";
 export const DEFAULT_ADVISORY_ALLOWLIST = ".github/release-auto-tag-advisories.json";
 export const DEFAULT_POLL_SECONDS = 60;
+// Condition 7b's allowed surface beyond the version-bearing files: the changelog
+// (the release's own edit), the unreleased fragments (prose about shipped
+// versions) and the lockfile (resolved dependency versions, not a declaration).
+// The lockfile is matched by its exact root-level name: a lockfile-looking path
+// in a subdirectory is not the lockfile.
+export const RELEASE_PR_EXTRA_FILES = Object.freeze(["CHANGELOG.md"]);
+export const RELEASE_PR_EXTRA_PREFIXES = Object.freeze([".changelog/unreleased/"]);
+export const LOCKFILE_NAMES = Object.freeze([
+  "bun.lock",
+  "bun.lockb",
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+]);
 // Measured before this landed, 2026-09-25; the workflow comment carries the
 // measurement. 30 min = the 24.37 min P95 of the slowest workflow on main (this
 // repo's CI) rounded up with ~5 min of margin.
@@ -233,6 +253,10 @@ export function createClient({ repo, token, fetchImpl = globalThis.fetch, apiBas
     async listReviews(prNumber) {
       return getPaged(`/repos/${repo}/pulls/${prNumber}/reviews?per_page=100`);
     },
+    /** `pulls/<n>/files` — the PR's changed files, for condition 7b's shape check. */
+    async listPullFiles(prNumber) {
+      return getPaged(`/repos/${repo}/pulls/${prNumber}/files?per_page=100`);
+    },
     /**
      * `commits/<sha>/check-runs` — latest runs only. This endpoint answers with an
      * OBJECT (`{ total_count, check_runs }`), not an array: unwrap it, or every
@@ -350,13 +374,33 @@ export function createDeps({ overrides = {}, root = process.cwd(), log, api } = 
       },
     },
     /**
+     * The default branch's checker's INVENTORY (`--list`): the files a release
+     * bumps. Condition 7b (round 4, item 1) uses it as the allowed set for the
+     * release PR's shape. Returns null when the checker is absent or fails — the
+     * caller REFUSEs; an unread inventory is not "no version-bearing files".
+     */
+    listVersionFiles() {
+      const checker = join(root, "scripts", "check-version-sync.mjs");
+      if (!existsSync(checker)) return null;
+      const r = spawnSync(process.execPath, [checker, "--list"], { cwd: root, encoding: "utf8" });
+      if (r.status !== 0) return null;
+      const paths = String(r.stdout ?? "")
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      return paths.length > 0 ? paths : null;
+    },
+    /**
      * Condition 6: verify `<sha>`'s version-bearing files AGREE, reading the
-     * candidate as DATA. Round 3 (#1890 "No candidate code runs at all"): the
-     * candidate's files are materialised with `git show <sha>:<path>` and the
-     * DEFAULT BRANCH's `scripts/check-version-sync.mjs` checks them. No file
-     * from `<sha>` is ever executed — a candidate's own version-sync script is
-     * never run, so it cannot write this step's GITHUB_OUTPUT. Injectable so a
-     * test can assert the candidate's script is not run.
+     * WHOLE candidate tree as DATA. Round 4, item 3 (#1890 "The default branch's
+     * checker keeps its discovery scan"): `git archive <sha>` is extracted into a
+     * scratch dir and the DEFAULT BRANCH's `scripts/check-version-sync.mjs` runs
+     * over it with `--root`. Materialising only the checker's inventory hid a new
+     * version declaration OUTSIDE it; the extraction hands the checker every file
+     * of the candidate, so its discovery scan sees them. NOTHING from `<sha>` is
+     * executed: the archive is passed through argv (never a shell), extracted with
+     * `tar`, and only `<sha>`'s own files are read. Injectable so a test can
+     * assert the candidate's own script is not run.
      */
     runVersionSync(sha, version) {
       const scratch = mkdtempSync(join(tmpdir(), "release-auto-tag-vsync-"));
@@ -370,32 +414,39 @@ export function createDeps({ overrides = {}, root = process.cwd(), log, api } = 
             output: "the default branch's scripts/check-version-sync.mjs is not present in this checkout",
           };
         }
-        // Which files to materialise — the checker owns that list.
-        const listed = spawnSync(process.execPath, [checker, "--list"], { cwd: root, encoding: "utf8" });
-        if (listed.status !== 0) {
+        // The archive goes BESIDE the tree (`scratch/tree`), not into it: the
+        // checker walks everything under `--root`, and a tarball of the candidate
+        // contains the candidate's own version text, which would read as an
+        // undeclared declaration site.
+        const tree = join(scratch, "tree");
+        mkdirSync(tree, { recursive: true });
+        const tarPath = join(scratch, "candidate.tar");
+        const archived = spawnSync("git", ["archive", "--format=tar", "-o", tarPath, sha], {
+          cwd: root,
+          encoding: "utf8",
+        });
+        if (archived.status !== 0) {
           return {
             ok: false,
-            code: listed.status ?? 1,
-            output: `could not list the version-bearing files: ${`${listed.stdout ?? ""}${listed.stderr ?? ""}`.trim()}`,
+            code: archived.status ?? 1,
+            output: `could not archive ${sha}: ${`${archived.stdout ?? ""}${archived.stderr ?? ""}`.trim()}`,
           };
         }
-        const paths = String(listed.stdout ?? "")
-          .split("\n")
-          .map((s) => s.trim())
-          .filter(Boolean);
-        if (paths.length === 0) {
-          return { ok: false, code: 127, output: "the default branch's checker listed no version-bearing files" };
+        // `--no-same-owner`: the extracted tree is data, and nothing in it is
+        // meant to take on a uid. `git archive` writes repo-relative paths only,
+        // so the extraction stays inside `tree`.
+        const extracted = spawnSync("tar", ["-xf", tarPath, "-C", tree, "--no-same-owner"], {
+          cwd: root,
+          encoding: "utf8",
+        });
+        if (extracted.status !== 0) {
+          return {
+            ok: false,
+            code: extracted.status ?? 1,
+            output: `could not extract the candidate tree of ${sha}: ${`${extracted.stdout ?? ""}${extracted.stderr ?? ""}`.trim()}`,
+          };
         }
-        for (const path of paths) {
-          const shown = spawnSync("git", ["show", `${sha}:${path}`], { cwd: root, encoding: "utf8" });
-          if (shown.status !== 0) {
-            return { ok: false, code: 127, output: `${path} is not present at ${sha}` };
-          }
-          const dest = join(scratch, path);
-          mkdirSync(dirname(dest), { recursive: true });
-          writeFileSync(dest, String(shown.stdout ?? ""));
-        }
-        const r = spawnSync(process.execPath, [checker, "--root", scratch, version], {
+        const r = spawnSync(process.execPath, [checker, "--root", tree, version], {
           cwd: root,
           encoding: "utf8",
         });
@@ -537,6 +588,59 @@ export async function conditionReleasePr(api, { sha, version, repo }) {
     };
   }
   return { ok: true, pr: matches[0] };
+}
+
+/**
+ * Condition 7b (round 4, item 1): the release PR's changed files are a SUBSET of
+ * the version-bearing files (the checker's inventory), `CHANGELOG.md`,
+ * `.changelog/unreleased/*` and the lockfile. Anything else REFUSEs
+ * `release-pr-shape`, so a release can never carry a change to the tagger, its
+ * checker, its workflow or the advisory allowlist — those move only through a
+ * normal, reviewed PR against the trust root (#1890).
+ */
+export async function conditionReleasePrShape(api, { pr, versionFiles }) {
+  if (!Array.isArray(versionFiles) || versionFiles.length === 0) {
+    return {
+      ok: false,
+      condition: CONDITION.RELEASE_PR_SHAPE,
+      summary: [
+        "could not read the version-bearing file inventory (the default branch's scripts/check-version-sync.mjs --list) — refusing rather than assuming an empty release surface",
+      ],
+    };
+  }
+  const files = await api.listPullFiles(pr.number);
+  if (!Array.isArray(files)) {
+    return {
+      ok: false,
+      condition: CONDITION.RELEASE_PR_SHAPE,
+      summary: [`could not read the changed files of PR #${pr.number}`],
+    };
+  }
+  const allowed = new Set(versionFiles);
+  const outside = new Set();
+  for (const file of files) {
+    // `previous_filename` too: a RENAME out of the trust root into an allowed
+    // path would otherwise pass while deleting the file it moved.
+    for (const path of [file?.filename, file?.previous_filename]) {
+      if (typeof path !== "string" || path.length === 0) continue;
+      if (allowed.has(path)) continue;
+      if (RELEASE_PR_EXTRA_FILES.includes(path)) continue;
+      if (RELEASE_PR_EXTRA_PREFIXES.some((prefix) => path.startsWith(prefix))) continue;
+      if (LOCKFILE_NAMES.includes(path)) continue;
+      outside.add(path);
+    }
+  }
+  if (outside.size > 0) {
+    const paths = [...outside];
+    return {
+      ok: false,
+      condition: CONDITION.RELEASE_PR_SHAPE,
+      summary: [
+        `PR #${pr.number} changes ${paths.length} file(s) outside the release surface (version-bearing files, CHANGELOG.md, .changelog/unreleased/*, the lockfile): ${paths.slice(0, 5).join(", ")}`,
+      ],
+    };
+  }
+  return { ok: true };
 }
 
 /** Condition 8: both reviewers' LATEST review on the PR's final head is APPROVED. */
@@ -707,6 +811,14 @@ export async function decide({ sha, deps, options = {} }) {
   const step7 = await conditionReleasePr(deps.api, { sha, version, repo: opts.repo });
   if (!step7.ok) return refuse(step7);
 
+  // 7b — the release PR's SHAPE: its changed files stay inside the release
+  // surface (round 4, item 1). After 7, which established the PR exists.
+  const step7b = await conditionReleasePrShape(deps.api, {
+    pr: step7.pr,
+    versionFiles: deps.listVersionFiles?.(),
+  });
+  if (!step7b.ok) return refuse(step7b);
+
   // 8 — both reviewers approved the PR's final head
   const step8 = await conditionReviews(deps.api, { pr: step7.pr, reviewers: opts.reviewers });
   if (!step8.ok) return refuse(step8);
@@ -780,6 +892,13 @@ export async function writeTag({ sha, version, deps, options = {} }) {
 
   const step7 = await conditionReleasePr(reads, { sha, version, repo: opts.repo });
   if (!step7.ok) return refuse(step7.condition, { summary: [...summary, ...(step7.summary ?? [])] });
+  // 7b at the write boundary too: `write` trusts nothing from `decide`, and the
+  // release PR's shape is part of what makes the tag safe to create.
+  const step7b = await conditionReleasePrShape(reads, {
+    pr: step7.pr,
+    versionFiles: deps.listVersionFiles?.(),
+  });
+  if (!step7b.ok) return refuse(step7b.condition, { summary: [...summary, ...(step7b.summary ?? [])] });
   const step8 = await conditionReviews(reads, { pr: step7.pr, reviewers: opts.reviewers });
   if (!step8.ok) return refuse(step8.condition, { summary: [...summary, ...(step8.summary ?? [])] });
 

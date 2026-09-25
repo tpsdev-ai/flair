@@ -21,7 +21,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 import {
@@ -100,6 +100,9 @@ function fixtureApi(over: Partial<GitHubClient> = {}): GitHubClient {
     listVersionTags: async () => [],
     listPullsForCommit: async () => [pull()],
     listReviews: async () => reviews(),
+    // No changed files by default: condition 7b's subset check passes vacuously
+    // unless a test shapes the release PR.
+    listPullFiles: async () => [],
     listCheckRuns: async () => checks(),
     readWorkflowMeta: async () => ({ name: "CI" }),
     readWorkflowRun: async () => ({ check_suite_id: 999 }),
@@ -123,7 +126,15 @@ interface HarnessOptions {
   parents?: Record<string, string>;
   /** The version file's own commit history (newest first), for the nightly. */
   fileHistory?: string[];
+  /**
+   * The default branch's checker inventory (`--list`). `null` models a checker
+   * that cannot be read; omit for the default inventory.
+   */
+  versionFiles?: string[] | null;
 }
+
+/** The inventory a fixture's checker would list. */
+const DEFAULT_VERSION_FILES = ["package.json", "packages/flair-client/package.json"];
 
 function harness(opts: HarnessOptions = {}) {
   const versionSyncCalls: string[] = [];
@@ -161,6 +172,7 @@ function harness(opts: HarnessOptions = {}) {
       const ok = opts.versionSyncOk ?? true;
       return { ok, code: ok ? 0 : 1, output: "" };
     },
+    listVersionFiles: () => ("versionFiles" in opts ? opts.versionFiles : DEFAULT_VERSION_FILES),
   };
   return { deps: deps as unknown as Deps, versionSyncCalls, sleeps, showCalls, allowlist };
 }
@@ -396,6 +408,60 @@ describe("release auto-tag — conditions 5 and 6 (the candidate is read as data
       else process.env.GITHUB_OUTPUT = prev;
     }
   });
+
+  test("round 4, item 3: a candidate that adds an UNDECLARED version site REFUSEs version-sync", () => {
+    // The discovery scan's whole point: a version declaration the checker's
+    // inventory does not list. It exists only in the candidate's tree, so
+    // materialising the INVENTORY hid it. The tagger must extract the WHOLE tree
+    // (`git archive`) and let the checker walk every file of it.
+    const repo = scratchDir();
+    const git = (...args: string[]): string => {
+      const r = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+      if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr?.trim() ?? r.status}`);
+      return r.stdout.trim();
+    };
+    git("init", "-q");
+    git("symbolic-ref", "HEAD", "refs/heads/main");
+    git("config", "user.email", "t@example.invalid");
+    git("config", "user.name", "t");
+
+    // The default branch: the REAL checker (its inventory, its exclusions, its
+    // discovery scan) over its real inventory, all at the real version — copied
+    // out of this checkout, so the scan has the inventory it expects.
+    const realRoot = resolve(import.meta.dir, "../..");
+    const realVersion = JSON.parse(readFileSync(join(realRoot, "package.json"), "utf8")).version;
+    const realChecker = join(realRoot, "scripts", "check-version-sync.mjs");
+    const listed = spawnSync(process.execPath, [realChecker, "--list"], { cwd: realRoot, encoding: "utf8" });
+    expect(listed.status, "the real checker lists its inventory").toBe(0);
+    const inventory = String(listed.stdout ?? "")
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    expect(inventory.length, "the real inventory is not empty").toBeGreaterThan(0);
+    mkdirSync(join(repo, "scripts"), { recursive: true });
+    writeFileSync(join(repo, "scripts", "check-version-sync.mjs"), readFileSync(realChecker, "utf8"));
+    for (const path of inventory) {
+      const dest = join(repo, path);
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(dest, readFileSync(join(realRoot, path)));
+    }
+    git("add", "-A");
+    git("commit", "-q", "-m", "default branch");
+
+    // The candidate: ONE new file that declares the version but is NOT in the
+    // inventory. Every other declaration still agrees.
+    git("checkout", "-q", "-b", "candidate");
+    mkdirSync(join(repo, "src"), { recursive: true });
+    writeFileSync(join(repo, "src", "new-version-site.ts"), `export const RELEASE_VERSION = "${realVersion}";\n`);
+    git("add", "-A");
+    git("commit", "-q", "-m", "candidate");
+    const candidateSha = git("rev-parse", "HEAD");
+    git("checkout", "-q", "main");
+
+    const result = createDeps({ root: repo }).runVersionSync(candidateSha, realVersion);
+    expect(result.ok, "an undeclared version site refuses").toBe(false);
+    expect(result.output).toContain("new-version-site.ts");
+  });
 });
 
 // ── condition 7 (the release PR) ────────────────────────────────────────────────
@@ -449,6 +515,76 @@ describe("release auto-tag — condition 7", () => {
     const result = await decide({ sha: SHA, deps });
     expect(result.verdict).toBe(VERDICT.REFUSE);
     expect(result.condition).toBe(CONDITION.NO_RELEASE_PR);
+  });
+});
+
+// ── condition 7b (the release PR's shape) ─────────────────────────────────────
+
+describe("release auto-tag — condition 7b (the release PR stays inside the release surface)", () => {
+  test("round 4, item 1: a release PR that ALSO touches the tagger REFUSEs release-pr-shape", async () => {
+    // The failure the shape check exists for: a release that carries a change to
+    // the code that runs on the release, inside the release itself.
+    const { deps } = harness({
+      api: {
+        listPullFiles: async () => [
+          { filename: "package.json" },
+          { filename: "CHANGELOG.md" },
+          { filename: ".changelog/unreleased/fixed-x.md" },
+          { filename: "bun.lock" },
+          { filename: "scripts/release-auto-tag.mjs" },
+        ],
+      },
+    });
+    const result = await decide({ sha: SHA, deps });
+    expect(result.verdict).toBe(VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.RELEASE_PR_SHAPE);
+    expect(result.summary.join(" ")).toContain("scripts/release-auto-tag.mjs");
+  });
+
+  test("round 4, item 1: a release PR inside the release surface passes 7b", async () => {
+    const { deps } = harness({
+      api: {
+        listPullFiles: async () => [
+          { filename: "package.json" },
+          { filename: "packages/flair-client/package.json" },
+          { filename: "CHANGELOG.md" },
+          { filename: ".changelog/unreleased/fixed-x.md" },
+          { filename: "bun.lock" },
+        ],
+      },
+    });
+    const result = await decide({ sha: SHA, deps });
+    expect(result.verdict).toBe(VERDICT.TAG);
+  });
+
+  test("round 4, item 1: a RENAME out of the trust root REFUSEs (previous_filename is checked too)", async () => {
+    const { deps } = harness({
+      api: {
+        listPullFiles: async () => [
+          { filename: "CHANGELOG.md", previous_filename: "scripts/release-auto-tag.mjs" },
+        ],
+      },
+    });
+    const result = await decide({ sha: SHA, deps });
+    expect(result.verdict).toBe(VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.RELEASE_PR_SHAPE);
+    expect(result.summary.join(" ")).toContain("scripts/release-auto-tag.mjs");
+  });
+
+  test("round 4, item 1: a lockfile-LOOKALIKE in a subdirectory is not the lockfile", async () => {
+    const { deps } = harness({
+      api: { listPullFiles: async () => [{ filename: "docs/bun.lock" }] },
+    });
+    const result = await decide({ sha: SHA, deps });
+    expect(result.verdict).toBe(VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.RELEASE_PR_SHAPE);
+  });
+
+  test("round 4, item 1: an unreadable inventory REFUSEs (never 'no version files')", async () => {
+    const { deps } = harness({ versionFiles: null });
+    const result = await decide({ sha: SHA, deps });
+    expect(result.verdict).toBe(VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.RELEASE_PR_SHAPE);
   });
 });
 

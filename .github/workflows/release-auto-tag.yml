@@ -41,13 +41,16 @@ name: Release auto-tag
 # gets materially slower: too small a deadline refuses good releases.
 #
 # INVARIANTS (all asserted by test/unit/release-auto-tag-workflow.test.ts):
-#   - no candidate code runs at all (round 3). Condition 6 reads the candidate's
-#     version-bearing files as DATA (`git show <sha>:<path>`) and checks them
-#     with the DEFAULT branch's `scripts/check-version-sync.mjs`; a candidate's
-#     own script is never executed, in any job, so it cannot forge a verdict or
-#     a sha. `decide` holds NO App secret (no environment; `GH_TOKEN` is the
-#     read-only GITHUB_TOKEN); `write` is a SEPARATE job on a fresh runner with a
-#     fresh default-branch checkout, and only it references the `release-tag`
+#   - no candidate code runs at all (rounds 3 and 4). Condition 6 extracts the
+#     WHOLE candidate tree as DATA (`git archive <sha>` into a scratch dir) and
+#     checks it with the DEFAULT branch's `scripts/check-version-sync.mjs`; a
+#     candidate's own script is never executed, in any job, so it cannot forge a
+#     verdict or a sha. The WHOLE tree, not just the checker's inventory, so a
+#     version declaration the inventory does not list is still found (the
+#     checkout's `fetch-depth: 0` carries every main ancestor's tree). `decide`
+#     holds NO App secret (no environment; `GH_TOKEN` is the read-only
+#     GITHUB_TOKEN); `write` is a SEPARATE job on a fresh runner with a fresh
+#     default-branch checkout, and only it references the `release-tag`
 #     environment. The JOB BOUNDARY, not a tree restore, is the credential
 #     isolation: a merged commit can plant a git hook or re-point `.git`, and
 #     restoring the working tree never covered that;
@@ -58,9 +61,11 @@ name: Release auto-tag
 #     they never choose what gets tagged;
 #   - every checkout sets `persist-credentials: false`, so no token is left in
 #     `.git/config` for a later git command to pick up;
-#   - condition 10 re-checks only conditions 3, 4 and 8. Ancestry, version sync
-#     and PR identity are stable, and re-running condition 6 is unnecessary now
-#     that it executes nothing;
+#   - condition 10 re-checks only the conditions that can have MOVED between
+#     `decide` and the POST — tag state, release intent, the PR and its shape,
+#     and the reviews (3, 4, 7, 7b, 8). Ancestry and the check-run list are
+#     stable, and condition 6 executes nothing, so re-running it would only
+#     re-extract the same tree;
 #   - the reporter reads `needs.write.outputs` BEFORE `needs.decide.outputs`, so
 #     a REFUSE found in `write` (its own re-derivation or condition 10) reaches it.
 #
@@ -132,8 +137,8 @@ jobs:
     steps:
       - name: Check out the default branch's tree
         # The decision script always runs from the default branch's tree. <sha> is
-        # consulted only as DATA: condition 6 materialises its version-bearing
-        # files with `git show` and checks them with THIS tree's checker.
+        # consulted only as DATA: condition 6 extracts its whole tree with
+        # `git archive` and checks it with THIS tree's checker.
         # `persist-credentials: false`: the token must not survive in .git/config.
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
@@ -330,6 +335,13 @@ jobs:
           owner: tpsdev-ai
           repositories: flair
           permission-contents: write
+
+      - name: Re-fetch the real main (after the re-derivation's wait)
+        # `redecide` can itself poll for up to 30 minutes (condition 9's
+        # check-run wait), so main is fetched AGAIN here, immediately before the
+        # tag: the tag step's release-intent re-check must read the main of NOW,
+        # or a release that merged during the wait is tagged as superseded.
+        run: git fetch --no-tags --prune origin +refs/heads/main:refs/remotes/origin/main
 
       - name: Tag (condition 10 re-check, then the POST)
         # `always()` so this runs even when the mint failed (unconfigured App) and

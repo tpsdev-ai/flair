@@ -344,6 +344,34 @@ describe("release-auto-tag workflow — the coupling and the allowlist file", ()
   });
 });
 
+// ── CODEOWNERS: the trust root (#1890, round 4 item 2) ────────────────────────
+
+describe("release-auto-tag workflow — the trust root is owned by the repo admin", () => {
+  test("round 4, item 2: CODEOWNERS gives the tagger, its workflow, the checker and the allowlist one owner", () => {
+    const rules = readFileSync(join(REPO, ".github", "CODEOWNERS"), "utf8")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith("#"))
+      .map((line) => {
+        const [pattern, ...owners] = line.split(/\s+/);
+        return { pattern: pattern ?? "", owners: owners.join(" ") };
+      });
+    const ownerOf = (pattern: string) => rules.find((r) => r.pattern === pattern)?.owners ?? null;
+    // A release PR cannot change what the tagger does (condition 7b), and a
+    // change to the tagger itself needs the repo admin — not a release.
+    for (const pattern of [
+      "/.github/workflows/release-*.yml",
+      "/scripts/release-auto-tag.mjs",
+      "/scripts/check-version-sync.mjs",
+      "/.github/release-auto-tag-advisories.json",
+    ]) {
+      expect(ownerOf(pattern), `${pattern} is owned`).toBe("@heskew");
+    }
+    // …and the existing catch-all still covers everything else, unchanged.
+    expect(ownerOf("*")).toBe("@tpsdev-ai/reviewers");
+  });
+});
+
 describe("release-auto-tag workflow — credential isolation and the reporter's shell", () => {
   test("isolation is the JOB BOUNDARY: `write` has a fresh default-branch checkout, and no step restores a shared tree", () => {
     // The single-job design restored the workspace between the decision and the
@@ -364,7 +392,9 @@ describe("release-auto-tag workflow — credential isolation and the reporter's 
   test("the write job re-reads main before its re-derivation and the POST, so a release that merged during the wait is seen", () => {
     const steps = job("write").steps ?? [];
     const indexOf = (fn: (s: Step) => boolean) => steps.findIndex(fn);
-    const fetchIndex = indexOf((s) => (s.run ?? "").includes("git fetch") && (s.run ?? "").includes("refs/heads/main"));
+    const lastIndexOf = (fn: (s: Step) => boolean) => steps.map(fn).lastIndexOf(true);
+    const isFetch = (s: Step) => (s.run ?? "").includes("git fetch") && (s.run ?? "").includes("refs/heads/main");
+    const fetchIndex = indexOf(isFetch);
     const redecideIndex = indexOf((s) => s.id === "redecide");
     const mintIndex = indexOf((s) => s.id === "app-token");
     const writeIndex = indexOf((s) => s.id === "write");
@@ -372,6 +402,13 @@ describe("release-auto-tag workflow — credential isolation and the reporter's 
     expect(fetchIndex).toBeLessThan(redecideIndex);
     expect(redecideIndex).toBeLessThan(mintIndex);
     expect(mintIndex).toBeLessThan(writeIndex);
+    // AND again after the re-derivation: `redecide` can itself poll for up to 30
+    // minutes, so the first fetch is stale by the time the tag's release-intent
+    // re-check runs. Without the second fetch a release that merged during the
+    // wait is tagged as superseded (round 4: the CodeRabbit finding).
+    const refetchIndex = lastIndexOf(isFetch);
+    expect(refetchIndex, "main is fetched again after the re-derivation").toBeGreaterThan(redecideIndex);
+    expect(refetchIndex).toBeLessThan(writeIndex);
     expect(step("write", "write").run).toContain("release-auto-tag.mjs tag");
   });
 
