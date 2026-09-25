@@ -266,13 +266,63 @@ export function instanceIdentitySummary(input: {
   const usable = usableInstanceRows(input.rows);
   const described =
     usable.length === 0 ? "no rows" : `one row, role=${canonicalInstanceRole(usable) ?? "(none)"}`;
-  if (input.roleNames === null) {
-    return {
-      level: "unverified",
-      text: `${described}; the ${PAIR_INITIATOR_ROLE} pairing-role check is UNVERIFIED (the role list could not be read)`,
-    };
+  const unverified = instanceIdentityRoleCheckUnverified(input.roleNames);
+  if (unverified !== null) {
+    return { level: "unverified", text: `${described}; ${unverified}` };
   }
   return { level: "ok", text: described };
+}
+
+/**
+ * The pairing-role half of the check as its OWN sentence, or null when that
+ * check ran (flair#1883 round 5).
+ *
+ * `instanceIdentitySummary` carried this sentence inline, which is how it
+ * became printable only on the no-finding path. The row facts and the
+ * pairing-role state are two facts; reporting one must never swallow the other.
+ */
+export function instanceIdentityRoleCheckUnverified(roleNames: readonly string[] | null): string | null {
+  if (roleNames !== null) return null;
+  return `the ${PAIR_INITIATOR_ROLE} pairing-role check is UNVERIFIED (the role list could not be read)`;
+}
+
+/** One line `flair doctor` prints about this instance's identity. */
+export interface InstanceIdentityDoctorLine {
+  /** The icon the caller prints; `fail` is also what makes the line an issue. */
+  level: "ok" | "warn" | "fail";
+  /** The line, `Instance identity: ` prefix included. */
+  text: string;
+  /** A `Fix: …` continuation for a finding. */
+  fix?: string;
+}
+
+/**
+ * Every Instance-identity line `flair doctor` prints, in order: one line per
+ * finding, then the state line.
+ *
+ * The state is INDEPENDENT of the findings (flair#1883 round 5). Before this,
+ * doctor printed the summary only when there was NO finding: several rows AND an
+ * unreadable role list reported the rows and said nothing about the pairing-role
+ * check that never ran. Here a row finding and the pairing-role UNVERIFIED
+ * status are two lines from one call, so neither can be dropped by the other.
+ */
+export function instanceIdentityLines(input: {
+  rows: readonly InstanceIdentityRow[];
+  roleNames: readonly string[] | null;
+}): InstanceIdentityDoctorLine[] {
+  const findings = instanceIdentityFindings(input);
+  const lines: InstanceIdentityDoctorLine[] = findings.map((finding) => {
+    const [text, fix] = instanceIdentityFindingLines(finding);
+    return { level: "fail" as const, text, fix };
+  });
+  if (findings.length === 0) {
+    const summary = instanceIdentitySummary(input);
+    lines.push({ level: summary.level === "ok" ? "ok" : "warn", text: `Instance identity: ${summary.text}` });
+  } else {
+    const unverified = instanceIdentityRoleCheckUnverified(input.roleNames);
+    if (unverified !== null) lines.push({ level: "warn", text: `Instance identity: ${unverified}` });
+  }
+  return lines;
 }
 
 /**
@@ -453,16 +503,32 @@ export async function updateInstanceRole(endpoint: OpsEndpoint, id: string, role
   }
 }
 
-/** Delete one Instance row. Used only by `flair federation instance prune`. */
+/**
+ * Delete one Instance row. Used only by `flair federation instance prune`.
+ *
+ * Verified against the result body, like `updateInstanceRole` (flair#1883 round
+ * 5): a Harper `delete` answers 200 with the removed ids in `deleted_hashes` and
+ * names an id it did NOT remove in `skipped_hashes`. Status alone would let a
+ * skipped row read as deleted, and `prune --apply` would print a row it never
+ * removed as gone.
+ */
 export async function deleteInstanceRow(endpoint: OpsEndpoint, id: string): Promise<void> {
   // `hash_values` is the field Harper's delete schema REQUIRES (a list); the
   // singular `hash_value` is refused with a 400. Verified against a live Harper
   // in test/integration/init-remote-instance-identity.test.ts.
-  await opsPost(
+  const parsed = await opsPost(
     endpoint,
     { operation: "delete", database: "flair", table: "Instance", hash_values: [id] },
     `Instance delete for ${id}`,
   );
+  const deleted = Array.isArray(parsed?.deleted_hashes) ? parsed.deleted_hashes : null;
+  if (deleted === null || !deleted.includes(id)) {
+    const skipped = Array.isArray(parsed?.skipped_hashes) ? parsed.skipped_hashes.join(", ") : "unknown";
+    throw new Error(
+      `Instance delete for ${id} removed no row (skipped: ${skipped}). ` +
+        `The row is still there — re-run ${INSTANCE_ROW_PRUNE_COMMAND} and check the rows it names.`,
+    );
+  }
 }
 
 /** Every row this instance holds, or a thrown error. Doctor uses the probe. */

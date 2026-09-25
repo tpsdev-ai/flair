@@ -18,6 +18,7 @@ import {
   decideInstanceAnswer,
   decideInstancePrune,
   decideSweepMode,
+  deleteInstanceRow,
   formatInstanceRow,
   INSTANCE_ROWS_SQL,
   INSTANCE_ROW_PRUNE_COMMAND,
@@ -574,6 +575,68 @@ describe("pruneInstanceRows", () => {
     const { dropped } = await pruneInstanceRows(endpoint, HUB_ROW.id);
     expect(dropped).toEqual([]);
     expect(calls.some((c) => c.body.operation === "delete")).toBe(false);
+  });
+});
+
+describe("deleteInstanceRow — HTTP 200 is not success", () => {
+  it("sends the hash_values list Harper requires and accepts a reported deletion", async () => {
+    const { endpoint, calls } = opsEndpointMock(() =>
+      jsonResponse({ deleted_hashes: [HUB_ROW.id], skipped_hashes: [] }),
+    );
+
+    await deleteInstanceRow(endpoint, HUB_ROW.id);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].body).toMatchObject({
+      operation: "delete",
+      database: "flair",
+      table: "Instance",
+      hash_values: [HUB_ROW.id],
+    });
+  });
+
+  it("refuses a 200 whose deleted_hashes does not name the id, and names what was skipped", async () => {
+    // Harper can answer 200 and still skip the row (the contract
+    // `updateInstanceRole` already checks). The skipped id here is NOT the id we
+    // asked to delete, so it can only reach the message through skipped_hashes.
+    const { endpoint } = opsEndpointMock(() =>
+      jsonResponse({ deleted_hashes: [SECOND_HUB_ROW.id], skipped_hashes: [HUB_ROW.id] }),
+    );
+
+    const err = (await deleteInstanceRow(endpoint, HUB_ROW.id).catch((e) => e as Error)) as Error;
+
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain("removed no row");
+    expect(err.message).toContain("skipped: flair_aaaaaaaa");
+  });
+
+  it("refuses a 200 that reports no delete result at all", async () => {
+    const { endpoint } = opsEndpointMock(() => jsonResponse({ ok: true }));
+
+    const err = (await deleteInstanceRow(endpoint, HUB_ROW.id).catch((e) => e as Error)) as Error;
+
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain("removed no row");
+    expect(err.message).toContain("skipped: unknown");
+  });
+
+  it("prune reports only rows it deleted: a 200 that skips a row is an error, never a 'deleted' line", async () => {
+    // End to end through the command the operator runs: `prune --apply` must not
+    // print a row the ops API did not actually delete (flair#1883 round 5).
+    const { endpoint } = opsEndpointMock((body) =>
+      body.operation === "sql"
+        ? jsonResponse([HUB_ROW, SPOKE_ROW, SECOND_HUB_ROW])
+        : jsonResponse({
+            deleted_hashes: body.hash_values.filter((h: string) => h !== SECOND_HUB_ROW.id),
+            skipped_hashes: body.hash_values.filter((h: string) => h === SECOND_HUB_ROW.id),
+          }),
+    );
+
+    const err = (await pruneInstanceRows(endpoint, HUB_ROW.id).catch((e) => e as Error)) as Error;
+
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain(SECOND_HUB_ROW.id);
+    expect(err.message).toContain("removed no row");
   });
 });
 
