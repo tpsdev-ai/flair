@@ -1,5 +1,14 @@
 name: CI
 
+# LIVENESS COUPLING (flair#1890) — READ BEFORE CHANGING THIS WORKFLOW'S NAME OR
+# ITS `push` TRIGGER. .github/workflows/release-auto-tag.yml is woken ONLY by
+# `workflow_run: workflows: ["CI"], types: [completed]`, and it asserts that the
+# completed run came from this file's path. Renaming this workflow, giving its
+# push trigger a `paths:` filter, or cancelling its runs would mean NO wake for a
+# release — silently, because a trigger that never fires raises nothing. Nothing
+# else tags releases; release-auto-tag.yml's nightly sweep is a recovery net for
+# exactly this class (and for a rename), not a trigger.
+
 # Explicit least privilege: an absent top-level block inherits the repository
 # default, which is not "no write". Every job here reads the repo; the one job
 # that needs more (sast-codeql → security-events: write) declares it locally.

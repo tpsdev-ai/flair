@@ -1,0 +1,32 @@
+{
+  "$documentation": [
+    "ADVISORY ALLOWLIST for the release auto-tagger (flair#1890).",
+    "",
+    "Condition 9 of scripts/release-auto-tag.mjs refuses a release whose checks are",
+    "not all on the whitelist success|neutral|skipped. This file is the ONE",
+    "exception: a check named here may fail (or be non-success in any way) without",
+    "refusing the release; those failures are still listed in the run summary.",
+    "",
+    "Matching is by EXACT NAME, which is the whole point. Check names are chosen by",
+    "the workflows in this repo, so a merged PR could rename a failing check to",
+    "look advisory (name it 'x (advisory)') — a suffix or substring match would",
+    "silently widen the exception. Only the strings below are tolerated, and a",
+    "check whose name merely ENDS in '(advisory)' but is not listed here still",
+    "refuses (asserted by test/unit/release-auto-tag.test.ts).",
+    "",
+    "Seed (2026-09-25): derived from the checks on main's HEAD that this repo",
+    "declares advisory-only. The repo's standing rule (see the PROMOTION CRITERION",
+    "comment in .github/workflows/test.yml) is that an advisory-only check carries",
+    "the marker '(advisory)' in its own name AND, at its definition, (a) what",
+    "would make it blocking and (b) when that is re-evaluated. Exactly one check",
+    "on main carries that marker today, so this list has exactly one entry:",
+    "  - 'launchd adopt-then-upgrade (macOS, advisory)'",
+    "    (test.yml job launchd-adopt-upgrade-darwin; blocking when #1685 lands).",
+    "",
+    "ADDING AN ENTRY IS A REVIEWED ACT. Deleting it once the check becomes",
+    "blocking is the point of listing it here rather than in the workflow."
+  ],
+  "allow": [
+    "launchd adopt-then-upgrade (macOS, advisory)"
+  ]
+}

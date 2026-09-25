@@ -1,0 +1,277 @@
+name: Release auto-tag
+
+# Tag a release automatically once its release PR is merged, reviewed and green
+# (flair#1890). The tag only STAGES packages: publishing still needs the
+# maintainer's npm 2FA approval on the staged tarballs (see release-publish.yml).
+#
+# THREE ENTRY EVENTS, each with its own guard:
+#   - `workflow_run` on the `CI` workflow completing: only when the triggering
+#     run was a PUSH to main that SUCCEEDED. `workflow_run` always executes this
+#     file from the default branch, so a PR cannot change what the tagger does
+#     before it is merged. `head_branch == 'main'` alone is spoofable (a fork PR
+#     from a branch named `main` reports it), which is why `event == 'push'` is
+#     required as well — it excludes fork PRs — and condition 5 re-checks
+#     ancestry against the real main.
+#   - `schedule` (nightly): one decision, on the commit that introduced the
+#     version main's HEAD declares. It does not depend on any workflow NAME, so
+#     it is also where a renamed `CI` is caught (condition `ci-renamed`).
+#   - `workflow_dispatch`: ALWAYS a dry run — it decides against a named commit
+#     on main and prints the verdict without creating anything. There is no
+#     non-dry dispatch, so write access to this repo is not a new way to start a
+#     release; the nightly is the only other writer.
+#
+# WHY THE TRIGGER MATCHES A NAME, AND WHY THAT IS GUARDED TWICE. `workflow_run`
+# matches by workflow name. One failure stops the trigger itself (a rename: the
+# nightly's `GET /actions/workflows/test.yml` must still report `name: CI`) and
+# the other lets a DIFFERENT workflow named `CI` fire this one (a second file
+# named CI on the default branch: the path assertion below fails loudly). Both
+# are real: this repository has two workflows registered under the name `CI`,
+# and only `.github/workflows/test.yml` is in the tree.
+#
+# THE CHECKS-PENDING DEADLINE: 30 minutes. Measured 2026-09-25 with
+#
+#   GET /repos/tpsdev-ai/flair/actions/workflows
+#   GET /repos/tpsdev-ai/flair/actions/workflows/<id>/runs?branch=main&status=completed&per_page=30
+#
+# for every workflow, taking each one's last 30 completed runs on main and its
+# duration as `updated_at - run_started_at`, with P95 as the nearest-rank 29th of
+# 30 ascending values. The slowest workflow on main is this repository's CI
+# (test.yml): P50 18.8 min, P95 24.4 min, max 25.2 min. 30 = ceil(24.4) + ~5 min
+# of margin, which covers the observed maximum with headroom. Re-measure when CI
+# gets materially slower: too small a deadline refuses good releases.
+#
+# INVARIANTS (both asserted by test/unit/release-auto-tag-workflow.test.ts):
+#   - the decide step's environment holds no App token. The App token is minted
+#     in a LATER step than the decision, so nothing the release commit contains
+#     ever runs with the App credential in its environment;
+#   - condition 10 re-checks only conditions 3, 4 and 8. Ancestry, version sync
+#     and PR identity are stable, and re-running condition 6 would execute the
+#     release commit's code next to the App token.
+#
+# Token custody: `permissions: {}` here and per-job grants below. GITHUB_TOKEN
+# reads only (contents, pull-requests, checks, actions). The App token is used
+# for exactly one ref write, and the reporter's token has exactly `issues: write`.
+
+permissions: {}
+
+on:
+  workflow_run:
+    # Matches by NAME. A rename stops this trigger silently — the nightly's
+    # ci-renamed check and the comment in test.yml are the two places that see it.
+    workflows: ["CI"]
+    types: [completed]
+  schedule:
+    # Nightly recovery: one decision, on the commit that introduced the version
+    # main's HEAD declares. Catches a release whose CI wake was missed, and the
+    # renamed-CI case.
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit on main to decide against (always a dry run: nothing is created)"
+        required: true
+        type: string
+
+# Serialized: two taggers never interleave. NEVER cancel: a cancelled run in the
+# window between condition 10 and the POST is the one shape that could lose a
+# release, and `cancel-in-progress: false` is what makes "runs are serialized"
+# true rather than aspirational.
+concurrency:
+  group: release-auto-tag
+  cancel-in-progress: false
+
+jobs:
+  decide:
+    name: Decide (and tag when the verdict is TAG)
+    # A dependent job is skipped by default once a needed job has failed, which is
+    # why the reporter below carries `always()`. This guard is the trigger guard:
+    # the nightly and a dry dispatch have no workflow_run payload to check.
+    if: >-
+      github.event_name == 'schedule'
+      || github.event_name == 'workflow_dispatch'
+      || (github.event.workflow_run.event == 'push'
+      && github.event.workflow_run.head_branch == 'main'
+      && github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    # The ONLY job that references the release-tag environment: the App id
+    # (environment variable) and private key (environment secret) live there, with
+    # a deployment branch policy of main only and no required reviewers.
+    environment: release-tag
+    permissions:
+      contents: read # git/ref, git/tags, matching-refs; the checkout's fetch
+      pull-requests: read # commits/<sha>/pulls, pulls/<n>/reviews
+      checks: read # commits/<sha>/check-runs
+      actions: read # actions/workflows/<file>, actions/runs/<id> (own check suite)
+    outputs:
+      # Explicitly mapped from step to JOB output: a dependent job can only read
+      # job outputs. `write` wins when it set a verdict, so a REFUSE found at the
+      # write boundary (condition 10) reaches the reporter, not the first verdict.
+      verdict: ${{ steps.write.outputs.verdict || steps.decide.outputs.verdict }}
+      condition: ${{ steps.write.outputs.condition || steps.decide.outputs.condition }}
+      version: ${{ steps.write.outputs.version || steps.decide.outputs.version }}
+    steps:
+      - name: Check out the default branch's tree
+        # The decision script always runs from the default branch's tree. <sha> is
+        # consulted only as data, with one deliberate exception (condition 6).
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Assert the workflow_run trigger came from the CI workflow at the pinned path
+        # A second workflow named `CI` would otherwise decide releases. Fails LOUDLY
+        # rather than refusing: no verdict exists yet, and this is a workflow bug.
+        if: github.event_name == 'workflow_run'
+        env:
+          TRIGGER_NAME: ${{ github.event.workflow_run.name }}
+          TRIGGER_PATH: ${{ github.event.workflow_run.path }}
+        run: |
+          set -euo pipefail
+          if [ "$TRIGGER_PATH" != ".github/workflows/test.yml" ]; then
+            echo "REFUSING: the workflow_run trigger came from '${TRIGGER_NAME}' at '${TRIGGER_PATH}', not from '.github/workflows/test.yml'. Fix the name filter or this assertion — do not delete it." >&2
+            exit 1
+          fi
+
+      - name: Fetch the real main
+        run: git fetch --no-tags --prune origin +refs/heads/main:refs/remotes/origin/main
+
+      - name: Resolve the commit to decide on
+        id: target
+        env:
+          EVENT: ${{ github.event_name }}
+          WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          INPUT_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          sha=""
+          case "$EVENT" in
+            workflow_run) sha="$WORKFLOW_RUN_SHA" ;;
+            workflow_dispatch) sha="$INPUT_SHA" ;;
+            schedule) sha="" ;;
+            *) echo "unexpected event ${EVENT}" >&2; exit 1 ;;
+          esac
+          if [ -n "$sha" ] && ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "REFUSING: '${sha}' is not a full 40-character commit sha" >&2
+            exit 1
+          fi
+          printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Decide (conditions 1-9)
+        # Always exits 0: the verdict is the output, not the exit code. The next
+        # step is what goes red. Read-only token; no App credential in this env.
+        id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TARGET_SHA: ${{ steps.target.outputs.sha }}
+          SELF_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          args=(decide
+            --repo "$REPO"
+            --self-run-id "$SELF_RUN_ID"
+            --version-file package.json
+            --main-ref origin/main
+            --output "$GITHUB_OUTPUT"
+            --advisory-allowlist .github/release-auto-tag-advisories.json
+            --deadline-minutes 30
+            --workflow-path .github/workflows/test.yml
+            --workflow-name CI)
+          if [ -n "$TARGET_SHA" ]; then args+=(--sha "$TARGET_SHA"); else args+=(--nightly); fi
+          node scripts/release-auto-tag.mjs "${args[@]}"
+
+      - name: Mint the release-tag App token
+        # Minted in a LATER step than the decision, so nothing <sha> contains ever
+        # runs with the App credential in its environment. Skipped on a dry run.
+        # If the App is not configured yet (it is installed after this lands) this
+        # step fails; the write step still runs and REFUSES `app-not-configured`.
+        id: app-token
+        if: steps.decide.outputs.verdict == 'TAG' && github.event_name != 'workflow_dispatch'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ vars.RELEASE_TAG_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TAG_APP_PRIVATE_KEY }}
+          owner: tpsdev-ai
+          repositories: flair
+          permission-contents: write
+
+      - name: Tag (condition 10 re-check, then the POST)
+        # `always()` so this runs even when the mint step failed (unconfigured
+        # App) and can REFUSE `app-not-configured`. Condition 10 re-runs 3, 4 and 8
+        # only; the POST is the race-breaker.
+        id: write
+        if: always() && steps.decide.outputs.verdict == 'TAG' && github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          TARGET_SHA: ${{ steps.target.outputs.sha }}
+          VERSION: ${{ steps.decide.outputs.version }}
+          RELEASE_TAG_APP_ID: ${{ vars.RELEASE_TAG_APP_ID }}
+          RELEASE_TAG_APP_KEY_PRESENT: ${{ secrets.RELEASE_TAG_APP_PRIVATE_KEY != '' }}
+        run: |
+          set -euo pipefail
+          node scripts/release-auto-tag.mjs tag \
+            --repo "$REPO" \
+            --sha "$TARGET_SHA" \
+            --version "$VERSION" \
+            --main-ref origin/main \
+            --output "$GITHUB_OUTPUT"
+
+      - name: Enforce (the job goes red on REFUSE)
+        # A red job summary alone is not enough (that is the failure this workflow
+        # exists to fix), but a REFUSE must still be red: the reporter opens an
+        # issue about it.
+        if: always() && (steps.write.outputs.verdict == 'REFUSE' || steps.decide.outputs.verdict == 'REFUSE')
+        env:
+          VERDICT: ${{ steps.write.outputs.verdict || steps.decide.outputs.verdict }}
+          CONDITION: ${{ steps.write.outputs.condition || steps.decide.outputs.condition }}
+          VERSION: ${{ steps.write.outputs.version || steps.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+          echo "release-auto-tag REFUSE: condition=${CONDITION} version=${VERSION} verdict=${VERDICT}" >&2
+          exit 1
+
+  report:
+    name: Report a refusal
+    needs: decide
+    # Explicit `always()`: a dependent job is skipped by default once a needed job
+    # has failed, and the enforce step above fails this job on exactly the REFUSE
+    # we need to report. Dispatch is excluded, so a dry run writes nothing.
+    if: always() && needs.decide.outputs.verdict == 'REFUSE' && github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # `issues: write` and NOTHING else. No checkout: this job executes no repo code.
+    permissions:
+      issues: write
+    steps:
+      - name: Open (or leave alone) the refusal issue
+        # Title and body come from a fixed template filled with three values: the
+        # condition id from the script's fixed enum, the version output (already
+        # re-validated as \d+.\d+.\d+, or the literal `invalid`) and the run URL
+        # built from github.run_id. No PR title, branch name or unvalidated field
+        # reaches here.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          CONDITION: ${{ needs.decide.outputs.condition }}
+          VERSION: ${{ needs.decide.outputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="release auto-tag refused v${VERSION}: ${CONDITION}"
+          open_count=$(gh api --paginate "repos/${REPO}/issues?state=open&per_page=100" \
+            | jq --arg t "$title" '[.[] | select(.title == $t and (.pull_request | not))] | length')
+          if [ "$open_count" != "0" ]; then
+            echo "an open issue with this title already exists (${open_count}); adding nothing (idempotent by title, so the nightly does not re-open a known refusal)"
+            exit 0
+          fi
+          body_file="$(mktemp)"
+          {
+            printf '%s\n' "The release auto-tagger refused a release on the main branch."
+            printf '\n'
+            printf '%s\n' "- condition: ${CONDITION}"
+            printf '%s\n' "- version: v${VERSION}"
+            printf '%s\n' "- run: ${RUN_URL}"
+            printf '\n'
+            printf '%s\n' "Nothing was tagged. Conditions and the fixed condition ids: scripts/release-auto-tag.mjs. Workflow: .github/workflows/release-auto-tag.yml."
+          } > "$body_file"
+          gh issue create --repo "$REPO" --title "$title" --body-file "$body_file"
