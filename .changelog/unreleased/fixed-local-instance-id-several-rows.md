@@ -1,12 +1,13 @@
 - **A local write on an instance with several Instance rows now stamps no originator identity instead of an arbitrary one, and says so once.**
 
-  The write-time `originatorInstanceId` stamp (Memory/Soul/Agent/Relationship
-  writes, and Message's org resolution) resolves this instance's own identity
-  from the `Instance` table. It used to take the first row of an unordered
+  The write-time `originatorInstanceId` stamp resolves this instance's own
+  identity from the `Instance` table for a local Memory, Soul, Agent or
+  Relationship write that carries no originator yet; Message uses the same
+  resolution for its org scope. It used to take the first row of an unordered
   search and cache it, so on an instance whose table holds several rows — a
   legacy install, or the state `flair init --remote`'s detected race leaves —
-  every local record was attributed to an arbitrary identity, one peers may
-  never have pinned. It now decides through the same shared rule the federation
+  those writes were stamped with an arbitrary identity, one peers may never have
+  pinned. It now decides through the same shared rule the federation
   readers use:
 
   - one row → cached and returned, as before;
