@@ -22,7 +22,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync, unlinkSy
 import { join } from "node:path";
 import * as render from "../render.js";
 import {
-  readAdminPassFileSecure,
+  resolveAdminPassFromSources,
   defaultKeysDir,
   resolveLocalAdminPass,
   resolveAdminUser,
@@ -119,21 +119,28 @@ export function register(program: Command): void {
         resolveEffectiveOpsUrl({ target: opts.target, opsTarget: opts.opsTarget }) ?? opsPort;
       const isRemoteTarget = typeof seedOpsTarget === "string";
 
-      // flair#1259 — --admin-pass-file resolves into the same explicit slot the
-      // inline flag uses (same shape as `flair federation sync`), read in-process
+      // flair#1259 / #1910 — --admin-pass-file and --admin-pass resolve through
+      // the ONE resolver (resolveAdminPassFromSources), the file read in-process
       // via readAdminPassFileSecure so the secret never appears in ps or shell
-      // history. This does NOT weaken the #1085 remote guard below: an explicit
-      // flag naming a file IS operator intent toward this target, exactly like an
-      // explicit inline --admin-pass — what the guard blocks is the AMBIENT
-      // env/local-file fallbacks silently traveling to a third-party host.
-      if (!opts.adminPass && opts.adminPassFile) {
-        try {
-          opts.adminPass = readAdminPassFileSecure(opts.adminPassFile);
-        } catch (err: any) {
-          console.error(`Error reading --admin-pass-file ${opts.adminPassFile}: ${err.message}`);
-          process.exit(1);
-        }
+      // history. Combining the file and the flag is a usage error (the flag used
+      // to silently win). This does NOT weaken the #1085 remote guard below: an
+      // explicit flag naming a file IS operator intent toward this target,
+      // exactly like an explicit inline --admin-pass — what the guard blocks is
+      // the AMBIENT env/local-file fallbacks silently traveling to a third-party
+      // host.
+      let explicitPass: string | undefined;
+      try {
+        explicitPass =
+          resolveAdminPassFromSources({
+            adminPassFile: opts.adminPassFile,
+            adminPass: opts.adminPass,
+            envPass: undefined,
+          }) || undefined;
+      } catch (err: any) {
+        console.error(`Error: ${err.message}`);
+        process.exit(1);
       }
+      opts.adminPass = explicitPass;
 
       // #590 — local convenience fallback: FLAIR_ADMIN_PASS env, then the secure
       // ~/.flair/admin-pass file `flair init` already writes (mode 0600). Never

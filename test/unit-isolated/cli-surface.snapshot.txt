@@ -885,10 +885,10 @@ flair federation sync
       description: Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)
       attr: opsTarget
     --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS env, or use --admin-pass-file)
+      description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
       attr: adminPass
     --admin-pass-file <path>
-      description: Read admin password from a file (e.g., ~/.flair/admin-pass). Preferred over --admin-pass for launchd/cron — keeps the secret out of ps and shell history.
+      description: Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
       attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
@@ -989,10 +989,10 @@ flair federation instance list
   usage: [options]
   options:
     --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS env, or use --admin-pass-file)
+      description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
       attr: adminPass
     --admin-pass-file <path>
-      description: Read admin password from a file (e.g., ~/.flair/admin-pass). Preferred over --admin-pass for launchd/cron — keeps the secret out of ps and shell history.
+      description: Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
       attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
@@ -1018,10 +1018,10 @@ flair federation instance prune
   usage: [options]
   options:
     --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS env, or use --admin-pass-file)
+      description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
       attr: adminPass
     --admin-pass-file <path>
-      description: Read admin password from a file (e.g., ~/.flair/admin-pass). Preferred over --admin-pass for launchd/cron — keeps the secret out of ps and shell history.
+      description: Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
       attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
@@ -1076,10 +1076,10 @@ flair federation verify
       description: Agent ID (or set FLAIR_AGENT_ID env)
       attr: agent
     --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS env, or use --admin-pass-file)
+      description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
       attr: adminPass
     --admin-pass-file <path>
-      description: Read admin password from a file (e.g., ~/.flair/admin-pass). Preferred over --admin-pass for launchd/cron — keeps the secret out of ps and shell history.
+      description: Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
       attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
@@ -1284,10 +1284,10 @@ flair rem restore
     date (required)
   options:
     --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS env, or use --admin-pass-file)
+      description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
       attr: adminPass
     --admin-pass-file <path>
-      description: Read admin password from a file (e.g., ~/.flair/admin-pass). Preferred over --admin-pass for launchd/cron — keeps the secret out of ps and shell history.
+      description: Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
       attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
@@ -1790,10 +1790,10 @@ flair memory add
       description: Agent ID (or set FLAIR_AGENT_ID env)
       attr: agent
     --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS env, or use --admin-pass-file)
+      description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
       attr: adminPass
     --admin-pass-file <path>
-      description: Read admin password from a file (e.g., ~/.flair/admin-pass). Preferred over --admin-pass for launchd/cron — keeps the secret out of ps and shell history.
+      description: Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
       attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
@@ -2104,10 +2104,10 @@ flair soul set
   usage: [options]
   options:
     --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS env, or use --admin-pass-file)
+      description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
       attr: adminPass
     --admin-pass-file <path>
-      description: Read admin password from a file (e.g., ~/.flair/admin-pass). Preferred over --admin-pass for launchd/cron — keeps the secret out of ps and shell history.
+      description: Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
       attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
@@ -2138,10 +2138,10 @@ flair soul get
     id (required)
   options:
     --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS env, or use --admin-pass-file)
+      description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
       attr: adminPass
     --admin-pass-file <path>
-      description: Read admin password from a file (e.g., ~/.flair/admin-pass). Preferred over --admin-pass for launchd/cron — keeps the secret out of ps and shell history.
+      description: Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
       attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
@@ -2161,10 +2161,10 @@ flair soul list
   usage: [options]
   options:
     --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS env, or use --admin-pass-file)
+      description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
       attr: adminPass
     --admin-pass-file <path>
-      description: Read admin password from a file (e.g., ~/.flair/admin-pass). Preferred over --admin-pass for launchd/cron — keeps the secret out of ps and shell history.
+      description: Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
       attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
@@ -2329,10 +2329,10 @@ flair backup
       description: Flair base URL (overrides --port)
       attr: url
     --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS env, or use --admin-pass-file)
+      description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
       attr: adminPass
     --admin-pass-file <path>
-      description: Read admin password from a file (e.g., ~/.flair/admin-pass). Preferred over --admin-pass for launchd/cron — keeps the secret out of ps and shell history.
+      description: Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
       attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
@@ -3474,12 +3474,14 @@ Options:
   --target <url>            Remote Flair URL (env: FLAIR_TARGET)
   --ops-target <url>        Explicit ops API URL (env: FLAIR_OPS_TARGET;
                             bypasses port derivation)
-  --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env, or use
-                            --admin-pass-file)
-  --admin-pass-file <path>  Read admin password from a file (e.g.,
-                            ~/.flair/admin-pass). Preferred over --admin-pass
-                            for launchd/cron — keeps the secret out of ps and
-                            shell history.
+  --admin-pass <pass>       Admin password (legacy: lands in shell history and
+                            the process list — prefer --admin-pass-file or
+                            FLAIR_ADMIN_PASS)
+  --admin-pass-file <path>  Read the admin password from an owner-only file
+                            (mode 0600 enforced), keeping it out of shell
+                            history and the process list. An explicit option
+                            (this or --admin-pass) overrides FLAIR_ADMIN_PASS;
+                            combining it with --admin-pass is a usage error.
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   -h, --help                display help for command
@@ -3511,12 +3513,14 @@ Global Options:
   --target <url>            Remote Flair URL (env: FLAIR_TARGET)
   --ops-target <url>        Explicit ops API URL (env: FLAIR_OPS_TARGET;
                             bypasses port derivation)
-  --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env, or use
-                            --admin-pass-file)
-  --admin-pass-file <path>  Read admin password from a file (e.g.,
-                            ~/.flair/admin-pass). Preferred over --admin-pass
-                            for launchd/cron — keeps the secret out of ps and
-                            shell history.
+  --admin-pass <pass>       Admin password (legacy: lands in shell history and
+                            the process list — prefer --admin-pass-file or
+                            FLAIR_ADMIN_PASS)
+  --admin-pass-file <path>  Read the admin password from an owner-only file
+                            (mode 0600 enforced), keeping it out of shell
+                            history and the process list. An explicit option
+                            (this or --admin-pass) overrides FLAIR_ADMIN_PASS;
+                            combining it with --admin-pass is a usage error.
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   -v, --version             output the version number
@@ -3542,12 +3546,14 @@ Global Options:
   --target <url>            Remote Flair URL (env: FLAIR_TARGET)
   --ops-target <url>        Explicit ops API URL (env: FLAIR_OPS_TARGET;
                             bypasses port derivation)
-  --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env, or use
-                            --admin-pass-file)
-  --admin-pass-file <path>  Read admin password from a file (e.g.,
-                            ~/.flair/admin-pass). Preferred over --admin-pass
-                            for launchd/cron — keeps the secret out of ps and
-                            shell history.
+  --admin-pass <pass>       Admin password (legacy: lands in shell history and
+                            the process list — prefer --admin-pass-file or
+                            FLAIR_ADMIN_PASS)
+  --admin-pass-file <path>  Read the admin password from an owner-only file
+                            (mode 0600 enforced), keeping it out of shell
+                            history and the process list. An explicit option
+                            (this or --admin-pass) overrides FLAIR_ADMIN_PASS;
+                            combining it with --admin-pass is a usage error.
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   -v, --version             output the version number
@@ -3567,12 +3573,14 @@ Global Options:
   --target <url>            Remote Flair URL (env: FLAIR_TARGET)
   --ops-target <url>        Explicit ops API URL (env: FLAIR_OPS_TARGET;
                             bypasses port derivation)
-  --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env, or use
-                            --admin-pass-file)
-  --admin-pass-file <path>  Read admin password from a file (e.g.,
-                            ~/.flair/admin-pass). Preferred over --admin-pass
-                            for launchd/cron — keeps the secret out of ps and
-                            shell history.
+  --admin-pass <pass>       Admin password (legacy: lands in shell history and
+                            the process list — prefer --admin-pass-file or
+                            FLAIR_ADMIN_PASS)
+  --admin-pass-file <path>  Read the admin password from an owner-only file
+                            (mode 0600 enforced), keeping it out of shell
+                            history and the process list. An explicit option
+                            (this or --admin-pass) overrides FLAIR_ADMIN_PASS;
+                            combining it with --admin-pass is a usage error.
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   -v, --version             output the version number
@@ -3639,12 +3647,14 @@ Usage: flair federation instance list [options]
 List every Instance row on this instance (a hub should have exactly one)
 
 Options:
-  --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env, or use
-                            --admin-pass-file)
-  --admin-pass-file <path>  Read admin password from a file (e.g.,
-                            ~/.flair/admin-pass). Preferred over --admin-pass
-                            for launchd/cron — keeps the secret out of ps and
-                            shell history.
+  --admin-pass <pass>       Admin password (legacy: lands in shell history and
+                            the process list — prefer --admin-pass-file or
+                            FLAIR_ADMIN_PASS)
+  --admin-pass-file <path>  Read the admin password from an owner-only file
+                            (mode 0600 enforced), keeping it out of shell
+                            history and the process list. An explicit option
+                            (this or --admin-pass) overrides FLAIR_ADMIN_PASS;
+                            combining it with --admin-pass is a usage error.
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --port <port>             Harper HTTP port
@@ -3663,12 +3673,14 @@ Usage: flair federation instance prune [options]
 Delete every Instance row except --keep <id> (dry-run by default)
 
 Options:
-  --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env, or use
-                            --admin-pass-file)
-  --admin-pass-file <path>  Read admin password from a file (e.g.,
-                            ~/.flair/admin-pass). Preferred over --admin-pass
-                            for launchd/cron — keeps the secret out of ps and
-                            shell history.
+  --admin-pass <pass>       Admin password (legacy: lands in shell history and
+                            the process list — prefer --admin-pass-file or
+                            FLAIR_ADMIN_PASS)
+  --admin-pass-file <path>  Read the admin password from an owner-only file
+                            (mode 0600 enforced), keeping it out of shell
+                            history and the process list. An explicit option
+                            (this or --admin-pass) overrides FLAIR_ADMIN_PASS;
+                            combining it with --admin-pass is a usage error.
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --keep <id>               The Instance row to keep; the rest are deleted
@@ -3701,12 +3713,14 @@ Options:
   --ops-target <url>        Explicit ops API URL (env: FLAIR_OPS_TARGET;
                             bypasses port derivation)
   --agent <id>              Agent ID (or set FLAIR_AGENT_ID env)
-  --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env, or use
-                            --admin-pass-file)
-  --admin-pass-file <path>  Read admin password from a file (e.g.,
-                            ~/.flair/admin-pass). Preferred over --admin-pass
-                            for launchd/cron — keeps the secret out of ps and
-                            shell history.
+  --admin-pass <pass>       Admin password (legacy: lands in shell history and
+                            the process list — prefer --admin-pass-file or
+                            FLAIR_ADMIN_PASS)
+  --admin-pass-file <path>  Read the admin password from an owner-only file
+                            (mode 0600 enforced), keeping it out of shell
+                            history and the process list. An explicit option
+                            (this or --admin-pass) overrides FLAIR_ADMIN_PASS;
+                            combining it with --admin-pass is a usage error.
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   -h, --help                display help for command
@@ -3968,12 +3982,14 @@ Usage: flair rem restore [options] <date>
 Restore from a REM snapshot (inspect by default; --apply rewinds Harper state)
 
 Options:
-  --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env, or use
-                            --admin-pass-file)
-  --admin-pass-file <path>  Read admin password from a file (e.g.,
-                            ~/.flair/admin-pass). Preferred over --admin-pass
-                            for launchd/cron — keeps the secret out of ps and
-                            shell history.
+  --admin-pass <pass>       Admin password (legacy: lands in shell history and
+                            the process list — prefer --admin-pass-file or
+                            FLAIR_ADMIN_PASS)
+  --admin-pass-file <path>  Read the admin password from an owner-only file
+                            (mode 0600 enforced), keeping it out of shell
+                            history and the process list. An explicit option
+                            (this or --admin-pass) overrides FLAIR_ADMIN_PASS;
+                            combining it with --admin-pass is a usage error.
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --agent <id>              Agent id (or FLAIR_AGENT_ID env)
@@ -4647,12 +4663,14 @@ Write a new memory row for an agent (content via positional arg or --content)
 
 Options:
   --agent <id>              Agent ID (or set FLAIR_AGENT_ID env)
-  --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env, or use
-                            --admin-pass-file)
-  --admin-pass-file <path>  Read admin password from a file (e.g.,
-                            ~/.flair/admin-pass). Preferred over --admin-pass
-                            for launchd/cron — keeps the secret out of ps and
-                            shell history.
+  --admin-pass <pass>       Admin password (legacy: lands in shell history and
+                            the process list — prefer --admin-pass-file or
+                            FLAIR_ADMIN_PASS)
+  --admin-pass-file <path>  Read the admin password from an owner-only file
+                            (mode 0600 enforced), keeping it out of shell
+                            history and the process list. An explicit option
+                            (this or --admin-pass) overrides FLAIR_ADMIN_PASS;
+                            combining it with --admin-pass is a usage error.
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --content <text>          memory content (alias for positional arg)
@@ -4937,12 +4955,14 @@ Usage: flair soul set [options]
 Set (upsert) a soul entry for an agent by key
 
 Options:
-  --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env, or use
-                            --admin-pass-file)
-  --admin-pass-file <path>  Read admin password from a file (e.g.,
-                            ~/.flair/admin-pass). Preferred over --admin-pass
-                            for launchd/cron — keeps the secret out of ps and
-                            shell history.
+  --admin-pass <pass>       Admin password (legacy: lands in shell history and
+                            the process list — prefer --admin-pass-file or
+                            FLAIR_ADMIN_PASS)
+  --admin-pass-file <path>  Read the admin password from an owner-only file
+                            (mode 0600 enforced), keeping it out of shell
+                            history and the process list. An explicit option
+                            (this or --admin-pass) overrides FLAIR_ADMIN_PASS;
+                            combining it with --admin-pass is a usage error.
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --agent <id>
@@ -4966,12 +4986,14 @@ Usage: flair soul get [options] <id>
 Fetch a single soul entry by id (agent:key)
 
 Options:
-  --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env, or use
-                            --admin-pass-file)
-  --admin-pass-file <path>  Read admin password from a file (e.g.,
-                            ~/.flair/admin-pass). Preferred over --admin-pass
-                            for launchd/cron — keeps the secret out of ps and
-                            shell history.
+  --admin-pass <pass>       Admin password (legacy: lands in shell history and
+                            the process list — prefer --admin-pass-file or
+                            FLAIR_ADMIN_PASS)
+  --admin-pass-file <path>  Read the admin password from an owner-only file
+                            (mode 0600 enforced), keeping it out of shell
+                            history and the process list. An explicit option
+                            (this or --admin-pass) overrides FLAIR_ADMIN_PASS;
+                            combining it with --admin-pass is a usage error.
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --agent <id>              Agent ID to sign the read as (or set
@@ -4992,12 +5014,14 @@ Usage: flair soul list [options]
 List all soul entries for an agent
 
 Options:
-  --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env, or use
-                            --admin-pass-file)
-  --admin-pass-file <path>  Read admin password from a file (e.g.,
-                            ~/.flair/admin-pass). Preferred over --admin-pass
-                            for launchd/cron — keeps the secret out of ps and
-                            shell history.
+  --admin-pass <pass>       Admin password (legacy: lands in shell history and
+                            the process list — prefer --admin-pass-file or
+                            FLAIR_ADMIN_PASS)
+  --admin-pass-file <path>  Read the admin password from an owner-only file
+                            (mode 0600 enforced), keeping it out of shell
+                            history and the process list. An explicit option
+                            (this or --admin-pass) overrides FLAIR_ADMIN_PASS;
+                            combining it with --admin-pass is a usage error.
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   --agent <id>              Agent ID (or set FLAIR_AGENT_ID env)
@@ -5183,12 +5207,14 @@ Options:
   --agents <ids>            Comma-separated agent IDs to include (default: all)
   --port <port>             Harper HTTP port
   --url <url>               Flair base URL (overrides --port)
-  --admin-pass <pass>       Admin password (or set FLAIR_ADMIN_PASS env, or use
-                            --admin-pass-file)
-  --admin-pass-file <path>  Read admin password from a file (e.g.,
-                            ~/.flair/admin-pass). Preferred over --admin-pass
-                            for launchd/cron — keeps the secret out of ps and
-                            shell history.
+  --admin-pass <pass>       Admin password (legacy: lands in shell history and
+                            the process list — prefer --admin-pass-file or
+                            FLAIR_ADMIN_PASS)
+  --admin-pass-file <path>  Read the admin password from an owner-only file
+                            (mode 0600 enforced), keeping it out of shell
+                            history and the process list. An explicit option
+                            (this or --admin-pass) overrides FLAIR_ADMIN_PASS;
+                            combining it with --admin-pass is a usage error.
   --admin-user <name>       Admin username for Basic auth (env:
                             FLAIR_ADMIN_USER; default: admin)
   -h, --help                display help for command

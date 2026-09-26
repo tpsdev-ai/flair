@@ -42,7 +42,7 @@ describe("federation instance list/prune --admin-pass-file (flair#1883)", () => 
 
   async function runCli(args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     const env: Record<string, string> = { ...process.env } as Record<string, string>;
-    delete env.FLAIR_ADMIN_PASS;
+    for (const key of ["FLAIR_ADMIN_PASS", "HDB_ADMIN_PASSWORD", "FLAIR_AGENT_ID", "FLAIR_TOKEN"]) delete env[key];
     env.HOME = dir;
     const proc = Bun.spawn(["bun", cliPath, ...args], { env, stdout: "pipe", stderr: "pipe" });
     const stdout = await new Response(proc.stdout).text();
@@ -90,11 +90,21 @@ describe("federation instance list/prune --admin-pass-file (flair#1883)", () => 
     }
   });
 
-  test("an inline --admin-pass still wins over the file", async () => {
-    const { exitCode } = await runCli(
-      ["federation", "instance", "list", "--ops-target", opsTarget(), "--admin-pass", "inline-1883", "--admin-pass-file", passFile(0o600)],
+  test("file + --admin-pass is now a usage error (was: flag wins silently); the flag alone still works", async () => {
+    seenAuth = [];
+    const bad = await runCli(
+      ["federation", "instance", "list", "--ops-target", opsTarget(), "--admin-pass", "inline-1910", "--admin-pass-file", passFile(0o600)],
     );
-    expect(exitCode).toBe(0);
-    expect(seenAuth).toEqual([basic("inline-1883")]);
+    expect(bad.exitCode).not.toBe(0);
+    expect(bad.stderr).toContain("cannot be combined");
+    expect(seenAuth).toEqual([]);
+
+    seenAuth = [];
+    const ok = await runCli(
+      ["federation", "instance", "list", "--ops-target", opsTarget(), "--admin-pass", "inline-1910"],
+    );
+    expect(ok.exitCode).toBe(0);
+    expect(seenAuth.length).toBeGreaterThan(0);
+    for (const auth of seenAuth) expect(auth).toBe(basic("inline-1910"));
   });
 });

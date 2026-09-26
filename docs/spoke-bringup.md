@@ -165,7 +165,7 @@ The spoke admin credential (`--admin-pass-file ~/.flair/admin-pass`, or `FLAIR_A
 ## 6. Sync for the First Time
 
 ```bash
-flair federation sync --admin-pass "$FLAIR_ADMIN_PASS"
+flair federation sync --admin-pass-file ~/.flair/admin-pass
 ```
 
 Expected:
@@ -179,7 +179,7 @@ Then verify the pairing. `federation verify` pushes the canary itself — you
 do not need the systemd timer from §7 first:
 
 ```bash
-flair federation verify --admin-pass "$FLAIR_ADMIN_PASS"
+flair federation verify --admin-pass-file ~/.flair/admin-pass
 flair federation reachability
 ```
 
