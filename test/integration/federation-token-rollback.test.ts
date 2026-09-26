@@ -42,6 +42,7 @@ async function ops(body: Record<string, unknown>): Promise<any> {
       Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`),
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(20_000),
   });
   if (!res.ok) throw new Error(`ops ${String(body.operation)} failed (${res.status}): ${await res.text()}`);
   return await res.json().catch(() => null);

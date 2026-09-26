@@ -1,9 +1,9 @@
 /**
  * Types for scripts/ci/check-cli-spawn-budgets.mjs (flair#1807's CLI-spawn
- * class gate). The matching primitives are imported by
- * test/unit/check-cli-spawn-budgets.test.ts, which type-checks under strict —
- * and an untyped `.mjs` import fails that check, so the exported surface the
- * test touches is declared here (the same shape as the other scripts/*.d.mts).
+ * class gate; extended for Bun.spawn + a trusted baseline in flair#1825). The
+ * matching primitives are imported by test/unit/check-cli-spawn-budgets*.test.ts,
+ * which type-checks under strict — and an untyped `.mjs` import fails that check,
+ * so the exported surface the tests touch is declared here.
  */
 
 /** True when `ch` is a JS identifier character — `[A-Za-z0-9_$]`. */
@@ -21,3 +21,107 @@ export function findIdentifier(text: string, id: string, from?: number): number;
  * character in `text` is `(` — i.e. the identifier is called.
  */
 export function identifierCallFollows(text: string, idx: number): boolean;
+
+/** One spawn-family call found in a file (Bun forms and node forms). */
+export interface SpawnCall {
+  fn: string;
+  index: number;
+  line: number;
+  text: string;
+  isCliEntry: boolean;
+  hasTimeout: boolean;
+  scope?: string;
+}
+
+/** One `it()`/`test()` case. */
+export interface CaseRecord {
+  fn: string;
+  line: number;
+  name: string;
+  argCount: number;
+  reachesSpawn: boolean;
+  hasBudget: boolean;
+  reachedFingerprints?: string[];
+  open: number;
+  close: number;
+}
+
+/** One offender: keyed on file + scope + fingerprint + kind (+ occurrence). */
+export interface SpawnOffender {
+  file: string;
+  line?: number;
+  kind: string;
+  detail?: string;
+  scope: string;
+  fingerprint: string;
+  occurrence?: number;
+}
+
+export function topLevelArgs(src: string, open: number): { spans: Array<{ start: number; end: number; text: string }>; close: number } | null;
+export function cliEntryIdentifiers(source: string): Set<string>;
+export function aliasedSpawnFns(source: string): Map<string, string>;
+export function findSpawnCalls(source: string): { calls: SpawnCall[]; ids: Set<string> };
+export function functionBodies(source: string): Array<{ name: string; start: number; end: number }>;
+export function localHelpersThatSpawn(source: string, calls: SpawnCall[]): Set<string>;
+export function findCases(source: string, calls: SpawnCall[], helpers: Set<string>): CaseRecord[];
+export function analyzeTestFile(source: string): { calls: SpawnCall[]; ids: Set<string>; helpers: Set<string>; cases: CaseRecord[]; bodies: Array<{ name: string; start: number; end: number }> };
+export function normalizeFingerprint(text: string): string;
+export function offenderKey(o: { file: string; scope: string; fingerprint: string; kind: string; occurrence?: number }): string;
+export function scanTree(root: string): { files: string[]; spawnOffenders: SpawnOffender[]; caseOffenders: SpawnOffender[] };
+export function testFilesUnder(root: string): string[];
+export function parseBudgetMs(text: string): number | null;
+export function sumWaitsMs(body: string, calls: SpawnCall[], open: number, close: number, extraBodies?: Array<{ name: string; start: number; end: number }>): number;
+export function firstUnboundedFetch(body: string): string | null;
+export function reachableHelperBodies(body: string, src: string, helpers: Set<string>, bodies: Array<{ name: string; start: number; end: number }>): Array<{ name: string; start: number; end: number }>;
+
+/** The trusted base ref the baseline is read from (env, else `origin/main`). */
+export function gateBaseRef(env?: Record<string, string | undefined>): string;
+/** The baseline at `ref` in `root`'s git store, or null when the ref lacks it. */
+export function loadBaselineAtRef(ref: string, root: string): BaselineEntry[] | null;
+/** The PR tree's copy of the baseline. */
+export function readPrBaseline(root: string): BaselineEntry[];
+/** Entries a PR added relative to the trusted base (a PR may only remove). */
+export function addedExceptions(baseEntries: BaselineEntry[], prEntries: BaselineEntry[]): BaselineEntry[];
+
+/** End-to-end check used by main() and the gate-level tests. */
+export function runGate(opts?: { root?: string; baseRef?: string; env?: Record<string, string | undefined>; seedBase?: string }): {
+  files: string[];
+  spawnOffenders: SpawnOffender[];
+  caseOffenders: SpawnOffender[];
+  baseRef: string;
+  baseSha: string;
+  basePresent: boolean;
+  defaulted: boolean;
+  anchored: boolean;
+  seedAccepted: boolean;
+  allowEntries: BaselineEntry[];
+  prEntries: BaselineEntry[];
+  baseEntries: BaselineEntry[];
+  errors: string[];
+  added: BaselineEntry[];
+  newOffenders: SpawnOffender[];
+  staleEntries: BaselineEntry[];
+  ok: boolean;
+};
+
+/** A single baseline entry. */
+export interface BaselineEntry {
+  file: string;
+  scope: string;
+  fingerprint: string;
+  kind: string;
+  occurrence?: number;
+  reason: string;
+}
+
+export const BASELINE_PATH: string;
+export const SEED_INTRODUCTION_BASE: string;
+export function resolveRef(ref: string, root: string): string;
+export function isLineKey(entry: unknown): boolean;
+export function validateBaseline(entries: unknown): string[];
+export function diffAgainstBaseline(
+  spawnOffenders: SpawnOffender[],
+  caseOffenders: SpawnOffender[],
+  baselineEntries: BaselineEntry[],
+): { newOffenders: SpawnOffender[]; staleEntries: BaselineEntry[]; ok: boolean };
+export function loadBaseline(path?: string): BaselineEntry[];

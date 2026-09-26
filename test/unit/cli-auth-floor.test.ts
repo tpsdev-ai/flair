@@ -311,7 +311,7 @@ async function runCli(args: string[], env: Record<string, string | undefined>): 
     if (v === undefined) delete merged[k];
     else merged[k] = v;
   }
-  const proc = Bun.spawn(["bun", cliPath, ...args], { env: merged, stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn(["bun", cliPath, ...args], { timeout: 20_000, env: merged, stdout: "pipe", stderr: "pipe" });
   const stdout = await new Response(proc.stdout).text();
   const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;

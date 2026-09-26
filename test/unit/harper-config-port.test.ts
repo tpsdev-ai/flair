@@ -108,7 +108,7 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
     // developer's shell would mask exactly what these tests measure.
     delete env.FLAIR_URL;
     delete env.FLAIR_TARGET;
-    const proc = Bun.spawn(["bun", cliPath, ...args], { env, stdout: "pipe", stderr: "pipe" });
+    const proc = Bun.spawn(["bun", cliPath, ...args], { timeout: 20_000, env, stdout: "pipe", stderr: "pipe" });
     const stdout = await new Response(proc.stdout).text();
     const stderr = await new Response(proc.stderr).text();
     const exitCode = await proc.exited;
@@ -719,6 +719,7 @@ describe("flair#1454 — self-heal requires /Health proof, not just a live pid",
       delete (env as Record<string, string | undefined>)["FLAIR_TARGET"];
       const cliPath = join(import.meta.dirname, "..", "..", "src", "cli.ts");
       const proc = Bun.spawn(["bun", cliPath, "stop", "--port", String(PORT)], {
+        timeout: 20_000,
         env,
         stdout: "pipe",
         stderr: "pipe",
@@ -791,6 +792,7 @@ describe("flair#1478 — self-heal requires flair /Health identity and pid→por
     delete (env as Record<string, string | undefined>)["FLAIR_TARGET"];
     const cliPath = join(import.meta.dirname, "..", "..", "src", "cli.ts");
     const proc = Bun.spawn(["bun", cliPath, "stop", "--port", String(port)], {
+      timeout: 20_000,
       env,
       stdout: "pipe",
       stderr: "pipe",

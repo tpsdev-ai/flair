@@ -1,0 +1,2138 @@
+[
+  {
+    "file": "test/cli-v2.test.ts",
+    "scope": "runCli",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env: process.env,timeout: CHILD_DEADLINE_MS,}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/compat/upgrade-restart-liveness.test.ts",
+    "scope": "<module>",
+    "fingerprint": "NODE_BIN [localCli,\"restart\",\"--port\",String(httpPort)] ; { encoding: \"utf-8\",timeout: UPGRADE_TIMEOUT_MS,env: { ...childEnv,PATH: `${join(prefix,\"bin\")}:${packEnv.PATH ?? \"\"}` },}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/integration/cli-local-admin-pass-fallback.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/integration/doctor-fix-launchd-darwin.test.ts",
+    "scope": "runDoctorFix",
+    "fingerprint": "nodeBin() [CLI_JS,\"doctor\",\"--fix\",\"--port\",String(port)] ; { cwd: REPO_ROOT,env: doctorEnv(tmpHome,opts),stdio: [\"ignore\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/integration/doctor-fix-launchd-darwin.test.ts",
+    "scope": "runInit",
+    "fingerprint": "nodeBin() [CLI_JS,\"init\",\"--port\",String(port),\"--no-mcp\",\"--skip-soul\",...extraArgs] ; { cwd: REPO_ROOT,// No env credential: the sandbox's ~/.flair/admin-pass is the source,so // this exercises the reuse leg of the resolution rather than a proof. env: doctorEnv(tmpHome,{ adminPassEnv: false }),stdio: [\"ignore\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/integration/doctor-fleet-presence.test.ts",
+    "scope": "runCli",
+    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},timeout: CHILD_DEADLINE_MS,}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/integration/federation-token-rollback.test.ts",
+    "scope": "runCli",
+    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: home,FLAIR_URL: harper.httpURL,FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",},timeout: CHILD_DEADLINE_MS,}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/integration/init-remote-instance-identity.test.ts",
+    "scope": "runCli",
+    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: home,FLAIR_URL: harper.httpURL,FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",},timeout: CHILD_DEADLINE_MS,}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/integration/memory-authority-fields.test.ts",
+    "scope": "the built REM CLI promotes through the trusted server workflow",
+    "fingerprint": "[\"bun\",\"dist/cli.js\",\"rem\",\"promote\",\"cli-candidate\",\"--to\",\"memory\",\"--rationale\",\"verified rollback procedure\"] ; { env: { ...env,HOME: home,FLAIR_URL: harper.httpURL,FLAIR_AGENT_ID: owner.id,FLAIR_KEY_DIR: home },stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/integration/onboarding-smoke.test.ts",
+    "scope": "runCli",
+    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,// isolates ~/.flair (keys,config,admin-pass) FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,// Defensive: ensure no inherited token/admin identity leaks in. The // agent identity comes from the on-disk key written by `agent add` // (under cliHome/.flair/keys),resolved via FLAIR_AGENT_ID per-command. FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},// flair#1807: the child carries its OWN deadline (it replaces the manual // 30 s kill this used to arm); a signal kill is named,with its output. timeout: CHILD_DEADLINE_MS,}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/integration/status-federation-spoke-peers-1146.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/integration/workspace-orgevent-cli-e2e.test.ts",
+    "scope": "runCli",
+    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},// flair#1807: the child carries its OWN deadline (it replaces the manual // 30 s kill this used to arm); a signal kill is named,with its output. timeout: CHILD_DEADLINE_MS,}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/doctor-fix-hook-boundary-1834.test.ts",
+    "scope": "runDoctor",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"doctor\",\"--port\",String(deadPort),...args] ; { cwd: home,env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/doctor-fix-mcp-pins.test.ts",
+    "scope": "runDoctor",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"doctor\",\"--port\",String(deadPort),...args] ; { cwd: home,env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/doctor-fix-pin-hold.test.ts",
+    "scope": "runDoctor",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"doctor\",\"--port\",String(deadPort),...args] ; { cwd: home,env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/admin-pass-wrapper-env-tier-1910.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/agent-add-adminpass-fallback.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/backup-admin-pass-file-1910.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-auth-identity-override.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-credential-identity-flags.test.ts",
+    "scope": "runCli",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-entities-option.test.ts",
+    "scope": "runCli",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: REPO_ROOT,// HOME → tmp dir: no invocation may read or write the real ~/.flair. env: { ...process.env,HOME: tmpDir,FLAIR_KEY_DIR: keysDir,...env },timeout: CHILD_DEADLINE_MS,}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-memory-add-derived-from.test.ts",
+    "scope": "runCli",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-memory-add-visibility.test.ts",
+    "scope": "runCli",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-port-config-1719.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-relationship-add.test.ts",
+    "scope": "runCli",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-search-explain.test.ts",
+    "scope": "runCli",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-signing-identity.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-startup-errors.test.ts",
+    "scope": "runCLI",
+    "fingerprint": "\"bun\" [CLI_SOURCE,...args] ; { env: { ...process.env,...opts.env },timeout: CHILD_DEADLINE_MS,encoding: \"utf8\",}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-test-banner.test.ts",
+    "scope": "runCli",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env,cwd: join(import.meta.dirname,\"..\",\"..\"),timeout: CHILD_DEADLINE_MS,}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/doctor-fix-continuity-consent.test.ts",
+    "scope": "runCLI",
+    "fingerprint": "\"bun\" [CLI_SOURCE,...args] ; { cwd: isoCwd,// doctor --fix appends to ./CLAUDE.md — keep that off the repo env: { ...process.env,HOME: isoHome,USERPROFILE: isoHome,PATH: `${fakeBin}:${process.env.PATH ?? \"\"}`,// Scrub ambient Flair identity/target so only the flags decide. FLAIR_AGENT_ID: \"\",FLAIR_URL: \"\",FLAIR_TARGET: \"\",},// flair#1807: the child carries its OWN deadline,so a signal kill is // reported by name,with the child's output,rather than as a bare exit. timeout: CHILD_DEADLINE_MS,encoding: \"utf8\",}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/doctor-readonly-no-lock.test.ts",
+    "scope": "runDoctor",
+    "fingerprint": "\"bun\" [CLI_SOURCE,\"doctor\",\"--port\",DEAD_PORT] ; { cwd: isoCwd,// never the repo: doctor reads ./CLAUDE.md env: { ...process.env,HOME: isoHome,USERPROFILE: isoHome,PATH: `${fakeBin}:${process.env.PATH ?? \"\"}`,FLAIR_AGENT_ID: \"\",FLAIR_URL: \"\",FLAIR_TARGET: \"\",},timeout: CHILD_DEADLINE_MS,encoding: \"utf8\",}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-instance-admin-pass-file.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-sync-admin-pass-file-1910.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-token-pair-admin-pass-file.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-verify-admin-pass-file-1910.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/http-bind.test.ts",
+    "scope": "end to end: widen via the CLI, then narrow via the CLI, and the persisted value stays narrow",
+    "fingerprint": "process.execPath [cli,\"init\",\"--skip-start\",\"--no-mcp\",\"--port\",\"20991\",\"--http-bind\",bind] ; { cwd: join(import.meta.dir,\"..\",\"..\"),env,encoding: \"utf8\",// flair#1807: the child's OWN deadline,so a hung `flair init` is // reported by the deadline (and named) rather than by bun's timer. timeout: CHILD_DEADLINE_MS,}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/init-pin-guard.test.ts",
+    "scope": "runInit",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",\"init\",\"--agent\",AGENT,\"--skip-start\",\"--skip-soul\",\"--skip-smoke\",\"--skip-hook\",\"--skip-claude-md\",\"--client\",\"claude-code\",\"--port\",String(httpPort),\"--ops-port\",String(opsPort),\"--admin-pass\",\"test-admin-pin-guard\",] ; { cwd: \".\",env: { ...process.env,HOME: isoHome },timeout: CHILD_DEADLINE_MS }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/init-socket-path-preflight.test.ts",
+    "scope": "runInit",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",\"init\",\"--skip-start\",\"--no-mcp\",\"--skip-soul\",\"--data-dir\",dataDir,\"--admin-pass\",\"test-admin-916\",] ; { cwd: \".\",env: { ...process.env,HOME: isoHome },timeout: CHILD_DEADLINE_MS }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/local-no-auth.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/orgevent-cli.test.ts",
+    "scope": "runCli",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { // Each case supplies its own identity; a developer's agent must not fill it in. env: { ...process.env,FLAIR_AGENT_ID: \"\",...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/port-not-identity.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/port-not-identity.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 1,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/port-not-identity.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 2,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/port-not-identity.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 3,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/presence-set.test.ts",
+    "scope": "runCli",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env: { ...process.env,...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/snapshot-datadir-instance-targeting.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/snapshot-restore-path-escape.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { // HOME-isolated: nothing in this command should touch the real ~/.flair,// and this makes sure of it. env: { ...process.env,HOME: root },stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/soul-credential-flags-1719.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/status-federation-peers-1146.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/status-ops-bind.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/uninstall-purge.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/upgrade-data-snapshot.test.ts",
+    "scope": "runCli",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/unit/workspace-set.test.ts",
+    "scope": "runCli",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env: { ...process.env,...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "spawn-no-timeout",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
+  },
+  {
+    "file": "test/cli-v2.test.ts",
+    "scope": "does not print generated admin password to stdout",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env: process.env,timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/cli-v2.test.ts",
+    "scope": "respects admin password from environment variable",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env: process.env,timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/cli-v2.test.ts",
+    "scope": "respects admin password from deprecated --admin-pass option (with warning)",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env: process.env,timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/integration/doctor-fix-launchd-darwin.test.ts",
+    "scope": "corrupt or missing launchd plist: doctor --fix regenerates and comes up managed",
+    "fingerprint": "nodeBin() [CLI_JS,\"doctor\",\"--fix\",\"--port\",String(port)] ; { cwd: REPO_ROOT,env: doctorEnv(tmpHome,opts),stdio: [\"ignore\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/integration/doctor-fix-launchd-darwin.test.ts",
+    "scope": "detached direct-spawned instance: doctor --fix adopts into launchd, bouncing once",
+    "fingerprint": "nodeBin() [CLI_JS,\"doctor\",\"--fix\",\"--port\",String(port)] ; { cwd: REPO_ROOT,env: doctorEnv(tmpHome,opts),stdio: [\"ignore\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/integration/doctor-fix-launchd-darwin.test.ts",
+    "scope": "adopt with NO pass file and a proven env credential: doctor writes the 0600 file and adopts (flair#1685)",
+    "fingerprint": "nodeBin() [CLI_JS,\"doctor\",\"--fix\",\"--port\",String(port)] ; { cwd: REPO_ROOT,env: doctorEnv(tmpHome,opts),stdio: [\"ignore\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/integration/doctor-fix-launchd-darwin.test.ts",
+    "scope": "regenerate with NO pass file, no live process, and no env credential: refuse and write no plist (flair#1685)",
+    "fingerprint": "nodeBin() [CLI_JS,\"doctor\",\"--fix\",\"--port\",String(port)] ; { cwd: REPO_ROOT,env: doctorEnv(tmpHome,opts),stdio: [\"ignore\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/integration/doctor-fix-launchd-darwin.test.ts",
+    "scope": "flair init on an already-adopted instance leaves the plist byte-identical (flair#1693)",
+    "fingerprint": "nodeBin() [CLI_JS,\"doctor\",\"--fix\",\"--port\",String(port)] ; { cwd: REPO_ROOT,env: doctorEnv(tmpHome,opts),stdio: [\"ignore\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/integration/doctor-fix-launchd-darwin.test.ts",
+    "scope": "flair init on an already-adopted instance leaves the plist byte-identical (flair#1693)",
+    "fingerprint": "nodeBin() [CLI_JS,\"init\",\"--port\",String(port),\"--no-mcp\",\"--skip-soul\",...extraArgs] ; { cwd: REPO_ROOT,// No env credential: the sandbox's ~/.flair/admin-pass is the source,so // this exercises the reuse leg of the resolution rather than a proof. env: doctorEnv(tmpHome,{ adminPassEnv: false }),stdio: [\"ignore\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/integration/doctor-fleet-presence.test.ts",
+    "scope": "agent add + presence heartbeat + doctor renders fleet presence with the real version",
+    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/integration/doctor-fleet-presence.test.ts",
+    "scope": "doctor without --agent: auto-iterates the local key (flair#722) — versions are NOT hidden",
+    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/integration/doctor-fleet-presence.test.ts",
+    "scope": "doctor without --agent, zero local keys: roster read is refused (verified-reader default) and NAMED, not silently blank",
+    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/integration/doctor-fleet-presence.test.ts",
+    "scope": "failure isolation (flair#722): an unregistered local key reports its own finding without hiding the registered agent's subsection",
+    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/integration/doctor-fleet-presence.test.ts",
+    "scope": "an older-version instance is flagged stale and sorted ahead of the current one",
+    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/integration/doctor-fleet-presence.test.ts",
+    "scope": "natural-presence: a stale-activity instance renders 'offline' with its last-known activity, not a live label",
+    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/integration/init-remote-instance-identity.test.ts",
+    "scope": "prune warns that ANY deleted row may be the identity a peer pinned, and the printed --apply form really deletes",
+    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: home,FLAIR_URL: harper.httpURL,FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",},timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/integration/onboarding-smoke.test.ts",
+    "scope": "agent add seeds via ops API (#499)",
+    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,// isolates ~/.flair (keys,config,admin-pass) FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,// Defensive: ensure no inherited token/admin identity leaks in. The // agent identity comes from the on-disk key written by `agent add` // (under cliHome/.flair/keys),resolved via FLAIR_AGENT_ID per-command. FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},// flair#1807: the child carries its OWN deadline (it replaces the manual // 30 s kill this used to arm); a signal kill is named,with its output. timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/integration/onboarding-smoke.test.ts",
+    "scope": "soul set succeeds via PUT /Soul/{id} (#498)",
+    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,// isolates ~/.flair (keys,config,admin-pass) FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,// Defensive: ensure no inherited token/admin identity leaks in. The // agent identity comes from the on-disk key written by `agent add` // (under cliHome/.flair/keys),resolved via FLAIR_AGENT_ID per-command. FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},// flair#1807: the child carries its OWN deadline (it replaces the manual // 30 s kill this used to arm); a signal kill is named,with its output. timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/integration/onboarding-smoke.test.ts",
+    "scope": "agent list does not null-scan the PK (#500)",
+    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,// isolates ~/.flair (keys,config,admin-pass) FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,// Defensive: ensure no inherited token/admin identity leaks in. The // agent identity comes from the on-disk key written by `agent add` // (under cliHome/.flair/keys),resolved via FLAIR_AGENT_ID per-command. FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},// flair#1807: the child carries its OWN deadline (it replaces the manual // 30 s kill this used to arm); a signal kill is named,with its output. timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/integration/workspace-orgevent-cli-e2e.test.ts",
+    "scope": "workspace set writes via PUT /WorkspaceState/{id}, round-trips readable (#679)",
+    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},// flair#1807: the child carries its OWN deadline (it replaces the manual // 30 s kill this used to arm); a signal kill is named,with its output. timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/integration/workspace-orgevent-cli-e2e.test.ts",
+    "scope": "workspace set is idempotent per (agentId, ref) — a second call overwrites the same row",
+    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},// flair#1807: the child carries its OWN deadline (it replaces the manual // 30 s kill this used to arm); a signal kill is named,with its output. timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/integration/workspace-orgevent-cli-e2e.test.ts",
+    "scope": "orgevent publishes via PUT /OrgEvent/{id}, round-trips readable (#679)",
+    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},// flair#1807: the child carries its OWN deadline (it replaces the manual // 30 s kill this used to arm); a signal kill is named,with its output. timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/integration/workspace-orgevent-cli-e2e.test.ts",
+    "scope": "orgevent generates a fresh id per call — two publishes never collide",
+    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},// flair#1807: the child carries its OWN deadline (it replaces the manual // 30 s kill this used to arm); a signal kill is named,with its output. timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/doctor-fix-hook-boundary-1834.test.ts",
+    "scope": "claude-code caller: a duplicate-assignment hook is HELD and printed",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"doctor\",\"--port\",String(deadPort),...args] ; { cwd: home,env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/doctor-fix-hook-boundary-1834.test.ts",
+    "scope": "codex caller: the same HOLD is printed",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"doctor\",\"--port\",String(deadPort),...args] ; { cwd: home,env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/doctor-fix-hook-boundary-1834.test.ts",
+    "scope": "claude-code caller, hook wired but Claude Code NOT configured (project-scoped MCP): the HOLD is still printed",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"doctor\",\"--port\",String(deadPort),...args] ; { cwd: home,env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/doctor-fix-mcp-pins.test.ts",
+    "scope": "BEHIND (claude-code + codex): --fix rewrites BOTH and prints a line each",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"doctor\",\"--port\",String(deadPort),...args] ; { cwd: home,env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/doctor-fix-mcp-pins.test.ts",
+    "scope": "BEHIND + AHEAD: only the behind client is rewritten; the ahead one is byte-identical (held)",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"doctor\",\"--port\",String(deadPort),...args] ; { cwd: home,env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/doctor-fix-mcp-pins.test.ts",
+    "scope": "UNKNOWN: untouched, a warn line, and zero blocking issues (parity with a current pin)",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"doctor\",\"--port\",String(deadPort),...args] ; { cwd: home,env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/doctor-fix-mcp-pins.test.ts",
+    "scope": "DRY-RUN: writes nothing and prints the Would lines",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"doctor\",\"--port\",String(deadPort),...args] ; { cwd: home,env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/doctor-fix-pin-hold.test.ts",
+    "scope": "AHEAD: held pass (no ✗, no --fix) and the hook file is byte-identical",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"doctor\",\"--port\",String(deadPort),...args] ; { cwd: home,env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/doctor-fix-pin-hold.test.ts",
+    "scope": "the AHEAD pin adds ZERO issues (exit/count parity with a current pin)",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"doctor\",\"--port\",String(deadPort),...args] ; { cwd: home,env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/doctor-fix-pin-hold.test.ts",
+    "scope": "BEHIND: unchanged behaviour — ✗ stale error, and --fix re-pins to the running CLI",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"doctor\",\"--port\",String(deadPort),...args] ; { cwd: home,env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/doctor-fix-pin-hold.test.ts",
+    "scope": "UNKNOWN: a warn line (no ✗) and --fix leaves the hook byte-identical",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"doctor\",\"--port\",String(deadPort),...args] ; { cwd: home,env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/doctor-fix-pin-hold.test.ts",
+    "scope": "UNKNOWN: the unreadable pin adds ZERO blocking issues (parity with a current pin)",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"doctor\",\"--port\",String(deadPort),...args] ; { cwd: home,env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/upgrade-no-downgrade.test.ts",
+    "scope": "HAZARD: --check shows '(ahead of latest)', no arrow, no '→ 0.54.2'",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"upgrade\",...args] ; { timeout: 20_000,cwd: REPO,env,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/upgrade-no-downgrade.test.ts",
+    "scope": "HAZARD: plain run invokes NO install and leaves the tree byte-identical",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"upgrade\",...args] ; { timeout: 20_000,cwd: REPO,env,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/upgrade-no-downgrade.test.ts",
+    "scope": "regression: installed 0.54.2 / latest 0.55.1 still upgrades",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"upgrade\",...args] ; { timeout: 20_000,cwd: REPO,env,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/upgrade-no-downgrade.test.ts",
+    "scope": "prerelease: installed 0.56.0-rc.1 ahead of 0.55.1; 0.55.1 outdated vs a prerelease latest",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"upgrade\",...args] ; { timeout: 20_000,cwd: REPO,env,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/upgrade-no-downgrade.test.ts",
+    "scope": "unparseable installed version renders '❔ unknown', no arrow, no install",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"upgrade\",...args] ; { timeout: 20_000,cwd: REPO,env,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/upgrade-no-downgrade.test.ts",
+    "scope": "N1: an unparseable installed version is never summarised as 'Everything is up to date'",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"upgrade\",...args] ; { timeout: 20_000,cwd: REPO,env,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/upgrade-no-downgrade.test.ts",
+    "scope": "N3: flair ahead + an outdated sibling — only the sibling installs; the pin holds; the cache expects the RUNNING flair",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"upgrade\",...args] ; { timeout: 20_000,cwd: REPO,env,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/upgrade-no-downgrade.test.ts",
+    "scope": "Q2: an openclaw plugin with an unparseable version renders ❔ unknown and the neutral summary",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"upgrade\",...args] ; { timeout: 20_000,cwd: REPO,env,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit-isolated/upgrade-no-downgrade.test.ts",
+    "scope": "Q3: with flair ahead and a sibling undetected, the summary never says 'up to date'",
+    "fingerprint": "[\"bun\",join(REPO,\"src\",\"cli.ts\"),\"upgrade\",...args] ; { timeout: 20_000,cwd: REPO,env,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/admin-pass-wrapper-env-tier-1910.test.ts",
+    "scope": "memory add --agent X with FLAIR_ADMIN_PASS set signs as X (TPS-Ed25519), not Basic admin",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/agent-add-adminpass-fallback.test.ts",
+    "scope": "agent add with no --admin-pass, no env, no ~/.flair/admin-pass: errors clearly (local)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/agent-add-adminpass-fallback.test.ts",
+    "scope": "agent add with both --admin-pass and --admin-pass-file is a usage error, nothing sent (flair#1910)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/agent-add-adminpass-fallback.test.ts",
+    "scope": "agent add with FLAIR_ADMIN_PASS env set but bad Harper connection still gets past admin-pass resolution (does not error on missing --admin-pass)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/agent-add-adminpass-fallback.test.ts",
+    "scope": "agent add with --target set (remote) and no --admin-pass: STILL errors even if FLAIR_ADMIN_PASS is set (security guard)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/agent-add-adminpass-fallback.test.ts",
+    "scope": "agent add with --ops-target set (remote) and no --admin-pass: STILL errors even with a valid local admin-pass file (security guard)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/agent-add-adminpass-fallback.test.ts",
+    "scope": "agent add with --admin-pass-file works for a REMOTE target — an explicit flag is operator intent (flair#1259, does not weaken the #1085 ambient-fallback guard)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/agent-add-adminpass-fallback.test.ts",
+    "scope": "agent add with --admin-pass-file works locally too (flair#1259)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/agent-add-adminpass-fallback.test.ts",
+    "scope": "agent add --admin-pass-file enforces owner-only mode — a 0644 file is refused with an actionable chmod error (flair#1259)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/agent-add-adminpass-fallback.test.ts",
+    "scope": "agent add inline --admin-pass still works for a remote target (flair#1259 adds, never replaces)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/agent-add-adminpass-fallback.test.ts",
+    "scope": "agent add (local) with a valid ~/.flair/admin-pass file and no --admin-pass/env: does not hit the missing-admin-pass guard",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/agent-add-adminpass-fallback.test.ts",
+    "scope": "principal add with no --admin-pass, no env, no file: errors clearly",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/agent-add-adminpass-fallback.test.ts",
+    "scope": "principal add with a valid ~/.flair/admin-pass file and no --admin-pass/env: does not hit the missing-admin-pass guard",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/agent-add-adminpass-fallback.test.ts",
+    "scope": "principal add: FLAIR_ADMIN_PASS env still takes precedence over the file",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/backup-admin-pass-file-1910.test.ts",
+    "scope": "file + --admin-pass is now a usage error (was: flag wins silently); the flag alone still works",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-auth-floor.test.ts",
+    "scope": "flair status --agent <id>: machine with ONLY an agent key authenticates HealthDetail via the signed floor/pinned path",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { timeout: 20_000,env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-auth-floor.test.ts",
+    "scope": "flair status (no --agent at all): machine with ONLY an agent key still authenticates HealthDetail — the floor tries every registered key (the flair#741 scenario, generalized to `status`)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { timeout: 20_000,env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-auth-floor.test.ts",
+    "scope": "flair status: machine with admin-pass file (no agent key) is unchanged — still authenticates via Basic admin auth",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { timeout: 20_000,env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-auth-floor.test.ts",
+    "scope": "flair status: FLAIR_ADMIN_PASS env still wins over an ENV-pinned agent (FLAIR_AGENT_ID) — env-pinned unchanged (flair#1500)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { timeout: 20_000,env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-auth-floor.test.ts",
+    "scope": "flair status: no auth material at all → healthy:true (the /Health liveness probe succeeded) but no authenticated detail — never a false 'unreachable'",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { timeout: 20_000,env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-auth-floor.test.ts",
+    "scope": "flair bootstrap --agent <id>: machine with ONLY that agent's key authenticates via the signed request (unchanged happy path)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { timeout: 20_000,env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-auth-floor.test.ts",
+    "scope": "flair bootstrap --agent <id>: a flag-pinned agent with NO key is a hard error (flair#1500) — never falls back to the admin-pass file",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { timeout: 20_000,env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-auth-floor.test.ts",
+    "scope": "flair bootstrap --key <path>: an explicit key path still wins (tier 1), even with FLAIR_ADMIN_PASS set in env",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { timeout: 20_000,env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-auth-floor.test.ts",
+    "scope": "flair bootstrap: no auth material at all → a clear, honest error naming the remedy, not a stack trace and not a generic failure",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { timeout: 20_000,env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-auth-identity-override.test.ts",
+    "scope": "(a) --agent only → the request is signed as that agent (Ed25519)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-auth-identity-override.test.ts",
+    "scope": "(b) ambient env only → the request carries Basic admin auth",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-auth-identity-override.test.ts",
+    "scope": "(c) BOTH --agent + ambient admin → the explicit agent wins, never Basic (the #1504 guarantee)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-auth-identity-override.test.ts",
+    "scope": "(c-env) FLAIR_AGENT_ID + ambient admin → admin signs AND the override is announced, never silent",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-auth-identity-override.test.ts",
+    "scope": "(c-explicit) --agent + --admin-pass both explicit → admin signs AND the conflict is announced, never silent",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-auth-identity-override.test.ts",
+    "scope": "(d) neither → no credential is sent at all (no false signing as someone else)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-credential-identity-flags.test.ts",
+    "scope": "rejects --admin-pass-file as a known flag (file missing), not as an unknown option",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-credential-identity-flags.test.ts",
+    "scope": "does not treat --agent as a commander requiredOption when FLAIR_AGENT_ID is unset",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-credential-identity-flags.test.ts",
+    "scope": "writes the memory under FLAIR_AGENT_ID when --agent is omitted",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-credential-identity-flags.test.ts",
+    "scope": "accepts --admin-pass-file and sends Basic auth from the file (shared credential path)",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-entities-option.test.ts",
+    "scope": "memory add: accepted entities land on the written record (CSV split + trim)",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: REPO_ROOT,// HOME → tmp dir: no invocation may read or write the real ~/.flair. env: { ...process.env,HOME: tmpDir,FLAIR_KEY_DIR: keysDir,...env },timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-entities-option.test.ts",
+    "scope": "memory add: omitting --entities leaves the field off the record (no regression)",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: REPO_ROOT,// HOME → tmp dir: no invocation may read or write the real ~/.flair. env: { ...process.env,HOME: tmpDir,FLAIR_KEY_DIR: keysDir,...env },timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-entities-option.test.ts",
+    "scope": "memory add: an unknown entity type is rejected with the format + type-set message, before any write",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: REPO_ROOT,// HOME → tmp dir: no invocation may read or write the real ~/.flair. env: { ...process.env,HOME: tmpDir,FLAIR_KEY_DIR: keysDir,...env },timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-entities-option.test.ts",
+    "scope": "memory add: a colon-less value is rejected with the same message",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: REPO_ROOT,// HOME → tmp dir: no invocation may read or write the real ~/.flair. env: { ...process.env,HOME: tmpDir,FLAIR_KEY_DIR: keysDir,...env },timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-entities-option.test.ts",
+    "scope": "workspace set: accepted entities land on the written record",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: REPO_ROOT,// HOME → tmp dir: no invocation may read or write the real ~/.flair. env: { ...process.env,HOME: tmpDir,FLAIR_KEY_DIR: keysDir,...env },timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-entities-option.test.ts",
+    "scope": "workspace set: a malformed entity is rejected with the format + type-set message, before any write",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: REPO_ROOT,// HOME → tmp dir: no invocation may read or write the real ~/.flair. env: { ...process.env,HOME: tmpDir,FLAIR_KEY_DIR: keysDir,...env },timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-entities-option.test.ts",
+    "scope": "orgevent: accepted entities land on the written record",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: REPO_ROOT,// HOME → tmp dir: no invocation may read or write the real ~/.flair. env: { ...process.env,HOME: tmpDir,FLAIR_KEY_DIR: keysDir,...env },timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-entities-option.test.ts",
+    "scope": "orgevent: a malformed entity is rejected with the format + type-set message, before any write",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: REPO_ROOT,// HOME → tmp dir: no invocation may read or write the real ~/.flair. env: { ...process.env,HOME: tmpDir,FLAIR_KEY_DIR: keysDir,...env },timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-memory-add-derived-from.test.ts",
+    "scope": "sets derivedFrom from a comma-separated list on the written memory",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-memory-add-derived-from.test.ts",
+    "scope": "omits derivedFrom when --derived-from is not passed (no regression)",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-memory-add-visibility.test.ts",
+    "scope": "sets visibility=shared on the written memory so every agent on the instance can read it",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-memory-add-visibility.test.ts",
+    "scope": "sets visibility=private on the written memory so it stays owner-only",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-memory-add-visibility.test.ts",
+    "scope": "trims surrounding whitespace on the visibility value",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-memory-add-visibility.test.ts",
+    "scope": "omits visibility when --visibility is not passed (server applies the durability-keyed default)",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-memory-add-visibility.test.ts",
+    "scope": "refuses --visibility ${bad} and writes nothing",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-relationship-add.test.ts",
+    "scope": "PUTs the triple to /Relationship/<canonical-id> with agentId from --agent",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-relationship-add.test.ts",
+    "scope": "forwards --confidence/--valid-from/--valid-to/--source only when passed",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-relationship-add.test.ts",
+    "scope": "re-running with the SAME triple writes to the SAME canonical id (upsert, not a new row)",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-relationship-add.test.ts",
+    "scope": "a DIFFERENT triple (different predicate) writes to a DIFFERENT canonical id",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-relationship-add.test.ts",
+    "scope": "DRIFT GUARD: the CLI's local canonical-id algorithm matches flair-client's canonicalRelationshipId() exactly",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-search-explain.test.ts",
+    "scope": "emits a per-hit _explain block when piped, instead of silently dropping the flag",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-search-explain.test.ts",
+    "scope": "emits _explain under --explain --json too",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-search-explain.test.ts",
+    "scope": "reports composite and raw as separate terms under --scoring composite",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-search-explain.test.ts",
+    "scope": "never labels a raw score 'composite' under the default raw scoring",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-search-explain.test.ts",
+    "scope": "does not report retrievalCount as a scoring term (flair#683 removed it)",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-search-explain.test.ts",
+    "scope": "leaves JSON output byte-identical when --explain is absent",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",...args] ; { cwd: \".\",env,timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-signing-identity.test.ts",
+    "scope": "top-level `search`: --agent alpha signs as alpha even with FLAIR_AGENT_ID=bravo",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-signing-identity.test.ts",
+    "scope": "api()-routed `memory search`: --agent alpha signs as alpha even with FLAIR_AGENT_ID=bravo (the core inversion)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-signing-identity.test.ts",
+    "scope": "soul family (the worst rung): `soul set --agent alpha` signs as alpha even with FLAIR_AGENT_ID=bravo",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-signing-identity.test.ts",
+    "scope": "`presence set --agent alpha` signs as alpha even with FLAIR_AGENT_ID=bravo",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-signing-identity.test.ts",
+    "scope": "`status --agent alpha` signs its HealthDetail read as alpha even with FLAIR_AGENT_ID=bravo",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-signing-identity.test.ts",
+    "scope": "flag-pinned agent signs BEFORE env admin: --agent alpha + FLAIR_ADMIN_PASS → Ed25519, not Basic (flair#1500)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-signing-identity.test.ts",
+    "scope": "`FLAIR_AGENT_ID=bravo flair search` (no --agent) signs as bravo",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-signing-identity.test.ts",
+    "scope": "`FLAIR_AGENT_ID=bravo flair bootstrap` (no --agent) signs as bravo",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-signing-identity.test.ts",
+    "scope": "`FLAIR_AGENT_ID=bravo flair memory search` (no --agent) signs as bravo",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-signing-identity.test.ts",
+    "scope": "FLAIR_DEBUG names the resolved identity + source on stderr; silent without it",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-startup-errors.test.ts",
+    "scope": "flair --version prints version and exits 0",
+    "fingerprint": "\"bun\" [CLI_SOURCE,...args] ; { env: { ...process.env,...opts.env },timeout: CHILD_DEADLINE_MS,encoding: \"utf8\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-startup-errors.test.ts",
+    "scope": "unknown subcommand exits nonzero with helpful error",
+    "fingerprint": "\"bun\" [CLI_SOURCE,...args] ; { env: { ...process.env,...opts.env },timeout: CHILD_DEADLINE_MS,encoding: \"utf8\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-startup-errors.test.ts",
+    "scope": "flair start without prior init fails cleanly",
+    "fingerprint": "\"bun\" [CLI_SOURCE,...args] ; { env: { ...process.env,...opts.env },timeout: CHILD_DEADLINE_MS,encoding: \"utf8\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-startup-errors.test.ts",
+    "scope": "memory add without --content errors with required-option message",
+    "fingerprint": "\"bun\" [CLI_SOURCE,...args] ; { env: { ...process.env,...opts.env },timeout: CHILD_DEADLINE_MS,encoding: \"utf8\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-startup-errors.test.ts",
+    "scope": "agent add without admin-pass reports a clear actionable error",
+    "fingerprint": "\"bun\" [CLI_SOURCE,...args] ; { env: { ...process.env,...opts.env },timeout: CHILD_DEADLINE_MS,encoding: \"utf8\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-test-banner.test.ts",
+    "scope": "banner text under FLAIR_URL override contains the override, not the default",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env,cwd: join(import.meta.dirname,\"..\",\"..\"),timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/cli-test-banner.test.ts",
+    "scope": "default banner is stock :19926, not the stale :9926 literal (#1347 family sweep)",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env,cwd: join(import.meta.dirname,\"..\",\"..\"),timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/doctor-fix-continuity-consent.test.ts",
+    "scope": "GUARD: --fix on a clean install leaves the continuity hooks NOT enabled",
+    "fingerprint": "\"bun\" [CLI_SOURCE,...args] ; { cwd: isoCwd,// doctor --fix appends to ./CLAUDE.md — keep that off the repo env: { ...process.env,HOME: isoHome,USERPROFILE: isoHome,PATH: `${fakeBin}:${process.env.PATH ?? \"\"}`,// Scrub ambient Flair identity/target so only the flags decide. FLAIR_AGENT_ID: \"\",FLAIR_URL: \"\",FLAIR_TARGET: \"\",},// flair#1807: the child carries its OWN deadline,so a signal kill is // reported by name,with the child's output,rather than as a bare exit. timeout: CHILD_DEADLINE_MS,encoding: \"utf8\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/doctor-fix-continuity-consent.test.ts",
+    "scope": "POSITIVE CONTROL: the same fixture, spawn env and detector DO see hooks when the user opts in",
+    "fingerprint": "\"bun\" [CLI_SOURCE,...args] ; { cwd: isoCwd,// doctor --fix appends to ./CLAUDE.md — keep that off the repo env: { ...process.env,HOME: isoHome,USERPROFILE: isoHome,PATH: `${fakeBin}:${process.env.PATH ?? \"\"}`,// Scrub ambient Flair identity/target so only the flags decide. FLAIR_AGENT_ID: \"\",FLAIR_URL: \"\",FLAIR_TARGET: \"\",},// flair#1807: the child carries its OWN deadline,so a signal kill is // reported by name,with the child's output,rather than as a bare exit. timeout: CHILD_DEADLINE_MS,encoding: \"utf8\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/doctor-fix-continuity-consent.test.ts",
+    "scope": "--fix --dry-run on a clean install does not announce continuity wiring",
+    "fingerprint": "\"bun\" [CLI_SOURCE,...args] ; { cwd: isoCwd,// doctor --fix appends to ./CLAUDE.md — keep that off the repo env: { ...process.env,HOME: isoHome,USERPROFILE: isoHome,PATH: `${fakeBin}:${process.env.PATH ?? \"\"}`,// Scrub ambient Flair identity/target so only the flags decide. FLAIR_AGENT_ID: \"\",FLAIR_URL: \"\",FLAIR_TARGET: \"\",},// flair#1807: the child carries its OWN deadline,so a signal kill is // reported by name,with the child's output,rather than as a bare exit. timeout: CHILD_DEADLINE_MS,encoding: \"utf8\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/doctor-fix-continuity-consent.test.ts",
+    "scope": "REPAIR: --fix completes a PARTIAL install (prior opt-in evidence) to the full pair",
+    "fingerprint": "\"bun\" [CLI_SOURCE,...args] ; { cwd: isoCwd,// doctor --fix appends to ./CLAUDE.md — keep that off the repo env: { ...process.env,HOME: isoHome,USERPROFILE: isoHome,PATH: `${fakeBin}:${process.env.PATH ?? \"\"}`,// Scrub ambient Flair identity/target so only the flags decide. FLAIR_AGENT_ID: \"\",FLAIR_URL: \"\",FLAIR_TARGET: \"\",},// flair#1807: the child carries its OWN deadline,so a signal kill is // reported by name,with the child's output,rather than as a bare exit. timeout: CHILD_DEADLINE_MS,encoding: \"utf8\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/doctor-fix-continuity-consent.test.ts",
+    "scope": "--fix --dry-run on a PARTIAL install still announces the repair (and writes nothing)",
+    "fingerprint": "\"bun\" [CLI_SOURCE,...args] ; { cwd: isoCwd,// doctor --fix appends to ./CLAUDE.md — keep that off the repo env: { ...process.env,HOME: isoHome,USERPROFILE: isoHome,PATH: `${fakeBin}:${process.env.PATH ?? \"\"}`,// Scrub ambient Flair identity/target so only the flags decide. FLAIR_AGENT_ID: \"\",FLAIR_URL: \"\",FLAIR_TARGET: \"\",},// flair#1807: the child carries its OWN deadline,so a signal kill is // reported by name,with the child's output,rather than as a bare exit. timeout: CHILD_DEADLINE_MS,encoding: \"utf8\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/doctor-readonly-no-lock.test.ts",
+    "scope": "doctor WITHOUT --fix in a read-only settings dir creates no lock/temp/.bak and changes nothing",
+    "fingerprint": "\"bun\" [CLI_SOURCE,\"doctor\",\"--port\",DEAD_PORT] ; { cwd: isoCwd,// never the repo: doctor reads ./CLAUDE.md env: { ...process.env,HOME: isoHome,USERPROFILE: isoHome,PATH: `${fakeBin}:${process.env.PATH ?? \"\"}`,FLAIR_AGENT_ID: \"\",FLAIR_URL: \"\",FLAIR_TARGET: \"\",},timeout: CHILD_DEADLINE_MS,encoding: \"utf8\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-instance-admin-pass-file.test.ts",
+    "scope": "list sends the password read from an owner-only --admin-pass-file",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-instance-admin-pass-file.test.ts",
+    "scope": "prune (dry run) sends the password read from --admin-pass-file",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-instance-admin-pass-file.test.ts",
+    "scope": "a group- or world-readable file is refused before anything is sent",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-instance-admin-pass-file.test.ts",
+    "scope": "file + --admin-pass is now a usage error (was: flag wins silently); the flag alone still works",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-sync-admin-pass-file-1910.test.ts",
+    "scope": "reads the password from an owner-only --admin-pass-file",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-sync-admin-pass-file-1910.test.ts",
+    "scope": "a 0644 file is refused naming the mode, and nothing is sent",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-sync-admin-pass-file-1910.test.ts",
+    "scope": "file + --admin-pass together is a usage error, and nothing is sent",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-sync-admin-pass-file-1910.test.ts",
+    "scope": "--admin-pass still authenticates",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-sync-admin-pass-file-1910.test.ts",
+    "scope": "FLAIR_ADMIN_PASS alone still authenticates (the CI form)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-sync-admin-pass-file-1910.test.ts",
+    "scope": "--help prefers the file form and warns that --admin-pass leaks",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-token-pair-admin-pass-file.test.ts",
+    "scope": "reads the password from an owner-only --admin-pass-file",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-token-pair-admin-pass-file.test.ts",
+    "scope": "a 0644 file is refused naming the mode, and nothing is sent",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-token-pair-admin-pass-file.test.ts",
+    "scope": "file + --admin-pass together is a usage error, and nothing is sent",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-token-pair-admin-pass-file.test.ts",
+    "scope": "--admin-pass still authenticates",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-token-pair-admin-pass-file.test.ts",
+    "scope": "an explicit --admin-pass overrides FLAIR_ADMIN_PASS (explicit beats ambient)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-token-pair-admin-pass-file.test.ts",
+    "scope": "--admin-pass-file overrides FLAIR_ADMIN_PASS",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-token-pair-admin-pass-file.test.ts",
+    "scope": "FLAIR_ADMIN_PASS alone still authenticates",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-token-pair-admin-pass-file.test.ts",
+    "scope": "--help prefers the file form and warns that --admin-pass leaks",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-token-pair-admin-pass-file.test.ts",
+    "scope": "reads the password from an owner-only --admin-pass-file and pairs",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-token-pair-admin-pass-file.test.ts",
+    "scope": "a 0644 file is refused naming the mode, and nothing is sent to the hub",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-token-pair-admin-pass-file.test.ts",
+    "scope": "file + --admin-pass together is a usage error, and nothing is sent",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 1,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-token-pair-admin-pass-file.test.ts",
+    "scope": "--admin-pass still authenticates",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 1,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-token-pair-admin-pass-file.test.ts",
+    "scope": "--help prefers the file form and warns that --admin-pass leaks",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 1,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-verify-admin-pass-file-1910.test.ts",
+    "scope": "reads the password from an owner-only --admin-pass-file",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-verify-admin-pass-file-1910.test.ts",
+    "scope": "a 0644 file is refused naming the mode, and nothing is sent",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-verify-admin-pass-file-1910.test.ts",
+    "scope": "file + --admin-pass together is a usage error, and nothing is sent",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-verify-admin-pass-file-1910.test.ts",
+    "scope": "--admin-pass still authenticates",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/federation-verify-admin-pass-file-1910.test.ts",
+    "scope": "--help prefers the file form and warns that --admin-pass leaks",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/http-bind.test.ts",
+    "scope": "end to end: widen via the CLI, then narrow via the CLI, and the persisted value stays narrow",
+    "fingerprint": "process.execPath [cli,\"init\",\"--skip-start\",\"--no-mcp\",\"--port\",\"20991\",\"--http-bind\",bind] ; { cwd: join(import.meta.dir,\"..\",\"..\"),env,encoding: \"utf8\",// flair#1807: the child's OWN deadline,so a hung `flair init` is // reported by the deadline (and named) rather than by bun's timer. timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/init-pin-guard.test.ts",
+    "scope": "AHEAD of the running CLI → bytes UNCHANGED + a held line",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",\"init\",\"--agent\",AGENT,\"--skip-start\",\"--skip-soul\",\"--skip-smoke\",\"--skip-hook\",\"--skip-claude-md\",\"--client\",\"claude-code\",\"--port\",String(httpPort),\"--ops-port\",String(opsPort),\"--admin-pass\",\"test-admin-pin-guard\",] ; { cwd: \".\",env: { ...process.env,HOME: isoHome },timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/init-pin-guard.test.ts",
+    "scope": "range / malformed spec → held, bytes preserved",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",\"init\",\"--agent\",AGENT,\"--skip-start\",\"--skip-soul\",\"--skip-smoke\",\"--skip-hook\",\"--skip-claude-md\",\"--client\",\"claude-code\",\"--port\",String(httpPort),\"--ops-port\",String(opsPort),\"--admin-pass\",\"test-admin-pin-guard\",] ; { cwd: \".\",env: { ...process.env,HOME: isoHome },timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/init-pin-guard.test.ts",
+    "scope": "unpinned → pinned UP to the running CLI",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",\"init\",\"--agent\",AGENT,\"--skip-start\",\"--skip-soul\",\"--skip-smoke\",\"--skip-hook\",\"--skip-claude-md\",\"--client\",\"claude-code\",\"--port\",String(httpPort),\"--ops-port\",String(opsPort),\"--admin-pass\",\"test-admin-pin-guard\",] ; { cwd: \".\",env: { ...process.env,HOME: isoHome },timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/init-pin-guard.test.ts",
+    "scope": "BEHIND + newer running CLI → repin UP (positive control)",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",\"init\",\"--agent\",AGENT,\"--skip-start\",\"--skip-soul\",\"--skip-smoke\",\"--skip-hook\",\"--skip-claude-md\",\"--client\",\"claude-code\",\"--port\",String(httpPort),\"--ops-port\",String(opsPort),\"--admin-pass\",\"test-admin-pin-guard\",] ; { cwd: \".\",env: { ...process.env,HOME: isoHome },timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/init-socket-path-preflight.test.ts",
+    "scope": "refuses with non-zero exit, an actionable message, and touches nothing on disk",
+    "fingerprint": "\"bun\" [\"src/cli.ts\",\"init\",\"--skip-start\",\"--no-mcp\",\"--skip-soul\",\"--data-dir\",dataDir,\"--admin-pass\",\"test-admin-916\",] ; { cwd: \".\",env: { ...process.env,HOME: isoHome },timeout: CHILD_DEADLINE_MS }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/keys-prune.test.ts",
+    "scope": "fresh/empty key dir: exits 0 without needing a reachable instance",
+    "fingerprint": "\"bun\" [CLI_SOURCE,...args] ; { env: { ...process.env,...env },timeout: 10_000,encoding: \"utf8\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/keys-prune.test.ts",
+    "scope": "unreachable instance: hard-aborts with a non-zero exit and moves nothing",
+    "fingerprint": "\"bun\" [CLI_SOURCE,...args] ; { env: { ...process.env,...env },timeout: 10_000,encoding: \"utf8\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/keys-prune.test.ts",
+    "scope": "unparseable .key is reported unidentified, not 'no key files found', and not pruned",
+    "fingerprint": "\"bun\" [CLI_SOURCE,...args] ; { env: { ...process.env,...env },timeout: 10_000,encoding: \"utf8\",}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/local-no-auth.test.ts",
+    "scope": "no admin-pass file, no env: local call sends no Authorization header",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/local-no-auth.test.ts",
+    "scope": "flair#634: falls back to the ~/.flair/admin-pass file when no env/agent key is set",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/local-no-auth.test.ts",
+    "scope": "precedence: FLAIR_ADMIN_PASS env wins over the admin-pass file",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/local-no-auth.test.ts",
+    "scope": "precedence: a resolved FLAIR_AGENT_ID + real key wins over the admin-pass file",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/local-no-auth.test.ts",
+    "scope": "precedence: file beats nothing — falls back to the file when Ed25519 resolution fails (no key on disk for the agent)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/local-no-auth.test.ts",
+    "scope": "missing admin-pass file (no ~/.flair dir at all) falls through cleanly to no auth, no crash",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/local-no-auth.test.ts",
+    "scope": "unreadable/unsafe-permission admin-pass file falls through to no auth (warns, never crashes, never echoes the secret)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/local-no-auth.test.ts",
+    "scope": "flair#634: 403 with no credentials available prints a clear actionable message, not a stack trace",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/local-no-auth.test.ts",
+    "scope": "403 with credentials already sent (wrong password) surfaces the server's own error, not the no-creds hint",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/orgevent-cli.test.ts",
+    "scope": "rejects missing --kind",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { // Each case supplies its own identity; a developer's agent must not fill it in. env: { ...process.env,FLAIR_AGENT_ID: \"\",...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/orgevent-cli.test.ts",
+    "scope": "rejects missing --summary",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { // Each case supplies its own identity; a developer's agent must not fill it in. env: { ...process.env,FLAIR_AGENT_ID: \"\",...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/orgevent-cli.test.ts",
+    "scope": "rejects missing agent ID",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { // Each case supplies its own identity; a developer's agent must not fill it in. env: { ...process.env,FLAIR_AGENT_ID: \"\",...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/orgevent-cli.test.ts",
+    "scope": "PUTs to /OrgEvent/{id} with kind/summary/targets/authorId/id/createdAt (#679)",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { // Each case supplies its own identity; a developer's agent must not fill it in. env: { ...process.env,FLAIR_AGENT_ID: \"\",...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/orgevent-cli.test.ts",
+    "scope": "sends an Ed25519 Authorization header signed by the agent",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { // Each case supplies its own identity; a developer's agent must not fill it in. env: { ...process.env,FLAIR_AGENT_ID: \"\",...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/orgevent-cli.test.ts",
+    "scope": "exits with error on server 5xx",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { // Each case supplies its own identity; a developer's agent must not fill it in. env: { ...process.env,FLAIR_AGENT_ID: \"\",...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/presence-set.test.ts",
+    "scope": "rejects missing --activity",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env: { ...process.env,...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/presence-set.test.ts",
+    "scope": "rejects invalid activity value",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env: { ...process.env,...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/presence-set.test.ts",
+    "scope": "rejects task exceeding 120 chars",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env: { ...process.env,...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/presence-set.test.ts",
+    "scope": "rejects task exactly 121 chars",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env: { ...process.env,...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/presence-set.test.ts",
+    "scope": "accepts task exactly 120 chars",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env: { ...process.env,...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/presence-set.test.ts",
+    "scope": "posts to /Presence with correct activity and task",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env: { ...process.env,...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/presence-set.test.ts",
+    "scope": "posts activity-only (no task)",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env: { ...process.env,...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/presence-set.test.ts",
+    "scope": "sends Ed25519 Authorization header",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env: { ...process.env,...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/presence-set.test.ts",
+    "scope": "exits with error on server 5xx",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env: { ...process.env,...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/presence-set.test.ts",
+    "scope": "rejects missing agent ID",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env: { ...process.env,...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/presence-set.test.ts",
+    "scope": "rejects missing private key",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env: { ...process.env,...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/presence-set.test.ts",
+    "scope": "supports all valid activity values",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env: { ...process.env,...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/snapshot-datadir-instance-targeting.test.ts",
+    "scope": "snapshot restore --data-dir <scratch> resolves the SCRATCH instance's launchd label, never the default install's",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/snapshot-datadir-instance-targeting.test.ts",
+    "scope": "snapshot create --data-dir <scratch> quiesces the SCRATCH instance around the snapshot",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/snapshot-datadir-instance-targeting.test.ts",
+    "scope": "refuses to stop the legacy launchd service when its plist belongs to another data dir",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/status-federation-peers-1146.test.ts",
+    "scope": "emits HealthDetail.federation.peers unchanged, including measuredBy",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/status-federation-peers-1146.test.ts",
+    "scope": "does not invent measuredBy when HealthDetail omitted it",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/status-federation-peers-1146.test.ts",
+    "scope": "does not raise connected from agents.perAgent.lastWriteAt",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/status-ops-bind.test.ts",
+    "scope": "all-interfaces bind: status does NOT report all-passing — it surfaces the same finding doctor makes",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/status-ops-bind.test.ts",
+    "scope": "all-interfaces bind: --json carries the warning so machine consumers cannot see a false green either",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/status-ops-bind.test.ts",
+    "scope": "wildcard host:port bind (--ops-bind 0.0.0.0): status does NOT report all-passing",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/status-ops-bind.test.ts",
+    "scope": "loopback-bound instance: status still reports a genuine green",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/status-ops-bind.test.ts",
+    "scope": "--deep also surfaces the finding instead of ending on 'no warnings'",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/status-ops-bind.test.ts",
+    "scope": "a remote target is not judged by the local install's harper config",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/upgrade-data-snapshot.test.ts",
+    "scope": "snapshot list: empty state reports no snapshots (json and human)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/upgrade-data-snapshot.test.ts",
+    "scope": "snapshot list: a real snapshot created via createDataSnapshot() (the exact primitive `snapshot create` reuses) shows up",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/upgrade-data-snapshot.test.ts",
+    "scope": "snapshot create: fails cleanly (before touching Flair) when --data-dir does not exist",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/upgrade-data-snapshot.test.ts",
+    "scope": "snapshot restore: fails cleanly (before touching Flair) when the snapshot path does not exist",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/upgrade-data-snapshot.test.ts",
+    "scope": "snapshot restore: refuses to destroy data in a non-interactive shell without --yes (never silently destructive)",
+    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/workspace-set.test.ts",
+    "scope": "rejects missing --ref",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env: { ...process.env,...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/workspace-set.test.ts",
+    "scope": "rejects missing agent ID",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env: { ...process.env,...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/workspace-set.test.ts",
+    "scope": "rejects missing private key",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env: { ...process.env,...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/workspace-set.test.ts",
+    "scope": "PUTs to /WorkspaceState/{agentId:ref} with ref/phase/task/agentId/createdAt (#679)",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env: { ...process.env,...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/workspace-set.test.ts",
+    "scope": "sends an Ed25519 Authorization header signed by the agent",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env: { ...process.env,...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  },
+  {
+    "file": "test/unit/workspace-set.test.ts",
+    "scope": "exits with error on server 5xx",
+    "fingerprint": "\"bun\" [cliPath,...args] ; { env: { ...process.env,...env },stdio: [\"inherit\",\"pipe\",\"pipe\"],timeout: CHILD_DEADLINE_MS,}",
+    "kind": "case-no-budget",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
+  }
+]
