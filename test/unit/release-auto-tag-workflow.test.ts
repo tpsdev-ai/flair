@@ -250,8 +250,11 @@ describe("release-auto-tag workflow — the reporter (acceptance 9, YAML half)",
     expect(report.if).toContain("needs.write.outputs.verdict || needs.decide.outputs.verdict");
     expect(report.if).toContain("github.event_name != 'workflow_dispatch'");
     // The condition and version it renders read write's before decide's too.
+    // The adk condition wins when the adk write refused (slice 3 of #1928).
     const env = (report.steps ?? [])[0].env ?? {};
-    expect(String(env.CONDITION)).toBe("${{ needs.write.outputs.condition || needs.decide.outputs.condition }}");
+    expect(String(env.CONDITION)).toBe(
+      "${{ needs.write.outputs.adk_verdict == 'REFUSE' && needs.write.outputs.adk_condition || needs.write.outputs.condition || needs.decide.outputs.condition }}",
+    );
     expect(String(env.VERSION)).toBe("${{ needs.write.outputs.version || needs.decide.outputs.version }}");
   });
 
@@ -506,5 +509,63 @@ describe("release-auto-tag workflow — credential isolation and the reporter's 
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("release-auto-tag workflow — the adk-flair verdict (slice 3 of #1928)", () => {
+  test("the write job publishes the adk verdict, and its Enforce step goes red on an adk REFUSE", () => {
+    const write = job("write");
+    expect(write.outputs?.adk_verdict).toBe("${{ steps.write.outputs.adk_verdict }}");
+    expect(write.outputs?.adk_condition).toBe("${{ steps.write.outputs.adk_condition }}");
+    const enforce = (write.steps ?? []).find((s) => (s.name ?? "").startsWith("Enforce"));
+    expect(enforce, "the write job has an Enforce step").toBeDefined();
+    // The job goes red on an adk REFUSE, not only a v REFUSE.
+    expect(String(enforce!.if)).toContain("steps.write.outputs.adk_verdict == 'REFUSE'");
+    // And the message names the adk condition when the adk write refused.
+    expect(String(enforce!.env?.CONDITION)).toContain("steps.write.outputs.adk_condition");
+  });
+
+  test("the reporter fires on an adk REFUSE too, and names the adk condition", () => {
+    const report = job("report");
+    // The v verdict is TAGGED on an adk refusal, so the guard must ALSO watch the
+    // adk verdict or the report job never runs.
+    expect(String(report.if)).toContain("needs.write.outputs.adk_verdict == 'REFUSE'");
+    const refusalStep = (report.steps ?? [])[0];
+    expect(String(refusalStep.env?.CONDITION)).toContain("needs.write.outputs.adk_condition");
+  });
+});
+
+describe("release-auto-tag workflow — the adk re-run (slice 3 of #1928, round 2)", () => {
+  test("the write job's gate lets a same-sha re-run TAG through, and publishes v_verdict", () => {
+    const write = job("write");
+    // A same-sha re-run returns decide verdict TAG (the adk tag must be finished),
+    // so the existing TAG gate lets it through.
+    expect(String(write.if)).toContain("needs.decide.outputs.verdict == 'TAG'");
+    expect(write.outputs?.v_verdict).toBe("${{ steps.write.outputs.v_verdict }}");
+    expect(write.outputs?.adk_verdict).toBe("${{ steps.write.outputs.adk_verdict }}");
+  });
+
+  test("the reporter names a line PER REF, and no longer claims nothing was tagged", () => {
+    const refusalStep = (job("report").steps ?? [])[0];
+    const script = String(refusalStep.run ?? "");
+    expect(script).toContain("v${VERSION}: ${V_VERDICT:-REFUSE}");
+    expect(script).toContain("adk-flair-v${VERSION}: ${ADK_VERDICT:-not attempted}");
+    expect(script).not.toContain("Nothing was tagged.");
+    const env = refusalStep.env ?? {};
+    expect(String(env.V_VERDICT)).toBe("${{ needs.write.outputs.v_verdict }}");
+    expect(String(env.ADK_VERDICT)).toBe("${{ needs.write.outputs.adk_verdict }}");
+  });
+});
+
+describe("release-auto-tag workflow — the v line never says REFUSE for an existing ref (round 3)", () => {
+  test("the reporter renders the v ref from V_VERDICT, so an adk REFUSE with v already at the sha prints v: SKIP", () => {
+    const write = job("write");
+    // decide/write carry v_verdict (SKIP when the v tag is already at the sha).
+    expect(write.outputs?.v_verdict).toBe("${{ steps.write.outputs.v_verdict }}");
+    // …and the reporter's v line uses it, defaulting to REFUSE only when absent.
+    const script = String((job("report").steps ?? [])[0].run ?? "");
+    expect(script).toContain("v${VERSION}: ${V_VERDICT:-REFUSE}");
+    const env = (job("report").steps ?? [])[0].env ?? {};
+    expect(String(env.V_VERDICT)).toBe("${{ needs.write.outputs.v_verdict }}");
   });
 });

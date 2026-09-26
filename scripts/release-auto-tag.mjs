@@ -75,6 +75,8 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { projectVersionFromPyproject, readProjectVersion } from "./ci/pyproject-version.mjs";
+
 // ── the fixed enum ─────────────────────────────────────────────────────────────
 // Condition ids are an enum so the reporter, the summary and any test can switch
 // on them. `ci-renamed` and `checks-pending` are the two that the issue lists as
@@ -116,6 +118,20 @@ export const CONDITION = Object.freeze({
   // Not one of the ten conditions: the App is installed AFTER this lands, so the
   // write step must refuse loudly rather than proceed unauthenticated.
   APP_NOT_CONFIGURED: "app-not-configured",
+  // The adk-flair side of the tag boundary (slice 3 of #1928). The auto-tag also
+  // creates `adk-flair-v<version>` when the tree carries the Python package:
+  //   - the on-tree pyproject version differs from the version being tagged, so
+  //     the two packages would disagree — refused BEFORE the v tag is written;
+  //   - an `adk-flair-v<version>` tag already exists at ANOTHER commit;
+  //   - the second ref POST was rejected (a 403/422, e.g. the ruleset does not
+  //     list the App as a bypass actor) — the v tag stays, nothing retries.
+  ADK_VERSION_MISMATCH: "adk-version-mismatch",
+  ADK_TAG_EXISTS_ELSEWHERE: "adk-tag-exists-elsewhere",
+  ADK_REF_WRITE_REJECTED: "adk-ref-write-rejected",
+  // The on-tree pyproject carries a `[project]` version form the tagger does not
+  // implement (a quoted key, a dotted key, an inline `project` table, or an odd
+  // `version =` line). bob must NOT guess the version from it.
+  ADK_PYPROJECT_UNSUPPORTED: "adk-pyproject-unsupported",
 });
 export const CONDITION_IDS = Object.freeze(Object.values(CONDITION));
 
@@ -126,6 +142,8 @@ export const VERSION_SHAPE = /^\d+\.\d+\.\d+$/;
 export const CONCLUSION_WHITELIST = Object.freeze(["success", "neutral", "skipped"]);
 export const DEFAULT_REVIEWERS = Object.freeze(["tps-kern", "tps-sherlock"]);
 export const DEFAULT_VERSION_FILE = "package.json";
+// The Python package whose release the auto-tag also marks (slice 3 of #1928).
+export const ADK_PYPROJECT_PATH = "packages/adk-flair/pyproject.toml";
 export const DEFAULT_WORKFLOW_PATH = ".github/workflows/test.yml";
 export const DEFAULT_WORKFLOW_NAME = "CI";
 export const DEFAULT_ADVISORY_ALLOWLIST = ".github/release-auto-tag-advisories.json";
@@ -546,6 +564,94 @@ export function versionAt(deps, rev, versionFile) {
   return readVersionFromManifest(deps.git.show(rev, versionFile));
 }
 
+/**
+ * The `version` the `[project]` table of a `pyproject.toml` declares, or null
+ * when the text is absent or carries none. One helper, shared with
+ * `scripts/check-version-sync.mjs` (scripts/ci/pyproject-version.mjs).
+ */
+export const adkVersionFromPyproject = projectVersionFromPyproject;
+
+/**
+ * The `adk-flair-v<version>` tag name and ref for a version.
+ */
+export function adkTagName(version) {
+  return `adk-flair-v${version}`;
+}
+
+/**
+ * The tagger's adk decision for an on-tree pyproject (round 3):
+ *   { kind: "absent" }                              no pyproject at this sha
+ *   { kind: "ok" }                                  the whitelisted version matches
+ *   { kind: "refuse", condition, summary }          a mismatch, a dynamic version,
+ *                                                   or an unsupported form
+ * Fail-closed: an unsupported form REFUSEs `adk-pyproject-unsupported` naming the
+ * line; a dynamic or absent project version REFUSEs `adk-version-mismatch`.
+ */
+export function adkVersionCheck(adkText, version) {
+  if (adkText === null || adkText === undefined) return { kind: "absent" };
+  const r = readProjectVersion(adkText);
+  if (r.kind === "unsupported") {
+    return {
+      kind: "refuse",
+      condition: CONDITION.ADK_PYPROJECT_UNSUPPORTED,
+      summary: [
+        `${ADK_PYPROJECT_PATH} carries an unsupported version form on the line \`${r.line}\` (${r.reason})`,
+      ],
+    };
+  }
+  if (r.kind === "none") {
+    return {
+      kind: "refuse",
+      condition: CONDITION.ADK_VERSION_MISMATCH,
+      summary: [
+        `the on-tree ${ADK_PYPROJECT_PATH} declares no project version (${r.reason}), not ${version}`,
+      ],
+    };
+  }
+  if (r.version !== version) {
+    return {
+      kind: "refuse",
+      condition: CONDITION.ADK_VERSION_MISMATCH,
+      summary: [`the on-tree ${ADK_PYPROJECT_PATH} declares version ${r.version}, not ${version}`],
+    };
+  }
+  return { kind: "ok" };
+}
+
+/**
+ * When the v tag is ALREADY at <sha> (condition 3 skip), this decides whether the
+ * run has anything LEFT to do — the adk tag (slice 3 of #1928, round 2). A v tag
+ * at this sha used to end the run, so after an `adk-ref-write-rejected` nothing
+ * ever finished the release. Returns:
+ *   { kind: "skip" }                 the pyproject is absent, or the adk tag
+ *                                    already resolves to <sha> — nothing left
+ *   { kind: "adk" }                  v is at <sha>; only the adk ref is written
+ *   { kind: "refuse", condition, summary } the adk tag resolves ELSEWHERE, or
+ *                                    the on-tree version differs
+ * Uses the READ client (like condition 3) — the App holds no pull-requests
+ * permission, and this is a read.
+ */
+export async function adkWorkAfterVAtSha(reads, deps, { sha, version }) {
+  const adkText = deps.git?.show ? deps.git.show(sha, ADK_PYPROJECT_PATH) : null;
+  const adkCheck = adkVersionCheck(adkText, version);
+  if (adkCheck.kind === "absent") return { kind: "skip" };
+  if (adkCheck.kind === "refuse") {
+    return { kind: "refuse", condition: adkCheck.condition, summary: adkCheck.summary };
+  }
+  const tag = adkTagName(version);
+  const ref = await reads.readTagRef(tag);
+  if (ref) {
+    const commit = await resolveTagCommit(reads, ref);
+    if (commit === sha) return { kind: "skip" };
+    return {
+      kind: "refuse",
+      condition: CONDITION.ADK_TAG_EXISTS_ELSEWHERE,
+      summary: [`${tag} already exists at ${commit ?? "nothing"}, not ${sha}`],
+    };
+  }
+  return { kind: "adk" };
+}
+
 /** Condition 1: the version at <sha> differs from <sha>^. */
 export function conditionReleaseCommit(deps, { sha, versionFile }) {
   const version = versionAt(deps, sha, versionFile);
@@ -915,9 +1021,26 @@ export async function decide({ sha, deps, options = {} }) {
   const skip = (reason, extra = {}) => ({ verdict: VERDICT.SKIP, condition: "", version, reason, summary, ...extra });
 
   // 3 — tag state, checked FIRST after shape (two API calls instead of waiting on
-  // release-publish's own jobs, which attach to the same commit).
+  // release-publish's own jobs, which attach to the same commit). A v tag at <sha>
+  // is a SKIP only when NOTHING is left to do: the pyproject is absent, or its
+  // version matches and the adk tag already resolves to <sha>. Otherwise the adk
+  // tag still has to be finished, so the verdict is TAG with the v POST skipped
+  // (round 2 — a rejected adk POST used to strand the release forever).
+  let vAlreadyAtSha = false;
   const step3 = await conditionTagState(deps.api, { sha, version });
-  if (!step3.ok) return step3.skip ? skip(step3.reason) : refuse(step3);
+  if (!step3.ok) {
+    if (!step3.skip) return refuse(step3);
+    const adk = await adkWorkAfterVAtSha(deps.api, deps, { sha, version });
+    if (adk.kind === "skip") return skip(step3.reason);
+    if (adk.kind === "refuse") {
+      return refuse(adk, {
+        adkVerdict: WRITE_VERDICT.REFUSE,
+        adkCondition: adk.condition,
+        vVerdict: WRITE_VERDICT.SKIP,
+      });
+    }
+    vAlreadyAtSha = true;
+  }
 
   // 4 — release intent
   const step4 = await conditionReleaseIntent(deps.api, deps, { version, versionFile: opts.versionFile, mainRef: opts.mainRef });
@@ -966,7 +1089,16 @@ export async function decide({ sha, deps, options = {} }) {
   if (!step9.ok) return refuse(step9);
   if (step9.tolerated?.length) summary.push(`allowlisted non-success checks (do not refuse): ${step9.tolerated.join(", ")}`);
 
-  return { verdict: VERDICT.TAG, condition: "", version, summary, pr: step7.pr };
+  return {
+    verdict: VERDICT.TAG,
+    condition: "",
+    version,
+    summary: vAlreadyAtSha
+      ? [...summary, `v${version} is already at ${sha}: the v POST is skipped and only the adk tag is written`]
+      : summary,
+    pr: step7.pr,
+    ...(vAlreadyAtSha ? { vVerdict: WRITE_VERDICT.SKIP } : {}),
+  };
 }
 
 // ── the write boundary (condition 10) ─────────────────────────────────────────
@@ -1012,11 +1144,25 @@ export async function writeTag({ sha, version, deps, options = {} }) {
     });
   }
 
+  let vAlreadyAtSha = false;
   const step3 = await conditionTagState(reads, { sha, version });
   if (!step3.ok) {
-    return step3.skip
-      ? { verdict: WRITE_VERDICT.SKIP, condition: "", version, reason: "already tagged at this commit", summary }
-      : refuse(step3.condition, { summary: [...summary, ...(step3.summary ?? [])] });
+    if (!step3.skip) return refuse(step3.condition, { summary: [...summary, ...(step3.summary ?? [])] });
+    // v is at <sha>: SKIP only if nothing is left to do — else finish the adk tag
+    // (round 2; a rejected adk POST used to strand the release).
+    const adk = await adkWorkAfterVAtSha(reads, deps, { sha, version });
+    if (adk.kind === "skip") {
+      return { verdict: WRITE_VERDICT.SKIP, condition: "", version, reason: "already tagged at this commit", summary };
+    }
+    if (adk.kind === "refuse") {
+      return refuse(adk.condition, {
+        summary: [...summary, ...(adk.summary ?? [])],
+        adkVerdict: WRITE_VERDICT.REFUSE,
+        adkCondition: adk.condition,
+        vVerdict: WRITE_VERDICT.SKIP,
+      });
+    }
+    vAlreadyAtSha = true;
   }
 
   const step4 = await conditionReleaseIntent(reads, deps, { version, versionFile: opts.versionFile, mainRef: opts.mainRef });
@@ -1039,29 +1185,115 @@ export async function writeTag({ sha, version, deps, options = {} }) {
   const step8 = await conditionReviews(reads, { pr: step7.pr, reviewers: opts.reviewers });
   if (!step8.ok) return refuse(step8.condition, { summary: [...summary, ...(step8.summary ?? [])] });
 
-  const ref = `refs/tags/v${version}`;
-  const created = await deps.api.createTagRef(ref, sha);
-  if (!created?.ok) {
-    // The POST is the race-breaker: the loser re-reads the ref and becomes a SKIP
-    // (or a REFUSE when the ref points somewhere else).
-    const existing = await deps.api.readTagRef(`v${version}`);
-    const commit = existing ? await resolveTagCommit(deps.api, existing) : null;
-    if (commit === sha) {
-      return { verdict: WRITE_VERDICT.SKIP, condition: "", version, reason: "another run tagged this commit first", summary };
-    }
-    return refuse(CONDITION.TAG_CONFLICT, {
-      summary: [...summary, `POST ${ref} failed (${created?.status}) and the ref resolves to ${commit ?? "nothing"}`],
+  // Condition 10 also reads the adk-flair package's own version (slice 3 of
+  // #1928). A MISMATCH is refused HERE, before the v tag is written, so a
+  // mismatch never leaves a half-tagged release. A MISSING file is fine — flair
+  // can release without the Python package — and only skips the second tag.
+  const adkText = deps.git?.show ? deps.git.show(sha, ADK_PYPROJECT_PATH) : null;
+  const adkPresent = adkText !== null && adkText !== undefined;
+  const adkCheck = adkVersionCheck(adkText, version);
+  if (adkCheck.kind === "refuse") {
+    return refuse(adkCheck.condition, {
+      summary: [...summary, ...adkCheck.summary],
+      adkVerdict: WRITE_VERDICT.REFUSE,
+      adkCondition: adkCheck.condition,
     });
+  }
+  const adkTag = adkTagName(version);
+  // PRE-CHECK the adk tag BEFORE the v POST (round 2): an adk tag that resolves
+  // ELSEWHERE must refuse WITHOUT writing the v tag. The post-v read below is only
+  // the race-breaker. A read failure here is a refusal too (unmeasurable is FAIL).
+  if (adkPresent) {
+    const existingAdk = await reads.readTagRef(adkTag);
+    if (existingAdk) {
+      const existingCommit = await resolveTagCommit(reads, existingAdk);
+      if (existingCommit !== sha) {
+        return refuse(CONDITION.ADK_TAG_EXISTS_ELSEWHERE, {
+          summary: [...summary, `${adkTag} already exists at ${existingCommit ?? "nothing"}, not ${sha}`],
+          adkVerdict: WRITE_VERDICT.REFUSE,
+          adkCondition: CONDITION.ADK_TAG_EXISTS_ELSEWHERE,
+        });
+      }
+    }
   }
 
-  const readBack = await deps.api.readTagRef(`v${version}`);
-  const resolved = readBack ? await resolveTagCommit(deps.api, readBack) : null;
-  if (resolved !== sha) {
-    return refuse(CONDITION.TAG_CONFLICT, {
-      summary: [...summary, `after the POST, ${ref} resolves to ${resolved ?? "nothing"}, not ${sha}`],
-    });
+  const ref = `refs/tags/v${version}`;
+  let vVerdict = WRITE_VERDICT.TAGGED;
+  if (vAlreadyAtSha) {
+    vVerdict = WRITE_VERDICT.SKIP;
+    summary.push(`v${version} is already at ${sha}: the v POST is skipped`);
+  } else {
+    const created = await deps.api.createTagRef(ref, sha);
+    if (!created?.ok) {
+      // The POST is the race-breaker: the loser re-reads the ref and becomes a SKIP
+      // (or a REFUSE when the ref points somewhere else).
+      const existing = await deps.api.readTagRef(`v${version}`);
+      const commit = existing ? await resolveTagCommit(deps.api, existing) : null;
+      if (commit === sha) {
+        return { verdict: WRITE_VERDICT.SKIP, condition: "", version, reason: "another run tagged this commit first", summary };
+      }
+      return refuse(CONDITION.TAG_CONFLICT, {
+        summary: [...summary, `POST ${ref} failed (${created?.status}) and the ref resolves to ${commit ?? "nothing"}`],
+      });
+    }
+
+    const readBack = await deps.api.readTagRef(`v${version}`);
+    const resolved = readBack ? await resolveTagCommit(deps.api, readBack) : null;
+    if (resolved !== sha) {
+      return refuse(CONDITION.TAG_CONFLICT, {
+        summary: [...summary, `after the POST, ${ref} resolves to ${resolved ?? "nothing"}, not ${sha}`],
+      });
+    }
   }
-  return { verdict: WRITE_VERDICT.TAGGED, condition: "", version, summary, ref };
+
+  // The v tag is up. The SECOND ref — `adk-flair-v<version>` — is created only
+  // when the tree carries the Python package (slice 3 of #1928). The read-back
+  // rule and the never-retry-the-POST rule apply to it EXACTLY as to the first.
+  let adkVerdict = WRITE_VERDICT.SKIP;
+  let adkCondition = "";
+  if (!adkPresent) {
+    deps.log?.info?.(
+      `no ${ADK_PYPROJECT_PATH} at ${sha}: skipping the adk-flair tag (flair can release without the Python package)`,
+    );
+  } else {
+    // Re-read as the race-breaker (another run may have written it meanwhile).
+    const existingAdk = await deps.api.readTagRef(adkTag);
+    if (existingAdk) {
+      const existingCommit = await resolveTagCommit(deps.api, existingAdk);
+      if (existingCommit === sha) {
+        deps.log?.info?.(`${adkTag} already exists at ${sha}: skipping`);
+      } else {
+        adkVerdict = WRITE_VERDICT.REFUSE;
+        adkCondition = CONDITION.ADK_TAG_EXISTS_ELSEWHERE;
+        summary.push(`${adkTag} already exists at ${existingCommit ?? "nothing"}, not ${sha}; v${version} stays at ${sha}`);
+      }
+    } else {
+      const createdAdk = await deps.api.createTagRef(`refs/tags/${adkTag}`, sha);
+      if (!createdAdk?.ok) {
+        // The POST is not retried. The v tag stays in place (it was written and
+        // read back), and the failure is reported as an adk refusal with the exact
+        // sha and version and the re-run instruction.
+        adkVerdict = WRITE_VERDICT.REFUSE;
+        adkCondition = CONDITION.ADK_REF_WRITE_REJECTED;
+        summary.push(
+          `POST refs/tags/${adkTag} failed (${createdAdk?.status}); v${version} was created at ${sha}; ${adkTag} was not; re-running the workflow on this commit completes it`,
+        );
+      } else {
+        const adkReadBack = await deps.api.readTagRef(adkTag);
+        const adkResolved = adkReadBack ? await resolveTagCommit(deps.api, adkReadBack) : null;
+        if (adkResolved !== sha) {
+          adkVerdict = WRITE_VERDICT.REFUSE;
+          adkCondition = CONDITION.ADK_REF_WRITE_REJECTED;
+          summary.push(
+            `after the POST, ${adkTag} now points at ${adkResolved ?? "nothing"}, not ${sha}; v${version} stays at ${sha}; a human must move or delete ${adkTag} before a re-run can complete it (the next run will refuse adk-tag-exists-elsewhere)`,
+          );
+        } else {
+          adkVerdict = WRITE_VERDICT.TAGGED;
+        }
+      }
+    }
+  }
+  return { verdict: WRITE_VERDICT.TAGGED, condition: "", version, summary, ref, adkVerdict, adkCondition, vVerdict };
 }
 
 // ── the nightly target ────────────────────────────────────────────────────────
@@ -1154,6 +1386,13 @@ function writeOutputs(target, decision, sha = "") {
     `version=${decision.version ?? ""}`,
     `sha=${sha}`,
   ];
+  if (decision.vVerdict !== undefined) {
+    lines.push(`v_verdict=${decision.vVerdict}`);
+  }
+  if (decision.adkVerdict !== undefined) {
+    lines.push(`adk_verdict=${decision.adkVerdict}`);
+    lines.push(`adk_condition=${decision.adkCondition ?? ""}`);
+  }
   if (!target || target === "-") {
     for (const line of lines) console.log(line);
     return;
@@ -1263,7 +1502,16 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
     });
     console.log(`${result.verdict} v${result.version} ${args.sha}${result.condition ? ` (${result.condition})` : ""}`);
     for (const line of result.summary ?? []) console.log(`  ${line}`);
-    writeOutputs(output, result, args.sha);
+    writeOutputs(
+      output,
+      {
+        ...result,
+        vVerdict: result.vVerdict ?? "",
+        adkVerdict: result.adkVerdict ?? "",
+        adkCondition: result.adkCondition ?? "",
+      },
+      args.sha,
+    );
     return 0;
   }
 

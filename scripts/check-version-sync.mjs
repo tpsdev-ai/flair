@@ -57,6 +57,7 @@ import { readFileSync, writeFileSync, statSync, readdirSync } from "node:fs";
 import { join, dirname, resolve, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import { projectVersionFromPyproject, replaceProjectVersion } from "./ci/pyproject-version.mjs";
 
 // cli#1890 condition 6: the release tagger extracts the WHOLE candidate commit
 // as DATA (`git archive <sha>` into a scratch dir) and runs THIS file — the
@@ -109,10 +110,13 @@ const SOURCE_VERSION_FILES = [
   {
     path: "packages/adk-flair/pyproject.toml",
     label: "version",
-    // Matches: version = "X.Y.Z"  (TOML string)
+    // The `[project]` table's own `version = "X.Y.Z"` (TOML string), read and
+    // written through the SHARED helper (scripts/ci/pyproject-version.mjs) the
+    // auto-tagger uses — a `[tool.x]` version line above `[project]` must not be
+    // mistaken for the package version.
     // The adk-flair package tracks flair's minor while 0.x (compat-signal
     // policy), so this must be bumped in lockstep with every release.
-    pattern: /(^version\s*=\s*")([^"]*)(")/gm,
+    project: true,
   },
 ];
 
@@ -227,6 +231,12 @@ function matchesIn(src, pattern) {
 function readDeclared(file) {
   const abs = join(REPO_ROOT, file.path);
   const src = readFileSync(abs, "utf8");
+  if (file.project) {
+    const version = projectVersionFromPyproject(src);
+    return version === null
+      ? { ok: false, reason: `no [project].version declaration in ${file.path}` }
+      : { ok: true, version };
+  }
   const m = matchesIn(src, file.pattern);
   if (m.length === 0) {
     return { ok: false, reason: `no ${file.label} declaration matched in ${file.path}` };
@@ -244,6 +254,16 @@ function write(version) {
   for (const file of SOURCE_VERSION_FILES) {
     const abs = join(REPO_ROOT, file.path);
     const src = readFileSync(abs, "utf8");
+    if (file.project) {
+      const next = replaceProjectVersion(src, version);
+      if (next === null) {
+        console.error(`❌ ${file.path}: no [project].version declaration to rewrite.`);
+        process.exit(1);
+      }
+      writeFileSync(abs, next);
+      console.log(`  ✓ ${file.path} ${file.label} → ${version}`);
+      continue;
+    }
     const n = matchesIn(src, file.pattern).length;
     if (n !== 1) {
       console.error(

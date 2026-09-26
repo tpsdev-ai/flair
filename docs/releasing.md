@@ -90,6 +90,41 @@ git checkout main && git pull
 git tag v0.11.0 && git push origin v0.11.0
 ```
 
+> The [`release-auto-tag`](../.github/workflows/release-auto-tag.yml) workflow
+> normally pushes this tag for you once a release PR merges green (see
+> [#1928](https://github.com/tpsdev-ai/flair/issues/1928)); the hand-push above is
+> the manual fallback. When the release commit's tree carries
+> `packages/adk-flair/pyproject.toml` whose `[project].version` equals the version
+> being tagged, the auto-tagger ALSO creates `adk-flair-v<version>` from the same
+> commit — so the PyPI publish run then needs only the environment gate its owner
+> keeps or drops (no hand-pushed `adk-flair-v` tag).
+>
+> The project version is read by a WHITELIST: a bare, unquoted `version = "<x>"`
+> line inside `[project]` — never the first `version =` in the file. Any `[table]`
+> or `[[array-of-tables]]` header ends `[project]`, and a
+> `dynamic = [ … "version" … ]` means the project version is NONE. A tree whose
+> `[project].version` differs (or is dynamic/absent) refuses `adk-version-mismatch`
+> before either tag is written; a form the reader does not implement (a quoted or
+> dotted key, an inline `project` table, an odd `version` line) refuses
+> `adk-pyproject-unsupported` naming the line — never a guess; an
+> `adk-flair-v<version>` already at another commit refuses
+> `adk-tag-exists-elsewhere` before the `v` tag is written; and a second POST
+> rejected for lack of permission refuses `adk-ref-write-rejected` with the `v` tag
+> left in place. (`test/unit/release-auto-tag.test.ts` (a)–(m).)
+>
+> Re-run states (`decide`): with the `v` tag already at `<sha>` and the adk tag
+> absent, the run is a TAG with the `v` step marked SKIP; with BOTH tags at `<sha>`
+> it is a SKIP, so no write job starts on later runs ((n)/(o)). If the adk POST
+> instead read back ELSEWHERE, the refusal says the ref now points at the other sha
+> and a human must move or delete it before a re-run can complete (the next run
+> refuses `adk-tag-exists-elsewhere`) ((i)); the refusal issue prints a line per ref
+> so it never claims nothing was tagged when the `v` ref exists. Ordered read-backs
+> — each ref's read-back FOLLOWS its POST — are asserted ((a)). The App must be
+> listed as a bypass actor on the `adk-flair-v*` tag ruleset (id 24044018) for that
+> second POST to be allowed. Each guarantee names its test:
+> `test/unit/release-auto-tag.test.ts` ((a)–(o)) and
+> `test/unit/release-auto-tag-workflow.test.ts`.
+
 The tag push triggers the [`release-publish`](../.github/workflows/release-publish.yml)
 workflow, which:
 
