@@ -214,10 +214,13 @@ describe("anchored seed (descendant predicate) + fail-closed base (flair#1825 ro
     return git(dir, ["rev-parse", "HEAD"]).trim();
   }
 
-  it("the anchor IS the PR's real merge-base of origin/main and this branch", () => {
+  it("the anchor is on origin/main's history and this branch descends from it", () => {
+    // Robust to main moving: the anchor must be an ancestor of BOTH origin/main
+    // and HEAD (execFileSync throws on a non-zero exit).
     const root = join(import.meta.dirname, "..", "..");
-    const sha = execFileSync("git", ["merge-base", "origin/main", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
-    expect(SEED_INTRODUCTION_BASE).toBe(sha);
+    for (const target of ["origin/main", "HEAD"]) {
+      execFileSync("git", ["merge-base", "--is-ancestor", SEED_INTRODUCTION_BASE, target], { cwd: root, encoding: "utf8" });
+    }
   });
 
   it("item 1a: base DESCENDS from the anchor with no file → PASS (the CI case)", () => {

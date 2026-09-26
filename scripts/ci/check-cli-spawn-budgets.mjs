@@ -593,7 +593,10 @@ export function findSpawnCalls(source) {
   // of the waits inside it (flair#1825).
   for (const call of calls) {
     const m = call.text.match(/(?:^|[^\w$.])timeout\s*[:=]\s*([0-9][0-9_]*)/);
-    call.timeoutMs = m ? Number(m[1].replace(/_/g, "")) : null;
+    const n = m ? Number(m[1].replace(/_/g, "")) : NaN;
+    // ONLY a positive finite value is a deadline: `timeout: 0` (node and Bun)
+    // means NO timeout, so it is unbounded (flair#1825).
+    call.timeoutMs = Number.isFinite(n) && n > 0 ? n : null;
     call.hasTimeout = call.timeoutMs !== null;
   }
   return { calls, ids };
