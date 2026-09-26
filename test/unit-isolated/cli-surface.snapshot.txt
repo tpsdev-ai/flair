@@ -810,7 +810,7 @@ flair federation pair
       description: Harper HTTP port
       attr: port
     --admin-pass-file <path>
-      description: Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. Preferred source: file > FLAIR_ADMIN_PASS > --admin-pass; combining it with --admin-pass is a usage error.
+      description: Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
       attr: adminPassFile
     --admin-pass <pass>
       description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
@@ -842,7 +842,7 @@ flair federation token
       description: Harper HTTP port
       attr: port
     --admin-pass-file <path>
-      description: Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. Preferred source: file > FLAIR_ADMIN_PASS > --admin-pass; combining it with --admin-pass is a usage error.
+      description: Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
       attr: adminPassFile
     --admin-pass <pass>
       description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
@@ -3412,9 +3412,9 @@ Options:
   --port <port>             Harper HTTP port
   --admin-pass-file <path>  Read the admin password from an owner-only file
                             (mode 0600 enforced), keeping it out of shell
-                            history and the process list. Preferred source: file
-                            > FLAIR_ADMIN_PASS > --admin-pass; combining it with
-                            --admin-pass is a usage error.
+                            history and the process list. An explicit option
+                            (this or --admin-pass) overrides FLAIR_ADMIN_PASS;
+                            combining it with --admin-pass is a usage error.
   --admin-pass <pass>       Admin password (legacy: lands in shell history and
                             the process list — prefer --admin-pass-file or
                             FLAIR_ADMIN_PASS)
@@ -3442,9 +3442,9 @@ Options:
   --port <port>             Harper HTTP port
   --admin-pass-file <path>  Read the admin password from an owner-only file
                             (mode 0600 enforced), keeping it out of shell
-                            history and the process list. Preferred source: file
-                            > FLAIR_ADMIN_PASS > --admin-pass; combining it with
-                            --admin-pass is a usage error.
+                            history and the process list. An explicit option
+                            (this or --admin-pass) overrides FLAIR_ADMIN_PASS;
+                            combining it with --admin-pass is a usage error.
   --admin-pass <pass>       Admin password (legacy: lands in shell history and
                             the process list — prefer --admin-pass-file or
                             FLAIR_ADMIN_PASS)

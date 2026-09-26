@@ -6,9 +6,9 @@
  * (`readAdminPassFileSecure`), so a group- or world-readable file is refused
  * with a message naming the path and the mode.
  *
- * Precedence, as the usage text states: `--admin-pass-file` >
- * `FLAIR_ADMIN_PASS` > `--admin-pass`; giving both the file and the flag is a
- * usage error. Each test drives the real CLI against a stand-in hub/ops server
+ * Precedence, as the usage text states: an explicit `--admin-pass-file` or
+ * `--admin-pass` overrides `FLAIR_ADMIN_PASS`; giving both the file and the flag
+ * is a usage error. Each test drives the real CLI against a stand-in hub/ops server
  * that records the Basic credential it was sent, so "authenticates" means the
  * credential actually left the process, not that a branch was taken.
  */
@@ -23,6 +23,7 @@ const cliPath = join(import.meta.dirname, "..", "..", "src", "cli.ts");
 /** Distinctive values so a leak into stdout/stderr is unmistakable. */
 const FILE_PASS = "file-secret-federation-1873";
 const INLINE_PASS = "inline-secret-federation-1873";
+const ENV_PASS = "env-secret-federation-1873";
 const OPS_BASED = () => `http://127.0.0.1:${server.port}`;
 const basic = (pass: string) => `Basic ${Buffer.from(`admin:${pass}`).toString("base64")}`;
 
@@ -82,7 +83,10 @@ function opsAuths(): string[] {
   return requests.filter((r) => r.path === "/" && r.operation !== undefined).map((r) => r.auth);
 }
 
-async function runCli(args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+async function runCli(
+  args: string[],
+  extraEnv: Record<string, string> = {},
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const env: Record<string, string> = { ...process.env } as Record<string, string>;
   for (const key of [
     "FLAIR_ADMIN_PASS",
@@ -97,6 +101,7 @@ async function runCli(args: string[]): Promise<{ stdout: string; stderr: string;
     delete env[key];
   }
   env.HOME = dir;
+  Object.assign(env, extraEnv);
   const proc = Bun.spawn(["bun", cliPath, ...args], { env, stdout: "pipe", stderr: "pipe" });
   const stdout = await new Response(proc.stdout).text();
   const stderr = await new Response(proc.stderr).text();
@@ -166,6 +171,42 @@ describe("federation token — --admin-pass-file (flair#1873)", () => {
     const auths = opsAuths();
     expect(auths.length).toBeGreaterThan(0);
     for (const auth of auths) expect(auth).toBe(basic(INLINE_PASS));
+  });
+
+  test("an explicit --admin-pass overrides FLAIR_ADMIN_PASS (explicit beats ambient)", async () => {
+    const { stdout, stderr, exitCode } = await runCli(tokenArgs(["--admin-pass", INLINE_PASS]), {
+      FLAIR_ADMIN_PASS: ENV_PASS,
+    });
+    expect(stderr).not.toContain(INLINE_PASS);
+    expect(stderr).not.toContain(ENV_PASS);
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout).token).toBeString();
+    const auths = opsAuths();
+    expect(auths.length).toBeGreaterThan(0);
+    for (const auth of auths) expect(auth).toBe(basic(INLINE_PASS));
+  });
+
+  test("--admin-pass-file overrides FLAIR_ADMIN_PASS", async () => {
+    const { stdout, stderr, exitCode } = await runCli(tokenArgs(["--admin-pass-file", passFile(0o600)]), {
+      FLAIR_ADMIN_PASS: ENV_PASS,
+    });
+    expect(stderr).not.toContain(FILE_PASS);
+    expect(stderr).not.toContain(ENV_PASS);
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout).token).toBeString();
+    const auths = opsAuths();
+    expect(auths.length).toBeGreaterThan(0);
+    for (const auth of auths) expect(auth).toBe(basic(FILE_PASS));
+  });
+
+  test("FLAIR_ADMIN_PASS alone still authenticates", async () => {
+    const { stdout, stderr, exitCode } = await runCli(tokenArgs([]), { FLAIR_ADMIN_PASS: ENV_PASS });
+    expect(stderr).not.toContain(ENV_PASS);
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout).token).toBeString();
+    const auths = opsAuths();
+    expect(auths.length).toBeGreaterThan(0);
+    for (const auth of auths) expect(auth).toBe(basic(ENV_PASS));
   });
 
   test("--help prefers the file form and warns that --admin-pass leaks", async () => {

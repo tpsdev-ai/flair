@@ -91,15 +91,15 @@ function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }
 const ADMIN_PASS_FILE_FLAG = "--admin-pass-file <path>";
 const ADMIN_PASS_FILE_HELP =
   "Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. " +
-  "Preferred source: file > FLAIR_ADMIN_PASS > --admin-pass; combining it with --admin-pass is a usage error.";
+  "An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.";
 const ADMIN_PASS_HELP =
   "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)";
 
 /**
  * Resolve `federation token`/`pair`'s admin password through the SAME reader
  * `flair backup` uses (`readAdminPassFileSecure`), with the precedence the
- * usage text states: `--admin-pass-file` > env > `--admin-pass`; combining the
- * file and the flag is a usage error. The resolved value is written back to
+ * usage text states: an explicit `--admin-pass-file` or `--admin-pass` over
+ * `FLAIR_ADMIN_PASS`; combining the file and the flag is a usage error. The resolved value is written back to
  * `opts.adminPass`, the slot the ops preflight and `loadInstanceSecretKey`
  * read — mirroring `applyAdminPassFile` for the sibling commands. Never prints
  * the value.
@@ -1649,7 +1649,8 @@ export function register(program: Command): void {
 
         const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
         // flair#1873: read --admin-pass-file in-process (mode 0600 enforced);
-        // file > FLAIR_ADMIN_PASS > --admin-pass, and file+flag is a usage error.
+        // an explicit --admin-pass-file or --admin-pass overrides FLAIR_ADMIN_PASS,
+        // and file+flag is a usage error.
         const adminPass = resolveFederationAdminPass(opts, process.env.FLAIR_ADMIN_PASS);
         const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
 

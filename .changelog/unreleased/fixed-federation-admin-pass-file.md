@@ -3,7 +3,8 @@
   Both commands now take `--admin-pass-file <path>`, read in-process through the
   same reader `flair backup` uses: the file must be owner-only (mode 0600), and a
   group- or world-readable file is refused with a message naming the path and the
-  mode. Precedence is `--admin-pass-file` > `FLAIR_ADMIN_PASS` > `--admin-pass`;
+  mode. An explicit `--admin-pass-file` or `--admin-pass` overrides
+  `FLAIR_ADMIN_PASS` (explicit beats ambient, as for every other `--admin-pass`);
   combining the file and the flag is a usage error. `--admin-pass` still works,
   but the `--help` text warns that it lands in shell history and the process
   list. The federation docs now show the file form in every token-minting and

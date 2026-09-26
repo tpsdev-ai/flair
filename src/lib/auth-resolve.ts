@@ -149,11 +149,13 @@ export class AdminPassSourceError extends Error {}
 
 /**
  * Resolve an admin password from the credential sources a command exposes, in
- * the precedence its usage text states: `--admin-pass-file` first, then
- * `FLAIR_ADMIN_PASS`/`HDB_ADMIN_PASSWORD`, then `--admin-pass` (the form the
- * help warns against). Supplying BOTH `--admin-pass-file` and `--admin-pass` is
- * refused: two sources at once is ambiguous, and one of them is the discouraged
- * argv form. The file is read through `readAdminPassFileSecure` — the same
+ * the precedence its usage text states: an explicit option — `--admin-pass-file`
+ * or `--admin-pass` (the form the help warns against) — over the ambient
+ * `FLAIR_ADMIN_PASS`/`HDB_ADMIN_PASSWORD`. Explicit beats ambient, the same rule
+ * `resolveLocalAdminPass` applies to `--admin-pass`, so a value the operator
+ * typed is never silently replaced by one the shell happened to carry.
+ * Supplying BOTH `--admin-pass-file` and `--admin-pass` is refused: two explicit
+ * sources at once is ambiguous, and one of them is the discouraged argv form. The file is read through `readAdminPassFileSecure` — the same
  * reader `flair backup` uses — so a group- or world-readable file is refused
  * with a message naming the path and its mode.
  *
@@ -175,8 +177,8 @@ export function resolveAdminPassFromSources(input: {
     );
   }
   if (adminPassFile) return readAdminPassFileSecure(adminPassFile);
-  if (envPass) return envPass;
-  return adminPass ?? "";
+  if (adminPass) return adminPass;
+  return envPass ?? "";
 }
 
 export function defaultAdminPassPath(): string {
