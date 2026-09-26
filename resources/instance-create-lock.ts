@@ -8,40 +8,54 @@
 // does not serialise two GETs on two workers — both read `none`, both mint. On
 // Linux Harper runs at least two workers by default (configValidator: threads
 // count = cpus-1, floor 2), and Flair never writes that key. So the lock is a
-// Flair-owned FILESYSTEM TICKET LOCK, cross-worker AND cross-process, under the
+// Flair-owned FILESYSTEM BAKERY LOCK, cross-worker AND cross-process, under the
 // same Flair home the keystore already relies on.
 //
-// WHAT IT COVERS. `findOrCreateInstance` holds the ticket across: the read that
+// WHAT IT COVERS. `findOrCreateInstance` holds the lock across: the read that
 // found no row, the mint, the `put`, the keystore seed write, and a confirming
 // re-read. A GET that already found a row never takes the lock, so reads stay
 // concurrent.
 //
-// TICKET PROTOCOL (Harper's own componentPreparationLock.ts is the reference for
-// the pitfalls — not imported, it is not a package export):
-//   - Each contender creates ONE claim file with the `wx` flag (O_EXCL):
-//     `${zero-padded stamp}-${pid}-${threadId}-${token}.json`, content {pid,
-//     threadId, token, createdAt}.
-//   - The HOLDER is the lexicographically smallest claim whose owner pid is
-//     alive (`process.kill(pid, 0)`; ESRCH = dead, EPERM = alive). Ordering only
-//     has to be TOTAL and agreed among LIVE claims, so clock skew between workers
-//     cannot break correctness — a claim that sorts early but is dead is deleted,
-//     not honoured. The stamp is monotonic WITHIN a realm, and a claim must stay
-//     the smallest LIVE one for LOCK_STABLE_MS before it holds, so two claims
-//     stamped in the same millisecond (one per worker) can never BOTH hold.
-//   - A claim whose pid is dead may be deleted by anyone — that specific file
-//     only. Never the directory, never a live claim, never a reclaim-by-age.
-//   - A wait DEADLINE (10 s) → delete YOUR OWN claim and REFUSE. Never steal a
-//     live lock: a slow/paused holder outliving a lease is exactly how two
-//     writers happen.
+// TICKET PROTOCOL — LAMPORT'S BAKERY ON FILES (Harper's own
+// componentPreparationLock.ts is the reference for the pitfalls — not imported,
+// it is not a package export). No timing assumption: only atomic `wx` create,
+// atomic rename within one directory, and live-pid detection (`process.kill(pid,
+// 0)`; ESRCH = dead, EPERM = alive).
+//   - CHOOSE: write the claim JSON to `tmp-<token>.json` (never listed), then
+//     `rename` it to `choosing-<pid>-<threadId>-<token>.json`. A visible claim is
+//     therefore ALWAYS complete — `writeFileSync` exposing a half-written file is
+//     closed off. Any visible claim that still fails to parse is treated as a LIVE
+//     BLOCKER (wait), never skipped; if that persists to the deadline the refusal
+//     names the file.
+//   - TICKET: list the directory; ticket = 1 + max(ticket of every visible
+//     `ticket-…` claim, dead or alive; 0 if none). Atomically rename `choosing-…`
+//     -> `ticket-<zero-padded ticket>-<pid>-<threadId>-<token>.json`.
+//   - WAIT: poll (LOCK_WAIT_POLL_MS); list; unlink `ticket-…` and `choosing-…`
+//     claims whose pid is dead (that file only); if ANY live `choosing-…` claim
+//     exists -> keep waiting; else the holder is the live `ticket-…` claim with
+//     the smallest (ticket, name); if it is mine -> HOLD; else wait. Deadline ->
+//     unlink my own claim(s) and REFUSE with the truth (the holder claim, or
+//     "a contender is still choosing: <file>").
+//   - CORRECTNESS. My ticket is chosen only AFTER my choosing marker is visible.
+//     Any contender that has already decided either saw my marker (and waits), or
+//     its ticket was visible when I chose — and then mine is strictly larger.
+//     Concurrent choosers see each other's markers, both wait, and the tie on
+//     equal tickets is broken by name. A crash between CHOOSE and TICKET leaves a
+//     dead-pid choosing claim that others unlink.
+//   - FAILURE MODE (fail closed). A dead WORKER THREAD inside a live process (or
+//     a reused pid / EPERM) leaves a claim that blocks every contender until the
+//     deadline -> refusals until the process restarts. `createdAt` stays
+//     informational; process-start identity is a possible later refinement, not
+//     this PR.
 //   - Release = unlink your own claim in `finally`.
-//   - The lock dir being unwritable (EACCES/ENOENT-on-create) → REFUSE identity
+//   - The lock dir being unwritable (EACCES/ENOENT-on-create) -> REFUSE identity
 //     creation; never fall back to an in-process chain, never mint unlocked.
 //
 // SCOPE: this serialises the GET create path across the workers and processes
 // that share one Flair home. `flair init --remote` (src/cli.ts) does not take the
 // lock yet — the CLI writer must join it in slice 2.
 
-import { readFileSync, readdirSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, mkdirSync, unlinkSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { threadId } from "node:worker_threads";
@@ -50,15 +64,12 @@ import { decideInstanceAnswer, type InstanceIdentityRow } from "../src/lib/insta
 
 export const LOCK_DEADLINE_MS = 10_000;
 export const LOCK_WAIT_POLL_MS = 25;
-/**
- * A contender must remain the smallest LIVE claim for this long before it holds.
- * Names sort by a millisecond stamp, and two realms (Harper HTTP workers) or two
- * processes can stamp the SAME millisecond; without this grace the later claim's
- * random token could sort it FIRST, so an earlier contender that already held
- * would not stand down — both mint. Requiring the smallest claim to be stable for
- * a full poll interval lets a lagging sibling become visible before any put.
- */
-export const LOCK_STABLE_MS = 60;
+
+/** TEST-ONLY hooks, awaited at the choosing/ticket points. Never set in production. */
+export interface LockHooks {
+  afterChoosing?: () => Promise<void> | void;
+  afterTicket?: () => Promise<void> | void;
+}
 
 /** The keystore-write failure note (flair#1233) — a read path must not abort. */
 export const KEYSTORE_FAILURE_NOTE =
@@ -90,41 +101,47 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
+const CHOOSING_RE = /^choosing-(\d+)-(\d+)-[0-9a-f]+\.json$/;
+const TICKET_RE = /^ticket-(\d+)-(\d+)-(\d+)-[0-9a-f]+\.json$/;
+
 interface Claim {
   name: string;
+  kind: "choosing" | "ticket";
   pid: number;
+  ticket: number | null;
 }
 
-// Monotonic WITHIN a realm: two claims stamped in the same millisecond (the
-// common case for concurrent requests in one worker) must still sort by creation
-// order, so the later contender never sorts first. Sibling realms/processes are
-// covered by LOCK_STABLE_MS.
-let lastStamp = 0;
-function nextStamp(): number {
-  const now = Date.now();
-  lastStamp = now > lastStamp ? now : lastStamp + 1;
-  return lastStamp;
-}
-
-/** Live claims in the dir; DEAD claims are unlinked (that file only). */
-export function listLiveClaims(dir: string): Claim[] {
-  const out: Claim[] = [];
+/**
+ * Split the lock dir into: live claims, and BLOCKERS — recognised claim files
+ * that cannot be parsed (a live contender mid-write under a hostile filesystem,
+ * or a corrupt file). DEAD claims are unlinked (that file only). Unknown file
+ * names are ignored (they are not claims).
+ */
+export function listClaims(dir: string): { claims: Claim[]; blockers: string[] } {
+  const claims: Claim[] = [];
+  const blockers: string[] = [];
   let names: string[] = [];
   try {
     names = readdirSync(dir);
   } catch {
-    return out;
+    return { claims, blockers };
   }
   for (const name of names) {
-    if (!name.endsWith(".json")) continue;
-    let pid = NaN;
+    const choosing = CHOOSING_RE.exec(name);
+    const ticket = TICKET_RE.exec(name);
+    if (!choosing && !ticket) continue; // tmp-… and foreign files are not claims
+    let parsed: any;
     try {
-      pid = Number(JSON.parse(readFileSync(join(dir, name), "utf8"))?.pid);
+      parsed = JSON.parse(readFileSync(join(dir, name), "utf8"));
     } catch {
+      // A visible claim that cannot be read is a LIVE BLOCKER — never skipped.
+      blockers.push(name);
       continue;
     }
-    if (pidAlive(pid)) out.push({ name, pid });
-    else {
+    const pid = Number(parsed?.pid);
+    if (pidAlive(pid)) {
+      claims.push({ name, kind: choosing ? "choosing" : "ticket", pid, ticket: ticket ? Number(ticket[1]) : null });
+    } else {
       try {
         unlinkSync(join(dir, name));
       } catch {
@@ -132,17 +149,35 @@ export function listLiveClaims(dir: string): Claim[] {
       }
     }
   }
-  return out;
+  return { claims, blockers };
+}
+
+/** ticket = 1 + max(ticket of every visible ticket-… claim, dead or alive; 0 if none). */
+export function nextTicket(dir: string): number {
+  let max = 0;
+  let names: string[] = [];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return 1;
+  }
+  for (const name of names) {
+    const m = TICKET_RE.exec(name);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return max + 1;
 }
 
 export type LockAcquire = { ok: true; release: () => void } | { ok: false; detail: string };
 
 /**
- * Create a claim and wait until it is the holder. Returns a release fn, or a
- * refusal detail (deadline, or an unusable lock dir). Cross-worker/cross-process.
+ * Take the bakery lock: CHOOSE (write+rename a `choosing` marker), TICKET
+ * (rename to a `ticket` claim), then WAIT until mine is the smallest live ticket.
+ * Returns a release fn, or a refusal detail (deadline, or an unusable lock dir).
+ * Cross-worker and cross-process.
  */
 export async function acquireInstanceCreateLock(
-  opts: { home?: string; deadlineMs?: number; log?: (message: string) => void } = {},
+  opts: { home?: string; deadlineMs?: number; log?: (message: string) => void; hooks?: LockHooks } = {},
 ): Promise<LockAcquire> {
   const dir = instanceCreateLockDir(opts.home);
   const log = opts.log ?? ((m) => console.error(m));
@@ -152,42 +187,79 @@ export async function acquireInstanceCreateLock(
     return { ok: false, detail: `the identity-create lock dir is unusable (${dir}): ${err?.message ?? err}. ${LOCK_DIR_REMEDY}` };
   }
 
-  const name = `${String(nextStamp()).padStart(15, "0")}-${process.pid}-${threadId}-${randomBytes(8).toString("hex")}.json`;
-  const file = join(dir, name);
+  const pid = process.pid;
+  const tid = threadId;
+  const token = randomBytes(8).toString("hex");
+  const tmpFile = join(dir, `tmp-${token}.json`);
+  const choosingFile = join(dir, `choosing-${pid}-${tid}-${token}.json`);
+  const payload = JSON.stringify({ pid, threadId: tid, token, createdAt: new Date().toISOString() });
+
+  // CHOOSE: a visible claim is written complete (tmp then atomic rename).
   try {
-    writeFileSync(file, JSON.stringify({ pid: process.pid, threadId, token: name.slice(-16), createdAt: new Date().toISOString() }), { flag: "wx" });
+    writeFileSync(tmpFile, payload, { flag: "wx", mode: 0o600 });
+    renameSync(tmpFile, choosingFile);
   } catch (err: any) {
-    return { ok: false, detail: `could not create the identity-create claim (${file}): ${err?.message ?? err}. ${LOCK_DIR_REMEDY}` };
+    try {
+      unlinkSync(tmpFile);
+    } catch {
+      /* nothing to clean */
+    }
+    return { ok: false, detail: `could not create the identity-create claim (${choosingFile}): ${err?.message ?? err}. ${LOCK_DIR_REMEDY}` };
   }
+  await opts.hooks?.afterChoosing?.();
+
+  // TICKET: 1 + the max ticket any visible ticket claim carries.
+  const ticket = nextTicket(dir);
+  const ticketName = `ticket-${String(ticket).padStart(12, "0")}-${pid}-${tid}-${token}.json`;
+  const ticketFile = join(dir, ticketName);
+  try {
+    renameSync(choosingFile, ticketFile);
+  } catch (err: any) {
+    try {
+      unlinkSync(choosingFile);
+    } catch {
+      /* nothing to clean */
+    }
+    return { ok: false, detail: `could not create the identity-create ticket (${ticketFile}): ${err?.message ?? err}. ${LOCK_DIR_REMEDY}` };
+  }
+  await opts.hooks?.afterTicket?.();
 
   const release = (): void => {
-    try {
-      unlinkSync(file);
-    } catch (err: any) {
-      log(
-        `[federation] identity-create lock: could not unlink ${file} on release (${err?.message ?? err}). ` +
-          `That claim's pid stays alive, so later identity creation refuses until this process exits.`,
-      );
+    for (const f of [ticketFile, choosingFile]) {
+      try {
+        unlinkSync(f);
+      } catch (err: any) {
+        if (err?.code !== "ENOENT") {
+          log(
+            `[federation] identity-create lock: could not unlink ${f} on release (${err?.message ?? err}). ` +
+              `That claim's pid stays alive, so later identity creation refuses until this process exits.`,
+          );
+        }
+      }
     }
   };
 
   const deadline = Date.now() + (opts.deadlineMs ?? LOCK_DEADLINE_MS);
-  let smallestSince: number | null = null;
   for (;;) {
-    const live = listLiveClaims(dir).sort((a, b) => a.name.localeCompare(b.name));
-    const holder = live[0];
-    if (holder && holder.name === name) {
-      // The smallest LIVE claim — but hold only once it has stayed smallest for
-      // LOCK_STABLE_MS, so a sibling stamped in the same millisecond (that may
-      // sort first once its file lands) is seen before either contender puts.
-      smallestSince ??= Date.now();
-      if (Date.now() - smallestSince >= LOCK_STABLE_MS) return { ok: true, release };
-    } else {
-      smallestSince = null;
+    const { claims, blockers } = listClaims(dir);
+    const liveChoosing = claims.filter((c) => c.kind === "choosing");
+    const liveTickets = claims
+      .filter((c) => c.kind === "ticket")
+      .sort((a, b) => (a.ticket! - b.ticket!) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+
+    if (blockers.length === 0 && liveChoosing.length === 0 && liveTickets[0]?.name === ticketName) {
+      return { ok: true, release };
     }
     if (Date.now() >= deadline) {
       release();
-      const held = holder ? `holder claim ${holder.name}, pid ${holder.pid}` : "no live holder claim";
+      const held =
+        blockers.length > 0
+          ? `a contender is still choosing: ${blockers[0]}`
+          : liveChoosing.length > 0
+            ? `a contender is still choosing: ${liveChoosing[0].name}`
+            : liveTickets.length > 0
+              ? `holder claim ${liveTickets[0].name}, pid ${liveTickets[0].pid}`
+              : "no live holder claim";
       return {
         ok: false,
         detail:
@@ -216,6 +288,8 @@ export interface CreateDeps {
   lockDeadlineMs?: number;
   now?: () => string;
   log?: (message: string) => void;
+  /** TEST-ONLY: awaited at the lock's choosing/ticket points. */
+  hooks?: LockHooks;
 }
 
 export type CreateOutcome =
@@ -228,14 +302,14 @@ export type CreateOutcome =
 
 /**
  * Find the instance identity, minting one only when a read UNDER the ticket lock
- * found no row. The lock is a filesystem ticket shared by every HTTP worker of
+ * found no row. The lock is a filesystem bakery shared by every HTTP worker of
  * this Harper process AND every process sharing this Flair home (flair#1897), so
  * concurrent first-boot GETs mint ONE row and every caller is answered it.
  */
 export async function findOrCreateInstance(deps: CreateDeps): Promise<CreateOutcome> {
   const log = deps.log ?? ((m) => console.error(m));
   const now = deps.now ?? (() => new Date().toISOString());
-  const lock = await acquireInstanceCreateLock({ home: deps.home, deadlineMs: deps.lockDeadlineMs, log });
+  const lock = await acquireInstanceCreateLock({ home: deps.home, deadlineMs: deps.lockDeadlineMs, log, hooks: deps.hooks });
   if (!lock.ok) return { kind: "refuse-lock", detail: lock.detail };
   try {
     const rows = await deps.readAll();
@@ -276,8 +350,9 @@ export async function findOrCreateInstance(deps: CreateDeps): Promise<CreateOutc
       return { kind: "refuse-unobservable", mintedId: id };
     }
     if (confirmed.row.id !== id) {
-      // A row written outside this lock. Practically unreachable now that the put
-      // commits under the lock — a cheap safety net, not an outside-writer claim.
+      // A row written outside this lock. Practically unreachable now that the
+      // put commits under the lock — a cheap safety net, not an outside-writer
+      // claim.
       return {
         kind: "row",
         row: confirmed.row,

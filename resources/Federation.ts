@@ -302,10 +302,12 @@ export class FederationInstance extends Resource {
 
     if (decision.kind === "none") {
       // First boot: the read OUTSIDE the lock found no row. The create runs in the
-      // in-process critical section (flair#1897): a read taken UNDER the lock, the
-      // mint, the put, the keystore seed and a confirming re-read — so two
-      // concurrent first-boot GETs mint ONE row and both are answered with it. A
-      // GET that found a row above never reaches here, so reads stay concurrent.
+      // filesystem bakery critical section (flair#1897) — shared by EVERY HTTP
+      // worker of this process AND every process on this Flair home: a read taken
+      // UNDER the lock, the mint, the put, the keystore seed and a confirming
+      // re-read — so two concurrent first-boot GETs mint ONE row and both are
+      // answered with it. A GET that found a row above never reaches here, so
+      // reads stay concurrent.
       const outcome = await findOrCreateInstance({
         // Detach the request's transaction for EVERY read inside the lock: the
         // outer read above opened the request's transaction BEFORE this create, so

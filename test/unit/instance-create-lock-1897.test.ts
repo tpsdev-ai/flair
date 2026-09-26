@@ -112,8 +112,8 @@ describe("filesystem ticket create lock (flair#1897)", () => {
   it("a claim naming a DEAD pid is discarded and the next contender proceeds", async () => {
     const dir = instanceCreateLockDir(home);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    // A claim whose pid is very unlikely to exist, sorting BEFORE any new claim.
-    writeFileSync(join(dir, "000000000000000-999999-0-dead.json"), JSON.stringify({ pid: 999999, threadId: 0 }), "utf8");
+    // A claim whose pid is very unlikely to exist, with the SMALLEST ticket.
+    writeFileSync(join(dir, "ticket-000000000001-999999-0-dead.json"), JSON.stringify({ pid: 999999, threadId: 0 }), "utf8");
     const t = fakeTable();
     const out = await findOrCreateInstance(t.deps({ lockDeadlineMs: 300 }));
     expect(out.kind).toBe("row");
@@ -123,8 +123,8 @@ describe("filesystem ticket create lock (flair#1897)", () => {
   it("a LIVE foreign claim makes the waiter wait, and the deadline REFUSES naming it", async () => {
     const dir = instanceCreateLockDir(home);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    // A live claim (our own pid) sorting before any new claim; never released.
-    const foreign = "000000000000000-" + String(process.pid) + "-0-foreign.json";
+    // A live claim (our own pid) with the smallest ticket; never released.
+    const foreign = "ticket-000000000001-" + String(process.pid) + "-0-ffffff.json";
     writeFileSync(join(dir, foreign), JSON.stringify({ pid: process.pid, threadId: 0 }), "utf8");
     const t = fakeTable();
     const out = await findOrCreateInstance(t.deps({ lockDeadlineMs: 250 }));
