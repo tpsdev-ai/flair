@@ -187,7 +187,11 @@ describe("wiring — pair identity GET uses the named rewriter", () => {
     expect(hubPostIdx).toBeGreaterThan(secretKeyIdx);
     expect(pairSrc.split("rewriteFederationPairLocalAccessError").length - 1).toBe(1);
     expect(pairSrc).toContain("identityUrl");
-    expect(pairSrc).toContain("{ baseUrl: identityUrl }");
+    // The GET is pinned to identityUrl. flair#1873 rides the resolved admin
+    // credential along with it, so the object is no longer the single-field
+    // literal this line used to assert verbatim.
+    expect(pairSrc).toContain("baseUrl: identityUrl");
+    expect(pairSrc).toContain("explicitAdminPass: opts.adminPass");
     expect(pairSrc).toContain("url: redactUrl(identityUrl)");
   });
 });

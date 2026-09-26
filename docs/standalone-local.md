@@ -221,10 +221,10 @@ Available. Pair a local instance as a hub or spoke with another Flair instance:
 
 ```bash
 # On the hub — generate a one-time pairing token triple
-(umask 077; set -C; FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation token > triple.json)
+(umask 077; set -C; flair federation token --admin-pass-file ~/.flair/admin-pass > triple.json)
 
 # On the spoke — its own admin password writes the local Peer row
-FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation pair <hub-url> --token-from ./triple.json
+flair federation pair <hub-url> --admin-pass-file ~/.flair/admin-pass --token-from ./triple.json
 
 # Sync (one-shot)
 flair federation sync --admin-pass-file ~/.flair/admin-pass

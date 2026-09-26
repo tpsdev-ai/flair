@@ -27,6 +27,7 @@ import {
 import {
   defaultAdminPassPath,
   isLocalBase,
+  resolveAdminPassFromSources,
   resolveAdminUser,
 } from "../lib/auth-resolve.js";
 import { DEFAULT_INTERVAL_SECONDS as FEDERATION_SYNC_DEFAULT_INTERVAL } from "../federation/scheduler.js";
@@ -84,6 +85,41 @@ function resolveOpsPort(opts: { opsPort?: string | number; port?: string | numbe
 }
 function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }): void {
   cli.applyAdminPassFile(opts);
+}
+
+/** `federation token` / `federation pair` credential flags (flair#1873). */
+const ADMIN_PASS_FILE_FLAG = "--admin-pass-file <path>";
+const ADMIN_PASS_FILE_HELP =
+  "Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. " +
+  "An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.";
+const ADMIN_PASS_HELP =
+  "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)";
+
+/**
+ * Resolve `federation token`/`pair`'s admin password through the SAME reader
+ * `flair backup` uses (`readAdminPassFileSecure`), with the precedence the
+ * usage text states: an explicit `--admin-pass-file` or `--admin-pass` over
+ * `FLAIR_ADMIN_PASS`; combining the file and the flag is a usage error. The resolved value is written back to
+ * `opts.adminPass`, the slot the ops preflight and `loadInstanceSecretKey`
+ * read — mirroring `applyAdminPassFile` for the sibling commands. Never prints
+ * the value.
+ */
+function resolveFederationAdminPass(
+  opts: { adminPass?: string; adminPassFile?: string },
+  envPass: string | undefined,
+): string {
+  try {
+    const pass = resolveAdminPassFromSources({
+      adminPassFile: opts.adminPassFile,
+      adminPass: opts.adminPass,
+      envPass,
+    });
+    if (pass) opts.adminPass = pass;
+    return pass;
+  } catch (err: any) {
+    console.error(`Error: ${err.message}`);
+    process.exit(1);
+  }
 }
 function addSharedCredentialOptions(cmd: Command): Command {
   return cli.addSharedCredentialOptions(cmd);
@@ -1319,7 +1355,8 @@ export function register(program: Command): void {
     .command("pair <hub-url>")
     .description("Pair this spoke with a hub instance")
     .option("--port <port>", "Harper HTTP port")
-    .option("--admin-pass <pass>", "Admin password")
+    .option(ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP)
+    .option("--admin-pass <pass>", ADMIN_PASS_HELP)
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--token <token>", "One-time pairing token from hub admin (env: FLAIR_PAIRING_TOKEN) [deprecated: use --token-from]")
@@ -1328,6 +1365,15 @@ export function register(program: Command): void {
     .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
     .action(async (hubUrl: string, opts: any) => {
       const target = resolveTarget(opts);
+      // flair#1873: resolve the SPOKE admin credential FIRST, before any
+      // request. `--admin-pass-file` is read in-process (mode 0600 enforced),
+      // so a refusal sends nothing anywhere; combining it with --admin-pass is
+      // a usage error. The value is written back into opts.adminPass, which the
+      // ops preflight and the signing-key fallback below both read.
+      const adminPass = resolveFederationAdminPass(
+        opts,
+        process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD,
+      );
       // One URL for the identity GET and the named error. resolveBaseUrl
       // honors --target / FLAIR_TARGET / FLAIR_URL / --port — the same host
       // the GET actually probes (do not cite resolveBaseUrl only in the
@@ -1342,7 +1388,15 @@ export function register(program: Command): void {
         // Rewrite Harper's raw AccessViolation into a named role/grant error.
         let instance: any;
         try {
-          instance = await api("GET", "/FederationInstance", undefined, { baseUrl: identityUrl });
+          // flair#1873: hand the identity GET the credential the operator
+          // provided (--admin-pass-file / --admin-pass), not only baseUrl — a
+          // protected instance refuses this allowAdmin GET before pair ever
+          // reaches the authenticated ops preflight.
+          instance = await api("GET", "/FederationInstance", undefined, {
+            baseUrl: identityUrl,
+            explicitAdminPass: opts.adminPass,
+            adminUser: opts.adminUser,
+          });
         } catch (err: unknown) {
           throw rewriteFederationPairLocalAccessError(err, {
             url: redactUrl(identityUrl),
@@ -1384,16 +1438,16 @@ export function register(program: Command): void {
           process.exit(1);
         }
 
-        // flair#1875: resolve the SPOKE admin credential and preflight it BEFORE
-        // any request that consumes the one-time token. The hub's FederationPair
-        // burns the token, so a missing or refused admin credential must be
-        // caught here — while the token is still valid — not after the hub has
-        // already paired us. Zero hub requests happen on this path.
-        const adminPass = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
+        // flair#1875: the SPOKE admin credential was resolved at the top of this
+        // action (flair#1873) and preflighted BEFORE any request that consumes the
+        // one-time token. The hub's FederationPair burns the token, so a missing or
+        // refused admin credential must be caught here — while the token is still
+        // valid — not after the hub has already paired us. Zero hub requests happen
+        // on this path.
         if (!adminPass) {
           console.error(
             "Error: refusing to contact the hub: the local hub-peer record needs admin auth to write — " +
-            "pass --admin-pass, or set FLAIR_ADMIN_PASS / HDB_ADMIN_PASSWORD (the SPOKE admin password), then re-run pair. " +
+            "pass --admin-pass-file (preferred), --admin-pass, or set FLAIR_ADMIN_PASS / HDB_ADMIN_PASSWORD (the SPOKE admin password), then re-run pair. " +
             NOTHING_SENT_TO_HUB
           );
           process.exit(1);
@@ -1577,7 +1631,8 @@ export function register(program: Command): void {
     .command("token")
     .description("Generate a one-time pairing token (run on the hub)")
     .option("--port <port>", "Harper HTTP port")
-    .option("--admin-pass <pass>", "Admin password")
+    .option(ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP)
+    .option("--admin-pass <pass>", ADMIN_PASS_HELP)
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--ttl <minutes>", "Token TTL in minutes (default: 60)", "60")
@@ -1593,7 +1648,10 @@ export function register(program: Command): void {
         const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
 
         const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
-        const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+        // flair#1873: read --admin-pass-file in-process (mode 0600 enforced);
+        // an explicit --admin-pass-file or --admin-pass overrides FLAIR_ADMIN_PASS,
+        // and file+flag is a usage error.
+        const adminPass = resolveFederationAdminPass(opts, process.env.FLAIR_ADMIN_PASS);
         const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
 
         // 1. Persist the PairingToken record
