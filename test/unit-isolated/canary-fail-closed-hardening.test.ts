@@ -143,6 +143,7 @@ const nodeStub = [
    "  process.exit(0);",
    "}",
    "if (joined.includes('registry-latest-skew.mjs') && process.env.SKEW_FAIL === '1') process.exit(1);",
+   "if (joined.includes('registry-latest-skew.mjs') && process.env.SKEW_FAIL === '2') process.exit(2);",
    "// Any other node script the gate runs (registry-latest-skew) is a no-op here.",
    "process.exit(0);",
 ].join("\n");
@@ -649,6 +650,7 @@ const ctlNpmStub = [
   "if [ \"${1:-}\" = \"dist-tag\" ] && [ \"${2:-}\" = \"add\" ]; then",
   "  n=\"$(cat \"${NFAIL_COUNT:-\"$CTL_LOG_DIR/nfail\"}\" 2>/dev/null || echo 0)\"",
   "  n=$((n + 1)); echo \"$n\" > \"${NFAIL_COUNT:-\"$CTL_LOG_DIR/nfail\"}\"",
+  "  if [ \"${3:-}\" = \"${DISTTAG_APPLY_THEN_FAIL:-}\" ]; then printf 'dist-tag add %s\\n' \"${3:-}\" >> \"${DISTTAG_LOG:-/dev/null}\"; exit 1; fi",
   "  if [ \"$n\" -ge \"${NFAIL_FAIL_ON:-99}\" ]; then exit 1; fi",
   "  printf 'dist-tag add %s\\n' \"${3:-}\" >> \"${DISTTAG_LOG:-/dev/null}\"",
   "  exit 0",
@@ -752,5 +754,47 @@ describe("item 1 (A1c of #1671, round 5): a mid-promote failure RESTORES the mov
     expect(r.dt).toBe("");
     expect(r.stderr).toContain("garbage");
     expect(r.stderr).toContain("is not a version");
+  });
+
+  test("(g) an add that APPLIES its tag then exits 1 => that package is ATTEMPTED and RESTORED too", () => {
+    const failed = PACKAGES[1]!;
+    // The stub compares the FULL argv token (pkg@version).
+    const r = runPromoteBlock({ DISTTAG_APPLY_THEN_FAIL: `${failed}@${VER}` });
+    expect(r.status, `stderr:\n${r.stderr}`).not.toBe(0);
+    // The add DID apply (the stub logged it) and then exited non-zero.
+    expect(r.dt).toContain(`dist-tag add ${failed}@${VER}`);
+    // The attempted package gets its own restore line (state UNKNOWN).
+    expect(r.stderr).toContain(`npm dist-tag add ${failed}@1.2.2 latest`);
+    expect(r.stderr).toContain("ATTEMPTED");
+    expect(r.stderr).toContain("UNKNOWN");
+    // The NOT-moved list is only the packages NEVER attempted (after the failed one).
+    const notMoved = r.stderr.slice(r.stderr.indexOf("NOT moved"));
+    expect(notMoved).toContain(PACKAGES[2]!);
+    expect(notMoved).not.toContain(failed);
+  });
+
+  test("(h) a final-check READ failure => no sentence asserts the packages' state; all attempted restored", () => {
+    const r = runPromoteBlock({ SKEW_FAIL: "2" }); // registry-latest-skew exits 2 (could not read)
+    expect(r.status, `stderr:\n${r.stderr}`).not.toBe(0);
+    expect(r.stderr).toContain("COULD NOT READ");
+    expect(r.stderr).not.toContain("none is still on its previous latest");
+    for (const p of PACKAGES) expect(r.stderr).toContain(`npm dist-tag add ${p}@1.2.2 latest`);
+    expect(r.status).not.toBe(0);
+  });
+});
+
+describe("round 8: the emitted block promises an EQUALITY check, not freshness", () => {
+  test("a PASS block with an unchanged certified digest does not promise a freshness refusal", () => {
+    const cert = rederivedDigest("sha:");
+    const r = runVerdict(["pass", VER, RUN_URL, "--os", "ubuntu-latest", "--package-set-digest", cert]);
+    expect(r.status, "stderr:\n" + r.stderr).toBe(0);
+    const out = `${r.stdout}${r.stderr}`;
+    // No sentence claims a stale PASS or a paste-from-a-FAIL is necessarily refused.
+    expect(out).not.toContain("stale PASS");
+    expect(out).not.toContain("paste from a FAIL");
+    // It says what the check actually is.
+    expect(out).toContain("EQUALITY check");
+    expect(out).toContain("not a freshness check");
+    expect(out).toContain("a different package set is refused");
   });
 });

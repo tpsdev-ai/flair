@@ -296,21 +296,25 @@ for _p in ${PACKAGES[*]}; do
 done
 
 # 3. Move the tags SEQUENTIALLY (\`@tpsdev-ai/flair\` LAST, so a partial paste never
-#    leaves the CLI ahead of its client library), stopping at the FIRST failure. On
-#    failure: a RESTORE line per already-moved package (its PREVIOUS latest - it never
-#    deletes a tag), then the packages NOT moved. No skew check on this path.
+#    leaves the CLI ahead of its client library), stopping at the FIRST failure. A
+#    failed \`npm dist-tag add\` may STILL have applied the tag server-side (npm can
+#    exit non-zero after the write), so the package whose add FAILED is
+#    ATTEMPTED - state UNKNOWN and gets a RESTORE line too; only packages never
+#    attempted are "NOT moved". No skew check on this path.
 _LPKGS="${PACKAGES[*]}"
 for _p in \$_LPKGS; do
   if ! npm dist-tag add "\$_p@${VERSION}" latest; then
-    echo "canary promote ABORTED at '\$_p' - npm is not atomic. RESTORE the packages already moved, in this order, each to its PREVIOUS latest (this does not delete a tag):" >&2
+    echo "canary promote ABORTED at '\$_p' - npm is not atomic. '\$_p' was ATTEMPTED and npm can apply the tag server-side even when it exits non-zero, so its state is UNKNOWN: it is restored too. RESTORE these packages, in this order, each to its PREVIOUS latest (this does not delete a tag):" >&2
+    _pv="\$(grep -F "\${_p}=" "\$PREV_LATEST" | head -n 1 | cut -d= -f2- || true)"
+    printf '%s=%s\n' "\$_p" "\$_pv" >> "\$MOVED"
     while IFS= read -r _line; do
       _mp="\${_line%%=*}"; _mv="\${_line#*=}"
       echo "  npm dist-tag add \${_mp}@\${_mv} latest" >&2
     done < "\$MOVED"
-    echo "NOT moved (still on their previous latest):" >&2
+    echo "NOT moved (never attempted - still on their previous latest):" >&2
     _seen=0
     for _q in \$_LPKGS; do
-      if [ "\$_q" = "\$_p" ]; then _seen=1; fi
+      if [ "\$_q" = "\$_p" ]; then _seen=1; continue; fi
       if [ "\$_seen" -eq 1 ]; then echo "  \$_q" >&2; fi
     done
     exit 1
@@ -319,9 +323,19 @@ for _p in \$_LPKGS; do
   printf '%s=%s\n' "\$_p" "\$_pv" >> "\$MOVED"
 done
 
-# 4. Confirm the set converged — ONLY when every move succeeded.
-if ! node scripts/ci/registry-latest-skew.mjs ${VERSION}; then
-  echo "canary promote: the skew check failed AFTER every tag moved. ALL ${#PACKAGES[@]} packages were moved (none is still on its previous latest). RESTORE every moved package to its PREVIOUS latest (this does not delete a tag):" >&2
+# 4. Confirm the set converged — ONLY when every move succeeded. The check exits 2
+#    when it could NOT READ the current state; then the tag state is UNKNOWN and the
+#    block must not claim any package is or is not on its previous latest.
+set +e
+node scripts/ci/registry-latest-skew.mjs ${VERSION}
+_skew=\$?
+set -e
+if [ "\$_skew" -ne 0 ]; then
+  if [ "\$_skew" -eq 2 ]; then
+    echo "canary promote: the convergence check COULD NOT READ the current tag state (the registry read was unavailable), so every package's state is UNKNOWN. RESTORE every attempted package to its PREVIOUS latest (this does not delete a tag):" >&2
+  else
+    echo "canary promote: the skew check failed AFTER every tag moved. ALL ${#PACKAGES[@]} packages were moved (none is still on its previous latest). RESTORE every moved package to its PREVIOUS latest (this does not delete a tag):" >&2
+  fi
   while IFS= read -r _line; do
     _mp="\${_line%%=*}"; _mv="\${_line#*=}"
     echo "  npm dist-tag add \${_mp}@\${_mv} latest" >&2
@@ -330,10 +344,13 @@ if ! node scripts/ci/registry-latest-skew.mjs ${VERSION}; then
 fi
 \`\`\`
 
-A stale PASS, a re-cut version, a different package set, or a paste from a FAIL
-aborts at the preflight — the re-derived digest never equals the certified
-\`${PKG_SET_DIGEST}\` — before \`latest\` can move. The sha256 helper downloads
-the published tarball, so it checks the exact bytes, not a tag.
+The preflight re-derives the package-set digest from the published tarballs and
+refuses unless it is EQUAL to the certified \`${PKG_SET_DIGEST}\`, so the pasted
+block promotes only the package set whose digest equals the certified one: a re-cut
+version or a different package set is refused before \`latest\` can move. That is an
+EQUALITY check, not a freshness check: an old PASS with an unchanged package set
+(and so an unchanged digest) is NOT refused by it. The sha256 helper downloads the
+published tarball, so it checks the exact bytes, not a tag.
 EOF
 else
   cat <<EOF
