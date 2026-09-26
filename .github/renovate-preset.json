@@ -1,63 +1,115 @@
 {
-    "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-    "description": "Shared org preset for tpsdev-ai repositories. Establishes the supply-chain posture: pin version updates, enforce a 7-day bake-time cooldown, and group non-major PRs so review surface stays small. Every update is proposal-only (automerge: false) — it must pass the full CI suite + K&S review before merge. See https://github.com/tpsdev-ai/flair/blob/main/docs/supply-chain-policy.md.",
-    "extends": [
-        "config:recommended",
-        ":dependencyDashboard",
-        ":semanticCommits",
-        "helpers:pinGitHubActionDigests"
-    ],
-    "timezone": "America/New_York",
-    "schedule": ["before 9am on monday"],
-    "prConcurrentLimit": 5,
-    "prHourlyLimit": 2,
-    "rangeStrategy": "pin",
-    "minimumReleaseAge": "7 days",
-    "internalChecksFilter": "strict",
-    "labels": ["dependencies", "supply-chain"],
-    "automerge": false,
-    "ignorePaths": ["**/node_modules/**", "**/dist/**"],
-    "packageRules": [
-        {
-            "description": "Group bun + npm non-major updates into a single PR so the review surface stays small. A red CI on a 60-package PR is hard to diagnose.",
-            "matchManagers": ["bun", "npm"],
-            "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
-            "groupName": "non-major npm dependencies"
-        },
-        {
-            "description": "Group Python non-major updates into a single PR so the review surface stays small. A red CI on a 60-package PR is hard to diagnose.",
-            "matchManagers": ["pep621", "pip_requirements", "pip_setup", "poetry"],
-            "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
-            "groupName": "non-major python dependencies"
-        },
-        {
-            "description": "Major updates land as their own PRs — they carry the most behavioral risk and deserve isolated review.",
-            "matchUpdateTypes": ["major"],
-            "groupName": null
-        },
-        {
-            "description": "Group GitHub Actions into a single PR so sub-actions land together. CodeQL rejects mixed versions across sub-actions (bob#58/#99), so all codeql-action sub-actions must land in one PR.",
-            "matchManagers": ["github-actions"],
-            "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
-            "groupName": "github-actions"
-        },
-        {
-            "description": "Group Docker non-major updates into a single PR so the review surface stays small. A red CI on a 60-package PR is hard to diagnose.",
-            "matchManagers": ["dockerfile", "docker-compose"],
-            "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
-            "groupName": "non-major docker dependencies"
-        }
-    ],
-    "lockFileMaintenance": {
-        "enabled": true,
-        "schedule": ["before 9am on the first day of the month"]
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Shared org preset for tpsdev-ai repositories. Establishes the supply-chain posture: pin version updates, enforce a 7-day bake-time cooldown, and group non-major PRs so review surface stays small. Every update is proposal-only (automerge: false) \u2014 it must pass the full CI suite + K&S review before merge. See https://github.com/tpsdev-ai/flair/blob/main/docs/supply-chain-policy.md.",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "timezone": "America/New_York",
+  "schedule": [
+    "before 9am on monday"
+  ],
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "rangeStrategy": "pin",
+  "minimumReleaseAge": "7 days",
+  "internalChecksFilter": "strict",
+  "labels": [
+    "dependencies",
+    "supply-chain"
+  ],
+  "automerge": false,
+  "ignorePaths": [
+    "**/node_modules/**",
+    "**/dist/**"
+  ],
+  "packageRules": [
+    {
+      "description": "Group bun + npm non-major updates into a single PR so the review surface stays small. A red CI on a 60-package PR is hard to diagnose.",
+      "matchManagers": [
+        "bun",
+        "npm"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "pin",
+        "digest"
+      ],
+      "groupName": "non-major npm dependencies"
     },
-    "vulnerabilityAlerts": {
-        "enabled": true,
-        "labels": ["security", "dependencies"],
-        "minimumReleaseAge": "0 days"
+    {
+      "description": "Group Python non-major updates into a single PR so the review surface stays small. A red CI on a 60-package PR is hard to diagnose.",
+      "matchManagers": [
+        "pep621",
+        "pip_requirements",
+        "pip_setup",
+        "poetry"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "pin",
+        "digest"
+      ],
+      "groupName": "non-major python dependencies"
     },
-    "docker": {
-        "pinDigests": true
+    {
+      "description": "Major updates land as their own PRs \u2014 they carry the most behavioral risk and deserve isolated review.",
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "groupName": null
+    },
+    {
+      "description": "Group GitHub Actions into a single PR so sub-actions land together. CodeQL rejects mixed versions across sub-actions (bob#58/#99), so all codeql-action sub-actions must land in one PR.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "pin",
+        "digest"
+      ],
+      "groupName": "github-actions"
+    },
+    {
+      "description": "Group Docker non-major updates into a single PR so the review surface stays small. A red CI on a 60-package PR is hard to diagnose.",
+      "matchManagers": [
+        "dockerfile",
+        "docker-compose"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "pin",
+        "digest"
+      ],
+      "groupName": "non-major docker dependencies"
+    },
+    {
+      "description": "Pin Docker image digests (every docker-category manager: Dockerfiles, compose files, workflow images) so a republished tag cannot change the bytes we build or test on; the digest is the identity, the tag is a label.",
+      "matchCategories": [
+        "docker"
+      ],
+      "pinDigests": true
     }
+  ],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": [
+      "before 9am on the first day of the month"
+    ]
+  },
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": [
+      "security",
+      "dependencies"
+    ],
+    "minimumReleaseAge": "0 days"
+  }
 }
