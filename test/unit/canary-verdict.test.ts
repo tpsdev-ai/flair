@@ -299,3 +299,48 @@ describe("canary-verdict — an injected newline + garbage is refused (F0/F2, A1
       expect(r.stdout.toLowerCase()).toContain("never");
      });
 });
+
+describe("canary-verdict — `--emit bash` is the machine surface (flair#1928 slice 1)", () => {
+  test("--emit bash prints EXACTLY the fenced block: byte-identical to the human PASS text", () => {
+    const human = run(["pass", "1.2.3", RUN_URL, "--os", "ubuntu-latest", "--package-set-digest", CERTIFIED_DIGEST]);
+    expect(human.status).toBe(0);
+    const emitted = run([
+      "pass",
+      "1.2.3",
+      RUN_URL,
+      "--os",
+      "ubuntu-latest",
+      "--package-set-digest",
+      CERTIFIED_DIGEST,
+      "--emit",
+      "bash",
+    ]);
+    expect(emitted.status).toBe(0);
+    // Byte-identical: the emitted block IS the fenced content (with its trailing
+    // newline) — the human text wraps exactly these bytes in fences.
+    expect(human.stdout).toContain("```\n" + emitted.stdout + "```");
+    expect(emitted.stdout).toBe(fencedBlock(human.stdout).replace(/\n$/, "") + "\n");
+    // ONE definition: no fence, no prose — just the executable block.
+    expect(emitted.stdout.startsWith("set -e\n")).toBe(true);
+    expect(emitted.stdout).not.toContain("### ");
+    expect(emitted.stdout).not.toContain("```");
+  });
+
+  test("--emit bash on a FAIL exits 3 with one stderr line and NO stdout", () => {
+    const r = run(["fail", "1.2.3", RUN_URL, "--emit", "bash"]);
+    expect(r.status).toBe(3);
+    expect(r.stdout).toBe("");
+    expect(r.stderr.trim().split("\n").length).toBe(1);
+  });
+
+  test("--emit bash on a prerelease exits 3 (there is no promote block)", () => {
+    const r = run(["pass", "1.2.3-rc.1", RUN_URL, "--package-set-digest", CERTIFIED_DIGEST, "--emit", "bash"]);
+    expect(r.status).toBe(3);
+    expect(r.stdout).toBe("");
+  });
+
+  test("--emit rejects any value other than bash", () => {
+    const r = run(["pass", "1.2.3", RUN_URL, "--package-set-digest", CERTIFIED_DIGEST, "--emit", "sh"]);
+    expect(r.status).toBe(2);
+  });
+});

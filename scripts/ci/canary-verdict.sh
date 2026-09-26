@@ -37,14 +37,21 @@
 # syntax error.
 #
 # Usage:
-#   scripts/ci/canary-verdict.sh <pass|fail> <version> <run-url> [--os <os>] [--package-set-digest <64-hex>]
+#   scripts/ci/canary-verdict.sh <pass|fail> <version> <run-url> [--os <os>] [--package-set-digest <64-hex>] [--emit bash]
 #
 #   --package-set-digest <64-hex> is REQUIRED for the pass path: the digest the
 #   release run certified, against which the emitted preflight re-derives from the
 #   registry at paste time. For a prerelease <version> it is ignored (no promote
 #   block is printed).
 #
+#   --emit bash prints ONLY the executable promote block — the exact bytes the
+#   human PASS text shows between its fences, nothing else — so the promote job
+#   never scrapes markdown (flair#1928 slice 1). There is no block for a FAIL or a
+#   non-release version: --emit bash then exits 3 with one stderr line.
+#
 # Output is Markdown, suitable for `tee -a "$GITHUB_STEP_SUMMARY"`.
+#
+# Exit: 0 emitted; 2 DID NOT RUN / usage error; 3 --emit bash found no promote block.
 #
 # flair#1856 R2: the emitted preflight pipes each per-package re-hash through the
 # SAME 64-hex check before folding it into the digest, and re-checks the
@@ -95,15 +102,23 @@ if [ "$#" -ge 3 ]; then shift 3; fi
 # of bindings — the promote is bound to ONE package-set digest (A1c, #1671).
 OS_NAME="linux"
 PKG_SET_DIGEST=""
+EMIT=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
       --os) OS_NAME="${2:-}"; shift 2 ;;
       --os=*) OS_NAME="${1#--os=}"; shift ;;
       --package-set-digest) PKG_SET_DIGEST="${2:-}"; shift 2 ;;
       --package-set-digest=*) PKG_SET_DIGEST="${1#--package-set-digest=}"; shift ;;
+      --emit) EMIT="${2:-}"; shift 2 ;;
+      --emit=*) EMIT="${1#--emit=}"; shift ;;
       *) echo "canary-verdict.sh: unexpected argument '$1'" >&2; exit 2 ;;
   esac
 done
+
+if [ -n "$EMIT" ] && [ "$EMIT" != "bash" ]; then
+  echo "canary-verdict.sh: --emit supports only 'bash' (got '${EMIT}')" >&2
+  exit 2
+fi
 
 # Promotability is a WHITELIST (F2 of #1671, A1c): the promote block is
 # emitted ONLY for a version that is exactly `<major>.<minor>.<patch>`.
@@ -146,49 +161,11 @@ version such as \`1.2.3+20260101\`) is **not** a prerelease and is staged on \`s
 EOF
 }
 
-if [ "$VERDICT" = "pass" ]; then
-   # Only an exact `<major>.<minor>.<patch>` is promoted. Anything else
-   # (a prerelease, build metadata, or any other label) prints the note and
-   # stops: no promote block, no dist-tag line — a prerelease never moves `latest`.
-  if ! is_release "$VERSION"; then
-    emit_prerelease_note
-    exit 0
-  fi
-
-  # The pass path requires the certified package-set digest to bind the promote.
-     # F0 (A1c of #1671): a WHOLE-STRING match, not a line match. `printf | grep -Eq`
-     # accepts a valid first line followed by a newline and garbage, so a 64-hex digest
-     # carrying a trailing newline and junk read as valid. `[[ =~ ]]` matches the whole
-     # string, so only an exact 64-char hex sha256 is accepted here.
-  if ! [[ "$PKG_SET_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "canary-verdict.sh: DID NOT RUN — --package-set-digest is required and must be a 64-char hex sha256 (got '${PKG_SET_DIGEST}')" >&2
-    exit 2
-  fi
-
+# The ONE definition of the promote block (flair#1928 slice 1). `--emit bash`
+# prints EXACTLY this; the human PASS text embeds it between fences — the two are
+# byte-identical by construction (a test generates both and compares).
+emit_promote_block() {
   cat <<EOF
-### ✅ Canary PASS — \`${OS_NAME}\`
-
-Promote ALL ${#PACKAGES[@]} lockstep packages to \`latest\`. **npm has no atomic,
-all-or-none promote** — this block moves the tags SEQUENTIALLY and STOPS at the first
-failure (the failing move exits non-zero). It reads every package's CURRENT \`latest\`
-BEFORE the first move, and STOPS before moving a single tag if ANY read fails — a
-non-zero npm exit, an empty read, or a value that is not a version — so it only
-reaches the moves with a clean PREVIOUS \`latest\` for every package — the values its
-RESTORE lines print.
-On the move-failure path it prints one RESTORE line per already-moved package
-(\`npm dist-tag add <pkg>@<previous> latest\`, never \`npm dist-tag rm\`) and then the
-packages it did NOT move; on the final-check path (every add call succeeded)
-the block runs the convergence check and, IF THAT CHECK FAILS, prints its result
-and the same RESTORE lines; on success the convergence check prints its own success line and the block
-prints no RESTORE lines. The block never asserts a tag's current value — the convergence
-check's output is the only state evidence. The preflight is bound to the release run's **package-set digest** — a single
-sha256 over the canonical sorted list of \`<name>@${VERSION} <sha256>\` lines, one per
-lockstep package (the digest \`${PKG_SET_DIGEST}\` the pack job certified). Paste this
-WHOLE block once, from the repo root: it re-derives that digest from the published
-tarballs FIRST, so a re-cut version or a different package set aborts BEFORE any tag
-moves.
-
-\`\`\`
 set -e
 
 # 1. Preflight — re-derive the package-set digest from the published tarballs and
@@ -345,6 +322,75 @@ if [ "\$_skew" -ne 0 ]; then
   done < "\$MOVED"
   exit 1
 fi
+EOF
+}
+
+# `--emit bash`: the machine surface. Prints ONLY the executable block, so the
+# promote job never scrapes markdown. No block exists for a FAIL or a non-release
+# version: exit 3 with one stderr line.
+if [ "$EMIT" = "bash" ]; then
+  if [ "$VERDICT" != "pass" ]; then
+    echo "canary-verdict.sh: no promote block — the canary verdict is '${VERDICT}'" >&2
+    exit 3
+  fi
+  if ! is_release "$VERSION"; then
+    echo "canary-verdict.sh: no promote block — '${VERSION}' is not a clean release" >&2
+    exit 3
+  fi
+  if ! [[ "$PKG_SET_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "canary-verdict.sh: no promote block — --package-set-digest is required and must be a 64-char hex sha256 (got '${PKG_SET_DIGEST}')" >&2
+    exit 3
+  fi
+  emit_promote_block
+  exit 0
+fi
+
+if [ "$VERDICT" = "pass" ]; then
+   # Only an exact `<major>.<minor>.<patch>` is promoted. Anything else
+   # (a prerelease, build metadata, or any other label) prints the note and
+   # stops: no promote block, no dist-tag line — a prerelease never moves `latest`.
+  if ! is_release "$VERSION"; then
+    emit_prerelease_note
+    exit 0
+  fi
+
+  # The pass path requires the certified package-set digest to bind the promote.
+     # F0 (A1c of #1671): a WHOLE-STRING match, not a line match. `printf | grep -Eq`
+     # accepts a valid first line followed by a newline and garbage, so a 64-hex digest
+     # carrying a trailing newline and junk read as valid. `[[ =~ ]]` matches the whole
+     # string, so only an exact 64-char hex sha256 is accepted here.
+  if ! [[ "$PKG_SET_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "canary-verdict.sh: DID NOT RUN — --package-set-digest is required and must be a 64-char hex sha256 (got '${PKG_SET_DIGEST}')" >&2
+    exit 2
+  fi
+
+  cat <<EOF
+### ✅ Canary PASS — \`${OS_NAME}\`
+
+Promote ALL ${#PACKAGES[@]} lockstep packages to \`latest\`. **npm has no atomic,
+all-or-none promote** — this block moves the tags SEQUENTIALLY and STOPS at the first
+failure (the failing move exits non-zero). It reads every package's CURRENT \`latest\`
+BEFORE the first move, and STOPS before moving a single tag if ANY read fails — a
+non-zero npm exit, an empty read, or a value that is not a version — so it only
+reaches the moves with a clean PREVIOUS \`latest\` for every package — the values its
+RESTORE lines print.
+On the move-failure path it prints one RESTORE line per already-moved package
+(\`npm dist-tag add <pkg>@<previous> latest\`, never \`npm dist-tag rm\`) and then the
+packages it did NOT move; on the final-check path (every add call succeeded)
+the block runs the convergence check and, IF THAT CHECK FAILS, prints its result
+and the same RESTORE lines; on success the convergence check prints its own success line and the block
+prints no RESTORE lines. The block never asserts a tag's current value — the convergence
+check's output is the only state evidence. The preflight is bound to the release run's **package-set digest** — a single
+sha256 over the canonical sorted list of \`<name>@${VERSION} <sha256>\` lines, one per
+lockstep package (the digest \`${PKG_SET_DIGEST}\` the pack job certified). Paste this
+WHOLE block once, from the repo root: it re-derives that digest from the published
+tarballs FIRST, so a re-cut version or a different package set aborts BEFORE any tag
+moves.
+
+\`\`\`
+EOF
+  emit_promote_block
+  cat <<EOF
 \`\`\`
 
 The preflight re-derives the package-set digest from the published tarballs and
@@ -355,6 +401,7 @@ EQUALITY check, not a freshness check: an old PASS with an unchanged package set
 (and so an unchanged digest) is NOT refused by it. The sha256 helper downloads the
 published tarball, so it checks the exact bytes, not a tag.
 EOF
+
 else
   cat <<EOF
 ### ❌ Canary FAIL — \`${OS_NAME}\`

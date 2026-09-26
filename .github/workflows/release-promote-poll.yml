@@ -1,0 +1,113 @@
+name: Release promote poll
+# flair#1928 slice 1 — the UNPRIVILEGED poll. It answers ONE question per pending
+# release: does the `release-attempt` marker for `v<version>` exist, and is every
+# lockstep package `<name>@<version>` public (ALL-form: one not-yet-approved
+# package means NOT READY)? On READY it DISPATCHES `release-promote.yml` on the tag
+# ref; on NOT READY it exits 0 and logs the pending package.
+#
+# It holds NO credential: no environment, no secret, and it never checks out a
+# tag's tree (a tag can carry tampered `scripts/ci/`, so only the DEFAULT BRANCH at
+# this run's own sha is used — trusted main). Its outputs are NEVER an input to what gets promoted:
+# the privileged job re-derives everything it acts on; this poll only decides WHETHER to start it.
+#
+# The version comes from the MARKER PAYLOAD, never from main's `package.json` —
+# main moves on after a release, so its version is not the release being promoted.
+#
+# Slice 2 (`release-promote.yml`) is not merged yet: until it exists the poll logs
+# "would dispatch" and exits 0 (the dispatch is gated behind the workflow file's
+# existence).
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+# Top-level: nothing. Each job grants exactly what it needs.
+permissions: {}
+
+concurrency:
+  # One poll at a time; never cancel a run mid-dispatch.
+  group: release-promote-poll
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    name: Poll pending releases
+    runs-on: ubuntu-latest
+    # actions: write — `gh workflow run`. contents: read — the sparse checkout and
+    # the workflow-file lookup. deployments: read — the marker query. No
+    # `environment:`, no secret: this job can start a run, not hold the token.
+    permissions:
+      actions: write
+      contents: read
+      deployments: read
+    steps:
+      - name: Check out ONLY scripts/ci from the DEFAULT BRANCH at this run's sha
+        # NOT a tag ref: a tag can carry a tampered `scripts/ci/`. `github.sha` is
+        # the default branch's commit this schedule/dispatch ran on — trusted main.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ci
+          sparse-checkout-cone-mode: false
+
+      - name: Poll and dispatch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Every release-attempt marker (deployments API, paginated).
+          DEPLOYMENTS="$(mktemp)"
+          gh api --paginate "repos/${REPO}/deployments?environment=release-attempt&per_page=100" > "$DEPLOYMENTS"
+
+          # Pending = a release-attempt marker whose ref has NO `promoted` marker.
+          PROMOTED="$(mktemp)"
+          gh api --paginate "repos/${REPO}/deployments?environment=promoted&per_page=100" > "$PROMOTED"
+
+          jq -s '.[0] | map(select(.ref | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")))' "$DEPLOYMENTS" > "$DEPLOYMENTS.valid"
+
+          while IFS=$'\t' read -r ref psd; do
+            [ -n "$ref" ] || continue
+            version="${ref#v}"
+            if jq -e --arg r "$ref" 'any(.[]; .ref == $r)' <(jq -s '.[0]' "$PROMOTED") >/dev/null 2>&1; then
+              echo "v${version}: already promoted — skipping"
+              continue
+            fi
+            if [ -z "$psd" ] || ! printf '%s' "$psd" | grep -Eq '^[0-9a-f]{64}$'; then
+              echo "v${version}: marker payload has no valid package_set_digest — NOT READY"
+              continue
+            fi
+            # ALL-form: every lockstep package must be downloadable and measurable.
+            NOT_READY=""
+            CANON="$(mktemp)"
+            : > "$CANON"
+            while IFS= read -r pkg; do
+              [ -n "$pkg" ] || continue
+              if ! out="$(node scripts/ci/registry-tarball-sha256.mjs "$version" "$pkg" 2>/dev/null)" || ! printf '%s' "$out" | grep -Eq '^[0-9a-f]{64}$'; then
+                echo "v${version}: NOT READY — ${pkg}@${version} is not downloadable or not measurable"
+                NOT_READY=1
+                break
+              fi
+              printf '%s@%s %s\n' "$pkg" "$version" "$out" >> "$CANON"
+            done < <(node scripts/ci/lockstep-packages.mjs)
+            if [ -n "$NOT_READY" ]; then
+              # Not an error: nothing was attempted, so unmeasurable is not FAIL.
+              continue
+            fi
+            LC_ALL=C sort -o "$CANON" "$CANON"
+            RE_DERIVED="$(sha256sum "$CANON")"; RE_DERIVED="${RE_DERIVED%% *}"
+            if [ "$RE_DERIVED" != "$psd" ]; then
+              echo "v${version}: NOT READY — re-derived package-set digest ${RE_DERIVED} differs from the marker's ${psd}"
+              continue
+            fi
+            echo "v${version}: READY"
+            if gh api "repos/${REPO}/actions/workflows/release-promote.yml" >/dev/null 2>&1; then
+              gh workflow run release-promote.yml --ref "$ref"
+              echo "  dispatched release-promote.yml --ref ${ref}"
+            else
+              echo "  would dispatch release-promote.yml --ref ${ref} (slice 2 not merged yet)"
+            fi
+          done < <(jq -r '.[] | "\(.ref)\t\(.payload.package_set_digest // "")"' "$DEPLOYMENTS.valid")

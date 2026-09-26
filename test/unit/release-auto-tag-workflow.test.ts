@@ -368,6 +368,14 @@ describe("release-auto-tag workflow — the trust root is owned by the repo admi
       "/scripts/check-version-sync.mjs",
       "/.github/release-auto-tag-advisories.json",
       "/.github/CODEOWNERS",
+      // flair#1928 slice 1: the machinery the promote job will EXECUTE, and the
+      // promote workflows.
+      "/scripts/ci/canary-verdict.sh",
+      "/scripts/ci/registry-tarball-sha256.mjs",
+      "/scripts/ci/registry-latest-skew.mjs",
+      "/scripts/ci/lockstep-packages.mjs",
+      "/.github/workflows/canary.yml",
+      "/.github/workflows/release-promote*.yml",
     ]) {
       expect(ownerOf(pattern), `${pattern} is owned`).toBe("@heskew");
       expect(indexOf(pattern), `${pattern} is below the catch-all`).toBeGreaterThan(indexOf("*"));
