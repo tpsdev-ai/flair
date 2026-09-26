@@ -44,6 +44,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { lockstepPackages, ROOT } from "./lockstep-packages.mjs";
+import { computePackageSetDigest } from "./package-set-digest.mjs";
 
 /** The dependency sections a published manifest ships. devDependencies do not ship. */
 export const PIN_SECTIONS = ["dependencies", "peerDependencies", "optionalDependencies"];
@@ -60,13 +61,6 @@ export function sha256Hex(input) {
 export function tarballBasename(name, version) {
   const stem = name.startsWith("@") ? name.slice(1).replace("/", "-") : name;
   return `${stem}-${version}.tgz`;
-}
-
-/** The canonical, sorted `name@version sha256` list the package-set digest hashes. */
-export function packageSetLines(packages) {
-  const lines = packages.map((p) => `${p.name}@${p.version} ${p.sha256}`);
-  lines.sort();
-  return lines.join("\n") + "\n";
 }
 
 function readJson(path) {
@@ -256,7 +250,11 @@ export function packAll({ root, out, version, dirs }) {
     })
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
-  const packageSetDigest = sha256Hex(packageSetLines(packages));
+  const packageSetDigest = computePackageSetDigest(
+      packages.map((p) => [p.name, p.sha256]),
+      version,
+       { expected: members },
+   );
   const manifest = {
     schema: 1,
     version,
