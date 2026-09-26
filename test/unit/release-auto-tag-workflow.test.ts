@@ -384,6 +384,24 @@ describe("release-auto-tag workflow — the trust root is owned by the repo admi
   });
 });
 
+describe("CODEOWNERS — the shared Renovate preset is in the trust root (#1930)", () => {
+  test("/.github/renovate-preset.json is owned by @heskew and sits below the catch-all", () => {
+    const rules = readFileSync(join(REPO, ".github", "CODEOWNERS"), "utf8")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith("#"))
+      .map((line) => {
+        const [pattern, ...owners] = line.split(/\s+/);
+        return { pattern: pattern ?? "", owners: owners.join(" ") };
+      });
+    // Last matching rule wins: the EFFECTIVE owner of the file is the owner of
+    // the last rule whose pattern matches it (exact path or the catch-all here).
+    const matches = rules.filter((r) => r.pattern === "*" || r.pattern === "/.github/renovate-preset.json");
+    expect(matches.at(-1)?.pattern, "the preset's own rule is the last match").toBe("/.github/renovate-preset.json");
+    expect(matches.at(-1)?.owners).toBe("@heskew");
+  });
+});
+
 describe("release-auto-tag workflow — credential isolation and the reporter's shell", () => {
   test("isolation is the JOB BOUNDARY: `write` has a fresh default-branch checkout, and no step restores a shared tree", () => {
     // The single-job design restored the workspace between the decision and the
