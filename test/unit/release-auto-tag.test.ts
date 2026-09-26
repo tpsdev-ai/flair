@@ -496,6 +496,13 @@ describe("release auto-tag — conditions 5 and 6 (the candidate is read as data
     expect(inventory.length, "the real inventory is not empty").toBeGreaterThan(0);
     mkdirSync(join(repo, "scripts"), { recursive: true });
     writeFileSync(join(repo, "scripts", "check-version-sync.mjs"), readFileSync(realChecker, "utf8"));
+    // The checker imports the SHARED pyproject helper from a sibling module; a
+    // materialised tree needs it too, or the checker cannot load (round 2).
+    mkdirSync(join(repo, "scripts", "ci"), { recursive: true });
+    writeFileSync(
+      join(repo, "scripts", "ci", "pyproject-version.mjs"),
+      readFileSync(join(realRoot, "scripts", "ci", "pyproject-version.mjs"), "utf8"),
+    );
     for (const path of inventory) {
       const dest = join(repo, path);
       mkdirSync(dirname(dest), { recursive: true });
@@ -1259,8 +1266,14 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
       path === ADK_PYPROJECT_PATH ? text : orig(rev, path);
   }
 
-  /** A ref store: the POST records the ref (and makes it resolvable at <sha>). */
-  function refApi(posts: string[], tags: Map<string, unknown>, reject?: (ref: string) => boolean) {
+  /** A ref store: the POST records the ref (and makes it resolvable at <sha>);
+   *  every read is recorded so a test can prove a read-back happened. */
+  function refApi(
+    posts: string[],
+    tags: Map<string, unknown>,
+    reads: string[] = [],
+    reject?: (ref: string) => boolean,
+  ) {
     return {
       createTagRef: async (ref: string, sha: string) => {
         posts.push(ref);
@@ -1268,20 +1281,27 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
         tags.set(ref.replace("refs/tags/", ""), { object: { type: "commit", sha } });
         return { ok: true, status: 201, body: {} };
       },
-      readTagRef: async (tag: string) => tags.get(tag) ?? null,
+      readTagRef: async (tag: string) => {
+        reads.push(tag);
+        return tags.get(tag) ?? null;
+      },
     };
   }
 
   test("(a) pyproject matches → the v ref then the adk ref are POSTed and read back, adk TAGGED", async () => {
     const posts: string[] = [];
     const tags = new Map<string, unknown>();
-    const { deps } = harness({ api: refApi(posts, tags) });
+    const reads: string[] = [];
+    const { deps } = harness({ api: refApi(posts, tags, reads) });
     pinPyproject(deps, pyproject(VERSION));
     const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
     expect(result.verdict).toBe(WRITE_VERDICT.TAGGED);
     expect(posts).toEqual([`refs/tags/v${VERSION}`, `refs/tags/adk-flair-v${VERSION}`]);
     expect(result.adkVerdict).toBe("TAGGED");
     expect(result.adkCondition).toBe("");
+    // BOTH read-backs happened (round 2, item 4): the v ref and the adk ref.
+    expect(reads).toContain(`v${VERSION}`);
+    expect(reads).toContain(`adk-flair-v${VERSION}`);
   });
 
   test("(b) no pyproject at <sha> → only the v ref, adk SKIP (flair releases without the Python package)", async () => {
@@ -1323,7 +1343,8 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
       expect(posts).toEqual([`refs/tags/v${VERSION}`]); // the adk ref was NOT posted
       expect(result.adkVerdict).toBe("SKIP");
     }
-    // another sha → REFUSE, no adk POST
+    // another sha → REFUSE with NO POST AT ALL (round 2, item 2: pre-checked
+    // before the v POST, so an adk-elsewhere never writes the v tag).
     {
       const posts: string[] = [];
       const tags = new Map<string, unknown>([
@@ -1332,10 +1353,10 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
       const { deps } = harness({ api: refApi(posts, tags) });
       pinPyproject(deps, pyproject(VERSION));
       const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
-      expect(result.verdict).toBe(WRITE_VERDICT.TAGGED);
+      expect(result.verdict).toBe(WRITE_VERDICT.REFUSE);
       expect(result.adkVerdict).toBe("REFUSE");
       expect(result.adkCondition).toBe(CONDITION.ADK_TAG_EXISTS_ELSEWHERE);
-      expect(posts).toEqual([`refs/tags/v${VERSION}`]);
+      expect(posts).toEqual([]); // zero POSTs
     }
   });
 
@@ -1343,7 +1364,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     const posts: string[] = [];
     const tags = new Map<string, unknown>();
     const { deps } = harness({
-      api: refApi(posts, tags, (ref) => ref === `refs/tags/adk-flair-v${VERSION}`),
+      api: refApi(posts, tags, [], (ref) => ref === `refs/tags/adk-flair-v${VERSION}`),
     });
     pinPyproject(deps, pyproject(VERSION));
     const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
@@ -1353,6 +1374,105 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     // The adk POST was ATTEMPTED once and never retried.
     expect(posts).toEqual([`refs/tags/v${VERSION}`, `refs/tags/adk-flair-v${VERSION}`]);
     expect(tags.has(`v${VERSION}`)).toBe(true);
+  });
+
+  test("(f) a re-run on the same sha completes the adk tag: the v POST is skipped, one adk POST, adk TAGGED", async () => {
+    const posts: string[] = [];
+    const tags = new Map<string, unknown>();
+    const reads: string[] = [];
+    let rejectAdk = true;
+    const { deps } = harness({
+      api: refApi(posts, tags, reads, (ref) => rejectAdk && ref === `refs/tags/adk-flair-v${VERSION}`),
+    });
+    pinPyproject(deps, pyproject(VERSION));
+    // Pass 1: the adk POST is rejected → v is created, the adk tag is not.
+    const first = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(first.verdict).toBe(WRITE_VERDICT.TAGGED);
+    expect(first.adkVerdict).toBe("REFUSE");
+    expect(first.adkCondition).toBe(CONDITION.ADK_REF_WRITE_REJECTED);
+    expect(tags.has(`v${VERSION}`)).toBe(true);
+    expect(tags.has(`adk-flair-v${VERSION}`)).toBe(false);
+    const postsBeforeReRun = posts.length;
+    const readsBeforeReRun = reads.length;
+    // Pass 2: the SAME sha. v is already there but the adk tag is not → TAG, with
+    // the v POST skipped.
+    rejectAdk = false;
+    const second = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(second.verdict).toBe(WRITE_VERDICT.TAGGED);
+    expect(second.adkVerdict).toBe("TAGGED");
+    expect(second.vVerdict).toBe(WRITE_VERDICT.SKIP);
+    // Zero v POSTs, exactly one adk POST on the re-run.
+    expect(posts.slice(postsBeforeReRun)).toEqual([`refs/tags/adk-flair-v${VERSION}`]);
+    expect(tags.get(`adk-flair-v${VERSION}`)).toEqual({ object: { type: "commit", sha: SHA } });
+    // Both read-backs were recorded on the re-run.
+    expect(reads.slice(readsBeforeReRun)).toContain(`v${VERSION}`);
+    expect(reads.slice(readsBeforeReRun)).toContain(`adk-flair-v${VERSION}`);
+  });
+
+  test("(g) a [tool.x] version ABOVE [project] is read as the PROJECT version (mismatch refuses)", async () => {
+    const posts: string[] = [];
+    const tags = new Map<string, unknown>();
+    const { deps } = harness({ api: refApi(posts, tags) });
+    // VERSION is 0.56.0; [project].version is 0.55.2, [tool.demo].version 0.56.0.
+    pinPyproject(
+      deps,
+      `[tool.demo]\nversion = "${VERSION}"\n[project]\nname = "adk-flair"\nversion = "0.55.2"\n`,
+    );
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(result.verdict).toBe(WRITE_VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.ADK_VERSION_MISMATCH);
+    expect((result.summary ?? []).join(" ")).toContain("0.55.2");
+    expect(posts).toEqual([]);
+  });
+
+  test("(h) check-version-sync reads the [project] version, not a [tool.x] line above it", () => {
+    const root = scratchDir();
+    const realRoot = resolve(import.meta.dir, "../..");
+    const realChecker = join(realRoot, "scripts", "check-version-sync.mjs");
+    const realVersion = JSON.parse(readFileSync(join(realRoot, "package.json"), "utf8")).version;
+    const listed = spawnSync(process.execPath, [realChecker, "--list"], { cwd: realRoot, encoding: "utf8" });
+    expect(listed.status).toBe(0);
+    const inventory = String(listed.stdout ?? "")
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const path of inventory) {
+      const dest = join(root, path);
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(dest, readFileSync(join(realRoot, path)));
+    }
+    const bumped = "0.0.1";
+    writeFileSync(
+      join(root, "packages/adk-flair/pyproject.toml"),
+      `[tool.demo]\nversion = "${realVersion}"\n[project]\nname = "adk-flair"\nversion = "${bumped}"\n`,
+    );
+    const r = spawnSync(process.execPath, [realChecker, "--root", root, realVersion], { encoding: "utf8" });
+    const out = `${r.stdout}${r.stderr}`;
+    expect(r.status, out).not.toBe(0);
+    expect(out).toContain(bumped); // the PROJECT version is reported, not the tool line
+    expect(out).toContain("packages/adk-flair/pyproject.toml");
+  });
+
+  test("(i) a failed adk read-back (resolves elsewhere) refuses with a named condition, v stays", async () => {
+    const posts: string[] = [];
+    const tags = new Map<string, unknown>();
+    // The POST reports OK but the adk ref resolves to HEAD, not SHA.
+    const api = {
+      createTagRef: async (ref: string, sha: string) => {
+        posts.push(ref);
+        const name = ref.replace("refs/tags/", "");
+        tags.set(name, { object: { type: "commit", sha: name.startsWith("adk-flair-v") ? HEAD : sha } });
+        return { ok: true, status: 201, body: {} };
+      },
+      readTagRef: async (tag: string) => tags.get(tag) ?? null,
+    };
+    const { deps } = harness({ api });
+    pinPyproject(deps, pyproject(VERSION));
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(result.verdict).toBe(WRITE_VERDICT.TAGGED);
+    expect(result.adkVerdict).toBe("REFUSE");
+    expect(result.adkCondition).toBe(CONDITION.ADK_REF_WRITE_REJECTED);
+    expect(tags.get(`v${VERSION}`)).toEqual({ object: { type: "commit", sha: SHA } });
   });
 });
 

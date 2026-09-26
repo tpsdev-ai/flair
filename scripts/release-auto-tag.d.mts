@@ -136,6 +136,11 @@ export interface Decision {
   reason?: string;
   summary: string[];
   pr?: PullRequestShape;
+  /** On a re-run where the v tag is already at <sha>: SKIP (the v POST is skipped). */
+  vVerdict?: string;
+  /** Set only when the adk write refused (slice 3 of #1928). */
+  adkVerdict?: string;
+  adkCondition?: string;
 }
 
 export interface WriteResult {
@@ -145,6 +150,8 @@ export interface WriteResult {
   reason?: string;
   summary: string[];
   ref?: string;
+  /** The v ref verdict: TAGGED on a first pass, SKIP on a same-sha re-run. */
+  vVerdict?: string;
   /** The adk-flair ref verdict (slice 3 of #1928): TAGGED | SKIP | REFUSE. */
   adkVerdict?: string;
   /** The adk condition id when `adkVerdict` is REFUSE, else "". */
@@ -167,6 +174,12 @@ export interface WriteOptions {
 export function compareVersions(a: string, b: string): number;
 export function readVersionFromManifest(text: string | null): string | null;
 export function adkVersionFromPyproject(text: string | null): string | null;
+export function adkTagName(version: string): string;
+export function adkWorkAfterVAtSha(
+  reads: GitHubClient,
+  deps: Deps,
+  args: { sha: string; version: string },
+): Promise<{ kind: "skip" | "adk" | "refuse"; condition?: string; summary?: string[] }>;
 export function parseAdvisoryAllowlist(text: string): Set<string>;
 export function createClient(options: {
   repo: string;

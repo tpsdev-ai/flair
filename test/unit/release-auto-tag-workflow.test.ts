@@ -534,3 +534,25 @@ describe("release-auto-tag workflow — the adk-flair verdict (slice 3 of #1928)
     expect(String(refusalStep.env?.CONDITION)).toContain("needs.write.outputs.adk_condition");
   });
 });
+
+describe("release-auto-tag workflow — the adk re-run (slice 3 of #1928, round 2)", () => {
+  test("the write job's gate lets a same-sha re-run TAG through, and publishes v_verdict", () => {
+    const write = job("write");
+    // A same-sha re-run returns decide verdict TAG (the adk tag must be finished),
+    // so the existing TAG gate lets it through.
+    expect(String(write.if)).toContain("needs.decide.outputs.verdict == 'TAG'");
+    expect(write.outputs?.v_verdict).toBe("${{ steps.write.outputs.v_verdict }}");
+    expect(write.outputs?.adk_verdict).toBe("${{ steps.write.outputs.adk_verdict }}");
+  });
+
+  test("the reporter names a line PER REF, and no longer claims nothing was tagged", () => {
+    const refusalStep = (job("report").steps ?? [])[0];
+    const script = String(refusalStep.run ?? "");
+    expect(script).toContain("v${VERSION}: ${V_VERDICT:-REFUSE}");
+    expect(script).toContain("adk-flair-v${VERSION}: ${ADK_VERDICT:-not attempted}");
+    expect(script).not.toContain("Nothing was tagged.");
+    const env = refusalStep.env ?? {};
+    expect(String(env.V_VERDICT)).toBe("${{ needs.write.outputs.v_verdict }}");
+    expect(String(env.ADK_VERDICT)).toBe("${{ needs.write.outputs.adk_verdict }}");
+  });
+});
