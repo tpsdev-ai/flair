@@ -37,6 +37,10 @@ const databasesMock = {
       },
       put: async (record: any) => {
         puts.push(record);
+        // A real store makes the row visible to the NEXT read (the confirming
+        // re-read under the create lock). The old fake left it invisible, which
+        // is now the seam-failure case that refuses (flair#1897) — model the real store.
+        rowsToServe.push(record);
         return record;
       },
     },
