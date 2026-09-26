@@ -29,6 +29,8 @@
  *     a search that never comes.
  */
 
+import type { RetrievalMode } from "./bm25.js";
+
 /**
  * How a ready result was verified. Constant strings — no interpolation
  * (flair#1411). Public /Health still omits this field when searchReady is
@@ -101,6 +103,14 @@ export function resolveSearchReadiness(opts: {
   memoryTable?: MemoryTable;
   bm25?: Bm25Status;
   hybridEnabled?: boolean;
+  /**
+   * The active retrieval mode (retrievalMode() in ./bm25.ts). Preferred over
+   * `hybridEnabled` when supplied: the persistent BM25 index is in the
+   * retrieval path for "hybrid" AND "bm25-only", and out of it for
+   * "vector-only". Unset ⇒ derived from `hybridEnabled` (undefined/true ⇒
+   * hybrid, false ⇒ vector-only), so existing callers are unaffected.
+   */
+  retrievalMode?: RetrievalMode;
   /** Persistent BM25 index kill switch (`FLAIR_BM25_INDEX`). Default on. */
   bm25IndexEnabled?: boolean;
   /** Optional sink for the missing-registry once-warn (live path: harper logger). */
@@ -138,7 +148,14 @@ export function resolveSearchReadiness(opts: {
   // status stays `empty` for the life of the process — that is serving, not
   // cold. Treating it as lag would make searchReady false forever and refuse
   // a node that is already answering recall.
-  const indexInPath = opts.hybridEnabled !== false && opts.bm25IndexEnabled !== false;
+  // The persistent BM25 index is in the retrieval path for "hybrid" and
+  // "bm25-only"; a "vector-only" process has no lexical leg to keep warm.
+  // `retrievalMode` is the current selector; `hybridEnabled` is the legacy
+  // boolean callers passed before it — an unset retrievalMode falls back to it
+  // exactly (false ⇒ vector-only, so the shipped behavior is unchanged).
+  const effectiveMode: RetrievalMode =
+    opts.retrievalMode ?? (opts.hybridEnabled === false ? "vector-only" : "hybrid");
+  const indexInPath = effectiveMode !== "vector-only" && opts.bm25IndexEnabled !== false;
   if (indexInPath && opts.bm25) {
     if (opts.bm25.state === "building") {
       return namesLag("bm25 index building — first search is still scanning the corpus");

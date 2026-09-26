@@ -21,7 +21,7 @@ import {
 // retrievalCount hit-tracking side effects (see resources/
 // semantic-retrieval-core.ts's module doc for the full boundary).
 import { retrieveCandidates, DEFAULT_SELECT } from "./semantic-retrieval-core.js";
-import { hybridEnabled } from "./bm25.js";
+import { retrievalMode } from "./bm25.js";
 import { buildTrustBlock } from "./trust-block.js";
 import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
 import { estimateTokens } from "./token-estimate.js";
@@ -973,15 +973,22 @@ export class BootstrapMemories extends Resource {
     tokenBudget += taskReserve;
     if (currentTask && tokenBudget <= 0) taskRetrievalHint = "Task retrieval skipped: no content budget remains.";
     if (currentTask && tokenBudget > 0) {
+      // Resolve the mode ONCE here so the embedding guard and the core agree.
+      // The bm25-only arm ranks on the lexical leg alone and needs NO query
+      // embedding — gating it on one being available would skip the lexical
+      // search entirely and lose task-relevant memories for no reason.
+      const mode = retrievalMode();
       let queryEmbedding: number[] | null = null;
-      try {
-        // flair#504 Phase 2: 'query' — currentTask is the bootstrap's
-        // task-relevance search query, not stored content.
-        queryEmbedding = await getEmbedding(currentTask, "query");
-      } catch {}
+      if (mode !== "bm25-only") {
+        try {
+          // flair#504 Phase 2: 'query' — currentTask is the bootstrap's
+          // task-relevance search query, not stored content.
+          queryEmbedding = await getEmbedding(currentTask, "query");
+        } catch {}
+      }
 
-      if (!queryEmbedding) taskRetrievalHint = "Task retrieval skipped: query embedding unavailable.";
-      if (queryEmbedding) {
+      if (mode !== "bm25-only" && !queryEmbedding) taskRetrievalHint = "Task retrieval skipped: query embedding unavailable.";
+      if (mode === "bm25-only" || queryEmbedding) {
         // flair#1207 — exclude own memories ALREADY placed via the authoritative
         // set (permanent + recent + predicted actually admitted). The old set was
         // built positionally (recent.filter by index) AND omitted `predicted`, so
@@ -1011,9 +1018,9 @@ export class BootstrapMemories extends Resource {
           limit: candidatePoolK,
           // flair#1246 — ONE RANKER, ONE SCALE: this pass now invokes the
           // core in the SAME mode memory_search does (hybrid + q via the
-          // shared hybridEnabled() selector, so the FLAIR_HYBRID_RETRIEVAL
-          // kill-switch moves BOTH surfaces together — a split mode IS the
-          // #1246 bug). HNSW-only here was an accident of early code, and it
+          // shared retrievalMode() selector, so the FLAIR_RETRIEVAL_MODE /
+          // FLAIR_HYBRID_RETRIEVAL kill-switch moves BOTH surfaces together —
+          // a split mode IS the #1246 bug). HNSW-only here was an accident of early code, and it
           // made bootstrap's teammate picks diverge from search on the same
           // store+query: a record whose task-relevance is LEXICAL (exact task
           // terms in semantically-atypical prose) ranks BELOW bland-generic
@@ -1025,7 +1032,7 @@ export class BootstrapMemories extends Resource {
           // fusion carries it to the top, same as search. Perf (Kern-ratified
           // trade): the BM25 corpus scan this adds to the bootstrap path is
           // the same per-call scan every memory_search request already runs.
-          hybrid: hybridEnabled(),
+          mode,
           // The lexical leg — same query text the embedding was computed
           // from, so both legs rank the same question (parity with search,
           // where `q` drives BM25 and the keyword bump).

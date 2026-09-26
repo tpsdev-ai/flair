@@ -118,7 +118,7 @@ const READER_PROFILES = {
     family: "qwen3_5",
     temperature: 0,
     seed: 0,
-    numCtx: 16384,       // retrieval arms (flair / vector-only / no-context)
+    numCtx: 16384,       // retrieval arms (flair / vector-only / bm25-only / no-context)
     numPredict: 256,
   },
   cloud: {
@@ -155,9 +155,9 @@ export const FULL_CONTEXT = {
 // ── Retrieval: documented defaults, held fixed across arms ───────────────────
 export const RETRIEVAL = {
   scoring: "raw" as const,       // production default since flair#623
-  readerTopK: 20,                // memories fed to the reader (flair / vector-only)
-  // hybrid on/off is a Harper PROCESS-level env (FLAIR_HYBRID_RETRIEVAL), set
-  // per arm by eval.ts: flair=true, vector-only=false.
+  readerTopK: 20,                // memories fed to the reader (flair / vector-only / bm25-only)
+  // The retrieval mode is a Harper PROCESS-level env (FLAIR_RETRIEVAL_MODE), set
+  // per arm by eval.ts: flair=hybrid, vector-only=vector-only, bm25-only=bm25-only.
 } as const;
 
 export const INGESTION = {

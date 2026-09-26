@@ -44,7 +44,7 @@ import { formatReport } from "./report";
 import {
   probeReaderDeterminism, failedProbe, printReaderDeterminism, type ReaderDeterminism,
 } from "./determinism";
-import { ALL_ARMS, type Arm } from "./arms";
+import { ALL_ARMS, HARPER_ARMS, type Arm, type HarperArm } from "./arms";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -163,14 +163,16 @@ async function runSlice(): Promise<void> {
   // contamination / ceiling reads that need the missing arms do not exist.
   (manifest as { arms: Arm[] }).arms = SELECTED_ARMS;
 
-  // (2) The Harper-store topology. When both Harper arms run, one ingest per
-  // question serves both over a shared store with a per-question mode flip
-  // (take-2 ingest-reuse). This is a MEASUREMENT-VALIDITY difference, not a
+  // (2) The Harper-store topology. When two or more Harper arms run, one ingest
+  // per question serves them all over a shared store with a per-question mode
+  // flip (take-2 ingest-reuse). This is a MEASUREMENT-VALIDITY difference, not a
   // speed one: per-arm stores gave the vector-only arm a full-size HNSW graph
   // while flair queried a growing one — a confound biased FOR flair. A
   // shared-store run and a per-arm-store run therefore must never share a
   // configHash even though models, dataset and prompts are identical.
-  const sharedStore = SELECTED_ARMS.includes("flair") && SELECTED_ARMS.includes("vector-only");
+  // MUST match eval.ts's sharedStore decision exactly (2+ selected Harper arms).
+  const harperSelected: HarperArm[] = HARPER_ARMS.filter((a) => SELECTED_ARMS.includes(a));
+  const sharedStore = harperSelected.length >= 2;
   (manifest as { ingestion: unknown }).ingestion = {
     ...INGESTION,
     harperStoreSharing: sharedStore ? "ingest-once-shared-store-alternating-mode" : "per-arm-store",
@@ -180,7 +182,7 @@ async function runSlice(): Promise<void> {
   if (process.env.LME_RESUME === "1") console.log(`resume: LME_RESUME=1 — banked (question,arm) pairs from ${process.env.LME_RECORDS_JSONL} will be skipped`);
   console.log(`arms: ${SELECTED_ARMS.join(", ")}`);
   if (sharedStore) {
-    console.log(`ingest-reuse (take-2): one ingest per question serves flair + vector-only over a shared store with per-question mode flip. configHash intentionally differs from per-arm-store runs (ingestion.harperStoreSharing is hashed).`);
+    console.log(`ingest-reuse (take-2): one ingest per question serves ${harperSelected.join(" + ")} over a shared store with per-question mode flip. configHash intentionally differs from per-arm-store runs (ingestion.harperStoreSharing is hashed).`);
   }
   console.log(`configHash: ${configHash}\n`);
 

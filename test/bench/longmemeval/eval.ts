@@ -28,7 +28,8 @@ import { generate, type OllamaModelSpec } from "./ollama";
 import { buildJudgePrompt, parseVerdict, JudgeParseError, type LmeTask } from "./judge";
 import {
   buildReaderPrompt, formatRetrieved, formatFullContext, HARPER_ARMS, ALL_ARMS,
-  assertRetrievedReaderContextEqualsTopK, type Arm,
+  ARM_RETRIEVAL_MODE,
+  assertRetrievedReaderContextEqualsTopK, type Arm, type HarperArm, type RetrievalMode,
 } from "./arms";
 import { writeFileSync, rmSync, appendFileSync, readFileSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -401,18 +402,18 @@ async function runNoHarperArms(
   return out;
 }
 
-/** A Harper arm: spawn a fresh ephemeral Harper with hybrid on/off, then per
- *  question ingest → wait searchable → retrieve → read → judge. */
+/** A Harper arm: spawn a fresh ephemeral Harper in the arm's retrieval mode,
+ *  then per question ingest → wait searchable → retrieve → read → judge. */
 async function runHarperArm(
-  arm: Arm, hybrid: boolean, entries: LmeEntry[], opts: RunOptions, host: string,
+  arm: Arm, mode: RetrievalMode, entries: LmeEntry[], opts: RunOptions, host: string,
 ): Promise<QuestionArmResult[]> {
   const log = opts.log ?? (() => {});
-  const prev = process.env.FLAIR_HYBRID_RETRIEVAL;
-  process.env.FLAIR_HYBRID_RETRIEVAL = hybrid ? "true" : "false";
+  const prev = process.env.FLAIR_RETRIEVAL_MODE;
+  process.env.FLAIR_RETRIEVAL_MODE = mode;
   let harper: HarperInstance | undefined;
   const out: QuestionArmResult[] = [];
   try {
-    log(`  [${arm}] spawning ephemeral Harper (hybrid=${hybrid})...`);
+    log(`  [${arm}] spawning ephemeral Harper (mode=${mode})...`);
     harper = await startHarper({
       // tps-bench: cwd => the npm-installed published @tpsdev-ai/flair package
       // (the system under test), harperBinDir => the install root (npm hoists
@@ -444,8 +445,8 @@ async function runHarperArm(
     }
   } finally {
     if (harper) await stopHarper(harper, { keepInstallDir: false });
-    if (prev === undefined) delete process.env.FLAIR_HYBRID_RETRIEVAL;
-    else process.env.FLAIR_HYBRID_RETRIEVAL = prev;
+    if (prev === undefined) delete process.env.FLAIR_RETRIEVAL_MODE;
+    else process.env.FLAIR_RETRIEVAL_MODE = prev;
   }
   return out;
 }
@@ -478,31 +479,39 @@ async function runHarperArm(
  * measured 99% 4-core saturation, libuv embed workers hot, JS main thread idle.
  * That is the reason it was reachable, not the reason it is correct.)
  *
- * Design constraint that shapes the loop: hybrid on/off is a Harper
- * PROCESS-level env (read per-call server-side, but not per-request), and the
- * HNSW index grows as questions accumulate. A naive "flair phase then
- * vector-only phase" would have vector-only querying a full-size index while
- * flair queried a growing one — a systematic index-state asymmetry biased FOR
- * flair (filtered-ANN candidate recall degrades as the graph grows). So we
- * ALTERNATE the Harper's mode per question over ONE shared store
- * (StartHarperOptions.installDir reuse — the lifecycle's documented shape).
- * Each phase: the arm matching the current mode (1) queries the question
- * ingested in the PREVIOUS phase (query-only, ZERO ingest), then (2) ingests
- * and queries the NEXT question; then the store restarts with the mode
- * flipped.
+ * Design constraint that shapes the loop: the retrieval mode is a Harper
+ * PROCESS-level env (FLAIR_RETRIEVAL_MODE, read per-call server-side, but not
+ * per-request), and the HNSW index grows as questions accumulate. A naive
+ * "flair phase then vector-only phase" would have vector-only querying a
+ * full-size index while flair queried a growing one — a systematic index-state
+ * asymmetry biased FOR flair (filtered-ANN candidate recall degrades as the
+ * graph grows). So we ALTERNATE the Harper's mode per phase over ONE shared
+ * store (StartHarperOptions.installDir reuse — the lifecycle's documented
+ * shape), cycling through every selected Harper arm. Each phase (current mode
+ * m): (1) re-check and query EVERY question still pending under m (query-only,
+ * ZERO ingest) — a question ingested under m stays pending until it has been
+ * queried under all harperArms.length modes; then (2) ingest and query the
+ * NEXT question under m; then the store restarts with the mode advanced.
  *
- * Effect: every question is ingested exactly once, and BOTH arms query it
- * against the byte-identical store state (memories 1..i) — exact per-question
- * index parity, 1 restart per question (~10-20s each vs ~700s saved per
- * question). Queries are agent-scoped (one agent per question, keypair held
- * in-memory across restarts), so results never see other questions' memories.
+ * Effect: every question is ingested exactly once, and EVERY Harper arm queries
+ * it against the byte-identical store state (memories 1..i) — exact
+ * per-question index parity. A question is a pipeline of depth
+ * (harperArms.length - 1): one query per phase for as many phases as there are
+ * other arms, i.e. (harperArms.length - 1) restarts per question (~10-20s each,
+ * vs ~700s of re-ingest per question saved). Queries are agent-scoped (one agent
+ * per question, keypair held in-memory across restarts), so results never see
+ * other questions' memories.
  */
 async function runHarperArmsShared(
   entries: LmeEntry[], opts: RunOptions, host: string,
   isDone: (qid: string, arm: Arm) => boolean = () => false,
 ): Promise<QuestionArmResult[]> {
   const log = opts.log ?? (() => {});
-  const prev = process.env.FLAIR_HYBRID_RETRIEVAL;
+  // The Harper arms this run actually executes, in HARPER_ARMS canonical order.
+  // Ingest-reuse needs at least two (one ingest, several rankers).
+  const harperArms: HarperArm[] = HARPER_ARMS.filter((a) => SELECTED_ARMS.includes(a));
+  if (harperArms.length < 2) throw new Error(`runHarperArmsShared requires ≥2 Harper arms (got ${harperArms.length})`);
+  const prev = process.env.FLAIR_RETRIEVAL_MODE;
   const startOpts = () => ({
     cwd: process.env.LME_FLAIR_PKG_DIR ?? opts.repoRoot,
     harperBinDir: process.env.LME_HARPER_BIN_DIR ?? opts.repoRoot,
@@ -512,10 +521,16 @@ async function runHarperArmsShared(
   const agents = new Map<string, TestAgent>();
   const restartMs: number[] = [];
   let ingests = 0;
-  const phaseIngests: Record<string, number> = { flair: 0, "vector-only": 0 };
-  let hybrid = true;
-  process.env.FLAIR_HYBRID_RETRIEVAL = "true";
-  log(`  [shared] ingest-reuse: one ingest/question serves both Harper arms; alternating mode flip (1 restart/question) keeps exact per-question index parity`);
+  const phaseIngests: Record<string, number> = Object.fromEntries(harperArms.map((a) => [a, 0]));
+  // Mode cycling. Each question is ingested ONCE and queried under EVERY
+  // selected Harper arm. The phase mode cycles through harperArms and the
+  // Harper process is restarted on every flip, so a question ingested at phase
+  // p is queried under modes p, p+1, … (one query per phase) until every arm
+  // has seen it — a pipeline of depth (harperArms.length - 1).
+  let modeIdx = 0;
+  const currentArm = (): HarperArm => harperArms[modeIdx % harperArms.length]!;
+  process.env.FLAIR_RETRIEVAL_MODE = ARM_RETRIEVAL_MODE[currentArm()];
+  log(`  [shared] ingest-reuse: one ingest/question serves ${harperArms.join(" + ")}; alternating mode flip keeps exact per-question index parity`);
   let harper = await startHarper(startOpts());
   const installDir = harper.installDir;
   log(`  [shared] store: ${installDir}`);
@@ -660,60 +675,79 @@ async function runHarperArmsShared(
     }));
   }
 
-  async function flipMode(): Promise<void> {
+  /** Restart Harper so it re-reads FLAIR_RETRIEVAL_MODE for the CURRENT arm. */
+  async function restartHarper(): Promise<void> {
     const t0 = performance.now();
     await stopHarper(harper, { keepInstallDir: true });
-    hybrid = !hybrid;
-    process.env.FLAIR_HYBRID_RETRIEVAL = hybrid ? "true" : "false";
+    process.env.FLAIR_RETRIEVAL_MODE = ARM_RETRIEVAL_MODE[currentArm()];
     harper = await startHarper({ ...startOpts(), installDir });
     restartMs.push(performance.now() - t0);
   }
+  async function flipMode(): Promise<void> {
+    modeIdx++;
+    await restartHarper();
+  }
+  /** Jump straight to a specific arm's mode (used by the resume path). */
+  async function setArm(target: HarperArm): Promise<void> {
+    if (currentArm() === target) return;
+    modeIdx = harperArms.indexOf(target);
+    await restartHarper();
+  }
 
   // Resume partitioning: fully-banked questions are skipped outright; a
-  // question with exactly ONE arm banked (the crash boundary) gets its corpus
-  // ingested and ONLY the missing arm queried; the rest run the normal
+  // question with SOME arms banked (the crash boundary) gets its corpus
+  // ingested and ONLY the missing arms queried; the rest run the normal
   // alternation.
-  const singles: Array<{ entry: LmeEntry; missing: Arm }> = [];
+  const singles: Array<{ entry: LmeEntry; missing: HarperArm[] }> = [];
   const todo: LmeEntry[] = [];
   for (const e of entries) {
-    const f = isDone(e.question_id, "flair");
-    const v = isDone(e.question_id, "vector-only");
-    if (f && v) continue;
-    if (f || v) singles.push({ entry: e, missing: f ? "vector-only" : "flair" });
+    const missing = harperArms.filter((a) => !isDone(e.question_id, a));
+    if (!missing.length) continue;
+    if (missing.length < harperArms.length) singles.push({ entry: e, missing });
     else todo.push(e);
   }
   if (singles.length || entries.length !== todo.length) {
-    log(`  [shared] resume partition: ${entries.length - todo.length - singles.length} fully banked, ${singles.length} single-arm, ${todo.length} to run`);
+    log(`  [shared] resume partition: ${entries.length - todo.length - singles.length} fully banked, ${singles.length} partially banked, ${todo.length} to run`);
   }
 
   try {
     for (const { entry, missing } of singles) {
-      const needHybrid = missing === "flair";
-      if (hybrid !== needHybrid) await flipMode();
       const agent = mkAgent(`lme-shared-${entry.question_id}`);
       agents.set(entry.question_id, agent);
       await registerAgent(harper, agent);
       const client: BenchClient = { harper, agent };
       const sessions = entryToSessions(entry);
       await ingestSessionHistory(client, toSessionHistories(sessions), { concurrency: INGEST_CONCURRENCY });
-      ingests++; phaseIngests[missing]! += 1;
+      ingests++; for (const a of missing) phaseIngests[a]! += 1;
       await ensureSearchable(entry);
-      await queryEval(entry, missing);
-      log(`  [shared] single-arm resume: ${entry.question_id} ${missing} done`);
+      for (const a of missing) {
+        await setArm(a);
+        // setArm may restart Harper; the index must still serve this corpus
+        // before the query (same contract as the main loop).
+        await ensureSearchable(entry);
+        await queryEval(entry, a);
+      }
+      log(`  [shared] partial resume: ${entry.question_id} ${missing.join("+")} done`);
     }
 
     let idx = 0;
-    let pending: LmeEntry | null = null; // ingested last phase; other arm still owes its query
+    // Pipeline of questions still owing queries. A question ingested at phase p
+    // is queried under the current mode at each of the next (harperArms.length
+    // - 1) phases; `remaining` counts the queries it still owes, so it
+    // graduates once it has been scored under every arm.
+    let pending: Array<{ entry: LmeEntry; remaining: number }> = [];
+    const pipelineDepth = harperArms.length - 1;
     entries = todo;
-    while (idx < entries.length || pending) {
-      const arm: Arm = hybrid ? "flair" : "vector-only";
-      // (a) the pending question: QUERY-ONLY under this mode — zero ingest.
-      if (pending) {
-        const entry = pending; pending = null;
+    while (idx < entries.length || pending.length) {
+      const arm: HarperArm = currentArm();
+      // (a) pending questions: QUERY-ONLY under this mode — zero ingest.
+      for (const p of pending) {
         // canary re-check after restart: index must still serve this corpus
-        await ensureSearchable(entry);
-        await queryEval(entry, arm);
+        await ensureSearchable(p.entry);
+        await queryEval(p.entry, arm);
+        p.remaining -= 1;
       }
+      pending = pending.filter((p) => p.remaining > 0);
       // (b) next question: ingest ONCE + query under this same mode.
       if (idx < entries.length) {
         const entry = entries[idx++]!;
@@ -726,23 +760,23 @@ async function runHarperArmsShared(
         ingests++; phaseIngests[arm]! += 1;
         await ensureSearchable(entry);
         await queryEval(entry, arm);
-        pending = entry;
+        pending.push({ entry, remaining: pipelineDepth });
         if (idx % 5 === 0 || idx === entries.length) {
           const mr = restartMs.length ? (restartMs.reduce((a, b) => a + b, 0) / restartMs.length / 1000).toFixed(1) : "n/a";
           log(`  [shared] ${idx}/${entries.length} ingested (last: ${ingest.written} events, ${ingest.elapsedMs.toFixed(0)}ms; ingests ${ingests}; restarts ${restartMs.length}, mean ${mr}s; searchWait max ${(maxSearchWaitMs / 1000).toFixed(1)}s, next deadline ${(searchDeadlineMs() / 1000).toFixed(0)}s)`);
         }
       }
       // (c) flip the mode if any work remains.
-      if (idx < entries.length || pending) await flipMode();
+      if (idx < entries.length || pending.length) await flipMode();
     }
-    log(`  [shared] complete: ${ingests} ingests for ${entries.length} questions × 2 arms = ${out.length} evals ` +
-        `(flair-phase ingests ${phaseIngests.flair}, vector-phase ingests ${phaseIngests["vector-only"]}); ` +
+    log(`  [shared] complete: ${ingests} ingests for ${entries.length} questions × ${harperArms.length} arms = ${out.length} evals ` +
+        `(${harperArms.map((a) => `${a}-phase ingests ${phaseIngests[a]}`).join(", ")}); ` +
         `${restartMs.length} restarts, mean ${(restartMs.reduce((a, b) => a + b, 0) / Math.max(1, restartMs.length) / 1000).toFixed(1)}s`);
   } finally {
     await stopHarper(harper, { keepInstallDir: false });
     try { rmSync(installDir, { recursive: true, force: true, maxRetries: 2 }); } catch { /* best effort */ }
-    if (prev === undefined) delete process.env.FLAIR_HYBRID_RETRIEVAL;
-    else process.env.FLAIR_HYBRID_RETRIEVAL = prev;
+    if (prev === undefined) delete process.env.FLAIR_RETRIEVAL_MODE;
+    else process.env.FLAIR_RETRIEVAL_MODE = prev;
   }
   return out;
 }
@@ -819,19 +853,17 @@ export async function runOnce(runIndex: number, entries: LmeEntry[], opts: RunOp
   if (SELECTED_ARMS.includes("full-context") || SELECTED_ARMS.includes("no-context")) {
     results.push(...(await runNoHarperArms(host, entries, log, isDone)));
   }
-  const sharedStore = SELECTED_ARMS.includes("flair") && SELECTED_ARMS.includes("vector-only");
+  const harperSelected: HarperArm[] = HARPER_ARMS.filter((a) => SELECTED_ARMS.includes(a));
+  const sharedStore = harperSelected.length >= 2;
   if (sharedStore) {
-    // Ingest-reuse: one ingest per question serves both Harper arms.
+    // Ingest-reuse: one ingest per question serves every selected Harper arm.
     results.push(...(await runHarperArmsShared(entries, opts, host, isDone)));
   } else {
-    if (process.env.LME_RESUME === "1" && (SELECTED_ARMS.includes("flair") || SELECTED_ARMS.includes("vector-only"))) {
-      throw new Error("LME_RESUME=1 is only supported for the shared-store (flair+vector-only) path — a single Harper arm would re-run banked pairs and duplicate results");
+    if (process.env.LME_RESUME === "1" && harperSelected.length > 0) {
+      throw new Error("LME_RESUME=1 is only supported for the shared-store (2+ Harper arms) path — a single Harper arm would re-run banked pairs and duplicate results");
     }
-    if (SELECTED_ARMS.includes("flair")) {
-      results.push(...(await runHarperArm("flair", true, entries, opts, host)));
-    }
-    if (SELECTED_ARMS.includes("vector-only")) {
-      results.push(...(await runHarperArm("vector-only", false, entries, opts, host)));
+    for (const a of harperSelected) {
+      results.push(...(await runHarperArm(a, ARM_RETRIEVAL_MODE[a], entries, opts, host)));
     }
   }
 

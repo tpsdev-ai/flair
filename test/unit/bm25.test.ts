@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, afterEach } from "bun:test";
 // Exercise the SHIPPED BM25 module (resources/bm25.ts) directly — Harper-free,
 // same convention as temporal-scoring.test.ts. FLAIR-BM25-HYBRID.
 import {
@@ -7,6 +7,7 @@ import {
   fuseRrfNormalized,
   rrfScores,
   hybridEnabled,
+  retrievalMode,
   BM25_K1,
   BM25_B,
   RRF_K,
@@ -43,6 +44,63 @@ describe("feature flag — FLAIR_HYBRID_RETRIEVAL (ACTIVATED 2026-07-08: default
       expect(hybridEnabled()).toBe(true);
     }
     restore();
+  });
+});
+
+// ── FLAIR_RETRIEVAL_MODE (bench-facing selector) ────────────────────────────
+// The selector a harness uses to run the hybrid / vector-only / bm25-only arms.
+// Its whole job is to make an arm's NAME match what it measures, so the tests
+// below pin the two ways it could lie: an explicit mode losing to the legacy
+// boolean, and an unknown mode silently falling back instead of refusing.
+describe("retrievalMode — FLAIR_RETRIEVAL_MODE selector (bench arms)", () => {
+  const origMode = process.env.FLAIR_RETRIEVAL_MODE;
+  const origLegacy = process.env.FLAIR_HYBRID_RETRIEVAL;
+  const restore = () => {
+    if (origMode === undefined) delete process.env.FLAIR_RETRIEVAL_MODE;
+    else process.env.FLAIR_RETRIEVAL_MODE = origMode;
+    if (origLegacy === undefined) delete process.env.FLAIR_HYBRID_RETRIEVAL;
+    else process.env.FLAIR_HYBRID_RETRIEVAL = origLegacy;
+  };
+  afterEach(restore);
+
+  test("an explicit mode WINS over the legacy boolean — all nine combinations", () => {
+    const modes = ["hybrid", "vector-only", "bm25-only"] as const;
+    const legacies = [undefined, "true", "false"] as const;
+    let checked = 0;
+    for (const m of modes) {
+      for (const legacy of legacies) {
+        process.env.FLAIR_RETRIEVAL_MODE = m;
+        if (legacy === undefined) delete process.env.FLAIR_HYBRID_RETRIEVAL;
+        else process.env.FLAIR_HYBRID_RETRIEVAL = legacy;
+        expect(retrievalMode()).toBe(m);
+        checked++;
+      }
+    }
+    expect(checked).toBe(9); // count the input, not just the matches
+  });
+
+  test("mode unset → legacy boolean honoured exactly (unset/true → hybrid, false → vector-only)", () => {
+    delete process.env.FLAIR_RETRIEVAL_MODE;
+    delete process.env.FLAIR_HYBRID_RETRIEVAL;
+    expect(retrievalMode()).toBe("hybrid"); // unset + unset → hybrid (documented default)
+    process.env.FLAIR_HYBRID_RETRIEVAL = "true";
+    expect(retrievalMode()).toBe("hybrid");
+    process.env.FLAIR_HYBRID_RETRIEVAL = "false";
+    expect(retrievalMode()).toBe("vector-only");
+  });
+
+  test("an unknown mode is a REFUSAL naming the value and the three accepted ones — never a silent default", () => {
+    process.env.FLAIR_RETRIEVAL_MODE = "vector"; // near-miss for "vector-only"
+    expect(() => retrievalMode()).toThrow(/unknown FLAIR_RETRIEVAL_MODE value "vector"/);
+    expect(() => retrievalMode()).toThrow(/hybrid, vector-only, bm25-only/);
+  });
+
+  test("hybridEnabled() === (retrievalMode() === 'hybrid') — legacy boolean callers keep their meaning", () => {
+    process.env.FLAIR_RETRIEVAL_MODE = "bm25-only";
+    delete process.env.FLAIR_HYBRID_RETRIEVAL;
+    expect(hybridEnabled()).toBe(false);
+    process.env.FLAIR_RETRIEVAL_MODE = "hybrid";
+    expect(hybridEnabled()).toBe(true);
   });
 });
 

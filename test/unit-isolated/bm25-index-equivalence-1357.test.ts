@@ -275,7 +275,7 @@ function buildCases(): Case[] {
     const q = texts[i];
     const base = {
       q, conditions: [condition, notArchived], limit: 20, agentId: reader,
-      isAllowed, hybrid: true, scoring: "raw", minScore: 0,
+      isAllowed, mode: "hybrid", scoring: "raw", minScore: 0,
     };
     cases.push({ name: `plain/${i}`, params: { ...base, queryEmbedding: qEmbFor(100 + i) } });
     cases.push({ name: `no-embedding/${i}`, params: { ...base, queryEmbedding: null } });
@@ -345,7 +345,7 @@ function buildCases(): Case[] {
     name: "listing",
     params: {
       q: undefined, queryEmbedding: null, conditions: [condition, notArchived], limit: 500,
-      agentId: reader, isAllowed, hybrid: true, scoring: "raw", minScore: 0,
+      agentId: reader, isAllowed, mode: "hybrid", scoring: "raw", minScore: 0,
     },
   });
   // Embedding but no text.
@@ -353,7 +353,7 @@ function buildCases(): Case[] {
     name: "embedding-only",
     params: {
       q: undefined, queryEmbedding: qEmbFor(31337), conditions: [condition, notArchived], limit: 20,
-      agentId: reader, isAllowed, hybrid: true, scoring: "raw", minScore: 0,
+      agentId: reader, isAllowed, mode: "hybrid", scoring: "raw", minScore: 0,
     },
   });
   return cases;
@@ -480,7 +480,7 @@ describe("flair#1357 — the indexed lexical leg is byte-identical to the legacy
       q: "vertex ingress proxy certificate fingerprint handshake rollout cluster",
       queryEmbedding: qEmbFor(4242),
       conditions: [condition, { attribute: "archived", comparator: "not_equal", value: true }],
-      limit: 200, agentId: "agent-a", isAllowed, hybrid: true, scoring: "raw", minScore: 0,
+      limit: 200, agentId: "agent-a", isAllowed, mode: "hybrid", scoring: "raw", minScore: 0,
     };
     process.env.FLAIR_BM25_INDEX = "true";
     __resetBm25IndexForTests();
@@ -520,7 +520,7 @@ describe("flair#1357 — incremental maintenance keeps the lexical leg current",
   function search(q: string, extra: Record<string, any> = {}) {
     return retrieveCandidates({
       q, queryEmbedding: null, conditions: [condition, notArchived], limit: 50,
-      agentId: reader, isAllowed, hybrid: true, scoring: "raw", minScore: 0, ...extra,
+      agentId: reader, isAllowed, mode: "hybrid", scoring: "raw", minScore: 0, ...extra,
     } as any);
   }
 
@@ -677,7 +677,7 @@ describe("flair#1357 — concurrency", () => {
   function search(q: string) {
     return retrieveCandidates({
       q, queryEmbedding: null, conditions: [condition, notArchived], limit: 50,
-      agentId: reader, isAllowed, hybrid: true, scoring: "raw", minScore: 0,
+      agentId: reader, isAllowed, mode: "hybrid", scoring: "raw", minScore: 0,
     } as any);
   }
 
