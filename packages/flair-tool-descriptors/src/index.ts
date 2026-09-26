@@ -99,7 +99,7 @@ export function descriptorNames(descriptors: readonly ToolDescriptor[]): string[
 export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
   {
     "name": "memory_search",
-    "description": "Search memories by meaning. Understands temporal queries like 'what happened today'. Scoped to your agent's own + granted memories.",
+    "description": "Search memories by meaning. Understands temporal queries like 'what happened today'. Scoped to your agent's own and other agents' non-private memories.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -128,7 +128,7 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
         "query"
       ]
     },
-    "outputShape": "{ results: MemoryRecord[] } — semantic hits scoped to the caller's own + granted memories; each hit carries content, never the raw embedding.",
+    "outputShape": "{ results: MemoryRecord[] } — semantic hits scoped to the caller's own and other agents' non-private memories; each hit carries content, never the raw embedding.",
     "annotations": {
       "readOnlyHint": true
     },
