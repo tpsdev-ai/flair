@@ -466,3 +466,27 @@ describe("closing round: the default-budget case is an offender (flair#1825 r7 i
     expect(caseOffenders.some((o: any) => o.kind === "case-no-budget")).toBe(true);
   });
 });
+
+describe("round 9: post-separator digit cap + options-only timeout (flair#1825)", () => {
+  function offendersFor(src: string) {
+    const dir = mkdtempSync(join(tmpdir(), "spawn-scan-r9-"));
+    repos.push(dir);
+    writeTree(dir, { "test/x.test.ts": src });
+    return scanTree(dir);
+  }
+  const spawnNoTimeout = (src: string) => offendersFor(src).spawnOffenders.some((o: any) => o.kind === "spawn-no-timeout");
+  const spawnSrc = (opts: string, argv = '["bun","src/cli.ts","status"]') => `test("t", () => {\n  Bun.spawn(${argv}, ${opts});\n});\n`;
+
+  it("item 1: a >15-digit literal (separators included) is UNBOUNDED; exactly 15 digits is bounded", () => {
+    expect(spawnNoTimeout(spawnSrc("{ timeout: 1_000_000_000_000_000 }"))).toBe(true); // 19 digits
+    expect(spawnNoTimeout(spawnSrc("{ timeout: 999_999_999_999_999 }"))).toBe(false); // 15 digits
+    expect(spawnNoTimeout(spawnSrc("{ timeout: 30_000 }"))).toBe(false);
+  });
+
+  it("item 2: the timeout is read from OPTIONS only — an argv token never decides it", () => {
+    // False offender before: the argv `--timeout=5000` was captured → reported unbounded.
+    expect(spawnNoTimeout(spawnSrc("{ timeout: 30_000 }", '["bun","src/cli.ts","--timeout=5000"]'))).toBe(false);
+    // False pass before: an argv element `timeout=5000` bounded a spawn with NO options timeout.
+    expect(spawnNoTimeout(spawnSrc("{}", '["bun","src/cli.ts","timeout=5000"]'))).toBe(true);
+  });
+});

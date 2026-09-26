@@ -566,6 +566,9 @@ export function findSpawnCalls(source) {
       index: m.index,
       line: lineOf(m.index),
       text: `${argvText} ; ${optText}`,
+      // The OPTIONS text is kept separately: a `timeout` is read from HERE only,
+      // never from argv (round 9 item 2).
+      optText,
       isCliEntry: textNamesCliEntry(argvText, ids),
       hasTimeout: /(^|[^\w$.])timeout\s*[:=]/.test(optText),
     });
@@ -585,6 +588,7 @@ export function findSpawnCalls(source) {
       index: m.index,
       line: lineOf(m.index),
       text: `${argvText} ; ${optText}`,
+      optText,
       isCliEntry: textNamesCliEntry(argvText, ids),
       hasTimeout: /(^|[^\w$.])timeout\s*[:=]/.test(optText),
     });
@@ -592,7 +596,8 @@ export function findSpawnCalls(source) {
   // A numeric `timeout:` value, so a case budget can be checked against the sum
   // of the waits inside it (flair#1825).
   for (const call of calls) {
-    const m = call.text.match(/(?:^|[^\w$.])timeout\s*[:=]\s*([^\s,;)}\]]+)/);
+    // OPTIONS ONLY: an argv element must never decide `hasTimeout` (round 9 item 2).
+    const m = (call.optText ?? "").match(/(?:^|[^\w$.])timeout\s*[:=]\s*([^\s,;)}\]]+)/);
     // ONLY the EXACT token `[1-9][0-9]*` (underscores allowed) is a deadline:
     // `timeout: 0` is NO timeout (node and Bun), and `1e999` / `10000-10000` are
     // expressions, not positive integers — all are unbounded (flair#1825 r6).
@@ -701,10 +706,15 @@ export function localHelpersThatSpawn(source, calls) {
 // leading/trailing/double underscore, at most 15 digits so the value is finite
 // and safe. Anything else — `0`, `1__000`, `_1000`, `1e999`, `10000-10000`, a
 // 310-digit literal (Infinity) — is unknown → unbounded / no-budget.
-const TIMEOUT_LITERAL_RE = /^[1-9][0-9]{0,14}(?:_[0-9]{1,3})*$/;
+// Digits with single underscores, no leading zero / leading/trailing/double
+// underscore; the DIGIT COUNT after removing underscores is ≤ 15 (finite, safe).
+const TIMEOUT_LITERAL_RE = /^[1-9](?:_?[0-9])*$/;
 export function timeoutLiteralMs(raw) {
   const tok = String(raw ?? "").trim();
-  return TIMEOUT_LITERAL_RE.test(tok) ? Number(tok.replace(/_/g, "")) : null;
+  if (!TIMEOUT_LITERAL_RE.test(tok)) return null;
+  const digits = tok.replace(/_/g, "");
+  if (digits.length > 15) return null; // `1_000_000_000_000_000` is NOT a deadline
+  return Number(digits);
 }
 
 /** Parse a per-case budget: a numeric literal (`30_000`) or `{ timeout: N }`. */
