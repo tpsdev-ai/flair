@@ -97,7 +97,8 @@ const npmStub = [
    "  base=\"$(cat \"$FIXTURES\")\"; spec=\"$2\"",
    "  printf '%s/%s@%s.tgz\\n' \"$base\" \"${spec%@*}\" \"${spec##*@}\"",
    "fi",
-   "if [ \"${1:-}\" = \"dist-tag\" ]; then printf 'dist-tag %s %s\\n' \"${2:-}\" \"${3:-}\" >> \"${DISTTAG_LOG:-/dev/null}\"; fi",
+   "if [ \"${1:-}\" = \"dist-tag\" ] && [ \"${2:-}\" = \"ls\" ]; then echo \"latest: 1.2.2\"; exit 0; fi",
+   "if [ \"${1:-}\" = \"dist-tag\" ] && [ \"${2:-}\" = \"add\" ]; then printf 'dist-tag add %s\\n' \"${3:-}\" >> \"${DISTTAG_LOG:-/dev/null}\"; fi",
    "exit 0",
 ].join("\n");
 
@@ -141,6 +142,7 @@ const nodeStub = [
    "  process.stdout.write(createHash('sha256').update(seed + pk).digest('hex') + '\\n');",
    "  process.exit(0);",
    "}",
+   "if (joined.includes('registry-latest-skew.mjs') && process.env.SKEW_FAIL === '1') process.exit(1);",
    "// Any other node script the gate runs (registry-latest-skew) is a no-op here.",
    "process.exit(0);",
 ].join("\n");
@@ -382,7 +384,7 @@ describe("A1c: the promote block is the single package-set-digest preflight", ()
     const digestChecks = lines.filter((l) => l.includes('if [ "$_rehash" != "'));
     expect(digestChecks.length).toBe(1);
     const firstDigest = lines.findIndex((l) => l.includes('if [ "$_rehash" != "'));
-    const firstPromote = lines.findIndex((l) => l.startsWith("npm dist-tag add "));
+    const firstPromote = lines.findIndex((l) => l.includes('if ! npm dist-tag add'));
     expect(firstDigest).toBeLessThan(firstPromote);
   });
 
@@ -624,81 +626,103 @@ describe("F4 (registry hasher, A1c of #1671): the emitted preflight refuses a ba
     });
  });
 
-// ── item 1 (A1c of #1671): a mid-promote npm failure STOPS the block and prints the
-// rollback for the already-moved packages. npm has NO atomic, all-or-none promote, so a
-// failure after the first tag leaves a PARTIAL promote. The block must (a) exit non-zero,
-// (b) move exactly the packages before the failure, and (c) print the exact reverse
-// (`npm dist-tag rm <pkg> latest`) commands for the already-moved packages. A stub npm
-// that fails on the 3rd dist-tag add drives this; the log proves exactly two moves
-// really happened, and stderr proves the rollback names those two.
-const NPART_SHIM = join(SCRATCH, "npart-shim");
-mkdirSync(NPART_SHIM, { recursive: true });
-// Stub npm: for `dist-tag add`, succeed on the 1st and 2nd add, fail on the 3rd (NFAIL_FAIL_ON)
-// and after. It LOGS only the moves that SUCCEED, so the log is exactly the set of tags
-// really pushed — a failed move is never logged, which is what makes the "two moves" count real.
-const npartNpmStub = [
+// ── item 1 (A1c of #1671, round 5): the RESTORE, not a delete. A mid-promote npm
+// failure STOPS the block; the block prints one RESTORE line per already-moved
+// package — `npm dist-tag add <pkg>@<previous> latest` — and the packages NOT moved.
+// It never `npm dist-tag rm`s a tag. A failing skew check after every move prints the
+// same restore lines; a pre-move `dist-tag ls` failure stops BEFORE any move.
+const CTL_SHIM = join(SCRATCH, "ctl-shim");
+const CTL_LOG_DIR = join(SCRATCH, "ctl-log");
+mkdirSync(CTL_SHIM, { recursive: true });
+// Stub npm: `dist-tag ls <pkg>` answers `latest: 1.2.2` (or FAILS for DISTTAG_LS_FAIL_PKG);
+// `dist-tag add` logs the SUCCESSFUL moves and fails from NFAIL_FAIL_ON (default: never).
+const ctlNpmStub = [
   "#!/usr/bin/env bash",
+  "if [ \"${1:-}\" = \"dist-tag\" ] && [ \"${2:-}\" = \"ls\" ]; then",
+  "  if [ -n \"${DISTTAG_LS_FAIL_PKG:-}\" ] && [ \"${3:-}\" = \"$DISTTAG_LS_FAIL_PKG\" ]; then exit 1; fi",
+  "  echo \"latest: 1.2.2\"",
+  "  exit 0",
+  "fi",
   "if [ \"${1:-}\" = \"dist-tag\" ] && [ \"${2:-}\" = \"add\" ]; then",
-  "  n=$(cat \"${NFAIL_COUNT:-/tmp/nfail}\" 2>/dev/null || echo 0)",
-  "  n=$((n + 1)); echo \"$n\" > \"${NFAIL_COUNT:-/tmp/nfail}\"",
-  "  if [ \"$n\" -ge \"${NFAIL_FAIL_ON:-3}\" ]; then exit 1; fi",
+  "  n=\"$(cat \"${NFAIL_COUNT:-\"$CTL_LOG_DIR/nfail\"}\" 2>/dev/null || echo 0)\"",
+  "  n=$((n + 1)); echo \"$n\" > \"${NFAIL_COUNT:-\"$CTL_LOG_DIR/nfail\"}\"",
+  "  if [ \"$n\" -ge \"${NFAIL_FAIL_ON:-99}\" ]; then exit 1; fi",
   "  printf 'dist-tag add %s\\n' \"${3:-}\" >> \"${DISTTAG_LOG:-/dev/null}\"",
   "  exit 0",
   "fi",
   "exit 0",
   "",
 ].join("\n");
-writeFileSync(join(NPART_SHIM, "npm"), npartNpmStub);
-chmodSync(join(NPART_SHIM, "npm"), 0o755);
+writeFileSync(join(CTL_SHIM, "npm"), ctlNpmStub);
+chmodSync(join(CTL_SHIM, "npm"), 0o755);
 
-describe("item 1 (A1c of #1671): a mid-promote npm failure stops the block and prints the rollback", () => {
-  test("a stub that fails on the 3rd dist-tag add => exactly two moves, rollback named, non-zero exit", () => {
-    // The certified digest is the "bindings" (seed 'sha:') re-derivation, so the happy
-    // preflight (SHIM node in bindings mode) passes and the block reaches the promote step.
-    const cert = rederivedDigest("sha:");
-    const emitted = runVerdict(["pass", VER, RUN_URL, "--os", "ubuntu-latest", "--package-set-digest", cert]);
-    expect(emitted.status).toBe(0);
-    const m = emitted.stdout.match(/```\n([\s\S]*?)\n```/);
-    if (!m?.[1]) throw new Error("item1: no fenced promote block in the PASS output");
-    const block = m[1]!;
-    const cwd = mkdtempSync(join(SCRATCH, "item1-"));
-    const f = join(cwd, "block.sh");
-    const dt = join(cwd, "disttag.log");
-    const nfail = join(cwd, "nfail.count");
-    writeFileSync(f, block);
-    writeFileSync(dt, "");
-    writeFileSync(nfail, "0");
-    // PATH: SHIM (happy node for the preflight) + NPART_SHIM (the failing npm stub). Each
-    // directory owns the one binary it provides (node vs npm), so the order does not matter.
-    const r = spawnSync("bash", [f], {
-      cwd: REPO,
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        PATH: `${SHIM}:${NPART_SHIM}:${process.env.PATH}`,
-        REAL_NODE,
-        NODE_STUB: join(SCRATCH, "node-stub.mjs"),
-        REPO_ROOT: REPO,
-        STUB_SHA_MODE: "bindings",
-        DISTTAG_LOG: dt,
-        NFAIL_COUNT: nfail,
-        NFAIL_FAIL_ON: "3",
-      },
-    });
-    // (a) the block exits non-zero: the 3rd move failed and the block stopped there.
+/** Emit the PASS block (bindings-certified digest) and run it under the control npm stub. */
+function runPromoteBlock(extraEnv: Record<string, string>): { status: number | null; stderr: string; dt: string } {
+  const cert = rederivedDigest("sha:");
+  const emitted = runVerdict(["pass", VER, RUN_URL, "--os", "ubuntu-latest", "--package-set-digest", cert]);
+  expect(emitted.status).toBe(0);
+  const m = emitted.stdout.match(/```\n([\s\S]*?)\n```/);
+  if (!m?.[1]) throw new Error("item1: no fenced promote block in the PASS output");
+  const cwd = mkdtempSync(join(SCRATCH, "item1-"));
+  const f = join(cwd, "block.sh");
+  const dt = join(cwd, "disttag.log");
+  const nfail = join(cwd, "nfail.count");
+  writeFileSync(f, m[1]!);
+  writeFileSync(dt, "");
+  writeFileSync(nfail, "0");
+  const r = spawnSync("bash", [f], {
+    cwd: REPO,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${SHIM}:${CTL_SHIM}:${process.env.PATH}`,
+      REAL_NODE,
+      NODE_STUB: join(SCRATCH, "node-stub.mjs"),
+      REPO_ROOT: REPO,
+      STUB_SHA_MODE: "bindings",
+      DISTTAG_LOG: dt,
+      NFAIL_COUNT: nfail,
+      ...extraEnv,
+    },
+  });
+  return { status: r.status, stderr: r.stderr, dt: readFileSync(dt, "utf8") };
+}
+
+describe("item 1 (A1c of #1671, round 5): a mid-promote failure RESTORES the moved tags", () => {
+  test("(a) the 3rd dist-tag add fails => RESTORE lines for exactly the two moved packages, no `rm`", () => {
+    const r = runPromoteBlock({ NFAIL_FAIL_ON: "3" });
     expect(r.status, `stderr:\n${r.stderr}`).not.toBe(0);
-    // (b) exactly two tag moves were really pushed — the log records only successful adds.
-    const moves = readFileSync(dt, "utf8").split("\n").filter((l) => l.startsWith("dist-tag add "));
+    const moves = r.dt.split("\n").filter((l) => l.startsWith("dist-tag add "));
     expect(moves.length).toBe(2);
-    // The two moved packages are exactly the first two lockstep packages (the promote order).
     expect(moves[0]).toContain(PACKAGES[0]);
     expect(moves[1]).toContain(PACKAGES[1]);
-    // (c) the block prints the exact reverse commands for the already-moved packages, names the
-    // package it aborts at, and never touches the failed package or any after it.
-    expect(r.stderr).toContain("npm dist-tag rm " + PACKAGES[0] + " latest");
-    expect(r.stderr).toContain("npm dist-tag rm " + PACKAGES[1] + " latest");
+    // The RESTORE lines restore each moved package to its PREVIOUS latest (1.2.2).
+    expect(r.stderr).toContain(`npm dist-tag add ${PACKAGES[0]}@1.2.2 latest`);
+    expect(r.stderr).toContain(`npm dist-tag add ${PACKAGES[1]}@1.2.2 latest`);
+    // Never a delete, and the not-moved set is named (the failed package included).
+    expect(r.stderr).not.toContain("dist-tag rm");
     expect(r.stderr).toContain("ABORTED");
+    expect(r.stderr).toContain("NOT moved");
     expect(r.stderr).toContain(PACKAGES[2]);
-    expect(readFileSync(dt, "utf8")).not.toContain(PACKAGES[2]);
+    expect(r.dt).not.toContain(PACKAGES[2]);
+  });
+
+  test("(b) the skew check fails after EVERY move => RESTORE lines for all moved packages, no `rm`", () => {
+    const r = runPromoteBlock({ SKEW_FAIL: "1" });
+    expect(r.status, `stderr:\n${r.stderr}`).not.toBe(0);
+    const moves = r.dt.split("\n").filter((l) => l.startsWith("dist-tag add "));
+    expect(moves.length).toBe(PACKAGES.length); // every move succeeded before the skew check
+    for (const p of PACKAGES) expect(r.stderr).toContain(`npm dist-tag add ${p}@1.2.2 latest`);
+    expect(r.stderr).not.toContain("dist-tag rm");
+    expect(r.stderr).toContain("skew check failed");
+  });
+
+  test("(c) the pre-move dist-tag ls fails for one package => no add is reached, and it is named", () => {
+    const r = runPromoteBlock({ DISTTAG_LS_FAIL_PKG: PACKAGES[2] });
+    expect(r.status, `stderr:\n${r.stderr}`).not.toBe(0);
+    expect(r.dt).toBe(""); // no dist-tag add was ever reached
+    expect(r.stderr).toContain(PACKAGES[2]);
+    expect(r.stderr).toContain("could not read the current latest");
+    expect(r.stderr).toContain("NOTHING has moved");
   });
 });

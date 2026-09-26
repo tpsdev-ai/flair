@@ -170,16 +170,17 @@ if [ "$VERDICT" = "pass" ]; then
 
 Promote ALL ${#PACKAGES[@]} lockstep packages to \`latest\`. **npm has no atomic,
 all-or-none promote** — this block moves the tags SEQUENTIALLY and STOPS at the first
-failure (the failing line's \`|| {\` block exits non-zero). Every package moved BEFORE
-that failure STAYS on \`latest\` until you run the rollback the failing line prints (one
-\`npm dist-tag rm <pkg> latest\` per already-moved package). The preflight is bound to
-the release run's **package-set digest** — a single sha256 over the canonical sorted list
-of \`<name>@${VERSION} <sha256>\` lines, one per lockstep package (the digest
-\`${PKG_SET_DIGEST}\` the pack job certified). Paste this WHOLE block once, from the
-repo root: it re-derives that digest from the published tarballs FIRST, so a re-cut
-version or a different package set aborts BEFORE any tag moves; but a failure DURING
-the promote loop is not atomic, so the block names and rolls back the already-moved
-tags, then confirms the set converged.
+failure (the failing move exits non-zero). It reads every package's CURRENT \`latest\`
+BEFORE the first move, so it can RESTORE. On any failure — a move, or the final skew
+check — it prints one RESTORE line per package it already moved,
+\`npm dist-tag add <pkg>@<previous> latest\` (never \`npm dist-tag rm\`), then the
+packages it did NOT move. The convergence (skew) check runs ONLY on the all-succeeded
+path. The preflight is bound to the release run's **package-set digest** — a single
+sha256 over the canonical sorted list of \`<name>@${VERSION} <sha256>\` lines, one per
+lockstep package (the digest \`${PKG_SET_DIGEST}\` the pack job certified). Paste this
+WHOLE block once, from the repo root: it re-derives that digest from the published
+tarballs FIRST, so a re-cut version or a different package set aborts BEFORE any tag
+moves.
 
 \`\`\`
 set -e
@@ -188,8 +189,12 @@ set -e
 #    require it to equal the release run's digest. Nothing below runs if the
 #    re-derivation is empty, malformed, or a different digest.
 PSD_LINES="\$(mktemp)"
-trap 'rm -f "\$PSD_LINES"' EXIT
+PREV_LATEST="\$(mktemp)"
+MOVED="\$(mktemp)"
+trap 'rm -f "\$PSD_LINES" "\$PREV_LATEST" "\$MOVED"' EXIT
 : > "\$PSD_LINES"
+: > "\$PREV_LATEST"
+: > "\$MOVED"
 EOF
   # The paste-time loop re-hashes every lockstep package from the registry
   # (flair LAST, derived from the manifests above), refusing — never matching — if
@@ -257,27 +262,50 @@ fi
 EOF
   cat <<EOF
 
-# 2. Promote every lockstep package (\`@tpsdev-ai/flair\` LAST, so a partial paste
-#    never leaves the CLI ahead of its client library). **npm has no atomic,
-#    all-or-none promote**: these run SEQUENTIALLY and the block STOPS at the first
-#    failure (the failing line's \`|| {\` block exits non-zero). Every package moved
-#    BEFORE that failure STAYS on \`latest\` until you run the rollback the failing
-#    line prints (one \`npm dist-tag rm <pkg> latest\` per already-moved package).
-EOF
-  for ((i = 0; i < ${#PACKAGES[@]}; i++)); do
-    p="${PACKAGES[$i]}"
-    rollback_list=""
-    for ((j = 0; j < i; j++)); do rollback_list="$rollback_list ${PACKAGES[$j]}"; done
-    if [ "$i" -eq 0 ]; then
-      printf 'npm dist-tag add %s@%s latest || { echo "canary promote ABORTED at %s (this was the first move; nothing before it was moved) - npm is not atomic." >&2; exit 1; }\n' "$p" "$VERSION" "$p"
-    else
-      printf 'npm dist-tag add %s@%s latest || { echo "canary promote ABORTED at %s - npm is not atomic; the %s package(s) below were ALREADY moved to latest and STAY there until you run the rollback:" >&2; for _m in %s; do echo "  npm dist-tag rm $_m latest       # rollback: undo the move already applied" >&2; done; exit 1; }\n' "$p" "$VERSION" "$p" "$i" "$rollback_list"
-    fi
-  done
-  cat <<EOF
+# 2. Read each package's CURRENT latest BEFORE any move. If a read fails, NOTHING
+#    has moved — stop here and say so.
+for _p in ${PACKAGES[*]}; do
+  _cur="\$(npm dist-tag ls "\$_p" 2>/dev/null | sed -n 's/^latest: //p')"
+  if [ -z "\$_cur" ]; then
+    echo "canary promote: could not read the current latest of '\$_p' - NOTHING has moved; do not promote." >&2
+    exit 1
+  fi
+  printf '%s=%s\n' "\$_p" "\$_cur" >> "\$PREV_LATEST"
+done
 
-# 3. Confirm the set converged.
-node scripts/ci/registry-latest-skew.mjs ${VERSION}
+# 3. Move the tags SEQUENTIALLY (\`@tpsdev-ai/flair\` LAST, so a partial paste never
+#    leaves the CLI ahead of its client library), stopping at the FIRST failure. On
+#    failure: a RESTORE line per already-moved package (its PREVIOUS latest - it never
+#    deletes a tag), then the packages NOT moved. No skew check on this path.
+_LPKGS="${PACKAGES[*]}"
+for _p in \$_LPKGS; do
+  if ! npm dist-tag add "\$_p@${VERSION}" latest; then
+    echo "canary promote ABORTED at '\$_p' - npm is not atomic. RESTORE the packages already moved, in this order, each to its PREVIOUS latest (this does not delete a tag):" >&2
+    while IFS= read -r _line; do
+      _mp="\${_line%%=*}"; _mv="\${_line#*=}"
+      echo "  npm dist-tag add \${_mp}@\${_mv} latest" >&2
+    done < "\$MOVED"
+    echo "NOT moved (still on their previous latest):" >&2
+    _seen=0
+    for _q in \$_LPKGS; do
+      if [ "\$_q" = "\$_p" ]; then _seen=1; fi
+      if [ "\$_seen" -eq 1 ]; then echo "  \$_q" >&2; fi
+    done
+    exit 1
+  fi
+  _pv="\$(grep -F "\${_p}=" "\$PREV_LATEST" | head -n 1 | cut -d= -f2- || true)"
+  printf '%s=%s\n' "\$_p" "\$_pv" >> "\$MOVED"
+done
+
+# 4. Confirm the set converged — ONLY when every move succeeded.
+if ! node scripts/ci/registry-latest-skew.mjs ${VERSION}; then
+  echo "canary promote: the skew check failed AFTER every tag moved. RESTORE every moved package to its PREVIOUS latest (this does not delete a tag):" >&2
+  while IFS= read -r _line; do
+    _mp="\${_line%%=*}"; _mv="\${_line#*=}"
+    echo "  npm dist-tag add \${_mp}@\${_mv} latest" >&2
+  done < "\$MOVED"
+  exit 1
+fi
 \`\`\`
 
 A stale PASS, a re-cut version, a different package set, or a paste from a FAIL

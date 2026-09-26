@@ -75,24 +75,24 @@ describe("canary-verdict — PASS is bound to ONE package-set digest (A1c, #1671
     expect(block).toContain("node scripts/ci/package-set-digest.mjs");
     expect(block).toContain(`--version 1.2.3`);
 
-     // One `npm dist-tag add <pkg>@1.2.3 latest` per lockstep package, `@tpsdev-ai/flair`
-     // LAST (partial paste never leaves the CLI ahead of its client library). npm offers
-     // no atomic all-or-none promote, so each line carries a `|| { rollback; exit 1 }`
-     // guard: a mid-promote failure STOPS the block and prints the reverse commands for
-     // every package already moved (item 1, A1c of #1671).
-    const promote = blockLines.filter((l) => l.startsWith("npm dist-tag add "));
-    expect(promote.length).toBe(PACKAGES.length);
-    for (const pkg of PACKAGES) {
-      expect(promote.some((l) => l.startsWith(`npm dist-tag add ${pkg}@1.2.3 latest`))).toBe(true);
-     }
-    expect(promote[promote.length - 1]!).toContain("npm dist-tag add @tpsdev-ai/flair@1.2.3 latest");
-     // Every promote line carries the `|| { rollback; exit 1 }` guard (npm is not all-or-none).
-    expect(promote.every((l) => l.includes("|| {"))).toBe(true);
+     // One promote LOOP over the lockstep set (`@tpsdev-ai/flair` LAST, so a partial
+     // paste never leaves the CLI ahead of its client library). npm offers no atomic
+     // all-or-none promote, so the loop stops at the FIRST failure and prints RESTORE
+     // lines for the already-moved packages (item 1, round 5).
+    const promoteLines = blockLines.filter((l) => l.includes("npm dist-tag add "));
+    expect(promoteLines.length).toBeGreaterThanOrEqual(1);
+    expect(block).toContain('if ! npm dist-tag add "$_p@1.2.3" latest');
+    expect(block).toContain("for _p in $_LPKGS");
+    const lp = blockLines.find((l) => l.startsWith("_LPKGS="))!;
+    expect(lp.trim().endsWith('@tpsdev-ai/flair"')).toBe(true); // flair is LAST
+    // A failure RESTORES (never `rm`s) and names the packages not moved.
+    expect(block).toContain("npm dist-tag add ${_mp}@${_mv} latest");
+    expect(block).toContain("NOT moved");
+    expect(block).not.toContain("npm dist-tag rm");
 
-    // TWO PHASES: the (single) digest preflight comes before the first dist-tag —
-    // a mid-paste mismatch (or an unmeasurable re-hash) aborts before any tag moves.
+    // TWO PHASES: the (single) digest preflight comes before the promote loop.
     const firstDigest = blockLines.findIndex((l) => l.includes('if [ "$_rehash" != "'));
-    const firstPromote = blockLines.findIndex((l) => l.startsWith("npm dist-tag add "));
+    const firstPromote = blockLines.findIndex((l) => l.includes('if ! npm dist-tag add'));
     expect(firstDigest).toBeGreaterThanOrEqual(0);
     expect(firstDigest).toBeLessThan(firstPromote);
 
@@ -138,7 +138,7 @@ describe("canary-verdict — a SemVer prerelease is never promoted (A1c, #1671)"
     const rel = run(["pass", "1.2.3", RUN_URL, "--os", "ubuntu-latest", "--package-set-digest", CERTIFIED_DIGEST]);
     expect(rel.status).toBe(0);
     expect(rel.stderr).toBe("");
-    expect(rel.stdout).toContain("npm dist-tag add @tpsdev-ai/flair@1.2.3 latest");
+    expect(rel.stdout).toContain('npm dist-tag add "$_p@1.2.3" latest');
     // Everything that is NOT an exact <major>.<minor>.<patch> prints the note and NO dist-tag line.
     const nonReleases = ["1.2.3-rc.1", "1.2.3-0", "1.2.3--", "1.2.3+build", "totally-not-a-version"];
     for (const v of nonReleases) {
