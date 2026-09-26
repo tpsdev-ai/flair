@@ -395,10 +395,26 @@ describe("CODEOWNERS — the shared Renovate preset is in the trust root (#1930)
         return { pattern: pattern ?? "", owners: owners.join(" ") };
       });
     // Last matching rule wins: the EFFECTIVE owner of the file is the owner of
-    // the last rule whose pattern matches it (exact path or the catch-all here).
-    const matches = rules.filter((r) => r.pattern === "*" || r.pattern === "/.github/renovate-preset.json");
+    // the last rule whose pattern matches it. Patterns are CODEOWNERS globs
+    // (gitignore-style), so a later "/.github/*" or "*.json" rule would override
+    // the specific one — match every rule, not only the exact path.
+    const toRegex = (pattern: string): RegExp => {
+      const anchored = pattern.startsWith("/");
+      let body = (anchored ? pattern.slice(1) : pattern).replace(/[.+^${}()|[\]\\]/g, "\\$&");
+      body = body.replace(/\*\*/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\u0000/g, ".*").replace(/\?/g, "[^/]");
+      if (body.endsWith("/")) body += ".*";
+      const prefix = anchored ? "^" : "^(?:.*/)?";
+      // A pattern without a wildcard can name a directory: it matches the path itself or anything below it.
+      return new RegExp(prefix + body + "(?:/.*)?$");
+    };
+    const path = ".github/renovate-preset.json";
+    const matches = rules.filter((r) => toRegex(r.pattern).test(path));
     expect(matches.at(-1)?.pattern, "the preset's own rule is the last match").toBe("/.github/renovate-preset.json");
     expect(matches.at(-1)?.owners).toBe("@heskew");
+    // The matcher itself can fire: a later glob that covers the file would win.
+    expect(toRegex("/.github/*").test(path)).toBe(true);
+    expect(toRegex("*.json").test(path)).toBe(true);
+    expect(toRegex("/docs/*").test(path)).toBe(false);
   });
 });
 
