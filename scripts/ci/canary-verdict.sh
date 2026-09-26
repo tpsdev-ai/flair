@@ -177,8 +177,8 @@ reaches the moves with a clean PREVIOUS \`latest\` for every package, and can RE
 On the move-failure path it prints one RESTORE line per already-moved package
 (\`npm dist-tag add <pkg>@<previous> latest\`, never \`npm dist-tag rm\`) and then the
 packages it did NOT move; on the final-check path (every add call succeeded)
-it prints the check's own result, then the same RESTORE lines
-for each. The block never asserts a tag's current value — the convergence
+the block runs the convergence check and, IF THAT CHECK FAILS, prints its result
+and the same RESTORE lines; on success it prints nothing further. The block never asserts a tag's current value — the convergence
 check's output is the only state evidence. The preflight is bound to the release run's **package-set digest** — a single
 sha256 over the canonical sorted list of \`<name>@${VERSION} <sha256>\` lines, one per
 lockstep package (the digest \`${PKG_SET_DIGEST}\` the pack job certified). Paste this
@@ -304,14 +304,14 @@ done
 _LPKGS="${PACKAGES[*]}"
 for _p in \$_LPKGS; do
   if ! npm dist-tag add "\$_p@${VERSION}" latest; then
-    echo "canary promote ABORTED at '\$_p' - npm is not atomic. '\$_p' was ATTEMPTED and npm can apply the tag server-side even when it exits non-zero, so its state is UNKNOWN: it is restored too. RESTORE these packages, in this order, each to its PREVIOUS latest (this does not delete a tag):" >&2
+    echo "canary promote ABORTED at '\$_p' - npm is not atomic. '\$_p' was ATTEMPTED and npm can apply the tag server-side even when it exits non-zero, so its state is UNKNOWN: it gets a RESTORE line too (the block prints the command; it does not run it). RESTORE these packages, in this order, each to its PREVIOUS latest (this does not delete a tag):" >&2
     _pv="\$(grep -F "\${_p}=" "\$PREV_LATEST" | head -n 1 | cut -d= -f2- || true)"
     printf '%s=%s\n' "\$_p" "\$_pv" >> "\$MOVED"
     while IFS= read -r _line; do
       _mp="\${_line%%=*}"; _mv="\${_line#*=}"
       echo "  npm dist-tag add \${_mp}@\${_mv} latest" >&2
     done < "\$MOVED"
-    echo "NOT moved (never attempted - still on their previous latest):" >&2
+    echo "NOT moved (never attempted by this block):" >&2
     _seen=0
     for _q in \$_LPKGS; do
       if [ "\$_q" = "\$_p" ]; then _seen=1; continue; fi
@@ -323,9 +323,10 @@ for _p in \$_LPKGS; do
   printf '%s=%s\n' "\$_p" "\$_pv" >> "\$MOVED"
 done
 
-# 4. Confirm the set converged — ONLY when every move succeeded. The check exits 2
-#    when it could NOT READ the current state; then the tag state is UNKNOWN and the
-#    block must not claim any package is or is not on its previous latest.
+# 4. Confirm the set converged — ONLY when every move succeeded. exit 2 = the check
+#    DID NOT RUN (usage error, package-set derivation failure, empty set, or an
+#    unreadable latest); then the tag state is UNKNOWN and the block must not claim
+#    any package is or is not on its previous latest.
 set +e
 node scripts/ci/registry-latest-skew.mjs ${VERSION}
 _skew=\$?
