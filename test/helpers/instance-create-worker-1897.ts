@@ -117,7 +117,7 @@ if (schedule === "realm-chain") {
         }
       : undefined;
   const outcome = await mod.findOrCreateInstance({
-    home,
+    lockRoot: home,
     hooks,
     readAll: async () => {
       const rows = readRows();

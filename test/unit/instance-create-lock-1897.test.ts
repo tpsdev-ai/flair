@@ -55,7 +55,7 @@ function fakeTable(opts: { putDelayMs?: number } = {}) {
           const n = ++seq;
           return { id: `flair_fake${n}`, publicKey: `pk${n}`, secretKey: new Uint8Array(32).fill(n % 255) };
         },
-        home,
+        lockRoot: home,
         log: () => {},
         ...extra,
       };

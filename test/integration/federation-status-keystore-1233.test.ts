@@ -106,6 +106,28 @@ describe("flair#1233: GET /FederationInstance with an unusable keystore (HOME/.f
     expect(lstatSync(blockedFlairPath).isFile()).toBe(true);
   });
 
+  test("(round 6 b) THREE CONCURRENT first-boot GETs with HOME/.flair a file still create exactly ONE row", async () => {
+    // The lock lives with the STORE (ROOTPATH), not the keystore, so an unusable
+    // $HOME/.flair must not block identity creation. RED before (all three 503
+    // instance_create_lock_unavailable); GREEN after (one row, all answered it).
+    const resps = await Promise.all(
+      [0, 1, 2].map(() => fetch(`${harper.httpURL}/FederationInstance`, { headers: { Authorization: basicAuth(harper) } })),
+    );
+    const bodies = await Promise.all(resps.map(async (r) => ({ status: r.status, body: await r.json().catch(() => null) })));
+    expect(bodies.map((b) => b.status), JSON.stringify(bodies.map((b) => b.body))).toEqual([200, 200, 200]);
+    expect(new Set(bodies.map((b) => b.body?.id)).size).toBe(1);
+
+    // Exactly one Instance row.
+    const ops = await fetch(`${harper.opsURL.replace(/\/$/, "")}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: basicAuth(harper) },
+      body: JSON.stringify({ operation: "sql", sql: "SELECT id FROM flair.Instance" }),
+    });
+    const parsed: any = await ops.json().catch(() => null);
+    const rows = Array.isArray(parsed) ? parsed : parsed?.results;
+    expect(Array.isArray(rows) ? rows.length : -1).toBe(1);
+  }, 30_000);
+
   test("RED-ON-MAIN: first admin GET → 200 with identity + signingKeyAvailable:false (main: 500 'Keystore unavailable')", async () => {
     const res = await fetch(`${harper.httpURL}/FederationInstance`, {
       headers: { Authorization: basicAuth(harper) },

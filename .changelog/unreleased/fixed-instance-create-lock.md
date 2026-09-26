@@ -1,13 +1,16 @@
 - **Concurrent first-boot `GET /FederationInstance` requests create exactly one identity row, and every caller is answered with it.**
 
-  The read-mint-write runs under a Flair-owned filesystem bakery lock
-  (`$HOME/.flair/locks/instance-create/`), so it serialises **every HTTP worker of
+  The read-mint-write runs under a Flair-owned filesystem bakery lock in the
+  STORE's root (`<rootPath>/flair-locks/instance-create/`, NOT `$HOME/.flair`), so it serialises **every HTTP worker of
   one Harper process** — not just one — and separate processes that share the same
   Flair home. The holder rule is Lamport's bakery on files: a contender writes a
   complete claim (tmp then atomic rename), takes the next ticket
   (`1 + max visible ticket`), and holds once its ticket is the smallest live one.
   No timing assumption — only atomic create, atomic rename within one directory,
-  and live-pid detection.
+  and live-pid detection. The lock lives with the STORE it protects, so an
+  UNUSABLE keystore (a FILE `$HOME/.flair`) no longer blocks identity creation —
+  flair#1233's contract: the row is still created and reads answer 200 with
+  `signingKeyAvailable:false` (test: `test/integration/federation-status-keystore-1233.test.ts`).
 
   The detached write completes in its own Harper immediate transaction before the
   lock is released, so the confirming re-read sees the row the same request wrote;

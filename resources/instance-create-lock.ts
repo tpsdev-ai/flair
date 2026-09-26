@@ -9,7 +9,7 @@
 // Linux Harper runs at least two workers by default (configValidator: threads
 // count = cpus-1, floor 2), and Flair never writes that key. So the lock is a
 // Flair-owned FILESYSTEM BAKERY LOCK, cross-worker AND cross-process, under the
-// same Flair home the keystore already relies on.
+// store root this process serves (`<rootPath>/flair-locks/instance-create/`) — NOT the keystore: flair#1233 requires an unusable `$HOME/.flair` to leave the read path working (the row is still created).
 //
 // WHAT IT COVERS. `findOrCreateInstance` holds the lock across: the read that
 // found no row, the mint, the `put`, the keystore seed write, and a confirming
@@ -59,7 +59,6 @@ import { readFileSync, readdirSync, mkdirSync, unlinkSync, writeFileSync, rename
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { threadId } from "node:worker_threads";
-import { resolveHome } from "../src/lib/home.js";
 import { decideInstanceAnswer, type InstanceIdentityRow } from "../src/lib/instance-identity-row.js";
 
 export const LOCK_DEADLINE_MS = 10_000;
@@ -85,9 +84,28 @@ export const LOCK_DIR_REMEDY =
   "Remedy: make the Flair home writable by the Harper process (a directory the process can create " +
   "$HOME/.flair/locks with mode 0700). Identity creation is REFUSED while the lock dir is unusable.";
 
-/** The identity-create lock directory under a Flair home. */
-export function instanceCreateLockDir(home?: string): string {
-  return join(home ?? resolveHome(), ".flair", "locks", "instance-create");
+/**
+ * Harper's data root for THIS process — the `ROOTPATH` env var Harper sets for a
+ * component (read the same way `resources/models-dir.ts` reads it). The lock lives
+ * with the STORE it protects, never with the keystore.
+ */
+export function harperRootPath(env: NodeJS.ProcessEnv = process.env): string {
+  const root = (env.ROOTPATH ?? "").trim();
+  return root || process.cwd();
+}
+
+/**
+ * The identity-create lock directory. It lives with the STORE whose Instance table
+ * it protects — `<rootPath>/flair-locks/instance-create/` — NOT under the keystore's
+ * `$HOME/.flair`. WHY: flair#1233's contract is that an UNUSABLE keystore must not
+ * abort the read path (the identity row is still created and reads answer 200 with
+ * `signingKeyAvailable:false`); a lock under `$HOME/.flair` turned a FILE
+ * `HOME/.flair` into a 503. A store whose ROOT is unwritable cannot run Harper at
+ * all, so an unusable lock dir THERE is a genuine refusal and stays one.
+ * `lockRoot` is a TEST seam only; production never passes it.
+ */
+export function instanceCreateLockDir(lockRoot?: string): string {
+  return join(lockRoot ?? harperRootPath(), "flair-locks", "instance-create");
 }
 
 /** `process.kill(pid, 0)`: ESRCH = dead, EPERM = alive (a live pid we can't signal). */
@@ -188,9 +206,9 @@ export type LockAcquire = { ok: true; release: () => void } | { ok: false; detai
  * Cross-worker and cross-process.
  */
 export async function acquireInstanceCreateLock(
-  opts: { home?: string; deadlineMs?: number; log?: (message: string) => void; hooks?: LockHooks } = {},
+  opts: { lockRoot?: string; deadlineMs?: number; log?: (message: string) => void; hooks?: LockHooks } = {},
 ): Promise<LockAcquire> {
-  const dir = instanceCreateLockDir(opts.home);
+  const dir = instanceCreateLockDir(opts.lockRoot);
   const log = opts.log ?? ((m) => console.error(m));
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -315,8 +333,8 @@ export interface CreateDeps {
   seedPresent: (id: string) => Promise<boolean> | boolean;
   /** Mint a fresh identity (id, publicKey, secretKey). */
   mint: () => { id: string; publicKey: string; secretKey: Uint8Array };
-  /** Flair home the lock dir lives under (default: resolveHome()). */
-  home?: string;
+  /** TEST-ONLY: the store root the lock dir lives under. Production uses ROOTPATH. */
+  lockRoot?: string;
   lockDeadlineMs?: number;
   now?: () => string;
   log?: (message: string) => void;
@@ -341,7 +359,7 @@ export type CreateOutcome =
 export async function findOrCreateInstance(deps: CreateDeps): Promise<CreateOutcome> {
   const log = deps.log ?? ((m) => console.error(m));
   const now = deps.now ?? (() => new Date().toISOString());
-  const lock = await acquireInstanceCreateLock({ home: deps.home, deadlineMs: deps.lockDeadlineMs, log, hooks: deps.hooks });
+  const lock = await acquireInstanceCreateLock({ lockRoot: deps.lockRoot, deadlineMs: deps.lockDeadlineMs, log, hooks: deps.hooks });
   if (!lock.ok) return { kind: "refuse-lock", detail: lock.detail };
   try {
     const rows = await deps.readAll();

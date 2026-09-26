@@ -61,7 +61,7 @@ describe("filesystem bakery lock — the two schedules (flair#1897 round 4)", ()
     const sab = new SharedArrayBuffer(4 * 4);
     // wantWorkers: 1 — A must be paused with its marker visible BEFORE B starts,
     // so the two are started in order rather than racing.
-    const base = { modulePath: MODULE, tableFile, home: dir, eventsFile, sab, wantWorkers: 1, putDelayMs: 200, resumeFile };
+    const base = { modulePath: MODULE, tableFile, lockRoot: dir, eventsFile, sab, wantWorkers: 1, putDelayMs: 200, resumeFile };
 
     // A pauses at afterChoosing (its marker is visible, no ticket yet)…
     const pa = runWorker({ ...base, schedule: "pause-after-choosing" });
@@ -112,7 +112,7 @@ describe("filesystem bakery lock — the two schedules (flair#1897 round 4)", ()
     // before its bytes land): a live contender's marker, mid-write.
     writeFileSync(join(lockDir, "choosing-" + String(process.pid) + "-0-deadbeef.json"), '{"pid":', "utf8");
 
-    const out = await acquireInstanceCreateLock({ home: dir, deadlineMs: 300 });
+    const out = await acquireInstanceCreateLock({ lockRoot: dir, deadlineMs: 300 });
     expect(out.ok).toBe(false); // RED before: skipped → held
     if (out.ok) throw new Error("unreachable");
     expect(out.detail).toContain("choosing-" + String(process.pid) + "-0-deadbeef.json");
@@ -128,7 +128,7 @@ describe("bakery round 5 — body/filename, exits, and discriminating tests (fla
     const bad = `choosing-${process.pid}-0-deadbeef.json`; // filename pid = OUR live pid
     mkdirSync(lockDir, { recursive: true, mode: 0o700 });
     writeFileSync(join(lockDir, bad), JSON.stringify({ pid: -1 }), "utf8");
-    const out = await acquireInstanceCreateLock({ home: dir, deadlineMs: 300 });
+    const out = await acquireInstanceCreateLock({ lockRoot: dir, deadlineMs: 300 });
     expect(out.ok).toBe(false);
     if (!out.ok) expect(out.detail).toContain(bad);
     expect(existsSync(join(lockDir, bad))).toBe(true); // never unlinked by another contender
@@ -141,7 +141,7 @@ describe("bakery round 5 — body/filename, exits, and discriminating tests (fla
     const dead = "ticket-000000000001-999999-0-deadbeef.json";
     mkdirSync(lockDir, { recursive: true, mode: 0o700 });
     writeFileSync(join(lockDir, dead), JSON.stringify({ pid: 999999 }), "utf8");
-    const out = await acquireInstanceCreateLock({ home: dir, deadlineMs: 500 });
+    const out = await acquireInstanceCreateLock({ lockRoot: dir, deadlineMs: 500 });
     expect(out.ok).toBe(true);
     if (out.ok) out.release();
     expect(existsSync(join(lockDir, dead))).toBe(false);
@@ -152,11 +152,11 @@ describe("bakery round 5 — body/filename, exits, and discriminating tests (fla
     dirs.push(dir);
     const lockDir = instanceCreateLockDir(dir);
     await expect(
-      acquireInstanceCreateLock({ home: dir, hooks: { afterChoosing: () => { throw new Error("boom-choose"); } } }),
+      acquireInstanceCreateLock({ lockRoot: dir, hooks: { afterChoosing: () => { throw new Error("boom-choose"); } } }),
     ).rejects.toThrow("boom-choose");
     expect(readdirSync(lockDir)).toEqual([]);
     await expect(
-      acquireInstanceCreateLock({ home: dir, hooks: { afterTicket: () => { throw new Error("boom-ticket"); } } }),
+      acquireInstanceCreateLock({ lockRoot: dir, hooks: { afterTicket: () => { throw new Error("boom-ticket"); } } }),
     ).rejects.toThrow("boom-ticket");
     expect(readdirSync(lockDir)).toEqual([]);
   }, 30_000);
@@ -165,7 +165,7 @@ describe("bakery round 5 — body/filename, exits, and discriminating tests (fla
     const dir = mkdtempSync(join(tmpdir(), "flair-bakery-r5d-"));
     dirs.push(dir);
     const lockDir = instanceCreateLockDir(dir);
-    const out = await acquireInstanceCreateLock({ home: dir, deadlineMs: 120, hooks: { afterChoosing: async () => { await new Promise((r) => setTimeout(r, 300)); } } });
+    const out = await acquireInstanceCreateLock({ lockRoot: dir, deadlineMs: 120, hooks: { afterChoosing: async () => { await new Promise((r) => setTimeout(r, 300)); } } });
     expect(out.ok).toBe(false); // RED before: the clock did not cover CHOOSING
     expect(readdirSync(lockDir)).toEqual([]);
   }, 30_000);
