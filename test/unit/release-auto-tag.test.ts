@@ -1650,7 +1650,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     const { deps } = harness({ api: refApi(posts, tags) });
     pinPyproject(
       deps,
-      `[project]\nname = "adk-flair"\nversion = "0.55.2"\nkeywords = [\n  "version = \\"${VERSION}\\"",\n]\n`,
+      `[project]\nname = "adk-flair"\nversion = "0.55.2"\nkeywords = [\n  'version = "${VERSION}"',\n]\n`,
     );
     const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
     expect(result.verdict).toBe(WRITE_VERDICT.REFUSE); // assertion A: REFUSE
