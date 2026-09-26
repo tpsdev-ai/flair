@@ -1,11 +1,12 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Shared org preset for tpsdev-ai repositories. Establishes the supply-chain posture: pin version updates, enforce a 7-day bake-time cooldown, and group non-major PRs so review surface stays small. Every update is proposal-only (automerge: false) \u2014 it must pass the full CI suite + K&S review before merge. See https://github.com/tpsdev-ai/flair/blob/main/docs/supply-chain-policy.md.",
+  "description": "Shared org preset for tpsdev-ai repositories. Establishes the supply-chain posture: pin version updates, enforce a 7-day bake-time cooldown, and group non-major PRs so review surface stays small. Every update is proposal-only (automerge: false) \u2014 it must pass the full CI suite + K&S review before merge. See https://github.com/tpsdev-ai/flair/blob/main/docs/supply-chain-policy.md. Docker image digests are pinned via Renovate's docker:pinDigests preset (it covers Dockerfiles, compose files and workflow container images; a republished tag cannot change the bytes we build or test on).",
   "extends": [
     "config:recommended",
     ":dependencyDashboard",
     ":semanticCommits",
-    "helpers:pinGitHubActionDigests"
+    "helpers:pinGitHubActionDigests",
+    "docker:pinDigests"
   ],
   "timezone": "America/New_York",
   "schedule": [
@@ -89,13 +90,6 @@
         "digest"
       ],
       "groupName": "non-major docker dependencies"
-    },
-    {
-      "description": "Pin Docker image digests (every docker-category manager: Dockerfiles, compose files, workflow images) so a republished tag cannot change the bytes we build or test on; the digest is the identity, the tag is a label.",
-      "matchCategories": [
-        "docker"
-      ],
-      "pinDigests": true
     }
   ],
   "lockFileMaintenance": {
