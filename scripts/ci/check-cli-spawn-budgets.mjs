@@ -814,7 +814,10 @@ function signalValueBounds(value, src) {
  *  position) — and only then is it skipped. Both must hold (round 7 item 1): the
  *  significant token before `fetch` is `{`, `,`, `;` or the keyword `async` (no
  *  `await`/`=`/`(`/`return`/`:`/`?`/`=>` before it), AND the `{` follows the
- *  closing paren on the SAME line. */
+ *  closing paren on the SAME line. Everything else is a CALL — except the one
+ *  shape that is neither a method nor live code: `; fetch("x") {}` (a statement
+ *  brace on a bare call) is a SYNTAX ERROR, so it cannot be live, and is skipped
+ *  by the same rule. */
 function isMethodDefinition(body, fetchStart, close) {
   const before = body.slice(0, fetchStart).replace(/\s+$/, "");
   const prevChar = before.slice(-1);
@@ -1258,12 +1261,15 @@ if (isMain) {
     process.stderr.write(`check-cli-spawn-budgets: ${err.message}\n`);
     process.exit(1);
   }
-  const { files, spawnOffenders, caseOffenders, baseRef, basePresent, defaulted, seedAccepted, allowEntries, errors, added, newOffenders, staleEntries, ok } = result;
+  const { files, spawnOffenders, caseOffenders, baseRef, baseSha, basePresent, defaulted, seedAccepted, allowEntries, errors, added, newOffenders, staleEntries, ok } = result;
   if (seedAccepted) {
+    // Say EXACTLY what the predicate guarantees: the base is named by its own sha
+    // and DESCENDS from the anchor — it does not "resolve to" it, and a descendant
+    // base without the file is ACCEPTED, not refused (flair#1825 round 10).
     process.stdout.write(
-      "check-cli-spawn-budgets: SEED — the base resolves to the seed-introduction commit " +
-        `${SEED_INTRODUCTION_BASE}, which has no baseline file; the PR copy is the initial list. ` +
-        "Any other base without the file is refused.\n",
+      `check-cli-spawn-budgets: SEED — the base ${baseRef} (${baseSha}) has no baseline file but DESCENDS from the ` +
+        `seed-introduction commit ${SEED_INTRODUCTION_BASE}; the PR copy is the initial list. ` +
+        "A base without the file that does NOT descend from that commit, or cannot be read, is refused.\n",
     );
   }
   process.stdout.write(

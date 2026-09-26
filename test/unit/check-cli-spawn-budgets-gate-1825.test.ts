@@ -9,7 +9,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -478,7 +478,7 @@ describe("round 9: post-separator digit cap + options-only timeout (flair#1825)"
   const spawnSrc = (opts: string, argv = '["bun","src/cli.ts","status"]') => `test("t", () => {\n  Bun.spawn(${argv}, ${opts});\n});\n`;
 
   it("item 1: a >15-digit literal (separators included) is UNBOUNDED; exactly 15 digits is bounded", () => {
-    expect(spawnNoTimeout(spawnSrc("{ timeout: 1_000_000_000_000_000 }"))).toBe(true); // 19 digits
+    expect(spawnNoTimeout(spawnSrc("{ timeout: 1_000_000_000_000_000 }"))).toBe(true); // 16 digits
     expect(spawnNoTimeout(spawnSrc("{ timeout: 999_999_999_999_999 }"))).toBe(false); // 15 digits
     expect(spawnNoTimeout(spawnSrc("{ timeout: 30_000 }"))).toBe(false);
   });
@@ -489,4 +489,32 @@ describe("round 9: post-separator digit cap + options-only timeout (flair#1825)"
     // False pass before: an argv element `timeout=5000` bounded a spawn with NO options timeout.
     expect(spawnNoTimeout(spawnSrc("{}", '["bun","src/cli.ts","timeout=5000"]'))).toBe(true);
   });
+});
+
+describe("round 10: the SEED stdout says exactly what it guarantees (flair#1825)", () => {
+  const root = join(import.meta.dirname, "..", "..");
+  const hasAnchor = (() => {
+    try {
+      execFileSync("git", ["cat-file", "-e", `${SEED_INTRODUCTION_BASE}^{commit}`], { cwd: root, stdio: "ignore" });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  it.skipIf(!hasAnchor)(`the SEED text names the ACTUAL base sha and says it DESCENDS from the anchor${hasAnchor ? "" : " — skipped: anchor object not in this checkout"}`, () => {
+    // The real CI case: origin/main is a DESCENDANT of the anchor and has no
+    // baseline file → the seed path fires (Sherlock's repro).
+    const r = spawnSync("node", [join(root, "scripts", "ci", "check-cli-spawn-budgets.mjs")], {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...process.env, CLI_SPAWN_BUDGETS_BASE_REF: "origin/main" },
+    });
+    const out = `${r.stdout}${r.stderr}`;
+    const baseSha = execFileSync("git", ["rev-parse", "origin/main"], { cwd: root, encoding: "utf8" }).trim();
+    expect(out).toContain("SEED");
+    expect(out).toContain(baseSha); // names the ACTUAL base sha
+    expect(out).toContain("DESCENDS from");
+    expect(out).not.toContain("resolves to");
+    expect(out).not.toContain("Any other base");
+  }, 60_000);
 });

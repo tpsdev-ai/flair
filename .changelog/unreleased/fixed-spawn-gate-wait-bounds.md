@@ -15,7 +15,7 @@
   arguments alike: `0` is neither a spawn timeout nor a budget, and `1e999`,
   `10000-10000`, `1__000`, `_1000` and a 310-digit literal are all unknown →
   unbounded / no-budget. The count is of the digits AFTER underscores are removed,
-  so `1_000_000_000_000_000` (19 digits) is unknown and `999_999_999_999_999`
+  so `1_000_000_000_000_000` (16 digits) is unknown and `999_999_999_999_999`
   (15) is a deadline. A spawn's `timeout:` is read from the OPTIONS argument ONLY —
   an argv element never decides it. Tests: round 7 item 4; round 9 items 1-2.
 
