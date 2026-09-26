@@ -630,8 +630,9 @@ server.http(async (request: any, nextLayer: any) => {
         if (memId) {
           const record = await (databases as any).flair.Memory.get(memId);
           if (record && record.agentId && record.agentId !== agentId) {
-            // Centralized read-scope (Layer 1): a grant only covers
-            // the owner's SHARED memories, never their private ones. This
+            // Centralized read-scope (Layer 1): the owner's records at any
+            // visibility plus every other agent's non-private records; grants
+            // are not consulted on reads (resolveReadScope()). This
             // used to be a `visibility === "office"` bypass (any authenticated
             // agent, no grant needed) — that's gone; the private-exclusion is
             // now enforced the same way every other read path enforces it.

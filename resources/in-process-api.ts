@@ -240,7 +240,8 @@ class AgentMemory {
    * Search memories scoped to this agent.
    *
    * Delegates to Memory.search() which applies the agent's read scope
-   * (own memories + granted owners' shared memories).
+   * (own records at any visibility + every other agent's non-private records;
+   * grants are not consulted on reads — see resolveReadScope()).
    */
   async search(opts?: MemorySearchOptions): Promise<MemoryRecord[]> {
     const Cls = resolveResource(this.#server, "Memory");
