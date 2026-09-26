@@ -7,7 +7,7 @@
 // Shared Int32Array indices: [1] = the first worker to read has HELD;
 //                            [2] = how many workers have finished their first read.
 import { parentPort, workerData, threadId as _tid } from "node:worker_threads";
-import { readFileSync, appendFileSync, writeFileSync, readdirSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -21,9 +21,11 @@ const { modulePath, tableFile, home, wantWorkers, schedule, sab, eventsFile, put
   eventsFile: string;
   putDelayMs: number;
   pauseChoosingMs?: number;
+  resumeFile?: string;
 };
 const flags = new Int32Array(sab);
 const pauseChoosingMs = (workerData as any).pauseChoosingMs ?? 150;
+const resumeFile: string | undefined = (workerData as any).resumeFile;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function readRows(): any[] {
@@ -97,11 +99,20 @@ if (schedule === "realm-chain") {
     schedule === "pause-after-choosing"
       ? {
           afterChoosing: async () => {
-            // A fixed scheduler pause (the schedule's point is "paused after it
-            // chose"): with a CORRECT bakery the sibling sees this marker and
-            // waits; with a lock that ignores live `choosing` markers the sibling
-            // runs through and HOLDS, so both hold → RED.
-            await sleep(pauseChoosingMs);
+            // The schedule's point: "paused after it chose, before its ticket".
+            // With a CORRECT bakery the sibling sees this live `choosing` marker
+            // and WAITS; a lock that ignores live choosers lets the sibling run
+            // through and HOLD while this marker is right here → RED.
+            record("choosing");
+            if (resumeFile) {
+              const deadline = Date.now() + 15000;
+              while (!existsSync(resumeFile)) {
+                if (Date.now() > deadline) throw new Error("resume signal timed out");
+                await sleep(5);
+              }
+            } else {
+              await sleep(pauseChoosingMs);
+            }
           },
         }
       : undefined;

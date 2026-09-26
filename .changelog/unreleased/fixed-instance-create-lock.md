@@ -12,10 +12,15 @@
   The detached write completes in its own Harper immediate transaction before the
   lock is released, so the confirming re-read sees the row the same request wrote;
   a re-read that finds NONE is refused rather than answered from the local object.
-  A contender that cannot take the lock within the deadline refuses (5xx) with the
-  holder named — a documented fail-closed mode, not a retry; a dead worker thread
-  in a live process blocks contenders until the deadline, so the remedy is to
-  restart the process.
+  A contender that cannot take the lock within the deadline refuses (5xx) naming
+  the blocking claim when known — the live holder, or a contender still choosing;
+  the deadline covers the choosing state too, and every exit (a hold, a refusal, or
+  a throw from a hook) releases whatever claim this contender created. This is a
+  documented fail-closed mode, not a retry. Residual: a claim whose pid is reused,
+  or a dead worker thread inside a live process, blocks contenders until the
+  deadline — refusals until the process restarts (a recognised claim whose body is
+  missing, invalid, or disagrees with the pid in its filename is such a blocker,
+  never reclaimed by another contender).
 
   `flair init --remote` does not take the lock yet — the CLI writer joining the
   same lock, and a store-enforced one-row invariant, remain desirable (slice 2).

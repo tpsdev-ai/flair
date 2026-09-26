@@ -11,7 +11,7 @@
 // stale snapshot.
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, chmodSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { findOrCreateInstance, instanceCreateLockDir } from "../../resources/instance-create-lock.js";
@@ -73,8 +73,8 @@ describe("filesystem ticket create lock (flair#1897)", () => {
     if (a.kind !== "row" || b.kind !== "row") throw new Error("unreachable");
     expect(a.row.id).toBe(b.row.id);
     expect(t.rows()[0].id).toBe(a.row.id);
-    // No claim files left behind (release ran).
-    expect(instanceCreateLockDir(home).length).toBeGreaterThan(0);
+    // No claim files left behind — assert on the directory CONTENTS, not a path string.
+    expect(readdirSync(instanceCreateLockDir(home))).toEqual([]);
   });
 
   it("a post-put re-read of `none` REFUSES naming the minted id (no retry, no local-row fall-through)", async () => {

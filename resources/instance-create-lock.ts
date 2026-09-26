@@ -113,9 +113,12 @@ interface Claim {
 
 /**
  * Split the lock dir into: live claims, and BLOCKERS — recognised claim files
- * that cannot be parsed (a live contender mid-write under a hostile filesystem,
- * or a corrupt file). DEAD claims are unlinked (that file only). Unknown file
- * names are ignored (they are not claims).
+ * whose BODY is missing, invalid, or whose `pid` disagrees with the pid in the
+ * FILENAME. A recognised claim's pid is taken FROM THE FILENAME; the body only
+ * corroborates it. A mismatch is a live BLOCKER (wait; the deadline names it) and
+ * is NEVER unlinked by another contender; only a claim whose FILENAME pid is
+ * provably dead (ESRCH) is unlinked. Stray names (not tmp-/choosing-/ticket-)
+ * stay ignored.
  */
 export function listClaims(dir: string): { claims: Claim[]; blockers: string[] } {
   const claims: Claim[] = [];
@@ -130,18 +133,26 @@ export function listClaims(dir: string): { claims: Claim[]; blockers: string[] }
     const choosing = CHOOSING_RE.exec(name);
     const ticket = TICKET_RE.exec(name);
     if (!choosing && !ticket) continue; // tmp-… and foreign files are not claims
+    // The pid is the FILENAME's: choosing-<pid>-<tid>-<token>; ticket-<n>-<pid>-<tid>-<token>.
+    const filePid = Number(choosing ? choosing[1] : ticket![2]);
     let parsed: any;
     try {
       parsed = JSON.parse(readFileSync(join(dir, name), "utf8"));
     } catch {
-      // A visible claim that cannot be read is a LIVE BLOCKER — never skipped.
+      // A visible claim whose body cannot be read is a LIVE BLOCKER.
       blockers.push(name);
       continue;
     }
-    const pid = Number(parsed?.pid);
-    if (pidAlive(pid)) {
-      claims.push({ name, kind: choosing ? "choosing" : "ticket", pid, ticket: ticket ? Number(ticket[1]) : null });
+    const bodyPid = Number(parsed?.pid);
+    if (!Number.isInteger(bodyPid) || bodyPid !== filePid) {
+      // Missing / invalid / filename-mismatched body: a LIVE BLOCKER, never "dead".
+      blockers.push(name);
+      continue;
+    }
+    if (pidAlive(filePid)) {
+      claims.push({ name, kind: choosing ? "choosing" : "ticket", pid: filePid, ticket: ticket ? Number(ticket[1]) : null });
     } else {
+      // Only a provably-dead FILENAME pid is reclaimed (that file only).
       try {
         unlinkSync(join(dir, name));
       } catch {
@@ -194,38 +205,12 @@ export async function acquireInstanceCreateLock(
   const choosingFile = join(dir, `choosing-${pid}-${tid}-${token}.json`);
   const payload = JSON.stringify({ pid, threadId: tid, token, createdAt: new Date().toISOString() });
 
-  // CHOOSE: a visible claim is written complete (tmp then atomic rename).
-  try {
-    writeFileSync(tmpFile, payload, { flag: "wx", mode: 0o600 });
-    renameSync(tmpFile, choosingFile);
-  } catch (err: any) {
-    try {
-      unlinkSync(tmpFile);
-    } catch {
-      /* nothing to clean */
-    }
-    return { ok: false, detail: `could not create the identity-create claim (${choosingFile}): ${err?.message ?? err}. ${LOCK_DIR_REMEDY}` };
-  }
-  await opts.hooks?.afterChoosing?.();
-
-  // TICKET: 1 + the max ticket any visible ticket claim carries.
-  const ticket = nextTicket(dir);
-  const ticketName = `ticket-${String(ticket).padStart(12, "0")}-${pid}-${tid}-${token}.json`;
-  const ticketFile = join(dir, ticketName);
-  try {
-    renameSync(choosingFile, ticketFile);
-  } catch (err: any) {
-    try {
-      unlinkSync(choosingFile);
-    } catch {
-      /* nothing to clean */
-    }
-    return { ok: false, detail: `could not create the identity-create ticket (${ticketFile}): ${err?.message ?? err}. ${LOCK_DIR_REMEDY}` };
-  }
-  await opts.hooks?.afterTicket?.();
-
+  // Every file this contender created. `release` unlinks them (ENOENT ignored) and
+  // is called on EVERY exit — a hold, a refusal, or a throw from a hook — so no
+  // claim is ever left behind by a contender that did not hold.
+  const mine = new Set<string>();
   const release = (): void => {
-    for (const f of [ticketFile, choosingFile]) {
+    for (const f of [...mine]) {
       try {
         unlinkSync(f);
       } catch (err: any) {
@@ -236,39 +221,86 @@ export async function acquireInstanceCreateLock(
           );
         }
       }
+      mine.delete(f);
     }
   };
 
+  // The deadline starts BEFORE CHOOSE, so a contender held in the choosing state
+  // past it removes its marker and refuses too.
   const deadline = Date.now() + (opts.deadlineMs ?? LOCK_DEADLINE_MS);
-  for (;;) {
-    const { claims, blockers } = listClaims(dir);
-    const liveChoosing = claims.filter((c) => c.kind === "choosing");
-    const liveTickets = claims
-      .filter((c) => c.kind === "ticket")
-      .sort((a, b) => (a.ticket! - b.ticket!) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-
-    if (blockers.length === 0 && liveChoosing.length === 0 && liveTickets[0]?.name === ticketName) {
-      return { ok: true, release };
+  let ticketName = "";
+  try {
+    // CHOOSE: a visible claim is written complete (tmp then atomic rename).
+    try {
+      writeFileSync(tmpFile, payload, { flag: "wx", mode: 0o600 });
+      mine.add(tmpFile);
+      renameSync(tmpFile, choosingFile);
+      mine.delete(tmpFile);
+      mine.add(choosingFile);
+    } catch (err: any) {
+      release();
+      return { ok: false, detail: `could not create the identity-create claim (${choosingFile}): ${err?.message ?? err}. ${LOCK_DIR_REMEDY}` };
     }
+    await opts.hooks?.afterChoosing?.();
+
     if (Date.now() >= deadline) {
       release();
-      const held =
-        blockers.length > 0
-          ? `a contender is still choosing: ${blockers[0]}`
-          : liveChoosing.length > 0
-            ? `a contender is still choosing: ${liveChoosing[0].name}`
-            : liveTickets.length > 0
-              ? `holder claim ${liveTickets[0].name}, pid ${liveTickets[0].pid}`
-              : "no live holder claim";
       return {
         ok: false,
         detail:
           `could not acquire the identity-create lock within ${(opts.deadlineMs ?? LOCK_DEADLINE_MS) / 1000}s ` +
-          `(${held}). Remedy: retry; if it persists, restart the Harper process — a stuck holder inside the ` +
-          `same process cannot be told from a live one.`,
+          `(a contender is still choosing: ${choosingFile}). Remedy: retry; if it persists, restart the Harper process.`,
       };
     }
-    await new Promise((r) => setTimeout(r, LOCK_WAIT_POLL_MS));
+
+    // TICKET: 1 + the max ticket any visible ticket claim carries.
+    const ticket = nextTicket(dir);
+    ticketName = `ticket-${String(ticket).padStart(12, "0")}-${pid}-${tid}-${token}.json`;
+    const ticketFile = join(dir, ticketName);
+    try {
+      renameSync(choosingFile, ticketFile);
+      mine.delete(choosingFile);
+      mine.add(ticketFile);
+    } catch (err: any) {
+      release();
+      return { ok: false, detail: `could not create the identity-create ticket (${ticketFile}): ${err?.message ?? err}. ${LOCK_DIR_REMEDY}` };
+    }
+    await opts.hooks?.afterTicket?.();
+
+    for (;;) {
+      const { claims, blockers } = listClaims(dir);
+      const liveChoosing = claims.filter((c) => c.kind === "choosing");
+      const liveTickets = claims
+        .filter((c) => c.kind === "ticket")
+        .sort((a, b) => (a.ticket! - b.ticket!) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+
+      if (blockers.length === 0 && liveChoosing.length === 0 && liveTickets[0]?.name === ticketName) {
+        return { ok: true, release };
+      }
+      if (Date.now() >= deadline) {
+        release();
+        const held =
+          blockers.length > 0
+            ? `the blocking claim ${blockers[0]}`
+            : liveChoosing.length > 0
+              ? `the blocking claim ${liveChoosing[0].name} (still choosing)`
+              : liveTickets.length > 0
+                ? `holder claim ${liveTickets[0].name}, pid ${liveTickets[0].pid}`
+                : "no live holder claim";
+        return {
+          ok: false,
+          detail:
+            `could not acquire the identity-create lock within ${(opts.deadlineMs ?? LOCK_DEADLINE_MS) / 1000}s ` +
+            `(${held}). Remedy: retry; if it persists, restart the Harper process — a stuck holder inside the ` +
+            `same process cannot be told from a live one.`,
+        };
+      }
+      await new Promise((r) => setTimeout(r, LOCK_WAIT_POLL_MS));
+    }
+  } catch (err) {
+    // A throw anywhere (including from a hook) releases whatever we created.
+    release();
+    throw err;
   }
 }
 
