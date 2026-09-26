@@ -1,0 +1,51 @@
+{
+   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+   "description": "Shared org preset for tpsdev-ai repositories. Establishes the supply-chain posture: pin version updates, enforce a 7-day bake-time cooldown, and group non-major PRs so review surface stays small. Every update is proposal-only (automerge: false) — it must pass the full CI suite + K&S review before merge. See docs/supply-chain-policy.md.",
+   "extends": [
+     "config:recommended",
+     ":dependencyDashboard",
+     ":semanticCommits",
+     "helpers:pinGitHubActionDigests"
+   ],
+   "timezone": "America/New_York",
+   "schedule": ["before 9am on monday"],
+   "prConcurrentLimit": 5,
+   "prHourlyLimit": 2,
+   "rangeStrategy": "pin",
+   "minimumReleaseAge": "7 days",
+   "internalChecksFilter": "strict",
+   "labels": ["dependencies", "supply-chain"],
+   "automerge": false,
+   "ignorePaths": ["**/node_modules/**", "**/dist/**"],
+   "packageRules": [
+     {
+       "description": "Group all non-major updates (minor, patch, pin, digest) into a single PR per run so the review surface stays small. Each still goes through the full test suite + K&S review before merge — automerge is off.",
+       "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+       "groupName": "non-major dependencies"
+     },
+     {
+       "description": "Major updates land as their own PRs — they carry the most behavioral risk and deserve isolated review.",
+       "matchUpdateTypes": ["major"],
+       "groupName": null
+     },
+     {
+       "description": "Group GitHub Actions into a single PR so sub-actions land together. CodeQL rejects mixed versions across sub-actions (bob#58/#99), so all codeql-action sub-actions must land in one PR.",
+       "matchManagers": ["github-actions"],
+       "groupName": "github-actions"
+     },
+     {
+       "description": "Pin digests for Docker managers to lock the image content; prevents supply-chain drift from republished image tags.",
+       "managers": ["docker"],
+       "pinDigests": true
+     }
+   ],
+   "lockFileMaintenance": {
+     "enabled": true,
+     "schedule": ["before 9am on the first day of the month"]
+   },
+   "vulnerabilityAlerts": {
+     "enabled": true,
+     "labels": ["security", "dependencies"],
+     "minimumReleaseAge": "0 days"
+   }
+}
