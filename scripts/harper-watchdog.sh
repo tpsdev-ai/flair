@@ -27,6 +27,12 @@ LAUNCHD_LABEL="${LAUNCHD_LABEL:-ai.tpsdev.flair}"
 LOG="${HOME}/.tps/logs/harper-watchdog.log"
 HEALTH_URL="http://localhost:${HARPER_PORT}/Health"
 
+# Sender identity for the mail alert. No default: an identity shipped in a script
+# is a trust anchor by omission (flair#1822) — an invocation missing its env var
+# would mail as a principal nobody chose. When unset, the mail leg is skipped
+# (with the remedy logged) rather than sent as that principal.
+WATCHDOG_AGENT_ID="${HARPER_WATCHDOG_AGENT_ID:-${FLAIR_AGENT_ID:-}}"
+
 # Alerting: Discord webhook (preferred) → tps mail send flint (fallback) → log+stderr.
 # Reuses the house pattern from mail-deliver-health.sh / mail-loop-canary.sh.
 WEBHOOK_FILE="${WEBHOOK_FILE:-${HOME}/.tps/secrets/discord-webhook-tps-activity}"
@@ -62,7 +68,9 @@ alert() {
     fi
   fi
   if [ -z "$posted" ] && [ -x "$BUN" ] && [ -f "$TPS_BIN" ]; then
-    if (cd "$TPS_DIR" && TPS_AGENT_ID=flint "$BUN" run "$TPS_BIN" mail send flint "$msg") >/dev/null 2>&1; then
+    if [ -z "$WATCHDOG_AGENT_ID" ]; then
+      log "WARNING: mail alert skipped — no sender identity. Set FLAIR_AGENT_ID or pass --agent <id> to the mailer (or set HARPER_WATCHDOG_AGENT_ID)."
+    elif (cd "$TPS_DIR" && TPS_AGENT_ID="$WATCHDOG_AGENT_ID" "$BUN" run "$TPS_BIN" mail send flint "$msg") >/dev/null 2>&1; then
       log "alert sent via tps mail to flint"
       posted="mail"
     else

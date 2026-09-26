@@ -19,6 +19,7 @@ import { keystore, keyPath as keystoreKeyPath } from "../keystore.js";
 import * as render from "../render.js";
 import { runFederationVerify } from "../federation-verify.js";
 import { resolveHubPeerIdentity } from "../lib/federation-pair-identity.js";
+import { redactTokenMessage } from "../lib/redact-token-id.js";
 import {
   rewriteFederationPairHubAccessError,
   rewriteFederationPairLocalAccessError,
@@ -26,9 +27,26 @@ import {
 import {
   defaultAdminPassPath,
   isLocalBase,
+  resolveAdminPassFromSources,
   resolveAdminUser,
+  ADMIN_PASS_FILE_FLAG,
+  ADMIN_PASS_FILE_HELP,
+  ADMIN_PASS_FLAG,
+  ADMIN_PASS_HELP,
 } from "../lib/auth-resolve.js";
 import { DEFAULT_INTERVAL_SECONDS as FEDERATION_SYNC_DEFAULT_INTERVAL } from "../federation/scheduler.js";
+import {
+  decideInstancePrune,
+  formatInstanceRow,
+  INSTANCE_ROW_PRUNE_REMEDY,
+  prunePeerWarningLines,
+  readInstanceRows,
+  pruneInstanceRows,
+  writeConfirmed,
+  type InstanceIdentityRow,
+  type InstancePruneDecision,
+  type OpsEndpoint,
+} from "../lib/instance-identity-row.js";
 
 export type FederationCli = {
   api: (...args: any[]) => Promise<any>;
@@ -71,6 +89,37 @@ function resolveOpsPort(opts: { opsPort?: string | number; port?: string | numbe
 }
 function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }): void {
   cli.applyAdminPassFile(opts);
+}
+
+/** `federation token` / `federation pair` credential flags (flair#1873).
+ *  The flag/help strings live in auth-resolve.ts next to the resolver, shared
+ *  with every sibling command's credential options (flair#1910). */
+
+/**
+ * Resolve `federation token`/`pair`'s admin password through the SAME reader
+ * `flair backup` uses (`readAdminPassFileSecure`), with the precedence the
+ * usage text states: an explicit `--admin-pass-file` or `--admin-pass` over
+ * `FLAIR_ADMIN_PASS`; combining the file and the flag is a usage error. The resolved value is written back to
+ * `opts.adminPass`, the slot the ops preflight and `loadInstanceSecretKey`
+ * read — mirroring `applyAdminPassFile` for the sibling commands. Never prints
+ * the value.
+ */
+function resolveFederationAdminPass(
+  opts: { adminPass?: string; adminPassFile?: string },
+  envPass: string | undefined,
+): string {
+  try {
+    const pass = resolveAdminPassFromSources({
+      adminPassFile: opts.adminPassFile,
+      adminPass: opts.adminPass,
+      envPass,
+    });
+    if (pass) opts.adminPass = pass;
+    return pass;
+  } catch (err: any) {
+    console.error(`Error: ${err.message}`);
+    process.exit(1);
+  }
 }
 function addSharedCredentialOptions(cmd: Command): Command {
   return cli.addSharedCredentialOptions(cmd);
@@ -155,18 +204,153 @@ function isFederationPrivateVisibility(visibility: string | null | undefined): b
   return visibility === FEDERATION_PRIVATE_VISIBILITY;
 }
 
-async function loadInstanceSecretKey(instanceId: string, opts: { adminPass?: string; adminUser?: string; opsPort?: string | number; port?: string | number }): Promise<Uint8Array> {
+/** The exact refusal sentence when nothing has reached the hub yet. */
+const NOTHING_SENT_TO_HUB = "Nothing was sent to the hub; the pairing token is still valid.";
+/** The post-hub failure sentence: the token is already spent. */
+const PAIR_TOKEN_CONSUMED =
+  "The pairing token has been consumed; mint a new one with 'flair federation token' on the hub and re-run pair.";
+/** A rejected hub fetch may or may not have reached the hub, so be uncertain. */
+const PAIR_TOKEN_MAYBE_CONSUMED =
+  "The request may not have reached the hub; verify the pairing token there before re-minting one with 'flair federation token'.";
+
+/**
+ * Strip any userinfo (user:password) and query string from a URL before printing
+ * it. An --ops-target like https://user:pass@host/?token=... must never put the
+ * credential or the query token on stderr.
+ */
+export function redactUrl(u: string): string {
+  try {
+    const url = new URL(u);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    return url.toString();
+  } catch {
+    // Not a parseable absolute URL: strip a userinfo-looking prefix and any query.
+    return u.replace(/\/\/[^/@]*@/, "//").replace(/\?.*$/, "");
+  }
+}
+
+/**
+ * A fetch error's code or name — NEVER its message. Under Node a rejected
+ * fetch to a user-supplied URL can carry the full URL (credentials included)
+ * in err.message, so the message must never reach an error line.
+ */
+function fetchErrorLabel(err: unknown): string {
+  // Node's fetch wraps the OS error: the useful code (ECONNREFUSED, ENOTFOUND,
+  // …) is on err.cause.code, so prefer it over the wrapper's code/name.
+  const e = err as { code?: unknown; name?: unknown; cause?: { code?: unknown } };
+  const causeCode = typeof e?.cause?.code === "string" && e.cause.code ? e.cause.code : undefined;
+  const code = typeof e?.code === "string" && e.code ? e.code : undefined;
+  const name = typeof e?.name === "string" && e.name ? e.name : undefined;
+  return causeCode ?? code ?? name ?? "request failed";
+}
+
+/** Strip any userinfo from URLs embedded in a message before printing it. */
+function redactMessage(text: string): string {
+  return text.replace(/\/\/[^/@\s]+@/g, "//");
+}
+
+/**
+ * The one line `flair federation token` prints about its PairingToken rollback.
+ *
+ * A rollback is only real if Harper CONFIRMS the delete. A `delete` answers 200
+ * even when it removes nothing, naming what it removed in `deleted_hashes` and a
+ * record it did NOT remove in `skipped_hashes`; a body that names no ids at all
+ * is also not a confirmation. One rule, shared with the identity-row writes and
+ * the cleanup sweep — `writeConfirmed` (flair#1899). A confirmed rollback is
+ * reported as such; anything else is reported as a FAILED rollback that names
+ * the token by its 8-character prefix only.
+ */
+export function pairingTokenRollbackLine(result: unknown, tokenId: string): string {
+  const prefix = tokenId.slice(0, 8);
+  if (writeConfirmed(result, "deleted_hashes", tokenId)) {
+    // Only the delete is claimed. A LOST add_user response does not establish
+    // that the user was not created, so the line says nothing about it.
+    return `Rolled back pairing token ${prefix}…: Harper confirmed it was deleted.`;
+  }
+  const body = (result ?? {}) as Record<string, unknown>;
+  const why =
+    body.error !== undefined && body.error !== null
+      ? `Harper reported: ${redactTokenMessage(String(body.error), [tokenId])}`
+      : Array.isArray(body.skipped_hashes) && body.skipped_hashes.map(String).includes(tokenId)
+        ? "Harper named it in skipped_hashes"
+        : "Harper's result did not name it as deleted";
+  // An unconfirmed delete is NOT proof the row survived: the response may have
+  // been lost. Report what is known (the delete is unconfirmed), not the state
+  // we cannot see.
+  return (
+    `Pairing token rollback FAILED: Harper did not confirm that token ${prefix}… was deleted — ${why}. ` +
+    `A lost response does not mean the row survived; check the PairingToken table.`
+  );
+}
+
+/**
+ * Delete the PairingToken a failed `flair federation token` persisted, and
+ * return the one-line outcome for the caller to print.
+ *
+ * Never throws: the caller is already failing, and its ORIGINAL error is what
+ * must reach the exit code, so a rollback that itself fails is reported, not
+ * raised. Sends `hash_values` (a list) — the field Harper's delete schema
+ * REQUIRES; the singular `hash_value` is refused with a 400, which left the
+ * token in the table so it outlived the user it was minted for (flair#1895).
+ */
+export async function rollbackPairingToken(
+  opsEndpoint: string,
+  auth: string,
+  tokenId: string,
+): Promise<string> {
+  try {
+    const res = await fetch(`${opsEndpoint}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({
+        operation: "delete",
+        database: "flair",
+        table: "PairingToken",
+        hash_values: [tokenId],
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const result = await res.json().catch(() => null);
+    return pairingTokenRollbackLine(result, tokenId);
+  } catch (err: any) {
+    return pairingTokenRollbackLine({ error: String(err?.message ?? err) }, tokenId);
+  }
+}
+
+/**
+ * Whether a Harper permission object can WRITE the Peer table: a super_user, or
+ * an explicit flair.Peer insert+update grant. A restrictive `operations`
+ * allowlist additionally gates the operation itself, so `upsert` must be
+ * permitted for any Peer write to reach the table. A read-only credential can
+ * search but not upsert, so the preflight must check this, not readability.
+ */
+export function canWritePeerPermission(permission: any): boolean {
+  if (permission?.super_user === true) return true;
+  const operations = permission?.operations;
+  if (Array.isArray(operations) && !operations.includes("upsert") && !operations.includes("standard_user")) {
+    return false;
+  }
+  const peer = permission?.flair?.tables?.Peer;
+  return peer?.insert === true && peer?.update === true;
+}
+
+async function loadInstanceSecretKey(instanceId: string, opts: { adminPass?: string; adminUser?: string; opsPort?: string | number; port?: string | number; target?: string; opsTarget?: string }): Promise<Uint8Array> {
   // Try keystore first
   const seed = keystore.getPrivateKeySeed(instanceId);
   if (seed) {
     return nacl.sign.keyPair.fromSeed(seed).secretKey;
   }
 
-  // Fallback: check DB for legacy _keySeed
-  const opsPort = resolveOpsPort(opts);
-  const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+  // Fallback: check DB for legacy _keySeed. Use the SAME three-source
+  // credential and the SAME resolved ops endpoint as the pair preflight, so a
+  // legacy-key spoke cannot pass preflight and then fail here for a different
+  // endpoint or a credential the fallback would not send.
+  const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
+  const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
   const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
-  const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+  const res = await fetch(`${opsEndpoint}/`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: auth },
     body: JSON.stringify({ operation: "search_by_value", schema: "flair", table: "Instance", search_attribute: "id", search_type: "equals", search_value: instanceId, get_attributes: ["*"] }),
@@ -1171,7 +1355,8 @@ export function register(program: Command): void {
     .command("pair <hub-url>")
     .description("Pair this spoke with a hub instance")
     .option("--port <port>", "Harper HTTP port")
-    .option("--admin-pass <pass>", "Admin password")
+    .option(ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP)
+    .option("--admin-pass <pass>", ADMIN_PASS_HELP)
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--token <token>", "One-time pairing token from hub admin (env: FLAIR_PAIRING_TOKEN) [deprecated: use --token-from]")
@@ -1180,21 +1365,41 @@ export function register(program: Command): void {
     .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
     .action(async (hubUrl: string, opts: any) => {
       const target = resolveTarget(opts);
+      // flair#1873: resolve the SPOKE admin credential FIRST, before any
+      // request. `--admin-pass-file` is read in-process (mode 0600 enforced),
+      // so a refusal sends nothing anywhere; combining it with --admin-pass is
+      // a usage error. The value is written back into opts.adminPass, which the
+      // ops preflight and the signing-key fallback below both read.
+      const adminPass = resolveFederationAdminPass(
+        opts,
+        process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD,
+      );
       // One URL for the identity GET and the named error. resolveBaseUrl
       // honors --target / FLAIR_TARGET / FLAIR_URL / --port — the same host
       // the GET actually probes (do not cite resolveBaseUrl only in the
       // rewriter while api() falls through to resolveHttpPort({})).
       const identityUrl = resolveBaseUrl(opts).replace(/\/$/, "");
+      // Set immediately before the hub's FederationPair request, so the outer
+      // catch can say whether the one-time token may already be consumed.
+      let hubContacted = false;
       try {
         // flair#820: the identity GET is pair's first step and is allowAdmin.
         // A 403 here is LOCAL (or --target REMOTE), never the hub handshake.
         // Rewrite Harper's raw AccessViolation into a named role/grant error.
         let instance: any;
         try {
-          instance = await api("GET", "/FederationInstance", undefined, { baseUrl: identityUrl });
+          // flair#1873: hand the identity GET the credential the operator
+          // provided (--admin-pass-file / --admin-pass), not only baseUrl — a
+          // protected instance refuses this allowAdmin GET before pair ever
+          // reaches the authenticated ops preflight.
+          instance = await api("GET", "/FederationInstance", undefined, {
+            baseUrl: identityUrl,
+            explicitAdminPass: opts.adminPass,
+            adminUser: opts.adminUser,
+          });
         } catch (err: unknown) {
           throw rewriteFederationPairLocalAccessError(err, {
-            url: identityUrl,
+            url: redactUrl(identityUrl),
             side: target ? "REMOTE" : "LOCAL",
             agentId: process.env.FLAIR_AGENT_ID,
           });
@@ -1233,6 +1438,76 @@ export function register(program: Command): void {
           process.exit(1);
         }
 
+        // flair#1875: the SPOKE admin credential was resolved at the top of this
+        // action (flair#1873) and preflighted BEFORE any request that consumes the
+        // one-time token. The hub's FederationPair burns the token, so a missing or
+        // refused admin credential must be caught here — while the token is still
+        // valid — not after the hub has already paired us. Zero hub requests happen
+        // on this path.
+        if (!adminPass) {
+          console.error(
+            "Error: refusing to contact the hub: the local hub-peer record needs admin auth to write — " +
+            "pass --admin-pass-file (preferred), --admin-pass, or set FLAIR_ADMIN_PASS / HDB_ADMIN_PASSWORD (the SPOKE admin password), then re-run pair. " +
+            NOTHING_SENT_TO_HUB
+          );
+          process.exit(1);
+        }
+        const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
+        const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
+        const safeOps = redactUrl(opsEndpoint);
+
+        // Preflight the credential against the LOCAL ops API before the hub
+        // request. user_info reports the credential's own role/permissions, so
+        // this proves it can WRITE flair.Peer — a read-only credential can search
+        // but is refused by the upsert, and by then the hub has burned the token.
+        let preflightRes: Awaited<ReturnType<typeof fetch>>;
+        try {
+          preflightRes = await fetch(`${opsEndpoint}/`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: auth },
+            body: JSON.stringify({ operation: "user_info" }),
+            signal: AbortSignal.timeout(10_000),
+          });
+        } catch (err) {
+          // Never print err.message: a rejected fetch to the user-supplied ops
+          // URL can carry the full URL (credentials included) in its message.
+          console.error(
+            `Error: could not reach the local ops API at ${safeOps} to preflight the spoke admin credential ` +
+            `(${fetchErrorLabel(err)}). ${NOTHING_SENT_TO_HUB}`
+          );
+          process.exit(1);
+        }
+        if (preflightRes.status === 401 || preflightRes.status === 403) {
+          console.error(
+            `Error: the spoke admin credential was refused by the local ops API (${preflightRes.status}). ${NOTHING_SENT_TO_HUB}`
+          );
+          process.exit(1);
+        }
+        if (!preflightRes.ok) {
+          console.error(
+            `Error: the local ops API at ${safeOps} answered ${preflightRes.status} to user_info. ${NOTHING_SENT_TO_HUB}`
+          );
+          process.exit(1);
+        }
+        const userInfo = (await preflightRes.json().catch(() => null)) as any;
+        const rolePermission = userInfo?.role?.permission;
+        if (rolePermission === undefined || rolePermission === null) {
+          console.error(`Error: user_info returned no role information. ${NOTHING_SENT_TO_HUB}`);
+          process.exit(1);
+        }
+        // super_user is the supported credential. For a non-super_user role this
+        // checks TABLE-level grants only (flair.Peer insert+update) plus the
+        // operations allowlist; it cannot see attribute-level grants, so a role
+        // with table access but restricted attributes still passes here and the
+        // upsert may fail later (reported on the consumed-token path).
+        if (!canWritePeerPermission(rolePermission)) {
+          const roleName = userInfo?.role?.role ?? userInfo?.role?.name ?? "(unknown)";
+          console.error(
+            `Error: the spoke admin credential cannot write the Peer table (role ${roleName}). ${NOTHING_SENT_TO_HUB}`
+          );
+          process.exit(1);
+        }
+
         // Load secret key and sign the pairing request.
         const secretKey = await loadInstanceSecretKey(instance.id, opts);
         const pairBody: Record<string, any> = {
@@ -1248,15 +1523,27 @@ export function register(program: Command): void {
           fetchHeaders.Authorization = authHeader;
         }
 
-        const res = await fetch(`${hubUrl}/FederationPair`, {
-          method: "POST",
-          headers: fetchHeaders,
-          body: JSON.stringify(signedBody),
-        });
+        let res: Awaited<ReturnType<typeof fetch>>;
+        try {
+          hubContacted = true;
+          res = await fetch(`${hubUrl}/FederationPair`, {
+            method: "POST",
+            headers: fetchHeaders,
+            body: JSON.stringify(signedBody),
+          });
+        } catch (err) {
+          // A rejected fetch to the user-supplied hub URL: name the error, never
+          // print its message (it can carry the URL). The request was sent, so
+          // the token may already be consumed.
+          console.error(
+            `Error: could not reach the hub at ${redactUrl(hubUrl)} (${fetchErrorLabel(err)}). ${PAIR_TOKEN_MAYBE_CONSUMED}`
+          );
+          process.exit(1);
+        }
 
         if (!res.ok) {
           const text = await res.text().catch(() => "");
-          const hubDenial = rewriteFederationPairHubAccessError(res.status, hubUrl, text);
+          const hubDenial = rewriteFederationPairHubAccessError(res.status, redactUrl(hubUrl), text);
           if (hubDenial) {
             console.error(`Error: ${hubDenial.message}`);
             process.exit(1);
@@ -1286,45 +1573,56 @@ export function register(program: Command): void {
         // never runs. Previously this was gated on `if (adminPass)` and the write
         // result was never checked — pairing with only an agent key (or a failed
         // upsert) left no peer behind a misleadingly green "✅ Paired".
-        const adminPass = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
-        if (!adminPass) {
+        // flair#1875: the admin credential was resolved and preflighted BEFORE the
+        // hub request, so reaching here means it was accepted. A rejected write
+        // (or a failed upsert) is a genuine post-pair failure: the token is gone.
+        let peerRes: Awaited<ReturnType<typeof fetch>>;
+        try {
+          peerRes = await fetch(`${opsEndpoint}/`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: auth },
+            body: JSON.stringify({
+              operation: "upsert", database: "flair", table: "Peer",
+              records: [{
+                id: resolvedHub.peer.id,
+                publicKey: resolvedHub.peer.publicKey,
+                role: "hub", endpoint: hubUrl, status: "paired",
+                pairedAt: new Date().toISOString(),
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+              }],
+            }),
+            signal: AbortSignal.timeout(10_000),
+          });
+        } catch (err) {
+          // A THROWN upsert (network error) after the hub returned 200 is the same
+          // post-pair failure as an HTTP error: the token is already consumed.
+          // Name the error, never print its message (the ops URL is user-supplied).
           console.error(
-            "Error: paired on the hub, but the local hub-peer record needs admin auth to write — " +
-            "pass --admin-pass, or set FLAIR_ADMIN_PASS / HDB_ADMIN_PASSWORD, then re-run pair. " +
-            "Without it, 'flair federation sync' will report 'No hub peer configured'."
+            `Error: paired on the hub, but writing the local hub-peer record failed ` +
+            `(${fetchErrorLabel(err)}). ${PAIR_TOKEN_CONSUMED}`
           );
           process.exit(1);
         }
-        const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
-        const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
-        const peerRes = await fetch(`${opsEndpoint}/`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: auth },
-          body: JSON.stringify({
-            operation: "upsert", database: "flair", table: "Peer",
-            records: [{
-              id: resolvedHub.peer.id,
-              publicKey: resolvedHub.peer.publicKey,
-              role: "hub", endpoint: hubUrl, status: "paired",
-              pairedAt: new Date().toISOString(),
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-            }],
-          }),
-          signal: AbortSignal.timeout(10_000),
-        });
         if (!peerRes.ok) {
           const text = await peerRes.text().catch(() => "");
           console.error(
-            `Error: paired with the hub but failed to write the local hub-peer record ` +
-            `(${peerRes.status} ${text.slice(0, 200)}). Ops endpoint: ${opsEndpoint}. ` +
-            `'flair federation sync' will not find the hub until this succeeds — check --admin-pass and the ops port.`
+            `Error: paired on the hub, but writing the local hub-peer record failed ` +
+            `(${peerRes.status} ${text.slice(0, 200)}). ${PAIR_TOKEN_CONSUMED}`
           );
           process.exit(1);
         }
         console.log(`✅ Recorded hub as local peer: ${resolvedHub.peer.id} → ${hubUrl}`);
       } catch (err: any) {
-        console.error(`Error: ${err.message}`);
+        // A rejected fetch to a user-supplied URL can carry the full URL —
+        // credentials included — in err.message, so for fetch-shaped errors
+        // print the code/name instead. Append whether the hub was contacted: if
+        // the identity GET (or anything before the hub fetch) failed, nothing
+        // reached the hub and the token is untouched.
+        const tail = hubContacted ? PAIR_TOKEN_CONSUMED : NOTHING_SENT_TO_HUB;
+        const name = typeof err?.name === "string" ? err.name : "";
+        const fetchShaped = name === "TypeError" || name === "AbortError" || name === "TimeoutError";
+        console.error(`Error: ${fetchShaped ? fetchErrorLabel(err) : redactMessage(String(err?.message ?? err))}. ${tail}`);
         process.exit(1);
       }
     });
@@ -1333,7 +1631,8 @@ export function register(program: Command): void {
     .command("token")
     .description("Generate a one-time pairing token (run on the hub)")
     .option("--port <port>", "Harper HTTP port")
-    .option("--admin-pass <pass>", "Admin password")
+    .option(ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP)
+    .option("--admin-pass <pass>", ADMIN_PASS_HELP)
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--ops-port <port>", "Harper operations API port")
     .option("--ttl <minutes>", "Token TTL in minutes (default: 60)", "60")
@@ -1349,7 +1648,10 @@ export function register(program: Command): void {
         const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
 
         const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
-        const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+        // flair#1873: read --admin-pass-file in-process (mode 0600 enforced);
+        // an explicit --admin-pass-file or --admin-pass overrides FLAIR_ADMIN_PASS,
+        // and file+flag is a usage error.
+        const adminPass = resolveFederationAdminPass(opts, process.env.FLAIR_ADMIN_PASS);
         const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
 
         // 1. Persist the PairingToken record
@@ -1368,7 +1670,12 @@ export function register(program: Command): void {
         });
         if (!opsRes.ok) {
           const detail = await opsRes.text().catch(() => "");
-          throw new Error(`Failed to persist pairing token (${opsRes.status}): ${detail || "no body"}`);
+          // Harper's error body can echo the upsert's record, whose `id` IS the
+          // pairing token. Cut the token id to its prefix before it reaches the
+          // thrown message, which this command's catch prints (flair#1902).
+          throw new Error(
+            `Failed to persist pairing token (${opsRes.status}): ${redactTokenMessage(detail || "no body", [token])}`,
+          );
         }
 
         // 2. Create bootstrap user for this token
@@ -1390,34 +1697,18 @@ export function register(program: Command): void {
             signal: AbortSignal.timeout(10_000),
           });
         } catch (err: any) {
-          // Network failure creating bootstrap user — roll back PairingToken
-          await fetch(`${opsEndpoint}/`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: auth },
-            body: JSON.stringify({
-              operation: "delete",
-              database: "flair",
-              table: "PairingToken",
-              hash_value: token,
-            }),
-            signal: AbortSignal.timeout(10_000),
-          }).catch(() => {});
+          // Network failure creating bootstrap user — roll back PairingToken. The
+          // rollback outcome is an ADDITIONAL line; the command still exits on the
+          // original (network) failure below.
+          console.error(await rollbackPairingToken(opsEndpoint, auth, token));
           throw new Error(`Failed to create bootstrap user (network): ${err.message}`);
         }
 
         if (!addUserRes.ok) {
-          // add_user failed — roll back PairingToken so the two stay in sync
-          await fetch(`${opsEndpoint}/`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: auth },
-            body: JSON.stringify({
-              operation: "delete",
-              database: "flair",
-              table: "PairingToken",
-              hash_value: token,
-            }),
-            signal: AbortSignal.timeout(10_000),
-          }).catch(() => {});
+          // add_user failed — roll back PairingToken so the two stay in sync. The
+          // rollback outcome is an ADDITIONAL line; the command still exits on the
+          // original add_user failure below.
+          console.error(await rollbackPairingToken(opsEndpoint, auth, token));
           const detail = await addUserRes.text().catch(() => "");
           throw new Error(`Failed to create bootstrap user (${addUserRes.status}): ${detail || "no body"}`);
         }
@@ -1691,6 +1982,135 @@ export function register(program: Command): void {
       }
       console.log(`${deleted} peer(s) deleted; ${errors} error(s).`);
       if (errors > 0) process.exit(1);
+    });
+
+  // ── flair federation instance — the identity row (flair#1883) ────────────
+  //
+  // A hub's identity is ONE `flair.Instance` row and the pairing-cleanup sweep
+  // reads its role. `GET /FederationInstance` find-or-creates one, `flair init
+  // --remote` used to insert a SECOND, and everything downstream that took "the
+  // first row" then read whichever row the table yielded first. `list` shows the
+  // rows; `prune` gets back to one.
+  const instanceCmd = federation
+    .command("instance")
+    .description("Inspect and repair this instance's federation identity row");
+
+  /** The ops endpoint these two subcommands read and write. */
+  const instanceOpsEndpoint = (opts: any): OpsEndpoint => {
+    // --admin-pass-file resolves into the same `adminPass` slot the inline flag
+    // uses (the shared idiom: the secret stays out of ps and shell history).
+    applyAdminPassFile(opts);
+    const opsUrl = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    return { opsUrl, credentials: { user: resolveAdminUser(opts.adminUser), pass: adminPass } };
+  };
+
+  addSharedCredentialOptions(instanceCmd.command("list"))
+    .description("List every Instance row on this instance (a hub should have exactly one)")
+    .option("--port <port>", "Harper HTTP port")
+    .option("--ops-port <port>", "Harper operations API port")
+    .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
+    .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET)")
+    .option("--json", "Emit JSON")
+    .action(async (opts: any) => {
+      let rows: InstanceIdentityRow[];
+      try {
+        rows = await readInstanceRows(instanceOpsEndpoint(opts));
+      } catch (err: any) {
+        console.error(`Error: ${err?.message ?? err}`);
+        process.exit(1);
+      }
+      if (opts.json) {
+        console.log(JSON.stringify({ rows }, null, 2));
+        return;
+      }
+      if (rows.length === 0) {
+        console.log("No Instance rows. This instance has no federation identity yet (it is created on the first `GET /FederationInstance`, or by `flair init --remote`).");
+        return;
+      }
+      console.log(`${rows.length} Instance row(s):`);
+      for (const row of rows) console.log(`  ${formatInstanceRow(row)}`);
+      if (rows.length > 1) {
+        console.log(`\nMore than one row means there is no canonical identity. Keep one and delete the rest:`);
+        console.log(`  ${INSTANCE_ROW_PRUNE_REMEDY}`);
+      }
+    });
+
+  addSharedCredentialOptions(instanceCmd.command("prune"))
+    .description("Delete every Instance row except --keep <id> (dry-run by default)")
+    .option("--keep <id>", "The Instance row to keep; the rest are deleted")
+    .option("--apply", "Actually delete (default is dry-run)")
+    .option("--port <port>", "Harper HTTP port")
+    .option("--ops-port <port>", "Harper operations API port")
+    .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
+    .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET)")
+    .action(async (opts: any) => {
+      const endpoint = instanceOpsEndpoint(opts);
+      if (!opts.keep) {
+        // No --keep: show what is there. Never guess which row is the identity —
+        // the id and key peers know is the operator's fact, not this command's.
+        try {
+          const rows = await readInstanceRows(endpoint);
+          if (rows.length === 0) {
+            console.log("No Instance rows — nothing to prune.");
+            return;
+          }
+          console.log(`${rows.length} Instance row(s):`);
+          for (const row of rows) console.log(`  ${formatInstanceRow(row)}`);
+          console.error(`\nError: --keep <id> is required: name the row to keep.`);
+        } catch (err: any) {
+          console.error(`Error: ${err?.message ?? err}`);
+        }
+        process.exit(1);
+      }
+
+      let decision: InstancePruneDecision;
+      try {
+        decision = decideInstancePrune(await readInstanceRows(endpoint), opts.keep);
+      } catch (err: any) {
+        console.error(`Error: ${err?.message ?? err}`);
+        process.exit(1);
+      }
+
+      if (decision.kind === "unknown-id") {
+        console.error(`Error: --keep ${opts.keep} names no Instance row on this instance. Rows present:`);
+        for (const row of decision.rows) console.error(`  ${formatInstanceRow(row)}`);
+        process.exit(1);
+      }
+      if (decision.kind === "nothing") {
+        console.log(`Nothing to prune — --keep names the only Instance row this instance has.`);
+        return;
+      }
+
+      // What a prune must tell the operator (flair#1883 round 3; tense
+      // corrected in round 4): a paired peer pinned this instance's identity from
+      // the `POST /FederationPair` response, which — while the table held several
+      // rows — was whichever row the search yielded first. A peer that paired in
+      // that state may have pinned ANY of the rows being deleted, and which one
+      // it pinned is NOT determinable here, so the warning does not name one. (The
+      // response is a 409 now, so this is history, not the current behaviour — but
+      // those peers are still out there.) A peer paired with a deleted identity
+      // must re-pair.
+      const peerWarnings = prunePeerWarningLines({ drop: decision.drop });
+
+      if (!opts.apply) {
+        console.log(`── flair federation instance prune — dry-run (use --apply to delete) ──`);
+        console.log(`Keeping ${formatInstanceRow(decision.keep)}`);
+        console.log(`Would delete ${decision.drop.length} row(s):`);
+        for (const row of decision.drop) console.log(`  ${formatInstanceRow(row)}`);
+        for (const line of peerWarnings) console.log(line);
+        return;
+      }
+
+      try {
+        const { dropped } = await pruneInstanceRows(endpoint, opts.keep);
+        console.log(`Kept ${decision.keep.id}; deleted ${dropped.length} row(s): ${dropped.join(", ")}`);
+        for (const line of peerWarnings) console.log(line);
+        console.log("Re-run `flair init --remote` to set the kept row's role to hub.");
+      } catch (err: any) {
+        console.error(`Error: ${err?.message ?? err}`);
+        process.exit(1);
+      }
     });
 
   // `flair federation verify` — end-to-end roundtrip: write a tagged memory

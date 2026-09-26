@@ -14,6 +14,14 @@
  * the per-file re-hash show up as a red test rather than as a quiet change in a
  * YAML diff.
  *
+ * The reservation marker (Invariant 8) can be DEACTIVATED (a non-success status)
+ * and then DELETED by the same `deployments: write` token that writes it, so
+ * GitHub does not enforce the burn. What enforces it is the stage job's
+ * allowlist — no `DELETE /deployments`, no `POST /deployments/{id}/statuses`,
+ * `gh api` only as the reservation GET and POST — plus branch protection on the
+ * workflow. The repo-wide checks below assert no other workflow or job grants
+ * `deployments: write` or declares the reservation environment.
+ *
  * The runtime behaviours are exercised by extracting the stage job's INLINE
  * shell from the parsed YAML and running it in a temp directory against fixture
  * tarballs with a fake `npm` on PATH that records its argv (no network, no real
@@ -61,7 +69,7 @@ const SHA40 = /^[0-9a-f]{40}$/;
 /** Simple-command words the stage job's run bodies may use. */
 const ALLOWED = new Set([
   "set", "cd", "mkdir", "printf", "echo", "exit", "npm", "jq", "sha256sum",
-  "sort", "cmp", "chmod", "git", "find", "while", "read", "do", "done", "for", "in", "if", "then",
+  "sort", "cmp", "chmod", "git", "gh", "find", "while", "read", "do", "done", "for", "in", "if", "then",
   "else", "fi", "[", ":", "continue", "break",
 ]);
 /** Leading words that are structural, not commands. */
@@ -180,11 +188,23 @@ function npmInvocationProblem(stmt: string, raw: string): string | null {
   return `unexpected npm invocation: ${stmt.split(/\s+/).slice(0, 3).join(" ")}`;
 }
 
-/** Allowed git invocations: the ancestry check, and nothing else. */
+/** Allowed git invocations: the ancestry + recency checks, and nothing else. */
 function gitInvocationProblem(stmt: string): string | null {
   if (/^git fetch --no-tags origin main\b/.test(stmt)) return null;
   if (/^git merge-base --is-ancestor \S+ origin\/main\b/.test(stmt)) return null;
+  if (/^git diff --quiet origin\/main -- \.github\/workflows\/release-publish\.yml\b/.test(stmt)) return null;
   return `unexpected git invocation: ${stmt.split(/\s+/).slice(0, 3).join(" ")}`;
+}
+
+/** Allowed gh invocations: the reservation GET and POST, and nothing else. */
+function ghInvocationProblem(stmt: string): string | null {
+  if (/^gh api --paginate repos\/\S+/.test(stmt) && /deployments\?environment=release-attempt&ref=v/.test(stmt)) {
+    return null;
+  }
+  if (/^gh api --method POST repos\/\S+/.test(stmt) && /\/deployments\b/.test(stmt) && !/\/statuses/.test(stmt)) {
+    return null;
+  }
+  return `unexpected gh invocation: ${stmt.split(/\s+/).slice(0, 4).join(" ")}`;
 }
 
 /** Allowed find invocation: the flat artifact enumeration, and nothing else. */
@@ -248,8 +268,21 @@ function runBodyProblems(runBody: string): string[] {
   }
   const { text, subs } = extractSubstitutions(runBody);
   for (const inner of subs) {
-    const cmd = leadingCommand(stripQuoted(inner));
-    if (cmd && !ALLOWED.has(cmd)) problems.push(`command substitution outside the set: $(${cmd} …)`);
+    const cs = commandStatement(stripQuoted(inner));
+    if (!cs) continue;
+    if (!ALLOWED.has(cs.cmd)) problems.push(`command substitution outside the set: $(${cs.cmd} …)`);
+    if (cs.cmd === "npm") {
+      const p = npmInvocationProblem(unquoteStatement(inner), inner);
+      if (p) problems.push(p);
+    }
+    if (cs.cmd === "git") {
+      const p = gitInvocationProblem(unquoteStatement(inner));
+      if (p) problems.push(p);
+    }
+    if (cs.cmd === "gh") {
+      const p = ghInvocationProblem(unquoteStatement(inner));
+      if (p) problems.push(p);
+    }
   }
   for (const rawLine of text.split("\n")) {
     if (/^\s*#/.test(rawLine)) continue;
@@ -265,6 +298,10 @@ function runBodyProblems(runBody: string): string[] {
       }
       if (cs.cmd === "git") {
         const p = gitInvocationProblem(unquoteStatement(frag));
+        if (p) problems.push(p);
+      }
+      if (cs.cmd === "gh") {
+        const p = ghInvocationProblem(unquoteStatement(frag));
         if (p) problems.push(p);
       }
       if (cs.cmd === "find") {
@@ -288,9 +325,26 @@ interface StageStep {
   with?: Record<string, unknown>;
   id?: string;
 }
+
+/**
+ * The `name` of a job's `environment:` value. GitHub accepts EITHER a string
+ * (`environment: release`) OR the object form (`environment: { name: release,
+ * url: ... }`); a string-only comparison is blind to the second form (F2).
+ *
+ * The name is returned UNCHANGED — callers normalise case, because GitHub
+ * environment names are NOT case-sensitive (so `Release` must be treated as
+ * `release`).
+ */
+function environmentName(env: unknown): string | undefined {
+  if (typeof env === "string") return env;
+  if (env && typeof env === "object" && typeof (env as { name?: unknown }).name === "string") {
+    return (env as { name: string }).name;
+  }
+  return undefined;
+}
 interface WorkflowDoc {
   permissions?: unknown;
-  jobs?: Record<string, { permissions?: Record<string, string>; environment?: string; steps?: StageStep[] }>;
+  jobs?: Record<string, { permissions?: Record<string, string>; environment?: unknown; steps?: StageStep[] }>;
 }
 
 /** The full stage-job contract. Returns human-readable problems ([] is good). */
@@ -309,11 +363,16 @@ export function inspectStageJob(text: string): { problems: string[] } {
 
   const perms = stage.permissions ?? {};
   const permPairs = Object.entries(perms).sort();
-  const want = [["contents", "read"], ["id-token", "write"]];
+  const want = [["contents", "read"], ["deployments", "write"], ["id-token", "write"]];
   if (JSON.stringify(permPairs) !== JSON.stringify(want)) {
-    problems.push(`stage-publish permissions must be exactly contents: read + id-token: write, got ${JSON.stringify(perms)}`);
+    problems.push(`stage-publish permissions must be exactly contents: read + deployments: write + id-token: write, got ${JSON.stringify(perms)}`);
   }
-  if (stage.environment !== "release") problems.push("stage-publish must keep environment: release (OIDC scoping)");
+  if ((environmentName(stage.environment) ?? "").toLowerCase() !== "release") problems.push("stage-publish must keep environment: release (OIDC scoping)");
+
+  const packPerms = doc.jobs?.pack?.permissions ?? {};
+  if (packPerms.contents !== "read" || packPerms.deployments !== "read" || Object.keys(packPerms).length !== 2) {
+    problems.push(`pack permissions must be exactly contents: read + deployments: read, got ${JSON.stringify(packPerms)}`);
+  }
 
   const steps = stage.steps ?? [];
   if (steps.length !== 6) problems.push(`stage-publish must have exactly 6 allowlisted steps, got ${steps.length}`);
@@ -328,9 +387,10 @@ export function inspectStageJob(text: string): { problems: string[] } {
   if (
     !ancestry?.run ||
     !/git fetch --no-tags origin main/.test(ancestry.run) ||
-    !/git merge-base --is-ancestor/.test(ancestry.run)
+    !/git merge-base --is-ancestor/.test(ancestry.run) ||
+    !/git diff --quiet origin\/main -- \.github\/workflows\/release-publish\.yml/.test(ancestry.run)
   ) {
-    problems.push("step 2 must be the ancestry check (git fetch --no-tags origin main; git merge-base --is-ancestor)");
+    problems.push("step 2 must be the ancestry + recency check (fetch --no-tags origin main; merge-base --is-ancestor; git diff --quiet on the workflow path)");
   }
 
   if (!setupNode || !/^actions\/setup-node@[0-9a-f]{40}$/.test(setupNode.uses ?? "")) {
@@ -363,11 +423,105 @@ export function inspectStageJob(text: string): { problems: string[] } {
       problems.push(`action is not pinned to a 40-hex SHA: ${step.uses}`);
     }
   }
+
+  // Reservation-marker shape (Invariant 8). The marker can be undone by the same
+  // token, so this allowlist (plus branch protection) is the burn's enforcement.
+  const allRuns = steps.map((s) => s.run ?? "").join("\n");
+  const fetchCount = (allRuns.match(/git fetch/g) ?? []).length;
+  if (fetchCount !== 1) {
+    problems.push(`the stage job must contain exactly one git fetch (the ancestry/recency step), found ${fetchCount}`);
+  }
+  if (/--method DELETE/.test(allRuns) || /DELETE \/deployments/.test(allRuns)) {
+    problems.push("the stage job must not delete deployments");
+  }
+  if (/\/statuses/.test(allRuns)) {
+    problems.push("the stage job must not POST a deployment status");
+  }
+  if (stageStep?.run && !/gh api --paginate/.test(stageStep.run)) {
+    problems.push("the stage shell must contain the paginated reservation GET");
+  }
+  if (stageStep?.run && !/gh api --method POST/.test(stageStep.run)) {
+    problems.push("the stage shell must POST the release-attempt marker");
+  }
   return { problems };
 }
 
 function realWorkflow(): string {
   return readFileSync(WORKFLOW, "utf8");
+}
+
+/** Repo-relative path of the release workflow (the only one allowed to widen). */
+const RELEASE_WORKFLOW_REL = ".github/workflows/release-publish.yml";
+
+interface WorkflowEntry { path: string; text: string }
+
+/** Every workflow file under .github/workflows, for the repo-wide checks. */
+function realWorkflows(): WorkflowEntry[] {
+  const dir = join(REPO, ".github", "workflows");
+  return readdirSync(dir)
+    .filter((f) => /\.ya?ml$/.test(f))
+    .sort()
+    .map((f) => ({ path: `.github/workflows/${f}`, text: readFileSync(join(dir, f), "utf8") }));
+}
+
+/**
+ * Repo-wide assertions: only release-publish.yml's stage-publish may grant
+ * `deployments: write`, and only release-publish.yml may declare the `release`
+ * or `release-attempt` environment. Takes entries so a test can inject a second
+ * workflow and confirm the check goes red.
+ */
+export function inspectRepoWide(entries: WorkflowEntry[]): { problems: string[] } {
+  const problems: string[] = [];
+  let writeJobs = 0;
+  for (const { path, text } of entries) {
+    let doc: any;
+    try {
+      doc = yaml.load(text);
+    } catch {
+      problems.push(`${path}: could not be parsed`);
+      continue;
+    }
+    if (!doc || typeof doc !== "object") continue;
+    const wfPerm = doc.permissions as unknown;
+    // F3: an ABSENT top-level block is not "no write" — GitHub falls back to the
+    // repository default, which this proof cannot see. Require an explicit,
+    // least-privilege mapping so the repository default is irrelevant here.
+    if (wfPerm === undefined || wfPerm === null) {
+      problems.push(`${path}: no top-level permissions: block (an absent block inherits the repository default)`);
+    } else if (typeof wfPerm !== "object") {
+      problems.push(`${path}: top-level permissions must be an explicit least-privilege mapping, got ${JSON.stringify(wfPerm)}`);
+    }
+    for (const [jobName, job] of Object.entries(doc.jobs ?? {})) {
+      const j = job as { permissions?: unknown; environment?: unknown };
+      // A job-level block OVERRIDES the workflow-level one (including `{}`).
+      const effective = j.permissions !== undefined ? j.permissions : wfPerm;
+      const grantsDeploymentsWrite =
+        effective === "write-all" ||
+        (!!effective && typeof effective === "object" && (effective as Record<string, string>).deployments === "write");
+      if (grantsDeploymentsWrite) {
+        writeJobs++;
+        if (path !== RELEASE_WORKFLOW_REL || jobName !== "stage-publish") {
+          problems.push(`${path}: job "${jobName}" grants deployments: write (only release-publish.yml stage-publish may)`);
+        }
+      }
+      const envName = environmentName(j.environment);
+      const env = envName?.toLowerCase();
+      if (env === "release" || env === "release-attempt") {
+        if (path !== RELEASE_WORKFLOW_REL) {
+          problems.push(`${path}: job "${jobName}" declares environment "${envName}" (only release-publish.yml may)`);
+        }
+      } else if (envName !== undefined && envName.includes("${{") && path !== RELEASE_WORKFLOW_REL) {
+        // An expression-valued environment (e.g. `${{ inputs.target }}`) can
+        // resolve to a release environment without matching either literal, so
+        // it cannot be proven safe — reject it outside release-publish.yml.
+        problems.push(`${path}: job "${jobName}" uses an expression for environment (cannot prove it is not a release environment)`);
+      }
+    }
+  }
+  if (writeJobs === 0) {
+    problems.push("no job grants deployments: write (release-publish.yml stage-publish must, for the reservation marker)");
+  }
+  return { problems };
 }
 
 // ── the shape tests (item 6), plus mutations (e) and (f) ─────────────────────
@@ -455,7 +609,7 @@ describe("the stage job is an allowlisted shape (flair#1671 A1a)", () => {
   test("workflow-level permissions are {} and github-release keeps contents: write", () => {
     const doc = yaml.load(realWorkflow()) as WorkflowDoc;
     expect(Object.keys(doc.permissions as object)).toEqual([]);
-    expect(doc.jobs!["pack"]!.permissions).toEqual({ contents: "read" });
+    expect(doc.jobs!["pack"]!.permissions).toEqual({ contents: "read", deployments: "read" });
     expect(doc.jobs!["github-release"]!.permissions).toEqual({ contents: "write" });
   });
 });
@@ -538,10 +692,35 @@ process.exit(0);
   return path;
 }
 
+/** A fake gh that records argv, answers the reservation GET, and POSTs with a scripted status. */
+function installFakeGh(): string {
+  const script = `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (process.env.GH_LOG) fs.appendFileSync(process.env.GH_LOG, JSON.stringify({ argv: args }) + "\\n");
+if (args.includes("--method") && args[args.indexOf("--method") + 1] === "POST") {
+  let body = "";
+  process.stdin.on("data", (d) => { body += d; });
+  process.stdin.on("end", () => {
+    if (process.env.GH_LOG) fs.appendFileSync(process.env.GH_LOG, JSON.stringify({ post_body: body }) + "\\n");
+    process.exit(parseInt(process.env.GH_POST_STATUS || "0", 10));
+  });
+} else {
+  process.stdout.write((process.env.GH_GET_RESPONSE || "[]") + "\\n");
+  process.exit(0);
+}
+`;
+  const p = join(BIN, "gh");
+  writeFileSync(p, script);
+  chmodSync(p, 0o755);
+  return p;
+}
+
 interface RunResult {
   status: number | null;
   out: string;
   log: { argv: string[]; cwd: string }[];
+  ghCalls: any[];
   scratch: string;
   userconfig: string;
 }
@@ -553,6 +732,7 @@ function runStageShell(
   scratchFiles: Record<string, string> = {},
 ): RunResult {
   installFakeNpm();
+  installFakeGh();
   const scratch = mkdtempSync(join(SCRATCH, "run-"));
   const sh = join(scratch, "stage.sh");
   writeFileSync(sh, stageStageShell(realWorkflow()));
@@ -565,6 +745,8 @@ function runStageShell(
   for (const [rel, content] of Object.entries(scratchFiles)) writeFileSync(join(scratch, rel), content);
   const log = join(scratch, "npm.log");
   writeFileSync(log, "");
+  const ghLog = join(scratch, "gh.log");
+  writeFileSync(ghLog, "");
   const r = spawnSync("bash", [sh], {
     cwd: scratch,
     encoding: "utf8",
@@ -574,6 +756,11 @@ function runStageShell(
       ART_DIR: artDir,
       NPM_USERCONFIG: userconfig,
       WORK_DIR: workDir,
+      GITHUB_REPOSITORY: "tpsdev-ai/flair",
+      GH_TOKEN: "test-token",
+      GH_LOG: ghLog,
+      GH_GET_RESPONSE: "[]",
+      GH_POST_STATUS: "0",
       PACK_PACKAGE_SET_DIGEST: artifact.packageSetDigest,
       PACK_MANIFEST_DIGEST: artifact.manifestDigest,
       GITHUB_STEP_SUMMARY: summary,
@@ -585,7 +772,11 @@ function runStageShell(
     .split("\n")
     .filter(Boolean)
     .map((l) => JSON.parse(l) as { argv: string[]; cwd: string });
-  return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}`, log: records, scratch, userconfig };
+  const ghCalls = readFileSync(ghLog, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l));
+  return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}`, log: records, ghCalls, scratch, userconfig };
 }
 
 const VERSION = "0.55.2";
@@ -803,6 +994,7 @@ function writeFakePackNpm(): void {
 const fs = require("node:fs");
 const path = require("node:path");
 const args = process.argv.slice(2);
+if (process.env.NPM_PACK_LOG) fs.appendFileSync(process.env.NPM_PACK_LOG, JSON.stringify(args) + "\\n");
 if (args[0] === "--version") { process.stdout.write("11.20.0\\n"); process.exit(0); }
 const dest = args[args.indexOf("--pack-destination") + 1];
 const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8"));
@@ -853,7 +1045,9 @@ function makePackFixture(opts: {
 function runPackScript(fixture: PackFixture, out: string, extraDirs?: string[]) {
   writeFakePackNpm();
   const dirs = extraDirs ?? fixture.dirs;
-  return spawnSync(
+  const packLog = join(SCRATCH, `packlog-${Math.random().toString(36).slice(2)}.log`);
+  writeFileSync(packLog, "");
+  const r = spawnSync(
     process.execPath,
     [PACK_SCRIPT, "--root", fixture.dir, "--out", out, "--version", "1.2.3", "--dirs", ...dirs],
     {
@@ -861,6 +1055,7 @@ function runPackScript(fixture: PackFixture, out: string, extraDirs?: string[]) 
       env: {
         ...process.env,
         PATH: `${BIN}:${process.env.PATH}`,
+        NPM_PACK_LOG: packLog,
         GITHUB_REPOSITORY: "tpsdev-ai/flair",
         GITHUB_REF_NAME: "v1.2.3",
         GITHUB_SHA: "abcdef0123456789abcdef0123456789abcdef01",
@@ -869,6 +1064,8 @@ function runPackScript(fixture: PackFixture, out: string, extraDirs?: string[]) 
       },
     },
   );
+  const packCalls = readFileSync(packLog, "utf8").split("\n").filter((l) => l.includes("--pack-destination")).length;
+  return Object.assign(r, { packCalls });
 }
 
 describe("the pack script enforces the exact-pin invariant and the tarball set", () => {
@@ -924,6 +1121,28 @@ describe("the pack script enforces the exact-pin invariant and the tarball set",
     const r = runPackScript(fixture, out, fixture.dirs.filter((d) => d !== "packages/b"));
     expect(r.status).not.toBe(0);
     expect(`${r.stdout}${r.stderr}`).toContain("missing");
+  });
+
+  test("(0) a --dirs list missing one member is refused with ZERO pack invocations", () => {
+    const fixture = makePackFixture({ version: "1.2.3", packages: { a: {}, b: {} } });
+    const out = mkdtempSync(join(SCRATCH, "out-"));
+    const r = runPackScript(fixture, out, fixture.dirs.filter((d) => d !== "packages/b"));
+    expect(r.status).not.toBe(0);
+    expect(`${r.stdout}${r.stderr}`).toContain("missing");
+    expect(r.packCalls).toBe(0);
+  });
+
+  test("(0b) an explicitly EMPTY --dirs list is a declared set, refused with ZERO pack invocations", () => {
+    // An omitted --dirs means "use the derived set"; an --dirs present with zero
+    // entries is a DECLARED set that names no members — the opposite of the
+    // derived set it must match. It must refuse before any pack, naming the
+    // missing members, not silently substitute the canonical set.
+    const fixture = makePackFixture({ version: "1.2.3", packages: { a: {}, b: {} } });
+    const out = mkdtempSync(join(SCRATCH, "out-"));
+    const r = runPackScript(fixture, out, []);
+    expect(r.status).not.toBe(0);
+    expect(`${r.stdout}${r.stderr}`).toContain("missing");
+    expect(r.packCalls).toBe(0);
   });
 
   test("(d) packing a package twice (a duplicated directory) fails the pack", () => {
@@ -1009,5 +1228,214 @@ describe("the restored ancestry check refuses a tag commit not on main (F1)", ()
     const bad = run(side);
     expect(bad.status).not.toBe(0);
     expect(`${bad.stdout}${bad.stderr}`).toContain("not an ancestor of origin/main");
+  });
+});
+
+// ── A1b: dispatch on the tag, one attempt per version, machinery recency ──────
+
+function reservationArtifact(): { dir: string; artifact: Artifact } {
+  const dir = mkdtempSync(join(SCRATCH, "resv-"));
+  return { dir, artifact: buildArtifact(dir, "1.2.3", FIXTURE_NAMES) };
+}
+
+describe("A1b — dispatch, recency and the reservation marker", () => {
+  test("(a) a dispatch on main is refused before pack; a tag ref resolves the version", () => {
+    const doc = yaml.load(realWorkflow()) as WorkflowDoc;
+    const step = (doc.jobs!["pack"]!.steps ?? []).find((s) => s.id === "ver");
+    if (!step?.run) throw new Error("no Resolve version step");
+    const scratch = mkdtempSync(join(SCRATCH, "ver-"));
+    const sh = join(scratch, "ver.sh");
+    writeFileSync(sh, step.run);
+    const run = (env: Record<string, string>) => {
+      const out = join(scratch, "out.txt");
+      writeFileSync(out, "");
+      const r = spawnSync("bash", [sh], { cwd: scratch, encoding: "utf8", env: { ...process.env, GITHUB_OUTPUT: out, ...env } });
+      return { status: r.status, out: (r.stdout ?? "") + (r.stderr ?? ""), githubOut: readFileSync(out, "utf8") };
+    };
+    const bad = run({ REF_TYPE: "branch", REF: "refs/heads/main" });
+    expect(bad.status).not.toBe(0);
+    expect(bad.out).toContain("must run on a v* tag ref");
+    const good = run({ REF_TYPE: "tag", REF: "refs/tags/v1.2.3" });
+    expect(good.status).toBe(0);
+    expect(good.githubOut).toContain("version=1.2.3");
+  });
+
+  test("(b) a tag whose workflow file differs from origin/main is refused", () => {
+    const doc = yaml.load(realWorkflow()) as WorkflowDoc;
+    const step = (doc.jobs!["stage-publish"]!.steps ?? []).find((s) => /merge-base --is-ancestor/.test(s.run ?? ""));
+    if (!step?.run) throw new Error("no ancestry step");
+    const root = mkdtempSync(join(SCRATCH, "recency-"));
+    const bare = join(root, "origin.git");
+    const work = join(root, "work");
+    mkdirSync(bare);
+    mkdirSync(work);
+    const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "f", GIT_AUTHOR_EMAIL: "f@x", GIT_COMMITTER_NAME: "f", GIT_COMMITTER_EMAIL: "f@x" };
+    const g = (args: string[]) => spawnSync("git", args, { cwd: work, encoding: "utf8", env: gitEnv });
+    expect(spawnSync("git", ["init", "-q", "--bare", "--initial-branch=main"], { cwd: bare, encoding: "utf8" }).status).toBe(0);
+    expect(spawnSync("git", ["init", "-q", "--initial-branch=main"], { cwd: work, encoding: "utf8", env: gitEnv }).status).toBe(0);
+    const wf = join(work, ".github", "workflows");
+    mkdirSync(wf, { recursive: true });
+    writeFileSync(join(wf, "release-publish.yml"), "A\n");
+    g(["add", "-A"]);
+    expect(g(["commit", "-q", "-m", "c1"]).status).toBe(0);
+    const c1 = g(["rev-parse", "HEAD"]).stdout.trim();
+    writeFileSync(join(wf, "release-publish.yml"), "B\n");
+    g(["add", "-A"]);
+    expect(g(["commit", "-q", "-m", "c2"]).status).toBe(0);
+    const c2 = g(["rev-parse", "HEAD"]).stdout.trim();
+    g(["remote", "add", "origin", bare]);
+    expect(g(["push", "-q", "origin", "main"]).status).toBe(0);
+
+    const sh = join(root, "recency.sh");
+    writeFileSync(sh, step.run);
+    const runAt = (sha: string) => {
+      g(["checkout", "-q", sha]);
+      return spawnSync("bash", [sh], { cwd: work, encoding: "utf8", env: { ...process.env, GITHUB_SHA: sha } });
+    };
+    const bad = runAt(c1); // c1 is on main, but its workflow file differs from origin/main (c2)
+    expect(bad.status).not.toBe(0);
+    expect((bad.stdout ?? "") + (bad.stderr ?? "")).toContain("differs from origin/main");
+    const good = runAt(c2);
+    expect(good.status).toBe(0);
+  });
+
+  test("(c) a release-attempt record for the SHORT ref v1.2.3 refuses (version burned)", () => {
+    const { dir, artifact } = reservationArtifact();
+    const r = runStageShell(artifact, dir, { GH_GET_RESPONSE: JSON.stringify([{ id: 42, ref: "v1.2.3" }]) });
+    expect(r.status).not.toBe(0);
+    expect(r.out).toContain("burned");
+    expect(r.log.filter((l) => l.argv[0] === "stage").length).toBe(0);
+    // The GET asks for the short ref, so a predicate written against refs/tags/v1.2.3 sees nothing.
+    expect(r.ghCalls.some((c) => (c.argv ?? []).some((a: string) => a.includes("ref=v1.2.3")))).toBe(true);
+  });
+
+  test("(d) no records: proceed, and the POST body is asserted field by field", () => {
+    const { dir, artifact } = reservationArtifact();
+    const r = runStageShell(artifact, dir, { GH_GET_RESPONSE: "[]" });
+    expect(r.status).toBe(0);
+    const post = r.ghCalls.find((c) => c.post_body !== undefined);
+    expect(post).toBeTruthy();
+    const body = JSON.parse(post.post_body);
+    expect(body.ref).toBe("v1.2.3");
+    expect(body.environment).toBe("release-attempt");
+    expect(body.task).toBe("stage-attempt");
+    expect(body.auto_merge).toBe(false);
+    expect(body.required_contexts).toEqual([]);
+    const getIdx = r.ghCalls.findIndex((c) => (c.argv ?? []).includes("--paginate"));
+    const postIdx = r.ghCalls.findIndex((c) => c.post_body !== undefined);
+    expect(getIdx).toBeGreaterThan(-1);
+    expect(getIdx).toBeLessThan(postIdx);
+  });
+
+  test("(e) a non-2xx POST aborts before any stage request", () => {
+    const { dir, artifact } = reservationArtifact();
+    const r = runStageShell(artifact, dir, { GH_GET_RESPONSE: "[]", GH_POST_STATUS: "1" });
+    expect(r.status).not.toBe(0);
+    expect(r.out).toContain("could not write the release-attempt marker");
+    expect(r.log.filter((l) => l.argv[0] === "stage").length).toBe(0);
+  });
+
+  test("(f) a stage-publish re-run sees attempt 1's marker and refuses", () => {
+    const { dir, artifact } = reservationArtifact();
+    const r = runStageShell(artifact, dir, { GH_GET_RESPONSE: JSON.stringify([{ id: 7, ref: "v1.2.3", environment: "release-attempt" }]) });
+    expect(r.status).not.toBe(0);
+    expect(r.out).toContain("burned");
+    expect(r.log.filter((l) => l.argv[0] === "stage").length).toBe(0);
+  });
+
+  test("repo-wide: only release-publish.yml grants deployments: write / declares the release environments", () => {
+    expect(inspectRepoWide(realWorkflows()).problems).toEqual([]);
+  });
+
+  test("(h) a second JOB granting deployments: write goes red", () => {
+    const entries = realWorkflows();
+    const rel = entries.find((e) => e.path === RELEASE_WORKFLOW_REL)!;
+    const doc = yaml.load(rel.text) as any;
+    doc.jobs.evil = { permissions: { deployments: "write" }, steps: [] };
+    const patched = entries.map((e) => (e.path === RELEASE_WORKFLOW_REL ? { path: e.path, text: yaml.dump(doc) } : e));
+    expect(inspectRepoWide(patched).problems.join("\n")).toContain("grants deployments: write");
+  });
+
+  test("(h) a second WORKFLOW granting deployments: write goes red", () => {
+    // The injected workflow declares an explicit top-level block, so the round-2
+    // absence check cannot name evil.yml — the only problem left is the grant.
+    const entries = realWorkflows().concat([{ path: ".github/workflows/evil.yml", text: yaml.dump({ permissions: {}, jobs: { x: { permissions: { deployments: "write" }, steps: [] } } }) }]);
+    expect(inspectRepoWide(entries).problems.join("\n")).toContain('evil.yml: job "x" grants deployments: write');
+  });
+
+  test("(h) a workflow-level deployments: write goes red", () => {
+    const entries = realWorkflows().concat([{ path: ".github/workflows/evil.yml", text: yaml.dump({ permissions: { deployments: "write" }, jobs: { x: { steps: [] } } }) }]);
+    expect(inspectRepoWide(entries).problems.join("\n")).toContain("evil.yml");
+  });
+
+  test("(h) a job-level write-all goes red", () => {
+    // Same as above: with an explicit top-level block the absence check is silent,
+    // so write-all must be caught by the deployment-grant detection itself.
+    const entries = realWorkflows().concat([{ path: ".github/workflows/evil.yml", text: yaml.dump({ permissions: {}, jobs: { x: { permissions: "write-all", steps: [] } } }) }]);
+    expect(inspectRepoWide(entries).problems.join("\n")).toContain('evil.yml: job "x" grants deployments: write');
+  });
+
+  test("(F2) a second WORKFLOW declaring the release environments goes red — string AND object form, for BOTH names, case-insensitively", () => {
+    const combos: Array<{ label: string; environment: unknown }> = [
+      { label: "release (string)", environment: "release" },
+      { label: "release-attempt (string)", environment: "release-attempt" },
+      { label: "release (object)", environment: { name: "release" } },
+      { label: "release-attempt (object)", environment: { name: "release-attempt", url: "https://example.invalid/" } },
+      // GitHub environment names are NOT case-sensitive.
+      { label: "Release (string)", environment: "Release" },
+      { label: "RELEASE-ATTEMPT (object)", environment: { name: "RELEASE-ATTEMPT" } },
+    ];
+    for (const c of combos) {
+      const entries = realWorkflows().concat([
+        {
+          path: ".github/workflows/evil.yml",
+          text: yaml.dump({ permissions: { contents: "read" }, jobs: { x: { environment: c.environment, steps: [] } } }),
+        },
+      ]);
+      const problems = inspectRepoWide(entries).problems.join("\n");
+      expect(problems, `mutant: ${c.label}`).toContain("declares environment");
+    }
+  });
+
+  test("(F2) a second WORKFLOW using an expression for its environment goes red", () => {
+    const entries = realWorkflows().concat([
+      {
+        path: ".github/workflows/evil.yml",
+        text: yaml.dump({ permissions: { contents: "read" }, jobs: { x: { environment: "${{ inputs.target }}", steps: [] } } }),
+      },
+    ]);
+    expect(inspectRepoWide(entries).problems.join("\n")).toContain("uses an expression for environment");
+  });
+
+  test("(F3) a workflow with NO top-level permissions: block goes red", () => {
+    const entries = realWorkflows();
+    const target = entries.find((e) => e.path === ".github/workflows/docker-test.yml")!;
+    const doc = yaml.load(target.text) as any;
+    delete doc.permissions; // the pre-fix shape: no top-level block
+    const patched = entries.map((e) => (e.path === target.path ? { path: e.path, text: yaml.dump(doc) } : e));
+    expect(inspectRepoWide(patched).problems.join("\n")).toContain("no top-level permissions");
+  });
+
+  test("(F3) a job in ANOTHER workflow granting deployments: write goes red", () => {
+    const entries = realWorkflows();
+    const target = entries.find((e) => e.path === ".github/workflows/test.yml")!;
+    const doc = yaml.load(target.text) as any;
+    doc.jobs["test-unit"].permissions = { contents: "read", deployments: "write" };
+    const patched = entries.map((e) => (e.path === target.path ? { path: e.path, text: yaml.dump(doc) } : e));
+    expect(inspectRepoWide(patched).problems.join("\n")).toContain("grants deployments: write");
+  });
+
+  test("(g) a DELETE /deployments line in the stage shell goes red", () => {
+    const doc = yaml.load(realWorkflow()) as WorkflowDoc;
+    const steps = doc.jobs!["stage-publish"]!.steps!;
+    steps[steps.length - 1]!.run += "\ngh api --method DELETE repos/OWNER/REPO/deployments/1\n";
+    expect(inspectStageJob(yaml.dump(doc)).problems.join("\n")).toContain("unexpected gh invocation");
+  });
+
+  test("(g) a deployment status POST in the stage shell goes red", () => {
+    const doc = yaml.load(realWorkflow()) as WorkflowDoc;
+    const steps = doc.jobs!["stage-publish"]!.steps!;
+    steps[steps.length - 1]!.run += "\ngh api --method POST repos/OWNER/REPO/deployments/1/statuses\n";
+    expect(inspectStageJob(yaml.dump(doc)).problems.join("\n")).toContain("unexpected gh invocation");
   });
 });

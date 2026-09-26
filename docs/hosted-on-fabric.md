@@ -213,15 +213,18 @@ See [upgrade.md](upgrade.md#upgrading-a-fabric-deployed-instance) for the full w
 Available. Pair a local spoke to a Fabric-hosted hub:
 
 ```bash
-# On any machine (no shell on the hub) — generate a pairing token triple
-FLAIR_ADMIN_PASS=<hub-admin-password> flair federation token \
+# On any machine (no shell on the hub) — generate a pairing token triple. /path/to/hub-admin-pass is a 0600 file holding the HUB admin password; --admin-pass-file reads it in-process, never as a literal on the command line
+(umask 077; set -C; flair federation token --admin-pass-file /path/to/hub-admin-pass \
   --target https://<cluster>.<org>.harperfabric.com \
-  --ops-target <ops-url> > ./pair-triple.json
+  --ops-target <ops-url> > ./pair-triple.json)
 
-# On the spoke — pair to the Fabric hub
+# On the spoke — the SPOKE admin password (its own ~/.flair/admin-pass) writes the local Peer row
 flair federation pair https://<cluster>.<org>.harperfabric.com \
+  --admin-pass-file ~/.flair/admin-pass \
   --token-from ./pair-triple.json
 ```
+
+`set -C` refuses an existing `./pair-triple.json`; remove an old one first (`rm ./pair-triple.json`).
 
 ### Pairing limitation
 

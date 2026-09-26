@@ -12,8 +12,9 @@
  * never substitutes for one. Missing or mismatched identity refuses, and a
  * refusal makes zero outgoing requests. Runtime workspace→Soul sync is removed.
  *
- * Hooks used: `before_prompt_build` (bootstrap, returned via `prependContext`)
- * and `agent_end` / `llm_input` / `llm_output` (optional auto-capture). The
+ * Hooks used: `before_prompt_build` (bootstrap, returned via `prependContext`),
+ * `agent_end` / `llm_input` / `llm_output` (optional auto-capture), and
+ * `gateway_stop` / `model_call_ended` (abort of an in-flight capture). The
  * deprecated `before_agent_start` hook is not used and no context-engine slot
  * is selected — the host's own native memory section is left intact.
  */
@@ -101,6 +102,28 @@ const DEFAULT_URL = "http://127.0.0.1:19926";
 const DEFAULT_MAX_RECALL = 5;
 const DEFAULT_MAX_BOOTSTRAP_TOKENS = 4000;
 const DEFAULT_AUTO_CAPTURE_MAX_PER_SESSION = 3;
+
+/**
+ * Round 12: how much of an error's message is used when its class falls back to
+ * the message (guarantee 6). The one-time-log set is already capped by
+ * `logOnceCap`, so this is not a second bound — it only keeps the keys readable.
+ */
+const REFUSE_KEY_CLASS_MAX = 120;
+
+/**
+ * The CLASS of an error, not its instance (round 12, guarantee 6). A Flair HTTP
+ * failure is classed by its status: its message embeds the client-assigned
+ * memory id, so keying on the message would make every retry of one failure look
+ * like a new failure. Everything else is classed by its name and as much of its
+ * message as fits — a missing key reads the same on every callback.
+ */
+function errorClass(err: unknown): string {
+  const e = err as { name?: unknown; message?: unknown; status?: unknown } | null | undefined;
+  const name = typeof e?.name === "string" && e.name.length > 0 ? e.name : "Error";
+  if (typeof e?.status === "number") return `${name}:${e.status}`;
+  const message = typeof e?.message === "string" ? e.message : String(err);
+  return `${name}:${message.slice(0, REFUSE_KEY_CLASS_MAX)}`;
+}
 /** Capture is OFF by default in slice 1 and turns on with slice 2. */
 const DEFAULT_AUTO_CAPTURE = false;
 
@@ -127,13 +150,150 @@ function excerptForCapture(text: string, maxChars = 500): string {
   return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
 }
 
+/**
+ * D5: the capture text of a host message `content` — a string, or an array of
+ * content blocks. Text blocks are concatenated IN ORDER; image, thinking and
+ * tool blocks contribute NOTHING (their contents are never read into a memory);
+ * anything else returns "". Every capture path goes through this.
+ */
+export function captureText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const parts: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    const b = block as { type?: unknown; text?: unknown };
+    if (b.type === "text" && typeof b.text === "string" && b.text.length > 0) parts.push(b.text);
+  }
+  return parts.join("");
+}
+
 interface CaptureState {
   count: number;
   hashes: Set<string>;
 }
 
-function createCaptureState(): CaptureState {
-  return { count: 0, hashes: new Set() };
+/**
+ * Injectable clock for the run-state retirement rule (D10). Production reads
+ * `Date.now`; a test substitutes a fake so the 30 s window is exercised without
+ * sleeping.
+ */
+export const captureClock: { now: () => number } = { now: () => Date.now() };
+
+/** A successful run retires this long after its `agent_end`. */
+export const RUN_RETIRE_AFTER_MS = 30_000;
+
+/**
+ * Bounds that keep the capture bookkeeping finite on a long-lived gateway
+ * (flair#1884 round 2, F2). Exported so a test can drive them small; production
+ * uses these values.
+ */
+export const captureBounds = {
+  /** Retire a run that has seen NO `agent_end` after this much inactivity. */
+  idleRunRetireMs: 30 * 60_000,
+  /**
+   * The ONE capacity budget (round 4): the number of records in the run map.
+   * Round 5: a record holds its slot from admission until `removable()` is true
+   * — it is retired or aborted, has no write in flight, and has aged past
+   * `tombstoneMinAgeMs`.
+   */
+  capacityCap: 10_000,
+  /**
+   * A retired/aborted record is kept at least this long — the longest plausible
+   * callback delay — so a late callback is dropped, never re-admitted. Only
+   * `removable()` frees a slot, and it is the same predicate for the sweep and
+   * for admission.
+   */
+  tombstoneMinAgeMs: 60 * 60_000,
+  /**
+   * Round 5: an abort for a run that was NEVER admitted must still be recorded,
+   * or its next callback is admitted and captured (the failed-run re-admission
+   * the round-4 review found). The abort path may therefore exceed
+   * `capacityCap` by at most this many records. When even that overflow is
+   * full, the abort records nothing and logs once — the documented residual.
+   */
+  abortOverflowCap: 1_000,
+  /** Max distinct one-time log keys remembered; the oldest are evicted. */
+  logOnceCap: 10_000,
+  /** How often the unref'd sweep timer runs. */
+  sweepIntervalMs: 30_000,
+};
+
+/** Test introspection into the ONE run map (see `captureBounds`). */
+export const captureInternals: {
+  /** Records in the map. The budget IS the map's size (round 5). */
+  runCount: () => number;
+  /** Alias of `runCount`, kept for the round-4 budget assertions. */
+  budgetUsed: () => number;
+  /** Records that can still capture: phase `live` or `ended`. */
+  stateCount: () => number;
+  /** Records waiting out `tombstoneMinAgeMs`: phase `retired` or `aborted`. */
+  tombstoneCount: () => number;
+  logOnceCount: () => number;
+  /** The record for a run BY IDENTITY, or undefined (round-5 tests). */
+  recordOf: (agentId: string, runId: string) => RunRecord | undefined;
+} = {
+  runCount: () => 0,
+  budgetUsed: () => 0,
+  stateCount: () => 0,
+  tombstoneCount: () => 0,
+  logOnceCount: () => 0,
+  recordOf: () => undefined,
+};
+
+/** Round 5: a run's phase in the ONE run map. */
+export type RunPhase = "live" | "ended" | "aborted" | "retired";
+
+/**
+ * ONE record per run (round 5). The capture state, the retired/aborted
+ * tombstone and the capacity accounting are the SAME structure — the budget is
+ * the size of the run map. A record holds its slot from admission until
+ * `removable()` is true, so retiring or aborting a run changes its phase IN
+ * PLACE and never adds an entry.
+ *
+ * Keyed by agent + runId — never by agent alone, or two concurrent runs of one
+ * agent would share a budget and a dedup set and collide. The record carries
+ * the run's AbortController (item 5) and the reservation: the per-session cap
+ * slot (`count`) and the dedup set (`hashes`).
+ *
+ * Lifecycle: a SUCCESSFUL `agent_end` moves the run to `ended` but does NOT
+ * delete it — the host can dispatch `agent_end` BEFORE `llm_output` for the
+ * same run, and that later capture must still land. An `ended` run retires
+ * after `RUN_RETIRE_AFTER_MS` with no in-flight writes; a run that never saw
+ * `agent_end` retires after `idleRunRetireMs` idle. Phase `retired` or
+ * `aborted` is terminal: a callback for such a record is dropped with a
+ * one-time log naming the run id, and the record leaves the map only through
+ * `removable()`.
+ */
+export interface RunRecord extends CaptureState {
+  agentId: string;
+  runId: string;
+  phase: RunPhase;
+  /** In-flight capture writes for this run. */
+  inFlight: number;
+  /** `captureClock.now()` of the last callback for this run (idle-retire clock). */
+  lastActivityAt: number;
+  /** `captureClock.now()` of the successful `agent_end`, or null. */
+  endedAt: number | null;
+  /** `captureClock.now()` at retirement/abort — the age clock for `removable()`. */
+  retiredAt: number | null;
+  /** One AbortController per run, owned by the plugin (agent hooks carry none). */
+  controller: AbortController;
+}
+
+function createRunRecord(agentId: string, runId: string, now: number): RunRecord {
+  return {
+    agentId,
+    runId,
+    count: 0,
+    hashes: new Set(),
+    phase: "live",
+    inFlight: 0,
+    lastActivityAt: now,
+    endedAt: null,
+    retiredAt: null,
+    controller: new AbortController(),
+  };
 }
 
 /**
@@ -154,11 +314,6 @@ export function evaluateAutoCapture(
   const hash = hashContent(excerpt);
   if (state.hashes.has(hash)) return null;
   return { excerpt, hash };
-}
-
-function recordCapture(state: CaptureState, hash: string): void {
-  state.count++;
-  state.hashes.add(hash);
 }
 
 // ─── Entity detection ────────────────────────────────────────────────────────
@@ -241,6 +396,19 @@ function detectEntities(text: string): DetectedEntity[] {
 
   return [...entities.values()];
 }
+
+/**
+ * Injectable entity scan (round 6). Production uses the real `detectEntities`;
+ * a test substitutes it to make the scan THROW. That throw must leave the run's
+ * reservation untouched: nothing that can throw may sit between taking the
+ * reservation and the `try` whose failure path releases it, or `inFlight`
+ * strands above 0 and the record is never removable.
+ */
+export const captureProbe: {
+  detectEntities: (text: string) => Array<{ name: string; kind: string; confidence: number }>;
+} = {
+  detectEntities: (text) => detectEntities(text),
+};
 
 // ─── Plugin export ────────────────────────────────────────────────────────────
 
@@ -476,7 +644,7 @@ export default {
         adminPassword: "",
       });
       const original = client.request.bind(client) as typeof client.request;
-      (client as any).request = async (method: string, path: string, body?: unknown) => {
+      (client as any).request = async (method: string, path: string, body?: unknown, opts?: { signal?: AbortSignal }) => {
         const current = signingKeyProbe.resolve(agentId, keyPath);
         if (!current) {
           throw new IdentityRefusal(
@@ -496,7 +664,7 @@ export default {
             `the private key for agent "${agentId}" changed while running — refusing until the gateway is restarted so identity is re-established`,
           );
         }
-        return original(method, path, body);
+        return original(method, path, body, opts);
       };
       return client;
     }
@@ -510,31 +678,332 @@ export default {
       cfg.autoCaptureMaxPerSession ?? DEFAULT_AUTO_CAPTURE_MAX_PER_SESSION,
     );
 
-    const captureStatePool = new Map<string, CaptureState>();
-    function getCaptureState(agentId: string): CaptureState {
-      let state = captureStatePool.get(agentId);
-      if (!state) {
-        state = createCaptureState();
-        captureStatePool.set(agentId, state);
-      }
-      return state;
-    }
-    function resetCaptureState(agentId: string): void {
-      captureStatePool.delete(agentId);
+    // ── Round 5: ONE record per run; the budget IS the map's size ─────────
+    // Four rounds of fixes kept leaking at the boundary between the live-state
+    // map, the tombstone set and the budget counters, so they are now ONE map.
+    // A run holds a slot from admission until `removable()` is true.
+    // State is keyed by agent + runId: keying by agent alone made two concurrent
+    // runs share a budget and a dedup set and collide. The run's AbortController
+    // is created with the record.
+    const runs = new Map<string, RunRecord>();
+    const loggedOnce = new Set<string>();
+    /**
+     * Round 13: set by `gateway_stop` BEFORE it aborts anything or clears the
+     * map, and never cleared here — a later registration builds a new map and
+     * its own gate. `gateway_stop` clears the map, so without this flag a late
+     * callback that finds no record is re-admitted as a NEW run and starts a
+     * write after the abort, with the sweep timer already stopped and nothing
+     * left to retire it. `captureGate` refuses while it is set, which is what
+     * makes clearing the map safe.
+     */
+    let captureStopped = false;
+    const runKeyOf = (agentId: string, runId: string): string => `${agentId}\u0000${runId}`;
+
+    function countWhere(p: (r: RunRecord) => boolean): number {
+      let n = 0;
+      for (const r of runs.values()) if (p(r)) n++;
+      return n;
     }
 
-    async function tryAutoCapture(client: FlairClient, agentId: string, text: string): Promise<boolean> {
-      const state = getCaptureState(agentId);
+    // Wire the test introspection once this registration owns the map.
+    captureInternals.runCount = () => runs.size;
+    captureInternals.budgetUsed = () => runs.size;
+    captureInternals.stateCount = () => countWhere((r) => r.phase === "live" || r.phase === "ended");
+    captureInternals.tombstoneCount = () => countWhere((r) => r.phase === "retired" || r.phase === "aborted");
+    captureInternals.logOnceCount = () => loggedOnce.size;
+    captureInternals.recordOf = (agentId, runId) => runs.get(runKeyOf(agentId, runId));
+
+    /** Evict the oldest entries of an insertion-ordered Set down to `cap`. */
+    function capSet(set: Set<string>, cap: number): void {
+      while (set.size > cap) {
+        const oldest = set.values().next().value as string | undefined;
+        if (oldest === undefined) break;
+        set.delete(oldest);
+      }
+    }
+
+    function logOnce(key: string, line: string): void {
+      if (loggedOnce.has(key)) return;
+      loggedOnce.add(key);
+      if (loggedOnce.size > captureBounds.logOnceCap) capSet(loggedOnce, captureBounds.logOnceCap);
+      api.logger.warn(line);
+    }
+
+    /**
+     * Round 10 (guarantee 6): a callback that carried no agent identity used to
+     * warn on EVERY occurrence — an unbounded run of identical lines. It goes
+     * through the bounded one-time path now. On this path there is no agent
+     * identity to key by, so the key is the callback source: at most one line per
+     * hook, however many identity-less callbacks the host delivers.
+     */
+    function refuseIdentity(hook: string): void {
+      logOnce(
+        `no-identity:${hook}`,
+        `openclaw-flair: ${hook} refused: no agent identity in host context — refusing rather than inheriting one`,
+      );
+    }
+
+    /**
+     * Round 11 (guarantee 6): a callback that carried a VALID identity but no
+     * usable key refuses on EVERY occurrence — the same line, unbounded. Those
+     * refusals go through the bounded one-time path too. With no identity to key
+     * by (the prompt hook can be delivered without one) the key says so.
+     *
+     * Round 12 (guarantee 6): the key is the agent AND the site AND the error
+     * CLASS (`errorClass`, above) — a failure's KIND, not its instance. Keying by
+     * agent ALONE silenced a LATER, DIFFERENT failure for the same agent: a
+     * missing key at 10:00 hid an HTTP 500 on a capture write at 11:00, which is
+     * exactly the line an operator needs. Now every distinct failure logs once,
+     * and repeats of it do not. The key set stays bounded by `logOnceCap`.
+     */
+    function refuseKey(agentId: string | undefined, site: string, err: unknown): void {
+      const who = typeof agentId === "string" && agentId.length > 0 ? agentId : "no-identity";
+      const message = (err as any)?.message ?? String(err);
+      logOnce(`refused-callback:${who}:${site}:${errorClass(err)}`, `openclaw-flair: ${site} refused/failed: ${message}`);
+    }
+
+    /**
+     * THE removal predicate (round 5) — the ONLY thing that frees a slot, used
+     * by the sweep and by admission alike: a record may be removed when it is
+     * retired or aborted, has NO write in flight, and has aged past
+     * `tombstoneMinAgeMs`. A record with a write still in flight is never
+     * removed, so a later abort can still discard its late result.
+     */
+    function removable(r: RunRecord, now: number): boolean {
+      return (
+        (r.phase === "retired" || r.phase === "aborted") &&
+        r.inFlight === 0 &&
+        r.retiredAt !== null &&
+        now - r.retiredAt >= captureBounds.tombstoneMinAgeMs
+      );
+    }
+
+    /** Drop every removable record — the sweep's and admission's shared step. */
+    function purgeRemovable(now: number): void {
+      for (const [key, r] of runs) if (removable(r, now)) runs.delete(key);
+    }
+
+    /** The run id for a callback, from the event or the hook context. */
+    function runIdOf(event: any, ctx: any): string | null {
+      const raw = event?.runId ?? ctx?.runId;
+      return typeof raw === "string" && raw.length > 0 ? raw : null;
+    }
+
+    /**
+     * Retire a run IN PLACE (round 5): the SAME record keeps the SAME slot, so
+     * retirement never adds an entry and never needs new room.
+     */
+    function retire(r: RunRecord, now: number): void {
+      if (r.phase === "retired" || r.phase === "aborted") return;
+      r.phase = "retired";
+      r.retiredAt = now;
+    }
+
+    /**
+     * The time-based sweep, unchanged in its rules (round 4 adjudicated the
+     * "refusal mutates state" finding NOT a defect: retirement that is due is
+     * not eviction to make room). It runs on each callback and on the unref'd
+     * interval timer, retires (a) ended runs by the 30 s rule and (b) runs that
+     * have seen NO `agent_end` after the idle bound — both IN PLACE — and then
+     * drops whatever `removable()` allows. It NEVER evicts a live record to
+     * make room: the budget is enforced at admission.
+     */
+    function sweep(): void {
+      const now = captureClock.now();
+      for (const [key, r] of runs) {
+        if (r.phase === "ended" && r.inFlight === 0 && r.endedAt !== null && now - r.endedAt >= RUN_RETIRE_AFTER_MS) {
+          retire(r, now);
+        }
+        if (r.phase === "live" && now - r.lastActivityAt >= captureBounds.idleRunRetireMs) {
+          retire(r, now);
+        }
+        if (removable(r, now)) runs.delete(key);
+      }
+    }
+
+    /**
+     * The record a callback should use, or null when it must not capture. A
+     * record is ADDED only here:
+     *   0. `gateway_stop` has run: NOTHING is admitted (round 13) — the map it
+     *      cleared is gone, so a record-less callback would otherwise be
+     *      re-admitted as a new run and start a write after the abort;
+     *   1. a record for the key exists: serve it (phase `live`/`ended`) or drop
+     *      the callback (phase `retired`/`aborted`) with the one-time log — a
+     *      retired or aborted run is NEVER re-admitted;
+     *   2. a key with NO record: purge what is removable, then admit ONLY when
+     *      the map is below `capacityCap` — the abort overflow is never counted
+     *      as room;
+     *   3. otherwise refuse (`capture-capacity: full`, logged once) and change
+     *      nothing else.
+     */
+    function captureGate(agentId: string, runId: string | null): RunRecord | null {
+      if (captureStopped) {
+        logOnce(
+          "capture-stopped",
+          `openclaw-flair: refused capture: the gateway is stopping (gateway_stop) — no new run is admitted and no write starts for agent ${agentId}`,
+        );
+        return null;
+      }
+      if (!runId) {
+        logOnce(
+          `no-run-id:${agentId}`,
+          `openclaw-flair: refused capture for agent ${agentId}: the host hook carried no runId (capture state is per run)`,
+        );
+        return null;
+      }
+      const key = runKeyOf(agentId, runId);
+      const now = captureClock.now();
+
+      // The time-based sweep runs on every callback, so a retirement that is due
+      // happens before this callback decides (the timer covers the callbacks
+      // that return early).
+      sweep();
+
+      const existing = runs.get(key);
+      if (existing) {
+        if (existing.phase === "aborted" || existing.phase === "retired") {
+          logOnce(`dropped:${key}`, `openclaw-flair: dropped a callback for retired run ${runId} (agent ${agentId})`);
+          return null;
+        }
+        existing.lastActivityAt = now;
+        return existing;
+      }
+
+      purgeRemovable(now);
+      if (runs.size >= captureBounds.capacityCap) {
+        logOnce(
+          "capacity-full",
+          `openclaw-flair: capture skipped: capture-capacity: full — ${runs.size} runs hold the whole budget of ${captureBounds.capacityCap}; refusing new run ${runId} (agent ${agentId})`,
+        );
+        return null;
+      }
+
+      const fresh = createRunRecord(agentId, runId, now);
+      runs.set(key, fresh);
+      return fresh;
+    }
+
+    /**
+     * Abort a run: cancel its in-flight capture fetches, discard late results
+     * and make every later callback for the run a no-op. An ADMITTED run changes
+     * phase IN PLACE — its slot becomes its own tombstone, so an abort never
+     * needs room. A run that was NEVER admitted ALWAYS gets an aborted record
+     * (round 5), even at the cap, using an overflow of at most
+     * `abortOverflowCap`: recording nothing there would let the run's next
+     * callback be admitted and captured — exactly the failed-run re-admission
+     * the round-4 review found. If even the overflow is full the record is not
+     * inserted and the line is logged once (the documented residual); it is safe
+     * because admission is refused while the budget AND its overflow are full.
+     *
+     * Round 13 guard: while `captureStopped` is set there is no registration to
+     * record into — `gateway_stop` has cleared the map and nothing more is
+     * admitted — so an abort for a run the registry never saw inserts NOTHING and
+     * returns after the rate-limited line. An abort that still inserted would
+     * leave the stopped registration holding a record no later callback can use.
+     */
+    function abortRun(agentId: string, runId: string | null, why: string): void {
+      if (!runId) {
+        logOnce(
+          `no-run-id-abort:${agentId}`,
+          `openclaw-flair: could not abort a run for agent ${agentId}: the host hook carried no runId`,
+        );
+        return;
+      }
+      const key = runKeyOf(agentId, runId);
+      const now = captureClock.now();
+      const existing = runs.get(key);
+      if (existing) {
+        if (existing.phase === "aborted") return; // already aborted (idempotent)
+        // An abort acts on ANY record still in the map, retired or not: a run
+        // idle-retired with a write in flight is still aborted here, so its late
+        // result is discarded. The phase changes IN PLACE — no new entry.
+        existing.phase = "aborted";
+        existing.retiredAt = now;
+        try {
+          existing.controller.abort(why);
+        } catch { /* an abort listener must not break the hook */ }
+        return;
+      }
+      // Never admitted, and the gateway is stopping: there is no live
+      // registration left to record into, so this abort inserts nothing. It is
+      // rate-limited like the other refusal lines (round 13).
+      if (captureStopped) {
+        logOnce(
+          "abort-stopped",
+          `openclaw-flair: refused to record an abort: the gateway is stopping (gateway_stop) — aborted run ${runId} (agent ${agentId}) is not recorded`,
+        );
+        return;
+      }
+      // Never admitted: record the abort so no later callback can re-admit it.
+      // Round 6: this path ASKS FOR ROOM, so it purges first — the same rule as
+      // admission. Without the purge, a map full of AGED aborted records reads
+      // as full and the abort records nothing; the run's next callback is then
+      // admitted by admission's own purge, so a capture write starts AFTER the
+      // abort.
+      purgeRemovable(now);
+      if (runs.size >= captureBounds.capacityCap + captureBounds.abortOverflowCap) {
+        logOnce(
+          "abort-overflow",
+          `openclaw-flair: capture skipped: capture-capacity: abort-overflow — the abort overflow of ${captureBounds.abortOverflowCap} above the budget of ${captureBounds.capacityCap} is full; aborted run ${runId} (agent ${agentId}) is not recorded`,
+        );
+        return;
+      }
+      const aborted = createRunRecord(agentId, runId, now);
+      aborted.phase = "aborted";
+      aborted.retiredAt = now;
+      runs.set(key, aborted);
+    }
+
+    async function tryAutoCapture(client: FlairClient, agentId: string, runId: string | null, text: string): Promise<boolean> {
+      const state = captureGate(agentId, runId);
+      if (!state) return false;
       const decision = evaluateAutoCapture(text, state, autoCaptureMaxPerSession);
       if (!decision) return false;
-      const entities = detectEntities(text);
+      // Round 6: the entity scan is COMPUTED BEFORE the reservation. It must not
+      // sit between the reservation and the `try` below — a throw there would
+      // strand `inFlight` above 0, and the record would never become removable
+      // again (a slot held for the life of the process). Nothing that can throw
+      // may sit between taking the reservation and the block that releases it.
+      // The scan is synchronous, so the reservation stays synchronous too.
+      const entities = captureProbe.detectEntities(text);
       const subject = entities.length > 0 ? entities[0].name.toLowerCase() : undefined;
-      await client.memory.write(decision.excerpt, {
-        type: "session",
-        tags: ["auto-captured"],
-        subject,
-      });
-      recordCapture(state, decision.hash);
+      // D10: take the cap slot and claim the excerpt SYNCHRONOUSLY, before any
+      // await, so a concurrent callback (or the agent_end rescan) that sees the
+      // same excerpt dedups against the reservation instead of writing twice.
+      state.count++;
+      state.hashes.add(decision.hash);
+      state.inFlight++;
+      try {
+        await client.memory.write(decision.excerpt, {
+          type: "session",
+          tags: ["auto-captured"],
+          subject,
+          // Item 5: the run's signal reaches the fetch, so an abort cancels an
+          // in-flight capture rather than letting it finish.
+          signal: state.controller.signal,
+        });
+      } catch (err) {
+        // The write failed: release the reservation so a later rescan may retry.
+        state.inFlight--;
+        state.count--;
+        state.hashes.delete(decision.hash);
+        throw err;
+      }
+      state.inFlight--;
+      if (state.phase === "aborted") {
+        // Item 5: a result that resolves after the abort is DISCARDED — release
+        // the reservation and never report it as a capture. This cannot UNWRITE
+        // a request Flair already received (see the README's abort guarantee).
+        state.count--;
+        state.hashes.delete(decision.hash);
+        logOnce(
+          `discarded:${runKeyOf(agentId, runId as string)}`,
+          `openclaw-flair: discarded a capture for run ${runId} (agent ${agentId}) that completed after the run was aborted`,
+        );
+        return false;
+      }
+      // Round 5: nothing to finalize — a settled write leaves the record in
+      // place, and only `removable()` frees its slot.
       return true;
     }
 
@@ -606,17 +1075,22 @@ export default {
         }),
         async execute(_id: string, params: any) {
           const { text, tags, durability, type, supersedes } = params;
+          let memId: string | null = null;
           try {
             const client = clientFor(ctx.agentId);
-            const memId = `${client.agentId}-${Date.now()}`;
+            // D11: no hand-built id. The client's canonical UUID path owns
+            // memory ids (`agentId-<uuid>`), so two writes in the same
+            // millisecond never address the same record.
             const result = await client.memory.write(text, {
-              id: memId,
               tags,
               durability,
               type,
               dedup: !supersedes,
               dedupThreshold: 0.7,
             });
+            memId = typeof (result as any).id === "string" ? (result as any).id : null;
+            const errors: string[] = [];
+            let supersedeClosed: true | false | "not-found" = false;
             if (supersedes) {
               try {
                 const old = await client.memory.get(supersedes);
@@ -627,12 +1101,15 @@ export default {
                     archivedAt: new Date().toISOString(),
                     supersededBy: memId,
                   });
+                  supersedeClosed = true;
                 } else {
+                  supersedeClosed = "not-found";
                   api.logger.warn(
                     `openclaw-flair: supersede target ${supersedes} not found — new memory ${memId} written; nothing to close`,
                   );
                 }
               } catch (closeErr: any) {
+                errors.push(`supersede-close failed for ${supersedes}: ${closeErr.message}`);
                 api.logger.warn(
                   `openclaw-flair: failed to close superseded memory ${supersedes} after writing ${memId}: ${closeErr.message} ` +
                   `(not lost — new record is safely written; old record remains active until retried)`,
@@ -647,16 +1124,29 @@ export default {
                   ? `Memory stored (id: ${memId}) — similar to existing memory id=${(result as any).matchedId}: ${result.content?.slice(0, 200)}`
                   : `Memory stored (id: ${memId})`,
               }],
+              // D14: machine-readable and honest. `written` is true only after the
+              // PRIMARY write succeeded; a partial success (memory written,
+              // supersede-close failed) is reported as exactly that via `errors`.
               details: {
-                id: result.id,
-                deduplicated: wasDeduplicated,
                 written: true,
+                id: memId,
+                supersedeClosed,
+                errors,
+                deduplicated: wasDeduplicated,
                 ...(wasDeduplicated ? { matchedId: (result as any).matchedId } : {}),
               },
             };
           } catch (err: any) {
             api.logger.warn(`openclaw-flair: store refused/failed: ${err.message}`);
-            return { content: [{ type: "text", text: `Memory store unavailable: ${err.message}` }], details: {} };
+            // D14: an unresolved identity is its own outcome, never a silent
+            // return and never written:true.
+            const noIdentity = /no agent identity|invalid agent identity|not in the configured allow-list/i.test(String(err?.message ?? ""));
+            return {
+              content: [{ type: "text", text: `Memory store unavailable: ${err.message}` }],
+              details: noIdentity
+                ? { written: false, reason: "no-identity", id: null, supersedeClosed: false, errors: [err.message] }
+                : { written: false, id: null, supersedeClosed: false, errors: [err.message] },
+            };
           }
         },
       }),
@@ -706,7 +1196,7 @@ export default {
               return { prependContext: `\n## Memory Context (from Flair)\n\n${truncated}\n` };
             }
           } catch (err: any) {
-            api.logger.warn(`openclaw-flair: bootstrap recall refused/failed: ${err.message}`);
+            refuseKey(agentId, "bootstrap recall", err);
           }
           return;
         });
@@ -716,68 +1206,131 @@ export default {
     // ── 8. Capture — permission-gated, OFF by default. ─────────────────────
     // Capture reads conversation content ONLY through the permission-gated
     // hooks; a missing permission produces a visible status line and no reads.
+    //
+    // Which callbacks capture, and why BOTH shapes are needed: `agent_end` is
+    // the full-session rescan for a discrete run, and `llm_input` / `llm_output`
+    // cover a live turn — the only shape that fires in a long-lived persistent
+    // gateway session, where a run never ends and `agent_end` never arrives.
+    // Both feed the same per-run record and the same gate; the unref'd sweep
+    // timer below covers the callbacks that return early.
     if (!allowConversationAccess) {
       // R8: reported whenever the permission is withheld, whether or not
       // capture is enabled.
       api.logger.warn("openclaw-flair: capture disabled (permission)");
     } else if (autoCapture) {
+        // F2: an unref'd interval sweeps ALL states even when no callback is
+        // arriving — an idle run that never saw `agent_end` would otherwise
+        // live forever. unref() so the timer never keeps the process alive; it
+        // is cleared on gateway_stop.
+        const sweepTimer = setInterval(() => {
+          try { sweep(); } catch { /* a timer callback must never throw */ }
+        }, captureBounds.sweepIntervalMs);
+        (sweepTimer as any).unref?.();
+
         api.on("agent_end", async (event: any, ctx: any) => {
           const agentId = ctx?.agentId;
           if (!agentId) {
-            api.logger.warn("openclaw-flair: agent_end refused: no agent identity in host context — refusing rather than inheriting one");
+            refuseIdentity("agent_end");
             return;
           }
+          const runId = runIdOf(event, ctx);
+          // Item 5(a): a failed run is ABORTED — no capture, and every in-flight
+          // capture for the run is cancelled and discarded. A successful
+          // agent_end never aborts.
+          if (event?.success === false) {
+            abortRun(agentId, runId, "agent_end reported the run failed");
+            return;
+          }
+          const state = captureGate(agentId, runId);
+          if (!state) return;
+          // A successful agent_end ENDS the run but does NOT delete its record:
+          // the host can dispatch agent_end BEFORE llm_output for this run, and
+          // that later capture must still land. An `ended` record retires (30 s,
+          // no in-flight writes) via the sweep on a later callback.
+          state.phase = "ended";
+          state.endedAt = captureClock.now();
           try {
             const client = clientFor(agentId);
-            const messages = (event?.messages ?? []) as Array<{ role: string; content?: string }>;
+            const messages = (event?.messages ?? []) as Array<{ role: string; content?: unknown }>;
             let stored = 0;
             for (const msg of messages) {
               if (msg.role !== "user" && msg.role !== "assistant") continue;
-              const text = typeof msg.content === "string" ? msg.content : "";
+              const text = captureText(msg.content);
               if (!text) continue;
-              if (await tryAutoCapture(client, agentId, text)) stored++;
+              if (await tryAutoCapture(client, agentId, runId, text)) stored++;
             }
             if (stored > 0) api.logger.info(`openclaw-flair: auto-captured ${stored} memories`);
           } catch (err: any) {
-            api.logger.warn(`openclaw-flair: auto-capture refused/failed: ${err.message}`);
-          } finally {
-            resetCaptureState(agentId);
+            refuseKey(agentId, "auto-capture", err);
           }
         });
 
         api.on("llm_input", async (event: any, ctx: any) => {
           const agentId = ctx?.agentId;
           if (!agentId) {
-            api.logger.warn("openclaw-flair: llm_input refused: no agent identity in host context — refusing rather than inheriting one");
+            refuseIdentity("llm_input");
             return;
           }
-          const text = typeof event?.prompt === "string" ? event.prompt : "";
+          const text = captureText(event?.prompt);
+          // No text → no capture, and no sweep here either; the unref'd sweep
+          // timer covers these early returns.
           if (!text) return;
           try {
             const client = clientFor(agentId);
-            const captured = await tryAutoCapture(client, agentId, text);
+            const captured = await tryAutoCapture(client, agentId, runIdOf(event, ctx), text);
             if (captured) api.logger.info("openclaw-flair: auto-captured 1 memory from live turn (llm_input)");
           } catch (err: any) {
-            api.logger.warn(`openclaw-flair: live auto-capture (llm_input) refused/failed: ${err.message}`);
+            refuseKey(agentId, "live auto-capture (llm_input)", err);
           }
         });
 
         api.on("llm_output", async (event: any, ctx: any) => {
           const agentId = ctx?.agentId;
           if (!agentId) {
-            api.logger.warn("openclaw-flair: llm_output refused: no agent identity in host context — refusing rather than inheriting one");
+            refuseIdentity("llm_output");
             return;
           }
           const texts = Array.isArray(event?.assistantTexts) ? event.assistantTexts : [];
-          const text = texts.filter((t: unknown) => typeof t === "string").join("\n");
+          const text = captureText(texts.map((t: unknown) => (typeof t === "string" ? { type: "text", text: t } : t)));
+          // No text → no capture (the unref'd sweep timer covers the sweep here).
           if (!text) return;
           try {
             const client = clientFor(agentId);
-            const captured = await tryAutoCapture(client, agentId, text);
+            const captured = await tryAutoCapture(client, agentId, runIdOf(event, ctx), text);
             if (captured) api.logger.info("openclaw-flair: auto-captured 1 memory from live turn (llm_output)");
           } catch (err: any) {
-            api.logger.warn(`openclaw-flair: live auto-capture (llm_output) refused/failed: ${err.message}`);
+            refuseKey(agentId, "live auto-capture (llm_output)", err);
           }
+        });
+
+        // Item 5(b): gateway_stop aborts every in-flight run and stops the
+        // sweep timer (F2).
+        api.on("gateway_stop", async () => {
+          // Round 13: the stop flag goes FIRST — before the aborts and before the
+          // clear. While it is set `captureGate` admits nothing, and that is
+          // what makes `runs.clear()` safe: a late callback that finds no record
+          // is refused instead of being admitted as a NEW run (the failed-run
+          // re-admission the abort tombstones exist to prevent), which would
+          // start a write after the abort with the sweep timer stopped.
+          captureStopped = true;
+          try { clearInterval(sweepTimer); } catch { /* already cleared */ }
+          for (const record of [...runs.values()]) {
+            abortRun(record.agentId, record.runId, "gateway_stop");
+          }
+          // Round 6: stopping the gateway drops the map as well. The aborts above
+          // cancel every live controller; clearing the records stops them being
+          // reachable through `captureInternals` until the next registration.
+          runs.clear();
+        });
+
+        // Item 5(c): model_call_ended with failureKind "aborted". Used only
+        // because PluginHookModelCallBaseEvent carries `runId`; the SDK type for
+        // that base event includes it, so the abort can be correlated to a run.
+        api.on("model_call_ended", async (event: any, ctx: any) => {
+          if (event?.failureKind !== "aborted") return;
+          const agentId = ctx?.agentId;
+          if (!agentId) return;
+          abortRun(agentId, runIdOf(event, ctx), "model_call_ended reported the call was aborted");
         });
     }
 

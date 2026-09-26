@@ -9,9 +9,9 @@
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tempDir } from "../helpers/temp-dir.ts";
 
 import {
   judge,
@@ -67,7 +67,7 @@ function only1454() {
 }
 
 function tmpDir() {
-  return mkdtempSync(join(tmpdir(), "flair-hostile-xfail-"));
+  return tempDir("flair-hostile-xfail-");
 }
 
 function runCli(args: string[], files: Record<string, string> = {}) {

@@ -2,3 +2,19 @@
 # Currently: heskew (Nathan) and tps-sherlock (Sherlock).
 # One approval from either satisfies branch protection.
 * @tpsdev-ai/reviewers
+
+# The release trust root (#1890). The tagger, its workflow, the version checker
+# and the advisory allowlist all execute from the default branch, so changing
+# what the tagger does is a repo-admin decision — never something a release PR
+# carries (condition 7b keeps a release PR inside the release surface).
+/.github/workflows/release-*.yml @heskew
+/scripts/release-auto-tag.mjs @heskew
+/scripts/check-version-sync.mjs @heskew
+/.github/release-auto-tag-advisories.json @heskew
+
+# …and the ownership map itself. Without this line the catch-all rule above
+# makes the reviewers team the owner of CODEOWNERS, so a collaborator with merge
+# access and that team's approval could delete the entries just above, then
+# change the tagger in a later pull request. Changing who owns the trust root
+# takes the same human as changing the trust root.
+/.github/CODEOWNERS @heskew

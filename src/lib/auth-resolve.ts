@@ -144,9 +144,63 @@ export function readAdminPassFileSecure(path: string): string {
   return readSecretFileSecure(path, "--admin-pass-file");
 }
 
+/** Thrown by `resolveAdminPassFromSources` when two credential sources are given at once. */
+export class AdminPassSourceError extends Error {}
+
+/**
+ * Resolve an admin password from the credential sources a command exposes, in
+ * the precedence its usage text states: an explicit option — `--admin-pass-file`
+ * or `--admin-pass` (the form the help warns against) — over the ambient
+ * `FLAIR_ADMIN_PASS`/`HDB_ADMIN_PASSWORD`. Explicit beats ambient, the same rule
+ * `resolveLocalAdminPass` applies to `--admin-pass`, so a value the operator
+ * typed is never silently replaced by one the shell happened to carry.
+ * Supplying BOTH `--admin-pass-file` and `--admin-pass` is refused: two explicit
+ * sources at once is ambiguous, and one of them is the discouraged argv form. The file is read through `readAdminPassFileSecure` — the same
+ * reader `flair backup` uses — so a group- or world-readable file is refused
+ * with a message naming the path and its mode.
+ *
+ * Returns "" when no source is set, so the caller owns its own "credential
+ * required" message; throws `AdminPassSourceError` on a conflict, or
+ * `readAdminPassFileSecure`'s error when the file is missing, empty or too
+ * open. Neither message carries the password value.
+ */
+export function resolveAdminPassFromSources(input: {
+  adminPassFile?: string;
+  adminPass?: string;
+  envPass?: string;
+}): string {
+  const { adminPassFile, adminPass, envPass } = input;
+  if (adminPassFile && adminPass) {
+    throw new AdminPassSourceError(
+      "--admin-pass and --admin-pass-file cannot be combined; pass exactly one. " +
+        "Prefer --admin-pass-file: it keeps the password out of shell history and the process list.",
+    );
+  }
+  if (adminPassFile) return readAdminPassFileSecure(adminPassFile);
+  if (adminPass) return adminPass;
+  return envPass ?? "";
+}
+
 export function defaultAdminPassPath(): string {
   return join(resolveHome(), ".flair", "admin-pass");
 }
+
+// ─── The ONE admin-password option surface (flair#1910) ─────────────────────
+//
+// Every command that declares the admin-password pair declares the SAME two
+// flags with the SAME help, so the file form is recommended identically
+// everywhere and the argv form always carries its leak warning. Defined here,
+// next to the resolver both forms feed (`resolveAdminPassFromSources`), so the
+// two surfaces cannot drift between `federation token`/`pair` (which declared
+// these strings locally, flair#1873) and the shared credential-option helper
+// every sibling command uses.
+export const ADMIN_PASS_FILE_FLAG = "--admin-pass-file <path>";
+export const ADMIN_PASS_FILE_HELP =
+  "Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. " +
+  "An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.";
+export const ADMIN_PASS_FLAG = "--admin-pass <pass>";
+export const ADMIN_PASS_HELP =
+  "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)";
 
 /** The admin username Harper's bootstrap creates and every Basic-auth path
  * historically hardcoded. Kept as the default; overridable per call via

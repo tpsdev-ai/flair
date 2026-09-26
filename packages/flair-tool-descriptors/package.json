@@ -1,7 +1,7 @@
 {
   "name": "@tpsdev-ai/flair-tool-descriptors",
   "private": true,
-  "version": "0.55.2",
+  "version": "0.56.0",
   "description": "Transport-agnostic MCP tool descriptors for Flair — name, description, inputSchema, output shape. No Harper, no FlairClient.",
   "type": "module",
   "main": "dist/index.js",

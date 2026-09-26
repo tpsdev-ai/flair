@@ -53,12 +53,28 @@
  *   1 — a mismatch, an unknown declaration site, or the check could not run
  */
 
-import { readFileSync, writeFileSync, statSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { readFileSync, writeFileSync, statSync, readdirSync } from "node:fs";
+import { join, dirname, resolve, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+// cli#1890 condition 6: the release tagger extracts the WHOLE candidate commit
+// as DATA (`git archive <sha>` into a scratch dir) and runs THIS file — the
+// default branch's checker — over that tree. `--root <dir>` (or
+// VERSION_SYNC_ROOT) points the checker at it, and because the tree carries
+// every file of the candidate, the discovery scan keeps its full scope: a
+// version declaration the inventory does not list is still found. `--list`
+// prints the inventory (the release PR's shape check, condition 7b, uses it as
+// the allowed set). An extracted tree has no `.git`, so the discovery file list
+// falls back to a recursive walk of the root — every file of the candidate.
+const ARGV = process.argv.slice(2);
+function argValue(name) {
+  const i = ARGV.indexOf(name);
+  return i >= 0 ? ARGV[i + 1] : undefined;
+}
+const ROOT_ARG = argValue("--root") ?? process.env.VERSION_SYNC_ROOT;
+const LIST_ONLY = ARGV.includes("--list");
+const REPO_ROOT = ROOT_ARG ? resolve(ROOT_ARG) : join(dirname(fileURLToPath(import.meta.url)), "..");
 
 // --- Inventory ---------------------------------------------------------------
 
@@ -143,7 +159,26 @@ function declaresVersion(text, expected) {
   return false;
 }
 
+function walkFiles(dir, base = dir, out = []) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) walkFiles(full, base, out);
+    else if (entry.isFile()) out.push(relative(base, full).split(sep).join("/"));
+  }
+  return out;
+}
+
 function trackedFiles() {
+  if (ROOT_ARG) {
+    // A materialised tree (no .git): the files present ARE the list to scan.
+    try {
+      return walkFiles(REPO_ROOT).sort();
+    } catch (err) {
+      console.error(`❌ Could not walk ${REPO_ROOT} (${err.message.trim()}).`);
+      console.error("   The discovery scan cannot run, and must not pass silently.");
+      process.exit(1);
+    }
+  }
   let out;
   try {
     out = execFileSync("git", ["-C", REPO_ROOT, "ls-files", "-z"], {
@@ -315,9 +350,24 @@ function verify(expected) {
 
 // --- Entry -------------------------------------------------------------------
 
-const argv = process.argv.slice(2);
+// Positional args, with `--root <dir>` and `--list` removed.
+const argv = [];
+for (let i = 0; i < ARGV.length; i++) {
+  if (ARGV[i] === "--root") {
+    i++;
+    continue;
+  }
+  if (ARGV[i] === "--list") continue;
+  argv.push(ARGV[i]);
+}
 
-if (argv[0] === "--write") {
+if (LIST_ONLY) {
+  // The inventory, one path per line. Condition 7b uses it as the allowed set
+  // for the release PR's changed files; condition 6 no longer materialises from
+  // it — the whole candidate tree is extracted as data and walked.
+  for (const path of [...PACKAGE_JSONS, ...SOURCE_VERSION_FILES.map((f) => f.path)]) console.log(path);
+  process.exit(0);
+} else if (argv[0] === "--write") {
   const version = argv[1];
   if (!version) {
     console.error("Usage: check-version-sync.mjs --write <version>");

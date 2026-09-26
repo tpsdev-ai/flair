@@ -1,5 +1,20 @@
 name: CI
 
+# LIVENESS COUPLING (flair#1890) — READ BEFORE CHANGING THIS WORKFLOW'S NAME OR
+# ITS `push` TRIGGER. .github/workflows/release-auto-tag.yml is woken ONLY by
+# `workflow_run: workflows: ["CI"], types: [completed]`, and it asserts that the
+# completed run came from this file's path. Renaming this workflow, giving its
+# push trigger a `paths:` filter, or cancelling its runs would mean NO wake for a
+# release — silently, because a trigger that never fires raises nothing. Nothing
+# else tags releases; release-auto-tag.yml's nightly sweep is a recovery net for
+# exactly this class (and for a rename), not a trigger.
+
+# Explicit least privilege: an absent top-level block inherits the repository
+# default, which is not "no write". Every job here reads the repo; the one job
+# that needs more (sast-codeql → security-events: write) declares it locally.
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
@@ -1944,9 +1959,10 @@ jobs:
   # flair#1807: the CLI spawn-budget gate. Every test that spawns the CLI entry
   # must carry its own child deadline (a `timeout:` on the spawn), and the case
   # that reaches it must carry a per-case budget, so a hung child is reported by
-  # the deadline, by name, with its output — never by bun's per-test timer. The
-  # allow-list is EMPTY on purpose and there is no skip flag: a file that cannot
-  # budget its spawns is a real offender, not an exception.
+  # the deadline, by name, with its output — never by bun's per-test timer. It
+  # sees node `child_process` and `Bun.spawn`/`Bun.spawnSync` (flair#1825). The
+  # exceptions live in a reviewed baseline file, not an in-script allow-list; the
+  # baseline can only shrink, and there is no skip flag.
   cli-spawn-budgets:
     name: "Doc/Code Lint: CLI spawn budgets"
     runs-on: ubuntu-latest
@@ -1955,7 +1971,23 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
+      - name: Fetch the base ref for the spawn-budget gate
+        # Fetch BOTH the base sha and the seed anchor, with history, so
+        # `git merge-base --is-ancestor <anchor> <base>` can decide. A
+        # --depth=1 fetch of each would leave them unconnected and the query
+        # would fail; fetching the two commits (their shared history comes with
+        # them) is what makes the predicate decidable.
+        run: |
+          git fetch --no-tags origin \
+            "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            4904699d80b55d9f299fe8e061aa80e4de8e9edc
       - run: node scripts/ci/check-cli-spawn-budgets.mjs
+        env:
+          # The trusted base ref the baseline is read from (flair#1825): a PR's base
+          # commit, or the previous commit on a push. Never the PR's own tree. The
+          # step above fetches that object so `git show <base>:...` can read it on a
+          # shallow checkout; the gate still fails closed if it is missing.
+          CLI_SPAWN_BUDGETS_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
 
   dist-esm-guard:
     # flair#1657 — the flair#1653 class. A compiled dist/**/*.js ES module that

@@ -8,9 +8,9 @@
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { tempDir } from "../helpers/temp-dir.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "release.sh");
@@ -34,7 +34,7 @@ function runPublish(args: string[], stdin?: string, env: NodeJS.ProcessEnv = pro
 
 /** Spawn with no npm credentials so the auth gate is what actually runs. */
 function runPublishUnauth(args: string[]) {
-  const home = mkdtempSync(join(tmpdir(), "flair-release-unauth-"));
+  const home = tempDir("flair-release-unauth-");
   return runPublish(args, undefined, {
     ...process.env,
     HOME: home,

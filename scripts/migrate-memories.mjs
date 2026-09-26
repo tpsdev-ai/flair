@@ -1,15 +1,21 @@
 #!/usr/bin/env node
 /**
  * Migrate flat-file daily memories into Flair.
- * Usage: FLAIR_AGENT_ID=flint node scripts/migrate-memories.mjs <memory-dir>/
+ * Usage: FLAIR_AGENT_ID=<id> node scripts/migrate-memories.mjs <memory-dir>/
+ *        node scripts/migrate-memories.mjs --agent <id> <memory-dir>/
  */
 import { readFileSync, readdirSync } from 'node:fs';
 import { webcrypto } from 'node:crypto';
 import { join, basename } from 'node:path';
+import { takeAgentFlag, requireAgentIdentity } from './lib/agent-identity.mjs';
 const { subtle } = webcrypto;
 
 const FLAIR_URL = process.env.FLAIR_URL || 'http://127.0.0.1:9926';
-const AGENT_ID = process.env.FLAIR_AGENT_ID || 'flint';
+
+// Identity (flair#1822): the caller's, never a shipped default. Refused before
+// any key load or network call. `--agent <id>` or FLAIR_AGENT_ID.
+const { agentId: agentFromFlag, rest: flagArgs } = takeAgentFlag(process.argv.slice(2));
+const AGENT_ID = requireAgentIdentity({ flagValue: agentFromFlag, action: 'migrate memories' });
 const PRIV_KEY_PATH = process.env.FLAIR_PRIV_KEY || `${process.env.HOME}/.tps/secrets/flair/${AGENT_ID}-priv.key`;
 
 async function loadPrivateKey() {
@@ -35,8 +41,8 @@ async function flairPost(path, body, privKey) {
   return res.text();
 }
 
-const memoryDir = process.argv[2];
-if (!memoryDir) { console.error('Usage: migrate-memories.mjs <memory-dir>'); process.exit(1); }
+const memoryDir = flagArgs[0];
+if (!memoryDir) { console.error('Usage: migrate-memories.mjs [--agent <id>] <memory-dir>'); process.exit(1); }
 
 const privKey = await loadPrivateKey();
 const files = readdirSync(memoryDir).filter(f => f.match(/^\d{4}-\d{2}-\d{2}\.md$/)).sort();

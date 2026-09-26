@@ -30,6 +30,12 @@
 # PR-controlled) and this workflow's own step outputs.
 name: Migration CI Lanes
 
+# Explicit least privilege: this lane reads the repo and installs published
+# packages from the public npm registry; nothing writes to GitHub (no
+# GITHUB_TOKEN use beyond the default read). `contents: read` is the grant.
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]

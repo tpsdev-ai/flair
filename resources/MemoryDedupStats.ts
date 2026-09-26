@@ -149,7 +149,7 @@ async function computeAndPersist(ctx: any, opts?: { annK?: number; maxMemories?:
         queryEmbedding: memory.embedding,
         conditions: NOT_ARCHIVED,
         limit: annK + 1,
-        hybrid: false,
+        mode: "vector-only",
         scoring: "raw",
         withSemSimilarity: true,
         select: ["id"],

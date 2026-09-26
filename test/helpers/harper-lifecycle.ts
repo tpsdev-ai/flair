@@ -753,6 +753,13 @@ export interface StartHarperOptions {
    */
   harperBinDir?: string;
   /**
+   * Harper HTTP worker count (`THREADS_COUNT`). Defaults to `"1"` (every
+   * existing call site). A real Linux install runs at least two workers, so a
+   * cross-worker test (flair#1897) passes `threads: 2`; on darwin Harper forces
+   * one worker regardless, so such a test must skip there.
+   */
+  threads?: number;
+  /**
    * Raw YAML appended to the instance's `harperdb-config.yaml` AFTER `harper
    * install` writes it and BEFORE `harper run` boots (flair#1257 slice 3).
    * Lets a test declare TOP-LEVEL config blocks the installer doesn't write —
@@ -858,7 +865,7 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
     DEFAULTS_MODE: "dev",
     HDB_ADMIN_USERNAME: "admin",
     HDB_ADMIN_PASSWORD: "test123",
-    THREADS_COUNT: "1",
+    THREADS_COUNT: String(opts.threads ?? 1),
     NODE_HOSTNAME: "127.0.0.1",     // IPv4 only — avoids bun uv_ip6_addr panic
     // Port audit (flair#1586): every listener a test-Harper can bind.
     //

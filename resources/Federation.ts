@@ -11,6 +11,15 @@ import {
   generateNonce,
 } from "./federation-crypto.js";
 import { reconcileState } from "./relay-lib.js";
+import {
+  decideInstanceAnswer,
+  INSTANCE_ROW_PRUNE_REMEDY,
+  multipleInstanceRowsMessage,
+  type InstanceIdentityRow,
+} from "../src/lib/instance-identity-row.js";
+import { readAllInstanceRows } from "./instance-identity-rows.js";
+import { findOrCreateInstance } from "./instance-create-lock.js";
+import { withDetachedTxnAsync } from "./table-helpers.js";
 import { isSkillWrite } from "./skill-write.js";
 import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
@@ -176,20 +185,47 @@ export function noteFederationMergedMemory(
 // ─── Instance identity ───────────────────────────────────────────────────────
 
 /**
+ * Every `flair.Instance` row on this instance, or a THROWN error — the ONE
+ * strict reader (resources/instance-identity-rows.ts), re-exported here so
+ * existing consumers keep importing it from the Federation resource.
+ *
+ * The readers used to take the first row `search()` yielded. `search()` order is
+ * not a fact about an identity: on a table with two rows one reader reported one
+ * identity and a pairing peer was handed the other, and which was which depended
+ * on the table's internal ordering (flair#1883 round 3).
+ *
+ * A read that FAILS must not look like a table with no rows: the callers answer
+ * 5xx and write nothing, because only a SUCCESSFUL read of zero rows may mint an
+ * identity.
+ *
+ * And neither must a row the reader cannot NAME (flair#1883 round 4): an entry
+ * without a usable id used to be skipped here, so a table serving one bad entry
+ * (or a good one beside it) read as "the rows I could name" — possibly zero — and
+ * the GET's create branch could mint a second identity from a read that never
+ * saw the table. `readableInstanceRows` throws instead, which the callers map to
+ * 5xx and no write.
+ */
+export { readAllInstanceRows };
+
+/**
  * GET /FederationInstance — return this instance's identity.
- * Used by peers during pairing and by the admin UI.
+ *
+ * The admin UI and CLI tooling read it. Peers do NOT read it while pairing: a
+ * spoke is handed this instance's identity in the `POST /FederationPair`
+ * response, which FederationPair.post() builds server-side by reading the
+ * Instance table directly. (The pair CLI must not GET this path to fill a missing
+ * pair publicKey either — flair#822: allowRead is allowAdmin, and get() creates an
+ * identity when it finds none, which would invent a hub row; #839.)
  *
  * allowRead()=allowAdmin (defense-in-depth, authorizeLocal-escalation-class
  * follow-up to #601/#604/#609/#612 — flair#614's backstop found this one had
  * NO allow* at all, so Harper's own default — `user?.role.permission.
  * super_user`, satisfiable only by a genuine admin OR authorizeLocal's forged
- * loopback super_user — was silently standing in). Same idiom as
- * AdminInstance.ts/AdminDashboard.ts: this is an admin-view endpoint (peers
- * never call it during pairing — FederationPair.post() reads the Instance
- * table directly server-side to hand a peer our identity; this HTTP GET is
- * CLI tooling only). The spoke pair CLI must not GET this path to fill a
- * missing pair publicKey (flair#822): allowRead is allowAdmin, and get()
- * find-or-creates an Instance (that would invent a hub row; #839).
+ * loopback super_user — was silently standing in).
+ *
+ * With SEVERAL rows there is no single identity to report, so this answers 409
+ * naming every row and the prune. It never reports the row the search happened
+ * to yield first (flair#1883 round 3).
  */
 export class FederationInstance extends Resource {
   async allowRead(): Promise<boolean> {
@@ -197,26 +233,65 @@ export class FederationInstance extends Resource {
   }
 
   async get() {
-    // Find or create instance identity
-    let instance: any = null;
+    // Find or create instance identity.
+    //
+    // A read that did not happen is an ERROR, never "no row" (flair#1883 round 2).
+    // This used to log and fall through to the create branch: on a persistent
+    // storage or permission failure the GET then MINTED A SECOND identity row on
+    // every call, and which identity this instance reported depended on which row
+    // `search()` yielded first. Only a SUCCESSFUL read that returns zero rows may
+    // create.
+    // Every row, not the first one (flair#1883 round 3): with several rows the
+    // first is a coin toss, and reporting one identity here while a peer is
+    // handed another is how the two writers disagreed in the first place.
+    let rows: InstanceIdentityRow[] | null = null;
+    let readError: any = null;
     try {
-      for await (const i of (databases as any).flair.Instance.search()) {
-        instance = i;
-        break;
-      }
+      rows = await readAllInstanceRows();
     } catch (err: any) {
-      // Expected on genuine first boot: the Instance table doesn't exist yet,
-      // and the create branch below handles that. But a bare swallow here also
-      // hid every OTHER read failure (storage, permissions), making a
-      // persistently failing read indistinguishable from first boot
-      // (flair#1233). Log the error class so the two are tellable apart in
-      // server logs; behavior is unchanged — fall through to create.
-      console.warn(
-        "[federation] Instance read failed — proceeding as first boot (create branch will run). " +
-          "If this instance already has an identity, this is a real read error, not an absent table. " +
-          `${err?.constructor?.name ?? "Error"}: ${err?.message ?? err}`,
+      readError = err;
+    }
+
+    if (readError) {
+      // 5xx: the caller retries, and a retry that finally reads is the only thing
+      // that creates. flair#1233's warn stays — the error class belongs in the
+      // server log — but it is no longer a licence to write.
+      console.error(
+        "[federation] GET /FederationInstance could not read the Instance table — answering 503 and creating NOTHING. " +
+          "A read error is not first boot; minting an identity here would add a second row to an instance that already has one. " +
+          `${readError?.constructor?.name ?? "Error"}: ${readError?.message ?? readError}`,
+      );
+      return new Response(
+        JSON.stringify({
+          error: "instance_identity_unreadable",
+          detail: "The Instance table could not be read, so this instance's identity is unknown. Nothing was created.",
+        }),
+        { status: 503, headers: { "content-type": "application/json" } },
       );
     }
+
+    const decision = decideInstanceAnswer(rows);
+
+    if (decision.kind === "refuse-multiple") {
+      // 409: several rows means there is no canonical identity, and reporting
+      // one of them would be exactly the coin toss #1883 exists to end — a peer
+      // could go on to pin it. Nothing is created and nothing is deleted; the
+      // operator resolves the table with the prune this names.
+      console.error(
+        `[federation] GET /FederationInstance found ${decision.rows.length} Instance rows — answering 409 and creating NOTHING. ` +
+          "Which row this instance reports must not depend on which row the search yields first.",
+      );
+      return new Response(
+        JSON.stringify({
+          error: "multiple_instance_rows",
+          detail: multipleInstanceRowsMessage(decision.rows, "GET /FederationInstance"),
+          rows: decision.rows,
+        }),
+        { status: 409, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    let instance: any = decision.kind === "answer" ? decision.row : null;
 
     // Runtime-only signal (flair#1233): whether this instance's private key
     // seed is present in the keystore, i.e. whether it can SIGN (pair/sync).
@@ -225,49 +300,104 @@ export class FederationInstance extends Resource {
     // every GET.
     let signingKeyAvailable = false;
 
-    if (!instance) {
-      // First boot — generate instance identity
-      const kp = nacl.sign.keyPair();
-      const id = `flair_${randomBytes(4).toString("hex")}`;
-      const publicKey = Buffer.from(kp.publicKey).toString("base64url");
+    if (decision.kind === "none") {
+      // First boot: the read OUTSIDE the lock found no row. The create runs in the
+      // filesystem bakery critical section (flair#1897) — shared by EVERY HTTP
+      // worker of this process AND every process on this Flair home: a read taken
+      // UNDER the lock, the mint, the put, the keystore seed and a confirming
+      // re-read — so two concurrent first-boot GETs mint ONE row and both are
+      // answered with it. A GET that found a row above never reaches here, so
+      // reads stay concurrent.
+      const outcome = await findOrCreateInstance({
+        // Detach the request's transaction for EVERY read inside the lock: the
+        // outer read above opened the request's transaction BEFORE this create, so
+        // reusing it here would read the pre-create snapshot and mint a second row
+        // even serialised (the table-helpers.ts class). A fresh transaction sees
+        // the row the prior lock holder committed.
+        readAll: () => withDetachedTxnAsync((this as any).getContext?.(), () => readAllInstanceRows()),
+        // Commit the WRITE before the lock releases: both the row put and the
+        // keystore seed run in a DETACHED transaction, so Harper builds a fresh
+        // ImmediateTransaction that commits on its own rather than at the end of
+        // the request (the lock cannot serialise a write that commits after the
+        // method returns — the earlier BLOCKED finding, flair#1897 slice 1).
+        put: (row) => withDetachedTxnAsync((this as any).getContext?.(), () => (databases as any).flair.Instance.put(row)),
+        setSeed: (createdId, seed) =>
+          withDetachedTxnAsync((this as any).getContext?.(), async () => {
+            const { keystore } = await import("../src/keystore.js");
+            keystore.setPrivateKeySeed(createdId, seed);
+          }),
+        seedPresent: async (rowId) => {
+          try {
+            const { keystore } = await import("../src/keystore.js");
+            return keystore.getPrivateKeySeed(rowId) !== null;
+          } catch {
+            return false;
+          }
+        },
+        mint: () => {
+          const kp = nacl.sign.keyPair();
+          return {
+            id: `flair_${randomBytes(4).toString("hex")}`,
+            publicKey: Buffer.from(kp.publicKey).toString("base64url"),
+            secretKey: kp.secretKey,
+          };
+        },
+      });
 
-      instance = {
-        id,
-        publicKey,
-        role: "spoke", // default; hub is set during `flair init --remote`
-        status: "active",
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-
-      await (databases as any).flair.Instance.put(instance);
-
-      // Store private key seed in encrypted keystore (not in DB).
-      //
-      // flair#1233: a keystore failure no longer aborts the GET. This is a
-      // READ path — the response never uses the private key, and the old
-      // throw here left federation state entirely unobservable on hosts
-      // whose HOME isn't writable (the #812 ENOTDIR class; keysDir() is
-      // homedir()-relative). Fail-closed stays where the key is USED:
-      // signing, in pair/sync, still throws when the key is absent. Here the
-      // failure is logged server-side and surfaced to the caller as
-      // signingKeyAvailable:false. Plaintext keys still never touch the DB.
-      try {
-        const { keystore } = await import("../src/keystore.js");
-        const seed = kp.secretKey.slice(0, 32);
-        keystore.setPrivateKeySeed(id, seed);
-        signingKeyAvailable = true;
-      } catch (err: any) {
+      if (outcome.kind === "refuse-multiple") {
+        if (outcome.putCommitted) {
+          // This request's OWN detached put committed a row AND the table holds >1.
+          console.error(
+            `[federation] GET /FederationInstance: this request committed row ${outcome.mintedId}; the table now holds ` +
+              `${outcome.rows.length} rows — hand to ${INSTANCE_ROW_PRUNE_REMEDY}.`,
+          );
+          return new Response(
+            JSON.stringify({
+              error: "multiple_instance_rows",
+              detail: multipleInstanceRowsMessage(outcome.rows, "GET /FederationInstance"),
+              rows: outcome.rows,
+            }),
+            { status: 409, headers: { "content-type": "application/json" } },
+          );
+        }
+        // Pre-put (the read before or the first in-lock read) — nothing created.
         console.error(
-          "[federation] Could not store the federation signing key seed in the keystore " +
-            "($HOME/.flair/keys, relative to the Harper process's HOME). The identity row was created and " +
-            "reads work, but this instance cannot sign — pair/sync will fail until the keystore is fixed. " +
-            "Remedy: make $HOME/.flair/keys a directory writable by the Harper process (mode 0700). " +
-            "The seed for THIS identity was never stored, so after fixing the keystore, re-key: delete the " +
-            "Instance row and re-pair to mint a fresh identity. " +
-            `${err?.constructor?.name ?? "Error"}: ${err?.message ?? err}`,
+          `[federation] GET /FederationInstance found ${outcome.rows.length} Instance rows under the create lock — answering 409 and creating NOTHING.`,
+        );
+        return new Response(
+          JSON.stringify({
+            error: "multiple_instance_rows",
+            detail: multipleInstanceRowsMessage(outcome.rows, "GET /FederationInstance"),
+            rows: outcome.rows,
+          }),
+          { status: 409, headers: { "content-type": "application/json" } },
         );
       }
+      if (outcome.kind === "refuse-unobservable") {
+        console.error(
+          `[federation] GET /FederationInstance: minted ${outcome.mintedId} but the confirming re-read saw NO row — ` +
+            `the detached write was not observable. Refusing (no retry).`,
+        );
+        return new Response(
+          JSON.stringify({
+            error: "instance_identity_unobservable",
+            detail:
+              `This instance minted ${outcome.mintedId} but could not read it back — the write did not commit where expected. ` +
+              `Nothing is answered. Retry; if it persists, inspect the flair.Instance table.`,
+          }),
+          { status: 503, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (outcome.kind === "refuse-lock") {
+        console.error(`[federation] GET /FederationInstance: ${outcome.detail}`);
+        return new Response(
+          JSON.stringify({ error: "instance_create_lock_unavailable", detail: outcome.detail }),
+          { status: 503, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (outcome.warning) console.error(`[federation] ${outcome.warning}`);
+      instance = outcome.row;
+      signingKeyAvailable = outcome.seeded;
     } else {
       // Existing identity: report whether its signing key is present and
       // decryptable. getPrivateKeySeed is a read-only probe that returns null
@@ -334,6 +464,69 @@ export class FederationPair extends Resource {
       return new Response(JSON.stringify({ error: `invalid signature — ${verifyResult.reason}` }), {
         status: 401, headers: { "content-type": "application/json" },
       });
+    }
+
+    // ── The identity this response hands the peer, decided BEFORE the pairing
+    // token is consumed, BEFORE the peer is read and before ANY peer is written
+    // (flair#1883 round 3). ──────────────────────────────────────────────────
+    //
+    // NOT "before anything": the signature check above has already run and
+    // RECORDED ITS NONCE (verifyBodySignatureFresh → NonceStore.set(), see
+    // federation-nonce-store.ts). That is deliberate anti-replay state, not a
+    // pairing effect — but it is written, and the refusal is precise about what
+    // it precedes.
+    //
+    // A spoke PINS what it is handed here as its hub peer, so this value is the
+    // identity a pairing outcome depends on. It used to be "the first row of an
+    // unordered search", read AFTER the pairing token was consumed and the peer
+    // written — so a hub holding two rows could burn a one-time token, record the
+    // new peer, and only then answer with whichever row the table yielded first.
+    // The read now comes first, and an unreadable table or several rows refuse
+    // with the token still unused and NO peer written.
+    let identityRows: InstanceIdentityRow[] | null = null;
+    try {
+      identityRows = await readAllInstanceRows();
+    } catch (err: any) {
+      console.error(
+        "[federation] POST /FederationPair could not read the Instance table — answering 503, consuming NO token and writing NO peer. " +
+          `${err?.constructor?.name ?? "Error"}: ${err?.message ?? err}`,
+      );
+      return new Response(
+        JSON.stringify({
+          error: "instance_identity_unreadable",
+          detail:
+            "The Instance table could not be read, so this hub's identity is unknown. Nothing was paired: the pairing token is unconsumed and no peer was written.",
+        }),
+        { status: 503, headers: { "content-type": "application/json" } },
+      );
+    }
+    const identity = decideInstanceAnswer(identityRows);
+
+    if (identity.kind === "refuse-multiple") {
+      // 409: with several rows there is no identity this hub can hand a peer
+      // without picking one, and the peer would pin the pick. Refuse before the
+      // token is consumed and before any Peer row is written.
+      //
+      // This route is PUBLIC, and this refusal runs before the pairing token or
+      // a re-pairing peer's key is checked: any caller with a self-signed body
+      // reaches it. So the answer names no row. Each row's id, role and
+      // createdAt go to this hub's log; the caller learns only what it can act
+      // on: pairing is blocked on the hub side, and the hub's operator resolves
+      // it with the prune, which needs admin credentials.
+      console.error(
+        `[federation] POST /FederationPair answering 409, consuming NO token and writing NO peer. ` +
+          multipleInstanceRowsMessage(identity.rows, "POST /FederationPair"),
+      );
+      return new Response(
+        JSON.stringify({
+          error: "multiple_instance_rows",
+          detail:
+            "This hub has more than one Instance row, so it has no single identity to hand a peer. Nothing was paired: " +
+            "the pairing token is unconsumed and no peer was written. The hub's operator must keep one row and delete the rest with: " +
+            INSTANCE_ROW_PRUNE_REMEDY,
+        }),
+        { status: 409, headers: { "content-type": "application/json" } },
+      );
     }
 
     // Check if already paired (re-pairing doesn't need a token)
@@ -426,25 +619,17 @@ export class FederationPair extends Resource {
       }
     }
 
-    // Return our own identity for the peer to record. Already
-    // `{ id, publicKey, role }` when an Instance row exists (flair#213).
-    // `instance: null` means the hub has no FederationInstance — that is
-    // #839, not a pair-response-shape bug. The spoke must ERROR, never
+    // Return our own identity for the peer to record — `{ id, publicKey, role }`,
+    // decided BEFORE the token was consumed (above; flair#1883 round 3). An
+    // `instance` of `null` means a SUCCESSFUL read found no FederationInstance:
+    // that is #839, not a pair-response-shape bug. The spoke must ERROR, never
     // store publicKey:"" (flair#822).
-    let ourInstance: any = null;
-    try {
-      for await (const i of (databases as any).flair.Instance.search()) {
-        ourInstance = i;
-        break;
-      }
-    } catch {}
-
     return {
       paired: true,
-      instance: ourInstance ? {
-        id: ourInstance.id,
-        publicKey: ourInstance.publicKey,
-        role: ourInstance.role,
+      instance: identity.kind === "answer" ? {
+        id: identity.row.id,
+        publicKey: identity.row.publicKey,
+        role: identity.row.role,
       } : null,
     };
   }

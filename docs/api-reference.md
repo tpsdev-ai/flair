@@ -44,14 +44,14 @@ the schema section so the catalog is complete.
 
 | Class | Credential | Typical grant |
 |-------|------------|---------------|
-| **Public** | none | Discovery, health, OAuth well-known, Presence roster (field-allowlisted) |
+| **Public** | none | Discovery, health, OAuth well-known. `GET /Presence` is public only when the instance opts in to a public roster (`PRESENCE_PUBLIC_ROSTER=true`) — by default it needs a verified reader. See [Presence for API consumers](#presence-for-api-consumers). |
 | **Ed25519 agent** | `TPS-Ed25519` header | Default agent path. Writes as self only. Reads follow the resource's read-scope (below). |
 | **Admin Basic** | Harper `HDB_ADMIN_PASSWORD` / `FLAIR_ADMIN_PASSWORD` | Whole-instance operator. Bypasses agent scoping, including `private` memory. Used by the web admin and `n8n-nodes-flair`. |
 | **Operator / internal** | Admin Basic, or a deliberate `internalContext()` call inside the process | Soul mutations and `AgentSeed`. Agent Ed25519 keys — including admin-agent keys — cannot author Soul. |
 | **Federation body-sig** | Ed25519 over the request body + timestamp/nonce; pairing uses a one-time token | `/FederationPair`, `/FederationSync`. Harper role gate is open; the handler is the auth boundary. |
 | **OAuth bearer** | Access token from Flair's AS or `@harperfast/oauth` | `/mcp` only, and only when `FLAIR_MCP_OAUTH=true` plus a public issuer. Off by default (path 404s). |
 
-Anonymous HTTP is denied on every agent-facing table. A by-id miss and a
+Anonymous HTTP is denied on every agent-facing table (and on `GET /Presence`, which needs a verified reader unless the instance enables the public-roster opt-in). A by-id miss and a
 by-id deny both return **404**, never 403, so ids are not an existence oracle.
 
 ### Read-scope vocabulary
@@ -107,8 +107,8 @@ is `GET /Name/<id>` unless noted.
 | POST | `/Agent` | Admin Basic | Create principal. Also `POST /AgentSeed` (operator/internal only — not an admin-agent key). |
 | PUT / PATCH | `/Agent/<id>` | Ed25519 | An agent updates **only its own** record. |
 | DELETE | `/Agent/<id>` | Admin Basic | Deprovision. |
-| GET | `/Presence` | Public | Roster, field-allowlisted. `currentTask` is null for anonymous callers; verified agents see the text. |
-| POST | `/Presence` | Ed25519 | Heartbeat. Agent writes only its own row (403 cross-agent). Stamps `flairVersion` / `harperVersion`. |
+| GET | `/Presence` | Verified reader | Roster. Requires a valid `TPS-Ed25519` agent signature or the admin credential; an anonymous request gets 401. An instance may opt in to a public roster with `PRESENCE_PUBLIC_ROSTER=true`, in which case an unverified reader gets the allowlisted roster with `currentTask`, `flairVersion`, and `harperVersion` as null. Thresholds: [Presence for API consumers](#presence-for-api-consumers). |
+| POST | `/Presence` | Ed25519 | Heartbeat. Agent writes only its own row (403 cross-agent). Stamps `flairVersion` / `harperVersion` on the row. |
 | PUT / DELETE | `/Presence/<id>` | Ed25519 | Own row only. Collection PUT is not a public bypass. |
 | GET | `/Soul`, `/Soul/<id>` | Ed25519 | Any verified agent; unscoped (identity/discovery). |
 | POST / PUT / PATCH / DELETE | `/Soul` | **Operator / internal** | Not Ed25519. Learned Memory text cannot be copied in as Soul. See [docs/auth.md](auth.md#soul-authorship). |
@@ -197,7 +197,7 @@ The remedy is `flair upgrade` (the adapter), not a server upgrade alone.
 | Method | Path | Auth | Notes |
 |--------|------|------|-------|
 | GET | `/FederationInstance` | Admin Basic | Local instance identity (CLI / admin). Peers do not call this during pair. |
-| POST | `/FederationPair` | Pairing token + body-sig | Public at the Harper role gate. Handler validates token, signature, anti-replay. Response includes `instance {id, publicKey}` when this hub has an Instance row; `instance` is null if it does not (flair#839). The spoke CLI must not store an empty hub key (flair#822). Fabric uses the bootstrap-user triple from `flair federation token`. |
+| POST | `/FederationPair` | Pairing token + body-sig | Public at the Harper role gate. Handler validates token, signature, anti-replay. Response includes `instance {id, publicKey}` when this hub has an Instance row; `instance` is null if it does not (flair#839). With several rows it answers `409 multiple_instance_rows` before the token is consumed, naming no row (the hub's log names them; flair#1883). The spoke CLI must not store an empty hub key (flair#822). Fabric uses the bootstrap-user triple from `flair federation token`. |
 | POST | `/FederationSync` | Peer body-sig | Public at the role gate. Merge Memory / Soul / Agent / Relationship (and classifier-ready Message). Originator + per-record signature checks. |
 | GET | `/FederationPeers` | Admin Basic | Known peers. |
 | GET / write | `/Instance` | Read: Ed25519. Write: admin | Instance row (`flair_…` id, role hub/spoke). |
@@ -295,8 +295,33 @@ client-writable even if a client sends them. Full comments live in
 | `currentTask` | String | Free text; verified-agent read only |
 | `activity` | String | `coding` \| `reviewing` \| `planning` \| `debugging` \| `idle` |
 | `activityUpdatedAt` | BigInt | When activity/task were asserted |
-| `flairVersion` | String | Serving `@tpsdev-ai/flair` version |
-| `harperVersion` | String | Serving Harper version |
+| `flairVersion` | String | Serving `@tpsdev-ai/flair` version. Null when redacted or never stamped — see below. |
+| `harperVersion` | String | Serving Harper version. Same redaction. Also null when the server could not resolve Harper's version. |
+
+### Presence for API consumers
+
+`GET /Presence` requires a **verified reader** by default. A verified reader is a request carrying a valid `TPS-Ed25519` agent signature from an agent registered on this instance, or the admin credential. An anonymous — or otherwise unverified — request gets **401**, not a redacted roster. The roster is org-visible data (who is working, on what class of activity, and how recently) and is not published by default.
+
+An instance that runs a public status page opts back in with the presence config key `PRESENCE_PUBLIC_ROSTER=true` (the same env-var channel as the thresholds below); it is **off by default** and is documented as *publishes your roster to the internet*. With it on the behaviour is exactly as it was before: an anonymous caller gets the field-allowlisted roster (id, display name, role, runtime, activity fields, `presenceStatus`, `lastHeartbeatAt`), and three fields are redacted to `null` unless the request carries a valid `TPS-Ed25519` agent signature: `currentTask`, `flairVersion`, and `harperVersion`. Anonymous callers, unsigned loopback, Basic admin, and in-process calls without that signature are unverified readers of the content gate. The nulls are intentional. Version strings are withheld so a public roster cannot fingerprint the instance (the same split as public `/Health` versus Ed25519 `/HealthDetail`). A null `flairVersion` on an unverified read does not mean the peer lacks a version, and it does not mean the peer cannot accept a directed handoff.
+
+A verified reader still sees `null` for a version the row never stored. Heartbeats stamp the running server's versions; a row written before that stamp, and not heartbeated since, has no value to return. `harperVersion` is also null when this process could not resolve Harper's package version. That null means unknown, not redacted.
+
+`presenceStatus` is liveness of `lastHeartbeatAt`. The idle threshold defaults to 90 seconds and the offline threshold defaults to 10 minutes. A tuned instance overrides those numbers with `PRESENCE_IDLE_THRESHOLD_MS` and `PRESENCE_OFFLINE_THRESHOLD_MS` (milliseconds). Read the live values from those variables; the 90s and 10m figures below are only what an unset process uses. An unset, empty, zero, or non-numeric value falls back to that default:
+
+| Age of `lastHeartbeatAt` | `presenceStatus` |
+|---|---|
+| Missing, or not a finite number | `offline` |
+| Negative (stamp ahead of the server clock) | `active` |
+| Younger than the idle threshold (`PRESENCE_IDLE_THRESHOLD_MS`, default 90s) | `active` |
+| Younger than the offline threshold (`PRESENCE_OFFLINE_THRESHOLD_MS`, default 10 min) | `idle` |
+| At or beyond the offline threshold, when the idle threshold is at or below it | `offline` |
+| At or beyond the idle threshold, when the idle threshold is above the offline threshold (the idle status never occurs then) | `offline` |
+
+The rows are checked in that order and the first match wins. `derivePresenceStatus` (`resources/Presence.ts`) returns `active` while the age is strictly below `PRESENCE_IDLE_THRESHOLD_MS`, even when that age is already at or past `PRESENCE_OFFLINE_THRESHOLD_MS`. The ordering these rows describe is an idle threshold strictly below the offline threshold. An age equal to the offline threshold is `offline` only when the idle threshold is at or below the offline threshold; when the idle threshold is above it, the `active` row matches first and the status is `active`.
+
+`activityFresh` uses a different stamp: `activityUpdatedAt` when that is a finite number, otherwise `lastHeartbeatAt`. It is true while that stamp is younger than the **offline** threshold (`PRESENCE_OFFLINE_THRESHOLD_MS`, default 10 minutes), including when the stamp is in the future. While it is true, `activity` is the stored label (`coding`, `reviewing`, `planning`, `debugging`, or `idle`). When it is false, `activity` is reported as `idle`, `lastActivity` keeps the stored label, and `currentTask` is null even for a verified reader. `activityAgeMs` is how old that stamp is.
+
+A peer can therefore show `presenceStatus: "offline"`, `activity: "idle"`, `lastActivity: "coding"`, and `activityFresh: false` at once: the heartbeat is past the offline threshold, and the live activity label has lapsed. Gate "is this agent doing this now" on `activityFresh` (and `activityAgeMs`). Read `presenceStatus` for heartbeat liveness. Read `lastActivity` as what they were doing, not what they are doing.
 
 ### Memory (`schemas/memory.graphql`)
 

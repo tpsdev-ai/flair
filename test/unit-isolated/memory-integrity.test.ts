@@ -96,6 +96,9 @@ let idCounter: number;
 // never-federated instance); the originatorInstanceId describe block below
 // sets this to a fixed test id.
 let instanceRow: any = null;
+// flair#1896: additional Instance rows, so a test can put the table in the
+// several-rows state (localInstanceId() must then stamp NOTHING).
+let extraInstanceRows: any[] = [];
 // Singleton-cosine-fallback simulation switch: when true, memorySearchGen's
 // cosine-sort branch omits `$distance` from every candidate (real Harper's
 // observed behavior for a SINGLETON cosine-query result set) instead of
@@ -213,6 +216,7 @@ const databasesMock = {
       search: () => {
         async function* gen() {
           if (instanceRow) yield instanceRow;
+          for (const r of extraInstanceRows) yield r;
         }
         return gen();
       },
@@ -247,6 +251,7 @@ beforeEach(() => {
   idCounter = 0;
   forceUndefinedDistance = false;
   instanceRow = null;
+  extraInstanceRows = [];
   embedInputTypeCalls = [];
   _resetLocalInstanceIdCacheForTests();
 });
@@ -1564,6 +1569,25 @@ describe("federation-edge-hardening slice 1 — Memory.post() write-time origina
     const stored = await BaseMemory.get(r.id);
     expect(stored.originatorInstanceId).toBe("instance-B");
     expect(stored.originatorInstanceId).not.toBe("flair_local_test");
+  });
+
+  it("flair#1896 — with SEVERAL Instance rows the write SUCCEEDS and stamps NOTHING (never an arbitrary identity)", async () => {
+    // Several rows is a state doctor reports and init refuses to create; the
+    // write path must not fail on it (a throw would lose every local write on
+    // a legacy install) and must not pick a row (stamping one attributes the
+    // record to an identity peers may not have pinned). A null
+    // originatorInstanceId is the defined local-origin state.
+    instanceRow = { id: "flair_row_a" };
+    extraInstanceRows = [{ id: "flair_row_b" }];
+    const errSpy = spyOn(console, "error"); // the one-per-process refusal line
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.post({ agentId: "agent-1", content: "Written while this instance's table holds two rows." });
+    expect(r instanceof Response).toBe(false);
+    const stored = await BaseMemory.get(r.id);
+    expect(stored.originatorInstanceId).toBeNull();
+    expect(stored.originatorInstanceId).not.toBe("flair_row_a");
+    expect(stored.originatorInstanceId).not.toBe("flair_row_b");
+    errSpy.mockRestore();
   });
 });
 

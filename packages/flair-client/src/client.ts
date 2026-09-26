@@ -28,6 +28,44 @@ import type {
 const DEFAULT_URL = "http://localhost:19926";
 const DEFAULT_TIMEOUT = 30_000;
 
+/**
+ * Combine two abort signals, safe on the OLDEST Node this package allows.
+ *
+ * `AbortSignal.any` landed in Node 20.3, but `engines.node` floors this package
+ * at 18, so a caller passing `opts.signal` on Node 18 / 20.0–20.2 would throw
+ * `TypeError: AbortSignal.any is not a function` BEFORE the fetch. Use it when
+ * present, else link the two signals by hand — honouring an already-aborted
+ * input and forwarding the abort reason.
+ */
+function anySignal(a: AbortSignal, b: AbortSignal): { signal: AbortSignal; cleanup: () => void } {
+  const any = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
+  if (typeof any === "function") return { signal: any.call(AbortSignal, [a, b]), cleanup: () => {} };
+  const linked = new AbortController();
+  if (a.aborted || b.aborted) {
+    linked.abort(a.aborted ? a.reason : b.reason);
+    return { signal: linked.signal, cleanup: () => {} };
+  }
+  const onA = () => {
+    linked.abort(a.reason);
+    b.removeEventListener("abort", onB); // either input aborting removes BOTH
+  };
+  const onB = () => {
+    linked.abort(b.reason);
+    a.removeEventListener("abort", onA);
+  };
+  a.addEventListener("abort", onA, { once: true });
+  b.addEventListener("abort", onB, { once: true });
+  // The caller's signal is long-lived; the caller MUST remove BOTH listeners
+  // when the request settles, or a listener leaks per request (flair#1884 r3).
+  return {
+    signal: linked.signal,
+    cleanup: () => {
+      a.removeEventListener("abort", onA);
+      b.removeEventListener("abort", onB);
+    },
+  };
+}
+
 export class FlairClient {
   readonly url: string;
   readonly agentId: string;
@@ -111,8 +149,21 @@ export class FlairClient {
     return this.privateKey;
   }
 
-  /** Make an authenticated request to Flair. */
-  async request<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
+  /**
+   * Make an authenticated request to Flair.
+   *
+   * `opts.signal` is an optional caller-owned abort signal (e.g. a plugin's
+   * per-run AbortController). It is combined with this client's per-request
+   * timeout so EITHER can cancel the underlying fetch. The timeout already
+   * exists per request; the caller signal is what lets an in-flight write be
+   * aborted when the work that requested it is cancelled.
+   */
+  async request<T = unknown>(
+    method: string,
+    path: string,
+    body?: unknown,
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<T> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       // flair#1383: the server refuses clients older than 0.18.0 on write paths.
@@ -136,18 +187,28 @@ export class FlairClient {
         authMethod: "basic",
       };
     }
-    const res = await fetch(`${this.url}${path}`, {
-      method,
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(this.timeoutMs),
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new FlairError(method, path, res.status, text.slice(0, 500), this.lastKeyLookup);
+    const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
+    const combined = opts.signal
+      ? anySignal(timeoutSignal, opts.signal)
+      : { signal: timeoutSignal, cleanup: () => {} };
+    try {
+      const res = await fetch(`${this.url}${path}`, {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: combined.signal,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new FlairError(method, path, res.status, text.slice(0, 500), this.lastKeyLookup);
+      }
+      const text = await res.text();
+      return text ? JSON.parse(text) : ({} as T);
+    } finally {
+      // Remove any listeners on the caller's long-lived signal on EVERY path —
+      // success, timeout, response error or a JSON error.
+      combined.cleanup();
     }
-    const text = await res.text();
-    return text ? JSON.parse(text) : ({} as T);
   }
 
   /** Cold-start bootstrap — get soul + recent memories as a formatted context block. */
@@ -216,6 +277,9 @@ class MemoryApi {
      *  the server credits each id through the same usage ledger as
      *  POST /RecordUsage and strips the field before persisting. */
     usedMemoryIds?: string[];
+    /** Optional caller-owned abort signal, forwarded to
+     *  `FlairClient.request` so an in-flight write can be cancelled. */
+    signal?: AbortSignal;
   } = {}): Promise<Memory> {
     const id = opts.id ?? `${this.client.agentId}-${crypto.randomUUID()}`;
     const record: Record<string, unknown> = {
@@ -248,7 +312,9 @@ class MemoryApi {
     // row (resources/Memory.ts). Absent = omitted, zero behavior change.
     if (this.client.claimedClient) record.claimedClient = this.client.claimedClient;
 
-    const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${id}`, record);
+    const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${id}`, record, {
+      signal: opts.signal,
+    });
     // Merge the server response (deduplicated/matchedId/matchConfidence/
     // written, plus any echoed fields) over the locally-constructed record —
     // the write always happens, so `record` always reflects what was sent,

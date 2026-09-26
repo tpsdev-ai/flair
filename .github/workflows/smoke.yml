@@ -1,5 +1,10 @@
 name: Smoke Tests
 
+# Explicit least privilege: an absent top-level block inherits the repository
+# default. This lane only reads the repo and downloads a public model.
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
   push:

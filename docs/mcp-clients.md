@@ -32,7 +32,20 @@ flair status
 
 > **`flair: command not found` right after installing?** Your npm global prefix's bin dir isn't on PATH (common with a user prefix like `~/.npm-global`) — run `export PATH="$(npm prefix -g)/bin:$PATH"`, persist that line in your shell profile, and `flair doctor` will print the exact line for your shell any time.
 
-Flair runs as a local server at `http://127.0.0.1:19926` by default. The MCP server connects to it on demand via Ed25519-signed requests; nothing leaves your machine unless you explicitly route to a remote Flair instance.
+Flair runs as a local server at `http://127.0.0.1:19926` by default. The MCP server this page configures connects to it on demand via Ed25519-signed requests; nothing leaves your machine unless you explicitly route to a remote Flair instance.
+
+## Two MCP paths
+
+The snippets below are the **local** path. Flair also has a native `/mcp` endpoint, and the two are not substitutes. The [README](../README.md#one-install-one-binary) names both; this section is why each exists.
+
+| Client | Path | Auth |
+|--------|------|------|
+| MCP client on this machine (Claude Code, Cursor, Codex, Gemini, and the snippets below) | `npx -y @tpsdev-ai/flair-mcp@<version>` stdio adapter | Ed25519 over HTTP to the instance |
+| Remote MCP client that must dial a public HTTPS origin | Native `/mcp` on the instance | OAuth bearer. Unmounted until `FLAIR_MCP_OAUTH=true` and a public issuer are set (otherwise the path 404s). |
+
+Native `/mcp` is remote-only by design. The OAuth authorization server fetches client metadata over HTTPS and refuses private, loopback, and link-local hosts. `flair mcp enable` refuses localhost, loopback, RFC1918, IPv4 link-local, and `.local`. Set `FLAIR_MCP_OAUTH=true` — that is the one value that enables both Flair's `/mcp` route and the OAuth component. A loopback Flair cannot be the origin those clients dial. The stdio adapter is the local path because it speaks the instance's Ed25519 HTTP API and does not need that public origin.
+
+`flair init` writes the stdio adapter. Turning on native `/mcp` is a separate operator step for a publicly reachable instance, documented from the API side in [api-reference.md](api-reference.md#mcp-tools).
 
 ---
 

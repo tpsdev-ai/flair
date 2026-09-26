@@ -164,17 +164,21 @@ No shell on the hub, so mint the token remotely rather than over `ssh`:
 
 ```bash
 # On any machine — note --ops-target, this hits the ops API
-FLAIR_ADMIN_PASS=<hub-admin-password> flair federation token \
+(umask 077; set -C; flair federation token --admin-pass-file /path/to/hub-admin-pass \
   --target https://<cluster>.<org>.harperfabric.com \
-  --ops-target <ops-url> > ./pair-triple.json
+  --ops-target <ops-url> > ./pair-triple.json)
 
 # On the spoke
 flair federation pair https://<cluster>.<org>.harperfabric.com \
+  --admin-pass-file ~/.flair/admin-pass \
   --token-from ./pair-triple.json
 ```
 
-`federation token` takes `--admin-pass`, **not** `--admin-pass-file`. The triple holds a
-one-time credential — delete it after pairing (60-min TTL, `--ttl`).
+`federation token` and `federation pair` both take `--admin-pass-file`, reading the
+password in-process (mode 0600 enforced) so it stays out of shell history and the process
+list; `--admin-pass` still works but lands in both, and `FLAIR_ADMIN_PASS` suits CI. The triple holds a
+one-time credential — delete it after pairing (60-min TTL, `--ttl`). `set -C` refuses to
+overwrite an existing `pair-triple.json`, so remove an old one first.
 
 ### Federation is push-only
 

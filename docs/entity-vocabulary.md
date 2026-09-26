@@ -10,9 +10,9 @@ matching across free-text fields.
 This document is that convention. It's written down and enforced by a small validator
 (`resources/entity-vocab.ts`) **before** anything is built on top of it, because three
 surfaces already consume entity strings today (the `Relationship` graph's `subject`/`object`,
-and the new `entities` fields on `WorkspaceState`/`OrgEvent`/`Memory`), plus a future
-attention query and any future MCP scope field — retrofitting a divergent vocabulary later
-is expensive.
+and the new `entities` fields on `WorkspaceState`/`OrgEvent`/`Memory`), plus the attention
+query and bootstrap collision surfacing (both shipped in later slices) and any future MCP
+scope field — retrofitting a divergent vocabulary later is expensive.
 
 > This doc covers the vocabulary and validator only — the foundation slice of the attention
 > plane (flair#675). The attention query ("what touches entity E in the last N days") and
@@ -84,7 +84,7 @@ Per the attention-plane spec's K&S-approved refinements, `entities: [String] @in
 - `WorkspaceState` (`schemas/workspace.graphql`)
 - `OrgEvent` (`schemas/event.graphql`)
 - `Memory` (`schemas/memory.graphql`) — added in v1 (not deferred to v2) for index-pushdown
-  uniformity across all three sources the future attention query joins.
+  uniformity across all three sources the attention query (shipped in a later slice) joins.
 
 Existing rows on all three tables simply carry no `entities` — readers must tolerate absence,
 the same pattern already used for `Presence.activityUpdatedAt`. No migration, no backfill.
@@ -111,7 +111,7 @@ vocabulary; wiring that validation is a follow-up, not part of this foundation s
 
 ## What's explicitly NOT in this slice
 
-- The attention query (`AttentionQuery` / `flair attention <entity>`) that joins Memory,
+- The attention query (`AttentionQuery` / `flair attention <type:value>`) that joins Memory,
   Relationship, WorkspaceState, Presence, and OrgEvent by entity — shipped in flair#678
   (`resources/AttentionQuery.ts`), a later slice.
 - Bootstrap collision surfacing ("others in the room") — shipped in flair#681

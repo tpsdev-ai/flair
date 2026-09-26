@@ -89,7 +89,7 @@ load each agent's `SOUL.md` / `AGENTS.md`.
 | `autoCapture` | boolean | `false` | Auto-capture trigger phrases from conversation. **Off by default**; requires `allowConversationAccess`. |
 | `maxRecallResults` | number | `5` | Max results for `memory_search`. |
 | `maxBootstrapTokens` | number | `4000` | Max tokens for the returned bootstrap context. |
-| `autoCaptureMaxPerSession` | number | `3` | Cap on trigger-based auto-captures per session. |
+| `autoCaptureMaxPerSession` | number | `3` | Cap on trigger-based auto-captures **per run**. |
 
 ### Required permissions
 
@@ -111,15 +111,59 @@ preserved. Logs say "returned", never "injected".
 
 ### Auto-capture
 
-> **Auto-capture is not production-ready until slice 2.** Slice 1 keeps it
-> available but **off by default**. Do not enable it in production yet.
+Off by default. When enabled — and only with the host's `allowConversationAccess`
+permission — the plugin writes a matching excerpt to Flair when conversation text
+carries a conservative trigger phrase ("remember this", "we decided", …). These
+are the guarantees it keeps, each with the test that proves it in
+`packages/openclaw-flair/test/plugin.test.ts`:
 
-Auto-capture scans conversation text for conservative trigger phrases (e.g.
-"remember this", "we decided") and writes a matching excerpt to Flair. It runs
-on `agent_end` (full-session scan) and `llm_input` / `llm_output` (live turns,
-which also covers long-lived persistent gateway sessions where `agent_end` never
-fires). Both share one per-session budget (`autoCaptureMaxPerSession`) and dedup
-by content hash.
+- **Capture is off by default.** With `autoCapture` unset no capture hook is
+  registered and no capture write happens, however the turn runs — recall is a
+  separate feature, and its own hook may still make a bootstrap read —
+  `capture is OFF by default: permission granted, no autoCapture config -> no
+  capture hooks and no capture writes`.
+- **Captures are keyed per agent and per run.** Two concurrent runs of one agent
+  share neither the session cap nor the dedup set, and every write is signed as
+  the agent whose callback produced it — `D10 (mutation: state keyed by agent
+  only): two concurrent runs of one agent share neither the session cap nor the
+  dedup set`; `R10: interleaved agents, driven through the host's turn order,
+  sign as themselves`.
+- **Memory is bounded.** The run map holds at most `capacityCap` records, plus at
+  most `abortOverflowCap` records for aborted runs that were never admitted, and a
+  new run is refused rather than evicting a live record — `(a) repeated aborts of
+  NEVER-admitted runs are bounded by the cap PLUS the abort overflow`;
+  `F2/round 4/round 5: the budget cap refuses new runs and never evicts a live
+  record`; `best effort residual: with the budget and its abort overflow full, an
+  abort records nothing and evicts no live record; its next callback is admitted
+  once room frees`.
+- **A failed or aborted run does not capture again while its record is retained**,
+  for at least `tombstoneMinAgeMs`: a late callback is dropped, never re-admitted,
+  and no new write starts after the abort — one already in flight may still land,
+  and once `gateway_stop` has run nothing is admitted at all —
+  `F1 (round 10): a callback just before tombstoneMinAgeMs after the abort is
+  still dropped`; `F1: a callback after an abort is dropped even after a later
+  sweep`; `item 5 (mutation: abort dropped): a failed agent_end starts no new
+  write and discards a late result`; `item 5(a2): a later callback after a
+  model_call_ended abort is dropped, with no new write`; `item 5(b2): a later
+  callback after gateway_stop is dropped, with no new write`; `round 13
+  (mutation: stop flag not checked): after gateway_stop a late llm_output for an
+  aborted run admits no record and starts no write`; `round 13 guard: after
+  gateway_stop an abort for a run the registry never saw inserts no record`.
+  Past the overflow bound this is best effort:
+  with the budget and its abort overflow both full, the abort of a never-admitted
+  run records nothing, so that run's next callback can capture again and start a
+  write — `(c) with the budget AND its abort overflow full, an abort records
+  nothing and logs once`; `best effort residual: with the budget and its abort
+  overflow full, an abort records nothing and evicts no live record; its next
+  callback is admitted once room frees`.
+- **Log lines about refused or dropped callbacks are rate-limited, not guaranteed
+  to appear exactly once** — `R3 (round 10, extended round 11): refusal lines are
+  rate-limited — ONE line per key, however many callbacks arrive`; `F2: the
+  one-time-log set is bounded`.
+
+The mechanics behind these bounds — which callbacks capture and sweep, the
+one-time-log set, the record phases, the removal predicate and the admission
+order — live beside the code in `index.ts` and in the tests named above.
 
 ## Auth
 

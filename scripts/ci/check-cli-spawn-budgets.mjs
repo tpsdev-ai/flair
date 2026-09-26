@@ -31,20 +31,23 @@
 // is about the CLI entry because that is the child whose hang cost flair#1807
 // its evidence.
 //
-// THE ALLOW-LIST IS EMPTY ON PURPOSE and must stay empty. A padded allow-list
-// turns this into a check that cannot fire: the files it skips are exactly the
-// ones nobody budgets, and the gate reports green over them. There is no skip
-// flag for the same reason. If a genuine exception appears, budget the spawn or
-// change the rule — do not add an entry here.
+// THE EXCEPTION LIST IS A TRUSTED BASELINE FILE, not an in-script allow-list
+// (flair#1825). `scripts/ci/cli-spawn-budgets.baseline.json` holds entries that
+// cannot be budgeted yet, and it cannot be gamed: each entry is keyed on file +
+// enclosing helper/case + a normalized call fingerprint + the violation kind
+// (plus an occurrence ordinal — never `file:line`); keys are unique, so one
+// entry covers exactly one call; the run is DIFFED against the committed
+// baseline, so a PR cannot add an offender together with its own exception; and
+// an entry that no longer offends FAILS, so the list can only shrink. There is
+// no skip flag and no whole-file skip.
 //
-// SCOPE — NODE `child_process` FORMS ONLY. This gate understands the node
-// child_process family (spawn / spawnSync / exec / execFile / fork and their
-// Sync forms). It does NOT see `Bun.spawn` / `Bun.spawnSync`. An exploratory
-// scan puts the un-scanned surface at roughly 27 spawn offenders and 81
-// unbudgeted cases, and an ungameable exception list needs its own design, so
-// that extension is its own PR (flair#1825). Until it lands this gate must not
-// be read as "the class is closed": it is closed for the node child_process
-// forms only. Do NOT add Bun.spawn detection or an allow-list here.
+// SCOPE — EVERY SPAWN FAMILY THIS REPO USES (flair#1825). The node
+// `child_process` family (spawn / spawnSync / exec / execFile / fork and their
+// Sync forms) — bare, or via a NAMED ALIAS import — AND `Bun.spawn` /
+// `Bun.spawnSync`. Bun's signature is `(argvArray, options)`, options SECOND;
+// node's is `(cmd, argv, options)`. A namespace import (`cp.spawn`) is not seen.
+// The scanner masks string/template/regex CONTENTS for call matching, so a
+// `Bun.spawn(...)` quoted in a string is not mistaken for a call.
 //
 // SCANNING. Test files are read as TEXT, not parsed: no AST dependency, so the
 // gate runs before `bun install`. That makes one thing load-bearing — the
@@ -61,10 +64,25 @@
 // scan and the exit code are identical, only the tree differs.
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const ALLOW_LIST = [];
+/**
+ * The trusted baseline of exceptions (flair#1825). It replaces the old in-script
+ * allow-list: a PR cannot add an offender together with its own exception here,
+ * because this file is the reviewed copy and the run is diffed against it.
+ */
+export const BASELINE_PATH = join(dirname(fileURLToPath(import.meta.url)), "cli-spawn-budgets.baseline.json");
+
+/**
+ * The ONE commit whose base legitimately has no baseline file: the origin/main
+ * sha this gate's baseline was introduced from (flair#1825). The seed path is
+ * taken ONLY when the base ref resolves to exactly this sha. Any OTHER base with
+ * no baseline file is a hard failure — a base ref repointed at any pre-baseline
+ * commit must not be enough. Full 40-char sha, read with `git merge-base`.
+ */
+export const SEED_INTRODUCTION_BASE = "4904699d80b55d9f299fe8e061aa80e4de8e9edc";
 
 const SPAWN_FNS = new Set([
   "spawn",
@@ -95,6 +113,12 @@ const ARGV_ARG_INDICES = new Map([
   ["exec", [0]],
   ["execSync", [0]],
 ]);
+
+// Bun's spawn forms (flair#1825): the argv ARRAY comes FIRST and the options
+// object SECOND — `Bun.spawn(cmd, opts)`, unlike node's `(cmd, argv, opts)`.
+const BUN_SPAWN_FNS = new Set(["Bun.spawn", "Bun.spawnSync"]);
+const BUN_OPTIONS_ARG_INDEX = 1;
+const BUN_ARGV_ARG_INDICES = [0];
 
 /** Last non-whitespace character before `i`, or "" at the start. */
 function prevSignificant(src, i) {
@@ -130,6 +154,98 @@ function skipRegex(src, i) {
     j++;
   }
   return i;
+}
+
+/**
+ * Like maskComments, but ALSO blanks the CONTENTS of string / regex literals and
+ * the literal TEXT of template literals (same length). Used for spawn-CALL
+ * matching, so a `Bun.spawn(...)` mentioned inside a plain string is not
+ * mistaken for a call. A template's `${…}` EXPRESSIONS are left as CODE — a
+ * `Bun.spawn(...)` of the CLI entry there IS a real call (flair#1825). The
+ * argv/options TEXT a call reports is sliced from the ORIGINAL source, so the
+ * CLI-entry and timeout checks still read real literal text.
+ */
+function maskLiteralsAndComments(src) {
+  const out = src.split("");
+  const blank = (from, to) => {
+    for (let j = from; j < to && j < src.length; j++) if (src[j] !== "\n") out[j] = " ";
+  };
+  let i = 0;
+  while (i < src.length) {
+    const ch = src[i];
+    if (ch === '"' || ch === "'") {
+      const end = skipNonCode(src, i);
+      blank(i, end);
+      i = end > i ? end : i + 1;
+      continue;
+    }
+    if (ch === "`") {
+      // Template: blank the literal TEXT, but leave `${…}` expressions as code.
+      out[i] = " "; // opening backtick
+      let j = i + 1;
+      while (j < src.length) {
+        if (src[j] === "\\") {
+          blank(j, j + 2);
+          j += 2;
+          continue;
+        }
+        if (src[j] === "`") {
+          out[j] = " "; // closing backtick
+          j++;
+          break;
+        }
+        if (src[j] === "$" && src[j + 1] === "{") {
+          j += 2;
+          let depth = 1;
+          while (j < src.length && depth > 0) {
+            if (src[j] === "{") depth++;
+            else if (src[j] === "}") {
+              depth--;
+              if (depth === 0) {
+                j++;
+                break;
+              }
+            }
+            j++;
+          }
+          continue;
+        }
+        if (src[j] !== "\n") out[j] = " ";
+        j++;
+      }
+      i = j;
+      continue;
+    }
+    if (ch === "/" && src[i + 1] === "/") {
+      while (i < src.length && src[i] !== "\n") {
+        out[i] = " ";
+        i++;
+      }
+      continue;
+    }
+    if (ch === "/" && src[i + 1] === "*") {
+      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) {
+        if (src[i] !== "\n") out[i] = " ";
+        i++;
+      }
+      if (i < src.length) {
+        out[i] = " ";
+        out[i + 1] = " ";
+        i += 2;
+      }
+      continue;
+    }
+    if (ch === "/" && regexCanStart(src, i)) {
+      const j = skipRegex(src, i);
+      if (j !== i) {
+        blank(i, j + 1);
+        i = j + 1;
+        continue;
+      }
+    }
+    i++;
+  }
+  return out.join("");
 }
 
 /**
@@ -327,6 +443,27 @@ export function cliEntryIdentifiers(source) {
 }
 
 /**
+ * Named aliases of the node `child_process` spawn functions, from a
+ * `import { spawn as run } from "node:child_process"` (flair#1825). Maps the
+ * alias (the name CALLED) to the original function, which fixes the arg shape.
+ * A namespace import (`import * as cp` / `cp.spawn`) is NOT covered — name the
+ * function as a named import, or call `Bun.spawn`.
+ */
+export function aliasedSpawnFns(source) {
+  const src = maskComments(source);
+  const aliases = new Map();
+  for (const m of src.matchAll(/import\s*\{([^}]*)\}\s*from\s*["'](?:node:)?child_process["']/g)) {
+    for (const item of m[1].split(",")) {
+      const parts = item.trim().split(/\s+as\s+/);
+      const orig = parts[0].trim();
+      const alias = (parts[1] ?? parts[0]).trim();
+      if (SPAWN_FNS.has(orig) && alias && alias !== orig) aliases.set(alias, orig);
+    }
+  }
+  return aliases;
+}
+
+/**
  * A single character that can appear inside a JS identifier (or the `$` of one).
  * The test is a literal regex over ONE character — no RegExp is ever built from
  * data in this file (the class Semgrep's detect-non-literal-regexp blocks, and
@@ -396,38 +533,76 @@ function textNamesCliEntry(text, ids) {
   return false;
 }
 
-/** All spawn-family calls in the file, with whether each targets the CLI entry. */
+/** All spawn-family calls in the file (node forms + Bun forms), with CLI-entry targeting. */
 export function findSpawnCalls(source) {
-  const src = maskComments(source);
+  const scan = maskLiteralsAndComments(source);
   const ids = cliEntryIdentifiers(source);
+  const aliases = aliasedSpawnFns(source);
   const constDecls = new Map();
-  for (const m of src.matchAll(/(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*/g)) {
+  for (const m of scan.matchAll(/(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*/g)) {
     const after = m.index + m[0].length;
-    const lineEnd = src.indexOf("\n", after);
-    constEnd: {
-      constDecls.set(m[1], src.slice(after, lineEnd === -1 ? src.length : lineEnd));
-    }
+    const lineEnd = source.indexOf("\n", after);
+    constDecls.set(m[1], source.slice(after, lineEnd === -1 ? source.length : lineEnd));
   }
   const calls = [];
-  for (const m of src.matchAll(/(^|[^\w$.])([A-Za-z_$][\w$]*)\s*\(/g)) {
-    const fn = m[2];
-    if (!SPAWN_FNS.has(fn)) continue;
+  const lineOf = (index) => source.slice(0, index).split("\n").length;
+  const textAt = (span) => (span ? source.slice(span.start, span.end) : "");
+  const resolveOptText = (optSpan) => {
+    const own = textAt(optSpan);
+    const trimmed = own.trim();
+    if (optSpan && /^[A-Za-z_$][\w$]*$/.test(trimmed)) return constDecls.get(trimmed) ?? "";
+    return own;
+  };
+  // Bun.spawn / Bun.spawnSync — argv array FIRST, options SECOND (flair#1825).
+  for (const m of scan.matchAll(/(^|[^\w$.])Bun\.(spawn|spawnSync)\s*\(/g)) {
+    const fn = `Bun.${m[2]}`;
     const open = m.index + m[0].length - 1;
-    const args = topLevelArgs(src, open);
+    const args = topLevelArgs(scan, open);
     if (!args) continue;
-    const argvText = (ARGV_ARG_INDICES.get(fn) ?? [0, 1]).map((i) => args.spans[i]?.text ?? "").join(" ");
-    const optSpan = args.spans[OPTIONS_ARG_INDEX.get(fn)];
-    let optText = optSpan?.text ?? "";
-    if (optSpan && /^[A-Za-z_$][\w$]*$/.test(optSpan.text.trim())) {
-      optText = constDecls.get(optSpan.text.trim()) ?? "";
-    }
+    const argvText = BUN_ARGV_ARG_INDICES.map((i) => textAt(args.spans[i])).join(" ");
+    const optText = resolveOptText(args.spans[BUN_OPTIONS_ARG_INDEX]);
     calls.push({
       fn,
       index: m.index,
-      line: src.slice(0, m.index).split("\n").length,
+      line: lineOf(m.index),
+      text: `${argvText} ; ${optText}`,
+      // The OPTIONS text is kept separately: a `timeout` is read from HERE only,
+      // never from argv (round 9 item 2).
+      optText,
       isCliEntry: textNamesCliEntry(argvText, ids),
       hasTimeout: /(^|[^\w$.])timeout\s*[:=]/.test(optText),
     });
+  }
+  // node child_process forms — bare, or via a named alias (flair#1825).
+  for (const m of scan.matchAll(/(^|[^\w$.])([A-Za-z_$][\w$]*)\s*\(/g)) {
+    const raw = m[2];
+    const fn = SPAWN_FNS.has(raw) ? raw : aliases.get(raw);
+    if (!fn) continue;
+    const open = m.index + m[0].length - 1;
+    const args = topLevelArgs(scan, open);
+    if (!args) continue;
+    const argvText = (ARGV_ARG_INDICES.get(fn) ?? [0, 1]).map((i) => textAt(args.spans[i])).join(" ");
+    const optText = resolveOptText(args.spans[OPTIONS_ARG_INDEX.get(fn)]);
+    calls.push({
+      fn: raw,
+      index: m.index,
+      line: lineOf(m.index),
+      text: `${argvText} ; ${optText}`,
+      optText,
+      isCliEntry: textNamesCliEntry(argvText, ids),
+      hasTimeout: /(^|[^\w$.])timeout\s*[:=]/.test(optText),
+    });
+  }
+  // A numeric `timeout:` value, so a case budget can be checked against the sum
+  // of the waits inside it (flair#1825).
+  for (const call of calls) {
+    // OPTIONS ONLY: an argv element must never decide `hasTimeout` (round 9 item 2).
+    const m = (call.optText ?? "").match(/(?:^|[^\w$.])timeout\s*[:=]\s*([^\s,;)}\]]+)/);
+    // ONLY the EXACT token `[1-9][0-9]*` (underscores allowed) is a deadline:
+    // `timeout: 0` is NO timeout (node and Bun), and `1e999` / `10000-10000` are
+    // expressions, not positive integers — all are unbounded (flair#1825 r6).
+    call.timeoutMs = m ? timeoutLiteralMs(m[1]) : null;
+    call.hasTimeout = call.timeoutMs !== null;
   }
   return { calls, ids };
 }
@@ -456,12 +631,9 @@ function bodyBraceFrom(src, from) {
   return -1;
 }
 
-/** File-local functions whose body contains a CLI-entry spawn, transitively. */
-export function localHelpersThatSpawn(source, calls) {
+/** File-local function/arrow bodies `{ name, start, end }` (for scope attribution). */
+export function functionBodies(source) {
   const src = maskComments(source);
-  const spawnIdx = calls.filter((c) => c.isCliEntry).map((c) => c.index);
-  const helpers = new Set();
-  if (spawnIdx.length === 0) return helpers;
   const bodies = [];
   for (const m of src.matchAll(/(?:^|\n)\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g)) {
     const open = src.indexOf("(", m.index);
@@ -470,6 +642,21 @@ export function localHelpersThatSpawn(source, calls) {
     const bodyClose = matchBrace(src, bodyOpen);
     if (bodyClose === -1) continue;
     bodies.push({ name: m[1], start: bodyOpen, end: bodyClose });
+  }
+  // ONE-LINE function bodies (round 7 item 2): `function f(...) { … }` wholly on
+  // one line — appended AFTER the existing detection so multiline bodies are
+  // unchanged (no fingerprint ripple).
+  for (const m of src.matchAll(/(?:^|\n)[ \t]*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{([^}\n]*)\}/g)) {
+    const open = src.indexOf("{", m.index);
+    const close = src.indexOf("}", open);
+    if (open !== -1 && close !== -1) {
+      // The one-line body is authoritative for this name — the primary rule may
+      // have crossed into a LATER declaration's brace for a one-line helper.
+      const idx = bodies.findIndex((b) => b.name === m[1]);
+      const entry = { name: m[1], start: open, end: close };
+      if (idx >= 0) bodies[idx] = entry;
+      else bodies.push(entry);
+    }
   }
   for (const m of src.matchAll(
     /(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/g,
@@ -485,6 +672,16 @@ export function localHelpersThatSpawn(source, calls) {
       bodies.push({ name: m[1], start: arrowEnd, end: lineEnd === -1 ? src.length : lineEnd });
     }
   }
+  return bodies;
+}
+
+/** File-local functions whose body contains a CLI-entry spawn, transitively. */
+export function localHelpersThatSpawn(source, calls) {
+  const src = maskComments(source);
+  const spawnIdx = calls.filter((c) => c.isCliEntry).map((c) => c.index);
+  const helpers = new Set();
+  if (spawnIdx.length === 0) return helpers;
+  const bodies = functionBodies(source);
   let added = true;
   while (added) {
     added = false;
@@ -502,7 +699,154 @@ export function localHelpersThatSpawn(source, calls) {
 }
 
 /** `it()` / `test()` cases, with whether each reaches a CLI-entry spawn. */
-export function findCases(source, calls, helpers) {
+/** A wait deadline is the EXACT token `[1-9][0-9]*` (underscores allowed). An
+ *  exponent (`1e999`), a trailing operator (`10000-10000`), `0`, or any other
+ *  expression is NOT a positive integer → null (unbounded, flair#1825 round 6). */
+// ONE strict literal for EVERY site (round 7 item 4): no leading zero, no
+// leading/trailing/double underscore, at most 15 digits so the value is finite
+// and safe. Anything else — `0`, `1__000`, `_1000`, `1e999`, `10000-10000`, a
+// 310-digit literal (Infinity) — is unknown → unbounded / no-budget.
+// Digits with single underscores, no leading zero / leading/trailing/double
+// underscore; the DIGIT COUNT after removing underscores is ≤ 15 (finite, safe).
+const TIMEOUT_LITERAL_RE = /^[1-9](?:_?[0-9])*$/;
+export function timeoutLiteralMs(raw) {
+  const tok = String(raw ?? "").trim();
+  if (!TIMEOUT_LITERAL_RE.test(tok)) return null;
+  const digits = tok.replace(/_/g, "");
+  if (digits.length > 15) return null; // `1_000_000_000_000_000` is NOT a deadline
+  return Number(digits);
+}
+
+/** Parse a per-case budget: a numeric literal (`30_000`) or `{ timeout: N }`. */
+export function parseBudgetMs(text) {
+  const t = (text ?? "").trim();
+  // A bare budget obeys the SAME strict literal rule (round 7 item 4): `0` is not
+  // a budget, and neither is `1__000` / `_1000`.
+  if (timeoutLiteralMs(t) !== null) return timeoutLiteralMs(t);
+  const m = t.match(/timeout\s*[:=]\s*([^\s,;)}\]]+)/);
+  return m ? timeoutLiteralMs(m[1]) : null;
+}
+
+/** Sum of every bounded wait inside a case: spawn `timeout:` + fetch timeouts.
+ *  `extraBodies` are the file-local helper bodies the case reaches (transitively),
+ *  so a wait held in a helper the case CALLS counts too (flair#1825). */
+export function sumWaitsMs(body, calls, open, close, extraBodies = []) {
+  let sum = 0;
+  for (const c of calls) {
+    if (!c.timeoutMs) continue;
+    const inside = (c.index > open && c.index < close) || extraBodies.some((b) => c.index > b.start && c.index < b.end);
+    if (inside) sum += c.timeoutMs;
+  }
+  for (const m of body.matchAll(/AbortSignal\.timeout\s*\(\s*([^\s)]+)/g)) {
+    const ms = timeoutLiteralMs(m[1]);
+    if (ms !== null) sum += ms;
+  }
+  return sum;
+}
+
+/** The bodies of every helper (transitively) a case body calls. */
+export function reachableHelperBodies(body, src, helpers, bodies) {
+  const out = [];
+  const seen = new Set();
+  const stack = [...helpers].filter((h) => identifierCalled(body, h));
+  while (stack.length) {
+    const name = stack.pop();
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const b = bodies.find((x) => x.name === name);
+    if (!b) continue;
+    out.push(b);
+    const text = src.slice(b.start, b.end);
+    for (const h of helpers) if (!seen.has(h) && identifierCalled(text, h)) stack.push(h);
+  }
+  return out;
+}
+
+/** The value text of a `signal:` property, up to the next top-level `,` or `}`. */
+function signalValueText(after) {
+  let depth = 0;
+  for (let i = 0; i < after.length; i++) {
+    const ch = after[i];
+    if (ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ")" || ch === "]") {
+      if (depth === 0) return after.slice(0, i);
+      depth--;
+    } else if (ch === "}") {
+      if (depth === 0) return after.slice(0, i);
+      depth--;
+    } else if (ch === "," && depth === 0) return after.slice(0, i);
+  }
+  return after;
+}
+
+/** Is a `signal:` value a REAL deadline? Exactly `AbortSignal.timeout(<posint>)`,
+ *  or an identifier that resolves IN THIS FILE to exactly that (flair#1825 r6). */
+function signalValueBounds(value, src) {
+  const v = value.trim();
+  const direct = v.match(/^AbortSignal\.timeout\s*\(\s*([^)]*)\)$/);
+  if (direct) return timeoutLiteralMs(direct[1]) !== null;
+  if (!/^[A-Za-z_$][\w$]*$/.test(v) || !src) return false;
+  // LITERAL scans that capture ANY identifier, compared with `===` — no dynamic
+  // RegExp, so nothing to escape (round 8 item 2). An identifier bounds a fetch
+  // ONLY when it is `const`-declared to exactly `AbortSignal.timeout(<literal>)`
+  // in the same file AND never reassigned.
+  let declaredArg = null;
+  for (const m of src.matchAll(/\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*AbortSignal\.timeout\s*\(\s*([^)]*)\)/g)) {
+    if (m[1] === v) declaredArg = m[2];
+  }
+  if (declaredArg === null) return false;
+  if (timeoutLiteralMs(declaredArg) === null) return false;
+  for (const m of src.matchAll(/\b(?:let|var)\s+([A-Za-z_$][\w$]*)\b/g)) {
+    if (m[1] === v) return false;
+  }
+  let assigns = 0;
+  for (const m of src.matchAll(/(^|[^\w$])([A-Za-z_$][\w$]*)\s*=(?!=)/g)) {
+    if (m[2] === v) assigns++;
+  }
+  if (assigns > 1) return false; // the declaration is one; more = reassigned
+  return true;
+}
+
+/** First `fetch(` whose OWN options carry no real deadline, or null. A deadline
+ *  attaches ONLY to the call whose options contain it — never by proximity, and a
+ *  bare `signal:` of unknown value is unbounded (flair#1825 round 6). */
+/** True iff this `fetch(` is a METHOD DEFINITION (object-literal/class-body
+ *  position) — and only then is it skipped. Both must hold (round 7 item 1): the
+ *  significant token before `fetch` is `{`, `,`, `;` or the keyword `async` (no
+ *  `await`/`=`/`(`/`return`/`:`/`?`/`=>` before it), AND the `{` follows the
+ *  closing paren on the SAME line. Everything else is a CALL — except the one
+ *  shape that is neither a method nor live code: `; fetch("x") {}` (a statement
+ *  brace on a bare call) is a SYNTAX ERROR, so it cannot be live, and is skipped
+ *  by the same rule. */
+function isMethodDefinition(body, fetchStart, close) {
+  const before = body.slice(0, fetchStart).replace(/\s+$/, "");
+  const prevChar = before.slice(-1);
+  const prevWord = (before.match(/([A-Za-z_$][\w$]*)$/) ?? [])[1];
+  if (!["{", ",", ";"].includes(prevChar) && prevWord !== "async") return false;
+  const rest = body.slice(close + 1);
+  const braceAt = rest.search(/\S/);
+  return braceAt !== -1 && rest[braceAt] === "{" && !/\n/.test(rest.slice(0, braceAt));
+}
+
+export function firstUnboundedFetch(body, src = body) {
+  for (const m of body.matchAll(/(^|[^\w$.])fetch\s*\(/g)) {
+    const open = body.indexOf("(", m.index);
+    const args = topLevelArgs(body, open);
+    // ONLY a real method definition is skipped; everything else is a call.
+    if (args && isMethodDefinition(body, m.index + (m[1] ? 1 : 0), args.close)) continue;
+    const initText = args && args.spans.length >= 2 ? args.spans[1].text : "";
+    const sig = initText.match(/signal\s*:\s*/);
+    let bounded = false;
+    if (sig) {
+      const value = signalValueText(initText.slice(sig.index + sig[0].length));
+      bounded = signalValueBounds(value, src);
+    }
+    if (!bounded) return `fetch(${body.slice(m.index, m.index + 40).replace(/\s+/g, " ").trim()})`;
+  }
+  return null;
+}
+
+export function findCases(source, calls, helpers, bodies = []) {
   const src = maskComments(source);
   const cases = [];
   const cliSpawnRanges = calls.filter((c) => c.isCliEntry).map((c) => c.index);
@@ -531,23 +875,80 @@ export function findCases(source, calls, helpers) {
         }
       }
     }
+    const caseBody = src.slice(open + 1, args.close);
+    const reach = reachableHelperBodies(caseBody, src, bodies.map((b) => b.name), bodies);
+    const waitsText = caseBody + "\n" + reach.map((b) => src.slice(b.start, b.end)).join("\n");
+    // The CLI-entry calls this case reaches (directly, or through a helper).
+    const reached = calls.filter(
+      (c) => c.isCliEntry && ((c.index > open && c.index < args.close) || reach.some((b) => c.index > b.start && c.index < b.end)),
+    );
+    const budgetText = args.spans[2]?.text ?? "";
     cases.push({
       fn: m[2],
       line: src.slice(0, m.index).split("\n").length,
       name: (args.spans[0]?.text.trim() ?? "").replace(/^["'`]|["'`]$/g, ""),
       argCount: args.spans.length,
       reachesSpawn: reaches,
-      hasBudget: args.spans.length >= 3,
+      budgetMs: parseBudgetMs(budgetText),
+      hasBudget: parseBudgetMs(budgetText) !== null,
+      sumWaitsMs: sumWaitsMs(waitsText, calls, open, args.close, reach),
+      unboundedFetch: firstUnboundedFetch(waitsText, src),
+      reachedFingerprints: reached.map((c) => normalizeFingerprint(c.text ?? c.fn)),
+      open,
+      close: args.close,
     });
   }
   return cases;
 }
 
+/**
+ * Normalize call text so a fingerprint survives whitespace and line moves.
+ * Whitespace inside brackets/parens/after commas is removed too, so
+ * `["bun", "src/cli.ts"]` and `["bun","src/cli.ts"]` share one key (flair#1825).
+ */
+export function normalizeFingerprint(text) {
+  return text
+    .replace(/\s+/g, " ")
+    .replace(/\[\s+/g, "[")
+    .replace(/\s+\]/g, "]")
+    .replace(/,\s+/g, ",")
+    .replace(/\s+,/g, ",")
+    .replace(/\(\s+/g, "(")
+    .replace(/\s+\)/g, ")")
+    .replace(/\s*,\s*$/, "")
+    .trim();
+}
+
+/**
+ * The stable key of an offender: file + scope + normalized fingerprint + kind +
+ * an occurrence ordinal. NEVER file:line. The ordinal distinguishes two
+ * otherwise-identical calls in one scope, so one entry covers exactly one call.
+ */
+export function offenderKey(o) {
+  return [o.file, o.scope, o.fingerprint, o.kind, String(o.occurrence ?? 0)].join(" | ");
+}
+
+/** Innermost enclosing helper (or case) name for a call index, else "<module>". */
+function scopeOf(index, bodies, cases) {
+  let best = null;
+  for (const b of bodies) {
+    if (index > b.start && index < b.end && (!best || b.start >= best.start)) best = b;
+  }
+  if (best) return best.name;
+  let bestCase = null;
+  for (const c of cases) {
+    if (index > c.open && index < c.close && (!bestCase || c.open >= bestCase.open)) bestCase = c;
+  }
+  return bestCase ? bestCase.name : "<module>";
+}
+
 export function analyzeTestFile(source) {
   const { calls, ids } = findSpawnCalls(source);
   const helpers = localHelpersThatSpawn(source, calls);
-  const cases = findCases(source, calls, helpers);
-  return { calls, ids, helpers, cases };
+  const bodies = functionBodies(source);
+  const cases = findCases(source, calls, helpers, bodies);
+  for (const call of calls) call.scope = scopeOf(call.index, bodies, cases);
+  return { calls, ids, helpers, cases, bodies };
 }
 
 function existsDir(path) {
@@ -578,26 +979,265 @@ export function scanTree(root) {
   const files = testFilesUnder(root);
   for (const file of files) {
     const rel = relative(root, file);
-    if (ALLOW_LIST.includes(rel)) continue;
     const src = readFileSync(file, "utf8");
     const { calls, cases } = analyzeTestFile(src);
     for (const call of calls) {
       if (call.isCliEntry && !call.hasTimeout) {
-        spawnOffenders.push({ file: rel, line: call.line, kind: "spawn-no-timeout", detail: `${call.fn}()` });
-      }
-    }
-    for (const c of cases) {
-      if (c.reachesSpawn && !c.hasBudget) {
-        caseOffenders.push({
+        spawnOffenders.push({
           file: rel,
-          line: c.line,
-          kind: "case-no-budget",
-          detail: `${c.fn}("${c.name.slice(0, 60)}")`,
+          line: call.line,
+          kind: "spawn-no-timeout",
+          detail: `${call.fn}()`,
+          scope: call.scope ?? "<module>",
+          fingerprint: normalizeFingerprint(call.text ?? `${call.fn}(...)`),
         });
       }
     }
+    for (const c of cases) {
+      if (!c.reachesSpawn) continue;
+      const base = { file: rel, line: c.line, scope: c.name };
+      if (!c.hasBudget) {
+        // One entry PER reached CLI-entry call, identified by the CALL, not just
+        // the case name (flair#1825 round 4).
+        const fps = c.reachedFingerprints && c.reachedFingerprints.length ? c.reachedFingerprints : [normalizeFingerprint(c.name)];
+        for (const fp of fps) {
+          caseOffenders.push({ ...base, kind: "case-no-budget", detail: `${c.fn}("${c.name.slice(0, 60)}")`, fingerprint: fp });
+        }
+      } else if (c.unboundedFetch) {
+        caseOffenders.push({ ...base, kind: "case-unbounded-fetch", detail: `unbounded ${c.unboundedFetch}`, fingerprint: normalizeFingerprint(c.name) });
+      } else if (c.budgetMs <= c.sumWaitsMs) {
+        caseOffenders.push({ ...base, kind: "case-budget-too-small", detail: `budget ${c.budgetMs} <= sum of waits ${c.sumWaitsMs} in ${c.fn}("${c.name.slice(0, 40)}")`, fingerprint: normalizeFingerprint(c.name) });
+      }
+    }
   }
+  const assignOccurrence = (list) => {
+    const counts = new Map();
+    for (const o of list) {
+      const base = [o.file, o.scope, o.fingerprint, o.kind].join(" | ");
+      const n = counts.get(base) ?? 0;
+      o.occurrence = n;
+      counts.set(base, n + 1);
+    }
+  };
+  assignOccurrence(spawnOffenders);
+  assignOccurrence(caseOffenders);
   return { files: files.map((f) => relative(root, f)), spawnOffenders, caseOffenders };
+}
+
+/** A baseline entry keyed on file:line (or carrying a `line`) is rejected. */
+export function isLineKey(entry) {
+  if (entry && typeof entry === "object" && "line" in entry) return true;
+  const file = entry && typeof entry.file === "string" ? entry.file : "";
+  return /:\d+$/.test(file);
+}
+
+/** Validate a baseline entry list: shape, no line keys, no duplicate keys. */
+export function validateBaseline(entries) {
+  const errors = [];
+  const seen = new Map();
+  if (!Array.isArray(entries)) return ["baseline must be an array of entries"];
+  entries.forEach((e, i) => {
+    const where = `entry[${i}]`;
+    if (!e || typeof e !== "object") {
+      errors.push(`${where}: not an object`);
+      return;
+    }
+    if (isLineKey(e)) errors.push(`${where}: keyed on file:line — use file + scope + fingerprint + kind`);
+    for (const f of ["file", "scope", "fingerprint", "kind"]) {
+      if (typeof e[f] !== "string" || e[f].length === 0) errors.push(`${where}: missing string "${f}"`);
+    }
+    if (!["spawn-no-timeout", "case-no-budget", "case-unbounded-fetch", "case-budget-too-small"].includes(e.kind)) {
+      errors.push(`${where}: unknown kind "${e.kind}"`);
+    }
+    if (typeof e.reason !== "string" || e.reason.length === 0) errors.push(`${where}: missing "reason"`);
+    if (e.occurrence !== undefined && (!Number.isInteger(e.occurrence) || e.occurrence < 0)) {
+      errors.push(`${where}: "occurrence" must be a non-negative integer`);
+    }
+    if (
+      typeof e.file === "string" &&
+      typeof e.scope === "string" &&
+      typeof e.fingerprint === "string" &&
+      typeof e.kind === "string"
+    ) {
+      const key = offenderKey(e);
+      if (seen.has(key)) errors.push(`${where}: duplicate fingerprint/key of ${seen.get(key)}`);
+      else seen.set(key, where);
+    }
+  });
+  return errors;
+}
+
+/** Compare current offenders to the trusted baseline. The baseline is authoritative. */
+export function diffAgainstBaseline(spawnOffenders, caseOffenders, baselineEntries) {
+  const current = [...spawnOffenders, ...caseOffenders];
+  const baselineKeys = new Set(baselineEntries.map((e) => offenderKey(e)));
+  const currentCounts = new Map();
+  for (const o of current) {
+    const k = offenderKey(o);
+    currentCounts.set(k, (currentCounts.get(k) ?? 0) + 1);
+  }
+  const newOffenders = [];
+  const seen = new Set();
+  for (const o of current) {
+    const k = offenderKey(o);
+    // Every entry covers exactly one call: the first match is the allowed one,
+    // a second identical call is a new offender (multiplicity enforced).
+    if (baselineKeys.has(k) && !seen.has(k)) {
+      seen.add(k);
+      continue;
+    }
+    newOffenders.push(o);
+  }
+  const staleEntries = baselineEntries.filter((e) => !currentCounts.has(offenderKey(e)));
+  return { newOffenders, staleEntries, ok: newOffenders.length === 0 && staleEntries.length === 0 };
+}
+
+/** Read a baseline file from disk (the PR copy; API kept for the unit tests). */
+export function loadBaseline(path = BASELINE_PATH) {
+  return JSON.parse(readFileSync(path, "utf8"));
+}
+
+/**
+ * The TRUSTED base ref the baseline is read from (flair#1825). CI supplies it via
+ * the environment (`CLI_SPAWN_BUDGETS_BASE_REF`: the PR's base sha, or the
+ * previous commit on a push). The baseline is read from THAT ref with
+ * `git show <ref>:scripts/ci/cli-spawn-budgets.baseline.json`, so a PR cannot add
+ * an exception by editing its own copy of the file. Locally the base defaults to
+ * `origin/main` and the run says so.
+ */
+export function gateBaseRef(env = process.env) {
+  const v = env.CLI_SPAWN_BUDGETS_BASE_REF || env.CLI_SPAWN_BUDGET_BASE_REF;
+  return v && v.trim().length > 0 ? v.trim() : "origin/main";
+}
+
+const BASELINE_REL = "scripts/ci/cli-spawn-budgets.baseline.json";
+
+/** Resolve a ref to its full 40-char commit sha in `root`; hard-fail if invalid. */
+export function resolveRef(ref, root) {
+  const r = spawnSync("git", ["-C", root, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { encoding: "utf8" });
+  if (r.status !== 0) {
+    throw new Error(
+      `invalid base ref '${ref}': cannot resolve it in ${root}` +
+        `${(r.stderr || "").trim() ? ` (${r.stderr.trim()})` : ""}. ` +
+        `Set CLI_SPAWN_BUDGETS_BASE_REF to a ref that exists.`,
+    );
+  }
+  return r.stdout.trim();
+}
+
+/**
+ * True when `ancestor` is an ancestor of `descendant` in `root`. Exit 1 →
+ * false; any other non-zero (e.g. a missing object) is a HARD failure naming
+ * both shas — never a silent "not an ancestor".
+ */
+export function isAncestor(ancestor, descendant, root) {
+  const r = spawnSync("git", ["-C", root, "merge-base", "--is-ancestor", ancestor, descendant], { encoding: "utf8" });
+  if (r.status === 0) return true;
+  if (r.status === 1) return false;
+  throw new Error(
+    `cannot decide whether ${ancestor} is an ancestor of ${descendant} in ${root}: ` +
+      `${(r.stderr || r.stdout || "").trim()} (is an object missing from the local store? flair#1825).`,
+  );
+}
+
+/** Read the baseline at `ref` from `root`'s git object store.
+ *
+ * FAIL CLOSED (flair#1825): an invalid/unreadable ref is a hard error naming the
+ * ref; a VALID ref with no baseline file returns null (the base baseline is
+ * EMPTY). Nothing else may be treated as "no baseline". */
+export function loadBaselineAtRef(ref, root) {
+  resolveRef(ref, root);
+  const res = spawnSync("git", ["-C", root, "show", `${ref}:${BASELINE_REL}`], { encoding: "utf8" });
+  if (res.status === 0) return JSON.parse(res.stdout);
+  // A valid ref whose tree has no baseline file → the base baseline is EMPTY.
+  if (/does not exist|exists on disk, but not in/i.test(res.stderr ?? "")) return null;
+  throw new Error(
+    `cannot read the baseline at '${ref}:${BASELINE_REL}' (git show exit ${res.status}): ${(res.stderr || "").trim()}`,
+  );
+}
+
+/** The PR tree's copy of the baseline — used ONLY to reject ADDED exceptions. */
+export function readPrBaseline(root) {
+  return JSON.parse(readFileSync(join(root, BASELINE_REL), "utf8"));
+}
+
+/** Entries a PR ADDED relative to the trusted base. A PR may only REMOVE. */
+export function addedExceptions(baseEntries, prEntries) {
+  const baseKeys = new Set(baseEntries.map(offenderKey));
+  return prEntries.filter((e) => !baseKeys.has(offenderKey(e)));
+}
+
+/**
+ * End-to-end check: scan `root`, diff against the baseline read from `baseRef`.
+ *
+ * The effective allow-list is the BASE copy. When the base has no baseline file
+ * (the PR that first introduces it), the PR copy is the initial list and no
+ * "added exception" is computed — there is nothing to add relative to. Once the
+ * base has the file, an entry in the PR copy but not the base is a failure.
+ * `stale` is computed against the PR copy, so removing a now-budgeted entry is
+ * allowed.
+ */
+export function runGate({ root, baseRef = gateBaseRef(), env = process.env, seedBase = SEED_INTRODUCTION_BASE } = {}) {
+  const { files, spawnOffenders, caseOffenders } = scanTree(root);
+  const defaulted = !(env.CLI_SPAWN_BUDGETS_BASE_REF || env.CLI_SPAWN_BUDGET_BASE_REF);
+  const prEntries = readPrBaseline(root);
+  const baseEntries = loadBaselineAtRef(baseRef, root); // throws on an invalid ref
+  const basePresent = baseEntries !== null;
+  const baseSha = resolveRef(baseRef, root);
+  const errors = [
+    ...validateBaseline(prEntries).map((e) => `pr: ${e}`),
+    ...(basePresent ? validateBaseline(baseEntries).map((e) => `base: ${e}`) : []),
+  ];
+  // The PR copy is the working list: new offenders, multiplicity, and stale
+  // entries are measured against it.
+  const diff = diffAgainstBaseline(spawnOffenders, caseOffenders, prEntries);
+  // Added exceptions: the PR copy may only REMOVE relative to the base. When the
+  // base has NO baseline file the base baseline is EMPTY, so EVERY PR entry is an
+  // addition → fail — UNLESS the base DESCENDS from the seed-introduction anchor
+  // (flair#1825). An exact-sha equality can never survive main moving. The anchor
+  // is resolved/checked ONLY on this seed path: when the base HAS the file it is
+  // dead code (a follow-up removes it — first slice of #1921).
+  let anchored = false;
+  let added;
+  if (basePresent) {
+    added = addedExceptions(baseEntries, prEntries);
+  } else {
+    let anchorSha;
+    try {
+      anchorSha = resolveRef(seedBase, root);
+    } catch {
+      throw new Error(
+        `the seed-introduction base ${seedBase} is missing from the local object store in ${root} ` +
+          `— the CI step must fetch it (git fetch origin ${seedBase}) (flair#1825).`,
+      );
+    }
+    if (!isAncestor(anchorSha, baseSha, root)) {
+      throw new Error(
+        `the base '${baseRef}' resolves to ${baseSha}, which has no baseline file and does not descend from the ` +
+          `seed-introduction base ${seedBase} — refusing to treat the PR's copy as the baseline (flair#1825).`,
+      );
+    }
+    anchored = true;
+    added = [];
+  }
+  return {
+    files,
+    spawnOffenders,
+    caseOffenders,
+    baseRef,
+    baseSha,
+    basePresent,
+    defaulted,
+    anchored,
+    seedAccepted: anchored && !basePresent,
+    allowEntries: prEntries,
+    prEntries,
+    baseEntries: baseEntries ?? [],
+    errors,
+    added,
+    ...diff,
+    ok: errors.length === 0 && diff.ok && added.length === 0,
+  };
 }
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
@@ -612,19 +1252,48 @@ if (isMain) {
     }
     root = resolve(argv[rootFlag + 1]);
   }
-  const { files, spawnOffenders, caseOffenders } = scanTree(root);
-  const offenders = [...spawnOffenders, ...caseOffenders];
-  process.stdout.write(`check-cli-spawn-budgets: scanned ${files.length} test file(s) under ${join(root, "test")}\n`);
+  const baseFlag = argv.indexOf("--base");
+  if (baseFlag !== -1 && argv[baseFlag + 1]) process.env.CLI_SPAWN_BUDGETS_BASE_REF = argv[baseFlag + 1];
+  let result;
+  try {
+    result = runGate({ root });
+  } catch (err) {
+    process.stderr.write(`check-cli-spawn-budgets: ${err.message}\n`);
+    process.exit(1);
+  }
+  const { files, spawnOffenders, caseOffenders, baseRef, baseSha, basePresent, defaulted, seedAccepted, allowEntries, errors, added, newOffenders, staleEntries, ok } = result;
+  if (seedAccepted) {
+    // Say EXACTLY what the predicate guarantees: the base is named by its own sha
+    // and DESCENDS from the anchor — it does not "resolve to" it, and a descendant
+    // base without the file is ACCEPTED, not refused (flair#1825 round 10).
+    process.stdout.write(
+      `check-cli-spawn-budgets: SEED — the base ${baseRef} (${baseSha}) has no baseline file but DESCENDS from the ` +
+        `seed-introduction commit ${SEED_INTRODUCTION_BASE}; the PR copy is the initial list. ` +
+        "A base without the file that does NOT descend from that commit, or cannot be read, is refused.\n",
+    );
+  }
+  process.stdout.write(
+    `check-cli-spawn-budgets: scanned ${files.length} test file(s) under ${join(root, "test")}; base ref ${baseRef}` +
+      `${defaulted ? " (defaulted — set CLI_SPAWN_BUDGETS_BASE_REF to pin it)" : ""}` +
+      `${basePresent ? "" : " — base has no baseline; the PR copy is the initial list"}\n`,
+  );
   if (files.length === 0) {
     process.stderr.write(
       "check-cli-spawn-budgets: no test files found — the scan saw nothing, which is not a pass.\n",
     );
     process.exit(1);
   }
-  for (const o of offenders) process.stdout.write(`  ${o.file}:${o.line}  ${o.kind}  ${o.detail}\n`);
+  for (const e of errors) process.stderr.write(`check-cli-spawn-budgets: bad baseline — ${e}\n`);
+  for (const o of newOffenders) process.stdout.write(`  NEW      ${o.file}:${o.line}  ${o.kind}  ${o.detail}\n`);
+  for (const o of staleEntries) {
+    process.stdout.write(`  STALE    ${o.file}  ${o.scope}  ${o.kind}  ${o.fingerprint.slice(0, 50)}\n`);
+  }
+  for (const o of added) {
+    process.stdout.write(`  ADDED-EX ${o.file}  ${o.scope}  ${o.kind}  ${o.fingerprint.slice(0, 50)}  (a PR may only REMOVE baseline entries)\n`);
+  }
   process.stdout.write(
-    `check-cli-spawn-budgets: ${spawnOffenders.length} CLI-entry spawn(s) with no timeout, ` +
-      `${caseOffenders.length} CLI-spawning case(s) with no budget — ${offenders.length} offender(s).\n`,
+    `check-cli-spawn-budgets: ${spawnOffenders.length} spawn(s) with no timeout, ${caseOffenders.length} case(s) offending, ` +
+      `${allowEntries.length} allowed at ${baseRef} — ${newOffenders.length} new, ${staleEntries.length} stale, ${added.length} added-exception.\n`,
   );
-  process.exit(offenders.length === 0 ? 0 : 1);
+  process.exit(ok ? 0 : 1);
 }

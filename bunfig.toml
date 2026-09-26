@@ -1,4 +1,9 @@
 [test]
 # Sandbox every `bun test` process in a throwaway HOME before any test module
 # loads (flair#1853). See test/helpers/sandbox-home.ts.
-preload = ["./test/helpers/sandbox-home.ts"]
+#
+# temp-dir.ts is loaded here too, so its removal hooks are process-global: a
+# shared helper's `afterEach`/`afterAll` registered from an importing test file
+# covers only that file, and bun evaluates every matched file in one process, so
+# a lazily-registered hook would miss the rest (flair#1889).
+preload = ["./test/helpers/sandbox-home.ts", "./test/helpers/temp-dir.ts"]

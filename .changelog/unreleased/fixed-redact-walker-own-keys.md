@@ -1,0 +1,1 @@
+- **The token-id redactor defines each rebuilt key as an own property, so a JSON-parsed `__proto__` key stays an own key.** (Refs #1907)

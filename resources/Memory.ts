@@ -67,8 +67,10 @@ function wantsTrust(target: any, opts: { includeTrust?: boolean } | undefined): 
 }
 
 /**
- * Owner ids a non-admin agent may READ (resolveAllowedOwners) live in
- * ./memory-read-scope.ts — still exported/used elsewhere (admin tooling).
+ * resolveAllowedOwners (./memory-read-scope.ts) no longer bounds reads — a
+ * non-admin reader sees its own records at any visibility plus every other
+ * agent's non-private records (resolveReadScope()); the helper is kept for
+ * admin tooling only.
  * The full read-scope condition + private-exclusion predicate is now
  * consumed through ./record-type-kit.ts's makeReadScope(), parameterized
  * from RECORD_TYPES.Memory (record-types slice 2, flair#520) rather than a
@@ -382,8 +384,9 @@ async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<stri
 }
 
 /** Does an agent hold a "write" grant from `ownerId`? Same MemoryGrant lookup
- *  pattern as Memory.search()/SemanticSearch.ts (read/search scopes) — reused
- *  here for the "write" scope that gates cross-agent supersede. */
+ *  the read paths used before the open-within-org reframe (reads no longer
+ *  consult MemoryGrant); it survives here for the "write" scope that gates
+ *  cross-agent supersede. */
 async function hasWriteGrant(granteeId: string, ownerId: string): Promise<boolean> {
   try {
     for await (const grant of (databases as any).flair.MemoryGrant.search({
@@ -549,8 +552,10 @@ export class Memory extends (databases as any).flair.Memory {
    * describe (`GET /Memory`) to a path outside search() — neither was gated
    * before this fix, so an anonymous caller got a 200 with full record
    * content / schema even though search() (and the write paths) correctly
-   * 401/403'd. Per-record ownership/grant scoping happens in get() below;
-   * the collection scope is still in search().
+   * 401/403'd. Per-record read scoping happens in get() below (its own records
+   * at any visibility plus every other agent's non-private records — grants are
+   * not consulted on reads; resolveReadScope()); the collection scope is still
+   * in search().
    *
    * allowCreate/allowUpdate/allowDelete are deliberately NOT added here:
    * post()/put()/delete() already self-enforce per-agent ownership inline
@@ -573,7 +578,8 @@ export class Memory extends (databases as any).flair.Memory {
   async get(target?: any, opts?: { includeTrust?: boolean }) {
     // Collection / query reads — the `GET /Memory/?<query>` form and the bare
     // collection — arrive as a RequestTarget with `isCollection === true`, and
-    // are governed by search() (same owner/grant scoping). Only a genuine by-id
+    // are governed by search() (same open-within-org read scope; grants are not
+    // consulted on reads). Only a genuine by-id
     // get is ownership-checked below. Without this guard, get() would receive
     // the query's RequestTarget, super.get() would return the (truthy) result
     // set, the single-record check would find no `.agentId` on it, and a valid
@@ -612,7 +618,10 @@ export class Memory extends (databases as any).flair.Memory {
    * boolean injection (e.g. [..., "or", { wildcard }]).
    *
    * Admin agents and unauthenticated internal calls pass through unfiltered.
-   * Non-admin calls also check MemoryGrant to include granted memories.
+   * Non-admin calls are scoped to the reader's own records at any visibility
+   * plus every other agent's non-private records — the shipped open-within-org
+   * read model. MemoryGrant is NOT consulted on reads; the one place the scope
+   * is resolved is memory-read-scope.ts's resolveReadScope().
    */
   async search(query?: any) {
     // Access request context via Harper's Resource instance context.
@@ -628,8 +637,9 @@ export class Memory extends (databases as any).flair.Memory {
     if (gate.kind === "denied") return gate.response;
     if (gate.kind === "unfiltered") return overlayHitStatsResult(super.search(query), ctx);
 
-    // Non-admin agent: scope to own (any visibility) + granted owners' SHARED
-    // memories only (Layer 1 private-exclusion). Centralized in
+    // Non-admin agent: scope to own records at any visibility plus every other
+    // agent's non-private records (open-within-org; MemoryGrant is not
+    // consulted on reads). Centralized in
     // memoryReadScope (record-type-kit.ts's makeReadScope(), parameterized
     // from RECORD_TYPES.Memory — see this file's header — delegating
     // "open-within-org" to memory-read-scope.ts's resolveReadScope()

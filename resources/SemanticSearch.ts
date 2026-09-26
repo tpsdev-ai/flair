@@ -12,7 +12,7 @@ import { resolveReadScope } from "./memory-read-scope.js";
 // of 2026-07-08 (see ./bm25.ts's hybridEnabled() doc); set
 // FLAIR_HYBRID_RETRIEVAL=false to revert to the legacy HNSW + +0.05
 // keyword-bump path, byte-identical to the original pre-hybrid behavior.
-import { hybridEnabled } from "./bm25.js";
+import { retrievalMode } from "./bm25.js";
 
 // The actual HNSW/BM25 retrieval + post-retrieval filtering (temporal/
 // supersede/isAllowed) now lives in the pure, side-effect-free
@@ -32,9 +32,9 @@ export class SemanticSearch extends Resource {
   // Self-authorize via the Ed25519 agent verify instead of relying on the auth
   // gate's admin super_user elevation (removed in the auth reshape). Any
   // cryptographically-verified agent may search; per-agent RESULT scoping is
-  // enforced in post() below (an agent only sees its own memories, any
-  // visibility, plus granted owners' SHARED memories — never their private
-  // ones). Without this, Harper's default denies the POST for the
+  // enforced in post() below (an agent sees its own records at any visibility
+  // plus every other agent's non-private records; grants are not consulted on
+  // reads — resolveReadScope()). Without this, Harper's default denies the POST for the
   // least-privilege flair_agent role (AccessViolation 403).
   async allowCreate(): Promise<boolean> {
     return allowVerified((this as any).getContext?.());
@@ -111,26 +111,36 @@ export class SemanticSearch extends Resource {
       }), { status: 403, headers: { "Content-Type": "application/json" } });
     }
 
-    // Scope: non-admin agent → own (+ granted). Admin agent or trusted internal
-    // call (no request) → honor the body-supplied agentId.
+    // Scope: non-admin agent → its own records at any visibility plus every
+    // other agent's non-private records (grants are not consulted on reads —
+    // resolveReadScope()). Admin agent or trusted internal call (no request) →
+    // honor the body-supplied agentId.
     const agentId: string | undefined = (authenticatedAgent && !callerIsAdmin)
       ? authenticatedAgent
       : bodyAgentId;
 
-    // Read-scope: own (any visibility) + granted owners' SHARED memories only
-    // (Layer 1). Centralized in resolveReadScope() — this used to be
+    // Read-scope: own records at any visibility + every other agent's
+    // non-private records (grants are not consulted on reads). Centralized in
+    // resolveReadScope() — this used to be
     // an inline grant-resolution loop here PLUS a `visibility === "office"`
     // global OR-clause below that leaked ANY authenticated agent's read of
     // ANY other agent's office-visible memories. Both are gone;
     // this is the ONE scoping resolution for this endpoint now.
     const scope = agentId ? await resolveReadScope(agentId) : null;
 
+    // Select the retrieval mode ONCE per request (bench-facing selector; see
+    // the flag doc in ./bm25.ts). Default (FLAIR_RETRIEVAL_MODE unset) follows
+    // the legacy FLAIR_HYBRID_RETRIEVAL boolean exactly.
+    const mode = retrievalMode();
+
     // Generate query embedding
     let qEmb = queryEmbedding;
-    if (!qEmb && q) {
+    if (!qEmb && q && mode !== "bm25-only") {
       // Always attempt embedding generation — getEmbedding() handles init internally.
       // Don't gate on getMode() which may return "none" before init completes in worker threads.
       // flair#504 Phase 2: 'query' — this is a search query, not stored content.
+      // bm25-only: skipped — that arm ranks on the lexical leg alone and must
+      // perform NO embedding call (the core ignores any qEmb it is handed).
       try { qEmb = await getEmbedding(String(q).slice(0, 8000), "query"); } catch {}
     }
 
@@ -181,8 +191,9 @@ export class SemanticSearch extends Resource {
     // ─── Build conditions for Harper query ──────────────────────────────────
     const conditions: any[] = [];
 
-    // Agent scoping: own (any visibility) OR granted-owner's SHARED memories
-    // (private-exclusion) — the centralized read-scope condition. No agentId
+    // Agent scoping: own records at any visibility OR every other agent's
+    // non-private records (grants are not consulted on reads — resolveReadScope())
+    // — the centralized read-scope condition. No agentId
     // → no scoping condition pushed (trusted internal call / admin without a
     // target agentId — matches the pre-existing unscoped fallback).
     if (scope) {
@@ -242,7 +253,9 @@ export class SemanticSearch extends Resource {
       };
     }
 
-    const hybrid = hybridEnabled();
+    // (`mode` was resolved at the top of post(); the bm25-only arm has no
+    // embedding, so the HNSW-leg portion of the overfetch policy does not apply
+    // to it — the core ignores `queryEmbedding` on that branch.)
 
     // The overfetch policy (how many raw candidates to pull from the
     // HNSW/BM25 legs relative to what the caller ultimately wants) is THIS
@@ -271,7 +284,7 @@ export class SemanticSearch extends Resource {
       minScore,
       agentId,
       isAllowed: scope?.isAllowed,
-      hybrid,
+      mode,
       ctx,
       onLegs: includeLegs ? (l) => { legs = l; } : undefined,
       // flair#744 slice 1: the trust block needs `provenance`, which the

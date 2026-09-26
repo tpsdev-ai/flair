@@ -4,6 +4,7 @@ import { handleJwtBearerGrant } from "./XAA.js";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { decideRegistration } from "./dcr-gate.js";
 import { buildAuthorizationServerMetadata } from "./oauth-discovery.js";
+import { esc } from "./admin-layout.js";
 
 /**
  * OAuth 2.1 Authorization Server for Flair.
@@ -24,9 +25,32 @@ import { buildAuthorizationServerMetadata } from "./oauth-discovery.js";
  */
 
 const ALLOWED_REDIRECT_URI = "https://claude.com/api/mcp/auth_callback";
+// The callback's ORIGIN, derived from the SAME constant the redirect_uri check
+// uses — never a second literal. The consent form's POST answers with a 302 to
+// this origin, and `form-action` is enforced across redirects, so it must be an
+// allowed form-action target.
+const ALLOWED_REDIRECT_ORIGIN = new URL(ALLOWED_REDIRECT_URI).origin;
 const ACCESS_TOKEN_TTL_MS = 3600_000;        // 1 hour
 const REFRESH_TOKEN_TTL_MS = 7 * 86400_000;  // 7 days
 const AUTH_CODE_TTL_MS = 600_000;            // 10 minutes
+
+/**
+ * The scopes this server can issue, straight from the authorization-server
+ * metadata — ONE source of truth, so the consent page can never render a scope
+ * the token endpoint would later refuse.
+ */
+const SUPPORTED_SCOPES = new Set<string>(buildAuthorizationServerMetadata().scopes_supported);
+
+/** `state` is an opaque passthrough: printable ASCII, bounded (RFC 6749 §4.1.2). */
+const STATE_MAX_LENGTH = 512;
+function isOpaqueState(value: string): boolean {
+  if (value.length > STATE_MAX_LENGTH) return false;
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if (c < 0x20 || c > 0x7e) return false;
+  }
+  return true;
+}
 
 function sha256(input: string): string {
   return createHash("sha256").update(input).digest("hex");
@@ -192,7 +216,7 @@ export class OAuthAuthorize extends Resource {
     const clientId = url.searchParams.get("client_id") ?? "";
     const redirectUri = url.searchParams.get("redirect_uri") ?? "";
     const responseType = url.searchParams.get("response_type") ?? "";
-    const scope = url.searchParams.get("scope") ?? "memory:read";
+    const scope = (url.searchParams.get("scope") ?? "").trim() || "memory:read";
     const state = url.searchParams.get("state") ?? "";
     const codeChallenge = url.searchParams.get("code_challenge") ?? "";
     const codeChallengeMethod = url.searchParams.get("code_challenge_method") ?? "";
@@ -209,6 +233,25 @@ export class OAuthAuthorize extends Resource {
       });
     }
 
+    // `state` is an opaque passthrough: printable ASCII, bounded. Anything else
+    // is refused (400) BEFORE rendering, so it can never reach the page.
+    if (!isOpaqueState(state)) {
+      return new Response(JSON.stringify({
+        error: "invalid_request",
+        error_description: `state must be printable ASCII of at most ${STATE_MAX_LENGTH} characters`,
+      }), { status: 400, headers: { "content-type": "application/json" } });
+    }
+
+    // Every requested scope must be one the server advertises (RFC 6749
+    // §4.1.2.1: invalid_scope).
+    const scopeTokens = scope.split(/\s+/).filter(Boolean);
+    if (scopeTokens.some((s) => !SUPPORTED_SCOPES.has(s))) {
+      return new Response(JSON.stringify({
+        error: "invalid_scope",
+        error_description: "one or more requested scopes are not supported by this server",
+      }), { status: 400, headers: { "content-type": "application/json" } });
+    }
+
     // Verify client exists
     const client = await (databases as any).flair.OAuthClient.get(clientId);
     if (!client) {
@@ -217,7 +260,9 @@ export class OAuthAuthorize extends Resource {
       });
     }
 
-    // Server-rendered consent page (minimal HTML, no JS frameworks)
+    // Server-rendered consent page (minimal HTML, no JS frameworks). EVERY
+    // interpolated value passes through `esc` — correct for element text and
+    // for the double-quoted attribute values below.
     const html = `<!DOCTYPE html>
 <html><head><title>Flair — Authorize</title>
 <style>body{font-family:system-ui;max-width:480px;margin:60px auto;padding:0 20px}
@@ -225,23 +270,31 @@ h1{font-size:1.4em}button{padding:10px 24px;font-size:1em;border:none;border-rad
 .approve{background:#2563eb;color:#fff}.deny{background:#e5e7eb;color:#333}
 .scope{background:#f3f4f6;padding:8px 12px;border-radius:4px;margin:4px 0;font-family:monospace}</style></head>
 <body>
-<h1>Authorize ${client.name || clientId}</h1>
+<h1>Authorize ${esc(client.name || clientId)}</h1>
 <p>This application wants to access your Flair memories:</p>
-${scope.split(" ").map((s: string) => `<div class="scope">${s}</div>`).join("")}
+${scopeTokens.map((s: string) => `<div class="scope">${esc(s)}</div>`).join("")}
 <form method="POST" action="/OAuthAuthorize" style="margin-top:24px">
-<input type="hidden" name="client_id" value="${clientId}">
-<input type="hidden" name="redirect_uri" value="${redirectUri || ALLOWED_REDIRECT_URI}">
-<input type="hidden" name="scope" value="${scope}">
-<input type="hidden" name="state" value="${state}">
-<input type="hidden" name="code_challenge" value="${codeChallenge}">
-<input type="hidden" name="code_challenge_method" value="${codeChallengeMethod}">
+<input type="hidden" name="client_id" value="${esc(clientId)}">
+<input type="hidden" name="redirect_uri" value="${esc(redirectUri || ALLOWED_REDIRECT_URI)}">
+<input type="hidden" name="scope" value="${esc(scope)}">
+<input type="hidden" name="state" value="${esc(state)}">
+<input type="hidden" name="code_challenge" value="${esc(codeChallenge)}">
+<input type="hidden" name="code_challenge_method" value="${esc(codeChallengeMethod)}">
 <button type="submit" name="action" value="approve" class="approve">Approve</button>
 <button type="submit" name="action" value="deny" class="deny">Deny</button>
 </form></body></html>`;
 
     return new Response(html, {
       status: 200,
-      headers: { "content-type": "text/html; charset=utf-8" },
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        // No script is needed by this page; an inline <style> is the only
+        // non-default allowance. The form posts back here and the POST answers
+        // with a 302 to the pinned callback, so that origin must be allowed too.
+        // Nothing may frame the consent page.
+        "content-security-policy": `default-src 'none'; frame-ancestors 'none'; style-src 'unsafe-inline'; form-action 'self' ${ALLOWED_REDIRECT_ORIGIN}`,
+        "x-content-type-options": "nosniff",
+      },
     });
   }
 

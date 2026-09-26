@@ -28,7 +28,11 @@ function resolveVersion(): string {
 
 const VERSION = resolveVersion();
 
-/** Escape HTML special characters to prevent stored XSS. */
+/**
+ * Escape HTML special characters. Correct for BOTH element text and
+ * double-quoted attribute values, so every interpolation can use it:
+ * `&`, `<`, `>`, `"`, `'` and backtick.
+ */
 export function esc(str: string | undefined | null): string {
   if (!str) return "";
   return String(str)
@@ -36,7 +40,8 @@ export function esc(str: string | undefined | null): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+    .replace(/'/g, "&#39;")
+    .replace(/`/g, "&#96;");
 }
 
 export function layout(title: string, content: string, activePage?: string): string {

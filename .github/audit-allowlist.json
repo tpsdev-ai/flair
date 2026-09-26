@@ -46,9 +46,9 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> @fastify/static",
-      "reason": "Resolved inside harper's pinned unreleased v5 build. @fastify/static 10.1.2 fixes it upstream, but the resolution belongs to harper's HTTP layer and overriding it globally would change the static-file server harper itself mounts. flair does not serve user-supplied paths through it.",
-      "added": "2026-07-27",
-      "expires": "2026-09-25",
+      "reason": "Renewed 2026-09-25 after re-reading (first added 2026-07-27). Still inside harper: harper 5.2.13 (latest) and 5.3.0-beta.2 still depend on @fastify/static ^9.1.3, and the fix is 10.1.1 (10.1.2 for the related moderate advisory), a major bump in harper's HTTP layer that a global override would force on the server harper itself mounts. Where it is used: harper's operations server registers @fastify/static once, to serve harper's own Studio assets from a fixed root (dist/server/operationsServer.js, root studio/web); flair's component config mounts no static files, and flair's application port does not load it. In the default flair install the operations server listens on 127.0.0.1 and an owner-only domain socket. Short leash (14 days) pending the upstream fix; the retirement path is harper moving to @fastify/static >=10.1.2, which also clears GHSA-8pvw-jcv7-9cmj.",
+      "added": "2026-09-25",
+      "expires": "2026-10-09",
       "removeWhen": "harper ships a v5 build resolving @fastify/static >=10.1.2, or flair stops depending on harper."
     },
     {
@@ -77,9 +77,9 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> lodash, and workspace @tpsdev-ai/n8n-nodes-flair -> n8n-workflow -> lodash",
-      "reason": "Two independent edges resolve the same vulnerable lodash, one of them inside harper's pinned build. lodash 4.18.1 fixes it, but a bun override is global \u2014 it would move harper's copy too, and lodash 4.18 is a minor bump across a package harper uses pervasively. The vulnerable API (_.template with attacker-controlled imports keys) is not reachable from flair's own code.",
-      "added": "2026-07-27",
-      "expires": "2026-09-25",
+      "reason": "Renewed 2026-09-25 after re-reading (first added 2026-07-27). The harper edge is now fixed in bun.lock (harper -> lodash 4.18.1). The one remaining vulnerable copy is n8n-workflow's nested lodash 4.17.21, inside the @tpsdev-ai/n8n-nodes-flair workspace package, where n8n-workflow is a peer dependency supplied by the host n8n at runtime (the pinned copy is a dev dependency). The vulnerable API (_.template with attacker-controlled imports keys) is called nowhere in flair or in the n8n package's source, and flair's server never loads that package.",
+      "added": "2026-09-25",
+      "expires": "2026-10-09",
       "removeWhen": "harper ships a v5 build resolving lodash >=4.18.1 AND n8n-workflow does the same, or the n8n-nodes-flair workspace package is dropped. Both edges must clear."
     },
     {

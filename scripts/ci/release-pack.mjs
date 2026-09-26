@@ -119,27 +119,48 @@ export function exactPinViolations(manifests, version, members) {
 /**
  * Resolve the ordered pack list. When `dirs` is supplied it is the workflow's
  * declared publish set and must name exactly the derived `lockstepPackages()`
- * set — no missing, extra or duplicated directory (a package packed twice).
- * Without `dirs`, the derived set is used.
+ * set: a missing, extra or duplicated directory (a package packed twice) is
+ * refused HERE — before any `npm pack` runs — as well as by the post-pack set
+ * check in `packAll`. An explicitly EMPTY `dirs` (a declared set of zero
+ * members) is NOT the same as an omitted one: it names none of the derived
+ * members and is refused, naming them. Without `dirs` (`null`/`undefined`),
+ * the derived set is used.
  */
 export function resolvePackOrder(root, dirs) {
-  const byDir = new Map(publishableManifests(root).map((m) => [m.dir, m.name]));
+  const manifests = publishableManifests(root);
+  const byDir = new Map(manifests.map((m) => [m.dir, m.name]));
+  const canonical = lockstepPackages(root);
 
-  if (!dirs || dirs.length === 0) {
-    const byName = new Map(publishableManifests(root).map((m) => [m.name, m.dir]));
-    return lockstepPackages(root).map((n) => byName.get(n));
+  if (dirs == null) {
+    const byName = new Map(manifests.map((m) => [m.name, m.dir]));
+    return canonical.map((n) => byName.get(n));
   }
 
   const seen = new Set();
+  const names = [];
   for (const raw of dirs) {
     const dir = raw.replace(/\/$/, "") || ".";
     if (seen.has(dir)) {
       throw new PackError(`the publish set lists "${dir}" twice; a package may be packed exactly once`);
     }
     seen.add(dir);
-    if (!byDir.has(dir)) {
+    const name = byDir.get(dir);
+    if (!name) {
       throw new PackError(`the publish set names "${dir}", which is not a publishable package`);
     }
+    names.push(name);
+  }
+
+  // Up-front coverage against the derived membership, so a missing member fails
+  // BEFORE any tarball is built (the comment promised this; the check used to
+  // live only after packing).
+  const missing = canonical.filter((n) => !names.includes(n));
+  const extra = names.filter((n) => !canonical.includes(n));
+  if (missing.length > 0) {
+    throw new PackError(`the publish set is missing ${missing.join(", ")} from lockstepPackages(); refusing before any tarball is built`);
+  }
+  if (extra.length > 0) {
+    throw new PackError(`the publish set adds ${extra.join(", ")}, which lockstepPackages() does not publish; refusing before any tarball is built`);
   }
   return dirs.map((d) => d.replace(/\/$/, "") || ".");
 }
@@ -254,13 +275,16 @@ export function packAll({ root, out, version, dirs }) {
 }
 
 export function parseArgs(argv) {
-  const out = { root: ROOT, out: null, version: null, dirs: [] };
+  const out = { root: ROOT, out: null, version: null, dirs: null };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--root") out.root = argv[++i];
     else if (arg === "--out") out.out = argv[++i];
     else if (arg === "--version") out.version = argv[++i];
     else if (arg === "--dirs") {
+      // `--dirs` present with zero entries is a DECLARED, empty set ([]) — not
+      // an omitted one (null). resolvePackOrder treats those differently.
+      if (out.dirs === null) out.dirs = [];
       while (i + 1 < argv.length && !argv[i + 1].startsWith("--")) out.dirs.push(argv[++i]);
     } else throw new PackError(`unknown argument: ${arg}`);
   }

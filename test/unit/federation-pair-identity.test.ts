@@ -94,11 +94,30 @@ describe("wiring — spoke fail-closed; no FederationInstance fetch", () => {
 
   it("FederationPair.post still returns instance.{id,publicKey} from the Instance row (flair#213)", () => {
     const src = readFileSync(join(root, "resources/Federation.ts"), "utf8");
-    expect(src).toContain("id: ourInstance.id");
-    expect(src).toContain("publicKey: ourInstance.publicKey");
-    expect(src).toMatch(/instance:\s*ourInstance\s*\?/);
+    // The row the response carries is the one the DECISION picked (flair#1883
+    // round 3): exactly one row, or a refusal — never the first row of a search.
+    expect(src).toContain("decideInstanceAnswer(identityRows)");
+    expect(src).toContain("id: identity.row.id");
+    expect(src).toContain("publicKey: identity.row.publicKey");
+    expect(src).toMatch(/instance:\s*identity\.kind === "answer"\s*\?/);
     expect(src).not.toContain("HUB_IDENTITY_INCOMPLETE");
     expect(src).not.toContain("pairResponseInstance");
+  });
+
+  it("the several-rows refusal is decided BEFORE the one-time token is consumed", () => {
+    // The order is the fix: a check that runs after the consumption has already
+    // burned the token and written the peer (flair#1883 round 3).
+    const src = readFileSync(join(root, "resources/Federation.ts"), "utf8");
+    // Search from FederationPair's own class: GET /FederationInstance has the
+    // same refusal earlier in the file, and a search from the top finds that
+    // one, which precedes the consume however FederationPair is ordered.
+    const pairClass = src.indexOf("class FederationPair");
+    expect(pairClass).toBeGreaterThan(-1);
+    const refusal = src.indexOf('error: "multiple_instance_rows"', pairClass);
+    const consume = src.indexOf("flair.PairingToken.put(", pairClass);
+    expect(refusal).toBeGreaterThan(-1);
+    expect(consume).toBeGreaterThan(-1);
+    expect(consume).toBeGreaterThan(refusal);
   });
 
   it("spoke pair writes resolvedHub.peer.publicKey and never ?? \"\" or GET /FederationInstance", () => {

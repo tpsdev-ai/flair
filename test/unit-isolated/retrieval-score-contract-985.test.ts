@@ -157,7 +157,7 @@ function run(overrides: Record<string, any> = {}) {
     scoring: "raw",
     minScore: 0,
     agentId: AGENT,
-    hybrid: true,
+    mode: "hybrid",
     ...overrides,
   } as any);
 }

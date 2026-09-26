@@ -97,15 +97,9 @@ At this point you'll see your instance ID, public key, and role: `spoke`. The pe
 
 ## 5. Pair with the Hub
 
-### 5a. Generate a pairing token on the hub
+### 5a. Generate a pairing token
 
-On the **hub host**, an admin runs:
-
-```bash
-flair federation token --admin-pass <hub-admin-pass> > pair-triple.json
-```
-
-Output (a single JSON object):
+The command prints one JSON object. Tokens expire after **60 minutes** by default. Use `--ttl <minutes>` to extend.
 
 ```json
 {
@@ -116,23 +110,48 @@ Output (a single JSON object):
 }
 ```
 
-Tokens expire after **60 minutes** by default. Use `--ttl <minutes>` to extend.
+#### Hub you can shell into
+
+On the **hub host**, an admin runs:
+
+```bash
+(umask 077; set -C; flair federation token --admin-pass-file ~/.flair/admin-pass > pair-triple.json)
+```
+
+`umask 077` sets the mode of a file the redirect CREATES; an existing file keeps its mode, so `set -C` (noclobber) makes the redirect refuse to overwrite it. Remove an old `pair-triple.json` first (`rm pair-triple.json`).
+
+#### Harper Fabric hub (no shell)
+
+A Fabric-deployed hub is a Harper component on a managed cluster. There is no host to shell into. Mint the triple from any machine that can reach the hub — for a personal spoke, that machine is the spoke — and name both the data URL and the ops URL:
+
+```bash
+(umask 077; set -C; flair federation token --admin-pass-file /path/to/hub-admin-pass \
+  --target https://<hub>.<org>.harperfabric.com \
+  --ttl 60 \
+  --ops-target https://<hub>.<org>.harperfabric.com:9925 > pair-triple.json)  # docs-freshness-allow: Fabric ops API port, not legacy data port
+```
+
+`/path/to/hub-admin-pass` is a 0600 file holding the **HUB** admin password on the minting machine, not the spoke's `~/.flair/admin-pass`, which authenticates only the spoke. `--admin-pass-file` reads it in-process (mode 0600 enforced), so it stays out of shell history and the process list; a literal on the command line would land in both. `--ops-target` is the Harper operations API on the same hostname at port 9925. <!-- docs-freshness-allow: Fabric ops API port, not legacy data port --> A portless `https://` `--target` derives that same port. Pass `--ops-target` so the URL is the one you chose. An explicit port other than 443 still derives as REST port minus one, which is not this ops port. `federation token` also accepts `--admin-pass` (kept for compatibility, but it lands in shell history and the process list) or `FLAIR_ADMIN_PASS` (suits CI).
 
 ### 5b. Transfer the triple to the spoke
+
+When the triple was minted **on the hub host**, copy it to the spoke:
 
 ```bash
 scp hub-host:/path/to/pair-triple.json ./pair-triple.json
 ```
 
+When it was minted with `--target` against a Fabric hub, the file is already on the machine that ran the command. If that machine is the spoke, this step is done. The file holds a one-time credential — delete it after pairing.
+
 ### 5c. Pair from the spoke
 
 ```bash
 flair federation pair https://<hub-url> \
-  --token-from ./pair-triple.json \
-  --admin-pass "$FLAIR_ADMIN_PASS"
+  --admin-pass-file ~/.flair/admin-pass \
+  --token-from ./pair-triple.json
 ```
 
-The `--admin-pass` is required so the CLI can write the hub as a local `Peer` record. Without it, pairing succeeds on the hub side but the spoke never records its peer, and `flair federation sync` reports "No hub peer configured."
+The spoke admin credential (`--admin-pass-file ~/.flair/admin-pass`, or `FLAIR_ADMIN_PASS`/`--admin-pass`) is required so the CLI can write the hub as a local `Peer` record. Without it, pairing succeeds on the hub side but the spoke never records its peer, and `flair federation sync` reports "No hub peer configured."
 
 ### 5d. What pairing does
 
@@ -146,7 +165,7 @@ The `--admin-pass` is required so the CLI can write the hub as a local `Peer` re
 ## 6. Sync for the First Time
 
 ```bash
-flair federation sync --admin-pass "$FLAIR_ADMIN_PASS"
+flair federation sync --admin-pass-file ~/.flair/admin-pass
 ```
 
 Expected:
@@ -160,7 +179,7 @@ Then verify the pairing. `federation verify` pushes the canary itself — you
 do not need the systemd timer from §7 first:
 
 ```bash
-flair federation verify --admin-pass "$FLAIR_ADMIN_PASS"
+flair federation verify --admin-pass-file ~/.flair/admin-pass
 flair federation reachability
 ```
 
@@ -267,18 +286,21 @@ grep port ~/.flair/config.yaml
 export FLAIR_URL=http://127.0.0.1:9926
 ```
 
-### 🔸 Fabric hosts split REST and ops ports
+### 🔸 Harper Fabric hub vs a self-hosted explicit port
 
-Fabric deployments split the REST API and the Harper operations API onto adjacent ports. The derivation rule is **ops = REST − 1**. When pointing a CLI at a remote Fabric instance, pass the REST URL and the ops URL is derived automatically — substitute the hub's actual REST port (19926 for a fresh deployment, or whatever it was provisioned with):
+A managed Harper Fabric hub (`https://<hub>.<org>.harperfabric.com`, HTTPS on 443) serves the operations API on port 9925 of the same hostname. <!-- docs-freshness-allow: Fabric ops API port, not legacy data port --> Mint the pairing token with `--target` and `--ops-target` as in [§5a](#harper-fabric-hub-no-shell). Pairing from the spoke still uses the public hub URL:
 
 ```bash
-flair federation pair https://fabric-node.example.com:19926/<instance> --token-from triple.json
+flair federation pair https://<hub>.<org>.harperfabric.com \
+  --admin-pass-file ~/.flair/admin-pass \
+  --token-from ./pair-triple.json
 ```
 
-For explicit ops control:
+A self-hosted instance that publishes an explicit REST port still uses ops = REST − 1 (a fresh local install is 19926 → 19925). Pass that ops URL with `--ops-target` when you are not on the box:
 
 ```bash
 flair federation pair https://fabric-node.example.com:19926/<instance> \
+  --admin-pass-file ~/.flair/admin-pass \
   --token-from triple.json \
   --ops-target https://fabric-node.example.com:19925
 ```
@@ -292,10 +314,10 @@ flair federation pair https://fabric-node.example.com:19926/<instance> \
 | Install | `npm install -g @tpsdev-ai/flair` |
 | Init spoke | `flair init --agent-id <id> --data-dir /data/flair --skip-soul` |
 | Check status | `flair status` / `flair federation status` |
-| Hub: mint token | `flair federation token --admin-pass <pass> > triple.json` |
-| Spoke: pair | `flair federation pair <hub-url> --token-from ./triple.json --admin-pass <pass>` |
-| Spoke: sync | `flair federation sync --admin-pass <pass>` |
-| Spoke: verify | `flair federation verify --admin-pass <pass>` then `flair federation reachability` |
+| Hub: mint token | On the hub host: `(umask 077; set -C; flair federation token --admin-pass-file ~/.flair/admin-pass > triple.json)`. Harper Fabric hub (no shell): §5a `--target` + `--ops-target` |
+| Spoke: pair | `flair federation pair <hub-url> --admin-pass-file ~/.flair/admin-pass --token-from ./triple.json` |
+| Spoke: sync | `FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation sync` |
+| Spoke: verify | `FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation verify` then `flair federation reachability` |
 | Watch loop | `flair federation watch --interval 30` |
 
 ---

@@ -195,7 +195,11 @@ async function main() {
       const extracted = extractTarball(tarball, dir);
       if (!extracted.ok) {
         console.error(`DID NOT RUN: could not extract ${tarball} (${extracted.error})`);
-        process.exit(2);
+        // Set the code and return through the `finally` below, which removes the
+        // temp dirs: `process.exit()` terminates immediately and SKIPS `finally`,
+        // so an extract failure leaked its `flair-shipped-*` dir (flair#1889).
+        process.exitCode = 2;
+        return;
       }
       const shipped = findShippedModules(join(dir, "package"));
       if (!shipped.length) {
@@ -203,7 +207,8 @@ async function main() {
           `[shipped-descriptors] ✗ ${tarball}: no ${join("dist", "<dir>", SHIPPED_REL_SUFFIX)} entry — ` +
             "the tarball ships no tool descriptors at all",
         );
-        process.exit(1);
+        process.exitCode = 1;
+        return;
       }
       for (const file of shipped) candidates.push({ label: `${tarball} → ${relative(dir, file)}`, module: file });
     }
@@ -234,7 +239,8 @@ async function main() {
     if (failures.length) {
       console.error(`[shipped-descriptors] FAILED ${failures.length} check(s):`);
       for (const f of failures) console.error(`  ✗ ${f}`);
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
     console.error(`[shipped-descriptors] OK — ${candidates.length} shipped module(s) match the source of truth`);
   } finally {

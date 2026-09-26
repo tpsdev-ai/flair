@@ -8,7 +8,7 @@ import { resolveBuildInfo } from "./build-info.js";
 import { getMigrationStatusSnapshot } from "./migrations/status.js";
 import { resolveMigrationDataDirForRead } from "./migrations/data-dir.js";
 import { REM_DEDUP_STATS_PATH } from "./dedup-cluster.js";
-import { hybridEnabled } from "./bm25.js";
+import { hybridEnabled, retrievalMode } from "./bm25.js";
 import { bm25IndexEnabled, bm25IndexStatus } from "./bm25-index-service.js";
 import { normalizeStamp } from "./embedding-space-guard.js";
 import { getModelId } from "./embeddings-provider.js";
@@ -21,6 +21,8 @@ import {
   PEER_LIVENESS_MEASURED_BY,
   summarizePeerLiveness,
 } from "./federation-peer-liveness.js";
+import { decideInstanceAnswer, INSTANCE_ROW_PRUNE_REMEDY } from "../src/lib/instance-identity-row.js";
+import { readAllInstanceRows } from "./Federation.js";
 
 const db = databases as any;
 
@@ -139,6 +141,7 @@ export function currentSearchReadiness(): SearchReadiness {
     memoryTable: db.flair?.Memory,
     bm25: bm25IndexStatus(),
     hybridEnabled: hybridEnabled(),
+    retrievalMode: retrievalMode(),
     bm25IndexEnabled: bm25IndexEnabled(),
     warn: (message) => { logger.warn?.(message); },
   });
@@ -188,6 +191,10 @@ export class HealthDetail extends Resource {
       warnings.push({ level: "warn", message: embeddingBody.embedding.fallback });
     }
     stats.searchReady = readiness.searchReady;
+    // The active retrieval strategy (retrievalMode() in ./bm25.ts) — reported
+    // so an operator can see WHICH ranker a process is serving from. Default
+    // (FLAIR_RETRIEVAL_MODE unset) is "hybrid", the shipped behavior.
+    stats.retrievalMode = retrievalMode();
     // Public/detail shape is unchanged: searchReadyReason stays a lag signal
     // (present iff !searchReady). Ready-path verification constants stay on
     // the decision object (flair#1411).
@@ -372,17 +379,56 @@ export class HealthDetail extends Resource {
 
     // ── Federation ──
     try {
-      const instances: any[] = [];
-      try { for await (const i of db.flair.Instance.search({})) instances.push(i); } catch { /* absent */ }
+      // flair#1896: read the Instance rows the SAME way GET /FederationInstance
+      // does — through readAllInstanceRows (the strict reader, which throws on a
+      // row it cannot name) and decide with decideInstanceAnswer. A read that
+      // FAILS is not "no instance": it must report unreadable, never a silent
+      // null (swallowing a failed read as absent was the defect this fix ends).
+      // Several rows are a refusal naming the prune, never a coin-toss pick of
+      // whichever row the search happened to yield first.
+      let instanceReport:
+         | null
+         | { id: string; role: string | null; status: string | null }
+         | { multiple: true; count: number; remedy: string; rows?: { id: string; role: string | null; createdAt: string | null }[] }
+         | { unreadable: true } = null;
+      try {
+        const instanceRows = await readAllInstanceRows();
+        const instanceDecision = decideInstanceAnswer(instanceRows);
+        if (instanceDecision.kind === "answer") {
+          instanceReport = {
+            id: instanceDecision.row.id,
+            role: instanceDecision.row.role ?? null,
+            status: instanceDecision.row.status ?? null,
+           };
+         } else if (instanceDecision.kind === "refuse-multiple") {
+          const multi: { multiple: true; count: number; remedy: string; rows?: { id: string; role: string | null; createdAt: string | null }[] } = {
+            multiple: true,
+            count: instanceDecision.rows.length,
+            remedy: INSTANCE_ROW_PRUNE_REMEDY,
+           };
+          if (isAdmin) {
+            multi.rows = instanceDecision.rows.map((r) => ({
+              id: r.id,
+              role: r.role ?? null,
+              createdAt: r.createdAt ?? null,
+             }));
+           }
+          instanceReport = multi;
+         }
+         // "none" leaves instanceReport === null — exactly as before.
+       } catch {
+         // A failed read, or a row the reader could not name, is UNREADABLE —
+         // never a silent null. (readAllInstanceRows throws in both cases.)
+        instanceReport = { unreadable: true };
+       }
       const peers: any[] = [];
       try { for await (const p of db.flair.Peer.search({})) peers.push(p); } catch { /* absent */ }
       const tokens: any[] = [];
       try { for await (const t of db.flair.PairingToken.search({})) tokens.push(t); } catch { /* absent */ }
 
-      if (instances.length === 0 && peers.length === 0) {
+      if (instanceReport === null && peers.length === 0) {
         stats.federation = null;
       } else {
-        const inst = instances[0];
         // flair#1499: derive connected/down from lastSyncAt, not stored
         // status. Pairing writes `paired`; a recent lastSyncAt is connected.
         // Revoked rows are counted separately and never drive the >24h warning.
@@ -401,7 +447,7 @@ export class HealthDetail extends Resource {
           (t: any) => !t.consumedBy && t.expiresAt && new Date(t.expiresAt).getTime() > nowMs,
         ).length;
         stats.federation = {
-          instance: inst ? { id: inst.id, role: inst.role, status: inst.status } : null,
+          instance: instanceReport,
           peers: peersBlock,
           pendingTokens,
           peerList: isAdmin

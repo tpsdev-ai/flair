@@ -30,6 +30,7 @@ async function adminOp(harper: HarperInstance, op: Record<string, any>): Promise
       Authorization: "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64"),
     },
     body: JSON.stringify(op),
+    signal: AbortSignal.timeout(20_000),
   });
 }
 
@@ -147,6 +148,7 @@ describe("flair#1146 status --json federation.peers on a real instance", () => {
   test("HealthDetail and status --json agree: both peers with lastSyncAt count as connected", async () => {
     const healthRes = await fetch(`${harper.httpURL}/HealthDetail`, {
       headers: { Authorization: basicAuth(harper) },
+      signal: AbortSignal.timeout(5_000),
     });
     expect(healthRes.ok).toBe(true);
     const health = await healthRes.json() as any;

@@ -4,11 +4,16 @@
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { webcrypto } from 'node:crypto';
+import { takeAgentFlag, requireAgentIdentity } from './lib/agent-identity.mjs';
 const { subtle } = webcrypto;
 
 const FLAIR_URL = process.env.FLAIR_URL || 'http://127.0.0.1:9926';
 const EMBED_URL = process.env.EMBED_URL || 'http://127.0.0.1:9927';
-const AGENT_ID = process.env.FLAIR_AGENT_ID || 'flint';
+
+// Identity (flair#1822): the caller's, never a shipped default. Refused before
+// any key load or network call. `--agent <id>` or FLAIR_AGENT_ID.
+const { agentId: agentFromFlag, rest: flagArgs } = takeAgentFlag(process.argv.slice(2));
+const AGENT_ID = requireAgentIdentity({ flagValue: agentFromFlag, action: 'sync' });
 const PRIV_KEY_PATH = process.env.FLAIR_PRIV_KEY || `${process.env.HOME}/.tps/secrets/flair/${AGENT_ID}-priv.key`;
 const MEMORY_DIR = process.env.FLAIR_MEMORY_DIR || `${process.env.HOME}/ops/agents/${AGENT_ID}/memory`;
 
@@ -34,7 +39,7 @@ async function flairFetch(method, path, body, privKey) {
 }
 
 const privKey = await loadPrivateKey();
-const [,, cmd, arg] = process.argv;
+const [cmd, arg] = flagArgs;
 const today = new Date().toISOString().slice(0, 10);
 
 switch (cmd) {

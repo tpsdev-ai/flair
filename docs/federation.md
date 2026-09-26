@@ -4,7 +4,7 @@ Hub-and-spoke sync between Flair instances. A hub instance coordinates sync for 
 
 ## Overview
 
-Federation lets multiple Flair instances share memories, relationships, and agent records **in one direction per call**. Each instance maintains its own Ed25519 identity. Sync requests are signed and verified against pinned peer public keys.
+Federation lets multiple Flair instances share memories, relationships, and agent records **in one direction per call**. Each instance maintains its own Ed25519 identity. Sync requests are signed and verified against pinned peer public keys. A push omits private memories — see [What a push sends](#what-a-push-sends).
 
 ```
 Spoke A ──[POST /FederationSync]──▶ Hub
@@ -35,7 +35,7 @@ Pairing connects a spoke to a hub with mutual key pinning and an auth-aware hand
 On the hub machine, the admin runs `flair federation token`. The command emits a JSON triple containing a one-time bootstrap credential:
 
 ```bash
-flair federation token --admin-pass <hub-admin-password>
+flair federation token --admin-pass-file ~/.flair/admin-pass
 ```
 
 Output (a single JSON object):
@@ -56,10 +56,10 @@ On the spoke machine:
 
 ```bash
 # From a file
-flair federation pair <hub-url> --token-from /path/to/triple.json
+flair federation pair <hub-url> --admin-pass-file ~/.flair/admin-pass --token-from /path/to/triple.json
 
 # From stdin
-cat triple.json | flair federation pair <hub-url> --token-from -
+cat triple.json | flair federation pair <hub-url> --admin-pass-file ~/.flair/admin-pass --token-from -
 ```
 
 **4. Behind the scenes**
@@ -76,21 +76,25 @@ Earlier designs relied on `allowCreate=true` combined with body-only authenticat
 
 ## Fabric Pairing Example
 
-When the hub runs on Harper Fabric, adapt the hub URL to the Fabric pattern:
+A managed Harper Fabric hub has no shell. Mint the triple from any machine that can reach it, then pair from the spoke. The `--admin-pass-file` on that mint is the **hub/cluster** admin (the admin file on the hub host, or a secret manager), not the spoke's `~/.flair/admin-pass`. `--admin-pass-file` reads the password in-process (mode 0600 enforced) so it stays out of shell history and the process list; `--admin-pass` is also accepted but lands in both, and `FLAIR_ADMIN_PASS` suits CI. The full bring-up, including why `--ops-target` names port 9925, is [spoke-bringup.md §5a](spoke-bringup.md#harper-fabric-hub-no-shell). <!-- docs-freshness-allow: Fabric ops API port, not legacy data port -->
 
 ```bash
-# 1. Hub admin generates the triple (on the Fabric host)
-ssh hub-host
-flair federation token --admin-pass <hub-admin-password> > /tmp/pair-triple.json
+# 1. On any machine (the spoke itself is fine) — no ssh, no scp.
+# umask 077 sets the mode of a file the redirect CREATES; set -C makes the redirect
+# refuse to overwrite an existing one, so a retry cannot truncate-and-reuse a looser file.
+# /path/to/hub-admin-pass is a 0600 file holding the HUB admin password, not ~/.flair/admin-pass on this machine.
+(umask 077; set -C; flair federation token --admin-pass-file /path/to/hub-admin-pass \
+  --target https://<hub>.<org>.harperfabric.com \
+  --ttl 60 \
+  --ops-target https://<hub>.<org>.harperfabric.com:9925 > ./pair-triple.json)  # docs-freshness-allow: Fabric ops API port, not legacy data port
 
-# 2. Transfer the triple to the spoke admin (out-of-band)
-scp hub-host:/tmp/pair-triple.json ./pair-triple.json
-
-# 3. Spoke admin pairs using the Fabric URL
-flair federation pair https://<fabric-node>:19926/<instance-name> --token-from ./pair-triple.json
+# 2. On the spoke — the SPOKE admin password (its own ~/.flair/admin-pass) writes the local Peer row; the mint above used the hub admin
+flair federation pair https://<hub>.<org>.harperfabric.com \
+  --admin-pass-file ~/.flair/admin-pass \
+  --token-from ./pair-triple.json
 ```
 
-Replace `<fabric-node>`, `<instance-name>`, and `<hub-admin-password>` with your actual values.
+Replace `<hub>` and `<org>` with your actual values, and point `/path/to/hub-admin-pass` at a 0600 file holding the hub admin password on the minting machine. The pair step's admin password is the spoke's, used to write the local Peer row.
 
 Running the hub on Fabric has its own considerations — port derivation against a managed
 `443` endpoint, why the sync driver can only be installed on a machine you control, and
@@ -102,9 +106,29 @@ the observability limits of a node you have no shell on. See
 Push local changes to the hub, once:
 
 ```bash
-flair federation sync --admin-pass <password>
+flair federation sync --admin-pass-file ~/.flair/admin-pass
 # Output: ✅ Synced 12 records (0 skipped) in 145ms
 ```
+
+`sync` and `verify` take the admin password from `--admin-pass-file` (an owner-only
+file, mode 0600 enforced). In CI, where a file is awkward, set `FLAIR_ADMIN_PASS`
+instead: an explicit `--admin-pass-file` or `--admin-pass` overrides it, and giving
+both the file and `--admin-pass` is a usage error. Avoid `--admin-pass` itself — it
+lands in shell history and the process list.
+
+### What a push sends
+
+Each sync pushes rows changed since the cursor from four tables: `Memory`, `Soul`, `Agent`, and `Relationship`. `Presence` is not in that set.
+
+**Memory rows with `visibility` exactly `"private"` are left behind.** Durability is not the filter. `"shared"` and any other present value are included. Soul, Agent, and Relationship have no `visibility` field, so this rule does not apply to them.
+
+A Memory row with **no `visibility` field still syncs, on purpose.** Those rows were written before the field existed. The push uses the same predicate as cross-agent read (`resolveReadScope` in `resources/memory-read-scope.ts`): only the literal string `"private"` is private. Missing, `null`, and anything else stay non-private so pre-field rows keep replicating exactly as they did. That is the migration rule, not a hole in the filter.
+
+Private means owner-only on this instance. A peer that received the row would hold a copy other agents on that instance could read. Holding the row back is the point of `private`.
+
+Durability still explains a count gap that is entirely `standard` rows. When a write omits `visibility`, the server defaults it from durability: `permanent` and `persistent` become `shared`; `standard`, `ephemeral`, and an omitted durability become `private`. A standard memory therefore stays on the spoke unless the writer set `visibility` to `shared`. Ephemeral memories are private-only at write time, so they never federate. That is the default and the ephemeral constraint, not a second filter and not loss of memories that were stored as shared.
+
+`flair federation verify` writes its canary as `durability: "standard"` and `visibility: "shared"` for this reason. When every changed Memory row was withheld, sync says they were held back for private visibility instead of reporting that nothing changed.
 
 ### Keeping it synced
 
@@ -245,7 +269,7 @@ Records with `updatedAt` more than 5 minutes in the future are rejected. This pr
 | `flair federation sync disable [--remove-shim]` | Remove the scheduled sync driver |
 | `flair federation sync status` | Show whether the driver is installed and genuinely active |
 | `flair federation watch [--interval <s>]` | Run sync in a foreground loop for an interactive session (default 30s) |
-| `flair federation verify [--wait <s>] [--admin-pass <pass>]` | Write a canary, push it, and check each peer. Flag/file admin credentials authenticate the admin-gated peer listing. 401/403, unreachable, and revoked are UNVERIFIABLE (warning, exit 0); a reachable peer missing the canary still FAILs (exit 1). |
+| `flair federation verify [--wait <s>] [--admin-pass-file <path>]` | Write a canary, push it, and check each peer. Flag/file admin credentials authenticate the admin-gated peer listing. 401/403, unreachable, and revoked are UNVERIFIABLE (warning, exit 0); a reachable peer missing the canary still FAILs (exit 1). |
 | `flair federation reachability` | Probe local instance + each paired peer (read-only) |
 | `flair federation token [--ttl <min>]` | Generate a one-time pairing token triple (hub only) |
 

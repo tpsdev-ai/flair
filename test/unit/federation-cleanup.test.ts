@@ -1,5 +1,14 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
-import { runCleanupTick, initFederationCleanup } from "../../resources/federation-cleanup.js";
+import { describe, it, expect, mock, beforeEach, afterEach, jest } from "bun:test";
+import {
+  runCleanupTick,
+  initFederationCleanup,
+  runSweepTick,
+  stopFederationCleanup,
+  listUsernamesOrNull,
+  logTickError,
+  BOOTSTRAP_USER_PREFIX,
+  type SweepLogState,
+} from "../../resources/federation-cleanup.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -44,7 +53,7 @@ function createMockServerOp(
   return { fn, captured };
 }
 
-function createMockDb(tokens: any[]) {
+function createMockDb(tokens: any[], instanceRows: any[] = []) {
   // async iterable from an array
   function fromArray<T>(items: T[]): AsyncIterable<T> {
     return {
@@ -65,8 +74,71 @@ function createMockDb(tokens: any[]) {
       PairingToken: {
         search: () => fromArray(tokens),
       },
+      Instance: {
+        search: () => fromArray(instanceRows),
+      },
     },
   };
+}
+
+/** A db whose Instance table is read fresh on every search (role can change). */
+function createLiveDb(getInstanceRows: () => any[], tokens: any[] = []) {
+  function fromArray<T>(items: T[]): AsyncIterable<T> {
+    return {
+      [Symbol.asyncIterator]() {
+        let i = 0;
+        return {
+          async next() {
+            if (i < items.length) return { value: items[i++], done: false };
+            return { value: undefined as any, done: true };
+          },
+        };
+      },
+    };
+  }
+  return {
+    flair: {
+      PairingToken: { search: () => fromArray(tokens) },
+      Instance: { search: () => fromArray(getInstanceRows()) },
+    },
+  };
+}
+
+/** A serverOp stub that answers every call and records it. */
+function recordingServerOp(opts?: { users?: string[]; fail?: Error }) {
+  const captured: any[] = [];
+  const fn = mock(async (body: any) => {
+    captured.push(body);
+    if (opts?.fail) throw opts.fail;
+    if (body.operation === "list_users") {
+      return (opts?.users ?? []).map((username) => ({ username }));
+    }
+    return { ok: true };
+  });
+  return { fn, captured };
+}
+
+function captureLog(): { lines: string[]; errors: string[]; log: Pick<Console, "log" | "error"> } {
+  const lines: string[] = [];
+  const errors: string[] = [];
+  return {
+    lines,
+    errors,
+    log: {
+      log: (...args: any[]) => lines.push(args.map(String).join(" ")),
+      error: (...args: any[]) => errors.push(args.map(String).join(" ")),
+    } as unknown as Pick<Console, "log" | "error">,
+  };
+}
+
+/**
+ * Let a faked-out interval callback finish. bun has no
+ * `advanceTimersByTimeAsync`, so after `jest.advanceTimersByTime(...)` the tick's
+ * promise chain is drained by yielding to the microtask queue — the sweep awaits
+ * no real timer (only the db and serverOp mocks), so microtasks are all it needs.
+ */
+async function settleTicks(rounds = 100): Promise<void> {
+  for (let i = 0; i < rounds; i++) await Promise.resolve();
 }
 
 // ─── Tests: runCleanupTick ───────────────────────────────────────────────────
@@ -129,7 +201,9 @@ describe("federation-cleanup sweep", () => {
       const db = createMockDb(tokens);
       const { fn: serverOp, captured } = createMockServerOp([
         { ok: true, data: { message: "user dropped" } },  // drop_user
-        { ok: true, data: { message: "deleted 1 record" } },  // delete token record
+        // Harper's real delete result shape (flair#1898): a 200 names what it
+        // removed in deleted_hashes and what it skipped in skipped_hashes.
+        { ok: true, data: { deleted_hashes: [tId], skipped_hashes: [] } },  // delete token record
       ]);
 
       await runCleanupTick({ serverOp, db: db as any, now });
@@ -144,7 +218,7 @@ describe("federation-cleanup sweep", () => {
       expect(captured[1].body.operation).toBe("delete");
       expect(captured[1].body.database).toBe("flair");
       expect(captured[1].body.table).toBe("PairingToken");
-      expect(captured[1].body.hash_value).toBe(tId);
+      expect(captured[1].body.hash_values).toEqual([tId]);
     });
 
     it("sweep keeps record (just deletes user) for consumed token", async () => {
@@ -270,7 +344,7 @@ describe("federation-cleanup sweep", () => {
       const { fn: serverOp, captured } = createMockServerOp([
         { ok: true }, // drop tok_X1
         { ok: true }, // drop tok_X2
-        { ok: true }, // delete tok_X2
+        { ok: true, data: { deleted_hashes: ["tok_X2_expired__BBBB"] } }, // delete tok_X2
         { ok: true }, // drop tok_X4
       ]);
 
@@ -286,7 +360,7 @@ describe("federation-cleanup sweep", () => {
 
       const deleteCalls = captured.filter((c) => c.body.operation === "delete");
       expect(deleteCalls).toHaveLength(1);
-      expect(deleteCalls[0].body.hash_value).toBe("tok_X2_expired__BBBB");
+      expect(deleteCalls[0].body.hash_values).toEqual(["tok_X2_expired__BBBB"]);
     });
 
     it("delete token record error does not prevent processing other tokens", async () => {
@@ -306,7 +380,7 @@ describe("federation-cleanup sweep", () => {
         { ok: true },           // drop tok_Y1
         { ok: false, error: deleteErr }, // delete tok_Y1 fails
         { ok: true },           // drop tok_Y2
-        { ok: true },           // delete tok_Y2 succeeds
+        { ok: true, data: { deleted_hashes: ["tok_Y2_expired"] } },           // delete tok_Y2 succeeds
       ]);
 
       await runCleanupTick({ serverOp, db: db as any, now });
@@ -314,7 +388,7 @@ describe("federation-cleanup sweep", () => {
       expect(captured).toHaveLength(4);
       expect(captured[2].body.operation).toBe("drop_user");
       expect(captured[3].body.operation).toBe("delete");
-      expect(captured[3].body.hash_value).toBe("tok_Y2_expired");
+      expect(captured[3].body.hash_values).toEqual(["tok_Y2_expired"]);
     });
 
     it("handles search failure gracefully (returns without throwing)", async () => {
@@ -338,9 +412,168 @@ describe("federation-cleanup sweep", () => {
     });
   });
 
+  // ── flair#1898: the expired-token delete is verified, not trusted ──────────
+  //
+  // runCleanupTick logs through the console directly, so these cases capture it.
+  // The second argument of each sweep log line is an OBJECT, which a naive
+  // String() capture flattens to "[object Object]" — so the capture serialises
+  // it, which is what lets a case assert the token id is NAMED.
+  describe("runCleanupTick — the expired-token delete verifies its result (flair#1898)", () => {
+    const now = new Date("2026-05-05T22:00:00Z");
+    const expired = (id: string) =>
+      makeToken(id, { expiresAt: new Date("2026-05-05T21:00:00Z").toISOString() });
+
+    /** What Harper reports: a 200 names what it removed and what it skipped. */
+    const DELETE_CONFIRMED = (id: string) => ({
+      ok: true as const,
+      data: { deleted_hashes: [id], skipped_hashes: [] },
+    });
+    const DELETE_SKIPPED = (id: string) => ({
+      ok: true as const,
+      data: { deleted_hashes: [], skipped_hashes: [id] },
+    });
+    /** A 200 whose body reports no ids at all — a write that cannot be confirmed. */
+    const DELETE_NO_IDS = { ok: true as const, data: { message: "ok" } };
+
+    function captureConsole(): { lines: string[]; errors: string[]; restore: () => void } {
+      const lines: string[] = [];
+      const errors: string[] = [];
+      const fmt = (args: any[]) =>
+        args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
+      const logSpy = jest.spyOn(console, "log").mockImplementation((...a: any[]) => {
+        lines.push(fmt(a));
+      });
+      const errSpy = jest.spyOn(console, "error").mockImplementation((...a: any[]) => {
+        errors.push(fmt(a));
+      });
+      return {
+        lines,
+        errors,
+        restore: () => {
+          logSpy.mockRestore();
+          errSpy.mockRestore();
+        },
+      };
+    }
+
+    it("a confirmed delete is logged as deleted", async () => {
+      const tId = "token_verify_ok_AAAA";
+      const db = createMockDb([expired(tId)]);
+      const { fn: serverOp } = createMockServerOp([{ ok: true }, DELETE_CONFIRMED(tId)]);
+      const { lines, errors, restore } = captureConsole();
+      try {
+        await runCleanupTick({ serverOp, db: db as any, now });
+      } finally {
+        restore();
+      }
+
+      expect(lines.join("\n")).toContain("deleted expired token");
+      expect(errors.join("\n")).not.toContain("NOT confirmed");
+    });
+
+    it("a delete Harper SKIPS is logged as NOT confirmed, naming the token's prefix and never the whole id", async () => {
+      const tId = "token_verify_skip_BBBB";
+      const db = createMockDb([expired(tId)]);
+      const { fn: serverOp } = createMockServerOp([{ ok: true }, DELETE_SKIPPED(tId)]);
+      const { lines, errors, restore } = captureConsole();
+      try {
+        await runCleanupTick({ serverOp, db: db as any, now });
+      } finally {
+        restore();
+      }
+
+      // The record is still in the table, so this tick did NOT delete it — and
+      // the log must not say it did.
+      expect(lines.join("\n")).not.toContain("deleted expired token");
+      const text = errors.join("\n");
+      expect(text).toContain("NOT confirmed");
+      // The token id IS the pairing credential: the log carries its prefix only.
+      expect(text).toContain(tId.slice(0, 8));
+      expect(text).not.toContain(tId);
+    });
+
+    it("a result naming the token as both deleted and skipped is NOT a confirmed delete", async () => {
+      const tId = "token_verify_both_DDDD";
+      const db = createMockDb([expired(tId)]);
+      const { fn: serverOp } = createMockServerOp([
+        { ok: true },
+        { ok: true, data: { deleted_hashes: [tId], skipped_hashes: [tId] } },
+      ]);
+      const { lines, errors, restore } = captureConsole();
+      try {
+        await runCleanupTick({ serverOp, db: db as any, now });
+      } finally {
+        restore();
+      }
+
+      expect(lines.join("\n")).not.toContain("deleted expired token");
+      expect(errors.join("\n")).toContain("NOT confirmed");
+      expect(errors.join("\n")).not.toContain(tId);
+    });
+
+    it("a delete that throws logs the error with the token id cut to its prefix", async () => {
+      const tId = "token_verify_err_EEEEEEEE";
+      const db = createMockDb([expired(tId)]);
+      // A Harper error can echo the request body, token id included.
+      const { fn: serverOp } = createMockServerOp([
+        { ok: true },
+        { ok: false, error: new Error(`delete failed for hash_values ["${tId}"]`) },
+      ]);
+      const { lines, errors, restore } = captureConsole();
+      try {
+        await runCleanupTick({ serverOp, db: db as any, now });
+      } finally {
+        restore();
+      }
+
+      const text = errors.join("\n");
+      expect(text).toContain("delete token error");
+      expect(text).toContain(tId.slice(0, 8));
+      expect(text).not.toContain(tId);
+      expect(lines.join("\n")).not.toContain("deleted expired token");
+    });
+
+    it("the consumed-token audit line cuts the token id to its prefix, even inside a caller-supplied consumedBy", async () => {
+      // consumedBy is the pairing caller's instanceId, so it is whatever that
+      // caller sent, including the token id itself.
+      const tId = "token_audit_consumed_FFFFFFFF";
+      const db = createMockDb([makeToken(tId, { consumedBy: `instance-${tId}-x` })]);
+      const { fn: serverOp } = createMockServerOp([{ ok: true }]);
+      const { lines, errors, restore } = captureConsole();
+      try {
+        await runCleanupTick({ serverOp, db: db as any, now });
+      } finally {
+        restore();
+      }
+      const all = [...lines, ...errors].join("\n");
+      expect(all).toContain("keeping audit record");
+      expect(all).toContain(tId.slice(0, 8));
+      expect(all).not.toContain(tId);
+    });
+
+    it("a 200 whose body reports no deleted_hashes is not logged as deleted either", async () => {
+      const tId = "token_verify_no_ids_CCCC";
+      const db = createMockDb([expired(tId)]);
+      const { fn: serverOp } = createMockServerOp([{ ok: true }, DELETE_NO_IDS]);
+      const { lines, errors, restore } = captureConsole();
+      try {
+        await runCleanupTick({ serverOp, db: db as any, now });
+      } finally {
+        restore();
+      }
+
+      expect(lines.join("\n")).not.toContain("deleted expired token");
+      expect(errors.join("\n")).toContain("NOT confirmed");
+    });
+  });
+
   // ── Hub-vs-spoke guard ─────────────────────────────────────────────────────
 
   describe("initFederationCleanup hub guard", () => {
+    afterEach(() => {
+      stopFederationCleanup();
+    });
+
     it("spoke role → cleanup is a no-op", async () => {
       const db = createMockDb([]);
       const { fn: serverOp, captured } = createMockServerOp([]);
@@ -362,21 +595,21 @@ describe("federation-cleanup sweep", () => {
 
     it("hub role → cleanup starts", async () => {
       const db = createMockDb([]);
-      const { fn: serverOp, captured } = createMockServerOp([]);
+      // A hub tick lists the bootstrap users, then sweeps (flair#1883): with an
+      // empty token table and no bootstrap users there is nothing to drop, but
+      // the read happens — that read is what makes the sweep user-driven.
+      const { fn: serverOp, captured } = createMockServerOp([{ ok: true, data: [] }]);
 
-      initFederationCleanup({
+      await initFederationCleanup({
         instanceRole: "hub",
         serverOp,
         db: db as any,
         immediateTick: true,
       });
 
-      // Let the async rolePromise + immediate tick run
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      // immediateTick should have called runCleanupTick, which queries the
-      // empty table → 0 ops calls, but tick completed (no rejection)
-      expect(captured).toHaveLength(0);
+      // immediateTick should have called runSweepTick, which lists users and
+      // then queries the empty token table → 0 drop/delete ops calls.
+      expect(captured.map((c) => c.body.operation)).toEqual(["list_users"]);
     });
 
     it("no instance record → treated as no-op (role is null)", async () => {
@@ -394,5 +627,453 @@ describe("federation-cleanup sweep", () => {
 
       expect(captured).toHaveLength(0);
     });
+  });
+
+  // ── flair#1883: the sweep follows the role, not the startup moment ─────────
+
+  describe("runSweepTick — the role is re-read every tick", () => {
+    it("a hub row written AFTER startup starts the sweep, with no restart", async () => {
+      let instanceRows: any[] = [];
+      const db = createLiveDb(
+        () => instanceRows,
+        [makeToken("tok_after_hub_AA", { consumedBy: "instance-x" })],
+      );
+      const { fn: serverOp, captured } = recordingServerOp();
+
+      const first = await runSweepTick({ serverOp, db: db as any, state: { last: null } });
+      expect(first).toBe("not-hub");
+      expect(captured).toHaveLength(0);
+
+      // The identity row appears after the process started — the seed runs after
+      // the server is up, which is exactly when the old one-time read missed it.
+      instanceRows = [{ id: "flair_hub_after", role: "hub", createdAt: "2026-09-25T00:00:00Z" }];
+
+      const second = await runSweepTick({ serverOp, db: db as any, state: { last: null } });
+      expect(second).toBe("hub");
+      expect(captured.map((c) => c.operation)).toEqual(["list_users", "drop_user"]);
+      expect(captured[1].username).toBe(`${BOOTSTRAP_USER_PREFIX}tok_afte`);
+    });
+
+    it("two Instance rows is a logged error naming the remedy, and no sweep", async () => {
+      const db = createMockDb(
+        [makeToken("tok_two_rows_A", { consumedBy: "instance-x" })],
+        [{ id: "flair_a", role: "hub" }, { id: "flair_b", role: "spoke" }],
+      );
+      const { fn: serverOp, captured } = recordingServerOp();
+      const { errors, log } = captureLog();
+
+      const mode = await runSweepTick({ serverOp, db: db as any, state: { last: null }, log });
+
+      expect(mode).toBe("multiple");
+      expect(captured).toHaveLength(0);
+      const text = errors.join("\n");
+      expect(text).toContain("more than one Instance row");
+      expect(text).toContain("flair federation instance prune --keep <id>");
+    });
+
+    it("a hub row beside an entry with no usable id is unreadable — and no sweep (the strict reader)", async () => {
+      for (const bad of [{}, { role: "spoke" }, { id: "" }, null]) {
+        const db = createMockDb(
+          [makeToken("tok_malformed", { consumedBy: "instance-x" })],
+          [{ id: "flair_hub", role: "hub" }, bad],
+        );
+        const { fn: serverOp, captured } = recordingServerOp();
+        const { lines, log } = captureLog();
+
+        const mode = await runSweepTick({ serverOp, db: db as any, state: { last: null }, log });
+
+        expect(mode, JSON.stringify(bad)).toBe("unreadable");
+        expect(captured, JSON.stringify(bad)).toHaveLength(0);
+        expect(lines.join("\n")).toContain("could not read the Instance table");
+      }
+    });
+
+    it("a failed Instance read is unreadable, not a spoke — and no sweep", async () => {
+      const db = {
+        flair: {
+          PairingToken: { search: () => [] as any },
+          Instance: {
+            search: () => {
+              throw new Error("table does not exist");
+            },
+          },
+        },
+      };
+      const { fn: serverOp, captured } = recordingServerOp();
+      const { lines, log } = captureLog();
+
+      const mode = await runSweepTick({ serverOp, db: db as any, state: { last: null }, log });
+
+      expect(mode).toBe("unreadable");
+      expect(captured).toHaveLength(0);
+      expect(lines.join("\n")).toContain("could not read the Instance table");
+    });
+
+    it("a steady mode is logged once, not on every tick", async () => {
+      const db = createMockDb([], [{ id: "flair_spoke_only", role: "spoke" }]);
+      const { fn: serverOp } = recordingServerOp();
+      const { lines, log } = captureLog();
+      const state: SweepLogState = { last: null };
+
+      await runSweepTick({ serverOp, db: db as any, state, log });
+      await runSweepTick({ serverOp, db: db as any, state, log });
+      await runSweepTick({ serverOp, db: db as any, state, log });
+
+      expect(lines).toHaveLength(1);
+    });
+
+    it("lists users once and passes them to the sweep", async () => {
+      const db = createMockDb([], [{ id: "flair_hub_users", role: "hub" }]);
+      const { fn: serverOp, captured } = recordingServerOp({
+        users: [`${BOOTSTRAP_USER_PREFIX}deadbeef`],
+      });
+
+      await runSweepTick({ serverOp, db: db as any, state: { last: null } });
+
+      expect(captured.map((c) => c.operation)).toEqual(["list_users", "drop_user"]);
+      expect(captured[1].username).toBe(`${BOOTSTRAP_USER_PREFIX}deadbeef`);
+    });
+
+    it("a failed user list does not stop the token-driven sweep", async () => {
+      const db = createMockDb(
+        [makeToken("tok_tokensonly_A", { consumedBy: "instance-x" })],
+        [{ id: "flair_hub_z", role: "hub" }],
+      );
+      let calls = 0;
+      const captured: any[] = [];
+      const serverOp = mock(async (body: any) => {
+        calls++;
+        captured.push(body);
+        if (body.operation === "list_users") throw new Error("list_users refused");
+        return { ok: true };
+      });
+
+      await runSweepTick({ serverOp, db: db as any, state: { last: null } });
+
+      expect(calls).toBe(2);
+      expect(captured.map((c) => c.operation)).toEqual(["list_users", "drop_user"]);
+      expect(captured[1].username).toBe(`${BOOTSTRAP_USER_PREFIX}tok_toke`);
+    });
+  });
+
+  describe("initFederationCleanup — installed on every instance", () => {
+    afterEach(() => {
+      stopFederationCleanup();
+      jest.useRealTimers();
+    });
+
+    it("re-reads the role on a later tick: a hub row appearing after startup begins sweeping", async () => {
+      // The tick is driven by the INSTALLED interval (not by calling runSweepTick),
+      // and the clock is advanced explicitly: a 20 ms cadence plus a real 120 ms
+      // wait flaked under CI load, when the callback ran late (flair#1883 round 5).
+      jest.useFakeTimers();
+      let instanceRows: any[] = [];
+      const db = createLiveDb(
+        () => instanceRows,
+        [makeToken("tok_timer_hub_AA", { consumedBy: "instance-y" })],
+      );
+      const { fn: serverOp, captured } = recordingServerOp();
+
+      await initFederationCleanup({ serverOp, db: db as any, intervalMs: 20, immediateTick: true });
+      try {
+        // First tick saw no row: nothing swept.
+        expect(captured).toHaveLength(0);
+
+        instanceRows = [{ id: "flair_hub_timer", role: "hub" }];
+        jest.advanceTimersByTime(120);
+        await settleTicks();
+
+        expect(captured.map((c) => c.operation)).toContain("list_users");
+        expect(captured.map((c) => c.operation)).toContain("drop_user");
+      } finally {
+        stopFederationCleanup();
+      }
+    });
+
+    it("an explicit spoke role installs the sweep but never runs it", async () => {
+      // Same discipline: the interval IS installed (that is what this case
+      // covers), and time passing on the faked clock must produce no call.
+      jest.useFakeTimers();
+      const db = createMockDb([]);
+      const { fn: serverOp, captured } = recordingServerOp();
+
+      await initFederationCleanup({ instanceRole: "spoke", serverOp, db: db as any, intervalMs: 20 });
+      jest.advanceTimersByTime(80);
+      await settleTicks();
+
+      expect(captured).toHaveLength(0);
+      stopFederationCleanup();
+      const afterStop = captured.length;
+      jest.advanceTimersByTime(60);
+      await settleTicks();
+      expect(captured.length).toBe(afterStop);
+    });
+  });
+
+  // ── flair#1883: the sweep is user-driven too ───────────────────────────────
+
+  describe("runCleanupTick — user-driven pass", () => {
+    const now = new Date("2026-05-05T22:00:00Z");
+
+    it("drops a pair-bootstrap user whose token record is gone", async () => {
+      const db = createMockDb([]); // no tokens at all
+      const { fn: serverOp, captured } = createMockServerOp([{ ok: true }]);
+
+      await runCleanupTick({ serverOp, db: db as any, now, users: [`${BOOTSTRAP_USER_PREFIX}deadbeef`] });
+
+      expect(captured).toHaveLength(1);
+      expect(captured[0].body.operation).toBe("drop_user");
+      expect(captured[0].body.username).toBe(`${BOOTSTRAP_USER_PREFIX}deadbeef`);
+    });
+
+    it("a hand-made bootstrap user with a long suffix is logged by its first 8 characters only", async () => {
+      // Real bootstrap users are pair-bootstrap- plus 8 characters; a hand-made
+      // one can carry a whole token id, and Harper's error can echo the name.
+      const longSuffix = "feedfacefeedface_whole_token_id";
+      const username = `${BOOTSTRAP_USER_PREFIX}${longSuffix}`;
+      const errs: string[] = [];
+      const logs: string[] = [];
+      const fmt = (a: any[]) => a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ");
+      const logSpy = jest.spyOn(console, "log").mockImplementation((...a: any[]) => { logs.push(fmt(a)); });
+      const errSpy = jest.spyOn(console, "error").mockImplementation((...a: any[]) => { errs.push(fmt(a)); });
+      try {
+        const ok = createMockServerOp([{ ok: true }]);
+        await runCleanupTick({ serverOp: ok.fn, db: createMockDb([]) as any, now, users: [username] });
+        const failing = createMockServerOp([{ ok: false, error: new Error(`drop_user failed for ${username}`) }]);
+        await runCleanupTick({ serverOp: failing.fn, db: createMockDb([]) as any, now, users: [username] });
+      } finally {
+        logSpy.mockRestore();
+        errSpy.mockRestore();
+      }
+      const all = [...logs, ...errs].join("\n");
+      expect(all).toContain("dropped user");
+      expect(all).toContain("drop_user error");
+      expect(all).toContain(longSuffix.slice(0, 8));
+      expect(all).not.toContain(longSuffix);
+    });
+
+    it("leaves a user whose token is live and unexpired", async () => {
+      const db = createMockDb([
+        makeToken("cafebabe_live_token", { expiresAt: new Date("2026-05-05T23:00:00Z").toISOString() }),
+      ]);
+      const { fn: serverOp, captured } = createMockServerOp([]);
+
+      await runCleanupTick({ serverOp, db: db as any, now, users: [`${BOOTSTRAP_USER_PREFIX}cafebabe`] });
+
+      expect(captured).toHaveLength(0);
+    });
+
+    it("drops a user once when its consumed token is also a token candidate", async () => {
+      const db = createMockDb([makeToken("cafebabe_consumed_token", { consumedBy: "instance-z" })]);
+      const { fn: serverOp, captured } = createMockServerOp([{ ok: true }]);
+
+      await runCleanupTick({ serverOp, db: db as any, now, users: [`${BOOTSTRAP_USER_PREFIX}cafebabe`] });
+
+      const drops = captured.filter((c) => c.body.operation === "drop_user");
+      expect(drops).toHaveLength(1);
+      expect(drops[0].body.username).toBe(`${BOOTSTRAP_USER_PREFIX}cafebabe`);
+    });
+
+    it("drops a user whose token is expired, and still deletes that token", async () => {
+      const db = createMockDb([
+        makeToken("feedface_expired_token", { expiresAt: new Date("2026-05-05T21:00:00Z").toISOString() }),
+      ]);
+      const { fn: serverOp, captured } = createMockServerOp([
+        { ok: true },
+        { ok: true, data: { deleted_hashes: ["feedface_expired_token"] } },
+      ]);
+
+      await runCleanupTick({ serverOp, db: db as any, now, users: [`${BOOTSTRAP_USER_PREFIX}feedface`] });
+
+      expect(captured.map((c) => c.body.operation)).toEqual(["drop_user", "delete"]);
+      expect(captured[1].body.hash_values).toEqual(["feedface_expired_token"]);
+    });
+
+    it("never drops a non-bootstrap user, even if one is handed to it", async () => {
+      const db = createMockDb([]);
+      const { fn: serverOp, captured } = createMockServerOp([]);
+
+      await runCleanupTick({ serverOp, db: db as any, now, users: ["admin", "flair-agent"] });
+
+      expect(captured).toHaveLength(0);
+    });
+
+    it("null users (the list did not read) skips only the user pass", async () => {
+      const db = createMockDb([makeToken("tok_null_users_A", { consumedBy: "instance-n" })]);
+      const { fn: serverOp, captured } = createMockServerOp([{ ok: true }]);
+
+      await runCleanupTick({ serverOp, db: db as any, now, users: null });
+
+      expect(captured).toHaveLength(1);
+      expect(captured[0].body.operation).toBe("drop_user");
+    });
+  });
+
+  describe("listUsernamesOrNull", () => {
+    it("keeps only the pair-bootstrap names", async () => {
+      const svr = mock(async () => [
+        { username: "admin" },
+        { username: `${BOOTSTRAP_USER_PREFIX}aaaaaaaa` },
+        { user: { username: `${BOOTSTRAP_USER_PREFIX}bbbbbbbb` } },
+      ]);
+      expect(await listUsernamesOrNull(svr)).toEqual([
+        `${BOOTSTRAP_USER_PREFIX}aaaaaaaa`,
+        `${BOOTSTRAP_USER_PREFIX}bbbbbbbb`,
+      ]);
+    });
+
+    it("returns null when the list fails", async () => {
+      const svr = mock(async () => {
+        throw new Error("list_users refused");
+      });
+      const { log } = captureLog();
+      expect(await listUsernamesOrNull(svr, log)).toBeNull();
+    });
+  });
+});
+
+// ── flair#1902 — one shared token-id redactor ─────────────────────────────────
+//
+// Every sweep log line goes through src/lib/redact-token-id.ts. The redactor's
+// own behaviour is unit-tested in redact-token-id.test.ts; these cases prove the
+// SWEEP applies it, including its two table-level lines.
+
+describe("federation-cleanup — shared token-id redaction (flair#1902)", () => {
+  const now = new Date("2026-05-05T22:00:00Z");
+
+  function captureConsole(): { lines: string[]; errors: string[]; restore: () => void } {
+    const lines: string[] = [];
+    const errors: string[] = [];
+    const fmt = (args: any[]) =>
+      args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
+    const logSpy = jest.spyOn(console, "log").mockImplementation((...a: any[]) => {
+      lines.push(fmt(a));
+    });
+    const errSpy = jest.spyOn(console, "error").mockImplementation((...a: any[]) => {
+      errors.push(fmt(a));
+    });
+    return {
+      lines,
+      errors,
+      restore: () => {
+        logSpy.mockRestore();
+        errSpy.mockRestore();
+      },
+    };
+  }
+
+  it("a foreign token id inside a consumedBy is cut when that token is in the batch", async () => {
+    const foreign = "feedface_foreign_token_0000000000";
+    const tId = "token_audit_multi_ABCDEFGHIJKL";
+    // The consumed token's consumedBy embeds the OTHER token's id; that other
+    // token is read in the same pass, so it is a secret for this line too.
+    const db = createMockDb([
+      makeToken(tId, { consumedBy: `instance-${foreign}-x` }),
+      makeToken(foreign, { consumedBy: "instance-z" }),
+    ]);
+    const { fn: serverOp } = createMockServerOp([{ ok: true }]);
+    const { lines, errors, restore } = captureConsole();
+    try {
+      await runCleanupTick({ serverOp, db: db as any, now });
+    } finally {
+      restore();
+    }
+    const all = [...lines, ...errors].join("\n");
+    expect(all).toContain("keeping audit record");
+    expect(all).toContain(foreign.slice(0, 8));
+    expect(all).not.toContain(foreign);
+  });
+
+  it("a PairingToken read that fails mid-scan redacts the id it echoed", async () => {
+    const tId = "token_query_fail_GGGGGGGGGGGG";
+    // search() yields one token, then the iterator throws an error that echoes
+    // that id — the id was read this pass, so the table-level error line cuts it.
+    const failingDb = {
+      flair: {
+        PairingToken: {
+          search: () => ({
+            [Symbol.asyncIterator]() {
+              let i = 0;
+              return {
+                async next() {
+                  if (i++ === 0) return { value: { id: tId }, done: false };
+                  throw new Error(`query failed for hash_values ["${tId}"]`);
+                },
+              };
+            },
+          }),
+        },
+      },
+    };
+    const { fn: serverOp } = createMockServerOp([]);
+    const { lines, errors, restore } = captureConsole();
+    try {
+      await runCleanupTick({ serverOp, db: failingDb as any, now });
+    } finally {
+      restore();
+    }
+    const text = errors.join("\n");
+    expect(text).toContain("failed to query PairingToken records");
+    expect(text).toContain(tId.slice(0, 8));
+    expect(text).not.toContain(tId);
+  });
+
+  it("the list_users failure line is routed through the redactor", async () => {
+    const tId = "token_list_users_HHHHHHHHHHHH";
+    const svr = mock(async () => {
+      throw new Error(`list_users refused for ${tId}`);
+    });
+    const { lines, errors, log } = captureLog();
+    expect(await listUsernamesOrNull(svr, log, [tId])).toBeNull();
+    const text = [...lines, ...errors].join("\n");
+    expect(text).toContain("failed to list users");
+    expect(text).toContain(tId.slice(0, 8));
+    expect(text).not.toContain(tId);
+  });
+
+  it("a real bootstrap user's dropped line keeps its 8-character suffix, not [redacted]", async () => {
+    // A real bootstrap user is `pair-bootstrap-` plus EXACTLY the token's
+    // 8-character prefix. That suffix IS the prefix — not a secret — so it must
+    // not join the secret list: otherwise the length guard replaces the prefix
+    // itself and the operator cannot tell which user was dropped (flair#1902).
+    const suffix = "deadbeef";
+    const username = `${BOOTSTRAP_USER_PREFIX}${suffix}`;
+    const { lines, errors, restore } = captureConsole();
+    try {
+      const ok = createMockServerOp([{ ok: true }]);
+      await runCleanupTick({ serverOp: ok.fn, db: createMockDb([]) as any, now, users: [username] });
+      const failing = createMockServerOp([{ ok: false, error: new Error(`drop_user failed for ${username}`) }]);
+      await runCleanupTick({ serverOp: failing.fn, db: createMockDb([]) as any, now, users: [username] });
+    } finally {
+      restore();
+    }
+    const all = [...lines, ...errors].join("\n");
+    expect(all).toContain("dropped user");
+    expect(all).toContain("drop_user error");
+    expect(all).toContain(suffix);
+    expect(all).not.toContain("[redacted]");
+  });
+
+  it("the tick-error line redacts an id the tick read", async () => {
+    const tId = "token_tick_error_KKKKKKKKKK";
+    const db = createMockDb([makeToken(tId, { consumedBy: "instance-z" })]);
+    const state: SweepLogState = { last: null };
+    // A real tick reads the token table; the ids it read land on `state`.
+    await runSweepTick({
+      instanceRole: "hub",
+      serverOp: createMockServerOp([{ ok: true }, { ok: true }]).fn,
+      db: db as any,
+      state,
+    });
+    expect(state.seenTokenIds).toContain(tId);
+    const errors: string[] = [];
+    const log = {
+      error: (...a: any[]) => errors.push(a.map(String).join(" ")),
+    } as unknown as Pick<Console, "error">;
+    logTickError(new Error(`tick blew up carrying ${tId}`), state, log);
+    const text = errors.join("\n");
+    expect(text).toContain("tick error");
+    expect(text).toContain(tId.slice(0, 8));
+    expect(text).not.toContain(tId);
   });
 });

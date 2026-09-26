@@ -15,6 +15,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { tempDir } from "../helpers/temp-dir.ts";
 import { generateKeyPairSync, privateDecrypt, createDecipheriv, constants } from "node:crypto";
 import { probeSecretsCapability, pushSecrets, PROCESS_ENV_TIER } from "../../src/lib/secrets-push.js";
 import { ENV_ENCRYPTED_PREFIX } from "../../src/lib/secret-envelope.js";
@@ -373,6 +374,10 @@ describe("self-verify accepts a valid MCP surface with DCR disabled", () => {
 describe("enableMcp is wired to the probe, not merely shipping it", () => {
   test("a run against a capable target ASKS for the public key", async () => {
     const ops: string[] = [];
+    // The probe writes the signing key and the staging env at these paths; put
+    // them in a directory the shared helper removes, not at fixed /tmp paths
+    // that leaked (flair#1889).
+    const dir = tempDir("flair-wiring-probe-");
     const fetchImpl = (async (_url: any, init: any) => {
       const body = JSON.parse(init?.body ?? "{}");
       if (body.operation) ops.push(body.operation);
@@ -390,8 +395,8 @@ describe("enableMcp is wired to the probe, not merely shipping it", () => {
         adminUser: "admin", adminPass: "pw",
         idpProvider: "github", idpClientId: "id", idpClientSecret: "secret", idpSubject: "octocat",
         principal: "self", principalKind: "human", confirmSecretsApplied: true,
-        signingKeyFilePath: `${process.env.TMPDIR ?? "/tmp"}/flair-wiring-probe-key.pem`,
-        secretsStagingPath: `${process.env.TMPDIR ?? "/tmp"}/flair-wiring-probe-secrets.env`,
+        signingKeyFilePath: join(dir, "signing-key.pem"),
+        secretsStagingPath: join(dir, "secrets.env"),
        } as any,
        { fetchImpl } as any,
     );

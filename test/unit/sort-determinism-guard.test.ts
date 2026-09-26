@@ -152,11 +152,13 @@ export type RankPushHit = { line: number; excerpt: string };
 
 /**
  * Pinned count of `pushRanked` call sites in semantic-retrieval-core.ts
- * (flair#1415). Four on current main: no-signal listing, candidate-union
- * RRF, HNSW embedding leg, keyword-only fallback. A fifth (or a dropped)
- * site must fail CI rather than be re-counted by a reader.
+ * (flair#1415). Five in this tree: no-signal listing, candidate-union RRF,
+ * BM25-only lexical arm, HNSW embedding leg, keyword-only fallback. A sixth
+ * (or a dropped) site must fail CI rather than be re-counted by a reader.
+ * The BM25-only site was added with the `FLAIR_RETRIEVAL_MODE` selector; it
+ * supplies `_rank` exactly like the others (BM25 rank order).
  */
-export const EXPECTED_RANK_PUSH_SITES = 4;
+export const EXPECTED_RANK_PUSH_SITES = 5;
 
 const RETRIEVAL_CORE = "resources/semantic-retrieval-core.ts";
 

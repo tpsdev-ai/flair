@@ -64,8 +64,8 @@ export function register(program: Command): void {
 /** Render one attention-result row for its source group — human-readable mode only. */
 
 program
-  .command("attention <entity>")
-  .description("What's touching entity E in the last N days? Grouped view across memory/relationship/workspace/presence/orgevent (POST /AttentionQuery)")
+  .command("attention <type:value>")
+  .description("What's touching this entity in the last N days? Argument is a vocabulary string (type:value from a closed set, e.g. repo:owner/name). Grouped view across memory/relationship/workspace/presence/orgevent (POST /AttentionQuery)")
   .option("--days <n>", "Window size in days (default 7)")
   .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
   .option("--key <path>", "Ed25519 private key path")

@@ -21,6 +21,10 @@ import { DOCTOR_CHECK_IDS, catalogIssueDelta, mcpRepinIcon, renderCatalogDoctorL
 import { describeEmbedGpuDoctorFinding } from "../lib/embed-gpu-doctor.js";
 import { adminPassDesyncFinding, detectPersistedAdminUser } from "../lib/init-admin-pass.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
+import {
+  instanceIdentityLines,
+  probeInstanceIdentity,
+} from "../lib/instance-identity-row.js";
 import { FLAIR_MCP_PACKAGE, flairCliVersion, mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
 import { mcpClientPinFindings, refreshOwnedPins, repinSessionStartHookGuarded, sessionStartHookPinFindings } from "../lib/owned-pins.js";
 import * as render from "../render.js";
@@ -786,6 +790,54 @@ program
           // credential on this box).
           console.log(`  ${render.icons.warn} Audit log: UNVERIFIED (could not probe — ${auditStatus.detail})`);
           break;
+      }
+    }
+
+    // 4c. Instance identity (flair#1883). A hub's identity is ONE
+    // `flair.Instance` row, and the pairing-cleanup sweep reads its role from
+    // that row. More than one row means there is no canonical identity — the
+    // state a hub lands in when `GET /FederationInstance` find-or-creates a
+    // spoke row and `flair init --remote` inserted a second one (which is why
+    // the sweep could find no hub role and never clean up). A
+    // `flair_pair_initiator` role on an instance whose identity row is not a
+    // hub is the same debris seen from the other side. Both are read from the
+    // instance itself, so they need the ops API — same admin credential as the
+    // audit check above. A read that does not happen is UNVERIFIED: never a
+    // pass, and never a fabricated finding. The two reads are separate, so the
+    // states are separate too (flair#1883 round 2): rows read but list_roles
+    // unreadable leaves the pairing-role check UNVERIFIED while the row facts
+    // are still reported — a green line would claim a check that did not run.
+    if (harperResponding) {
+      let identityAdminPass: string | undefined;
+      let identityCredIssue: string | null = null;
+      try {
+        identityAdminPass = resolveLocalAdminPass(undefined);
+      } catch (err: unknown) {
+        identityCredIssue = err instanceof Error ? err.message : String(err);
+      }
+      if (identityCredIssue) {
+        console.log(`  ${render.icons.warn} Instance identity: UNVERIFIED (could not probe — ${identityCredIssue})`);
+      } else {
+        const probe = await probeInstanceIdentity({
+          opsUrl: `http://127.0.0.1:${resolveOpsPort(opts)}`,
+          credentials: { user: resolveAdminUser(undefined), pass: identityAdminPass ?? "" },
+        });
+        if (probe.rows === null) {
+          console.log(`  ${render.icons.warn} Instance identity: UNVERIFIED (could not read the Instance table via the ops API)`);
+        } else {
+          // The lines — and therefore the pairing-role state — are built in
+          // `instanceIdentityLines`, so "an unread pairing-role check is never
+          // silent" is a property of the lines and not of this call site: a row
+          // finding and the pairing-role UNVERIFIED status print as two lines
+          // from one call (flair#1883 round 5).
+          for (const line of instanceIdentityLines({ rows: probe.rows, roleNames: probe.roleNames })) {
+            const icon =
+              line.level === "ok" ? render.icons.ok : line.level === "warn" ? render.icons.warn : render.icons.error;
+            console.log(`  ${icon} ${line.level === "fail" ? line.text : render.wrap(render.c.dim, line.text)}`);
+            if (line.fix) console.log(`     ${render.wrap(render.c.dim, line.fix)}`);
+            if (line.level === "fail") issues++;
+          }
+        }
       }
     }
 
@@ -1599,6 +1651,19 @@ program
       try {
         const presRes = await fetch(`${baseUrl}/Presence`, { headers, signal: AbortSignal.timeout(5000) });
         if (!presRes.ok) {
+          // flair#1880: GET /Presence requires a verified reader by default, so
+          // a keyless (unsigned) read now gets 401. Say so plainly instead of a
+          // bare HTTP code — there is no agent to sign as here, so the fix is
+          // either to pass one (--agent) or to opt the instance into a public
+          // roster. Never silent: the flip must not blind our own tooling.
+          if (presRes.status === 401 && !canSign) {
+            console.log(
+              `${indent}${render.icons.info} Presence roster requires a verified reader (HTTP 401). ` +
+              `Pass --agent <id> (with a matching key in ~/.flair/keys) to read it, or set ` +
+              `PRESENCE_PUBLIC_ROSTER=true on the instance to publish a public roster.`,
+            );
+            return;
+          }
           console.log(`${indent}${render.icons.warn} Could not fetch presence roster (HTTP ${presRes.status})`);
           return;
         }

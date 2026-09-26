@@ -16,10 +16,10 @@ const headers = (who: typeof owner, method: string, path: string) => {
   return { "Content-Type": "application/json", Authorization: `TPS-Ed25519 ${who.id}:${ts}:${nonce}:${Buffer.from(signature).toString("base64")}` };
 };
 async function request(who: typeof owner, method: string, path: string, body?: unknown) {
-  return fetch(harper.httpURL + path, { method, headers: headers(who, method, path), body: body === undefined ? undefined : JSON.stringify(body) });
+  return fetch(harper.httpURL + path, { method, headers: headers(who, method, path), body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(20_000) });
 }
 async function op(body: Record<string, unknown>) {
-  const response = await fetch(harper.opsURL, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Basic ${btoa(`${harper.admin.username}:${harper.admin.password}`)}` }, body: JSON.stringify(body) });
+  const response = await fetch(harper.opsURL, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Basic ${btoa(`${harper.admin.username}:${harper.admin.password}`)}` }, body: JSON.stringify(body), signal: AbortSignal.timeout(20_000) });
   expect(response.status).toBe(200);
   return response.json();
 }
@@ -64,7 +64,7 @@ describe("Memory authority fields over HTTP", () => {
       expect((await request(owner, "PUT", `/Memory/new-${field}`, { id: `new-${field}`, agentId: owner.id, content: "new", [field]: "forged" })).status).toBe(403);
       expect(await read(`new-${field}`)).toBeUndefined();
     }
-  });
+  }, 30_000);
   test("administrator REST writes cannot manufacture verdicts either", async () => {
     for (const method of ["PUT", "PATCH"]) {
       const response = await fetch(`${harper.httpURL}/Memory/stamped`, {

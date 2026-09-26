@@ -13,9 +13,9 @@
  */
 
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { tempDir } from "../helpers/temp-dir.ts";
 import {
   checkVersion,
   classifyGap,
@@ -179,16 +179,11 @@ describe("checkVersion", () => {
     };
   }
 
-  // beforeEach/afterEach aren't imported — each test creates/cleans its own
-  // tmpdir to avoid any cross-test cache bleed (cachePath is per-test anyway,
-  // but this keeps disk tidy).
+  // beforeEach/afterEach aren't imported — each test creates its own tmpdir via
+  // the shared helper, which registers the removal (afterEach/afterAll).
   function withTmpDir<T>(fn: () => T): T {
-    dir = mkdtempSync(join(tmpdir(), "flair-version-check-"));
-    try {
-      return fn();
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    dir = tempDir("flair-version-check-");
+    return fn();
   }
 
   test("network success writes the cache and reports source 'network'", async () => withTmpDir(async () => {
@@ -393,12 +388,8 @@ describe("primeVersionCheckCache", () => {
   const cachePathFor = (d: string) => join(d, ".version-check-cache.json");
 
   function withTmpDir<T>(fn: () => T): T {
-    dir = mkdtempSync(join(tmpdir(), "flair-version-check-prime-"));
-    try {
-      return fn();
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    dir = tempDir("flair-version-check-prime-");
+    return fn();
   }
 
   test("writes the cache such that a subsequent checkVersion returns the primed latest without a network fetch", async () => withTmpDir(async () => {
