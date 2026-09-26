@@ -64,7 +64,7 @@ describe("Memory authority fields over HTTP", () => {
       expect((await request(owner, "PUT", `/Memory/new-${field}`, { id: `new-${field}`, agentId: owner.id, content: "new", [field]: "forged" })).status).toBe(403);
       expect(await read(`new-${field}`)).toBeUndefined();
     }
-  });
+  }, 30_000);
   test("administrator REST writes cannot manufacture verdicts either", async () => {
     for (const method of ["PUT", "PATCH"]) {
       const response = await fetch(`${harper.httpURL}/Memory/stamped`, {

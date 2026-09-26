@@ -373,3 +373,65 @@ describe("wait bounds: false acceptances in the budgeted-case arm (flair#1825 ro
     expect(spawnOffenders.some((o: any) => o.kind === "spawn-no-timeout")).toBe(true);
   });
 });
+
+describe("closing round: method position, one-line bodies, reassigned signals, strict literals (flair#1825 r7)", () => {
+  function offendersFor(src: string) {
+    const dir = mkdtempSync(join(tmpdir(), "spawn-scan-r7-"));
+    repos.push(dir);
+    writeTree(dir, { "test/x.test.ts": src });
+    return scanTree(dir);
+  }
+  const has = (src: string, kind: string) => offendersFor(src).caseOffenders.some((o: any) => o.kind === kind);
+
+  it("item 1: `await fetch(\"x\")\\n{}` is a CALL → unbounded (the trailing `{` is not a method body)", () => {
+    const src = `test("t", async () => {\n  Bun.spawn(["bun","src/cli.ts","status"], { timeout: 5_000 });\n  await fetch("http://127.0.0.1:9/x")\n  {}\n}, 60_000);\n`;
+    expect(has(src, "case-unbounded-fetch")).toBe(true);
+  });
+  it("item 1: `if (fetch(\"x\")) {}` is a CALL → unbounded", () => {
+    const src = `test("t", async () => {\n  Bun.spawn(["bun","src/cli.ts","status"], { timeout: 5_000 });\n  if (fetch("http://127.0.0.1:9/x")) {}\n}, 60_000);\n`;
+    expect(has(src, "case-unbounded-fetch")).toBe(true);
+  });
+  it("item 1: `Bun.serve({ fetch(req) { … } })` is a METHOD → skipped", () => {
+    const src = `const srv = Bun.serve({ fetch(req) { return new Response("ok"); } });\ntest("t", () => {\n  Bun.spawn(["bun","src/cli.ts","status"], { timeout: 5_000 });\n}, 60_000);\n`;
+    expect(has(src, "case-unbounded-fetch")).toBe(false);
+  });
+  it("item 1: `const s = { async fetch(req) { … } }` is a METHOD → skipped", () => {
+    const src = `const s = { async fetch(req) { return new Response("ok"); } };\ntest("t", () => {\n  Bun.spawn(["bun","src/cli.ts","status"], { timeout: 5_000 });\n}, 60_000);\n`;
+    expect(has(src, "case-unbounded-fetch")).toBe(false);
+  });
+
+  it("item 2: a ONE-LINE helper body is summed", () => {
+    const src = `function waitOnly() { AbortSignal.timeout(30_000); }\ntest("t", async () => {\n  waitOnly();\n  Bun.spawn(["bun","src/cli.ts","status"], { timeout: 5_000 });\n}, 30_000);\n`;
+    expect(has(src, "case-budget-too-small")).toBe(true); // 30_000 <= 5_000 + 30_000
+  });
+
+  it("item 3: a REASSIGNED signal identifier is unbounded; a const one stays bounded", () => {
+    const bad = `let sig = AbortSignal.timeout(5_000);\nsig = new AbortController().signal;\ntest("t", async () => {\n  Bun.spawn(["bun","src/cli.ts","status"], { timeout: 5_000 });\n  await fetch("http://127.0.0.1:9/x", { signal: sig });\n}, 60_000);\n`;
+    expect(has(bad, "case-unbounded-fetch")).toBe(true);
+    const good = `const sig = AbortSignal.timeout(5_000);\ntest("t", async () => {\n  Bun.spawn(["bun","src/cli.ts","status"], { timeout: 5_000 });\n  await fetch("http://127.0.0.1:9/x", { signal: sig });\n}, 60_000);\n`;
+    expect(has(good, "case-unbounded-fetch")).toBe(false);
+  });
+
+  it("item 4: a 310-digit literal / `0` budget / `1__000` / `_1000` are all unknown", () => {
+    const big = "9".repeat(310);
+    expect(offendersFor(`test("t", () => {\n  Bun.spawn(["bun","src/cli.ts","status"], { timeout: ${big} });\n});\n`).spawnOffenders.some((o: any) => o.kind === "spawn-no-timeout")).toBe(true);
+    // `0` as a bare CASE budget is not a budget → case-no-budget
+    expect(has(`test("t", () => {\n  Bun.spawn(["bun","src/cli.ts","status"], { timeout: 5_000 });\n}, 0);\n`, "case-no-budget")).toBe(true);
+    // invalid underscore forms in a spawn timeout → unbounded
+    for (const lit of ["1__000", "_1000"]) {
+      expect(offendersFor(`test("t", () => {\n  Bun.spawn(["bun","src/cli.ts","status"], { timeout: ${lit} });\n});\n`).spawnOffenders.some((o: any) => o.kind === "spawn-no-timeout"), lit).toBe(true);
+    }
+  });
+});
+
+describe("closing round: the default-budget case is an offender (flair#1825 r7 item 5)", () => {
+  it("a spawn-reaching case with NO budget and a reachable deadline ≥ 5 s is case-no-budget", () => {
+    const dir = mkdtempSync(join(tmpdir(), "spawn-scan-r7b-"));
+    repos.push(dir);
+    writeTree(dir, {
+      "test/x.test.ts": `function helper() { return Bun.spawn(["bun","src/cli.ts","status"], { timeout: 5_000 }); }\ntest("t", async () => {\n  helper();\n  await new Promise((r) => setTimeout(r, 0));\n  AbortSignal.timeout(20_000);\n});\n`,
+    });
+    const { caseOffenders } = scanTree(dir);
+    expect(caseOffenders.some((o: any) => o.kind === "case-no-budget")).toBe(true);
+  });
+});

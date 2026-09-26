@@ -638,6 +638,21 @@ export function functionBodies(source) {
     if (bodyClose === -1) continue;
     bodies.push({ name: m[1], start: bodyOpen, end: bodyClose });
   }
+  // ONE-LINE function bodies (round 7 item 2): `function f(...) { … }` wholly on
+  // one line — appended AFTER the existing detection so multiline bodies are
+  // unchanged (no fingerprint ripple).
+  for (const m of src.matchAll(/(?:^|\n)[ \t]*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{([^}\n]*)\}/g)) {
+    const open = src.indexOf("{", m.index);
+    const close = src.indexOf("}", open);
+    if (open !== -1 && close !== -1) {
+      // The one-line body is authoritative for this name — the primary rule may
+      // have crossed into a LATER declaration's brace for a one-line helper.
+      const idx = bodies.findIndex((b) => b.name === m[1]);
+      const entry = { name: m[1], start: open, end: close };
+      if (idx >= 0) bodies[idx] = entry;
+      else bodies.push(entry);
+    }
+  }
   for (const m of src.matchAll(
     /(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/g,
   )) {
@@ -682,17 +697,23 @@ export function localHelpersThatSpawn(source, calls) {
 /** A wait deadline is the EXACT token `[1-9][0-9]*` (underscores allowed). An
  *  exponent (`1e999`), a trailing operator (`10000-10000`), `0`, or any other
  *  expression is NOT a positive integer → null (unbounded, flair#1825 round 6). */
+// ONE strict literal for EVERY site (round 7 item 4): no leading zero, no
+// leading/trailing/double underscore, at most 15 digits so the value is finite
+// and safe. Anything else — `0`, `1__000`, `_1000`, `1e999`, `10000-10000`, a
+// 310-digit literal (Infinity) — is unknown → unbounded / no-budget.
+const TIMEOUT_LITERAL_RE = /^[1-9][0-9]{0,14}(?:_[0-9]{1,3})*$/;
 export function timeoutLiteralMs(raw) {
-  const tok = String(raw ?? "").trim().replace(/_/g, "");
-  return /^[1-9][0-9]*$/.test(tok) ? Number(tok) : null;
+  const tok = String(raw ?? "").trim();
+  return TIMEOUT_LITERAL_RE.test(tok) ? Number(tok.replace(/_/g, "")) : null;
 }
 
 /** Parse a per-case budget: a numeric literal (`30_000`) or `{ timeout: N }`. */
 export function parseBudgetMs(text) {
-  const t = (text ?? "").trim().replace(/_/g, "");
-  let m = t.match(/^([0-9]+)$/);
-  if (m) return Number(m[1]);
-  m = t.match(/timeout\s*[:=]\s*([^\s,;)}\]]+)/);
+  const t = (text ?? "").trim();
+  // A bare budget obeys the SAME strict literal rule (round 7 item 4): `0` is not
+  // a budget, and neither is `1__000` / `_1000`.
+  if (timeoutLiteralMs(t) !== null) return timeoutLiteralMs(t);
+  const m = t.match(/timeout\s*[:=]\s*([^\s,;)}\]]+)/);
   return m ? timeoutLiteralMs(m[1]) : null;
 }
 
@@ -752,10 +773,20 @@ function signalValueText(after) {
  *  or an identifier that resolves IN THIS FILE to exactly that (flair#1825 r6). */
 function signalValueBounds(value, src) {
   const v = value.trim();
-  if (/^AbortSignal\.timeout\s*\(\s*[1-9][0-9_]*\s*\)$/.test(v)) return true;
+  const direct = v.match(/^AbortSignal\.timeout\s*\(\s*([^)]*)\)$/);
+  if (direct) return timeoutLiteralMs(direct[1]) !== null;
+  // An identifier bounds a fetch ONLY when it is `const`-declared to exactly
+  // `AbortSignal.timeout(<positive integer literal>)` in the same file AND never
+  // reassigned (round 7 item 3): a `let`/`var`, or any second assignment, → unbounded.
   if (/^[A-Za-z_$][\w$]*$/.test(v) && src) {
-    const decl = new RegExp(String.raw`(?:const|let|var)\s+${v}\s*=\s*AbortSignal\.timeout\s*\(\s*[1-9][0-9_]*\s*\)`);
-    return decl.test(src);
+    const esc = v.replace(/\$/g, "\\$");
+    const decl = new RegExp(String.raw`\bconst\s+${esc}\s*=\s*AbortSignal\.timeout\s*\(\s*([^)]*)\)`).exec(src);
+    if (!decl) return false;
+    if (timeoutLiteralMs(decl[1]) === null) return false;
+    if (new RegExp(String.raw`\b(?:let|var)\s+${esc}\b`).test(src)) return false;
+    const assigns = src.match(new RegExp(String.raw`(^|[^\w$])${esc}\s*=(?!=)`, "g")) ?? [];
+    if (assigns.length > 1) return false; // the declaration is one; more = reassigned
+    return true;
   }
   return false;
 }
@@ -763,12 +794,27 @@ function signalValueBounds(value, src) {
 /** First `fetch(` whose OWN options carry no real deadline, or null. A deadline
  *  attaches ONLY to the call whose options contain it — never by proximity, and a
  *  bare `signal:` of unknown value is unbounded (flair#1825 round 6). */
+/** True iff this `fetch(` is a METHOD DEFINITION (object-literal/class-body
+ *  position) — and only then is it skipped. Both must hold (round 7 item 1): the
+ *  significant token before `fetch` is `{`, `,`, `;` or the keyword `async` (no
+ *  `await`/`=`/`(`/`return`/`:`/`?`/`=>` before it), AND the `{` follows the
+ *  closing paren on the SAME line. */
+function isMethodDefinition(body, fetchStart, close) {
+  const before = body.slice(0, fetchStart).replace(/\s+$/, "");
+  const prevChar = before.slice(-1);
+  const prevWord = (before.match(/([A-Za-z_$][\w$]*)$/) ?? [])[1];
+  if (!["{", ",", ";"].includes(prevChar) && prevWord !== "async") return false;
+  const rest = body.slice(close + 1);
+  const braceAt = rest.search(/\S/);
+  return braceAt !== -1 && rest[braceAt] === "{" && !/\n/.test(rest.slice(0, braceAt));
+}
+
 export function firstUnboundedFetch(body, src = body) {
   for (const m of body.matchAll(/(^|[^\w$.])fetch\s*\(/g)) {
     const open = body.indexOf("(", m.index);
     const args = topLevelArgs(body, open);
-    // `fetch(req) { … }` is a Bun.serve handler METHOD, not a client call — skip it.
-    if (args && /^\s*\{/.test(body.slice(args.close + 1))) continue;
+    // ONLY a real method definition is skipped; everything else is a call.
+    if (args && isMethodDefinition(body, m.index + (m[1] ? 1 : 0), args.close)) continue;
     const initText = args && args.spans.length >= 2 ? args.spans[1].text : "";
     const sig = initText.match(/signal\s*:\s*/);
     let bounded = false;
