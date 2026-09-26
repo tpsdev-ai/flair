@@ -556,3 +556,16 @@ describe("release-auto-tag workflow — the adk re-run (slice 3 of #1928, round 
     expect(String(env.ADK_VERDICT)).toBe("${{ needs.write.outputs.adk_verdict }}");
   });
 });
+
+describe("release-auto-tag workflow — the v line never says REFUSE for an existing ref (round 3)", () => {
+  test("the reporter renders the v ref from V_VERDICT, so an adk REFUSE with v already at the sha prints v: SKIP", () => {
+    const write = job("write");
+    // decide/write carry v_verdict (SKIP when the v tag is already at the sha).
+    expect(write.outputs?.v_verdict).toBe("${{ steps.write.outputs.v_verdict }}");
+    // …and the reporter's v line uses it, defaulting to REFUSE only when absent.
+    const script = String((job("report").steps ?? [])[0].run ?? "");
+    expect(script).toContain("v${VERSION}: ${V_VERDICT:-REFUSE}");
+    const env = (job("report").steps ?? [])[0].env ?? {};
+    expect(String(env.V_VERDICT)).toBe("${{ needs.write.outputs.v_verdict }}");
+  });
+});

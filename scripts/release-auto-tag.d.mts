@@ -24,6 +24,7 @@ export interface ConditionIds {
   ADK_VERSION_MISMATCH: string;
   ADK_TAG_EXISTS_ELSEWHERE: string;
   ADK_REF_WRITE_REJECTED: string;
+  ADK_PYPROJECT_UNSUPPORTED: string;
 }
 
 export const CONDITION: ConditionIds;
@@ -174,6 +175,10 @@ export interface WriteOptions {
 export function compareVersions(a: string, b: string): number;
 export function readVersionFromManifest(text: string | null): string | null;
 export function adkVersionFromPyproject(text: string | null): string | null;
+export function adkVersionCheck(
+  adkText: string | null,
+  version: string,
+): { kind: "absent" } | { kind: "ok" } | { kind: "refuse"; condition: string; summary: string[] };
 export function adkTagName(version: string): string;
 export function adkWorkAfterVAtSha(
   reads: GitHubClient,

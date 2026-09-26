@@ -75,7 +75,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { projectVersionFromPyproject } from "./ci/pyproject-version.mjs";
+import { projectVersionFromPyproject, readProjectVersion } from "./ci/pyproject-version.mjs";
 
 // ── the fixed enum ─────────────────────────────────────────────────────────────
 // Condition ids are an enum so the reporter, the summary and any test can switch
@@ -128,6 +128,10 @@ export const CONDITION = Object.freeze({
   ADK_VERSION_MISMATCH: "adk-version-mismatch",
   ADK_TAG_EXISTS_ELSEWHERE: "adk-tag-exists-elsewhere",
   ADK_REF_WRITE_REJECTED: "adk-ref-write-rejected",
+  // The on-tree pyproject carries a `[project]` version form the tagger does not
+  // implement (a quoted key, a dotted key, an inline `project` table, or an odd
+  // `version =` line). bob must NOT guess the version from it.
+  ADK_PYPROJECT_UNSUPPORTED: "adk-pyproject-unsupported",
 });
 export const CONDITION_IDS = Object.freeze(Object.values(CONDITION));
 
@@ -575,6 +579,46 @@ export function adkTagName(version) {
 }
 
 /**
+ * The tagger's adk decision for an on-tree pyproject (round 3):
+ *   { kind: "absent" }                              no pyproject at this sha
+ *   { kind: "ok" }                                  the whitelisted version matches
+ *   { kind: "refuse", condition, summary }          a mismatch, a dynamic version,
+ *                                                   or an unsupported form
+ * Fail-closed: an unsupported form REFUSEs `adk-pyproject-unsupported` naming the
+ * line; a dynamic or absent project version REFUSEs `adk-version-mismatch`.
+ */
+export function adkVersionCheck(adkText, version) {
+  if (adkText === null || adkText === undefined) return { kind: "absent" };
+  const r = readProjectVersion(adkText);
+  if (r.kind === "unsupported") {
+    return {
+      kind: "refuse",
+      condition: CONDITION.ADK_PYPROJECT_UNSUPPORTED,
+      summary: [
+        `${ADK_PYPROJECT_PATH} carries an unsupported version form on the line \`${r.line}\` (${r.reason})`,
+      ],
+    };
+  }
+  if (r.kind === "none") {
+    return {
+      kind: "refuse",
+      condition: CONDITION.ADK_VERSION_MISMATCH,
+      summary: [
+        `the on-tree ${ADK_PYPROJECT_PATH} declares no project version (${r.reason}), not ${version}`,
+      ],
+    };
+  }
+  if (r.version !== version) {
+    return {
+      kind: "refuse",
+      condition: CONDITION.ADK_VERSION_MISMATCH,
+      summary: [`the on-tree ${ADK_PYPROJECT_PATH} declares version ${r.version}, not ${version}`],
+    };
+  }
+  return { kind: "ok" };
+}
+
+/**
  * When the v tag is ALREADY at <sha> (condition 3 skip), this decides whether the
  * run has anything LEFT to do — the adk tag (slice 3 of #1928, round 2). A v tag
  * at this sha used to end the run, so after an `adk-ref-write-rejected` nothing
@@ -589,15 +633,10 @@ export function adkTagName(version) {
  */
 export async function adkWorkAfterVAtSha(reads, deps, { sha, version }) {
   const adkText = deps.git?.show ? deps.git.show(sha, ADK_PYPROJECT_PATH) : null;
-  const adkPresent = adkText !== null && adkText !== undefined;
-  if (!adkPresent) return { kind: "skip" };
-  const onTree = adkVersionFromPyproject(adkText);
-  if (onTree !== version) {
-    return {
-      kind: "refuse",
-      condition: CONDITION.ADK_VERSION_MISMATCH,
-      summary: [`the on-tree ${ADK_PYPROJECT_PATH} declares version ${onTree ?? "none"}, not ${version}`],
-    };
+  const adkCheck = adkVersionCheck(adkText, version);
+  if (adkCheck.kind === "absent") return { kind: "skip" };
+  if (adkCheck.kind === "refuse") {
+    return { kind: "refuse", condition: adkCheck.condition, summary: adkCheck.summary };
   }
   const tag = adkTagName(version);
   const ref = await reads.readTagRef(tag);
@@ -994,7 +1033,11 @@ export async function decide({ sha, deps, options = {} }) {
     const adk = await adkWorkAfterVAtSha(deps.api, deps, { sha, version });
     if (adk.kind === "skip") return skip(step3.reason);
     if (adk.kind === "refuse") {
-      return refuse(adk, { adkVerdict: WRITE_VERDICT.REFUSE, adkCondition: adk.condition });
+      return refuse(adk, {
+        adkVerdict: WRITE_VERDICT.REFUSE,
+        adkCondition: adk.condition,
+        vVerdict: WRITE_VERDICT.SKIP,
+      });
     }
     vAlreadyAtSha = true;
   }
@@ -1116,6 +1159,7 @@ export async function writeTag({ sha, version, deps, options = {} }) {
         summary: [...summary, ...(adk.summary ?? [])],
         adkVerdict: WRITE_VERDICT.REFUSE,
         adkCondition: adk.condition,
+        vVerdict: WRITE_VERDICT.SKIP,
       });
     }
     vAlreadyAtSha = true;
@@ -1147,15 +1191,12 @@ export async function writeTag({ sha, version, deps, options = {} }) {
   // can release without the Python package — and only skips the second tag.
   const adkText = deps.git?.show ? deps.git.show(sha, ADK_PYPROJECT_PATH) : null;
   const adkPresent = adkText !== null && adkText !== undefined;
-  const adkOnTreeVersion = adkVersionFromPyproject(adkText);
-  if (adkPresent && adkOnTreeVersion !== version) {
-    return refuse(CONDITION.ADK_VERSION_MISMATCH, {
-      summary: [
-        ...summary,
-        `the on-tree ${ADK_PYPROJECT_PATH} declares version ${adkOnTreeVersion ?? "none"}, not ${version}`,
-      ],
+  const adkCheck = adkVersionCheck(adkText, version);
+  if (adkCheck.kind === "refuse") {
+    return refuse(adkCheck.condition, {
+      summary: [...summary, ...adkCheck.summary],
       adkVerdict: WRITE_VERDICT.REFUSE,
-      adkCondition: CONDITION.ADK_VERSION_MISMATCH,
+      adkCondition: adkCheck.condition,
     });
   }
   const adkTag = adkTagName(version);
@@ -1244,7 +1285,7 @@ export async function writeTag({ sha, version, deps, options = {} }) {
           adkVerdict = WRITE_VERDICT.REFUSE;
           adkCondition = CONDITION.ADK_REF_WRITE_REJECTED;
           summary.push(
-            `after the POST, ${adkTag} resolves to ${adkResolved ?? "nothing"}, not ${sha}; v${version} was created at ${sha}; re-running the workflow on this commit completes it`,
+            `after the POST, ${adkTag} now points at ${adkResolved ?? "nothing"}, not ${sha}; v${version} stays at ${sha}; a human must move or delete ${adkTag} before a re-run can complete it (the next run will refuse adk-tag-exists-elsewhere)`,
           );
         } else {
           adkVerdict = WRITE_VERDICT.TAGGED;
