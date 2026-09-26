@@ -1972,7 +1972,15 @@ jobs:
         with:
           node-version: "22"
       - name: Fetch the base ref for the spawn-budget gate
-        run: git fetch --no-tags origin "${{ github.event.pull_request.base.sha || github.event.before }}"
+        # Fetch BOTH the base sha and the seed anchor, with history, so
+        # `git merge-base --is-ancestor <anchor> <base>` can decide. A
+        # --depth=1 fetch of each would leave them unconnected and the query
+        # would fail; fetching the two commits (their shared history comes with
+        # them) is what makes the predicate decidable.
+        run: |
+          git fetch --no-tags origin \
+            "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            4904699d80b55d9f299fe8e061aa80e4de8e9edc
       - run: node scripts/ci/check-cli-spawn-budgets.mjs
         env:
           # The trusted base ref the baseline is read from (flair#1825): a PR's base

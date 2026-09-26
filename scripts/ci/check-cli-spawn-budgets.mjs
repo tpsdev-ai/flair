@@ -1011,6 +1011,21 @@ export function resolveRef(ref, root) {
   return r.stdout.trim();
 }
 
+/**
+ * True when `ancestor` is an ancestor of `descendant` in `root`. Exit 1 →
+ * false; any other non-zero (e.g. a missing object) is a HARD failure naming
+ * both shas — never a silent "not an ancestor".
+ */
+export function isAncestor(ancestor, descendant, root) {
+  const r = spawnSync("git", ["-C", root, "merge-base", "--is-ancestor", ancestor, descendant], { encoding: "utf8" });
+  if (r.status === 0) return true;
+  if (r.status === 1) return false;
+  throw new Error(
+    `cannot decide whether ${ancestor} is an ancestor of ${descendant} in ${root}: ` +
+      `${(r.stderr || r.stdout || "").trim()} (is an object missing from the local store? flair#1825).`,
+  );
+}
+
 /** Read the baseline at `ref` from `root`'s git object store.
  *
  * FAIL CLOSED (flair#1825): an invalid/unreadable ref is a hard error naming the
@@ -1055,7 +1070,6 @@ export function runGate({ root, baseRef = gateBaseRef(), env = process.env, seed
   const baseEntries = loadBaselineAtRef(baseRef, root); // throws on an invalid ref
   const basePresent = baseEntries !== null;
   const baseSha = resolveRef(baseRef, root);
-  const anchored = baseSha === seedBase;
   const errors = [
     ...validateBaseline(prEntries).map((e) => `pr: ${e}`),
     ...(basePresent ? validateBaseline(baseEntries).map((e) => `base: ${e}`) : []),
@@ -1065,18 +1079,32 @@ export function runGate({ root, baseRef = gateBaseRef(), env = process.env, seed
   const diff = diffAgainstBaseline(spawnOffenders, caseOffenders, prEntries);
   // Added exceptions: the PR copy may only REMOVE relative to the base. When the
   // base has NO baseline file the base baseline is EMPTY, so EVERY PR entry is an
-  // addition → fail — UNLESS the base resolves to exactly SEED_INTRODUCTION_BASE,
-  // the one commit whose base legitimately predates the file (flair#1825).
+  // addition → fail — UNLESS the base DESCENDS from the seed-introduction anchor
+  // (flair#1825). An exact-sha equality can never survive main moving. The anchor
+  // is resolved/checked ONLY on this seed path: when the base HAS the file it is
+  // dead code (a follow-up removes it — first slice of #1921).
+  let anchored = false;
   let added;
   if (basePresent) {
     added = addedExceptions(baseEntries, prEntries);
-  } else if (anchored) {
-    added = [];
   } else {
-    throw new Error(
-      `the base '${baseRef}' resolves to ${baseSha}, which has no baseline file and is not the seed-introduction base ` +
-        `${seedBase} — refusing to treat the PR's copy as the baseline (flair#1825).`,
-    );
+    let anchorSha;
+    try {
+      anchorSha = resolveRef(seedBase, root);
+    } catch {
+      throw new Error(
+        `the seed-introduction base ${seedBase} is missing from the local object store in ${root} ` +
+          `— the CI step must fetch it (git fetch origin ${seedBase}) (flair#1825).`,
+      );
+    }
+    if (!isAncestor(anchorSha, baseSha, root)) {
+      throw new Error(
+        `the base '${baseRef}' resolves to ${baseSha}, which has no baseline file and does not descend from the ` +
+          `seed-introduction base ${seedBase} — refusing to treat the PR's copy as the baseline (flair#1825).`,
+      );
+    }
+    anchored = true;
+    added = [];
   }
   return {
     files,

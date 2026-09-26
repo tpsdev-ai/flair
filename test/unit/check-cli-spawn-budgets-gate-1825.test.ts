@@ -201,13 +201,17 @@ describe("budget, templates, keys, skips (flair#1825 items 2/3/4)", () => {
     expect(offenderKey(o)).not.toMatch(/\.ts:\d/);
   });
 });
-
-describe("anchored seed + fail-closed base (flair#1825 round 4)", () => {
+describe("anchored seed (descendant predicate) + fail-closed base (flair#1825 round 5)", () => {
   function offendersFor(src: string) {
-    const dir = mkdtempSync(join(tmpdir(), "spawn-scan-r4-"));
+    const dir = mkdtempSync(join(tmpdir(), "spawn-scan-r5-"));
     repos.push(dir);
     writeTree(dir, { "test/x.test.ts": src });
     return scanTree(dir);
+  }
+  function commit(dir: string, msg: string): string {
+    git(dir, ["add", "-A"]);
+    git(dir, ["commit", "-q", "-m", msg]);
+    return git(dir, ["rev-parse", "HEAD"]).trim();
   }
 
   it("the anchor IS the PR's real merge-base of origin/main and this branch", () => {
@@ -216,39 +220,62 @@ describe("anchored seed + fail-closed base (flair#1825 round 4)", () => {
     expect(SEED_INTRODUCTION_BASE).toBe(sha);
   });
 
-  it("item 1a: a base with NO baseline file that is NOT the seed-introduction commit throws, naming both shas", () => {
+  it("item 1a: base DESCENDS from the anchor with no file → PASS (the CI case)", () => {
+    const { dir, baseSha } = mk({ "test/base.test.ts": `test("ok", () => {});\n` });
+    writeTree(dir, { "test/x2.test.ts": `test("ok2", () => {});\n` });
+    const b2 = commit(dir, "B2");
+    writeTree(dir, { "scripts/ci/cli-spawn-budgets.baseline.json": "[]\n" });
+    const r = runGate({ root: dir, baseRef: b2, env: {}, seedBase: baseSha });
+    expect(r.anchored).toBe(true);
+    expect(r.ok).toBe(true);
+  });
+
+  it("item 1b: base == the anchor with no file → PASS", () => {
+    const { dir, baseSha } = mk({ "test/base.test.ts": `test("ok", () => {});\n` });
+    writeTree(dir, { "scripts/ci/cli-spawn-budgets.baseline.json": "[]\n" });
+    const r = runGate({ root: dir, baseRef: baseSha, env: {}, seedBase: baseSha });
+    expect(r.ok).toBe(true);
+  });
+
+  it("item 1c: an OLDER non-descendant base with no file → throws naming both shas", () => {
+    const { dir, baseSha } = mk({ "test/base.test.ts": `test("ok", () => {});\n` }); // B1 = anchor
+    writeTree(dir, { "test/x2.test.ts": `test("ok2", () => {});\n` });
+    const b2 = commit(dir, "B2");
+    writeTree(dir, { "scripts/ci/cli-spawn-budgets.baseline.json": "[]\n" });
+    let err: any;
+    try {
+      runGate({ root: dir, baseRef: baseSha, env: {}, seedBase: b2 }); // anchor B2 (later), base B1 (earlier)
+    } catch (e) {
+      err = e;
+    }
+    expect(String(err?.message)).toMatch(/does not descend from the seed-introduction base/);
+  });
+
+  it("item 1d: the anchor missing from the local object store → hard failure naming it", () => {
+    // base commit has NO baseline file (the seed path is attempted), and the PR copy does.
     const { dir, baseSha } = mk({ "test/base.test.ts": `test("ok", () => {});\n` });
     writeTree(dir, { "scripts/ci/cli-spawn-budgets.baseline.json": "[]\n" });
     let err: any;
     try {
-      runGate({ root: dir, baseRef: baseSha, env: {} });
+      runGate({ root: dir, baseRef: baseSha, env: {}, seedBase: "1111111111111111111111111111111111111111" });
     } catch (e) {
       err = e;
     }
-    expect(String(err?.message)).toMatch(/seed-introduction base/);
-    expect(String(err?.message)).toContain(baseSha);
+    expect(String(err?.message)).toMatch(/missing from the local object store/);
+    expect(String(err?.message)).toContain("1111111111111111111111111111111111111111");
   });
 
-  it("item 1a-seed: base == the anchored sha and no file → PASS", () => {
-    const { dir, baseSha } = mk({ "test/base.test.ts": `test("ok", () => {});\n` });
-    writeTree(dir, { "scripts/ci/cli-spawn-budgets.baseline.json": "[]\n" });
-    const r = runGate({ root: dir, baseRef: baseSha, env: {}, seedBase: baseSha });
-    expect(r.anchored).toBe(true);
-    expect(r.seedAccepted).toBe(true);
-    expect(r.ok).toBe(true);
-  });
-
-  it("item 1b: an invalid base ref is a hard failure naming the ref", () => {
-    const { dir } = mk({ "scripts/ci/cli-spawn-budgets.baseline.json": "[]\n", "test/x.test.ts": `test("ok", () => {});\n` });
-    expect(() => runGate({ root: dir, baseRef: "definitely-not-a-ref", env: {} })).toThrow(/invalid base ref/);
-  });
-
-  it("item 1c: when the base HAS the file the anchor is irrelevant and the normal comparison runs", () => {
+  it("item 1e: base HAS the file → normal comparison, the anchor is irrelevant (dead code)", () => {
     const { dir, baseSha } = mk({ "scripts/ci/cli-spawn-budgets.baseline.json": "[]\n", "test/x.test.ts": `test("ok", () => {});\n` });
     const r = runGate({ root: dir, baseRef: baseSha, env: {}, seedBase: "0000000000000000000000000000000000000000" });
     expect(r.basePresent).toBe(true);
     expect(r.anchored).toBe(false);
     expect(r.ok).toBe(true);
+  });
+
+  it("item 1-invalid: an invalid base ref is a hard failure naming the ref", () => {
+    const { dir } = mk({ "scripts/ci/cli-spawn-budgets.baseline.json": "[]\n", "test/x.test.ts": `test("ok", () => {});\n` });
+    expect(() => runGate({ root: dir, baseRef: "definitely-not-a-ref", env: {} })).toThrow(/invalid base ref/);
   });
 
   it("item 3: a listed case that gains a SECOND unbudgeted CLI spawn is 1 NEW offender", () => {
@@ -260,7 +287,6 @@ describe("anchored seed + fail-closed base (flair#1825 round 4)", () => {
         null, 2,
       ) + "\n",
     });
-    // PR: the same case gains a SECOND unbudgeted CLI spawn; the PR copy keeps the one entry.
     writeTree(dir, {
       "test/dup.test.ts": `test("two", () => {\n  const a = Bun.spawn(["bun", "src/cli.ts", "status"], {});\n  const b = Bun.spawn(["bun", "src/cli.ts", "stop"], {});\n});\n`,
     });
@@ -268,7 +294,6 @@ describe("anchored seed + fail-closed base (flair#1825 round 4)", () => {
     expect(r.ok).toBe(false);
     const newCase = r.newOffenders.filter((o: any) => o.kind === "case-no-budget");
     expect(newCase.length).toBe(1);
-    // The NEW offender is identified by the CALL it reaches, not the case name.
     expect(newCase[0].fingerprint).toBe(`["bun","src/cli.ts","stop"] ; {}`);
   });
 
