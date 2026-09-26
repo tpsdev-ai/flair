@@ -1388,7 +1388,15 @@ export function register(program: Command): void {
         // Rewrite Harper's raw AccessViolation into a named role/grant error.
         let instance: any;
         try {
-          instance = await api("GET", "/FederationInstance", undefined, { baseUrl: identityUrl });
+          // flair#1873: hand the identity GET the credential the operator
+          // provided (--admin-pass-file / --admin-pass), not only baseUrl — a
+          // protected instance refuses this allowAdmin GET before pair ever
+          // reaches the authenticated ops preflight.
+          instance = await api("GET", "/FederationInstance", undefined, {
+            baseUrl: identityUrl,
+            explicitAdminPass: opts.adminPass,
+            adminUser: opts.adminUser,
+          });
         } catch (err: unknown) {
           throw rewriteFederationPairLocalAccessError(err, {
             url: redactUrl(identityUrl),
