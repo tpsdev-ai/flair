@@ -168,7 +168,17 @@ function walkDeep(value: unknown, redact: (text: string) => string, copies: Map<
     const out: Record<string, unknown> = {};
     copies.set(value, out);
     for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
-      out[redact(key)] = walkDeep(v, redact, copies);
+      // Define each rebuilt key as an OWN property. A bracket assignment
+      // (`out[redact(key)] = …`) for the key `__proto__` would set the COPY's
+      // prototype instead of defining a key, dropping it and giving the copy an
+      // attacker-chosen prototype — reachable whenever the input came from
+      // JSON.parse or Object.defineProperty (flair#1907).
+      Object.defineProperty(out, redact(key), {
+        value: walkDeep(v, redact, copies),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
     }
     return out;
   }

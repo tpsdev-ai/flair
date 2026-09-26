@@ -151,3 +151,31 @@ describe("redactTokenIds — walk robustness (flair#1902)", () => {
     expect((redactTokenIds({ d }, [TOKEN]) as any).d).toBe(d);
   });
 });
+
+describe("redactTokenIds — an own __proto__ key (flair#1907)", () => {
+  // 24 characters, like a real pairing-token id.
+  const ID = "token-id-own-keys-1907ab";
+  const ID_PREFIX = ID.slice(0, 8);
+
+  test("a JSON-parsed own __proto__ key is copied as an OWN property, not the copy's prototype", () => {
+    // A plain object can only carry an OWN `__proto__` key via JSON.parse or
+    // Object.defineProperty — never an object literal. JSON.parse defines it as
+    // an own data property, so Object.entries yields it.
+    const input = JSON.parse(`{"__proto__": {"x": 1}, "tokenId": "${ID}"}`) as Record<string, unknown>;
+    const copy = redactTokenIds(input, [ID]) as Record<string, unknown>;
+
+    // The rebuilt key must be an OWN property of the copy...
+    expect(Object.hasOwn(copy, "__proto__")).toBe(true);
+    // ...not a prototype swap on the copy.
+    expect(Object.getPrototypeOf(copy)).toBe(Object.prototype);
+    // The pollution must not have reached Object.prototype.
+    expect((Object.prototype as any).x).toBeUndefined();
+    // The __proto__ payload is still present and rebuilt normally.
+    expect(JSON.stringify(copy)).toContain("__proto__");
+    expect((copy as any).__proto__).toEqual({ x: 1 });
+
+    // The tokenId field is redacted exactly as before.
+    expect(copy.tokenId).toBe(`${ID_PREFIX}…`);
+    expect(JSON.stringify(copy)).not.toContain(ID);
+  });
+});
