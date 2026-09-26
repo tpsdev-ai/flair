@@ -173,12 +173,14 @@ all-or-none promote** — this block moves the tags SEQUENTIALLY and STOPS at th
 failure (the failing move exits non-zero). It reads every package's CURRENT \`latest\`
 BEFORE the first move, and STOPS before moving a single tag if ANY read fails — a
 non-zero npm exit, an empty read, or a value that is not a version — so it only
-reaches the moves with a clean PREVIOUS \`latest\` for every package, and can RESTORE.
+reaches the moves with a clean PREVIOUS \`latest\` for every package — the values its
+RESTORE lines print.
 On the move-failure path it prints one RESTORE line per already-moved package
 (\`npm dist-tag add <pkg>@<previous> latest\`, never \`npm dist-tag rm\`) and then the
 packages it did NOT move; on the final-check path (every add call succeeded)
 the block runs the convergence check and, IF THAT CHECK FAILS, prints its result
-and the same RESTORE lines; on success it prints nothing further. The block never asserts a tag's current value — the convergence
+and the same RESTORE lines; on success the convergence check prints its own success line and the block
+prints no RESTORE lines. The block never asserts a tag's current value — the convergence
 check's output is the only state evidence. The preflight is bound to the release run's **package-set digest** — a single
 sha256 over the canonical sorted list of \`<name>@${VERSION} <sha256>\` lines, one per
 lockstep package (the digest \`${PKG_SET_DIGEST}\` the pack job certified). Paste this
