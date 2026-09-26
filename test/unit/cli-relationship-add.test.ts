@@ -22,7 +22,7 @@
 // Mirrors test/unit/cli-memory-add-derived-from.test.ts's mock-server +
 // spawn-the-real-CLI pattern.
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, afterAll } from "bun:test";
 import { createServer, IncomingMessage, ServerResponse, Server } from "node:http";
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, chmodSync, rmSync } from "node:fs";
@@ -45,6 +45,11 @@ mkdirSync(join(tmpHome, ".flair", "keys"), { recursive: true });
   chmodSync(p, 0o600);
 }
 process.on("exit", () => { try { rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ } });
+// bun's test runner does not run Node's `exit` listener after the suite (measured
+// on bun 1.3.10), so the exit hook above never fired under `bun test` and this
+// module-level home leaked on every run (flair#1889). `afterAll` IS a bun:test
+// hook and does fire; keep the exit hook for a non-test import.
+afterAll(() => { try { rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ } });
 import { canonicalRelationshipId } from "../../packages/flair-client/src/client";
 
 type Capture = { method?: string; path?: string; body?: any };
