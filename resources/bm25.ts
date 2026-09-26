@@ -9,21 +9,48 @@
 // candidate-UNION RRF (NOT naive whole-corpus RRF) recovers 4/6 into top-10 with
 // no regression on the within-cluster gate (p@3 holds 0.88).
 
-// ─── Feature flag: BM25 + union-RRF hybrid retrieval ────────────────────────
-// ACTIVATED 2026-07-08 (ops-i39b activation follow-up to #519): default is now
-// ON. Recall-eval validated at build time (CHANGELOG 0.20.x): NEW-8
-// within-cluster gate p@3 holds 0.88 (no regression), OLD-6 severe
-// near-verbatim misses recover 0/6 → 4/6 into top-10. A fresh isolated-Harper
-// measurement at activation time (no prod contact) confirmed zero regression
-// on both severe- and within-cluster-style synthetic queries and a small
-// (~+4ms/query) latency delta. Set FLAIR_HYBRID_RETRIEVAL=false (also "0" /
-// "off") to REVERT to the pre-hybrid legacy path — byte-identical to the
-// original default-OFF behavior, no code rollback needed. Read per-call so it
-// can be flipped without a rebuild and set per-case in tests. Lives here
-// (Harper-free) so it's unit-testable.
+// ─── Retrieval-mode selector (bench-facing) ─────────────────────────────────
+// The BM25 + union-RRF hybrid path was ACTIVATED 2026-07-08 (ops-i39b
+// activation follow-up to #519): default is hybrid. Recall-eval validated at
+// build time (CHANGELOG 0.20.x): NEW-8 within-cluster gate p@3 holds 0.88 (no
+// regression), OLD-6 severe near-verbatim misses recover 0/6 → 4/6 into top-10.
+//
+// `FLAIR_RETRIEVAL_MODE` selects the strategy by NAME:
+//   "hybrid"       — BM25 + union-RRF hybrid (the default; see above)
+//   "vector-only"  — pure HNSW/vector (the pre-hybrid legacy path)
+//   "bm25-only"    — the lexical leg alone: no HNSW leg, no query embedding,
+//                    no RRF fusion (a benchmark arm, never a user feature)
+// This is a BENCH MEASUREMENT knob, not a shipped toggle — no CLI flag, no docs
+// page, and the default is unchanged. It exists so a harness can measure recall
+// of BM25 alone against hybrid and vector-only on the same corpus.
+//
+// Back-compat is exact: when `FLAIR_RETRIEVAL_MODE` is UNSET the legacy boolean
+// `FLAIR_HYBRID_RETRIEVAL` is honoured exactly as the old flag was —
+// true/1/on → hybrid, anything else → vector-only, unset → hybrid. An UNKNOWN
+// `FLAIR_RETRIEVAL_MODE` value is a REFUSAL at read time (throws, naming the
+// value and the three accepted ones), never a silent default: a mislabelled
+// measurement arm is precisely the failure this selector exists to prevent.
+// Read per-call so it can be flipped without a rebuild and set per-arm in the
+// bench harness. Lives here (Harper-free) so it's unit-testable.
+export type RetrievalMode = "hybrid" | "vector-only" | "bm25-only";
+
+const RETRIEVAL_MODES: readonly RetrievalMode[] = ["hybrid", "vector-only", "bm25-only"];
+
+export function retrievalMode(): RetrievalMode {
+  const raw = process.env.FLAIR_RETRIEVAL_MODE;
+  if (raw !== undefined) {
+    const v = raw.toLowerCase();
+    if ((RETRIEVAL_MODES as readonly string[]).includes(v)) return v as RetrievalMode;
+    throw new Error(
+      `unknown FLAIR_RETRIEVAL_MODE value "${raw}" (accepted: ${RETRIEVAL_MODES.join(", ")})`,
+    );
+  }
+  const legacy = (process.env.FLAIR_HYBRID_RETRIEVAL ?? "true").toLowerCase();
+  return (legacy === "true" || legacy === "1" || legacy === "on") ? "hybrid" : "vector-only";
+}
+
 export function hybridEnabled(): boolean {
-  const v = (process.env.FLAIR_HYBRID_RETRIEVAL ?? "true").toLowerCase();
-  return v === "true" || v === "1" || v === "on";
+  return retrievalMode() === "hybrid";
 }
 
 // BM25 parameters (Kern-approved): k1≈1.2, b≈0.75; standard IDF + BM25.

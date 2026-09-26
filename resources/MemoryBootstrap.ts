@@ -21,7 +21,7 @@ import {
 // retrievalCount hit-tracking side effects (see resources/
 // semantic-retrieval-core.ts's module doc for the full boundary).
 import { retrieveCandidates, DEFAULT_SELECT } from "./semantic-retrieval-core.js";
-import { hybridEnabled } from "./bm25.js";
+import { retrievalMode } from "./bm25.js";
 import { buildTrustBlock } from "./trust-block.js";
 import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
 import { estimateTokens } from "./token-estimate.js";
@@ -1011,9 +1011,9 @@ export class BootstrapMemories extends Resource {
           limit: candidatePoolK,
           // flair#1246 — ONE RANKER, ONE SCALE: this pass now invokes the
           // core in the SAME mode memory_search does (hybrid + q via the
-          // shared hybridEnabled() selector, so the FLAIR_HYBRID_RETRIEVAL
-          // kill-switch moves BOTH surfaces together — a split mode IS the
-          // #1246 bug). HNSW-only here was an accident of early code, and it
+          // shared retrievalMode() selector, so the FLAIR_RETRIEVAL_MODE /
+          // FLAIR_HYBRID_RETRIEVAL kill-switch moves BOTH surfaces together —
+          // a split mode IS the #1246 bug). HNSW-only here was an accident of early code, and it
           // made bootstrap's teammate picks diverge from search on the same
           // store+query: a record whose task-relevance is LEXICAL (exact task
           // terms in semantically-atypical prose) ranks BELOW bland-generic
@@ -1025,7 +1025,7 @@ export class BootstrapMemories extends Resource {
           // fusion carries it to the top, same as search. Perf (Kern-ratified
           // trade): the BM25 corpus scan this adds to the bootstrap path is
           // the same per-call scan every memory_search request already runs.
-          hybrid: hybridEnabled(),
+          mode: retrievalMode(),
           // The lexical leg — same query text the embedding was computed
           // from, so both legs rank the same question (parity with search,
           // where `q` drives BM25 and the keyword bump).

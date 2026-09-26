@@ -59,7 +59,7 @@ import { withDetachedTxn } from "./table-helpers.js";
 import { wrapUntrusted } from "./content-safety.js";
 import { cosineSimilarity } from "./dedup.js";
 import { compositeScore } from "./scoring.js";
-import { buildBM25, fuseRrfNormalized, SEM_LIMIT } from "./bm25.js";
+import { buildBM25, fuseRrfNormalized, SEM_LIMIT, type RetrievalMode } from "./bm25.js";
 import { isAllowedBm25Candidate, type Condition } from "./bm25-filter.js";
 import { indexedBm25Ids } from "./bm25-index-service.js";
 import { byRecencyThenId } from "./sort-comparators.js";
@@ -172,11 +172,14 @@ export interface RetrieveCandidatesParams {
    */
   isAllowed?: (record: any) => boolean;
   /**
-   * Whether to run the BM25 + union-RRF hybrid leg (true) or the legacy
-   * HNSW-only / keyword-fallback path (false). Explicit and REQUIRED — never
-   * read from hybridEnabled() internally, so a caller gets a deterministic
-   * mode regardless of the global FLAIR_HYBRID_RETRIEVAL env value.
-   * Both production callers resolve it from the SAME hybridEnabled()
+   * The retrieval strategy for this call. Explicit and REQUIRED — never read
+   * from retrievalMode() internally, so a caller gets a deterministic mode
+   * regardless of the global FLAIR_RETRIEVAL_MODE env value.
+   *   "hybrid"      — BM25 + union-RRF hybrid leg (the default)
+   *   "vector-only" — legacy HNSW-only / keyword-fallback path
+   *   "bm25-only"   — the lexical (BM25) leg ALONE: no HNSW leg, no query
+   *                   embedding, no RRF fusion. A benchmark arm.
+   * Both production callers resolve it from the SAME retrievalMode()
    * selector — SemanticSearch since the hybrid activation, MemoryBootstrap's
    * task-relevant pass since flair#1246 (one ranker, one scale: HNSW-only
    * bootstrap ranked lexically-relevant records below bland-generic noise on
@@ -186,7 +189,7 @@ export interface RetrieveCandidatesParams {
    * scan (no `limit`), the same per-call scan every search request already
    * runs — the Kern-ratified cost of putting bootstrap on the search ranker.
    */
-  hybrid: boolean;
+  mode: RetrievalMode;
   /** Request context, for withDetachedTxn — both SemanticSearch and
    *  MemoryBootstrap are Resources with their own ctx. */
   ctx?: any;
@@ -233,7 +236,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
     minScore = 0,
     agentId,
     isAllowed,
-    hybrid,
+    mode,
     ctx,
     withSemSimilarity = false,
     onLegs,
@@ -246,7 +249,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
   const hnswLegIds: string[] = [];
   const bm25LegIds: string[] = [];
 
-  if (hybrid) {
+  if (mode === "hybrid") {
     // ─── BM25 + union-RRF hybrid path ────────────────────────────────────
     // 1. Semantic candidates via HNSW (unchanged fetch). 2. BM25 lexical pass
     //    over the SCOPED corpus. 3. SECURITY: the BM25 candidate set is filtered
@@ -486,8 +489,92 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
         }, scoring === "raw" ? rrfRaw : finalScore);
       }
     }
+  } else if (mode === "bm25-only") {
+    // ─── BM25-only path (benchmark arm) ────────────────────────────────────
+    // The lexical leg ALONE: no HNSW leg, no query embedding, no RRF fusion.
+    // `semIds` stays empty by construction and any qEmb the caller passed is
+    // IGNORED — ranking comes from the BM25 list and nothing else, so the arm
+    // measures exactly what its name says. The result shape is identical to
+    // the other modes (same keys, same `_rank` ordering key, stripped before
+    // return). `_score` carries no semantic evidence on this path (there is no
+    // cosine to report): it is the legacy keyword bump alone, the same value
+    // the no-embedding fallback reports.
+    const allowedById = new Map<string, any>();
+    let bm25Ids: string[] = [];
+    let servedFromIndex = false;
+
+    if (q) {
+      const fromIndex = await indexedBm25Ids({
+        q: String(q),
+        conditions: conditions as Condition[],
+        timeFilters: { sinceDate, asOf },
+        isAllowed,
+        limit: SEM_LIMIT,
+        ctx,
+      });
+      if (fromIndex) { bm25Ids = fromIndex; servedFromIndex = true; }
+    }
+
+    if (!servedFromIndex && q) {
+      // Legacy path: scoped corpus scan + per-query buildBM25() (see the
+      // hybrid branch above for the flair#1357 rationale).
+      const corpusQuery: any = conditions.length > 0 ? { conditions, select } : { select };
+      const corpusResults = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search(corpusQuery));
+      const bm25Docs: { id: string; content?: string }[] = [];
+      for await (const record of corpusResults) {
+        if (!isAllowedBm25Candidate(record, conditions as Condition[], { sinceDate, asOf })) continue;
+        if (!passesAllowed(record)) continue;
+        allowedById.set(record.id, record);
+        bm25Docs.push({ id: record.id, content: record.content });
+      }
+      const bm25 = buildBM25(bm25Docs);
+      const ranked = bm25.rank(String(q));
+      bm25Ids = ranked.filter(r => r.score > 0).slice(0, SEM_LIMIT).map(r => r.id);
+    }
+
+    if (servedFromIndex) {
+      const resolved: string[] = [];
+      for (const id of bm25Ids) {
+        if (allowedById.has(id)) { resolved.push(id); continue; }
+        const full = await withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(id));
+        if (!full) continue;
+        if (!isAllowedBm25Candidate(full, conditions as Condition[], { sinceDate, asOf })) continue;
+        if (!passesAllowed(full)) continue;
+        const projected: any = {};
+        for (const key of select) if (key in full) projected[key] = (full as any)[key];
+        allowedById.set(id, projected);
+        resolved.push(id);
+      }
+      bm25Ids = resolved;
+    }
+    bm25LegIds.push(...bm25Ids);
+
+    // Emit in BM25 order alone — rank 0 gets the highest `_rank`, so the final
+    // descending sort keeps the lexical order. No fusion, no cosine.
+    for (let i = 0; i < bm25Ids.length; i++) {
+      const id = bm25Ids[i]!;
+      const record = allowedById.get(id);
+      if (!record) continue;
+      let keywordHit = false;
+      if (q && String(record.content || "").toLowerCase().includes(String(q).toLowerCase())) {
+        keywordHit = true;
+      }
+      const rawScore = keywordHit ? 0.05 : 0;
+      let finalScore = scoring === "raw" ? rawScore : compositeScore(rawScore, record);
+      if (temporalBoost > 1.0) finalScore *= temporalBoost;
+
+      const isFlagged = record._safetyFlags && Array.isArray(record._safetyFlags) && record._safetyFlags.length > 0;
+      const source = record.agentId !== agentId ? record.agentId : undefined;
+      pushRanked(results, {
+        ...record,
+        content: isFlagged ? wrapUntrusted(record.content, source) : record.content,
+        _score: Math.round(finalScore * 1000) / 1000,
+        _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
+        _source: source,
+      }, bm25Ids.length - i);
+    }
   } else if (qEmb) {
-    // ─── HNSW vector search path (legacy, hybrid flag OFF — the
+    // ─── HNSW vector search path (legacy, mode "vector-only" — the
     // FLAIR_HYBRID_RETRIEVAL kill-switch path for BOTH production callers
     // since flair#1246) ─────────────────────────────────────────────────────
     const query: any = {

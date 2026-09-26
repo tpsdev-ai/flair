@@ -12,7 +12,7 @@ import { resolveReadScope } from "./memory-read-scope.js";
 // of 2026-07-08 (see ./bm25.ts's hybridEnabled() doc); set
 // FLAIR_HYBRID_RETRIEVAL=false to revert to the legacy HNSW + +0.05
 // keyword-bump path, byte-identical to the original pre-hybrid behavior.
-import { hybridEnabled } from "./bm25.js";
+import { retrievalMode } from "./bm25.js";
 
 // The actual HNSW/BM25 retrieval + post-retrieval filtering (temporal/
 // supersede/isAllowed) now lives in the pure, side-effect-free
@@ -125,12 +125,19 @@ export class SemanticSearch extends Resource {
     // this is the ONE scoping resolution for this endpoint now.
     const scope = agentId ? await resolveReadScope(agentId) : null;
 
+    // Select the retrieval mode ONCE per request (bench-facing selector; see
+    // the flag doc in ./bm25.ts). Default (FLAIR_RETRIEVAL_MODE unset) follows
+    // the legacy FLAIR_HYBRID_RETRIEVAL boolean exactly.
+    const mode = retrievalMode();
+
     // Generate query embedding
     let qEmb = queryEmbedding;
-    if (!qEmb && q) {
+    if (!qEmb && q && mode !== "bm25-only") {
       // Always attempt embedding generation — getEmbedding() handles init internally.
       // Don't gate on getMode() which may return "none" before init completes in worker threads.
       // flair#504 Phase 2: 'query' — this is a search query, not stored content.
+      // bm25-only: skipped — that arm ranks on the lexical leg alone and must
+      // perform NO embedding call (the core ignores any qEmb it is handed).
       try { qEmb = await getEmbedding(String(q).slice(0, 8000), "query"); } catch {}
     }
 
@@ -242,7 +249,9 @@ export class SemanticSearch extends Resource {
       };
     }
 
-    const hybrid = hybridEnabled();
+    // (`mode` was resolved at the top of post(); the bm25-only arm has no
+    // embedding, so the HNSW-leg portion of the overfetch policy does not apply
+    // to it — the core ignores `queryEmbedding` on that branch.)
 
     // The overfetch policy (how many raw candidates to pull from the
     // HNSW/BM25 legs relative to what the caller ultimately wants) is THIS
@@ -271,7 +280,7 @@ export class SemanticSearch extends Resource {
       minScore,
       agentId,
       isAllowed: scope?.isAllowed,
-      hybrid,
+      mode,
       ctx,
       onLegs: includeLegs ? (l) => { legs = l; } : undefined,
       // flair#744 slice 1: the trust block needs `provenance`, which the

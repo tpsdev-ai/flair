@@ -8,7 +8,7 @@ import { resolveBuildInfo } from "./build-info.js";
 import { getMigrationStatusSnapshot } from "./migrations/status.js";
 import { resolveMigrationDataDirForRead } from "./migrations/data-dir.js";
 import { REM_DEDUP_STATS_PATH } from "./dedup-cluster.js";
-import { hybridEnabled } from "./bm25.js";
+import { hybridEnabled, retrievalMode } from "./bm25.js";
 import { bm25IndexEnabled, bm25IndexStatus } from "./bm25-index-service.js";
 import { normalizeStamp } from "./embedding-space-guard.js";
 import { getModelId } from "./embeddings-provider.js";
@@ -141,6 +141,7 @@ export function currentSearchReadiness(): SearchReadiness {
     memoryTable: db.flair?.Memory,
     bm25: bm25IndexStatus(),
     hybridEnabled: hybridEnabled(),
+    retrievalMode: retrievalMode(),
     bm25IndexEnabled: bm25IndexEnabled(),
     warn: (message) => { logger.warn?.(message); },
   });
@@ -190,6 +191,10 @@ export class HealthDetail extends Resource {
       warnings.push({ level: "warn", message: embeddingBody.embedding.fallback });
     }
     stats.searchReady = readiness.searchReady;
+    // The active retrieval strategy (retrievalMode() in ./bm25.ts) — reported
+    // so an operator can see WHICH ranker a process is serving from. Default
+    // (FLAIR_RETRIEVAL_MODE unset) is "hybrid", the shipped behavior.
+    stats.retrievalMode = retrievalMode();
     // Public/detail shape is unchanged: searchReadyReason stays a lag signal
     // (present iff !searchReady). Ready-path verification constants stay on
     // the decision object (flair#1411).

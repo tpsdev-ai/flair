@@ -136,6 +136,45 @@ describe("resolveSearchReadiness (flair#1326)", () => {
     expect(r.status).toBe(200);
   });
 
+  test("retrievalMode 'vector-only': a cold BM25 index is not a lie — no lexical leg in the path", () => {
+    const r = resolveSearchReadiness({
+      resources: mounted,
+      memoryTable,
+      bm25: { state: "empty" },
+      retrievalMode: "vector-only",
+    });
+    expect(r.searchReady).toBe(true);
+    expect(r.ok).toBe(true);
+    expect(r.status).toBe(200);
+  });
+
+  test("retrievalMode 'bm25-only': the lexical index IS the path, so a cold index is named as lag", () => {
+    const r = resolveSearchReadiness({
+      resources: mounted,
+      memoryTable,
+      bm25: { state: "empty" },
+      retrievalMode: "bm25-only",
+    });
+    expect(r.searchReady).toBe(false);
+    expect(r.ok).toBe(true);
+    expect(r.status).toBe(200);
+    expect(r.searchReadyReason).toContain("bm25 index not built");
+  });
+
+  test("retrievalMode is authoritative over the legacy hybridEnabled boolean", () => {
+    // hybridEnabled:false (legacy vector-only) but an explicit bm25-only mode:
+    // the mode is what the process actually runs, so the cold index IS lag.
+    const r = resolveSearchReadiness({
+      resources: mounted,
+      memoryTable,
+      bm25: { state: "empty" },
+      hybridEnabled: false,
+      retrievalMode: "bm25-only",
+    });
+    expect(r.searchReady).toBe(false);
+    expect(r.searchReadyReason).toContain("bm25 index not built");
+  });
+
   test("FLAIR_BM25_INDEX off: empty is the kill-switch steady state, not cold lag", () => {
     // ensureReady never builds when the index is killed, so status stays
     // empty for the process lifetime while hybrid still serves the legacy

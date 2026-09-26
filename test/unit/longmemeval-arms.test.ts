@@ -8,7 +8,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
-  formatRetrieved, formatFullContext, READER_PAYLOAD_FORMAT, HARPER_ARMS,
+  formatRetrieved, formatFullContext, READER_PAYLOAD_FORMAT, HARPER_ARMS, ARM_RETRIEVAL_MODE,
   assertRetrievedReaderContextEqualsTopK,
 } from "../bench/longmemeval/arms";
 import { entryToSessions, type LmeEntry } from "../bench/longmemeval/dataset";
@@ -61,7 +61,7 @@ describe("retrieved-arm readerContext === topK (flair#1430)", () => {
 
   test("formatRetrieved admits the same id set as topK for every Harper arm", () => {
     const readerContext = formatRetrieved(items).admittedIds;
-    expect(HARPER_ARMS).toEqual(["flair", "vector-only"]);
+    expect(HARPER_ARMS).toEqual(["flair", "vector-only", "bm25-only"]);
     for (const arm of HARPER_ARMS) {
       assertRetrievedReaderContextEqualsTopK(arm, readerContext, topK);
     }
@@ -119,6 +119,22 @@ describe("formatFullContext reports which events it admitted (flair#1358)", () =
     const cut = formatFullContext(sessions, header.length + firstLine.length);
     expect(cut.truncated).toBe(true);
     expect(cut.includedEventIds).toEqual([sessions[0]!.events[0]!.id]);
+  });
+});
+
+describe("Harper arms name their retrieval mode (bm25-only arm)", () => {
+  test("every Harper arm has exactly one FLAIR_RETRIEVAL_MODE mapping", () => {
+    // A missing mapping is a compile error (Record<HarperArm, RetrievalMode>);
+    // this pins the VALUES so a mislabelled arm (the failure this task exists
+    // to prevent) is caught at review time, not at measurement time.
+    expect(ARM_RETRIEVAL_MODE).toEqual({
+      "flair": "hybrid",
+      "vector-only": "vector-only",
+      "bm25-only": "bm25-only",
+    });
+    for (const arm of HARPER_ARMS) {
+      expect(ARM_RETRIEVAL_MODE[arm]).toBeDefined();
+    }
   });
 });
 

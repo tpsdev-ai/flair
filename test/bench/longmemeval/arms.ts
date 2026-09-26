@@ -8,7 +8,11 @@
  *   - vector-only  the same retrieval with BM25 disabled — pure HNSW/vector
  *                  (a clean ablation: Flair with hybrid off, everything else
  *                  identical). Set at the Harper PROCESS level via
- *                  FLAIR_HYBRID_RETRIEVAL=false (eval.ts spawns a second Harper).
+ *                  FLAIR_RETRIEVAL_MODE=vector-only (eval.ts spawns a second
+ *                  Harper).
+ *   - bm25-only    the lexical (BM25) leg alone — no HNSW, no query embedding,
+ *                  no RRF fusion (FLAIR_RETRIEVAL_MODE=bm25-only). The arm that
+ *                  measures what BM25 by itself recovers.
  *   - full-context the ENTIRE haystack (the ceiling AND the memory-validity
  *                  check: if it ≈ flair, the benchmark is measuring long-context,
  *                  not memory). Uses its own larger, still-pinned num_ctx.
@@ -24,11 +28,24 @@
 import type { RetrievedItem } from "../../../packages/flair-bench/lib/index";
 import type { LmeSession } from "./dataset";
 
-export type Arm = "flair" | "vector-only" | "full-context" | "no-context";
-export const ALL_ARMS: Arm[] = ["flair", "vector-only", "full-context", "no-context"];
+export type Arm = "flair" | "vector-only" | "bm25-only" | "full-context" | "no-context";
+export const ALL_ARMS: Arm[] = ["flair", "vector-only", "bm25-only", "full-context", "no-context"];
+
+/** The retrieval strategies a Harper arm can run under (`FLAIR_RETRIEVAL_MODE`). */
+export type RetrievalMode = "hybrid" | "vector-only" | "bm25-only";
 
 /** Arms that retrieve from a running Flair (need an ephemeral Harper). */
-export const HARPER_ARMS: Arm[] = ["flair", "vector-only"];
+export type HarperArm = "flair" | "vector-only" | "bm25-only";
+export const HARPER_ARMS: HarperArm[] = ["flair", "vector-only", "bm25-only"];
+
+/** The `FLAIR_RETRIEVAL_MODE` value each retrieved arm runs under. Kept next to
+ *  HARPER_ARMS so adding an arm forces naming its mode; a `Record` keyed by the
+ *  arm union makes a missing mapping a compile error. */
+export const ARM_RETRIEVAL_MODE: Record<HarperArm, RetrievalMode> = {
+  "flair": "hybrid",
+  "vector-only": "vector-only",
+  "bm25-only": "bm25-only",
+};
 
 export const READER_SYSTEM =
   "You are a helpful assistant answering the user's question using ONLY the conversation memory provided. " +
