@@ -18,6 +18,8 @@ import {
   type InstanceIdentityRow,
 } from "../src/lib/instance-identity-row.js";
 import { readAllInstanceRows } from "./instance-identity-rows.js";
+import { findOrCreateInstance } from "./instance-create-lock.js";
+import { withDetachedTxnAsync } from "./table-helpers.js";
 import { isSkillWrite } from "./skill-write.js";
 import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
@@ -299,56 +301,103 @@ export class FederationInstance extends Resource {
     let signingKeyAvailable = false;
 
     if (decision.kind === "none") {
-      // No row on a successful read — the one state that may create.
-      const kp = nacl.sign.keyPair();
-      const id = `flair_${randomBytes(4).toString("hex")}`;
-      const publicKey = Buffer.from(kp.publicKey).toString("base64url");
+      // First boot: the read OUTSIDE the lock found no row. The create runs in the
+      // filesystem bakery critical section (flair#1897) — shared by EVERY HTTP
+      // worker of this process AND every process on this Flair home: a read taken
+      // UNDER the lock, the mint, the put, the keystore seed and a confirming
+      // re-read — so two concurrent first-boot GETs mint ONE row and both are
+      // answered with it. A GET that found a row above never reaches here, so
+      // reads stay concurrent.
+      const outcome = await findOrCreateInstance({
+        // Detach the request's transaction for EVERY read inside the lock: the
+        // outer read above opened the request's transaction BEFORE this create, so
+        // reusing it here would read the pre-create snapshot and mint a second row
+        // even serialised (the table-helpers.ts class). A fresh transaction sees
+        // the row the prior lock holder committed.
+        readAll: () => withDetachedTxnAsync((this as any).getContext?.(), () => readAllInstanceRows()),
+        // Commit the WRITE before the lock releases: both the row put and the
+        // keystore seed run in a DETACHED transaction, so Harper builds a fresh
+        // ImmediateTransaction that commits on its own rather than at the end of
+        // the request (the lock cannot serialise a write that commits after the
+        // method returns — the earlier BLOCKED finding, flair#1897 slice 1).
+        put: (row) => withDetachedTxnAsync((this as any).getContext?.(), () => (databases as any).flair.Instance.put(row)),
+        setSeed: (createdId, seed) =>
+          withDetachedTxnAsync((this as any).getContext?.(), async () => {
+            const { keystore } = await import("../src/keystore.js");
+            keystore.setPrivateKeySeed(createdId, seed);
+          }),
+        seedPresent: async (rowId) => {
+          try {
+            const { keystore } = await import("../src/keystore.js");
+            return keystore.getPrivateKeySeed(rowId) !== null;
+          } catch {
+            return false;
+          }
+        },
+        mint: () => {
+          const kp = nacl.sign.keyPair();
+          return {
+            id: `flair_${randomBytes(4).toString("hex")}`,
+            publicKey: Buffer.from(kp.publicKey).toString("base64url"),
+            secretKey: kp.secretKey,
+          };
+        },
+      });
 
-      // A fresh identity is a SPOKE. `flair init --remote` does not insert over
-      // a row it can read: it reconciles the ONE row it finds and sets ROLE to
-      // "hub", keeping that id and publicKey (flair#1883) — so the identity
-      // peers learn is the one this GET created. That is the only guarantee the
-      // reconcile gives: it creates only when its own read found no row, and if
-      // a row appears in that read-then-insert window (a concurrent GET here)
-      // it re-reads and REFUSES, naming both rows and the prune that resolves
-      // them, rather than reporting success.
-      instance = {
-        id,
-        publicKey,
-        role: "spoke",
-        status: "active",
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-
-      await (databases as any).flair.Instance.put(instance);
-
-      // Store private key seed in encrypted keystore (not in DB).
-      //
-      // flair#1233: a keystore failure no longer aborts the GET. This is a
-      // READ path — the response never uses the private key, and the old
-      // throw here left federation state entirely unobservable on hosts
-      // whose HOME isn't writable (the #812 ENOTDIR class; keysDir() is
-      // homedir()-relative). Fail-closed stays where the key is USED:
-      // signing, in pair/sync, still throws when the key is absent. Here the
-      // failure is logged server-side and surfaced to the caller as
-      // signingKeyAvailable:false. Plaintext keys still never touch the DB.
-      try {
-        const { keystore } = await import("../src/keystore.js");
-        const seed = kp.secretKey.slice(0, 32);
-        keystore.setPrivateKeySeed(id, seed);
-        signingKeyAvailable = true;
-      } catch (err: any) {
+      if (outcome.kind === "refuse-multiple") {
+        if (outcome.putCommitted) {
+          // This request's OWN detached put committed a row AND the table holds >1.
+          console.error(
+            `[federation] GET /FederationInstance: this request committed row ${outcome.mintedId}; the table now holds ` +
+              `${outcome.rows.length} rows — hand to ${INSTANCE_ROW_PRUNE_REMEDY}.`,
+          );
+          return new Response(
+            JSON.stringify({
+              error: "multiple_instance_rows",
+              detail: multipleInstanceRowsMessage(outcome.rows, "GET /FederationInstance"),
+              rows: outcome.rows,
+            }),
+            { status: 409, headers: { "content-type": "application/json" } },
+          );
+        }
+        // Pre-put (the read before or the first in-lock read) — nothing created.
         console.error(
-          "[federation] Could not store the federation signing key seed in the keystore " +
-            "($HOME/.flair/keys, relative to the Harper process's HOME). The identity row was created and " +
-            "reads work, but this instance cannot sign — pair/sync will fail until the keystore is fixed. " +
-            "Remedy: make $HOME/.flair/keys a directory writable by the Harper process (mode 0700). " +
-            "The seed for THIS identity was never stored, so after fixing the keystore, re-key: delete the " +
-            "Instance row and re-pair to mint a fresh identity. " +
-            `${err?.constructor?.name ?? "Error"}: ${err?.message ?? err}`,
+          `[federation] GET /FederationInstance found ${outcome.rows.length} Instance rows under the create lock — answering 409 and creating NOTHING.`,
+        );
+        return new Response(
+          JSON.stringify({
+            error: "multiple_instance_rows",
+            detail: multipleInstanceRowsMessage(outcome.rows, "GET /FederationInstance"),
+            rows: outcome.rows,
+          }),
+          { status: 409, headers: { "content-type": "application/json" } },
         );
       }
+      if (outcome.kind === "refuse-unobservable") {
+        console.error(
+          `[federation] GET /FederationInstance: minted ${outcome.mintedId} but the confirming re-read saw NO row — ` +
+            `the detached write was not observable. Refusing (no retry).`,
+        );
+        return new Response(
+          JSON.stringify({
+            error: "instance_identity_unobservable",
+            detail:
+              `This instance minted ${outcome.mintedId} but could not read it back — the write did not commit where expected. ` +
+              `Nothing is answered. Retry; if it persists, inspect the flair.Instance table.`,
+          }),
+          { status: 503, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (outcome.kind === "refuse-lock") {
+        console.error(`[federation] GET /FederationInstance: ${outcome.detail}`);
+        return new Response(
+          JSON.stringify({ error: "instance_create_lock_unavailable", detail: outcome.detail }),
+          { status: 503, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (outcome.warning) console.error(`[federation] ${outcome.warning}`);
+      instance = outcome.row;
+      signingKeyAvailable = outcome.seeded;
     } else {
       // Existing identity: report whether its signing key is present and
       // decryptable. getPrivateKeySeed is a read-only probe that returns null
