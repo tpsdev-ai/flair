@@ -445,7 +445,13 @@ jobs:
             echo "::error::version v${VERSION_TOP} is burned: a release-attempt deployment already exists for it; the next patch is the only path"
             exit 1
           fi
-          MARKER_BODY="$(jq -n --arg ref "v${VERSION_TOP}" '{ref:$ref, environment:"release-attempt", task:"stage-attempt", auto_merge:false, required_contexts:[]}')"
+          # The marker carries the CERTIFIED values this job re-derived from the
+          # artifact it staged (flair#1928 slice 1): the package-set digest and the
+          # manifest sha256, plus the version. The promote job later reads the version
+          # and the certified digest from HERE as DATA (never from main's package.json,
+          # which moves on after a release). It is written BEFORE anything is staged,
+          # so a missing/invalid digest refuses the stage (nothing staged).
+          MARKER_BODY="$(jq -n --arg ref "v${VERSION_TOP}" --arg psd "$PACKAGE_SET_DIGEST" --arg ms "$MANIFEST_DIGEST" --arg ver "$VERSION_TOP" '{ref:$ref, environment:"release-attempt", task:"stage-attempt", auto_merge:false, required_contexts:[], payload:{package_set_digest:$psd, manifest_sha256:$ms, version:$ver}}')"
           if ! printf '%s' "$MARKER_BODY" | gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments" --input - > /dev/null; then
             echo "::error::could not write the release-attempt marker for v${VERSION_TOP}; nothing was staged"
             exit 1

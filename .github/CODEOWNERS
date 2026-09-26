@@ -12,6 +12,17 @@
 /scripts/check-version-sync.mjs @heskew
 /.github/release-auto-tag-advisories.json @heskew
 
+# flair#1928 slice 1: the machinery the privileged promote job will EXECUTE (the
+# canary block it emits, the registry hashers/skew check and the lockstep source)
+# and the promote workflows. A non-release PR must not be able to land an
+# exfiltrating version of any of these on main, so they join the trust root.
+/scripts/ci/canary-verdict.sh @heskew
+/scripts/ci/registry-tarball-sha256.mjs @heskew
+/scripts/ci/registry-latest-skew.mjs @heskew
+/scripts/ci/lockstep-packages.mjs @heskew
+/.github/workflows/canary.yml @heskew
+/.github/workflows/release-promote*.yml @heskew
+
 # …and the ownership map itself. Without this line the catch-all rule above
 # makes the reviewers team the owner of CODEOWNERS, so a collaborator with merge
 # access and that team's approval could delete the entries just above, then
