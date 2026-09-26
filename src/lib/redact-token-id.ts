@@ -129,12 +129,14 @@ export function createTokenRedactor(secrets: readonly string[]): TokenRedactor {
 }
 
 function walk(value: unknown, redact: (text: string) => string): unknown {
-  return walkDeep(value, redact, new WeakSet<object>());
+  return walkDeep(value, redact, new Map<object, unknown>());
 }
 
 /**
  * A plain object: its prototype is `Object.prototype` or null. A Date, Error,
- * Map, Set or class instance is NOT a plain object, so it is not rebuilt.
+ * Map, Set or class instance is NOT a plain object, so it is not rebuilt — it
+ * passes through UNREDACTED, and its String form is what a caller should log
+ * (every call site stringifies an error before it reaches the redactor).
  */
 function isPlainObject(value: object): boolean {
   const proto = Object.getPrototypeOf(value);
@@ -142,30 +144,33 @@ function isPlainObject(value: object): boolean {
 }
 
 /**
- * Rebuild `value` with every string redacted. `seen` holds the containers on the
- * current path, so a cyclic value terminates — the repeated reference is returned
- * as-is — instead of recursing forever. Non-plain objects pass through unchanged.
+ * Rebuild `value` with every string redacted. `copies` maps each container
+ * already rebuilt to its REDACTED copy, and the copy is registered before its
+ * children are walked: a sub-object reached twice (an alias) is the same
+ * redacted copy both times, and a cyclic value terminates by pointing at its own
+ * redacted copy. Returning the original for a repeated reference would hand back
+ * the unredacted container — the leak flair#1905's review found.
  */
-function walkDeep(value: unknown, redact: (text: string) => string, seen: WeakSet<object>): unknown {
+function walkDeep(value: unknown, redact: (text: string) => string, copies: Map<object, unknown>): unknown {
   if (typeof value === "string") return redact(value);
   if (Array.isArray(value)) {
-    if (seen.has(value)) return value;
-    seen.add(value);
-    return value.map((v) => walkDeep(v, redact, seen));
+    const known = copies.get(value);
+    if (known !== undefined) return known;
+    const out: unknown[] = [];
+    copies.set(value, out);
+    for (const v of value) out.push(walkDeep(v, redact, copies));
+    return out;
   }
   if (value && typeof value === "object") {
-    // A Date, Error, Map or class instance is left alone: rebuilding it through
-    // Object.entries would drop its message/entries, and its String form is what
-    // a caller should log.
     if (!isPlainObject(value)) return value;
-    if (seen.has(value)) return value;
-    seen.add(value);
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(([key, v]) => [
-        redact(key),
-        walkDeep(v, redact, seen),
-      ]),
-    );
+    const known = copies.get(value);
+    if (known !== undefined) return known;
+    const out: Record<string, unknown> = {};
+    copies.set(value, out);
+    for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+      out[redact(key)] = walkDeep(v, redact, copies);
+    }
+    return out;
   }
   // Numbers, booleans, null, undefined, functions, symbols: untouched.
   return value;

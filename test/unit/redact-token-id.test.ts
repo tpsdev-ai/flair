@@ -111,15 +111,30 @@ describe("redactTokenIds — deep token-id redaction (flair#1902)", () => {
 });
 
 describe("redactTokenIds — walk robustness (flair#1902)", () => {
-  test("a cyclic value does not throw", () => {
-    const cyclic: any = { name: "loop" };
+  test("a cyclic value does not throw, and the cycle points at the REDACTED copy", () => {
+    const cyclic: any = { name: "loop", id: TOKEN };
     cyclic.self = cyclic;
     let out: any;
     expect(() => {
       out = redactTokenIds(cyclic, [TOKEN]);
     }).not.toThrow();
-    // The container already on the path is returned as-is, not recursed into.
-    expect(out.self).toBe(cyclic);
+    // The repeated reference resolves to the redacted copy, never to the original:
+    // returning the original here handed back the unredacted container.
+    expect(out.self).toBe(out);
+    expect(out.self).not.toBe(cyclic);
+    expect(out.id).toBe(`${PREFIX}…`);
+    expect(out.self.id).toBe(`${PREFIX}…`);
+  });
+
+  test("a sub-object reached twice (an alias) is redacted on every reference", () => {
+    const shared = { consumedBy: TOKEN };
+    const out = redactTokenIds({ first: shared, second: shared, list: [shared] }, [TOKEN]) as any;
+    expect(out.first.consumedBy).toBe(`${PREFIX}…`);
+    expect(out.second.consumedBy).toBe(`${PREFIX}…`);
+    expect(out.list[0].consumedBy).toBe(`${PREFIX}…`);
+    // One redacted copy per original container.
+    expect(out.second).toBe(out.first);
+    expect(JSON.stringify(out)).not.toContain(TOKEN);
   });
 
   test("a non-plain object keeps its identity and its message", () => {
