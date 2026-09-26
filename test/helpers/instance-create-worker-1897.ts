@@ -63,7 +63,7 @@ if (schedule === "realm-chain") {
   const realmChain = async (fn: () => Promise<void>): Promise<void> => {
     const prev = (globalThis as any).__flairChain;
     let release!: () => void;
-    (globalThis as any).__flairChain = new Promise((r) => (release = r));
+    (globalThis as any).__flairChain = new Promise<void>((r) => (release = r));
     await prev;
     try {
       await fn();
