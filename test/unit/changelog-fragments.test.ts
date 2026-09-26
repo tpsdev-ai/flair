@@ -11,9 +11,9 @@
 // exactly once.
 
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { tempDir } from "../helpers/temp-dir.ts";
 
 import {
   CATEGORIES,
@@ -33,7 +33,7 @@ import {
 } from "../../scripts/changelog-fragments.mjs";
 
 function tmp(): string {
-  return mkdtempSync(join(tmpdir(), "flair-changelog-frag-"));
+  return tempDir("flair-changelog-frag-");
 }
 
 function write(dir: string, name: string, body: string): void {

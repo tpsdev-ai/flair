@@ -24,6 +24,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { afterAll } from "bun:test";
 
 export interface SandboxHome {
   /** The freshly created sandbox directory. */
@@ -79,10 +80,24 @@ export function installSandboxHome(): SandboxHome {
   // "this harness cannot own a process-wide signal handler: its own tests use
   // signals as data."
   //
-  // The exit hook covers a clean exit (a suite that finishes with the sandbox
-  // still present). An interrupted run leaves its temp home behind — the accepted
-  // cost, and harmless: the dir is under the OS temp dir, never a real home.
+  // The exit hook covers a clean exit in a NON-test process (a `bun -e` script,
+  // the lane runner itself). An interrupted run leaves its temp home behind —
+  // the accepted cost, and harmless: the dir is under the OS temp dir, never a
+  // real home.
   process.on("exit", sandbox.cleanup);
+  // Under `bun test` the exit hook above never fires: bun's test runner does not
+  // run Node's `exit`/`beforeExit` listeners (measured on bun 1.3.10 — a handler
+  // registered from a test file OR from this preload does not run after the
+  // suite finishes). Without this, every `bun test` process leaked one
+  // `flair-test-home-*` directory (flair#1889: a lane of ~50 test processes left
+  // ~50). `afterAll` IS a bun:test hook and does fire, so register the same
+  // cleanup there. It throws outside a test context, which the exit hook above
+  // already covers, so the failure is swallowed.
+  try {
+    afterAll(sandbox.cleanup);
+  } catch {
+    /* not a test context — the exit hook covers this process */
+  }
   return sandbox;
 }
 

@@ -1,4 +1,5 @@
 import { existsSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +15,56 @@ export interface UnitStep {
   cwd: string;
   args: string[];
   files: string[];
+}
+
+/** Names of `flair-*` entries in the OS temp dir right now — NAMES, not a count. */
+export function flairTempNames(dir: string = tmpdir()): Set<string> {
+  try {
+    return new Set(readdirSync(dir).filter((name) => name.startsWith("flair-")));
+  } catch {
+    return new Set();
+  }
+}
+
+/** The `flair-*` names present in `after` that were not present in `before`. */
+export function newFlairTempNames(before: ReadonlySet<string>, after: ReadonlySet<string>): string[] {
+  return [...after].filter((name) => !before.has(name)).sort();
+}
+
+/**
+ * The temp-dir leak guard (flair#1889).
+ *
+ * A unit test must remove the scratch directory it creates. The lane is the only
+ * place that can see all of them, so it snapshots the `flair-*` names in the OS
+ * temp dir before the lane and again after it, and fails on any name that
+ * APPEARED during the lane.
+ *
+ * It compares NAMES, not a bare count, and reports only the names that appeared:
+ * a `flair-*` directory that was already there (an earlier run's leftover, which
+ * this lane did not create) is not a leak this lane caused. The accepted
+ * false-positive is a genuinely concurrent, unrelated process that creates a
+ * `flair-*` temp dir while the lane runs — an entry carries no owner, so it
+ * cannot be attributed to a process, and hiding it would mean hiding real leaks
+ * too.
+ *
+ * @returns true when the lane leaked (and the caller must fail).
+ */
+export function reportTempDirLeaks(leaked: readonly string[], dir: string = tmpdir()): boolean {
+  if (!leaked.length) return false;
+  const counts = new Map<string, number>();
+  for (const name of leaked) {
+    const cut = name.lastIndexOf("-");
+    const prefix = cut > 0 ? name.slice(0, cut + 1) : "flair-";
+    counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
+  }
+  const prefixes = [...counts.entries()].map(([prefix, n]) => `${prefix} (${n})`).join(", ");
+  console.error(
+    `Temp-dir leak guard FAILED: the unit lane left ${leaked.length} new flair-* director${leaked.length === 1 ? "y" : "ies"} in ${dir}. ` +
+      `A unit test must remove the scratch directory it creates — use tempDir() from test/helpers/temp-dir.ts, which registers the removal in the same call (flair#1889). ` +
+      `New prefixes: ${prefixes}`,
+  );
+  console.error(`  new entries:\n${leaked.map((name) => `    ${name}`).join("\n")}`);
+  return true;
 }
 
 export function unitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -93,6 +144,8 @@ export function runUnitSteps(steps: UnitStep[], executable = process.execPath, g
   // lets a test point the guard at a fixture home and prove the boundary without
   // ever touching the real one (flair#1853 round 3).
   const before = snapshotClientConfigs(guardHome);
+  // The temp-dir leak guard's `before` snapshot (flair#1889).
+  const tempBefore = flairTempNames();
   const guardPassed = (): boolean => {
     const changed = changedConfigs(before, snapshotClientConfigs(guardHome));
     if (!changed.length) return true;
@@ -123,11 +176,14 @@ export function runUnitSteps(steps: UnitStep[], executable = process.execPath, g
     if (result.error || result.status !== 0) {
       guardPassed();
       console.error(`Unit lane failed: ${step.name} (${result.error?.message ?? result.signal ?? `exit ${result.status}`}). ${completed}/${steps.length} steps completed.`);
+      reportTempDirLeaks(newFlairTempNames(tempBefore, flairTempNames()));
       return 1;
     }
     completed++;
   }
+  const tempLeakFailed = reportTempDirLeaks(newFlairTempNames(tempBefore, flairTempNames()));
   if (!guardPassed()) return 1;
+  if (tempLeakFailed) return 1;
   console.log(`\nUnit lane passed: ${completed} steps, ${steps.reduce((n, step) => n + step.files.length, 0)} test files. Test pass/skip counts are reported by Bun above.`);
   return 0;
 }

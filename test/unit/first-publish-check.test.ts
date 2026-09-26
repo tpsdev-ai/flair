@@ -15,9 +15,9 @@
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tempDir } from "../helpers/temp-dir.ts";
 
 import {
   ALLOW_LIST_REL,
@@ -57,7 +57,7 @@ interface FixtureOptions {
 }
 
 function makeFixture(opts: FixtureOptions): { dir: string; lookupPath: string } {
-  const dir = mkdtempSync(join(tmpdir(), "flair-first-publish-"));
+  const dir = tempDir("flair-first-publish-");
   const rootPkg: Record<string, unknown> = {
     name: opts.rootName ?? "@tpsdev-ai/root",
     version: "1.0.0",

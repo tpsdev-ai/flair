@@ -9,8 +9,8 @@
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
+import { tempDir } from "../helpers/temp-dir.ts";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -144,7 +144,7 @@ describe("Heads-up convention", () => {
       "export function extractHeadsUps(_entryText) { return []; }",
     );
     expect(mutated).not.toBe(src);
-    const dir = mkdtempSync(join(tmpdir(), "flair-release-notes-mut-"));
+    const dir = tempDir("flair-release-notes-mut-");
     const copy = join(dir, "changelog-release-notes.mjs");
     // The mutated file still imports changelog-extract.mjs from ./
     writeFileSync(join(dir, "changelog-extract.mjs"), readFileSync(join(REPO_ROOT, "scripts", "changelog-extract.mjs")));
