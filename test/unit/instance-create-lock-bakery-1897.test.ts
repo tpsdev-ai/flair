@@ -61,7 +61,7 @@ describe("filesystem bakery lock — the two schedules (flair#1897 round 4)", ()
     const sab = new SharedArrayBuffer(4 * 4);
     // wantWorkers: 1 — A must be paused with its marker visible BEFORE B starts,
     // so the two are started in order rather than racing.
-    const base = { modulePath: MODULE, tableFile, lockRoot: dir, eventsFile, sab, wantWorkers: 1, putDelayMs: 200, resumeFile };
+    const base = { modulePath: MODULE, tableFile, home: dir, eventsFile, sab, wantWorkers: 1, putDelayMs: 200, resumeFile };
 
     // A pauses at afterChoosing (its marker is visible, no ticket yet)…
     const pa = runWorker({ ...base, schedule: "pause-after-choosing" });
