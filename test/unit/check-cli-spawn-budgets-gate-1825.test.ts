@@ -326,3 +326,50 @@ describe("anchored seed (descendant predicate) + fail-closed base (flair#1825 ro
     expect(normalizeFingerprint(a.text)).toBe(normalizeFingerprint(b.text));
   });
 });
+
+describe("wait bounds: false acceptances in the budgeted-case arm (flair#1825 round 6)", () => {
+  function offendersFor(src: string) {
+    const dir = mkdtempSync(join(tmpdir(), "spawn-scan-r6-"));
+    repos.push(dir);
+    writeTree(dir, { "test/x.test.ts": src });
+    return scanTree(dir);
+  }
+
+  it("(a) fetch(..., { signal: new AbortController().signal }) is UNBOUNDED (only a real deadline bounds)", () => {
+    // Gauge's probe: any signal that is not AbortSignal.timeout(<posint>) is unknown.
+    const src = `test("a", async () => {\n  const p = Bun.spawn(["bun", "src/cli.ts", "status"], { timeout: 5_000 });\n  await fetch("http://127.0.0.1:9/x", { signal: new AbortController().signal });\n}, 60_000);\n`;
+    const { caseOffenders } = offendersFor(src);
+    expect(caseOffenders.some((o: any) => o.kind === "case-unbounded-fetch")).toBe(true);
+  });
+
+  it("(a') fetch(..., { signal: AbortSignal.timeout(5_000) }) IS bounded (no offender)", () => {
+    const src = `test("a2", async () => {\n  const p = Bun.spawn(["bun", "src/cli.ts", "status"], { timeout: 5_000 });\n  await fetch("http://127.0.0.1:9/x", { signal: AbortSignal.timeout(5_000) });\n}, 60_000);\n`;
+    const { caseOffenders } = offendersFor(src);
+    expect(caseOffenders.some((o: any) => o.kind === "case-unbounded-fetch")).toBe(false);
+  });
+
+  it("(b) a LATER AbortSignal.timeout does not bound an earlier unbounded fetch (no proximity)", () => {
+    const src = `test("b", async () => {\n  const p = Bun.spawn(["bun", "src/cli.ts", "status"], { timeout: 5_000 });\n  await fetch("http://127.0.0.1:9/x");\n  const t = AbortSignal.timeout(1_000);\n}, 60_000);\n`;
+    const { caseOffenders } = offendersFor(src);
+    expect(caseOffenders.some((o: any) => o.kind === "case-unbounded-fetch")).toBe(true);
+  });
+
+  it("(c) a WAIT-ONLY helper the case reaches contributes its deadline (spawn or not)", () => {
+    const src = `async function waitABit() {\n  await new Promise((r) => setTimeout(r, 10));\n  const t = AbortSignal.timeout(30_000);\n}\ntest("c", async () => {\n  await waitABit();\n  const p = Bun.spawn(["bun", "src/cli.ts", "status"], { timeout: 5_000 });\n}, 30_000);\n`;
+    const { caseOffenders } = offendersFor(src);
+    // budget 30_000 <= sum of waits 5_000 (spawn) + 30_000 (helper) = 35_000.
+    expect(caseOffenders.some((o: any) => o.kind === "case-budget-too-small")).toBe(true);
+  });
+
+  it("(d1) `timeout: 1e999` is NOT a positive literal → the spawn is UNBOUNDED", () => {
+    const src = `test("d1", () => {\n  const p = Bun.spawn(["bun", "src/cli.ts", "status"], { timeout: 1e999 });\n});\n`;
+    const { spawnOffenders } = offendersFor(src);
+    expect(spawnOffenders.some((o: any) => o.kind === "spawn-no-timeout")).toBe(true);
+  });
+
+  it("(d2) `timeout: 10000-10000` (trailing operator) is NOT a positive literal → UNBOUNDED", () => {
+    const src = `test("d2", () => {\n  const p = Bun.spawn(["bun", "src/cli.ts", "status"], { timeout: 10000-10000 });\n});\n`;
+    const { spawnOffenders } = offendersFor(src);
+    expect(spawnOffenders.some((o: any) => o.kind === "spawn-no-timeout")).toBe(true);
+  });
+});

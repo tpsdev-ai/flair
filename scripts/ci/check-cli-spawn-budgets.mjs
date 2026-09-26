@@ -592,11 +592,11 @@ export function findSpawnCalls(source) {
   // A numeric `timeout:` value, so a case budget can be checked against the sum
   // of the waits inside it (flair#1825).
   for (const call of calls) {
-    const m = call.text.match(/(?:^|[^\w$.])timeout\s*[:=]\s*([0-9][0-9_]*)/);
-    const n = m ? Number(m[1].replace(/_/g, "")) : NaN;
-    // ONLY a positive finite value is a deadline: `timeout: 0` (node and Bun)
-    // means NO timeout, so it is unbounded (flair#1825).
-    call.timeoutMs = Number.isFinite(n) && n > 0 ? n : null;
+    const m = call.text.match(/(?:^|[^\w$.])timeout\s*[:=]\s*([^\s,;)}\]]+)/);
+    // ONLY the EXACT token `[1-9][0-9]*` (underscores allowed) is a deadline:
+    // `timeout: 0` is NO timeout (node and Bun), and `1e999` / `10000-10000` are
+    // expressions, not positive integers — all are unbounded (flair#1825 r6).
+    call.timeoutMs = m ? timeoutLiteralMs(m[1]) : null;
     call.hasTimeout = call.timeoutMs !== null;
   }
   return { calls, ids };
@@ -679,13 +679,21 @@ export function localHelpersThatSpawn(source, calls) {
 }
 
 /** `it()` / `test()` cases, with whether each reaches a CLI-entry spawn. */
+/** A wait deadline is the EXACT token `[1-9][0-9]*` (underscores allowed). An
+ *  exponent (`1e999`), a trailing operator (`10000-10000`), `0`, or any other
+ *  expression is NOT a positive integer → null (unbounded, flair#1825 round 6). */
+export function timeoutLiteralMs(raw) {
+  const tok = String(raw ?? "").trim().replace(/_/g, "");
+  return /^[1-9][0-9]*$/.test(tok) ? Number(tok) : null;
+}
+
 /** Parse a per-case budget: a numeric literal (`30_000`) or `{ timeout: N }`. */
 export function parseBudgetMs(text) {
   const t = (text ?? "").trim().replace(/_/g, "");
   let m = t.match(/^([0-9]+)$/);
   if (m) return Number(m[1]);
-  m = t.match(/timeout\s*[:=]\s*([0-9]+)/);
-  return m ? Number(m[1]) : null;
+  m = t.match(/timeout\s*[:=]\s*([^\s,;)}\]]+)/);
+  return m ? timeoutLiteralMs(m[1]) : null;
 }
 
 /** Sum of every bounded wait inside a case: spawn `timeout:` + fetch timeouts.
@@ -698,8 +706,9 @@ export function sumWaitsMs(body, calls, open, close, extraBodies = []) {
     const inside = (c.index > open && c.index < close) || extraBodies.some((b) => c.index > b.start && c.index < b.end);
     if (inside) sum += c.timeoutMs;
   }
-  for (const m of body.matchAll(/AbortSignal\.timeout\s*\(\s*([0-9][0-9_]*)/g)) {
-    sum += Number(m[1].replace(/_/g, ""));
+  for (const m of body.matchAll(/AbortSignal\.timeout\s*\(\s*([^\s)]+)/g)) {
+    const ms = timeoutLiteralMs(m[1]);
+    if (ms !== null) sum += ms;
   }
   return sum;
 }
@@ -722,15 +731,52 @@ export function reachableHelperBodies(body, src, helpers, bodies) {
   return out;
 }
 
-/** First `fetch(` in a case with no deadline in its argument list, or null. */
-export function firstUnboundedFetch(body) {
+/** The value text of a `signal:` property, up to the next top-level `,` or `}`. */
+function signalValueText(after) {
+  let depth = 0;
+  for (let i = 0; i < after.length; i++) {
+    const ch = after[i];
+    if (ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ")" || ch === "]") {
+      if (depth === 0) return after.slice(0, i);
+      depth--;
+    } else if (ch === "}") {
+      if (depth === 0) return after.slice(0, i);
+      depth--;
+    } else if (ch === "," && depth === 0) return after.slice(0, i);
+  }
+  return after;
+}
+
+/** Is a `signal:` value a REAL deadline? Exactly `AbortSignal.timeout(<posint>)`,
+ *  or an identifier that resolves IN THIS FILE to exactly that (flair#1825 r6). */
+function signalValueBounds(value, src) {
+  const v = value.trim();
+  if (/^AbortSignal\.timeout\s*\(\s*[1-9][0-9_]*\s*\)$/.test(v)) return true;
+  if (/^[A-Za-z_$][\w$]*$/.test(v) && src) {
+    const decl = new RegExp(String.raw`(?:const|let|var)\s+${v}\s*=\s*AbortSignal\.timeout\s*\(\s*[1-9][0-9_]*\s*\)`);
+    return decl.test(src);
+  }
+  return false;
+}
+
+/** First `fetch(` whose OWN options carry no real deadline, or null. A deadline
+ *  attaches ONLY to the call whose options contain it — never by proximity, and a
+ *  bare `signal:` of unknown value is unbounded (flair#1825 round 6). */
+export function firstUnboundedFetch(body, src = body) {
   for (const m of body.matchAll(/(^|[^\w$.])fetch\s*\(/g)) {
-    const seg = body.slice(m.index, m.index + 400);
-    // `signal:` must carry a REAL deadline — `{ signal: undefined }` is
-    // present-but-undefined and is NOT bounded (flair#1825).
-    if (!/AbortSignal\.timeout\s*\(/.test(seg) && !/signal\s*:\s*(?!undefined\b)\S/.test(seg)) {
-      return `fetch(${body.slice(m.index, m.index + 40).replace(/\s+/g, " ").trim()})`;
+    const open = body.indexOf("(", m.index);
+    const args = topLevelArgs(body, open);
+    // `fetch(req) { … }` is a Bun.serve handler METHOD, not a client call — skip it.
+    if (args && /^\s*\{/.test(body.slice(args.close + 1))) continue;
+    const initText = args && args.spans.length >= 2 ? args.spans[1].text : "";
+    const sig = initText.match(/signal\s*:\s*/);
+    let bounded = false;
+    if (sig) {
+      const value = signalValueText(initText.slice(sig.index + sig[0].length));
+      bounded = signalValueBounds(value, src);
     }
+    if (!bounded) return `fetch(${body.slice(m.index, m.index + 40).replace(/\s+/g, " ").trim()})`;
   }
   return null;
 }
@@ -765,7 +811,7 @@ export function findCases(source, calls, helpers, bodies = []) {
       }
     }
     const caseBody = src.slice(open + 1, args.close);
-    const reach = reachableHelperBodies(caseBody, src, helpers, bodies);
+    const reach = reachableHelperBodies(caseBody, src, bodies.map((b) => b.name), bodies);
     const waitsText = caseBody + "\n" + reach.map((b) => src.slice(b.start, b.end)).join("\n");
     // The CLI-entry calls this case reaches (directly, or through a helper).
     const reached = calls.filter(
@@ -781,7 +827,7 @@ export function findCases(source, calls, helpers, bodies = []) {
       budgetMs: parseBudgetMs(budgetText),
       hasBudget: parseBudgetMs(budgetText) !== null,
       sumWaitsMs: sumWaitsMs(waitsText, calls, open, args.close, reach),
-      unboundedFetch: firstUnboundedFetch(waitsText),
+      unboundedFetch: firstUnboundedFetch(waitsText, src),
       reachedFingerprints: reached.map((c) => normalizeFingerprint(c.text ?? c.fn)),
       open,
       close: args.close,

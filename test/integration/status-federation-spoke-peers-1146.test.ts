@@ -30,6 +30,7 @@ async function adminOp(harper: HarperInstance, op: Record<string, any>): Promise
       Authorization: "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64"),
     },
     body: JSON.stringify(op),
+    signal: AbortSignal.timeout(20_000),
   });
 }
 
