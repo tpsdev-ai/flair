@@ -111,7 +111,9 @@ Run it locally with `node scripts/audit-gate.mjs --explain`.
 
 ### The shared org preset — `.github/renovate-preset.json` (`.github/renovate.json` holds only flair-specific exceptions)
 
-Renovate opens PRs to propose dependency updates so we don't drift behind upstream indefinitely — but on our terms, not the registry's. The org preset (`.github/renovate-preset.json`) is common to all tpsdev-ai repos; `.github/renovate.json` holds only flair-specific overrides (workspace-internal dep exclusions, keep-current allow-list, pip manager for `packages/adk-flair`). Renovate is configured to never auto-merge (`automerge: false`), to pin (`rangeStrategy: "pin"`, consistent with §2), and to respect the bake-time cooldown (`minimumReleaseAge: "7 days"`, matching `FLAIR_DEP_MIN_AGE_DAYS` in `check-dep-ages.mjs`) so it only proposes versions that have already cleared the detection window. Non-major updates are grouped; majors land as isolated PRs. The keep-current allow-list (`harper`, `harper-fabric-embeddings`, `@harperfast/oauth`) mirrors the script's `DEFAULT_KEEP_CURRENT` — keep the two in lockstep when either changes. Vulnerability alerts bypass the cooldown. Every Renovate PR still runs the full CI suite (including the bake-time and workspace-deps gates) and is K&S-reviewed before merge.
+Renovate opens PRs to propose dependency updates so we don't drift behind upstream indefinitely — but on our terms, not the registry's. The org preset (`.github/renovate-preset.json`) is common to all tpsdev-ai repos; `.github/renovate.json` holds only flair-specific overrides (workspace-internal dep exclusions, keep-current allow-list)
+
+Renovate is configured to never auto-merge (`automerge: false`), to pin (`rangeStrategy: "pin"`, consistent with §2), and to respect the bake-time cooldown (`minimumReleaseAge: "7 days"`, matching `FLAIR_DEP_MIN_AGE_DAYS` in `check-dep-ages.mjs`) so it only proposes versions that have already cleared the detection window. Non-major updates are grouped; majors land as isolated PRs. The keep-current allow-list (`harper`, `harper-fabric-embeddings`, `@harperfast/oauth`) mirrors the script's `DEFAULT_KEEP_CURRENT` — keep the two in lockstep when either changes. Vulnerability alerts bypass the cooldown. Every Renovate PR still runs the full CI suite (including the bake-time and workspace-deps gates) and is K&S-reviewed before merge.
 
 ### `scripts/check-workspace-deps.mjs` (already shipped, PR #368)
 
@@ -172,6 +174,12 @@ chmod +x scripts/check-dep-ages.mjs
 ```
 
 The script has no external dependencies — node 18+ is enough.
+
+To adopt the same Renovate preset in your repo, point your `.github/renovate.json` at the shared org preset:
+
+```
+"extends": ["github>tpsdev-ai/flair//.github/renovate-preset"]
+```
 
 ---
 

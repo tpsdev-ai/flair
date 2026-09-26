@@ -1,39 +1,25 @@
 {
-      "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-      "extends": [
-            "github>tpsdev-ai/flair//.github/renovate-preset"
-      ],
-      "description": "Flair-specific Renovate overrides extending the shared org preset. Only repo-exception rules live here.",
-      "packageRules": [
-            {
-                  "description": "Workspace-internal @tpsdev-ai/* deps are version-locked to what each workspace package ships (enforced by check-workspace-deps.mjs) and bumped by the release process, not Renovate.",
-                  "matchPackageNames": [
-                        "@tpsdev-ai/**"
-                  ],
-                  "enabled": false
-            },
-            {
-                  "description": "Keep-current allow-list — mirrors scripts/check-dep-ages.mjs DEFAULT_KEEP_CURRENT. These are tightly coupled to Flair runtime correctness (Harper / embedding fixes); we accept the bake-time risk and pull them eagerly, so Renovate skips the cooldown for them too. Keep this list in lockstep with the script and docs/supply-chain-policy.md.",
-                  "matchPackageNames": [
-                        "harper",
-                        "harper-fabric-embeddings",
-                        "@harperfast/oauth"
-                  ],
-                  "minimumReleaseAge": "0 days"
-            },
-            {
-                  "description": "Enable pip manager for packages/adk-flair pyproject — apply the shared policy (pin, cooldown)",
-                  "matchManagers": [
-                        "pip"
-                  ],
-                  "rangeStrategy": "pin"
-            },
-            {
-                  "description": "Enable bun manager for the bun.lockfile — use the same pinning policy",
-                  "matchManagers": [
-                        "bun"
-                  ],
-                  "rangeStrategy": "pin"
-            }
-      ]
+       "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+       "extends": [
+             "github>tpsdev-ai/flair//.github/renovate-preset"
+       ],
+       "description": "Flair-specific Renovate overrides extending the shared org preset. Only repo-exception rules live here.",
+       "packageRules": [
+             {
+                   "description": "Workspace-internal @tpsdev-ai/* deps are version-locked to what each workspace package ships (enforced by check-workspace-deps.mjs) and bumped by the release process, not Renovate.",
+                   "matchPackageNames": [
+                         "@tpsdev-ai/**"
+                   ],
+                   "enabled": false
+             },
+             {
+                   "description": "Keep-current allow-list — mirrors scripts/check-dep-ages.mjs DEFAULT_KEEP_CURRENT. These are tightly coupled to Flair runtime correctness (Harper / embedding fixes); we accept the bake-time risk and pull them eagerly, so Renovate skips the cooldown for them too. Keep this list in lockstep with the script and docs/supply-chain-policy.md.",
+                   "matchPackageNames": [
+                         "harper",
+                         "harper-fabric-embeddings",
+                         "@harperfast/oauth"
+                   ],
+                   "minimumReleaseAge": "0 days"
+             }
+       ]
 }
