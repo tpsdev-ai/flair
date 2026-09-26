@@ -1959,9 +1959,10 @@ jobs:
   # flair#1807: the CLI spawn-budget gate. Every test that spawns the CLI entry
   # must carry its own child deadline (a `timeout:` on the spawn), and the case
   # that reaches it must carry a per-case budget, so a hung child is reported by
-  # the deadline, by name, with its output — never by bun's per-test timer. The
-  # allow-list is EMPTY on purpose and there is no skip flag: a file that cannot
-  # budget its spawns is a real offender, not an exception.
+  # the deadline, by name, with its output — never by bun's per-test timer. It
+  # sees node `child_process` and `Bun.spawn`/`Bun.spawnSync` (flair#1825). The
+  # exceptions live in a reviewed baseline file, not an in-script allow-list; the
+  # baseline can only shrink, and there is no skip flag.
   cli-spawn-budgets:
     name: "Doc/Code Lint: CLI spawn budgets"
     runs-on: ubuntu-latest

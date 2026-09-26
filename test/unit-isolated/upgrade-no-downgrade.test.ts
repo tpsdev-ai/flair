@@ -134,6 +134,7 @@ async function runUpgrade(
   // Async spawn, NOT spawnSync: the stub registry lives in THIS process, and a
   // synchronous child would block the event loop so the stub could never answer.
   const proc = Bun.spawn(["bun", join(REPO, "src", "cli.ts"), "upgrade", ...args], {
+    timeout: 30_000,
     cwd: REPO,
     env,
     stdout: "pipe",
