@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Shared org preset for tpsdev-ai repositories. Establishes the supply-chain posture: pin version updates, enforce a 7-day bake-time cooldown, and group non-major PRs so review surface stays small. Every update is proposal-only (automerge: false) \u2014 it must pass the full CI suite + K&S review before merge. See https://github.com/tpsdev-ai/flair/blob/main/docs/supply-chain-policy.md. Docker image digests are pinned via Renovate's docker:pinDigests preset (it covers Dockerfiles, compose files and workflow container images; a republished tag cannot change the bytes we build or test on).",
+  "description": "Shared org preset for tpsdev-ai repositories. Establishes the supply-chain posture: pin version updates, enforce a 7-day bake-time cooldown, and group non-major PRs so review surface stays small. Every update is proposal-only (automerge: false) \u2014 it must pass the full CI suite + K&S review before merge. See https://github.com/tpsdev-ai/flair/blob/main/docs/supply-chain-policy.md. Docker image digest pins are PROPOSED via Renovate's docker:pinDigests preset for Dockerfiles, compose files and workflow container/service images (the preset itself exempts argocd, devcontainer, helmv3 and pyenv); like every update here they are PRs, never automerged, so the protection \u2014 a republished tag cannot change the bytes we build or test on \u2014 holds for an image once its pin PR is merged.",
   "extends": [
     "config:recommended",
     ":dependencyDashboard",
