@@ -1971,16 +1971,15 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
+      - name: Fetch the base ref for the spawn-budget gate
+        run: git fetch --no-tags origin "${{ github.event.pull_request.base.sha || github.event.before }}"
       - run: node scripts/ci/check-cli-spawn-budgets.mjs
         env:
           # The trusted base ref the baseline is read from (flair#1825): a PR's base
-          # commit, or the previous commit on a push. Never the PR's own tree.
+          # commit, or the previous commit on a push. Never the PR's own tree. The
+          # step above fetches that object so `git show <base>:...` can read it on a
+          # shallow checkout; the gate still fails closed if it is missing.
           CLI_SPAWN_BUDGETS_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
-          # ONE-TIME SEED (flair#1825): this PR is the one that first introduces
-          # scripts/ci/cli-spawn-budgets.baseline.json, so its base has no baseline
-          # file. The flag is accepted ONLY when the base lacks the file, and is
-          # logged; the next PR that touches the gate REMOVES this line.
-          CLI_SPAWN_BUDGETS_SEED_BASELINE: "1"
 
   dist-esm-guard:
     # flair#1657 — the flair#1653 class. A compiled dist/**/*.js ES module that

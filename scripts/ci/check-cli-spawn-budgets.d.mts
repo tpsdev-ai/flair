@@ -41,6 +41,7 @@ export interface CaseRecord {
   argCount: number;
   reachesSpawn: boolean;
   hasBudget: boolean;
+  reachedFingerprints?: string[];
   open: number;
   close: number;
 }
@@ -83,13 +84,15 @@ export function readPrBaseline(root: string): BaselineEntry[];
 export function addedExceptions(baseEntries: BaselineEntry[], prEntries: BaselineEntry[]): BaselineEntry[];
 
 /** End-to-end check used by main() and the gate-level tests. */
-export function runGate(opts?: { root?: string; baseRef?: string; env?: Record<string, string | undefined> }): {
+export function runGate(opts?: { root?: string; baseRef?: string; env?: Record<string, string | undefined>; seedBase?: string }): {
   files: string[];
   spawnOffenders: SpawnOffender[];
   caseOffenders: SpawnOffender[];
   baseRef: string;
+  baseSha: string;
   basePresent: boolean;
   defaulted: boolean;
+  anchored: boolean;
   seedAccepted: boolean;
   allowEntries: BaselineEntry[];
   prEntries: BaselineEntry[];
@@ -112,6 +115,8 @@ export interface BaselineEntry {
 }
 
 export const BASELINE_PATH: string;
+export const SEED_INTRODUCTION_BASE: string;
+export function resolveRef(ref: string, root: string): string;
 export function isLineKey(entry: unknown): boolean;
 export function validateBaseline(entries: unknown): string[];
 export function diffAgainstBaseline(

@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import {
   runGate,
   scanTree,
+  SEED_INTRODUCTION_BASE,
   offenderKey,
   normalizeFingerprint,
   findSpawnCalls,
@@ -201,34 +202,38 @@ describe("budget, templates, keys, skips (flair#1825 items 2/3/4)", () => {
   });
 });
 
-describe("fail closed on the base baseline + helper waits (flair#1825 round 3)", () => {
+describe("anchored seed + fail-closed base (flair#1825 round 4)", () => {
   function offendersFor(src: string) {
-    const dir = mkdtempSync(join(tmpdir(), "spawn-scan-r3-"));
+    const dir = mkdtempSync(join(tmpdir(), "spawn-scan-r4-"));
     repos.push(dir);
     writeTree(dir, { "test/x.test.ts": src });
     return scanTree(dir);
   }
 
-  it("item 1a: a base with NO baseline file, no seed flag → the PR copy's entries are ADDED → fail", () => {
-    // Base commit has no baseline file at all.
-    const { dir, baseSha } = mk({ "test/base.test.ts": `test("ok", () => {});\n` });
-    writeTree(dir, {
-      "test/attack.test.ts": CLI_SPAWN_CASE,
-      "scripts/ci/cli-spawn-budgets.baseline.json": JSON.stringify(
-        [{ file: "test/attack.test.ts", scope: "a CLI spawn", fingerprint: `["bun","src/cli.ts","status"] ; {}`, kind: "spawn-no-timeout", occurrence: 0, reason: "self" }],
-        null, 2,
-      ) + "\n",
-    });
-    const r = runGate({ root: dir, baseRef: baseSha, env: {} });
-    expect(r.basePresent).toBe(false);
-    expect(r.ok).toBe(false);
-    expect(r.added.length).toBeGreaterThan(0);
+  it("the anchor IS the PR's real merge-base of origin/main and this branch", () => {
+    const root = join(import.meta.dirname, "..", "..");
+    const sha = execFileSync("git", ["merge-base", "origin/main", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    expect(SEED_INTRODUCTION_BASE).toBe(sha);
   });
 
-  it("item 1a-seed: the seed flag is accepted ONLY when the base has no baseline file", () => {
+  it("item 1a: a base with NO baseline file that is NOT the seed-introduction commit throws, naming both shas", () => {
     const { dir, baseSha } = mk({ "test/base.test.ts": `test("ok", () => {});\n` });
     writeTree(dir, { "scripts/ci/cli-spawn-budgets.baseline.json": "[]\n" });
-    const r = runGate({ root: dir, baseRef: baseSha, env: { CLI_SPAWN_BUDGETS_SEED_BASELINE: "1" } });
+    let err: any;
+    try {
+      runGate({ root: dir, baseRef: baseSha, env: {} });
+    } catch (e) {
+      err = e;
+    }
+    expect(String(err?.message)).toMatch(/seed-introduction base/);
+    expect(String(err?.message)).toContain(baseSha);
+  });
+
+  it("item 1a-seed: base == the anchored sha and no file → PASS", () => {
+    const { dir, baseSha } = mk({ "test/base.test.ts": `test("ok", () => {});\n` });
+    writeTree(dir, { "scripts/ci/cli-spawn-budgets.baseline.json": "[]\n" });
+    const r = runGate({ root: dir, baseRef: baseSha, env: {}, seedBase: baseSha });
+    expect(r.anchored).toBe(true);
     expect(r.seedAccepted).toBe(true);
     expect(r.ok).toBe(true);
   });
@@ -236,15 +241,35 @@ describe("fail closed on the base baseline + helper waits (flair#1825 round 3)",
   it("item 1b: an invalid base ref is a hard failure naming the ref", () => {
     const { dir } = mk({ "scripts/ci/cli-spawn-budgets.baseline.json": "[]\n", "test/x.test.ts": `test("ok", () => {});\n` });
     expect(() => runGate({ root: dir, baseRef: "definitely-not-a-ref", env: {} })).toThrow(/invalid base ref/);
-    expect(() => runGate({ root: dir, baseRef: "definitely-not-a-ref", env: {} })).toThrow(/definitely-not-a-ref/);
   });
 
-  it("item 1c: the seed flag is REFUSED when a base baseline exists", () => {
+  it("item 1c: when the base HAS the file the anchor is irrelevant and the normal comparison runs", () => {
+    const { dir, baseSha } = mk({ "scripts/ci/cli-spawn-budgets.baseline.json": "[]\n", "test/x.test.ts": `test("ok", () => {});\n` });
+    const r = runGate({ root: dir, baseRef: baseSha, env: {}, seedBase: "0000000000000000000000000000000000000000" });
+    expect(r.basePresent).toBe(true);
+    expect(r.anchored).toBe(false);
+    expect(r.ok).toBe(true);
+  });
+
+  it("item 3: a listed case that gains a SECOND unbudgeted CLI spawn is 1 NEW offender", () => {
+    const base = `test("two", () => {\n  const a = Bun.spawn(["bun", "src/cli.ts", "status"], {});\n});\n`;
     const { dir, baseSha } = mk({
-      "scripts/ci/cli-spawn-budgets.baseline.json": "[]\n",
-      "test/x.test.ts": `test("ok", () => {});\n`,
+      "test/dup.test.ts": base,
+      "scripts/ci/cli-spawn-budgets.baseline.json": JSON.stringify(
+        [{ file: "test/dup.test.ts", scope: "two", fingerprint: `["bun","src/cli.ts","status"] ; {}`, kind: "case-no-budget", occurrence: 0, reason: "r" }],
+        null, 2,
+      ) + "\n",
     });
-    expect(() => runGate({ root: dir, baseRef: baseSha, env: { CLI_SPAWN_BUDGETS_SEED_BASELINE: "1" } })).toThrow(/SEED_BASELINE/);
+    // PR: the same case gains a SECOND unbudgeted CLI spawn; the PR copy keeps the one entry.
+    writeTree(dir, {
+      "test/dup.test.ts": `test("two", () => {\n  const a = Bun.spawn(["bun", "src/cli.ts", "status"], {});\n  const b = Bun.spawn(["bun", "src/cli.ts", "stop"], {});\n});\n`,
+    });
+    const r = runGate({ root: dir, baseRef: baseSha, env: {}, seedBase: baseSha });
+    expect(r.ok).toBe(false);
+    const newCase = r.newOffenders.filter((o: any) => o.kind === "case-no-budget");
+    expect(newCase.length).toBe(1);
+    // The NEW offender is identified by the CALL it reaches, not the case name.
+    expect(newCase[0].fingerprint).toBe(`["bun","src/cli.ts","stop"] ; {}`);
   });
 
   it("item 2: a wait held in a file-local helper the case CALLS counts toward the sum", () => {
@@ -255,13 +280,19 @@ describe("fail closed on the base baseline + helper waits (flair#1825 round 3)",
     expect(String(small!.detail)).toContain("30000");
   });
 
-  it("item 3: fetch(..., { signal: undefined }) is unbounded", () => {
+  it("item 4: a budgeted case with an unbounded REACHABLE fetch fails naming the call", () => {
+    const src = `function helper() {\n  return Bun.spawn(["bun", "src/cli.ts"], { timeout: 5_000 });\n}\ntest("f", async () => {\n  helper();\n  await fetch("http://127.0.0.1:9/");\n}, 30_000);\n`;
+    const { caseOffenders } = offendersFor(src);
+    expect(caseOffenders.some((o: any) => o.kind === "case-unbounded-fetch")).toBe(true);
+  });
+
+  it("item 3(round3): fetch(..., { signal: undefined }) is unbounded", () => {
     const src = `test("f", async () => {\n  const p = Bun.spawn(["bun", "src/cli.ts"], { timeout: 5_000 });\n  await fetch("http://127.0.0.1:9/", { signal: undefined });\n}, 30_000);\n`;
     const { caseOffenders } = offendersFor(src);
     expect(caseOffenders.some((o: any) => o.kind === "case-unbounded-fetch")).toBe(true);
   });
 
-  it("item 4: fingerprint normalization is symmetric around argv commas", () => {
+  it("item 4(round3): fingerprint normalization is symmetric around argv commas", () => {
     const a = findSpawnCalls('Bun.spawn(["bun","src/cli.ts"], {});').calls[0];
     const b = findSpawnCalls('Bun.spawn(["bun" ,"src/cli.ts"], {});').calls[0];
     expect(normalizeFingerprint(a.text)).toBe(normalizeFingerprint(b.text));

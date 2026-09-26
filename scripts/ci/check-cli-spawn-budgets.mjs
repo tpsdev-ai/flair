@@ -75,6 +75,15 @@ import { fileURLToPath } from "node:url";
  */
 export const BASELINE_PATH = join(dirname(fileURLToPath(import.meta.url)), "cli-spawn-budgets.baseline.json");
 
+/**
+ * The ONE commit whose base legitimately has no baseline file: the origin/main
+ * sha this gate's baseline was introduced from (flair#1825). The seed path is
+ * taken ONLY when the base ref resolves to exactly this sha. Any OTHER base with
+ * no baseline file is a hard failure — a base ref repointed at any pre-baseline
+ * commit must not be enough. Full 40-char sha, read with `git merge-base`.
+ */
+export const SEED_INTRODUCTION_BASE = "4904699d80b55d9f299fe8e061aa80e4de8e9edc";
+
 const SPAWN_FNS = new Set([
   "spawn",
   "spawnSync",
@@ -755,6 +764,10 @@ export function findCases(source, calls, helpers, bodies = []) {
     const caseBody = src.slice(open + 1, args.close);
     const reach = reachableHelperBodies(caseBody, src, helpers, bodies);
     const waitsText = caseBody + "\n" + reach.map((b) => src.slice(b.start, b.end)).join("\n");
+    // The CLI-entry calls this case reaches (directly, or through a helper).
+    const reached = calls.filter(
+      (c) => c.isCliEntry && ((c.index > open && c.index < args.close) || reach.some((b) => c.index > b.start && c.index < b.end)),
+    );
     const budgetText = args.spans[2]?.text ?? "";
     cases.push({
       fn: m[2],
@@ -766,6 +779,7 @@ export function findCases(source, calls, helpers, bodies = []) {
       hasBudget: parseBudgetMs(budgetText) !== null,
       sumWaitsMs: sumWaitsMs(waitsText, calls, open, args.close, reach),
       unboundedFetch: firstUnboundedFetch(waitsText),
+      reachedFingerprints: reached.map((c) => normalizeFingerprint(c.text ?? c.fn)),
       open,
       close: args.close,
     });
@@ -867,27 +881,18 @@ export function scanTree(root) {
     }
     for (const c of cases) {
       if (!c.reachesSpawn) continue;
-      let kind = null;
-      let detail = "";
+      const base = { file: rel, line: c.line, scope: c.name };
       if (!c.hasBudget) {
-        kind = "case-no-budget";
-        detail = `${c.fn}("${c.name.slice(0, 60)}")`;
+        // One entry PER reached CLI-entry call, identified by the CALL, not just
+        // the case name (flair#1825 round 4).
+        const fps = c.reachedFingerprints && c.reachedFingerprints.length ? c.reachedFingerprints : [normalizeFingerprint(c.name)];
+        for (const fp of fps) {
+          caseOffenders.push({ ...base, kind: "case-no-budget", detail: `${c.fn}("${c.name.slice(0, 60)}")`, fingerprint: fp });
+        }
       } else if (c.unboundedFetch) {
-        kind = "case-unbounded-fetch";
-        detail = `unbounded ${c.unboundedFetch}`;
+        caseOffenders.push({ ...base, kind: "case-unbounded-fetch", detail: `unbounded ${c.unboundedFetch}`, fingerprint: normalizeFingerprint(c.name) });
       } else if (c.budgetMs <= c.sumWaitsMs) {
-        kind = "case-budget-too-small";
-        detail = `budget ${c.budgetMs} <= sum of waits ${c.sumWaitsMs} in ${c.fn}("${c.name.slice(0, 40)}")`;
-      }
-      if (kind) {
-        caseOffenders.push({
-          file: rel,
-          line: c.line,
-          kind,
-          detail,
-          scope: c.name,
-          fingerprint: normalizeFingerprint(c.name),
-        });
+        caseOffenders.push({ ...base, kind: "case-budget-too-small", detail: `budget ${c.budgetMs} <= sum of waits ${c.sumWaitsMs} in ${c.fn}("${c.name.slice(0, 40)}")`, fingerprint: normalizeFingerprint(c.name) });
       }
     }
   }
@@ -993,22 +998,26 @@ export function gateBaseRef(env = process.env) {
 
 const BASELINE_REL = "scripts/ci/cli-spawn-budgets.baseline.json";
 
+/** Resolve a ref to its full 40-char commit sha in `root`; hard-fail if invalid. */
+export function resolveRef(ref, root) {
+  const r = spawnSync("git", ["-C", root, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { encoding: "utf8" });
+  if (r.status !== 0) {
+    throw new Error(
+      `invalid base ref '${ref}': cannot resolve it in ${root}` +
+        `${(r.stderr || "").trim() ? ` (${r.stderr.trim()})` : ""}. ` +
+        `Set CLI_SPAWN_BUDGETS_BASE_REF to a ref that exists.`,
+    );
+  }
+  return r.stdout.trim();
+}
+
 /** Read the baseline at `ref` from `root`'s git object store.
  *
  * FAIL CLOSED (flair#1825): an invalid/unreadable ref is a hard error naming the
  * ref; a VALID ref with no baseline file returns null (the base baseline is
- * EMPTY — this PR introduces the file). Nothing else may be treated as "no
- * baseline": a permission error or a bad object is not a licence to fall back
- * to the PR's own copy. */
+ * EMPTY). Nothing else may be treated as "no baseline". */
 export function loadBaselineAtRef(ref, root) {
-  const verify = spawnSync("git", ["-C", root, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { encoding: "utf8" });
-  if (verify.status !== 0) {
-    throw new Error(
-      `invalid base ref '${ref}': cannot resolve it in ${root}` +
-        `${(verify.stderr || "").trim() ? ` (${verify.stderr.trim()})` : ""}. ` +
-        `Set CLI_SPAWN_BUDGETS_BASE_REF to a ref that exists.`,
-    );
-  }
+  resolveRef(ref, root);
   const res = spawnSync("git", ["-C", root, "show", `${ref}:${BASELINE_REL}`], { encoding: "utf8" });
   if (res.status === 0) return JSON.parse(res.stdout);
   // A valid ref whose tree has no baseline file → the base baseline is EMPTY.
@@ -1039,19 +1048,14 @@ export function addedExceptions(baseEntries, prEntries) {
  * `stale` is computed against the PR copy, so removing a now-budgeted entry is
  * allowed.
  */
-export function runGate({ root, baseRef = gateBaseRef(), env = process.env } = {}) {
+export function runGate({ root, baseRef = gateBaseRef(), env = process.env, seedBase = SEED_INTRODUCTION_BASE } = {}) {
   const { files, spawnOffenders, caseOffenders } = scanTree(root);
   const defaulted = !(env.CLI_SPAWN_BUDGETS_BASE_REF || env.CLI_SPAWN_BUDGET_BASE_REF);
-  const seed = env.CLI_SPAWN_BUDGETS_SEED_BASELINE === "1" || env.CLI_SPAWN_BUDGETS_SEED_BASELINE === "true";
   const prEntries = readPrBaseline(root);
   const baseEntries = loadBaselineAtRef(baseRef, root); // throws on an invalid ref
   const basePresent = baseEntries !== null;
-  if (seed && basePresent) {
-    throw new Error(
-      `CLI_SPAWN_BUDGETS_SEED_BASELINE is set, but the base ref '${baseRef}' already has a baseline ` +
-        `— the seed flag is ONLY for the PR that first introduces the file. Remove it.`,
-    );
-  }
+  const baseSha = resolveRef(baseRef, root);
+  const anchored = baseSha === seedBase;
   const errors = [
     ...validateBaseline(prEntries).map((e) => `pr: ${e}`),
     ...(basePresent ? validateBaseline(baseEntries).map((e) => `base: ${e}`) : []),
@@ -1060,21 +1064,30 @@ export function runGate({ root, baseRef = gateBaseRef(), env = process.env } = {
   // entries are measured against it.
   const diff = diffAgainstBaseline(spawnOffenders, caseOffenders, prEntries);
   // Added exceptions: the PR copy may only REMOVE relative to the base. When the
-  // base has NO baseline file, the base baseline is EMPTY, so EVERY PR entry is
-  // an addition → fail — unless the explicit, visible seed flag is set.
+  // base has NO baseline file the base baseline is EMPTY, so EVERY PR entry is an
+  // addition → fail — UNLESS the base resolves to exactly SEED_INTRODUCTION_BASE,
+  // the one commit whose base legitimately predates the file (flair#1825).
   let added;
-  if (basePresent) added = addedExceptions(baseEntries, prEntries);
-  else if (seed) added = [];
-  else added = addedExceptions([], prEntries);
-  const seedAccepted = seed && !basePresent;
+  if (basePresent) {
+    added = addedExceptions(baseEntries, prEntries);
+  } else if (anchored) {
+    added = [];
+  } else {
+    throw new Error(
+      `the base '${baseRef}' resolves to ${baseSha}, which has no baseline file and is not the seed-introduction base ` +
+        `${seedBase} — refusing to treat the PR's copy as the baseline (flair#1825).`,
+    );
+  }
   return {
     files,
     spawnOffenders,
     caseOffenders,
     baseRef,
+    baseSha,
     basePresent,
     defaulted,
-    seedAccepted,
+    anchored,
+    seedAccepted: anchored && !basePresent,
     allowEntries: prEntries,
     prEntries,
     baseEntries: baseEntries ?? [],
@@ -1109,8 +1122,9 @@ if (isMain) {
   const { files, spawnOffenders, caseOffenders, baseRef, basePresent, defaulted, seedAccepted, allowEntries, errors, added, newOffenders, staleEntries, ok } = result;
   if (seedAccepted) {
     process.stdout.write(
-      "check-cli-spawn-budgets: SEED — CLI_SPAWN_BUDGETS_SEED_BASELINE accepted because the base has no baseline file; " +
-        "the PR copy is the initial list for this introduction. REMOVE the seed flag in the next PR.\n",
+      "check-cli-spawn-budgets: SEED — the base resolves to the seed-introduction commit " +
+        `${SEED_INTRODUCTION_BASE}, which has no baseline file; the PR copy is the initial list. ` +
+        "Any other base without the file is refused.\n",
     );
   }
   process.stdout.write(

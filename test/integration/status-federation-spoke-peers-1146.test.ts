@@ -147,6 +147,7 @@ describe("flair#1146 status --json federation.peers on a real instance", () => {
   test("HealthDetail and status --json agree: both peers with lastSyncAt count as connected", async () => {
     const healthRes = await fetch(`${harper.httpURL}/HealthDetail`, {
       headers: { Authorization: basicAuth(harper) },
+      signal: AbortSignal.timeout(5_000),
     });
     expect(healthRes.ok).toBe(true);
     const health = await healthRes.json() as any;
