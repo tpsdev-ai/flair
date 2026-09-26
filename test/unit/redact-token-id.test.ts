@@ -63,6 +63,15 @@ describe("redactTokenIds — deep token-id redaction (flair#1902)", () => {
     expect(redactTokenIds({ [SHORT]: SHORT }, [SHORT])).toEqual({ [FULLY_REDACTED]: FULLY_REDACTED });
   });
 
+  test("the boundary: an 11-character secret is replaced in full, a 12-character secret keeps its 8-character prefix", () => {
+    const eleven = "abcdefghijk"; // 11 characters — one below the bound
+    const twelve = "abcdefghijkl"; // 12 characters — at the bound
+    expect(eleven).toHaveLength(MIN_SECRET_LENGTH - 1);
+    expect(twelve).toHaveLength(MIN_SECRET_LENGTH);
+    expect(redactTokenMessage(`a ${eleven} b`, [eleven])).toBe(`a ${FULLY_REDACTED} b`);
+    expect(redactTokenMessage(`a ${twelve} b`, [twelve])).toBe(`a ${twelve.slice(0, 8)}… b`);
+  });
+
   test("ignores empty secrets — no replacement spliced between characters", () => {
     expect(redactTokenMessage("abc", [""])).toBe("abc");
     expect(redactTokenIds({ a: "b" }, ["", ""])).toEqual({ a: "b" });
@@ -98,5 +107,32 @@ describe("redactTokenIds — deep token-id redaction (flair#1902)", () => {
       k: `${PREFIX}…`,
       list: [`${PREFIX}…`],
     });
+  });
+});
+
+describe("redactTokenIds — walk robustness (flair#1902)", () => {
+  test("a cyclic value does not throw", () => {
+    const cyclic: any = { name: "loop" };
+    cyclic.self = cyclic;
+    let out: any;
+    expect(() => {
+      out = redactTokenIds(cyclic, [TOKEN]);
+    }).not.toThrow();
+    // The container already on the path is returned as-is, not recursed into.
+    expect(out.self).toBe(cyclic);
+  });
+
+  test("a non-plain object keeps its identity and its message", () => {
+    const err = new Error(`boom ${TOKEN}`);
+    const out = redactTokenIds({ e: err }, [TOKEN]) as any;
+    // The Error passes through unchanged: rebuilding it through Object.entries
+    // would drop its message, and String(err) is what a caller logs.
+    expect(out.e).toBe(err);
+    expect(out.e.message).toBe(`boom ${TOKEN}`);
+  });
+
+  test("a Date passes through unchanged", () => {
+    const d = new Date("2026-01-01T00:00:00Z");
+    expect((redactTokenIds({ d }, [TOKEN]) as any).d).toBe(d);
   });
 });

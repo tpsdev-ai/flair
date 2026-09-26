@@ -14,9 +14,13 @@
  *
  * What "deep" means: a string (a message OR a string field at any depth, an array
  * element, or an object KEY) has each secret replaced; numbers, booleans and null
- * pass through untouched; an object is rebuilt with redacted keys and values.
+ * pass through untouched; a PLAIN object is rebuilt with redacted keys and values.
  * Object keys are redacted too — a `{ "<token-id>": ... }` map is exactly as much
- * a leak as one in a value.
+ * a leak as one in a value. A NON-plain object — a Date, Error, Map, Set or class
+ * instance — passes through unchanged: rebuilding it through `Object.entries`
+ * would lose its message or entries, and its String form is what a caller should
+ * log. A cyclic value terminates: a container already on the path is returned
+ * as-is rather than recursed into (a log helper must never crash the sweep).
  *
  * Two properties the naive `split(secret).join(prefix)` gets wrong, and this
  * module gets right:
@@ -70,8 +74,9 @@ function secretReplacements(secrets: readonly string[]): Array<readonly [string,
     seen.add(secret);
     out.push([secret, replacementFor(secret)] as const);
   }
-  // Longest-first: the alternation tries alternatives left to right at each
-  // position, so the longest secret wins where two overlap.
+  // Longest-first: the scan takes the LONGEST secret that starts at a position,
+  // so where two secrets overlap the longer one wins and no suffix of it is left
+  // stranded by a shorter secret matching first.
   out.sort((a, b) => b[0].length - a[0].length);
   return out;
 }
@@ -124,13 +129,41 @@ export function createTokenRedactor(secrets: readonly string[]): TokenRedactor {
 }
 
 function walk(value: unknown, redact: (text: string) => string): unknown {
+  return walkDeep(value, redact, new WeakSet<object>());
+}
+
+/**
+ * A plain object: its prototype is `Object.prototype` or null. A Date, Error,
+ * Map, Set or class instance is NOT a plain object, so it is not rebuilt.
+ */
+function isPlainObject(value: object): boolean {
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+/**
+ * Rebuild `value` with every string redacted. `seen` holds the containers on the
+ * current path, so a cyclic value terminates — the repeated reference is returned
+ * as-is — instead of recursing forever. Non-plain objects pass through unchanged.
+ */
+function walkDeep(value: unknown, redact: (text: string) => string, seen: WeakSet<object>): unknown {
   if (typeof value === "string") return redact(value);
-  if (Array.isArray(value)) return value.map((v) => walk(v, redact));
+  if (Array.isArray(value)) {
+    if (seen.has(value)) return value;
+    seen.add(value);
+    return value.map((v) => walkDeep(v, redact, seen));
+  }
   if (value && typeof value === "object") {
+    // A Date, Error, Map or class instance is left alone: rebuilding it through
+    // Object.entries would drop its message/entries, and its String form is what
+    // a caller should log.
+    if (!isPlainObject(value)) return value;
+    if (seen.has(value)) return value;
+    seen.add(value);
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>).map(([key, v]) => [
         redact(key),
-        walk(v, redact),
+        walkDeep(v, redact, seen),
       ]),
     );
   }

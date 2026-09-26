@@ -9,6 +9,7 @@ import {
 import {
   createTokenRedactor,
   redactTokenMessage,
+  TOKEN_ID_PREFIX_LENGTH,
   type TokenRedactor,
 } from "../src/lib/redact-token-id.js";
 
@@ -22,6 +23,12 @@ let cleanupTimer: ReturnType<typeof setInterval> | null = null;
 /** What the sweep last decided, so a steady state is logged once, not per tick. */
 export interface SweepLogState {
   last: SweepMode | null;
+  /**
+   * The token ids read during the current tick, mirrored here so a tick that
+   * dies AFTER reading them still cuts them out of its own error line
+   * (flair#1902). Populated by `runCleanupTick`.
+   */
+  seenTokenIds?: string[];
 }
 
 /**
@@ -89,7 +96,10 @@ export async function initFederationCleanup(
       instanceRole: opts?.instanceRole,
       state,
     }).catch((err: any) => {
-      console.error("[federation-cleanup] tick error:", err?.message ?? err);
+      // The ids this tick read are mirrored on `state`; route the failure through
+      // the same redactor, so an error that echoes one is cut to its prefix too
+      // (flair#1902).
+      logTickError(err, state);
     });
 
   cleanupTimer = setInterval(tick, intervalMs);
@@ -145,8 +155,28 @@ export async function runSweepTick(opts: {
   }
 
   const users = await listUsernamesOrNull(svr, opts.log);
-  await runCleanupTick({ serverOp: svr, db, now: opts.now, users });
+  await runCleanupTick({ serverOp: svr, db, now: opts.now, users, state: opts.state });
   return mode;
+}
+
+/**
+ * Log a tick-level failure through the token-id redactor, carrying the ids the
+ * tick read (mirrored on `state`), so an error that echoes one is cut to its
+ * prefix (flair#1902). Exported so the path can be driven directly: nothing
+ * inside a tick throws after the scan today, so the wiring has no reachable site
+ * of its own to exercise — but this line is a catch-all and must not print an
+ * id whole if one ever does.
+ */
+export function logTickError(
+  err: unknown,
+  state?: SweepLogState,
+  log: Pick<Console, "error"> = console,
+): void {
+  const redactor = createTokenRedactor(state?.seenTokenIds ?? []);
+  log.error(
+    redactor.redactMessage("[federation-cleanup] tick error:"),
+    redactor.redactMessage(String((err as any)?.message ?? err)),
+  );
 }
 
 /** Log the sweep's state; only on change, so a steady state is not a log flood. */
@@ -282,6 +312,11 @@ export async function runCleanupTick(
      * undefined skips the user-driven pass; null means the list did not read.
      */
     users?: readonly string[] | null;
+    /**
+     * Sweep state whose `seenTokenIds` mirrors the ids read this tick, so a tick
+     * that dies after reading them can redact its own error line (flair#1902).
+     */
+    state?: SweepLogState;
   } = {},
 ): Promise<void> {
   let svr: (op: any, ctx?: any, authorize?: boolean) => Promise<any>;
@@ -303,7 +338,9 @@ export async function runCleanupTick(
   // Every token id READ this pass. The redactor's secrets are the current token
   // id plus these, so a value that embeds a DIFFERENT token id (a consumedBy
   // naming another token, a Harper error echoing one) is cut too (flair#1902).
-  const seenTokenIds: string[] = [];
+  if (opts.state && !opts.state.seenTokenIds) opts.state.seenTokenIds = [];
+  const seenTokenIds: string[] = opts.state?.seenTokenIds ?? [];
+  seenTokenIds.length = 0; // this tick's ids only
   // Token-id prefixes that are still LIVE (unconsumed and unexpired). A live
   // token still needs its bootstrap user, so the user-driven pass (below) must
   // not collect that user. Built in the same scan: one pass over the table.
@@ -440,7 +477,13 @@ export async function runCleanupTick(
     }
     const userRedactor = createTokenRedactor([
       ...seenTokenIds,
-      ...toDrop.map(({ tid }) => tid),
+      // A real bootstrap user's suffix IS the token's 8-character prefix — the
+      // very value this log prints anyway — so it is not a secret. Adding it
+      // would let the length guard replace the prefix itself with [redacted],
+      // and the operator could no longer tell which user was dropped. Only a
+      // suffix LONGER than the prefix (a hand-made user carrying a whole token
+      // id, which Harper's error can echo) is a secret (flair#1902).
+      ...toDrop.map(({ tid }) => tid).filter((tid) => tid.length > TOKEN_ID_PREFIX_LENGTH),
     ]);
     for (const { username, tid } of toDrop) {
       await dropBootstrapUser(svr, username, tid, droppedUsers, userRedactor);

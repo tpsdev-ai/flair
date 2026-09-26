@@ -5,6 +5,7 @@ import {
   runSweepTick,
   stopFederationCleanup,
   listUsernamesOrNull,
+  logTickError,
   BOOTSTRAP_USER_PREFIX,
   type SweepLogState,
 } from "../../resources/federation-cleanup.js";
@@ -1026,6 +1027,52 @@ describe("federation-cleanup — shared token-id redaction (flair#1902)", () => 
     expect(await listUsernamesOrNull(svr, log, [tId])).toBeNull();
     const text = [...lines, ...errors].join("\n");
     expect(text).toContain("failed to list users");
+    expect(text).toContain(tId.slice(0, 8));
+    expect(text).not.toContain(tId);
+  });
+
+  it("a real bootstrap user's dropped line keeps its 8-character suffix, not [redacted]", async () => {
+    // A real bootstrap user is `pair-bootstrap-` plus EXACTLY the token's
+    // 8-character prefix. That suffix IS the prefix — not a secret — so it must
+    // not join the secret list: otherwise the length guard replaces the prefix
+    // itself and the operator cannot tell which user was dropped (flair#1902).
+    const suffix = "deadbeef";
+    const username = `${BOOTSTRAP_USER_PREFIX}${suffix}`;
+    const { lines, errors, restore } = captureConsole();
+    try {
+      const ok = createMockServerOp([{ ok: true }]);
+      await runCleanupTick({ serverOp: ok.fn, db: createMockDb([]) as any, now, users: [username] });
+      const failing = createMockServerOp([{ ok: false, error: new Error(`drop_user failed for ${username}`) }]);
+      await runCleanupTick({ serverOp: failing.fn, db: createMockDb([]) as any, now, users: [username] });
+    } finally {
+      restore();
+    }
+    const all = [...lines, ...errors].join("\n");
+    expect(all).toContain("dropped user");
+    expect(all).toContain("drop_user error");
+    expect(all).toContain(suffix);
+    expect(all).not.toContain("[redacted]");
+  });
+
+  it("the tick-error line redacts an id the tick read", async () => {
+    const tId = "token_tick_error_KKKKKKKKKK";
+    const db = createMockDb([makeToken(tId, { consumedBy: "instance-z" })]);
+    const state: SweepLogState = { last: null };
+    // A real tick reads the token table; the ids it read land on `state`.
+    await runSweepTick({
+      instanceRole: "hub",
+      serverOp: createMockServerOp([{ ok: true }, { ok: true }]).fn,
+      db: db as any,
+      state,
+    });
+    expect(state.seenTokenIds).toContain(tId);
+    const errors: string[] = [];
+    const log = {
+      error: (...a: any[]) => errors.push(a.map(String).join(" ")),
+    } as unknown as Pick<Console, "error">;
+    logTickError(new Error(`tick blew up carrying ${tId}`), state, log);
+    const text = errors.join("\n");
+    expect(text).toContain("tick error");
     expect(text).toContain(tId.slice(0, 8));
     expect(text).not.toContain(tId);
   });

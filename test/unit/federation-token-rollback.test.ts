@@ -13,6 +13,7 @@
 import { describe, expect, test } from "bun:test";
 import { pairingTokenRollbackLine, rollbackPairingToken } from "../../src/commands/federation.js";
 import { redactTokenMessage } from "../../src/lib/redact-token-id.js";
+import { program } from "../../src/cli.js";
 
 // Long enough that its 8-character prefix is a strict prefix — a shorter id
 // would make "the whole id never appears" vacuous.
@@ -100,5 +101,64 @@ describe("pairing token rollback reporting (flair#1895)", () => {
     } finally {
       globalThis.fetch = original;
     }
+  });
+});
+
+// ── flair#1902: the persist-failure path redacts the token id ─────────────────
+//
+// The PairingToken upsert's record `id` IS the pairing token. A Harper refusal
+// echoes that record, so the error the command throws — and prints — must carry
+// the id cut to its prefix. Driven through the REAL `federation token` action.
+
+describe("federation token — the persist failure redacts the id the error body echoed (flair#1902)", () => {
+  test("a rejected PairingToken upsert that echoes the token id prints only its prefix", async () => {
+    const originalFetch = globalThis.fetch;
+    const originalExit = process.exit;
+    const originalError = console.error;
+    const originalLog = console.log;
+    const errors: string[] = [];
+    let echoed: string | null = null;
+    // The token id is generated inside the action; learn it from the upsert body
+    // and have the refusal echo it back — exactly what Harper's error body does.
+    globalThis.fetch = (async (_url: any, init: any) => {
+      const body = JSON.parse(String(init?.body));
+      echoed = body.records?.[0]?.id ?? null;
+      return new Response(JSON.stringify({ error: `upsert refused for ${echoed}` }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    console.error = (...a: any[]) => {
+      errors.push(a.map((x) => String(x)).join(" "));
+    };
+    console.log = () => {};
+    process.exit = ((code?: number) => {
+      throw new Error(`process.exit(${code ?? 0})`);
+    }) as typeof process.exit;
+    try {
+      await program.parseAsync([
+        "node",
+        "flair",
+        "federation",
+        "token",
+        "--ops-target",
+        "http://127.0.0.1:19999",
+        "--admin-pass",
+        "x",
+      ]);
+    } catch (e: any) {
+      if (!String(e?.message ?? "").includes("process.exit")) throw e;
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.error = originalError;
+      console.log = originalLog;
+      process.exit = originalExit;
+    }
+    expect(echoed).not.toBeNull();
+    const token = echoed as unknown as string;
+    const text = errors.join("\n");
+    expect(text).toContain("Failed to persist pairing token (400)");
+    expect(text).toContain(token.slice(0, 8));
+    expect(text).not.toContain(token);
   });
 });

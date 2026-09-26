@@ -1612,7 +1612,12 @@ export function register(program: Command): void {
         });
         if (!opsRes.ok) {
           const detail = await opsRes.text().catch(() => "");
-          throw new Error(`Failed to persist pairing token (${opsRes.status}): ${detail || "no body"}`);
+          // Harper's error body can echo the upsert's record, whose `id` IS the
+          // pairing token. Cut the token id to its prefix before it reaches the
+          // thrown message, which this command's catch prints (flair#1902).
+          throw new Error(
+            `Failed to persist pairing token (${opsRes.status}): ${redactTokenMessage(detail || "no body", [token])}`,
+          );
         }
 
         // 2. Create bootstrap user for this token
