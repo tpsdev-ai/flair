@@ -549,8 +549,10 @@ export class Memory extends (databases as any).flair.Memory {
    * describe (`GET /Memory`) to a path outside search() — neither was gated
    * before this fix, so an anonymous caller got a 200 with full record
    * content / schema even though search() (and the write paths) correctly
-   * 401/403'd. Per-record ownership/grant scoping happens in get() below;
-   * the collection scope is still in search().
+   * 401/403'd. Per-record read scoping happens in get() below (its own records
+   * at any visibility plus every other agent's non-private records — grants are
+   * not consulted on reads; resolveReadScope()); the collection scope is still
+   * in search().
    *
    * allowCreate/allowUpdate/allowDelete are deliberately NOT added here:
    * post()/put()/delete() already self-enforce per-agent ownership inline
@@ -573,7 +575,8 @@ export class Memory extends (databases as any).flair.Memory {
   async get(target?: any, opts?: { includeTrust?: boolean }) {
     // Collection / query reads — the `GET /Memory/?<query>` form and the bare
     // collection — arrive as a RequestTarget with `isCollection === true`, and
-    // are governed by search() (same owner/grant scoping). Only a genuine by-id
+    // are governed by search() (same open-within-org read scope; grants are not
+    // consulted on reads). Only a genuine by-id
     // get is ownership-checked below. Without this guard, get() would receive
     // the query's RequestTarget, super.get() would return the (truthy) result
     // set, the single-record check would find no `.agentId` on it, and a valid
