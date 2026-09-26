@@ -612,7 +612,10 @@ export class Memory extends (databases as any).flair.Memory {
    * boolean injection (e.g. [..., "or", { wildcard }]).
    *
    * Admin agents and unauthenticated internal calls pass through unfiltered.
-   * Non-admin calls also check MemoryGrant to include granted memories.
+   * Non-admin calls are scoped to the reader's own records at any visibility
+   * plus every other agent's non-private records — the shipped open-within-org
+   * read model. MemoryGrant is NOT consulted on reads; the one place the scope
+   * is resolved is memory-read-scope.ts's resolveReadScope().
    */
   async search(query?: any) {
     // Access request context via Harper's Resource instance context.
@@ -628,8 +631,9 @@ export class Memory extends (databases as any).flair.Memory {
     if (gate.kind === "denied") return gate.response;
     if (gate.kind === "unfiltered") return overlayHitStatsResult(super.search(query), ctx);
 
-    // Non-admin agent: scope to own (any visibility) + granted owners' SHARED
-    // memories only (Layer 1 private-exclusion). Centralized in
+    // Non-admin agent: scope to own records at any visibility plus every other
+    // agent's non-private records (open-within-org; MemoryGrant is not
+    // consulted on reads). Centralized in
     // memoryReadScope (record-type-kit.ts's makeReadScope(), parameterized
     // from RECORD_TYPES.Memory — see this file's header — delegating
     // "open-within-org" to memory-read-scope.ts's resolveReadScope()
