@@ -14,6 +14,10 @@
 // reads stay concurrent. Nothing is ever deleted: if the confirming re-read
 // shows a row this caller did NOT mint (only possible if something outside the
 // lock wrote), the caller is answered the survivor and warned with both ids.
+//
+// SCOPE: this serialises GETs in THIS process. An independent writer — `flair
+// init --remote` writes the Instance row outside this lock (src/cli.ts ~3421) —
+// can still race a first-boot GET; that writer is slice 2, not covered here.
 
 import { decideInstanceAnswer, type InstanceIdentityRow } from "../src/lib/instance-identity-row.js";
 

@@ -19,7 +19,7 @@ import {
 } from "../src/lib/instance-identity-row.js";
 import { readAllInstanceRows } from "./instance-identity-rows.js";
 import { findOrCreateInstance } from "./instance-create-lock.js";
-import { withDetachedTxn } from "./table-helpers.js";
+import { withDetachedTxn, withDetachedTxnAsync } from "./table-helpers.js";
 import { isSkillWrite } from "./skill-write.js";
 import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
@@ -318,13 +318,12 @@ export class FederationInstance extends Resource {
         // ImmediateTransaction that commits on its own rather than at the end of
         // the request (the lock cannot serialise a write that commits after the
         // method returns — the earlier BLOCKED finding, flair#1897 slice 1).
-        put: (row) => withDetachedTxn((this as any).getContext?.(), () => (databases as any).flair.Instance.put(row)),
-        setSeed: async (createdId, seed) => {
-          await withDetachedTxn((this as any).getContext?.(), async () => {
+        put: (row) => withDetachedTxnAsync((this as any).getContext?.(), () => (databases as any).flair.Instance.put(row)),
+        setSeed: (createdId, seed) =>
+          withDetachedTxnAsync((this as any).getContext?.(), async () => {
             const { keystore } = await import("../src/keystore.js");
             keystore.setPrivateKeySeed(createdId, seed);
-          });
-        },
+          }),
         seedPresent: async (rowId) => {
           try {
             const { keystore } = await import("../src/keystore.js");
