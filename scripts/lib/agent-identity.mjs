@@ -22,12 +22,12 @@ export function takeAgentFlag(args) {
   if (i === -1) return { agentId: undefined, rest: args };
   const value = args[i + 1];
   if (value === undefined || value === '' || value.startsWith('--')) {
-    console.error('--agent requires a value');
+    console.error(`--agent requires a value. ${AGENT_IDENTITY_REMEDY}.`);
     process.exit(1);
   }
   const rest = args.slice(0, i).concat(args.slice(i + 2));
   if (rest.includes('--agent')) {
-    console.error('--agent may only be given once');
+    console.error(`--agent may only be given once. ${AGENT_IDENTITY_REMEDY}.`);
     process.exit(1);
   }
   return { agentId: value, rest };

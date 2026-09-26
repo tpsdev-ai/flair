@@ -72,6 +72,22 @@ describe("scripts refuse without an agent identity, before reading a key (flair#
     }, 30_000);
   }
 
+  test("a value-less --agent names both remedies", async () => {
+    const r = await runScript("flair-bootstrap.mjs", ["--agent"]);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain("FLAIR_AGENT_ID");
+    expect(r.out).toContain("--agent");
+    expect(r.out).not.toContain(missingKey);
+  }, 30_000);
+
+  test("a repeated --agent names both remedies", async () => {
+    const r = await runScript("flair-bootstrap.mjs", ["--agent", "a", "--agent", "b"]);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain("FLAIR_AGENT_ID");
+    expect(r.out).toContain("--agent");
+    expect(r.out).not.toContain(missingKey);
+  }, 30_000);
+
   test("flair-client.mjs refuses a READ without an identity (reads sign too)", async () => {
     const r = await runScript("flair-client.mjs", ["memory", "list"]);
     expect(r.code).not.toBe(0);

@@ -45,13 +45,29 @@ function isCommentLine(trimmed: string): boolean {
   );
 }
 
-/** Patterns that spell a literal agent id as a default/assignment value. */
+/**
+ * Patterns for identity-SETTING SYNTAX, not for a list of agent names. A guard
+ * keyed on the names it has seen is a blacklist: a default under a new id slips
+ * through. These match the SHAPE — an identity constant falling back to a string
+ * literal, a literal assigned to `AGENT_ID`/`agentId` or an `agent:` field, and
+ * a literal `TPS_AGENT_ID=`/`FLAIR_AGENT_ID=` shell assignment — without naming
+ * any agent.
+ */
 const OFFENDER = [
-  /\|\|\s*['"](flint|anvil)['"]/, //   ... || 'flint'
-  /\?\?\s*['"](flint|anvil)['"]/, //   ... ?? "anvil"
-  /=\s*['"](flint|anvil)['"]\s*[;,)]?/, //  ... = 'flint'
-  /\bTPS_AGENT_ID\s*=\s*(flint|anvil)\b/, //  TPS_AGENT_ID=flint
+  // `AGENT_ID ... || '<literal>'` / `agentId ... ?? "<literal>"` — env fallback to a literal
+  /\b(?:AGENT_ID|agentId)\b[^\n;]*?(?:\|\||\?\?)\s*['"][A-Za-z][A-Za-z0-9_-]*['"]/,
+  // `AGENT_ID = '<literal>'` / `agentId = "<literal>"` — literal assignment
+  /\b(?:AGENT_ID|agentId)\s*[:=]\s*['"][A-Za-z][A-Za-z0-9_-]*['"]/,
+  // `agentId: '<literal>'` — identity field set to a bare literal
+  /\bagentId\s*:\s*['"][A-Za-z][A-Za-z0-9_-]*['"]/,
+  // shell: `TPS_AGENT_ID=<literal>` / `FLAIR_AGENT_ID=<literal>` (unquoted literal)
+  /\b(?:TPS_AGENT_ID|FLAIR_AGENT_ID)=[A-Za-z][A-Za-z0-9_-]*/,
 ];
+
+/** True when `text` carries identity-setting syntax. Exposed for the tests. */
+function matchesAny(text: string): boolean {
+  return OFFENDER.some((re) => re.test(text));
+}
 
 function walk(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
@@ -75,7 +91,7 @@ function scan(): Offender[] {
     lines.forEach((raw, i) => {
       const trimmed = raw.trim();
       if (isCommentLine(trimmed)) return;
-      if (!OFFENDER.some((re) => re.test(raw))) return;
+      if (!matchesAny(raw)) return;
       if (ALLOWLIST.some((a) => a.path === rel && a.line === trimmed)) return;
       found.push({ path: rel, line: i + 1, text: trimmed });
     });
@@ -96,8 +112,18 @@ describe("scripts/ ships no default agent identity (flair#1822)", () => {
     expect(files).toContain("scripts/lib/agent-identity.mjs");
   });
 
-  test("a planted default is caught (guard the guard)", () => {
-    const planted = "const AGENT_ID = process.env.FLAIR_AGENT_ID || 'flint';";
-    expect(OFFENDER.some((re) => re.test(planted))).toBe(true);
+  test("the SHAPE of an identity default is caught, not just known names (guard the guard)", () => {
+    const planted = [
+      `const AGENT_ID = process.env.FLAIR_AGENT_ID || "another-agent";`, // env fallback to a literal
+      `const agentId = get("--agent") ?? "another-agent";`, // nullish fallback to a literal
+      `const AGENT_ID = "another-agent";`, // direct literal assignment
+      `const body = { agentId: "another-agent" };`, // identity field
+      `const body = { agentId: 'another-agent' };`, // identity field
+      `TPS_AGENT_ID=another-agent tps mail send x y`, // shell assignment
+      `FLAIR_AGENT_ID=another-agent node scripts/x.mjs`, // shell assignment
+    ];
+    for (const line of planted) {
+      expect(matchesAny(line), `not caught: ${line}`).toBe(true);
+    }
   });
 });
