@@ -116,6 +116,16 @@ export const CONDITION = Object.freeze({
   // Not one of the ten conditions: the App is installed AFTER this lands, so the
   // write step must refuse loudly rather than proceed unauthenticated.
   APP_NOT_CONFIGURED: "app-not-configured",
+  // The adk-flair side of the tag boundary (slice 3 of #1928). The auto-tag also
+  // creates `adk-flair-v<version>` when the tree carries the Python package:
+  //   - the on-tree pyproject version differs from the version being tagged, so
+  //     the two packages would disagree — refused BEFORE the v tag is written;
+  //   - an `adk-flair-v<version>` tag already exists at ANOTHER commit;
+  //   - the second ref POST was rejected (a 403/422, e.g. the ruleset does not
+  //     list the App as a bypass actor) — the v tag stays, nothing retries.
+  ADK_VERSION_MISMATCH: "adk-version-mismatch",
+  ADK_TAG_EXISTS_ELSEWHERE: "adk-tag-exists-elsewhere",
+  ADK_REF_WRITE_REJECTED: "adk-ref-write-rejected",
 });
 export const CONDITION_IDS = Object.freeze(Object.values(CONDITION));
 
@@ -126,6 +136,8 @@ export const VERSION_SHAPE = /^\d+\.\d+\.\d+$/;
 export const CONCLUSION_WHITELIST = Object.freeze(["success", "neutral", "skipped"]);
 export const DEFAULT_REVIEWERS = Object.freeze(["tps-kern", "tps-sherlock"]);
 export const DEFAULT_VERSION_FILE = "package.json";
+// The Python package whose release the auto-tag also marks (slice 3 of #1928).
+export const ADK_PYPROJECT_PATH = "packages/adk-flair/pyproject.toml";
 export const DEFAULT_WORKFLOW_PATH = ".github/workflows/test.yml";
 export const DEFAULT_WORKFLOW_NAME = "CI";
 export const DEFAULT_ADVISORY_ALLOWLIST = ".github/release-auto-tag-advisories.json";
@@ -544,6 +556,17 @@ export async function resolveTagCommit(api, ref) {
 
 export function versionAt(deps, rev, versionFile) {
   return readVersionFromManifest(deps.git.show(rev, versionFile));
+}
+
+/**
+ * The `version = "<v>"` a `pyproject.toml` declares, or null when the text is
+ * absent or carries none. Used by the write boundary to compare the on-tree
+ * adk-flair version with the version being tagged (slice 3 of #1928).
+ */
+export function adkVersionFromPyproject(text) {
+  if (text === null || text === undefined) return null;
+  const m = String(text).match(/^\s*version\s*=\s*"([^"]*)"/m);
+  return m ? m[1] : null;
 }
 
 /** Condition 1: the version at <sha> differs from <sha>^. */
@@ -1039,6 +1062,24 @@ export async function writeTag({ sha, version, deps, options = {} }) {
   const step8 = await conditionReviews(reads, { pr: step7.pr, reviewers: opts.reviewers });
   if (!step8.ok) return refuse(step8.condition, { summary: [...summary, ...(step8.summary ?? [])] });
 
+  // Condition 10 also reads the adk-flair package's own version (slice 3 of
+  // #1928). A MISMATCH is refused HERE, before the v tag is written, so a
+  // mismatch never leaves a half-tagged release. A MISSING file is fine — flair
+  // can release without the Python package — and only skips the second tag.
+  const adkText = deps.git?.show ? deps.git.show(sha, ADK_PYPROJECT_PATH) : null;
+  const adkPresent = adkText !== null && adkText !== undefined;
+  const adkOnTreeVersion = adkVersionFromPyproject(adkText);
+  if (adkPresent && adkOnTreeVersion !== version) {
+    return refuse(CONDITION.ADK_VERSION_MISMATCH, {
+      summary: [
+        ...summary,
+        `the on-tree ${ADK_PYPROJECT_PATH} declares version ${adkOnTreeVersion ?? "none"}, not ${version}`,
+      ],
+      adkVerdict: WRITE_VERDICT.REFUSE,
+      adkCondition: CONDITION.ADK_VERSION_MISMATCH,
+    });
+  }
+
   const ref = `refs/tags/v${version}`;
   const created = await deps.api.createTagRef(ref, sha);
   if (!created?.ok) {
@@ -1061,7 +1102,52 @@ export async function writeTag({ sha, version, deps, options = {} }) {
       summary: [...summary, `after the POST, ${ref} resolves to ${resolved ?? "nothing"}, not ${sha}`],
     });
   }
-  return { verdict: WRITE_VERDICT.TAGGED, condition: "", version, summary, ref };
+
+  // The v tag is up. The SECOND ref — `adk-flair-v<version>` — is created only
+  // when the tree carries the Python package (slice 3 of #1928). The read-back
+  // rule and the never-retry-the-POST rule apply to it EXACTLY as to the first.
+  let adkVerdict = WRITE_VERDICT.SKIP;
+  let adkCondition = "";
+  if (!adkPresent) {
+    deps.log?.info?.(
+      `no ${ADK_PYPROJECT_PATH} at ${sha}: skipping the adk-flair tag (flair can release without the Python package)`,
+    );
+  } else {
+    const adkTag = `adk-flair-v${version}`;
+    const existingAdk = await deps.api.readTagRef(adkTag);
+    if (existingAdk) {
+      const existingCommit = await resolveTagCommit(deps.api, existingAdk);
+      if (existingCommit === sha) {
+        deps.log?.info?.(`${adkTag} already exists at ${sha}: skipping`);
+      } else {
+        adkVerdict = WRITE_VERDICT.REFUSE;
+        adkCondition = CONDITION.ADK_TAG_EXISTS_ELSEWHERE;
+        summary.push(`${adkTag} already exists at ${existingCommit ?? "nothing"}, not ${sha}`);
+      }
+    } else {
+      const createdAdk = await deps.api.createTagRef(`refs/tags/${adkTag}`, sha);
+      if (!createdAdk?.ok) {
+        // The POST is not retried. The v tag stays in place (it was written and
+        // read back), and the failure is reported as an adk refusal.
+        adkVerdict = WRITE_VERDICT.REFUSE;
+        adkCondition = CONDITION.ADK_REF_WRITE_REJECTED;
+        summary.push(
+          `POST refs/tags/${adkTag} failed (${createdAdk?.status}) after the v tag was written; the v tag is left in place and the POST is not retried`,
+        );
+      } else {
+        const adkReadBack = await deps.api.readTagRef(adkTag);
+        const adkResolved = adkReadBack ? await resolveTagCommit(deps.api, adkReadBack) : null;
+        if (adkResolved !== sha) {
+          adkVerdict = WRITE_VERDICT.REFUSE;
+          adkCondition = CONDITION.ADK_REF_WRITE_REJECTED;
+          summary.push(`after the POST, ${adkTag} resolves to ${adkResolved ?? "nothing"}, not ${sha}`);
+        } else {
+          adkVerdict = WRITE_VERDICT.TAGGED;
+        }
+      }
+    }
+  }
+  return { verdict: WRITE_VERDICT.TAGGED, condition: "", version, summary, ref, adkVerdict, adkCondition };
 }
 
 // ── the nightly target ────────────────────────────────────────────────────────
@@ -1154,6 +1240,10 @@ function writeOutputs(target, decision, sha = "") {
     `version=${decision.version ?? ""}`,
     `sha=${sha}`,
   ];
+  if (decision.adkVerdict !== undefined) {
+    lines.push(`adk_verdict=${decision.adkVerdict}`);
+    lines.push(`adk_condition=${decision.adkCondition ?? ""}`);
+  }
   if (!target || target === "-") {
     for (const line of lines) console.log(line);
     return;
@@ -1263,7 +1353,11 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
     });
     console.log(`${result.verdict} v${result.version} ${args.sha}${result.condition ? ` (${result.condition})` : ""}`);
     for (const line of result.summary ?? []) console.log(`  ${line}`);
-    writeOutputs(output, result, args.sha);
+    writeOutputs(
+      output,
+      { ...result, adkVerdict: result.adkVerdict ?? "", adkCondition: result.adkCondition ?? "" },
+      args.sha,
+    );
     return 0;
   }
 

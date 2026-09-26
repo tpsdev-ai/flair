@@ -90,6 +90,20 @@ git checkout main && git pull
 git tag v0.11.0 && git push origin v0.11.0
 ```
 
+> The [`release-auto-tag`](../.github/workflows/release-auto-tag.yml) workflow
+> normally pushes this tag for you once a release PR merges green (see
+> [#1928](https://github.com/tpsdev-ai/flair/issues/1928)); the hand-push above is
+> the manual fallback. When the release commit's tree carries
+> `packages/adk-flair/pyproject.toml` at the same version, the auto-tagger ALSO
+> creates `adk-flair-v<version>` from the same commit — so the PyPI publish run
+> then needs only the environment gate its owner keeps or drops (no hand-pushed
+> `adk-flair-v` tag). A tree whose `pyproject.toml` version differs refuses
+> `adk-version-mismatch` before either tag is written; an `adk-flair-v<version>`
+> that already exists at another commit refuses `adk-tag-exists-elsewhere`; and a
+> second POST rejected for lack of permission refuses `adk-ref-write-rejected`
+> with the `v` tag left in place. The App must be listed as a bypass actor on the
+> `adk-flair-v*` tag ruleset for that second POST to be allowed.
+
 The tag push triggers the [`release-publish`](../.github/workflows/release-publish.yml)
 workflow, which:
 

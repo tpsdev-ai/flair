@@ -21,6 +21,9 @@ export interface ConditionIds {
   CI_RENAMED: string;
   VERSION_ORIGIN_NOT_FOUND: string;
   APP_NOT_CONFIGURED: string;
+  ADK_VERSION_MISMATCH: string;
+  ADK_TAG_EXISTS_ELSEWHERE: string;
+  ADK_REF_WRITE_REJECTED: string;
 }
 
 export const CONDITION: ConditionIds;
@@ -31,6 +34,7 @@ export const VERSION_SHAPE: RegExp;
 export const CONCLUSION_WHITELIST: readonly string[];
 export const DEFAULT_REVIEWERS: readonly string[];
 export const DEFAULT_VERSION_FILE: string;
+export const ADK_PYPROJECT_PATH: string;
 export const DEFAULT_WORKFLOW_PATH: string;
 export const DEFAULT_WORKFLOW_NAME: string;
 export const DEFAULT_ADVISORY_ALLOWLIST: string;
@@ -141,6 +145,10 @@ export interface WriteResult {
   reason?: string;
   summary: string[];
   ref?: string;
+  /** The adk-flair ref verdict (slice 3 of #1928): TAGGED | SKIP | REFUSE. */
+  adkVerdict?: string;
+  /** The adk condition id when `adkVerdict` is REFUSE, else "". */
+  adkCondition?: string;
 }
 
 export interface WriteOptions {
@@ -158,6 +166,7 @@ export interface WriteOptions {
 
 export function compareVersions(a: string, b: string): number;
 export function readVersionFromManifest(text: string | null): string | null;
+export function adkVersionFromPyproject(text: string | null): string | null;
 export function parseAdvisoryAllowlist(text: string): Set<string>;
 export function createClient(options: {
   repo: string;

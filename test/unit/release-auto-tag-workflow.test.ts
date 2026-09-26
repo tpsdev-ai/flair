@@ -250,8 +250,11 @@ describe("release-auto-tag workflow — the reporter (acceptance 9, YAML half)",
     expect(report.if).toContain("needs.write.outputs.verdict || needs.decide.outputs.verdict");
     expect(report.if).toContain("github.event_name != 'workflow_dispatch'");
     // The condition and version it renders read write's before decide's too.
+    // The adk condition wins when the adk write refused (slice 3 of #1928).
     const env = (report.steps ?? [])[0].env ?? {};
-    expect(String(env.CONDITION)).toBe("${{ needs.write.outputs.condition || needs.decide.outputs.condition }}");
+    expect(String(env.CONDITION)).toBe(
+      "${{ needs.write.outputs.adk_verdict == 'REFUSE' && needs.write.outputs.adk_condition || needs.write.outputs.condition || needs.decide.outputs.condition }}",
+    );
     expect(String(env.VERSION)).toBe("${{ needs.write.outputs.version || needs.decide.outputs.version }}");
   });
 
@@ -506,5 +509,28 @@ describe("release-auto-tag workflow — credential isolation and the reporter's 
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("release-auto-tag workflow — the adk-flair verdict (slice 3 of #1928)", () => {
+  test("the write job publishes the adk verdict, and its Enforce step goes red on an adk REFUSE", () => {
+    const write = job("write");
+    expect(write.outputs?.adk_verdict).toBe("${{ steps.write.outputs.adk_verdict }}");
+    expect(write.outputs?.adk_condition).toBe("${{ steps.write.outputs.adk_condition }}");
+    const enforce = (write.steps ?? []).find((s) => (s.name ?? "").startsWith("Enforce"));
+    expect(enforce, "the write job has an Enforce step").toBeDefined();
+    // The job goes red on an adk REFUSE, not only a v REFUSE.
+    expect(String(enforce!.if)).toContain("steps.write.outputs.adk_verdict == 'REFUSE'");
+    // And the message names the adk condition when the adk write refused.
+    expect(String(enforce!.env?.CONDITION)).toContain("steps.write.outputs.adk_condition");
+  });
+
+  test("the reporter fires on an adk REFUSE too, and names the adk condition", () => {
+    const report = job("report");
+    // The v verdict is TAGGED on an adk refusal, so the guard must ALSO watch the
+    // adk verdict or the report job never runs.
+    expect(String(report.if)).toContain("needs.write.outputs.adk_verdict == 'REFUSE'");
+    const refusalStep = (report.steps ?? [])[0];
+    expect(String(refusalStep.env?.CONDITION)).toContain("needs.write.outputs.adk_condition");
   });
 });

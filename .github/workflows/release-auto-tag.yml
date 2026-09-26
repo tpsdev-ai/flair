@@ -261,6 +261,11 @@ jobs:
       verdict: ${{ steps.write.outputs.verdict || steps.redecide.outputs.verdict }}
       condition: ${{ steps.write.outputs.condition || steps.redecide.outputs.condition }}
       version: ${{ steps.write.outputs.version || steps.redecide.outputs.version }}
+      # The adk-flair verdict from the write boundary (slice 3 of #1928). A REFUSE
+      # here (version mismatch, an adk tag elsewhere, or a rejected second POST)
+      # must make the job red and reach the reporter, exactly like a v REFUSE.
+      adk_verdict: ${{ steps.write.outputs.adk_verdict }}
+      adk_condition: ${{ steps.write.outputs.adk_condition }}
     steps:
       - name: Check out the default branch's tree
         # A FRESH workspace, and the default branch's tree: the credential
@@ -384,12 +389,14 @@ jobs:
             --output "$GITHUB_OUTPUT"
 
       - name: Enforce (the write job goes red on REFUSE)
-        # A REFUSE found by this job's re-derivation OR at the write boundary must
-        # be red, and it reaches the reporter through this job's outputs.
-        if: always() && (steps.write.outputs.verdict == 'REFUSE' || steps.redecide.outputs.verdict == 'REFUSE')
+        # A REFUSE found by this job's re-derivation, at the v write boundary, OR
+        # by the adk write (slice 3 of #1928) must be red; it reaches the reporter
+        # through this job's outputs.
+        if: always() && (steps.write.outputs.verdict == 'REFUSE' || steps.write.outputs.adk_verdict == 'REFUSE' || steps.redecide.outputs.verdict == 'REFUSE')
         env:
           VERDICT: ${{ steps.write.outputs.verdict || steps.redecide.outputs.verdict }}
-          CONDITION: ${{ steps.write.outputs.condition || steps.redecide.outputs.condition }}
+          # The adk condition wins when the adk write refused; else the v condition.
+          CONDITION: ${{ steps.write.outputs.adk_verdict == 'REFUSE' && steps.write.outputs.adk_condition || steps.write.outputs.condition || steps.redecide.outputs.condition }}
           VERSION: ${{ steps.write.outputs.version || steps.redecide.outputs.version }}
         run: |
           set -euo pipefail
@@ -406,7 +413,8 @@ jobs:
     # excluded, so a dry run writes nothing.
     if: >-
       always()
-      && (needs.write.outputs.verdict || needs.decide.outputs.verdict) == 'REFUSE'
+      && ((needs.write.outputs.verdict || needs.decide.outputs.verdict) == 'REFUSE'
+      || needs.write.outputs.adk_verdict == 'REFUSE')
       && github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     # `issues: write` and NOTHING else. No checkout: this job executes no repo code.
@@ -422,7 +430,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          CONDITION: ${{ needs.write.outputs.condition || needs.decide.outputs.condition }}
+          CONDITION: ${{ needs.write.outputs.adk_verdict == 'REFUSE' && needs.write.outputs.adk_condition || needs.write.outputs.condition || needs.decide.outputs.condition }}
           VERSION: ${{ needs.write.outputs.version || needs.decide.outputs.version }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
