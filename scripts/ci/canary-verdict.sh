@@ -176,10 +176,10 @@ non-zero npm exit, an empty read, or a value that is not a version — so it onl
 reaches the moves with a clean PREVIOUS \`latest\` for every package, and can RESTORE.
 On the move-failure path it prints one RESTORE line per already-moved package
 (\`npm dist-tag add <pkg>@<previous> latest\`, never \`npm dist-tag rm\`) and then the
-packages it did NOT move; on the skew-failure path (where every package was moved)
-it prints an explicit \`ALL N packages were moved\` line first, then the same RESTORE
-lines for each. The convergence (skew) check runs ONLY on the all-succeeded
-path. The preflight is bound to the release run's **package-set digest** — a single
+packages it did NOT move; on the final-check path (every add call succeeded)
+it prints the check's own result, then the same RESTORE lines
+for each. The block never asserts a tag's current value — the convergence
+check's output is the only state evidence. The preflight is bound to the release run's **package-set digest** — a single
 sha256 over the canonical sorted list of \`<name>@${VERSION} <sha256>\` lines, one per
 lockstep package (the digest \`${PKG_SET_DIGEST}\` the pack job certified). Paste this
 WHOLE block once, from the repo root: it re-derives that digest from the published
@@ -332,9 +332,9 @@ _skew=\$?
 set -e
 if [ "\$_skew" -ne 0 ]; then
   if [ "\$_skew" -eq 2 ]; then
-    echo "canary promote: the convergence check COULD NOT READ the current tag state (the registry read was unavailable), so every package's state is UNKNOWN. RESTORE every attempted package to its PREVIOUS latest (this does not delete a tag):" >&2
+    echo "canary promote: the convergence check DID NOT RUN — it could not establish the current tag state (its message above says why); every package's state is UNKNOWN. RESTORE every attempted package to its PREVIOUS latest (this does not delete a tag):" >&2
   else
-    echo "canary promote: the skew check failed AFTER every tag moved. ALL ${#PACKAGES[@]} packages were moved (none is still on its previous latest). RESTORE every moved package to its PREVIOUS latest (this does not delete a tag):" >&2
+    echo "canary promote: the convergence check found skew — the set did not reach the expected version; the offenders and their current latest are above in the check's output. RESTORE every attempted package to its PREVIOUS latest (this does not delete a tag):" >&2
   fi
   while IFS= read -r _line; do
     _mp="\${_line%%=*}"; _mv="\${_line#*=}"

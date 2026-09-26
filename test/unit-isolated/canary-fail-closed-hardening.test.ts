@@ -662,7 +662,7 @@ writeFileSync(join(CTL_SHIM, "npm"), ctlNpmStub);
 chmodSync(join(CTL_SHIM, "npm"), 0o755);
 
 /** Emit the PASS block (bindings-certified digest) and run it under the control npm stub. */
-function runPromoteBlock(extraEnv: Record<string, string>): { status: number | null; stderr: string; dt: string } {
+function runPromoteBlock(extraEnv: Record<string, string>): { status: number | null; stderr: string; dt: string; stdout: string } {
   const cert = rederivedDigest("sha:");
   const emitted = runVerdict(["pass", VER, RUN_URL, "--os", "ubuntu-latest", "--package-set-digest", cert]);
   expect(emitted.status).toBe(0);
@@ -690,7 +690,7 @@ function runPromoteBlock(extraEnv: Record<string, string>): { status: number | n
       ...extraEnv,
     },
   });
-  return { status: r.status, stderr: r.stderr, dt: readFileSync(dt, "utf8") };
+  return { status: r.status, stderr: r.stderr, dt: readFileSync(dt, "utf8"), stdout: r.stdout };
 }
 
 describe("item 1 (A1c of #1671, round 5): a mid-promote failure RESTORES the moved tags", () => {
@@ -714,12 +714,14 @@ describe("item 1 (A1c of #1671, round 5): a mid-promote failure RESTORES the mov
 
   test("(b) the skew check fails after EVERY move => RESTORE lines for all moved packages, no `rm`", () => {
     const r = runPromoteBlock({ SKEW_FAIL: "1" });
+    const combined = `${r.stdout}${r.stderr}`;
     expect(r.status, `stderr:\n${r.stderr}`).not.toBe(0);
     const moves = r.dt.split("\n").filter((l) => l.startsWith("dist-tag add "));
     expect(moves.length).toBe(PACKAGES.length); // every move succeeded before the skew check
-    for (const p of PACKAGES) expect(r.stderr).toContain(`npm dist-tag add ${p}@1.2.2 latest`);
-    expect(r.stderr).not.toContain("dist-tag rm");
-    expect(r.stderr).toContain("skew check failed");
+    for (const p of PACKAGES) expect(combined).toContain(`npm dist-tag add ${p}@1.2.2 latest`);
+    expect(combined).not.toContain("dist-tag rm");
+    expect(combined).toContain("convergence check found skew");
+    expect(combined).not.toContain("none is still on its previous latest");
   });
 
   test("(c) the pre-move dist-tag ls fails for one package => no add is reached, and it is named", () => {
@@ -774,11 +776,13 @@ describe("item 1 (A1c of #1671, round 5): a mid-promote failure RESTORES the mov
   });
 
   test("(h) a final-check READ failure => no sentence asserts the packages' state; all attempted restored", () => {
-    const r = runPromoteBlock({ SKEW_FAIL: "2" }); // registry-latest-skew exits 2 (could not read)
+    const r = runPromoteBlock({ SKEW_FAIL: "2" }); // registry-latest-skew exits 2 (could not run)
+    const combined = `${r.stdout}${r.stderr}`;
     expect(r.status, `stderr:\n${r.stderr}`).not.toBe(0);
-    expect(r.stderr).toContain("COULD NOT READ");
-    expect(r.stderr).not.toContain("none is still on its previous latest");
-    for (const p of PACKAGES) expect(r.stderr).toContain(`npm dist-tag add ${p}@1.2.2 latest`);
+    expect(combined).toContain("DID NOT RUN");
+    expect(combined).toContain("could not establish the current tag state");
+    expect(combined).not.toContain("none is still on its previous latest");
+    for (const p of PACKAGES) expect(combined).toContain(`npm dist-tag add ${p}@1.2.2 latest`);
     expect(r.status).not.toBe(0);
   });
 });

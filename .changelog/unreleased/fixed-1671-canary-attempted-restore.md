@@ -1,5 +1,5 @@
-- **The canary promote block restores a package whose `dist-tag add` FAILED, and says
-  so when the final check cannot read the state.**
+- **The canary promote block prints a restore line for a package whose `dist-tag add` FAILED, and says
+  so when the check cannot read the state.**
 
   A failed `npm dist-tag add` can still have applied the tag server-side (npm may
   exit non-zero after the write), so that package is now reported as ATTEMPTED with
