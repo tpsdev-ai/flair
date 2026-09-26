@@ -35,7 +35,7 @@ Pairing connects a spoke to a hub with mutual key pinning and an auth-aware hand
 On the hub machine, the admin runs `flair federation token`. The command emits a JSON triple containing a one-time bootstrap credential:
 
 ```bash
-FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation token
+flair federation token --admin-pass-file ~/.flair/admin-pass
 ```
 
 Output (a single JSON object):
@@ -56,10 +56,10 @@ On the spoke machine:
 
 ```bash
 # From a file
-FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation pair <hub-url> --token-from /path/to/triple.json
+flair federation pair <hub-url> --admin-pass-file ~/.flair/admin-pass --token-from /path/to/triple.json
 
 # From stdin
-cat triple.json | FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation pair <hub-url> --token-from -
+cat triple.json | flair federation pair <hub-url> --admin-pass-file ~/.flair/admin-pass --token-from -
 ```
 
 **4. Behind the scenes**
@@ -76,20 +76,21 @@ Earlier designs relied on `allowCreate=true` combined with body-only authenticat
 
 ## Fabric Pairing Example
 
-A managed Harper Fabric hub has no shell. Mint the triple from any machine that can reach it, then pair from the spoke. `FLAIR_ADMIN_PASS` on that mint is the **hub/cluster** admin (the admin file on the hub host, or a secret manager), not the spoke's `~/.flair/admin-pass`. `--admin-pass` is also accepted but puts the password in shell history and process listings; prefer the environment form below. The full bring-up, including why `--ops-target` names port 9925, is [spoke-bringup.md §5a](spoke-bringup.md#harper-fabric-hub-no-shell). <!-- docs-freshness-allow: Fabric ops API port, not legacy data port -->
+A managed Harper Fabric hub has no shell. Mint the triple from any machine that can reach it, then pair from the spoke. The `--admin-pass-file` on that mint is the **hub/cluster** admin (the admin file on the hub host, or a secret manager), not the spoke's `~/.flair/admin-pass`. `--admin-pass-file` reads the password in-process (mode 0600 enforced) so it stays out of shell history and the process list; `--admin-pass` is also accepted but lands in both, and `FLAIR_ADMIN_PASS` suits CI. The full bring-up, including why `--ops-target` names port 9925, is [spoke-bringup.md §5a](spoke-bringup.md#harper-fabric-hub-no-shell). <!-- docs-freshness-allow: Fabric ops API port, not legacy data port -->
 
 ```bash
 # 1. On any machine (the spoke itself is fine) — no ssh, no scp.
 # umask 077 sets the mode of a file the redirect CREATES; set -C makes the redirect
 # refuse to overwrite an existing one, so a retry cannot truncate-and-reuse a looser file.
-# /path/to/hub-admin-pass is a 0600 file holding the HUB admin password, not ~/.flair/admin-pass on this machine; a literal here would land in shell history.
-(umask 077; set -C; FLAIR_ADMIN_PASS="$(cat /path/to/hub-admin-pass)" flair federation token \
+# /path/to/hub-admin-pass is a 0600 file holding the HUB admin password, not ~/.flair/admin-pass on this machine.
+(umask 077; set -C; flair federation token --admin-pass-file /path/to/hub-admin-pass \
   --target https://<hub>.<org>.harperfabric.com \
   --ttl 60 \
   --ops-target https://<hub>.<org>.harperfabric.com:9925 > ./pair-triple.json)  # docs-freshness-allow: Fabric ops API port, not legacy data port
 
 # 2. On the spoke — the SPOKE admin password (its own ~/.flair/admin-pass) writes the local Peer row; the mint above used the hub admin
-FLAIR_ADMIN_PASS="$(cat ~/.flair/admin-pass)" flair federation pair https://<hub>.<org>.harperfabric.com \
+flair federation pair https://<hub>.<org>.harperfabric.com \
+  --admin-pass-file ~/.flair/admin-pass \
   --token-from ./pair-triple.json
 ```
 

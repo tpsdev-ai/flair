@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=132 options=577
+# commands=132 options=579
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -809,8 +809,11 @@ flair federation pair
     --port <port>
       description: Harper HTTP port
       attr: port
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. Preferred source: file > FLAIR_ADMIN_PASS > --admin-pass; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
     --admin-pass <pass>
-      description: Admin password
+      description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
       attr: adminPass
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
@@ -838,8 +841,11 @@ flair federation token
     --port <port>
       description: Harper HTTP port
       attr: port
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. Preferred source: file > FLAIR_ADMIN_PASS > --admin-pass; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
     --admin-pass <pass>
-      description: Admin password
+      description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
       attr: adminPass
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
@@ -3403,21 +3409,29 @@ Usage: flair federation pair [options] <hub-url>
 Pair this spoke with a hub instance
 
 Options:
-  --port <port>        Harper HTTP port
-  --admin-pass <pass>  Admin password
-  --admin-user <name>  Admin username for Basic auth (env: FLAIR_ADMIN_USER;
-                       default: admin)
-  --ops-port <port>    Harper operations API port
-  --token <token>      One-time pairing token from hub admin (env:
-                       FLAIR_PAIRING_TOKEN) [deprecated: use --token-from]
-  --token-from <file>  Read bootstrap triple from JSON file (use '-' for stdin)
-  --target <url>       Remote Flair URL (env: FLAIR_TARGET)
-  --ops-target <url>   Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses
-                       port derivation)
-  -h, --help           display help for command
+  --port <port>             Harper HTTP port
+  --admin-pass-file <path>  Read the admin password from an owner-only file
+                            (mode 0600 enforced), keeping it out of shell
+                            history and the process list. Preferred source: file
+                            > FLAIR_ADMIN_PASS > --admin-pass; combining it with
+                            --admin-pass is a usage error.
+  --admin-pass <pass>       Admin password (legacy: lands in shell history and
+                            the process list — prefer --admin-pass-file or
+                            FLAIR_ADMIN_PASS)
+  --admin-user <name>       Admin username for Basic auth (env:
+                            FLAIR_ADMIN_USER; default: admin)
+  --ops-port <port>         Harper operations API port
+  --token <token>           One-time pairing token from hub admin (env:
+                            FLAIR_PAIRING_TOKEN) [deprecated: use --token-from]
+  --token-from <file>       Read bootstrap triple from JSON file (use '-' for
+                            stdin)
+  --target <url>            Remote Flair URL (env: FLAIR_TARGET)
+  --ops-target <url>        Explicit ops API URL (env: FLAIR_OPS_TARGET;
+                            bypasses port derivation)
+  -h, --help                display help for command
 
 Global Options:
-  -v, --version        output the version number
+  -v, --version             output the version number
 
 ----- flair federation token -----
 Usage: flair federation token [options]
@@ -3425,21 +3439,28 @@ Usage: flair federation token [options]
 Generate a one-time pairing token (run on the hub)
 
 Options:
-  --port <port>        Harper HTTP port
-  --admin-pass <pass>  Admin password
-  --admin-user <name>  Admin username for Basic auth (env: FLAIR_ADMIN_USER;
-                       default: admin)
-  --ops-port <port>    Harper operations API port
-  --ttl <minutes>      Token TTL in minutes (default: 60) (default: "60")
-  --target <url>       Remote Flair URL (env: FLAIR_TARGET)
-  --ops-target <url>   Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses
-                       port derivation)
-  --format <format>    Output format: json (default) or text (bare token,
-                       deprecated) (default: "json")
-  -h, --help           display help for command
+  --port <port>             Harper HTTP port
+  --admin-pass-file <path>  Read the admin password from an owner-only file
+                            (mode 0600 enforced), keeping it out of shell
+                            history and the process list. Preferred source: file
+                            > FLAIR_ADMIN_PASS > --admin-pass; combining it with
+                            --admin-pass is a usage error.
+  --admin-pass <pass>       Admin password (legacy: lands in shell history and
+                            the process list — prefer --admin-pass-file or
+                            FLAIR_ADMIN_PASS)
+  --admin-user <name>       Admin username for Basic auth (env:
+                            FLAIR_ADMIN_USER; default: admin)
+  --ops-port <port>         Harper operations API port
+  --ttl <minutes>           Token TTL in minutes (default: 60) (default: "60")
+  --target <url>            Remote Flair URL (env: FLAIR_TARGET)
+  --ops-target <url>        Explicit ops API URL (env: FLAIR_OPS_TARGET;
+                            bypasses port derivation)
+  --format <format>         Output format: json (default) or text (bare token,
+                            deprecated) (default: "json")
+  -h, --help                display help for command
 
 Global Options:
-  -v, --version        output the version number
+  -v, --version             output the version number
 
 ----- flair federation sync -----
 Usage: flair federation sync [options] [command]

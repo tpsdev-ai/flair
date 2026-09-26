@@ -144,6 +144,41 @@ export function readAdminPassFileSecure(path: string): string {
   return readSecretFileSecure(path, "--admin-pass-file");
 }
 
+/** Thrown by `resolveAdminPassFromSources` when two credential sources are given at once. */
+export class AdminPassSourceError extends Error {}
+
+/**
+ * Resolve an admin password from the credential sources a command exposes, in
+ * the precedence its usage text states: `--admin-pass-file` first, then
+ * `FLAIR_ADMIN_PASS`/`HDB_ADMIN_PASSWORD`, then `--admin-pass` (the form the
+ * help warns against). Supplying BOTH `--admin-pass-file` and `--admin-pass` is
+ * refused: two sources at once is ambiguous, and one of them is the discouraged
+ * argv form. The file is read through `readAdminPassFileSecure` — the same
+ * reader `flair backup` uses — so a group- or world-readable file is refused
+ * with a message naming the path and its mode.
+ *
+ * Returns "" when no source is set, so the caller owns its own "credential
+ * required" message; throws `AdminPassSourceError` on a conflict, or
+ * `readAdminPassFileSecure`'s error when the file is missing, empty or too
+ * open. Neither message carries the password value.
+ */
+export function resolveAdminPassFromSources(input: {
+  adminPassFile?: string;
+  adminPass?: string;
+  envPass?: string;
+}): string {
+  const { adminPassFile, adminPass, envPass } = input;
+  if (adminPassFile && adminPass) {
+    throw new AdminPassSourceError(
+      "--admin-pass and --admin-pass-file cannot be combined; pass exactly one. " +
+        "Prefer --admin-pass-file: it keeps the password out of shell history and the process list.",
+    );
+  }
+  if (adminPassFile) return readAdminPassFileSecure(adminPassFile);
+  if (envPass) return envPass;
+  return adminPass ?? "";
+}
+
 export function defaultAdminPassPath(): string {
   return join(resolveHome(), ".flair", "admin-pass");
 }
