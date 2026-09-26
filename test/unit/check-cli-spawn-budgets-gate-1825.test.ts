@@ -214,7 +214,20 @@ describe("anchored seed (descendant predicate) + fail-closed base (flair#1825 ro
     return git(dir, ["rev-parse", "HEAD"]).trim();
   }
 
-  it("the anchor is on origin/main's history and this branch descends from it", () => {
+  // The Unit Tests checkout is SHALLOW and does not carry the anchor object; the
+  // ancestry proof on the real base lives in the spawn-budgets CI job (which
+  // fetches base + anchor). Here it runs only where the history exists.
+  function gitHasObject(rev: string): boolean {
+    const root = join(import.meta.dirname, "..", "..");
+    try {
+      execFileSync("git", ["cat-file", "-e", `${rev}^{commit}`], { cwd: root, stdio: "ignore" });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  const anchorPresent = gitHasObject(SEED_INTRODUCTION_BASE);
+  it.skipIf(!anchorPresent)(`the anchor is on origin/main's history and this branch descends from it${anchorPresent ? "" : " — skipped: anchor object not in this checkout"}`, () => {
     // Robust to main moving: the anchor must be an ancestor of BOTH origin/main
     // and HEAD (execFileSync throws on a non-zero exit).
     const root = join(import.meta.dirname, "..", "..");
@@ -410,6 +423,24 @@ describe("closing round: method position, one-line bodies, reassigned signals, s
     expect(has(bad, "case-unbounded-fetch")).toBe(true);
     const good = `const sig = AbortSignal.timeout(5_000);\ntest("t", async () => {\n  Bun.spawn(["bun","src/cli.ts","status"], { timeout: 5_000 });\n  await fetch("http://127.0.0.1:9/x", { signal: sig });\n}, 60_000);\n`;
     expect(has(good, "case-unbounded-fetch")).toBe(false);
+  });
+
+  it("round 8 item 2: identifiers with `$` and `_` behave exactly like plain names", () => {
+    const good = (name: string) => `const ${name} = AbortSignal.timeout(5_000);
+test("t", async () => {
+  Bun.spawn(["bun","src/cli.ts","status"], { timeout: 5_000 });
+  await fetch("http://127.0.0.1:9/x", { signal: ${name} });
+}, 60_000);
+`;
+    for (const name of ["$sig", "_sig", "sig$"]) expect(has(good(name), "case-unbounded-fetch"), name).toBe(false);
+    const bad = (name: string) => `let ${name} = AbortSignal.timeout(5_000);
+${name} = new AbortController().signal;
+test("t", async () => {
+  Bun.spawn(["bun","src/cli.ts","status"], { timeout: 5_000 });
+  await fetch("http://127.0.0.1:9/x", { signal: ${name} });
+}, 60_000);
+`;
+    for (const name of ["$sig", "_sig"]) expect(has(bad(name), "case-unbounded-fetch"), name).toBe(true);
   });
 
   it("item 4: a 310-digit literal / `0` budget / `1__000` / `_1000` are all unknown", () => {

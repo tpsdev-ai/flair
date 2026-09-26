@@ -775,20 +775,26 @@ function signalValueBounds(value, src) {
   const v = value.trim();
   const direct = v.match(/^AbortSignal\.timeout\s*\(\s*([^)]*)\)$/);
   if (direct) return timeoutLiteralMs(direct[1]) !== null;
-  // An identifier bounds a fetch ONLY when it is `const`-declared to exactly
-  // `AbortSignal.timeout(<positive integer literal>)` in the same file AND never
-  // reassigned (round 7 item 3): a `let`/`var`, or any second assignment, → unbounded.
-  if (/^[A-Za-z_$][\w$]*$/.test(v) && src) {
-    const esc = v.replace(/\$/g, "\\$");
-    const decl = new RegExp(String.raw`\bconst\s+${esc}\s*=\s*AbortSignal\.timeout\s*\(\s*([^)]*)\)`).exec(src);
-    if (!decl) return false;
-    if (timeoutLiteralMs(decl[1]) === null) return false;
-    if (new RegExp(String.raw`\b(?:let|var)\s+${esc}\b`).test(src)) return false;
-    const assigns = src.match(new RegExp(String.raw`(^|[^\w$])${esc}\s*=(?!=)`, "g")) ?? [];
-    if (assigns.length > 1) return false; // the declaration is one; more = reassigned
-    return true;
+  if (!/^[A-Za-z_$][\w$]*$/.test(v) || !src) return false;
+  // LITERAL scans that capture ANY identifier, compared with `===` — no dynamic
+  // RegExp, so nothing to escape (round 8 item 2). An identifier bounds a fetch
+  // ONLY when it is `const`-declared to exactly `AbortSignal.timeout(<literal>)`
+  // in the same file AND never reassigned.
+  let declaredArg = null;
+  for (const m of src.matchAll(/\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*AbortSignal\.timeout\s*\(\s*([^)]*)\)/g)) {
+    if (m[1] === v) declaredArg = m[2];
   }
-  return false;
+  if (declaredArg === null) return false;
+  if (timeoutLiteralMs(declaredArg) === null) return false;
+  for (const m of src.matchAll(/\b(?:let|var)\s+([A-Za-z_$][\w$]*)\b/g)) {
+    if (m[1] === v) return false;
+  }
+  let assigns = 0;
+  for (const m of src.matchAll(/(^|[^\w$])([A-Za-z_$][\w$]*)\s*=(?!=)/g)) {
+    if (m[2] === v) assigns++;
+  }
+  if (assigns > 1) return false; // the declaration is one; more = reassigned
+  return true;
 }
 
 /** First `fetch(` whose OWN options carry no real deadline, or null. A deadline
