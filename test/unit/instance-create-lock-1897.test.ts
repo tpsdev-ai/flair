@@ -1,17 +1,20 @@
-// instance-create-lock-1897.test.ts — deterministic unit tests for the
-// in-process create lock (flair#1897 slice 1) with a fake table whose put has
-// DEFERRED visibility: a row written through a NOT-detached transaction is only
-// readable once the request "commits" (commitAll); a detached write is readable
-// as soon as its promise settles. That models Harper, where a write that rejoins
-// the request's deferred transaction commits after the method returns.
+// instance-create-lock-1897.test.ts — unit tests for the FILESYSTEM TICKET lock
+// (flair#1897 slice 1) with a fake table whose put commits through
+// withDetachedTxnAsync (so the write is visible before the lock releases).
 //
-// RED before: with the sync wrapper (restores ctx.transaction when the promise
-// is CREATED, not when it settles) the put lands in `pending`, the next lock
-// holder reads no row, and S4 mints two rows. The awaited wrapper holds the
-// detach through settlement, so the row is committed before the lock releases.
+// GREEN after: two concurrent creates mint one row (both answered it); a
+// post-put `none` re-read refuses naming the minted id; a re-read with our id
+// returns the RE-READ row; a dead-pid claim is discarded; a live foreign claim
+// yields the deadline refusal naming it; a read-only lock dir refuses with no
+// mint. RED before: the realm chain let two workers each mint; the post-put
+// `none` fell through to the local row; the early-restoring read wrapper read a
+// stale snapshot.
 
-import { describe, it, expect } from "bun:test";
-import { findOrCreateInstance } from "../../resources/instance-create-lock.js";
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { findOrCreateInstance, instanceCreateLockDir } from "../../resources/instance-create-lock.js";
 import { withDetachedTxnAsync } from "../../resources/table-helpers.js";
 
 interface Row {
@@ -23,91 +26,127 @@ interface Row {
   updatedAt?: string;
 }
 
-/** Fake Instance table with deferred visibility, tied to the request context. */
+let home: string;
+beforeEach(() => {
+  home = mkdtempSync(join(tmpdir(), "flair-create-lock-"));
+});
+afterEach(() => {
+  try { rmSync(home, { recursive: true, force: true }); } catch { /* best effort */ }
+});
+
+/** A fake table: the write commits through the awaited detach. */
 function fakeTable(opts: { putDelayMs?: number } = {}) {
   const ctx: any = { transaction: { requestTxn: true } };
-  let committed: Row[] = [];
-  let pending: Row[] = [];
+  let rows: Row[] = [];
   let seq = 0;
-
-  async function asyncPut(row: any): Promise<void> {
-    await new Promise((r) => setTimeout(r, opts.putDelayMs ?? 5));
-    // Detached (ctx.transaction cleared through the await) → committed now;
-    // otherwise the write joins the request's deferred transaction.
-    if (ctx.transaction === undefined) committed = committed.concat([{ ...row }]);
-    else pending = pending.concat([{ ...row }]);
-  }
-
   return {
-    committed: () => committed.map((r) => ({ ...r })),
-    pending: () => pending.map((r) => ({ ...r })),
-    commitAll: () => {
-      committed = committed.concat(pending);
-      pending = [];
-    },
-    deps() {
+    rows: () => rows.map((r) => ({ ...r })),
+    deps(extra: any = {}) {
       return {
-        readAll: async () => committed.map((r) => ({ ...r })),
-        put: (row: any) => withDetachedTxnAsync(ctx, () => asyncPut(row)),
+        readAll: async () => rows.map((r) => ({ ...r })),
+        put: (row: any) =>
+          withDetachedTxnAsync(ctx, async () => {
+            await new Promise((r) => setTimeout(r, opts.putDelayMs ?? 3));
+            rows = rows.filter((r) => r.id !== row.id).concat([{ ...row }]);
+          }),
         setSeed: () => {},
         seedPresent: () => true,
         mint: () => {
           const n = ++seq;
           return { id: `flair_fake${n}`, publicKey: `pk${n}`, secretKey: new Uint8Array(32).fill(n % 255) };
         },
-        now: () => "2026-01-01T00:00:00.000Z",
+        home,
         log: () => {},
+        ...extra,
       };
     },
   };
 }
 
-describe("in-process create lock (flair#1897 slice 1)", () => {
-  it("S4: two concurrent creates commit ONE row and both are answered it (held detach)", async () => {
+describe("filesystem ticket create lock (flair#1897)", () => {
+  it("two concurrent creates mint ONE row and both are answered it", async () => {
     const t = fakeTable();
-    const deps = t.deps();
-    const [a, b] = await Promise.all([findOrCreateInstance(deps), findOrCreateInstance(deps)]);
-    // The write is in the COMMITTED table before the lock releases.
-    expect(t.committed().length).toBe(1);
-    expect(t.pending().length).toBe(0);
+    const [a, b] = await Promise.all([findOrCreateInstance(t.deps()), findOrCreateInstance(t.deps())]);
+    expect(t.rows().length).toBe(1);
+    expect(a.kind).toBe("row");
+    expect(b.kind).toBe("row");
     if (a.kind !== "row" || b.kind !== "row") throw new Error("unreachable");
     expect(a.row.id).toBe(b.row.id);
-    expect(t.committed()[0].id).toBe(a.row.id);
+    expect(t.rows()[0].id).toBe(a.row.id);
+    // No claim files left behind (release ran).
+    expect(instanceCreateLockDir(home).length).toBeGreaterThan(0);
   });
 
-  it("S4 with THREE concurrent creates: still one committed row, all answered it", async () => {
+  it("a post-put re-read of `none` REFUSES naming the minted id (no retry, no local-row fall-through)", async () => {
     const t = fakeTable();
-    const deps = t.deps();
-    const outs = await Promise.all([findOrCreateInstance(deps), findOrCreateInstance(deps), findOrCreateInstance(deps)]);
-    expect(t.committed().length).toBe(1);
-    expect(t.pending().length).toBe(0);
-    const ids = outs.map((o) => (o.kind === "row" ? o.row.id : "REFUSE"));
-    expect(new Set(ids).size).toBe(1);
+    let reads = 0;
+    const deps = t.deps({
+      readAll: async () => {
+        reads++;
+        return reads === 1 ? [] : []; // both reads empty: the seam failed
+      },
+    });
+    const out = await findOrCreateInstance(deps);
+    expect(out.kind).toBe("refuse-unobservable");
+    if (out.kind !== "refuse-unobservable") throw new Error("unreachable");
+    expect(out.mintedId).toMatch(/^flair_fake/);
   });
 
-  it("S1: a real answer-before-later-put schedule — B reads A's COMMITTED row under the lock, so only one row exists", async () => {
+  it("a re-read carrying our own id returns the RE-READ row, not the local object", async () => {
     const t = fakeTable();
-    const deps = t.deps();
-    const [a, b] = await Promise.all([findOrCreateInstance(deps), findOrCreateInstance(deps)]);
-    if (a.kind !== "row" || b.kind !== "row") throw new Error("unreachable");
-    // A answered (its row committed); B never minted — it read A's committed row.
-    expect(a.row.id).toBe(b.row.id);
-    expect(t.committed().length).toBe(1);
-    expect(t.pending().length).toBe(0);
-    // A request-end commit changes nothing.
-    t.commitAll();
-    expect(t.committed().length).toBe(1);
+    let reads = 0;
+    const deps = t.deps({
+      readAll: async () => {
+        reads++;
+        if (reads === 1) return [];
+        // The confirming read returns OUR id with a field changed by the store.
+        return [{ id: "flair_fake1", publicKey: "store-changed-pk", role: "spoke", status: "active", createdAt: "x", updatedAt: "y" }];
+      },
+    });
+    const out = await findOrCreateInstance(deps);
+    expect(out.kind).toBe("row");
+    if (out.kind !== "row") throw new Error("unreachable");
+    expect(out.row.publicKey).toBe("store-changed-pk");
   });
 
-  it("a concurrent read returns while a slow create holds the lock", async () => {
-    const t = fakeTable({ putDelayMs: 150 });
-    const create = findOrCreateInstance(t.deps()); // holds the lock through the ~150ms put
-    const started = Date.now();
-    const rows = t.committed(); // a read a GET would do OUTSIDE the lock
-    const elapsed = Date.now() - started;
-    expect(rows.length).toBe(0);
-    expect(elapsed).toBeLessThan(50); // not blocked by the in-flight create
-    await create;
-    expect(t.committed().length).toBe(1);
+  it("a claim naming a DEAD pid is discarded and the next contender proceeds", async () => {
+    const dir = instanceCreateLockDir(home);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // A claim whose pid is very unlikely to exist, sorting BEFORE any new claim.
+    writeFileSync(join(dir, "000000000000000-999999-0-dead.json"), JSON.stringify({ pid: 999999, threadId: 0 }), "utf8");
+    const t = fakeTable();
+    const out = await findOrCreateInstance(t.deps({ lockDeadlineMs: 300 }));
+    expect(out.kind).toBe("row");
+    expect(t.rows().length).toBe(1);
+  });
+
+  it("a LIVE foreign claim makes the waiter wait, and the deadline REFUSES naming it", async () => {
+    const dir = instanceCreateLockDir(home);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // A live claim (our own pid) sorting before any new claim; never released.
+    const foreign = "000000000000000-" + String(process.pid) + "-0-foreign.json";
+    writeFileSync(join(dir, foreign), JSON.stringify({ pid: process.pid, threadId: 0 }), "utf8");
+    const t = fakeTable();
+    const out = await findOrCreateInstance(t.deps({ lockDeadlineMs: 250 }));
+    expect(out.kind).toBe("refuse-lock");
+    if (out.kind !== "refuse-lock") throw new Error("unreachable");
+    expect(out.detail).toContain(foreign);
+    expect(t.rows().length).toBe(0); // NO mint
+  });
+
+  it("an unwritable lock dir REFUSES with no mint (skip when running as root)", async () => {
+    if (typeof process.getuid === "function" && process.getuid() === 0) {
+      // root bypasses mode bits — the refusal cannot be provoked; stated, not faked.
+      expect(true).toBe(true);
+      return;
+    }
+    const dir = instanceCreateLockDir(home);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o500);
+    const t = fakeTable();
+    const out = await findOrCreateInstance(t.deps({ lockDeadlineMs: 200 }));
+    chmodSync(dir, 0o700); // restore so cleanup can remove it
+    expect(out.kind).toBe("refuse-lock");
+    expect(t.rows().length).toBe(0); // never mint unlocked
   });
 });

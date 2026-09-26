@@ -81,6 +81,15 @@ export function withDetachedTxn<T>(ctx: any, fn: () => T): T {
  * transaction and commits after the caller has moved on. This variant keeps the
  * transaction detached until `fn`'s promise settles: save, clear, `await fn()`,
  * THEN restore. Use it for a WRITE you need committed before the next reader.
+ *
+ * Relied-on Harper behaviour (5.2.8, exact branches): `txnForContext`
+ * (Table.ts:5767) selects the LMDB OR RocksDB `ImmediateTransaction`
+ * (LMDBTransaction.ts:349 / DatabaseTransaction.ts:1465) when `context.transaction`
+ * is not a joinable scope; an immediate transaction writes on its own, while a
+ * joined one commits when its transaction function completes. The 50-round
+ * integration test
+ * (`test/integration/federation-instance-create-race-1897.test.ts`, run in the
+ * REQUIRED `Integration Tests` job) is the tripwire for an upgrade changing this.
  */
 export async function withDetachedTxnAsync<T>(ctx: any, fn: () => Promise<T>): Promise<T> {
   if (!ctx) return fn();

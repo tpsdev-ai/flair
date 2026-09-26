@@ -19,7 +19,7 @@ import {
 } from "../src/lib/instance-identity-row.js";
 import { readAllInstanceRows } from "./instance-identity-rows.js";
 import { findOrCreateInstance } from "./instance-create-lock.js";
-import { withDetachedTxn, withDetachedTxnAsync } from "./table-helpers.js";
+import { withDetachedTxnAsync } from "./table-helpers.js";
 import { isSkillWrite } from "./skill-write.js";
 import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
@@ -312,7 +312,7 @@ export class FederationInstance extends Resource {
         // reusing it here would read the pre-create snapshot and mint a second row
         // even serialised (the table-helpers.ts class). A fresh transaction sees
         // the row the prior lock holder committed.
-        readAll: () => withDetachedTxn((this as any).getContext?.(), () => readAllInstanceRows()),
+        readAll: () => withDetachedTxnAsync((this as any).getContext?.(), () => readAllInstanceRows()),
         // Commit the WRITE before the lock releases: both the row put and the
         // keystore seed run in a DETACHED transaction, so Harper builds a fresh
         // ImmediateTransaction that commits on its own rather than at the end of
@@ -343,6 +343,22 @@ export class FederationInstance extends Resource {
       });
 
       if (outcome.kind === "refuse-multiple") {
+        if (outcome.putCommitted) {
+          // This request's OWN detached put committed a row AND the table holds >1.
+          console.error(
+            `[federation] GET /FederationInstance: this request committed row ${outcome.mintedId}; the table now holds ` +
+              `${outcome.rows.length} rows — hand to ${INSTANCE_ROW_PRUNE_REMEDY}.`,
+          );
+          return new Response(
+            JSON.stringify({
+              error: "multiple_instance_rows",
+              detail: multipleInstanceRowsMessage(outcome.rows, "GET /FederationInstance"),
+              rows: outcome.rows,
+            }),
+            { status: 409, headers: { "content-type": "application/json" } },
+          );
+        }
+        // Pre-put (the read before or the first in-lock read) — nothing created.
         console.error(
           `[federation] GET /FederationInstance found ${outcome.rows.length} Instance rows under the create lock — answering 409 and creating NOTHING.`,
         );
@@ -353,6 +369,28 @@ export class FederationInstance extends Resource {
             rows: outcome.rows,
           }),
           { status: 409, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (outcome.kind === "refuse-unobservable") {
+        console.error(
+          `[federation] GET /FederationInstance: minted ${outcome.mintedId} but the confirming re-read saw NO row — ` +
+            `the detached write was not observable. Refusing (no retry).`,
+        );
+        return new Response(
+          JSON.stringify({
+            error: "instance_identity_unobservable",
+            detail:
+              `This instance minted ${outcome.mintedId} but could not read it back — the write did not commit where expected. ` +
+              `Nothing is answered. Retry; if it persists, inspect the flair.Instance table.`,
+          }),
+          { status: 503, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (outcome.kind === "refuse-lock") {
+        console.error(`[federation] GET /FederationInstance: ${outcome.detail}`);
+        return new Response(
+          JSON.stringify({ error: "instance_create_lock_unavailable", detail: outcome.detail }),
+          { status: 503, headers: { "content-type": "application/json" } },
         );
       }
       if (outcome.warning) console.error(`[federation] ${outcome.warning}`);
