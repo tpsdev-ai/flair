@@ -106,9 +106,15 @@ the observability limits of a node you have no shell on. See
 Push local changes to the hub, once:
 
 ```bash
-flair federation sync --admin-pass <password>
+flair federation sync --admin-pass-file ~/.flair/admin-pass
 # Output: ✅ Synced 12 records (0 skipped) in 145ms
 ```
+
+`sync` and `verify` take the admin password from `--admin-pass-file` (an owner-only
+file, mode 0600 enforced). In CI, where a file is awkward, set `FLAIR_ADMIN_PASS`
+instead: an explicit `--admin-pass-file` or `--admin-pass` overrides it, and giving
+both the file and `--admin-pass` is a usage error. Avoid `--admin-pass` itself — it
+lands in shell history and the process list.
 
 ### What a push sends
 
@@ -263,7 +269,7 @@ Records with `updatedAt` more than 5 minutes in the future are rejected. This pr
 | `flair federation sync disable [--remove-shim]` | Remove the scheduled sync driver |
 | `flair federation sync status` | Show whether the driver is installed and genuinely active |
 | `flair federation watch [--interval <s>]` | Run sync in a foreground loop for an interactive session (default 30s) |
-| `flair federation verify [--wait <s>] [--admin-pass <pass>]` | Write a canary, push it, and check each peer. Flag/file admin credentials authenticate the admin-gated peer listing. 401/403, unreachable, and revoked are UNVERIFIABLE (warning, exit 0); a reachable peer missing the canary still FAILs (exit 1). |
+| `flair federation verify [--wait <s>] [--admin-pass-file <path>]` | Write a canary, push it, and check each peer. Flag/file admin credentials authenticate the admin-gated peer listing. 401/403, unreachable, and revoked are UNVERIFIABLE (warning, exit 0); a reachable peer missing the canary still FAILs (exit 1). |
 | `flair federation reachability` | Probe local instance + each paired peer (read-only) |
 | `flair federation token [--ttl <min>]` | Generate a one-time pairing token triple (hub only) |
 

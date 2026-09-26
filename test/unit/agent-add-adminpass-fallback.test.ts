@@ -211,6 +211,23 @@ describe("flair agent add / principal add — subprocess error paths (#590)", ()
     expect(stderr).toContain("is required for agent add");
   });
 
+  test("agent add with both --admin-pass and --admin-pass-file is a usage error, nothing sent (flair#1910)", async () => {
+    const passFile = join(tmpHome, "conflict-pass");
+    writeFileSync(passFile, "file-secret-conflict\n", "utf-8");
+    chmodSync(passFile, 0o600);
+
+    const { stdout, stderr, exitCode } = await runCli(
+      ["agent", "add", "test-agent-1910-conflict", "--target", "https://remote.example.com:9926",
+        "--admin-pass-file", passFile, "--admin-pass", "inline-secret-conflict"],
+      { HOME: tmpHome, FLAIR_ADMIN_PASS: undefined },
+    );
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("cannot be combined");
+    expect(stderr).not.toContain("file-secret-conflict");
+    expect(stderr).not.toContain("inline-secret-conflict");
+    expect(stdout).not.toContain("inline-secret-conflict");
+  });
+
   test("agent add with FLAIR_ADMIN_PASS env set but bad Harper connection still gets past admin-pass resolution (does not error on missing --admin-pass)", async () => {
     // We can't stand up a full Harper instance in this unit test, but we can
     // confirm the process does NOT die on the "--admin-pass is required"

@@ -29,6 +29,10 @@ import {
   isLocalBase,
   resolveAdminPassFromSources,
   resolveAdminUser,
+  ADMIN_PASS_FILE_FLAG,
+  ADMIN_PASS_FILE_HELP,
+  ADMIN_PASS_FLAG,
+  ADMIN_PASS_HELP,
 } from "../lib/auth-resolve.js";
 import { DEFAULT_INTERVAL_SECONDS as FEDERATION_SYNC_DEFAULT_INTERVAL } from "../federation/scheduler.js";
 import {
@@ -87,13 +91,9 @@ function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }
   cli.applyAdminPassFile(opts);
 }
 
-/** `federation token` / `federation pair` credential flags (flair#1873). */
-const ADMIN_PASS_FILE_FLAG = "--admin-pass-file <path>";
-const ADMIN_PASS_FILE_HELP =
-  "Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. " +
-  "An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.";
-const ADMIN_PASS_HELP =
-  "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)";
+/** `federation token` / `federation pair` credential flags (flair#1873).
+ *  The flag/help strings live in auth-resolve.ts next to the resolver, shared
+ *  with every sibling command's credential options (flair#1910). */
 
 /**
  * Resolve `federation token`/`pair`'s admin password through the SAME reader

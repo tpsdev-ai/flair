@@ -185,6 +185,23 @@ export function defaultAdminPassPath(): string {
   return join(resolveHome(), ".flair", "admin-pass");
 }
 
+// ─── The ONE admin-password option surface (flair#1910) ─────────────────────
+//
+// Every command that declares the admin-password pair declares the SAME two
+// flags with the SAME help, so the file form is recommended identically
+// everywhere and the argv form always carries its leak warning. Defined here,
+// next to the resolver both forms feed (`resolveAdminPassFromSources`), so the
+// two surfaces cannot drift between `federation token`/`pair` (which declared
+// these strings locally, flair#1873) and the shared credential-option helper
+// every sibling command uses.
+export const ADMIN_PASS_FILE_FLAG = "--admin-pass-file <path>";
+export const ADMIN_PASS_FILE_HELP =
+  "Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. " +
+  "An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.";
+export const ADMIN_PASS_FLAG = "--admin-pass <pass>";
+export const ADMIN_PASS_HELP =
+  "Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)";
+
 /** The admin username Harper's bootstrap creates and every Basic-auth path
  * historically hardcoded. Kept as the default; overridable per call via
  * `resolveAdminUser` (flair#1345). */
