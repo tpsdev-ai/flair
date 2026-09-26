@@ -267,3 +267,30 @@ describe("lockstep-packages — the ONE source for the release set", () => {
     expect(r.stdout.trim().split("\n")).toEqual(["@tpsdev-ai/good", "@tpsdev-ai/flair"]);
   });
 });
+
+describe("canary-verdict — an injected newline + garbage is refused (F0/F2, A1c of #1671)", () => {
+     // Round 3: a line-based `grep -E`/`grep -Eqx` matches the FIRST line of a multi-line
+     // value (bash 3.2 and 5.x alike), so a valid first line followed by a newline and
+     // garbage passes as a whole-string validator would not. These tests are RED on the
+     // pre-fix head (c0bc720e) and GREEN after the whole-string `[[ =~ ]]` fix.
+    test("F0: a 64-hex digest with a trailing newline + garbage => DID NOT RUN, no promote", () => {
+      const injected = "f".repeat(64) + "\ngarbage\n";
+      const r = run(["pass", "1.2.3", RUN_URL, "--os", "ubuntu-latest", "--package-set-digest", injected]);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain("64-char hex");
+      expect(r.stdout).not.toContain("npm dist-tag add");
+      expect(r.stdout).not.toContain("dist-tag add");
+     });
+
+    test("F2: 1.2.3 + newline + garbage => the prerelease note, no dist-tag line", () => {
+      const injected = "1.2.3\ngarbage";
+      const r = run(["pass", injected, RUN_URL, "--os", "ubuntu-latest", "--package-set-digest", "f".repeat(64)]);
+      expect(r.status).toBe(0);
+      expect(r.stderr).toBe("");
+      expect(r.stdout).not.toContain("npm dist-tag add");
+      expect(r.stdout).not.toContain("dist-tag add");
+      expect(r.stdout.toLowerCase()).toContain("prerelease");
+      expect(r.stdout.toLowerCase()).toContain("next");
+      expect(r.stdout.toLowerCase()).toContain("never");
+     });
+});

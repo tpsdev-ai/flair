@@ -11,9 +11,11 @@
   re-derived digest before any verdict, so a digest that does not match the
   certified set is a `FAIL` verdict (with both digests named), never a promote.
 
-  A SemVer prerelease is never promoted: its `PASS` prints a one-line note that
-  the version lives on `next` and that `latest` moves only for a release without
-  a prerelease label, and prints no `dist-tag add` lines at all. The `FAIL`
+  A SemVer prerelease is never promoted: its `PASS` prints a note that the
+  version lives on `next` and that `latest` moves only for a version that is
+  exactly a `<major>.<minor>.<patch>` (a whole-string match; a prerelease
+  label, build metadata, or any other text is not promoted), and prints no
+  `dist-tag add` lines at all. The `FAIL`
   verdict (deprecate every lockstep package, the CLI first) is unchanged.
 
   (Refs #1671)

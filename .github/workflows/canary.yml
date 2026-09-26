@@ -122,7 +122,7 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p canary-logs
-          if ! printf '%s' "$EXPECTED" | grep -Eq '^[0-9a-f]{64}$'; then
+          if ! [[ "$EXPECTED" =~ ^[0-9a-f]{64}$ ]]; then
             echo "::error::expected_sha256 is not a 64-char hex sha256: '$EXPECTED'"
             exit 1
           fi
@@ -150,7 +150,7 @@ jobs:
                  # unmeasurable tarball is FAIL. Without this an empty sha would
                  # change the re-derived digest, and the line-count check below counts
                  # lines, not values. `expected_count` is 0 only if the derivation failed.
-            if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{64}$'; then
+            if ! [[ "$sha" =~ ^[0-9a-f]{64}$ ]]; then
               echo "::error::could not hash ${pkg}@${VERSION} — is it approved and public? (unmeasurable is FAIL)"
               missing=1
               continue
@@ -185,12 +185,12 @@ jobs:
           # the certified set, so the verdict must be FAIL. The same canonical form
           # is what scripts/ci/canary-verdict.sh re-derives at paste time.
           PKG_SET_DIGEST="${PKG_SET_DIGEST:-}"
-          if ! printf '%s' "$PKG_SET_DIGEST" | grep -Eq '^[0-9a-f]{64}$'; then
+          if ! [[ "$PKG_SET_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
             echo "::error::package_set_digest is not a 64-char hex sha256: '$PKG_SET_DIGEST'"
             exit 1
           fi
           COMPUTED_DIGEST="$(node scripts/ci/package-set-digest.mjs --version "$VERSION" < canary-logs/lockstep-sha256.txt)"
-          if ! printf '%s' "$COMPUTED_DIGEST" | grep -Eq '^[0-9a-f]{64}$'; then
+          if ! [[ "$COMPUTED_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
             echo "::error::could not re-derive the package-set digest from the verified tarballs (unmeasurable is FAIL)"
             exit 1
           fi
@@ -382,7 +382,7 @@ jobs:
              # F0 (A1c of #1671): refuse early unless the package-set digest input is
              # 64 lowercase hex. Carried to canary-verdict.sh as "$PACKAGE_SET_DIGEST"
              # (an env var, never an unquoted interpolation), naming the input on failure.
-          if ! printf '%s' "$PACKAGE_SET_DIGEST" | grep -Eq '^[0-9a-f]{64}$'; then
+          if ! [[ "$PACKAGE_SET_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
             echo "::error::package-set-digest input is not a 64-char hex sha256: '$PACKAGE_SET_DIGEST' (refused at dispatch; name the digest)" >&2
             exit 1
           fi

@@ -35,6 +35,10 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+// F3 (A1c of #1671): the lockstep set is the ONE source for membership; it is
+// dependency-free (node: builtins only), so importing it keeps this script runnable
+// on the clean, credential-less canary runner.
+import { lockstepPackages } from "./lockstep-packages.mjs";
 
 const SHA256_RE = /^[0-9a-f]{64}$/;
 
@@ -62,9 +66,14 @@ export function computePackageSetDigest(pairs, version, options = {}) {
   if (!Array.isArray(pairs) || pairs.length === 0) {
     throw new Error("no package=sha256 lines");
    }
-  if (options?.expected != null) {
-    assertExactSetOfNames(pairs.map((p) => p[0]), [...options.expected], "the package set");
-   }
+   // F3 (A1c of #1671): membership is MANDATORY. The names in `pairs` must be exactly the
+   // lockstep set; a caller may pin it (release-pack passes lockstepPackages(root)), and
+   // absent a caller-supplied set it defaults to lockstepPackages() derived from the
+   // manifests, so no path, notably the CLI `--version` + stdin path that passes no
+   // `expected`, can skip the check. A missing, extra or duplicated member is a refusal
+   // naming the offending package.
+  const expected = options?.expected ?? lockstepPackages();
+   assertExactSetOfNames(pairs.map((p) => p[0]), [...expected], "the package set");
   const lines = [];
   for (const [name, sha] of pairs) {
     if (typeof name !== "string" || name.length === 0) {

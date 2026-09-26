@@ -113,7 +113,12 @@ done
 # (matching a `-<prerelease>` part) misses `1.2.3--`, whose first `-` is a valid
 # SemVer prerelease token, and would wrongly promote it; the whitelist cannot.
 is_release() {
-  printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
+    # F2 (A1c of #1671): a WHOLE-STRING match, not a line match. `printf | grep -Eq`
+    # matches any line of a multi-line value, so "1.2.3" followed by a newline and
+    # garbage read as a release and print nine dist-tag lines. `[[ =~ ]]` matches the
+    # whole string, so a value like "1.2.3\ngarbage" is refused: only an exact
+    # <major>.<minor>.<patch> is promoted, everything else prints the note and nothing else.
+    [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
 # The ONE source for the lockstep set (never a second list here).
@@ -147,7 +152,11 @@ if [ "$VERDICT" = "pass" ]; then
   fi
 
   # The pass path requires the certified package-set digest to bind the promote.
-  if ! printf '%s' "$PKG_SET_DIGEST" | grep -Eq '^[0-9a-f]{64}$'; then
+     # F0 (A1c of #1671): a WHOLE-STRING match, not a line match. `printf | grep -Eq`
+     # accepts a valid first line followed by a newline and garbage, so a 64-hex digest
+     # carrying a trailing newline and junk read as valid. `[[ =~ ]]` matches the whole
+     # string, so only an exact 64-char hex sha256 is accepted here.
+  if ! [[ "$PKG_SET_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
     echo "canary-verdict.sh: DID NOT RUN — --package-set-digest is required and must be a 64-char hex sha256 (got '${PKG_SET_DIGEST}')" >&2
     exit 2
   fi
@@ -180,13 +189,30 @@ EOF
   # any re-hash is empty or not 64 hex.
   cat <<EOF
 for _p in ${PACKAGES[*]}; do
-  _s="\$(node scripts/ci/registry-tarball-sha256.mjs ${VERSION} "\$_p" | grep -E '^[0-9a-f]{64}\$')"
-  if [ -z "\$_s" ]; then
-    echo "canary promote preflight: refused — '\$_p' did not hash to a 64-char sha256 at paste time (unmeasurable is FAIL)" >&2
-    exit 1
-  fi
-  printf '%s=%s\n' "\$_p" "\$_s" >> "\$PSD_LINES"
-done
+      # F4 (A1c of #1671): capture the producer's stdout AND its exit status SEPARATELY.
+      # A grep -E pipe, which both filters a failing producer's output (a valid first line + garbage
+      # from a producer that exits non-zero) AND reports grep's own status (0 on a match),
+      # masking the non-zero exit. Instead: require the producer to exit 0 AND emit exactly
+      # one line matching 64 hex; anything else is a refusal naming the package.
+    set +e
+    _out="\$(node scripts/ci/registry-tarball-sha256.mjs ${VERSION} "\$_p")"
+    _out_status=\$?
+    set -e
+    if [ "\$_out_status" -ne 0 ]; then
+      echo "canary promote preflight: refused — '\$_p' tarball hasher exited \$_out_status (unmeasurable is FAIL)" >&2
+      exit 1
+    fi
+      _out_n="\$(printf '%s\n' "\$_out" | wc -l | tr -d '[:space:]')"
+    if [ "\$_out_n" -ne 1 ]; then
+      echo "canary promote preflight: refused — '\$_p' hasher emitted \$_out_n lines (exactly one 64-hex line is required; unmeasurable is FAIL)" >&2
+      exit 1
+    fi
+    if ! [[ "\$_out" =~ ^[0-9a-f]{64}\$ ]]; then
+      echo "canary promote preflight: refused — '\$_p' did not hash to a 64-char sha256 at paste time (unmeasurable is FAIL)" >&2
+      exit 1
+    fi
+    printf '%s=%s\n' "\$_p" "\$_out" >> "\$PSD_LINES"
+  done
 # F4 (A1c of #1671): the producer's stdout and its exit status are captured
 # SEPARATELY. A non-zero producer exit (even with a valid-looking first line)
 # is a refusal, and the re-derived digest must be exactly ONE 64-hex line; a
@@ -210,10 +236,13 @@ if [ "\$_rehash_lines" -ne 1 ]; then
   echo "canary promote preflight: refused — the package-set digest producer emitted \$_rehash_lines lines (exactly one 64-hex line is required; unmeasurable is FAIL)" >&2
   exit 1
 fi
-if ! printf '%s' "\$_rehash" | grep -Eqx '^[0-9a-f]{64}\$'; then
-  echo "canary promote preflight: refused — the re-derived package-set digest is not a 64-char hex sha256 (unmeasurable is FAIL)" >&2
-  exit 1
-fi
+       # F0 (A1c of #1671): a WHOLE-STRING match, not a line match. printf | grep -Eqx
+       # accepts a valid first line followed by a newline and garbage; [[ =~ ]] matches
+       # the whole string, so only an exact 64-char hex sha256 is accepted.
+  if ! [[ "\$_rehash" =~ ^[0-9a-f]{64}\$ ]]; then
+    echo "canary promote preflight: refused — the re-derived package-set digest is not a 64-char hex sha256 (unmeasurable is FAIL)" >&2
+    exit 1
+  fi
 if [ "\$_rehash" != "${PKG_SET_DIGEST}" ]; then
   echo "canary promote preflight: refused — paste-time package-set digest \$_rehash differs from the release run's digest ${PKG_SET_DIGEST}; do not promote" >&2
   exit 1

@@ -565,3 +565,59 @@ describe("F4: the producer's stdout and its exit status are captured SEPARATELY 
 void nodeStdin;
 void SHA_SCRIPT;
 void LOCKSTEP_SCRIPT;
+
+// ── F4 (registry hasher, A1c of #1671): the emitted preflight's per-package producer
+// is captured by stdout AND exit status. A `registry-tarball-sha256.mjs` that prints a
+// valid first line followed by garbage, and exits non-zero, MUST be a refusal. The old
+// `| grep -E '^[0-9a-f]{64}` filtered the bad line AND supplied grep's (0) status,
+// masking the non-zero exit and promoting anyway — this test is RED on c0bc720e.
+const F4REG_STUB = join(SCRATCH, "f4reg-stub.mjs");
+const F4REG_SHIM = join(SCRATCH, "f4reg-shim");
+mkdirSync(F4REG_SHIM, { recursive: true });
+const f4regNodeStub = [
+       "#!/usr/bin/env node",
+      "const a0 = process.argv[2] || '';",
+      "if (a0.includes('registry-tarball-sha256.mjs')) {",
+      "  process.stdout.write('a'.repeat(64) + '\\ngarbage\\n');",
+      "  process.exit(1);",
+      "}",
+      "if (a0.includes('package-set-digest.mjs')) { process.stdout.write('e'.repeat(64) + '\\n'); process.exit(0); }",
+      "if (a0.includes('registry-latest-skew.mjs')) { process.exit(0); }",
+      "process.exit(0);",
+].join("\n");
+writeFileSync(F4REG_STUB, f4regNodeStub);
+writeFileSync(join(F4REG_SHIM, "node"), ["#!/usr/bin/env bash", 'exec "$REAL_NODE" "$F4REG_STUB" "$@"', ""].join("\n"));
+chmodSync(join(F4REG_SHIM, "node"), 0o755);
+
+describe("F4 (registry hasher, A1c of #1671): the emitted preflight refuses a bad per-package producer", () => {
+      test("a registry hasher that prints a valid line then garbage and exits 1 is refused; no tag moves", () => {
+       // Emit a real PASS block (the 9 lockstep packages, a valid 64-hex certified digest).
+    const cert = "e".repeat(64);
+    const emitted = runVerdict(["pass", VER, RUN_URL, "--os", "ubuntu-latest", "--package-set-digest", cert]);
+    expect(emitted.status).toBe(0);
+    const m = emitted.stdout.match(/```\n([\s\S]*?)\n```/);
+    if (!m?.[1]) throw new Error("F4-registry: no fenced promote block in the PASS output");
+    const block = m[1]!;
+    const cwd = mkdtempSync(join(SCRATCH, "f4regblock-"));
+    const f = join(cwd, "block.sh");
+    const dt = join(cwd, "disttag.log");
+    writeFileSync(f, block);
+    writeFileSync(dt, "");
+    const r = spawnSync("bash", [f], {
+      cwd: REPO,
+      encoding: "utf8",
+      env: {
+           ...process.env,
+        PATH: `${F4REG_SHIM}:${process.env.PATH}`,
+        REAL_NODE,
+        F4REG_STUB,
+        DISTTAG_LOG: dt,
+       },
+       });
+       // The preflight refuses before the first tag: non-zero exit, names the package,
+       // and the dist-tag log is empty (no `npm dist-tag add` ran).
+    expect(r.status, `stderr:\n${r.stderr}\nstdout:\n${r.stdout}`).not.toBe(0);
+    expect(r.stderr).toContain("tarball hasher exited");
+    expect(readFileSync(dt, "utf8")).toBe("");
+    });
+ });

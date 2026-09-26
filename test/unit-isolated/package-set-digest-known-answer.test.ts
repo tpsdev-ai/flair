@@ -37,6 +37,9 @@
 
 import { describe, expect, test } from "bun:test";
 import { computePackageSetDigest } from "../../scripts/ci/package-set-digest.mjs";
+import { lockstepPackages } from "../../scripts/ci/lockstep-packages.mjs";
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
 
 // ── The fixed inputs ─────────────────────────────────────────────────────────
 // The nine lockstep package names (the set under test), a single lockstep
@@ -151,4 +154,36 @@ describe("F3 · the digest refuses a set that is not exactly the expected lockst
     expect(msg).toContain("duplicated");
     expect(msg).toContain("@tpsdev-ai/b");
   });
+});
+
+// ── F3 (A1c of #1671): the CLI path (no caller-supplied expected) now defaults 'expected'
+// to lockstepPackages(), so a missing/extra/duplicate member is a refusal on EVERY path, not
+// just the ones that pass `expected`. RED on c0bc720e (the CLI path passed no `expected`,
+// so the membership check was skipped and the partial set digested). The KAT vectors stay
+// byte-identical with `expected` absent, because the real lockstep set equals the test set.
+describe("F3 (A1c of #1671): the default expected (lockstep set) is always checked", () => {
+      const S = "a".repeat(64);
+    test("F3: a direct call with the real lockstep set minus one member throws, naming the missing package", () => {
+      const all9 = lockstepPackages();
+      expect(all9.length).toBe(9);
+      const eight = all9.slice(0, all9.length - 1); // drop the last (flair)
+      const eightPairs = eight.map((n) => [n, S] as [string, string]);
+      expect(() => computePackageSetDigest(eightPairs, "0.29.0")).toThrow("missing [@tpsdev-ai/flair]");
+      });
+
+    test("F3: the CLI path with the real set minus one member refuses (exit 2) naming the missing package", () => {
+      const all9 = lockstepPackages();
+      const eight = all9.slice(0, all9.length - 1);
+      const eightIn = eight.map((n) => `${n}=${S}`).join("\n") + "\n";
+      const scriptPath = join(import.meta.dir, "..", "..", "scripts/ci/package-set-digest.mjs");
+      const r = spawnSync(process.execPath, [scriptPath, "--version", "0.29.0"], { input: eightIn, encoding: "utf8" });
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain("missing [@tpsdev-ai/flair]");
+      });
+
+    test("F3: with expected absent the KAT vectors are byte-identical (lockstep default equals the real set)", () => {
+      // The default 'expected' is lockstepPackages() (the real 9, flair last), which equals
+      // the KAT's 9-member set in the same order; the digest is byte-identical to the F3 KAT.
+      expect(computePackageSetDigest(canonicalPairs, VERSION)).toBe(VEC_CANONICAL);
+      });
 });
