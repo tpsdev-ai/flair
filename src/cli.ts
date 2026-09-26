@@ -1260,10 +1260,19 @@ function addSharedIdentityOption(cmd: Command): Command {
  */
 function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }): void {
   try {
+    // envPass is DELIBERATELY omitted: this wrapper folds an explicit
+    // `--admin-pass-file` (or `--admin-pass`) into `opts.adminPass`, and each
+    // call site keeps its own `opts.adminPass ?? FLAIR_ADMIN_PASS` fallback —
+    // exactly main's shape. Resolving the ambient env HERE would pre-fill
+    // `opts.adminPass`, and a call site that threads it as `explicitAdminPass`
+    // (memory add, soul, …) would then send ambient admin Basic auth where it
+    // used to send nothing and let the `--agent`/env tier decide (flair#1910
+    // round 2: `federation sync` merged nothing in the mixed-version compat
+    // lane because `memory add --agent X` with FLAIR_ADMIN_PASS set signed as
+    // admin, not as X).
     const pass = resolveAdminPassFromSources({
       adminPassFile: opts.adminPassFile,
       adminPass: opts.adminPass,
-      envPass: process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD,
     });
     if (pass) opts.adminPass = pass;
   } catch (err: any) {
