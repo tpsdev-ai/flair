@@ -30,7 +30,7 @@ function fakeTable(opts: { putDelayMs?: number } = {}) {
   let pending: Row[] = [];
   let seq = 0;
 
-  async function asyncPut(row: Row): Promise<void> {
+  async function asyncPut(row: any): Promise<void> {
     await new Promise((r) => setTimeout(r, opts.putDelayMs ?? 5));
     // Detached (ctx.transaction cleared through the await) → committed now;
     // otherwise the write joins the request's deferred transaction.
@@ -48,7 +48,7 @@ function fakeTable(opts: { putDelayMs?: number } = {}) {
     deps() {
       return {
         readAll: async () => committed.map((r) => ({ ...r })),
-        put: (row: Row) => withDetachedTxnAsync(ctx, () => asyncPut(row)),
+        put: (row: any) => withDetachedTxnAsync(ctx, () => asyncPut(row)),
         setSeed: () => {},
         seedPresent: () => true,
         mint: () => {
