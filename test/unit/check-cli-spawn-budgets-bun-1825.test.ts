@@ -9,6 +9,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   findSpawnCalls,
   analyzeTestFile,
@@ -128,7 +129,7 @@ describe("the gate today (flair#1825)", () => {
   });
 
   it("analyzeTestFile attributes a helper spawn to its enclosing helper", () => {
-    const src = readFileSync("test/unit/cli-auth-floor.test.ts", "utf8");
+    const src = readFileSync(join(ROOT, "test/unit/cli-auth-floor.test.ts"), "utf8");
     const { calls } = analyzeTestFile(src);
     const entry = calls.find((c) => c.isCliEntry);
     expect(entry).toBeDefined();
