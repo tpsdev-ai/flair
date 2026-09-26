@@ -57,6 +57,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { requireAgentIdentity } from "../lib/agent-identity.mjs";
 
 export const EXIT_OK = 0;
 export const EXIT_FAIL = 1;
@@ -420,7 +421,9 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   const flairUrl = (args.flairUrl || process.env.FLAIR_URL || "http://127.0.0.1:19926").replace(/\/$/, "");
-  const agentId = args.agent || process.env.FLAIR_AGENT_ID || "canary";
+  // No shipped default: an identity defaulted here would sign as a principal
+  // the caller did not choose (flair#1822). `--agent <id>` or FLAIR_AGENT_ID.
+  const agentId = requireAgentIdentity({ flagValue: args.agent, action: "run the plugin canary" });
   const keyPath =
     args.keyPath ||
     process.env.FLAIR_KEY_PATH ||
