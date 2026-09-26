@@ -13,8 +13,13 @@
  *     directories created since the previous sweep — a run's temp usage stays
  *     bounded instead of "everything at the very end";
  *   - an `afterAll` hook calls `sweep()` once when the file ends, covering a
- *     directory created outside a test body — in a `beforeAll`, say — so nothing
- *     created through `tempDir` survives the file.
+ *     directory created outside a test body — in a `beforeAll`, say.
+ *
+ * Both sweeps are best-effort, not a guarantee: `sweep()` removes each
+ * outstanding directory once, swallows a removal that fails (teardown must
+ * never fail a test) and forgets it, so a directory whose removal failed is not
+ * retried. What turns a survivor into a failure is the unit-lane guard, which
+ * snapshots the OS temp directory before and after the lane.
  *
  * A `process.on("exit")` hook is registered too, for a caller outside a test
  * context — a plain `bun -e` script, say. NOTE: bun's TEST RUNNER does not run
