@@ -973,15 +973,22 @@ export class BootstrapMemories extends Resource {
     tokenBudget += taskReserve;
     if (currentTask && tokenBudget <= 0) taskRetrievalHint = "Task retrieval skipped: no content budget remains.";
     if (currentTask && tokenBudget > 0) {
+      // Resolve the mode ONCE here so the embedding guard and the core agree.
+      // The bm25-only arm ranks on the lexical leg alone and needs NO query
+      // embedding — gating it on one being available would skip the lexical
+      // search entirely and lose task-relevant memories for no reason.
+      const mode = retrievalMode();
       let queryEmbedding: number[] | null = null;
-      try {
-        // flair#504 Phase 2: 'query' — currentTask is the bootstrap's
-        // task-relevance search query, not stored content.
-        queryEmbedding = await getEmbedding(currentTask, "query");
-      } catch {}
+      if (mode !== "bm25-only") {
+        try {
+          // flair#504 Phase 2: 'query' — currentTask is the bootstrap's
+          // task-relevance search query, not stored content.
+          queryEmbedding = await getEmbedding(currentTask, "query");
+        } catch {}
+      }
 
-      if (!queryEmbedding) taskRetrievalHint = "Task retrieval skipped: query embedding unavailable.";
-      if (queryEmbedding) {
+      if (mode !== "bm25-only" && !queryEmbedding) taskRetrievalHint = "Task retrieval skipped: query embedding unavailable.";
+      if (mode === "bm25-only" || queryEmbedding) {
         // flair#1207 — exclude own memories ALREADY placed via the authoritative
         // set (permanent + recent + predicted actually admitted). The old set was
         // built positionally (recent.filter by index) AND omitted `predicted`, so
@@ -1025,7 +1032,7 @@ export class BootstrapMemories extends Resource {
           // fusion carries it to the top, same as search. Perf (Kern-ratified
           // trade): the BM25 corpus scan this adds to the bootstrap path is
           // the same per-call scan every memory_search request already runs.
-          mode: retrievalMode(),
+          mode,
           // The lexical leg — same query text the embedding was computed
           // from, so both legs rank the same question (parity with search,
           // where `q` drives BM25 and the keyword bump).

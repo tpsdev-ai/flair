@@ -722,6 +722,9 @@ async function runHarperArmsShared(
       await ensureSearchable(entry);
       for (const a of missing) {
         await setArm(a);
+        // setArm may restart Harper; the index must still serve this corpus
+        // before the query (same contract as the main loop).
+        await ensureSearchable(entry);
         await queryEval(entry, a);
       }
       log(`  [shared] partial resume: ${entry.question_id} ${missing.join("+")} done`);
