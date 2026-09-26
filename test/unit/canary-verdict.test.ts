@@ -138,8 +138,8 @@ describe("canary-verdict — a SemVer prerelease is never promoted (A1c, #1671)"
     const nonReleases = ["1.2.3-rc.1", "1.2.3-0", "1.2.3--", "1.2.3+build", "totally-not-a-version"];
     for (const v of nonReleases) {
       const r = run(["pass", v, RUN_URL, "--os", "ubuntu-latest", "--package-set-digest", CERTIFIED_DIGEST]);
-      expect(r.status).toBe(0, `status for ${v}`);
-      expect(r.stderr).toBe("", `stderr for ${v}`);
+      expect(r.status, `status for ${v}`).toBe(0);
+      expect(r.stderr, `stderr for ${v}`).toBe("");
       expect(r.stdout, `stdout for ${v}`).not.toContain("npm dist-tag add");
       expect(r.stdout, `dist-tag for ${v}`).not.toContain("dist-tag add");
       expect(r.stdout.toLowerCase(), `prerelease for ${v}`).toContain("prerelease");
