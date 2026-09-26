@@ -1197,7 +1197,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   memory_search: {
         impl: memorySearch,
     contract: {
-      summary: "{ results: MemoryRecord[] } — semantic hits scoped to the caller's own + granted memories; each hit carries content, never the raw embedding.",
+      summary: "{ results: MemoryRecord[] } — semantic hits scoped to the caller's own and other agents' non-private memories; each hit carries content, never the raw embedding.",
       requiredFields: ["results"],
       fieldTypes: { results: "array" },
       invariants: {
