@@ -69,8 +69,9 @@ export function offenderKey(o: { file: string; scope: string; fingerprint: strin
 export function scanTree(root: string): { files: string[]; spawnOffenders: SpawnOffender[]; caseOffenders: SpawnOffender[] };
 export function testFilesUnder(root: string): string[];
 export function parseBudgetMs(text: string): number | null;
-export function sumWaitsMs(body: string, calls: SpawnCall[], open: number, close: number): number;
+export function sumWaitsMs(body: string, calls: SpawnCall[], open: number, close: number, extraBodies?: Array<{ name: string; start: number; end: number }>): number;
 export function firstUnboundedFetch(body: string): string | null;
+export function reachableHelperBodies(body: string, src: string, helpers: Set<string>, bodies: Array<{ name: string; start: number; end: number }>): Array<{ name: string; start: number; end: number }>;
 
 /** The trusted base ref the baseline is read from (env, else `origin/main`). */
 export function gateBaseRef(env?: Record<string, string | undefined>): string;
@@ -89,6 +90,7 @@ export function runGate(opts?: { root?: string; baseRef?: string; env?: Record<s
   baseRef: string;
   basePresent: boolean;
   defaulted: boolean;
+  seedAccepted: boolean;
   allowEntries: BaselineEntry[];
   prEntries: BaselineEntry[];
   baseEntries: BaselineEntry[];

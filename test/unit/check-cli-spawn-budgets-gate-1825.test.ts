@@ -200,3 +200,70 @@ describe("budget, templates, keys, skips (flair#1825 items 2/3/4)", () => {
     expect(offenderKey(o)).not.toMatch(/\.ts:\d/);
   });
 });
+
+describe("fail closed on the base baseline + helper waits (flair#1825 round 3)", () => {
+  function offendersFor(src: string) {
+    const dir = mkdtempSync(join(tmpdir(), "spawn-scan-r3-"));
+    repos.push(dir);
+    writeTree(dir, { "test/x.test.ts": src });
+    return scanTree(dir);
+  }
+
+  it("item 1a: a base with NO baseline file, no seed flag → the PR copy's entries are ADDED → fail", () => {
+    // Base commit has no baseline file at all.
+    const { dir, baseSha } = mk({ "test/base.test.ts": `test("ok", () => {});\n` });
+    writeTree(dir, {
+      "test/attack.test.ts": CLI_SPAWN_CASE,
+      "scripts/ci/cli-spawn-budgets.baseline.json": JSON.stringify(
+        [{ file: "test/attack.test.ts", scope: "a CLI spawn", fingerprint: `["bun","src/cli.ts","status"] ; {}`, kind: "spawn-no-timeout", occurrence: 0, reason: "self" }],
+        null, 2,
+      ) + "\n",
+    });
+    const r = runGate({ root: dir, baseRef: baseSha, env: {} });
+    expect(r.basePresent).toBe(false);
+    expect(r.ok).toBe(false);
+    expect(r.added.length).toBeGreaterThan(0);
+  });
+
+  it("item 1a-seed: the seed flag is accepted ONLY when the base has no baseline file", () => {
+    const { dir, baseSha } = mk({ "test/base.test.ts": `test("ok", () => {});\n` });
+    writeTree(dir, { "scripts/ci/cli-spawn-budgets.baseline.json": "[]\n" });
+    const r = runGate({ root: dir, baseRef: baseSha, env: { CLI_SPAWN_BUDGETS_SEED_BASELINE: "1" } });
+    expect(r.seedAccepted).toBe(true);
+    expect(r.ok).toBe(true);
+  });
+
+  it("item 1b: an invalid base ref is a hard failure naming the ref", () => {
+    const { dir } = mk({ "scripts/ci/cli-spawn-budgets.baseline.json": "[]\n", "test/x.test.ts": `test("ok", () => {});\n` });
+    expect(() => runGate({ root: dir, baseRef: "definitely-not-a-ref", env: {} })).toThrow(/invalid base ref/);
+    expect(() => runGate({ root: dir, baseRef: "definitely-not-a-ref", env: {} })).toThrow(/definitely-not-a-ref/);
+  });
+
+  it("item 1c: the seed flag is REFUSED when a base baseline exists", () => {
+    const { dir, baseSha } = mk({
+      "scripts/ci/cli-spawn-budgets.baseline.json": "[]\n",
+      "test/x.test.ts": `test("ok", () => {});\n`,
+    });
+    expect(() => runGate({ root: dir, baseRef: baseSha, env: { CLI_SPAWN_BUDGETS_SEED_BASELINE: "1" } })).toThrow(/SEED_BASELINE/);
+  });
+
+  it("item 2: a wait held in a file-local helper the case CALLS counts toward the sum", () => {
+    const src = `function runCli() {\n  return Bun.spawn(["bun", "src/cli.ts", "stop"], { timeout: 30_000 });\n}\ntest("uses helper", () => {\n  runCli();\n}, 1);\n`;
+    const { caseOffenders } = offendersFor(src);
+    const small = caseOffenders.find((o: any) => o.kind === "case-budget-too-small");
+    expect(small).toBeDefined();
+    expect(String(small!.detail)).toContain("30000");
+  });
+
+  it("item 3: fetch(..., { signal: undefined }) is unbounded", () => {
+    const src = `test("f", async () => {\n  const p = Bun.spawn(["bun", "src/cli.ts"], { timeout: 5_000 });\n  await fetch("http://127.0.0.1:9/", { signal: undefined });\n}, 30_000);\n`;
+    const { caseOffenders } = offendersFor(src);
+    expect(caseOffenders.some((o: any) => o.kind === "case-unbounded-fetch")).toBe(true);
+  });
+
+  it("item 4: fingerprint normalization is symmetric around argv commas", () => {
+    const a = findSpawnCalls('Bun.spawn(["bun","src/cli.ts"], {});').calls[0];
+    const b = findSpawnCalls('Bun.spawn(["bun" ,"src/cli.ts"], {});').calls[0];
+    expect(normalizeFingerprint(a.text)).toBe(normalizeFingerprint(b.text));
+  });
+});

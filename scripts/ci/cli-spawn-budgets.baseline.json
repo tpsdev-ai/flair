@@ -536,6 +536,62 @@
     "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
   },
   {
+    "file": "test/integration/federation-status-keystore-1233.test.ts",
+    "scope": "CLI human render: degraded marker with keystore path + remedy, exit 0",
+    "fingerprint": "CLI human render: degraded marker with keystore path + remedy,exit 0",
+    "kind": "case-budget-too-small",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case budget does not exceed the sum of the waits inside it; budget in #1921."
+  },
+  {
+    "file": "test/integration/federation-status-keystore-1233.test.ts",
+    "scope": "CLI JSON render: instance.signingKeyAvailable:false, peers verified, exit 0",
+    "fingerprint": "CLI JSON render: instance.signingKeyAvailable:false,peers verified,exit 0",
+    "kind": "case-budget-too-small",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case budget does not exceed the sum of the waits inside it; budget in #1921."
+  },
+  {
+    "file": "test/integration/federation-status-keystore-1233.test.ts",
+    "scope": "CLI human render: NO degraded marker, exit 0",
+    "fingerprint": "CLI human render: NO degraded marker,exit 0",
+    "kind": "case-budget-too-small",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case budget does not exceed the sum of the waits inside it; budget in #1921."
+  },
+  {
+    "file": "test/integration/federation-status-keystore-1233.test.ts",
+    "scope": "instance 500s (unpatched #1233 hub), peers OK → peers render, instance marked unverifiable, exit 0",
+    "fingerprint": "instance 500s (unpatched #1233 hub),peers OK → peers render,instance marked unverifiable,exit 0",
+    "kind": "case-budget-too-small",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case budget does not exceed the sum of the waits inside it; budget in #1921."
+  },
+  {
+    "file": "test/integration/federation-status-keystore-1233.test.ts",
+    "scope": "instance OK, peers 500 → instance renders, peers marked unverifiable (not 'no peers'), exit 0",
+    "fingerprint": "instance OK,peers 500 → instance renders,peers marked unverifiable (not 'no peers'),exit 0",
+    "kind": "case-budget-too-small",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case budget does not exceed the sum of the waits inside it; budget in #1921."
+  },
+  {
+    "file": "test/integration/federation-status-keystore-1233.test.ts",
+    "scope": "both reads fail → classic failure UX, exit 1 (nothing to render is still an error)",
+    "fingerprint": "both reads fail → classic failure UX,exit 1 (nothing to render is still an error)",
+    "kind": "case-budget-too-small",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case budget does not exceed the sum of the waits inside it; budget in #1921."
+  },
+  {
+    "file": "test/integration/federation-status-keystore-1233.test.ts",
+    "scope": "JSON mode carries the unverifiable map alongside what was read",
+    "fingerprint": "JSON mode carries the unverifiable map alongside what was read",
+    "kind": "case-budget-too-small",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case budget does not exceed the sum of the waits inside it; budget in #1921."
+  },
+  {
     "file": "test/integration/init-remote-instance-identity.test.ts",
     "scope": "prune warns that ANY deleted row may be the identity a peer pinned, and the printed --apply form really deletes",
     "fingerprint": "prune warns that ANY deleted row may be the identity a peer pinned,and the printed --apply form really deletes",
@@ -1665,8 +1721,104 @@
   },
   {
     "file": "test/unit/harper-config-port.test.ts",
+    "scope": "resolves a named instance's port from Harper's config, never from the per-user file",
+    "fingerprint": "resolves a named instance's port from Harper's config,never from the per-user file",
+    "kind": "case-budget-too-small",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case budget does not exceed the sum of the waits inside it; budget in #1921."
+  },
+  {
+    "file": "test/unit/harper-config-port.test.ts",
+    "scope": "reads the port out of Harper's LEGACY config filename too",
+    "fingerprint": "reads the port out of Harper's LEGACY config filename too",
+    "kind": "case-budget-too-small",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case budget does not exceed the sum of the waits inside it; budget in #1921."
+  },
+  {
+    "file": "test/unit/harper-config-port.test.ts",
+    "scope": "a default install with only the per-user config resolves from it, and nothing is written",
+    "fingerprint": "a default install with only the per-user config resolves from it,and nothing is written",
+    "kind": "case-budget-too-small",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case budget does not exceed the sum of the waits inside it; budget in #1921."
+  },
+  {
+    "file": "test/unit/harper-config-port.test.ts",
+    "scope": "Harper's config outranks the per-user file for the default install",
+    "fingerprint": "Harper's config outranks the per-user file for the default install",
+    "kind": "case-budget-too-small",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case budget does not exceed the sum of the waits inside it; budget in #1921."
+  },
+  {
+    "file": "test/unit/harper-config-port.test.ts",
+    "scope": "a Harper config with no http.port falls through to the per-user file for the default install",
+    "fingerprint": "a Harper config with no http.port falls through to the per-user file for the default install",
+    "kind": "case-budget-too-small",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case budget does not exceed the sum of the waits inside it; budget in #1921."
+  },
+  {
+    "file": "test/unit/harper-config-port.test.ts",
+    "scope": "a non-default data directory with no Harper config is refused, not defaulted",
+    "fingerprint": "a non-default data directory with no Harper config is refused,not defaulted",
+    "kind": "case-budget-too-small",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case budget does not exceed the sum of the waits inside it; budget in #1921."
+  },
+  {
+    "file": "test/unit/harper-config-port.test.ts",
+    "scope": "a non-default directory whose Harper config records no http.port is refused too",
+    "fingerprint": "a non-default directory whose Harper config records no http.port is refused too",
+    "kind": "case-budget-too-small",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case budget does not exceed the sum of the waits inside it; budget in #1921."
+  },
+  {
+    "file": "test/unit/harper-config-port.test.ts",
+    "scope": "`--port` carries no commander default",
+    "fingerprint": "`--port` carries no commander default",
+    "kind": "case-budget-too-small",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case budget does not exceed the sum of the waits inside it; budget in #1921."
+  },
+  {
+    "file": "test/unit/harper-config-port.test.ts",
+    "scope": "the flair#910 attribution guard passes when Harper's recorded port is the one this instance serves",
+    "fingerprint": "the flair#910 attribution guard passes when Harper's recorded port is the one this instance serves",
+    "kind": "case-budget-too-small",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case budget does not exceed the sum of the waits inside it; budget in #1921."
+  },
+  {
+    "file": "test/unit/harper-config-port.test.ts",
     "scope": "self-heal: a live pid that is NOT serving /Health must classify DISAGREEMENT and must not be signalled",
     "fingerprint": "self-heal: a live pid that is NOT serving /Health must classify DISAGREEMENT and must not be signalled",
+    "kind": "case-budget-too-small",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case budget does not exceed the sum of the waits inside it; budget in #1921."
+  },
+  {
+    "file": "test/unit/harper-config-port.test.ts",
+    "scope": "decoy: a foreign 200-responder on the port does NOT count as healed",
+    "fingerprint": "decoy: a foreign 200-responder on the port does NOT count as healed",
+    "kind": "case-budget-too-small",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case budget does not exceed the sum of the waits inside it; budget in #1921."
+  },
+  {
+    "file": "test/unit/harper-config-port.test.ts",
+    "scope": "stale pid: a leftover listener after a failed restart is NOT healed",
+    "fingerprint": "stale pid: a leftover listener after a failed restart is NOT healed",
+    "kind": "case-budget-too-small",
+    "occurrence": 0,
+    "reason": "flair#1825 inventory: case budget does not exceed the sum of the waits inside it; budget in #1921."
+  },
+  {
+    "file": "test/unit/harper-config-port.test.ts",
+    "scope": "positive control: flair-shaped /Health + launched pid on the port + worktree/dataDir heals",
+    "fingerprint": "positive control: flair-shaped /Health + launched pid on the port + worktree/dataDir heals",
     "kind": "case-budget-too-small",
     "occurrence": 0,
     "reason": "flair#1825 inventory: case budget does not exceed the sum of the waits inside it; budget in #1921."

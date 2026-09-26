@@ -676,28 +676,54 @@ export function parseBudgetMs(text) {
   return m ? Number(m[1]) : null;
 }
 
-/** Sum of every bounded wait inside a case: spawn `timeout:` + fetch timeouts. */
-export function sumWaitsMs(body, calls, open, close) {
+/** Sum of every bounded wait inside a case: spawn `timeout:` + fetch timeouts.
+ *  `extraBodies` are the file-local helper bodies the case reaches (transitively),
+ *  so a wait held in a helper the case CALLS counts too (flair#1825). */
+export function sumWaitsMs(body, calls, open, close, extraBodies = []) {
   let sum = 0;
-  for (const c of calls) if (c.index > open && c.index < close && c.timeoutMs) sum += c.timeoutMs;
+  for (const c of calls) {
+    if (!c.timeoutMs) continue;
+    const inside = (c.index > open && c.index < close) || extraBodies.some((b) => c.index > b.start && c.index < b.end);
+    if (inside) sum += c.timeoutMs;
+  }
   for (const m of body.matchAll(/AbortSignal\.timeout\s*\(\s*([0-9][0-9_]*)/g)) {
     sum += Number(m[1].replace(/_/g, ""));
   }
   return sum;
 }
 
+/** The bodies of every helper (transitively) a case body calls. */
+export function reachableHelperBodies(body, src, helpers, bodies) {
+  const out = [];
+  const seen = new Set();
+  const stack = [...helpers].filter((h) => identifierCalled(body, h));
+  while (stack.length) {
+    const name = stack.pop();
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const b = bodies.find((x) => x.name === name);
+    if (!b) continue;
+    out.push(b);
+    const text = src.slice(b.start, b.end);
+    for (const h of helpers) if (!seen.has(h) && identifierCalled(text, h)) stack.push(h);
+  }
+  return out;
+}
+
 /** First `fetch(` in a case with no deadline in its argument list, or null. */
 export function firstUnboundedFetch(body) {
   for (const m of body.matchAll(/(^|[^\w$.])fetch\s*\(/g)) {
     const seg = body.slice(m.index, m.index + 400);
-    if (!/AbortSignal\.timeout\s*\(/.test(seg) && !/signal\s*:/.test(seg)) {
+    // `signal:` must carry a REAL deadline — `{ signal: undefined }` is
+    // present-but-undefined and is NOT bounded (flair#1825).
+    if (!/AbortSignal\.timeout\s*\(/.test(seg) && !/signal\s*:\s*(?!undefined\b)\S/.test(seg)) {
       return `fetch(${body.slice(m.index, m.index + 40).replace(/\s+/g, " ").trim()})`;
     }
   }
   return null;
 }
 
-export function findCases(source, calls, helpers) {
+export function findCases(source, calls, helpers, bodies = []) {
   const src = maskComments(source);
   const cases = [];
   const cliSpawnRanges = calls.filter((c) => c.isCliEntry).map((c) => c.index);
@@ -726,16 +752,20 @@ export function findCases(source, calls, helpers) {
         }
       }
     }
+    const caseBody = src.slice(open + 1, args.close);
+    const reach = reachableHelperBodies(caseBody, src, helpers, bodies);
+    const waitsText = caseBody + "\n" + reach.map((b) => src.slice(b.start, b.end)).join("\n");
+    const budgetText = args.spans[2]?.text ?? "";
     cases.push({
       fn: m[2],
       line: src.slice(0, m.index).split("\n").length,
       name: (args.spans[0]?.text.trim() ?? "").replace(/^["'`]|["'`]$/g, ""),
       argCount: args.spans.length,
       reachesSpawn: reaches,
-      budgetMs: parseBudgetMs(args.spans[2]?.text ?? ""),
-      hasBudget: parseBudgetMs(args.spans[2]?.text ?? "") !== null,
-      sumWaitsMs: sumWaitsMs(body, calls, open, args.close),
-      unboundedFetch: firstUnboundedFetch(body),
+      budgetMs: parseBudgetMs(budgetText),
+      hasBudget: parseBudgetMs(budgetText) !== null,
+      sumWaitsMs: sumWaitsMs(waitsText, calls, open, args.close, reach),
+      unboundedFetch: firstUnboundedFetch(waitsText),
       open,
       close: args.close,
     });
@@ -754,6 +784,7 @@ export function normalizeFingerprint(text) {
     .replace(/\[\s+/g, "[")
     .replace(/\s+\]/g, "]")
     .replace(/,\s+/g, ",")
+    .replace(/\s+,/g, ",")
     .replace(/\(\s+/g, "(")
     .replace(/\s+\)/g, ")")
     .replace(/\s*,\s*$/, "")
@@ -787,7 +818,7 @@ export function analyzeTestFile(source) {
   const { calls, ids } = findSpawnCalls(source);
   const helpers = localHelpersThatSpawn(source, calls);
   const bodies = functionBodies(source);
-  const cases = findCases(source, calls, helpers);
+  const cases = findCases(source, calls, helpers, bodies);
   for (const call of calls) call.scope = scopeOf(call.index, bodies, cases);
   return { calls, ids, helpers, cases, bodies };
 }
@@ -962,12 +993,29 @@ export function gateBaseRef(env = process.env) {
 
 const BASELINE_REL = "scripts/ci/cli-spawn-budgets.baseline.json";
 
-/** Read the baseline at `ref` from `root`'s git object store. Returns null when
- *  the ref has no baseline file (this PR introduces it). */
+/** Read the baseline at `ref` from `root`'s git object store.
+ *
+ * FAIL CLOSED (flair#1825): an invalid/unreadable ref is a hard error naming the
+ * ref; a VALID ref with no baseline file returns null (the base baseline is
+ * EMPTY — this PR introduces the file). Nothing else may be treated as "no
+ * baseline": a permission error or a bad object is not a licence to fall back
+ * to the PR's own copy. */
 export function loadBaselineAtRef(ref, root) {
+  const verify = spawnSync("git", ["-C", root, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { encoding: "utf8" });
+  if (verify.status !== 0) {
+    throw new Error(
+      `invalid base ref '${ref}': cannot resolve it in ${root}` +
+        `${(verify.stderr || "").trim() ? ` (${verify.stderr.trim()})` : ""}. ` +
+        `Set CLI_SPAWN_BUDGETS_BASE_REF to a ref that exists.`,
+    );
+  }
   const res = spawnSync("git", ["-C", root, "show", `${ref}:${BASELINE_REL}`], { encoding: "utf8" });
-  if (res.status !== 0) return null;
-  return JSON.parse(res.stdout);
+  if (res.status === 0) return JSON.parse(res.stdout);
+  // A valid ref whose tree has no baseline file → the base baseline is EMPTY.
+  if (/does not exist|exists on disk, but not in/i.test(res.stderr ?? "")) return null;
+  throw new Error(
+    `cannot read the baseline at '${ref}:${BASELINE_REL}' (git show exit ${res.status}): ${(res.stderr || "").trim()}`,
+  );
 }
 
 /** The PR tree's copy of the baseline — used ONLY to reject ADDED exceptions. */
@@ -994,18 +1042,31 @@ export function addedExceptions(baseEntries, prEntries) {
 export function runGate({ root, baseRef = gateBaseRef(), env = process.env } = {}) {
   const { files, spawnOffenders, caseOffenders } = scanTree(root);
   const defaulted = !(env.CLI_SPAWN_BUDGETS_BASE_REF || env.CLI_SPAWN_BUDGET_BASE_REF);
+  const seed = env.CLI_SPAWN_BUDGETS_SEED_BASELINE === "1" || env.CLI_SPAWN_BUDGETS_SEED_BASELINE === "true";
   const prEntries = readPrBaseline(root);
-  const baseEntries = loadBaselineAtRef(baseRef, root);
+  const baseEntries = loadBaselineAtRef(baseRef, root); // throws on an invalid ref
   const basePresent = baseEntries !== null;
+  if (seed && basePresent) {
+    throw new Error(
+      `CLI_SPAWN_BUDGETS_SEED_BASELINE is set, but the base ref '${baseRef}' already has a baseline ` +
+        `— the seed flag is ONLY for the PR that first introduces the file. Remove it.`,
+    );
+  }
   const errors = [
     ...validateBaseline(prEntries).map((e) => `pr: ${e}`),
     ...(basePresent ? validateBaseline(baseEntries).map((e) => `base: ${e}`) : []),
   ];
   // The PR copy is the working list: new offenders, multiplicity, and stale
-  // entries are all measured against it. The BASE copy only gates ADDITIONS —
-  // a PR may remove an entry, but not add one (flair#1825).
+  // entries are measured against it.
   const diff = diffAgainstBaseline(spawnOffenders, caseOffenders, prEntries);
-  const added = basePresent ? addedExceptions(baseEntries, prEntries) : [];
+  // Added exceptions: the PR copy may only REMOVE relative to the base. When the
+  // base has NO baseline file, the base baseline is EMPTY, so EVERY PR entry is
+  // an addition → fail — unless the explicit, visible seed flag is set.
+  let added;
+  if (basePresent) added = addedExceptions(baseEntries, prEntries);
+  else if (seed) added = [];
+  else added = addedExceptions([], prEntries);
+  const seedAccepted = seed && !basePresent;
   return {
     files,
     spawnOffenders,
@@ -1013,6 +1074,7 @@ export function runGate({ root, baseRef = gateBaseRef(), env = process.env } = {
     baseRef,
     basePresent,
     defaulted,
+    seedAccepted,
     allowEntries: prEntries,
     prEntries,
     baseEntries: baseEntries ?? [],
@@ -1044,7 +1106,13 @@ if (isMain) {
     process.stderr.write(`check-cli-spawn-budgets: ${err.message}\n`);
     process.exit(1);
   }
-  const { files, spawnOffenders, caseOffenders, baseRef, basePresent, defaulted, allowEntries, errors, added, newOffenders, staleEntries, ok } = result;
+  const { files, spawnOffenders, caseOffenders, baseRef, basePresent, defaulted, seedAccepted, allowEntries, errors, added, newOffenders, staleEntries, ok } = result;
+  if (seedAccepted) {
+    process.stdout.write(
+      "check-cli-spawn-budgets: SEED — CLI_SPAWN_BUDGETS_SEED_BASELINE accepted because the base has no baseline file; " +
+        "the PR copy is the initial list for this introduction. REMOVE the seed flag in the next PR.\n",
+    );
+  }
   process.stdout.write(
     `check-cli-spawn-budgets: scanned ${files.length} test file(s) under ${join(root, "test")}; base ref ${baseRef}` +
       `${defaulted ? " (defaulted — set CLI_SPAWN_BUDGETS_BASE_REF to pin it)" : ""}` +
