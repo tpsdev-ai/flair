@@ -8,7 +8,7 @@
  * Options:
  *   --since <ISO>       Start time (default: 1 hour ago)
  *   --interval <sec>    Poll interval in seconds (default: 10)
- *   --agent <id>        Agent id for auth (default: anvil)
+ *   --agent <id>        Agent id for auth (required; or set FLAIR_AGENT_ID)
  *   --key <path>        Path to Ed25519 private key
  *   --flair <url>       Flair base URL (default: http://localhost:9926)
  *
@@ -19,12 +19,15 @@ import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createPrivateKey, sign } from "node:crypto";
+import { takeAgentFlag, requireAgentIdentity } from "./lib/agent-identity.mjs";
 
-const args = process.argv.slice(2);
+const { agentId: agentFromFlag, rest: args } = takeAgentFlag(process.argv.slice(2));
 const get = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : null; };
 
 const FLAIR_URL = get("--flair") ?? "http://localhost:9926";
-const AGENT_ID  = get("--agent") ?? "anvil";
+// Identity (flair#1822): the caller's, never a shipped default. Refused before
+// any key load or network call. `--agent <id>` or FLAIR_AGENT_ID.
+const AGENT_ID  = requireAgentIdentity({ flagValue: agentFromFlag, action: "stream activity" });
 const INTERVAL  = parseInt(get("--interval") ?? "10", 10);
 const HOME = homedir();
 const KEY_PATH = get("--key")

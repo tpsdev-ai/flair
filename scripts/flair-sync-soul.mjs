@@ -5,10 +5,15 @@
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { webcrypto } from 'node:crypto';
+import { takeAgentFlag, requireAgentIdentity } from './lib/agent-identity.mjs';
 const { subtle } = webcrypto;
 
 const FLAIR_URL = process.env.FLAIR_URL || 'http://127.0.0.1:9926';
-const AGENT_ID = process.env.FLAIR_AGENT_ID || 'flint';
+
+// Identity (flair#1822): the caller's, never a shipped default. Refused before
+// any key load or network call. `--agent <id>` or FLAIR_AGENT_ID.
+const { agentId: agentFromFlag } = takeAgentFlag(process.argv.slice(2));
+const AGENT_ID = requireAgentIdentity({ flagValue: agentFromFlag, action: 'sync soul' });
 const PRIV_KEY_PATH = process.env.FLAIR_PRIV_KEY || `${process.env.HOME}/.tps/secrets/flair/${AGENT_ID}-priv.key`;
 const WORKSPACE = `${process.env.HOME}/.openclaw/workspace-${AGENT_ID}`;
 

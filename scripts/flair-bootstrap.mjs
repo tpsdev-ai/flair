@@ -8,13 +8,21 @@
  *   node flair-bootstrap.mjs --soul-only              # Just identity
  *   node flair-bootstrap.mjs --days 3                 # Last N days
  *   node flair-bootstrap.mjs --query "Harper sandbox"  # Semantic context
+ *   node flair-bootstrap.mjs --agent <id>              # sign as this agent (or set FLAIR_AGENT_ID)
  */
 import { readFileSync } from 'node:fs';
 import { webcrypto } from 'node:crypto';
+import { takeAgentFlag, requireAgentIdentity } from './lib/agent-identity.mjs';
 const { subtle } = webcrypto;
 
 const FLAIR_URL = process.env.FLAIR_URL || 'http://127.0.0.1:9926';
-const AGENT_ID = process.env.FLAIR_AGENT_ID || 'flint';
+
+// Identity (flair#1822): the caller's, never a shipped default. Resolved and
+// refused BEFORE any key load or network call, so a forgotten env var cannot
+// sign as a principal nobody chose.
+const args = process.argv.slice(2);
+const { agentId: agentFromFlag, rest: flagArgs } = takeAgentFlag(args);
+const AGENT_ID = requireAgentIdentity({ flagValue: agentFromFlag, action: 'bootstrap' });
 const PRIV_KEY_PATH = process.env.FLAIR_PRIV_KEY || `${process.env.HOME}/.tps/secrets/flair/${AGENT_ID}-priv.key`;
 
 async function loadPrivateKey() {
@@ -38,13 +46,12 @@ async function flairFetch(method, path, privKey, body = null) {
   return res.json();
 }
 
-const args = process.argv.slice(2);
-const soulOnly = args.includes('--soul-only');
-const daysIdx = args.indexOf('--days');
-const days = daysIdx > -1 ? parseInt(args[daysIdx + 1]) : 3;
-const queryIdx = args.indexOf('--query');
-const query = queryIdx > -1 ? args.slice(queryIdx + 1).join(' ') : null;
-const json = args.includes('--json');
+const soulOnly = flagArgs.includes('--soul-only');
+const daysIdx = flagArgs.indexOf('--days');
+const days = daysIdx > -1 ? parseInt(flagArgs[daysIdx + 1]) : 3;
+const queryIdx = flagArgs.indexOf('--query');
+const query = queryIdx > -1 ? flagArgs.slice(queryIdx + 1).join(' ') : null;
+const json = flagArgs.includes('--json');
 
 try {
   const privKey = await loadPrivateKey();
