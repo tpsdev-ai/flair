@@ -132,6 +132,7 @@ describe("the gate today (flair#1825)", () => {
     const { calls } = analyzeTestFile(src);
     const entry = calls.find((c) => c.isCliEntry);
     expect(entry).toBeDefined();
+    if (!entry) throw new Error("no CLI-entry spawn found");
     expect(entry.scope).toBe("runCli");
     expect(entry.hasTimeout).toBe(true);
   });

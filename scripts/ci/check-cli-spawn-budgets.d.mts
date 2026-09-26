@@ -48,9 +48,9 @@ export interface CaseRecord {
 /** One offender: keyed on file + scope + fingerprint + kind (+ occurrence). */
 export interface SpawnOffender {
   file: string;
-  line: number;
+  line?: number;
   kind: string;
-  detail: string;
+  detail?: string;
   scope: string;
   fingerprint: string;
   occurrence?: number;
