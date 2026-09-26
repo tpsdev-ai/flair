@@ -75,6 +75,25 @@ function allSteps(): Array<{ job: string; step: Step }> {
   return Object.entries(wf.jobs ?? {}).flatMap(([name, j]) => (j.steps ?? []).map((s) => ({ job: name, step: s })));
 }
 
+/** The reporter's body-building block (the `{ … } > "$body_file"` shell). */
+function reporterBodyBlock(): string {
+  const run = String((job("report").steps ?? [])[0].run ?? "");
+  const m = run.match(/body_file="\$\(mktemp\)"[\s\S]*?\}\s*>\s*"\$body_file"/);
+  expect(m, "the reporter's body block is present").not.toBeNull();
+  return m![0];
+}
+
+/** RENDER the reporter's body by RUNNING its shell block with the given env. */
+function renderReporter(env: Record<string, string>): string {
+  const script = `set -euo pipefail\nbody_file=$(mktemp)\n${reporterBodyBlock()}\ncat "$body_file"\n`;
+  const res = spawnSync("bash", ["-c", script], {
+    env: { ...process.env, ...env },
+    encoding: "utf8",
+  });
+  expect(res.status, String(res.stderr)).toBe(0);
+  return String(res.stdout ?? "");
+}
+
 describe("release-auto-tag workflow — least privilege and custody", () => {
   test("permissions: {} at the top, and the issue's exact per-job grants", () => {
     expect(wf.permissions).toEqual({});
@@ -552,7 +571,7 @@ describe("release-auto-tag workflow — the adk re-run (slice 3 of #1928, round 
     expect(script).toContain("adk-flair-v${VERSION}: ${ADK_VERDICT:-not attempted}");
     expect(script).not.toContain("Nothing was tagged.");
     const env = refusalStep.env ?? {};
-    expect(String(env.V_VERDICT)).toBe("${{ needs.write.outputs.v_verdict }}");
+    expect(String(env.V_VERDICT)).toBe("${{ needs.write.outputs.v_verdict || needs.decide.outputs.v_verdict }}");
     expect(String(env.ADK_VERDICT)).toBe("${{ needs.write.outputs.adk_verdict }}");
   });
 });
@@ -562,10 +581,41 @@ describe("release-auto-tag workflow — the v line never says REFUSE for an exis
     const write = job("write");
     // decide/write carry v_verdict (SKIP when the v tag is already at the sha).
     expect(write.outputs?.v_verdict).toBe("${{ steps.write.outputs.v_verdict }}");
-    // …and the reporter's v line uses it, defaulting to REFUSE only when absent.
+    // decide publishes its own v_verdict too, for the write-skipped fallback.
+    expect(job("decide").outputs?.v_verdict).toBe("${{ steps.decide.outputs.v_verdict }}");
+    // …and the reporter's v line uses it, defaulting to REFUSE only when absent,
+    // falling back to decide's when write was skipped (round 4, item 3).
     const script = String((job("report").steps ?? [])[0].run ?? "");
     expect(script).toContain("v${VERSION}: ${V_VERDICT:-REFUSE}");
     const env = (job("report").steps ?? [])[0].env ?? {};
-    expect(String(env.V_VERDICT)).toBe("${{ needs.write.outputs.v_verdict }}");
+    expect(String(env.V_VERDICT)).toBe("${{ needs.write.outputs.v_verdict || needs.decide.outputs.v_verdict }}");
+  });
+});
+
+describe("release-auto-tag workflow — the RENDERED reporter line (round 4, item 3)", () => {
+  test("a decide refusal with v already at the sha renders `v: SKIP`, never `v: REFUSE`", () => {
+    // decide refused with the v tag at the sha (v_verdict=SKIP) and the adk tag
+    // elsewhere; write was skipped, so the reporter's V_VERDICT comes from decide.
+    const out = renderReporter({
+      VERSION: "0.57.0",
+      V_VERDICT: "SKIP",
+      ADK_VERDICT: "REFUSE",
+      CONDITION: "adk-tag-exists-elsewhere",
+      RUN_URL: "https://example.invalid/run",
+    });
+    expect(out.split("\n")).toContain("- v0.57.0: SKIP"); // assertion: rendered v line
+    expect(out).not.toContain("- v0.57.0: REFUSE");
+  });
+
+  test("a MISSING adk read-back renders the adk ref as REFUSE with the v ref TAGGED", () => {
+    const out = renderReporter({
+      VERSION: "0.57.0",
+      V_VERDICT: "TAGGED",
+      ADK_VERDICT: "REFUSE",
+      CONDITION: "adk-ref-write-rejected",
+      RUN_URL: "https://example.invalid/run",
+    });
+    expect(out).toContain("- v0.57.0: TAGGED"); // assertion: the v ref EXISTS, TAGGED
+    expect(out).toContain("- adk-flair-v0.57.0: REFUSE"); // assertion: the adk ref refused
   });
 });

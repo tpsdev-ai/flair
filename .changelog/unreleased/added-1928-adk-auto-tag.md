@@ -3,19 +3,24 @@
   tagged, the auto-tagger creates `adk-flair-v<version>` from the SAME commit as
   `v<version>`, so the PyPI publish no longer waits for a hand-pushed tag. A tree
   without the file skips the second tag (flair releases without the Python
-  package); the `[project]` version is read by a WHITELIST (a bare, unquoted
-  `version = "<x>"` line inside `[project]` — `[table]`/`[[array-of-tables]]`
-  headers END the table, and a `dynamic` version is NONE), so a tree whose version
-  differs or is dynamic/absent refuses `adk-version-mismatch` BEFORE either tag is
-  written, and any form the reader does not implement (a quoted or dotted key, an
-  inline `project` table, an odd `version` line) refuses
-  `adk-pyproject-unsupported` naming the line — never a guess; an
+  package); the `[project]` version is read with Python's `tomllib` — the SAME
+  reader `.github/workflows/adk-flair-publish.yml` decides with — so a
+  `version =` line inside a multi-line string or array is never mistaken for the
+  project version. The reader fails CLOSED: a TOML parse error, a `python3`
+  without `tomllib`, or a `[project]` that is not a table refuses
+  `adk-pyproject-unsupported` naming the reason; a `dynamic` version or a missing
+  `[project].version` refuses `adk-version-mismatch`; and a version that differs
+  refuses `adk-version-mismatch` BEFORE either tag is written. An
   `adk-flair-v<version>` already at another commit refuses `adk-tag-exists-elsewhere`
-  without writing the `v` tag; and a rejected second POST refuses
-  `adk-ref-write-rejected`, leaving the `v` tag in place and never retrying —
-  re-running the workflow on the SAME commit then skips the `v` POST and writes
-  only `adk-flair-v<version>`, completing the release. Each guarantee names its
-  test in `test/unit/release-auto-tag.test.ts` ((a)–(o)) and
+  without writing the `v` tag; a rejected second POST refuses
+  `adk-ref-write-rejected`, leaving the `v` tag in place and never retrying; and a
+  MISSING adk read-back after the POST has its OWN refusal (the ref did not read
+  back; re-run on this commit) — which then skips the `v` POST and writes only
+  `adk-flair-v<version>`, completing the release. The version WRITER
+  (`scripts/check-version-sync.mjs --write`) re-verifies every edit with `tomllib`
+  and refuses (writes nothing) unless only `project.version` changed and it equals
+  the requested version, preserving line endings. Each guarantee names its test in
+  `test/unit/release-auto-tag.test.ts` and
   `test/unit/release-auto-tag-workflow.test.ts`.
 
   > **Heads-up:** a repo admin must list the release-tag App as a bypass actor on

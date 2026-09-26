@@ -135,6 +135,10 @@ jobs:
       # binds its own target and re-derives its own verdict (round 3), so a
       # forged value here changes nothing.
       sha: ${{ steps.decide.outputs.sha }}
+      # The v ref's verdict from `decide` (round 4, item 3): the reporter falls
+      # back to it when `write` was skipped, so it never prints `v: REFUSE` for a
+      # ref that already exists (a same-sha re-run reports v_verdict=SKIP).
+      v_verdict: ${{ steps.decide.outputs.v_verdict }}
     steps:
       - name: Check out the default branch's tree
         # The decision script always runs from the default branch's tree. <sha> is
@@ -146,6 +150,15 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Pin Python (the tomllib reader the reader and PyPI use)
+        # The version is read by Python's tomllib (round 4, item 1). Pin the
+        # interpreter this job reads the pyproject with, before any step that
+        # reads it: the reader fails closed if tomllib is missing, and a floating
+        # `python3` makes the decision depend on the runner's image.
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
 
       - name: Assert the workflow_run trigger came from the CI workflow at the pinned path
         # A second workflow named `CI` would otherwise decide releases. Fails LOUDLY
@@ -278,6 +291,13 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Pin Python (the tomllib reader the reader and PyPI use)
+        # Round 4, item 3: `write` re-reads the pyproject (the re-derivation and
+        # condition 10), so it pins the same interpreter BEFORE any such step.
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
 
       - name: Fetch the real main
         # The re-derivation re-checks release intent against origin/main, and the
@@ -436,7 +456,9 @@ jobs:
           CONDITION: ${{ needs.write.outputs.adk_verdict == 'REFUSE' && needs.write.outputs.adk_condition || needs.write.outputs.condition || needs.decide.outputs.condition }}
           VERSION: ${{ needs.write.outputs.version || needs.decide.outputs.version }}
           # A line PER REF: never claim nothing was tagged when the v ref exists.
-          V_VERDICT: ${{ needs.write.outputs.v_verdict }}
+          # Read write's v verdict, falling back to decide's when write was
+          # skipped (round 4, item 3).
+          V_VERDICT: ${{ needs.write.outputs.v_verdict || needs.decide.outputs.v_verdict }}
           ADK_VERDICT: ${{ needs.write.outputs.adk_verdict }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |

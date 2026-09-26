@@ -99,30 +99,41 @@ git tag v0.11.0 && git push origin v0.11.0
 > commit — so the PyPI publish run then needs only the environment gate its owner
 > keeps or drops (no hand-pushed `adk-flair-v` tag).
 >
-> The project version is read by a WHITELIST: a bare, unquoted `version = "<x>"`
-> line inside `[project]` — never the first `version =` in the file. Any `[table]`
-> or `[[array-of-tables]]` header ends `[project]`, and a
-> `dynamic = [ … "version" … ]` means the project version is NONE. A tree whose
-> `[project].version` differs (or is dynamic/absent) refuses `adk-version-mismatch`
-> before either tag is written; a form the reader does not implement (a quoted or
-> dotted key, an inline `project` table, an odd `version` line) refuses
-> `adk-pyproject-unsupported` naming the line — never a guess; an
+> The project version is read with Python's `tomllib` — the SAME reader
+> `.github/workflows/adk-flair-publish.yml` decides with — by handing the file to
+> `python3` on stdin. It fails CLOSED: a TOML parse error, a `python3` without
+> `tomllib` (older than 3.11), or a `[project]` that is not a table is
+> `unsupported`, and the tagger refuses `adk-pyproject-unsupported` naming the
+> reason ((s), (v)); a `dynamic = [ … "version" … ]` or a missing
+> `[project].version` is NONE and refuses `adk-version-mismatch` ((t)); a
+> `[project].version` that differs from the version being tagged refuses
+> `adk-version-mismatch` BEFORE either tag is written ((p), (q), (g)) — a
+> `version =` line inside a multi-line string or array is never read as the
+> project version. A tree with NO `packages/adk-flair/pyproject.toml` is fine: the
+> `v` tag is still written and the adk step is skipped ((b)). An
 > `adk-flair-v<version>` already at another commit refuses
-> `adk-tag-exists-elsewhere` before the `v` tag is written; and a second POST
+> `adk-tag-exists-elsewhere` before the `v` tag is written ((d)); a second POST
 > rejected for lack of permission refuses `adk-ref-write-rejected` with the `v` tag
-> left in place. (`test/unit/release-auto-tag.test.ts` (a)–(m).)
+> left in place ((e)); a MISSING adk read-back after the POST is its OWN refusal —
+> the ref did not read back, the `v` tag stays, re-run the workflow on this commit
+> ((i2)) — distinct from a read-back that resolves ELSEWHERE ((i)).
+>
+> The writer (`scripts/check-version-sync.mjs --write`) rewrites the
+> `[project].version` line only after re-verifying with `tomllib`: it refuses
+> (writes nothing) unless the new document's `project.version` equals the
+> requested version AND the two parsed documents are otherwise deep-equal, and it
+> preserves line endings ((w), (x), (m)).
 >
 > Re-run states (`decide`): with the `v` tag already at `<sha>` and the adk tag
-> absent, the run is a TAG with the `v` step marked SKIP; with BOTH tags at `<sha>`
-> it is a SKIP, so no write job starts on later runs ((n)/(o)). If the adk POST
-> instead read back ELSEWHERE, the refusal says the ref now points at the other sha
-> and a human must move or delete it before a re-run can complete (the next run
-> refuses `adk-tag-exists-elsewhere`) ((i)); the refusal issue prints a line per ref
-> so it never claims nothing was tagged when the `v` ref exists. Ordered read-backs
-> — each ref's read-back FOLLOWS its POST — are asserted ((a)). The App must be
-> listed as a bypass actor on the `adk-flair-v*` tag ruleset (id 24044018) for that
-> second POST to be allowed. Each guarantee names its test:
-> `test/unit/release-auto-tag.test.ts` ((a)–(o)) and
+> absent, the run is a TAG with the `v` step marked SKIP ((n)); with BOTH tags at
+> `<sha>` it is a SKIP, so no write job starts on later runs ((o)). Once `v` is
+> known to sit at the sha, EVERY later refusal carries `v_verdict=SKIP`, so the
+> refusal issue never prints `v: REFUSE` for an existing ref — fed from `decide`'s
+> outputs when `write` was skipped — and that is asserted on the RENDERED issue
+> line, not the wiring (`test/unit/release-auto-tag-workflow.test.ts`). The App
+> must be listed as a bypass actor on the `adk-flair-v*` tag ruleset (id 24044018)
+> for that second POST to be allowed. Each guarantee names its test:
+> `test/unit/release-auto-tag.test.ts` and
 > `test/unit/release-auto-tag-workflow.test.ts`.
 
 The tag push triggers the [`release-publish`](../.github/workflows/release-publish.yml)

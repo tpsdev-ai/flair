@@ -32,6 +32,7 @@ import {
   DEFAULT_POLL_SECONDS,
   VERDICT,
   WRITE_VERDICT,
+  adkVersionCheck,
   compareVersions,
   createClient,
   createDeps,
@@ -1501,6 +1502,30 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     expect(summary).not.toContain("re-running the workflow on this commit completes it");
   });
 
+  test("(i2) a MISSING adk read-back refuses adk-ref-write-rejected with its OWN text, distinct from elsewhere", async () => {
+    const posts: string[] = [];
+    const tags = new Map<string, unknown>();
+    // The POST reports OK, but the adk ref does NOT read back (readTagRef → null).
+    const api = {
+      createTagRef: async (ref: string, sha: string) => {
+        posts.push(ref);
+        if (ref.startsWith("refs/tags/adk-flair-v")) return { ok: true, status: 201, body: {} };
+        tags.set(ref.replace("refs/tags/", ""), { object: { type: "commit", sha } });
+        return { ok: true, status: 201, body: {} };
+      },
+      readTagRef: async (tag: string) => tags.get(tag) ?? null,
+    };
+    const { deps } = harness({ api });
+    pinPyproject(deps, pyproject(VERSION));
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(result.adkVerdict).toBe("REFUSE"); // assertion A
+    expect(result.adkCondition).toBe(CONDITION.ADK_REF_WRITE_REJECTED);
+    const summary = (result.summary ?? []).join(" ");
+    expect(summary).toContain("did not read back"); // assertion B: its OWN text
+    expect(summary).not.toContain("another commit"); // assertion C: not the elsewhere text
+    expect(summary).toContain("re-run the workflow on this commit");
+  });
+
   test("(j) a [[array-of-tables]] + dynamic version refuses adk-version-mismatch naming dynamic, zero POSTs", async () => {
     const posts: string[] = [];
     const tags = new Map<string, unknown>();
@@ -1516,16 +1541,12 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     expect(posts).toEqual([]);
   });
 
-  test("(k) a quoted `version` key is UNSUPPORTED (adk-pyproject-unsupported) naming the line", async () => {
-    const posts: string[] = [];
-    const tags = new Map<string, unknown>();
-    const { deps } = harness({ api: refApi(posts, tags) });
-    pinPyproject(deps, `[project]\nname = "adk-flair"\n"version" = "${VERSION}"\n`);
-    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
-    expect(result.verdict).toBe(WRITE_VERDICT.REFUSE);
-    expect(result.condition).toBe(CONDITION.ADK_PYPROJECT_UNSUPPORTED);
-    expect((result.summary ?? []).join(" ")).toContain('"version" =');
-    expect(posts).toEqual([]);
+  test("(k) a quoted `version` key is READ (valid TOML): tomllib reads it as the project version", () => {
+    // Round 4: the hand-written parser called a quoted key unsupported; tomllib
+    // (what PyPI's publish workflow uses) reads it. The value is the version.
+    const r = readProjectVersion(`[project]\nname = "adk-flair"\n"version" = "${VERSION}"\n`);
+    expect(r.kind).toBe("version"); // assertion: a quoted key is read, not refused
+    expect(r.kind === "version" ? r.version : null).toBe(VERSION);
   });
 
   test("(l) a version line after a [project.x] sub-table is NOT read (no [project].version → mismatch)", async () => {
@@ -1542,9 +1563,11 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     expect(posts).toEqual([]);
   });
 
-  test("(m) the writer refuses an unsupported file (returns null)", () => {
+  test("(m) the writer refuses a file it cannot line-rewrite (a quoted key), but still READS it", () => {
+    // Round 4: the value is readable (tomllib), but there is no bare
+    // `version = "…"` line to rewrite, so the writer returns null.
     expect(replaceProjectVersion(`[project]\n"version" = "1.0.0"\n`, "2.0.0")).toBeNull();
-    expect(readProjectVersion(`[project]\n"version" = "1.0.0"\n`).kind).toBe("unsupported");
+    expect(readProjectVersion(`[project]\n"version" = "1.0.0"\n`).kind).toBe("version");
   });
 
   test("(n) decide: v at <sha>, pyproject equal, adk absent → TAG with v_verdict=SKIP (unfinished)", async () => {
@@ -1559,6 +1582,8 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
   });
 
   test("(o) decide: BOTH tags at <sha> → SKIP (completed; no write job starts)", async () => {
+    // Mutation that turns (o) red: make decide return TAG unconditionally (drop
+    // the adkWorkAfterVAtSha `skip` branch) — then this asserts SKIP and fails.
     const tags = new Map<string, unknown>([
       [`v${VERSION}`, { object: { type: "commit", sha: SHA } }],
       [`adk-flair-v${VERSION}`, { object: { type: "commit", sha: SHA } }],
@@ -1569,6 +1594,19 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     });
     const result = await decide({ sha: SHA, deps });
     expect(result.verdict).toBe(VERDICT.SKIP);
+  });
+
+  test("(n2) a LATER decide refusal (superseded) still carries vVerdict=SKIP when v is at the sha", async () => {
+    const tags = new Map<string, unknown>([[`v${VERSION}`, { object: { type: "commit", sha: SHA } }]]);
+    const { deps } = harness({
+      api: { readTagRef: async (t: string) => tags.get(t) ?? null },
+      files: { [`${SHA}:${ADK_PYPROJECT_PATH}`]: pyproject(VERSION) },
+      versions: { "origin/main": manifest("0.58.0") },
+    });
+    const result = await decide({ sha: SHA, deps });
+    expect(result.verdict).toBe(VERDICT.REFUSE); // assertion A
+    expect(result.condition).toBe(CONDITION.SUPERSEDED);
+    expect(result.vVerdict).toBe(WRITE_VERDICT.SKIP); // assertion B: never REFUSE for an existing ref
   });
 
   test("reporter: decide refuses an adk conflict with v already at the sha, carrying v_verdict=SKIP", async () => {
@@ -1585,6 +1623,117 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     expect(result.adkCondition).toBe(CONDITION.ADK_TAG_EXISTS_ELSEWHERE);
     // The v ref EXISTS at <sha>, so its output is SKIP — never REFUSE.
     expect(result.vVerdict).toBe(WRITE_VERDICT.SKIP);
+  });
+
+  // ── round 4: the reader is Python's tomllib (p)-(x) ────────────────────────
+
+  test("(p) a multi-line description containing a version line does NOT fool the reader → REFUSE, zero POSTs", async () => {
+    // Mutation that turns (p) red: point the reader back at the JS parser — it
+    // reads the `version = "0.57.0"` line INSIDE the description and returns TAG.
+    const posts: string[] = [];
+    const tags = new Map<string, unknown>();
+    const { deps } = harness({ api: refApi(posts, tags) });
+    pinPyproject(
+      deps,
+      `[project]\nname = "adk-flair"\nversion = "0.55.2"\ndescription = """\nversion = "${VERSION}"\n"""\n`,
+    );
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(result.verdict).toBe(WRITE_VERDICT.REFUSE); // assertion A: REFUSE
+    expect(result.condition).toBe(CONDITION.ADK_VERSION_MISMATCH);
+    expect((result.summary ?? []).join(" ")).toContain("0.55.2"); // assertion B: the PROJECT version
+    expect(posts).toEqual([]); // assertion C: zero POSTs
+  });
+
+  test("(q) a multi-line ARRAY containing a version line does NOT fool the reader → REFUSE, zero POSTs", async () => {
+    const posts: string[] = [];
+    const tags = new Map<string, unknown>();
+    const { deps } = harness({ api: refApi(posts, tags) });
+    pinPyproject(
+      deps,
+      `[project]\nname = "adk-flair"\nversion = "0.55.2"\nkeywords = [\n  "version = \\"${VERSION}\\"",\n]\n`,
+    );
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(result.verdict).toBe(WRITE_VERDICT.REFUSE); // assertion A: REFUSE
+    expect(result.condition).toBe(CONDITION.ADK_VERSION_MISMATCH);
+    expect(posts).toEqual([]); // assertion B: zero POSTs
+  });
+
+  test("(r) a version line after [project.\"urls#alternate\"] is NOT read → mismatch", async () => {
+    const posts: string[] = [];
+    const tags = new Map<string, unknown>();
+    const { deps } = harness({ api: refApi(posts, tags) });
+    pinPyproject(
+      deps,
+      `[project]\nname = "adk-flair"\n[project."urls#alternate"]\nhomepage = "https://example.invalid"\nversion = "${VERSION}"\n`,
+    );
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(result.verdict).toBe(WRITE_VERDICT.REFUSE); // assertion: not read → REFUSE
+    expect(result.condition).toBe(CONDITION.ADK_VERSION_MISMATCH);
+    expect(posts).toEqual([]);
+  });
+
+  test("(s) [[project]] → unsupported (project is not a table)", async () => {
+    const posts: string[] = [];
+    const tags = new Map<string, unknown>();
+    const { deps } = harness({ api: refApi(posts, tags) });
+    pinPyproject(deps, `[[project]]\nname = "adk-flair"\nversion = "${VERSION}"\n`);
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(result.verdict).toBe(WRITE_VERDICT.REFUSE); // assertion: REFUSE
+    expect(result.condition).toBe(CONDITION.ADK_PYPROJECT_UNSUPPORTED);
+    expect(posts).toEqual([]);
+  });
+
+  test("(t) a multi-line dynamic = [ \\n \"version\", \\n ] → none/dynamic → mismatch", async () => {
+    const posts: string[] = [];
+    const tags = new Map<string, unknown>();
+    const { deps } = harness({ api: refApi(posts, tags) });
+    pinPyproject(deps, `[project]\nname = "adk-flair"\ndynamic = [\n  "version",\n]\n`);
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(result.verdict).toBe(WRITE_VERDICT.REFUSE); // assertion: dynamic is NONE → REFUSE
+    expect(result.condition).toBe(CONDITION.ADK_VERSION_MISMATCH);
+    expect((result.summary ?? []).join(" ")).toContain("dynamic");
+    expect(posts).toEqual([]);
+  });
+
+  test("(u) a single-quoted 'version' key IS valid TOML: tomllib reads the value", () => {
+    const r = readProjectVersion(`[project]\nname = "adk-flair"\n'version' = "1.2.3"\n`);
+    expect(r.kind).toBe("version"); // assertion: read, not refused
+    expect(r.kind === "version" ? r.version : null).toBe("1.2.3");
+  });
+
+  test("(v) python3 absent (PATH points at an empty dir) → unsupported, and the tagger REFUSES", () => {
+    // Run in a CHILD process with PATH emptied: bun caches its own command
+    // resolution, so mutating this process's PATH would not hide `python3`.
+    const mod = resolve(import.meta.dir, "../../scripts/ci/pyproject-version.mjs");
+    const code = [
+      `import { readProjectVersion } from ${JSON.stringify(mod)};`,
+      `console.log(readProjectVersion('[project]\\nversion = "1.0.0"\\n').kind);`,
+    ].join("\n");
+    const run = spawnSync(process.execPath, ["-e", code], {
+      env: { ...process.env, PATH: scratchDir() },
+      encoding: "utf8",
+    });
+    expect(String(run.stdout ?? "").trim()).toBe("unsupported"); // assertion: fail closed
+    // The tagger maps unsupported → REFUSE adk-pyproject-unsupported (a
+    // tomllib-invalid shape stands in for the no-python case here).
+    const c = adkVersionCheck(`[[project]]\nname = "adk-flair"\nversion = "1.0.0"\n`, VERSION);
+    expect(c.kind === "refuse" ? c.condition : null).toBe(CONDITION.ADK_PYPROJECT_UNSUPPORTED);
+  });
+
+  test("(w) the writer refuses the multi-line-string file and leaves it byte-identical", () => {
+    const src = `[project]\nname = "adk-flair"\nversion = """0.55.2"""\n`;
+    const file = join(scratchDir(), "pyproject.toml");
+    writeFileSync(file, src);
+    const next = replaceProjectVersion(readFileSync(file, "utf8"), "0.99.0");
+    expect(next).toBeNull(); // assertion: refused
+    if (next !== null) writeFileSync(file, next);
+    expect(readFileSync(file, "utf8")).toBe(src); // assertion: byte-identical
+  });
+
+  test("(x) the writer preserves CRLF line endings", () => {
+    const next = replaceProjectVersion(`[project]\r\nname = "adk-flair"\r\nversion = "1.0.0"\r\n`, "2.0.0");
+    expect(next).toBe(`[project]\r\nname = "adk-flair"\r\nversion = "2.0.0"\r\n`); // assertion: CRLF preserved
+    expect(next?.includes("\r\n")).toBe(true);
   });
 });
 

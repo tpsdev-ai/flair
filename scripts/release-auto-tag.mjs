@@ -595,7 +595,7 @@ export function adkVersionCheck(adkText, version) {
       kind: "refuse",
       condition: CONDITION.ADK_PYPROJECT_UNSUPPORTED,
       summary: [
-        `${ADK_PYPROJECT_PATH} carries an unsupported version form on the line \`${r.line}\` (${r.reason})`,
+        `${ADK_PYPROJECT_PATH} carries a version form the tomllib reader does not accept (${r.reason})`,
       ],
     };
   }
@@ -1017,7 +1017,11 @@ export async function decide({ sha, deps, options = {} }) {
   }
   const version = step2.version;
 
-  const refuse = (r, extra = {}) => ({ verdict: VERDICT.REFUSE, condition: r.condition, version, summary: [...summary, ...(r.summary ?? [])], ...extra });
+  // v at <sha> is discovered below; carried on EVERY later refusal as vVerdict=SKIP
+  // so the reporter never prints `v: REFUSE` for a ref that already exists
+  // (round 4, item 3).
+  let vAlreadyAtSha = false;
+  const refuse = (r, extra = {}) => ({ verdict: VERDICT.REFUSE, condition: r.condition, version, summary: [...summary, ...(r.summary ?? [])], ...(vAlreadyAtSha ? { vVerdict: WRITE_VERDICT.SKIP } : {}), ...extra });
   const skip = (reason, extra = {}) => ({ verdict: VERDICT.SKIP, condition: "", version, reason, summary, ...extra });
 
   // 3 — tag state, checked FIRST after shape (two API calls instead of waiting on
@@ -1026,7 +1030,7 @@ export async function decide({ sha, deps, options = {} }) {
   // version matches and the adk tag already resolves to <sha>. Otherwise the adk
   // tag still has to be finished, so the verdict is TAG with the v POST skipped
   // (round 2 — a rejected adk POST used to strand the release forever).
-  let vAlreadyAtSha = false;
+  vAlreadyAtSha = false;
   const step3 = await conditionTagState(deps.api, { sha, version });
   if (!step3.ok) {
     if (!step3.skip) return refuse(step3);
@@ -1123,7 +1127,11 @@ export async function writeTag({ sha, version, deps, options = {} }) {
     ...options,
   };
   const summary = [];
-  const refuse = (condition, extra = {}) => ({ verdict: WRITE_VERDICT.REFUSE, condition, version, summary, ...extra });
+  // v at <sha> is discovered below; carried on EVERY later refusal as
+  // vVerdict=SKIP so the reporter never prints `v: REFUSE` for an existing ref
+  // (round 4, item 3).
+  let vAlreadyAtSha = false;
+  const refuse = (condition, extra = {}) => ({ verdict: WRITE_VERDICT.REFUSE, condition, version, summary, ...(vAlreadyAtSha ? { vVerdict: WRITE_VERDICT.SKIP } : {}), ...extra });
 
   // The re-check's READS (tag state, release intent, the PR and its reviews) go
   // through the job's read-only GITHUB_TOKEN when the caller supplies one. The
@@ -1144,7 +1152,6 @@ export async function writeTag({ sha, version, deps, options = {} }) {
     });
   }
 
-  let vAlreadyAtSha = false;
   const step3 = await conditionTagState(reads, { sha, version });
   if (!step3.ok) {
     if (!step3.skip) return refuse(step3.condition, { summary: [...summary, ...(step3.summary ?? [])] });
@@ -1281,11 +1288,20 @@ export async function writeTag({ sha, version, deps, options = {} }) {
       } else {
         const adkReadBack = await deps.api.readTagRef(adkTag);
         const adkResolved = adkReadBack ? await resolveTagCommit(deps.api, adkReadBack) : null;
-        if (adkResolved !== sha) {
+        if (adkResolved === null) {
+          // A MISSING read-back (round 4, item 3): its own text, distinct from
+          // "elsewhere" — the POST may have landed and the read may simply have
+          // failed, so say the ref did not read back and to re-run.
           adkVerdict = WRITE_VERDICT.REFUSE;
           adkCondition = CONDITION.ADK_REF_WRITE_REJECTED;
           summary.push(
-            `after the POST, ${adkTag} now points at ${adkResolved ?? "nothing"}, not ${sha}; v${version} stays at ${sha}; a human must move or delete ${adkTag} before a re-run can complete it (the next run will refuse adk-tag-exists-elsewhere)`,
+            `${adkTag} did not read back after the POST; v${version} stays at ${sha}; re-run the workflow on this commit`,
+          );
+        } else if (adkResolved !== sha) {
+          adkVerdict = WRITE_VERDICT.REFUSE;
+          adkCondition = CONDITION.ADK_REF_WRITE_REJECTED;
+          summary.push(
+            `after the POST, ${adkTag} now points at ${adkResolved}, not ${sha}; v${version} stays at ${sha}; a human must move or delete ${adkTag} before a re-run can complete it (the next run will refuse adk-tag-exists-elsewhere)`,
           );
         } else {
           adkVerdict = WRITE_VERDICT.TAGGED;
