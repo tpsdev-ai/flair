@@ -67,8 +67,10 @@ function wantsTrust(target: any, opts: { includeTrust?: boolean } | undefined): 
 }
 
 /**
- * Owner ids a non-admin agent may READ (resolveAllowedOwners) live in
- * ./memory-read-scope.ts — still exported/used elsewhere (admin tooling).
+ * resolveAllowedOwners (./memory-read-scope.ts) no longer bounds reads — a
+ * non-admin reader sees its own records at any visibility plus every other
+ * agent's non-private records (resolveReadScope()); the helper is kept for
+ * admin tooling only.
  * The full read-scope condition + private-exclusion predicate is now
  * consumed through ./record-type-kit.ts's makeReadScope(), parameterized
  * from RECORD_TYPES.Memory (record-types slice 2, flair#520) rather than a
@@ -382,8 +384,9 @@ async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<stri
 }
 
 /** Does an agent hold a "write" grant from `ownerId`? Same MemoryGrant lookup
- *  pattern as Memory.search()/SemanticSearch.ts (read/search scopes) — reused
- *  here for the "write" scope that gates cross-agent supersede. */
+ *  the read paths used before the open-within-org reframe (reads no longer
+ *  consult MemoryGrant); it survives here for the "write" scope that gates
+ *  cross-agent supersede. */
 async function hasWriteGrant(granteeId: string, ownerId: string): Promise<boolean> {
   try {
     for await (const grant of (databases as any).flair.MemoryGrant.search({
