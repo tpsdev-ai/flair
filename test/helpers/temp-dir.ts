@@ -9,11 +9,12 @@
  *
  * Cleanup is registered two ways, because a helper is called from two places:
  *
- *   - an `afterEach` hook removes every directory created since the last sweep,
- *     right after the test that created it — so a run's temp usage stays bounded
- *     instead of "everything at the very end";
- *   - an `afterAll` hook sweeps anything the last test left (a file with a
- *     single test, or a directory created in a `beforeAll`).
+ *   - an `afterEach` hook calls `sweep()` after every test, removing the
+ *     directories created since the previous sweep — a run's temp usage stays
+ *     bounded instead of "everything at the very end";
+ *   - an `afterAll` hook calls `sweep()` once when the file ends, covering a
+ *     directory created outside a test body — in a `beforeAll`, say — so nothing
+ *     created through `tempDir` survives the file.
  *
  * A `process.on("exit")` hook is registered too, for a caller outside a test
  * context — a plain `bun -e` script, say. NOTE: bun's TEST RUNNER does not run
