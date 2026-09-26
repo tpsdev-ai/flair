@@ -68,6 +68,36 @@ export function normalizeFingerprint(text: string): string;
 export function offenderKey(o: { file: string; scope: string; fingerprint: string; kind: string; occurrence?: number }): string;
 export function scanTree(root: string): { files: string[]; spawnOffenders: SpawnOffender[]; caseOffenders: SpawnOffender[] };
 export function testFilesUnder(root: string): string[];
+export function parseBudgetMs(text: string): number | null;
+export function sumWaitsMs(body: string, calls: SpawnCall[], open: number, close: number): number;
+export function firstUnboundedFetch(body: string): string | null;
+
+/** The trusted base ref the baseline is read from (env, else `origin/main`). */
+export function gateBaseRef(env?: Record<string, string | undefined>): string;
+/** The baseline at `ref` in `root`'s git store, or null when the ref lacks it. */
+export function loadBaselineAtRef(ref: string, root: string): BaselineEntry[] | null;
+/** The PR tree's copy of the baseline. */
+export function readPrBaseline(root: string): BaselineEntry[];
+/** Entries a PR added relative to the trusted base (a PR may only remove). */
+export function addedExceptions(baseEntries: BaselineEntry[], prEntries: BaselineEntry[]): BaselineEntry[];
+
+/** End-to-end check used by main() and the gate-level tests. */
+export function runGate(opts?: { root?: string; baseRef?: string; env?: Record<string, string | undefined> }): {
+  files: string[];
+  spawnOffenders: SpawnOffender[];
+  caseOffenders: SpawnOffender[];
+  baseRef: string;
+  basePresent: boolean;
+  defaulted: boolean;
+  allowEntries: BaselineEntry[];
+  prEntries: BaselineEntry[];
+  baseEntries: BaselineEntry[];
+  errors: string[];
+  added: BaselineEntry[];
+  newOffenders: SpawnOffender[];
+  staleEntries: BaselineEntry[];
+  ok: boolean;
+};
 
 /** A single baseline entry. */
 export interface BaselineEntry {

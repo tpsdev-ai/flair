@@ -1972,6 +1972,10 @@ jobs:
         with:
           node-version: "22"
       - run: node scripts/ci/check-cli-spawn-budgets.mjs
+        env:
+          # The trusted base ref the baseline is read from (flair#1825): a PR's base
+          # commit, or the previous commit on a push. Never the PR's own tree.
+          CLI_SPAWN_BUDGETS_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
 
   dist-esm-guard:
     # flair#1657 — the flair#1653 class. A compiled dist/**/*.js ES module that

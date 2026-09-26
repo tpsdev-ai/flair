@@ -64,6 +64,7 @@
 // scan and the exit code are identical, only the tree differs.
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -147,21 +148,63 @@ function skipRegex(src, i) {
 }
 
 /**
- * Like maskComments, but ALSO blanks the CONTENTS of string / template / regex
- * literals (same length). Used for spawn-CALL matching, so a `Bun.spawn(...)`
- * mentioned inside a string (a sample, a doc) is not mistaken for a call. The
+ * Like maskComments, but ALSO blanks the CONTENTS of string / regex literals and
+ * the literal TEXT of template literals (same length). Used for spawn-CALL
+ * matching, so a `Bun.spawn(...)` mentioned inside a plain string is not
+ * mistaken for a call. A template's `${…}` EXPRESSIONS are left as CODE — a
+ * `Bun.spawn(...)` of the CLI entry there IS a real call (flair#1825). The
  * argv/options TEXT a call reports is sliced from the ORIGINAL source, so the
  * CLI-entry and timeout checks still read real literal text.
  */
 function maskLiteralsAndComments(src) {
   const out = src.split("");
+  const blank = (from, to) => {
+    for (let j = from; j < to && j < src.length; j++) if (src[j] !== "\n") out[j] = " ";
+  };
   let i = 0;
   while (i < src.length) {
     const ch = src[i];
-    if (ch === '"' || ch === "'" || ch === "`") {
+    if (ch === '"' || ch === "'") {
       const end = skipNonCode(src, i);
-      for (let j = i; j < end && j < src.length; j++) if (src[j] !== "\n") out[j] = " ";
+      blank(i, end);
       i = end > i ? end : i + 1;
+      continue;
+    }
+    if (ch === "`") {
+      // Template: blank the literal TEXT, but leave `${…}` expressions as code.
+      out[i] = " "; // opening backtick
+      let j = i + 1;
+      while (j < src.length) {
+        if (src[j] === "\\") {
+          blank(j, j + 2);
+          j += 2;
+          continue;
+        }
+        if (src[j] === "`") {
+          out[j] = " "; // closing backtick
+          j++;
+          break;
+        }
+        if (src[j] === "$" && src[j + 1] === "{") {
+          j += 2;
+          let depth = 1;
+          while (j < src.length && depth > 0) {
+            if (src[j] === "{") depth++;
+            else if (src[j] === "}") {
+              depth--;
+              if (depth === 0) {
+                j++;
+                break;
+              }
+            }
+            j++;
+          }
+          continue;
+        }
+        if (src[j] !== "\n") out[j] = " ";
+        j++;
+      }
+      i = j;
       continue;
     }
     if (ch === "/" && src[i + 1] === "/") {
@@ -186,7 +229,7 @@ function maskLiteralsAndComments(src) {
     if (ch === "/" && regexCanStart(src, i)) {
       const j = skipRegex(src, i);
       if (j !== i) {
-        for (let k = i; k <= j && k < src.length; k++) if (src[k] !== "\n") out[k] = " ";
+        blank(i, j + 1);
         i = j + 1;
         continue;
       }
@@ -537,6 +580,13 @@ export function findSpawnCalls(source) {
       hasTimeout: /(^|[^\w$.])timeout\s*[:=]/.test(optText),
     });
   }
+  // A numeric `timeout:` value, so a case budget can be checked against the sum
+  // of the waits inside it (flair#1825).
+  for (const call of calls) {
+    const m = call.text.match(/(?:^|[^\w$.])timeout\s*[:=]\s*([0-9][0-9_]*)/);
+    call.timeoutMs = m ? Number(m[1].replace(/_/g, "")) : null;
+    call.hasTimeout = call.timeoutMs !== null;
+  }
   return { calls, ids };
 }
 
@@ -617,6 +667,36 @@ export function localHelpersThatSpawn(source, calls) {
 }
 
 /** `it()` / `test()` cases, with whether each reaches a CLI-entry spawn. */
+/** Parse a per-case budget: a numeric literal (`30_000`) or `{ timeout: N }`. */
+export function parseBudgetMs(text) {
+  const t = (text ?? "").trim().replace(/_/g, "");
+  let m = t.match(/^([0-9]+)$/);
+  if (m) return Number(m[1]);
+  m = t.match(/timeout\s*[:=]\s*([0-9]+)/);
+  return m ? Number(m[1]) : null;
+}
+
+/** Sum of every bounded wait inside a case: spawn `timeout:` + fetch timeouts. */
+export function sumWaitsMs(body, calls, open, close) {
+  let sum = 0;
+  for (const c of calls) if (c.index > open && c.index < close && c.timeoutMs) sum += c.timeoutMs;
+  for (const m of body.matchAll(/AbortSignal\.timeout\s*\(\s*([0-9][0-9_]*)/g)) {
+    sum += Number(m[1].replace(/_/g, ""));
+  }
+  return sum;
+}
+
+/** First `fetch(` in a case with no deadline in its argument list, or null. */
+export function firstUnboundedFetch(body) {
+  for (const m of body.matchAll(/(^|[^\w$.])fetch\s*\(/g)) {
+    const seg = body.slice(m.index, m.index + 400);
+    if (!/AbortSignal\.timeout\s*\(/.test(seg) && !/signal\s*:/.test(seg)) {
+      return `fetch(${body.slice(m.index, m.index + 40).replace(/\s+/g, " ").trim()})`;
+    }
+  }
+  return null;
+}
+
 export function findCases(source, calls, helpers) {
   const src = maskComments(source);
   const cases = [];
@@ -652,7 +732,10 @@ export function findCases(source, calls, helpers) {
       name: (args.spans[0]?.text.trim() ?? "").replace(/^["'`]|["'`]$/g, ""),
       argCount: args.spans.length,
       reachesSpawn: reaches,
-      hasBudget: args.spans.length >= 3,
+      budgetMs: parseBudgetMs(args.spans[2]?.text ?? ""),
+      hasBudget: parseBudgetMs(args.spans[2]?.text ?? "") !== null,
+      sumWaitsMs: sumWaitsMs(body, calls, open, args.close),
+      unboundedFetch: firstUnboundedFetch(body),
       open,
       close: args.close,
     });
@@ -660,9 +743,21 @@ export function findCases(source, calls, helpers) {
   return cases;
 }
 
-/** Normalize call text so a fingerprint survives whitespace and line moves. */
+/**
+ * Normalize call text so a fingerprint survives whitespace and line moves.
+ * Whitespace inside brackets/parens/after commas is removed too, so
+ * `["bun", "src/cli.ts"]` and `["bun","src/cli.ts"]` share one key (flair#1825).
+ */
 export function normalizeFingerprint(text) {
-  return text.replace(/\s+/g, " ").replace(/\s*,\s*$/, "").trim();
+  return text
+    .replace(/\s+/g, " ")
+    .replace(/\[\s+/g, "[")
+    .replace(/\s+\]/g, "]")
+    .replace(/,\s+/g, ",")
+    .replace(/\(\s+/g, "(")
+    .replace(/\s+\)/g, ")")
+    .replace(/\s*,\s*$/, "")
+    .trim();
 }
 
 /**
@@ -740,12 +835,25 @@ export function scanTree(root) {
       }
     }
     for (const c of cases) {
-      if (c.reachesSpawn && !c.hasBudget) {
+      if (!c.reachesSpawn) continue;
+      let kind = null;
+      let detail = "";
+      if (!c.hasBudget) {
+        kind = "case-no-budget";
+        detail = `${c.fn}("${c.name.slice(0, 60)}")`;
+      } else if (c.unboundedFetch) {
+        kind = "case-unbounded-fetch";
+        detail = `unbounded ${c.unboundedFetch}`;
+      } else if (c.budgetMs <= c.sumWaitsMs) {
+        kind = "case-budget-too-small";
+        detail = `budget ${c.budgetMs} <= sum of waits ${c.sumWaitsMs} in ${c.fn}("${c.name.slice(0, 40)}")`;
+      }
+      if (kind) {
         caseOffenders.push({
           file: rel,
           line: c.line,
-          kind: "case-no-budget",
-          detail: `${c.fn}("${c.name.slice(0, 60)}")`,
+          kind,
+          detail,
           scope: c.name,
           fingerprint: normalizeFingerprint(c.name),
         });
@@ -788,7 +896,9 @@ export function validateBaseline(entries) {
     for (const f of ["file", "scope", "fingerprint", "kind"]) {
       if (typeof e[f] !== "string" || e[f].length === 0) errors.push(`${where}: missing string "${f}"`);
     }
-    if (e.kind !== "spawn-no-timeout" && e.kind !== "case-no-budget") errors.push(`${where}: unknown kind "${e.kind}"`);
+    if (!["spawn-no-timeout", "case-no-budget", "case-unbounded-fetch", "case-budget-too-small"].includes(e.kind)) {
+      errors.push(`${where}: unknown kind "${e.kind}"`);
+    }
     if (typeof e.reason !== "string" || e.reason.length === 0) errors.push(`${where}: missing "reason"`);
     if (e.occurrence !== undefined && (!Number.isInteger(e.occurrence) || e.occurrence < 0)) {
       errors.push(`${where}: "occurrence" must be a non-negative integer`);
@@ -832,9 +942,85 @@ export function diffAgainstBaseline(spawnOffenders, caseOffenders, baselineEntri
   return { newOffenders, staleEntries, ok: newOffenders.length === 0 && staleEntries.length === 0 };
 }
 
-/** Load the committed baseline (trusted). */
+/** Read a baseline file from disk (the PR copy; API kept for the unit tests). */
 export function loadBaseline(path = BASELINE_PATH) {
   return JSON.parse(readFileSync(path, "utf8"));
+}
+
+/**
+ * The TRUSTED base ref the baseline is read from (flair#1825). CI supplies it via
+ * the environment (`CLI_SPAWN_BUDGETS_BASE_REF`: the PR's base sha, or the
+ * previous commit on a push). The baseline is read from THAT ref with
+ * `git show <ref>:scripts/ci/cli-spawn-budgets.baseline.json`, so a PR cannot add
+ * an exception by editing its own copy of the file. Locally the base defaults to
+ * `origin/main` and the run says so.
+ */
+export function gateBaseRef(env = process.env) {
+  const v = env.CLI_SPAWN_BUDGETS_BASE_REF || env.CLI_SPAWN_BUDGET_BASE_REF;
+  return v && v.trim().length > 0 ? v.trim() : "origin/main";
+}
+
+const BASELINE_REL = "scripts/ci/cli-spawn-budgets.baseline.json";
+
+/** Read the baseline at `ref` from `root`'s git object store. Returns null when
+ *  the ref has no baseline file (this PR introduces it). */
+export function loadBaselineAtRef(ref, root) {
+  const res = spawnSync("git", ["-C", root, "show", `${ref}:${BASELINE_REL}`], { encoding: "utf8" });
+  if (res.status !== 0) return null;
+  return JSON.parse(res.stdout);
+}
+
+/** The PR tree's copy of the baseline — used ONLY to reject ADDED exceptions. */
+export function readPrBaseline(root) {
+  return JSON.parse(readFileSync(join(root, BASELINE_REL), "utf8"));
+}
+
+/** Entries a PR ADDED relative to the trusted base. A PR may only REMOVE. */
+export function addedExceptions(baseEntries, prEntries) {
+  const baseKeys = new Set(baseEntries.map(offenderKey));
+  return prEntries.filter((e) => !baseKeys.has(offenderKey(e)));
+}
+
+/**
+ * End-to-end check: scan `root`, diff against the baseline read from `baseRef`.
+ *
+ * The effective allow-list is the BASE copy. When the base has no baseline file
+ * (the PR that first introduces it), the PR copy is the initial list and no
+ * "added exception" is computed — there is nothing to add relative to. Once the
+ * base has the file, an entry in the PR copy but not the base is a failure.
+ * `stale` is computed against the PR copy, so removing a now-budgeted entry is
+ * allowed.
+ */
+export function runGate({ root, baseRef = gateBaseRef(), env = process.env } = {}) {
+  const { files, spawnOffenders, caseOffenders } = scanTree(root);
+  const defaulted = !(env.CLI_SPAWN_BUDGETS_BASE_REF || env.CLI_SPAWN_BUDGET_BASE_REF);
+  const prEntries = readPrBaseline(root);
+  const baseEntries = loadBaselineAtRef(baseRef, root);
+  const basePresent = baseEntries !== null;
+  const errors = [
+    ...validateBaseline(prEntries).map((e) => `pr: ${e}`),
+    ...(basePresent ? validateBaseline(baseEntries).map((e) => `base: ${e}`) : []),
+  ];
+  // The PR copy is the working list: new offenders, multiplicity, and stale
+  // entries are all measured against it. The BASE copy only gates ADDITIONS —
+  // a PR may remove an entry, but not add one (flair#1825).
+  const diff = diffAgainstBaseline(spawnOffenders, caseOffenders, prEntries);
+  const added = basePresent ? addedExceptions(baseEntries, prEntries) : [];
+  return {
+    files,
+    spawnOffenders,
+    caseOffenders,
+    baseRef,
+    basePresent,
+    defaulted,
+    allowEntries: prEntries,
+    prEntries,
+    baseEntries: baseEntries ?? [],
+    errors,
+    added,
+    ...diff,
+    ok: errors.length === 0 && diff.ok && added.length === 0,
+  };
 }
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
@@ -849,29 +1035,38 @@ if (isMain) {
     }
     root = resolve(argv[rootFlag + 1]);
   }
-  const { files, spawnOffenders, caseOffenders } = scanTree(root);
-  process.stdout.write(`check-cli-spawn-budgets: scanned ${files.length} test file(s) under ${join(root, "test")}\n`);
+  const baseFlag = argv.indexOf("--base");
+  if (baseFlag !== -1 && argv[baseFlag + 1]) process.env.CLI_SPAWN_BUDGETS_BASE_REF = argv[baseFlag + 1];
+  let result;
+  try {
+    result = runGate({ root });
+  } catch (err) {
+    process.stderr.write(`check-cli-spawn-budgets: ${err.message}\n`);
+    process.exit(1);
+  }
+  const { files, spawnOffenders, caseOffenders, baseRef, basePresent, defaulted, allowEntries, errors, added, newOffenders, staleEntries, ok } = result;
+  process.stdout.write(
+    `check-cli-spawn-budgets: scanned ${files.length} test file(s) under ${join(root, "test")}; base ref ${baseRef}` +
+      `${defaulted ? " (defaulted — set CLI_SPAWN_BUDGETS_BASE_REF to pin it)" : ""}` +
+      `${basePresent ? "" : " — base has no baseline; the PR copy is the initial list"}\n`,
+  );
   if (files.length === 0) {
     process.stderr.write(
       "check-cli-spawn-budgets: no test files found — the scan saw nothing, which is not a pass.\n",
     );
     process.exit(1);
   }
-  const baseline = loadBaseline();
-  const errors = validateBaseline(baseline);
-  if (errors.length) {
-    for (const e of errors) process.stderr.write(`check-cli-spawn-budgets: bad baseline — ${e}\n`);
-    process.exit(1);
-  }
-  const { newOffenders, staleEntries, ok } = diffAgainstBaseline(spawnOffenders, caseOffenders, baseline);
-  for (const o of newOffenders) process.stdout.write(`  NEW    ${o.file}:${o.line}  ${o.kind}  ${o.detail}\n`);
+  for (const e of errors) process.stderr.write(`check-cli-spawn-budgets: bad baseline — ${e}\n`);
+  for (const o of newOffenders) process.stdout.write(`  NEW      ${o.file}:${o.line}  ${o.kind}  ${o.detail}\n`);
   for (const o of staleEntries) {
-    process.stdout.write(`  STALE  ${o.file}  ${o.scope}  ${o.kind}  ${o.fingerprint.slice(0, 50)}\n`);
+    process.stdout.write(`  STALE    ${o.file}  ${o.scope}  ${o.kind}  ${o.fingerprint.slice(0, 50)}\n`);
+  }
+  for (const o of added) {
+    process.stdout.write(`  ADDED-EX ${o.file}  ${o.scope}  ${o.kind}  ${o.fingerprint.slice(0, 50)}  (a PR may only REMOVE baseline entries)\n`);
   }
   process.stdout.write(
-    `check-cli-spawn-budgets: ${spawnOffenders.length} spawn(s) with no timeout, ` +
-      `${caseOffenders.length} case(s) with no budget, ${baseline.length} baselined — ` +
-      `${newOffenders.length} new, ${staleEntries.length} stale.\n`,
+    `check-cli-spawn-budgets: ${spawnOffenders.length} spawn(s) with no timeout, ${caseOffenders.length} case(s) offending, ` +
+      `${allowEntries.length} allowed at ${baseRef} — ${newOffenders.length} new, ${staleEntries.length} stale, ${added.length} added-exception.\n`,
   );
   process.exit(ok ? 0 : 1);
 }
