@@ -75,14 +75,19 @@ describe("canary-verdict — PASS is bound to ONE package-set digest (A1c, #1671
     expect(block).toContain("node scripts/ci/package-set-digest.mjs");
     expect(block).toContain(`--version 1.2.3`);
 
-    // One dist-tag per lockstep package, `@tpsdev-ai/flair` LAST (partial paste
-    // never leaves the CLI ahead of its client library).
+     // One `npm dist-tag add <pkg>@1.2.3 latest` per lockstep package, `@tpsdev-ai/flair`
+     // LAST (partial paste never leaves the CLI ahead of its client library). npm offers
+     // no atomic all-or-none promote, so each line carries a `|| { rollback; exit 1 }`
+     // guard: a mid-promote failure STOPS the block and prints the reverse commands for
+     // every package already moved (item 1, A1c of #1671).
     const promote = blockLines.filter((l) => l.startsWith("npm dist-tag add "));
     expect(promote.length).toBe(PACKAGES.length);
     for (const pkg of PACKAGES) {
-      expect(promote.some((l) => l === `npm dist-tag add ${pkg}@1.2.3 latest`)).toBe(true);
-    }
+      expect(promote.some((l) => l.startsWith(`npm dist-tag add ${pkg}@1.2.3 latest`))).toBe(true);
+     }
     expect(promote[promote.length - 1]!).toContain("npm dist-tag add @tpsdev-ai/flair@1.2.3 latest");
+     // Every promote line carries the `|| { rollback; exit 1 }` guard (npm is not all-or-none).
+    expect(promote.every((l) => l.includes("|| {"))).toBe(true);
 
     // TWO PHASES: the (single) digest preflight comes before the first dist-tag —
     // a mid-paste mismatch (or an unmeasurable re-hash) aborts before any tag moves.

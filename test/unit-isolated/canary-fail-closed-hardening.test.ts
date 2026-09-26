@@ -608,16 +608,97 @@ describe("F4 (registry hasher, A1c of #1671): the emitted preflight refuses a ba
       encoding: "utf8",
       env: {
            ...process.env,
-        PATH: `${F4REG_SHIM}:${process.env.PATH}`,
+        PATH: `${F4REG_SHIM}:${BIN}:${process.env.PATH}`,   // item 3: BIN carries the logging npm stub, so "no tag moves" is a real observation (the stub is reachable), not a pass because npm was unreachable
         REAL_NODE,
         F4REG_STUB,
         DISTTAG_LOG: dt,
        },
        });
-       // The preflight refuses before the first tag: non-zero exit, names the package,
-       // and the dist-tag log is empty (no `npm dist-tag add` ran).
+        // The preflight refuses before the first tag: non-zero exit, names the package,
+        // and the dist-tag log is empty because the *logging* npm stub (BIN, now on the
+        // PATH) was never reached. item 3: "no tag moves" is a real observation, not a
+        // vacuous pass — the stub is reachable, so a wrong promote would log here.
     expect(r.status, `stderr:\n${r.stderr}\nstdout:\n${r.stdout}`).not.toBe(0);
     expect(r.stderr).toContain("tarball hasher exited");
-    expect(readFileSync(dt, "utf8")).toBe("");
+    expect(readFileSync(dt, "utf8")).toBe("");    // the logging npm stub (BIN, on the PATH) recorded zero dist-tag adds
     });
  });
+
+// ── item 1 (A1c of #1671): a mid-promote npm failure STOPS the block and prints the
+// rollback for the already-moved packages. npm has NO atomic, all-or-none promote, so a
+// failure after the first tag leaves a PARTIAL promote. The block must (a) exit non-zero,
+// (b) move exactly the packages before the failure, and (c) print the exact reverse
+// (`npm dist-tag rm <pkg> latest`) commands for the already-moved packages. A stub npm
+// that fails on the 3rd dist-tag add drives this; the log proves exactly two moves
+// really happened, and stderr proves the rollback names those two.
+const NPART_SHIM = join(SCRATCH, "npart-shim");
+mkdirSync(NPART_SHIM, { recursive: true });
+// Stub npm: for `dist-tag add`, succeed on the 1st and 2nd add, fail on the 3rd (NFAIL_FAIL_ON)
+// and after. It LOGS only the moves that SUCCEED, so the log is exactly the set of tags
+// really pushed — a failed move is never logged, which is what makes the "two moves" count real.
+const npartNpmStub = [
+  "#!/usr/bin/env bash",
+  "if [ \"${1:-}\" = \"dist-tag\" ] && [ \"${2:-}\" = \"add\" ]; then",
+  "  n=$(cat \"${NFAIL_COUNT:-/tmp/nfail}\" 2>/dev/null || echo 0)",
+  "  n=$((n + 1)); echo \"$n\" > \"${NFAIL_COUNT:-/tmp/nfail}\"",
+  "  if [ \"$n\" -ge \"${NFAIL_FAIL_ON:-3}\" ]; then exit 1; fi",
+  "  printf 'dist-tag add %s\\n' \"${3:-}\" >> \"${DISTTAG_LOG:-/dev/null}\"",
+  "  exit 0",
+  "fi",
+  "exit 0",
+  "",
+].join("\n");
+writeFileSync(join(NPART_SHIM, "npm"), npartNpmStub);
+chmodSync(join(NPART_SHIM, "npm"), 0o755);
+
+describe("item 1 (A1c of #1671): a mid-promote npm failure stops the block and prints the rollback", () => {
+  test("a stub that fails on the 3rd dist-tag add => exactly two moves, rollback named, non-zero exit", () => {
+    // The certified digest is the "bindings" (seed 'sha:') re-derivation, so the happy
+    // preflight (SHIM node in bindings mode) passes and the block reaches the promote step.
+    const cert = rederivedDigest("sha:");
+    const emitted = runVerdict(["pass", VER, RUN_URL, "--os", "ubuntu-latest", "--package-set-digest", cert]);
+    expect(emitted.status).toBe(0);
+    const m = emitted.stdout.match(/```\n([\s\S]*?)\n```/);
+    if (!m?.[1]) throw new Error("item1: no fenced promote block in the PASS output");
+    const block = m[1]!;
+    const cwd = mkdtempSync(join(SCRATCH, "item1-"));
+    const f = join(cwd, "block.sh");
+    const dt = join(cwd, "disttag.log");
+    const nfail = join(cwd, "nfail.count");
+    writeFileSync(f, block);
+    writeFileSync(dt, "");
+    writeFileSync(nfail, "0");
+    // PATH: SHIM (happy node for the preflight) + NPART_SHIM (the failing npm stub). Each
+    // directory owns the one binary it provides (node vs npm), so the order does not matter.
+    const r = spawnSync("bash", [f], {
+      cwd: REPO,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${SHIM}:${NPART_SHIM}:${process.env.PATH}`,
+        REAL_NODE,
+        NODE_STUB: join(SCRATCH, "node-stub.mjs"),
+        REPO_ROOT: REPO,
+        STUB_SHA_MODE: "bindings",
+        DISTTAG_LOG: dt,
+        NFAIL_COUNT: nfail,
+        NFAIL_FAIL_ON: "3",
+      },
+    });
+    // (a) the block exits non-zero: the 3rd move failed and the block stopped there.
+    expect(r.status, `stderr:\n${r.stderr}`).not.toBe(0);
+    // (b) exactly two tag moves were really pushed — the log records only successful adds.
+    const moves = readFileSync(dt, "utf8").split("\n").filter((l) => l.startsWith("dist-tag add "));
+    expect(moves.length).toBe(2);
+    // The two moved packages are exactly the first two lockstep packages (the promote order).
+    expect(moves[0]).toContain(PACKAGES[0]);
+    expect(moves[1]).toContain(PACKAGES[1]);
+    // (c) the block prints the exact reverse commands for the already-moved packages, names the
+    // package it aborts at, and never touches the failed package or any after it.
+    expect(r.stderr).toContain("npm dist-tag rm " + PACKAGES[0] + " latest");
+    expect(r.stderr).toContain("npm dist-tag rm " + PACKAGES[1] + " latest");
+    expect(r.stderr).toContain("ABORTED");
+    expect(r.stderr).toContain(PACKAGES[2]);
+    expect(readFileSync(dt, "utf8")).not.toContain(PACKAGES[2]);
+  });
+});

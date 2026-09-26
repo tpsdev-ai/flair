@@ -109,7 +109,7 @@ done
 # emitted ONLY for a version that is exactly `<major>.<minor>.<patch>`.
 # Everything else — a SemVer prerelease (`1.2.3-rc.1`, the bare `1.2.3-0`
 # or `1.2.3--`), build metadata (`1.2.3+build`), or any other label — is NOT
-# a release and is never promoted to `latest` (it lives on `next`). A blacklist
+# a release and is never promoted to `latest` (a `-` label sits on `next`; a `+build`/no-`-` version sits on `staged`). A blacklist
 # (matching a `-<prerelease>` part) misses `1.2.3--`, whose first `-` is a valid
 # SemVer prerelease token, and would wrongly promote it; the whitelist cannot.
 is_release() {
@@ -133,12 +133,16 @@ fi
 
 emit_prerelease_note() {
   cat <<EOF
-### Canary — prerelease \`${VERSION}\` is never promoted (\`${OS_NAME}\`)
+### Canary - \`${VERSION}\` is not a clean release and is **never** promoted to \`latest\` (\`${OS_NAME}\`)
 
-This version carries a SemVer prerelease label (\`${VERSION}\`), so it is
-published on the \`next\` tag and is **never** promoted to \`latest\`. No promote
-block is printed: a prerelease lives on \`next\`, and \`latest\` moves only for a
-release without a prerelease label.
+This block promotes **only** an exact \`major.minor.patch\` to \`latest\`. \`${VERSION}\` is
+not one, so **no promote block is printed and \`latest\` does not move** — a version this
+block cannot promote is never pushed live. Where this version actually sits follows
+release-publish.yml: a SemVer **prerelease** (a \`-\` label, such as \`1.2.3-rc.1\`) is
+staged on the \`next\` dist-tag; anything **without** a \`-\` (for example a \`+build\` metadata
+version such as \`1.2.3+20260101\`) is **not** a prerelease and is staged on \`staged\`
+(the no-\`-\` branch), never \`next\`. Either way the version is **not** \`latest\`; a
+\`+build\` version is **not** a prerelease and is **not** promoted by this block either.
 EOF
 }
 
@@ -164,15 +168,18 @@ if [ "$VERDICT" = "pass" ]; then
   cat <<EOF
 ### ✅ Canary PASS — \`${OS_NAME}\`
 
-Promote ALL ${#PACKAGES[@]} lockstep packages to \`latest\` — **all or none**. A
-partial paste leaves \`latest\` skewed across the set (the mismatch flair#1383
-detects at runtime). This block is bound to the release run's **package-set
-digest**: a single sha256 over the canonical sorted list of
-\`<name>@${VERSION} <sha256>\` lines, one per lockstep package (the digest
-\`${PKG_SET_DIGEST}\` the pack job certified). Paste this WHOLE block once, from
-the repo root: it re-derives that digest from the published tarballs FIRST (so a
-mid-paste failure or a re-cut version touches no tag), then moves the tags, then
-confirms the set converged.
+Promote ALL ${#PACKAGES[@]} lockstep packages to \`latest\`. **npm has no atomic,
+all-or-none promote** — this block moves the tags SEQUENTIALLY and STOPS at the first
+failure (the failing line's \`|| {\` block exits non-zero). Every package moved BEFORE
+that failure STAYS on \`latest\` until you run the rollback the failing line prints (one
+\`npm dist-tag rm <pkg> latest\` per already-moved package). The preflight is bound to
+the release run's **package-set digest** — a single sha256 over the canonical sorted list
+of \`<name>@${VERSION} <sha256>\` lines, one per lockstep package (the digest
+\`${PKG_SET_DIGEST}\` the pack job certified). Paste this WHOLE block once, from the
+repo root: it re-derives that digest from the published tarballs FIRST, so a re-cut
+version or a different package set aborts BEFORE any tag moves; but a failure DURING
+the promote loop is not atomic, so the block names and rolls back the already-moved
+tags, then confirms the set converged.
 
 \`\`\`
 set -e
@@ -251,11 +258,21 @@ EOF
   cat <<EOF
 
 # 2. Promote every lockstep package (\`@tpsdev-ai/flair\` LAST, so a partial paste
-#    never leaves the CLI ahead of its client library).
+#    never leaves the CLI ahead of its client library). **npm has no atomic,
+#    all-or-none promote**: these run SEQUENTIALLY and the block STOPS at the first
+#    failure (the failing line's \`|| {\` block exits non-zero). Every package moved
+#    BEFORE that failure STAYS on \`latest\` until you run the rollback the failing
+#    line prints (one \`npm dist-tag rm <pkg> latest\` per already-moved package).
 EOF
   for ((i = 0; i < ${#PACKAGES[@]}; i++)); do
     p="${PACKAGES[$i]}"
-    printf 'npm dist-tag add %s@%s latest\n' "$p" "$VERSION"
+    rollback_list=""
+    for ((j = 0; j < i; j++)); do rollback_list="$rollback_list ${PACKAGES[$j]}"; done
+    if [ "$i" -eq 0 ]; then
+      printf 'npm dist-tag add %s@%s latest || { echo "canary promote ABORTED at %s (this was the first move; nothing before it was moved) - npm is not atomic." >&2; exit 1; }\n' "$p" "$VERSION" "$p"
+    else
+      printf 'npm dist-tag add %s@%s latest || { echo "canary promote ABORTED at %s - npm is not atomic; the %s package(s) below were ALREADY moved to latest and STAY there until you run the rollback:" >&2; for _m in %s; do echo "  npm dist-tag rm $_m latest       # rollback: undo the move already applied" >&2; done; exit 1; }\n' "$p" "$VERSION" "$p" "$i" "$rollback_list"
+    fi
   done
   cat <<EOF
 

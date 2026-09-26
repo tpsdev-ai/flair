@@ -15,7 +15,9 @@
   version lives on `next` and that `latest` moves only for a version that is
   exactly a `<major>.<minor>.<patch>` (a whole-string match; a prerelease
   label, build metadata, or any other text is not promoted), and prints no
-  `dist-tag add` lines at all. The `FAIL`
+ `dist-tag add` lines at all. The `FAIL`
   verdict (deprecate every lockstep package, the CLI first) is unchanged.
+
+  A `+build` (build-metadata) version is **not** a SemVer prerelease: release-publish.yml stages it on `staged` (the no-`-` branch of the version rule), never `next`, and the canary never promotes it to `latest` either — `latest` still moves only for an exact `<major>.<minor>.<patch>`.
 
   (Refs #1671)
