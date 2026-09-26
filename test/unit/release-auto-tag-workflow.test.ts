@@ -401,7 +401,14 @@ describe("CODEOWNERS — the shared Renovate preset is in the trust root (#1930)
     const toRegex = (pattern: string): RegExp => {
       const anchored = pattern.startsWith("/");
       let body = (anchored ? pattern.slice(1) : pattern).replace(/[.+^${}()|[\]\\]/g, "\\$&");
-      body = body.replace(/\*\*/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\u0000/g, ".*").replace(/\?/g, "[^/]");
+      // "**/" matches zero or more directories; any other "**" matches anything; "*" stays within one segment.
+      body = body
+        .replace(/\*\*\//g, "\u0001")
+        .replace(/\*\*/g, "\u0000")
+        .replace(/\*/g, "[^/]*")
+        .replace(/\?/g, "[^/]")
+        .replace(/\u0001/g, "(?:.*/)?")
+        .replace(/\u0000/g, ".*");
       if (body.endsWith("/")) body += ".*";
       const prefix = anchored ? "^" : "^(?:.*/)?";
       // A pattern without a wildcard can name a directory: it matches the path itself or anything below it.
@@ -415,6 +422,9 @@ describe("CODEOWNERS — the shared Renovate preset is in the trust root (#1930)
     expect(toRegex("/.github/*").test(path)).toBe(true);
     expect(toRegex("*.json").test(path)).toBe(true);
     expect(toRegex("/docs/*").test(path)).toBe(false);
+    // "**/" includes the zero-directory case: git matches "/.github/**/renovate-preset.json" to the preset.
+    expect(toRegex("/.github/**/renovate-preset.json").test(path)).toBe(true);
+    expect(toRegex("**/renovate-preset.json").test(path)).toBe(true);
   });
 });
 
