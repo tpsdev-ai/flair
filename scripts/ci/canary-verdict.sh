@@ -171,10 +171,14 @@ if [ "$VERDICT" = "pass" ]; then
 Promote ALL ${#PACKAGES[@]} lockstep packages to \`latest\`. **npm has no atomic,
 all-or-none promote** — this block moves the tags SEQUENTIALLY and STOPS at the first
 failure (the failing move exits non-zero). It reads every package's CURRENT \`latest\`
-BEFORE the first move, so it can RESTORE. On any failure — a move, or the final skew
-check — it prints one RESTORE line per package it already moved,
-\`npm dist-tag add <pkg>@<previous> latest\` (never \`npm dist-tag rm\`), then the
-packages it did NOT move. The convergence (skew) check runs ONLY on the all-succeeded
+BEFORE the first move, and STOPS before moving a single tag if ANY read fails — a
+non-zero npm exit, an empty read, or a value that is not a version — so it only
+reaches the moves with a clean PREVIOUS \`latest\` for every package, and can RESTORE.
+On the move-failure path it prints one RESTORE line per already-moved package
+(\`npm dist-tag add <pkg>@<previous> latest\`, never \`npm dist-tag rm\`) and then the
+packages it did NOT move; on the skew-failure path (where every package was moved)
+it prints an explicit \`ALL N packages were moved\` line first, then the same RESTORE
+lines for each. The convergence (skew) check runs ONLY on the all-succeeded
 path. The preflight is bound to the release run's **package-set digest** — a single
 sha256 over the canonical sorted list of \`<name>@${VERSION} <sha256>\` lines, one per
 lockstep package (the digest \`${PKG_SET_DIGEST}\` the pack job certified). Paste this
@@ -265,9 +269,27 @@ EOF
 # 2. Read each package's CURRENT latest BEFORE any move. If a read fails, NOTHING
 #    has moved — stop here and say so.
 for _p in ${PACKAGES[*]}; do
-  _cur="\$(npm dist-tag ls "\$_p" 2>/dev/null | sed -n 's/^latest: //p')"
+  # Capture npm's stdout and its exit status SEPARATELY. A (npm | sed) pipeline
+  # reports sed's status (0 on a match), so an npm that FAILS while still printing
+  # a "latest: 1.2.2" line would read as success. A failed read must stop here.
+  set +e
+  _ls="\$(npm dist-tag ls "\$_p" 2>/dev/null)"
+  _ls_status=\$?
+  set -e
+  if [ "\$_ls_status" -ne 0 ]; then
+    echo "canary promote: could not read the current latest of '\$_p' (npm dist-tag ls exited \$_ls_status; unmeasurable is FAIL) - NOTHING has moved; do not promote." >&2
+    exit 1
+  fi
+  # Strip a trailing CR (CRLF registry output) and surrounding whitespace BEFORE
+  # parsing, then require a version - the shape this block promotes. A malformed
+  # value stops here; it never reaches a restore line.
+  _cur="\$(printf '%s\n' "\$_ls" | sed -n 's/^latest: //p' | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*\$//')"
   if [ -z "\$_cur" ]; then
-    echo "canary promote: could not read the current latest of '\$_p' - NOTHING has moved; do not promote." >&2
+    echo "canary promote: could not read the current latest of '\$_p' (empty latest) - NOTHING has moved; do not promote." >&2
+    exit 1
+  fi
+  if ! [[ "\$_cur" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?\$ ]]; then
+    echo "canary promote: the current latest of '\$_p' is not a version (raw '\$_cur') - NOTHING has moved; do not promote." >&2
     exit 1
   fi
   printf '%s=%s\n' "\$_p" "\$_cur" >> "\$PREV_LATEST"
@@ -299,7 +321,7 @@ done
 
 # 4. Confirm the set converged — ONLY when every move succeeded.
 if ! node scripts/ci/registry-latest-skew.mjs ${VERSION}; then
-  echo "canary promote: the skew check failed AFTER every tag moved. RESTORE every moved package to its PREVIOUS latest (this does not delete a tag):" >&2
+  echo "canary promote: the skew check failed AFTER every tag moved. ALL ${#PACKAGES[@]} packages were moved (none is still on its previous latest). RESTORE every moved package to its PREVIOUS latest (this does not delete a tag):" >&2
   while IFS= read -r _line; do
     _mp="\${_line%%=*}"; _mv="\${_line#*=}"
     echo "  npm dist-tag add \${_mp}@\${_mv} latest" >&2

@@ -640,6 +640,9 @@ const ctlNpmStub = [
   "#!/usr/bin/env bash",
   "if [ \"${1:-}\" = \"dist-tag\" ] && [ \"${2:-}\" = \"ls\" ]; then",
   "  if [ -n \"${DISTTAG_LS_FAIL_PKG:-}\" ] && [ \"${3:-}\" = \"$DISTTAG_LS_FAIL_PKG\" ]; then exit 1; fi",
+  "  if [ -n \"${DISTTAG_LS_PRINTFAIL_PKG:-}\" ] && [ \"${3:-}\" = \"$DISTTAG_LS_PRINTFAIL_PKG\" ]; then echo \"latest: 1.2.2\"; exit 1; fi",
+  "  if [ -n \"${DISTTAG_LS_CR:-}\" ]; then printf 'latest: 1.2.2\\r\\n'; exit 0; fi",
+  "  if [ -n \"${DISTTAG_LS_GARBAGE:-}\" ]; then echo \"latest: garbage\"; exit 0; fi",
   "  echo \"latest: 1.2.2\"",
   "  exit 0",
   "fi",
@@ -724,5 +727,30 @@ describe("item 1 (A1c of #1671, round 5): a mid-promote failure RESTORES the mov
     expect(r.stderr).toContain(PACKAGES[2]);
     expect(r.stderr).toContain("could not read the current latest");
     expect(r.stderr).toContain("NOTHING has moved");
+  });
+
+  test("(d) npm prints `latest: 1.2.2` but EXITS 1 => no add reached, package named", () => {
+    const r = runPromoteBlock({ DISTTAG_LS_PRINTFAIL_PKG: PACKAGES[1] });
+    expect(r.status, `stderr:\n${r.stderr}`).not.toBe(0);
+    expect(r.dt).toBe(""); // the failed read stopped the block BEFORE the first move
+    expect(r.stderr).toContain(PACKAGES[1]);
+    expect(r.stderr).toContain("unmeasurable is FAIL");
+  });
+
+  test("(e) a CRLF `latest: 1.2.2\\r\\n` read yields a CLEAN previous (no CR in the RESTORE line)", () => {
+    const r = runPromoteBlock({ DISTTAG_LS_CR: "1", NFAIL_FAIL_ON: "2" }); // 2nd move fails => RESTORE lines
+    expect(r.status, `stderr:\n${r.stderr}`).not.toBe(0);
+    // The recorded previous is exactly 1.2.2, so the restore line is well-formed.
+    expect(r.stderr).toContain(`npm dist-tag add ${PACKAGES[0]}@1.2.2 latest`);
+    expect(r.stderr).not.toContain("1.2.2\r");
+    expect(r.stderr).not.toContain("\r");
+  });
+
+  test("(f) a non-version `latest: garbage` read => stop before any move, value named", () => {
+    const r = runPromoteBlock({ DISTTAG_LS_GARBAGE: "1" });
+    expect(r.status, `stderr:\n${r.stderr}`).not.toBe(0);
+    expect(r.dt).toBe("");
+    expect(r.stderr).toContain("garbage");
+    expect(r.stderr).toContain("is not a version");
   });
 });
