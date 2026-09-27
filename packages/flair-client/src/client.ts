@@ -594,14 +594,14 @@ class RelationshipApi {
     if (input.validTo !== undefined) record.validTo = input.validTo;
     if (input.source !== undefined) record.source = input.source;
 
-    const response = await this.client.request<Record<string, unknown>>("PUT", `/Relationship/${id}`, record);
+    const response = await this.client.request<Record<string, unknown>>("PUT", `/Relationship/${encodeURIComponent(id)}`, record);
     return { ...record, id, agentId: this.client.agentId, ...(response ?? {}) } as unknown as Relationship;
   }
 
   /** Get a relationship by canonical id (or any id, e.g. one openclaw wrote
    *  under its own convention). Returns null on 404 (not found / not yours). */
   async get(id: string): Promise<Relationship | null> {
-    try { return await this.client.request("GET", `/Relationship/${id}`); }
+    try { return await this.client.request("GET", `/Relationship/${encodeURIComponent(id)}`); }
     catch (e) {
       if (e instanceof FlairError && e.status === 404) return null;
       throw e;
@@ -610,7 +610,7 @@ class RelationshipApi {
 
   /** Delete a relationship by id. */
   async delete(id: string): Promise<void> {
-    await this.client.request("DELETE", `/Relationship/${id}`);
+    await this.client.request("DELETE", `/Relationship/${encodeURIComponent(id)}`);
   }
 }
 
