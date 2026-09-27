@@ -87,6 +87,30 @@ export class BaseMemory {
     }
     return gen();
   }
+  // STATIC callables: real writers reach Memory via `databases.flair.Memory.*`
+  // (e.g. Memory.put's pre-existing fetch, MemoryMaintenance's scan), not only
+  // via the prototype `super.*`. Mirror the MemoryHostSource class below.
+  static get(t?: any) {
+    return new BaseMemory().get(t);
+  }
+  static put(c: any) {
+    return new BaseMemory().put(c);
+  }
+  static post(c: any) {
+    return new BaseMemory().post(c);
+  }
+  static patch(c: any, q?: any) {
+    return new BaseMemory().patch(c, q);
+  }
+  static update(id: string, row: any) {
+    return new BaseMemory().update(id, row);
+  }
+  static delete(id: any) {
+    return new BaseMemory().delete(id);
+  }
+  static search(q?: any) {
+    return new BaseMemory().search(q);
+  }
 }
 
 // Harper's `databases.flair.MemoryHostSource.search/put/get/delete` are

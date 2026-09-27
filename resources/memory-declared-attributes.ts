@@ -36,6 +36,7 @@ export const DECLARED_MEMORY_ATTRIBUTES = Object.freeze([
   "tags",
   "durability",
   "source",
+  "type",
   "createdAt",
   "updatedAt",
   "expiresAt",
@@ -68,13 +69,28 @@ const DECLARED = new Set<string>(DECLARED_MEMORY_ATTRIBUTES as readonly string[]
 
 /** Pre-existing UNDECLARED attributes the codebase deliberately stores on a
  *  Memory row and must keep (the guard's job is the POINTER, not these).
- *  `meta` is the continuity-journal payload {seq, processUUID, sessionId, hook}
- *  written by the capture path (PUT /Memory/<id>, flair#1257 slice 3); Kern's
- *  slice-2 ruling settled that it round-trips as an undeclared field, and
- *  test/integration/continuity-rem-promotion-1257.test.ts pins that. Declaring
- *  it is a separate schema decision — it is not a flat String, so a schema
- *  declaration would change its stored shape. */
-export const UNDECLARED_ALLOWED = Object.freeze(["meta"] as const);
+ *  This is an EXPLICIT, NAMED list measured against a live store (A1'' item 1)
+ *  — never derived from the schema, because the schema is not the source of
+ *  truth for what is on disk:
+ *    - `meta`   — the continuity-journal payload {seq, processUUID, sessionId,
+ *                 hook} written by the capture path (PUT /Memory/<id>,
+ *                 flair#1257 slice 3); Kern's slice-2 ruling settled that it
+ *                 round-trips as an undeclared field, and
+ *                 test/integration/continuity-rem-promotion-1257.test.ts pins
+ *                 that. It is not a flat String, so declaring it would change
+ *                 the stored shape.
+ *    - `kind`   — carried on a couple of older rows.
+ *    - `_originatorInstanceId`, `_syncedFrom`, `_syncedAt` — federation
+ *                 bookkeeping stamped by the RECEIVER at merge time
+ *                 (resources/Federation.ts's mergeRecord) on every synced row.
+ *  Any OTHER undeclared key (in particular any pointer input) is stripped. */
+export const UNDECLARED_ALLOWED = Object.freeze([
+  "meta",
+  "kind",
+  "_originatorInstanceId",
+  "_syncedFrom",
+  "_syncedAt",
+] as const);
 
 const ALLOWED_UNDECLARED = new Set<string>(UNDECLARED_ALLOWED as readonly string[]);
 

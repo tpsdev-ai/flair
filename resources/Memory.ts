@@ -1194,6 +1194,10 @@ export class Memory extends (databases as any).flair.Memory {
         });
       }
       delete content._reindex;
+      // A1'' item 1: the reindex path is a Memory writer too. The guard runs
+      // here as well, so a pointer input (or any other key that is neither
+      // declared nor in UNDECLARED_ALLOWED) cannot ride a reindex onto the row.
+      stripUndeclaredMemoryAttributes(content);
       const reindexed = await super.put(content);
       noteMemoryUpsert(content);
       noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())

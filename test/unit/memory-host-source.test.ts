@@ -18,6 +18,8 @@ process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete (process.env as any).FLAIR_PUBLIC;
 
 const { Memory, MemoryHostSource, _resetLocalInstanceIdCacheForTests } = await installMemoryHarperMock();
+// Imported AFTER the harper mock is registered, like Memory/MemoryHostSource.
+const { MemoryMaintenance } = await import("../../resources/MemoryMaintenance.ts");
 const memoryStore = harnessState.memoryStore;
 const pointerStore = harnessState.pointerStore;
 
@@ -157,12 +159,34 @@ describe("A1' — the MemoryHostSource resource", () => {
     const row: any = await makeTable(agentCtx("root", true)).get("mem-1");
     expect(row?.hostSource).toBe(JSON.stringify(POINTER)); // assertion: admin sees it
   });
+});
 
-  it("a body-supplied authorId is IGNORED — the principal's is stamped", async () => {
+// ─── A1'' item 3: no REST write verbs on the table resource ──────────────────
+
+describe("A1'' item 3 — MemoryHostSource has no REST write verbs", () => {
+  it("(r1) a non-admin PUT for another agent's memory is refused and writes nothing", async () => {
     const t = makeTable(agentCtx("agent-b"));
-    const res: any = await t.post({ memoryId: "mem-9", hostSource: POINTER, authorId: "agent-a" });
-    expect(pointerStore.get("mem-9")?.authorId).toBe("agent-b"); // assertion: principal stamped, body ignored
-    expect(res.authorId).toBe("agent-b");
+    const res: any = await t.put({ memoryId: "mem-r1", hostSource: POINTER, scopeAtWrite: "shared", authorId: "agent-a" });
+    expect((res as Response)?.status).toBe(403); // assertion: refused
+    expect(pointerStore.has("mem-r1")).toBe(false); // assertion: nothing written
+  });
+
+  it("(r2) an admin PUT is refused too", async () => {
+    const t = makeTable(agentCtx("root", true));
+    const res: any = await t.put({ memoryId: "mem-r2", hostSource: POINTER });
+    expect((res as Response)?.status).toBe(403); // assertion: admin refused too
+    expect(pointerStore.has("mem-r2")).toBe(false); // assertion: nothing written
+    const p: any = await t.post({ memoryId: "mem-r2", hostSource: POINTER });
+    expect((p as Response)?.status).toBe(403); // assertion: post refused too
+    expect(pointerStore.has("mem-r2")).toBe(false); // assertion
+  });
+
+  it("(r3) PATCH and DELETE are refused", async () => {
+    const t = makeTable(agentCtx("root", true));
+    const p: any = await t.patch({ memoryId: "mem-r3", scopeAtWrite: "shared" });
+    expect((p as Response)?.status).toBe(403); // assertion: patch refused
+    const d: any = await t.delete("mem-r3");
+    expect((d as Response)?.status).toBe(403); // assertion: delete refused
   });
 });
 
@@ -191,5 +215,69 @@ describe("A1' — cascade: delete leaves no pointer row", () => {
     pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a" });
     await makeMemory(agentCtx("agent-a")).delete(row.id);
     expect(pointerStore.has(row.id)).toBe(false); // assertion: cascade deleted the pointer
+  });
+});
+
+// ─── A1'' item 1: the whitelist is MEASURED, so shipped attributes survive ────
+
+describe("A1'' item 1 — shipped attributes survive the guarded write", () => {
+  it("(w1) a full-row put keeps `type` and the three federation bookkeeping fields", async () => {
+    seedMemory({ id: "mem-w1", agentId: "agent-a" });
+    const m = makeMemory(agentCtx("agent-a"));
+    await m.put({
+      id: "mem-w1",
+      agentId: "agent-a",
+      content: "a short note",
+      visibility: "shared",
+      type: "session",
+      _originatorInstanceId: "inst-orig",
+      _syncedFrom: "inst-peer",
+      _syncedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const stored: any = memoryStore.get("mem-w1");
+    expect(stored.type).toBe("session"); // assertion: declared `type` kept
+    expect(stored._originatorInstanceId).toBe("inst-orig"); // assertion: federation bookkeeping kept
+    expect(stored._syncedFrom).toBe("inst-peer"); // assertion
+    expect(stored._syncedAt).toBe("2026-01-01T00:00:00.000Z"); // assertion
+  });
+
+  it("(w2) MemoryMaintenance still archives a type:'session' record written through the guarded path", async () => {
+    const old = new Date(Date.now() - 40 * 24 * 3600_000).toISOString();
+    const m = makeMemory(agentCtx("agent-a"));
+    const res: any = await m.post({
+      agentId: "agent-a",
+      content: "an old session note",
+      durability: "standard",
+      visibility: "private",
+      type: "session",
+      createdAt: old,
+    });
+    const id = res.id;
+    expect(memoryStore.get(id)?.type).toBe("session"); // assertion: the guard kept the declared `type`
+
+    const maint: any = new (MemoryMaintenance as any)();
+    maint.getContext = () => ({ request: { tpsAgent: "agent-a" } });
+    const out: any = await maint.post({});
+    expect(out.archived).toBe(1); // assertion: the archive branch still sees type === "session"
+    expect(memoryStore.get(id)?.archived).toBe(true); // assertion: the row was archived
+  });
+
+  it("(w3) the _reindex path strips an undeclared pointer-like field", async () => {
+    seedMemory({ id: "mem-w3", agentId: "agent-a", type: "session" });
+    const m = makeMemory({}); // internal ctx: the reindex bypass needs no agent actor
+    await m.put({
+      _reindex: true,
+      id: "mem-w3",
+      agentId: "agent-a",
+      content: "a short note",
+      visibility: "shared",
+      type: "session",
+      undeclaredProbe: "SENTINEL",
+      hostSource: POINTER,
+    });
+    const stored: any = memoryStore.get("mem-w3");
+    expect(stored.undeclaredProbe).toBeUndefined(); // assertion: an undeclared pointer-like field is stripped
+    expect(stored.hostSource).toBeUndefined(); // assertion: the pointer input is stripped
+    expect(stored.type).toBe("session"); // assertion: the declared field is kept
   });
 });

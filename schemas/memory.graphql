@@ -42,6 +42,12 @@ type Memory @table(database: "flair") {
   tags: [String] @indexed
   durability: String @indexed
   source: String
+  type: String                # flair#1940 A1'' item 1: declared from MEASURED data, not derived from the schema. A live
+                               # store (3,963 Memory rows) really carries `type` on 62% of rows — the client filters
+                               # on it and MemoryMaintenance archives `type === "session"`. Declaring it here is what
+                               # lets the declared-only whitelist (resources/memory-declared-attributes.ts) KEEP it on a
+                               # full-row write instead of stripping it. Nullable/additive — existing rows keep their
+                               # value, rows without it stay without it.
   createdAt: String! @indexed
   updatedAt: String
   expiresAt: String @indexed
