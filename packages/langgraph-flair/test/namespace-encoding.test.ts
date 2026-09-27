@@ -133,21 +133,26 @@ describe("flair#1939 round 2 — namespace label encoding is lossless", () => {
     expect(out.map((i) => i.namespace)).toEqual([["docs"]]); // assertion: old-form tag still matches
   });
 
-  it("(e7) listNamespaces applies matchConditions; an invalid label matches nothing", async () => {
+  it("(e7) The list-namespaces batch operation applies match conditions; invalid conditions reject previously stored invalid labels.", async () => {
     const { store } = storeWith([
       { id: "lg:agent1:docs/a:r1", content: "{}", tags: ["lg-ns:docs/a"], createdAt: "2026-01-01T00:00:00.000Z" },
       { id: "lg:agent1:docs/b:r2", content: "{}", tags: ["lg-ns:docs/b"], createdAt: "2026-01-01T00:00:00.000Z" },
       { id: "lg:agent1:other:r3", content: "{}", tags: ["lg-ns:other"], createdAt: "2026-01-01T00:00:00.000Z" },
+      // An earlier version could store a label that decodes with a `.` in it;
+      // this row's decoded namespace is ["old.name"].
+      { id: "lg:agent1:old.name:r4", content: "{}", tags: ["lg-ns:old.name"], createdAt: "2026-01-01T00:00:00.000Z" },
     ]);
     const all = (await store.batch([{ matchConditions: [], limit: 10, offset: 0 } as any]))[0];
-    expect(all.map((n: string[]) => n.join("/")).sort()).toEqual(["docs/a", "docs/b", "other"]); // assertion: no conditions → all
+    expect(all.map((n: string[]) => n.join("/")).sort()).toEqual(["docs/a", "docs/b", "old.name", "other"]); // assertion: no conditions → all (incl. the previously stored invalid label)
     const prefixed = (await store.batch([
       { matchConditions: [{ matchType: "prefix", path: ["docs"] }], limit: 10, offset: 0 } as any,
     ]))[0];
     expect(prefixed.map((n: string[]) => n.join("/")).sort()).toEqual(["docs/a", "docs/b"]); // assertion: prefix filter
+    // An invalid condition label matches nothing, so it cannot select the
+    // previously stored ["old.name"] row, whose label also contains ".".
     const invalid = (await store.batch([
-      { matchConditions: [{ matchType: "prefix", path: ["do.cs"] }], limit: 10, offset: 0 } as any,
+      { matchConditions: [{ matchType: "prefix", path: ["old.name"] }], limit: 10, offset: 0 } as any,
     ]))[0];
-    expect(invalid).toEqual([]); // assertion: a label containing "." matches nothing
+    expect(invalid).toEqual([]); // assertion: an invalid condition rejects the previously stored invalid label
   });
 });

@@ -28,11 +28,10 @@
  * are joined by `/`, and that string is the whole `lg-ns:` tag and the middle
  * of the id. LangGraph forbids `.` in namespace labels, so `.` is the escape
  * character: `/` is written `.2F` and `:` is written `.3A`, and every other
- * character is unchanged. A label without `/` or `:` therefore encodes to
- * itself, so items stored under such labels keep the same id and tag and need
- * no migration. A label that is empty, or that contains `.`, is invalid and is
- * refused before any id or tag is built. Both search paths filter on the
- * client: the queryless path lists the agent's full item set and matches the
+ * character is unchanged. Earlier items under valid labels without `/` or `:`
+ * retain their IDs and tags and need no migration. A label that is empty, or
+ * that contains `.`, is invalid and is refused before any id or tag is built.
+ * Both search paths filter on the client: the queryless path lists the agent's full item set and matches the
  * requested namespace PREFIX against the stored tag, and the semantic path
  * post-filters the namespace parsed from each id.
  *
@@ -43,8 +42,8 @@
  *   and embeds the full content blob. If you need per-field embedding,
  *   pre-extract the fields and put them as separate items.
  * - `search.filter` operators ($eq/$ne/$gt/$gte/$lt/$lte) are applied
- *   client-side after retrieving candidates, so filter-heavy workloads can
- *   incur a network round-trip per matching memory.
+ *   client-side after retrieving candidates. Filtering follows one backend
+ *   request, so large candidate sets can increase transfer and local processing.
  * - `listNamespaces` returns namespaces seen in the agent's stored memories.
  *   It can't enumerate empty namespaces.
  *
@@ -170,8 +169,8 @@ function nsTags(namespace: string[]): string[] {
  * `("a","b")` and `("a","b","c")`, but NOT `("a","bc")`, and a single label
  * `"a/b"` encodes to `a.2Fb` and does not match `("a",)`). An EMPTY prefix
  * matches every `lg-ns:` item, and a prefix with an invalid label matches
- * nothing. Items written under a label without `/` or `:` are covered with no
- * migration — their label encodes to itself, so the tag is unchanged.
+ * nothing. Earlier items under valid labels without `/` or `:` retain their
+ * IDs and tags and need no migration.
  */
 export function namespaceTagMatches(tags: unknown, prefix: string[]): boolean {
   if (!Array.isArray(tags)) return false;
@@ -193,9 +192,7 @@ function memoryId(agentId: string, namespace: string[], key: string): string {
 /**
  * flair#1939 — does a decoded namespace satisfy one listNamespaces match
  * condition? Mirrors LangGraph's own store: `matchType` is `prefix` or
- * `suffix`, `path` is the label pattern (a `*` element matches any label),
- * and a `path` label can never equal a stored label when it is invalid (a
- * valid stored label never contains `.`), so such a condition matches nothing.
+ * `suffix`, and `path` is the label pattern (a `*` element matches any label).
  */
 export function namespaceMatchesCondition(condition: any, namespace: string[]): boolean {
   const { matchType, path } = condition ?? {};
@@ -203,6 +200,9 @@ export function namespaceMatchesCondition(condition: any, namespace: string[]): 
     throw new Error(`listNamespaces: unsupported match type: ${matchType}`);
   }
   if (!Array.isArray(path) || path.length > namespace.length) return false;
+  // Validate condition labels before comparing them with decoded stored
+  // namespaces; an invalid condition matches nothing.
+  if (path.some((label: unknown) => label !== "*" && isInvalidLabel(label))) return false;
   const start = matchType === "prefix" ? 0 : namespace.length - path.length;
   return path.every((label: unknown, i: number) => label === "*" || namespace[start + i] === label);
 }

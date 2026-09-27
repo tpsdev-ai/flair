@@ -77,11 +77,11 @@ describe("flair#1939 — a parent-prefix search returns descendants", () => {
     expect(nsOf(out)).toEqual(["a/b", "a/bc", "docs"]); // assertion: all namespaces
   });
 
-  it("(d4) with 80 newer non-matching rows ahead of five matches, limit N returns N (no short page)", async () => {
+  it("(d4) With 80 non-matching rows ahead of five matches, limit N returns N.", async () => {
     const newerNonMatching = Array.from({ length: 80 }, (_, i) => row(["other"], `n${i}`));
     const matching = Array.from({ length: 5 }, (_, i) => row(["a", "b"], `m${i}`));
-    // Newer rows sort ahead of the matches, so an 80-row candidate cap would
-    // see only non-matching rows and return a short page.
+    // The mock returns the non-matching rows first, so an 80-row candidate cap
+    // sees no matches.
     const store = storeWith([...newerNonMatching, ...matching]);
     const out = await store.search(["a"], { limit: 5 });
     expect(out).toHaveLength(5); // assertion: a full page, not a short one
