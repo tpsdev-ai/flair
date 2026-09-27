@@ -130,14 +130,28 @@ describe("A1' — writers keep only declared attributes and only post/put write 
 });
 
 // ─── item 2: atomicity ──────────────────────────────────────────────────────
+//
+// A1'' item 2 replaces the compensating delete with the request transaction:
+// the pointer row is written with the request CONTEXT, so it stages into the
+// SAME transaction as the Memory row (both tables in database flair); on a
+// pointer failure the request transaction is ABORTED so NEITHER row commits.
+// The unit lane asserts the HANDLER-LEVEL mechanism — the 500 and that the
+// request transaction is aborted — and the DB outcome (no Memory row, and a
+// byte-identical pre-existing row) is proved against REAL Harper in
+// test/repro/host-source-txn-probe.ts, where the transaction actually exists.
+// A mock cannot roll back a Map, so a mock assertion on the store would be a
+// lie; we assert the abort that the real transaction acts on.
 
-describe("A1' — a failed pointer write fails the whole write", () => {
-  it("leaves no Memory row when the pointer store fails", async () => {
+describe("A1' — a failed pointer write aborts the request transaction", () => {
+  it("aborts the request transaction and returns 500 when the pointer store fails", async () => {
     harnessState.failNextPointerPut = true;
-    const m = makeMemory(agentCtx("agent-a"));
-    const res = await m.post({ id: "mem-atomic", content: "a short note", hostSource: POINTER });
+    let aborted = false;
+    const r: any = new (Memory as any)();
+    r.getContext = () => ({ request: agentCtx("agent-a"), transaction: { abort() { aborted = true; } } });
+    const res = await r.post({ id: "mem-atomic", content: "a short note", hostSource: POINTER });
     expect((res as Response)?.status).toBe(500); // assertion: the write fails
-    expect(memoryStore.has("mem-atomic")).toBe(false); // assertion: no orphan Memory row
+    expect(aborted).toBe(true); // assertion: the request transaction is aborted (nothing commits)
+    expect(harnessState.pointerStore.has("mem-atomic")).toBe(false); // assertion: no pointer row
   });
 });
 
@@ -331,6 +345,20 @@ describe("A1'' item 5 — partial PUT stamps scopeAtWrite from the effective vis
   });
 });
 
+// ─── adjudication A (round 4): a partial PUT must not widen a private record ──
+
+describe("adjudication A — a partial PUT carries the existing visibility into the row", () => {
+  it("(p2) a partial PUT of a PRIVATE record keeps it private (stored row + cross-agent read)", async () => {
+    seedMemory({ id: "mem-p2", agentId: "agent-a", visibility: "private" });
+    const m = makeMemory(agentCtx("agent-a"));
+    // Body OMITS visibility (the memory_update full-put shape).
+    await m.put({ id: "mem-p2", agentId: "agent-a", content: "still private" });
+    expect(memoryStore.get("mem-p2")?.visibility).toBe("private"); // assertion: the STORED row stays private
+    const other: any = await makeMemory(agentCtx("agent-b")).get("mem-p2");
+    expect((other as Response)?.status).toBe(404); // assertion: a cross-agent read returns nothing
+  });
+});
+
 // ─── A1'' item 6: round trip — reads return the validated object ──────────────
 
 describe("A1'' item 6 — a read-then-full-put round trip preserves the pointer", () => {
@@ -347,5 +375,70 @@ describe("A1'' item 6 — a read-then-full-put round trip preserves the pointer"
     const res: any = await m.put({ ...read });
     expect((res as Response)?.status).toBeUndefined(); // assertion: not a refusal
     expect(pointerStore.get(row.id)?.hostSource).toBe(JSON.stringify(POINTER)); // assertion: the pointer is preserved
+  });
+
+  // adjudication B (round 4): an echo must not NARROW a shared pointer or lose
+  // the URL's query/fragment.
+  it("(rt2) an echo of a SHARED pointer keeps it shared (not withheld) and preserves the URL exactly", async () => {
+    const stored = JSON.stringify({ v: 1, host: "openclaw", kind: "run", id: "run-bbbbbbbb", url: "https://example.com/path?q=1#frag" });
+    const row = seedMemory({ id: "mem-rt2", agentId: "agent-a", visibility: "shared" });
+    pointerStore.set(row.id, { memoryId: row.id, hostSource: stored, scopeAtWrite: "shared", authorId: "agent-a" });
+    const m = makeMemory(agentCtx("agent-a"));
+
+    const read: any = await m.get(row.id);
+    expect(read.hostSource.url).toBe("https://example.com/path"); // assertion: the read renders the URL with query+fragment stripped
+
+    await m.put({ ...read }); // echo the read row back
+
+    const after = pointerStore.get(row.id);
+    expect(after?.hostSource).toBe(stored); // assertion: the STORED pointer keeps the URL's query+fragment EXACTLY
+    expect(after?.scopeAtWrite).toBe("shared"); // assertion: the stored scope is preserved (not reset to author-only)
+
+    const other: any = await makeMemory(agentCtx("agent-b")).get(row.id);
+    expect(other.hostSource).not.toBe("withheld"); // assertion: a non-author still sees the pointer (echo did not narrow it)
+    expect(other.hostSource).toEqual({ v: 1, host: "openclaw", kind: "run", id: "run-bbbbbbbb", url: "https://example.com/path" }); // assertion
+  });
+});
+
+// ─── A1'' item 2 (cleanup): pointer cascade + orphan sweep ────────────────────
+
+describe("A1'' item 2 — pointer cleanup joins the write and the sweep removes orphans", () => {
+  const maint = () => {
+    const m: any = new (MemoryMaintenance as any)();
+    m.getContext = () => ({ request: { tpsAgent: "agent-a" } });
+    return m;
+  };
+
+  it("(c1) archiving a session record removes its pointer; a by-id get of the archived row shows none", async () => {
+    const old = new Date(Date.now() - 40 * 24 * 3600_000).toISOString();
+    seedMemory({ id: "mem-c1", agentId: "agent-a", durability: "standard", visibility: "private", type: "session", createdAt: old });
+    pointerStore.set("mem-c1", { memoryId: "mem-c1", hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a" });
+    const out: any = await maint().post({});
+    expect(out.archived).toBe(1); // assertion: the archive branch ran
+    expect(memoryStore.get("mem-c1")?.archived).toBe(true); // assertion: the row is archived
+    expect(pointerStore.has("mem-c1")).toBe(false); // assertion: the pointer row is removed
+    const byId: any = await makeMemory(agentCtx("agent-a")).get("mem-c1");
+    expect(byId.hostSource).toBeUndefined(); // assertion: the by-id get of the archived row shows no pointer
+  });
+
+  it("(c2) the orphan sweep removes a pointer whose Memory is missing", async () => {
+    pointerStore.set("mem-orphan", { memoryId: "mem-orphan", hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a" });
+    const out: any = await maint().post({});
+    expect(out.orphans).toBe(1); // assertion: one orphan swept
+    expect(pointerStore.has("mem-orphan")).toBe(false); // assertion: the orphan pointer row is gone
+  });
+
+  it("(c3) a failing pointer delete fails the Memory delete and aborts the request transaction", async () => {
+    const row = seedMemory({ id: "mem-c3", agentId: "agent-a" });
+    pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a" });
+    harnessState.failNextPointerDelete = true;
+    let aborted = false;
+    const r: any = new (Memory as any)();
+    r.getContext = () => ({ request: agentCtx("agent-a"), transaction: { abort() { aborted = true; } } });
+    const res: any = await r.delete("mem-c3");
+    expect((res as Response)?.status).toBe(500); // assertion: the delete fails
+    expect(aborted).toBe(true); // assertion: the request transaction is aborted (nothing commits)
+    // The mock Map cannot roll back; the no-delete outcome is proved against
+    // REAL Harper in test/repro/host-source-txn-probe.ts.
   });
 });

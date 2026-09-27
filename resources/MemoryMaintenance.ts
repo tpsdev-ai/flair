@@ -20,11 +20,14 @@
 import { Resource, databases } from "harper";
 import { MEMORY_HOST_SOURCE_TABLE } from "./memory-host-source.js";
 
-/** flair#1940 A1' item 6 — best-effort pointer cascade where a Memory row dies. */
-async function deletePointerRow(memoryId: string): Promise<void> {
+/** flair#1940 A1' item 6 (A1'' item 2) — pointer cascade where a Memory row is
+ *  archived or an orphan pointer is swept. The delete is passed the request
+ *  context so it JOINS the request transaction (both tables in database flair).
+ *  Failures are NOT swallowed: a throw propagates to the caller's error path. */
+async function deletePointerRowOrThrow(memoryId: string, ctx: any): Promise<void> {
   const table = (databases as any).flair?.[MEMORY_HOST_SOURCE_TABLE];
   if (!table?.delete) return;
-  await table.delete(memoryId);
+  await table.delete(memoryId, ctx);
 }
 import { isAdmin } from "./agent-auth.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
@@ -64,7 +67,7 @@ export class MemoryMaintenance extends Resource {
     }
 
     const now = new Date();
-    const stats = { expired: 0, archived: 0, total: 0, errors: 0, agent: targetAgent || "all" };
+    const stats = { expired: 0, archived: 0, total: 0, errors: 0, orphans: 0, agent: targetAgent || "all" };
 
     try {
       for await (const record of (databases as any).flair.Memory.search()) {
@@ -84,10 +87,9 @@ export class MemoryMaintenance extends Resource {
         ) {
           if (!dryRun) {
             try {
+              // Memory.delete() cascades its pointer row in the SAME request
+              // transaction (resources/Memory.ts) — no separate delete here.
               await (databases as any).flair.Memory.delete(record.id);
-              // flair#1940 A1' item 6: cascade — the pointer row dies with the
-              // Memory row.
-              await deletePointerRow(record.id).catch(() => {});
               // flair#1357 — ephemeral expiry removes the row from what the
               // lexical leg may score.
               noteMemoryDelete(record.id);
@@ -122,6 +124,11 @@ export class MemoryMaintenance extends Resource {
                 };
                 stripUndeclaredMemoryAttributes(archivedRow);
                 await (databases as any).flair.Memory.update(record.id, archivedRow);
+                // A1'' item 2: an archived record is not readable, so its
+                // pointer must go too. The delete joins this request's
+                // transaction; a failure is not swallowed (throws to the
+                // caller's error path below).
+                await deletePointerRowOrThrow(record.id, ctx);
                 // flair#1357 — an `archived` flip changes what the retrieval
                 // conditions (`archived not_equal true`) admit, so the lexical
                 // index has to see it, not just content writes.
@@ -133,6 +140,24 @@ export class MemoryMaintenance extends Resource {
             } else {
               stats.archived++;
             }
+          }
+        }
+      }
+
+      // 3. Orphan sweep: pointer rows whose Memory is MISSING or ARCHIVED. An
+      // orphan is unreadable by construction (the only read path joins pointers
+      // INTO Memory results), but it should not be left behind either. A
+      // failing sweep delete is NOT swallowed: it propagates to the caller's
+      // error path below (HTTP 500), never silently ignored.
+      const pointerTable = (databases as any).flair?.[MEMORY_HOST_SOURCE_TABLE];
+      if (pointerTable?.search && !dryRun) {
+        for await (const ptr of pointerTable.search()) {
+          const memoryId = ptr?.memoryId;
+          if (typeof memoryId !== "string" || memoryId.length === 0) continue;
+          const mem = await (databases as any).flair.Memory.get(memoryId);
+          if (!mem || mem.archived === true) {
+            await deletePointerRowOrThrow(memoryId, ctx);
+            stats.orphans++;
           }
         }
       }
@@ -153,6 +178,7 @@ export class MemoryMaintenance extends Resource {
       archived: stats.archived,
       total: stats.total,
       errors: stats.errors,
+      orphans: stats.orphans,
     };
   }
 }

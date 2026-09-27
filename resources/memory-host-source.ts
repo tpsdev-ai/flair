@@ -13,6 +13,7 @@
  *   - the federation refusal predicate (A1' item 5).
  */
 import { databases } from "harper";
+import { parseHostSource, validateHostSource } from "./host-source.js";
 import type { PointerRow } from "./host-source-visibility.js";
 
 /** The table name, so callers and tests never re-type it as a literal. */
@@ -80,6 +81,36 @@ export function buildPointerRow(args: {
 
 function pointerTable(): any {
   return (databases as any).flair?.[MEMORY_HOST_SOURCE_TABLE];
+}
+
+/** Reduce a URL to scheme/host/path (drop query + fragment), or leave a
+ *  non-parseable value unchanged. Mirrors host-source-visibility.ts's render. */
+function renderedUrl(url: string | undefined): string | undefined {
+  if (url === undefined) return undefined;
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.host}${u.pathname}`;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * flair#1940 A1'' item 6 (adjudication B) — is an incoming hostSource an ECHO of
+ * the STORED pointer? A read renders the pointer OBJECT with any URL reduced to
+ * scheme/host/path (query + fragment stripped) and without the stored
+ * scopeAtWrite, so a read-then-full-PUT echoes that rendered object. Detect it
+ * by comparing v/host/kind/id and the RENDERED urls: an echo must not replace
+ * (and thereby narrow / de-query) the stored pointer.
+ */
+export function isPointerEchoOf(input: unknown, storedCanonical: string | null | undefined): boolean {
+  const stored = parseHostSource(storedCanonical);
+  if (!stored) return false;
+  const incoming = validateHostSource(input);
+  if (!incoming.ok) return false;
+  const a = incoming.value;
+  if (a.v !== stored.v || a.host !== stored.host || a.kind !== stored.kind || a.id !== stored.id) return false;
+  return renderedUrl(a.url) === renderedUrl(stored.url);
 }
 
 /**

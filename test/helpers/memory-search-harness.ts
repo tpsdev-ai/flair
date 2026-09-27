@@ -21,6 +21,7 @@ export const harnessState = {
   instanceRow: null as any,
   pointerSearchCalls: 0,
   failNextPointerPut: false,
+  failNextPointerDelete: false,
 };
 
 export function resetHarnessState(): void {
@@ -29,6 +30,7 @@ export function resetHarnessState(): void {
   harnessState.instanceRow = null;
   harnessState.pointerSearchCalls = 0;
   harnessState.failNextPointerPut = false;
+  harnessState.failNextPointerDelete = false;
 }
 
 export function matchesCondition(record: any, cond: any): boolean {
@@ -129,6 +131,10 @@ function mhsPut(row: any) {
   return Promise.resolve({ ...row });
 }
 function mhsDelete(id: any) {
+  if (harnessState.failNextPointerDelete) {
+    harnessState.failNextPointerDelete = false;
+    return Promise.reject(new Error("boom: pointer delete down"));
+  }
   harnessState.pointerStore.delete(typeof id === "string" ? id : id?.memoryId);
   return Promise.resolve({ ok: true });
 }
@@ -165,6 +171,13 @@ export class BaseMemoryHostSource {
   post(r: any) {
     return mhsPut(r);
   }
+  // A1'' item 3 (adjudication C): the mock must MODEL patch (write-through)
+  // so the r3 assertion is BEHAVIOURAL — it passes only because the resource
+  // override refuses, and would go RED (a row written) if that override were
+  // removed, rather than erroring on a missing method.
+  patch(r: any) {
+    return mhsPut(r);
+  }
   delete(id: any) {
     return mhsDelete(id);
   }
@@ -178,6 +191,9 @@ export class BaseMemoryHostSource {
     return mhsPut(r);
   }
   static post(r: any) {
+    return mhsPut(r);
+  }
+  static patch(r: any) {
     return mhsPut(r);
   }
   static delete(id: any) {

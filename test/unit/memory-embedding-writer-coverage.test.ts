@@ -87,8 +87,8 @@ add("Memory", ["writer:table.put#1", "writer:table.delete#1"], "OTHER_TABLE",
   "MemoryHostSource pointer row (A1') — not the Memory table, never an embeddingModel.");
 add("MemoryMaintenance", ["writer:table.delete#1"], "OTHER_TABLE",
   "MemoryHostSource pointer cascade (A1') — not the Memory table, never an embeddingModel.");
-add("Memory", ["writer:patchRecord#1", "writer:super.patch#1", "writer:super.delete#1", "writer:super.delete#2", "writer:super.delete#3"], "NON_EMBED",
-  "derivedFrom/lastReflected patch, patch(), delete(), and the A1' pointer-write rollback deletes — never write embeddingModel.");
+add("Memory", ["writer:patchRecord#1", "writer:super.patch#1", "writer:super.delete#1"], "NON_EMBED",
+  "derivedFrom/lastReflected patch, patch(), delete() — never write embeddingModel.");
 add("MemoryReflect", ["writer:patchRecordSilent#1"], "NON_EMBED", "lastReflected stamp — partial, non-embedding.");
 add("hit-tracking", [
   "writer:this.pending.delete#1",

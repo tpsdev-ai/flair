@@ -16,6 +16,7 @@ import { validateHostSource } from "./host-source.js";
 import {
   buildPointerRow,
   extractPointerInputs,
+  isPointerEchoOf,
   loadPointerRows,
   MEMORY_HOST_SOURCE_TABLE,
 } from "./memory-host-source.js";
@@ -47,7 +48,7 @@ import { attachTrust } from "./trust-block.js";
 import { recordCitations } from "./usage-recording.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 import { applyHitStats, clearHitStats, overlayHitStatsResult } from "./hit-tracking.js";
-import { projectHostSource } from "./host-source-visibility.js";
+import { projectHostSource, type PointerRow } from "./host-source-visibility.js";
 import { refuseStaleClientWrite, stripClientVersionPassthrough } from "./client-version-gate.js";
 
 /** flair#1940 A1' — a named 400 for an invalid host pointer (reject, never
@@ -80,8 +81,9 @@ function buildPointerForWrite(args: {
   memoryId: string;
   visibility: string | null | undefined;
   auth: AgentAuthVerdict;
+  storedPointer?: PointerRow | null;
 }): { row: ReturnType<typeof buildPointerRow> | null; denial?: Response } {
-  const { inputs, memoryId, visibility, auth } = args;
+  const { inputs, memoryId, visibility, auth, storedPointer } = args;
   if (inputs.hostSource === undefined || inputs.hostSource === null) {
     if (inputs.hostSourceScope !== undefined) {
       return { row: null, denial: hostSourceBadRequest("invalid_host_source_scope", "hostSourceScope requires a hostSource") };
@@ -90,6 +92,15 @@ function buildPointerForWrite(args: {
   }
   const hs = validateHostSource(inputs.hostSource);
   if (!hs.ok) return { row: null, denial: hostSourceBadRequest("invalid_host_source", hs.error) };
+  // Adjudication B (round 4): an ECHO of the unchanged stored pointer (a
+  // read-then-full-PUT that omits hostSourceScope) must keep the stored pointer
+  // row AND its scopeAtWrite — otherwise the echo would replace the row with a
+  // scope-less (author-only) pointer and lose the URL's query/fragment. No
+  // hostSourceScope opt-in is treated as an echo too: the client is echoing,
+  // not opting in anew.
+  if (inputs.hostSourceScope === undefined && storedPointer && isPointerEchoOf(inputs.hostSource, storedPointer.hostSource)) {
+    return { row: null };
+  }
   let scopeAtWrite: string | null = null;
   if (inputs.hostSourceScope !== undefined) {
     if (inputs.hostSourceScope !== "record") {
@@ -114,46 +125,88 @@ function buildPointerForWrite(args: {
   };
 }
 
+/** A fixed 500 body for a pointer that could not be persisted. The RESPONSE
+ *  carries only a fixed message, never the raw error/stack (CodeQL:
+ *  information exposure through a stack trace). */
+function hostSourcePersistFailure(message: string): Response {
+  return new Response(JSON.stringify({ error: "host_source_persist_failed", message }), {
+    status: 500,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 /**
- * flair#1940 A1' item 2 — persist the pointer row in the SAME request
- * transaction as the Memory row (no detached txn between). A pointer that
- * cannot be persisted fails the WHOLE write: the just-written Memory row is
- * removed so no Memory row without its pointer survives, and a 500 is
- * returned. Returns null on success.
+ * Abort the request's open transaction so the Memory row staged into it is
+ * rolled back with the failed pointer row (flair#1940 A1' item 2). This is
+ * exactly harper 5.2.8's `transaction.abort(context)` (dist/resources/
+ * transaction.js): resolve `context.transaction` and abort it. The module is
+ * not importable as a named export of the `harper` package (its exports map
+ * exposes only "."), so we call the transaction object the context already
+ * carries. A context with no open transaction has nothing to abort (the unit
+ * lane's hand-built contexts).
  */
-async function persistPointerRow(
-  row: ReturnType<typeof buildPointerRow>,
-  removeMemoryRow: () => Promise<unknown>,
-): Promise<Response | null> {
-  const table = hostSourceTable();
-  if (!table?.put) {
-    await removeMemoryRow().catch(() => {});
-    return new Response(JSON.stringify({ error: "host_source_persist_failed", message: "MemoryHostSource table unavailable" }), {
-      status: 500,
-      headers: { "content-type": "application/json" },
-    });
-  }
+function abortRequestTransaction(ctx: any): void {
+  const txn = ctx?.transaction;
+  if (!txn || typeof txn.abort !== "function") return;
   try {
-    await table.put(row);
-    return null;
+    txn.abort();
   } catch (err) {
-    await removeMemoryRow().catch(() => {});
-    // The failure is logged server-side; the RESPONSE carries only a fixed
-    // message, never the raw error/stack (CodeQL: information exposure through
-    // a stack trace). A7 still holds: no silent loss — the write fails.
-    console.error("Memory: host-source pointer persist failed (write aborted)", err);
-    return new Response(JSON.stringify({ error: "host_source_persist_failed", message: "host-source pointer could not be persisted" }), {
-      status: 500,
-      headers: { "content-type": "application/json" },
-    });
+    console.error("Memory: failed to abort the request transaction after a pointer persist failure", err);
   }
 }
 
-/** flair#1940 A1' item 6 — best-effort pointer cascade where a Memory row dies. */
-async function deletePointerRow(memoryId: string): Promise<void> {
+/**
+ * flair#1940 A1' item 2 — persist the pointer row in the SAME request
+ * transaction as the Memory row. The request context is passed to the table
+ * write so Harper's `txnForContext` joins the write to the request's open
+ * transaction (`context.transaction`, joinable) instead of opening its own —
+ * both tables live in database flair, so both rows commit together or not at
+ * all. On failure the request transaction is ABORTED, so the already-staged
+ * Memory row never commits, and the fixed 500 body is returned. There is no
+ * compensating delete: the transaction is the mechanism. Returns null on
+ * success.
+ */
+async function persistPointerRow(
+  row: ReturnType<typeof buildPointerRow>,
+  ctx: any,
+): Promise<Response | null> {
   const table = hostSourceTable();
-  if (!table?.delete) return;
-  await table.delete(memoryId);
+  if (!table?.put) {
+    abortRequestTransaction(ctx);
+    return hostSourcePersistFailure("MemoryHostSource table unavailable");
+  }
+  try {
+    await table.put(row, ctx);
+    return null;
+  } catch (err) {
+    // Abort the request transaction so NEITHER row commits, then fail the
+    // write. No silent loss (A7): the write fails loudly.
+    abortRequestTransaction(ctx);
+    console.error("Memory: host-source pointer persist failed (write aborted)", err);
+    return hostSourcePersistFailure("host-source pointer could not be persisted");
+  }
+}
+
+/** flair#1940 A1' item 6 (A1'' item 2) — cascade: delete the pointer row where a
+ *  Memory row dies. The delete is passed the request context so it JOINS the
+ *  request transaction (both tables in database flair), so a failing pointer
+ *  delete fails the whole operation atomically; failures are NEVER swallowed.
+ *  Returns null on success, a fixed 500 body on failure (after aborting the
+ *  request transaction so nothing commits). */
+async function deletePointerRow(memoryId: string, ctx: any): Promise<Response | null> {
+  const table = hostSourceTable();
+  if (!table?.delete) return null;
+  try {
+    await table.delete(memoryId, ctx);
+    return null;
+  } catch (err) {
+    abortRequestTransaction(ctx);
+    console.error("Memory: host-source pointer delete failed (delete aborted)", err);
+    return new Response(JSON.stringify({ error: "host_source_delete_failed", message: "host-source pointer could not be deleted" }), {
+      status: 500,
+      headers: { "content-type": "application/json" },
+    });
+  }
 }
 
 /** flair#1940 A1' — apply the gated join to ONE record for a reader. */
@@ -1092,7 +1145,7 @@ export class Memory extends (databases as any).flair.Memory {
     // cannot be persisted removes the just-written row and fails the write.
     if (pointer.row) {
       pointer.row.memoryId = (result as any)?.id ?? content.id ?? "";
-      const persistDenial = await persistPointerRow(pointer.row, () => super.delete(pointer.row!.memoryId));
+      const persistDenial = await persistPointerRow(pointer.row, ctx);
       if (persistDenial) return persistDenial;
     }
     // flair#1357 — read-your-write for the lexical leg. The table change feed
@@ -1454,7 +1507,31 @@ export class Memory extends (databases as any).flair.Memory {
     // EFFECTIVE visibility — the existing row's when the body omits it — not
     // from an undefined body value that would wrongly yield author-only.
     const effectiveVisibility = content.visibility ?? preExisting?.visibility;
-    const pointer = buildPointerForWrite({ inputs: pointerInputs, memoryId: content.id ?? "", visibility: effectiveVisibility, auth });
+    // Adjudication A (round 4): Harper put() is a FULL REPLACEMENT, and the read
+    // side treats a MISSING visibility as non-private. So a partial PUT that
+    // omits `visibility` (e.g. a memory_update full put) would silently WIDEN a
+    // private memory — its content becomes readable by every other agent. Carry
+    // the pre-existing row's visibility into the written row so the STORED
+    // visibility matches the effective visibility the pointer scope is stamped
+    // from. Only when the body omitted it; an explicit visibility always wins.
+    if (
+      (content.visibility === undefined || content.visibility === null) &&
+      preExisting?.visibility !== undefined && preExisting?.visibility !== null
+    ) {
+      content.visibility = preExisting.visibility;
+    }
+    // Adjudication B (round 4): load the stored pointer row so an echo of it is
+    // recognised and not replaced (see buildPointerForWrite).
+    let storedPointer: PointerRow | null = null;
+    if (
+      content.id &&
+      pointerInputs.hostSource !== undefined &&
+      pointerInputs.hostSource !== null &&
+      pointerInputs.hostSourceScope === undefined
+    ) {
+      storedPointer = (await loadPointerRows([content.id])).get(content.id) ?? null;
+    }
+    const pointer = buildPointerForWrite({ inputs: pointerInputs, memoryId: content.id ?? "", visibility: effectiveVisibility, auth, storedPointer });
     if (pointer.denial) return pointer.denial;
 
     // Write-time provenance stamp (memory-provenance slice 1) — see
@@ -1488,7 +1565,7 @@ export class Memory extends (databases as any).flair.Memory {
     // post()). A pointer that cannot be persisted fails the whole put.
     if (pointer.row) {
       pointer.row.memoryId = (result as any)?.id ?? content.id ?? "";
-      const persistDenial = await persistPointerRow(pointer.row, () => super.delete(pointer.row!.memoryId));
+      const persistDenial = await persistPointerRow(pointer.row, ctx);
       if (persistDenial) return persistDenial;
     }
     // flair#1357 — read-your-write for the lexical leg (see post()).
@@ -1512,7 +1589,8 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   async delete(id: any) {
-    const auth = await resolveAgentAuth((this as any).getContext?.());
+    const ctx = (this as any).getContext?.();
+    const auth = await resolveAgentAuth(ctx);
     if (auth.kind === "anonymous") return UNAUTH();
     // Read stored ownership, not the read-scoped get() response. Enforce here
     // as well as middleware so MCP/in-process callers have the same policy.
@@ -1526,9 +1604,13 @@ export class Memory extends (databases as any).flair.Memory {
     noteMemoryDelete(id);
     const deletedId = typeof id === "string" ? id : record?.id;
     if (typeof deletedId === "string" && deletedId.length > 0) {
-      await clearHitStats(deletedId, (this as any).getContext?.()).catch(() => {});
-      // A1' item 6: cascade — the pointer row dies with its Memory row.
-      await deletePointerRow(deletedId).catch(() => {});
+      await clearHitStats(deletedId, ctx).catch(() => {});
+      // A1' item 6 (A1'' item 2): cascade — the pointer row dies with its
+      // Memory row, in the SAME request transaction. A failing pointer delete
+      // fails the WHOLE delete: the request transaction is aborted and a 500
+      // returned, so neither row is deleted. Failures are NOT swallowed.
+      const pointerDenial = await deletePointerRow(deletedId, ctx);
+      if (pointerDenial) return pointerDenial;
     }
     return deleted;
   }
