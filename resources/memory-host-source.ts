@@ -92,11 +92,12 @@ export async function loadPointerRows(ids: readonly string[]): Promise<Map<strin
   if (wanted.length === 0) return map;
   const table = pointerTable();
   if (!table?.search) return map;
-  // ONE search: an OR of exact-id conditions (a batched IN, never N queries).
-  const query = {
-    operator: "or",
-    conditions: wanted.map((id) => ({ attribute: "memoryId", comparator: "equals", value: id })),
-  };
+  // Harper refuses an `or` with fewer than two conditions, so a single id uses
+  // a plain equals condition and a set uses an `or`. Either way it is ONE call.
+  const query =
+    wanted.length === 1
+      ? { conditions: [{ attribute: "memoryId", comparator: "equals", value: wanted[0] }] }
+      : { operator: "or", conditions: wanted.map((id) => ({ attribute: "memoryId", comparator: "equals", value: id })) };
   const result = table.search(query);
   for await (const row of result as AsyncIterable<PointerRow>) {
     if (row && typeof (row as PointerRow).memoryId === "string") map.set((row as PointerRow).memoryId, row);

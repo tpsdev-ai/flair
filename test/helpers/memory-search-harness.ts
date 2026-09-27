@@ -110,8 +110,13 @@ function mhsDelete(id: any) {
 }
 function mhsSearch(query?: any) {
   harnessState.pointerSearchCalls++;
-  let records = Array.from(harnessState.pointerStore.values());
   const conds = Array.isArray(query?.conditions) ? query.conditions : [];
+  // Harper refuses an `or` with fewer than two conditions — mirror that so a
+  // single-id lookup that wrongly emits an `or` fails here rather than in CI.
+  if (query?.operator === "or" && conds.length < 2) {
+    throw new Error('An "or" operator requires at least two conditions');
+  }
+  let records = Array.from(harnessState.pointerStore.values());
   if (conds.length > 0) records = records.filter((r) => conds.every((c: any) => matchesCondition(r, c)));
   return (async function* gen() {
     for (const r of records) yield r;
