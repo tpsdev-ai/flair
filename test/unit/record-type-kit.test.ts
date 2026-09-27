@@ -34,6 +34,7 @@ const {
   makeAuthGate,
   makeReadScope,
   makeByIdReadGate,
+  makeScopedSearch,
   resolveAuthGate,
   stampAttribution,
   buildProvenance,
@@ -477,5 +478,42 @@ describe("stampAttribution — field parameterization (authorId, not just agentI
     const result = stampAttribution({ kind: "agent", agentId: "attacker", isAdmin: false }, content, "authorId", "validate-strict", "authorId mismatch");
     expect(result.denied).toBeDefined();
     expect(content.agentId).toBeUndefined(); // only authorId touched
+  });
+});
+
+// ─── makeScopedSearch: query composition ────────────────────────────────────
+
+describe("makeScopedSearch — the scope is the outermost AND; caller conditions are kept", () => {
+  const scope = { attribute: "agentId", comparator: "equals", value: "me" };
+  const readScope = async () => ({ condition: scope, isAllowed: () => true });
+  const compose = async (query: any) => {
+    let seen: any;
+    await makeScopedSearch(readScope)("me", query, (q: any) => (seen = q));
+    return seen;
+  };
+  const a = { attribute: "x", comparator: "equals", value: 1 };
+  const b = { attribute: "y", comparator: "equals", value: 2 };
+
+  it("no query, an empty array or empty conditions → just the scope", async () => {
+    for (const q of [undefined, [], { conditions: [] }, { operator: "or" }]) {
+      expect(await compose(q)).toMatchObject({ conditions: [scope], operator: "and" });
+    }
+  });
+
+  it("one caller condition sits directly under the outer AND, whatever the caller's operator", async () => {
+    expect(await compose({ operator: "or", conditions: [a] })).toMatchObject({ conditions: [scope, a], operator: "and" });
+    expect(await compose([a])).toMatchObject({ conditions: [scope, a], operator: "and" });
+  });
+
+  it("a single condition object (not an array) is kept", async () => {
+    expect(await compose({ conditions: a })).toMatchObject({ conditions: [scope, a], operator: "and" });
+  });
+
+  it("several caller conditions keep the caller's operator inside their own group", async () => {
+    expect(await compose({ operator: "or", conditions: [a, b], limit: 5 })).toMatchObject({
+      conditions: [scope, { conditions: [a, b], operator: "or" }],
+      operator: "and",
+      limit: 5,
+    });
   });
 });

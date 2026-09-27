@@ -4,7 +4,7 @@ import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { makeByIdReadGate, makeReadScope, makeScopedSearch } from "./record-type-kit.js";
 
 // Owner-only read scope, applied through the shared by-id gate and scoped search
-// (the same helpers Relationship.ts uses).
+// (resources/record-type-kit.ts).
 const integrationReadScope = makeReadScope("owner-only", "agentId");
 const integrationByIdReadGate = makeByIdReadGate(integrationReadScope);
 const integrationScopedSearch = makeScopedSearch(integrationReadScope);

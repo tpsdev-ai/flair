@@ -11,6 +11,8 @@ const stores: Record<string, Map<string, any>> = {};
 
 function matches(record: any, cond: any): boolean {
   if (cond && Array.isArray(cond.conditions)) {
+    // Harper's planner rejects a one-condition `or` group.
+    if (cond.operator === "or" && cond.conditions.length === 1) throw new Error("one-condition or group");
     const results = cond.conditions.map((c: any) => matches(record, c));
     return cond.operator === "or" ? results.some(Boolean) : results.every(Boolean);
   }
@@ -27,7 +29,10 @@ function baseFor(name: string) {
     search(query?: any) {
       const q = Array.isArray(query)
         ? { operator: "and", conditions: query }
-        : { operator: query?.operator ?? "and", conditions: Array.isArray(query?.conditions) ? query.conditions : [] };
+        : {
+            operator: query?.operator ?? "and",
+            conditions: Array.isArray(query?.conditions) ? query.conditions : query?.conditions ? [query.conditions] : [],
+          };
       const rows = Array.from(stores[name].values()).filter((r) => q.conditions.length === 0 || matches(r, q));
       async function* gen() {
         for (const r of rows) yield r;
@@ -98,6 +103,26 @@ describe("a caller-supplied top-level operator cannot widen the read scope", () 
   it("MemoryGrant: a party reads its grants; a non-party reads none", async () => {
     expect(await ids(await as(MemoryGrant, "agent-b").search(orQuery("g-ab")))).toEqual(["g-ab"]);
     expect(await ids(await as(MemoryGrant, "agent-b").search(orQuery("g-cd")))).toEqual([]);
+  });
+});
+
+describe("the caller's conditions are kept and still narrow", () => {
+  it("a single condition object (not an array) filters the owner's rows", async () => {
+    stores.Integration.set("int-a2", { id: "int-a2", agentId: "agent-a", platform: "z" });
+    const one = { conditions: { attribute: "platform", comparator: "equals", value: "z" } };
+    expect(await ids(await as(Integration, "agent-a").search(one))).toEqual(["int-a2"]);
+  });
+
+  it("several caller conditions keep the caller's operator inside their own group", async () => {
+    stores.Integration.set("int-a2", { id: "int-a2", agentId: "agent-a", platform: "z" });
+    const two = {
+      operator: "or",
+      conditions: [
+        { attribute: "platform", comparator: "equals", value: "x" },
+        { attribute: "platform", comparator: "equals", value: "y" },
+      ],
+    };
+    expect(await ids(await as(Integration, "agent-a").search(two))).toEqual(["int-a"]);
   });
 });
 

@@ -336,29 +336,32 @@ export function makeScopedSearch(
     const scope = await readScope(agentId);
     const agentCondition = scope.condition;
 
-    // Object with a conditions array — nest caller's conditions inside the
-    // scope condition as the outermost AND block so a caller-supplied
-    // `operator: "or"` cannot boolean-inject past the owner scope.
+    // The caller's conditions as an array. Harper accepts `conditions` as an
+    // array or as a single condition object; both are kept.
+    const callerConditions = (list: any): any[] =>
+      Array.isArray(list) ? list : list && typeof list === "object" ? [list] : [];
+
+    // The scope is always the OUTERMOST `and`, so a caller-supplied
+    // `operator: "or"` can only combine the caller's own conditions and never
+    // widens past the scope. A lone caller condition sits directly under that
+    // `and` (Harper's planner rejects a one-condition group); several keep the
+    // caller's operator inside their own group.
+    const compose = (conds: any[], operator: any): any[] =>
+      conds.length === 0
+        ? [agentCondition]
+        : conds.length === 1
+          ? [agentCondition, conds[0]]
+          : [agentCondition, { conditions: conds, operator: operator || "and" }];
+
     if (query && typeof query === "object" && !Array.isArray(query)) {
-      if (Array.isArray(query.conditions) && query.conditions.length > 0) {
-        return superSearch({
-          ...query,
-          conditions: [agentCondition, { conditions: query.conditions, operator: query.operator || "and" }],
-          operator: "and",
-        });
-      }
-      // No (or empty) conditions array — just scope, preserving other query
-      // properties but NOT a caller-supplied operator (force "and").
-      const { conditions: _c, operator: _o, ...rest } = query;
-      return superSearch({ ...rest, conditions: [agentCondition], operator: "and" });
+      // Preserve other query properties (select, limit, sort, ...) but never a
+      // caller-supplied top-level operator.
+      const { conditions, operator, ...rest } = query;
+      return superSearch({ ...rest, conditions: compose(callerConditions(conditions), operator), operator: "and" });
     }
 
-    // Plain array or no query — wrap in an object with operator "and" so
-    // the scope condition is always the outermost AND.
-    const conditions = Array.isArray(query) && query.length > 0
-      ? [agentCondition, { conditions: query, operator: "and" }]
-      : [agentCondition];
-    return superSearch({ conditions, operator: "and" });
+    // Plain array or no query.
+    return superSearch({ conditions: compose(callerConditions(query), "and"), operator: "and" });
   };
 }
 
