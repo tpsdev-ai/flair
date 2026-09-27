@@ -1,11 +1,4 @@
-- **The session-start hook writes one line to stderr when a bootstrap fails, naming auth, timeout or unreachable, so the failure is no longer swallowed.**
-  The hook catches every bootstrap error and still returns its inert no-op payload
-  on stdout with the same exit code — a failure never blocks the session — but it
-  now writes one line to STDERR: `flair session-start: bootstrap failed (<kind>);
-  this session starts without Flair context. Next: run `flair doctor`, and check
-  FLAIR_URL and this agent's key.` `<kind>` is `auth` (401/403), `timeout`, or
-  `unreachable`, from what the error carries. The line never contains a key,
-  token, password or Authorization value. The same path serves Claude Code and
-  Codex; the Codex install keeps stderr visible, so the failure is now visible.
+- **The session-start hook writes one line to stderr when a bootstrap fails, naming the failure kind, so the failure is no longer silent.**
+  A failed bootstrap still never blocks the session: the hook exits 0, and stdout carries the continuity resume hint when that separate lookup succeeds, or the inert `{}` payload otherwise. The new stderr line names the kind and the next step (run `flair doctor`, then check FLAIR_URL and this agent's key). The kind is `auth` for an HTTP 401 or 403, `http-<status>` for any other HTTP status, `timeout` when the hook's own bootstrap timer fires or the error is a `TimeoutError`, and `unreachable` otherwise. The line is a fixed template with only the kind filled in, so it never contains a key, token, password, Authorization value, URL or response body. A failed stderr write is ignored. The Codex hook command keeps stderr, so Codex shows the line; the Claude Code hook command discards stderr, so Claude Code does not show it.
 
   (Refs #1943)
