@@ -241,7 +241,14 @@ describe("flair bridge import: the signed Memory path equals the sent path (#197
 
   it("a base URL with a query string or fragment is refused with ZERO requests", async () => {
     writeFileSync(join(dir, "records.jsonl"), JSON.stringify({ id: RAW_ID, text: "hello there" }) + "\n");
-    for (const base of [`${mockUrl}/?tenant=1`, `${mockUrl}/#frag`]) {
+    for (const base of [
+      `${mockUrl}/?tenant=1`,
+      `${mockUrl}/#frag`,
+      `${mockUrl}/?`, // bare ": new URL reports an empty search
+      `${mockUrl}/#`, // bare "#": empty hash
+      `${mockUrl}/flair?`, // bare delimiter AND a base path
+      `${mockUrl}/flair#`,
+    ]) {
       const before = requestCount;
       const res = await runCli(
         ["bridge", "import", BRIDGE_NAME, "--agent", AGENT, "--cwd", dir, "--url", base, "--key", keyPath],
@@ -253,5 +260,33 @@ describe("flair bridge import: the signed Memory path equals the sent path (#197
       expect(res.stderr).toContain(base); // assertion: the base URL is named
       expect(res.stderr).toMatch(/query string or fragment/); // assertion: the rule is named
     }
+  }, 25_000);
+
+  it("a dry-run or empty import refuses a base URL with a query string or fragment", async () => {
+    // Dry run: refused before the (skipped) import loop.
+    writeFileSync(join(dir, "records.jsonl"), JSON.stringify({ id: RAW_ID, text: "hello there" }) + "\n");
+    let before = requestCount;
+    let res = await runCli(
+      ["bridge", "import", BRIDGE_NAME, "--agent", AGENT, "--cwd", dir, "--url", `${mockUrl}/flair?`, "--key", keyPath, "--dry-run"],
+      { HOME: scratch },
+      dir,
+    );
+    expect(requestCount).toBe(before); // assertion: dry run sent nothing
+    expect(res.code).not.toBe(0); // assertion: dry run refused the base
+    expect(res.stderr).toContain(`${mockUrl}/flair?`); // assertion: the base URL is named
+    expect(res.stderr).toMatch(/query string or fragment/); // assertion: the rule is named
+
+    // Empty import: no records, still refused before the (empty) loop.
+    writeFileSync(join(dir, "records.jsonl"), "");
+    before = requestCount;
+    res = await runCli(
+      ["bridge", "import", BRIDGE_NAME, "--agent", AGENT, "--cwd", dir, "--url", `${mockUrl}/flair#`, "--key", keyPath],
+      { HOME: scratch },
+      dir,
+    );
+    expect(requestCount).toBe(before); // assertion: empty import sent nothing
+    expect(res.code).not.toBe(0); // assertion: empty import refused the base
+    expect(res.stderr).toContain(`${mockUrl}/flair#`); // assertion: the base URL is named
+    expect(res.stderr).toMatch(/query string or fragment/); // assertion: the rule is named
   }, 25_000);
 });

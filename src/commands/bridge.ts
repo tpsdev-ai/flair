@@ -176,6 +176,20 @@ export function register(program: Command): void {
       }
 
       const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
+
+      // A Flair base URL is an origin with an optional path; a query string or
+      // fragment on the base is refused before anything is imported — including
+      // for an empty or dry-run import, and including a bare trailing "?" or "#"
+      // (new URL reports those as an empty search/hash, but the join would drop
+      // the base's path). The route's own query string is what gets signed. #1970.
+      {
+        const parsedBase = new URL(baseUrl);
+        if (parsedBase.href.includes("?") || parsedBase.href.includes("#")) {
+          console.error(`Bridge import failed: refusing base URL "${baseUrl}": a Flair base URL must not carry a query string or fragment.`);
+          process.exit(1);
+        }
+      }
+
       const ctx = makeContext({ bridge: name });
 
       // Memory POST: Ed25519-signed when an agent key is available, fall back
@@ -191,13 +205,6 @@ export function register(program: Command): void {
         // request actually carries (#1970); ids of ordinary characters address
         // the same record as before.
         const memoryPath = `/Memory/${encodeRecordId(body.id)}`;
-        // A Flair base URL is an origin with an optional path. A query string or
-        // fragment on the base is refused before any request (it is the route's
-        // own query string that is signed). #1970.
-        const parsedBase = new URL(baseUrl);
-        if (parsedBase.search || parsedBase.hash) {
-          throw new Error(`refusing base URL "${baseUrl}": a Flair base URL must not carry a query string or fragment.`);
-        }
         const memoryUrl = new URL(memoryPath.replace(/^\/+/, ""), `${baseUrl.replace(/\/+$/, "")}/`);
         const signedPath = `${memoryUrl.pathname}${memoryUrl.search}`;
         if (keyPath) {

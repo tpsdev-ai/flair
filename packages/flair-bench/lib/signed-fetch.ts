@@ -70,7 +70,9 @@ export async function signedFetch(
   // request actually carries (#1970). A base URL with a query string or fragment
   // is refused before any request; the route's own query is what gets signed.
   const parsedBase = new URL(harper.httpURL);
-  if (parsedBase.search || parsedBase.hash) {
+  // A bare trailing "?" or "#" reports an empty search/hash but still makes the
+  // join drop the base's path, so refuse ANY query or fragment delimiter.
+  if (parsedBase.href.includes("?") || parsedBase.href.includes("#")) {
     throw new Error(`signedFetch: refusing base URL "${harper.httpURL}": a base URL must not carry a query string or fragment.`);
   }
   const url = new URL(p.replace(/^\/+/, ""), `${harper.httpURL.replace(/\/+$/, "")}/`);

@@ -137,7 +137,7 @@ describe("flair-bench ingest: the signed Memory path equals the sent path (#1970
   });
 
   test("a base URL with a query string or fragment is refused before any request", async () => {
-    for (const base of ["http://h/?tenant=1", "http://h/#frag"]) {
+    for (const base of ["http://h/?tenant=1", "http://h/#frag", "http://h/?", "http://h/#", "http://h/flair?", "http://h/flair#"]) {
       captured = [];
       const bench = client("bench-agent", base);
       const err = await signedFetch(
