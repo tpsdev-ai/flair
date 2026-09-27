@@ -109,7 +109,7 @@ When `FLAIR_AUTO_CAPTURE=true`, the handler *attempts to store* the inspected as
 - AWS/GCP/Azure credentials
 - Any other sensitive data
 
-Auto-capture is best-effort, skips recognized secrets and content shorter than 100 characters, and truncates text to 4000 characters. For production use, disable auto-capture and store only non-sensitive summaries manually via `memory_store`.
+Auto-capture is best-effort, skips recognized secrets and content of 100 characters or fewer, and truncates text to 4000 characters. For production use, disable auto-capture and store only non-sensitive summaries manually via `memory_store`.
 
 ## How It Works
 
