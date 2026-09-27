@@ -222,23 +222,10 @@ class TestStoreMemoryToolSurfacesWriteFailure:
         assert result["failed"] == 1
 
     @pytest.mark.asyncio
-    async def test_error_dict_reports_skipped_when_non_zero(self, service):
-        # The tool writes one record, so drive the batch accounting directly.
-        from adk_flair.memory_service import FlairWriteError
-
-        store = create_flair_tools(service, app_name="app", user_id="user")[0]
-        with patch.object(
-            service,
-            "add_memory",
-            AsyncMock(
-                side_effect=FlairWriteError(
-                    1, 2, [("m3", 403)], skipped=1
-                )
-            ),
-        ):
-            result = await store(subject="s", description="a fact")
-
-        assert result["written"] == 1
-        assert result["failed"] == 1
-        assert result["skipped"] == 1
-        assert result.get("status") != "stored"
+    async def test_all_text_less_batch_raises_and_writes_nothing(self, service):
+        empty = MemoryEntry(id="e1", content=types.Content(role="user", parts=[types.Part(text="")]))
+        empty2 = MemoryEntry(id="e2", content=types.Content(role="user", parts=[]))
+        with pytest.raises(ValueError) as info:
+            await service.add_memory(app_name="app", user_id="user", memories=[empty, empty2])
+        assert "nothing was written" in str(info.value)
+        assert service._client.request.call_count == 0

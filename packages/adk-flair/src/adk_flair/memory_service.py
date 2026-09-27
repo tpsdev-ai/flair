@@ -136,9 +136,9 @@ class FlairWriteError(FlairRequestError):
     that was refused or could not be confirmed (status ``"?"`` when the failure
     carried none, e.g. a connection error or timeout, where the record may or
     may not have landed). ``status_code`` is the first failure's status as an
-    ``int``, or ``None`` when that status is unknown — the ``"?"`` sentinel
-    lives only in the message and the ``failed`` list, so a caller can compare
-    ``status_code`` numerically without a TypeError on a transport failure.
+    ``int``, or ``None`` when that status is unknown (the ``"?"`` sentinel lives
+    only in the message and the ``failed`` list). Check for ``None`` before
+    comparing ``status_code`` numerically.
     """
 
     def __init__(
@@ -920,6 +920,12 @@ class FlairMemoryService(BaseMemoryService):
         # no-op and add_memory keeps returning None as before.
         if failed:
             raise FlairWriteError(written, attempted, failed, skipped)
+        # A batch whose every entry had no text wrote nothing; returning
+        # normally would read as success to the caller.
+        if attempted == 0 and skipped:
+            raise ValueError(
+                f"add_memory: all {skipped} memories in the batch have no text; nothing was written"
+            )
 
     async def search_memory(
         self,

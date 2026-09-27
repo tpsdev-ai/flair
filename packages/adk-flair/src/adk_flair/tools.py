@@ -205,16 +205,11 @@ def create_flair_tools(
         except FlairWriteError as exc:
             # A failed write is never "stored" (flair#1938). Report the
             # partial batch so the model knows what landed and what did not.
-            result = {
+            return {
                 "error": str(exc),
                 "written": exc.written,
                 "failed": len(exc.failed),
             }
-            # Add the skipped count only when non-zero, so the error shape is
-            # unchanged for the common single-record case.
-            if getattr(exc, "skipped", 0):
-                result["skipped"] = exc.skipped
-            return result
         return {"status": "stored", "subject": subject}
 
     async def search_memory(query: str, limit: int = 5) -> dict:
