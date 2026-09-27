@@ -77,11 +77,15 @@ describe("flair#1939 — a parent-prefix search returns descendants", () => {
     expect(nsOf(out)).toEqual(["a/b", "a/bc", "docs"]); // assertion: all namespaces
   });
 
-  it("(d4) with more matching items than the old cap, limit N returns N (no short page)", async () => {
-    const rows = Array.from({ length: 120 }, (_, i) => row(["a", "b"], `k${i}`));
-    const store = storeWith(rows);
+  it("(d4) with 80 newer non-matching rows ahead of five matches, limit N returns N (no short page)", async () => {
+    const newerNonMatching = Array.from({ length: 80 }, (_, i) => row(["other"], `n${i}`));
+    const matching = Array.from({ length: 5 }, (_, i) => row(["a", "b"], `m${i}`));
+    // Newer rows sort ahead of the matches, so an 80-row candidate cap would
+    // see only non-matching rows and return a short page.
+    const store = storeWith([...newerNonMatching, ...matching]);
     const out = await store.search(["a"], { limit: 5 });
     expect(out).toHaveLength(5); // assertion: a full page, not a short one
+    expect(out.map((i) => i.key).sort()).toEqual(["m0", "m1", "m2", "m3", "m4"]); // assertion: exactly the five matches
   });
 
   it("(d5) semantic search keeps its prefix filtering (no-regression guard)", async () => {
