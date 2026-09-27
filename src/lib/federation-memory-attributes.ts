@@ -30,6 +30,7 @@ export const FEDERATION_MEMORY_ATTRIBUTES = Object.freeze([
   "type",
   "createdAt",
   "updatedAt",
+  "instanceToken",
   "expiresAt",
   "retrievalCount",
   "lastRetrieved",
