@@ -2,9 +2,10 @@ name: CI
 
 # LIVENESS COUPLING (flair#1890) — READ BEFORE CHANGING THIS WORKFLOW'S NAME OR
 # ITS `push` TRIGGER. .github/workflows/release-auto-tag.yml is triggered by
-# completed runs named `CI`; its decision job accepts only successful pushes
-# to main from this file's path. Renaming this workflow or filtering out a
-# relevant push-to-main event prevents that fast-path trigger. Cancelling a
+# `workflow_run: workflows: ["CI"], types: [completed]`; its decision job
+# accepts only successful pushes to main from this file's path. Renaming
+# this workflow or filtering out a relevant push-to-main event prevents that
+# fast-path trigger. Cancelling a
 # push run before success still triggers `workflow_run: completed`, but the
 # tagger's success guard skips it. The nightly schedule is a recovery trigger
 # for a missed fast path.
