@@ -334,12 +334,14 @@ describe("relationship-write-path — Relationship.put() write-time provenance s
     expect(prov.verified.agentId).toBeNull();
   });
 
-  it("uses the SAME shape as Memory's provenance — {v, verified:{agentId,timestamp}} — no Relationship-specific format", async () => {
+  it("uses the SAME shape as Memory's provenance — {v, verified:{agentId,timestamp,receivedAt}} — no Relationship-specific format", async () => {
     const r = makeRelationship(agentCtx("agent-1"));
     const res: any = await r.put({ id: "rel-prov-3", subject: "nathan", predicate: "manages", object: "flint" });
     const prov = JSON.parse(res.provenance);
     expect(Object.keys(prov).sort()).toEqual(["v", "verified"]);
-    expect(Object.keys(prov.verified).sort()).toEqual(["agentId", "timestamp"]);
+    // flair#1940 A4: the shared buildProvenance() now also stamps the server's
+    // receipt time; Relationship reuses it as-is, so the shape stays identical.
+    expect(Object.keys(prov.verified).sort()).toEqual(["agentId", "receivedAt", "timestamp"]);
   });
 
   // ─── migration-equivalence (same discipline as flair#684's usageCount) ──────
