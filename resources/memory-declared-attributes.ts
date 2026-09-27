@@ -9,9 +9,10 @@
  * does NOT stop a raw writer from persisting it — a
  * `Memory.put({..., hostSource})` would still land. The one-shot real-Harper
  * probe is `test/repro/harper-undeclared-attr-probe.ts`; the unit test checks
- * whitelist behavior and schema drift. The only reliable stop is a whitelist
- * applied on the way IN, shared by every writer, so no path has to remember
- * the rule again.
+ * whitelist behavior and schema drift. The named application write paths remove
+ * pointer fields before persisting Memory rows. Federation filters its outbound
+ * and inbound Memory rows separately. Trusted raw table operations remain
+ * outside these resource guards.
  *
  * The pointer inputs (`hostSource`, `hostSourceScope`, `hostSourceVisibility`)
  * are NOT declared Memory attributes after A1'. Only `Memory.post()` and

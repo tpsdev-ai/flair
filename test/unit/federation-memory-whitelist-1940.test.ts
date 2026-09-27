@@ -1,9 +1,8 @@
 /**
  * federation-memory-whitelist-1940.test.ts — flair#1940 slice 1, A1'' item 8.
  *
- * Both federation directions must apply the SAME declared-attribute whitelist
- * the Memory writers apply, so a dirty row cannot carry a pointer field
- * (`hostSource` / `hostSourceScope` / `hostSourceVisibility`) either way: the
+ * The outbound reader projects declared Memory attributes. The inbound merge
+ * removes undeclared attributes except the named bookkeeping fields. The
  * outbound read projects the whitelist (f1-out, in
  * test/unit/federation-sync-push-privacy.test.ts), and the inbound merge
  * strips it (f1-in, here).

@@ -802,8 +802,9 @@ export class Memory extends (databases as any).flair.Memory {
     // flair#1940 A3 (by-ID surface): the pointer is projected for THIS reader
     // BEFORE the trust block is attached. Admin/internal stay unfiltered (they
     // read the unredacted row, like every other field); a non-admin agent is
-    // the reader the withheld rule protects. projection is a no-op when the row
-    // carries no hostSource, so a pointerless record is byte-identical to today.
+    // the reader the withheld rule protects. The projection leaves a record
+    // unchanged only when it has neither a bound pointer row nor an inline
+    // pointer field.
     let projected = result;
     if (result && typeof result === "object" && !(result instanceof Response) && typeof (result as any).agentId === "string") {
       const auth = await resolveAgentAuth((this as any).getContext?.());

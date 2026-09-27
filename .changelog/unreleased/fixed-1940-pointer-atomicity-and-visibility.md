@@ -8,12 +8,10 @@
   a private memory is preserved sequentially (`p2`); concurrent updates need a conflict check. An echo of the
   stored pointer keeps it (and its scope) unchanged ONLY when the writer is the stored
   pointer's author AND the value matches exactly, full URL included — a different query is a
-  new value, not an echo. The pointer is cascaded away where its Memory row is deleted,
-  expired or archived, all in one owned transaction; an orphan sweep re-checks inside the
+  new value, not an echo. `Memory.delete` and maintenance expiry or age-based archival delete the pointer with their Memory operation. `MemoryArchive` basement/restore retains the pointer row; the join suppresses it while the Memory is archived. `Memory.delete` joins a request transaction when present; maintenance uses an owned transaction per item. An orphan sweep re-checks inside the
   transaction before deleting. `MemoryHostSource` refuses every REST write verb for every
   caller (`r4-http`); a superuser Harper operation against the table (export, backup,
-  reseed) is the operator path. Both federation directions apply the writers' declared
-  attribute whitelist, so a dirty row cannot carry a pointer field either way (`f1-out`,
+  reseed) is the operator path. The outbound reader projects declared Memory attributes. The inbound merge removes undeclared attributes except the named bookkeeping fields (`f1-out`,
   `f1-in`).
 
   (Refs #1940)

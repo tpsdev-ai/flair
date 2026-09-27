@@ -6,7 +6,9 @@
  * A1' moved the pointer OFF the Memory row and into its OWN table
  * (`MemoryHostSource`, keyed by memoryId). Supported writes store host pointers
  * only in `MemoryHostSource`. A pointer reaches a non-admin reader only through
- * the gated join; reads remove any `hostSource` stored inline on a Memory row.
+ * the gated join. For non-admin `Memory.get`, `Memory.search`, and
+ * `SemanticSearch` results, the gated projection removes inline pointer fields
+ * and renders a pointer only from a bound `MemoryHostSource` row.
  * So the projection no longer reads a field off the record: the caller reads the
  * pointer ROW and passes it in. The three outcomes of the join (A1' item 4) are:
  *   - no pointer row           → the record is returned with any inline
@@ -141,8 +143,9 @@ export function stripInlinePointerFields<T>(record: T): T {
 
 /**
  * Project a record's pointer for a given reader, given that record's pointer
- * row (or null). EVERY branch removes any inline pointer field stored on the
- * row itself, so a pointer reaches a non-admin reader ONLY through the join:
+ * row (or null). Every call to `projectHostSource` removes inline pointer fields.
+ * Other response paths must remove them independently or exclude them from their
+ * selected fields:
  *   - no pointer row (or one that is unbound/token-mismatched) → the record is
  *     returned with any inline `hostSource` removed;
  *   - otherwise `hostSource` is set to the canonical pointer or

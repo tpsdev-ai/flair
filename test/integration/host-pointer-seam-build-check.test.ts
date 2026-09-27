@@ -3,9 +3,9 @@
  *
  * The production tree ships NO failure-injection seam: the failing pointer-table
  * adapter is driven from TEST code (the shared Harper mock), never by a switch
- * under resources/ or src/. This check reads the BUILT output and fails if the
- * seam symbol (or any FLAIR_TEST_FAIL_* failure switch) appears in ANY file
- * under dist/, at any depth — not just top-level dist/resources/*.js. It
+ * under resources/ or src/. The build check recursively scans JavaScript (`.js`)
+ * files under `dist`, excluding `node_modules`, for the former seam symbol and
+ * failure switch. It
  * requires a build (the integration lane builds before running).
  *
  * A positive control plants the seam's symbol in a temporary nested dist file

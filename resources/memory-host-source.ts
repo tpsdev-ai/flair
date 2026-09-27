@@ -2,19 +2,22 @@
  * memory-host-source.ts — the MemoryHostSource table's non-resource helpers
  * (flair#1940 slice 1 / A1'). The pointer lives in its OWN table keyed by
  * memoryId. Supported writes store host pointers only in `MemoryHostSource`: a pointer
- * reaches a non-admin reader only through the gated join, and reads remove any
- * `hostSource` stored inline on a Memory row.
+ * reaches a non-admin reader only through the gated join. For non-admin `Memory.get`,
+ * `Memory.search`, and `SemanticSearch` results, the gated projection removes inline
+ * pointer fields and renders a pointer only from a bound `MemoryHostSource` row.
  *
  * This module holds:
- *   - the WRITE-BODY-ONLY pointer inputs and their extraction, so every
- *     Memory writer strips them from the row before persist (A1' item 1);
+ *   - the WRITE-BODY-ONLY pointer inputs and their extraction; The named
+ *     application write paths remove pointer fields before persisting Memory
+ *     rows. Federation filters its outbound and inbound Memory rows separately.
+ *     Trusted raw table operations remain outside these resource guards (A1' item 1);
  *   - the pointer row builder (canonical hostSource + scopeAtWrite +
  *     server-stamped authorId/receivedAt) (A1' items 1, 3);
  *   - the ONE batched pointer read the gated join uses (A1' item 4: never one
  *     query per row);
- *   - the federation refusal predicate (A1' item 5); BOTH directions apply the
- *     writers' declared-attribute whitelist (A1'' item 8), so a dirty row
- *     cannot carry a pointer field either way (f1-out/f1-in).
+ *   - the federation refusal predicate (A1' item 5); The outbound reader
+ *     projects declared Memory attributes. The inbound merge removes undeclared
+ *     attributes except the named bookkeeping fields (A1'' item 8) (f1-out/f1-in).
  */
 import { databases } from "harper";
 import { validateHostSource } from "./host-source.js";

@@ -2,12 +2,8 @@
  * federation-memory-attributes.ts — the Memory attributes the OUTBOUND
  * federation reader may project (flair#1940 slice 1, A1'' item 8).
  *
- * The Memory writers persist ONLY declared attributes plus the named
- * undeclared bookkeeping fields (resources/memory-declared-attributes.ts's
- * `DECLARED_MEMORY_ATTRIBUTES` + `UNDECLARED_ALLOWED`). Federation must apply
- * the SAME whitelist when it READS a Memory row to push, so a dirty row (a
- * legacy direct-insert, or a raw writer) cannot carry a pointer field
- * (`hostSource` / `hostSourceScope` / `hostSourceVisibility`) off the instance
+ * The outbound reader projects declared Memory attributes. The inbound merge
+ * removes undeclared attributes except the named bookkeeping fields.
  * even though the pointer now lives in its own, unfederated table.
  *
  * The CLI build (tsconfig.cli, rootDir src) cannot import from resources/, so

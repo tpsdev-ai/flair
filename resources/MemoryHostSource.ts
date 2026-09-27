@@ -2,10 +2,14 @@
  * MemoryHostSource.ts — the resource class for the host-pointer table
  * (flair#1940 slice 1 / A1' item 3). The pointer lives in its own table,
  * keyed by memoryId. Supported writes store host pointers only in `MemoryHostSource`:
- * a pointer reaches a non-admin reader only through the gated join, and reads remove
- * any `hostSource` stored inline on a Memory row.
+ * a pointer reaches a non-admin reader only through the gated join. For non-admin
+ * `Memory.get`, `Memory.search`, and `SemanticSearch` results, the gated projection
+ * removes inline pointer fields and renders a pointer only from a bound
+ * `MemoryHostSource` row.
  *
- * READ — ADMIN-ONLY. Bare `@export` (schemas/memory.graphql) would otherwise
+ * READ — Direct resource reads permit admin agents and trusted in-process callers;
+ * non-admin agents cannot read this table directly. Bare `@export`
+ * (schemas/memory.graphql) would otherwise
  * reach Harper's default allow-decision (super_user passthrough), reachable by
  * the forged-loopback super_user and, once the global gate is non-rejecting, by
  * a genuinely anonymous remote caller. So allowRead/get/search gate on the
@@ -17,12 +21,9 @@
  * WRITE — there are NO REST write verbs. post/put/patch and delete are refused
  * for EVERY caller (admin included), with a message naming the Memory write
  * path (A1'' item 3) — proved over real HTTP for non-admin AND admin (r4-http).
- * A pointer row is written ONLY by Memory's write path (POST/PUT /Memory),
- * through the table object, in the SAME transaction as the Memory row (a
- * request's open one, or one created when an internal caller has no request
- * context), so the two commit together or not at all (real-Harper t1/t2);
- * authorId is stamped there from the authenticated principal, never the body.
- * A superuser Harper operation against the table (an operator export, backup
+ * Application pointer writes use `Memory.post` or `Memory.put`; trusted operator
+ * table operations remain available. A superuser Harper operation against the
+ * table (an operator export, backup
  * or reseed) is the operator path, not gated by this resource.
  */
 import { databases } from "harper";
@@ -90,7 +91,7 @@ export class MemoryHostSource extends (databases as any).flair.MemoryHostSource 
 /** The fixed refusal every REST write verb on MemoryHostSource returns. */
 function writelessRefusal(): Response {
   return FORBIDDEN(
-    "forbidden: MemoryHostSource has no REST write verbs; a pointer row is written only by the Memory write path (POST/PUT /Memory)",
+    "MemoryHostSource REST writes are disabled; use POST/PUT `/Memory` for application pointer writes",
   );
 }
 

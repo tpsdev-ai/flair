@@ -119,11 +119,10 @@ export const OWNER_GUARD_EXEMPT: Readonly<Record<string, string>> = Object.freez
   // resources/Agent.ts's shared write-authorization helper, which both its
   // put() and its patch() route through.
   Agent: "self-ownership by primary key; enforced in resources/Agent.ts for every verb",
-  // flair#1940 A1': MemoryHostSource's `authorId` is SERVER-STAMPED from the
-  // authenticated principal and is never client-settable (resources/
-  // MemoryHostSource.ts overwrites a body-supplied authorId), and the table's
-  // reads are admin-only — so there is no client-controlled owner to guard.
-  MemoryHostSource: "authorId is server-stamped from the principal, never the body; reads are admin-only",
+  // flair#1940 A1': MemoryHostSource refuses REST writes. Application pointer
+  // writes stamp `authorId` from the authenticated principal; direct resource
+  // reads permit admins and trusted internal callers.
+  MemoryHostSource: "REST writes refused; application writes stamp authorId; direct reads limited to admins and trusted internal callers",
 });
 
 /** The verbs that can mutate a record, and therefore need the rule applied. */

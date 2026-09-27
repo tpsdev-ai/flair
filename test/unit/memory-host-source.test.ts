@@ -618,7 +618,7 @@ describe("A1-iv items 2/3 — one reader helper and one server-stamped strip lis
 
 // ─── A3 item 2: every Memory projection removes an inline hostSource ──────────
 
-describe("A3 item 2 — a reader never sees an inline hostSource stored on the row", () => {
+describe("A3 item 2 — every call to projectHostSource removes inline pointer fields; other response paths remove them independently or exclude them from their selected fields", () => {
   it("(i1) with NO pointer row, another reader gets the row WITHOUT the inline hostSource", async () => {
     // A RAW test path writes the pointer straight onto the Memory row (a
     // supported write never does). No pointer row exists.

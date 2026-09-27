@@ -1,7 +1,7 @@
 /**
  * host-pointer/registry.ts — the host-pointer write adapter (flair#1940 slice 1).
- * The failure-injection seam exists only in test code; a build check scans every
- * file under dist/ for it. This module is NOT under `dist/resources/*.js` (the
+ * The build check recursively scans JavaScript (`.js`) files under `dist`, excluding
+ * `node_modules`, for the former seam symbol and failure switch. This module is NOT under `dist/resources/*.js` (the
  * jsResource glob loads only top-level files there), so it is not a resource
  * surface. It exports NO failure switch and NO test seam: the production
  * adapter is the real MemoryHostSource table, and tests that need a failing
