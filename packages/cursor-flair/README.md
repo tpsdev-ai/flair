@@ -61,7 +61,7 @@ Cursor ships a native **Memories** feature: persistent notes the agent saves as 
 
 - Set `FLAIR_URL` to an origin the agent VM can reach. The default `http://127.0.0.1:19926` points at the npx host, which on a cloud agent is the cloud VM.
 - The agent key lives on the **npx host** at `~/.flair/keys/<id>.key` (or `FLAIR_KEY_PATH` in that machine's environment). If you cannot mount a key, set `FLAIR_ADMIN_USER` / `FLAIR_ADMIN_PASSWORD` in the host env of the machine that runs `npx` — not in plugin Configure.
-- Node **>= 22.18** must be on that same machine.
+- Node **>= 22** must be on that same machine.
 
 ## Skills
 

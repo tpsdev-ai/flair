@@ -68,14 +68,14 @@ const store = new FlairStore({
 - **Persistence**: memories survive process restarts and re-deploys.
 - **Federation**: pair your local Flair to a hub; memories sync peer-to-peer.
 - **Cross-orchestrator**: switch from LangGraph to OpenClaw to Claude Code without losing the agent's history.
-- **Identity**: every memory is scoped to an `agentId` that verifies writes with Ed25519 auth when a key is present (admin Basic credentials skip cryptographic validation). No tenant-isolation slop.
+- **Identity**: every memory is scoped to an `agentId` that verifies writes with Ed25519 auth when a key is present (admin Basic credentials skip cryptographic validation). A signed non-admin agent can write only as itself; non-private memories are readable by other agents on the instance. Memory is a signal, never isolation.
 - **Open source**: runs on your hardware. No SaaS lock-in.
 
 ## Limitations (v1)
 
 - LangGraph's `IndexConfig` (custom embedding model, per-field indexing) is ignored. Flair has its own embedding pipeline (`nomic-embed-text-v1.5`, 768-dim) and embeds the full content blob. If you need per-field embeddings, pre-extract and store as separate items.
 - `search.filter` operators (`$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`) are applied client-side after retrieval. Neither the tag-based path nor the semantic path applies a namespace pre-filter on the server; both fetch then filter on the client. For non-semantic queries the tag lookup performs an exact match on the joined tag, while semantic results are post-filtered client-side against the requested namespace prefix. High-fanout filters across many memories will be slower.
-- Namespace-prefix matching requests the full joined-path tag (`lg-ns:users/profiles`) from the non-semantic path; that exact-tag lookup does **not** reach descendants. The semantic path post-filters against the prefix, which is the sole route to descendant matches. LangGraph's `BaseStore.search` API doesn't expose a label-only surface either, so there's no read path that would benefit; if a future LangGraph extension exposes it we'd add a derived index then.
+- Namespace-prefix matching requests the full joined-path tag (`lg-ns:users/profiles`) from the non-semantic path; that exact-tag lookup applies only for a non-empty prefix—an empty prefix sends no tag filter. The semantic path post-filters against the prefix, which is the sole route to descendant matches for a non-empty prefix. A non-semantic search with an empty prefix also returns all entries beneath the agent, including descendants. LangGraph's `BaseStore.search` API doesn't expose a label-only surface either, so there's no read path that would benefit; if a future LangGraph extension exposes it we'd add a derived index then.
 - `listNamespaces` returns namespaces seen in your stored memories (best-effort scan via `batch()`). Empty namespaces aren't enumerable.
 
 ## License

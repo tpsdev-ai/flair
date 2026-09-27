@@ -27,11 +27,11 @@ FLAIR_AGENT_ID=anvil CURSOR_API_KEY=… \
 FLAIR_AGENT_ID=anvil bun packages/cursor-wake-runner/src/cli.ts --once --dry-run
 ```
 
-Identity is the `FLAIR_AGENT_ID`, resolved with Ed25519 auth (admin Basic auth is available when `FLAIR_ADMIN_USER` and `FLAIR_ADMIN_PASSWORD` are set and no Ed25519 key exists). A signed key confines access to its own feed; admin Basic auth can select another agent's ID. There is no `--participant` flag.
+Identity is the `FLAIR_AGENT_ID`, resolved with Ed25519 auth (admin Basic auth is available when `FLAIR_ADMIN_USER` and `FLAIR_ADMIN_PASSWORD` are set and no Ed25519 key exists). Signed non-admin keys are confined to their own feed; signed admins and Basic admins can select another. There is no `--participant` flag.
 
 | Variable | Required | Notes |
 |---|---|---|
-| `FLAIR_AGENT_ID` | yes | Own feed only |
+| `FLAIR_AGENT_ID` | yes | Non-admin keys only; admins can select another |
 | `FLAIR_URL` | no | Default `http://localhost:19926` |
 | `FLAIR_KEY_PATH` | no | Default `~/.flair/keys/<id>.key` |
 | `CURSOR_API_KEY` | yes (unless `--dry-run`) | [Dashboard → API Keys](https://cursor.com/dashboard/api) |
