@@ -82,11 +82,11 @@ add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"], "NON_EMBED",
   "Feed rows — the record carries no embedding/embeddingModel.");
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.update#1", "writer:(databases as any).flair.Memory.delete#1"], "NON_EMBED",
   "Archive/expiry maintenance — partial update (archive fields) / delete; never touches the stamp.");
-// flair#1940 A1': the host-pointer table (MemoryHostSource) is written/deleted
-// on the pointer path — a DIFFERENT table, no embeddingModel. The conservative
-// sink enumeration cannot tell the two apart, so classify explicitly.
-add("Memory", ["writer:table.put#1", "writer:table.delete#1"], "OTHER_TABLE",
-  "MemoryHostSource pointer row (A1') — not the Memory table, never an embeddingModel.");
+// flair#1940 A1-iv item 6: Memory.ts no longer touches the MemoryHostSource
+// table directly — pointer writes/deletes go through the host-pointer ADAPTER
+// (resources/host-pointer-adapter.ts -> resources/host-pointer/registry.ts),
+// which the conservative sink enumeration does not match. No Memory.ts table
+// write site remains.
 add("MemoryMaintenance", ["writer:table.delete#1"], "OTHER_TABLE",
   "MemoryHostSource pointer cascade (A1') — not the Memory table, never an embeddingModel.");
 add("Memory", ["writer:patchRecord#1", "writer:super.patch#1", "writer:(databases as any).flair.Memory.delete#1"], "NON_EMBED",
