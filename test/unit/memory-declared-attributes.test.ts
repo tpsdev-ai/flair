@@ -49,12 +49,14 @@ describe("A1' — declared attributes only", () => {
       hostSource: { v: 1 },
       hostSourceScope: "record",
       undeclaredProbe: "SENTINEL",
+      meta: { seq: 1, hook: "Stop" },
     };
     const removed = stripUndeclaredMemoryAttributes(body);
     expect(removed.sort()).toEqual(["hostSource", "hostSourceScope", "undeclaredProbe"]); // assertion: all undeclared removed
     expect(body.id).toBe("m1"); // assertion: declared kept
     expect(body.content).toBe("x"); // assertion: declared kept
     expect("hostSource" in body).toBe(false); // assertion: the pointer input is gone
+    expect((body.meta as any).seq).toBe(1); // assertion: the pre-existing UNDECLARED_ALLOWED `meta` survives (flair#1257)
   });
 
   test("isDeclaredMemoryAttribute knows the boundary; a non-object body is untouched", () => {

@@ -66,6 +66,18 @@ export const DECLARED_MEMORY_ATTRIBUTES = Object.freeze([
 
 const DECLARED = new Set<string>(DECLARED_MEMORY_ATTRIBUTES as readonly string[]);
 
+/** Pre-existing UNDECLARED attributes the codebase deliberately stores on a
+ *  Memory row and must keep (the guard's job is the POINTER, not these).
+ *  `meta` is the continuity-journal payload {seq, processUUID, sessionId, hook}
+ *  written by the capture path (PUT /Memory/<id>, flair#1257 slice 3); Kern's
+ *  slice-2 ruling settled that it round-trips as an undeclared field, and
+ *  test/integration/continuity-rem-promotion-1257.test.ts pins that. Declaring
+ *  it is a separate schema decision — it is not a flat String, so a schema
+ *  declaration would change its stored shape. */
+export const UNDECLARED_ALLOWED = Object.freeze(["meta"] as const);
+
+const ALLOWED_UNDECLARED = new Set<string>(UNDECLARED_ALLOWED as readonly string[]);
+
 /** True when `key` is a declared Memory attribute. */
 export function isDeclaredMemoryAttribute(key: string): boolean {
   return DECLARED.has(key);
@@ -82,7 +94,7 @@ export function stripUndeclaredMemoryAttributes(content: unknown): string[] {
   const obj = content as Record<string, unknown>;
   const removed: string[] = [];
   for (const key of Object.keys(obj)) {
-    if (!DECLARED.has(key)) {
+    if (!DECLARED.has(key) && !ALLOWED_UNDECLARED.has(key)) {
       delete obj[key];
       removed.push(key);
     }
