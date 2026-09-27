@@ -2,7 +2,10 @@ import { databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
-import { stampAttribution, UNAUTH } from "./record-type-kit.js";
+import { makeReadScope, makeScopedSearch, stampAttribution, UNAUTH } from "./record-type-kit.js";
+
+const credentialReadScope = makeReadScope("owner-only", "principalId");
+const credentialScopedSearch = makeScopedSearch(credentialReadScope);
 
 /**
  * Credential resource — authentication surfaces for Principals.
@@ -94,15 +97,7 @@ export class Credential extends (databases as any).flair.Credential {
     }
 
     // Non-admin agent: scope to own credentials.
-    const condition = { attribute: "principalId", comparator: "equals", value: auth.agentId };
-    if (!query?.conditions) {
-      return super.search({ conditions: [condition], ...(query || {}) });
-    }
-    return super.search({
-      ...query,
-      conditions: [condition, { conditions: query.conditions, operator: query.operator || "and" }],
-      operator: "and",
-    });
+    return credentialScopedSearch(auth.agentId, query, (q: any) => super.search(q));
   }
 
   async get() {

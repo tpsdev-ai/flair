@@ -4,6 +4,7 @@ import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import {
   makeAuthGate,
   makeReadScope,
+  makeScopedSearch,
   makeByIdReadGate,
   resolveAuthGate,
   stampAttribution,
@@ -20,6 +21,7 @@ import { RECORD_TYPES } from "./record-types.js";
 // `.ownerField` against RECORD_TYPES.MemoryCandidate — not for any other
 // runtime consumer.
 export const memoryCandidateReadScope = makeReadScope(RECORD_TYPES.MemoryCandidate.readScope, RECORD_TYPES.MemoryCandidate.ownerField);
+const memoryCandidateScopedSearch = makeScopedSearch(memoryCandidateReadScope);
 const memoryCandidateByIdReadGate = makeByIdReadGate(memoryCandidateReadScope);
 // See makeAuthGate's doc (record-type-kit.ts): must be wired as a genuine
 // prototype method below, never a class-field assignment.
@@ -109,16 +111,7 @@ export class MemoryCandidate extends (databases as any).flair.MemoryCandidate {
     if (gate.kind === "unfiltered") return super.search(query);
 
     // Non-admin agent: scope to own candidates only.
-    const scope = await memoryCandidateReadScope(gate.agentId);
-    const agentCondition = scope.condition;
-    if (!query?.conditions) {
-      return super.search({ conditions: [agentCondition], ...(query || {}) });
-    }
-    return super.search({
-      ...query,
-      conditions: [agentCondition, { conditions: query.conditions, operator: query.operator || "and" }],
-      operator: "and",
-    });
+    return memoryCandidateScopedSearch(gate.agentId, query, (q: any) => super.search(q));
   }
 
   /**
