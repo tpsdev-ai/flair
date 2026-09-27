@@ -1,9 +1,10 @@
 - **The release tagger also marks the Python package.** When the release commit's
   tree carries `packages/adk-flair/pyproject.toml` at the very version being
   tagged, the auto-tagger creates `adk-flair-v<version>` from the SAME commit as
-  `v<version>`, so the PyPI publish no longer waits for a hand-pushed tag. A tree
-  without the file skips the second tag (flair releases without the Python
-  package); the `[project]` version is read with Python's `tomllib` — the SAME
+  `v<version>`, so the PyPI publish no longer waits for a hand-pushed tag. The tagger
+  skips the second tag when the file is absent, but the version-sync checker lists
+  the pyproject as a source file, so removing the Python package also removes it
+  there, and only then is a release tagged `v` alone; the `[project]` version is read with Python's `tomllib` — the SAME
   reader `.github/workflows/adk-flair-publish.yml` decides with — so a
   `version =` line inside a multi-line string or array is never mistaken for the
   project version. The reader fails CLOSED: a TOML parse error, a `python3`

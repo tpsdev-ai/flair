@@ -109,8 +109,12 @@ git tag v0.11.0 && git push origin v0.11.0
 > `[project].version` that differs from the version being tagged refuses
 > `adk-version-mismatch` BEFORE either tag is written ((p), (q), (g)) — a
 > `version =` line inside a multi-line string or array is never read as the
-> project version. A tree with NO `packages/adk-flair/pyproject.toml` is fine: the
-> `v` tag is still written and the adk step is skipped ((b)). An
+> project version. With NO `packages/adk-flair/pyproject.toml` the
+> tagger's adk step is skipped ((b)), but `scripts/check-version-sync.mjs` lists the
+> pyproject as a source file and refuses when it is missing, so today such a release
+> refuses at `version-sync`. Removing the Python package from the repo means removing
+> it from the checker's source list in the same change; a release is then tagged `v`
+> alone. An
 > `adk-flair-v<version>` already at another commit refuses
 > `adk-tag-exists-elsewhere` before the `v` tag is written ((d)); a second POST
 > rejected for lack of permission refuses `adk-ref-write-rejected`, and the text

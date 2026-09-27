@@ -1172,6 +1172,31 @@ export async function decide({ sha, deps, options = {} }) {
     vAlreadyAtSha = true;
   }
 
+  // The adk pyproject, on the v-ABSENT path too (round 8): the same shared read
+  // and version check the v-at-sha path and the write boundary use. It runs right
+  // after tag state (3) and BEFORE release intent and version sync (4-6), so an
+  // unreadable, dynamic or mismatched pyproject is reported as its own adk
+  // condition rather than as version-sync, which also reads that file. (With v at
+  // <sha>, adkWorkAfterVAtSha above already ran it.)
+  if (!vAlreadyAtSha) {
+    const adkRead = readAdkPyproject(deps.git, sha);
+    if (adkRead.kind === "failed") {
+      return refuse(
+        {
+          condition: CONDITION.ADK_PYPROJECT_UNREADABLE,
+          summary: [
+            `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${sha} (${adkRead.reason}); the tagger cannot verify the Python package, so the release is refused`,
+          ],
+        },
+        { adkVerdict: WRITE_VERDICT.REFUSE, adkCondition: CONDITION.ADK_PYPROJECT_UNREADABLE },
+      );
+    }
+    const adkCheck = adkVersionCheck(adkRead.kind === "present" ? adkRead.text : null, version);
+    if (adkCheck.kind === "refuse") {
+      return refuse(adkCheck, { adkVerdict: WRITE_VERDICT.REFUSE, adkCondition: adkCheck.condition });
+    }
+  }
+
   // 4 — release intent
   const step4 = await conditionReleaseIntent(deps.api, deps, { version, versionFile: opts.versionFile, mainRef: opts.mainRef });
   if (!step4.ok) return refuse(step4);
@@ -1218,29 +1243,6 @@ export async function decide({ sha, deps, options = {} }) {
   });
   if (!step9.ok) return refuse(step9);
   if (step9.tolerated?.length) summary.push(`allowlisted non-success checks (do not refuse): ${step9.tolerated.join(", ")}`);
-
-  // The adk pyproject, on the v-ABSENT path too (round 8): the same shared read
-  // and version check the v-at-sha path and the write boundary use, so decide never
-  // returns TAG for an unreadable or mismatched pyproject. (With v at <sha>,
-  // adkWorkAfterVAtSha above already ran it.)
-  if (!vAlreadyAtSha) {
-    const adkRead = readAdkPyproject(deps.git, sha);
-    if (adkRead.kind === "failed") {
-      return refuse(
-        {
-          condition: CONDITION.ADK_PYPROJECT_UNREADABLE,
-          summary: [
-            `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${sha} (${adkRead.reason}); the tagger cannot verify the Python package, so the release is refused`,
-          ],
-        },
-        { adkVerdict: WRITE_VERDICT.REFUSE, adkCondition: CONDITION.ADK_PYPROJECT_UNREADABLE },
-      );
-    }
-    const adkCheck = adkVersionCheck(adkRead.kind === "present" ? adkRead.text : null, version);
-    if (adkCheck.kind === "refuse") {
-      return refuse(adkCheck, { adkVerdict: WRITE_VERDICT.REFUSE, adkCondition: adkCheck.condition });
-    }
-  }
 
   return {
     verdict: VERDICT.TAG,

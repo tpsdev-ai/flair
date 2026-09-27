@@ -1799,6 +1799,16 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     }
   });
 
+  test("(r8f) the v-absent adk check runs BEFORE version sync: a mismatch is reported as adk-version-mismatch even when version sync would also refuse", async () => {
+    // version sync ALSO reads the pyproject and would refuse this tree; the adk
+    // condition must be the one reported (docs/releasing.md names it).
+    const { deps } = harness({ api: refApi([], new Map()), versionSyncOk: false });
+    pinPyproject(deps, pyproject("0.1.0"));
+    const result = await decide({ sha: SHA, deps });
+    expect(result.verdict).toBe(VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.ADK_VERSION_MISMATCH);
+  });
+
   test("(r8e) check-version-sync names a DYNAMIC version as a policy refusal, not as a missing declaration", () => {
     const realRoot = resolve(import.meta.dir, "../..");
     const checker = join(realRoot, "scripts", "check-version-sync.mjs");
