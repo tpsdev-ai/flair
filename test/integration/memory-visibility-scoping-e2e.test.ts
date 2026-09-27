@@ -118,6 +118,24 @@ describe("within-org-read-open — private/shared visibility + centralized read-
       expect(await res.text()).not.toContain("explicitly private note");
     }, 30_000);
 
+    // MemoryCandidate uses the same shared by-id gate in owner-only mode and has no
+    // middleware precheck, so this reaches the gate itself: the owner's selected
+    // read of its own row must succeed (the scope reads the stored owner, not the
+    // selected fields), and another agent's must not.
+    test("the shared by-id gate scopes a selected MemoryCandidate read on the stored row", async () => {
+      const candId = "vis-cand-selected-1";
+      const seeded = await adminOp(harper, {
+        operation: "insert", database: "flair", table: "MemoryCandidate",
+        records: [{ id: candId, agentId: owner.id, claim: "selected-read claim", status: "pending", generatedAt: new Date().toISOString(), generatedBy: "test-seed" }],
+      });
+      expect(seeded.status).toBe(200);
+      const own = await authFetch(harper, owner, "GET", `/MemoryCandidate/${candId}?select(claim,)`);
+      expect(own.status, `owner selected GET own candidate → ${own.status} (expected 200)`).toBe(200);
+      expect(await own.text()).toContain("selected-read claim");
+      const other = await authFetch(harper, stranger, "GET", `/MemoryCandidate/${candId}?select(claim,)`);
+      expect(other.status, `stranger selected GET candidate → ${other.status} (expected 404)`).toBe(404);
+    }, 30_000);
+
     test("a selected by-id read still works for the owner and for a shared memory", async () => {
       const own = await authFetch(harper, owner, "GET", `/Memory/${idPrivate}?select(content,)`);
       expect(own.status, `owner selected GET private → ${own.status}`).toBe(200);
