@@ -1758,8 +1758,9 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     // rewriting the description would change the document, so the tomllib
     // comparison refuses (null) and the file is left byte-identical.
     const src = `[project]\nname = "adk-flair"\ndescription = """\nversion = "0.55.2"\n"""\nversion = "1.0.0"\n`;
-    expect(readProjectVersion(src).kind).toBe("version"); // assertion: tomllib reads 1.0.0
-    expect(readProjectVersion(src).lineIndex).toBeGreaterThanOrEqual(0); // assertion: the locator accepts a line
+    const rv = readProjectVersion(src);
+    expect(rv.kind).toBe("version"); // assertion: tomllib reads 1.0.0
+    expect(rv.kind === "version" ? rv.lineIndex : -1).toBeGreaterThanOrEqual(0); // assertion: the locator accepts a line
     const file = join(scratchDir(), "pyproject.toml");
     writeFileSync(file, src);
     const next = replaceProjectVersion(readFileSync(file, "utf8"), "2.0.0");
