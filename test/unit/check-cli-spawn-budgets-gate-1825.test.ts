@@ -501,7 +501,26 @@ describe("round 10: the SEED stdout says exactly what it guarantees (flair#1825)
       return false;
     }
   })();
-  it.skipIf(!hasAnchor)(`the SEED text names the ACTUAL base sha and says it DESCENDS from the anchor${hasAnchor ? "" : " — skipped: anchor object not in this checkout"}`, () => {
+  // The seed path runs only while the base has NO baseline file. origin/main
+  // has carried scripts/ci/cli-spawn-budgets.baseline.json since #1920, so on
+  // any checkout where origin/main has it this case cannot arise; the dead
+  // seed path's removal is tracked in #1921. Check the precondition instead of
+  // assuming it: a full-history clone previously failed here, while CI's
+  // shallow checkout skipped it for lack of the anchor.
+  const baseHasBaseline = (() => {
+    try {
+      execFileSync("git", ["cat-file", "-e", "origin/main:scripts/ci/cli-spawn-budgets.baseline.json"], { cwd: root, stdio: "ignore" });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  const skipReason = !hasAnchor
+    ? " — skipped: anchor object not in this checkout"
+    : baseHasBaseline
+      ? " — skipped: origin/main already has the baseline file, so the seed path cannot run (#1921)"
+      : "";
+  it.skipIf(!hasAnchor || baseHasBaseline)(`the SEED text names the ACTUAL base sha and says it DESCENDS from the anchor${skipReason}`, () => {
     // The real CI case: origin/main is a DESCENDANT of the anchor and has no
     // baseline file → the seed path fires (Sherlock's repro).
     const r = spawnSync("node", [join(root, "scripts", "ci", "check-cli-spawn-budgets.mjs")], {
