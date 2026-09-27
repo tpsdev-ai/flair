@@ -200,6 +200,33 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   });
 }
 
+/**
+ * flair#1943 — classify a bootstrap failure for the single stderr line. Uses
+ * what the error actually carries: an HTTP status (401/403 → auth), a
+ * timeout sentinel/name, else the unreachable/other bucket. Never reads or
+ * includes credentials.
+ */
+export function classifyBootstrapFailure(err: unknown): "auth" | "timeout" | "unreachable" {
+  const e = err as { status_code?: unknown; statusCode?: unknown; name?: unknown; message?: unknown } | null;
+  const status = typeof e?.status_code === "number" ? e.status_code : typeof e?.statusCode === "number" ? e.statusCode : undefined;
+  if (status === 401 || status === 403) return "auth";
+  const name = typeof e?.name === "string" ? e.name : "";
+  const message = typeof e?.message === "string" ? e.message : "";
+  if (name === "TimeoutError" || /timeout|timed out/i.test(message)) return "timeout";
+  if (/(^|[^0-9])(401|403)([^0-9]|$)/.test(message) || /unauthor|forbidden|invalid_signature|auth/i.test(message)) return "auth";
+  return "unreachable";
+}
+
+/** The one stderr line for a failed bootstrap. NAMES the actor, the state and
+ *  the remedy; never contains a key, token, password or Authorization value. */
+function reportBootstrapFailure(err: unknown): void {
+  const kind = classifyBootstrapFailure(err);
+  process.stderr.write(
+    `flair session-start: bootstrap failed (${kind}); this session starts without Flair context. ` +
+      "Next: run `flair doctor`, and check FLAIR_URL and this agent's key.\n",
+  );
+}
+
 /** Build the SessionStart hook output JSON from a context string. */
 function hookOutput(context: string): string {
   return JSON.stringify({
@@ -298,8 +325,14 @@ export async function runHook(
       resolveTimeoutMs(),
     );
     context = res && res.context ? String(res.context) : "";
-  } catch {
+  } catch (err) {
     context = ""; // flair unreachable / auth error / timeout → no bootstrap context
+    // flair#1943: keeping stderr open cannot reveal an error never written to
+    // it. Write ONE line to STDERR (never stdout — that is the hook payload),
+    // so a real failure stays visible instead of being swallowed. stdout and
+    // the exit code are unchanged (the no-op payload), so a failure never
+    // blocks the session.
+    reportBootstrapFailure(err);
   }
 
   const resumeHint = await resumeHintDone;
