@@ -836,17 +836,25 @@ class TestCreateVerbAndConflictFallback:
     async def test_non_conflict_error_propagates_with_real_status(self, service, caplog):
         """A non-409 failure does NOT fall back to PUT, and the warning log
         carries the real status (status=404), not the pre-#1336 'status=?' —
-        FlairRequestError exposes .status_code and the log line reads it."""
+        FlairRequestError exposes .status_code and the log line reads it.
+
+        flair#1938: a failed direct write now also RAISES (a FlairWriteError,
+        a FlairRequestError subclass) instead of returning normally — the
+        record is not reported as stored."""
+        from adk_flair.memory_service import FlairWriteError
+
         service._client.request.return_value = _mock_response(404, "Not Found")
 
-        await service.add_memory(
-            app_name="app", user_id="user",
-            memories=[MemoryEntry(
-                id="mem-404",
-                content=types.Content(role="user", parts=[types.Part(text="fact")]),
-            )],
-        )
+        with pytest.raises(FlairWriteError) as excinfo:
+            await service.add_memory(
+                app_name="app", user_id="user",
+                memories=[MemoryEntry(
+                    id="mem-404",
+                    content=types.Content(role="user", parts=[types.Part(text="fact")]),
+                )],
+            )
 
+        assert excinfo.value.failed == [("mem-404", 404)]
         assert service._client.request.call_count == 1  # no PUT fallback on non-409
         warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert any("status=404" in w for w in warnings), warnings

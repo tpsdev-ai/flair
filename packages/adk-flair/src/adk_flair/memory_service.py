@@ -30,7 +30,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -121,6 +121,40 @@ class FlairRequestError(RuntimeError):
         self.path = path
         self.status_code = status_code
         self.reason = reason
+
+
+class FlairWriteError(FlairRequestError):
+    """One or more records in an ``add_memory`` batch failed to write.
+
+    A subclass of :class:`FlairRequestError`, so every existing
+    ``except FlairRequestError`` keeps catching a failed write — the README
+    already promises the write path raises it. What it adds is honest batch
+    accounting: ``written`` is how many records landed, and ``failed`` lists
+    ``(record_id, status)`` for each that did not (status ``"?"`` when the
+    failure carried none, e.g. a connection error). ``status_code`` is the
+    first failure's status, so callers that read ``.status_code`` (as the
+    write-path logging does) keep working.
+    """
+
+    def __init__(
+        self, written: int, total: int, failed: List[Tuple[str, Any]]
+    ):
+        self.written = written
+        self.total = total
+        self.failed = failed
+        first_status = failed[0][1] if failed else "?"
+        self.status_code = first_status
+        # Attribute-compatibility with FlairRequestError. A batch failure has
+        # no single method/path/reason, so these stay None rather than being
+        # fabricated from an arbitrary member of the batch.
+        self.method = None
+        self.path = None
+        self.reason = None
+        RuntimeError.__init__(
+            self,
+            f"{written} of {total} memories written; "
+            f"{len(failed)} refused (status {first_status})",
+        )
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
@@ -823,6 +857,7 @@ class FlairMemoryService(BaseMemoryService):
         subject_value = _resolve_subject(subject, custom_metadata)
 
         written = 0
+        failed: List[Tuple[str, Any]] = []
         for mem in memories:
             content_text = self._extract_content_text(mem.content)
             if not content_text:
@@ -851,6 +886,7 @@ class FlairMemoryService(BaseMemoryService):
                 written += 1
             except Exception as exc:
                 status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None) or "?"
+                failed.append((record_id, status))
                 logger.warning(
                     "adk-flair: direct memory write failed for id %s "
                     "(status=%s, written=%d/%d)",
@@ -862,6 +898,13 @@ class FlairMemoryService(BaseMemoryService):
                 "adk-flair: wrote %d direct memories (app=%s, user=%s)",
                 written, app_name, user_id,
             )
+
+        # A failed write must never be reported as stored (flair#1938): after
+        # attempting every record, surface the partial batch honestly. If the
+        # whole batch landed, this is a no-op and add_memory keeps returning
+        # None as before.
+        if failed:
+            raise FlairWriteError(written, len(memories), failed)
 
     async def search_memory(
         self,

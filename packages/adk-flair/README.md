@@ -230,7 +230,11 @@ shapes above — not that you should switch POST for PUT.
 
 `search_memory` swallows transport failures to empty (ADK's contract).
 `list_memories` and the write path raise `FlairRequestError` with
-`.status_code` — read that status before guessing.
+`.status_code` — read that status before guessing. A failed write is never
+reported as stored: when any record in a `store_memory` batch fails to write,
+the tool returns `{"error": <message>, "written": n, "failed": m}`, and
+`add_memory` raises `FlairWriteError` — a `FlairRequestError` subclass carrying
+`written`, `failed` and the first failure's `.status_code`.
 
 ## Security
 
