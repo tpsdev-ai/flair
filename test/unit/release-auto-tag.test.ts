@@ -33,6 +33,8 @@ import {
   VERDICT,
   WRITE_VERDICT,
   adkVersionCheck,
+  classifyLsTree,
+  readAdkPyproject,
   compareVersions,
   createClient,
   createDeps,
@@ -221,6 +223,14 @@ function harness(opts: HarnessOptions = {}) {
         return path === "package.json" ? (versions[rev] ?? null) : null;
       },
       isAncestor: () => opts.ancestor ?? true,
+      lsTree: (sha: string, path: string = ADK_PYPROJECT_PATH) => {
+        const key = `${sha}:${path}`;
+        if (opts.files && Object.prototype.hasOwnProperty.call(opts.files, key)) {
+          const t = opts.files[key];
+          return t === null || t === undefined ? { kind: "absent" } : { kind: "present" };
+        }
+        return { kind: "absent" };
+      },
       revParse: (ref: string) => opts.parents?.[ref] ?? ref,
       logFileHistory: () => opts.fileHistory ?? [],
       changedFiles: () => opts.changedFiles ?? DEFAULT_CHANGED_FILES,
@@ -1267,6 +1277,13 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     const orig = deps.git.show.bind(deps.git);
     deps.git.show = (rev: string, path: string) =>
       path === ADK_PYPROJECT_PATH ? text : orig(rev, path);
+    // The shared read asks MEMBERSHIP first (round 7): pin ls-tree to agree.
+    deps.git.lsTree = (sha: string, path: string) =>
+      path === ADK_PYPROJECT_PATH
+        ? text === null || text === undefined
+          ? { kind: "absent" }
+          : { kind: "present" }
+        : { kind: "absent" };
   }
 
   /** A ref store: the POST records the ref (and makes it resolvable at <sha>);
@@ -1566,22 +1583,142 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     ]);
   });
 
-  test("(git-fail) a git.show failure at the write boundary REFUSES before ANY POST, naming the reason", async () => {
+  test("(git-fail) a git failure at the write boundary REFUSES before ANY POST, naming the reason", async () => {
     const posts: string[] = [];
     const tags = new Map<string, unknown>();
     const { deps } = harness({ api: refApi(posts, tags) });
-    const orig = deps.git.show.bind(deps.git);
-    deps.git.show = (rev: string, path: string) => {
-      if (path === ADK_PYPROJECT_PATH) throw new Error("git show failed (exit 128): fatal: not a git repository");
-      return orig(rev, path);
-    };
+    deps.git.lsTree = () => ({ kind: "failed", reason: "spawn error: boom" });
     const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
     expect(result.verdict).toBe(WRITE_VERDICT.REFUSE); // assertion A
-    expect(result.condition).toBe(CONDITION.ADK_PYPROJECT_UNSUPPORTED);
+    expect(result.condition).toBe(CONDITION.ADK_PYPROJECT_UNREADABLE);
+    expect(result.adkCondition).toBe(CONDITION.ADK_PYPROJECT_UNREADABLE);
     expect(result.summary).toEqual([
-      `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${SHA} (git failed: git show failed (exit 128): fatal: not a git repository); bob cannot verify whether the Python package is present, so the whole release is refused before any tag`,
+      `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${SHA} (spawn error: boom); bob cannot verify the Python package, so the whole release is refused before any tag`,
     ]); // assertion B: the reason, in the whole text
     expect(posts).toEqual([]); // assertion C: zero POSTs
+  });
+
+  test("(r1) ls-tree says absent → absent, and git show is NEVER called", async () => {
+    const posts: string[] = [];
+    const tags = new Map<string, unknown>();
+    const { deps } = harness({ api: refApi(posts, tags) });
+    let showCalls = 0;
+    const origShow = deps.git.show.bind(deps.git);
+    deps.git.show = (rev: string, path: string) => {
+      if (path === ADK_PYPROJECT_PATH) showCalls++;
+      return origShow(rev, path);
+    };
+    deps.git.lsTree = () => ({ kind: "absent" });
+    expect(readAdkPyproject(deps.git, SHA)).toEqual({ kind: "absent" }); // assertion A
+    expect(showCalls).toBe(0); // assertion B: no show call
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(result.adkVerdict).toBe("SKIP"); // the adk step is skipped
+    expect(posts).toEqual([`refs/tags/v${VERSION}`]); // only the v POST
+  });
+
+  test("(r2) ls-tree exits NON-ZERO with stderr containing the old absence fragment → failed → REFUSE adk-pyproject-unreadable, ZERO POSTs", async () => {
+    // The OLD classifier returned null (absent) when stderr contained "does not
+    // exist in"; this is that false-absent case. Classification is by EXIT STATUS.
+    const cls = classifyLsTree(
+      { status: 128, stdout: "", stderr: "fatal: path 'packages/adk-flair/pyproject.toml' does not exist in 'abc'" },
+      ADK_PYPROJECT_PATH,
+    );
+    expect(cls.kind).toBe("failed"); // assertion A: the old classifier's false-absent case
+    const posts: string[] = [];
+    const tags = new Map<string, unknown>();
+    const { deps } = harness({ api: refApi(posts, tags) });
+    deps.git.lsTree = () => cls;
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(result.verdict).toBe(WRITE_VERDICT.REFUSE); // assertion B
+    expect(result.condition).toBe(CONDITION.ADK_PYPROJECT_UNREADABLE);
+    expect(result.summary).toEqual([
+      `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${SHA} (git ls-tree exited 128: fatal: path 'packages/adk-flair/pyproject.toml' does not exist in 'abc'); bob cannot verify the Python package, so the whole release is refused before any tag`,
+    ]); // assertion C: the whole text
+    expect(posts).toEqual([]); // assertion D: ZERO POSTs
+  });
+
+  test("(r3) ls-tree TIMES OUT → failed, reason names the timeout, ZERO POSTs", async () => {
+    const cls = classifyLsTree({ error: { code: "ETIMEDOUT" }, signal: "SIGTERM", status: null }, ADK_PYPROJECT_PATH);
+    expect(cls.kind).toBe("failed"); // assertion A
+    expect(cls.kind === "failed" ? cls.reason : "").toContain("timeout"); // assertion B: names the timeout
+    const posts: string[] = [];
+    const tags = new Map<string, unknown>();
+    const { deps } = harness({ api: refApi(posts, tags) });
+    deps.git.lsTree = () => cls;
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(result.verdict).toBe(WRITE_VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.ADK_PYPROJECT_UNREADABLE);
+    expect(result.summary).toEqual([
+      `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${SHA} (timeout after ${10_000}ms); bob cannot verify the Python package, so the whole release is refused before any tag`,
+    ]); // assertion C
+    expect(posts).toEqual([]); // assertion D: ZERO POSTs
+  });
+
+  test("(r4) the DECIDE path with v at the sha and a failing read → a STRUCTURED REFUSE, not a throw", async () => {
+    const tags = new Map<string, unknown>([[`v${VERSION}`, { object: { type: "commit", sha: SHA } }]]);
+    const { deps } = harness({
+      api: refApi([], tags),
+      files: { [`${SHA}:${ADK_PYPROJECT_PATH}`]: pyproject(VERSION) },
+    });
+    deps.git.lsTree = () => ({ kind: "failed", reason: "spawn error: boom" });
+    const result = await decide({ sha: SHA, deps }); // must NOT throw
+    expect(result.verdict).toBe(VERDICT.REFUSE); // assertion A: a structured refuse
+    expect(result.condition).toBe(CONDITION.ADK_PYPROJECT_UNREADABLE);
+    expect(result.adkCondition).toBe(CONDITION.ADK_PYPROJECT_UNREADABLE);
+    expect((result.summary ?? []).join(" ")).toContain("could not be read"); // assertion B: its summary survives
+    expect(result.vVerdict).toBe(WRITE_VERDICT.SKIP);
+  });
+
+  test("(r5) check-version-sync on `version = 1` reports 'present but unsupported: <reason>', not 'no declaration'", () => {
+    const root = scratchDir();
+    const realRoot = resolve(import.meta.dir, "../..");
+    const checker = join(realRoot, "scripts", "check-version-sync.mjs");
+    const realVersion = JSON.parse(readFileSync(join(realRoot, "package.json"), "utf8")).version;
+    const listed = spawnSync(process.execPath, [checker, "--list"], { cwd: realRoot, encoding: "utf8" });
+    expect(listed.status).toBe(0);
+    const inventory = String(listed.stdout ?? "").split("\n").map((s) => s.trim()).filter(Boolean);
+    for (const path of inventory) {
+      const dest = join(root, path);
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(dest, readFileSync(join(realRoot, path)));
+    }
+    // A present but UNSUPPORTED [project] version (valid TOML, a non-string value).
+    writeFileSync(join(root, "packages/adk-flair/pyproject.toml"), `[project]\nname = "adk-flair"\nversion = 1\n`);
+    const r = spawnSync(process.execPath, [checker, realVersion, "--root", root], { encoding: "utf8" });
+    const out = `${r.stdout}${r.stderr}`;
+    expect(r.status).not.toBe(0); // assertion A
+    expect(out).toContain("present but unsupported: project.version is not a string (int)"); // assertion B: the reader's reason
+    expect(out).not.toContain("no [project].version declaration"); // assertion C: NOT the other message
+  });
+
+  test("(r6) a rejected adk POST with an UNRESOLVABLE read-back reports its raw type and SHA", async () => {
+    const posts: string[] = [];
+    const tags = new Map<string, unknown>();
+    let attempted = false;
+    const api = {
+      createTagRef: async (ref: string, sha: string) => {
+        posts.push(ref);
+        if (ref.startsWith("refs/tags/adk-flair-v")) {
+          attempted = true;
+          return { ok: false, status: 403, body: { message: "nope" } };
+        }
+        tags.set(ref.replace("refs/tags/", ""), { object: { type: "commit", sha } });
+        return { ok: true, status: 201, body: {} };
+      },
+      readTagRef: async (tag: string) =>
+        tag.startsWith("adk-flair-v")
+          ? attempted
+            ? { object: { type: "blob", sha: "deadbeef" } }
+            : null
+          : (tags.get(tag) ?? null),
+    };
+    const { deps } = harness({ api });
+    pinPyproject(deps, pyproject(VERSION));
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    const adkTag = `adk-flair-v${VERSION}`;
+    expect(result.summary).toEqual([
+      `the POST of refs/tags/${adkTag} was rejected (403); this run read back v${VERSION} at ${SHA} and ${adkTag} at an unresolvable ref (type "blob", sha "deadbeef"); next: re-run the workflow on this commit, then confirm with \`git ls-remote --tags origin ${adkTag}\` that it resolves to ${SHA}`,
+    ]); // assertion: the raw type and SHA are in the text
   });
 
   test("(reader) a valid-TOML pyproject whose version the reader rejects emits the whole 'could not be verified' text", async () => {
@@ -1693,12 +1830,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
       const posts: string[] = [];
       const tags = new Map<string, unknown>();
       const { deps } = harness({ api: refApi(posts, tags) });
-      const orig = deps.git.show.bind(deps.git);
-      deps.git.show = (rev: string, path: string) => {
-        if (path === ADK_PYPROJECT_PATH) throw new Error("boom");
-        return orig(rev, path);
-      };
-      pinPyproject(deps, pyproject(VERSION));
+      deps.git.lsTree = () => ({ kind: "failed", reason: "spawn error: boom" });
       const r = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
       emitted.push(...(r.summary ?? []));
     }
@@ -1706,7 +1838,46 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     await collect(refApi([], new Map()), `[project]\nname = "adk-flair"\nversion = 1\n`);
 
     expect(emitted.length).toBeGreaterThan(0); // the scan saw real texts
-    for (const t of emitted) {
+    // SCAN COMPLETENESS: the fixture list must name every emitting path. The
+    // branches (file:line at this commit) are:
+    //   release-auto-tag.mjs: decide's adk-work refusal (:~1050) + the vAlreadyAtSha
+    //     TAG summary (:1212); writeTag's git-failure refusal (:1315),
+    //     version-mismatch/unsupported refusals (:1328), pre-POST adk-elsewhere,
+    //     rejected-POST (:1422), MISSING (:1427), UNRESOLVED (:1440), ELSEWHERE (:1454);
+    //   check-version-sync.mjs: write()'s refusal (:276) and readDeclared's two
+    //     reasons (:241/:244).
+    const FIXTURES = [
+      "rejected-post",
+      "missing",
+      "unresolved",
+      "elsewhere",
+      "git-fail",
+      "reader",
+      "cvs-verify",
+      "cvs-write",
+    ];
+    expect(FIXTURES.length).toBe(8); // the fixtures this scan runs
+    const checkVersionSyncMessages: string[] = [];
+    {
+      // check-version-sync's two messages, collected from real runs.
+      const realRoot = resolve(import.meta.dir, "../..");
+      const checker = join(realRoot, "scripts", "check-version-sync.mjs");
+      const root = scratchDir();
+      mkdirSync(join(root, "packages/flair-bench/src"), { recursive: true });
+      mkdirSync(join(root, "packages/adk-flair"), { recursive: true });
+      writeFileSync(join(root, "packages/flair-bench/src/version.ts"), 'export const TOOL_VERSION = "1.0.0";\n');
+      writeFileSync(join(root, "packages/adk-flair/pyproject.toml"), `[project]\nname = "adk-flair"\nversion = 1\n`);
+      const a = spawnSync(process.execPath, [checker, "1.0.0", "--root", root], { encoding: "utf8" });
+      checkVersionSyncMessages.push(`${a.stdout}${a.stderr}`);
+      writeFileSync(join(root, "packages/adk-flair/pyproject.toml"), `[project]\nname = "adk-flair"\ndescription = """\nversion = "0.55.2"\n"""\nversion = "1.0.0"\n`);
+      const b = spawnSync(process.execPath, [checker, "--write", "2.0.0", "--root", root], { encoding: "utf8" });
+      checkVersionSyncMessages.push(`${b.stdout}${b.stderr}`);
+    }
+    // The population the scan must have seen: the writeText fixtures (6) + the
+    // check-version-sync messages (2). A new emitting path that is NOT added here
+    // makes this assertion drift — the guard the brief asks for.
+    expect(emitted.length + checkVersionSyncMessages.length).toBe(11);
+    for (const t of [...emitted, ...checkVersionSyncMessages]) {
       for (const p of phrases) {
         const readBack = /[0-9a-f]{40}/.test(t) || /read back|not found|did not read back/.test(t);
         if (t.includes(p)) expect(readBack, `"${p}" with no read-back value: ${t}`).toBe(true);

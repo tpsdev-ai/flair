@@ -115,10 +115,17 @@ git tag v0.11.0 && git push origin v0.11.0
 > `adk-tag-exists-elsewhere` before the `v` tag is written ((d)); a second POST
 > rejected for lack of permission refuses `adk-ref-write-rejected`, and the text
 > reports what THIS run read back for BOTH refs and the check that confirms
-> completion ((e)). The post-POST read-back has THREE refusals, each reporting only
+> completion ((e)); when the adk read-back cannot be resolved, the text reports its raw
+> ref type and SHA (or `not found`), so it names BOTH refs' read-back values on every
+> branch. The post-POST read-back has THREE refusals, each reporting only
 > what this run observed: the adk ref did not read back at all (MISSING, (i2)); it
 > read back but could not be resolved to a commit (UNRESOLVED, (i3)); or it
-> resolves elsewhere (ELSEWHERE, (i)). None states what a future run will do.
+> resolves elsewhere (ELSEWHERE, (i)). None states what a future run will do. The
+> membership+read of the pyproject is ONE function (`readAdkPyproject`): a
+> `git ls-tree` that does not answer exactly "absent" or "the path" (non-zero exit,
+> spawn error, timeout, unexpected output) or a failed `git show` refuses
+> `adk-pyproject-unreadable` — before any POST, on BOTH the decide and write paths
+> ((r1)-(r4)); no stderr substring decides anything.
 >
 > The writer (`scripts/check-version-sync.mjs --write`) precomputes the two
 > `SOURCE_VERSION_FILES` edits — `packages/flair-bench/src/version.ts` and

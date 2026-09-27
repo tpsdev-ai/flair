@@ -17,8 +17,12 @@
   post-POST read-back has THREE distinct refusals, each reporting only what that run
   OBSERVED: the ref did not read back at all (MISSING); it read back but could not
   be resolved to a commit (UNRESOLVED); or it resolves elsewhere. The rejected-POST
-  and elsewhere texts name the two refs' read-back values and the check the operator
-  runs next. The `[project]` version is read by tomllib with `dynamic`
+  and elsewhere texts name the two refs' read-back values (the raw ref type and SHA
+  when unresolvable, or `not found`) and the check the operator runs next. The
+  pyproject's membership+read is ONE function: a `git ls-tree` that does not answer
+  exactly "absent" or "the path", or a failed `git show`, refuses
+  `adk-pyproject-unreadable` before any POST on BOTH paths; no stderr substring
+  decides anything. The `[project]` version is read by tomllib with `dynamic`
   checked BEFORE a static `version` line, so `dynamic = ["version"]` plus a stray
   `version` line has NO project version (and refuses `adk-version-mismatch`). The
   version WRITER (`scripts/check-version-sync.mjs --write`) precomputes the two

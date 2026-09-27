@@ -58,7 +58,6 @@ import { join, dirname, resolve, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import {
-  projectVersionFromPyproject,
   readProjectVersion,
   replaceProjectVersion,
 } from "./ci/pyproject-version.mjs";
@@ -236,10 +235,14 @@ function readDeclared(file) {
   const abs = join(REPO_ROOT, file.path);
   const src = readFileSync(abs, "utf8");
   if (file.project) {
-    const version = projectVersionFromPyproject(src);
-    return version === null
-      ? { ok: false, reason: `no [project].version declaration in ${file.path}` }
-      : { ok: true, version };
+    // Round 7, item 4: report the READER's actual reason — a present but
+    // unsupported file is a different message from no declaration.
+    const r = readProjectVersion(src);
+    if (r.kind === "version") return { ok: true, version: r.version };
+    if (r.kind === "unsupported") {
+      return { ok: false, reason: `${file.path}: present but unsupported: ${r.reason}` };
+    }
+    return { ok: false, reason: `${file.path}: no [project].version declaration (${r.reason})` };
   }
   const m = matchesIn(src, file.pattern);
   if (m.length === 0) {

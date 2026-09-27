@@ -133,6 +133,10 @@ export const CONDITION = Object.freeze({
   // response), or a git failure reading the file at <sha>. bob must NOT guess
   // the version from it.
   ADK_PYPROJECT_UNSUPPORTED: "adk-pyproject-unsupported",
+  // The on-tree pyproject could not be READ: git could not answer whether the path
+  // is present, or the read itself failed (round 7). Distinct from UNSUPPORTED,
+  // which is a file tomllib rejects.
+  ADK_PYPROJECT_UNREADABLE: "adk-pyproject-unreadable",
 });
 export const CONDITION_IDS = Object.freeze(Object.values(CONDITION));
 
@@ -149,6 +153,34 @@ export const DEFAULT_WORKFLOW_PATH = ".github/workflows/test.yml";
 export const DEFAULT_WORKFLOW_NAME = "CI";
 export const DEFAULT_ADVISORY_ALLOWLIST = ".github/release-auto-tag-advisories.json";
 export const DEFAULT_POLL_SECONDS = 60;
+
+/** Every git spawnSync carries this wall-clock ceiling; a timeout is a FAILURE. */
+export const GIT_TIMEOUT_MS = 10_000;
+
+/**
+ * Classify a `git ls-tree --name-only <sha> -- <path>` result (round 7, item 1).
+ * A pure function so its rules are testable without a real spawn. NO stderr
+ * SUBSTRING decides anything: only the exit status and whether the output is
+ * exactly `<path>`.
+ *   { kind: "absent" }            exit 0, empty output
+ *   { kind: "present" }           exit 0, output is exactly <path>
+ *   { kind: "failed", reason }    non-zero exit, spawn error, timeout, or output
+ *                                 other than <path>
+ */
+export function classifyLsTree(r, path) {
+  if (r?.error) {
+    if (r.error.code === "ETIMEDOUT" || r.signal === "SIGTERM")
+      return { kind: "failed", reason: `timeout after ${GIT_TIMEOUT_MS}ms` };
+    return { kind: "failed", reason: `spawn error: ${r.error.message}` };
+  }
+  if (r?.status !== 0) {
+    return { kind: "failed", reason: `git ls-tree exited ${r.status}: ${String(r.stderr ?? "").trim()}` };
+  }
+  const out = String(r.stdout ?? "").trim();
+  if (out === "") return { kind: "absent" };
+  if (out === path) return { kind: "present" };
+  return { kind: "failed", reason: `git ls-tree printed ${JSON.stringify(out)}, not ${JSON.stringify(path)}` };
+}
 // Condition 7b's allowed surface beyond the version-bearing files: the changelog
 // (the release's own edit), the unreleased fragments (prose about shipped
 // versions) and the repo's OWN lockfile (resolved dependency versions, not a
@@ -386,16 +418,40 @@ export function createDeps({ overrides = {}, root = process.cwd(), log, api } = 
        *     failure) — git's own "does not exist in" / "exists on disk, but not
        *     in" message;
        *   - THROWS for anything else: a spawn error, a non-zero exit with other
-       *     stderr, or a timeout. "git failed" must never read as "the path is
-       *     absent" — a caller would otherwise POST a tag and skip a whole step.
+       *     stderr, or a timeout.
        */
       show(rev, path) {
-        const r = spawnSync("git", ["show", `${rev}:${path}`], { cwd: root, encoding: "utf8" });
-        if (r.error) throw new Error(`git show ${rev}:${path} could not run: ${r.error.message}`);
+        const r = spawnSync("git", ["show", `${rev}:${path}`], {
+          cwd: root,
+          encoding: "utf8",
+          timeout: GIT_TIMEOUT_MS,
+        });
+        if (r.error) {
+          if (r.error.code === "ETIMEDOUT" || r.signal === "SIGTERM")
+            throw new Error(`git show ${rev}:${path} timed out after ${GIT_TIMEOUT_MS}ms`);
+          throw new Error(`git show ${rev}:${path} could not run: ${r.error.message}`);
+        }
         if (r.status === 0) return r.stdout;
         const stderr = String(r.stderr ?? "");
         if (/does not exist in|exists on disk, but not in/.test(stderr)) return null;
         throw new Error(`git show ${rev}:${path} failed (exit ${r.status}): ${stderr.trim()}`);
+      },
+      /**
+       * `git ls-tree --name-only <sha> -- <path>` — the MEMBERSHIP question
+       * (round 7, item 1). Returns a STRUCTURED result, never a decision from a
+       * stderr substring:
+       *   { kind: "absent" }            exit 0, empty output
+       *   { kind: "present" }           exit 0, output is exactly <path>
+       *   { kind: "failed", reason }    anything else: non-zero exit, spawn error,
+       *                                 timeout, or output other than <path>
+       */
+      lsTree(sha, path) {
+        const r = spawnSync("git", ["ls-tree", "--name-only", sha, "--", path], {
+          cwd: root,
+          encoding: "utf8",
+          timeout: GIT_TIMEOUT_MS,
+        });
+        return classifyLsTree(r, path);
       },
       /** true when <sha> is an ancestor of <ref>. Throws when the ref is unknown. */
       isAncestor(sha, ref) {
@@ -593,6 +649,49 @@ export function adkTagName(version) {
 }
 
 /**
+ * Read the on-tree `packages/adk-flair/pyproject.toml` at `sha` (round 7, item 1).
+ * ONE function shared by `decide` and `tag`. Returns EXACTLY one of:
+ *   { kind: "absent" }                git says the path is not in that tree
+ *   { kind: "present", text }         the file's text
+ *   { kind: "failed", reason }        git could not answer, or the read failed
+ *
+ * Membership comes from `git ls-tree --name-only <sha> -- <path>`; NO stderr
+ * substring decides anything (the round-6 classifier's `does not exist in` test is
+ * gone). The text is read with `git show` ONLY when present, and any failure there
+ * is `failed`. Every spawnSync carries a timeout; a timeout is `failed` with
+ * "timeout" in the reason.
+ */
+export function readAdkPyproject(git, sha) {
+  if (!git?.lsTree) {
+    return { kind: "failed", reason: "no git ls-tree seam is configured" };
+  }
+  const membership = git.lsTree(sha, ADK_PYPROJECT_PATH);
+  if (membership?.kind === "absent") return { kind: "absent" };
+  if (membership?.kind === "failed") return { kind: "failed", reason: membership.reason };
+  if (membership?.kind !== "present") {
+    return { kind: "failed", reason: `git ls-tree returned an unknown result: ${JSON.stringify(membership)}` };
+  }
+  if (typeof git.show !== "function") {
+    return { kind: "failed", reason: "no git show seam is configured" };
+  }
+  let text;
+  try {
+    text = git.show(sha, ADK_PYPROJECT_PATH);
+  } catch (err) {
+    return {
+      kind: "failed",
+      reason: `git show ${sha}:${ADK_PYPROJECT_PATH} failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  if (text === null || text === undefined) {
+    // ls-tree said present but show returned nothing: an inconsistency is a failure,
+    // never "absent".
+    return { kind: "failed", reason: `git show ${sha}:${ADK_PYPROJECT_PATH} returned nothing although ls-tree reported the path present` };
+  }
+  return { kind: "present", text };
+}
+
+/**
  * The tagger's adk decision for an on-tree pyproject (round 3):
  *   { kind: "absent" }                              no pyproject at this sha
  *   { kind: "ok" }                                  the whitelisted version matches
@@ -646,8 +745,17 @@ export function adkVersionCheck(adkText, version) {
  * permission, and this is a read.
  */
 export async function adkWorkAfterVAtSha(reads, deps, { sha, version }) {
-  const adkText = deps.git?.show ? deps.git.show(sha, ADK_PYPROJECT_PATH) : null;
-  const adkCheck = adkVersionCheck(adkText, version);
+  const read = readAdkPyproject(deps.git, sha);
+  if (read.kind === "failed") {
+    return {
+      kind: "refuse",
+      condition: CONDITION.ADK_PYPROJECT_UNREADABLE,
+      summary: [
+        `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${sha} (${read.reason}); bob cannot verify the Python package, so the release is refused`,
+      ],
+    };
+  }
+  const adkCheck = adkVersionCheck(read.kind === "present" ? read.text : null, version);
   if (adkCheck.kind === "absent") return { kind: "skip" };
   if (adkCheck.kind === "refuse") {
     return { kind: "refuse", condition: adkCheck.condition, summary: adkCheck.summary };
@@ -1112,7 +1220,7 @@ export async function decide({ sha, deps, options = {} }) {
     condition: "",
     version,
     summary: vAlreadyAtSha
-      ? [...summary, `v${version} is already at ${sha}: the v POST is skipped and only the adk tag is written`]
+      ? [...summary, `v${version} is already at ${sha}: the v POST is skipped; the adk tag will be attempted after the v read-back`]
       : summary,
     pr: step7.pr,
     ...(vAlreadyAtSha ? { vVerdict: WRITE_VERDICT.SKIP } : {}),
@@ -1211,26 +1319,22 @@ export async function writeTag({ sha, version, deps, options = {} }) {
   // mismatch never leaves a half-tagged release. A MISSING file is fine — flair
   // can release without the Python package — and only skips the second tag.
   //
-  // A git FAILURE (spawn error / non-zero exit with other stderr / timeout) is
-  // REFUSED here, before ANY POST: it means bob cannot tell whether the pyproject
-  // exists, and treating "could not read it" as "not there" would POST v and
-  // silently skip adk.
-  let adkText;
-  try {
-    adkText = deps.git?.show ? deps.git.show(sha, ADK_PYPROJECT_PATH) : null;
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    return refuse(CONDITION.ADK_PYPROJECT_UNSUPPORTED, {
+  // A git FAILURE (spawn error / non-zero exit / timeout / an unclear answer) is
+  // REFUSED here, before ANY POST: bob cannot tell whether the pyproject exists,
+  // and treating "could not read it" as "not there" would POST v and skip adk.
+  const adkRead = readAdkPyproject(deps.git, sha);
+  if (adkRead.kind === "failed") {
+    return refuse(CONDITION.ADK_PYPROJECT_UNREADABLE, {
       summary: [
         ...summary,
-        `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${sha} (git failed: ${detail}); bob cannot verify whether the Python package is present, so the whole release is refused before any tag`,
+        `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${sha} (${adkRead.reason}); bob cannot verify the Python package, so the whole release is refused before any tag`,
       ],
       adkVerdict: WRITE_VERDICT.REFUSE,
-      adkCondition: CONDITION.ADK_PYPROJECT_UNSUPPORTED,
+      adkCondition: CONDITION.ADK_PYPROJECT_UNREADABLE,
     });
   }
-  const adkPresent = adkText !== null && adkText !== undefined;
-  const adkCheck = adkVersionCheck(adkText, version);
+  const adkPresent = adkRead.kind === "present";
+  const adkCheck = adkVersionCheck(adkPresent ? adkRead.text : null, version);
   if (adkCheck.kind === "refuse") {
     return refuse(adkCheck.condition, {
       summary: [...summary, ...adkCheck.summary],
@@ -1318,10 +1422,12 @@ export async function writeTag({ sha, version, deps, options = {} }) {
         // promise about a future run.
         const adkAfter = await deps.api.readTagRef(adkTag);
         const adkAfterCommit = adkAfter ? await resolveTagCommit(deps.api, adkAfter) : null;
+        const adkAfterType = adkAfter?.object?.type;
+        const adkAfterSha = adkAfter?.object?.sha;
         const adkSaw = adkAfter
           ? adkAfterCommit !== null
             ? `at ${adkAfterCommit}`
-            : "at an unresolvable ref"
+            : `at an unresolvable ref (type ${JSON.stringify(adkAfterType)}, sha ${JSON.stringify(adkAfterSha)})`
           : "not found";
         adkVerdict = WRITE_VERDICT.REFUSE;
         adkCondition = CONDITION.ADK_REF_WRITE_REJECTED;

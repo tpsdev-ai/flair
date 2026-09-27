@@ -25,6 +25,7 @@ export interface ConditionIds {
   ADK_TAG_EXISTS_ELSEWHERE: string;
   ADK_REF_WRITE_REJECTED: string;
   ADK_PYPROJECT_UNSUPPORTED: string;
+  ADK_PYPROJECT_UNREADABLE: string;
 }
 
 export const CONDITION: ConditionIds;
@@ -36,6 +37,7 @@ export const CONCLUSION_WHITELIST: readonly string[];
 export const DEFAULT_REVIEWERS: readonly string[];
 export const DEFAULT_VERSION_FILE: string;
 export const ADK_PYPROJECT_PATH: string;
+export const GIT_TIMEOUT_MS: number;
 export const DEFAULT_WORKFLOW_PATH: string;
 export const DEFAULT_WORKFLOW_NAME: string;
 export const DEFAULT_ADVISORY_ALLOWLIST: string;
@@ -98,6 +100,7 @@ export interface GitHubClient {
 
 export interface GitReads {
   show(rev: string, path: string): string | null;
+  lsTree(sha: string, path: string): { kind: "absent" | "present" } | { kind: "failed"; reason: string };
   isAncestor(sha: string, ref: string): boolean;
   revParse(ref: string): string;
   logFileHistory(rev: string, path: string): string[];
@@ -180,6 +183,15 @@ export function adkVersionCheck(
   version: string,
 ): { kind: "absent" } | { kind: "ok" } | { kind: "refuse"; condition: string; summary: string[] };
 export function adkTagName(version: string): string;
+export type AdkPyprojectReadResult =
+  | { kind: "absent" }
+  | { kind: "present"; text: string }
+  | { kind: "failed"; reason: string };
+export function readAdkPyproject(git: unknown, sha: string): AdkPyprojectReadResult;
+export function classifyLsTree(
+  r: { error?: { code?: string; message?: string }; signal?: string; status?: number | null; stdout?: string | null; stderr?: string | null },
+  path: string,
+): { kind: "absent" } | { kind: "present" } | { kind: "failed"; reason: string };
 export function adkWorkAfterVAtSha(
   reads: GitHubClient,
   deps: Deps,
