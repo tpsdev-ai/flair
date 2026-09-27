@@ -680,21 +680,30 @@ describe("item 1 — a FeedMemories replacement keeps a stored-private row priva
 // ─── item 9: archiving must not rewrite the stored pointer ───────────────────
 
 describe("item 9 — archiving a row does not write the projected pointer back", () => {
-  it("(ar1) the stored pointer row keeps its full URL and scope after an archive", async () => {
+  it("(ar1) the write-back omits the pointer fields, so the stored pointer keeps its full URL and scope", async () => {
     const fullUrlPointer = { v: 1, host: "openclaw", kind: "run", id: "run-ar1", url: "https://host.example/path?a=1#frag" };
-    const m = makeMemory(agentCtx("agent-a"));
-    const created: any = await m.post({ id: "mem-ar1", content: "note", visibility: "shared", hostSource: fullUrlPointer, hostSourceScope: "record" });
-    const id = created.id ?? "mem-ar1";
-    const before = pointerStore.get(id)?.hostSource;
-    expect(before).toBe(JSON.stringify(fullUrlPointer)); // assertion: the full URL was stored
+    // The row carries a pointer (a raw write put one inline); its pointer row
+    // holds the full URL and a write-time scope.
+    seedMemory({ id: "mem-ar1", agentId: "agent-a", visibility: "shared", hostSource: JSON.stringify(fullUrlPointer) });
+    pointerStore.set("mem-ar1", { memoryId: "mem-ar1", hostSource: JSON.stringify(fullUrlPointer), scopeAtWrite: "shared", authorId: "agent-a", memoryInstanceToken: memoryStore.get("mem-ar1")?.instanceToken });
+    const before = pointerStore.get("mem-ar1")?.hostSource;
 
-    const arch: any = new (MemoryArchive as any)();
-    arch.getContext = () => ({ request: agentCtx("agent-a") });
-    const res: any = await arch.post({ id, action: "basement" });
-    expect(res?.archived).toBe(true); // assertion: the archive landed
+    // Capture the payload the archive hands to the write.
+    let captured: any = null;
+    const realPut = (Memory as any).put;
+    (Memory as any).put = async (content: any, ctx: any) => { captured = content; return realPut.call(Memory, content, ctx); };
+    try {
+      const arch: any = new (MemoryArchive as any)();
+      arch.getContext = () => ({ request: agentCtx("agent-a") });
+      const res: any = await arch.post({ id: "mem-ar1", action: "basement" });
+      expect(res?.archived).toBe(true); // assertion: the archive landed
+    } finally {
+      (Memory as any).put = realPut;
+    }
 
-    const after = pointerStore.get(id);
-    expect(after?.hostSource).toBe(before); // assertion: the full URL survived the archive
-    expect(after?.scopeAtWrite).toBe("shared"); // assertion: the scope survived the archive
+    expect(captured?.hostSource).toBeUndefined(); // assertion: the write-back omits the inline pointer
+    expect(captured?.hostSourceScope).toBeUndefined(); // assertion: and the scope
+    expect(pointerStore.get("mem-ar1")?.hostSource).toBe(before); // assertion: the full URL survived
+    expect(pointerStore.get("mem-ar1")?.scopeAtWrite).toBe("shared"); // assertion: the scope survived
   });
 });
