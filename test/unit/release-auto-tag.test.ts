@@ -1419,7 +1419,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     // The WHOLE emitted text: what this run read back for BOTH refs, then the check.
     const adkTag = `adk-flair-v${VERSION}`;
     expect(result.summary).toEqual([
-      `the POST of refs/tags/${adkTag} was rejected (403); this run read back v${VERSION} at ${SHA} and ${adkTag} not found; next: re-run the workflow on this commit, then confirm with \`git ls-remote --tags origin ${adkTag}\` that it resolves to ${SHA}`,
+      `the POST of refs/tags/${adkTag} was rejected (403); this run read back v${VERSION} at ${SHA} and ${adkTag} not found; next: an admin adds the release-tag App as a bypass actor on the adk-flair-v* tag ruleset (docs/releasing.md), then re-run the workflow on this commit and confirm with \`git ls-remote --tags origin ${adkTag}\` that it resolves to ${SHA}`,
     ]);
   });
 
@@ -1719,7 +1719,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
     const adkTag = `adk-flair-v${VERSION}`;
     expect(result.summary).toEqual([
-      `the POST of refs/tags/${adkTag} was rejected (403); this run read back v${VERSION} at ${SHA} and ${adkTag} at an unresolvable ref (type "blob", sha "deadbeef"); next: re-run the workflow on this commit, then confirm with \`git ls-remote --tags origin ${adkTag}\` that it resolves to ${SHA}`,
+      `the POST of refs/tags/${adkTag} was rejected (403); this run read back v${VERSION} at ${SHA} and ${adkTag} at an unresolvable ref (type "blob", sha "deadbeef"); next: an admin adds the release-tag App as a bypass actor on the adk-flair-v* tag ruleset (docs/releasing.md), then re-run the workflow on this commit and confirm with \`git ls-remote --tags origin ${adkTag}\` that it resolves to ${SHA}`,
     ]); // assertion: the raw type and SHA are in the text
   });
 
@@ -1807,6 +1807,111 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     const result = await decide({ sha: SHA, deps });
     expect(result.verdict).toBe(VERDICT.REFUSE);
     expect(result.condition).toBe(CONDITION.ADK_VERSION_MISMATCH);
+  });
+
+  /** refApi whose readTagRef THROWS on the Nth read of the adk ref (1-based). */
+  function adkReadThrowsOn(n: number, posts: string[], tags: Map<string, unknown>, reject?: (ref: string) => boolean) {
+    const base = refApi(posts, tags, [], reject);
+    let adkReads = 0;
+    return {
+      ...base,
+      readTagRef: async (tag: string) => {
+        if (tag === `adk-flair-v${VERSION}`) {
+          adkReads++;
+          if (adkReads === n) throw new Error("GET /git/ref/tags/adk failed (502)");
+        }
+        return base.readTagRef(tag);
+      },
+    };
+  }
+
+  test("(r9a) a NON-403 adk POST rejection keeps the plain re-run step (the admin step is named only for 403)", async () => {
+    const posts: string[] = [];
+    const tags = new Map<string, unknown>();
+    const adkTag = `adk-flair-v${VERSION}`;
+    const base = refApi(posts, tags);
+    const { deps } = harness({
+      api: {
+        ...base,
+        createTagRef: async (ref: string, sha: string) =>
+          ref === `refs/tags/${adkTag}` ? (posts.push(ref), { ok: false, status: 422, body: {} }) : base.createTagRef(ref, sha),
+      },
+    });
+    pinPyproject(deps, pyproject(VERSION));
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(result.summary).toEqual([
+      `the POST of refs/tags/${adkTag} was rejected (422); this run read back v${VERSION} at ${SHA} and ${adkTag} not found; next: re-run the workflow on this commit, then confirm with \`git ls-remote --tags origin ${adkTag}\` that it resolves to ${SHA}`,
+    ]);
+  });
+
+  test("(r9b) the adk PRE-CHECK read throws → REFUSE adk-ref-unreadable with ZERO POSTs, never an exception", async () => {
+    const posts: string[] = [];
+    const tags = new Map<string, unknown>();
+    const { deps } = harness({ api: adkReadThrowsOn(1, posts, tags) });
+    pinPyproject(deps, pyproject(VERSION));
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(result.verdict).toBe(WRITE_VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.ADK_REF_UNREADABLE);
+    expect(result.adkCondition).toBe(CONDITION.ADK_REF_UNREADABLE);
+    expect(posts).toEqual([]);
+    expect((result.summary ?? []).at(-1)).toBe(
+      `this run could not read adk-flair-v${VERSION} before writing any tag (GET /git/ref/tags/adk failed (502)); no tag was written; next: re-run the workflow on this commit`,
+    );
+  });
+
+  test("(r9c) the post-v adk re-read throws → the v tag stands, adk REFUSE adk-ref-unreadable, no adk POST", async () => {
+    const posts: string[] = [];
+    const tags = new Map<string, unknown>();
+    const { deps } = harness({ api: adkReadThrowsOn(2, posts, tags) });
+    pinPyproject(deps, pyproject(VERSION));
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(result.verdict).toBe(WRITE_VERDICT.TAGGED);
+    expect(result.adkVerdict).toBe(WRITE_VERDICT.REFUSE);
+    expect(result.adkCondition).toBe(CONDITION.ADK_REF_UNREADABLE);
+    expect(posts).toEqual([`refs/tags/v${VERSION}`]);
+  });
+
+  test("(r9d) the adk read-BACK after an accepted POST throws → adk REFUSE adk-ref-unreadable", async () => {
+    const posts: string[] = [];
+    const tags = new Map<string, unknown>();
+    const { deps } = harness({ api: adkReadThrowsOn(3, posts, tags) });
+    pinPyproject(deps, pyproject(VERSION));
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(result.verdict).toBe(WRITE_VERDICT.TAGGED);
+    expect(result.adkVerdict).toBe(WRITE_VERDICT.REFUSE);
+    expect(result.adkCondition).toBe(CONDITION.ADK_REF_UNREADABLE);
+    expect(posts).toEqual([`refs/tags/v${VERSION}`, `refs/tags/adk-flair-v${VERSION}`]);
+  });
+
+  test("(r9e) the tomllib reader runs ISOLATED: a stdlib-named module in the working directory never runs, and the child gets PATH only", () => {
+    const evil = scratchDir();
+    const marker = join(evil, "SHADOW-RAN");
+    // A planted json.py that would run on import if the cwd were on sys.path.
+    writeFileSync(join(evil, "json.py"), `open(${JSON.stringify(marker)}, "w").write("x")\nraise SystemExit(3)\n`);
+    // A wrapper interpreter that records the argv and env it was given, then runs python3.
+    const record = join(evil, "record.json");
+    const wrapper = join(evil, "py");
+    writeFileSync(wrapper, `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(record + ".argv")}\nenv > ${JSON.stringify(record + ".env")}\nexec python3 "$@"\n`);
+    chmodSync(wrapper, 0o755);
+    const prevCwd = process.cwd();
+    const prevToken = process.env.GH_TOKEN;
+    process.env.GH_TOKEN = "sentinel-token-must-not-reach-python";
+    try {
+      process.chdir(evil);
+      const r = readProjectVersion(`[project]\nname = "x"\nversion = "1.2.3"\n`, { pythonBin: wrapper });
+      expect(r).toMatchObject({ kind: "version", version: "1.2.3" });
+    } finally {
+      process.chdir(prevCwd);
+      if (prevToken === undefined) delete process.env.GH_TOKEN; else process.env.GH_TOKEN = prevToken;
+    }
+    expect(existsSync(marker)).toBe(false); // the planted module never ran
+    expect(readFileSync(record + ".argv", "utf8").split("\n")[0]).toBe("-I"); // isolated mode
+    const childEnv = readFileSync(record + ".env", "utf8");
+    expect(childEnv).not.toContain("sentinel-token-must-not-reach-python");
+    // The child's environment is PATH plus what /bin/sh itself sets; an inherited
+    // environment would carry HOME, USER, GH_TOKEN and the rest.
+    const keys = childEnv.split("\n").filter(Boolean).map((l) => l.split("=")[0]);
+    expect(keys.filter((k) => !["PATH", "PWD", "OLDPWD", "SHLVL", "_"].includes(k))).toEqual([]);
   });
 
   test("(r8e) check-version-sync names a DYNAMIC version as a policy refusal, not as a missing declaration", () => {

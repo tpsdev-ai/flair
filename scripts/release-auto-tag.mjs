@@ -129,14 +129,18 @@ export const CONDITION = Object.freeze({
   ADK_TAG_EXISTS_ELSEWHERE: "adk-tag-exists-elsewhere",
   ADK_REF_WRITE_REJECTED: "adk-ref-write-rejected",
   // The on-tree pyproject's `[project]` version could not be VERIFIED: a form
-  // tomllib does not accept, a reader failure (timeout, stderr noise, bad
-  // response), or a git failure reading the file at <sha>. bob must NOT guess
-  // the version from it.
+  // tomllib does not accept, or a reader failure (timeout, stderr noise, bad
+  // response). The tagger must NOT guess the version from it. (A git failure
+  // reading the file is ADK_PYPROJECT_UNREADABLE.)
   ADK_PYPROJECT_UNSUPPORTED: "adk-pyproject-unsupported",
   // The on-tree pyproject could not be READ: git could not answer whether the path
   // is present, or the read itself failed (round 7). Distinct from UNSUPPORTED,
   // which is a file tomllib rejects.
   ADK_PYPROJECT_UNREADABLE: "adk-pyproject-unreadable",
+  // The adk-flair-v<version> ref could not be READ from the API (round 9): the
+  // read threw instead of answering found / not found. A structured refusal, so
+  // the reporter can name it, never a bare exception.
+  ADK_REF_UNREADABLE: "adk-ref-unreadable",
 });
 export const CONDITION_IDS = Object.freeze(Object.values(CONDITION));
 
@@ -1256,6 +1260,20 @@ export async function decide({ sha, deps, options = {} }) {
   };
 }
 
+/**
+ * Read the adk ref and resolve it to a commit, never throwing (round 9): an API
+ * failure is `{ ok: false, reason }` so the caller refuses with a named condition.
+ */
+async function readAdkRef(api, tag) {
+  try {
+    const ref = await api.readTagRef(tag);
+    const commit = ref ? await resolveTagCommit(api, ref) : null;
+    return { ok: true, ref, commit };
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 // ── the write boundary (condition 10) ─────────────────────────────────────────
 
 /**
@@ -1376,9 +1394,17 @@ export async function writeTag({ sha, version, deps, options = {} }) {
   // ELSEWHERE must refuse WITHOUT writing the v tag. The post-v read below is only
   // the race-breaker. A read failure here is a refusal too (unmeasurable is FAIL).
   if (adkPresent) {
-    const existingAdk = await reads.readTagRef(adkTag);
+    const pre = await readAdkRef(reads, adkTag);
+    if (!pre.ok) {
+      return refuse(CONDITION.ADK_REF_UNREADABLE, {
+        summary: [...summary, `this run could not read ${adkTag} before writing any tag (${pre.reason}); no tag was written; next: re-run the workflow on this commit`],
+        adkVerdict: WRITE_VERDICT.REFUSE,
+        adkCondition: CONDITION.ADK_REF_UNREADABLE,
+      });
+    }
+    const existingAdk = pre.ref;
     if (existingAdk) {
-      const existingCommit = await resolveTagCommit(reads, existingAdk);
+      const existingCommit = pre.commit;
       if (existingCommit !== sha) {
         return refuse(CONDITION.ADK_TAG_EXISTS_ELSEWHERE, {
           summary: [...summary, `${adkTag} already exists at ${existingCommit ?? "nothing"}, not ${sha}`],
@@ -1433,9 +1459,16 @@ export async function writeTag({ sha, version, deps, options = {} }) {
     );
   } else {
     // Re-read as the race-breaker (another run may have written it meanwhile).
-    const existingAdk = await deps.api.readTagRef(adkTag);
-    if (existingAdk) {
-      const existingCommit = await resolveTagCommit(deps.api, existingAdk);
+    const again = await readAdkRef(deps.api, adkTag);
+    const existingAdk = again.ok ? again.ref : null;
+    if (!again.ok) {
+      adkVerdict = WRITE_VERDICT.REFUSE;
+      adkCondition = CONDITION.ADK_REF_UNREADABLE;
+      summary.push(
+        `this run read back v${version} at ${vReadBackSha} and could not read ${adkTag} (${again.reason}); no adk POST was made; next: re-run the workflow on this commit, then confirm with \`git ls-remote --tags origin ${adkTag}\` that it resolves to ${sha}`,
+      );
+    } else if (existingAdk) {
+      const existingCommit = again.commit;
       if (existingCommit === sha) {
         deps.log?.info?.(`${adkTag} already exists at ${sha}: skipping`);
       } else {
@@ -1449,24 +1482,40 @@ export async function writeTag({ sha, version, deps, options = {} }) {
         // The POST is not retried. This run reports what it READ BACK for BOTH
         // refs (v and adk) and the check that confirms completion — never a
         // promise about a future run.
-        const adkAfter = await deps.api.readTagRef(adkTag);
-        const adkAfterCommit = adkAfter ? await resolveTagCommit(deps.api, adkAfter) : null;
+        const after = await readAdkRef(deps.api, adkTag);
+        const adkAfter = after.ok ? after.ref : null;
+        const adkAfterCommit = after.ok ? after.commit : null;
         const adkAfterType = adkAfter?.object?.type;
         const adkAfterSha = adkAfter?.object?.sha;
-        const adkSaw = adkAfter
-          ? adkAfterCommit !== null
-            ? `at ${adkAfterCommit}`
-            : `at an unresolvable ref (type ${JSON.stringify(adkAfterType)}, sha ${JSON.stringify(adkAfterSha)})`
-          : "not found";
+        const adkSaw = !after.ok
+          ? `not read: ${after.reason}`
+          : adkAfter
+            ? adkAfterCommit !== null
+              ? `at ${adkAfterCommit}`
+              : `at an unresolvable ref (type ${JSON.stringify(adkAfterType)}, sha ${JSON.stringify(adkAfterSha)})`
+            : "not found";
+        // A 403 is the ruleset refusing the App (round 9): a plain re-run meets the
+        // same refusal, so the next step names the admin step first.
+        const nextStep =
+          createdAdk?.status === 403
+            ? `next: an admin adds the release-tag App as a bypass actor on the adk-flair-v* tag ruleset (docs/releasing.md), then re-run the workflow on this commit and confirm with \`git ls-remote --tags origin ${adkTag}\` that it resolves to ${sha}`
+            : `next: re-run the workflow on this commit, then confirm with \`git ls-remote --tags origin ${adkTag}\` that it resolves to ${sha}`;
         adkVerdict = WRITE_VERDICT.REFUSE;
         adkCondition = CONDITION.ADK_REF_WRITE_REJECTED;
         summary.push(
-          `the POST of refs/tags/${adkTag} was rejected (${createdAdk?.status}); this run read back v${version} at ${vReadBackSha} and ${adkTag} ${adkSaw}; next: re-run the workflow on this commit, then confirm with \`git ls-remote --tags origin ${adkTag}\` that it resolves to ${sha}`,
+          `the POST of refs/tags/${adkTag} was rejected (${createdAdk?.status}); this run read back v${version} at ${vReadBackSha} and ${adkTag} ${adkSaw}; ${nextStep}`,
         );
       } else {
-        const adkReadBack = await deps.api.readTagRef(adkTag);
-        const adkResolved = adkReadBack ? await resolveTagCommit(deps.api, adkReadBack) : null;
-        if (!adkReadBack) {
+        const back = await readAdkRef(deps.api, adkTag);
+        const adkReadBack = back.ok ? back.ref : null;
+        const adkResolved = back.ok ? back.commit : null;
+        if (!back.ok) {
+          adkVerdict = WRITE_VERDICT.REFUSE;
+          adkCondition = CONDITION.ADK_REF_UNREADABLE;
+          summary.push(
+            `the POST of refs/tags/${adkTag} was accepted, but this run could not read it back (${back.reason}); v${version} is at ${sha}; confirm with \`git ls-remote --tags origin ${adkTag}\` that it resolves to ${sha}`,
+          );
+        } else if (!adkReadBack) {
           // MISSING: the ref did not read back at all (round 5, item 5).
           adkVerdict = WRITE_VERDICT.REFUSE;
           adkCondition = CONDITION.ADK_REF_WRITE_REJECTED;

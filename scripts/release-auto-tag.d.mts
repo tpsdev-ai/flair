@@ -26,6 +26,7 @@ export interface ConditionIds {
   ADK_REF_WRITE_REJECTED: string;
   ADK_PYPROJECT_UNSUPPORTED: string;
   ADK_PYPROJECT_UNREADABLE: string;
+  ADK_REF_UNREADABLE: string;
 }
 
 export const CONDITION: ConditionIds;

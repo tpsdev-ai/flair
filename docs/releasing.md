@@ -101,7 +101,9 @@ git tag v0.11.0 && git push origin v0.11.0
 >
 > The project version is read with Python's `tomllib` — the SAME reader
 > `.github/workflows/adk-flair-publish.yml` decides with — by handing the file to
-> `python3` on stdin. It fails CLOSED: a TOML parse error, a `python3` without
+> `python3` on stdin, in isolated mode (`-I`: no working-directory module can
+> shadow the standard library) with an environment of `PATH` only, so no token
+> reaches the interpreter ((r9e)). It fails CLOSED: a TOML parse error, a `python3` without
 > `tomllib` (older than 3.11), or a `[project]` that is not a table is
 > `unsupported`, and the tagger refuses `adk-pyproject-unsupported` naming the
 > reason ((s), (v)); a `dynamic = [ … "version" … ]` or a missing
@@ -119,8 +121,13 @@ git tag v0.11.0 && git push origin v0.11.0
 > `adk-flair-v<version>` already at another commit refuses
 > `adk-tag-exists-elsewhere` before the `v` tag is written ((d)); a second POST
 > rejected for lack of permission refuses `adk-ref-write-rejected`, and the text
-> reports what THIS run read back for BOTH refs and the check that confirms
-> completion ((e)); when the adk read-back cannot be resolved, the text reports its raw
+> reports what THIS run read back for BOTH refs and the next step ((e)): for a 403
+> (the App is not a bypass actor on the `adk-flair-v*` ruleset) that step is the
+> admin change first, then a re-run; for any other status, a re-run ((r9a)). A read
+> of the adk ref that FAILS (the API answers neither found nor not found) refuses
+> `adk-ref-unreadable` instead of throwing: before any tag is written when it is the
+> pre-check ((r9b)), and with the `v` tag in place when it is the re-read or the
+> read-back ((r9c), (r9d)); when the adk read-back cannot be resolved, the text reports its raw
 > ref type and SHA (or `not found`), so it names BOTH refs' read-back values on every
 > branch. The post-POST read-back has THREE refusals, each reporting only
 > what this run observed: the adk ref did not read back at all (MISSING, (i2)); it

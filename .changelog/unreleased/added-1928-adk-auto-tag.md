@@ -15,7 +15,11 @@
   refuses `adk-version-mismatch` BEFORE either tag is written. An
   `adk-flair-v<version>` already at another commit refuses `adk-tag-exists-elsewhere`
   without writing the `v` tag; a rejected second POST refuses
-  `adk-ref-write-rejected`, leaving the `v` tag in place and never retrying. The
+  `adk-ref-write-rejected`, leaving the `v` tag in place and never retrying (for a
+  403 the text names the admin bypass step before the re-run). An adk ref read
+  that fails refuses `adk-ref-unreadable` rather than throwing. The `tomllib` reader
+  runs `python3 -I` with only `PATH` in its environment, so a module in the
+  checkout cannot shadow the standard library and no token reaches it. The
   post-POST read-back has THREE distinct refusals, each reporting only what that run
   OBSERVED: the ref did not read back at all (MISSING); it read back but could not
   be resolved to a commit (UNRESOLVED); or it resolves elsewhere. The rejected-POST
