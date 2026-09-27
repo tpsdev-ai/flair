@@ -1,17 +1,16 @@
 /**
  * FlairStore — LangGraph BaseStore implementation backed by Flair.
  *
- * Lets a LangGraph agent persist long-term memory ("Store" in LangGraph
- * vocabulary) into a Flair instance, getting crypto-pinned per-agent
- * identity, federated peer-to-peer sync, and cross-orchestrator portability
- * for free. The same memories are then visible to any other Flair-enabled
- * harness (Claude Code via flair-mcp, OpenClaw via openclaw-flair, n8n via
- * n8n-nodes-flair, Hermes via hermes-flair, Pi via pi-flair).
+ * FlairStore stores JSON items in Flair under a configured agent identity.
+ * Requests use Ed25519 when a key resolves, or configured administrator
+ * Basic authentication when no key resolves. Other Flair clients can
+ * retrieve the items when authorized; new items default to private and are
+ * excluded from federation.
  *
- * The adapter implements the abstract `batch()` method that every BaseStore
- * subclass must provide. The base class's concrete `get/put/search/delete/
- * listNamespaces` helpers all funnel through `batch()`, so we get the full
- * surface from one entry point.
+ * FlairStore defines its own get, put, delete, search, and batch methods. The
+ * convenience methods call dispatch directly, while batch dispatches its
+ * supplied operations concurrently through Promise.all. Namespace enumeration
+ * is available only as a batch operation.
  *
  * # Mapping
  *
@@ -37,27 +36,29 @@
  *
  * # Limitations (v1)
  *
- * - LangGraph's `IndexConfig` (custom embedding model + per-field indexing)
- *   is ignored. Flair has its own embedding pipeline (nomic-embed-text-v1.5)
- *   and embeds the full content blob. If you need per-field embedding,
- *   pre-extract the fields and put them as separate items.
+ * - FlairStore exposes no IndexConfig option and ignores the per-item index
+ *   argument. It sends each value as JSON content to Flair, which attempts
+ *   server-side embedding using its configured backend. To store fields
+ *   separately, extract them into separate items before calling put.
  * - `search.filter` operators ($eq/$ne/$gt/$gte/$lt/$lte) are applied
  *   client-side after retrieving candidates. Filtering follows one backend
  *   request, so large candidate sets can increase transfer and local processing.
- * - `listNamespaces` returns namespaces seen in the agent's stored memories.
- *   It can't enumerate empty namespaces.
+ * - Namespace enumeration derives namespaces from the agent's newest 1,000
+ *   memories, applies match conditions and maxDepth, and paginates the
+ *   distinct results. Namespaces without stored items cannot be enumerated,
+ *   and namespaces represented only outside that scan can be missed.
  *
  * # Auth
  *
- * Inherits from FlairClient — Ed25519 keypair if available (preferred), or
- * Basic auth via FLAIR_ADMIN_PASS for standalone deployments.
+ * FlairStore composes FlairClient, which signs requests with Ed25519 when a
+ * key resolves and otherwise uses configured administrator Basic credentials
+ * from adminUser/adminPassword or FLAIR_ADMIN_USER/FLAIR_ADMIN_PASSWORD.
  */
 
 import { FlairClient } from "@tpsdev-ai/flair-client";
 
-// We import only the types we need from langgraph-checkpoint. The actual
-// BaseStore class is extended below; we cast to any when needed because the
-// upstream package may not be installed at type-check time (it's a peer dep).
+// The item and operation types are declared locally; this module imports
+// FlairClient and does not import or extend BaseStore.
 
 interface Item {
   value: Record<string, any>;
@@ -138,7 +139,7 @@ export function encodeLabel(label: string): string {
   return label.replace(/\//g, ".2F").replace(/:/g, ".3A");
 }
 
-/** Inverse of encodeLabel. */
+/** Decodes the output of encodeLabel for valid namespace labels. */
 export function decodeLabel(encoded: string): string {
   return encoded.replace(/\.2F/g, "/").replace(/\.3A/g, ":");
 }
@@ -268,9 +269,9 @@ export function matchesAllFilters(value: Record<string, any>, filter: Record<str
 }
 
 /**
- * Configuration for FlairStore. Same shape as FlairClient's config plus
- * one extra: `agentId` is required (LangGraph isn't agent-aware on its own,
- * so we pin it at construction time).
+ * FlairStoreConfig requires agentId and exposes url, keyPath, a PEM-string
+ * privateKey, adminUser, adminPassword, and timeoutMs; these values are
+ * forwarded to the composed FlairClient.
  */
 export interface FlairStoreConfig {
   /** Required. The Flair agent identity to scope all memories under. */
@@ -289,10 +290,10 @@ export interface FlairStoreConfig {
 }
 
 /**
- * FlairStore — drop-in replacement for LangGraph's `InMemoryStore` that
- * persists into Flair. Extends LangGraph's `BaseStore` interface
- * structurally without importing the abstract class directly (peer-dep
- * pattern keeps the package install-light if a host already has langgraph).
+ * FlairStore implements LangGraph's `BaseStore` interface and persists items
+ * into Flair. It satisfies the interface structurally without importing the
+ * abstract class directly (peer-dep pattern keeps the package install-light
+ * if a host already has langgraph).
  *
  * Usage:
  *   import { FlairStore } from "@tpsdev-ai/langgraph-flair";
@@ -322,13 +323,18 @@ export class FlairStore {
     });
   }
 
-  /** The LangGraph-required entry point. All concrete operations funnel here. */
-  async batch<Op extends Operation[]>(operations: Op): Promise<any[]> {
+  /** Dispatches the supplied operations concurrently and returns their results in input order. */
+  // The result is typed `any`: LangGraph's `OperationResults` is keyed on its own
+  // operation types, and because this module declares its operation types
+  // locally (see the module comment), TypeScript cannot relate the two mapped
+  // types across the generic boundary. A precise mapped return would block the
+  // class from satisfying `BaseStore`; `any` keeps the contract in place.
+  async batch<Op extends Operation[]>(operations: Op): Promise<any> {
     return Promise.all(operations.map((op) => this.dispatch(op)));
   }
-
-  // The same surface BaseStore exposes as concrete methods. Reproduced here
-  // so callers don't have to subclass to get them.
+  // Convenience methods for get, put, delete, and search; each calls the
+  // private dispatcher directly. `listNamespaces`, `start`, and `stop` are
+  // public too (see below).
 
   async get(namespace: string[], key: string): Promise<Item | null> {
     return this.dispatch({ namespace, key }) as Promise<Item | null>;
@@ -353,6 +359,34 @@ export class FlairStore {
   ): Promise<SearchItem[]> {
     return this.dispatch({ namespacePrefix, ...options }) as Promise<SearchItem[]>;
   }
+
+  /**
+   * List namespaces seen in the agent's stored memories. `prefix` and `suffix`
+   * become match conditions, exactly as LangGraph's `BaseStore.listNamespaces`
+   * builds them; `limit` defaults to 100 and `offset` to 0.
+   */
+  async listNamespaces(
+    options: { prefix?: string[]; suffix?: string[]; maxDepth?: number; limit?: number; offset?: number } = {},
+  ): Promise<string[][]> {
+    const { prefix, suffix, maxDepth, limit = 100, offset = 0 } = options;
+    const matchConditions: any[] = [];
+    if (prefix) matchConditions.push({ matchType: "prefix", path: prefix });
+    if (suffix) matchConditions.push({ matchType: "suffix", path: suffix });
+    return (await this.batch([
+      {
+        matchConditions: matchConditions.length ? matchConditions : undefined,
+        maxDepth,
+        limit,
+        offset,
+      },
+    ]))[0];
+  }
+
+  /** FlairStore has no background work to start, so this is a no-op. */
+  start(): void {}
+
+  /** FlairStore has no background work to stop, so this is a no-op. */
+  stop(): void {}
 
   // ── private dispatch ─────────────────────────────────────────────────────
 
@@ -386,7 +420,7 @@ export class FlairStore {
     }
     const tags = nsTags(op.namespace);
     const content = JSON.stringify(op.value);
-    // Subject lets Flair index the namespace head for fast prefix filtering.
+    // Stores the namespace's first label as subject; current store searches do not send it as a backend filter.
     const subject = op.namespace[0] ?? undefined;
     await this.client.memory.write(content, {
       id,
@@ -405,7 +439,7 @@ export class FlairStore {
 
     if (op.query) {
       // Semantic search via Flair, then filter by namespace prefix client-side.
-      // Fetch a generous candidate pool so the post-filter still honors `limit`.
+      // Extra candidates can reduce short pages after filtering but do not guarantee a full page.
       const fetched = await this.client.memory.search(op.query, {
         limit: Math.max(limit + offset, 20) * 4,
       });

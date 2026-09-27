@@ -26,7 +26,7 @@ Where Flair already runs. Each integration can reach one shared Flair memory sto
 | **Google ADK** (Python) | [`adk-flair`](../packages/adk-flair/README.md) | Ed25519 | `BaseMemoryService`; see [hosted auth](#hosted-flair-auth--your-agent-got-a-404) if you just got a 404 |
 | **Google ADK** (JS/TS) | [`@tpsdev-ai/adk-flair`](../packages/adk-flair-js/README.md) | Ed25519 | Same identity model as the Python package |
 
-Don't see your harness? If it speaks **MCP** — Flair already works with `flair-mcp`. If it has a **custom memory protocol** like LangGraph's `BaseStore` or CrewAI's `RAGStorage`, an adapter is a ~200-line package; [open an issue](https://github.com/tpsdev-ai/flair/issues) or [send a PR](https://github.com/tpsdev-ai/flair).
+Don't see your harness? If it speaks **MCP** — Flair already works with `flair-mcp`. For a custom memory protocol such as LangGraph's `BaseStore` or CrewAI's `RAGStorage`, an adapter must translate that protocol's operations to Flair; [open an issue](https://github.com/tpsdev-ai/flair/issues) or [send a PR](https://github.com/tpsdev-ai/flair).
 
 **Already running on Harper?** Every surface above reaches Flair over HTTP. If your application is itself a Harper app, you can skip the network entirely — load Flair as a component of the same instance and call its resources in-process. See [embedding-in-a-harper-app.md](embedding-in-a-harper-app.md), which also covers the table-vs-resource distinction that decides whether your memories are scoped.
 
@@ -159,7 +159,7 @@ Full per-tool walkthrough including troubleshooting: [`docs/mcp-clients.md`](mcp
 
 ## LangGraph (TypeScript)
 
-[`@tpsdev-ai/langgraph-flair`](https://www.npmjs.com/package/@tpsdev-ai/langgraph-flair) implements LangGraph's `BaseStore`. FlairStore provides get, put, delete, search, and batch, with the limitations below.
+[`@tpsdev-ai/langgraph-flair`](https://www.npmjs.com/package/@tpsdev-ai/langgraph-flair) implements LangGraph's `BaseStore` interface. FlairStore provides get, put, delete, search, batch, listNamespaces, start, and stop; see the package README for its API and retrieval limitations.
 
 ```bash
 npm install @tpsdev-ai/langgraph-flair
@@ -173,9 +173,9 @@ const store = new FlairStore({ agentId: "my-langgraph-agent" });
 const agent = createReactAgent({ llm, tools, store });
 ```
 
-Maps LangGraph namespaces to Flair tags, keys to ids, values to JSON content. Search delegates to Flair's HNSW. Filter operators applied client-side. Full mapping table: [`packages/langgraph-flair/README.md`](../packages/langgraph-flair/README.md).
+Maps LangGraph namespaces to Flair tags, keys to ids, values to JSON content. Non-empty search queries call Flair's SemanticSearch endpoint; server retrieval mode and embedding availability determine whether vector or keyword retrieval is used. Filter operators applied client-side. Full mapping table: [`packages/langgraph-flair/README.md`](../packages/langgraph-flair/README.md).
 
-LangGraph **Python** support is on the roadmap (same `BaseStore` shape, Python adapter).
+This package contains the TypeScript adapter; it does not include a Python implementation.
 
 ---
 
@@ -264,7 +264,7 @@ Full details (tools, env reference, auto-recall/auto-capture flags, security not
 
 If it speaks MCP, you're already covered — every MCP client works through `flair-mcp` (the section above lists 6 we've explicitly tested).
 
-If it has a custom memory protocol, the adapter pattern is small (~200 lines). LangGraph and Hermes are the reference implementations. **Adapters we'd love to see:**
+If it has a custom memory protocol, an adapter must translate its operations, identity, and retrieval semantics to Flair. LangGraph and Hermes are the reference implementations. **Adapters we'd love to see:**
 
 - LangGraph Python (mirror of our TS adapter)
 - CrewAI (Python `BaseRAGStorage` protocol)
