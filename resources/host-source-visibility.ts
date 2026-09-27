@@ -4,9 +4,11 @@
  * so it is unit-testable and usable from the read paths.
  *
  * A1' moved the pointer OFF the Memory row and into its OWN table
- * (`MemoryHostSource`, keyed by memoryId). So the projection no longer reads a
- * field off the record: the caller reads the pointer ROW and passes it in. The
- * three outcomes of the join (A1' item 4) are:
+ * (`MemoryHostSource`, keyed by memoryId). Supported writes store host pointers
+ * only in `MemoryHostSource`. A pointer reaches a non-admin reader only through
+ * the gated join; reads remove any `hostSource` stored inline on a Memory row.
+ * So the projection no longer reads a field off the record: the caller reads the
+ * pointer ROW and passes it in. The three outcomes of the join (A1' item 4) are:
  *   - no pointer row           → the record is returned with any inline
  *                                `hostSource` removed (hostSource absent/null —
  *                                byte-identical to a pointerless record, which

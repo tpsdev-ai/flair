@@ -280,8 +280,8 @@ type MemoryHitStat @table(database: "flair") {
 # writes — a claimed external source. Flair does not verify the host object and
 # does not cryptographically sign the pointer body (the Ed25519 request
 # signature covers method and URL, not the body).
-# scopeAtWrite is the record's visibility AT WRITE (null → author-only); the
-# pointer's effective visibility is the NARROWER of it and the record's CURRENT
+# scopeAtWrite is the record's visibility AT WRITE (null → author-only). The join
+# takes the narrower of the stored pointer scope and the Memory row's current
 # visibility. A partial PUT carries the stored visibility it read at the start of
 # the request (p2). receivedAt is server-stamped.
 type MemoryHostSource @table(database: "flair") @export {
