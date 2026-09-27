@@ -688,7 +688,9 @@ class FlairMemoryService(BaseMemoryService):
         except FlairRequestError as exc:
             if exc.status_code != 409:
                 raise
-            await self._request("PUT", f"/Memory/{record_id}", json_body=body)
+            # The id is one percent-encoded path segment; ``_request`` signs the
+            # very same path it sends, so the signed and sent paths agree (#1970).
+            await self._request("PUT", f"/Memory/{quote(record_id, safe='')}", json_body=body)
 
     # ── BaseMemoryService implementation ─────────────────────────────────────
 

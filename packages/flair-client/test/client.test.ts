@@ -24,7 +24,7 @@ afterEach(() => {
 });
 
 // Import after mock setup
-const { FlairClient, FlairError } = await import("../src/client.js");
+const { FlairClient, FlairError, canonicalRelationshipId } = await import("../src/client.js");
 const authMod = await import("../src/auth.js");
 import { generateKeyPairSync } from "node:crypto";
 
@@ -1100,5 +1100,19 @@ describe("Memory and Relationship ids in request paths are percent-encoded", () 
       expect(mockFetch.mock.calls.length).toBe(2);
       for (const call of mockFetch.mock.calls) expect(onlyPathSegment(call, "Relationship")).toBe(id);
     }
+  });
+
+  test("relationship write addresses exactly its canonical id", async () => {
+    // The id is derived (agentId+subject+predicate+object hashed to base64url),
+    // so it is URL-safe by construction; this pins that the write sends it as
+    // ONE segment after /Relationship/ with no query and no fragment, exactly
+    // as get and delete do. All three Relationship verbs are now pinned.
+    mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+    const client = new FlairClient({ agentId: "test" });
+    const expectedId = canonicalRelationshipId("test", "nathan", "manages", "flair");
+    await client.relationship.write({ subject: "nathan", predicate: "manages", object: "flair" });
+    expect(mockFetch.mock.calls.length).toBe(1);
+    expect(onlyPathSegment(mockFetch.mock.calls[0], "Relationship")).toBe(expectedId);
   });
 });

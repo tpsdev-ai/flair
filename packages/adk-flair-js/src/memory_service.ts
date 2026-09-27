@@ -919,7 +919,9 @@ export class FlairMemoryService implements BaseMemoryService {
         `HTTP ${resp.status}${text ? `: ${text.slice(0, 200)}` : ""}`
       );
     }
-    const putResp = await this._sendJson("PUT", `/Memory/${recordId}`, body);
+    // The id is one percent-encoded path segment; `_sendJson` signs the very
+    // same path it sends, so the signed and sent paths always agree (#1970).
+    const putResp = await this._sendJson("PUT", `/Memory/${encodeURIComponent(recordId)}`, body);
     if (!putResp.ok) {
       const text = await putResp.text().catch(() => "");
       throw new Error(

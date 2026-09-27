@@ -310,7 +310,7 @@ const skill_store: StdioHandler = async (
       tags,
       claimedClient: flair.claimedClient,
     });
-    const result = await flair.request<Record<string, unknown>>("PUT", `/Memory/${id}`, body);
+    const result = await flair.request<Record<string, unknown>>("PUT", `/Memory/${encodeURIComponent(id)}`, body);
     const writtenId = typeof result?.id === "string" && result.id.length > 0 ? result.id : id;
     const preview = content.length > 120 ? content.slice(0, 120) + "..." : content;
     const lines = [

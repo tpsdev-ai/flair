@@ -179,7 +179,7 @@ export async function runCapture(rawInput: string, deps: CaptureDeps = {}): Prom
   const makeClient = deps.makeClient ?? defaultClientFactory;
   try {
     const client = await makeClient(agentId);
-    await withTimeout(Promise.resolve(client.request("PUT", `/Memory/${row.id}`, row)), resolveContinuityTimeoutMs(env));
+    await withTimeout(Promise.resolve(client.request("PUT", `/Memory/${encodeURIComponent(row.id)}`, row)), resolveContinuityTimeoutMs(env));
     return { wrote: true, reason: "written" };
   } catch (err: unknown) {
     // Fail-open: Flair unreachable, timeout, or the #1261 guard's 400 — one

@@ -148,6 +148,31 @@ function row(opts: {
   };
 }
 
+// ─── Memory PUT path encoding (flair#1970) ──────────────────────────────────
+
+describe("capture: journal PUT sends the id as one encoded path segment (#1970)", () => {
+  test("the row id reaches the wire as exactly one segment after /Memory/", async () => {
+    seedSession(dir, AGENT, HARNESS_SESSION);
+    const { calls, deps } = captureDeps();
+    const outcome = await runCapture(postToolUse("Write", { file_path: "/tmp/a.ts" }), deps);
+    expect(outcome.wrote).toBe(true);
+    expect(calls).toHaveLength(1);
+    const [call] = calls;
+    expect(call.method).toBe("PUT");
+    const id = call.body.id as string;
+    // The exact wire shape: one percent-encoded segment, no query, no fragment,
+    // and the signed-for path is byte-identical to what is sent (the client
+    // signs the path it is handed — see continuity-capture-hook.ts).
+    expect(call.path).toBe(`/Memory/${encodeURIComponent(id)}`);
+    const parts = call.path.split("/").filter(Boolean);
+    expect(parts.length).toBe(2); // assertion: /Memory/<one segment>
+    expect(parts[0]).toBe("Memory");
+    expect(call.path).not.toContain("?");
+    expect(call.path).not.toContain("#");
+    expect(decodeURIComponent(parts[1])).toBe(id);
+  });
+});
+
 // ─── capture discipline (S6 + Sherlock rulings) ─────────────────────────────
 
 describe("capture: mutating-tool allowlist", () => {

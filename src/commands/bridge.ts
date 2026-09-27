@@ -167,17 +167,21 @@ export function register(program: Command): void {
       const putMemory = async (body: import("../bridges/runtime/import-runner.js").PutMemoryBody): Promise<void> => {
         const headers: Record<string, string> = { "content-type": "application/json" };
         const keyPath: string | null = opts.key ?? resolveKeyPath(body.agentId);
+        // One percent-encoded path segment, built once: the Ed25519 signature
+        // covers the path that is actually PUT, so sign the same encoded path
+        // (#1970). Ids of ordinary characters address the same record as before.
+        const memoryPath = `/Memory/${encodeURIComponent(body.id)}`;
         if (keyPath) {
-          headers["authorization"] = buildEd25519Auth(body.agentId, "PUT", `/Memory/${body.id}`, keyPath);
+          headers["authorization"] = buildEd25519Auth(body.agentId, "PUT", memoryPath, keyPath);
         }
-        const res = await fetch(`${baseUrl}/Memory/${encodeURIComponent(body.id)}`, {
+        const res = await fetch(`${baseUrl}${memoryPath}`, {
           method: "PUT",
           headers,
           body: JSON.stringify(body),
         });
         if (!res.ok) {
           const text = await res.text().catch(() => "");
-          throw new Error(`PUT /Memory/${body.id} → ${res.status}: ${text || res.statusText}`);
+          throw new Error(`PUT ${memoryPath} → ${res.status}: ${text || res.statusText}`);
         }
       };
 

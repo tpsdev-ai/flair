@@ -890,7 +890,9 @@ describe("create verb and conflict fallback", () => {
     expect(calls[0].method).toBe("POST");
     expect(calls[0].url).toBe("http://localhost:19926/Memory/");
     expect(calls[1].method).toBe("PUT");
-    expect(calls[1].url).toBe("http://localhost:19926/Memory/app:user:sess-1:evt-1");
+    // #1970: the id is one percent-encoded path segment (':' → %3A); the
+    // server decodes it, so the record addressed is unchanged.
+    expect(calls[1].url).toBe("http://localhost:19926/Memory/app%3Auser%3Asess-1%3Aevt-1");
     expect(calls[1].body).toEqual(calls[0].body);
     // Idempotent re-ingestion must neither throw nor warn.
     expect(warnings.filter((w) => w.includes("write failed"))).toEqual([]);
@@ -920,6 +922,79 @@ describe("create verb and conflict fallback", () => {
     expect(failWarnings).toHaveLength(1);
     expect(failWarnings[0]).toContain("HTTP 404"); // the real status, never "?"
     expect(failWarnings[0]).toContain("mem-404");
+  });
+});
+
+// ─── Memory id path encoding (flair#1970) ────────────────────────────────────
+
+describe("Memory id path encoding on the 409 PUT fallback (#1970)", () => {
+  let keyfilePath: string;
+  let service: FlairMemoryService;
+  let origFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    const { keyfilePath: kp } = generateTestKey();
+    keyfilePath = kp;
+    service = new FlairMemoryService({
+      url: "http://localhost:19926",
+      agentId: "test-agent",
+      keyfile: keyfilePath,
+    });
+    origFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    try { fs.unlinkSync(keyfilePath); } catch {}
+    globalThis.fetch = origFetch;
+  });
+
+  it("the fallback PUT sends the id as ONE encoded segment, signed exactly as sent", async () => {
+    // Pre-#1970 the raw id was interpolated into the path, so `#` truncated
+    // it (became a fragment), `?` started a query, `/` split it into extra
+    // segments and `%`/space were malformed. Each id must instead reach the
+    // wire as exactly one segment after /Memory/ that decodes back to the id.
+    const ids = ["a#b", "x?y=1", "a/b/c", "50%", "sp ace"];
+    const calls: Array<{ method: string; url: string; auth: string }> = [];
+    globalThis.fetch = mock(async (url, init) => {
+      calls.push({
+        method: (init as RequestInit).method ?? "GET",
+        url: String(url),
+        auth: ((init as RequestInit).headers as Record<string, string>)["Authorization"],
+      });
+      return calls.length === 1
+        ? new Response("Conflict", { status: 409 })
+        : new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const publicKey = crypto.createPublicKey(loadEd25519Key(keyfilePath));
+
+    for (const id of ids) {
+      calls.length = 0;
+      await service.addMemory("app", "user", [{ ...makeMemoryEntry("fact"), id }]);
+      expect(calls.map((c) => c.method)).toEqual(["POST", "PUT"]);
+
+      const u = new URL(calls[1].url);
+      const parts = u.pathname.split("/").filter(Boolean);
+      expect(parts.length).toBe(2); // assertion: /Memory/<one segment>
+      expect(parts[0]).toBe("Memory");
+      expect(u.search).toBe("");
+      expect(u.hash).toBe("");
+      expect(decodeURIComponent(parts[1])).toBe(id);
+
+      // Where the site signs, the signed path equals the sent path: the
+      // Authorization payload covers METHOD:pathname, so verify it over the
+      // path that arrived.
+      const m = /^TPS-Ed25519 ([^:]+):(\d+):([^:]+):(.+)$/.exec(calls[1].auth);
+      expect(m).not.toBeNull();
+      const [, agent, ts, nonce, sigB64] = m!;
+      const ok = crypto.verify(
+        null,
+        Buffer.from(`${agent}:${ts}:${nonce}:PUT:${u.pathname}`, "utf-8"),
+        publicKey,
+        Buffer.from(sigB64, "base64"),
+      );
+      expect(ok).toBe(true);
+    }
   });
 });
 
