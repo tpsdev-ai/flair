@@ -82,7 +82,7 @@ Copy this into your project's `CLAUDE.md` (or `.claude/settings.md`, `AGENTS.md`
 
 ---
 
-That's it. Claude Code will now bootstrap context on start and store important things as it works.
+This is a prompt-driven CLI setup: Claude must choose to run these commands. For MCP tools and automatic startup recall, run `flair init --agent my-project --client claude-code`, restart Claude Code, and verify the hook with `flair hook status --harness claude-code`; these prompt instructions do not guarantee automatic capture.
 
 ## Multiple Projects
 
