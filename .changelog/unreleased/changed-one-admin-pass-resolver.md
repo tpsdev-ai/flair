@@ -1,18 +1,16 @@
-- **Every CLI command resolves the admin password through one resolver, and a file-plus-flag conflict is now a usage error.**
+- **The listed CLI admin commands share password-source validation and reject conflicting file and inline credentials.**
 
   `backup`, `federation sync`/`verify`/`instance`, `memory add`,
-  `rem restore --apply`, `soul set`/`get`/`list`, and `agent add` now resolve
-  `--admin-pass-file` and `--admin-pass` through `resolveAdminPassFromSources`
-  — the same resolver `federation token`/`pair` already use. Precedence for the
-  common case is unchanged: an explicit option (file or flag) overrides
-  `FLAIR_ADMIN_PASS` / `HDB_ADMIN_PASSWORD`, and `FLAIR_ADMIN_PASS` stays the CI
-  form. What changed: on 0.56.0, passing both `--admin-pass-file` and
-  `--admin-pass` let the flag win silently; that combination is now a usage
-  error, and the command sends nothing. A missing, empty, or
-  group-/world-readable file is refused naming the path and its mode.
+  `rem restore --apply`, `soul set`/`get`/`list`, and `agent add` resolve
+  `--admin-pass-file` and `--admin-pass` through `resolveAdminPassFromSources`,
+  as do `federation token` and `federation pair`. For these commands, supplying
+  nonempty values for both options is a usage error and exits before any request.
+  Environment-password and local-file fallbacks are command-specific.
 
-  > **Heads-up:** if a script or unit file passes `--admin-pass-file` together
-  > with `--admin-pass`, it now exits non-zero before any request. Pass exactly
-  > one; prefer `--admin-pass-file`.
+  Missing or empty password files are refused with their path; files with
+  group or other permission bits are refused with their path and mode.
+
+  > **Heads-up:** For the commands listed above, pass one explicit password
+  > source; prefer `--admin-pass-file` to `--admin-pass`.
 
   (Refs #1910)

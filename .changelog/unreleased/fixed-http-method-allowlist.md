@@ -1,2 +1,6 @@
-- **Flair's REST middleware accepts only the HTTP methods its clients use.**
-  Requests to Flair's REST resources with `GET`, `HEAD`, `OPTIONS`, `POST`, `PUT`, `PATCH` or `DELETE` are handled as before; any other method, in any spelling, gets `405` with an `Allow` header before any path or authentication branch of that middleware. Separately mounted routes (`/mcp`, OAuth discovery) keep their own method handling.
+- **Flair's REST middleware allows `GET`, `HEAD`, `OPTIONS`, `POST`, `PUT`, `PATCH` and `DELETE` through its method check.**
+
+  These methods proceed to the middleware's path and authentication handling.
+  Every other method receives `405` with an `Allow` header listing the permitted
+  methods before path or authentication handling. Separately mounted routes
+  such as `/mcp` and OAuth discovery keep their own method handling.

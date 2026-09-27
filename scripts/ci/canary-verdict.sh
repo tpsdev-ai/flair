@@ -106,12 +106,12 @@ while [ "$#" -gt 0 ]; do
 done
 
 # Promotability is a WHITELIST (F2 of #1671, A1c): the promote block is
-# emitted ONLY for a version that is exactly `<major>.<minor>.<patch>`.
-# Everything else — a SemVer prerelease (`1.2.3-rc.1`, the bare `1.2.3-0`
-# or `1.2.3--`), build metadata (`1.2.3+build`), or any other label — is NOT
-# a release and is never promoted to `latest` (a `-` label sits on `next`; a `+build`/no-`-` version sits on `staged`). A blacklist
+# emitted ONLY for a version that is exactly `<major>.<minor>.<patch>`; every
+# other version string emits no promote block on the PASS path. A blacklist
 # (matching a `-<prerelease>` part) misses `1.2.3--`, whose first `-` is a valid
 # SemVer prerelease token, and would wrongly promote it; the whitelist cannot.
+# release-publish.yml rejects build-metadata tags during tag validation;
+# accepted prerelease tags use the `next` staging dist-tag.
 is_release() {
     # F2 (A1c of #1671): a WHOLE-STRING match, not a line match. `printf | grep -Eq`
     # matches any line of a multi-line value, so "1.2.3" followed by a newline and
@@ -133,16 +133,14 @@ fi
 
 emit_prerelease_note() {
   cat <<EOF
-### Canary - \`${VERSION}\` is not a clean release and is **never** promoted to \`latest\` (\`${OS_NAME}\`)
+### Canary - \`${VERSION}\` is not eligible for this promote block (\`${OS_NAME}\`)
 
-This block promotes **only** an exact \`major.minor.patch\` to \`latest\`. \`${VERSION}\` is
-not one, so **no promote block is printed and \`latest\` does not move** — a version this
-block cannot promote is never pushed live. Where this version actually sits follows
-release-publish.yml: a SemVer **prerelease** (a \`-\` label, such as \`1.2.3-rc.1\`) is
-staged on the \`next\` dist-tag; anything **without** a \`-\` (for example a \`+build\` metadata
-version such as \`1.2.3+20260101\`) is **not** a prerelease and is staged on \`staged\`
-(the no-\`-\` branch), never \`next\`. Either way the version is **not** \`latest\`; a
-\`+build\` version is **not** a prerelease and is **not** promoted by this block either.
+This canary prints a promote block only for an exact \`major.minor.patch\`
+version. \`${VERSION}\` does not match, so no promote commands are printed and
+this block never moves \`latest\` for it.
+release-publish.yml rejects build-metadata tags during tag validation, before
+staging. Prerelease tags accepted by that validation use the \`next\` staging
+dist-tag.
 EOF
 }
 

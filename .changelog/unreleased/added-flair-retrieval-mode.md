@@ -1,6 +1,8 @@
-- **`FLAIR_RETRIEVAL_MODE` selects hybrid, vector-only or bm25-only retrieval for benchmarking; the default (hybrid) is unchanged and `FLAIR_HYBRID_RETRIEVAL` keeps its meaning.**
+- **The server environment selector `FLAIR_RETRIEVAL_MODE` supports `hybrid`, `vector-only` and `bm25-only` retrieval for benchmark runs.**
 
-  It is a benchmark measurement knob, not a shipped toggle: there is no CLI
-  flag and no default change. `bm25-only` ranks on the BM25 lexical leg alone —
-  no vector leg and no query embedding — so a harness can measure BM25 recall
-  against hybrid and vector-only on the same corpus.
+  This selector is intended for benchmark runs and has no CLI flag. When it is
+  unset, `FLAIR_HYBRID_RETRIEVAL` selects hybrid for `true`, `1` or `on`
+  (case-insensitively), and vector-only for other values; leaving both variables
+  unset selects hybrid.
+  In `bm25-only` mode, retrieval ranks using BM25 alone, without a vector leg
+  or query-embedding generation.

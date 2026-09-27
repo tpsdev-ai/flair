@@ -1,13 +1,14 @@
-- **A refused Flair callback now logs once per agent, site and error class, so a later different failure is no longer silenced.**
+- **OpenClaw callback warnings suppress repeated keys while those keys remain in a bounded cache.**
 
-  The plugin's bounded one-time-log path keyed refusals by the agent alone, so
-  after an agent's first refusal every later one for that agent was silent —
-  including a different failure, such as an HTTP 500 on a capture write after a
-  missing key, which is exactly the line an operator needs. The key is now the
-  agent, the callback site and the error's class: a Flair failure by its status
-  (its message embeds the client-assigned memory id, so the message alone would
-  make every retry look like a new failure), anything else by its name and
-  truncated message. Distinct failures each log once; repeats of one do not. The
-  line itself, the bounded log-once set and every refusal path are unchanged.
+  Missing-identity warnings from `agent_end`, `llm_input` and `llm_output`
+  are keyed by callback source. Capture and bootstrap-recall refusals or
+  failures use the agent identity (or `no-identity`), callback site and error
+  class. The class includes the error name and numeric status when present;
+  otherwise it uses the error name and a truncated message.
 
-  (Refs #1751)
+  The shared warning cache retains up to 10,000 keys and evicts the oldest
+  inserted keys when full. Repeats are suppressed while their key remains
+  cached; an evicted key can produce another warning. Missing host identity
+  or an unusable signing key is refused before any outgoing request.
+
+  (Refs #1751, #1884)
