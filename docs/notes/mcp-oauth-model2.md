@@ -106,8 +106,8 @@ registered identities.
 
 ## Enabling (operator checklist)
 
-1. **Configure the AS plugin** — `@harperfast/oauth` is already an exact-pinned
-   dependency in `config.yaml`; configure the existing block:
+1. **Configure the AS plugin** — `@harperfast/oauth` is exact-pinned in `package.json`
+   and already declared in `config.yaml`; configure the existing block:
 
    ```yaml
    '@harperfast/oauth':
@@ -134,8 +134,8 @@ registered identities.
    ```
 
    **DCR is not supported; clients connect via CIMD (Client ID Metadata
-   Documents).** `flair mcp enable` (flair#756) writes exactly this shape —
-   see "Legacy clients" below.
+   Documents).** The shipped `config.yaml` contains this block; `flair mcp enable`
+   uses it instead of creating it. See "Legacy clients" below.
 
    The shipped `config.yaml` already declares `@harperfast/oauth`; enable its MCP
    surface with `FLAIR_MCP_OAUTH=true` and configure the issuer and provider

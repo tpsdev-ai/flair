@@ -45,7 +45,7 @@ The snippets below are the **local** path. Flair also has a native `/mcp` endpoi
 
 Native `/mcp` is remote-only by design. The OAuth authorization server fetches client metadata over HTTPS and refuses private, loopback, and link-local hosts. `flair mcp enable` refuses localhost, loopback, RFC1918, IPv4 link-local, and `.local`. Set `FLAIR_MCP_OAUTH=true` — that is the one value that enables both Flair's `/mcp` route and the OAuth component. A loopback Flair cannot be the origin those clients dial. The stdio adapter is the local path because it speaks the instance's Ed25519 HTTP API and does not need that public origin.
 
-`flair init` writes the stdio adapter. Turning on native `/mcp` is a separate operator step for a publicly reachable instance, documented from the API side in [api-reference.md](api-reference.md#mcp-tools).
+`flair init --agent <id>` attempts to wire detected local clients unless MCP wiring is disabled; bare `flair init` only initializes the instance. Turning on native `/mcp` is a separate operator step for a publicly reachable instance, documented from the API side in [api-reference.md](api-reference.md#mcp-tools).
 
 ---
 
@@ -55,7 +55,7 @@ Pick whichever you use. The MCP server is the same package; only the config synt
 
 > **Pin the version.** An unpinned `@tpsdev-ai/flair-mcp` re-resolves to whatever is currently published on *every* agent session, so any future publish reaches your machine silently, with no lockfile and no review step in the path. `flair init --agent <id>` attempts to wire detected clients when wiring is enabled; every MCP-server config snippet below is written the same way: `@tpsdev-ai/flair-mcp@<version>`.
 >
-> Replace `<version>` with the version you intend to run — the one you already have is `flair --version` — and bump it deliberately. Leaving the literal `<version>` in place fails loudly at `npx`, which is the intended failure: better than a config that looks pinned and isn't. `flair init` is the easier path and fills this in for you.
+> Replace `<version>` with the version you intend to run — the one you already have is `flair --version` — and bump it deliberately. Leaving the literal `<version>` in place fails loudly at `npx`, which is the intended failure: better than a config that looks pinned and isn't. `flair init --agent <id>` can fill in the version for clients it wires; check its wiring summary for skipped or held configs.
 >
 > **Do not stay on a pin older than 0.18.0.** `@tpsdev-ai/flair-client` before 0.18.0 (and `@tpsdev-ai/flair-mcp` that shipped it) silently drops writes — including against another agent's shared memories — and a server upgrade does not fix that. `flair doctor` flags those pins; the remedy is `flair upgrade` (the adapter), not a newer Harper/Flair server alone. See [troubleshooting — silent write drop](troubleshooting.md#pre-0180-flair-client--flair-mcp-silently-drops-writes).
 
