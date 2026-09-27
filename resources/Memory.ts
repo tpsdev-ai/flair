@@ -138,7 +138,11 @@ async function persistPointerRow(
     return null;
   } catch (err) {
     await removeMemoryRow().catch(() => {});
-    return new Response(JSON.stringify({ error: "host_source_persist_failed", message: String((err as Error)?.message ?? err) }), {
+    // The failure is logged server-side; the RESPONSE carries only a fixed
+    // message, never the raw error/stack (CodeQL: information exposure through
+    // a stack trace). A7 still holds: no silent loss — the write fails.
+    console.error("Memory: host-source pointer persist failed (write aborted)", err);
+    return new Response(JSON.stringify({ error: "host_source_persist_failed", message: "host-source pointer could not be persisted" }), {
       status: 500,
       headers: { "content-type": "application/json" },
     });
