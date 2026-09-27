@@ -66,7 +66,7 @@ function assertBasicAuthTransportAllowed(target: string, base: string): void {
   if (parsed.host !== baseParsed.host) {
     throw new Error(
       `flair-client: refusing to send admin Basic credentials to ${parsed.host}: it is not FLAIR_URL's host ` +
-        `(${baseParsed.host}); pass a request path that starts with "/", or use an Ed25519 key for this agent`,
+        `(${baseParsed.host}); check FLAIR_URL, or use an Ed25519 key for this agent`,
     );
   }
   if (parsed.protocol !== "http:") return; // https (and anything else) unaffected
