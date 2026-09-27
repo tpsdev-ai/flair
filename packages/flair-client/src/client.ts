@@ -312,7 +312,7 @@ class MemoryApi {
     // row (resources/Memory.ts). Absent = omitted, zero behavior change.
     if (this.client.claimedClient) record.claimedClient = this.client.claimedClient;
 
-    const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${id}`, record, {
+    const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${encodeURIComponent(id)}`, record, {
       signal: opts.signal,
     });
     // Merge the server response (deduplicated/matchedId/matchConfidence/
@@ -345,7 +345,7 @@ class MemoryApi {
   async update(id: string, content: string, opts: { preserveHistory?: boolean; usedMemoryIds?: string[] } = {}): Promise<Memory> {
     const existing = await this.get(id);
     if (!existing) {
-      throw new FlairError("PUT", `/Memory/${id}`, 404, `memory ${id} not found`);
+      throw new FlairError("PUT", `/Memory/${encodeURIComponent(id)}`, 404, `memory ${id} not found`);
     }
 
     if (opts.preserveHistory) {
@@ -390,7 +390,7 @@ class MemoryApi {
       // `supersedes` being set also makes the server bypass the dedup gate
       // for this write (it's an intentional version link, not an ambiguous
       // new write).
-      const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${newId}`, record);
+      const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${encodeURIComponent(newId)}`, record);
       return { ...record, ...(response ?? {}) } as unknown as Memory;
     }
 
@@ -403,7 +403,7 @@ class MemoryApi {
     if (Array.isArray(opts.usedMemoryIds) && opts.usedMemoryIds.length > 0) {
       merged.usedMemoryIds = opts.usedMemoryIds;
     }
-    const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${id}`, merged);
+    const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${encodeURIComponent(id)}`, merged);
     return { ...merged, id, ...(response ?? {}) } as unknown as Memory;
   }
 
@@ -429,7 +429,7 @@ class MemoryApi {
 
   /** Get a memory by ID. */
   async get(id: string): Promise<Memory | null> {
-    try { return await this.client.request("GET", `/Memory/${id}`); }
+    try { return await this.client.request("GET", `/Memory/${encodeURIComponent(id)}`); }
     catch (e) {
       if (e instanceof FlairError && e.status === 404) return null;
       throw e;
@@ -492,7 +492,7 @@ class MemoryApi {
 
   /** Delete a memory. */
   async delete(id: string): Promise<void> {
-    await this.client.request("DELETE", `/Memory/${id}`);
+    await this.client.request("DELETE", `/Memory/${encodeURIComponent(id)}`);
   }
 }
 

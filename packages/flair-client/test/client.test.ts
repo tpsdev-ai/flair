@@ -1050,3 +1050,43 @@ describe("privateKey config option", () => {
     inspectSpy.mockRestore();
   });
 });
+
+describe("Memory ids in request paths are percent-encoded", () => {
+  // Every id must reach the server as exactly one path segment that decodes
+  // back to the id, whatever characters it contains.
+  const ids = ["a#b", "x?y=1", "a/b/c", "50%", "lg:agent:ns:key", "sp ace"];
+
+  function onlyPathSegment(call: unknown[]): string {
+    const url = new URL(String(call[0]));
+    const parts = url.pathname.split("/").filter(Boolean);
+    expect(parts.length).toBe(2); // assertion: /Memory/<one segment>
+    expect(parts[0]).toBe("Memory");
+    expect(url.search).toBe("");
+    expect(url.hash).toBe("");
+    return decodeURIComponent(parts[1]);
+  }
+
+  test("write, get and delete address exactly the given id", async () => {
+    for (const id of ids) {
+      mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+      globalThis.fetch = mockFetch as any;
+      const client = new FlairClient({ agentId: "test" });
+      await client.memory.write("hello", { id });
+      await client.memory.get(id);
+      await client.memory.delete(id);
+      for (const call of mockFetch.mock.calls) expect(onlyPathSegment(call)).toBe(id);
+      expect(mockFetch.mock.calls.length).toBe(3);
+    }
+  });
+
+  test("update reads and writes exactly the given id", async () => {
+    for (const id of ids) {
+      mockFetch = mock(() => Promise.resolve(new Response(JSON.stringify({ id, agentId: "test", content: "old" }), { status: 200 })));
+      globalThis.fetch = mockFetch as any;
+      const client = new FlairClient({ agentId: "test" });
+      await client.memory.update(id, "new");
+      expect(mockFetch.mock.calls.length).toBeGreaterThan(0);
+      for (const call of mockFetch.mock.calls) expect(onlyPathSegment(call)).toBe(id);
+    }
+  });
+});
