@@ -249,6 +249,33 @@ def test_canonical_base64_requires_padding_that_round_trips():
     assert flair_plugin._canonical_base64_decode(encoded.rstrip("=")) is None  # assertion
 
 
+def test_round_trip_guard_refuses_a_pad_bit_alias():
+    # Same bytes, non-canonical spelling: the unused low bits of the last data
+    # character are set. b64decode(validate=True) accepts it; only the
+    # round-trip comparison refuses it.
+    payload = bytes(range(47))
+    encoded = base64.b64encode(payload).decode("ascii")
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    last = encoded[-2]
+    alias = encoded[:-2] + alphabet[alphabet.index(last) | 1] + encoded[-1]
+    assert alias != encoded
+    assert base64.b64decode(alias, validate=True) == payload  # assertion: decodes to the same bytes
+    assert flair_plugin._canonical_base64_decode(alias) is None  # assertion: the guard refuses it
+
+
+def test_invalid_utf8_error_does_not_chain_the_key_bytes(tmp_path):
+    import traceback
+
+    path = tmp_path / "bad.key"
+    path.write_bytes(bytes([0xFF] * 40) + b"\n")
+    with pytest.raises(ValueError) as ei:
+        flair_plugin._load_private_key(str(path))
+    assert ei.value.__cause__ is None  # assertion: nothing chained
+    assert ei.value.__suppress_context__ is True
+    rendered = "".join(traceback.format_exception(ei.value))
+    assert "0xff" not in rendered and "\\xff" not in rendered  # assertion: no key byte in the traceback
+
+
 def test_load_private_key_file_read_error_propagates(tmp_path):
     # A missing file is a read error, NOT the named format error.
     with pytest.raises(FileNotFoundError):

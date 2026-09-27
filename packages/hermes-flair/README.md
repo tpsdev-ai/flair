@@ -54,7 +54,7 @@ Example `flair.json`:
 
 ## What this plugin does
 
-**At session start.** At session start, the plugin requests up to `bootstrap_limit` Memory rows for the configured agent, puts returned permanent rows first, and inserts nonempty snippets into the system prompt. It does not request a recency sort or query Soul or Agent.
+**At session start.** The plugin requests up to `bootstrap_limit` Memory rows for the configured agent, puts returned permanent rows first, and inserts nonempty snippets into the system prompt. It does not request a recency sort or query Soul or Agent.
 
 **Every turn.** Background-prefetches semantic-search results for the upcoming user message; injects relevant prior context into the next turn's prompt.
 
