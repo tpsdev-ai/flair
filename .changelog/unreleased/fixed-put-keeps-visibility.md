@@ -1,0 +1,1 @@
+- **A `PUT` to an existing memory that omits `visibility` now keeps the record's stored visibility.** Only the two writable values (`private`, `shared`) are carried, and the carried value is checked by the same write guards as an explicit one.

@@ -11,7 +11,7 @@ import { scanFields, isStrictMode } from "./content-safety.js";
 import { invalidEntitiesResponse } from "./entity-vocab.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveAllowedOwners } from "./memory-read-scope.js";
-import { assertValidVisibility, assertVisibilityAllowedForDurability } from "./memory-visibility.js";
+import { assertValidVisibility, assertVisibilityAllowedForDurability, PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
 import {
@@ -1091,6 +1091,19 @@ export class Memory extends (databases as any).flair.Memory {
     const preExisting = content.id
       ? await (databases as any).flair.Memory.get(content.id).catch(() => null)
       : null;
+
+    // A write that omits visibility on an EXISTING record keeps the record's
+    // stored visibility: PUT replaces the whole row, so an omitted field would
+    // otherwise be dropped. Placed before the guards below so they see the
+    // effective value (e.g. an ephemeral durability with a carried "shared" is
+    // refused, not stored). Only the two writable values are carried.
+    if (
+      preExisting &&
+      (content.visibility === undefined || content.visibility === null) &&
+      (preExisting.visibility === PRIVATE_VISIBILITY || preExisting.visibility === SHARED_VISIBILITY)
+    ) {
+      content.visibility = preExisting.visibility;
+    }
 
     // ─── Default visibility (durability-keyed) — Layer 1, part A ────────────
     // Explicit visibility on the write ALWAYS overrides; only stamp the
