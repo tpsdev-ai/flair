@@ -15,10 +15,12 @@ Why Flair specifically:
     plugin can answer "who am I and what do I know" from one place.
 
 Config (env vars or $HERMES_HOME/flair.json):
-  FLAIR_URL          — Flair server URL (default: http://127.0.0.1:9926)
+  FLAIR_URL          — Flair server URL (default: http://127.0.0.1:19926)
   FLAIR_AGENT_ID     — Agent identifier (default: hermes)
-  FLAIR_KEY_PATH     — PKCS8 base64 private key file
+  FLAIR_KEY_PATH     — Ed25519 private key file
                        (default: ~/.flair/keys/<agent>.key)
+                       Accepts a 32-byte raw seed (what `flair agent add`
+                       writes), a PEM key, or strict base64 of PKCS8 DER.
 
 Bootstrap a Flair-side identity for this agent:
   1. Install Flair: npm i -g @tpsdev-ai/flair
@@ -47,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 # ─── Config ────────────────────────────────────────────────────────────────
 
-DEFAULT_URL = "http://127.0.0.1:9926"
+DEFAULT_URL = "http://127.0.0.1:19926"
 DEFAULT_AGENT_ID = "hermes"
 DEFAULT_BOOTSTRAP_LIMIT = 10
 DEFAULT_RECALL_LIMIT = 5
@@ -96,9 +98,11 @@ def _load_config() -> dict:
 SEARCH_SCHEMA = {
     "name": "flair_search",
     "description": (
-        "Semantic search across this agent's Flair memories. Returns relevant "
-        "entries ranked by similarity. Use when the agent needs prior context "
-        "from earlier sessions on this topic."
+        "Semantic search over Flair memories. Results are the agent's own "
+        "records plus other agents' NON-PRIVATE records on the instance "
+        "(private records are owner-only). Returns relevant entries ranked by "
+        "similarity. Use when the agent needs prior context from earlier "
+        "sessions on this topic."
     ),
     "parameters": {
         "type": "object",
@@ -144,13 +148,56 @@ STORE_SCHEMA = {
 # ─── Ed25519 signing ───────────────────────────────────────────────────────
 
 def _load_private_key(key_path: str):
-    """Load PKCS8 base64-encoded Ed25519 key from a Flair-managed file."""
-    from cryptography.hazmat.primitives import serialization
+    """Load an Ed25519 private key from a Flair-managed file.
 
-    raw = Path(key_path).read_text(encoding="utf-8").strip()
-    der = base64.b64decode(raw)
-    key = serialization.load_der_private_key(der, password=None)
-    return key
+    Accepts, in this order (the order bob's key normalizer uses):
+      1. an exact 32-byte raw seed — what `flair agent add` writes;
+      2. a PEM private key;
+      3. strict base64 of a PKCS8 DER private key (standard alphabet, padded,
+         and it must round-trip).
+    Anything else raises a clear error naming the path and the accepted
+    formats — never the key bytes.
+    """
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    data = Path(key_path).read_bytes()  # BYTES — `flair agent add` writes a raw seed
+
+    # 1. Exact 32-byte raw seed.
+    if len(data) == 32:
+        return ed25519.Ed25519PrivateKey.from_private_bytes(data)
+
+    text = data.decode("utf-8", errors="ignore").strip()
+
+    # 2. PEM.
+    if "-----BEGIN" in text:
+        try:
+            key = serialization.load_pem_private_key(text.encode("utf-8"), password=None)
+            if isinstance(key, ed25519.Ed25519PrivateKey):
+                return key
+        except Exception:
+            pass
+
+    # 3. Strict base64 of PKCS8 DER (canonical: standard alphabet, padded, and
+    #    it must round-trip — so a truncated/garbled value is refused, not repaired).
+    der = None
+    try:
+        der = base64.b64decode(text, validate=True)
+    except Exception:
+        der = None
+    if der is not None and base64.b64encode(der).decode("ascii") == text:
+        try:
+            key = serialization.load_der_private_key(der, password=None)
+            if isinstance(key, ed25519.Ed25519PrivateKey):
+                return key
+        except Exception:
+            pass
+
+    raise ValueError(
+        "flair: could not load an Ed25519 private key from "
+        f"{key_path}: expected a 32-byte raw seed, a PEM key, or strict "
+        "base64 of PKCS8 DER (the formats `flair agent add` and Flair's CLI write)"
+    )
 
 
 def _sign_request(priv_key, agent_id: str, method: str, path: str) -> str:
@@ -218,7 +265,7 @@ class FlairMemoryProvider(MemoryProvider):
             },
             {
                 "key": "key_path",
-                "description": "Path to PKCS8 base64 Ed25519 private key (created by `flair agent add`)",
+                "description": "Path to the Ed25519 private key file (created by `flair agent add`): 32-byte raw seed, PEM, or strict base64 of PKCS8 DER",
                 "secret": True,
                 "env_var": "FLAIR_KEY_PATH",
             },

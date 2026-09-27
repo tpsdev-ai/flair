@@ -143,6 +143,53 @@ def test_load_private_key_round_trip(ed25519_key_file):
     assert isinstance(sig, bytes) and len(sig) == 64  # Ed25519 sig is 64 bytes
 
 
+def test_load_private_key_raw_seed_written_by_flair_agent_add(tmp_path):
+    """`flair agent add` writes a raw 32-byte seed (src/commands/agent.ts).
+    The plugin must load THAT file and sign a request that verifies with the
+    matching public key."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    priv = ed25519.Ed25519PrivateKey.generate()
+    seed = priv.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    assert len(seed) == 32
+    path = tmp_path / "hermes.key"
+    path.write_bytes(seed)  # exactly how `flair agent add` writes it
+
+    key = flair_plugin._load_private_key(str(path))
+    auth = flair_plugin._sign_request(key, "alpha", "GET", "/Memory/abc")
+    agent_id, ts, nonce, sig_b64 = auth[len("TPS-Ed25519 "):].split(":")
+    payload = f"{agent_id}:{ts}:{nonce}:GET:/Memory/abc".encode("utf-8")
+    # Verifies with the matching public key (raises on failure).
+    key.public_key().verify(base64.b64decode(sig_b64), payload)
+    assert key.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    ) == priv.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+
+
+def test_load_private_key_rejects_unknown_format_with_clear_error(tmp_path):
+    path = tmp_path / "garbage.key"
+    path.write_bytes(b"not-a-key")
+    with pytest.raises(ValueError) as ei:
+        flair_plugin._load_private_key(str(path))
+    msg = str(ei.value)
+    assert str(path) in msg  # names the path
+    assert "32-byte raw seed" in msg  # names the accepted formats
+
+
+def test_default_url_is_port_19926(monkeypatch):
+    assert flair_plugin.DEFAULT_URL == "http://127.0.0.1:19926"
+    monkeypatch.delenv("FLAIR_URL", raising=False)
+    cfg = flair_plugin._load_config()
+    assert cfg["url"] == "http://127.0.0.1:19926"  # Flair's default port
+
+
 def test_sign_request_format(ed25519_key_file):
     key = flair_plugin._load_private_key(str(ed25519_key_file))
     auth = flair_plugin._sign_request(key, "alpha", "GET", "/Memory/abc")
