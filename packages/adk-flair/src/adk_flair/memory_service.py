@@ -124,6 +124,7 @@ class FlairRequestError(RuntimeError):
 
 
 class FlairWriteError(FlairRequestError):
+    status_code: int | None
     """One or more records in an ``add_memory`` batch failed to write.
 
     A subclass of :class:`FlairRequestError`, so every existing

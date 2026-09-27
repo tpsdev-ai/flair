@@ -114,7 +114,7 @@ identities never collide and the `:` delimiter stays unambiguous.
 
 ### Write path
 
-- Deterministic record IDs: `app:user:session:eventId` — re-ingestion upserts.
+- Record IDs: an event with an `id` uses `app:user:session:eventId`, so re-ingestion upserts; an event without an `id` gets a random UUID in that position, so each ingestion stores it as a new record.
   Direct `addMemory()` writes use the entry's `id` when supplied, else the
   first 32 hex chars of the content's SHA-256 (re-adds replace, not duplicate)
 - Creates ride `POST /Memory/` (the create verb) with the id in the body; a

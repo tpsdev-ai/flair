@@ -720,6 +720,63 @@ describe("addSessionToMemory", () => {
     expect(calls[0].url).toBe("http://localhost:19926/Memory/");
     expect((calls[0].body as Record<string, unknown>).id).toBe("ws-app:ws-user:sess-ws:evt-ws");
   });
+  it("two events with no id in one session produce different record IDs (Refs #1967)", async () => {
+     // Without an id, each event gets its own random UUID.
+     // Neither record id may contain the literal "undefined".
+    const calls: Array<{ body: Record<string, unknown> }> = [];
+    globalThis.fetch = mock(async (url, init) => {
+      calls.push({
+        body: JSON.parse((init as RequestInit).body as string) as Record<string, unknown>,
+        });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        });
+
+       // Build events WITHOUT an id field
+    const session = makeSession({
+      id: "sess-noid",
+      appName: "my-app",
+      userId: "user-1",
+      events: [
+          { id: undefined, invocationId: "inv-1", author: "user", actions: {} as import("@google/adk").Event["actions"], timestamp: Date.now(), content: { role: "user", parts: [{ text: "first" }] } as import("@google/genai").Content },
+          { id: undefined, invocationId: "inv-2", author: "user", actions: {} as import("@google/adk").Event["actions"], timestamp: Date.now(), content: { role: "user", parts: [{ text: "second" }] } as import("@google/genai").Content },
+        ],
+        });
+
+    await service.addSessionToMemory(session);
+
+       // Two distinct record ids, neither contains "undefined"
+    const ids = calls.map(c => c.body.id as string);
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).not.toBe(ids[1]);
+    expect(ids[0]).not.toContain("undefined");
+    expect(ids[1]).not.toContain("undefined");
+        });
+
+  it("addEventsToMemory: two events with no id produce different record IDs (Refs #1967)", async () => {
+     // Same test for the addEventsToMemory write path
+    const calls: Array<{ body: Record<string, unknown> }> = [];
+    globalThis.fetch = mock(async (url, init) => {
+      calls.push({
+        body: JSON.parse((init as RequestInit).body as string) as Record<string, unknown>,
+        });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        });
+
+       // Build events WITHOUT an id field
+    const events = [
+        { id: undefined, invocationId: "inv-1", author: "user", actions: {} as import("@google/adk").Event["actions"], timestamp: Date.now(), content: { role: "user", parts: [{ text: "first" }] } as import("@google/genai").Content },
+        { id: undefined, invocationId: "inv-2", author: "user", actions: {} as import("@google/adk").Event["actions"], timestamp: Date.now(), content: { role: "user", parts: [{ text: "second" }] } as import("@google/genai").Content },
+      ];
+       // MakeSession wraps events, makeSession's id = the sessionId for addEventsToMemory
+      await service.addEventsToMemory("my-app", "user-1", events, "sess-noid");
+
+       // Two distinct record ids, neither contains "undefined"
+    const ids = calls.map(c => c.body.id as string);
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).not.toBe(ids[1]);
+    expect(ids[0]).not.toContain("undefined");
+    expect(ids[1]).not.toContain("undefined");
+        });
 });
 
 // ─── Create verb + conflict fallback (flair#1336 parity) ────────────────────
