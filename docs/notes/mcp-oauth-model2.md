@@ -20,7 +20,7 @@ gating gaps.
   dispatches to the curated tool.
 - `resources/mcp-tools.ts` — the 17 tools in `resources/mcp-tools.ts`, each a thin wrapper over the existing resource handler
   (Memory / SemanticSearch / BootstrapMemories / Soul / WorkspaceState /
-  OrgEvent). No raw CRUD surface — the only path to the datastore through `/mcp`
+  OrgEvent / AttentionQuery / RecordUsage). No raw CRUD surface — the only path to the datastore through `/mcp`
   is one of the 17 tools in `resources/mcp-tools.ts`. Curated **by construction**.
 - `resources/mcp-oauth.ts` — registers `server.http(withMCPAuth(mcpHandler),
   { urlPath: '/mcp' })` **only when `FLAIR_MCP_OAUTH` is on.** `/mcp` runs on its
