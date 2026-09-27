@@ -122,12 +122,15 @@ git tag v0.11.0 && git push origin v0.11.0
 > `adk-tag-exists-elsewhere` before the `v` tag is written ((d)); a second POST
 > rejected for lack of permission refuses `adk-ref-write-rejected`, and the text
 > reports what THIS run read back for BOTH refs and the next step ((e)): for a 403
-> (the App is not a bypass actor on the `adk-flair-v*` ruleset) that step is the
-> admin change first, then a re-run; for any other status, a re-run ((r9a)). A read
-> of the adk ref that FAILS (the API answers neither found nor not found) refuses
-> `adk-ref-unreadable` instead of throwing: before any tag is written when it is the
-> pre-check ((r9b)), and with the `v` tag in place when it is the re-read or the
-> read-back ((r9c), (r9d)); when the adk read-back cannot be resolved, the text reports its raw
+> the text names the App's bypass-actor setting on the `adk-flair-v*` ruleset as the
+> first thing to check (the usual cause; the code sees only the status), then a
+> re-run; for any other status, a re-run ((r9a)). A read of the adk ref that FAILS
+> (the API answers neither found nor not found) refuses `adk-ref-unreadable` instead
+> of throwing: before any tag is written at the pre-check and on a same-commit re-run
+> ((r9b), (r9f), (r9g)), and with the `v` tag in place at the re-read and the
+> read-back ((r9c), (r9d)). After a REJECTED adk POST the refusal stays
+> `adk-ref-write-rejected`, and the text reports the adk read-back as
+> `not read: <reason>`; when the adk read-back cannot be resolved, the text reports its raw
 > ref type and SHA (or `not found`), so it names BOTH refs' read-back values on every
 > branch. The post-POST read-back has THREE refusals, each reporting only
 > what this run observed: the adk ref did not read back at all (MISSING, (i2)); it

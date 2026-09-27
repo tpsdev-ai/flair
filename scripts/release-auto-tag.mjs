@@ -769,9 +769,21 @@ export async function adkWorkAfterVAtSha(reads, deps, { sha, version }) {
     return { kind: "refuse", condition: adkCheck.condition, summary: adkCheck.summary };
   }
   const tag = adkTagName(version);
-  const ref = await reads.readTagRef(tag);
+  const adkRef = await readAdkRef(reads, tag);
+  if (!adkRef.ok) {
+    // A same-commit re-run whose adk read FAILS refuses by name (round 9), never
+    // throws out of decide or writeTag.
+    return {
+      kind: "refuse",
+      condition: CONDITION.ADK_REF_UNREADABLE,
+      summary: [
+        `this run read v${version} at ${sha} and could not read ${tag} (${adkRef.reason}); no tag was written; next: re-run the workflow on this commit`,
+      ],
+    };
+  }
+  const ref = adkRef.ref;
   if (ref) {
-    const commit = await resolveTagCommit(reads, ref);
+    const commit = adkRef.commit;
     if (commit === sha) return { kind: "skip" };
     return {
       kind: "refuse",
@@ -1498,7 +1510,7 @@ export async function writeTag({ sha, version, deps, options = {} }) {
         // same refusal, so the next step names the admin step first.
         const nextStep =
           createdAdk?.status === 403
-            ? `next: an admin adds the release-tag App as a bypass actor on the adk-flair-v* tag ruleset (docs/releasing.md), then re-run the workflow on this commit and confirm with \`git ls-remote --tags origin ${adkTag}\` that it resolves to ${sha}`
+            ? `next: check that the release-tag App is a bypass actor on the adk-flair-v* tag ruleset (a 403 here usually means it is not; docs/releasing.md), then re-run the workflow on this commit and confirm with \`git ls-remote --tags origin ${adkTag}\` that it resolves to ${sha}`
             : `next: re-run the workflow on this commit, then confirm with \`git ls-remote --tags origin ${adkTag}\` that it resolves to ${sha}`;
         adkVerdict = WRITE_VERDICT.REFUSE;
         adkCondition = CONDITION.ADK_REF_WRITE_REJECTED;

@@ -1419,7 +1419,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     // The WHOLE emitted text: what this run read back for BOTH refs, then the check.
     const adkTag = `adk-flair-v${VERSION}`;
     expect(result.summary).toEqual([
-      `the POST of refs/tags/${adkTag} was rejected (403); this run read back v${VERSION} at ${SHA} and ${adkTag} not found; next: an admin adds the release-tag App as a bypass actor on the adk-flair-v* tag ruleset (docs/releasing.md), then re-run the workflow on this commit and confirm with \`git ls-remote --tags origin ${adkTag}\` that it resolves to ${SHA}`,
+      `the POST of refs/tags/${adkTag} was rejected (403); this run read back v${VERSION} at ${SHA} and ${adkTag} not found; next: check that the release-tag App is a bypass actor on the adk-flair-v* tag ruleset (a 403 here usually means it is not; docs/releasing.md), then re-run the workflow on this commit and confirm with \`git ls-remote --tags origin ${adkTag}\` that it resolves to ${SHA}`,
     ]);
   });
 
@@ -1719,7 +1719,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
     const adkTag = `adk-flair-v${VERSION}`;
     expect(result.summary).toEqual([
-      `the POST of refs/tags/${adkTag} was rejected (403); this run read back v${VERSION} at ${SHA} and ${adkTag} at an unresolvable ref (type "blob", sha "deadbeef"); next: an admin adds the release-tag App as a bypass actor on the adk-flair-v* tag ruleset (docs/releasing.md), then re-run the workflow on this commit and confirm with \`git ls-remote --tags origin ${adkTag}\` that it resolves to ${SHA}`,
+      `the POST of refs/tags/${adkTag} was rejected (403); this run read back v${VERSION} at ${SHA} and ${adkTag} at an unresolvable ref (type "blob", sha "deadbeef"); next: check that the release-tag App is a bypass actor on the adk-flair-v* tag ruleset (a 403 here usually means it is not; docs/releasing.md), then re-run the workflow on this commit and confirm with \`git ls-remote --tags origin ${adkTag}\` that it resolves to ${SHA}`,
     ]); // assertion: the raw type and SHA are in the text
   });
 
@@ -1881,6 +1881,29 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     expect(result.adkVerdict).toBe(WRITE_VERDICT.REFUSE);
     expect(result.adkCondition).toBe(CONDITION.ADK_REF_UNREADABLE);
     expect(posts).toEqual([`refs/tags/v${VERSION}`, `refs/tags/adk-flair-v${VERSION}`]);
+  });
+
+  test("(r9f) a same-commit RE-RUN whose adk read throws → DECIDE returns REFUSE adk-ref-unreadable, never throws", async () => {
+    const tags = new Map<string, unknown>([[`v${VERSION}`, { object: { type: "commit", sha: SHA } }]]);
+    const { deps } = harness({ api: adkReadThrowsOn(1, [], tags) });
+    pinPyproject(deps, pyproject(VERSION));
+    const result = await decide({ sha: SHA, deps });
+    expect(result.verdict).toBe(VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.ADK_REF_UNREADABLE);
+    expect((result.summary ?? []).at(-1)).toBe(
+      `this run read v${VERSION} at ${SHA} and could not read adk-flair-v${VERSION} (GET /git/ref/tags/adk failed (502)); no tag was written; next: re-run the workflow on this commit`,
+    );
+  });
+
+  test("(r9g) the same re-run at the WRITE boundary → REFUSE adk-ref-unreadable with ZERO POSTs, never throws", async () => {
+    const posts: string[] = [];
+    const tags = new Map<string, unknown>([[`v${VERSION}`, { object: { type: "commit", sha: SHA } }]]);
+    const { deps } = harness({ api: adkReadThrowsOn(1, posts, tags) });
+    pinPyproject(deps, pyproject(VERSION));
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(result.verdict).toBe(WRITE_VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.ADK_REF_UNREADABLE);
+    expect(posts).toEqual([]);
   });
 
   test("(r9e) the tomllib reader runs ISOLATED: a stdlib-named module in the working directory never runs, and the child gets PATH only", () => {
