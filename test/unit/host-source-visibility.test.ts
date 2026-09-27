@@ -28,6 +28,7 @@ function record(extra: Record<string, unknown> = {}): any {
   return {
     agentId: "agent-a",
     visibility: "shared",
+    instanceToken: "tok-1",
     provenance: prov("agent-a"),
     ...extra,
   };
@@ -35,7 +36,7 @@ function record(extra: Record<string, unknown> = {}): any {
 
 /** A MemoryHostSource row. */
 function pointer(extra: Partial<PointerRow> = {}): PointerRow {
-  return { memoryId: "mem-1", hostSource: POINTER, scopeAtWrite: null, authorId: "agent-a", ...extra };
+  return { memoryId: "mem-1", hostSource: POINTER, scopeAtWrite: null, authorId: "agent-a", memoryInstanceToken: "tok-1", ...extra };
 }
 
 describe("A3 — the read projection, both directions", () => {
@@ -85,8 +86,9 @@ describe("A3 — the read projection, both directions", () => {
     // A1'' item 4: the pointer row's authorId is server-stamped at Memory write
     // time; the projection compares the reader with THAT. Provenance (which a
     // default SemanticSearch select omits) is irrelevant to the join.
-    const forged: any = { agentId: "agent-b", visibility: "shared", provenance: prov("agent-a") };
-    // provenance says agent-a, the pointer row says agent-b: the pointer wins.
+    const forged: any = { agentId: "agent-b", visibility: "shared", instanceToken: "tok-1", provenance: prov("agent-a") };
+    // provenance says agent-a, the pointer row says agent-b: the pointer wins
+    // (the token matches and authorId === agentId).
     expect(projectHostSource(forged, "agent-b", pointer({ authorId: "agent-b" })).hostSource).toEqual(POINTER_OBJ); // assertion: b IS the pointer author
     expect(projectHostSource(forged, "agent-a", pointer({ authorId: "agent-b" })).hostSource).toBe(HOST_SOURCE_WITHHELD); // assertion: a is not
   });

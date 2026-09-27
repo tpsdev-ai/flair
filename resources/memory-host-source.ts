@@ -16,7 +16,7 @@
  */
 import { databases } from "harper";
 import { validateHostSource } from "./host-source.js";
-import type { PointerRow } from "./host-source-visibility.js";
+import { projectHostSource, type PointerRow } from "./host-source-visibility.js";
 
 /** The table name, so callers and tests never re-type it as a literal. */
 export const MEMORY_HOST_SOURCE_TABLE = "MemoryHostSource";
@@ -58,18 +58,21 @@ export interface MemoryHostSourceRow extends PointerRow {
   hostSource: string;
   scopeAtWrite: string | null;
   authorId: string;
+  memoryInstanceToken: string | null;
   receivedAt: string;
 }
 
 /** Build the pointer row to persist alongside a Memory row. `scopeAtWrite` is
  *  the record's visibility at write when the write opted in with
- *  `hostSourceScope: "record"`, else null (author-only). `authorId` and
- *  `receivedAt` are SERVER-stamped (A1' item 3) — never taken from the body. */
+ *  `hostSourceScope: "record"`, else null (author-only). `authorId`,
+ *  `memoryInstanceToken` and `receivedAt` are SERVER-stamped (A1' item 3,
+ *  A1-iv item 1) — never taken from the body. */
 export function buildPointerRow(args: {
   memoryId: string;
   canonical: string;
   scopeAtWrite: string | null;
   authorId: string;
+  memoryInstanceToken: string | null;
   receivedAt: string;
 }): MemoryHostSourceRow {
   return {
@@ -77,6 +80,7 @@ export function buildPointerRow(args: {
     hostSource: args.canonical,
     scopeAtWrite: args.scopeAtWrite ?? null,
     authorId: args.authorId,
+    memoryInstanceToken: args.memoryInstanceToken ?? null,
     receivedAt: args.receivedAt,
   };
 }
@@ -135,6 +139,32 @@ export async function loadPointerRows(ids: readonly string[]): Promise<Map<strin
     if (row && typeof (row as PointerRow).memoryId === "string") map.set((row as PointerRow).memoryId, row);
   }
   return map;
+}
+
+/**
+ * flair#1940 A1-iv item 2 — the ONE reader helper. Every non-admin reader that
+ * returns Memory rows projects their pointers through this: it fetches the
+ * pointer rows for the WHOLE result set in ONE batched query and applies the
+ * join, so no reader can forget the join and no module needs to touch the
+ * MemoryHostSource table itself. `readerAgentId` is the non-admin reader; an
+ * admin/operator read is the named exception (see MemoryHostSource.ts).
+ */
+export async function projectRowsThroughPointers<T extends { id?: unknown }>(
+  rows: readonly T[],
+  readerAgentId: string | null | undefined,
+): Promise<T[]> {
+  const ids = rows.map((r) => r?.id).filter((id): id is string => typeof id === "string" && id.length > 0);
+  const pointers = await loadPointerRows(ids);
+  return rows.map((row) => {
+    const id = row?.id;
+    return typeof id === "string" ? projectHostSource(row, readerAgentId, pointers.get(id) ?? null) : row;
+  });
+}
+
+/** Read ONE stored pointer row (the write path's echo check). Kept here so the
+ *  MemoryHostSource table is touched ONLY by this module. */
+export async function loadStoredPointer(memoryId: string): Promise<PointerRow | null> {
+  return (await loadPointerRows([memoryId])).get(memoryId) ?? null;
 }
 
 /** The Memory attributes that would carry a pointer into an inbound federated

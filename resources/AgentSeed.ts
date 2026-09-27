@@ -20,11 +20,12 @@
  */
 
 import { Resource, databases } from "harper";
+import { randomUUID } from "node:crypto";
 import { allowAdmin, invalidateAdminCache } from "./agent-auth.js";
 import { authorizeSoulWrite, refuseSoulWriteContent, soulProvenance } from "./soul-write-policy.js";
 import { reconcileAdminFields } from "./agent-admin.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
-import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
+import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { rejectSkillWritePath } from "./skill-write.js";
 
 const DEFAULT_SOUL_KEYS = (agentId: string, displayName: string, role: string, now: string) => ({
@@ -136,7 +137,7 @@ export class AgentSeed extends Resource {
         const skillDenial = rejectSkillWritePath(def);
         if (skillDenial) return skillDenial;
         const id = `seed-${agentId}-${i}-${Date.now()}`;
-        const record = {
+        const record: any = {
           id,
           agentId,
           content: def.content,
@@ -148,6 +149,10 @@ export class AgentSeed extends Resource {
           archived: false,
         };
         stripUndeclaredMemoryAttributes(record);
+        // A1-iv items 1/3: the seed is a create path — strip server-stamped
+        // fields and stamp a fresh incarnation token.
+        stripServerStampedFields(record);
+        record.instanceToken = randomUUID();
         await (databases as any).flair.Memory.put(record);
         noteMemoryUpsert(record);
         memories.push(record);

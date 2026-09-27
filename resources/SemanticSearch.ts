@@ -21,8 +21,7 @@ import { retrievalMode } from "./bm25.js";
 // tripping this file's rate-limit/hit-tracking side effects. See
 // resources/semantic-retrieval-core.ts's module doc for the full boundary.
 import { retrieveCandidates, DEFAULT_SELECT } from "./semantic-retrieval-core.js";
-import { projectHostSource } from "./host-source-visibility.js";
-import { loadPointerRows } from "./memory-host-source.js";
+import { projectRowsThroughPointers } from "./memory-host-source.js";
 import { attachTrust } from "./trust-block.js";
 import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
 
@@ -366,8 +365,7 @@ export class SemanticSearch extends Resource {
     const hostSourceReader: string | undefined = authenticatedAgent && !callerIsAdmin ? authenticatedAgent : undefined;
     let projected = topResults;
     if (hostSourceReader) {
-      const pointers = await loadPointerRows(topResults.map((r: any) => r?.id).filter((id: any): id is string => typeof id === "string" && id.length > 0));
-      projected = topResults.map((r: any) => projectHostSource(r, hostSourceReader, pointers.get(r?.id) ?? null));
+      projected = await projectRowsThroughPointers(topResults, hostSourceReader);
     }
 
     // Async hit tracking — MemoryHitStat only, never a Memory rewrite.

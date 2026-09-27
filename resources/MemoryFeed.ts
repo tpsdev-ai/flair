@@ -1,4 +1,5 @@
 import { Resource, databases } from "harper";
+import { randomUUID } from "node:crypto";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 import { computeContentHash, findExistingMemoryByContentHash } from "./memory-feed-lib.js";
 import { FORBIDDEN, UNAUTH, stampAttribution } from "./record-type-kit.js";
@@ -8,7 +9,7 @@ import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, refuseSkillWriteSource, skillScanGate } from "./skill-write.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
 import { extractPointerInputs } from "./memory-host-source.js";
-import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
+import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -178,6 +179,12 @@ export class FeedMemories extends Resource {
     extractPointerInputs(record);
     stripUndeclaredMemoryAttributes(record);
     stripAuthorityFields(record, "Memory");
+    // A1-iv items 1/3: the feed ingest is a Memory writer too — strip a
+    // caller-supplied server-stamped field (instanceToken, provenance), then
+    // PRESERVE the existing row's incarnation token, else generate one.
+    stripServerStampedFields(record);
+    const priorById = await (databases as any).flair.Memory.get(record.id).catch(() => null);
+    record.instanceToken = priorById?.instanceToken ?? randomUUID();
     await (databases as any).flair.Memory.put(record);
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).
     noteMemoryUpsert(record);

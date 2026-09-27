@@ -45,6 +45,7 @@ function seedMemory(overrides: Record<string, any> = {}) {
     content: "a short note",
     contentHash: "h",
     visibility: "shared",
+    instanceToken: overrides.instanceToken ?? `tok-${Math.random().toString(36).slice(2)}`,
     provenance: JSON.stringify({ v: 1, verified: { agentId: "agent-a", timestamp: "2026-01-01T00:00:00.000Z", receivedAt: "2026-01-01T00:00:00.000Z" } }),
     ...overrides,
   };
@@ -62,7 +63,7 @@ beforeEach(() => {
 describe("A1' — the gated join for Memory.get / Memory.search", () => {
   it("the author gets the pointer; a non-author gets 'withheld' (get and search)", async () => {
     const row = seedMemory();
-    pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a" });
+    pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a", memoryInstanceToken: memoryStore.get(row.id)?.instanceToken ?? null });
 
     const asAuthor: any = await makeMemory(agentCtx("agent-a")).get(row.id);
     expect(asAuthor.hostSource).toEqual(POINTER); // assertion: the author gets the validated object
@@ -77,13 +78,13 @@ describe("A1' — the gated join for Memory.get / Memory.search", () => {
 
   it("opted in (shared at write): a reader gets the pointer; widening after the write does not widen it", async () => {
     const row = seedMemory({ visibility: "shared" });
-    pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: "shared", authorId: "agent-a" });
+    pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: "shared", authorId: "agent-a", memoryInstanceToken: memoryStore.get(row.id)?.instanceToken ?? null });
     const opted: any = await makeMemory(agentCtx("agent-b")).get(row.id);
     expect(opted.hostSource).toEqual(POINTER); // assertion: opted-in reader sees it
 
     // Opted in while PRIVATE, then the record is widened to shared.
     const row2 = seedMemory({ visibility: "shared" });
-    pointerStore.set(row2.id, { memoryId: row2.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: "private", authorId: "agent-a" });
+    pointerStore.set(row2.id, { memoryId: row2.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: "private", authorId: "agent-a", memoryInstanceToken: memoryStore.get(row2.id)?.instanceToken ?? null });
     const widened: any = await makeMemory(agentCtx("agent-b")).get(row2.id);
     expect(widened.hostSource).toBe("withheld"); // assertion: widening never widens the pointer
   });
@@ -168,7 +169,7 @@ describe("A1' — a failed pointer write aborts the write (0a)", () => {
 
 describe("A1' — the MemoryHostSource resource", () => {
   it("a non-admin GET gets nothing (404) and a non-admin search gets 403", async () => {
-    pointerStore.set("mem-1", { memoryId: "mem-1", hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a" });
+    pointerStore.set("mem-1", { memoryId: "mem-1", hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a", memoryInstanceToken: memoryStore.get("mem-1")?.instanceToken ?? null });
     const byId = await makeTable(agentCtx("agent-b")).get("mem-1");
     expect((byId as Response)?.status).toBe(404); // assertion: nothing
     const search = await makeTable(agentCtx("agent-b")).search();
@@ -178,7 +179,7 @@ describe("A1' — the MemoryHostSource resource", () => {
   });
 
   it("an admin GET reads the row", async () => {
-    pointerStore.set("mem-1", { memoryId: "mem-1", hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a" });
+    pointerStore.set("mem-1", { memoryId: "mem-1", hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a", memoryInstanceToken: memoryStore.get("mem-1")?.instanceToken ?? null });
     const row: any = await makeTable(agentCtx("root", true)).get("mem-1");
     expect(row?.hostSource).toBe(JSON.stringify(POINTER)); // assertion: admin sees it
   });
@@ -235,7 +236,7 @@ describe("A1' — federation", () => {
 describe("A1' — cascade: delete leaves no pointer row", () => {
   it("Memory.delete() removes the pointer row", async () => {
     const row = seedMemory({ id: "mem-del" });
-    pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a" });
+    pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a", memoryInstanceToken: memoryStore.get(row.id)?.instanceToken ?? null });
     await makeMemory(agentCtx("agent-a")).delete(row.id);
     expect(pointerStore.has(row.id)).toBe(false); // assertion: cascade deleted the pointer
   });
@@ -319,7 +320,7 @@ describe("A1'' item 4 — the join trusts the pointer row's authorId", () => {
     // so a provenance-based join would withhold the pointer from its own
     // author. The pointer row's authorId is what decides.
     const row = seedMemory({ id: "mem-j2", agentId: "agent-a", visibility: "shared", provenance: undefined });
-    pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a" });
+    pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a", memoryInstanceToken: memoryStore.get(row.id)?.instanceToken ?? null });
 
     const asAuthor = await collectSearch("agent-a");
     expect(asAuthor.find((r) => r.id === row.id)?.hostSource).toEqual(POINTER); // assertion: the author sees it
@@ -330,7 +331,7 @@ describe("A1'' item 4 — the join trusts the pointer row's authorId", () => {
   it("(j3) a batched multi-row search does ONE pointer query with correct per-row outcomes", async () => {
     const rows = [0, 1, 2].map((i) => seedMemory({ id: `mem-j3-${i}`, agentId: "agent-a", visibility: "shared", provenance: undefined }));
     for (const row of rows) {
-      pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a" });
+      pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a", memoryInstanceToken: memoryStore.get(row.id)?.instanceToken ?? null });
     }
     harnessState.pointerSearchCalls = 0;
     const asAuthor = await collectSearch("agent-a");
@@ -373,7 +374,7 @@ describe("adjudication A — a partial PUT carries the existing visibility into 
 describe("A1'' item 6 — a read-then-full-put round trip preserves the pointer", () => {
   it("(rt1) get returns the pointer object, and writing the read row back keeps it", async () => {
     const row = seedMemory({ id: "mem-rt1", agentId: "agent-a", visibility: "shared" });
-    pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a" });
+    pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a", memoryInstanceToken: memoryStore.get(row.id)?.instanceToken ?? null });
     const m = makeMemory(agentCtx("agent-a"));
 
     const read: any = await m.get(row.id);
@@ -390,7 +391,7 @@ describe("A1'' item 6 — a read-then-full-put round trip preserves the pointer"
   it("(rt2/e0) an author's EXACT echo of the stored pointer keeps it (full URL preserved)", async () => {
     const stored = JSON.stringify({ v: 1, host: "openclaw", kind: "run", id: "run-bbbbbbbb", url: "https://example.com/path?q=1#frag" });
     const row = seedMemory({ id: "mem-rt2", agentId: "agent-a", visibility: "shared" });
-    pointerStore.set(row.id, { memoryId: row.id, hostSource: stored, scopeAtWrite: "shared", authorId: "agent-a" });
+    pointerStore.set(row.id, { memoryId: row.id, hostSource: stored, scopeAtWrite: "shared", authorId: "agent-a", memoryInstanceToken: memoryStore.get(row.id)?.instanceToken ?? null });
     const m = makeMemory(agentCtx("agent-a"));
     await m.put({ id: row.id, agentId: "agent-a", content: "unchanged", hostSource: stored }); // exact echo of the stored value
     const after = pointerStore.get(row.id);
@@ -404,7 +405,7 @@ describe("A1'' item 6 — a read-then-full-put round trip preserves the pointer"
     const stored = JSON.stringify({ v: 1, host: "openclaw", kind: "run", id: "run-bbbbbbbb", url: "https://example.com/path?q=1#frag" });
     const changed = { v: 1, host: "openclaw", kind: "run", id: "run-bbbbbbbb", url: "https://example.com/path?q=2#frag" };
     const row = seedMemory({ id: "mem-e1", agentId: "agent-a", visibility: "shared" });
-    pointerStore.set(row.id, { memoryId: row.id, hostSource: stored, scopeAtWrite: "shared", authorId: "agent-a" });
+    pointerStore.set(row.id, { memoryId: row.id, hostSource: stored, scopeAtWrite: "shared", authorId: "agent-a", memoryInstanceToken: memoryStore.get(row.id)?.instanceToken ?? null });
     const m = makeMemory(agentCtx("agent-a"));
     await m.put({ id: row.id, agentId: "agent-a", content: "changed", hostSource: changed });
     const after = pointerStore.get(row.id);
@@ -415,7 +416,7 @@ describe("A1'' item 6 — a read-then-full-put round trip preserves the pointer"
   it("(e2) a non-author echo does not keep the old pointer (0e)", async () => {
     const stored = JSON.stringify({ v: 1, host: "openclaw", kind: "run", id: "run-bbbbbbbb" });
     const row = seedMemory({ id: "mem-e2", agentId: "agent-b", visibility: "shared" });
-    pointerStore.set(row.id, { memoryId: row.id, hostSource: stored, scopeAtWrite: "shared", authorId: "agent-a" });
+    pointerStore.set(row.id, { memoryId: row.id, hostSource: stored, scopeAtWrite: "shared", authorId: "agent-a", memoryInstanceToken: memoryStore.get(row.id)?.instanceToken ?? null });
     const m = makeMemory(agentCtx("agent-b")); // owns the record, but NOT the stored pointer
     await m.put({ id: row.id, agentId: "agent-b", content: "owned now", hostSource: stored }); // exact value, wrong author
     const after = pointerStore.get(row.id);
@@ -436,7 +437,7 @@ describe("A1'' item 2 — pointer cleanup joins the write and the sweep removes 
   it("(c1) archiving a session record removes its pointer; a by-id get of the archived row shows none", async () => {
     const old = new Date(Date.now() - 40 * 24 * 3600_000).toISOString();
     seedMemory({ id: "mem-c1", agentId: "agent-a", durability: "standard", visibility: "private", type: "session", createdAt: old });
-    pointerStore.set("mem-c1", { memoryId: "mem-c1", hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a" });
+    pointerStore.set("mem-c1", { memoryId: "mem-c1", hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a", memoryInstanceToken: memoryStore.get("mem-c1")?.instanceToken ?? null });
     const out: any = await maint().post({});
     expect(out.archived).toBe(1); // assertion: the archive branch ran
     expect(memoryStore.get("mem-c1")?.archived).toBe(true); // assertion: the row is archived
@@ -446,14 +447,14 @@ describe("A1'' item 2 — pointer cleanup joins the write and the sweep removes 
   });
 
   it("(c2) the orphan sweep removes a pointer whose Memory is missing", async () => {
-    pointerStore.set("mem-orphan", { memoryId: "mem-orphan", hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a" });
+    pointerStore.set("mem-orphan", { memoryId: "mem-orphan", hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a", memoryInstanceToken: memoryStore.get("mem-orphan")?.instanceToken ?? null });
     const out: any = await maint().post({});
     expect(out.orphans).toBe(1); // assertion: one orphan swept
     expect(pointerStore.has("mem-orphan")).toBe(false); // assertion: the orphan pointer row is gone
   });
 
   it("(d1) the sweep RE-CHECKS inside the transaction: a row that reappears is not orphan-deleted (0d)", async () => {
-    pointerStore.set("mem-d1", { memoryId: "mem-d1", hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a" });
+    pointerStore.set("mem-d1", { memoryId: "mem-d1", hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a", memoryInstanceToken: memoryStore.get("mem-d1")?.instanceToken ?? null });
     let calls = 0;
     // First (outside-txn) read says missing; the re-check (inside the owned
     // transaction) sees a row that reappeared — the read-to-delete counterexample.
@@ -466,12 +467,130 @@ describe("A1'' item 2 — pointer cleanup joins the write and the sweep removes 
 
   it("(c3) a failing pointer delete fails the Memory delete and leaves the row (transaction aborted)", async () => {
     const row = seedMemory({ id: "mem-c3", agentId: "agent-a" });
-    pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a" });
+    pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a", memoryInstanceToken: memoryStore.get(row.id)?.instanceToken ?? null });
     harnessState.failNextPointerDelete = true;
     const r: any = new (Memory as any)();
     r.getContext = () => ({ request: agentCtx("agent-a") }); // request ctx, no transaction
     const res: any = await r.delete("mem-c3");
     expect((res as Response)?.status).toBe(500); // assertion: the delete fails
     expect(memoryStore.has("mem-c3")).toBe(true); // assertion: the Memory row was NOT deleted (transaction aborted)
+  });
+});
+
+// ─── A1-iv item 1: the binding — a server-stamped row incarnation token ───────
+
+describe("A1-iv item 1 — the pointer join binds on the row's instanceToken", () => {
+  it("(b1) a deleted-and-recreated id with the SAME client createdAt shows NO pointer", async () => {
+    const T = "2026-01-01T00:00:00.000Z";
+    const row = seedMemory({ id: "mem-b1", agentId: "agent-a", createdAt: T });
+    pointerStore.set("mem-b1", {
+      memoryId: "mem-b1", hostSource: JSON.stringify(POINTER), scopeAtWrite: null,
+      authorId: "agent-a", memoryInstanceToken: row.instanceToken,
+    });
+    // Author sees it while the row exists...
+    expect((await makeMemory(agentCtx("agent-a")).get("mem-b1") as any).hostSource).toEqual(POINTER);
+
+    // ...then the row dies and is recreated with the SAME id + SAME createdAt
+    // but a NEW incarnation token (a new server-generated token).
+    memoryStore.delete("mem-b1");
+    seedMemory({ id: "mem-b1", agentId: "agent-a", createdAt: T, instanceToken: "tok-reincarnated" });
+
+    const after: any = await makeMemory(agentCtx("agent-a")).get("mem-b1");
+    expect(after.hostSource).toBeUndefined(); // assertion: the stale pointer is NOT returned
+  });
+
+  it("(b2) an update via put and patch keeps the token and the pointer", async () => {
+    const row = seedMemory({ id: "mem-b2", agentId: "agent-a", visibility: "shared" });
+    pointerStore.set("mem-b2", {
+      memoryId: "mem-b2", hostSource: JSON.stringify(POINTER), scopeAtWrite: "shared",
+      authorId: "agent-a", memoryInstanceToken: row.instanceToken,
+    });
+
+    const m = makeMemory(agentCtx("agent-a"));
+    await m.put({ ...row });
+    expect(memoryStore.get("mem-b2")?.instanceToken).toBe(row.instanceToken); // assertion: put preserved the token
+    expect((await m.get("mem-b2") as any).hostSource).toEqual(POINTER); // assertion: the pointer still joins
+
+    await m.patch({ id: "mem-b2", agentId: "agent-a", content: "edited" });
+    expect(memoryStore.get("mem-b2")?.instanceToken).toBe(row.instanceToken); // assertion: patch preserved the token
+    expect((await makeMemory(agentCtx("agent-a")).get("mem-b2") as any).hostSource).toEqual(POINTER); // assertion
+  });
+
+  it("(b3) a client-supplied instanceToken is ignored on every writer", async () => {
+    const m = makeMemory(agentCtx("agent-a"));
+    const res: any = await m.post({ id: "mem-b3", content: "a short note", instanceToken: "forged-token" });
+    const stored = memoryStore.get("mem-b3")?.instanceToken;
+    expect(stored).not.toBe("forged-token"); // assertion: the forged value is stripped
+    expect(typeof stored).toBe("string"); // assertion: the server stamped its own UUID
+    expect(stored).toMatch(/^[0-9a-f-]{36}$/); // assertion: a UUID, not the body's value
+
+    const row = seedMemory({ id: "mem-b3b", agentId: "agent-a" });
+    await m.put({ ...row, instanceToken: "forged-token" });
+    expect(memoryStore.get("mem-b3b")?.instanceToken).toBe(row.instanceToken); // assertion: put preserved the stored token, not the forged one
+  });
+
+  it("(b4) an archived row shows no pointer", async () => {
+    const row = seedMemory({ id: "mem-b4", agentId: "agent-a", visibility: "shared", archived: true });
+    pointerStore.set("mem-b4", {
+      memoryId: "mem-b4", hostSource: JSON.stringify(POINTER), scopeAtWrite: "shared",
+      authorId: "agent-a", memoryInstanceToken: row.instanceToken,
+    });
+    const got: any = await makeMemory(agentCtx("agent-a")).get("mem-b4");
+    expect(got.hostSource).toBeUndefined(); // assertion: an archived row never joins a pointer
+  });
+
+  it("(b5) a row whose agentId changed (admin write) shows no pointer", async () => {
+    const row = seedMemory({ id: "mem-b5", agentId: "agent-a", visibility: "shared" });
+    pointerStore.set("mem-b5", {
+      memoryId: "mem-b5", hostSource: JSON.stringify(POINTER), scopeAtWrite: "shared",
+      authorId: "agent-a", memoryInstanceToken: row.instanceToken,
+    });
+    // Admin re-owns the row to a different agent (authorId !== agentId now).
+    const admin: any = new (Memory as any)();
+    admin.getContext = () => ({ request: agentCtx("root", true) });
+    await admin.put({ ...row, agentId: "agent-b" });
+    expect(memoryStore.get("mem-b5")?.agentId).toBe("agent-b"); // assertion: the re-own landed
+    const got: any = await makeMemory(agentCtx("agent-b")).get("mem-b5");
+    expect(got.hostSource).toBeUndefined(); // assertion: authorId !== agentId ⇒ no pointer
+  });
+});
+
+// ─── A1-iv item 2: one reader helper / A1-iv item 3: the server-stamped strip ─
+
+describe("A1-iv items 2/3 — one reader helper and one server-stamped strip list", () => {
+  it("(r2) only the helper module reads the MemoryHostSource table", () => {
+    const { readdirSync, readFileSync } = require("node:fs");
+    const { join } = require("node:path");
+    const dir = join(import.meta.dir, "..", "..", "resources");
+    // memory-host-source.ts is the ONE module that reads the table (loadPointerRows).
+    // MemoryHostSource.ts is the admin/operator RESOURCE; MemoryMaintenance.ts is
+    // the cleanup (hygiene) path. Memory.ts writes the table on the write path but
+    // must not READ it (it goes through the helper).
+    const offenders: string[] = [];
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith(".ts") || name === "memory-host-source.ts") continue;
+      const src = readFileSync(join(dir, name), "utf8");
+      if (/\bloadPointerRows\b/.test(src)) offenders.push(name);
+    }
+    expect(offenders).toEqual([]); // assertion: no module outside the helper reads the table
+  });
+
+  it("(r2b) the Memory readers project through the ONE helper", () => {
+    const { readFileSync } = require("node:fs");
+    const { join } = require("node:path");
+    for (const f of ["Memory.ts", "SemanticSearch.ts"]) {
+      const src = readFileSync(join(import.meta.dir, "..", "..", "resources", f), "utf8");
+      expect(src).toContain("projectRowsThroughPointers"); // assertion: the reader uses the helper
+      expect(src).not.toContain("loadPointerRows"); // assertion: it does not read the table itself
+    }
+  });
+
+  it("(s3) a forged provenance is stripped/overwritten on every writer", async () => {
+    const m = makeMemory(agentCtx("agent-a"));
+    const res: any = await m.post({ id: "mem-s3", content: "x", provenance: '{"forged":true}' });
+    expect(memoryStore.get("mem-s3")?.provenance).not.toContain("forged"); // assertion: post overwrites provenance
+    const row = seedMemory({ id: "mem-s3b", agentId: "agent-a" });
+    await m.patch({ id: "mem-s3b", agentId: "agent-a", content: "y", provenance: '{"forged":true}' });
+    expect(memoryStore.get("mem-s3b")?.provenance).not.toContain("forged"); // assertion: patch strips provenance
   });
 });

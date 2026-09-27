@@ -232,12 +232,13 @@ describe("SemanticSearch.post() — centralized read-scoping", () => {
     // (scopeAtWrite null). DEFAULT_SELECT omits `provenance`, so a
     // provenance-based join would fail here — the pointer row's authorId is
     // what decides.
-    memoryStore.set("m-shared", { id: "m-shared", agentId: "agent-a", content: "alpha", visibility: "shared" });
+    memoryStore.set("m-shared", { id: "m-shared", agentId: "agent-a", content: "alpha", visibility: "shared", instanceToken: "tok-j1" });
     pointerStore.set("m-shared", {
       memoryId: "m-shared",
       hostSource: JSON.stringify({ v: 1, host: "openclaw", kind: "run", id: "run-aaaaaaaa" }),
       scopeAtWrite: null,
       authorId: "agent-a",
+      memoryInstanceToken: "tok-j1",
     });
 
     const asAuthor: any = await makeSearch(agentCtx("agent-a")).post({ limit: 10 });

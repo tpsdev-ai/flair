@@ -1,5 +1,5 @@
 import { Resource, databases, server } from "harper";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import nacl from "tweetnacl";
 import { allowAdmin } from "./agent-auth.js";
 import {
@@ -21,7 +21,7 @@ import { readAllInstanceRows } from "./instance-identity-rows.js";
 import { findOrCreateInstance } from "./instance-create-lock.js";
 import { withDetachedTxnAsync } from "./table-helpers.js";
 import { isSkillWrite } from "./skill-write.js";
-import { stripInboundMemoryRow } from "./memory-declared-attributes.js";
+import { stripInboundMemoryRow, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
 import { createPersistentNonceStore, initNonceStoreCleanup } from "./federation-nonce-store.js";
@@ -866,6 +866,15 @@ export class FederationSync extends Resource {
         // even if it also carried one of the allowed keys.
         if (record.table === "Memory") {
           stripInboundMemoryRow(mergedData);
+          // A1-iv items 1/3: a federated receive is a LOCAL incarnation — the
+          // token is OURS, never the peer's. Drop a peer-supplied server-stamped
+          // field, then PRESERVE the local row's token on a merge (a new row
+          // gets a locally-generated one).
+          stripServerStampedFields(mergedData);
+          mergedData.instanceToken =
+            local && typeof local.instanceToken === "string" && local.instanceToken.length > 0
+              ? local.instanceToken
+              : randomUUID();
         }
 
         await table.put(mergedData);

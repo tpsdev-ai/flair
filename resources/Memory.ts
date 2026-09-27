@@ -1,4 +1,5 @@
 import { databases } from "harper";
+import { randomUUID } from "node:crypto";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
 import { guardAuthorityFields } from "./authority-field-guard.js";
@@ -17,10 +18,11 @@ import {
   buildPointerRow,
   extractPointerInputs,
   isPointerEchoOf,
-  loadPointerRows,
+  loadStoredPointer,
+  projectRowsThroughPointers,
   MEMORY_HOST_SOURCE_TABLE,
 } from "./memory-host-source.js";
-import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
+import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { withSharedWriteTransaction } from "./request-transaction.js";
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
@@ -49,7 +51,7 @@ import { attachTrust } from "./trust-block.js";
 import { recordCitations } from "./usage-recording.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 import { applyHitStats, clearHitStats, overlayHitStatsResult } from "./hit-tracking.js";
-import { projectHostSource, type PointerRow } from "./host-source-visibility.js";
+import type { PointerRow } from "./host-source-visibility.js";
 import { refuseStaleClientWrite, stripClientVersionPassthrough } from "./client-version-gate.js";
 
 /** flair#1940 A1' — a named 400 for an invalid host pointer (reject, never
@@ -89,6 +91,22 @@ function pointerAuthorId(auth: AgentAuthVerdict): string {
   return auth.kind === "agent" ? auth.agentId : "";
 }
 
+/** A fresh server-stamped row incarnation token (flair#1940 A1-iv item 1). */
+function newInstanceToken(): string {
+  return randomUUID();
+}
+
+/** Stamp the row incarnation token for a write: PRESERVE the existing row's
+ *  token on an update, else generate a fresh one (call AFTER
+ *  stripServerStampedFields, so a client-supplied value is gone first). */
+function stampInstanceToken(content: any, existing: any): void {
+  const preserved =
+    existing && typeof existing.instanceToken === "string" && existing.instanceToken.length > 0
+      ? existing.instanceToken
+      : null;
+  content.instanceToken = preserved ?? newInstanceToken();
+}
+
 /**
  * flair#1940 A1' — validate the write body's pointer inputs and build the
  * pointer row (canonical hostSource + scopeAtWrite + server-stamped
@@ -100,9 +118,10 @@ function buildPointerForWrite(args: {
   memoryId: string;
   visibility: string | null | undefined;
   auth: AgentAuthVerdict;
+  memoryInstanceToken?: string | null;
   storedPointer?: PointerRow | null;
 }): { row: ReturnType<typeof buildPointerRow> | null; denial?: Response } {
-  const { inputs, memoryId, visibility, auth, storedPointer } = args;
+  const { inputs, memoryId, visibility, auth, memoryInstanceToken, storedPointer } = args;
   if (inputs.hostSource === undefined || inputs.hostSource === null) {
     if (inputs.hostSourceScope !== undefined) {
       return { row: null, denial: hostSourceBadRequest("invalid_host_source_scope", "hostSourceScope requires a hostSource") };
@@ -143,6 +162,7 @@ function buildPointerForWrite(args: {
       canonical: hs.canonical,
       scopeAtWrite,
       authorId: pointerAuthorId(auth),
+      memoryInstanceToken: memoryInstanceToken ?? null,
       receivedAt: new Date().toISOString(),
     }),
   };
@@ -244,10 +264,6 @@ async function deletePointerRow(memoryId: string, ctx: any): Promise<Response | 
   }
 }
 
-/** flair#1940 A1' — apply the gated join to ONE record for a reader. */
-function joinPointerForReader(record: any, readerAgentId: string | null | undefined, pointer: any): any {
-  return projectHostSource(record, readerAgentId, pointer);
-}
 
 /**
  * flair#744 slice 1 — read the opt-in `includeTrust` flag for a by-id get.
@@ -813,11 +829,9 @@ export class Memory extends (databases as any).flair.Memory {
     if (result && typeof result === "object" && !(result instanceof Response) && typeof (result as any).agentId === "string") {
       const auth = await resolveAgentAuth((this as any).getContext?.());
       if (auth.kind === "agent" && !auth.isAdmin) {
-        // A1' item 4: the gated join — read this record's pointer ROW and
-        // project it for THIS reader (pointer | "withheld" | nothing).
-        const id = (result as any).id;
-        const pointers = await loadPointerRows([id]);
-        projected = joinPointerForReader(result, auth.agentId, pointers.get(id) ?? null);
+        // A1' item 4 / A1-iv item 2: the gated join, through the ONE reader
+        // helper (projectRowsThroughPointers) — pointer | "withheld" | nothing.
+        projected = (await projectRowsThroughPointers([result as any], auth.agentId))[0];
       }
     }
     // flair#744 slice 1 — opt-in inline trust-evidence block, attached ONLY to
@@ -884,12 +898,10 @@ export class Memory extends (databases as any).flair.Memory {
       // memoryScopedSearch returns a Promise of the iterable (its scopedSearch
       // is async); await it before iterating.
       for await (const row of await (source as any)) rows.push(row);
-      const ids = rows.map((r) => r?.id).filter((id): id is string => typeof id === "string" && id.length > 0);
-      const pointers = await loadPointerRows(ids);
-      for (const row of rows) {
-        const id = row?.id;
-        yield typeof id === "string" ? joinPointerForReader(row, readerAgentId, pointers.get(id) ?? null) : row;
-      }
+      // A1-iv item 2: project through the ONE reader helper (one batched
+      // pointer query for the whole set).
+      const projected = await projectRowsThroughPointers(rows, readerAgentId);
+      for (const row of projected) yield row;
     })();
     return overlayHitStatsResult(joined, ctx);
   }
@@ -1147,7 +1159,12 @@ export class Memory extends (databases as any).flair.Memory {
     // `hostSourceVisibility` is a FORGERY of the server's write-time stamp and
     // is dropped here (never read). Reject, never truncate/coerce.
     const pointerInputs = extractPointerInputs(content);
-    const pointer = buildPointerForWrite({ inputs: pointerInputs, memoryId: content.id ?? "", visibility: content.visibility, auth });
+    // A1-iv item 3: strip every server-stamped field a client body may not set
+    // (instanceToken, provenance). They are re-stamped below.
+    stripServerStampedFields(content);
+    // A1-iv item 1: a NEW row gets a server-stamped incarnation token.
+    content.instanceToken = newInstanceToken();
+    const pointer = buildPointerForWrite({ inputs: pointerInputs, memoryId: content.id ?? "", visibility: content.visibility, auth, memoryInstanceToken: content.instanceToken });
     if (pointer.denial) return pointer.denial;
 
     // Write-time provenance stamp (memory-provenance slice 1) — see
@@ -1245,6 +1262,9 @@ export class Memory extends (databases as any).flair.Memory {
     // therefore leaves no pointer anywhere.
     extractPointerInputs(content);
     stripUndeclaredMemoryAttributes(content);
+    // A1-iv item 3: strip server-stamped fields on patch too (a PATCH body may
+    // not set instanceToken or provenance; the stored values stand).
+    stripServerStampedFields(content);
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
     // ── flair#1542 + residual (Kern #1543 review 5135715289): reject skill patches ──
@@ -1293,6 +1313,14 @@ export class Memory extends (databases as any).flair.Memory {
       // here as well, so a pointer input (or any other key that is neither
       // declared nor in UNDECLARED_ALLOWED) cannot ride a reindex onto the row.
       stripUndeclaredMemoryAttributes(content);
+      // A1-iv items 1/3: strip a client-supplied server-stamped field, then
+      // PRESERVE the existing row's incarnation token (reindex is a re-PUT of
+      // an existing row, never a reincarnation).
+      stripServerStampedFields(content);
+      const reindexExisting = content.id
+        ? await (databases as any).flair.Memory.get(content.id).catch(() => null)
+        : null;
+      stampInstanceToken(content, reindexExisting);
       const reindexed = await super.put(content);
       noteMemoryUpsert(content);
       noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
@@ -1544,6 +1572,11 @@ export class Memory extends (databases as any).flair.Memory {
     // the Memory row below. A client-supplied `hostSourceVisibility` is dropped
     // (never read). Reject, never truncate/coerce.
     const pointerInputs = extractPointerInputs(content);
+    // A1-iv item 3: strip server-stamped fields (a client may not set them).
+    stripServerStampedFields(content);
+    // A1-iv item 1: PRESERVE the existing row's incarnation token on an update,
+    // else generate one (a fresh create via put).
+    stampInstanceToken(content, preExisting);
     // A1'' item 5: a partial PUT (one that omits `visibility`, e.g. a
     // memory_update full put) must stamp scopeAtWrite from the record's
     // EFFECTIVE visibility — the existing row's when the body omits it — not
@@ -1571,9 +1604,9 @@ export class Memory extends (databases as any).flair.Memory {
       pointerInputs.hostSource !== null &&
       pointerInputs.hostSourceScope === undefined
     ) {
-      storedPointer = (await loadPointerRows([content.id])).get(content.id) ?? null;
+      storedPointer = await loadStoredPointer(content.id);
     }
-    const pointer = buildPointerForWrite({ inputs: pointerInputs, memoryId: content.id ?? "", visibility: effectiveVisibility, auth, storedPointer });
+    const pointer = buildPointerForWrite({ inputs: pointerInputs, memoryId: content.id ?? "", visibility: effectiveVisibility, auth, memoryInstanceToken: content.instanceToken, storedPointer });
     if (pointer.denial) return pointer.denial;
 
     // Write-time provenance stamp (memory-provenance slice 1) — see

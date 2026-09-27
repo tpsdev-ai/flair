@@ -44,6 +44,7 @@ export interface PointerRow {
   hostSource: string;
   scopeAtWrite?: string | null;
   authorId?: string | null;
+  memoryInstanceToken?: string | null;
   receivedAt?: string | null;
 }
 
@@ -79,6 +80,17 @@ function renderableCanonical(stored: string): { v: 1; host: string; kind: string
  *   "none"     — no pointer row (the record is returned unchanged);
  *   "pointer"  — render the canonical pointer;
  *   "withheld" — render HOST_SOURCE_WITHHELD.
+ *
+ * A1-iv item 1 (the binding): the pointer is returned (or withheld) ONLY when
+ * ALL of these hold — otherwise it is as if no pointer existed, so a stale
+ * pointer can never be returned, whichever write path forgot to clean it up:
+ *   - pointer.authorId === record.agentId (the pointer's authenticated author
+ *     is the row's CURRENT owner);
+ *   - pointer.memoryInstanceToken === record.instanceToken (the SAME row
+ *     incarnation — a deleted-and-recreated id gets a NEW token);
+ *   - the record is not archived.
+ * (pointer.memoryId === record.id is implicit: the caller reads the pointer by
+ * the record's id.)
  */
 export function pointerOutcomeFor(
   record: any,
@@ -87,12 +99,17 @@ export function pointerOutcomeFor(
 ): "none" | "pointer" | "withheld" {
   if (!pointer || typeof pointer.hostSource !== "string" || pointer.hostSource.length === 0) return "none";
   // A1'' item 4: the author is the POINTER row's `authorId`, stamped from the
-  // authenticated principal at Memory write time (resources/Memory.ts). The
-  // projection NEVER uses Memory provenance — that is why SemanticSearch and
-  // search can show an author their pointer without selecting a provenance
-  // column.
+  // authenticated principal at Memory write time (resources/Memory.ts).
   const author = typeof pointer.authorId === "string" && pointer.authorId.length > 0 ? pointer.authorId : null;
-  const isAuthor = author !== null && readerAgentId != null && author === readerAgentId;
+  if (author === null) return "none";
+  // A1-iv item 1: the binding. authorId must equal the row's CURRENT agentId,
+  // the incarnation token must match, and the row must not be archived.
+  if (typeof record?.agentId !== "string" || author !== record.agentId) return "none";
+  const rowToken = typeof record?.instanceToken === "string" && record.instanceToken.length > 0 ? record.instanceToken : null;
+  const ptrToken = typeof pointer.memoryInstanceToken === "string" && pointer.memoryInstanceToken.length > 0 ? pointer.memoryInstanceToken : null;
+  if (rowToken === null || ptrToken === null || rowToken !== ptrToken) return "none";
+  if (record?.archived === true) return "none";
+  const isAuthor = readerAgentId != null && author === readerAgentId;
   if (isAuthor) return "pointer";
   const scopeAtWrite = pointer.scopeAtWrite;
   if (scopeAtWrite === undefined || scopeAtWrite === null) return "withheld"; // author-only

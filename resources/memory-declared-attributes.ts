@@ -39,6 +39,7 @@ export const DECLARED_MEMORY_ATTRIBUTES = Object.freeze([
   "type",
   "createdAt",
   "updatedAt",
+  "instanceToken",
   "expiresAt",
   "retrievalCount",
   "lastRetrieved",
@@ -111,6 +112,38 @@ export function stripUndeclaredMemoryAttributes(content: unknown): string[] {
   const removed: string[] = [];
   for (const key of Object.keys(obj)) {
     if (!DECLARED.has(key) && !ALLOWED_UNDECLARED.has(key)) {
+      delete obj[key];
+      removed.push(key);
+    }
+  }
+  return removed;
+}
+
+/**
+ * flair#1940 A1-iv item 3 — the SERVER-STAMPED fields a client body may never
+ * set. The declared-attributes whitelist KEEPS these (they are declared/named),
+ * so a whitelist alone does not stop forgery: a client could PUT a
+ * `provenance` or an `instanceToken` that then reads as if the server stamped
+ * it. This is the ONE list, applied on EVERY writer (post, put, patch, the
+ * _reindex path, the FeedMemories raw write, the seed, and the federation
+ * merge). `post()`/`put()` re-stamp `provenance` (via `buildProvenance`) and
+ * `instanceToken` after the strip; the other writers strip and preserve the
+ * stored value.
+ */
+export const SERVER_STAMPED_MEMORY_FIELDS = Object.freeze([
+  "instanceToken",
+  "provenance",
+] as const);
+
+const SERVER_STAMPED = new Set<string>(SERVER_STAMPED_MEMORY_FIELDS as readonly string[]);
+
+/** Strip every server-stamped field from a write body, IN PLACE. Returns removed keys. */
+export function stripServerStampedFields(content: unknown): string[] {
+  if (!content || typeof content !== "object" || Array.isArray(content)) return [];
+  const obj = content as Record<string, unknown>;
+  const removed: string[] = [];
+  for (const key of Object.keys(obj)) {
+    if (SERVER_STAMPED.has(key)) {
       delete obj[key];
       removed.push(key);
     }
