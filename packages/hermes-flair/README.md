@@ -68,7 +68,7 @@ Example `flair.json`:
 ## What this plugin deliberately doesn't do
 
 - **No background "summarize the conversation and persist insights."** The agent decides what's worth remembering. If it wanted something stored it should have called `flair_store`.
-- **No replace/remove mirroring** of Hermes built-in writes. This plugin mirrors add operations only; replace and remove remain local, although Flair supports in-place updates and deletion. Replace operations stay local to MEMORY.md.
+- **No replace/remove mirroring** of Hermes built-in writes. The plugin attempts to mirror `add` operations from `MEMORY.md` and `USER.md`; `replace` and `remove` stay in the corresponding local file, although Flair supports in-place updates and deletion.
 - **Cross-agent reads are possible within Flair's read scope:** own records and other agents' non-private records on the instance.
 
 ## Operational notes
