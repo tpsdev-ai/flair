@@ -426,9 +426,7 @@ entries = await memory_service.list_memories(
 - Returns `List[MemoryEntry]`, newest first (`createdAt` descending), with the
   full projection: content, `author`, `timestamp`, `custom_metadata`
   (including `subject`).
-- Scoped exactly like `search_memory`: the `adk:<app>:<user>` compound tag AND
-  the service's own agent identity, both pushed down server-side and
-  re-verified client-side on every row.
+- Listing sends owner and compound-tag filters to the server and rechecks both on returned rows; search sends the compound tag within Flair's read scope, then additionally rejects hits whose owner differs from the service identity.
 - **Pagination is a point-in-time snapshot** — `offset` is positional, not a
   live cursor. Writes between two page fetches shift positions, so a record
   can appear twice or be skipped across page boundaries; dedupe by `id` if you

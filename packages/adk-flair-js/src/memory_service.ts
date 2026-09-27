@@ -327,7 +327,7 @@ export class FlairMemoryService implements BaseMemoryService {
   /**
    * @param url - Flair HTTP URL (default: FLAIR_URL env or http://localhost:19926)
    * @param agentId - Flair agent ID (default: FLAIR_AGENT_ID env)
-   * @param keyfile - Path to Ed25519 PKCS8 base64 keyfile (default: FLAIR_KEYFILE env)
+   * @param keyfile - Path to an Ed25519 keyfile: raw seed, base64 seed, base64 PKCS8 DER, or PEM (default: FLAIR_KEYFILE env)
    * @param timeoutMs - Total request timeout in ms (default: 2000)
    */
   constructor(opts?: {

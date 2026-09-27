@@ -537,14 +537,12 @@ def _resolve_subject(
 class FlairMemoryService(BaseMemoryService):
     """Flair-backed memory service for Google ADK.
 
-    All users of one ADK app share one Flair principal. Per-user isolation is
-    enforced by tag-based server-side filtering, not cryptographic key
-    separation. See the README Security section for details.
+    The app/user tag is a retrieval filter within one Flair principal, not an isolation boundary.
 
     Constructor args (all optional; env vars provide defaults):
         url: Flair server URL. Default: FLAIR_URL or http://localhost:19926
         agent_id: Flair agent identity. Default: FLAIR_AGENT_ID
-        keyfile: Path to PKCS8 base64 Ed25519 key. Default: FLAIR_KEYFILE
+        keyfile: Path to an Ed25519 keyfile: raw seed, base64 seed, base64 PKCS8 DER, or PEM. Default: FLAIR_KEYFILE
         timeout: HTTP timeout. A float sets the read/write timeout in seconds
             (connect derived as min(timeout, 5.0)); an httpx.Timeout is used
             verbatim. Default: FLAIR_HTTP_TIMEOUT / FLAIR_HTTP_CONNECT_TIMEOUT
@@ -695,7 +693,7 @@ class FlairMemoryService(BaseMemoryService):
     async def add_session_to_memory(self, session: Session) -> None:
         """Batch-write session events to Flair. Filters no-text events.
 
-        Re-ingestion is idempotent via deterministic record ids.
+        Re-ingestion reuses record IDs when app, user, session, and event IDs remain stable; missing event IDs receive fresh UUIDs.
         """
         app_name = session.app_name
         user_id = session.user_id
