@@ -97,7 +97,7 @@ export function loadConfig(flags: CliFlags): WakeConfig {
   };
 }
 
-export const HELP = `cursor-flair-wake — drain this agent's OrgEventCatchup and wake a Cursor Cloud Agent
+export const HELP = `cursor-flair-wake — drain the selected OrgEventCatchup feed and wake a Cursor Cloud Agent
 
 Usage:
   bun packages/cursor-wake-runner/src/cli.ts [--once] [--interval SECONDS] [--dry-run] [--limit N]

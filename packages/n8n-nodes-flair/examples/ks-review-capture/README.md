@@ -1,6 +1,6 @@
 # Worked example: K&S review capture → Flair
 
-This is the worked-example workflow for `@tpsdev-ai/n8n-nodes-flair`. It captures inbound TPS-mail review notes from the Kern (architecture) and Sherlock (security) review agents into Flair as structured, tagged memories — turning ephemeral review reasoning into a searchable, federated archive.
+This is the worked-example workflow for `@tpsdev-ai/n8n-nodes-flair`. It captures inbound TPS-mail review notes from the Kern (architecture) and Sherlock (security) review agents into Flair as structured, tagged memories — turning ephemeral review reasoning into a searchable archive on the receiving Flair instance.
 
 It's also our first dogfood loop on n8n: every K&S review verdict that lands in Flint's TPS-mail inbox gets captured with semantic search, searchable across sessions and orchestrators. The capture writes at the `ephemeral` tier by default — high-volume automated streams should decay, not accumulate in the durable tier (see the durability warning below); elevate the genuinely high-value subset deliberately.
 
@@ -80,12 +80,12 @@ Notes on each step:
 
 - **Filter expansion**: add `host`, `ember`, or any agent to the `containedInList` value to capture more sources. Pair with a `kind:` tag-update in the Format step so the search story stays clean.
 - **Branch durability by value (recommended over blanket-tiering)**: the Format step is a Code node, so you can keep the stream cheap by default and only elevate the records worth keeping. Leave routine/coordination mail (canary pings, acks, "loop healthy") at `ephemeral`, and bump the genuinely high-value subset — e.g. a multi-paragraph verdict, or any mail that mentions a PR number — to `standard` (or, sparingly, `persistent`). This keeps the durable tier curated instead of flooded. See the durability warning above for why blanket `persistent` is the wrong default.
-- **Deeper formatting**: the Format step is also where you can pull more structure out of the body (e.g., bullet-point analysis vs paragraph prose). The downstream FlairWrite node forwards only `type`, `durability`, `tags`, and `subject`.
-- **Cross-instance**: this workflow writes to *one* Flair instance. The hub-spoke federation pair (local ↔ Fabric) propagates the writes without further n8n changes — every memory captured here becomes searchable from every federated peer.
+- **Deeper formatting**: the Format step is also where you can pull more structure out of the body (e.g., bullet-point analysis vs paragraph prose). The downstream FlairWrite node passes the formatted content to `memory.write` and forwards `type`, `durability`, `tags`, and `subject` as options.
+- **Cross-instance**: this workflow writes to *one* Flair instance. Federation can propagate memories marked for sharing when sync succeeds; this workflow's default ephemeral, private writes are held back.
 
 ## Operational notes
 
-- The dedup index is workflow-static-data scoped, so re-importing the workflow (new ID) starts fresh. To add a dedup signal, write to Flair with a deterministic ID via `flair.memory.write` — Flair's content hash reports collisions but never suppresses the write.
+- The dedup index is workflow-static-data scoped, so re-importing the workflow (new ID) starts fresh. To add a dedup signal, write to Flair with a deterministic ID via `flair.memory.write` — For a new memory ID, Flair may report a similarity-based duplicate match in the write response; it still writes the record, while reusing an existing ID updates that record without running the duplicate check.
 - The schedule trigger is 5 min on purpose — fast enough for review-mail freshness, slow enough that the inbox listing isn't burning CPU.
 - If Flint's inbox is full (the 100-message hard cap), TPS bounces inbound mail; this workflow only sees what's actually delivered. The inbox-cap is a separate operational concern (see `reference_flint_inbox_cap`).
 

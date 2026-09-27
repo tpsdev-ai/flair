@@ -39,7 +39,7 @@ In n8n: **Credentials → New → Flair API**. Fill in:
 | Field | Value |
 |---|---|
 | **Base URL** | `http://localhost:19926` (or your team's Flair URL) |
-| **Agent ID** | Logical identity that will own memories from this n8n workspace. Workflows that share an Agent ID share memory ownership. Use distinct IDs when isolation matters. |
+| **Agent ID** | Logical identity that will own memories from this n8n workspace. Workflows that share an Agent ID share memory ownership. Use distinct Agent IDs to organize ownership; the shared admin credential can access the whole instance. |
 | **Admin Password** | Your Flair admin password (in `~/.flair/admin-pass` for local installs). **Sensitive** — see [Security](#security). |
 
 Click **Test** — if the test request to `/Memory` returns 200, the credential is good.
@@ -48,7 +48,7 @@ Click **Test** — if the test request to `/Memory` returns 200, the credential 
 
 Three nodes ship in the package:
 
-- **Flair Chat Memory** — connects to an AI Agent's `Memory` socket. Stores chat history in Flair, scoped by Subject. Defaults to per-workflow memory; set the optional Session Sub-Key to `={{ $execution.id }}` for per-run isolation.
+- **Flair Chat Memory** — connects to an AI Agent's `Memory` socket. Stores chat history in Flair, scoped by Subject. Defaults to per-workflow memory; set the optional Session Sub-Key to `={{ $execution.id }}` for per-run chat-history grouping by subject.
 - **Flair Search** — connects to an AI Agent's `Tool` socket. Two operations:
   - *Semantic Search* — agent calls `flair_search({ query })`, gets memories ranked by similarity.
   - *Get By Subject* — agent calls `flair_get_by_subject()`, gets memories under a config-time-bound subject.
@@ -70,14 +70,14 @@ The agent now answers using both its current chat history (from Flair Chat Memor
 
 n8n memory connectors expose a `sessionKey` parameter that scopes the chat history. Flair has a richer model:
 
-- **Subject** (required) — the entity / conversation / topic the memory is about. Matching is client-side by subject comparison, with no ordering applied. Default: `={{ $workflow.name }}`.
-- **Session Sub-Key** (optional) — appended to the subject as `<subject>:<sessionKey>`. Use the n8n execution id (`={{ $execution.id }}`) for per-run isolation, or a customer/user id for per-customer scoping, or leave blank to share across runs.
+- **Subject** (required) — the entity / conversation / topic the memory is about. For Flair Search Get By Subject, the client compares subjects after retrieval and the node requests no ordering. Default: `={{ $workflow.name }}`.
+- **Session Sub-Key** (optional) — appended to the subject as `<subject>:<sessionKey>`. Use the n8n execution id (`={{ $execution.id }}`) for per-run chat-history grouping by subject, or a customer/user id for per-customer scoping, or leave blank to share across runs.
 
 Patterns:
 
 - **"This assistant remembers"** — set Subject to a stable string (`customer-support`, `daily-standup`). Leave Session Sub-Key blank. All runs share memory.
 - **Per-conversation isolation** — set Subject to the conversation owner (`customer:1234`), leave Session Sub-Key blank. Each conversation is isolated by subject.
-- **Per-execution isolation** — set Session Sub-Key to `={{ $execution.id }}`. Each n8n run gets its own memory window. (This is most similar to n8n's default `sessionKey={{ $execution.id }}`.)
+- **Per-execution isolation** — set Session Sub-Key to `={{ $execution.id }}`. A distinct subject selects each conversation's or run's chat-history window; it does not restrict access to those memories. (This is most similar to n8n's default `sessionKey={{ $execution.id }}`.)
 
 ## Security
 

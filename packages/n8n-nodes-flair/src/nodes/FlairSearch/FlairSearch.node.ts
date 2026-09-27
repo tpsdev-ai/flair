@@ -154,7 +154,7 @@ export class FlairSearch implements INodeType {
       },
       {
         displayName:
-          "Get By Tag is not yet available — flair-client.memory.list does not yet expose a tag filter (tracked in q3qf spec §6). Workaround: use Semantic Search and let the model filter results by tags in the response.",
+          "Get By Tag is not yet available in this node; `flair-client.memory.list` supports a `tags` filter for SDK callers.",
         name: "tagNotice",
         type: "notice",
         default: "",
