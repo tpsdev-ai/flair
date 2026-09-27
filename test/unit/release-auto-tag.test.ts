@@ -1758,7 +1758,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
   });
 
   test("(phrases) no recovery/refusal text the module actually EMITS predicts a future outcome", async () => {
-    const phrases = ["will refuse", "completes it", "was created", "was not created"];
+    const phrases = ["will refuse", "completes it", "was created", "was not created", "is written"];
     const adkTag = `adk-flair-v${VERSION}`;
     const emitted: string[] = [];
     const collect = async (api: unknown, pin: string) => {
@@ -1836,6 +1836,16 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     }
     // reader failure
     await collect(refApi([], new Map()), `[project]\nname = "adk-flair"\nversion = 1\n`);
+    // decide path: v already at <sha>, adk absent → the TAG/vAlreadyAtSha summary
+    {
+      const tags = new Map<string, unknown>([[`v${VERSION}`, { object: { type: "commit", sha: SHA } }]]);
+      const { deps } = harness({
+        api: { readTagRef: async (t: string) => tags.get(t) ?? null },
+        files: { [`${SHA}:${ADK_PYPROJECT_PATH}`]: pyproject(VERSION) },
+      });
+      const r = await decide({ sha: SHA, deps });
+      emitted.push(...(r.summary ?? []));
+    }
 
     expect(emitted.length).toBeGreaterThan(0); // the scan saw real texts
     // SCAN COMPLETENESS: the fixture list must name every emitting path. The
@@ -1853,10 +1863,11 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
       "elsewhere",
       "git-fail",
       "reader",
+      "decide-v-at-sha",
       "cvs-verify",
       "cvs-write",
     ];
-    expect(FIXTURES.length).toBe(8); // the fixtures this scan runs
+    expect(FIXTURES.length).toBe(9); // the fixtures this scan runs
     const checkVersionSyncMessages: string[] = [];
     {
       // check-version-sync's two messages, collected from real runs.
@@ -1876,7 +1887,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     // The population the scan must have seen: the writeText fixtures (6) + the
     // check-version-sync messages (2). A new emitting path that is NOT added here
     // makes this assertion drift — the guard the brief asks for.
-    expect(emitted.length + checkVersionSyncMessages.length).toBe(11);
+    expect(emitted.length + checkVersionSyncMessages.length).toBe(12);
     for (const t of [...emitted, ...checkVersionSyncMessages]) {
       for (const p of phrases) {
         const readBack = /[0-9a-f]{40}/.test(t) || /read back|not found|did not read back/.test(t);
@@ -1884,6 +1895,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
       }
       expect(t).not.toContain("will refuse");
       expect(t).not.toContain("completes it");
+      expect(t).not.toContain("is written");
     }
   });
 
