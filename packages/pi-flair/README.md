@@ -67,7 +67,7 @@ key takes local file paths only — an `npm:` spec there is silently ignored by 
 > }
 > ```
 
-Or use environment variables:
+After installing the extension, configure its required identity in the environment that launches Pi:
 
 ```bash
 export FLAIR_AGENT_ID=my-agent
