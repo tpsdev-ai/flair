@@ -399,12 +399,6 @@ so a hand-written entry here is lost.
   `flair federation instance prune` deletes rows with the list form, confirmed
   against a live Harper.
 
-  > **Heads-up:** two rollback deletes in `flair federation token` — the two that
-  > undo the `PairingToken` insert when the bootstrap (`add_user`) fails, on the
-  > network path and on the non-OK path — still send the singular key, and their
-  > failure is swallowed, so the row they were meant to remove survives. Neither
-  > is fixed here (flair#1895).
-
 - **`flair init --remote` confirms the identity row it wrote, so an absent or wrong hub identity is never reported as reconciled.**
 
   `flair init --remote` used to write its hub identity row blind: it inserted the
@@ -502,8 +496,7 @@ so a hand-written entry here is lost.
   created time. The pairing refusal
   happens BEFORE the one-time token is consumed, before the peer is read and
   before any peer is written: a refused pairing leaves the token usable and the
-  table unchanged. (Two other server readers still take the first
-  row of the table; that is a separate defect, tracked as flair#1896.)
+  table unchanged.
 
   The prune's warning says that any row being deleted may be the identity a
   paired peer pinned, and that such peers must re-pair. It cannot know which row
