@@ -98,13 +98,15 @@ server.http(async (request: any, nextLayer: any) => {
 
   const url = new URL(request.url, "http://" + (request.headers.get("host") || "localhost"));
 
-  // ── Rate limiting, FIRST ───────────────────────────────────────────────────
+  // ── Rate limiting, right after the method check ────────────────────────────
   // Before the public-path passthrough below (the OAuth endpoints all sit on it,
   // so a hook placed after it would never run for them), and before anything
-  // reads a credential.
+  // reads a credential. A request refused by the method check above never
+  // reaches the limiter, and consumes no budget.
   //
   // Ordering is a security property, not tidiness. The counter is consumed for
-  // every request to a throttled endpoint whether or not the credential that
+  // every request to a throttled endpoint that passes the method check, whether
+  // or not the credential that
   // came with it was any good — if only failures were counted, "did this consume
   // budget" would answer "was that credential valid", which is a cleaner
   // enumeration oracle than the 400 the endpoint already returns. Because the

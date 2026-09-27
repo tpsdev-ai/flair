@@ -54,13 +54,15 @@
  *   - Anything at all if the operator sets `FLAIR_RATE_LIMIT=off`.
  *
  * ── The counter is consumed BEFORE any credential is looked at ──────────────
- * `checkHttpRateLimit` runs at the top of auth-middleware, before the request
- * body is parsed and before any grant, code, secret or token is evaluated. That
+ * `checkHttpRateLimit` runs near the top of auth-middleware (right after its
+ * HTTP method check; a request with a refused method never reaches it), before
+ * the request body is parsed and before any grant, code, secret or token is
+ * evaluated. That
  * is deliberate and it is a security property, not an implementation detail: if
  * the limiter only counted FAILURES, then "did this attempt consume budget"
  * would answer "was that credential valid" — an enumeration oracle strictly
- * better than the 400 the endpoint already returns. Counting unconditionally
- * means a 429 carries no information about the credential that accompanied it,
+ * better than the 400 the endpoint already returns. Counting every request
+ * that passes the method check, whatever its credential, means a 429 carries no information about the credential that accompanied it,
  * and a valid credential and a garbage one are byte-identical once limited.
  *
  * For the same reason nothing here emits `RateLimit-Limit`/`RateLimit-Remaining`
