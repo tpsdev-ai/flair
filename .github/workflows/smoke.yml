@@ -21,6 +21,13 @@ on:
   pull_request:
     branches: [main]
 
+# A new push to a pull request supersedes its old head, whose results gate
+# nothing: cancel that run. Runs for any other event get a unique group, so a
+# push to main is never cancelled or queued behind another run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   smoke:
     name: Smoke Tests (Golden Path)
