@@ -131,6 +131,10 @@ describe("flair#1939 round 2 — namespace label encoding is lossless", () => {
       expect(await store.get(ns, key)).toBeNull(); // assertion: get returns null
     }
     expect(await store.search(["x\uD800"])).toEqual([]); // assertion: search returns []
+    const listed = await store.batch([
+      { matchConditions: [{ matchType: "prefix", path: ["x\uD800"] }], limit: 10, offset: 0 } as any,
+    ]);
+    expect(listed[0]).toEqual([]); // assertion: an invalid listNamespaces condition matches nothing
     expect(client.stats).toEqual({ writes: 0, deletes: 0, gets: 0, lists: 0, searches: 0 }); // assertion: nothing sent
   });
 

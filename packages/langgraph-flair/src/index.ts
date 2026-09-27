@@ -468,6 +468,11 @@ export class FlairStore {
     // Best-effort: scan recent memories, derive distinct namespaces. Honors
     // `limit` and `offset` against the derived list. maxDepth truncates each
     // namespace to that many segments.
+    // A condition with an invalid label matches nothing: answer before any request.
+    const conditionHasInvalidLabel = (op.matchConditions ?? []).some(
+      (c) => Array.isArray(c?.path) && c.path.some((label: unknown) => label !== "*" && isInvalidLabel(label)),
+    );
+    if (conditionHasInvalidLabel) return [];
     const fetched = await this.client.memory.list({
       limit: 1000,
       order: "createdAt-desc",
