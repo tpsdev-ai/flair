@@ -89,7 +89,7 @@ Point to a remote Flair instance:
 }
 ```
 
-Use HTTPS for a remote instance: when Basic auth is used, the admin credentials travel in a request header. Copy your key from the server: `scp server:~/.flair/keys/my-project.key ~/.flair/keys/`
+The client REFUSES to send admin Basic credentials over plain HTTP to a non-loopback host (the credentials would travel in a request header): use an HTTPS `FLAIR_URL`, or an Ed25519 key, for a remote instance. Copy your key from the server: `scp server:~/.flair/keys/my-project.key ~/.flair/keys/`
 
 ## License
 

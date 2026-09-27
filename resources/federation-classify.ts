@@ -47,7 +47,10 @@ export type SkipReason =
   // PRINCIPAL_OWNING_TABLES) whose principalId is absent or does not equal
   // data.agentId. Absent is a skip, not an accept — deriving the
   // requirement from field presence would make the check opt-out.
-  | "principal_mismatch";
+  | "principal_mismatch"
+  // Emitted by FederationSync.post before the row is read: the payload's id is
+  // missing or is not the envelope's id, so the record is not applied.
+  | "id_mismatch";
 
 /**
  * Static policy for every table FederationSync will merge.
