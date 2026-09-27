@@ -46,7 +46,7 @@ function runCli(args: string[], env: Record<string, string>, cwd: string): Promi
       cwd,
       env: { ...process.env, FLAIR_AGENT_ID: "", ...env },
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: CHILD_DEADLINE_MS,
+      timeout: 20_000, // literal so the spawn-budget gate sees a deadline (flair#1807)
     });
     let stdout = "";
     let stderr = "";
@@ -180,5 +180,5 @@ describe("flair bridge import: the signed Memory path equals the sent path (#197
     expect(JSON.parse(seen.body).id).toBe(RAW_ID);
 
     expect(res.code).toBe(0);
-  });
+  }, 25_000); // per-case budget > the child deadline (flair#1807)
 });
