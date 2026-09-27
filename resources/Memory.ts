@@ -802,11 +802,14 @@ export class Memory extends (databases as any).flair.Memory {
     // flair#1940 A3 (by-ID surface): the pointer is projected for THIS reader
     // BEFORE the trust block is attached. Admin/internal stay unfiltered (they
     // read the unredacted row, like every other field); a non-admin agent is
-    // the reader the withheld rule protects. The projection leaves a record
-    // unchanged only when it has neither a bound pointer row nor an inline
-    // pointer field.
+    // the reader the withheld rule protects. Every non-admin shape goes
+    // through the helper: a full row, a caller-selected row (with or without
+    // `id`/`agentId`), and a single-property result. The gated join renders a
+    // pointer ONLY when the row carries its `id` and `instanceToken`; a
+    // selection that omitted them renders nothing, and an inline pointer field
+    // on the Memory row is stripped from every returned object.
     let projected = result;
-    if (result && typeof result === "object" && !(result instanceof Response) && typeof (result as any).agentId === "string") {
+    if (result && typeof result === "object" && !(result instanceof Response)) {
       const auth = await resolveAgentAuth((this as any).getContext?.());
       if (auth.kind === "agent" && !auth.isAdmin) {
         // A1' item 4 / A1-iv item 2: the gated join, through the ONE reader

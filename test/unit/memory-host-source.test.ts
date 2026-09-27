@@ -616,9 +616,9 @@ describe("A1-iv items 2/3 — one reader helper and one server-stamped strip lis
   });
 });
 
-// ─── A3 item 2: every Memory projection removes an inline hostSource ──────────
+// ─── A3 item 2: the named non-admin reads remove an inline hostSource ─────────
 
-describe("A3 item 2 — every call to projectHostSource removes inline pointer fields; other response paths remove them independently or exclude them from their selected fields", () => {
+describe("A3 item 2 — every call to projectHostSource removes inline pointer fields; any other response path must remove them independently or exclude them from its selected fields", () => {
   it("(i1) with NO pointer row, another reader gets the row WITHOUT the inline hostSource", async () => {
     // A RAW test path writes the pointer straight onto the Memory row (a
     // supported write never does). No pointer row exists.
@@ -705,5 +705,49 @@ describe("item 9 — archiving a row does not write the projected pointer back",
     expect(captured?.hostSourceScope).toBeUndefined(); // assertion: and the scope
     expect(pointerStore.get("mem-ar1")?.hostSource).toBe(before); // assertion: the full URL survived
     expect(pointerStore.get("mem-ar1")?.scopeAtWrite).toBe("shared"); // assertion: the scope survived
+  });
+});
+
+// ─── round 11: caller-selected reads never carry an inline pointer ───────────
+//
+// A caller-supplied `select` narrows the shape a read returns. A raw table op
+// can leave a pointer field inline on the Memory row; the gated join renders a
+// pointer ONLY through a bound MemoryHostSource row (it needs the row's id and
+// instanceToken), so a selection that omits them must render nothing AND must
+// not carry the inline field. Every non-admin shape is covered here: a search
+// result with no `id`, a by-id result with no `agentId`, and a single-property
+// result.
+
+describe("round 11 — every non-admin read shape strips inline pointer fields", () => {
+  const INLINE = JSON.stringify(POINTER);
+
+  it("(s1) search with a select that omits id returns no inline hostSource", async () => {
+    // A raw writer left hostSource on the Memory row; the row is shared, so
+    // another agent may read it, and the selection omits `id` so the join can
+    // render nothing. The inline field must still be gone.
+    const row = seedMemory({ id: "mem-s1", agentId: "agent-a", visibility: "shared", hostSource: INLINE });
+
+    const out: any[] = [];
+    for await (const r of await makeMemory(agentCtx("agent-b")).search({ select: ["agentId", "visibility", "hostSource"] })) out.push(r);
+
+    expect(out.length).toBe(1); // assertion: the shared row is readable
+    expect("hostSource" in out[0]).toBe(false); // assertion: no inline hostSource in the result
+    expect((row as any).hostSource).toBe(INLINE); // assertion: the stored row itself is untouched
+  });
+
+  it("(s2) the owner's get with a select that omits agentId returns no inline hostSource", async () => {
+    seedMemory({ id: "mem-s2", agentId: "agent-a", visibility: "shared", hostSource: INLINE });
+    const res: any = await makeMemory(agentCtx("agent-a")).get({ id: "mem-s2", select: ["content", "hostSource"] });
+
+    expect(res instanceof Response).toBe(false); // assertion: it is a record, not a denial
+    expect("hostSource" in res).toBe(false); // assertion: no inline hostSource in the selected result
+  });
+
+  it("(s3) a single-property read of hostSource returns nothing, not a 404", async () => {
+    seedMemory({ id: "mem-s3", agentId: "agent-a", visibility: "shared", hostSource: INLINE });
+    const res: any = await makeMemory(agentCtx("agent-a")).get({ id: "mem-s3", select: ["hostSource"] });
+
+    expect(res instanceof Response).toBe(false); // assertion: no 404 that would confirm the row
+    expect(res?.hostSource).toBeUndefined(); // assertion: no inline value
   });
 });

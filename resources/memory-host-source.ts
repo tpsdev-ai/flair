@@ -21,7 +21,7 @@
  */
 import { databases } from "harper";
 import { validateHostSource } from "./host-source.js";
-import { projectHostSource, type PointerRow } from "./host-source-visibility.js";
+import { projectHostSource, stripInlinePointerFields, type PointerRow } from "./host-source-visibility.js";
 
 /** The table name, so callers and tests never re-type it as a literal. */
 export const MEMORY_HOST_SOURCE_TABLE = "MemoryHostSource";
@@ -156,6 +156,12 @@ export async function loadPointerRows(ids: readonly string[]): Promise<Map<strin
  * module needs to touch the MemoryHostSource table itself. `readerAgentId` is
  * the non-admin reader; an admin/operator read is the named exception (see
  * MemoryHostSource.ts).
+ *
+ * EVERY shape is stripped: the join needs the row's `id` and `instanceToken`
+ * to render a pointer, so a result that carries neither (a caller-selected
+ * projection that omitted them, or a single-property result) is returned with
+ * any inline pointer field removed rather than passed through — an inline
+ * pointer field on the Memory row must never reach a non-admin reader.
  */
 export async function projectRowsThroughPointers<T extends { id?: unknown }>(
   rows: readonly T[],
@@ -165,7 +171,7 @@ export async function projectRowsThroughPointers<T extends { id?: unknown }>(
   const pointers = await loadPointerRows(ids);
   return rows.map((row) => {
     const id = row?.id;
-    return typeof id === "string" ? projectHostSource(row, readerAgentId, pointers.get(id) ?? null) : row;
+    return typeof id === "string" ? projectHostSource(row, readerAgentId, pointers.get(id) ?? null) : stripInlinePointerFields(row);
   });
 }
 

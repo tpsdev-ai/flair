@@ -126,14 +126,18 @@ export function pointerOutcomeFor(
 
 /** The pointer-input keys a Memory row must never carry on output (A1' item 1).
  *  A supported write strips them before persist; a RAW writer can leave one on
- *  the row, so every projection removes them too. */
+ *  the row, so the named non-admin reads (Memory.get, Memory.search,
+ *  SemanticSearch) strip them too. Other Memory projections do not render
+ *  pointers in this slice. */
 const INLINE_POINTER_FIELDS = ["hostSource", "hostSourceScope", "hostSourceVisibility"] as const;
 
 /** Return `record` with every inline pointer-input field removed. Returns the
  *  SAME reference when there is nothing to remove, so a clean record is
- *  byte-identical to today. The one helper every response path uses to drop
- *  inline pointer fields independently of the gated join. */
+ *  byte-identical to today. The one helper the named non-admin reads
+ *  (Memory.get, Memory.search, SemanticSearch) use to drop inline pointer
+ *  fields independently of the gated join. */
 export function stripInlinePointerFields<T>(record: T): T {
+  if (!record || typeof record !== "object") return record;
   const r = record as any;
   if (!INLINE_POINTER_FIELDS.some((k) => k in r)) return record;
   const out = { ...r };

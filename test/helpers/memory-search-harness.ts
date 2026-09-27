@@ -92,7 +92,19 @@ export class BaseMemory {
       const override = harnessState.getOverride(id);
       if (override !== undefined) return override;
     }
-    return harnessState.memoryStore.get(id) ?? null;
+    const row = harnessState.memoryStore.get(id) ?? null;
+    // Harper's `get(target)` honours `target.select` exactly like search():
+    // only the selected attributes the row carries, in select order. Mirror it
+    // here (flair#1940 round 11) so a caller-selected by-id read can be driven
+    // at the handler level, the same way the `search` mock below mirrors
+    // `search({select})`.
+    const select = Array.isArray(target?.select) ? target.select : null;
+    if (select && row && typeof row === "object") {
+      const projected: any = {};
+      for (const key of select) if (key in row) projected[key] = row[key];
+      return projected;
+    }
+    return row;
   }
   async put(content: any, ctx?: any) {
     stageOrRun(ctx, () => harnessState.memoryStore.set(content.id, { ...content }));
