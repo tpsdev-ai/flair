@@ -62,3 +62,22 @@ export const FEDERATION_MEMORY_ATTRIBUTES = Object.freeze([
   "_syncedFrom",
   "_syncedAt",
 ] as const);
+
+export const FEDERATION_MEMORY_UNDECLARED = Object.freeze([
+  "meta",
+  "kind",
+  "_originatorInstanceId",
+  "_syncedFrom",
+  "_syncedAt",
+] as const);
+
+/** The DECLARED subset, safe as a Harper `get_attributes` projection: Harper
+ *  rejects an UNDECLARED attribute in a projection ("unknown attribute"), and
+ *  the receiver stamps the bookkeeping fields itself, so the outbound reader
+ *  projects only declared attributes. */
+export const FEDERATION_MEMORY_SELECT = Object.freeze(
+  FEDERATION_MEMORY_ATTRIBUTES.filter(
+    (a) => !(FEDERATION_MEMORY_UNDECLARED as readonly string[]).includes(a),
+  ),
+);
+
