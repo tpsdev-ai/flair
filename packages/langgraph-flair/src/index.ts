@@ -117,6 +117,26 @@ function nsTags(namespace: string[]): string[] {
   return [`${TAG_PREFIX_FULL}${namespace.join(NS_SEP)}`];
 }
 
+/**
+ * flair#1939 — does a stored full-namespace tag match this namespace PREFIX?
+ * `lg-ns:<joined>` matches when the prefix's joined form equals the tag's
+ * namespace or is a COMPONENT prefix of it (`lg-ns:a/b` matches a prefix of
+ * `("a","b")` and `("a","b","c")`, but NOT `("a","bc")`). An EMPTY prefix
+ * matches every `lg-ns:` item. Existing items are covered with no migration:
+ * the match reads the single full tag they already carry.
+ */
+export function namespaceTagMatches(tags: unknown, prefix: string[]): boolean {
+  if (!Array.isArray(tags)) return false;
+  const joined = prefix.join(NS_SEP);
+  for (const tag of tags) {
+    if (typeof tag !== "string" || !tag.startsWith(TAG_PREFIX_FULL)) continue;
+    const ns = tag.slice(TAG_PREFIX_FULL.length);
+    if (joined.length === 0) return true; // empty prefix: every lg-ns item
+    if (ns === joined || ns.startsWith(joined + NS_SEP)) return true;
+  }
+  return false;
+}
+
 function memoryId(agentId: string, namespace: string[], key: string): string {
   return `lg:${agentId}:${namespace.join(NS_SEP)}:${key}`;
 }
@@ -310,19 +330,21 @@ export class FlairStore {
         tags: r.tags,
       }));
     } else {
-      // Tag-based listing for the namespace prefix.
-      const fullTag = `${TAG_PREFIX_FULL}${op.namespacePrefix.join(NS_SEP)}`;
-      const fetched = await this.client.memory.list({
-        tags: op.namespacePrefix.length > 0 ? [fullTag] : [],
-        limit: Math.max(limit + offset, 20) * 4,
-        order: "createdAt-desc",
-      });
-      candidates = fetched.map((r) => ({
-        id: r.id,
-        content: r.content,
-        createdAt: r.createdAt,
-        tags: r.tags,
-      }));
+      // flair#1939: prefix match on the stored full-namespace tag. The listing
+      // is NOT filtered to the exact tag, so items stored under DESCENDANT
+      // namespaces are candidates; `namespaceTagMatches` selects by
+      // tag-component prefix (component boundary, existing items covered). The
+      // full agent-scoped set is fetched (no candidate cap), so a search never
+      // returns a short page when more matches exist.
+      const fetched = await this.client.memory.list({ order: "createdAt-desc" });
+      candidates = fetched
+        .filter((r) => namespaceTagMatches(r.tags, op.namespacePrefix))
+        .map((r) => ({
+          id: r.id,
+          content: r.content,
+          createdAt: r.createdAt,
+          tags: r.tags,
+        }));
     }
 
     const items: SearchItem[] = [];
