@@ -2,7 +2,7 @@
 
 Where Flair already runs. Each integration can reach one shared Flair memory store; signed requests identify an agent, while other verified agents may read its non-private records, and n8n uses admin Basic auth.
 
-> **The point.** Memory should follow the agent across orchestrators. An integration that signs with a per-agent Ed25519 key and points at the same Flair instance follows the same identity and read-scope rules: signed per-agent writes, and reads of your own records plus other agents' non-private records. n8n always uses administrator Basic authentication; stdio MCP, Pi, LangGraph, and the wake runner can also use it when no signing key resolves. It authenticates with the Harper admin password, whose authority covers the whole instance, private records included. Choose the integration for your harness with its authentication and recall behavior in mind.
+> **The point.** Memory can follow an agent across orchestrators. Integrations using an ordinary Ed25519 agent key can write under that identity and read their own plus other agents' non-private records. Administrator agent roles have broader authority. n8n uses Harper administrator Basic auth; stdio MCP, Pi, LangGraph, and the wake runner can also use it when no signing key resolves. Administrator Basic auth can read private records and write under any agent ID. Choose an integration with its authentication and recall behavior in mind.
 
 ---
 
@@ -232,12 +232,12 @@ Auth: TPS-Ed25519 (the same model the rest of Flair uses) — writes are isolate
 To provision an agent and wire Pi, use the init command below; if the agent is already provisioned, install the extension with Pi's installer.
 
 ```bash
-flair init --agent my-agent --client pi        # writes a pinned "packages" entry into ~/.pi/agent/settings.json
+flair init --agent my-agent --client pi        # attempts to wire Pi with a CLI-version pin
 # or
 pi install npm:@tpsdev-ai/pi-flair
 ```
 
-`flair init` writes a pinned package entry:
+When Flair writes a new Pi package entry, it uses this version-pinned form:
 
 ```json
 {
