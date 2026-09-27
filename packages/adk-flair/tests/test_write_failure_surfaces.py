@@ -116,7 +116,7 @@ class TestAddMemoryRaisesOnWriteFailure:
         assert type(err).__name__ == "FlairWriteError"
         assert err.written == 0
         assert err.failed == [("mem-conn", "?")]
-        assert err.status_code == "?"
+        assert err.status_code is None  # int | None — "?" lives only in message/failed
         assert "status ?" in str(err)
 
     @pytest.mark.asyncio
@@ -140,6 +140,32 @@ class TestAddMemoryRaisesOnWriteFailure:
         assert err.failed[0][0] == "m2"
         assert str(err) == "2 of 3 memories written; 1 refused (status 403)"
         assert service._client.request.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_skipped_entry_is_excluded_from_total_and_reported(self, service):
+        # flair#1954: three entries, one text-less (skipped, never attempted),
+        # one written, one refused → total counts the ATTEMPTED two.
+        service._client.request.side_effect = [
+            _mock_response(201),
+            _mock_response(403, "Forbidden"),
+        ]
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await service.add_memory(
+                app_name="app", user_id="user",
+                memories=[_mem("m1", "one"), _mem("m2", ""), _mem("m3", "three")],
+            )
+
+        err = excinfo.value
+        assert err.written == 1
+        assert err.total == 2  # m2 (no text) is NOT attempted
+        assert err.skipped == 1
+        assert err.failed == [("m3", 403)]
+        assert err.status_code == 403
+        assert str(err) == (
+            "1 of 2 memories written; 1 refused (status 403); 1 skipped (no text)"
+        )
+        assert service._client.request.call_count == 2  # the skipped entry is not written
 
 
 # ─── store_memory tool surfaces the error, never "stored" ───────────────────
@@ -181,3 +207,25 @@ class TestStoreMemoryToolSurfacesWriteFailure:
         result = await store(subject="Title", description="a fact")
 
         assert result == {"status": "stored", "subject": "Title"}
+
+    @pytest.mark.asyncio
+    async def test_error_dict_shape_is_unchanged_when_nothing_skipped(self, service):
+        # flair#1954 item 3: the shape stays {"error", "written", "failed"} —
+        # no "skipped" key unless it is non-zero.
+        service._client.request.return_value = _mock_response(403, "Forbidden")
+        store = create_flair_tools(service, app_name="app", user_id="user")[0]
+
+        result = await store(subject="s", description="a fact")
+
+        assert set(result.keys()) == {"error", "written", "failed"}
+        assert result["written"] == 0
+        assert result["failed"] == 1
+
+    @pytest.mark.asyncio
+    async def test_all_text_less_batch_raises_and_writes_nothing(self, service):
+        empty = MemoryEntry(id="e1", content=types.Content(role="user", parts=[types.Part(text="")]))
+        empty2 = MemoryEntry(id="e2", content=types.Content(role="user", parts=[]))
+        with pytest.raises(ValueError) as info:
+            await service.add_memory(app_name="app", user_id="user", memories=[empty, empty2])
+        assert "nothing was written" in str(info.value)
+        assert service._client.request.call_count == 0

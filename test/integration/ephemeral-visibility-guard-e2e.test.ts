@@ -100,7 +100,7 @@ describe("ephemeral memories are private-only (flair#1257)", () => {
     // Actor + state + remedy: the tier, the refused value, and both exits.
     expect(body.message).toContain("private-only");
     expect(body.message).toContain("shared");
-    expect(body.message).toContain("Omit visibility");
+    expect(body.message).toContain('Set visibility to "private"');
     expect(body.message).toContain("1257");
     // The refusal must be a refusal — no row lands.
     expect(await readStored(harper, id)).toBeNull();

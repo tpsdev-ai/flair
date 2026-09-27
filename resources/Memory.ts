@@ -11,7 +11,7 @@ import { scanFields, isStrictMode } from "./content-safety.js";
 import { invalidEntitiesResponse } from "./entity-vocab.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveAllowedOwners } from "./memory-read-scope.js";
-import { assertValidVisibility, assertVisibilityAllowedForDurability } from "./memory-visibility.js";
+import { assertValidVisibility, assertVisibilityAllowedForDurability, PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
 import {
@@ -324,7 +324,7 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
 }
 
 /** Build the final write response: always `written: true`, always includes
- *  `id`, `visibility`, and layers the dedup collision signal on top when
+ *  `id`, includes `visibility` when the persisted row has one, and layers the dedup collision signal on top when
  *  present. Never a code path where a match suppresses these base fields.
  *
  *  ── Why `visibility` is in the write response (flair#991) ──────────────────
@@ -341,9 +341,9 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
  *  Read from `content`, not from `base`: `content.visibility` is the value
  *  that was actually persisted a few lines earlier, and assigning after the
  *  `...base` spread means the persisted value wins over anything the storage
- *  layer echoes back. Omitted (not `null`) when unset, which happens only on
- *  the put()-over-an-existing-record path where a partial merge carried no
- *  visibility — reporting `null` there would read as "no one but the owner",
+ *  layer echoes back. Omitted (not `null`) when unset, which happens only for
+ *  an existing record that has no stored writable visibility — reporting `null`
+ *  there would read as "no one but the owner",
  *  the opposite of what an absent field means to `isPrivateVisibility()`. */
 function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | null): any {
   const base = result && typeof result === "object" && !Array.isArray(result) ? result : {};
@@ -967,6 +967,30 @@ export class Memory extends (databases as any).flair.Memory {
     stripClientVersionPassthrough(content);
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
+    // Preserve stored visibility on updates before applying write policy: a
+    // null is no change (PATCH merges), and a present value goes through the
+    // same validator and ephemeral-tier guard as put().
+    if (content && "visibility" in content && content.visibility == null) delete content.visibility;
+    if (content && (content.visibility !== undefined || content.durability !== undefined)) {
+      const visibilityError = assertValidVisibility(content.visibility);
+      if (visibilityError) {
+        return new Response(
+          JSON.stringify({ error: "invalid_visibility", message: visibilityError }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+      const stored = await super.get();
+      const tierError = assertVisibilityAllowedForDurability(
+        content.durability ?? stored?.durability,
+        content.visibility ?? stored?.visibility,
+      );
+      if (tierError) {
+        return new Response(
+          JSON.stringify({ error: "invalid_visibility_for_durability", message: tierError }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+    }
     // ── flair#1542 + residual (Kern #1543 review 5135715289): reject skill patches ──
     // patch() routes past put() (and thus past the SkillScan gate + forced
     // durability), so a skill write on this verb would land unscanned. There are
@@ -1009,6 +1033,14 @@ export class Memory extends (databases as any).flair.Memory {
         });
       }
       delete content._reindex;
+      // Preserve stored visibility on updates before applying write policy:
+      // a reindex payload that omits it keeps the record's stored value.
+      if (content.visibility === undefined || content.visibility === null) {
+        const stored = await super.get();
+        if (stored && (stored.visibility === PRIVATE_VISIBILITY || stored.visibility === SHARED_VISIBILITY)) {
+          content.visibility = stored.visibility;
+        }
+      }
       const reindexed = await super.put(content);
       noteMemoryUpsert(content);
       noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
@@ -1088,9 +1120,20 @@ export class Memory extends (databases as any).flair.Memory {
     // `{...existing, ...patch}` payload, and must never have their stored
     // visibility overwritten by a default recomputed from that merged content
     // — only a genuinely NEW id gets the default stamped.
+    // A lookup failure fails the write (it is not the same as "no record").
     const preExisting = content.id
-      ? await (databases as any).flair.Memory.get(content.id).catch(() => null)
+      ? await (databases as any).flair.Memory.get(content.id)
       : null;
+
+    // Preserve stored visibility on updates before applying write policy
+    // (only the two writable values; the guards below see the result).
+    if (
+      preExisting &&
+      (content.visibility === undefined || content.visibility === null) &&
+      (preExisting.visibility === PRIVATE_VISIBILITY || preExisting.visibility === SHARED_VISIBILITY)
+    ) {
+      content.visibility = preExisting.visibility;
+    }
 
     // ─── Default visibility (durability-keyed) — Layer 1, part A ────────────
     // Explicit visibility on the write ALWAYS overrides; only stamp the
