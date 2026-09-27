@@ -731,7 +731,7 @@ describe("addSessionToMemory", () => {
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
         });
 
-       // Build events WITHOUT an id field
+    // Build events with `id: undefined`.
     const session = makeSession({
       id: "sess-noid",
       appName: "my-app",
@@ -762,12 +762,12 @@ describe("addSessionToMemory", () => {
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
         });
 
-       // Build events WITHOUT an id field
+    // Build events with `id: undefined`.
     const events = [
         { id: undefined, invocationId: "inv-1", author: "user", actions: {} as import("@google/adk").Event["actions"], timestamp: Date.now(), content: { role: "user", parts: [{ text: "first" }] } as import("@google/genai").Content },
         { id: undefined, invocationId: "inv-2", author: "user", actions: {} as import("@google/adk").Event["actions"], timestamp: Date.now(), content: { role: "user", parts: [{ text: "second" }] } as import("@google/genai").Content },
       ];
-       // MakeSession wraps events, makeSession's id = the sessionId for addEventsToMemory
+    // Pass `sess-noid` directly as the session ID to `addEventsToMemory`.
       await service.addEventsToMemory("my-app", "user-1", events, "sess-noid");
 
        // Two distinct record ids, neither contains "undefined"

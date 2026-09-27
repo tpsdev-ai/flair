@@ -124,7 +124,6 @@ class FlairRequestError(RuntimeError):
 
 
 class FlairWriteError(FlairRequestError):
-    status_code: int | None
     """One or more records in an ``add_memory`` batch failed to write.
 
     A subclass of :class:`FlairRequestError`, so every existing
@@ -141,6 +140,8 @@ class FlairWriteError(FlairRequestError):
     only in the message and the ``failed`` list). Check for ``None`` before
     comparing ``status_code`` numerically.
     """
+
+    status_code: int | None
 
     def __init__(
         self, written: int, total: int, failed: List[Tuple[str, Any]], skipped: int = 0
