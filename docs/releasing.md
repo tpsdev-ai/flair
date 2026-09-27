@@ -337,7 +337,8 @@ The maintainer who approves staged packages must have 2FA enabled on their npm a
 
 After the npm approval, a maintainer today pastes the promote block from a
 checkout. Slice 1 lands the four pieces the privileged promote job (slice 2) will
-stand on; it holds no credential.
+stand on; it holds no npm credential (the poll runs on the automatic
+`GITHUB_TOKEN` with `actions: write`, `contents: read` and `deployments: read`).
 
 - **The certified digest travels with the release attempt.** The `release-attempt`
   deployment marker carries a `payload` of `package_set_digest`, `manifest_sha256`
@@ -349,21 +350,32 @@ stand on; it holds no credential.
   text between the fences a human sees (one definition). A FAIL or a non-release
   version has no promote block: `--emit bash` exits 3 with one stderr line.
 - **The unprivileged poll.** `release-promote-poll.yml` runs every 10 minutes
-  (`schedule` + `workflow_dispatch`) with `actions: write`, `contents: read` and
-  `deployments: read` — NO `environment`, NO secret, and it checks out only
-  `scripts/ci` from the DEFAULT BRANCH at the run's own sha (never a tag's tree).
-  Per pending `v<version>` it reads the version from the MARKER PAYLOAD (never
-  main's `package.json`, which moves on after a release), requires EVERY lockstep
-  package `<name>@<version>` to be public and to re-derive the certified
-  package-set digest (ALL-form: one missing/odd package is NOT READY, exit 0, the
-  package named), and on READY dispatches `release-promote.yml --ref v<version>`.
-  The dispatch is gated behind that workflow existing (slice 2). **The poll's
-  outputs are never an input to what gets promoted** — the privileged job
-  re-derives everything it acts on.
+  (`schedule` + `workflow_dispatch`) and holds NO npm credential: no `environment`,
+  no repo secret — it runs on the automatic `GITHUB_TOKEN` with `actions: write`,
+  `contents: read` and `deployments: read`. It checks out ONLY the default branch
+  at the run's own sha (never a tag's tree), and brings exactly what the package
+  derivation reads (`scripts/ci`, the root `package.json` and
+  `packages/*/package.json`); that derivation FAILS CLOSED — a non-zero exit or an
+  empty list is an error exit that names the cause, never a silent "ready". It
+  reads every `release-attempt` / `promoted` marker across ALL pages
+  (`--paginate`, flattened), and for each pending marker takes the version from the
+  MARKER PAYLOAD (never main's `package.json`, which moves on after a release;
+  never the ref alone — the ref must equal `v<payload.version>` or the marker is
+  refused). It requires EVERY lockstep package `<name>@<version>` to be public and
+  to re-derive the certified package-set digest (ALL-form: one missing/odd package
+  is NOT READY, exit 0, the package named), and on READY dispatches
+  `release-promote.yml --ref v<version>`, gated behind that workflow existing
+  (slice 2). A `workflow_dispatch` run is refused unless `github.ref` is the
+  default branch, so `github.sha` is always a main sha. **The poll's outputs are
+  never an input to what gets promoted** — the privileged job re-derives everything
+  it acts on. (`test/unit/release-promote-poll-workflow.test.ts`.)
 - **Trust-root ownership.** `.github/CODEOWNERS` puts `/scripts/ci/canary-verdict.sh`,
-  `/scripts/ci/registry-tarball-sha256.mjs`, `/scripts/ci/registry-latest-skew.mjs`,
-  `/scripts/ci/lockstep-packages.mjs`, `/.github/workflows/canary.yml` and
-  `/.github/workflows/release-promote*.yml` under the trust root (`@heskew`).
+  `/scripts/ci/package-set-digest.mjs`, `/scripts/ci/registry-tarball-sha256.mjs`,
+  `/scripts/ci/registry-latest-skew.mjs`, `/scripts/ci/lockstep-packages.mjs`,
+  `/.github/workflows/canary.yml` and `/.github/workflows/release-promote*.yml`
+  under the trust root (`@heskew`); the test resolves EFFECTIVE ownership (last
+  matching rule wins) for each protected path.
+  (`test/unit/release-auto-tag-workflow.test.ts`.)
 
 Not in this slice: the privileged `release-promote.yml`, the `release-promote`
 environment, `NPM_TOKEN`, the machinery-recency guard, and the refusal issue with

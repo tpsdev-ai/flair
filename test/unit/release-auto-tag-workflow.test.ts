@@ -347,7 +347,19 @@ describe("release-auto-tag workflow — the coupling and the allowlist file", ()
 // ── CODEOWNERS: the trust root (#1890, round 4 item 2) ────────────────────────
 
 describe("release-auto-tag workflow — the trust root is owned by the repo admin", () => {
-  test("round 4, item 2 (round 6, item 1): CODEOWNERS gives the trust root — the tagger, its workflow, the checker, the allowlist and this file — one owner", () => {
+  /** CODEOWNERS glob → regex: `/` anchors to the repo root, `*` does not cross `/`. */
+  function matches(pattern: string, path: string): boolean {
+    const anchored = pattern.startsWith("/");
+    const p = anchored ? pattern.slice(1) : pattern;
+    const re = p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*");
+    return new RegExp((anchored ? "^" : "(^|/)") + re + "$").test(path);
+  }
+  /**
+   * EFFECTIVE ownership: the LAST matching rule wins (CODEOWNERS order), so a
+   * later override rule — anywhere in the file — changes the answer, and this
+   * test fails. Repo-relative paths (no leading slash).
+   */
+  function effectiveOwner(path: string): string | null {
     const rules = readFileSync(join(REPO, ".github", "CODEOWNERS"), "utf8")
       .split("\n")
       .map((line) => line.trim())
@@ -356,39 +368,39 @@ describe("release-auto-tag workflow — the trust root is owned by the repo admi
         const [pattern, ...owners] = line.split(/\s+/);
         return { pattern: pattern ?? "", owners: owners.join(" ") };
       });
-    const ownerOf = (pattern: string) => rules.find((r) => r.pattern === pattern)?.owners ?? null;
-    const indexOf = (pattern: string) => rules.findIndex((r) => r.pattern === pattern);
-    // A release PR cannot change what the tagger does (condition 7b), and a
-    // change to the tagger itself needs the repo admin — not a release. The LAST
-    // matching pattern wins in CODEOWNERS, so each specific rule must sit BELOW
-    // the catch-all for it to be the one that applies.
-    for (const pattern of [
-      "/.github/workflows/release-*.yml",
-      "/scripts/release-auto-tag.mjs",
-      "/scripts/check-version-sync.mjs",
-      "/.github/release-auto-tag-advisories.json",
-      "/.github/CODEOWNERS",
+    let owner: string | null = null;
+    for (const r of rules) if (matches(r.pattern, path)) owner = r.owners;
+    return owner;
+  }
+
+  test("every protected path's EFFECTIVE owner (last matching rule) is the repo admin", () => {
+    // Concrete PATHS, not patterns: the matcher resolves which rule actually
+    // applies (last match wins), so an override added later in the file — even
+    // the catch-all moved below a specific rule — turns this red.
+    for (const path of [
+      // #1890: the tagger, its workflow, the checker and the advisory allowlist.
+      ".github/workflows/release-auto-tag.yml",
+      "scripts/release-auto-tag.mjs",
+      "scripts/check-version-sync.mjs",
+      ".github/release-auto-tag-advisories.json",
       // flair#1928 slice 1: the machinery the promote job will EXECUTE, and the
-      // promote workflows.
-      "/scripts/ci/canary-verdict.sh",
-      "/scripts/ci/registry-tarball-sha256.mjs",
-      "/scripts/ci/registry-latest-skew.mjs",
-      "/scripts/ci/lockstep-packages.mjs",
-      "/.github/workflows/canary.yml",
-      "/.github/workflows/release-promote*.yml",
+      // promote workflows (including the poll itself).
+      "scripts/ci/canary-verdict.sh",
+      "scripts/ci/package-set-digest.mjs",
+      "scripts/ci/registry-tarball-sha256.mjs",
+      "scripts/ci/registry-latest-skew.mjs",
+      "scripts/ci/lockstep-packages.mjs",
+      ".github/workflows/canary.yml",
+      ".github/workflows/release-promote.yml",
+      ".github/workflows/release-promote-poll.yml",
+      // …and the ownership map itself.
+      ".github/CODEOWNERS",
     ]) {
-      expect(ownerOf(pattern), `${pattern} is owned`).toBe("@heskew");
-      expect(indexOf(pattern), `${pattern} is below the catch-all`).toBeGreaterThan(indexOf("*"));
+      expect(effectiveOwner(path), `${path} is owned by the repo admin`).toBe("@heskew");
     }
-    // The ownership map ITSELF (round 6, item 1): without the entry above the
-    // catch-all makes the reviewers team the owner of this file, so a
-    // collaborator with merge access and that team's approval could delete the
-    // trust-root entries and then change the tagger in a later pull request.
-    expect(ownerOf("/.github/CODEOWNERS"), ".github/CODEOWNERS is not left to the catch-all").not.toBe(
-      ownerOf("*"),
-    );
-    // …and the existing catch-all still covers everything else, unchanged.
-    expect(ownerOf("*")).toBe("@tpsdev-ai/reviewers");
+    // NEGATIVE CONTROL: a path nobody protected still falls to the catch-all, so
+    // the matcher is not trivially returning @heskew for everything.
+    expect(effectiveOwner("README.md")).toBe("@tpsdev-ai/reviewers");
   });
 });
 

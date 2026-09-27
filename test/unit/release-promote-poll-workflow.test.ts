@@ -8,8 +8,10 @@
  * promoted.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import yaml from "js-yaml";
 
 interface Step {
@@ -72,13 +74,20 @@ describe("release-promote-poll — no credential, trusted-main only", () => {
     expect(checkout, "the poll checks out").toBeDefined();
     expect(String(checkout?.with?.ref)).toBe("${{ github.sha }}");
     expect(String(checkout?.with?.ref)).not.toContain("refs/tags");
-    expect(String(checkout?.with?.["sparse-checkout"])).toContain("scripts/ci");
+    const sparse = String(checkout?.with?.["sparse-checkout"]);
+    expect(sparse).toContain("scripts/ci");
+    // The derivation reads the root package.json and packages/*/package.json, so
+    // the sparse checkout must bring them — otherwise lockstep-packages.mjs sees
+    // an empty tree and (before the fail-closed fix) an empty package list.
+    expect(sparse).toContain("package.json");
+    expect(sparse).toContain("packages/*/package.json");
     expect(checkout?.with?.["persist-credentials"]).toBe(false);
   });
 
   test("the version comes from the MARKER PAYLOAD, never from main's package.json", () => {
     const script = job("poll").steps?.map((s) => s.run ?? "").join("\n") ?? "";
     expect(script).toContain(".payload.package_set_digest");
+    expect(script).toContain(".payload.version");
     expect(script).not.toContain("package.json");
     // Every lockstep package must be public and measurable — ALL-form.
     expect(script).toContain("registry-tarball-sha256.mjs");
@@ -96,5 +105,62 @@ describe("release-promote-poll — no credential, trusted-main only", () => {
 
   test("the header says the poll's outputs are never an input to what gets promoted", () => {
     expect(raw).toContain("NEVER an input to what gets promoted");
+  });
+});
+
+describe("release-promote-poll — round 2: derivation, payload version, all pages, main-bound dispatch", () => {
+  const runScript = () => (job("poll").steps ?? []).map((s) => s.run ?? "").join("\n");
+
+  test("the package-list derivation FAILS CLOSED: status captured separately, empty is an error, no swallowing substitution", () => {
+    const script = runScript();
+    // The output and its exit status are captured SEPARATELY.
+    expect(script).toContain("pkgs_status=$?");
+    expect(script).toContain('if [ "${pkgs_status}" -ne 0 ]');
+    expect(script).toContain('if [ ! -s "${PKGS}" ]');
+    expect(script).toMatch(/exit 1/);
+    // No `< <(node scripts/ci/lockstep-packages.mjs …)` that can swallow a non-zero exit.
+    expect(script).not.toContain("< <(node scripts/ci/lockstep-packages.mjs");
+  });
+
+  test("the version is the PAYLOAD's and is validated against the ref (a mismatch refuses the marker)", () => {
+    const script = runScript();
+    expect(script).toContain("payload_version"); // assertion: the payload field is read
+    expect(script).toContain('[ "${ref}" != "v${payload_version}" ]'); // assertion: ref must equal v<payload.version>
+    expect(script).toContain("refusing this marker"); // assertion: mismatch skips
+    expect(script).not.toMatch(/\bversion="\$\{ref#v\}"/); // assertion: never the ref alone
+  });
+
+  test("ALL deployment pages are read: the flatten uses add, not .[0]", () => {
+    const script = runScript();
+    expect(script).toContain("--paginate"); // assertion: every page is fetched
+    expect(script).toContain("jq -s 'add"); // assertion: pages are flattened
+    expect(script).not.toContain(".[0]"); // assertion: no first-page-only form
+  });
+
+  test("BEHAVIOURAL: a marker on page 2 is seen by the flatten (and .[0] would miss it)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "poll-pages-"));
+    try {
+      const p1 = join(dir, "p1.json");
+      const p2 = join(dir, "p2.json");
+      writeFileSync(p1, JSON.stringify([{ ref: "v0.1.0", payload: { version: "0.1.0" } }]));
+      writeFileSync(p2, JSON.stringify([{ ref: "v0.2.0", payload: { version: "0.2.0" } }]));
+      const flat = spawnSync("jq", ["-s", "add // [] | map(.ref)", p1, p2], { encoding: "utf8" });
+      expect(flat.status, String(flat.stderr)).toBe(0);
+      const refs = JSON.parse(flat.stdout) as string[];
+      expect(refs).toContain("v0.2.0"); // assertion: the page-2 marker is seen
+      const old = spawnSync("jq", ["-s", ".[0] | map(.ref)", p1, p2], { encoding: "utf8" });
+      expect(JSON.parse(old.stdout) as string[]).not.toContain("v0.2.0"); // the old bug
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a manual run is refused unless it is on the default branch", () => {
+    const first = (job("poll").steps ?? [])[0];
+    expect(first, "the guard is the FIRST step").toBeDefined();
+    expect(String(first?.if)).toContain("workflow_dispatch"); // assertion: manual runs only
+    expect(String(first?.env?.REF)).toBe("${{ github.ref }}");
+    expect(String(first?.run)).toContain("refs/heads/"); // assertion: compared to the default branch
+    expect(String(first?.run)).toMatch(/exit 1/); // assertion: refuses
   });
 });

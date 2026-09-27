@@ -17,6 +17,7 @@
 # and the promote workflows. A non-release PR must not be able to land an
 # exfiltrating version of any of these on main, so they join the trust root.
 /scripts/ci/canary-verdict.sh @heskew
+/scripts/ci/package-set-digest.mjs @heskew
 /scripts/ci/registry-tarball-sha256.mjs @heskew
 /scripts/ci/registry-latest-skew.mjs @heskew
 /scripts/ci/lockstep-packages.mjs @heskew
