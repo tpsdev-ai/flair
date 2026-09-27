@@ -155,12 +155,14 @@ describe("release-promote-poll — round 2: derivation, payload version, all pag
     }
   });
 
-  test("a manual run is refused unless it is on the default branch", () => {
-    const first = (job("poll").steps ?? [])[0];
-    expect(first, "the guard is the FIRST step").toBeDefined();
-    expect(String(first?.if)).toContain("workflow_dispatch"); // assertion: manual runs only
-    expect(String(first?.env?.REF)).toBe("${{ github.ref }}");
-    expect(String(first?.run)).toContain("refs/heads/"); // assertion: compared to the default branch
-    expect(String(first?.run)).toMatch(/exit 1/); // assertion: refuses
+  test("the poll runs ONLY on schedule — no manual trigger, so every run is the default branch's copy of the file", () => {
+    // `gh workflow run --ref <branch>` runs THAT branch's version of the workflow file, so a guard
+    // inside the file cannot bind a manual run to main (Gauge pass 2 on #1932). Schedule runs always
+    // execute the default branch's copy.
+    // js-yaml (YAML 1.1) reads the bare key `on` as boolean true, so accept either spelling.
+    const parsed = wf as unknown as { on?: Record<string, unknown>; true?: Record<string, unknown> };
+    const on = (parsed.on ?? parsed.true ?? {}) as Record<string, unknown>;
+    expect(Object.keys(on)).toEqual(["schedule"]); // assertion: schedule is the only trigger
+    expect(raw).not.toMatch(/^\s*workflow_dispatch\s*:/m); // assertion: no manual trigger key anywhere in the file
   });
 });

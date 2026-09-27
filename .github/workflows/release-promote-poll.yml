@@ -28,9 +28,11 @@ name: Release promote poll
 # existence).
 
 on:
+  # SCHEDULE ONLY. A schedule run always executes the DEFAULT BRANCH's copy of this file.
+  # There is deliberately no manual-dispatch trigger: `gh workflow run --ref <branch>` runs THAT
+  # branch's copy of the workflow, so a guard inside the file cannot bind a manual run to main.
   schedule:
     - cron: "*/10 * * * *"
-  workflow_dispatch:
 
 # Top-level: nothing. Each job grants exactly what it needs.
 permissions: {}
@@ -52,24 +54,9 @@ jobs:
       contents: read
       deployments: read
     steps:
-      - name: Refuse a manual run that is not on the default branch
-        # workflow_dispatch can select a ref, and `github.sha` is whatever that ref
-        # points at — so a manual run on a branch/tag would check out a NON-main
-        # tree as "trusted main". Refuse unless the ref is the default branch.
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          REF: ${{ github.ref }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          set -euo pipefail
-          if [ "${REF}" != "refs/heads/${DEFAULT_BRANCH}" ]; then
-            echo "REFUSING: this manual run is on '${REF}', not the default branch 'refs/heads/${DEFAULT_BRANCH}'; github.sha must be a main sha" >&2
-            exit 1
-          fi
-
       - name: Check out the DEFAULT BRANCH at this run's sha, with what the derivation needs
         # NOT a tag ref: a tag can carry a tampered `scripts/ci/`. `github.sha` is
-        # the default branch's commit this schedule/dispatch ran on — trusted main.
+        # the default branch's commit this schedule run started on — trusted main.
         # The sparse set is EXACTLY what `lockstep-packages.mjs` reads: scripts/ci,
         # the root package.json and packages/*/package.json.
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4

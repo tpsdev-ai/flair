@@ -350,7 +350,7 @@ stand on; it holds no npm credential (the poll runs on the automatic
   text between the fences a human sees (one definition). A FAIL or a non-release
   version has no promote block: `--emit bash` exits 3 with one stderr line.
 - **The unprivileged poll.** `release-promote-poll.yml` runs every 10 minutes
-  (`schedule` + `workflow_dispatch`) and holds NO npm credential: no `environment`,
+  (`schedule` only — there is no manual trigger, because `gh workflow run --ref <branch>` runs that branch's copy of the workflow, and a guard inside the file cannot bind it to main) and holds NO npm credential: no `environment`,
   no repo secret — it runs on the automatic `GITHUB_TOKEN` with `actions: write`,
   `contents: read` and `deployments: read`. It checks out ONLY the default branch
   at the run's own sha (never a tag's tree), and brings exactly what the package
@@ -365,8 +365,8 @@ stand on; it holds no npm credential (the poll runs on the automatic
   to re-derive the certified package-set digest (ALL-form: one missing/odd package
   is NOT READY, exit 0, the package named), and on READY dispatches
   `release-promote.yml --ref v<version>`, gated behind that workflow existing
-  (slice 2). A `workflow_dispatch` run is refused unless `github.ref` is the
-  default branch, so `github.sha` is always a main sha. **The poll's outputs are
+  (slice 2). Every run is a schedule run of the default branch's copy of the file, so
+  `github.sha` is always a main sha. **The poll's outputs are
   never an input to what gets promoted** — the privileged job re-derives everything
   it acts on. (`test/unit/release-promote-poll-workflow.test.ts`.)
 - **Trust-root ownership.** `.github/CODEOWNERS` puts `/scripts/ci/canary-verdict.sh`,

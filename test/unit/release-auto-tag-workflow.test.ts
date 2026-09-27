@@ -346,13 +346,31 @@ describe("release-auto-tag workflow — the coupling and the allowlist file", ()
 
 // ── CODEOWNERS: the trust root (#1890, round 4 item 2) ────────────────────────
 
+/**
+ * CODEOWNERS glob → regex (gitignore-style), the ONE matcher for every ownership test here:
+ * a leading "/" anchors to the repo root; "**\/" matches zero or more directories; any other "**"
+ * matches anything; "*" and "?" stay within one path segment; a trailing "/" names a directory; a
+ * pattern without a wildcard can also name a directory (it matches the path or anything below it).
+ */
+function codeownersRegex(pattern: string): RegExp {
+  const anchored = pattern.startsWith("/");
+  let body = (anchored ? pattern.slice(1) : pattern).replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  body = body
+    .replace(/\*\*\//g, "\u0001")
+    .replace(/\*\*/g, "\u0000")
+    .replace(/\*/g, "[^/]*")
+    .replace(/\?/g, "[^/]")
+    .replace(/\u0001/g, "(?:.*/)?")
+    .replace(/\u0000/g, ".*");
+  if (body.endsWith("/")) body += ".*";
+  const prefix = anchored ? "^" : "^(?:.*/)?";
+  return new RegExp(prefix + body + "(?:/.*)?$");
+}
+
 describe("release-auto-tag workflow — the trust root is owned by the repo admin", () => {
-  /** CODEOWNERS glob → regex: `/` anchors to the repo root, `*` does not cross `/`. */
+  /** One CODEOWNERS matcher for every ownership test in this file (codeownersRegex, below the imports). */
   function matches(pattern: string, path: string): boolean {
-    const anchored = pattern.startsWith("/");
-    const p = anchored ? pattern.slice(1) : pattern;
-    const re = p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*");
-    return new RegExp((anchored ? "^" : "(^|/)") + re + "$").test(path);
+    return codeownersRegex(pattern).test(path);
   }
   /**
    * EFFECTIVE ownership: the LAST matching rule wins (CODEOWNERS order), so a
@@ -401,6 +419,11 @@ describe("release-auto-tag workflow — the trust root is owned by the repo admi
     // NEGATIVE CONTROL: a path nobody protected still falls to the catch-all, so
     // the matcher is not trivially returning @heskew for everything.
     expect(effectiveOwner("README.md")).toBe("@tpsdev-ai/reviewers");
+    // The matcher sees zero-directory "**/" overrides too (Gauge pass 2 on #1932): git matches
+    // "/.github/workflows/**/release-promote-poll.yml" to the poll, so such a later rule would win.
+    expect(matches("/.github/workflows/**/release-promote-poll.yml", ".github/workflows/release-promote-poll.yml")).toBe(true);
+    expect(matches("**/canary-verdict.sh", "scripts/ci/canary-verdict.sh")).toBe(true);
+    expect(matches("/docs/*", "scripts/ci/canary-verdict.sh")).toBe(false);
   });
 });
 
@@ -418,22 +441,7 @@ describe("CODEOWNERS — the shared Renovate preset is in the trust root (#1930)
     // the last rule whose pattern matches it. Patterns are CODEOWNERS globs
     // (gitignore-style), so a later "/.github/*" or "*.json" rule would override
     // the specific one — match every rule, not only the exact path.
-    const toRegex = (pattern: string): RegExp => {
-      const anchored = pattern.startsWith("/");
-      let body = (anchored ? pattern.slice(1) : pattern).replace(/[.+^${}()|[\]\\]/g, "\\$&");
-      // "**/" matches zero or more directories; any other "**" matches anything; "*" stays within one segment.
-      body = body
-        .replace(/\*\*\//g, "\u0001")
-        .replace(/\*\*/g, "\u0000")
-        .replace(/\*/g, "[^/]*")
-        .replace(/\?/g, "[^/]")
-        .replace(/\u0001/g, "(?:.*/)?")
-        .replace(/\u0000/g, ".*");
-      if (body.endsWith("/")) body += ".*";
-      const prefix = anchored ? "^" : "^(?:.*/)?";
-      // A pattern without a wildcard can name a directory: it matches the path itself or anything below it.
-      return new RegExp(prefix + body + "(?:/.*)?$");
-    };
+    const toRegex = codeownersRegex;
     const path = ".github/renovate-preset.json";
     const matches = rules.filter((r) => toRegex(r.pattern).test(path));
     expect(matches.at(-1)?.pattern, "the preset's own rule is the last match").toBe("/.github/renovate-preset.json");
