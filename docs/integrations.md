@@ -22,7 +22,7 @@ Where Flair already runs. Each integration can reach one shared Flair memory sto
 | **OpenClaw** | [`openclaw-flair`](#openclaw) | Ed25519 | Native plugin (context-engine slot left intact) |
 | **n8n** | [`n8n-nodes-flair`](#n8n) | FlairApi credential | Three nodes (chat memory, search, store) |
 | **Hermes Agent** | [`hermes-flair`](#hermes-agent) | Ed25519 | Python `MemoryProvider` |
-| **Pi agent** | [`pi-flair`](#pi-agent) | Ed25519 | Native pi extension (pi has no MCP support); With `--agent <id>` and wiring enabled, `flair init` attempts Pi wiring for `--client pi`, for detected Pi under `--client all`, or for detected Pi when `--client` is omitted; `--client none` and `--no-mcp` skip it. |
+| **Pi agent** | [`pi-flair`](#pi-agent) | Ed25519 | Native pi extension (pi has no MCP support); with `--agent <id>` and wiring enabled, `flair init` attempts Pi wiring for `--client pi`, for detected Pi under `--client all`, or for detected Pi when `--client` is omitted; `--client none` and `--no-mcp` skip it. |
 | **Google ADK** (Python) | [`adk-flair`](../packages/adk-flair/README.md) | Ed25519 | `BaseMemoryService`; see [hosted auth](#hosted-flair-auth--your-agent-got-a-404) if you just got a 404 |
 | **Google ADK** (JS/TS) | [`@tpsdev-ai/adk-flair`](../packages/adk-flair-js/README.md) | Ed25519 | Same identity model as the Python package |
 
