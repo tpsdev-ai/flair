@@ -19,7 +19,7 @@ Where Flair already runs. Each integration shown here is a working surface — t
 | **Goose** (block/goose) | [`flair-mcp`](#claude-code-cursor-codex-gemini-cli-continuedev-via-flair-mcp) | MCP config | Goose ships native MCP support |
 | **DeepSeek Harness** (`dsh`) | [`flair-mcp`](deepseek-harness.md) | Cordis overlay | First-party MCP bridge; tools-only, reactive recall — [dedicated page](deepseek-harness.md) |
 | **LangGraph (TS)** | [`langgraph-flair`](#langgraph-typescript) | FlairClient | Drop-in `BaseStore` |
-| **OpenClaw** | [`openclaw-flair`](#openclaw) | Ed25519 | Native plugin + context engine |
+| **OpenClaw** | [`openclaw-flair`](#openclaw) | Ed25519 | Native plugin (context-engine slot left intact) |
 | **n8n** | [`n8n-nodes-flair`](#n8n) | FlairApi credential | Three nodes (chat memory, search, store) |
 | **Hermes Agent** | [`hermes-flair`](#hermes-agent) | Ed25519 | Python `MemoryProvider` |
 | **Pi agent** | [`pi-flair`](#pi-agent) | Ed25519 | Native pi extension (pi has no MCP support); `flair init --client pi` wires it, `flair doctor` checks it |
@@ -178,13 +178,13 @@ LangGraph **Python** support is on the roadmap (same `BaseStore` shape, Python a
 
 ## OpenClaw
 
-[`@tpsdev-ai/openclaw-flair`](https://www.npmjs.com/package/@tpsdev-ai/openclaw-flair) is the native OpenClaw plugin. Adds Flair as a memory provider AND registers the `flair` context engine that re-injects PERMANENT-tier rules (SOUL.md, IDENTITY.md, AGENTS.md) every turn.
+[`@tpsdev-ai/openclaw-flair`](https://www.npmjs.com/package/@tpsdev-ai/openclaw-flair) is the native OpenClaw plugin. Adds Flair as a memory provider AND provides bootstrap through a `before_prompt_build` hook (context-engine slot left intact; the host's native memory section stays untouched).
 
 ```bash
 openclaw plugins install @tpsdev-ai/openclaw-flair
 ```
 
-Configuration via OpenClaw's standard plugin surface. See [`docs/openclaw.md`](openclaw.md) for the per-agent install pattern, including how to wire SOUL.md so behavioral anchors persist across long sessions without drift.
+Configuration via OpenClaw's standard plugin surface. See [`docs/openclaw.md`](openclaw.md) for the per-agent install pattern. The host's own workspace files load each agent's `SOUL.md` / `AGENTS.md`; Flair does not manage or anchor these.
 
 ---
 

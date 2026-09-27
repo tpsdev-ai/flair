@@ -56,7 +56,7 @@ Example `flair.json`:
 
 **On demand.** Exposes two tools:
 
-- `flair_search(query, limit?)` — semantic search across this agent's memories.
+- `flair_search(query, limit?)` — semantic search using Flair's read scope (own records and other agents' non-private records).
 - `flair_store(content, durability?, tags?)` — persist a memory entry. Stored verbatim; no LLM extraction.
 
 **On Hermes built-in memory writes.** Mirrors `MEMORY.md` / `USER.md` `add` operations into Flair (tagged `hermes-builtin:memory|user`) so the durable record survives even if Hermes's local files get reset.
@@ -65,7 +65,7 @@ Example `flair.json`:
 
 - **No background "summarize the conversation and persist insights."** The agent decides what's worth remembering. If it wanted something stored it should have called `flair_store`.
 - **No replace/remove mirroring** of Hermes built-in writes. Flair's model is append-only with explicit `supersedes` chaining; Hermes's substring-match replace doesn't translate cleanly. Replace operations stay local to MEMORY.md.
-- **No cross-agent reads.** Even if the same Flair instance hosts memories for several Hermes agents, each can only see its own memories. Cross-agent memory sharing is a Flair-layer feature (`flair memory share`) not exposed through this plugin.
+- **Cross-agent reads are possible within Flair's read scope:** own records and other agents' non-private records on the instance.
 
 ## Operational notes
 

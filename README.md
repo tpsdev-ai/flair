@@ -244,7 +244,7 @@ Per-CLI config snippets (Gemini CLI's `~/.gemini/settings.json`, Codex CLI's `~/
 openclaw plugins install @tpsdev-ai/openclaw-flair
 ```
 
-Auto-detects the agent identity, provides `memory_store` / `memory_recall` / `memory_get`, and injects relevant memories at session start. See the [plugin README](packages/openclaw-flair/README.md).
+Auto-detects the agent identity, provides `memory_store` / `memory_search` / `memory_get`, and provides bootstrap context from `before_prompt_build` (requires host opt-in). See the [plugin README](packages/openclaw-flair/README.md).
 
 ### n8n
 

@@ -94,15 +94,14 @@ flair agent add project-beta
 flair agent add infra-ops
 ```
 
-Each project's `CLAUDE.md` uses its own agent ID. Memories are fully isolated between projects.
+Each project's `CLAUDE.md` uses its own agent ID. Writes carry an `agentId` field (tags are optional); reads use owner plus visibility.
 
 ## Subagents
 
 Claude Code subagents (spawned via `/run` or background tasks) can share the parent's memory:
 
     ### Subagents
-    Subagents share memory with the parent session. Use the same agent ID:
-    FLAIR_AGENT_ID=my-project
+    Subagents share memory with the parent session when they use the same agent ID (to share, set `FLAIR_AGENT_ID=my-project`). With their own write identity and owner-only private records, they can also be isolated.
 
     When spawning subagents, pass the agent ID so they can access shared context.
 

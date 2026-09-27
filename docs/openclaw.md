@@ -29,22 +29,33 @@ In your OpenClaw agent config, add the Flair plugin:
 
 ```json
 {
-  "plugins": {
-    "@tpsdev-ai/openclaw-flair": {
-      "agentId": "my-agent",
-      "flairUrl": "http://localhost:19926"
+    "plugins": {
+      "allow": ["openclaw-flair"],
+      "slots": {
+        "memory": "openclaw-flair"
+      },
+      "entries": {
+        "openclaw-flair": {
+          "enabled": true,
+          "hooks": {
+            "allowPromptInjection": true,
+            "allowConversationAccess": true
+          },
+          "config": {
+            "url": "http://127.0.0.1:19926",
+            "autoRecall": true,
+            "autoCapture": false,
+            "maxRecallResults": 5,
+            "maxBootstrapTokens": 4000,
+             "agentId": "my-agent"
+          }
+        }
+      }
     }
-  }
 }
 ```
 
-Or set environment variables:
-
-```bash
-export FLAIR_AGENT_ID=my-agent
-export FLAIR_URL=http://localhost:19926
-```
-
+An optional `agentId` in `config` is an **allow-list**: it restricts which agents may be served but never substitutes for the host's per-invocation identity, which comes from host context on every call.
 ### 5. Restart the gateway
 
 ```bash
@@ -58,33 +69,26 @@ The Flair plugin adds these tools to your OpenClaw agent:
 | Tool | Description |
 |------|-------------|
 | `memory_store` | Write a memory with optional type, durability, and tags |
-| `memory_recall` | Semantic search over stored memories |
+| `memory_search` | Semantic search over stored memories |
 | `memory_get` | Retrieve a specific memory by ID |
 
 ### Automatic Bootstrap
 
 On each new conversation, the plugin injects relevant context from Flair:
 - Soul entries (persistent personality and project context)
-- Recent memories (last 24h)
-- Relevant memories (semantically matched to the conversation topic)
+- Recent memories (an adaptive recent window, widening if the agent is quiet)
+- Bootstrap context up to a configured budget
 
-This happens automatically — no agent configuration needed beyond the plugin setup.
+With `hooks.allowPromptInjection` enabled, `before_prompt_build` requests budgeted bootstrap context without passing a conversation topic.
 
 ## Multi-Agent
 
-Each OpenClaw agent gets its own isolated memory space:
+Each OpenClaw agent writes with its `agentId` as a field (tags are optional); reads use owner plus visibility. A verified agent can read all its own records (private included) and other agents' non-private records on the instance; grants do not expand that read scope.
 
 ```bash
 flair agent add research-agent
 flair agent add coding-agent
 flair agent add review-agent
-```
-
-Agents can share memories via grants:
-
-```bash
-# Let review-agent read coding-agent's memories
-flair grant coding-agent review-agent --scope read
 ```
 
 ## Soul (Personality)
@@ -103,10 +107,7 @@ Soul entries are included in every bootstrap — they're the agent's persistent 
 
 ## Key Resolution
 
-The plugin resolves Ed25519 keys in this order:
-1. `FLAIR_KEY_PATH` environment variable
-2. `~/.flair/keys/<agent-id>.key`
-3. `~/.tps/secrets/flair/<agent-id>-priv.key` (legacy TPS path)
+The plugin finds Ed25519 keys for the host-provided agent identity: `keyPath` from config is only valid with a sole allowed agent (`agentId` set); otherwise the client resolves via `FLAIR_KEY_DIR` env var, then `~/.flair/keys/<agent-id>.key`, then `~/.tps/secrets/flair/<agent-id>-priv.key`. For each resolved home, `.flair` then the legacy path are checked in order before the next home.
 
 ## Troubleshooting
 
