@@ -282,9 +282,8 @@ type MemoryHitStat @table(database: "flair") {
 # signature covers method and URL, not the body).
 # scopeAtWrite is the record's visibility AT WRITE (null → author-only); the
 # pointer's effective visibility is the NARROWER of it and the record's CURRENT
-# visibility. A partial PUT that omits visibility carries the existing row's
-# visibility into the written row, so a PRIVATE memory is never silently widened
-# (p2). receivedAt is server-stamped.
+# visibility. A partial PUT carries the stored visibility it read at the start of
+# the request (p2). receivedAt is server-stamped.
 type MemoryHostSource @table(database: "flair") @export {
   memoryId: ID @primaryKey      # the Memory.id this pointer belongs to
   hostSource: String!           # canonical v1 JSON: { v:1, host, kind, id, url? }

@@ -1,20 +1,23 @@
 /**
- * memory-declared-attributes.ts — the "declared attributes only" guard
+ * memory-declared-attributes.ts — the declared Memory attributes guard
  * (flair#1940 slice 1 / A1' item 1). PURE: zero imports, so it is unit-
  * testable and callable from every Memory writer.
  *
  * WHY: Harper stores an attribute that is not DECLARED in the schema (the
- * `schemas/memory.graphql` ~32-35 note records this for `embeddingModel`;
- * the probe in test/unit/memory-declared-attributes.test.ts re-confirms it
- * against the pinned harper). So removing a field from the Memory schema does
- * NOT stop a raw writer from persisting it — a `Memory.put({..., hostSource})`
- * would still land. The only reliable stop is a whitelist applied on the way
- * IN, shared by every writer, so no path has to remember the rule again.
+ * `schemas/memory.graphql` ~32-35 note records this for `embeddingModel`; the
+ * pinned harper re-confirms it). So removing a field from the Memory schema
+ * does NOT stop a raw writer from persisting it — a
+ * `Memory.put({..., hostSource})` would still land. The one-shot real-Harper
+ * probe is `test/repro/harper-undeclared-attr-probe.ts`; the unit test checks
+ * whitelist behavior and schema drift. The only reliable stop is a whitelist
+ * applied on the way IN, shared by every writer, so no path has to remember
+ * the rule again.
  *
  * The pointer inputs (`hostSource`, `hostSourceScope`, `hostSourceVisibility`)
- * are NOT declared Memory attributes after A1'; they are consumed by
- * Memory.post()/put() (and MemoryHostSource's own resource) BEFORE the content
- * reaches this guard, so the guard strips them like any other undeclared key.
+ * are NOT declared Memory attributes after A1'. Only `Memory.post()` and
+ * `Memory.put()` accept pointer inputs; the `MemoryHostSource` resource refuses
+ * every REST write verb. They are consumed BEFORE the content reaches this
+ * guard, so the guard strips them like any other undeclared key.
  *
  * DECLARED_MEMORY_ATTRIBUTES is the schema's field list. A drift tripwire
  * (test/unit/memory-declared-attributes.test.ts) parses `type Memory` out of
@@ -124,9 +127,8 @@ export function stripUndeclaredMemoryAttributes(content: unknown): string[] {
  * set. The declared-attributes whitelist KEEPS these (they are declared/named),
  * so a whitelist alone does not stop forgery: a client could PUT a
  * `provenance` or an `instanceToken` that then reads as if the server stamped
- * it. This is the ONE list, applied on EVERY writer (post, put, patch, the
- * _reindex path, the FeedMemories raw write, the seed, and the federation
- * merge). `post()`/`put()` re-stamp `provenance` (via `buildProvenance`) and
+ * it. Memory's REST write paths remove `instanceToken` and `provenance` from the
+ * request body. `originatorInstanceId` is handled in #1965. `post()`/`put()` re-stamp `provenance` (via `buildProvenance`) and
  * `instanceToken` after the strip; the other writers strip and preserve the
  * stored value.
  */

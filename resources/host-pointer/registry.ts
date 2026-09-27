@@ -1,10 +1,12 @@
 /**
- * host-pointer/registry.ts — the host-pointer write adapter (flair#1940 slice 1,
- * A1-iv item 5/6). This module is NOT under `dist/resources/*.js` (the
+ * host-pointer/registry.ts — the host-pointer write adapter (flair#1940 slice 1).
+ * The failure-injection seam exists only in test code; a build check scans every
+ * file under dist/ for it. This module is NOT under `dist/resources/*.js` (the
  * jsResource glob loads only top-level files there), so it is not a resource
- * surface: the TEST-ONLY `setHostPointerAdapterForTests` symbol never appears in
- * the loaded resource surface, and only tests import it. Production gets the
- * real MemoryHostSource table.
+ * surface. It exports NO failure switch and NO test seam: the production
+ * adapter is the real MemoryHostSource table, and tests that need a failing
+ * pointer write drive the failure from TEST code (the shared Harper mock's
+ * next-write failure flag in test/helpers/memory-search-harness.ts).
  */
 import { databases } from "harper";
 import { MEMORY_HOST_SOURCE_TABLE } from "../memory-host-source.js";
@@ -33,14 +35,7 @@ export const productionHostPointerAdapter: HostPointerAdapter = {
   },
 };
 
-let override: HostPointerAdapter | null = null;
-
-/** The adapter the write path uses (the production one unless a test replaced it). */
+/** The adapter the write path uses. The production one, always. */
 export function currentHostPointerAdapter(): HostPointerAdapter {
-  return override ?? productionHostPointerAdapter;
-}
-
-/** TEST-ONLY seam. Imported only by tests; absent from the resource surface. */
-export function setHostPointerAdapterForTests(adapter: HostPointerAdapter | null): void {
-  override = adapter;
+  return productionHostPointerAdapter;
 }

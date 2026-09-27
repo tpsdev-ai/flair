@@ -16,8 +16,10 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { randomUUID } from "node:crypto";
 import nacl from "tweetnacl";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
-import { componentWithFailingHostPointer, type FailingComponent } from "../helpers/host-pointer-failing-component";
+import { componentWithFailingHostPointer, ADAPTER_REL, FAILING_ADAPTER_SRC, type FailingComponent } from "../helpers/host-pointer-failing-component";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 function mkAgent(id: string): TestAgent {
@@ -67,6 +69,18 @@ afterAll(async () => {
 });
 
 describe("flair#1940 A1-iv item 7 — real-Harper atomicity + REST refusal", () => {
+  it("ctrl: the composed copy IS the ESM failing adapter and its injected failure is observed", async () => {
+    // Positive control, judged BEFORE any rollback assertion: prove the failing
+    // adapter actually loaded, so t1/t2/c3 below can only pass because it did.
+    const onDisk = readFileSync(join(component.dir, ADAPTER_REL), "utf8");
+    expect(onDisk).toContain("export async function putPointerRow"); // assertion: ESM export, not CJS exports.*
+    expect(onDisk).toContain("forced host-pointer write failure"); // assertion: OUR injected failure
+    const id = `it-ctrl-${Date.now()}`;
+    const res = await authFetch(agent, "POST", "/Memory", { id, agentId: agent.id, content: "ctrl", visibility: "shared", hostSource: POINTER, hostSourceScope: "record" });
+    expect(res.status).toBe(500); // assertion: the injected failure IS observed on the wire
+    expect((await readRows("Memory", "id", id)).length).toBe(0); // assertion: nothing was written
+  }, 60_000);
+
   it("t1: a POST whose pointer write throws leaves NO Memory row", async () => {
     const id = `it-t1-${Date.now()}`;
     const res = await authFetch(agent, "POST", "/Memory", { id, agentId: agent.id, content: "t1", visibility: "shared", hostSource: POINTER, hostSourceScope: "record" });

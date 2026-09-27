@@ -1,12 +1,11 @@
-- **A pointer commits with its Memory row, a partial PUT keeps a PRIVATE memory private, and an echoed pointer keeps a SHARED pointer shared.**
+- **A pointer commits with its Memory row, and an echoed pointer keeps a SHARED pointer shared.**
   The host pointer (`hostSource`) lives in its own `MemoryHostSource` table and is written
   with the request's transaction — a request's open one when there is one, and a created one
   when an internal caller has no request context — so the Memory row and its pointer commit
   together or not at all. A failed pointer write aborts that transaction and neither row
   commits; a failed pointer delete fails the Memory delete (`t1`, `t2`,
-  `c3`). A partial `PUT` that omits `visibility` carries the existing row's visibility into
-  the written row, so a private memory is preserved sequentially (`p2`); concurrent updates
-  need a conflict check. An echo of the
+  `c3`). A partial PUT carries the stored visibility it read at the start of the request, so
+  a private memory is preserved sequentially (`p2`); concurrent updates need a conflict check. An echo of the
   stored pointer keeps it (and its scope) unchanged ONLY when the writer is the stored
   pointer's author AND the value matches exactly, full URL included — a different query is a
   new value, not an echo. The pointer is cascaded away where its Memory row is deleted,

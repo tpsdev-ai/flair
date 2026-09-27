@@ -11,8 +11,8 @@
  * even though the pointer now lives in its own, unfederated table.
  *
  * The CLI build (tsconfig.cli, rootDir src) cannot import from resources/, so
- * this list is mirrored here; test/unit/federation-memory-attributes.test.ts
- * asserts it equals resources' declared + named lists, so the two cannot drift.
+ * this list is mirrored here; `test/unit/federation-memory-whitelist-1940.test.ts`
+ * asserts that this mirror equals the resource lists, so the two cannot drift.
  */
 export const FEDERATION_MEMORY_ATTRIBUTES = Object.freeze([
   // Declared Memory attributes (schemas/memory.graphql), in schema order.

@@ -127,12 +127,9 @@ function buildPointerForWrite(args: {
   }
   const hs = validateHostSource(inputs.hostSource);
   if (!hs.ok) return { row: null, denial: hostSourceBadRequest("invalid_host_source", hs.error) };
-  // Adjudication B (round 4): an ECHO of the unchanged stored pointer (a
-  // read-then-full-PUT that omits hostSourceScope) must keep the stored pointer
-  // row AND its scopeAtWrite — otherwise the echo would replace the row with a
-  // scope-less (author-only) pointer and lose the URL's query/fragment. No
-  // hostSourceScope opt-in is treated as an echo too: the client is echoing,
-  // not opting in anew.
+  // Only an author's exact echo of the stored full canonical value preserves
+  // the pointer row. A normally projected URL has its query and fragment
+  // removed and is not an exact echo.
   if (
     inputs.hostSourceScope === undefined &&
     storedPointer &&
@@ -211,8 +208,8 @@ async function persistPointerRow(
 ): Promise<Response | null> {
   try {
     // The pointer-table ADAPTER (flair#1940 A1-iv item 6) writes via the real
-    // MemoryHostSource table in production; a test injects a failing adapter
-    // through the registry seam. A missing table throws (fail closed).
+    // MemoryHostSource table in production; a test drives a failing write from
+    // TEST code (the shared Harper mock). A missing table throws (fail closed).
     await putPointerRow(row, ctx);
     return null;
   } catch (err) {
@@ -1170,8 +1167,9 @@ export class Memory extends (databases as any).flair.Memory {
     await stampOriginatorInstanceId(content);
 
     // ── Write the new record FIRST ──────────────────────────────────────────
-    // A1' item 1: persist ONLY declared Memory attributes — an undeclared key
-    // (including a pointer field a raw writer tried to slip in) is dropped.
+    // A1' item 1: the guard keeps declared Memory attributes and the explicit
+    // `UNDECLARED_ALLOWED` fields, so an undeclared key (including a pointer
+    // field a raw writer tried to slip in) is dropped.
     stripUndeclaredMemoryAttributes(content);
     // A1' item 2 (adjudication 0a): the Memory row and its pointer row share ONE
     // transaction. With a request context they join its open transaction; with
@@ -1240,8 +1238,8 @@ export class Memory extends (databases as any).flair.Memory {
     // A1' item 1: patch() is a Memory writer too. Drop any pointer inputs and
     // every undeclared attribute here, so a PATCH can never carry a pointer
     // onto the row (the pointer is written ONLY by post()/put() and the table
-    // resource). A body-supplied hostSource/hostSourceScope/hostSourceVisibility
-    // therefore leaves no pointer anywhere.
+    // resource). These paths discard the supplied pointer input and create no
+    // pointer row; an existing pointer row stays bound to the updated Memory.
     extractPointerInputs(content);
     stripUndeclaredMemoryAttributes(content);
     // A1-iv item 3: strip server-stamped fields on patch too (a PATCH body may
@@ -1604,8 +1602,8 @@ export class Memory extends (databases as any).flair.Memory {
     // EFFECTIVE visibility — the existing row's when the body omits it — not
     // from an undefined body value that would wrongly yield author-only.
     const effectiveVisibility = content.visibility ?? preExisting?.visibility;
-    // (The stored-visibility carry for a partial PUT lives in one place: the
-    // #1956 carry block above, before the write-policy guards.)
+    // A partial PUT carries the stored visibility it read at the start of the
+    // request (one carry, above, before the write-policy guards).
     // Adjudication B (round 4): load the stored pointer row so an echo of it is
     // recognised and not replaced (see buildPointerForWrite).
     let storedPointer: PointerRow | null = null;

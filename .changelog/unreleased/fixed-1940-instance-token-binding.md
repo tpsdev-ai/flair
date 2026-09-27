@@ -6,7 +6,9 @@
   stores the row's `memoryInstanceToken`, and the join returns a pointer (or `"withheld"`) only when
   `memoryId`, `authorId === agentId`, the incarnation token, and “not archived” all hold — so a
   deleted-and-recreated id, a re-owned row, and an archived row all show no pointer, with no cleanup
-  required. Every non-admin reader projects pointers through one shared helper; one server-stamped
-  strip list (instanceToken, provenance) is applied on every writer.
+  required. `Memory.get()`, `Memory.search()` and `SemanticSearch` render pointers through the
+  pointer helper. Other Memory projections, bootstrap included, do not render pointers in
+  this slice. Memory's REST write paths remove `instanceToken` and `provenance` from the
+  request body. `originatorInstanceId` is handled in #1965.
 
   (Refs #1940)

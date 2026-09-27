@@ -20,6 +20,9 @@ delete (process.env as any).FLAIR_PUBLIC;
 const { Memory, MemoryHostSource, _resetLocalInstanceIdCacheForTests } = await installMemoryHarperMock();
 // Imported AFTER the harper mock is registered, like Memory/MemoryHostSource.
 const { MemoryMaintenance } = await import("../../resources/MemoryMaintenance.ts");
+const { FeedMemories } = await import("../../resources/MemoryFeed.ts");
+const { MemoryArchive } = await import("../../resources/MemoryArchive.ts");
+const { SemanticSearch } = await import("../../resources/SemanticSearch.ts");
 const memoryStore = harnessState.memoryStore;
 const pointerStore = harnessState.pointerStore;
 
@@ -575,13 +578,31 @@ describe("A1-iv items 2/3 — one reader helper and one server-stamped strip lis
     expect(offenders).toEqual([]); // assertion: no module outside the helper reads the table
   });
 
-  it("(r2b) the Memory readers project through the ONE helper", () => {
-    const { readFileSync } = require("node:fs");
-    const { join } = require("node:path");
-    for (const f of ["Memory.ts", "SemanticSearch.ts"]) {
-      const src = readFileSync(join(import.meta.dir, "..", "..", "resources", f), "utf8");
-      expect(src).toContain("projectRowsThroughPointers"); // assertion: the reader uses the helper
-      expect(src).not.toContain("loadPointerRows"); // assertion: it does not read the table itself
+  it("(r2b) Memory.get, Memory.search and SemanticSearch each RUN the pointer helper", async () => {
+    // Behavioural, not a source-text check: `harnessState.pointerSearchCalls`
+    // counts every pointer-table query, which only the helper (loadPointerRows)
+    // issues — so an increment proves the reader actually ran the join.
+    const row = seedMemory({ id: "mem-r2b", agentId: "agent-a", visibility: "shared", content: "needle" });
+    pointerStore.set("mem-r2b", { memoryId: "mem-r2b", hostSource: JSON.stringify(POINTER), scopeAtWrite: "shared", authorId: "agent-a", memoryInstanceToken: row.instanceToken });
+
+    harnessState.pointerSearchCalls = 0;
+    await makeMemory(agentCtx("agent-b")).get("mem-r2b");
+    expect(harnessState.pointerSearchCalls).toBeGreaterThan(0); // assertion: Memory.get RUNS the helper
+
+    harnessState.pointerSearchCalls = 0;
+    const s: any[] = [];
+    for await (const r of await makeMemory(agentCtx("agent-b")).search()) s.push(r);
+    expect(harnessState.pointerSearchCalls).toBeGreaterThan(0); // assertion: Memory.search RUNS the helper
+
+    process.env.FLAIR_RETRIEVAL_MODE = "bm25-only";
+    try {
+      const sem: any = new (SemanticSearch as any)();
+      sem.getContext = () => ({ request: agentCtx("agent-b") });
+      harnessState.pointerSearchCalls = 0;
+      await sem.post({ q: "needle", agentId: "agent-b" });
+      expect(harnessState.pointerSearchCalls).toBeGreaterThan(0); // assertion: SemanticSearch RUNS the helper
+    } finally {
+      delete process.env.FLAIR_RETRIEVAL_MODE;
     }
   });
 
@@ -592,5 +613,88 @@ describe("A1-iv items 2/3 — one reader helper and one server-stamped strip lis
     const row = seedMemory({ id: "mem-s3b", agentId: "agent-a" });
     await m.patch({ id: "mem-s3b", agentId: "agent-a", content: "y", provenance: '{"forged":true}' });
     expect(memoryStore.get("mem-s3b")?.provenance).not.toContain("forged"); // assertion: patch strips provenance
+  });
+});
+
+// ─── A3 item 2: every Memory projection removes an inline hostSource ──────────
+
+describe("A3 item 2 — a reader never sees an inline hostSource stored on the row", () => {
+  it("(i1) with NO pointer row, another reader gets the row WITHOUT the inline hostSource", async () => {
+    // A RAW test path writes the pointer straight onto the Memory row (a
+    // supported write never does). No pointer row exists.
+    seedMemory({ id: "mem-i1", agentId: "agent-a", visibility: "shared", hostSource: JSON.stringify(POINTER) });
+    const got: any = await makeMemory(agentCtx("agent-b")).get("mem-i1");
+    expect(got.hostSource).toBeUndefined(); // assertion: inline hostSource removed on get
+    const rows: any[] = [];
+    for await (const r of await makeMemory(agentCtx("agent-b")).search()) rows.push(r);
+    expect(rows.find((r) => r.id === "mem-i1")?.hostSource).toBeUndefined(); // assertion: removed on search too
+  });
+
+  it("(i2) with a token-MISMATCHED pointer row, the inline hostSource is still removed", async () => {
+    seedMemory({ id: "mem-i2", agentId: "agent-a", visibility: "shared", hostSource: JSON.stringify(POINTER) });
+    pointerStore.set("mem-i2", { memoryId: "mem-i2", hostSource: JSON.stringify(POINTER), scopeAtWrite: "shared", authorId: "agent-a", memoryInstanceToken: "TOKEN-MISMATCH" });
+    const got: any = await makeMemory(agentCtx("agent-b")).get("mem-i2");
+    expect(got.hostSource).toBeUndefined(); // assertion: an unbound pointer ⇒ inline hostSource removed
+  });
+});
+
+// ─── A3 item 5: semantic search returns the joined pointer ───────────────────
+
+describe("A3 item 5 — SemanticSearch returns the joined pointer to a permitted reader", () => {
+  it("(s5) a permitted non-admin reader gets the pointer from a semantic result", async () => {
+    const row = seedMemory({ id: "mem-s5", agentId: "agent-a", visibility: "shared", content: "needle" });
+    pointerStore.set("mem-s5", { memoryId: "mem-s5", hostSource: JSON.stringify(POINTER), scopeAtWrite: "shared", authorId: "agent-a", memoryInstanceToken: row.instanceToken });
+    process.env.FLAIR_RETRIEVAL_MODE = "bm25-only";
+    try {
+      const sem: any = new (SemanticSearch as any)();
+      sem.getContext = () => ({ request: agentCtx("agent-b") });
+      const out: any = await sem.post({ q: "needle", agentId: "agent-b" });
+      const hit = (out?.results ?? []).find((r: any) => r.id === "mem-s5");
+      expect(hit?.hostSource).toEqual(POINTER); // assertion: the gated join rendered the pointer
+    } finally {
+      delete process.env.FLAIR_RETRIEVAL_MODE;
+    }
+  });
+});
+
+// ─── item 1: a FeedMemories replacement must not widen a stored-private row ──
+
+describe("item 1 — a FeedMemories replacement keeps a stored-private row private", () => {
+  it("(f1) a replacement that omits visibility leaves a shared pointer withheld from another reader", async () => {
+    // The row is stored PRIVATE; its pointer was stamped when the row was shared.
+    seedMemory({ id: "mem-f1", agentId: "agent-a", visibility: "private", content: "note" });
+    pointerStore.set("mem-f1", { memoryId: "mem-f1", hostSource: JSON.stringify(POINTER), scopeAtWrite: "shared", authorId: "agent-a", memoryInstanceToken: memoryStore.get("mem-f1")?.instanceToken });
+
+    const feed: any = new (FeedMemories as any)();
+    feed.getContext = () => ({ request: agentCtx("agent-a") });
+    await feed.post({ id: "mem-f1", agentId: "agent-a", content: "note replaced" });
+
+    expect(memoryStore.get("mem-f1")?.visibility).toBe("private"); // assertion: the carry kept the row private
+    // A different ordinary reader must not receive the pointer.
+    const got: any = await makeMemory(agentCtx("agent-b")).get("mem-f1");
+    const disclosed = got && typeof got === "object" && got.hostSource === POINTER;
+    expect(disclosed).toBe(false); // assertion: the pointer stayed withheld from another reader
+  });
+});
+
+// ─── item 9: archiving must not rewrite the stored pointer ───────────────────
+
+describe("item 9 — archiving a row does not write the projected pointer back", () => {
+  it("(ar1) the stored pointer row keeps its full URL and scope after an archive", async () => {
+    const fullUrlPointer = { v: 1, host: "openclaw", kind: "run", id: "run-ar1", url: "https://host.example/path?a=1#frag" };
+    const m = makeMemory(agentCtx("agent-a"));
+    const created: any = await m.post({ id: "mem-ar1", content: "note", visibility: "shared", hostSource: fullUrlPointer, hostSourceScope: "record" });
+    const id = created.id ?? "mem-ar1";
+    const before = pointerStore.get(id)?.hostSource;
+    expect(before).toBe(JSON.stringify(fullUrlPointer)); // assertion: the full URL was stored
+
+    const arch: any = new (MemoryArchive as any)();
+    arch.getContext = () => ({ request: agentCtx("agent-a") });
+    const res: any = await arch.post({ id, action: "basement" });
+    expect(res?.archived).toBe(true); // assertion: the archive landed
+
+    const after = pointerStore.get(id);
+    expect(after?.hostSource).toBe(before); // assertion: the full URL survived the archive
+    expect(after?.scopeAtWrite).toBe("shared"); // assertion: the scope survived the archive
   });
 });

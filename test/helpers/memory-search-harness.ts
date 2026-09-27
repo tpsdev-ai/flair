@@ -129,6 +129,20 @@ export class BaseMemory {
         return op === "or" ? results.some(Boolean) : results.every(Boolean);
       });
     }
+    // Harper's `search({select})` returns ONLY the selected attributes, in
+    // select order — a projection, not the full row. Mirror that here (flair#1940
+    // A3): without it a test could pass on a field the real server never sends
+    // (the pointer join binds on `instanceToken`, which is easy to omit from
+    // DEFAULT_SELECT by accident). A query with no `select` still returns the
+    // full row (the resource-level search path).
+    const select = Array.isArray(topLevel.select) ? topLevel.select : null;
+    if (select) {
+      records = records.map((r) => {
+        const projected: any = {};
+        for (const key of select) if (key in r) projected[key] = r[key];
+        return projected;
+      });
+    }
     async function* gen() {
       for (const r of records) yield r;
     }

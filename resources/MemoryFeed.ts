@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { Resource, databases } from "harper";
-import { randomUUID } from "node:crypto";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 import { computeContentHash, findExistingMemoryByContentHash } from "./memory-feed-lib.js";
 import { FORBIDDEN, UNAUTH, stampAttribution } from "./record-type-kit.js";
@@ -184,8 +183,9 @@ export class FeedMemories extends Resource {
 
     // flair#1940 A1' item 1: the feed ingest is a Memory writer too. Drop any
     // pointer inputs (hostSource/hostSourceScope/hostSourceVisibility) and every
-    // undeclared attribute here, so a POST /FeedMemories carrying a pointer
-    // leaves NO pointer anywhere — neither on the row nor in the table.
+    // undeclared attribute here. These paths discard the supplied pointer input
+    // and create no pointer row; an existing pointer row stays bound to the
+    // updated Memory.
     extractPointerInputs(record);
     stripUndeclaredMemoryAttributes(record);
     stripAuthorityFields(record, "Memory");

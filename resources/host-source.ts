@@ -1,5 +1,6 @@
 /**
- * host-source.ts — validation and canonicalisation for Memory.hostSource
+ * host-source.ts — This validates pointers stored in `MemoryHostSource`; it
+ * accepts a pointer object or a JSON string representing one.
  * (flair#1940 slice 1 / A2). PURE: zero imports (not even "harper"), so it can
  * be unit-tested directly and imported from any write path.
  *
@@ -56,9 +57,9 @@ function nfc(s: string): string {
  * any violation, naming the field and the reason.
  */
 export function validateHostSource(input: unknown): HostSourceResult {
-  // A1'' item 6: accept the canonical JSON STRING too, so a value read back
-  // from a Memory row (or echoed by a client) round-trips through the write
-  // validator unchanged. An object is validated as before.
+  // This validates pointers stored in `MemoryHostSource`; it accepts a pointer
+  // object or a JSON string representing one, so a value read back (or echoed by
+  // a client) round-trips through the write validator unchanged.
   let raw: unknown = input;
   if (typeof input === "string") {
     try {

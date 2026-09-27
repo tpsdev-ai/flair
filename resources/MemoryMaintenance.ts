@@ -20,10 +20,9 @@
 import { Resource, databases } from "harper";
 import { MEMORY_HOST_SOURCE_TABLE } from "./memory-host-source.js";
 
-/** flair#1940 A1' item 6 (A1'' item 2, A1-iv item 4) — pointer cascade where a
- *  Memory row is archived or an orphan pointer is swept. The delete is passed
- *  the request context so it JOINS the request transaction (both tables in
- *  database flair). Failures are NOT swallowed: a throw propagates to the
+/** Maintenance creates an owned transaction for each expiry or archive item;
+ *  the Memory and pointer operations join that owned transaction (both tables
+ *  in database flair). Failures are NOT swallowed: a throw propagates to the
  *  caller's error path. A missing pointer table is REPORTED (throws), never
  *  silently skipped — cleanup is hygiene, so its failure must be visible. */
 async function deletePointerRowOrThrow(memoryId: string, ctx: any): Promise<void> {

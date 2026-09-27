@@ -21,12 +21,16 @@ export interface FailingComponent {
   cleanup: () => void;
 }
 
-const FAILING_ADAPTER_JS = `"use strict";
-// Test-only build replacement: every pointer-table write/delete throws.
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.putPointerRow = async function () { throw new Error("test adapter: forced host-pointer write failure"); };
-exports.deletePointerRowViaTable = async function () { throw new Error("test adapter: forced host-pointer delete failure"); };
+const FAILING_ADAPTER_JS = `// Test-only build replacement: every pointer-table write/delete throws.
+// ESM, matching the package's "type": "module" - a CJS exports.* file would
+// not be the module the loader imports, so the failure would never be injected.
+export async function putPointerRow() { throw new Error("test adapter: forced host-pointer write failure"); }
+export async function deletePointerRowViaTable() { throw new Error("test adapter: forced host-pointer delete failure"); }
 `;
+
+/** The exact ESM source the composed copy writes over the adapter, so a test
+ *  can assert the composed file IS the failing adapter (a positive control). */
+export const FAILING_ADAPTER_SRC = FAILING_ADAPTER_JS;
 
 function repoRoot(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..", "..");

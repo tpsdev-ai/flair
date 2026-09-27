@@ -307,6 +307,9 @@ export class SemanticSearch extends Resource {
       // same K&S projection ruling as `metadata`), so skill_search opts it in
       // per-request to return the trigger in its lightweight catalog. Neither
       // flag ⇒ select stays undefined ⇒ response bytes unchanged.
+      // flair#1940 A3: the gated pointer join also needs `instanceToken`, which
+      // DEFAULT_SELECT already carries (see semantic-retrieval-core.ts), so both
+      // the default and this widened projection hand the join what it binds on.
       select: (includeTrust || includeMetadata || includeTrigger)
         ? [...DEFAULT_SELECT,
            ...(includeTrust ? ["provenance"] : []),

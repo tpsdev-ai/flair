@@ -5,8 +5,9 @@
  *            reported, never silently skipped.
  *   item 5 — the transaction helper throws when Harper's transaction function
  *            is absent, and does not join a CLOSED (detached) transaction.
- *   item 6 — the failing pointer-table adapter is injected through the
- *            test-only registry seam (no FLAIR_TEST_FAIL_* env switch).
+ *   item 6 — a failing pointer-table adapter is driven from TEST code (the
+ *            shared Harper mock's next-write failure flag); no FLAIR_TEST_FAIL_*
+ *            env switch and no production seam exist.
  */
 import { describe, it, expect, beforeEach } from "bun:test";
 import {
@@ -20,7 +21,6 @@ process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 
 const { Memory, MemoryHostSource, _resetLocalInstanceIdCacheForTests } = await installMemoryHarperMock();
 const { MemoryMaintenance } = await import("../../resources/MemoryMaintenance.ts");
-const { setHostPointerAdapterForTests } = await import("../../resources/host-pointer/registry.ts");
 const { withSharedWriteTransaction, isJoinableTransaction } = await import("../../resources/request-transaction.ts");
 
 const memoryStore = harnessState.memoryStore;
@@ -55,7 +55,6 @@ const maint = () => {
 beforeEach(() => {
   resetHarnessState();
   _resetLocalInstanceIdCacheForTests();
-  setHostPointerAdapterForTests(null);
 });
 
 // ─── item 4: cleanup is hygiene ──────────────────────────────────────────────
@@ -117,19 +116,17 @@ describe("A1-iv item 5 — the transaction helper has no unwrapped fallback", ()
   });
 });
 
-// ─── item 6: the test seam ───────────────────────────────────────────────────
+// ─── item 6: a failing pointer write is driven from TEST code ────────────────
 
-describe("A1-iv item 6 — a failing pointer-table adapter injected via the test seam", () => {
-  it("(seam) a failing adapter makes the write fail and leaves no Memory row", async () => {
-    setHostPointerAdapterForTests({
-      putPointerRow: async () => { throw new Error("seam: pointer write down"); },
-      deletePointerRow: async () => { throw new Error("seam: pointer delete down"); },
-    });
+describe("A1-iv item 6 — a failing pointer-table write driven from test code", () => {
+  it("(seam) a failing pointer write makes the write fail and leaves no Memory row", async () => {
+    // No production seam: the shared Harper mock's pointer-table `put` throws
+    // once when this flag is set — a TEST-side failure injection only.
+    harnessState.failNextPointerPut = true;
     const r: any = new (Memory as any)();
     r.getContext = () => ({}); // no request context
     const res: any = await r.post({ id: "mem-seam", content: "x", hostSource: POINTER, hostSourceScope: "record" });
     expect((res as Response)?.status).toBe(500); // assertion: the write fails
     expect(memoryStore.has("mem-seam")).toBe(false); // assertion: no Memory row
-    setHostPointerAdapterForTests(null); // restore
   });
 });

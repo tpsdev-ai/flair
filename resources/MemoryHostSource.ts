@@ -1,7 +1,9 @@
 /**
  * MemoryHostSource.ts — the resource class for the host-pointer table
  * (flair#1940 slice 1 / A1' item 3). The pointer lives in its own table,
- * keyed by memoryId; Memory rows never carry it.
+ * keyed by memoryId. Supported writes store host pointers only in `MemoryHostSource`:
+ * a pointer reaches a non-admin reader only through the gated join, and reads remove
+ * any `hostSource` stored inline on a Memory row.
  *
  * READ — ADMIN-ONLY. Bare `@export` (schemas/memory.graphql) would otherwise
  * reach Harper's default allow-decision (super_user passthrough), reachable by

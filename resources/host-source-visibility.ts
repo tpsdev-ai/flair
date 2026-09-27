@@ -7,9 +7,10 @@
  * (`MemoryHostSource`, keyed by memoryId). So the projection no longer reads a
  * field off the record: the caller reads the pointer ROW and passes it in. The
  * three outcomes of the join (A1' item 4) are:
- *   - no pointer row           → the record is returned UNCHANGED (hostSource
- *                                absent/null — byte-identical to a pointerless
- *                                record, which is what every legacy row is);
+ *   - no pointer row           → the record is returned with any inline
+ *                                `hostSource` removed (hostSource absent/null —
+ *                                byte-identical to a pointerless record, which
+ *                                is what every legacy row is);
  *   - a pointer the reader may NOT see → `hostSource: "withheld"` (present but
  *                                unrendered, so the "externally sourced" signal
  *                                survives);
@@ -29,8 +30,10 @@
  * never with Memory provenance.
  *
  * The decision is made HERE, on the server, in the read projection — no client
- * or MCP layer can un-redact. Every read surface that returns Memory records
- * calls this (see the handler-level tests in test/unit/memory-host-source.test.ts).
+ * or MCP layer can un-redact. `Memory.get()`, `Memory.search()` and
+ * `SemanticSearch` render pointers through the pointer helper. Other Memory
+ * projections, bootstrap included, do not render pointers in this slice (see the
+ * handler-level tests in test/unit/memory-host-source.test.ts).
  */
 import { parseHostSource } from "./host-source.js";
 import { isPrivateVisibility } from "./memory-visibility.js";
@@ -117,18 +120,37 @@ export function pointerOutcomeFor(
   return isPrivateVisibility(effective) ? "withheld" : "pointer";
 }
 
+/** The pointer-input keys a Memory row must never carry on output (A1' item 1).
+ *  A supported write strips them before persist; a RAW writer can leave one on
+ *  the row, so every projection removes them too. */
+const INLINE_POINTER_FIELDS = ["hostSource", "hostSourceScope", "hostSourceVisibility"] as const;
+
+/** Return `record` with every inline pointer-input field removed. Returns the
+ *  SAME reference when there is nothing to remove, so a clean record is
+ *  byte-identical to today. */
+function stripInlinePointerFields<T>(record: T): T {
+  const r = record as any;
+  if (!INLINE_POINTER_FIELDS.some((k) => k in r)) return record;
+  const out = { ...r };
+  for (const k of INLINE_POINTER_FIELDS) delete out[k];
+  return out as T;
+}
+
 /**
  * Project a record's pointer for a given reader, given that record's pointer
- * row (or null). Returns the record UNCHANGED when there is no pointer row, so
- * a record with no pointer is byte-identical to today; otherwise sets
- * `hostSource` to the canonical pointer or HOST_SOURCE_WITHHELD.
+ * row (or null). EVERY branch removes any inline pointer field stored on the
+ * row itself, so a pointer reaches a non-admin reader ONLY through the join:
+ *   - no pointer row (or one that is unbound/token-mismatched) → the record is
+ *     returned with any inline `hostSource` removed;
+ *   - otherwise `hostSource` is set to the canonical pointer or
+ *     HOST_SOURCE_WITHHELD.
  */
 export function projectHostSource<T>(record: T, readerAgentId: string | null | undefined, pointer?: PointerRow | null): T {
   if (!record || typeof record !== "object") return record;
   const r = record as any;
   const decision = pointerOutcomeFor(record, readerAgentId, pointer);
-  if (decision === "none") return record;
-  const out = { ...r };
+  if (decision === "none") return stripInlinePointerFields(record);
+  const out = stripInlinePointerFields(record) as any;
   if (decision === "withheld") {
     out.hostSource = HOST_SOURCE_WITHHELD;
   } else {

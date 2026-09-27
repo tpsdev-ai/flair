@@ -40,6 +40,12 @@ const databasesMock = {
         return data;
       },
     },
+    MemoryHostSource: {
+      search: () => (async function* () {})(),
+      get: async () => null,
+      put: async (row: any) => row,
+      delete: async () => ({ ok: true }),
+    },
     Agent: { get: async () => null, search: async () => [] },
   },
 };
@@ -69,6 +75,23 @@ const adminCtx = () => ({ tpsAgent: "admin", tpsAgentIsAdmin: true });
 beforeEach(() => {
   memoryStore = new Map();
 });
+
+// flair#1940: Harper assigns `transaction` onto the global at load, and the
+// Memory write path creates one when a caller has no request context, refusing
+// to run a write unwrapped. Provide it in this isolated mock.
+(globalThis as any).transaction = (ctx: any, cb: (txn: any) => any) => {
+  if (ctx?.transaction && ctx.transaction.open === 1) return cb(ctx.transaction);
+  const txn: any = { open: 1, saveCommits: false, abort() { this.open = 0; }, commit() { this.open = 0; } };
+  const c = ctx && typeof ctx === "object" ? ctx : {};
+  c.transaction = txn;
+  let r: any;
+  try { r = cb(txn); } catch (e) { txn.abort(); throw e; }
+  if (r && typeof r.then === "function") {
+    return r.then((v: any) => { txn.commit(); return v; }, (e: any) => { txn.abort(); throw e; });
+  }
+  txn.commit();
+  return r;
+};
 
 describe("MemoryMaintenance expiry — ephemeral-only (flair#1265)", () => {
   it("deletes an ephemeral row whose expiresAt is in the past", async () => {

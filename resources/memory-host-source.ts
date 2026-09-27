@@ -1,7 +1,9 @@
 /**
  * memory-host-source.ts — the MemoryHostSource table's non-resource helpers
  * (flair#1940 slice 1 / A1'). The pointer lives in its OWN table keyed by
- * memoryId; Memory rows never carry it.
+ * memoryId. Supported writes store host pointers only in `MemoryHostSource`: a pointer
+ * reaches a non-admin reader only through the gated join, and reads remove any
+ * `hostSource` stored inline on a Memory row.
  *
  * This module holds:
  *   - the WRITE-BODY-ONLY pointer inputs and their extraction, so every
@@ -21,8 +23,9 @@ import { projectHostSource, type PointerRow } from "./host-source-visibility.js"
 /** The table name, so callers and tests never re-type it as a literal. */
 export const MEMORY_HOST_SOURCE_TABLE = "MemoryHostSource";
 
-/** The write-body-only pointer inputs (A1' item 1): accepted ONLY by
- *  Memory.post()/put() and MemoryHostSource's own resource. `hostSource` is
+/** The write-body-only pointer inputs (A1' item 1). Only `Memory.post()` and
+ *  `Memory.put()` accept pointer inputs; the `MemoryHostSource` resource refuses
+ *  every REST write verb. `hostSource` is
  *  the pointer; `hostSourceScope` is the write-time opt-in; a
  *  `hostSourceVisibility` supplied by a client is a FORGERY of the server's
  *  write-time stamp and is dropped (never read). */
@@ -142,12 +145,14 @@ export async function loadPointerRows(ids: readonly string[]): Promise<Map<strin
 }
 
 /**
- * flair#1940 A1-iv item 2 — the ONE reader helper. Every non-admin reader that
- * returns Memory rows projects their pointers through this: it fetches the
- * pointer rows for the WHOLE result set in ONE batched query and applies the
- * join, so no reader can forget the join and no module needs to touch the
- * MemoryHostSource table itself. `readerAgentId` is the non-admin reader; an
- * admin/operator read is the named exception (see MemoryHostSource.ts).
+ * flair#1940 A1-iv item 2 — the ONE reader helper. `Memory.get()`,
+ * `Memory.search()` and `SemanticSearch` render pointers through the pointer
+ * helper. Other Memory projections, bootstrap included, do not render pointers
+ * in this slice. It fetches the pointer rows for the WHOLE result set in ONE
+ * batched query and applies the join, so no reader can forget the join and no
+ * module needs to touch the MemoryHostSource table itself. `readerAgentId` is
+ * the non-admin reader; an admin/operator read is the named exception (see
+ * MemoryHostSource.ts).
  */
 export async function projectRowsThroughPointers<T extends { id?: unknown }>(
   rows: readonly T[],
