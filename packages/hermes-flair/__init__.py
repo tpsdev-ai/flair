@@ -196,6 +196,11 @@ def _load_private_key(key_path: str):
     files raise ValueError naming the path and the accepted formats — never the
     key bytes; file read errors propagate as they are.
     """
+    # Import the crypto modules BEFORE reading the key, so an import failure
+    # happens while no frame holds key bytes.
+    from cryptography.hazmat.primitives import serialization  # noqa: F401
+    from cryptography.hazmat.primitives.asymmetric import ed25519  # noqa: F401
+
     data = Path(key_path).read_bytes()  # file READ errors propagate as they are
     key = _parse_private_key(data)
     # The raising frame must not hold the key bytes (a traceback that captures

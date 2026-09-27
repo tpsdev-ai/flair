@@ -290,6 +290,27 @@ def test_format_error_frames_hold_no_key_bytes(tmp_path):
     assert "JUNK" not in rendered
 
 
+def test_crypto_import_failure_happens_before_the_key_is_read(tmp_path, monkeypatch):
+    import builtins
+
+    path = tmp_path / "any.key"
+    path.write_bytes(bytes(32))
+    real_import = builtins.__import__
+
+    def failing_import(name, *args, **kwargs):
+        if name.startswith("cryptography"):
+            raise ImportError("simulated: cryptography unavailable")
+        return real_import(name, *args, **kwargs)
+
+    reads = []
+    real_read = flair_plugin.Path.read_bytes
+    monkeypatch.setattr(flair_plugin.Path, "read_bytes", lambda self: reads.append(self) or real_read(self))
+    monkeypatch.setattr(builtins, "__import__", failing_import)
+    with pytest.raises(ImportError):
+        flair_plugin._load_private_key(str(path))
+    assert reads == []  # assertion: the key file was never read before the import failed
+
+
 def test_load_private_key_file_read_error_propagates(tmp_path):
     # A missing file is a read error, NOT the named format error.
     with pytest.raises(FileNotFoundError):
