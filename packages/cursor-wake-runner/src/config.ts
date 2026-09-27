@@ -1,7 +1,7 @@
 /**
- * Env / argv config for the wake-runner. There is deliberately no
- * `participant` / foreign-feed field — the runner always drains the
- * signed FLAIR_AGENT_ID.
+ * Env / argv config for the wake-runner. There is no participant or
+ * foreign-feed field. With Ed25519, `FLAIR_AGENT_ID` identifies the signer
+ * and its feed; with admin Basic credentials and no key, it selects the feed.
  */
 
 const CURSOR_ENV_TYPES = ["cloud", "pool", "machine"] as const;
