@@ -48,7 +48,7 @@ LangGraph's `BaseStore` uses hierarchical namespaces (`["users", "profiles"]`) a
 
 ## Authentication
 
-`FlairStore` inherits from `FlairClient`. Three options:
+`FlairStore` composes a `FlairClient`. Three options:
 
 1. **Ed25519 keypair** (preferred): set `FLAIR_AGENT_ID` and the client auto-resolves your key.
 2. **Explicit key path**: `new FlairStore({ agentId, keyPath: "/path/to/key.pem" })`
@@ -67,15 +67,15 @@ const store = new FlairStore({
 - **Persistence**: memories survive process restarts and re-deploys.
 - **Federation**: pair your local Flair to a hub; memories sync peer-to-peer.
 - **Cross-orchestrator**: switch from LangGraph to OpenClaw to Claude Code without losing the agent's history.
-- **Identity**: every memory is tied to a crypto-pinned `agentId`. No tenant-isolation slop.
+- **Identity**: every memory is scoped to an `agentId` that verifies writes with Ed25519 auth when a key is present (admin Basic credentials skip cryptographic validation). No tenant-isolation slop.
 - **Open source**: runs on your hardware. No SaaS lock-in.
 
 ## Limitations (v1)
 
 - LangGraph's `IndexConfig` (custom embedding model, per-field indexing) is ignored. Flair has its own embedding pipeline (`nomic-embed-text-v1.5`, 768-dim) and embeds the full content blob. If you need per-field embeddings, pre-extract and store as separate items.
-- `search.filter` operators (`$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`) are applied client-side after retrieving the namespace prefix. Tag-based pre-filtering (the namespace) keeps this bounded; high-fanout filters across many memories will be slower.
+- `search.filter` operators (`$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`) are applied client-side after retrieval. Tag-based pre-filtering (the namespace) applies only to non-semantic queries; semantic queries receive no namespace pre-filter from the server. High-fanout filters across many memories will be slower.
 - Namespace-prefix matching uses the full joined-path tag (`lg-ns:users/profiles`). Items in `["users", "profiles", "u123"]` are reachable via the `["users", "profiles"]` prefix because the search routine post-filters parsed namespaces against the requested prefix — but searching by a *single label anywhere in the namespace* (e.g. "all items with `profiles` somewhere") isn't supported. LangGraph's `BaseStore.search` API doesn't expose this surface either, so there's no read path that would benefit; if a future LangGraph extension adds it we'll add a derived index then.
-- `listNamespaces` returns namespaces seen in your stored memories (best-effort scan). Empty namespaces aren't enumerable.
+- `listNamespaces` returns namespaces seen in your stored memories (best-effort scan via `batch()`). Empty namespaces aren't enumerable.
 
 ## License
 

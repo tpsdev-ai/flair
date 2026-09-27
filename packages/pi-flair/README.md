@@ -99,7 +99,7 @@ pi
 
 ### Auto-Capture Warning
 
-When `FLAIR_AUTO_CAPTURE=true`, all assistant responses are persisted to Flair memory with **ephemeral durability**. **This includes any secrets, credentials, or tokens your LLM may output.**
+When `FLAIR_AUTO_CAPTURE=true`, assistant responses whose content exceeds 100 characters are persisted to Flair memory with **ephemeral durability**. Responses containing recognized secret patterns are skipped. Accepted text is truncated to 4000 characters.
 
 **Do not enable `FLAIR_AUTO_CAPTURE=true` if your sessions may output:**
 
@@ -109,7 +109,7 @@ When `FLAIR_AUTO_CAPTURE=true`, all assistant responses are persisted to Flair m
 - AWS/GCP/Azure credentials
 - Any other sensitive data
 
-Auto-capture is best-effort and uses `dedup: false` to ensure all content is captured. For production use, disable auto-capture and store only non-sensitive summaries manually via `memory_store`.
+Auto-capture is best-effort, skips recognized secrets and content shorter than 100 characters, and truncates text to 4000 characters. For production use, disable auto-capture and store only non-sensitive summaries manually via `memory_store`.
 
 ## How It Works
 
@@ -117,7 +117,7 @@ Auto-capture is best-effort and uses `dedup: false` to ensure all content is cap
 pi (extension) ↔ HTTP ↔ Flair (Harper)
 ```
 
-The extension calls Flair's HTTP API directly via `@tpsdev-ai/flair-client`. All memory is stored locally in `~/.flair/` with Ed25519 authentication.
+The extension calls Flair's HTTP API directly via `@tpsdev-ai/flair-client`. The server URL and authentication method (Ed25519 with admin Basic auth fallback) are configurable.
 
 ## Examples
 

@@ -21,7 +21,7 @@ flair status               # default HTTP origin: http://127.0.0.1:19926
 
 **Grok Bot / Cursor cloud / another machine:** `127.0.0.1:19926` is not reachable. Start on Harper Fabric: **[docs/quickstart-fabric.md](../../docs/quickstart-fabric.md)**.
 
-`<id>` must match the `FLAIR_AGENT_ID` you configure in the plugin. Node.js **>= 22.18** is required on the machine that runs `npx` (the MCP server's engines field).
+`<id>` must match the `FLAIR_AGENT_ID` you configure in the plugin. Node.js **>= 22** is required on the machine that runs `npx` (the MCP server's engines field).
 
 ## Install
 
@@ -99,7 +99,7 @@ Schedule that command. A running agent uses `flair_catchup` instead — see the 
 ## Not this plugin
 
 - Built-in Flair `/mcp` OAuth — off by default; a different surface
-- Claude Code `flair-session-start` hook — Claude-only; do not run it from Cursor
+- Claude Code / Codex `flair-session-start` hook — supported for both; the installer writes it into the target harness's settings.
 - OpenClaw, n8n, Hermes, LangGraph, Pi, ADK packages — other harnesses, same Flair backend
 
 ## Troubleshooting

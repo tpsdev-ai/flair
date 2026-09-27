@@ -27,7 +27,7 @@ FLAIR_AGENT_ID=anvil CURSOR_API_KEY=… \
 FLAIR_AGENT_ID=anvil bun packages/cursor-wake-runner/src/cli.ts --once --dry-run
 ```
 
-Identity is the signed `FLAIR_AGENT_ID`. There is no `--participant` flag and no way to name another agent's feed.
+Identity is the FLAIR_AGENT_ID, resolved with Ed25519 auth (admin Basic auth is available when `FLAIR_ADMIN_USER` and `FLAIR_ADMIN_PASSWORD` are set). There is no `--participant` flag and no way to name another agent's feed.
 
 | Variable | Required | Notes |
 |---|---|---|
