@@ -191,7 +191,7 @@ export class FlairSearch implements INodeType {
     const subject = this.getNodeParameter("subject", itemIndex) as string;
     const tool = new DynamicStructuredTool({
       name: "flair_get_by_subject",
-      description: `Get memories about subject "${subject}" from Flair, ordered by recency.`,
+      description: `Get memories about subject "${subject}" from Flair.`,
       schema: z.object({}),
       func: async () => {
         const results = await runGetBySubject(flair, subject, limit);

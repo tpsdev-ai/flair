@@ -85,9 +85,9 @@ Notes on each step:
 
 ## Operational notes
 
-- The dedup index is workflow-static-data scoped, so re-importing the workflow (new ID) starts fresh. To add a dedup signal, write to Flair with a deterministic ID via `flair.memory.write` — For a new memory ID, Flair may report a similarity-based duplicate match in the write response; it still writes the record, while reusing an existing ID updates that record without running the duplicate check.
+- The dedup index is workflow-static-data scoped, so re-importing the workflow (new ID) starts fresh. For cross-import idempotency, call `flair.memory.write` with a deterministic ID. A new ID may return a similarity-based duplicate signal without suppressing the write; reusing an existing ID updates that record and skips the duplicate check.
 - The schedule trigger is 5 min on purpose — fast enough for review-mail freshness, slow enough that the inbox listing isn't burning CPU.
-- If Flint's inbox is full (the 100-message hard cap), TPS bounces inbound mail; this workflow only sees what's actually delivered. The inbox-cap is a separate operational concern (see `reference_flint_inbox_cap`).
+- If Flint's inbox is full (the 100-message hard cap), TPS bounces inbound mail; this workflow only sees what's actually delivered. The inbox cap is a separate operational concern.
 
 ## What this dogfood loop is for
 
