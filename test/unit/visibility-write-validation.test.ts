@@ -124,7 +124,7 @@ describe("assertVisibilityAllowedForDurability — ephemeral is private-only (fl
     // The read side resolves anything other than the literal "private" to
     // non-private (migration invariant), so an unknown value on an ephemeral
     // row would leak exactly like "shared". assertValidVisibility refuses
-    // unknowns first at both call sites, but this guard must not depend on
+    // unknowns first at every call site (post, put, patch), but this guard must not depend on
     // that layering to be safe.
     for (const v of ["office", "prvate", "Private", "public", "", 1, true]) {
       expect(assertVisibilityAllowedForDurability(EPHEMERAL_DURABILITY, v)).not.toBeNull();
@@ -162,7 +162,7 @@ describe("assertVisibilityAllowedForDurability — ephemeral is private-only (fl
 // enough, and I proved it: neutering the guard inside `Memory.post()` broke
 // nothing — 3869 tests still passed. A validator nobody calls is not a control.
 //
-// This scan fails the build if either write path stops calling it. Same shape as
+// This scan fails the build if post(), put() or patch() stops calling it. Same shape as
 // claimed-zero-authority-tripwire.test.ts, and same limitation, stated plainly:
 // it detects DELETION, not misbehaviour. A behavioural assertion needs the REST
 // surface against a live Harper, which is the integration lane's job — the

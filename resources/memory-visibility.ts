@@ -82,7 +82,7 @@ export function assertValidVisibility(visibility: unknown): string | null {
     `visibility must be ${WRITABLE_VISIBILITIES.map((v) => `"${v}"`).join(" or ")} ` +
     `(got: ${JSON.stringify(visibility)}). Omit it to use the durability-keyed default on a new ` +
     `memory (permanent/persistent -> shared, standard/ephemeral -> private); on an update, ` +
-    `omitting it keeps the stored visibility.`
+    `omitting it keeps a stored private or shared visibility.`
   );
 }
 

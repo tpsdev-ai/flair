@@ -1,5 +1,5 @@
 /**
- * Memory updates (PUT, PATCH and reindex) preserve the record's stored
+ * Memory updates (PUT, PATCH and reindex) keep a stored private or shared
  * visibility unless the write explicitly sets a new one. Isolated: owns the
  * harper mock for Memory.ts.
  */
