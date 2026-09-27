@@ -1,6 +1,13 @@
 import { databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
+import { makeByIdReadGate, makeReadScope, makeScopedSearch } from "./record-type-kit.js";
+
+// Owner-only read scope, applied through the shared by-id gate and scoped search
+// (the same helpers Relationship.ts uses).
+const integrationReadScope = makeReadScope("owner-only", "agentId");
+const integrationByIdReadGate = makeByIdReadGate(integrationReadScope);
+const integrationScopedSearch = makeScopedSearch(integrationReadScope);
 
 const FORBIDDEN = (msg: string) =>
   new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
@@ -40,32 +47,7 @@ export class Integration extends (databases as any).flair.Integration {
    * integration ids.
    */
   async get(target?: any) {
-    // Collection / query reads arrive as a RequestTarget with
-    // `isCollection === true`, and are governed by search() (same owner
-    // scoping). Only a genuine by-id get is ownership-checked below — see
-    // Memory.ts's get() for the full rationale (same bug class).
-    if (!target || (typeof target === "object" && target.isCollection)) {
-      return this.search(target);
-    }
-
-    const auth = await this._auth();
-
-    // Anonymous by-id read is already blocked at the allowRead() gate (403);
-    // this is defense-in-depth if get() is ever reached directly.
-    if (auth.kind === "anonymous") {
-      return NOT_FOUND();
-    }
-
-    // Trusted internal call or admin agent — unfiltered, unchanged behavior.
-    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
-      return super.get(target);
-    }
-
-    // Non-admin agent: only its own integrations.
-    const record = await super.get(target);
-    if (!record) return NOT_FOUND();
-    if (record.agentId !== auth.agentId) return NOT_FOUND();
-    return record;
+    return integrationByIdReadGate.call(this, target, (t: any) => super.get(t));
   }
 
   async search(query?: any) {
@@ -74,14 +56,7 @@ export class Integration extends (databases as any).flair.Integration {
     if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
       return super.search(query);
     }
-    const agentIdCondition = { attribute: "agentId", comparator: "equals", value: auth.agentId };
-    if (query && typeof query === "object" && !Array.isArray(query)) {
-      const existing = query.conditions ?? [];
-      query.conditions = Array.isArray(existing) ? [agentIdCondition, ...existing] : [agentIdCondition, existing];
-      return super.search(query);
-    }
-    const conditions = Array.isArray(query) && query.length > 0 ? [agentIdCondition, ...query] : [agentIdCondition];
-    return super.search(conditions);
+    return integrationScopedSearch(auth.agentId, query, (q: any) => super.search(q));
   }
 
   async post(content: any, context?: any) {
