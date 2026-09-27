@@ -12,7 +12,7 @@
  *   - FLAIR_KEY_PATH
  *   - FLAIR_MAX_RECALL_RESULTS (default: 5)
  *   - FLAIR_MAX_BOOTSTRAP_TOKENS (default: 4000)
- *   - FLAIR_AUTO_CAPTURE (default: false) — "true" auto-saves session context to memory
+ *   - FLAIR_AUTO_CAPTURE (default: false) — "true" attempts to store a qualifying assistant entry at turn end
  *   - FLAIR_AUTO_RECALL (default: false) — "true" auto-loads bootstrap on session start
  *
  * Usage:
@@ -231,7 +231,7 @@ export default function (pi: ExtensionAPI) {
             "permanent — inviolable facts, identity, explicit never-forget (e.g., 'my name is Nathan')\n" +
             "persistent — key decisions and lessons to recall weeks later (e.g., 'PR review process')\n" +
             "standard — default working memory, recent context (e.g., 'discussed auth flow today')\n" +
-            "ephemeral — scratch state; expires after the server-configured TTL, which defaults to 24 hours (e.g., 'currently debugging issue #42')",
+            "ephemeral — scratch state; this tool's writes receive a server-configured expiresAt (24 hours by default); search and bootstrap skip expired rows (e.g., 'currently debugging issue #42')",
         }),
       ),
       tags: Type.Optional(Type.Array(Type.String(), { description: "Array of tag strings" })),

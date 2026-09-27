@@ -80,7 +80,7 @@ pi
 | Tool | Description |
 |------|-------------|
 | `memory_search` | Search memories by meaning. Understands temporal queries. |
-| `memory_store` | Save memories with type + durability (permanent/persistent/standard/ephemeral). |
+| `memory_store` | Save memories with a durability (permanent/persistent/standard/ephemeral) and optional tags. |
 | `bootstrap` | Load session context: soul + memories + predicted context. |
 
 ## Configuration Options

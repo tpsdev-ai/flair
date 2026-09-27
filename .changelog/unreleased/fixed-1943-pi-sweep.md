@@ -1,4 +1,4 @@
-- **The Pi extension's documentation and tool text describe what it does.**
-  The README and source header say the required identity comes from the environment that launches Pi and list the variables the extension reads, the tool signatures match the tools' schemas, and the `memory_store` tool says ephemeral memories expire after the server-configured TTL (24 hours by default). An unused function that guessed an agent id from the working directory is removed.
+- **Clarify Pi identity setup, registered tool signatures, and ephemeral expiry text.**
+  The README and source header say the required identity comes from the environment that launches Pi and list the FLAIR_* variables getConfig reads. The header's tool signatures and the README's tool table match the registered schemas. The memory_store tool describes the server-stamped expiresAt (24 hours by default) and that search and bootstrap skip expired rows. An unused helper that guessed an agent id from the working directory is removed.
 
   (Refs #1943)
