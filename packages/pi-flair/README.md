@@ -117,7 +117,7 @@ Auto-capture is best-effort, skips recognized secrets and content of 100 charact
 pi (extension) ↔ HTTP ↔ Flair (Harper)
 ```
 
-The extension calls Flair's HTTP API directly via `@tpsdev-ai/flair-client`. The server URL and authentication method (Ed25519 with admin Basic auth fallback) are configurable. Admin Basic auth is used only when no Ed25519 key resolves; send it only over HTTPS or to loopback, because the credentials travel in a request header.
+The extension calls Flair's HTTP API directly via `@tpsdev-ai/flair-client`. The server URL and authentication method (Ed25519 with admin Basic auth fallback) are configurable. Admin Basic auth is used only when no Ed25519 key resolves; the client refuses to send it over plain HTTP to a non-loopback host, because the credentials travel in a request header.
 
 ## Examples
 

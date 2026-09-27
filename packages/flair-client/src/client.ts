@@ -29,6 +29,42 @@ const DEFAULT_URL = "http://localhost:19926";
 const DEFAULT_TIMEOUT = 30_000;
 
 /**
+ * True when `hostname` (as WHATWG URL reports it) is a loopback host —
+ * `localhost`, any `127.0.0.0/8` address, or IPv6 `::1` (reported as `[::1]`
+ * by `new URL().hostname`). Compared exactly, brackets included.
+ */
+function isLoopbackHostname(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  if (h === "localhost") return true;
+  if (h === "[::1]" || h === "::1") return true; // IPv6 loopback
+  if (/^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(h)) return true; // 127.0.0.0/8
+  return false;
+}
+
+/**
+ * flair#1951 — refuse to SEND admin Basic credentials over plain `http://` to a
+ * non-loopback host. Credentials in an Authorization header on such a URL are
+ * readable by anyone on the path. Called BEFORE any request is made. Signed
+ * (Ed25519) requests and https are unaffected; loopback http is unaffected.
+ * The message names the actor, the state and the remedy, and NEVER includes the
+ * credentials.
+ */
+function assertBasicAuthTransportAllowed(url: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return; // unparseable URL: let fetch surface its own error
+  }
+  if (parsed.protocol !== "http:") return; // https (and anything else) unaffected
+  if (isLoopbackHostname(parsed.hostname)) return; // loopback http unaffected
+  throw new Error(
+    `flair-client: refusing to send admin Basic credentials over plain http to ${parsed.hostname}; ` +
+      `use an https:// FLAIR_URL, or an Ed25519 key for this agent`,
+  );
+}
+
+/**
  * Combine two abort signals, safe on the OLDEST Node this package allows.
  *
  * `AbortSignal.any` landed in Node 20.3, but `engines.node` floors this package
@@ -175,6 +211,9 @@ export class FlairClient {
     if (key) {
       headers["Authorization"] = signRequest(this.agentId, key, method, path);
     } else if (this.basicAuth) {
+      // flair#1951: never send admin Basic credentials over plain http to a
+      // non-loopback host. Refuse BEFORE any request is made.
+      assertBasicAuthTransportAllowed(this.url);
       headers["Authorization"] = this.basicAuth;
       // Basic-only snapshot — do not spread a prior inspectKeyLookup result.
       // A 401 here is about admin credentials, not key-file paths (review on #1390).
