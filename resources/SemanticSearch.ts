@@ -21,6 +21,7 @@ import { retrievalMode } from "./bm25.js";
 // tripping this file's rate-limit/hit-tracking side effects. See
 // resources/semantic-retrieval-core.ts's module doc for the full boundary.
 import { retrieveCandidates, DEFAULT_SELECT } from "./semantic-retrieval-core.js";
+import { projectHostSource } from "./host-source-visibility.js";
 import { attachTrust } from "./trust-block.js";
 import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
 
@@ -357,6 +358,16 @@ export class SemanticSearch extends Resource {
       filteredResults.slice(0, limit).map((r: any) => applyHitStats(r, ctx)),
     );
 
+    // flair#1940 A3 (semantic-search surface): project the host pointer for
+    // THIS reader. Only a non-admin agent that was scoped to itself is a
+    // "reader" under the withheld rule; an admin/internal call stays
+    // unfiltered (like every other field). No-op when the record carries no
+    // hostSource.
+    const hostSourceReader: string | undefined = authenticatedAgent && !callerIsAdmin ? authenticatedAgent : undefined;
+    const projected = hostSourceReader
+      ? topResults.map((r: any) => projectHostSource(r, hostSourceReader))
+      : topResults;
+
     // Async hit tracking — MemoryHitStat only, never a Memory rewrite.
     const now = new Date().toISOString();
     noteSearchHits(topResults.map((r: any) => r.id), now, ctx);
@@ -374,7 +385,7 @@ export class SemanticSearch extends Resource {
     // off the record to classify `matchQuality`. attachTrust returns a shallow
     // copy carrying `trust` (and still-present `_semSimilarity`); the strip then
     // drops the internal field from the copy.
-    const trusted = includeTrust ? topResults.map((r: any) => attachTrust(r, true)) : topResults;
+    const trusted = includeTrust ? projected.map((r: any) => attachTrust(r, true)) : projected;
     // flair#744 slice 2 + refinement: strip the internal `_semSimilarity`
     // confidence field from the consumer-facing results — it exists ONLY to feed
     // the abstention decision and the matchQuality classification, never the

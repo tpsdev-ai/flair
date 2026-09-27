@@ -92,7 +92,11 @@ type Memory @table(database: "flair") {
                                # REDACTED to "withheld" on read when the reader may read the record but not the pointer (A3).
                                # NEVER inside provenance (A5). Nullable by design — existing rows read back hostSource = null, unchanged
                                # behavior (clean-upgrade-path gate, same idiom as provenance above). Readers parse/validate and never
-                               # render the raw string. NOT YET IMPLEMENTED IN THIS PARTIAL: A3 visibility (see report).
+                               # render the raw string. A3 (withheld redaction + scope) is enforced in resources/host-source-visibility.ts.
+  hostSourceVisibility: String  # flair#1940 slice 1 (A3): the record's visibility AS IT WAS AT WRITE, stored next to the pointer
+                               # ONLY when the write opted in with hostSourceScope: "record". The pointer's effective visibility is
+                               # the narrower of this and the record's CURRENT visibility (a later widening never widens the pointer).
+                               # Null/absent → the pointer is visible only to the record's author.
                                # Nullable by design — existing rows read back provenance = null, unchanged behavior (clean-upgrade-path gate).
                                # Same idiom as Soul.metadata below. Stamped server-side in resources/Memory.ts; never client-writable.
   originatorInstanceId: String @indexed  # federation-edge-hardening slice 1: WRITE-TIME instance identity, stamped server-side in

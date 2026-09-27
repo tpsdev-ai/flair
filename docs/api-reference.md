@@ -349,10 +349,25 @@ A peer can therefore show `presenceStatus: "offline"`, `activity: "idle"`, `last
 | `subject` / `summary` | String | Compression: subject → summary → content |
 | `validFrom` / `validTo` | String | Temporal validity; expired rows drop out of search |
 | `_safetyFlags` | [String] | Content-safety scan |
-| `provenance` | String | Server JSON `{ v, verified, claimed? }` |
+| `provenance` | String | Server JSON `{ v, verified: { agentId, timestamp, receivedAt }, claimed? }`. `receivedAt` (A4 of #1940) is the server's receipt time, never client-writable. |
+| `hostSource` | String | Versioned host pointer `{ v: 1, host, kind, id, url? }` (#1940 A1). Set the writer's claim; see “Memory host pointer” below. |
+| `hostSourceVisibility` | String | The record's visibility at write, stored next to the pointer only when the write opted in with `hostSourceScope: "record"` (#1940 A3). |
 | `originatorInstanceId` | String | Write-time instance id; preserved across sync |
 | `metadata` | String | Client JSON blob; opaque to the server |
 | `entities` | [String] | Attention-plane `type:value` strings |
+
+#### Memory host pointer (`hostSource`, #1940 A1-A5)
+
+`hostSource` records which host object (a run, a launch, a turn) a memory came from. On WRITE (`POST /Memory`, `PUT /Memory/<id>`):
+
+- **A1** — `hostSource` is its own nullable field, versioned JSON `{ v: 1, host, kind, id, url? }`; it is additive, and existing rows read back `null`. Legacy `source` is a different field and is untouched.
+- **A2** — the server validates and REJECTS (never truncates): `host`/`kind` come from a closed set (`openclaw/run`, `cursor/launch`, `codex/turn`); `id` matches `^[A-Za-z0-9._:/@#-]{1,256}$`; `url` is https only, with no userinfo, capped at 2048 characters; control characters and bidi overrides are refused; values are NFC-normalised; unknown keys or any `v` other than 1 are refused. `hostSourceScope: "record"` opts the pointer into the record's own read scope (A3); any wider scope is refused.
+- **A4** — the server stamps `receivedAt` inside `provenance`; it is server-stamped and never client-writable. `createdAt` stays the writer's claimed time, so `asOf`/valid-time queries use the writer's claim.
+- **A5** — `hostSource` is NOT inside `provenance`; `provenance` stays never-client-writable.
+
+On READ (search, list, by-ID, semantic search, bootstrap; MCP rides the same handlers): **A3** — the pointer is visible only to the record's author unless the write opted it into the record's scope, and it is never wider than its record: the effective visibility is the narrower of the record's write-time visibility and its current visibility, so a later widening of the record does not widen the pointer. A reader who may read the record but not the pointer gets `hostSource: "withheld"` (present but unrendered, so the “externally sourced” signal survives). Wherever a URL is rendered, only scheme, host and path appear; query and fragment are stripped. Redaction is applied on the server, in the read projection — no client or MCP layer can un-redact.
+
+A `hostSource`, like a client-supplied `createdAt`, is the writer's claim, signed by the writer's Flair identity; it is not verified host authorship.
 
 ### Soul
 

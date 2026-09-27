@@ -40,6 +40,7 @@ import { attachTrust } from "./trust-block.js";
 import { recordCitations } from "./usage-recording.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 import { applyHitStats, clearHitStats, overlayHitStatsResult } from "./hit-tracking.js";
+import { projectHostSource, projectHostSourceResult } from "./host-source-visibility.js";
 import { refuseStaleClientWrite, stripClientVersionPassthrough } from "./client-version-gate.js";
 
 /**
@@ -596,6 +597,18 @@ export class Memory extends (databases as any).flair.Memory {
       return this.search(target);
     }
     const result = await memoryByIdReadGate.call(this, target, (t: any) => super.get(t));
+    // flair#1940 A3 (by-ID surface): the pointer is projected for THIS reader
+    // BEFORE the trust block is attached. Admin/internal stay unfiltered (they
+    // read the unredacted row, like every other field); a non-admin agent is
+    // the reader the withheld rule protects. projection is a no-op when the row
+    // carries no hostSource, so a pointerless record is byte-identical to today.
+    let projected = result;
+    if (result && typeof result === "object" && !(result instanceof Response) && typeof (result as any).agentId === "string") {
+      const auth = await resolveAgentAuth((this as any).getContext?.());
+      if (auth.kind === "agent" && !auth.isAdmin) {
+        projected = projectHostSource(result, auth.agentId);
+      }
+    }
     // flair#744 slice 1 — opt-in inline trust-evidence block, attached ONLY to
     // a genuine by-id record (never a NOT_FOUND `Response`, never null), and
     // ONLY after the ownership/read-scope gate above has already resolved. The
@@ -605,10 +618,10 @@ export class Memory extends (databases as any).flair.Memory {
     // byte-identical to pre-slice-1.
     if (result && typeof result === "object" && !(result instanceof Response) && typeof (result as any).agentId === "string") {
       const ctx = (this as any).getContext?.();
-      const withHits = await applyHitStats(result, ctx);
+      const withHits = await applyHitStats(projected, ctx);
       return attachTrust(withHits as any, wantsTrust(target, opts));
     }
-    return result;
+    return projected;
   }
 
   /**
@@ -651,7 +664,13 @@ export class Memory extends (databases as any).flair.Memory {
     // MemoryCandidate.search() already applies — so a caller-supplied
     // `operator: "or"` cannot boolean-inject past the owner scope.
     return overlayHitStatsResult(
-      memoryScopedSearch(gate.agentId, query, (q) => withDetachedTxn(ctx, () => super.search(q))),
+      // flair#1940 A3 (search surface): project the pointer for THIS reader —
+      // the scoped agentId is the reader. A record with no hostSource passes
+      // through unchanged.
+      projectHostSourceResult(
+        memoryScopedSearch(gate.agentId, query, (q) => withDetachedTxn(ctx, () => super.search(q))),
+        gate.agentId,
+      ),
       ctx,
     );
   }
@@ -912,6 +931,33 @@ export class Memory extends (databases as any).flair.Memory {
       }
       content.hostSource = hs.canonical;
     }
+
+    // ── flair#1940 slice 1 (A3): the pointer scope is FIXED at write time. ──
+    // The only opt-in is "record": the server stores the record's visibility AS
+    // IT IS NOW (next to the pointer). The pointer's effective visibility is the
+    // narrower of that stored value and the record's CURRENT visibility, so a
+    // later widening of the record never widens the pointer (A3). Any other
+    // scope value would make the pointer wider than the record → refused.
+    // `hostSourceScope` is write-body-only (stripped, like claimedClient).
+    if (content.hostSourceScope !== undefined) {
+      if (content.hostSourceScope !== "record") {
+        return new Response(
+          JSON.stringify({
+            error: "invalid_host_source_scope",
+            message: `hostSourceScope must be "record" or omitted; a scope wider than the record is refused (got ${JSON.stringify(content.hostSourceScope)})`,
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (content.hostSource === undefined || content.hostSource === null) {
+        return new Response(
+          JSON.stringify({ error: "invalid_host_source_scope", message: "hostSourceScope requires a hostSource" }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+      content.hostSourceVisibility = content.visibility ?? null;
+    }
+    delete content.hostSourceScope;
 
     // Write-time provenance stamp (memory-provenance slice 1) — see
     // buildProvenance's doc above. Stamped last, right before persist, so it
@@ -1284,6 +1330,29 @@ export class Memory extends (databases as any).flair.Memory {
       }
       content.hostSource = hs.canonical;
     }
+
+    // ── flair#1940 slice 1 (A3): the pointer scope is FIXED at write time. ──
+    // Identical rule to post(): the only opt-in is "record" (store the record's
+    // visibility as it is now, next to the pointer); anything wider is refused.
+    if (content.hostSourceScope !== undefined) {
+      if (content.hostSourceScope !== "record") {
+        return new Response(
+          JSON.stringify({
+            error: "invalid_host_source_scope",
+            message: `hostSourceScope must be "record" or omitted; a scope wider than the record is refused (got ${JSON.stringify(content.hostSourceScope)})`,
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (content.hostSource === undefined || content.hostSource === null) {
+        return new Response(
+          JSON.stringify({ error: "invalid_host_source_scope", message: "hostSourceScope requires a hostSource" }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+      content.hostSourceVisibility = content.visibility ?? null;
+    }
+    delete content.hostSourceScope;
 
     // Write-time provenance stamp (memory-provenance slice 1) — see
     // buildProvenance's doc above post(). Applies to every put() (fresh
