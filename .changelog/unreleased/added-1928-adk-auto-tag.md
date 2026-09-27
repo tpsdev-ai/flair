@@ -13,13 +13,19 @@
   refuses `adk-version-mismatch` BEFORE either tag is written. An
   `adk-flair-v<version>` already at another commit refuses `adk-tag-exists-elsewhere`
   without writing the `v` tag; a rejected second POST refuses
-  `adk-ref-write-rejected`, leaving the `v` tag in place and never retrying; and a
-  MISSING adk read-back after the POST has its OWN refusal (the ref did not read
-  back; re-run on this commit) — which then skips the `v` POST and writes only
-  `adk-flair-v<version>`, completing the release. The version WRITER
-  (`scripts/check-version-sync.mjs --write`) re-verifies every edit with `tomllib`
-  and refuses (writes nothing) unless only `project.version` changed and it equals
-  the requested version, preserving line endings. Each guarantee names its test in
+  `adk-ref-write-rejected`, leaving the `v` tag in place and never retrying. The
+  post-POST read-back has THREE distinct refusals: the ref did not read back at all
+  (MISSING); it read back but could not be resolved to a commit (UNRESOLVED — a
+  human should inspect the ref); or it resolves elsewhere. A re-run writes
+  `adk-flair-v<version>` only if it is still absent and the checks still pass — the
+  text never promises it. The `[project]` version is read by tomllib with `dynamic`
+  checked BEFORE a static `version` line, so `dynamic = ["version"]` plus a stray
+  `version` line has NO project version (and refuses `adk-version-mismatch`). The
+  version WRITER (`scripts/check-version-sync.mjs --write`) is ALL-OR-NOTHING —
+  every replacement is computed first and if ANY refuses it writes NOTHING — and
+  each edit is re-verified with `tomllib` (refused unless only `project.version`
+  changed and equals the requested version), replacing only the version bytes so a
+  mixed CRLF/LF file keeps every other byte intact. Each guarantee names its test in
   `test/unit/release-auto-tag.test.ts` and
   `test/unit/release-auto-tag-workflow.test.ts`.
 

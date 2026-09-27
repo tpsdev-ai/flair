@@ -1288,16 +1288,23 @@ export async function writeTag({ sha, version, deps, options = {} }) {
       } else {
         const adkReadBack = await deps.api.readTagRef(adkTag);
         const adkResolved = adkReadBack ? await resolveTagCommit(deps.api, adkReadBack) : null;
-        if (adkResolved === null) {
-          // A MISSING read-back (round 4, item 3): its own text, distinct from
-          // "elsewhere" — the POST may have landed and the read may simply have
-          // failed, so say the ref did not read back and to re-run.
+        if (!adkReadBack) {
+          // MISSING: the ref did not read back at all (round 5, item 5).
           adkVerdict = WRITE_VERDICT.REFUSE;
           adkCondition = CONDITION.ADK_REF_WRITE_REJECTED;
           summary.push(
             `${adkTag} did not read back after the POST; v${version} stays at ${sha}; re-run the workflow on this commit`,
           );
+        } else if (adkResolved === null) {
+          // UNRESOLVED: the ref read back but could not be resolved to a commit
+          // (round 5, item 5) — its OWN text, distinct from MISSING and ELSEWHERE.
+          adkVerdict = WRITE_VERDICT.REFUSE;
+          adkCondition = CONDITION.ADK_REF_WRITE_REJECTED;
+          summary.push(
+            `${adkTag} read back but could not be resolved to a commit; a human should inspect the ref; v${version} stays at ${sha}`,
+          );
         } else if (adkResolved !== sha) {
+          // ELSEWHERE: it resolves, but not at our sha.
           adkVerdict = WRITE_VERDICT.REFUSE;
           adkCondition = CONDITION.ADK_REF_WRITE_REJECTED;
           summary.push(

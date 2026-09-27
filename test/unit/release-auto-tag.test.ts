@@ -19,7 +19,7 @@
  * release-auto-tag-workflow.test.ts, where the workflow is parsed).
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -1526,6 +1526,38 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     expect(summary).toContain("re-run the workflow on this commit");
   });
 
+  test("(i3) an adk read-back that cannot be RESOLVED to a commit refuses with its OWN text", async () => {
+    const posts: string[] = [];
+    const tags = new Map<string, unknown>();
+    let adkPosted = false;
+    const api = {
+      createTagRef: async (ref: string, sha: string) => {
+        posts.push(ref);
+        if (ref.startsWith("refs/tags/adk-flair-v")) {
+          adkPosted = true;
+          return { ok: true, status: 201, body: {} };
+        }
+        tags.set(ref.replace("refs/tags/", ""), { object: { type: "commit", sha } });
+        return { ok: true, status: 201, body: {} };
+      },
+      readTagRef: async (tag: string) => {
+        if (tag.startsWith("adk-flair-v")) {
+          // Absent BEFORE the POST (so the pre-check passes), then a ref that
+          // resolves to no commit (a blob) AFTER it.
+          return adkPosted ? { object: { type: "blob", sha: "deadbeef" } } : null;
+        }
+        return tags.get(tag) ?? null;
+      },
+    };
+    const { deps } = harness({ api });
+    pinPyproject(deps, pyproject(VERSION));
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(result.adkVerdict).toBe("REFUSE"); // assertion A
+    const summary = (result.summary ?? []).join(" ");
+    expect(summary).toContain("could not be resolved"); // assertion B: UNRESOLVED text
+    expect(summary).not.toContain("did not read back"); // assertion C: not the MISSING text
+  });
+
   test("(j) a [[array-of-tables]] + dynamic version refuses adk-version-mismatch naming dynamic, zero POSTs", async () => {
     const posts: string[] = [];
     const tags = new Map<string, unknown>();
@@ -1650,7 +1682,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     const { deps } = harness({ api: refApi(posts, tags) });
     pinPyproject(
       deps,
-      `[project]\nname = "adk-flair"\nversion = "0.55.2"\nkeywords = [\n  'version = "${VERSION}"',\n]\n`,
+      `[project]\nname = "adk-flair"\nversion = "0.55.2"\nkeywords = [\n  """\nversion = "${VERSION}"\n""",\n]\n`,
     );
     const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
     expect(result.verdict).toBe(WRITE_VERDICT.REFUSE); // assertion A: REFUSE
@@ -1720,12 +1752,18 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     expect(c.kind === "refuse" ? c.condition : null).toBe(CONDITION.ADK_PYPROJECT_UNSUPPORTED);
   });
 
-  test("(w) the writer refuses the multi-line-string file and leaves it byte-identical", () => {
-    const src = `[project]\nname = "adk-flair"\nversion = """0.55.2"""\n`;
+  test("(w) the writer refuses a case the locator accepts but tomllib reads differently", () => {
+    // The locator finds a bare `version = "..."` line INSIDE the multi-line
+    // description (lineIndex >= 0), but tomllib reads project.version as 1.0.0;
+    // rewriting the description would change the document, so the tomllib
+    // comparison refuses (null) and the file is left byte-identical.
+    const src = `[project]\nname = "adk-flair"\ndescription = """\nversion = "0.55.2"\n"""\nversion = "1.0.0"\n`;
+    expect(readProjectVersion(src).kind).toBe("version"); // assertion: tomllib reads 1.0.0
+    expect(readProjectVersion(src).lineIndex).toBeGreaterThanOrEqual(0); // assertion: the locator accepts a line
     const file = join(scratchDir(), "pyproject.toml");
     writeFileSync(file, src);
-    const next = replaceProjectVersion(readFileSync(file, "utf8"), "0.99.0");
-    expect(next).toBeNull(); // assertion: refused
+    const next = replaceProjectVersion(readFileSync(file, "utf8"), "2.0.0");
+    expect(next).toBeNull(); // assertion: the tomllib comparison refuses
     if (next !== null) writeFileSync(file, next);
     expect(readFileSync(file, "utf8")).toBe(src); // assertion: byte-identical
   });
@@ -1734,6 +1772,75 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     const next = replaceProjectVersion(`[project]\r\nname = "adk-flair"\r\nversion = "1.0.0"\r\n`, "2.0.0");
     expect(next).toBe(`[project]\r\nname = "adk-flair"\r\nversion = "2.0.0"\r\n`); // assertion: CRLF preserved
     expect(next?.includes("\r\n")).toBe(true);
+  });
+
+  test("(x2) a MIXED CRLF/LF file: only the version bytes differ", () => {
+    const src = `[project]\r\nname = "adk-flair"\nversion = "1.0.0"\r\n`;
+    const next = replaceProjectVersion(src, "2.0.0");
+    // assertion: the mixed endings are preserved exactly
+    expect(next).toBe(`[project]\r\nname = "adk-flair"\nversion = "2.0.0"\r\n`);
+    // assertion: no byte OUTSIDE the version span changed
+    expect(next?.replace('"2.0.0"', '"1.0.0"')).toBe(src);
+  });
+
+  test("(y) dynamic = [version] PLUS a static version line → REFUSE adk-version-mismatch (dynamic wins), zero POSTs", async () => {
+    const posts: string[] = [];
+    const tags = new Map<string, unknown>();
+    const { deps } = harness({ api: refApi(posts, tags) });
+    pinPyproject(deps, `[project]\nname = "adk-flair"\ndynamic = ["version"]\nversion = "${VERSION}"\n`);
+    const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
+    expect(result.verdict).toBe(WRITE_VERDICT.REFUSE); // assertion A: REFUSE, not TAG
+    expect(result.condition).toBe(CONDITION.ADK_VERSION_MISMATCH);
+    expect((result.summary ?? []).join(" ")).toContain("dynamic"); // assertion B: names dynamic
+    expect(posts).toEqual([]); // assertion C: zero POSTs
+  });
+
+  /** A stub executable the reader is pointed at (the pythonBin seam). */
+  function stub(body: string): string {
+    const p = join(scratchDir(), "stub.sh");
+    writeFileSync(p, `#!/bin/sh\n${body}\n`);
+    chmodSync(p, 0o755);
+    return p;
+  }
+
+  test("(z1) a zero exit WITH stderr noise is unsupported (stderr: …)", () => {
+    const bin = stub(
+      "cat >/dev/null\nprintf '%s' '{\"version\": \"1.0.0\"}'\nprintf '%s\\n' 'sitecustomize noise' >&2\nexit 0",
+    );
+    const r = readProjectVersion(`[project]\nversion = "1.0.0"\n`, { pythonBin: bin });
+    expect(r.kind).toBe("unsupported"); // assertion: noise on stderr is not trusted
+    expect(r.kind === "unsupported" ? r.reason : "").toBe("stderr: sitecustomize noise");
+  });
+
+  test("(z2) a JSON `null` response is unsupported 'bad response', no throw", () => {
+    const bin = stub("cat >/dev/null\nprintf '%s' 'null'\nexit 0");
+    const r = readProjectVersion(`[project]\nversion = "1.0.0"\n`, { pythonBin: bin });
+    expect(r.kind).toBe("unsupported"); // assertion: shape validated
+    expect(r.kind === "unsupported" ? r.reason : "").toBe("bad response");
+  });
+
+  test("(z3) a stub that sleeps past the timeout is unsupported 'timeout'", () => {
+    const bin = stub("cat >/dev/null\nsleep 5\nprintf '%s' '{\"version\": \"1.0.0\"}'");
+    const r = readProjectVersion(`[project]\nversion = "1.0.0"\n`, { pythonBin: bin, timeoutMs: 300 });
+    expect(r.kind).toBe("unsupported"); // assertion: a hung reader is unsupported
+    expect(r.kind === "unsupported" ? r.reason : "").toBe("timeout");
+  });
+
+  test("round 5, item 4: --write is ALL-OR-NOTHING (a refusing pyproject writes NOTHING)", () => {
+    const root = scratchDir();
+    mkdirSync(join(root, "packages/flair-bench/src"), { recursive: true });
+    mkdirSync(join(root, "packages/adk-flair"), { recursive: true });
+    const bench = join(root, "packages/flair-bench/src/version.ts");
+    const py = join(root, "packages/adk-flair/pyproject.toml");
+    writeFileSync(bench, 'export const TOOL_VERSION = "1.0.0";\n');
+    writeFileSync(py, `[project]\nname = "adk-flair"\nversion = """1.0.0"""\n`); // the writer refuses this
+    const before = { bench: readFileSync(bench, "utf8"), py: readFileSync(py, "utf8") };
+    const realRoot = resolve(import.meta.dir, "../..");
+    const checker = join(realRoot, "scripts", "check-version-sync.mjs");
+    const r = spawnSync(process.execPath, [checker, "--write", "2.0.0", "--root", root], { encoding: "utf8" });
+    expect(r.status).not.toBe(0); // assertion: the refusal exits non-zero
+    expect(readFileSync(bench, "utf8")).toBe(before.bench); // assertion: flair-bench NOT written
+    expect(readFileSync(py, "utf8")).toBe(before.py); // assertion: pyproject NOT written
   });
 });
 

@@ -251,30 +251,41 @@ function readDeclared(file) {
 }
 
 function write(version) {
+  // ALL-OR-NOTHING (flair#1928 round 5, item 4): compute EVERY replacement
+  // first; if ANY refuses, write NOTHING and exit non-zero naming the refusal.
+  // A half-bumped tree (flair-bench bumped, the pyproject refused) is worse than
+  // no bump at all.
+  const edits = [];
   for (const file of SOURCE_VERSION_FILES) {
     const abs = join(REPO_ROOT, file.path);
     const src = readFileSync(abs, "utf8");
     if (file.project) {
       const next = replaceProjectVersion(src, version);
       if (next === null) {
-        console.error(`❌ ${file.path}: no [project].version declaration to rewrite.`);
+        console.error(
+          `❌ ${file.path}: no [project].version declaration to rewrite to ${version}; NOTHING was written.`,
+        );
         process.exit(1);
       }
-      writeFileSync(abs, next);
-      console.log(`  ✓ ${file.path} ${file.label} → ${version}`);
+      edits.push({ abs, path: file.path, label: file.label, next });
       continue;
     }
     const n = matchesIn(src, file.pattern).length;
     if (n !== 1) {
       console.error(
-        n === 0
+        (n === 0
           ? `❌ ${file.path}: no ${file.label} declaration to rewrite. The pattern in scripts/check-version-sync.mjs no longer matches this file.`
-          : `❌ ${file.path}: ${n} ${file.label} declarations, expected exactly 1. Refusing to rewrite an ambiguous file.`,
+          : `❌ ${file.path}: ${n} ${file.label} declarations, expected exactly 1. Refusing to rewrite an ambiguous file.`) +
+          ` NOTHING was written.`,
       );
       process.exit(1);
     }
-    writeFileSync(abs, src.replace(file.pattern, `$1${version}$3`));
-    console.log(`  ✓ ${file.path} ${file.label} → ${version}`);
+    edits.push({ abs, path: file.path, label: file.label, next: src.replace(file.pattern, `$1${version}$3`) });
+  }
+  // Every replacement is known-good: write them all.
+  for (const e of edits) {
+    writeFileSync(e.abs, e.next);
+    console.log(`  ✓ ${e.path} ${e.label} → ${version}`);
   }
 }
 

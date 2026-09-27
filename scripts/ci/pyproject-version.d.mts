@@ -5,11 +5,30 @@
  * `lockstep-packages.d.mts`).
  */
 
+/** The test seams: point the reader at a stub and/or shrink the timeout. */
+export interface PythonReaderOptions {
+  pythonBin?: string;
+  timeoutMs?: number;
+}
+
 export type ReadProjectVersionResult =
   | { kind: "version"; version: string; lineIndex: number }
   | { kind: "none"; reason: string }
   | { kind: "unsupported"; line: string; reason: string };
 
-export function readProjectVersion(text: string | null | undefined): ReadProjectVersionResult;
-export function projectVersionFromPyproject(text: string | null | undefined): string | null;
-export function replaceProjectVersion(text: string, version: string): string | null;
+/** The default wall-clock ceiling for the python child. */
+export const PYTHON_TIMEOUT_MS: number;
+
+export function readProjectVersion(
+  text: string | null | undefined,
+  opts?: PythonReaderOptions,
+): ReadProjectVersionResult;
+export function projectVersionFromPyproject(
+  text: string | null | undefined,
+  opts?: PythonReaderOptions,
+): string | null;
+export function replaceProjectVersion(
+  text: string,
+  version: string,
+  opts?: PythonReaderOptions,
+): string | null;
