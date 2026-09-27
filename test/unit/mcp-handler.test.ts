@@ -975,6 +975,10 @@ describe("body size cap", () => {
 
 // ─── tools/call argument types ───────────────────────────────────────────────
 describe("tools/call — arguments must match the tool's declared types", () => {
+  // A helper, not an inline assignment: TypeScript would otherwise narrow
+  // lastCall to null for the rest of the test.
+  function resetLastCall() { lastCall = null; }
+
   beforeEach(() => {
     credentials = [{ principalId: "agt_bob", kind: "idp", idpSubject: "sub-bob", status: "active" }];
   });
@@ -991,7 +995,7 @@ describe("tools/call — arguments must match the tool's declared types", () => 
   for (const name of ID_TOOLS) {
     it(`${name}: a non-string or empty id is refused before the tool runs`, async () => {
       for (const id of [42, true, ["m1"], { m: 1 }, ""]) {
-        lastCall = null;
+        resetLastCall();
         const body = await call(name, { id, content: "x" });
         expect(body.error?.code).toBe(-32602);
         expect(String(body.error?.message)).toContain(`invalid arguments for ${name}`);
@@ -1008,7 +1012,7 @@ describe("tools/call — arguments must match the tool's declared types", () => 
       ["memory_search", { query: { text: "hi" } }],
       ["memory_search", {}],
     ] as const) {
-      lastCall = null;
+      resetLastCall();
       const body = await call(name, args);
       expect(body.error?.code).toBe(-32602);
       expect(lastCall).toBeNull();
@@ -1016,14 +1020,14 @@ describe("tools/call — arguments must match the tool's declared types", () => 
   });
 
   it("conforming arguments still reach the tool (null optionals are treated as absent)", async () => {
-    lastCall = null;
+    resetLastCall();
     const body = await call("memory_search", { query: "hi", limit: 3, includeTrust: null });
     expect(body.error).toBeUndefined();
     expect(lastCall?.resource).toBe("SemanticSearch.post");
   });
 
   it("a null optional argument is not forwarded to the resource", async () => {
-    lastCall = null;
+    resetLastCall();
     const body = await call("memory_store", { content: "x", tags: null, type: null });
     expect(body.error).toBeUndefined();
     expect(lastCall?.resource).toBe("Memory.post");
@@ -1034,7 +1038,7 @@ describe("tools/call — arguments must match the tool's declared types", () => 
   });
 
   it("an undeclared id on a tool without an id argument is left to the tool, as before", async () => {
-    lastCall = null;
+    resetLastCall();
     const body = await call("memory_search", { query: "hi", id: 42 });
     expect(body.error).toBeUndefined();
     expect(lastCall?.resource).toBe("SemanticSearch.post");
