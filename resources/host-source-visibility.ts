@@ -1,29 +1,47 @@
 /**
  * host-source-visibility.ts — A3: the hostSource read projection (flair#1940
- * slice 1). PURE: zero imports beyond the A2 validator and the visibility
- * predicate, so it is unit-testable and usable from every read path.
+ * slice 1 / A1'). PURE beyond the A2 validator and the visibility predicate,
+ * so it is unit-testable and usable from the read paths.
+ *
+ * A1' moved the pointer OFF the Memory row and into its OWN table
+ * (`MemoryHostSource`, keyed by memoryId). So the projection no longer reads a
+ * field off the record: the caller reads the pointer ROW and passes it in. The
+ * three outcomes of the join (A1' item 4) are:
+ *   - no pointer row           → the record is returned UNCHANGED (hostSource
+ *                                absent/null — byte-identical to a pointerless
+ *                                record, which is what every legacy row is);
+ *   - a pointer the reader may NOT see → `hostSource: "withheld"` (present but
+ *                                unrendered, so the "externally sourced" signal
+ *                                survives);
+ *   - a pointer the reader may see → the canonical pointer (URL query/fragment
+ *                                stripped).
  *
  * The rule (A3): a pointer is content, never wider than its record.
- *   - Default (no `hostSourceScope: "record"` at write): the pointer is visible
- *     ONLY to the record's author.
- *   - Opted in: the write stored the record's visibility AS IT WAS AT WRITE
- *     (`hostSourceVisibility`); the pointer's EFFECTIVE visibility is the
+ *   - Default (scopeAtWrite absent/null): the pointer is visible ONLY to the
+ *     record's author.
+ *   - Opted in: the pointer row stored the record's visibility AS IT WAS AT
+ *     WRITE (`scopeAtWrite`); the pointer's EFFECTIVE visibility is the
  *     NARROWER of that stored value and the record's CURRENT visibility, so a
  *     later widening of the record never widens the pointer.
- *   - A reader who may read the record but not the pointer gets
- *     `hostSource: "withheld"` — present but unrendered, so the "externally
- *     sourced" signal survives.
  *
  * The decision is made HERE, on the server, in the read projection — no client
  * or MCP layer can un-redact. Every read surface that returns Memory records
- * calls projectHostSource()/projectHostSourceResult() (see the drift tripwire
- * in test/unit/host-source-visibility.test.ts).
+ * calls this (see the handler-level tests in test/unit/memory-host-source.test.ts).
  */
 import { parseHostSource } from "./host-source.js";
 import { isPrivateVisibility } from "./memory-visibility.js";
 
 /** The literal a reader gets in place of a pointer they may not see (A3). */
 export const HOST_SOURCE_WITHHELD = "withheld";
+
+/** A MemoryHostSource row, as the join needs it (A1'). */
+export interface PointerRow {
+  memoryId: string;
+  hostSource: string;
+  scopeAtWrite?: string | null;
+  authorId?: string | null;
+  receivedAt?: string | null;
+}
 
 /** The server-stamped, authenticated author id from provenance — NEVER a
  *  writer-supplied field (A6: attribution is the server's, not the claim's). */
@@ -65,61 +83,43 @@ function renderableCanonical(stored: string): string {
 }
 
 /**
- * Project a record's `hostSource` for a given reader. Returns:
- *   - the record's value unchanged when there is none (null/undefined), so a
- *     record with no pointer is byte-identical to today;
- *   - the canonical pointer (URL query/fragment stripped) when the reader is
- *     the author, OR the pointer was opted into the record's scope and the
- *     reader may read the record at the pointer's effective visibility;
- *   - HOST_SOURCE_WITHHELD otherwise.
+ * Whether a reader may see a pointer row, given the record it belongs to. The
+ * single decision point the three outcomes fall out of:
+ *   "none"     — no pointer row (the record is returned unchanged);
+ *   "pointer"  — render the canonical pointer;
+ *   "withheld" — render HOST_SOURCE_WITHHELD.
  */
-export function projectHostSource<T>(record: T, readerAgentId: string | null | undefined): T {
-  if (!record || typeof record !== "object") return record;
-  const r = record as any;
-  const stored = r.hostSource;
-  if (stored === undefined || stored === null) return record; // nothing to project (A1 migration-equivalence)
-  if (typeof stored === "string" && stored === HOST_SOURCE_WITHHELD) return record; // idempotent
-
+export function pointerOutcomeFor(
+  record: any,
+  readerAgentId: string | null | undefined,
+  pointer: PointerRow | null | undefined,
+): "none" | "pointer" | "withheld" {
+  if (!pointer || typeof pointer.hostSource !== "string" || pointer.hostSource.length === 0) return "none";
   const author = hostSourceAuthor(record);
   const isAuthor = author !== null && readerAgentId != null && author === readerAgentId;
-  const out = { ...r };
-
-  if (!isAuthor) {
-    // Opted in only when the write recorded a write-time visibility next to
-    // the pointer; otherwise the pointer is author-only.
-    const storedVisibility = r.hostSourceVisibility;
-    if (storedVisibility === undefined || storedVisibility === null) {
-      out.hostSource = HOST_SOURCE_WITHHELD;
-      return out as T;
-    }
-    const effective = narrowerVisibility(storedVisibility, r.visibility);
-    if (isPrivateVisibility(effective)) {
-      // Effective private → only the author may read the pointer; the reader
-      // is not the author (above), so withhold.
-      out.hostSource = HOST_SOURCE_WITHHELD;
-      return out as T;
-    }
-    // Shared effective + the reader already passed the record read gate → the
-    // pointer is readable. Fall through to render.
-  }
-
-  out.hostSource = renderableCanonical(stored);
-  return out as T;
+  if (isAuthor) return "pointer";
+  const scopeAtWrite = pointer.scopeAtWrite;
+  if (scopeAtWrite === undefined || scopeAtWrite === null) return "withheld"; // author-only
+  const effective = narrowerVisibility(scopeAtWrite, record?.visibility);
+  return isPrivateVisibility(effective) ? "withheld" : "pointer";
 }
 
-/** Apply projectHostSource to an async-iterable / thenable / single Memory
- *  search result (same shape handling as hit-tracking's overlayHitStatsResult). */
-export function projectHostSourceResult(result: any, readerAgentId: string | null | undefined): any {
-  if (result && typeof result.then === "function") {
-    return result.then((value: any) => projectHostSourceResult(value, readerAgentId));
+/**
+ * Project a record's pointer for a given reader, given that record's pointer
+ * row (or null). Returns the record UNCHANGED when there is no pointer row, so
+ * a record with no pointer is byte-identical to today; otherwise sets
+ * `hostSource` to the canonical pointer or HOST_SOURCE_WITHHELD.
+ */
+export function projectHostSource<T>(record: T, readerAgentId: string | null | undefined, pointer?: PointerRow | null): T {
+  if (!record || typeof record !== "object") return record;
+  const r = record as any;
+  const decision = pointerOutcomeFor(record, readerAgentId, pointer);
+  if (decision === "none") return record;
+  const out = { ...r };
+  if (decision === "withheld") {
+    out.hostSource = HOST_SOURCE_WITHHELD;
+  } else {
+    out.hostSource = renderableCanonical((pointer as PointerRow).hostSource);
   }
-  if (!result || result instanceof Response) return result;
-  if (typeof result[Symbol.asyncIterator] === "function") {
-    return (async function* projectSources() {
-      for await (const row of result) {
-        yield projectHostSource(row, readerAgentId);
-      }
-    })();
-  }
-  return projectHostSource(result, readerAgentId);
+  return out as T;
 }

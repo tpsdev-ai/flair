@@ -7,6 +7,8 @@ import { assertValidVisibility, assertVisibilityAllowedForDurability, PRIVATE_VI
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, refuseSkillWriteSource, skillScanGate } from "./skill-write.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
+import { extractPointerInputs } from "./memory-host-source.js";
+import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -169,6 +171,12 @@ export class FeedMemories extends Resource {
       record.visibility = PRIVATE_VISIBILITY;
     }
 
+    // flair#1940 A1' item 1: the feed ingest is a Memory writer too. Drop any
+    // pointer inputs (hostSource/hostSourceScope/hostSourceVisibility) and every
+    // undeclared attribute here, so a POST /FeedMemories carrying a pointer
+    // leaves NO pointer anywhere — neither on the row nor in the table.
+    extractPointerInputs(record);
+    stripUndeclaredMemoryAttributes(record);
     stripAuthorityFields(record, "Memory");
     await (databases as any).flair.Memory.put(record);
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).

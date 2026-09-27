@@ -86,19 +86,12 @@ type Memory @table(database: "flair") {
   _safetyFlags: [String]       # content safety flags from scanContent()
   provenance: String           # JSON blob (memory-provenance slice 1; claimed.client added by flair#718): { v, verified: { agentId, timestamp, receivedAt }, claimed?: { model, client } }
                                # Server-STAMPED (receivedAt is the server's receipt time, never client-writable — flair#1940 A4).
-  hostSource: String           # JSON blob (flair#1940 slice 1 / A1): versioned { v: 1, host, kind, id, url? } — a host-object pointer
-                               # (e.g. an openclaw run, a cursor launch, a codex turn). SERVER-VALIDATED at post()/put() against a closed
-                               # host/kind set and an id/url grammar (A2), stored as the canonical (NFC, fixed key order) form, and
-                               # REDACTED to "withheld" on read when the reader may read the record but not the pointer (A3).
-                               # NEVER inside provenance (A5). Nullable by design — existing rows read back hostSource = null, unchanged
-                               # behavior (clean-upgrade-path gate, same idiom as provenance above). Readers parse/validate and never
-                               # render the raw string. A3 (withheld redaction + scope) is enforced in resources/host-source-visibility.ts.
-  hostSourceVisibility: String  # flair#1940 slice 1 (A3): the record's visibility AS IT WAS AT WRITE, stored next to the pointer
-                               # ONLY when the write opted in with hostSourceScope: "record". The pointer's effective visibility is
-                               # the narrower of this and the record's CURRENT visibility (a later widening never widens the pointer).
-                               # Null/absent → the pointer is visible only to the record's author.
-                               # Nullable by design — existing rows read back provenance = null, unchanged behavior (clean-upgrade-path gate).
-                               # Same idiom as Soul.metadata below. Stamped server-side in resources/Memory.ts; never client-writable.
+  # flair#1940 A1' — the host pointer does NOT live on the Memory row. It is in
+  # its OWN table, MemoryHostSource (below), keyed by memoryId, so no Memory
+  # path can carry or leak it. The three write-body inputs (hostSource,
+  # hostSourceScope, hostSourceVisibility) are consumed by Memory.post()/put()
+  # and are never persisted here. A reader gets the pointer only through the
+  # gated join (resources/Memory.ts), which yields pointer | "withheld" | none.
   originatorInstanceId: String @indexed  # federation-edge-hardening slice 1: WRITE-TIME instance identity, stamped server-side in
                                # resources/Memory.ts from resources/instance-identity.ts's localInstanceId() — never client-writable.
                                # Nullable (existing rows read null = clean upgrade). Distinct from the legacy _originatorInstanceId
@@ -231,6 +224,44 @@ type MemoryHitStat @table(database: "flair") {
   id: ID @primaryKey           # Memory.id
   retrievalCount: Int
   lastRetrieved: String
+}
+
+# MemoryHostSource — the host pointer, IN ITS OWN TABLE (flair#1940 slice 1 /
+# A1', confirmed by Kern and Sherlock). The pointer is a host-object pointer —
+# versioned JSON { v: 1, host, kind, id, url? } — carried end to end by the
+# client/MCP/adapter slices. It lives here, keyed by memoryId, so no Memory path
+# (patch, feed ingest, consolidation, federation sync, admin export) can carry
+# or leak it: the Memory schema declares no hostSource attribute at all.
+#
+# Writes are NOT a REST surface for agents: Memory.post()/put() write the row in
+# the SAME request transaction as the Memory row (A1' item 2 — the row and its
+# pointer commit together or not at all), and this resource's own post()/put()
+# stamp authorId from the AUTHENTICATED principal, never the body (A1' item 3).
+#
+# Reads are ADMIN-ONLY (A1' item 3): a non-admin direct GET or search of this
+# table gets nothing (the resource class gates allowRead/get/search). The author
+# reads their own pointer only through the gated join INTO Memory results (A1'
+# item 4), never from this table directly.
+#
+# NOT federated (A1' item 5): the table is absent from FEDERATION_TABLE_POLICY,
+# so it is never in the sync's table set, and an inbound row carrying a pointer
+# field is REFUSED (resources/federation-classify.ts).
+#
+# Cascade (A1' item 6): the pointer row is deleted where the Memory row dies
+# (Memory.delete(), the expiry reaper and the archive path in
+# resources/MemoryMaintenance.ts), plus an orphan sweep. An orphan is unreadable
+# by construction — the ONLY read path joins pointers INTO Memory results.
+#
+# hostSource is the writer's claim, signed by the writer's Flair identity; it is
+# not verified host authorship. scopeAtWrite is the record's visibility AT WRITE
+# (null → author-only); the pointer's effective visibility is the NARROWER of it
+# and the record's CURRENT visibility. receivedAt is server-stamped.
+type MemoryHostSource @table(database: "flair") @export {
+  memoryId: ID @primaryKey      # the Memory.id this pointer belongs to
+  hostSource: String!           # canonical v1 JSON: { v:1, host, kind, id, url? }
+  scopeAtWrite: String          # the record's visibility at write when the write opted in; null = author-only
+  authorId: String! @indexed    # server-stamped from the authenticated principal, NEVER the body
+  receivedAt: String!           # server receipt time
 }
 
 # MemoryCandidate — staged distillations from the FLAIR-NIGHTLY-REM cycle.

@@ -92,9 +92,28 @@ describe("hostSource A1/A5 — stored shape and legacy nulls", () => {
     ]);
   });
 
-  test("A1 gate: schemas/memory.graphql declares hostSource nullable with the clean-upgrade-path idiom", () => {
+  test("A2 gaps: empty userinfo, the FULL bidi set, and C1 controls are all REFUSED", () => {
+    // Empty userinfo parses with username/password === "" — only an explicit
+    // "@" check in the authority catches it.
+    expect(validateHostSource({ v: 1, host: "openclaw", kind: "run", id: "r1", url: "https://@example.test/" }).ok).toBe(false); // assertion
+    // The bidi MARKS U+200E / U+200F, not only the overrides/isolates.
+    expect(validateHostSource({ v: 1, host: "openclaw", kind: "run", id: "r1", url: "https://example.test/\u200e" }).ok).toBe(false); // assertion
+    expect(validateHostSource({ v: 1, host: "openclaw", kind: "run", id: "r\u200f1" }).ok).toBe(false); // assertion
+    // C1 controls (U+0080-U+009F), including U+0085 (NEL).
+    expect(validateHostSource({ v: 1, host: "openclaw", kind: "run", id: "r\u00851" }).ok).toBe(false); // assertion
+    expect(validateHostSource({ v: 1, host: "openclaw", kind: "run", id: "r\u009f1" }).ok).toBe(false); // assertion
+  });
+
+  test("A1' gate: the Memory schema declares NO hostSource attribute; MemoryHostSource is its own table", () => {
     const schema = readFileSync(join(import.meta.dir, "../../schemas/memory.graphql"), "utf8");
-    expect(schema).toContain("hostSource: String"); // assertion
-    expect(/hostSource: String[\s\S]{0,800}clean-upgrade-path gate/.test(schema)).toBe(true);
+    // The Memory TYPE no longer declares hostSource / hostSourceVisibility (the
+    // MemoryHostSource table below DOES declare hostSource — check the block).
+    const memoryBlock = /type Memory @table\b[^{]*\{([\s\S]*?)\n\}/.exec(schema)?.[1] ?? "";
+    expect(memoryBlock.length).toBeGreaterThan(0); // assertion: the Memory block parsed
+    expect(memoryBlock).not.toContain("hostSource:"); // assertion: no pointer field on Memory
+    expect(memoryBlock).not.toContain("hostSourceVisibility:"); // assertion
+    // The pointer has its own @export table, keyed by memoryId.
+    expect(schema).toContain('type MemoryHostSource @table(database: "flair") @export {'); // assertion
+    expect(/type MemoryHostSource[\s\S]{0,400}memoryId: ID @primaryKey/.test(schema)).toBe(true); // assertion
   });
 });

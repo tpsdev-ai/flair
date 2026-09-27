@@ -80,8 +80,15 @@ add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"], "NON_EMBED",
   "Feed rows — the record carries no embedding/embeddingModel.");
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.update#1", "writer:(databases as any).flair.Memory.delete#1"], "NON_EMBED",
   "Archive/expiry maintenance — partial update (archive fields) / delete; never touches the stamp.");
-add("Memory", ["writer:patchRecord#1", "writer:super.patch#1", "writer:super.delete#1"], "NON_EMBED",
-  "derivedFrom/lastReflected patch, patch(), delete() — never write embeddingModel.");
+// flair#1940 A1': the host-pointer table (MemoryHostSource) is written/deleted
+// on the pointer path — a DIFFERENT table, no embeddingModel. The conservative
+// sink enumeration cannot tell the two apart, so classify explicitly.
+add("Memory", ["writer:table.put#1", "writer:table.delete#1"], "OTHER_TABLE",
+  "MemoryHostSource pointer row (A1') — not the Memory table, never an embeddingModel.");
+add("MemoryMaintenance", ["writer:table.delete#1"], "OTHER_TABLE",
+  "MemoryHostSource pointer cascade (A1') — not the Memory table, never an embeddingModel.");
+add("Memory", ["writer:patchRecord#1", "writer:super.patch#1", "writer:super.delete#1", "writer:super.delete#2", "writer:super.delete#3"], "NON_EMBED",
+  "derivedFrom/lastReflected patch, patch(), delete(), and the A1' pointer-write rollback deletes — never write embeddingModel.");
 add("MemoryReflect", ["writer:patchRecordSilent#1"], "NON_EMBED", "lastReflected stamp — partial, non-embedding.");
 add("hit-tracking", [
   "writer:this.pending.delete#1",

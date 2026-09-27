@@ -22,6 +22,7 @@ import { retrievalMode } from "./bm25.js";
 // resources/semantic-retrieval-core.ts's module doc for the full boundary.
 import { retrieveCandidates, DEFAULT_SELECT } from "./semantic-retrieval-core.js";
 import { projectHostSource } from "./host-source-visibility.js";
+import { loadPointerRows } from "./memory-host-source.js";
 import { attachTrust } from "./trust-block.js";
 import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
 
@@ -358,15 +359,16 @@ export class SemanticSearch extends Resource {
       filteredResults.slice(0, limit).map((r: any) => applyHitStats(r, ctx)),
     );
 
-    // flair#1940 A3 (semantic-search surface): project the host pointer for
-    // THIS reader. Only a non-admin agent that was scoped to itself is a
-    // "reader" under the withheld rule; an admin/internal call stays
-    // unfiltered (like every other field). No-op when the record carries no
-    // hostSource.
+    // flair#1940 A1' item 4 (semantic-search surface): the gated join. Only a
+    // non-admin agent scoped to itself is a "reader" under the withheld rule;
+    // an admin/internal call stays unfiltered. Fetch pointers for the WHOLE
+    // result set in ONE batched query (never one per row), then project.
     const hostSourceReader: string | undefined = authenticatedAgent && !callerIsAdmin ? authenticatedAgent : undefined;
-    const projected = hostSourceReader
-      ? topResults.map((r: any) => projectHostSource(r, hostSourceReader))
-      : topResults;
+    let projected = topResults;
+    if (hostSourceReader) {
+      const pointers = await loadPointerRows(topResults.map((r: any) => r?.id).filter((id: any): id is string => typeof id === "string" && id.length > 0));
+      projected = topResults.map((r: any) => projectHostSource(r, hostSourceReader, pointers.get(r?.id) ?? null));
+    }
 
     // Async hit tracking — MemoryHitStat only, never a Memory rewrite.
     const now = new Date().toISOString();

@@ -350,22 +350,38 @@ A peer can therefore show `presenceStatus: "offline"`, `activity: "idle"`, `last
 | `validFrom` / `validTo` | String | Temporal validity; expired rows drop out of search |
 | `_safetyFlags` | [String] | Content-safety scan |
 | `provenance` | String | Server JSON `{ v, verified: { agentId, timestamp, receivedAt }, claimed? }`. `receivedAt` (A4 of #1940) is the server's receipt time, never client-writable. |
-| `hostSource` | String | Versioned host pointer `{ v: 1, host, kind, id, url? }` (#1940 A1). Set the writer's claim; see “Memory host pointer” below. |
-| `hostSourceVisibility` | String | The record's visibility at write, stored next to the pointer only when the write opted in with `hostSourceScope: "record"` (#1940 A3). |
 | `originatorInstanceId` | String | Write-time instance id; preserved across sync |
 | `metadata` | String | Client JSON blob; opaque to the server |
 | `entities` | [String] | Attention-plane `type:value` strings |
 
-#### Memory host pointer (`hostSource`, #1940 A1-A5)
+> The host pointer (`hostSource`) is **not** a Memory attribute — it lives in its own `MemoryHostSource` table (below). There is no `hostSource` / `hostSourceVisibility` field on `Memory`.
 
-`hostSource` records which host object (a run, a launch, a turn) a memory came from. On WRITE (`POST /Memory`, `PUT /Memory/<id>`):
+#### Memory host pointer (`MemoryHostSource`, #1940 A1'-A5)
 
-- **A1** — `hostSource` is its own nullable field, versioned JSON `{ v: 1, host, kind, id, url? }`; it is additive, and existing rows read back `null`. Legacy `source` is a different field and is untouched.
-- **A2** — the server validates and REJECTS (never truncates): `host`/`kind` come from a closed set (`openclaw/run`, `cursor/launch`, `codex/turn`); `id` matches `^[A-Za-z0-9._:/@#-]{1,256}$`; `url` is https only, with no userinfo, capped at 2048 characters; control characters and bidi overrides are refused; values are NFC-normalised; unknown keys or any `v` other than 1 are refused. `hostSourceScope: "record"` opts the pointer into the record's own read scope (A3); any wider scope is refused.
+The pointer is a host-object pointer — versioned JSON `{ v: 1, host, kind, id, url? }` — that records which host object (a run, a launch, a turn) a memory came from. **It is stored in its OWN table, `MemoryHostSource`, keyed by memoryId; Memory rows never carry it.**
+
+`MemoryHostSource` fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `memoryId` | ID (primary key) | The `Memory.id` this pointer belongs to. |
+| `hostSource` | String | The canonical pointer JSON (fixed key order, NFC). |
+| `scopeAtWrite` | String | The record's visibility at write when the write opted in (`hostSourceScope: "record"`); `null` = author-only. |
+| `authorId` | String | The authenticated principal, server-stamped — never the body. |
+| `receivedAt` | String | Server receipt time. |
+
+**Write (`POST /Memory`, `PUT /Memory/<id>`)** — the three pointer inputs (`hostSource`, `hostSourceScope`, `hostSourceVisibility`) are write-body-only and are stripped from the Memory row before persist; only `post()`/`put()` and the `MemoryHostSource` resource accept them. The Memory row and its pointer row commit together or not at all (same request transaction): a pointer that cannot be persisted fails the whole write. The shared "declared attributes only" guard runs on every Memory writer (`post()`, `put()`, `patch()`, the feed ingest), so no path can carry an undeclared attribute.
+
+- **A1'** — the pointer is its own table; the Memory schema declares no `hostSource`. Additive with no data migration.
+- **A2** — the server validates and REJECTS (never truncates): `host`/`kind` come from a closed set (`openclaw/run`, `cursor/launch`, `codex/turn`); `id` matches `^[A-Za-z0-9._:/@#-]{1,256}$`; `url` is https only, with NO userinfo (an empty userinfo `https://@host/` is refused), capped at 2048 characters; C0/DEL/C1 controls (U+0000-U+001F, U+007F-U+009F, including U+0085) and the FULL bidi set (U+200E, U+200F, U+202A-U+202E, U+2066-U+2069) are refused anywhere; values are NFC-normalised; unknown keys or any `v` other than 1 are refused. `hostSourceScope: "record"` opts the pointer into the record's own read scope (A3); any wider scope is refused.
 - **A4** — the server stamps `receivedAt` inside `provenance`; it is server-stamped and never client-writable. `createdAt` stays the writer's claimed time, so `asOf`/valid-time queries use the writer's claim.
-- **A5** — `hostSource` is NOT inside `provenance`; `provenance` stays never-client-writable.
+- **A5** — the pointer is NOT inside `provenance`; `provenance` stays never-client-writable.
 
-On READ (search, list, by-ID, semantic search, bootstrap; MCP rides the same handlers): **A3** — the pointer is visible only to the record's author unless the write opted it into the record's scope, and it is never wider than its record: the effective visibility is the narrower of the record's write-time visibility and its current visibility, so a later widening of the record does not widen the pointer. A reader who may read the record but not the pointer gets `hostSource: "withheld"` (present but unrendered, so the “externally sourced” signal survives). Wherever a URL is rendered, only scheme, host and path appear; query and fragment are stripped. Redaction is applied on the server, in the read projection — no client or MCP layer can un-redact.
+**Read** — the pointer reaches a reader ONLY through a gated join into Memory results (search, by-ID, semantic search), which has three outcomes: the pointer, `"withheld"`, or nothing. A pointer is visible only to the record's author unless the write opted it into the record's scope, and it is never wider than its record: the effective visibility is the narrower of the record's write-time visibility (`scopeAtWrite`) and its current visibility (`narrower(scopeAtWrite, record.visibility)`), so a later widening of the record does not widen the pointer. A reader who may read the record but not the pointer gets `hostSource: "withheld"` (present but unrendered, so the "externally sourced" signal survives). Wherever a URL is rendered, only scheme, host and path appear; query and fragment are stripped. Redaction is applied on the server, in the read projection — no client or MCP layer can un-redact. Search and semantic search fetch pointers for the whole result set in ONE batched query. **Bootstrap does not render pointers in this slice.**
+
+**Direct access** — direct reads and searches of `MemoryHostSource` are **admin-only**: a non-admin by-ID read gets nothing (404) and a non-admin search gets 403. The author reads their own pointer only through the gated join. The table resource stamps `authorId` from the authenticated principal, never the body. This admin exception names `MemoryHostSource` explicitly.
+
+**Federation** — `MemoryHostSource` is excluded from the sync's table set by mechanism (it is absent from the federation table policy), and an inbound row carrying a pointer field is refused. Cascade cleanup runs where Memory rows die (`Memory.delete()`, the expiry reaper, the archive path) plus an orphan sweep; because the only read path joins pointers INTO Memory results, an orphaned pointer is unreadable by construction.
 
 A `hostSource`, like a client-supplied `createdAt`, is the writer's claim, signed by the writer's Flair identity; it is not verified host authorship.
 

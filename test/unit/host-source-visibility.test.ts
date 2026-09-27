@@ -1,24 +1,22 @@
 /**
- * host-source-visibility.test.ts — flair#1940 slice 1 (A3). The read
- * projection: the pointer is content, never wider than its record. Both
- * directions (opted in / not opted in) plus the widening rule, the withheld
- * literal, and the URL query/fragment strip. Also a drift tripwire asserting
- * every read surface wires the projection (source-text scan, the same idiom as
- * the record-types registry tripwire).
+ * host-source-visibility.test.ts — flair#1940 slice 1 (A3, A1'). The pure
+ * read projection: the pointer is content, never wider than its record. After
+ * A1' the pointer is a MemoryHostSource ROW, passed to the projection by the
+ * caller (the join reads the row, the projection decides). Both directions
+ * (opted in / not opted in), the widening rule, the withheld literal, the URL
+ * query/fragment strip, and the three outcomes (pointer | "withheld" | none).
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import {
   HOST_SOURCE_WITHHELD,
   hostSourceAuthor,
   narrowerVisibility,
+  pointerOutcomeFor,
   projectHostSource,
-  projectHostSourceResult,
   renderHostSourceUrl,
+  type PointerRow,
 } from "../../resources/host-source-visibility.ts";
 
-const ROOT = join(import.meta.dir, "../..");
 const POINTER = '{"v":1,"host":"openclaw","kind":"run","id":"run-aaaaaaaa"}';
 
 function prov(agentId: string | null): string {
@@ -31,51 +29,53 @@ function record(extra: Record<string, unknown> = {}): any {
     agentId: "agent-a",
     visibility: "shared",
     provenance: prov("agent-a"),
-    hostSource: POINTER,
     ...extra,
   };
 }
 
+/** A MemoryHostSource row. */
+function pointer(extra: Partial<PointerRow> = {}): PointerRow {
+  return { memoryId: "mem-1", hostSource: POINTER, scopeAtWrite: null, authorId: "agent-a", ...extra };
+}
+
 describe("A3 — the read projection, both directions", () => {
   test("not opted in: the author sees the pointer", () => {
-    const out = projectHostSource(record(), "agent-a");
+    const out = projectHostSource(record(), "agent-a", pointer());
     expect(out.hostSource).toBe(POINTER); // assertion: author gets the pointer
   });
 
   test("not opted in: another reader gets 'withheld'", () => {
-    const out = projectHostSource(record(), "agent-b");
+    const out = projectHostSource(record(), "agent-b", pointer());
     expect(out.hostSource).toBe(HOST_SOURCE_WITHHELD); // assertion: withheld
   });
 
   test("opted in (shared at write): a reader of the record gets the pointer", () => {
-    const out = projectHostSource(record({ hostSourceVisibility: "shared" }), "agent-b");
+    const out = projectHostSource(record({ visibility: "shared" }), "agent-b", pointer({ scopeAtWrite: "shared" }));
     expect(out.hostSource).toBe(POINTER); // assertion: opted in → reader sees it
   });
 
   test("opted in but private at write: another reader still gets 'withheld'", () => {
-    const out = projectHostSource(record({ hostSourceVisibility: "private" }), "agent-b");
+    const out = projectHostSource(record({ visibility: "shared" }), "agent-b", pointer({ scopeAtWrite: "private" }));
     expect(out.hostSource).toBe(HOST_SOURCE_WITHHELD); // assertion
   });
 
   test("widening the record AFTER the write does NOT widen the pointer", () => {
     // Opted in when the record was private; the record is later widened to
     // shared. The stored write-time value (private) is narrower → withheld.
-    const widened = record({ hostSourceVisibility: "private", visibility: "shared" });
-    expect(projectHostSource(widened, "agent-b").hostSource).toBe(HOST_SOURCE_WITHHELD); // assertion
+    expect(projectHostSource(record({ visibility: "shared" }), "agent-b", pointer({ scopeAtWrite: "private" })).hostSource).toBe(HOST_SOURCE_WITHHELD); // assertion
     // And narrowing after a shared opt-in narrows the pointer too.
-    const narrowed = record({ hostSourceVisibility: "shared", visibility: "private" });
-    expect(projectHostSource(narrowed, "agent-b").hostSource).toBe(HOST_SOURCE_WITHHELD); // assertion
+    expect(projectHostSource(record({ visibility: "private" }), "agent-b", pointer({ scopeAtWrite: "shared" })).hostSource).toBe(HOST_SOURCE_WITHHELD); // assertion
   });
 
-  test("a record with no hostSource is unchanged (null stays null)", () => {
-    const noPointer = record({ hostSource: null });
-    const out = projectHostSource(noPointer, "agent-b");
-    expect(out.hostSource).toBeNull(); // assertion: untouched
+  test("no pointer row → the record is unchanged (no hostSource key added)", () => {
+    const out = projectHostSource(record(), "agent-b", null);
+    expect("hostSource" in (out as any)).toBe(false); // assertion: untouched
+    expect(pointerOutcomeFor(record(), "agent-b", null)).toBe("none"); // assertion: "nothing"
   });
 
   test("a URL renders as scheme/host/path only (query + fragment stripped)", () => {
     const stored = '{"v":1,"host":"cursor","kind":"launch","id":"x","url":"https://example.test/a/b?tok=secret#frag"}';
-    const out = projectHostSource(record({ hostSource: stored, hostSourceVisibility: "shared" }), "agent-b");
+    const out = projectHostSource(record({ visibility: "shared" }), "agent-b", pointer({ hostSource: stored, scopeAtWrite: "shared" }));
     expect(out.hostSource).toBe('{"v":1,"host":"cursor","kind":"launch","id":"x","url":"https://example.test/a/b"}'); // assertion
     expect(out.hostSource).not.toContain("secret");
     expect(out.hostSource).not.toContain("#frag");
@@ -84,43 +84,21 @@ describe("A3 — the read projection, both directions", () => {
   test("the author id is read from provenance, never the record's agentId field", () => {
     // agentId says one thing, provenance says another (a forged field): the
     // server-stamped provenance author decides.
-    const forged = { agentId: "agent-b", visibility: "shared", provenance: prov("agent-a"), hostSource: POINTER };
+    const forged: any = { agentId: "agent-b", visibility: "shared", provenance: prov("agent-a") };
     expect(hostSourceAuthor(forged)).toBe("agent-a"); // assertion
-    expect(projectHostSource(forged, "agent-b").hostSource).toBe(HOST_SOURCE_WITHHELD); // b is not the author
+    expect(projectHostSource(forged, "agent-b", pointer()).hostSource).toBe(HOST_SOURCE_WITHHELD); // b is not the author
   });
 
   test("narrowerVisibility: private wins", () => {
-    expect(narrowerVisibility("shared", "private")).toBe("private");
-    expect(narrowerVisibility(null, "shared")).toBe("shared");
-    expect(narrowerVisibility("private", "private")).toBe("private");
+    expect(narrowerVisibility("shared", "private")).toBe("private"); // assertion
+    expect(narrowerVisibility("private", undefined)).toBe("private"); // assertion
+    expect(narrowerVisibility("shared", undefined)).toBe("shared"); // assertion
+    // A null scopeAtWrite is not "private" here — it is handled by the caller
+    // (author-only); narrowerVisibility itself only compares known visibilities.
   });
 
-  test("renderHostSourceUrl strips query + fragment", () => {
-    expect(renderHostSourceUrl("https://h.test/a/b?x=1#y")).toBe("https://h.test/a/b");
-    expect(renderHostSourceUrl("not-a-url")).toBe("not-a-url");
+  test("renderHostSourceUrl strips query/fragment; a non-URL passes through", () => {
+    expect(renderHostSourceUrl("https://h.test/a/b?x=1#y")).toBe("https://h.test/a/b"); // assertion
+    expect(renderHostSourceUrl("not a url")).toBe("not a url"); // assertion
   });
-
-  test("projectHostSourceResult maps an async iterable", async () => {
-    const src = (async function* () {
-      yield record();
-      yield record({ hostSourceVisibility: "shared" });
-    })();
-    const seen: any[] = [];
-    for await (const row of projectHostSourceResult(src, "agent-b")) seen.push(row);
-    expect(seen.map((r) => r.hostSource)).toEqual([HOST_SOURCE_WITHHELD, POINTER]); // assertion
-  });
-});
-
-describe("A3 drift tripwire — every read surface wires the projection", () => {
-  const surfaces: Array<[string, RegExp]> = [
-    ["resources/Memory.ts", /projectHostSource(Result)?\s*\(/], // search() + get()
-    ["resources/SemanticSearch.ts", /projectHostSource\s*\(/],
-    ["resources/MemoryBootstrap.ts", /projectHostSource\s*\(/],
-  ];
-  for (const [file, re] of surfaces) {
-    test(`${file} calls the projection`, () => {
-      const src = readFileSync(join(ROOT, file), "utf8");
-      expect(re.test(src)).toBe(true); // assertion: wired
-    });
-  }
 });

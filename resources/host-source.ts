@@ -28,8 +28,11 @@ export const HOST_SOURCE_ID_RE = /^[A-Za-z0-9._:/@#-]{1,256}$/;
 /** The url cap (A2), in characters. */
 export const HOST_SOURCE_URL_MAX = 2048;
 
-/** Control characters (C0 + DEL) and bidi overrides are refused anywhere (A2). */
-const FORBIDDEN = /[\u0000-\u001F\u007F\u202A-\u202E\u2066-\u2069]/;
+/** Control characters (C0, DEL, the C1 range U+0080-U+009F including U+0085)
+ *  and the FULL bidi set (LRE/RLE/PDF/LRO/RLO U+202A-U+202E, the isolates
+ *  U+2066-U+2069, and the marks LRM U+200E / RLM U+200F) are refused anywhere
+ *  (A2). */
+const FORBIDDEN = /[\u0000-\u001F\u007F-\u009F\u200E\u200F\u202A-\u202E\u2066-\u2069]/;
 
 export interface HostSourceInput {
   v?: unknown;
@@ -109,7 +112,12 @@ export function validateHostSource(input: unknown): HostSourceResult {
       return { ok: false, error: `hostSource.url ${JSON.stringify(u.s)} is not a valid URL` };
     }
     if (parsed.protocol !== "https:") return { ok: false, error: "hostSource.url must be https" };
-    if (parsed.username !== "" || parsed.password !== "") {
+    // Userinfo is refused — INCLUDING EMPTY userinfo ("https://@host/"), which
+    // parses with parsed.username === "" and parsed.password === "" (A2 fix).
+    // Detect the "@" in the authority directly so an empty userinfo cannot slip
+    // through the username/password check.
+    const authority = u.s.replace(/^https:\/\//i, "").split(/[/?#]/)[0];
+    if (authority.includes("@") || parsed.username !== "" || parsed.password !== "") {
       return { ok: false, error: "hostSource.url must not carry userinfo" };
     }
     url = u.s;

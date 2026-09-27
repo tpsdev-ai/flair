@@ -1,0 +1,91 @@
+/**
+ * memory-declared-attributes.ts — the "declared attributes only" guard
+ * (flair#1940 slice 1 / A1' item 1). PURE: zero imports, so it is unit-
+ * testable and callable from every Memory writer.
+ *
+ * WHY: Harper stores an attribute that is not DECLARED in the schema (the
+ * `schemas/memory.graphql` ~32-35 note records this for `embeddingModel`;
+ * the probe in test/unit/memory-declared-attributes.test.ts re-confirms it
+ * against the pinned harper). So removing a field from the Memory schema does
+ * NOT stop a raw writer from persisting it — a `Memory.put({..., hostSource})`
+ * would still land. The only reliable stop is a whitelist applied on the way
+ * IN, shared by every writer, so no path has to remember the rule again.
+ *
+ * The pointer inputs (`hostSource`, `hostSourceScope`, `hostSourceVisibility`)
+ * are NOT declared Memory attributes after A1'; they are consumed by
+ * Memory.post()/put() (and MemoryHostSource's own resource) BEFORE the content
+ * reaches this guard, so the guard strips them like any other undeclared key.
+ *
+ * DECLARED_MEMORY_ATTRIBUTES is the schema's field list. A drift tripwire
+ * (test/unit/memory-declared-attributes.test.ts) parses `type Memory` out of
+ * schemas/memory.graphql and fails if this constant and the schema disagree,
+ * so the whitelist can never silently fall behind the schema.
+ */
+
+/** Every DECLARED attribute of `type Memory` in schemas/memory.graphql, in
+ *  schema order. Keep in sync with the schema (the drift test enforces it). */
+export const DECLARED_MEMORY_ATTRIBUTES = Object.freeze([
+  "id",
+  "agentId",
+  "content",
+  "contentHash",
+  "trigger",
+  "visibility",
+  "embedding",
+  "embeddingModel",
+  "tags",
+  "durability",
+  "source",
+  "createdAt",
+  "updatedAt",
+  "expiresAt",
+  "retrievalCount",
+  "lastRetrieved",
+  "usageCount",
+  "promotionStatus",
+  "promotedAt",
+  "promotedBy",
+  "archived",
+  "archivedAt",
+  "archivedBy",
+  "parentId",
+  "derivedFrom",
+  "sessionId",
+  "lastReflected",
+  "supersedes",
+  "subject",
+  "summary",
+  "validFrom",
+  "validTo",
+  "_safetyFlags",
+  "provenance",
+  "originatorInstanceId",
+  "metadata",
+  "entities",
+] as const);
+
+const DECLARED = new Set<string>(DECLARED_MEMORY_ATTRIBUTES as readonly string[]);
+
+/** True when `key` is a declared Memory attribute. */
+export function isDeclaredMemoryAttribute(key: string): boolean {
+  return DECLARED.has(key);
+}
+
+/**
+ * Drop every UNDECLARED attribute from a Memory write body, IN PLACE, and
+ * return the list of keys removed. A non-object body is returned untouched.
+ * `id` is always kept (Harper assigns it when absent; a supplied id is the
+ * caller's own key, never an undeclared field).
+ */
+export function stripUndeclaredMemoryAttributes(content: unknown): string[] {
+  if (!content || typeof content !== "object" || Array.isArray(content)) return [];
+  const obj = content as Record<string, unknown>;
+  const removed: string[] = [];
+  for (const key of Object.keys(obj)) {
+    if (!DECLARED.has(key)) {
+      delete obj[key];
+      removed.push(key);
+    }
+  }
+  return removed;
+}

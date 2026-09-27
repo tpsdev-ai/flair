@@ -11,105 +11,22 @@
  * The fix extracts the correct composition into record-type-kit.ts's
  * makeScopedSearch(), which both resources now compose.
  *
- * No other test/unit/ file imports resources/Memory.ts with a harper mock
- * (memory-soul-read-gate.test.ts deliberately avoids it — see its docstring),
- * so this file owns the mock+import with no collision risk.
+ * The harper mock is SHARED with memory-host-source.test.ts (both import
+ * resources/Memory.ts) via test/helpers/memory-search-harness.ts, so the two
+ * files run in one process without racing for the Memory superclass binding.
  */
-import { describe, it, expect, beforeEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach } from "bun:test";
+import {
+  harnessState,
+  resetHarnessState,
+  installMemoryHarperMock,
+} from "../helpers/memory-search-harness";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete (process.env as any).FLAIR_PUBLIC;
 
-// ─── In-memory Harper Memory mock ───────────────────────────────────────────
-
-let memoryStore: Map<string, any>;
-let instanceRow: any = null;
-
-function matchesCondition(record: any, cond: any): boolean {
-  if (cond.operator && Array.isArray(cond.conditions)) {
-    const results = cond.conditions.map((c: any) => matchesCondition(record, c));
-    return cond.operator === "or" ? results.some(Boolean) : results.every(Boolean);
-  }
-  const fieldVal = record[cond.attribute];
-  if (cond.comparator === "equals") return fieldVal === cond.value;
-  if (cond.comparator === "not_equal") return fieldVal !== cond.value;
-  return true;
-}
-
-class BaseMemory {
-  async get(target?: any) {
-    const id = typeof target === "string" ? target : target?.id;
-    return memoryStore.get(id) ?? null;
-  }
-  async put(content: any) {
-    memoryStore.set(content.id, { ...content });
-    return { ...content };
-  }
-  async post(content: any) {
-    const id = content.id ?? `mem-${Math.random().toString(36).slice(2)}`;
-    content.id = id;
-    memoryStore.set(id, { ...content });
-    return { ...content };
-  }
-  search(query?: any) {
-    // Respect query.operator — Harper combines top-level conditions with
-    // the query's operator (default "and").  This is the behaviour the
-    // boolean-injection guard protects against: a caller-supplied
-    // `operator: "or"` at the top level would OR the scope condition with
-    // the caller's conditions if the scope is flat-prepended instead of
-    // nested.
-    const topLevel = Array.isArray(query) ? { conditions: query, operator: "and" } : query || {};
-    const conds = Array.isArray(topLevel.conditions) ? topLevel.conditions : [];
-    const op = topLevel.operator || "and";
-    let records = Array.from(memoryStore.values());
-    if (conds.length > 0) {
-      records = records.filter((r) => {
-        const results = conds.map((c: any) => matchesCondition(r, c));
-        return op === "or" ? results.some(Boolean) : results.every(Boolean);
-      });
-    }
-    async function* gen() {
-      for (const r of records) yield r;
-    }
-    return gen();
-  }
-  async delete(id: any) {
-    memoryStore.delete(id);
-    return { ok: true };
-  }
-}
-
-const databasesMock = {
-  flair: {
-    Memory: BaseMemory,
-    Agent: { get: async () => null, search: async () => [] },
-    Instance: {
-      search: () => {
-        async function* gen() {
-          if (instanceRow) yield instanceRow;
-        }
-        return gen();
-      },
-    },
-    MemoryGrant: {
-      search: () => {
-        async function* gen() {
-          // empty — no grants in these tests
-        }
-        return gen();
-      },
-    },
-  },
-};
-
-mock.module("harper", () => ({
-  server: { http: () => {}, getUser: async () => null },
-  databases: databasesMock,
-  Resource: class {},
-}));
-
-const { Memory } = await import("../../resources/Memory.ts");
-const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");
+const { Memory, _resetLocalInstanceIdCacheForTests } = await installMemoryHarperMock();
+const memoryStore = harnessState.memoryStore;
 
 function makeMemory(ctxRequest: any) {
   const r: any = new (Memory as any)();
@@ -130,8 +47,7 @@ function memoryRow(overrides: Record<string, any> = {}) {
 }
 
 beforeEach(() => {
-  memoryStore = new Map();
-  instanceRow = null;
+  resetHarnessState();
   _resetLocalInstanceIdCacheForTests();
 });
 

@@ -13,6 +13,13 @@ import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveAllowedOwners } from "./memory-read-scope.js";
 import { assertValidVisibility, assertVisibilityAllowedForDurability } from "./memory-visibility.js";
 import { validateHostSource } from "./host-source.js";
+import {
+  buildPointerRow,
+  extractPointerInputs,
+  loadPointerRows,
+  MEMORY_HOST_SOURCE_TABLE,
+} from "./memory-host-source.js";
+import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
 import {
@@ -40,8 +47,115 @@ import { attachTrust } from "./trust-block.js";
 import { recordCitations } from "./usage-recording.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 import { applyHitStats, clearHitStats, overlayHitStatsResult } from "./hit-tracking.js";
-import { projectHostSource, projectHostSourceResult } from "./host-source-visibility.js";
+import { projectHostSource } from "./host-source-visibility.js";
 import { refuseStaleClientWrite, stripClientVersionPassthrough } from "./client-version-gate.js";
+
+/** flair#1940 A1' — a named 400 for an invalid host pointer (reject, never
+ *  truncate). Same shape the pre-A1' inline checks returned. */
+function hostSourceBadRequest(error: string, message: string): Response {
+  return new Response(JSON.stringify({ error, message }), {
+    status: 400,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function hostSourceTable(): any {
+  return (databases as any).flair?.[MEMORY_HOST_SOURCE_TABLE];
+}
+
+/** The authenticated author id for a pointer row, or "" when there is no
+ *  principal (internal write). NEVER the body. */
+function pointerAuthorId(auth: AgentAuthVerdict): string {
+  return auth.kind === "agent" ? auth.agentId : "";
+}
+
+/**
+ * flair#1940 A1' — validate the write body's pointer inputs and build the
+ * pointer row (canonical hostSource + scopeAtWrite + server-stamped
+ * authorId/receivedAt). Returns a 400 `denial` on an invalid pointer/scope,
+ * `row: null` when the body carries no pointer, else the row to persist.
+ */
+function buildPointerForWrite(args: {
+  inputs: { hostSource: unknown; hostSourceScope: unknown };
+  memoryId: string;
+  visibility: string | null | undefined;
+  auth: AgentAuthVerdict;
+}): { row: ReturnType<typeof buildPointerRow> | null; denial?: Response } {
+  const { inputs, memoryId, visibility, auth } = args;
+  if (inputs.hostSource === undefined || inputs.hostSource === null) {
+    if (inputs.hostSourceScope !== undefined) {
+      return { row: null, denial: hostSourceBadRequest("invalid_host_source_scope", "hostSourceScope requires a hostSource") };
+    }
+    return { row: null };
+  }
+  const hs = validateHostSource(inputs.hostSource);
+  if (!hs.ok) return { row: null, denial: hostSourceBadRequest("invalid_host_source", hs.error) };
+  let scopeAtWrite: string | null = null;
+  if (inputs.hostSourceScope !== undefined) {
+    if (inputs.hostSourceScope !== "record") {
+      return {
+        row: null,
+        denial: hostSourceBadRequest(
+          "invalid_host_source_scope",
+          `hostSourceScope must be "record" or omitted; a scope wider than the record is refused (got ${JSON.stringify(inputs.hostSourceScope)})`,
+        ),
+      };
+    }
+    scopeAtWrite = visibility ?? null;
+  }
+  return {
+    row: buildPointerRow({
+      memoryId,
+      canonical: hs.canonical,
+      scopeAtWrite,
+      authorId: pointerAuthorId(auth),
+      receivedAt: new Date().toISOString(),
+    }),
+  };
+}
+
+/**
+ * flair#1940 A1' item 2 — persist the pointer row in the SAME request
+ * transaction as the Memory row (no detached txn between). A pointer that
+ * cannot be persisted fails the WHOLE write: the just-written Memory row is
+ * removed so no Memory row without its pointer survives, and a 500 is
+ * returned. Returns null on success.
+ */
+async function persistPointerRow(
+  row: ReturnType<typeof buildPointerRow>,
+  removeMemoryRow: () => Promise<unknown>,
+): Promise<Response | null> {
+  const table = hostSourceTable();
+  if (!table?.put) {
+    await removeMemoryRow().catch(() => {});
+    return new Response(JSON.stringify({ error: "host_source_persist_failed", message: "MemoryHostSource table unavailable" }), {
+      status: 500,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  try {
+    await table.put(row);
+    return null;
+  } catch (err) {
+    await removeMemoryRow().catch(() => {});
+    return new Response(JSON.stringify({ error: "host_source_persist_failed", message: String((err as Error)?.message ?? err) }), {
+      status: 500,
+      headers: { "content-type": "application/json" },
+    });
+  }
+}
+
+/** flair#1940 A1' item 6 — best-effort pointer cascade where a Memory row dies. */
+async function deletePointerRow(memoryId: string): Promise<void> {
+  const table = hostSourceTable();
+  if (!table?.delete) return;
+  await table.delete(memoryId);
+}
+
+/** flair#1940 A1' — apply the gated join to ONE record for a reader. */
+function joinPointerForReader(record: any, readerAgentId: string | null | undefined, pointer: any): any {
+  return projectHostSource(record, readerAgentId, pointer);
+}
 
 /**
  * flair#744 slice 1 — read the opt-in `includeTrust` flag for a by-id get.
@@ -606,7 +720,11 @@ export class Memory extends (databases as any).flair.Memory {
     if (result && typeof result === "object" && !(result instanceof Response) && typeof (result as any).agentId === "string") {
       const auth = await resolveAgentAuth((this as any).getContext?.());
       if (auth.kind === "agent" && !auth.isAdmin) {
-        projected = projectHostSource(result, auth.agentId);
+        // A1' item 4: the gated join — read this record's pointer ROW and
+        // project it for THIS reader (pointer | "withheld" | nothing).
+        const id = (result as any).id;
+        const pointers = await loadPointerRows([id]);
+        projected = joinPointerForReader(result, auth.agentId, pointers.get(id) ?? null);
       }
     }
     // flair#744 slice 1 — opt-in inline trust-evidence block, attached ONLY to
@@ -663,16 +781,24 @@ export class Memory extends (databases as any).flair.Memory {
     // makeScopedSearch (record-type-kit.ts) — same correct composition
     // MemoryCandidate.search() already applies — so a caller-supplied
     // `operator: "or"` cannot boolean-inject past the owner scope.
-    return overlayHitStatsResult(
-      // flair#1940 A3 (search surface): project the pointer for THIS reader —
-      // the scoped agentId is the reader. A record with no hostSource passes
-      // through unchanged.
-      projectHostSourceResult(
-        memoryScopedSearch(gate.agentId, query, (q) => withDetachedTxn(ctx, () => super.search(q))),
-        gate.agentId,
-      ),
-      ctx,
-    );
+    // A1' item 4: fetch pointers for the WHOLE result set in ONE batched query
+    // (never one per row), then project each row. The set is materialized so
+    // the batch is a single call.
+    const readerAgentId = gate.agentId;
+    const source = memoryScopedSearch(readerAgentId, query, (q) => withDetachedTxn(ctx, () => super.search(q)));
+    const joined = (async function* joinPointerBatch() {
+      const rows: any[] = [];
+      // memoryScopedSearch returns a Promise of the iterable (its scopedSearch
+      // is async); await it before iterating.
+      for await (const row of await (source as any)) rows.push(row);
+      const ids = rows.map((r) => r?.id).filter((id): id is string => typeof id === "string" && id.length > 0);
+      const pointers = await loadPointerRows(ids);
+      for (const row of rows) {
+        const id = row?.id;
+        yield typeof id === "string" ? joinPointerForReader(row, readerAgentId, pointers.get(id) ?? null) : row;
+      }
+    })();
+    return overlayHitStatsResult(joined, ctx);
   }
 
   async post(content: any, context?: any) {
@@ -919,45 +1045,15 @@ export class Memory extends (databases as any).flair.Memory {
       if (vec) { content.embedding = vec; content.embeddingModel = getModelId(); }
     }
 
-    // ── flair#1940 slice 1 (A2): validate+canonicalise hostSource before
-    // anything is stored. Reject, never truncate/coerce. ──
-    if (content.hostSource !== undefined && content.hostSource !== null) {
-      const hs = validateHostSource(content.hostSource);
-      if (!hs.ok) {
-        return new Response(
-          JSON.stringify({ error: "invalid_host_source", message: hs.error }),
-          { status: 400, headers: { "content-type": "application/json" } },
-        );
-      }
-      content.hostSource = hs.canonical;
-    }
-
-    // ── flair#1940 slice 1 (A3): the pointer scope is FIXED at write time. ──
-    // The only opt-in is "record": the server stores the record's visibility AS
-    // IT IS NOW (next to the pointer). The pointer's effective visibility is the
-    // narrower of that stored value and the record's CURRENT visibility, so a
-    // later widening of the record never widens the pointer (A3). Any other
-    // scope value would make the pointer wider than the record → refused.
-    // `hostSourceScope` is write-body-only (stripped, like claimedClient).
-    if (content.hostSourceScope !== undefined) {
-      if (content.hostSourceScope !== "record") {
-        return new Response(
-          JSON.stringify({
-            error: "invalid_host_source_scope",
-            message: `hostSourceScope must be "record" or omitted; a scope wider than the record is refused (got ${JSON.stringify(content.hostSourceScope)})`,
-          }),
-          { status: 400, headers: { "content-type": "application/json" } },
-        );
-      }
-      if (content.hostSource === undefined || content.hostSource === null) {
-        return new Response(
-          JSON.stringify({ error: "invalid_host_source_scope", message: "hostSourceScope requires a hostSource" }),
-          { status: 400, headers: { "content-type": "application/json" } },
-        );
-      }
-      content.hostSourceVisibility = content.visibility ?? null;
-    }
-    delete content.hostSourceScope;
+    // ── flair#1940 slice 1 (A1'): the host pointer is NOT a Memory attribute. ──
+    // Consume the write-body-only pointer inputs OUT of the row (they must
+    // never be persisted on the Memory row), validate them, and build the
+    // pointer row written alongside the Memory row below. A client-supplied
+    // `hostSourceVisibility` is a FORGERY of the server's write-time stamp and
+    // is dropped here (never read). Reject, never truncate/coerce.
+    const pointerInputs = extractPointerInputs(content);
+    const pointer = buildPointerForWrite({ inputs: pointerInputs, memoryId: content.id ?? "", visibility: content.visibility, auth });
+    if (pointer.denial) return pointer.denial;
 
     // Write-time provenance stamp (memory-provenance slice 1) — see
     // buildProvenance's doc above. Stamped last, right before persist, so it
@@ -980,7 +1076,18 @@ export class Memory extends (databases as any).flair.Memory {
     await stampOriginatorInstanceId(content);
 
     // ── Write the new record FIRST ──────────────────────────────────────────
+    // A1' item 1: persist ONLY declared Memory attributes — an undeclared key
+    // (including a pointer field a raw writer tried to slip in) is dropped.
+    stripUndeclaredMemoryAttributes(content);
     const result = await super.post(content);
+    // A1' item 2: write the pointer row, in the SAME request transaction, so
+    // the row and its pointer commit together or not at all. A pointer that
+    // cannot be persisted removes the just-written row and fails the write.
+    if (pointer.row) {
+      pointer.row.memoryId = (result as any)?.id ?? content.id ?? "";
+      const persistDenial = await persistPointerRow(pointer.row, () => super.delete(pointer.row!.memoryId));
+      if (persistDenial) return persistDenial;
+    }
     // flair#1357 — read-your-write for the lexical leg. The table change feed
     // (resources/bm25-index-service.ts) is the CORRECTNESS mechanism; this
     // synchronous hook is what makes a store immediately searchable rather
@@ -1029,6 +1136,13 @@ export class Memory extends (databases as any).flair.Memory {
       if (stale) return stale;
     }
     stripClientVersionPassthrough(content);
+    // A1' item 1: patch() is a Memory writer too. Drop any pointer inputs and
+    // every undeclared attribute here, so a PATCH can never carry a pointer
+    // onto the row (the pointer is written ONLY by post()/put() and the table
+    // resource). A body-supplied hostSource/hostSourceScope/hostSourceVisibility
+    // therefore leaves no pointer anywhere.
+    extractPointerInputs(content);
+    stripUndeclaredMemoryAttributes(content);
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
     // ── flair#1542 + residual (Kern #1543 review 5135715289): reject skill patches ──
@@ -1318,41 +1432,14 @@ export class Memory extends (databases as any).flair.Memory {
       // archivedBy should be set by the caller (CLI stamps req.tpsAgent via query param)
     }
 
-    // ── flair#1940 slice 1 (A2): validate+canonicalise hostSource before
-    // anything is stored. Reject, never truncate/coerce. ──
-    if (content.hostSource !== undefined && content.hostSource !== null) {
-      const hs = validateHostSource(content.hostSource);
-      if (!hs.ok) {
-        return new Response(
-          JSON.stringify({ error: "invalid_host_source", message: hs.error }),
-          { status: 400, headers: { "content-type": "application/json" } },
-        );
-      }
-      content.hostSource = hs.canonical;
-    }
-
-    // ── flair#1940 slice 1 (A3): the pointer scope is FIXED at write time. ──
-    // Identical rule to post(): the only opt-in is "record" (store the record's
-    // visibility as it is now, next to the pointer); anything wider is refused.
-    if (content.hostSourceScope !== undefined) {
-      if (content.hostSourceScope !== "record") {
-        return new Response(
-          JSON.stringify({
-            error: "invalid_host_source_scope",
-            message: `hostSourceScope must be "record" or omitted; a scope wider than the record is refused (got ${JSON.stringify(content.hostSourceScope)})`,
-          }),
-          { status: 400, headers: { "content-type": "application/json" } },
-        );
-      }
-      if (content.hostSource === undefined || content.hostSource === null) {
-        return new Response(
-          JSON.stringify({ error: "invalid_host_source_scope", message: "hostSourceScope requires a hostSource" }),
-          { status: 400, headers: { "content-type": "application/json" } },
-        );
-      }
-      content.hostSourceVisibility = content.visibility ?? null;
-    }
-    delete content.hostSourceScope;
+    // ── flair#1940 slice 1 (A1'): the host pointer is NOT a Memory attribute. ──
+    // Identical rule to post(): consume the write-body-only pointer inputs OUT
+    // of the row, validate them, and build the pointer row written alongside
+    // the Memory row below. A client-supplied `hostSourceVisibility` is dropped
+    // (never read). Reject, never truncate/coerce.
+    const pointerInputs = extractPointerInputs(content);
+    const pointer = buildPointerForWrite({ inputs: pointerInputs, memoryId: content.id ?? "", visibility: content.visibility, auth });
+    if (pointer.denial) return pointer.denial;
 
     // Write-time provenance stamp (memory-provenance slice 1) — see
     // buildProvenance's doc above post(). Applies to every put() (fresh
@@ -1378,7 +1465,16 @@ export class Memory extends (databases as any).flair.Memory {
     await stampOriginatorInstanceId(content);
 
     // ── Write the new/updated record FIRST ──────────────────────────────────
+    // A1' item 1: persist ONLY declared Memory attributes (see post()).
+    stripUndeclaredMemoryAttributes(content);
     const result = await super.put(content);
+    // A1' item 2: write the pointer row, in the SAME request transaction (see
+    // post()). A pointer that cannot be persisted fails the whole put.
+    if (pointer.row) {
+      pointer.row.memoryId = (result as any)?.id ?? content.id ?? "";
+      const persistDenial = await persistPointerRow(pointer.row, () => super.delete(pointer.row!.memoryId));
+      if (persistDenial) return persistDenial;
+    }
     // flair#1357 — read-your-write for the lexical leg (see post()).
     noteMemoryUpsert(content);
     noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
@@ -1415,6 +1511,8 @@ export class Memory extends (databases as any).flair.Memory {
     const deletedId = typeof id === "string" ? id : record?.id;
     if (typeof deletedId === "string" && deletedId.length > 0) {
       await clearHitStats(deletedId, (this as any).getContext?.()).catch(() => {});
+      // A1' item 6: cascade — the pointer row dies with its Memory row.
+      await deletePointerRow(deletedId).catch(() => {});
     }
     return deleted;
   }

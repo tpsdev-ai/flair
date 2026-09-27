@@ -55,14 +55,18 @@ add("Memory", ["writer:(databases as any).flair.Memory.put#1"],
   "closeSupersededRecord: read-modify-write close of an existing record (stamps validTo), preserves existing content/tags — not a new skill write.");
 add("Memory", ["writer:patchRecord#1"],
   "derivedFrom/lastReflected bookkeeping patch — never writes skill content.");
-add("Memory", ["writer:super.delete#1"],
-  "Memory.delete(): removal, not a write.");
+add("Memory", ["writer:super.delete#1", "writer:super.delete#2", "writer:super.delete#3"],
+  "Memory.delete() and the A1' pointer-write rollback deletes: removal, not a write.");
+add("Memory", ["writer:table.put#1", "writer:table.delete#1"],
+  "A1': MemoryHostSource pointer row write/delete — a different table, never skill content.");
 add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2"],
   "Read-only table alias (get/search) — no write through this handle.");
 
 // ── Non-skill writers in other modules ──
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.delete#1", "writer:(databases as any).flair.Memory.update#1"],
   "Maintenance (archive/expiry) — non-skill.");
+add("MemoryMaintenance", ["writer:table.delete#1"],
+  "A1': MemoryHostSource pointer cascade — a different table, never skill content.");
 add("MemoryReflect", ["writer:patchRecordSilent#1"],
   "lastReflected stamp — non-skill.");
 add("MemoryReindex", ["writer:Memory.put#1"],

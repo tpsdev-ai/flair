@@ -18,6 +18,14 @@
  */
 
 import { Resource, databases } from "harper";
+import { MEMORY_HOST_SOURCE_TABLE } from "./memory-host-source.js";
+
+/** flair#1940 A1' item 6 — best-effort pointer cascade where a Memory row dies. */
+async function deletePointerRow(memoryId: string): Promise<void> {
+  const table = (databases as any).flair?.[MEMORY_HOST_SOURCE_TABLE];
+  if (!table?.delete) return;
+  await table.delete(memoryId);
+}
 import { isAdmin } from "./agent-auth.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 
@@ -76,6 +84,9 @@ export class MemoryMaintenance extends Resource {
           if (!dryRun) {
             try {
               await (databases as any).flair.Memory.delete(record.id);
+              // flair#1940 A1' item 6: cascade — the pointer row dies with the
+              // Memory row.
+              await deletePointerRow(record.id).catch(() => {});
               // flair#1357 — ephemeral expiry removes the row from what the
               // lexical leg may score.
               noteMemoryDelete(record.id);

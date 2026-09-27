@@ -21,7 +21,6 @@ import {
 // retrievalCount hit-tracking side effects (see resources/
 // semantic-retrieval-core.ts's module doc for the full boundary).
 import { retrieveCandidates, DEFAULT_SELECT } from "./semantic-retrieval-core.js";
-import { projectHostSource } from "./host-source-visibility.js";
 import { retrievalMode } from "./bm25.js";
 import { buildTrustBlock } from "./trust-block.js";
 import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
@@ -280,11 +279,11 @@ const MAX_CANDIDATE_POOL = 100;
 // `m._source !== agentId` is the "is this a teammate's finding" check; own
 // memories never carry `_source` at all.
 function formatMemory(m: any, agentId?: string): string {
-  // flair#1940 A3 (bootstrap surface): project the host pointer for the
-  // bootstrapping agent BEFORE it can be cited. A pointer this reader may not
-  // see becomes "withheld" (present, unrendered); a record with no pointer is
-  // unchanged. Slice 4's citation constant reads this projected value.
-  m = projectHostSource(m, agentId);
+  // flair#1940 A1' item 5: bootstrap does NOT render pointers in this slice.
+  // The pointer lives in MemoryHostSource and is joined only into Memory.get/
+  // search/SemanticSearch results; the bootstrap citation (A6) arrives in slice
+  // 4. So this surface leaves the record unchanged.
+  void agentId;
   const tag = m.durability === "permanent" ? "🔒" : m.durability === "persistent" ? "📌" : "📝";
   const date = m.createdAt ? ` (${m.createdAt.slice(0, 10)})` : "";
   const chain = m.supersedes ? " [supersedes earlier decision]" : "";

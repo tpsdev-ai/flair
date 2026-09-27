@@ -47,7 +47,14 @@ export type SkipReason =
   // PRINCIPAL_OWNING_TABLES) whose principalId is absent or does not equal
   // data.agentId. Absent is a skip, not an accept — deriving the
   // requirement from field presence would make the check opt-out.
-  | "principal_mismatch";
+  | "principal_mismatch"
+  // ─── flair#1940 A1' item 5 (hostSource is NOT federated) ────────────────
+  // A record whose data carries a pointer field (hostSource / hostSourceScope
+  // / hostSourceVisibility) is refused, never merged. The pointer table
+  // (MemoryHostSource) is absent from FEDERATION_TABLE_POLICY, so it is never
+  // in the sync's table set either (an inbound "MemoryHostSource" row skips as
+  // "unknown_table").
+  | "pointer_not_federated";
 
 /**
  * Static policy for every table FederationSync will merge.
@@ -190,6 +197,15 @@ export type ClassifyResult =
   | { action: "merge"; originator: string }
   | { action: "skip"; reason: SkipReason };
 
+/** The Memory attributes that would carry a pointer into an inbound federated
+ *  row (flair#1940 A1' item 5). Local + pure — this module stays DB-free. */
+const FEDERATION_POINTER_FIELDS = ["hostSource", "hostSourceScope", "hostSourceVisibility"] as const;
+
+function inboundCarriesPointer(data: unknown): boolean {
+  if (!data || typeof data !== "object") return false;
+  return FEDERATION_POINTER_FIELDS.some((f) => (data as Record<string, unknown>)[f] !== undefined);
+}
+
 export function classifyRecord(
   record: SyncRecord,
   peerRole: string,
@@ -200,6 +216,11 @@ export function classifyRecord(
 ): ClassifyResult {
   if (!knownTables.has(record.table)) {
     return { action: "skip", reason: "unknown_table" };
+  }
+
+  // flair#1940 A1' item 5: refuse an inbound row carrying a host pointer.
+  if (inboundCarriesPointer(record.data)) {
+    return { action: "skip", reason: "pointer_not_federated" };
   }
 
   const originator = record.originatorInstanceId ?? receiverInstanceId;
