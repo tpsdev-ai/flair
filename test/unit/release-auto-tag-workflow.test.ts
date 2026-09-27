@@ -15,7 +15,7 @@
  * the invariants: `decide` holds no App credential at all, and every checkout
  * sets `persist-credentials: false`.
  */
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -347,34 +347,43 @@ describe("release-auto-tag workflow — the coupling and the allowlist file", ()
 // ── CODEOWNERS: the trust root (#1890, round 4 item 2) ────────────────────────
 
 /**
- * CODEOWNERS glob → regex (gitignore-style), the ONE matcher for every ownership test here:
- * a leading "/" anchors to the repo root; "**\/" matches zero or more directories; any other "**"
- * matches anything; "*" and "?" stay within one path segment; a trailing "/" names a directory; a
- * pattern without a wildcard can also name a directory (it matches the path or anything below it).
+ * CODEOWNERS matching, decided by GIT. GitHub documents CODEOWNERS patterns as gitignore patterns
+ * (without "!" negation or "[ ]" ranges), so the oracle is `git check-ignore --no-index` in a
+ * throwaway repository whose .gitignore holds the one pattern. Three rounds of a hand-written
+ * glob-to-regex translation each missed a gitignore rule (zero-directory and trailing "**\/",
+ * anchoring by an internal slash, "**" inside a segment); git has none of those gaps. The oracle is
+ * hermetic: no global or system config, no global excludes file, and case-SENSITIVE matching (a
+ * macOS clone defaults core.ignorecase to true; CODEOWNERS paths are case-sensitive).
  */
-function codeownersRegex(pattern: string): RegExp {
-  const anchored = pattern.startsWith("/");
-  let body = (anchored ? pattern.slice(1) : pattern).replace(/[.+^${}()|[\]\\]/g, "\\$&");
-  body = body
-    .replace(/\*\*\//g, "\u0001")
-    .replace(/\*\*/g, "\u0000")
-    .replace(/\*/g, "[^/]*")
-    .replace(/\?/g, "[^/]")
-    .replace(/\u0001/g, "(?:.*/)?")
-    .replace(/\u0000/g, ".*");
-  if (body.endsWith("/")) body += ".*";
-  const prefix = anchored ? "^" : "^(?:.*/)?";
-  return new RegExp(prefix + body + "(?:/.*)?$");
+const CODEOWNERS_ORACLE = mkdtempSync(join(tmpdir(), "codeowners-oracle-"));
+const ORACLE_ENV = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+{
+  const init = spawnSync("git", ["init", "-q", CODEOWNERS_ORACLE], { env: ORACLE_ENV, encoding: "utf8", timeout: 10_000 });
+  if (init.status !== 0) throw new Error(`codeowners oracle: git init failed (${init.status}): ${init.stderr}`);
+}
+afterAll(() => rmSync(CODEOWNERS_ORACLE, { recursive: true, force: true }));
+
+function codeownersMatches(pattern: string, path: string): boolean {
+  if (pattern.startsWith("!") || /[[\]]/.test(pattern)) {
+    throw new Error(`CODEOWNERS does not support "!" or "[ ]" patterns: ${pattern}`);
+  }
+  writeFileSync(join(CODEOWNERS_ORACLE, ".gitignore"), `${pattern}\n`);
+  const r = spawnSync(
+    "git",
+    ["-C", CODEOWNERS_ORACLE, "-c", "core.excludesFile=/dev/null", "-c", "core.ignorecase=false", "check-ignore", "--no-index", "-q", path],
+    { env: ORACLE_ENV, encoding: "utf8", timeout: 10_000 },
+  );
+  if (r.status === 0) return true;
+  if (r.status === 1) return false;
+  throw new Error(`codeowners oracle: git check-ignore failed (${r.status}) for ${pattern} vs ${path}: ${r.stderr}`);
 }
 
 describe("release-auto-tag workflow — the trust root is owned by the repo admin", () => {
-  /** One CODEOWNERS matcher for every ownership test in this file (codeownersRegex, below the imports). */
-  function matches(pattern: string, path: string): boolean {
-    return codeownersRegex(pattern).test(path);
-  }
+  /** Every ownership test in this file asks git (codeownersMatches, above). */
+  const matches = codeownersMatches;
   /**
    * EFFECTIVE ownership: the LAST matching rule wins (CODEOWNERS order), so a
-   * later override rule — anywhere in the file — changes the answer, and this
+   * later rule whose pattern git matches to the path changes the answer, and this
    * test fails. Repo-relative paths (no leading slash).
    */
   function effectiveOwner(path: string): string | null {
@@ -419,11 +428,16 @@ describe("release-auto-tag workflow — the trust root is owned by the repo admi
     // NEGATIVE CONTROL: a path nobody protected still falls to the catch-all, so
     // the matcher is not trivially returning @heskew for everything.
     expect(effectiveOwner("README.md")).toBe("@tpsdev-ai/reviewers");
-    // The matcher sees zero-directory "**/" overrides too (Gauge pass 2 on #1932): git matches
-    // "/.github/workflows/**/release-promote-poll.yml" to the poll, so such a later rule would win.
-    expect(matches("/.github/workflows/**/release-promote-poll.yml", ".github/workflows/release-promote-poll.yml")).toBe(true);
+    // Controls for the shapes a hand-written matcher missed (Gauge passes 2 and 3 on #1932), each
+    // answered by git: an override in any of the TRUE shapes would win, so it would turn this red.
+    const poll = ".github/workflows/release-promote-poll.yml";
+    expect(matches("/.github/workflows/**/release-promote-poll.yml", poll)).toBe(true); // zero-directory "**/"
+    expect(matches("/.github/**/", poll)).toBe(true); // trailing "**/"
     expect(matches("**/canary-verdict.sh", "scripts/ci/canary-verdict.sh")).toBe(true);
-    expect(matches("/docs/*", "scripts/ci/canary-verdict.sh")).toBe(false);
+    expect(matches("workflows/release-promote-poll.yml", poll)).toBe(false); // an internal slash anchors
+    expect(matches("/.github/**poll.yml", poll)).toBe(false); // "**" inside a segment stays in it
+    expect(matches("/docs/*.md", "docs/nested/file.md")).toBe(false); // "*" never crosses "/"
+    expect(matches("/.github/workflows/RELEASE-PROMOTE-POLL.yml", poll)).toBe(false); // case-sensitive
   });
 });
 
@@ -441,18 +455,16 @@ describe("CODEOWNERS — the shared Renovate preset is in the trust root (#1930)
     // the last rule whose pattern matches it. Patterns are CODEOWNERS globs
     // (gitignore-style), so a later "/.github/*" or "*.json" rule would override
     // the specific one — match every rule, not only the exact path.
-    const toRegex = codeownersRegex;
     const path = ".github/renovate-preset.json";
-    const matches = rules.filter((r) => toRegex(r.pattern).test(path));
+    const matches = rules.filter((r) => codeownersMatches(r.pattern, path));
     expect(matches.at(-1)?.pattern, "the preset's own rule is the last match").toBe("/.github/renovate-preset.json");
     expect(matches.at(-1)?.owners).toBe("@heskew");
     // The matcher itself can fire: a later glob that covers the file would win.
-    expect(toRegex("/.github/*").test(path)).toBe(true);
-    expect(toRegex("*.json").test(path)).toBe(true);
-    expect(toRegex("/docs/*").test(path)).toBe(false);
-    // "**/" includes the zero-directory case: git matches "/.github/**/renovate-preset.json" to the preset.
-    expect(toRegex("/.github/**/renovate-preset.json").test(path)).toBe(true);
-    expect(toRegex("**/renovate-preset.json").test(path)).toBe(true);
+    expect(codeownersMatches("/.github/*", path)).toBe(true);
+    expect(codeownersMatches("*.json", path)).toBe(true);
+    expect(codeownersMatches("/docs/*", path)).toBe(false);
+    expect(codeownersMatches("/.github/**/renovate-preset.json", path)).toBe(true);
+    expect(codeownersMatches("**/renovate-preset.json", path)).toBe(true);
   });
 });
 
