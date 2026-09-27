@@ -17,17 +17,23 @@
  *
  *   LangGraph                    Flair
  *   ---------                    -----
- *   namespace: string[]          tags: ["lg-ns:<joined>", "lg-ns-part:<each>"]
- *   key: string                  id suffix (full id: "lg:<agentId>:<ns>:<key>")
+ *   namespace: string[]          tags: ["lg-ns:<encoded labels joined by />"]  (one tag)
+ *   key: string                  id suffix (full id: "lg:<agentId>:<encoded labels joined by />:<key>")
  *   value: object                content: JSON.stringify(value)
  *   search.query                 SemanticSearch q
  *   search.filter (eq/gt/lt)     applied client-side after retrieval
  *   put(value=null)              DELETE
  *
- * Namespace fan-out: each namespace label gets its own tag prefixed with
- * `lg-ns-part:` so search filters can match prefixes, plus the full joined
- * namespace as `lg-ns:` for exact lookups. (LangGraph forbids periods in
- * labels, so we use `/` as the separator.)
+ * A namespace is stored in ONE form. Each label is escaped, then the labels
+ * are joined by `/`, and that string is the whole `lg-ns:` tag and the middle
+ * of the id. LangGraph forbids `.` in namespace labels, so `.` is the escape
+ * character: `/` is written `.2F` and `:` is written `.3A`, and every other
+ * character is unchanged. Earlier items under valid labels without `/` or `:`
+ * retain their IDs and tags and need no migration. A label that is empty, or
+ * that contains `.`, is invalid and is refused before any id or tag is built.
+ * Both search paths filter on the client: the queryless path lists the agent's full item set and matches the
+ * requested namespace PREFIX against the stored tag, and the semantic path
+ * post-filters the namespace parsed from each id.
  *
  * # Limitations (v1)
  *
@@ -36,9 +42,8 @@
  *   and embeds the full content blob. If you need per-field embedding,
  *   pre-extract the fields and put them as separate items.
  * - `search.filter` operators ($eq/$ne/$gt/$gte/$lt/$lte) are applied
- *   client-side after retrieving the namespace prefix, so filter-heavy
- *   workloads can incur a network round-trip per matching memory. Tag-based
- *   pre-filtering (the namespace prefix) keeps this bounded in practice.
+ *   client-side after retrieving candidates. Filtering follows one backend
+ *   request, so large candidate sets can increase transfer and local processing.
  * - `listNamespaces` returns namespaces seen in the agent's stored memories.
  *   It can't enumerate empty namespaces.
  *
@@ -99,8 +104,60 @@ type Operation =
   | PutOperation
   | ListNamespacesOperation;
 
-const NS_SEP = "/"; // LangGraph forbids periods in namespace labels
+const NS_SEP = "/"; // separator between encoded labels
 const TAG_PREFIX_FULL = "lg-ns:";
+const ESCAPE = "."; // LangGraph forbids "." in labels, so it is our escape character
+
+/**
+ * A namespace label is valid only when it is a non-empty string that does not
+ * contain `.` (LangGraph's own rule — `.` is reserved as the escape char).
+ */
+function isInvalidLabel(label: unknown): boolean {
+  return typeof label !== "string" || label.length === 0 || label.includes(ESCAPE) || !isWellFormed(label);
+}
+
+// An unpaired UTF-16 surrogate cannot be percent-encoded into a request path,
+// so a label or key containing one could never reach the server. (Written as a
+// regex rather than String.prototype.isWellFormed, which needs Node 20.)
+const UNPAIRED_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+function isWellFormed(s: string): boolean {
+  return !UNPAIRED_SURROGATE.test(s);
+}
+
+/** A key is usable only when it is a well-formed string. */
+function isInvalidKey(key: unknown): boolean {
+  return typeof key !== "string" || !isWellFormed(key);
+}
+
+/**
+ * Escape one namespace label for storage: `/` → `.2F`, `:` → `.3A`; every
+ * other character is unchanged. A valid label contains no `.`, so the result
+ * is unambiguous and decodeLabel reverses it exactly.
+ */
+export function encodeLabel(label: string): string {
+  return label.replace(/\//g, ".2F").replace(/:/g, ".3A");
+}
+
+/** Inverse of encodeLabel. */
+export function decodeLabel(encoded: string): string {
+  return encoded.replace(/\.2F/g, "/").replace(/\.3A/g, ":");
+}
+
+/** Encode each label, then join with `/` — the one stored form. */
+function encodeNamespace(namespace: string[]): string {
+  return namespace.map(encodeLabel).join(NS_SEP);
+}
+
+/** Throw if any label is not a non-empty string without `.` (LangGraph's rule). */
+function assertValidNamespace(namespace: string[]): void {
+  namespace.forEach((label, i) => {
+    if (isInvalidLabel(label)) {
+      throw new Error(
+        `FlairStore: refusing namespace label at index ${i}: LangGraph forbids "." in namespace labels, and every label must be a non-empty, well-formed string (no unpaired surrogate). No id or tag was written.`,
+      );
+    }
+  });
+}
 
 /** Single namespace tag — the joined-path form (e.g. "lg-ns:users/profiles").
  *
@@ -114,11 +171,53 @@ const TAG_PREFIX_FULL = "lg-ns:";
  *  add a derived index then — until then, dead storage is worse than a
  *  documented gap. */
 function nsTags(namespace: string[]): string[] {
-  return [`${TAG_PREFIX_FULL}${namespace.join(NS_SEP)}`];
+  return [`${TAG_PREFIX_FULL}${encodeNamespace(namespace)}`];
+}
+
+/**
+ * flair#1939 — does a stored full-namespace tag match this namespace PREFIX?
+ * The prefix labels are encoded (the same one stored form), then
+ * `lg-ns:<encoded>` matches when the encoded prefix equals the tag's encoded
+ * namespace or is a COMPONENT prefix of it (`lg-ns:a/b` matches a prefix of
+ * `("a","b")` and `("a","b","c")`, but NOT `("a","bc")`, and a single label
+ * `"a/b"` encodes to `a.2Fb` and does not match `("a",)`). An EMPTY prefix
+ * matches every `lg-ns:` item, and a prefix with an invalid label matches
+ * nothing. Earlier items under valid labels without `/` or `:` retain their
+ * IDs and tags and need no migration.
+ */
+export function namespaceTagMatches(tags: unknown, prefix: string[]): boolean {
+  if (!Array.isArray(tags)) return false;
+  if (prefix.some(isInvalidLabel)) return false;
+  const joined = encodeNamespace(prefix);
+  for (const tag of tags) {
+    if (typeof tag !== "string" || !tag.startsWith(TAG_PREFIX_FULL)) continue;
+    const ns = tag.slice(TAG_PREFIX_FULL.length);
+    if (joined.length === 0) return true; // empty prefix: every lg-ns item
+    if (ns === joined || ns.startsWith(joined + NS_SEP)) return true;
+  }
+  return false;
 }
 
 function memoryId(agentId: string, namespace: string[], key: string): string {
-  return `lg:${agentId}:${namespace.join(NS_SEP)}:${key}`;
+  return `lg:${agentId}:${encodeNamespace(namespace)}:${key}`;
+}
+
+/**
+ * flair#1939 — does a decoded namespace satisfy one listNamespaces match
+ * condition? Mirrors LangGraph's own store: `matchType` is `prefix` or
+ * `suffix`, and `path` is the label pattern (a `*` element matches any label).
+ */
+export function namespaceMatchesCondition(condition: any, namespace: string[]): boolean {
+  const { matchType, path } = condition ?? {};
+  if (matchType !== "prefix" && matchType !== "suffix") {
+    throw new Error(`listNamespaces: unsupported match type: ${matchType}`);
+  }
+  if (!Array.isArray(path) || path.length > namespace.length) return false;
+  // Validate condition labels before comparing them with decoded stored
+  // namespaces; an invalid condition matches nothing.
+  if (path.some((label: unknown) => label !== "*" && isInvalidLabel(label))) return false;
+  const start = matchType === "prefix" ? 0 : namespace.length - path.length;
+  return path.every((label: unknown, i: number) => label === "*" || namespace[start + i] === label);
 }
 
 function isGet(op: Operation): op is GetOperation {
@@ -266,6 +365,7 @@ export class FlairStore {
   }
 
   private async doGet(op: GetOperation): Promise<Item | null> {
+    if (op.namespace.some(isInvalidLabel) || isInvalidKey(op.key)) return null;
     const id = memoryId(this.agentId, op.namespace, op.key);
     const mem = await this.client.memory.get(id);
     if (!mem) return null;
@@ -273,6 +373,12 @@ export class FlairStore {
   }
 
   private async doPut(op: PutOperation): Promise<void> {
+    assertValidNamespace(op.namespace);
+    if (isInvalidKey(op.key)) {
+      throw new Error(
+        "FlairStore: refusing key: it must be a well-formed string (no unpaired surrogate), because it is sent in a request path. No id was written.",
+      );
+    }
     const id = memoryId(this.agentId, op.namespace, op.key);
     if (op.value === null) {
       await this.client.memory.delete(id);
@@ -291,6 +397,7 @@ export class FlairStore {
   }
 
   private async doSearch(op: SearchOperation): Promise<SearchItem[]> {
+    if (op.namespacePrefix.some(isInvalidLabel)) return [];
     const limit = op.limit ?? 10;
     const offset = op.offset ?? 0;
 
@@ -310,19 +417,21 @@ export class FlairStore {
         tags: r.tags,
       }));
     } else {
-      // Tag-based listing for the namespace prefix.
-      const fullTag = `${TAG_PREFIX_FULL}${op.namespacePrefix.join(NS_SEP)}`;
-      const fetched = await this.client.memory.list({
-        tags: op.namespacePrefix.length > 0 ? [fullTag] : [],
-        limit: Math.max(limit + offset, 20) * 4,
-        order: "createdAt-desc",
-      });
-      candidates = fetched.map((r) => ({
-        id: r.id,
-        content: r.content,
-        createdAt: r.createdAt,
-        tags: r.tags,
-      }));
+      // flair#1939: prefix match on the stored full-namespace tag. The listing
+      // is NOT filtered to the exact tag, so items stored under DESCENDANT
+      // namespaces are candidates; `namespaceTagMatches` selects by
+      // tag-component prefix (component boundary, existing items covered). The
+      // full agent-scoped set is fetched (no candidate cap), so a search never
+      // returns a short page when more matches exist.
+      const fetched = await this.client.memory.list({ order: "createdAt-desc" });
+      candidates = fetched
+        .filter((r) => namespaceTagMatches(r.tags, op.namespacePrefix))
+        .map((r) => ({
+          id: r.id,
+          content: r.content,
+          createdAt: r.createdAt,
+          tags: r.tags,
+        }));
     }
 
     const items: SearchItem[] = [];
@@ -359,6 +468,11 @@ export class FlairStore {
     // Best-effort: scan recent memories, derive distinct namespaces. Honors
     // `limit` and `offset` against the derived list. maxDepth truncates each
     // namespace to that many segments.
+    // A condition with an invalid label matches nothing: answer before any request.
+    const conditionHasInvalidLabel = (op.matchConditions ?? []).some(
+      (c) => Array.isArray(c?.path) && c.path.some((label: unknown) => label !== "*" && isInvalidLabel(label)),
+    );
+    if (conditionHasInvalidLabel) return [];
     const fetched = await this.client.memory.list({
       limit: 1000,
       order: "createdAt-desc",
@@ -369,8 +483,11 @@ export class FlairStore {
       const parsed = parseStoredId(r.id, this.agentId);
       if (!parsed) continue;
       let ns = parsed.namespace;
+      if (op.matchConditions && op.matchConditions.length > 0) {
+        if (!op.matchConditions.every((c) => namespaceMatchesCondition(c, ns))) continue;
+      }
       if (op.maxDepth !== undefined && ns.length > op.maxDepth) ns = ns.slice(0, op.maxDepth);
-      const key = ns.join(NS_SEP);
+      const key = JSON.stringify(ns); // de-dup on the label list, not a `/` join
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(ns);
@@ -383,16 +500,17 @@ export class FlairStore {
 // ── helpers exported for testability ────────────────────────────────────────
 
 export function parseStoredId(id: string, agentId: string): { namespace: string[]; key: string } | null {
-  // id format: "lg:<agentId>:<ns-joined-by-/>:<key>"
+  // id format: "lg:<agentId>:<encoded labels joined by />:<key>". An encoded
+  // namespace never contains a raw `:`, so the FIRST `:` after the prefix is
+  // the separator; the key may itself contain `:` and `/`.
   const expectedPrefix = `lg:${agentId}:`;
   if (!id.startsWith(expectedPrefix)) return null;
   const rest = id.slice(expectedPrefix.length);
-  // The last `:` separates ns from key. Namespace can contain `/` but not `:`.
-  const lastColon = rest.lastIndexOf(":");
-  if (lastColon < 0) return null;
-  const nsJoined = rest.slice(0, lastColon);
-  const key = rest.slice(lastColon + 1);
-  const namespace = nsJoined.length === 0 ? [] : nsJoined.split(NS_SEP);
+  const firstColon = rest.indexOf(":");
+  if (firstColon < 0) return null;
+  const nsJoined = rest.slice(0, firstColon);
+  const key = rest.slice(firstColon + 1);
+  const namespace = nsJoined.length === 0 ? [] : nsJoined.split(NS_SEP).map(decodeLabel);
   return { namespace, key };
 }
 

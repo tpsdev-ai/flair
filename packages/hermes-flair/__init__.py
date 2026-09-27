@@ -494,7 +494,7 @@ class FlairMemoryProvider(MemoryProvider):
             if not isinstance(rows, list) or not rows:
                 return ""
             lines = []
-            # Permanent first, then recent.
+            # Place returned permanent rows before the remaining returned rows; no recency ordering is requested.
             permanent = [r for r in rows if r.get("durability") == "permanent"]
             recent = [r for r in rows if r.get("durability") != "permanent"]
             for r in (permanent + recent)[: self._config.get("bootstrap_limit", DEFAULT_BOOTSTRAP_LIMIT)]:
@@ -543,7 +543,7 @@ class FlairMemoryProvider(MemoryProvider):
         if not self._is_primary or self._is_breaker_open():
             return
         if action != "add":
-            return  # Replace/remove map awkwardly to Flair's append-only model.
+            return  # The hook attempts to mirror add operations only; replace and remove remain in Hermes's local files.
         try:
             tag = f"hermes-builtin:{target}"
             self._store_memory(content=content, durability="persistent", tags=[tag])

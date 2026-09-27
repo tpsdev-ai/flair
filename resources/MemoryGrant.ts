@@ -1,6 +1,26 @@
 import { databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
+import { makeByIdReadGate, makeScopedSearch, type RecordTypeReadScope } from "./record-type-kit.js";
+
+// A grant is readable by either party: owner OR grantee. One scope object feeds
+// both the shared by-id gate and the scoped search, so the collection scope is
+// always the outermost AND and the by-id check reads the stored record.
+const grantReadScope = Object.assign(
+  async (agentId: string): Promise<RecordTypeReadScope> => ({
+    condition: {
+      operator: "or",
+      conditions: [
+        { attribute: "ownerId", comparator: "equals", value: agentId },
+        { attribute: "granteeId", comparator: "equals", value: agentId },
+      ],
+    },
+    isAllowed: (record: any) => !!record && (record.ownerId === agentId || record.granteeId === agentId),
+  }),
+  { mode: "owner-only" as const, ownerField: "ownerId" },
+);
+const grantByIdReadGate = makeByIdReadGate(grantReadScope);
+const grantScopedSearch = makeScopedSearch(grantReadScope);
 
 const FORBIDDEN = (msg: string) =>
   new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
@@ -45,33 +65,7 @@ export class MemoryGrant extends (databases as any).flair.MemoryGrant {
    * to enumerate other agents' grant ids.
    */
   async get(target?: any) {
-    // Collection / query reads arrive as a RequestTarget with
-    // `isCollection === true`, and are governed by search() (same owner/
-    // grantee scoping). Only a genuine by-id get is ownership-checked below
-    // — see Memory.ts's get() for the full rationale (same bug class).
-    if (!target || (typeof target === "object" && target.isCollection)) {
-      return this.search(target);
-    }
-
-    const auth = await this._auth();
-
-    // Anonymous by-id read is already blocked at the allowRead() gate (403);
-    // this is defense-in-depth if get() is ever reached directly.
-    if (auth.kind === "anonymous") {
-      return NOT_FOUND();
-    }
-
-    // Trusted internal call or admin agent — unfiltered, unchanged behavior.
-    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
-      return super.get(target);
-    }
-
-    // Non-admin agent: visible if it's the owner OR the grantee (parity with
-    // search()'s owner-OR-grantee scope).
-    const record = await super.get(target);
-    if (!record) return NOT_FOUND();
-    if (record.ownerId !== auth.agentId && record.granteeId !== auth.agentId) return NOT_FOUND();
-    return record;
+    return grantByIdReadGate.call(this, target, (t: any) => super.get(t));
   }
 
   async search(query?: any) {
@@ -80,21 +74,8 @@ export class MemoryGrant extends (databases as any).flair.MemoryGrant {
     if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
       return super.search(query);
     }
-    // owner OR grantee
-    const scope = {
-      operator: "or",
-      conditions: [
-        { attribute: "ownerId", comparator: "equals", value: auth.agentId },
-        { attribute: "granteeId", comparator: "equals", value: auth.agentId },
-      ],
-    };
-    if (query && typeof query === "object" && !Array.isArray(query)) {
-      const existing = query.conditions ?? [];
-      query.conditions = Array.isArray(existing) ? [scope, ...existing] : [scope, existing];
-      return super.search(query);
-    }
-    const conditions = Array.isArray(query) && query.length > 0 ? [scope, ...query] : [scope];
-    return super.search(conditions);
+    // owner OR grantee, as the outermost AND (makeScopedSearch).
+    return grantScopedSearch(auth.agentId, query, (q: any) => super.search(q));
   }
 
   async post(content: any, context?: any) {

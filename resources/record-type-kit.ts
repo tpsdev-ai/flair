@@ -281,8 +281,20 @@ export function makeByIdReadGate(
       return superGet(target);
     }
 
-    // Non-admin agent: scoped per the table's own read-scope model.
-    const record = await superGet(target);
+    // Non-admin agent: scoped per the table's own read-scope model. The scope
+    // is evaluated on the FULL stored row: a target that asks for a selection
+    // or a single property is re-read without that shaping for the check, and
+    // the shaped result is returned only once the row passes.
+    const shaped =
+      typeof target === "object" && target !== null && (target.select != null || target.property != null);
+    let unshaped: any = target;
+    if (shaped) {
+      const Ctor = (target as any).constructor;
+      if (typeof Ctor !== "function") return NOT_FOUND(); // fail closed: cannot re-read unshaped
+      unshaped = new Ctor();
+      unshaped.id = targetId;
+    }
+    const record = await superGet(unshaped);
     if (!record) {
       // Row did not load: either it genuinely does not exist, OR — the #1181
       // failure — a by-id read reached here on an unloaded instance and
@@ -303,7 +315,7 @@ export function makeByIdReadGate(
       return NOT_FOUND();
     }
 
-    return record;
+    return shaped ? superGet(target) : record;
   };
 }
 
@@ -336,29 +348,47 @@ export function makeScopedSearch(
     const scope = await readScope(agentId);
     const agentCondition = scope.condition;
 
-    // Object with a conditions array — nest caller's conditions inside the
-    // scope condition as the outermost AND block so a caller-supplied
-    // `operator: "or"` cannot boolean-inject past the owner scope.
-    if (query && typeof query === "object" && !Array.isArray(query)) {
-      if (Array.isArray(query.conditions) && query.conditions.length > 0) {
-        return superSearch({
-          ...query,
-          conditions: [agentCondition, { conditions: query.conditions, operator: query.operator || "and" }],
-          operator: "and",
-        });
-      }
-      // No (or empty) conditions array — just scope, preserving other query
-      // properties but NOT a caller-supplied operator (force "and").
-      const { conditions: _c, operator: _o, ...rest } = query;
-      return superSearch({ ...rest, conditions: [agentCondition], operator: "and" });
+    // The caller's conditions as an array. Harper accepts `conditions` as an
+    // array, any other iterable of conditions (it applies Array.from), or a
+    // single condition object; all are kept.
+    const isConditionIterable = (v: any): boolean =>
+      !!v && typeof v === "object" && typeof v[Symbol.iterator] === "function" && !(v instanceof URLSearchParams);
+    const callerConditions = (list: any): any[] =>
+      Array.isArray(list)
+        ? list
+        : isConditionIterable(list)
+          ? Array.from(list)
+          : list && typeof list === "object"
+            ? [list]
+            : [];
+
+    // The scope is always the OUTERMOST `and`, so a caller-supplied
+    // `operator: "or"` can only combine the caller's own conditions and never
+    // widens past the scope. A lone caller condition sits directly under that
+    // `and` (Harper's planner rejects a one-condition group); several keep the
+    // caller's operator inside their own group.
+    const compose = (conds: any[], operator: any): any[] =>
+      conds.length === 0
+        ? [agentCondition]
+        : conds.length === 1
+          ? [agentCondition, conds[0]]
+          : [agentCondition, { conditions: conds, operator: operator || "and" }];
+
+    // A bare iterable of conditions (not a RequestTarget, which is itself a
+    // URLSearchParams and carries its conditions on `.conditions`).
+    if (isConditionIterable(query) && !("conditions" in query)) {
+      return superSearch({ conditions: compose(Array.from(query), "and"), operator: "and" });
     }
 
-    // Plain array or no query — wrap in an object with operator "and" so
-    // the scope condition is always the outermost AND.
-    const conditions = Array.isArray(query) && query.length > 0
-      ? [agentCondition, { conditions: query, operator: "and" }]
-      : [agentCondition];
-    return superSearch({ conditions, operator: "and" });
+    if (query && typeof query === "object" && !Array.isArray(query)) {
+      // Preserve other query properties (select, limit, sort, ...) but never a
+      // caller-supplied top-level operator.
+      const { conditions, operator, ...rest } = query;
+      return superSearch({ ...rest, conditions: compose(callerConditions(conditions), operator), operator: "and" });
+    }
+
+    // Plain array or no query.
+    return superSearch({ conditions: compose(callerConditions(query), "and"), operator: "and" });
   };
 }
 

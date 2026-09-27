@@ -23,8 +23,9 @@ describe("langgraph-flair: parseStoredId", () => {
   });
 
   it("preserves slashes inside the key portion correctly", () => {
-    // The split is on the LAST colon — keys cannot contain colons but can
-    // contain slashes (which we don't interpret).
+    // The split is on the FIRST colon after the agent prefix — a namespace may
+    // not contain a raw colon (it is escaped in storage), but a key may, and a
+    // key may also contain slashes (which we don't interpret).
     const result = parseStoredId("lg:agent1:a/b/c:my/key/with/slashes", "agent1");
     expect(result).toEqual({
       namespace: ["a", "b", "c"],

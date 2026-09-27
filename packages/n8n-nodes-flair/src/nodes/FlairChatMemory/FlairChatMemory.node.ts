@@ -71,7 +71,7 @@ export class FlairChatMemory implements INodeType {
         type: "string",
         default: "",
         description:
-          "Optional sub-scope appended to the subject as `<subject>:<sessionKey>`. Use the n8n execution id (`={{ $execution.id }}`) for per-run isolation, or leave blank to share memory across runs.",
+          "Optional sub-scope appended to the subject as `<subject>:<sessionKey>`. Use the n8n execution id (`={{ $execution.id }}`) for per-run chat-history grouping by subject, or leave blank to share memory across runs.",
       },
       {
         displayName: "Context Window Length",

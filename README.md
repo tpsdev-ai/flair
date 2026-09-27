@@ -49,7 +49,7 @@ boost. Hybrid search combines semantic and lexical ranks to order results, so th
 first result need not have the highest percentage or be near 100%. The percentage
 is not a probability that the memory answers your question correctly.
 
-`flair init` installs and starts Harper, creates the agent's Ed25519 keypair, verifies semantic search actually works, wires every MCP client it detects (Claude Code, Cursor, Codex CLI, Gemini CLI), and runs a smoke test. Restart your MCP client afterwards, then ask the agent *"what do you remember about me?"*
+`flair init --agent <id>` installs or reuses Harper, creates or reuses the agent's Ed25519 keypair, and checks semantic search. When wiring is enabled, it attempts to wire detected clients and may run an MCP smoke test for MCP client wiring.
 
 > **Pass `--agent`.** A bare `flair init` bootstraps the instance and stops there — no agent, no keypair, no MCP wiring.
 
@@ -78,10 +78,10 @@ Keys are how an agent *outside* the process proves who it is. Code running insid
 ### Useful flags
 
 ```bash
-flair init --client claude-code    # wire one client: claude-code, codex, gemini, cursor, all, none
-flair init --no-mcp                # instance + agent only, skip MCP wiring
-flair init --skip-soul             # skip the interactive personality wizard
-flair init --port 8000             # non-default port, remembered in ~/.flair/config.yaml
+flair init --agent mybot --client claude-code  # attempt to wire one client
+flair init --agent mybot --no-mcp              # register the agent; skip MCP wiring
+flair init --agent mybot --skip-soul           # skip the personality wizard
+flair init --agent mybot --port 8000           # use a non-default port
 ```
 
 ### Lifecycle
@@ -147,7 +147,7 @@ One Ed25519 identity, one memory store, three MCP-capable CLIs. A memory written
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-11 harness surfaces today. Pick whichever you're shipping in; the memory layer doesn't care. **[Full integrations catalog →](docs/integrations.md)**
+Choose your harness from the [full integrations catalog →](docs/integrations.md).
 
 ## How it works
 
@@ -199,7 +199,7 @@ Every product here does semantic recall over stored memories. These are the dime
 |---|---|---|---|---|---|---|
 | **Where memories live** | infrastructure you run | self-host or Mem0 Cloud | self-host or hosted API | self-host or Letta Cloud | SageOx cloud | vendor cloud |
 | **Memory is scoped to** | the agent, via an Ed25519 keypair | tenant / user | per-user tenant | the runtime | the team | the account |
-| **Reaches other orchestrators** | 11 harnesses, incl. workflow and agent frameworks | several | several | Letta's runtime | 14+ coding agents and editors, via hooks, plugins and instruction files | no |
+| **Reaches other orchestrators** | Coding assistants, workflow engines, and agent frameworks ([catalog](docs/integrations.md)) | several | several | Letta's runtime | 14+ coding agents and editors, via hooks, plugins and instruction files | no |
 | **Sync between instances you run** | hub/spoke federation | no | no | no | one hosted service | one hosted service |
 | **Captures in-person conversation** | no | no | no | no | yes — Ox Dot | no |
 | **Per-agent persistent character** | first-class (Soul) | optional | persona-shaped | optional | team context, not per-agent | no |
@@ -212,7 +212,7 @@ Flair works with any agent runtime. Pick the path that fits yours — **[full ca
 
 ### Claude Code / Cursor / Codex CLI / Gemini CLI (MCP)
 
-`flair init` wires these automatically. To do it by hand:
+`flair init --agent <id>` attempts to wire detected clients when wiring is enabled. To configure one by hand:
 
 ```json
 // .mcp.json in your project root (Claude Code / Cursor format)
@@ -335,9 +335,9 @@ await h.post({ agentId: "mybot", content: "...", durability: "standard" });
 
 ### Auth across surfaces
 
-For every caller that reaches Flair over the network the default is **Ed25519 per-agent**: each agent holds its own key at `~/.flair/keys/<agent>.key` and signs every request. That gives write isolation — no agent can write as another — and identity-verified reads. It does *not* refuse cross-agent reads: within one instance, any verified agent can read any other agent's non-private memory by design. The hard boundary is the federation edge, not intra-instance reads. See [SECURITY.md](SECURITY.md).
+Ordinary agents using Ed25519 keys sign network requests. They can write only their own records and read their own plus other agents' non-private memories. Administrator agent roles and administrator Basic credentials have broader authority, including access to private memories. Stdio MCP, Pi, LangGraph, and the wake runner can use administrator Basic auth when no signing key resolves; n8n always uses Harper's administrator password. See [SECURITY.md](SECURITY.md).
 
-One exception: the **`n8n-nodes-flair`** node authenticates with the Harper **admin password** (Basic auth), which bypasses agent scoping entirely — it can read other agents' `visibility: private` memories and write as anyone. That is acceptable only on a single-tenant, operator-controlled n8n with trusted workflow inputs. Otherwise prefer the Ed25519 path. Full breakdown in **[docs/auth.md](docs/auth.md#auth-across-surfaces-read-this-first)**.
+Treat n8n's credential as an instance-wide administrator credential: a workflow can read private memories and write under any agent ID. Use it only on an operator-controlled, single-tenant n8n instance with trusted workflow inputs. Full breakdown: [docs/auth.md](docs/auth.md#auth-across-surfaces-read-this-first).
 
 In-process callers are a different model, not an exception to this one: they never sign, because identity is asserted through the call context rather than proven. Co-location *is* the grant — which is why Flair beside untrusted co-tenants on a shared instance is a different proposition to Flair inside your own app.
 
@@ -373,9 +373,9 @@ Managed hosting with multi-region replication and failover. Need a public URL fo
 
 Full model, threat analysis and recommendations in [SECURITY.md](SECURITY.md).
 
-- Ed25519 cryptographic identity — agents sign every request.
-- Writes are always agent-scoped. An agent can only write its own records.
-- Reads are open within the org: any agent can read any other agent's non-private memory, no grant required. `private` is the one owner-only exception ([DESIGN.md](DESIGN.md#access-model-open-within-the-org-closed-at-the-federation-edge)).
+- Ordinary agent keys use Ed25519 signatures and bind writes to their agent identity.
+- Administrator agent roles and administrator Basic credentials have broader authority.
+- Ordinary signed agents can read their own memories and other agents' non-private memories. Private memories are owner-only for ordinary agents; administrators can also read them.
 - Which memories are non-private is decided at write time, from durability: `permanent`/`persistent` default to `shared`, `standard`/`ephemeral` to `private`. A write that names neither is `standard`, so it lands `private`. Say what you mean with `--visibility shared|private` (CLI) or `visibility` (MCP / SDK); a write response names the visibility the record landed on, so it never has to be inferred.
 - The admin password is generated by `flair init` and written to `~/.flair/admin-pass` (mode 0600). The CLI prints the path, never the value. Prefer `--admin-pass-file` over `--admin-pass` so it stays out of `ps` and shell history.
 - Key rotation via `flair agent rotate-key`.

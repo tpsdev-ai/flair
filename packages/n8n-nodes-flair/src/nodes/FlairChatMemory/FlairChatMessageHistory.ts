@@ -20,7 +20,7 @@ import type { FlairClient } from "@tpsdev-ai/flair-client";
  * `getMessages()` reads memories filtered by subject and reconstructs the
  * BaseMessage[] in createdAt-ascending order. Order is computed client-side
  * from the createdAt timestamp because Memory.list does not yet expose a
- * server-side sort param (tracked as the `order` extension in q3qf §6).
+ * server-side sort param.
  *
  * The `windowK` constructor argument bounds the number of memories fetched
  * per `getMessages()` call: each turn is two messages (user + AI), so we

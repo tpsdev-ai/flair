@@ -2,7 +2,7 @@
 
 Where Flair already runs. Each integration can reach one shared Flair memory store; signed requests identify an agent, while other verified agents may read its non-private records, and n8n uses admin Basic auth.
 
-> **The point.** Memory should follow the agent across orchestrators. An integration that signs with a per-agent Ed25519 key and points at the same Flair instance follows the same identity and read-scope rules: signed per-agent writes, and reads of your own records plus other agents' non-private records. n8n is the exception: it authenticates with the Harper admin password, whose authority covers the whole instance, private records included. Choose the integration for your harness with its authentication and recall behavior in mind.
+> **The point.** Memory can follow an agent across orchestrators. Integrations using an ordinary Ed25519 agent key can write under that identity and read their own plus other agents' non-private records. Administrator agent roles have broader authority. n8n uses Harper administrator Basic auth; stdio MCP, Pi, LangGraph, and the wake runner can also use it when no signing key resolves. Administrator Basic auth can read private records and write under any agent ID. Choose an integration with its authentication and recall behavior in mind.
 
 ---
 
@@ -18,7 +18,7 @@ Where Flair already runs. Each integration can reach one shared Flair memory sto
 | **Antigravity CLI** (`agy`) | [`flair-mcp`](#claude-code-cursor-codex-gemini-cli-continuedev-via-flair-mcp) | MCP config | `~/.gemini/config/mcp_config.json`; pickup by a live `agy` pending verification |
 | **Goose** (block/goose) | [`flair-mcp`](#claude-code-cursor-codex-gemini-cli-continuedev-via-flair-mcp) | MCP config | Goose ships native MCP support |
 | **DeepSeek Harness** (`dsh`) | [`flair-mcp`](deepseek-harness.md) | Cordis overlay | First-party MCP bridge; tools-only, reactive recall — [dedicated page](deepseek-harness.md) |
-| **LangGraph (TS)** | [`langgraph-flair`](#langgraph-typescript) | FlairClient | Drop-in `BaseStore` |
+| **LangGraph (TS)** | [`langgraph-flair`](#langgraph-typescript) | FlairClient | FlairStore provides get, put, delete, search, and batch (limitations apply) |
 | **OpenClaw** | [`openclaw-flair`](#openclaw) | Ed25519 | Native plugin (context-engine slot left intact) |
 | **n8n** | [`n8n-nodes-flair`](#n8n) | FlairApi credential | Three nodes (chat memory, search, store) |
 | **Hermes Agent** | [`hermes-flair`](#hermes-agent) | Ed25519 | Python `MemoryProvider` |
@@ -91,7 +91,7 @@ n8n still uses Harper admin Basic auth — it is not this path. See [n8n.md](n8n
 
 [`@tpsdev-ai/flair-mcp`](https://www.npmjs.com/package/@tpsdev-ai/flair-mcp) is a [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes Flair as a memory tool to any MCP-speaking client. One server, every MCP client.
 
-No install step needed — every snippet below uses `npx -y @tpsdev-ai/flair-mcp`, which fetches and runs the server on demand (zero-install). The fastest path is `flair init`, which detects and wires these clients for you. To wire by hand, drop the relevant snippet into each tool's MCP config:
+No install step needed — every snippet below uses `npx -y @tpsdev-ai/flair-mcp`, which fetches and runs the server on demand (zero-install). The fastest path is `flair init --agent <id>`, which attempts to wire detected clients when wiring is enabled. To wire by hand, drop the relevant snippet into each tool's MCP config:
 
 **Claude Code** (user scope lives in `~/.claude.json` — the file `claude mcp add`, `flair init`, and `flair doctor` all read and write):
 ```bash
@@ -159,7 +159,7 @@ Full per-tool walkthrough including troubleshooting: [`docs/mcp-clients.md`](mcp
 
 ## LangGraph (TypeScript)
 
-[`@tpsdev-ai/langgraph-flair`](https://www.npmjs.com/package/@tpsdev-ai/langgraph-flair) implements LangGraph's `BaseStore`. Drop-in for `InMemoryStore`.
+[`@tpsdev-ai/langgraph-flair`](https://www.npmjs.com/package/@tpsdev-ai/langgraph-flair) implements LangGraph's `BaseStore`. FlairStore provides get, put, delete, search, and batch, with the limitations below.
 
 ```bash
 npm install @tpsdev-ai/langgraph-flair
@@ -197,7 +197,11 @@ Configuration via OpenClaw's standard plugin surface. See [`docs/openclaw.md`](o
 
 - **FlairChatMemory** — drop-in chat-memory for n8n's AI Agent / LangChain workflow nodes. Same role as Postgres / Redis chat memory but with cross-orchestrator portability.
 - **FlairSearch** — semantic search over your Flair memories from any workflow.
-- **FlairApi** credential — Ed25519 keypair entry point for the agentId.
+- **FlairWrite** — pipeline-mode node that writes a memory into Flair.
+
+The FlairApi credential provides authentication.
+
+**FlairApi credential** — Harper administrator password for Basic authentication; Agent ID selects memory ownership and does not restrict the credential's instance-wide authority.
 
 Install via the standard n8n community-node UI (Settings → Community nodes → `@tpsdev-ai/n8n-nodes-flair`) or:
 
@@ -225,21 +229,23 @@ Auth: TPS-Ed25519 (the same model the rest of Flair uses) — writes are isolate
 
 [`@tpsdev-ai/pi-flair`](https://www.npmjs.com/package/@tpsdev-ai/pi-flair) is the **native pi extension** for the [Pi coding agent](https://github.com/mariozechner/pi-coding-agent) — pi has no MCP client support, so this is a first-party plugin, not an MCP bridge. Memory + identity (`memory_search`, `memory_store`, `bootstrap`) for the pi runtime.
 
-Wire it (either form is equivalent):
+To provision an agent and wire Pi, use the init command below; if the agent is already provisioned, install the extension with Pi's installer.
 
 ```bash
-flair init --client pi        # writes a pinned "packages" entry into ~/.pi/agent/settings.json
+flair init --agent my-agent --client pi        # attempts to wire Pi with a CLI-version pin
 # or
 pi install npm:@tpsdev-ai/pi-flair
 ```
 
-Which produces:
+When Flair writes a new Pi package entry, it uses this version-pinned form:
 
 ```json
 {
   "packages": ["npm:@tpsdev-ai/pi-flair@<version>"]
 }
 ```
+
+`pi install npm:@tpsdev-ai/pi-flair` records the unpinned source `npm:@tpsdev-ai/pi-flair` instead.
 
 **Known trap:** the `extensions` settings key takes local file paths only — an `npm:` spec there is *silently ignored* by pi, so the tools never register ([#1346](https://github.com/tpsdev-ai/flair/issues/1346)). Package sources belong under `packages`. `flair doctor` detects pi, verifies the wiring, calls this exact misconfiguration out, and `flair doctor --fix` moves the entry.
 

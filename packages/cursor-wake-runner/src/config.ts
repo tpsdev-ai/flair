@@ -1,7 +1,7 @@
 /**
- * Env / argv config for the wake-runner. There is deliberately no
- * `participant` / foreign-feed field — the runner always drains the
- * signed FLAIR_AGENT_ID.
+ * Env / argv config for the wake-runner. There is no participant or
+ * foreign-feed field. With Ed25519, `FLAIR_AGENT_ID` identifies the signer
+ * and its feed; with admin Basic credentials and no key, it selects the feed.
  */
 
 const CURSOR_ENV_TYPES = ["cloud", "pool", "machine"] as const;
@@ -97,7 +97,7 @@ export function loadConfig(flags: CliFlags): WakeConfig {
   };
 }
 
-export const HELP = `cursor-flair-wake — drain this agent's OrgEventCatchup and wake a Cursor Cloud Agent
+export const HELP = `cursor-flair-wake — drain the selected OrgEventCatchup feed and wake a Cursor Cloud Agent
 
 Usage:
   bun packages/cursor-wake-runner/src/cli.ts [--once] [--interval SECONDS] [--dry-run] [--limit N]
@@ -108,7 +108,7 @@ command also works; do not point an automation at "start a crew agent" directly
 — that path has no idempotent agentId and can double-launch.
 
 Identity:
-  FLAIR_AGENT_ID     required. Own feed only — there is no --participant flag.
+  FLAIR_AGENT_ID     required. A signed runner drains its own feed; with admin Basic credentials and no key, selects the feed by ID (no --participant flag).
   FLAIR_URL          Flair HTTP origin (default http://localhost:19926)
   FLAIR_KEY_PATH     Ed25519 key (default ~/.flair/keys/<id>.key)
 

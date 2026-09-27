@@ -106,8 +106,8 @@ registered identities.
 
 ## Enabling (operator checklist)
 
-1. **Install the AS plugin** — add `@harperfast/oauth` (already an exact-pinned
-   dependency) and declare it in `config.yaml`:
+1. **Configure the AS plugin** — `@harperfast/oauth` is exact-pinned in `package.json`
+   and already declared in `config.yaml`; configure the existing block:
 
    ```yaml
    '@harperfast/oauth':
@@ -134,13 +134,12 @@ registered identities.
    ```
 
    **DCR is not supported; clients connect via CIMD (Client ID Metadata
-   Documents).** `flair mcp enable` (flair#756) writes exactly this shape —
-   see "Legacy clients" below.
+   Documents).** The shipped `config.yaml` contains this block; `flair mcp enable`
+   uses it instead of creating it. See "Legacy clients" below.
 
-   The `config.yaml` block is intentionally NOT committed to the live config in
-   this slice — adding it changes boot behavior, which would break the
-   default-OFF / byte-identical contract. An operator adds it deliberately when
-   turning the surface on.
+   The shipped `config.yaml` already declares `@harperfast/oauth`; enable its MCP
+   surface with `FLAIR_MCP_OAUTH=true` and configure the issuer and provider
+   credentials.
 
 2. **Set the env:**
    - `FLAIR_MCP_OAUTH=true` — turns on the `/mcp` route registration AND the
@@ -189,8 +188,6 @@ cannot connect to this surface.
 
 ## Deferred (not in this slice)
 
-- Live `config.yaml` wiring of the `@harperfast/oauth` plugin (kept out to
-  preserve the byte-identical flag-OFF contract; documented above for operators).
 - Migrating the homegrown `OAuth.ts` / `XAA.ts` opaque-token AS to the plugin.
   Per Kern: deprecate-don't-delete — they stay for the Ed25519/signed-REST path.
   XAA's JIT-provisioning is kept; the Model-2 handler reuses the same

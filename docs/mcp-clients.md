@@ -24,7 +24,7 @@ flair init
 # Provision an agent identity. Pick a name — typically per-project, per-purpose,
 # or "me" if you want one durable identity across everything.
 flair agent add my-project
-# → writes ~/.flair/keys/my-project.key (Ed25519 PKCS8) and registers the agent
+# → writes ~/.flair/keys/my-project.key (a raw 32-byte Ed25519 seed) and registers the agent
 
 # Sanity check
 flair status
@@ -45,7 +45,7 @@ The snippets below are the **local** path. Flair also has a native `/mcp` endpoi
 
 Native `/mcp` is remote-only by design. The OAuth authorization server fetches client metadata over HTTPS and refuses private, loopback, and link-local hosts. `flair mcp enable` refuses localhost, loopback, RFC1918, IPv4 link-local, and `.local`. Set `FLAIR_MCP_OAUTH=true` — that is the one value that enables both Flair's `/mcp` route and the OAuth component. A loopback Flair cannot be the origin those clients dial. The stdio adapter is the local path because it speaks the instance's Ed25519 HTTP API and does not need that public origin.
 
-`flair init` writes the stdio adapter. Turning on native `/mcp` is a separate operator step for a publicly reachable instance, documented from the API side in [api-reference.md](api-reference.md#mcp-tools).
+`flair init --agent <id>` attempts to wire detected local clients unless MCP wiring is disabled; bare `flair init` only initializes the instance. Turning on native `/mcp` is a separate operator step for a publicly reachable instance, documented from the API side in [api-reference.md](api-reference.md#mcp-tools).
 
 ---
 
@@ -53,9 +53,9 @@ Native `/mcp` is remote-only by design. The OAuth authorization server fetches c
 
 Pick whichever you use. The MCP server is the same package; only the config syntax differs.
 
-> **Pin the version.** An unpinned `@tpsdev-ai/flair-mcp` re-resolves to whatever is currently published on *every* agent session, so any future publish reaches your machine silently, with no lockfile and no review step in the path. `flair init` wires clients to a **pinned** spec on purpose, and every MCP-server config snippet below is written the same way: `@tpsdev-ai/flair-mcp@<version>`.
+> **Pin the version.** An unpinned `@tpsdev-ai/flair-mcp` re-resolves to whatever is currently published on *every* agent session, so any future publish reaches your machine silently, with no lockfile and no review step in the path. `flair init --agent <id>` attempts to wire detected clients when wiring is enabled; every MCP-server config snippet below is written the same way: `@tpsdev-ai/flair-mcp@<version>`.
 >
-> Replace `<version>` with the version you intend to run — the one you already have is `flair --version` — and bump it deliberately. Leaving the literal `<version>` in place fails loudly at `npx`, which is the intended failure: better than a config that looks pinned and isn't. `flair init` is the easier path and fills this in for you.
+> Replace `<version>` with the version you intend to run — the one you already have is `flair --version` — and bump it deliberately. Leaving the literal `<version>` in place fails loudly at `npx`, which is the intended failure: better than a config that looks pinned and isn't. `flair init --agent <id>` can fill in the version for clients it wires; check its wiring summary for skipped or held configs.
 >
 > **Do not stay on a pin older than 0.18.0.** `@tpsdev-ai/flair-client` before 0.18.0 (and `@tpsdev-ai/flair-mcp` that shipped it) silently drops writes — including against another agent's shared memories — and a server upgrade does not fix that. `flair doctor` flags those pins; the remedy is `flair upgrade` (the adapter), not a newer Harper/Flair server alone. See [troubleshooting — silent write drop](troubleshooting.md#pre-0180-flair-client--flair-mcp-silently-drops-writes).
 
@@ -188,8 +188,9 @@ It honors the same env as the MCP server (`FLAIR_AGENT_ID`, `FLAIR_URL`,
 `FLAIR_HOOK_HARNESS=codex` so bootstrap records the Codex channel; the
 stdout contract stays `hookSpecificOutput.additionalContext`.
 
-**It degrades to a no-op, always.** No `FLAIR_AGENT_ID`, Flair down, an auth
-error, or a hung daemon (past the timeout) → the hook prints `{}` and exits 0.
+A failed bootstrap attempts a stderr diagnostic and can still return a continuity
+resume hint; without either kind of context it returns `{}`, and the entry point
+exits successfully.
 Claude Code treats that as "no context to add" and starts normally. The hook
 can never block or break session startup. The injected context is clamped to
 ≤10,000 characters to keep the session-start payload small. And if the command
@@ -327,6 +328,8 @@ Which memories are non-private is decided at write time, and the default is not 
 
 ### Reading the `bootstrap` payload
 
+The following structured-payload details describe the HTTP bootstrap response and native `/mcp`; stdio `flair-mcp` returns the formatted context as an MCP text block.
+
 `bootstrap` returns the canonical structured containers — `soul`, `memories`, `predicted`, `teammateFindings`, `events` — plus counts and a `tokenEstimate`. The containers are **always present** (empty `[]`/`{}` when there's nothing), so an empty container is distinguishable from an unsupported one.
 
 **The token ledger reconciles `tokenEstimate` from the payload alone (flair#1270).** Every token-charged content class carries a counter — `soulTokens`, `memoryTokens`, `trustTokens`, `eventsTokens` — plus a measured `scaffoldTokens` for the fixed JSON frame, and `tokenEstimate ≈ scaffoldTokens + soulTokens + memoryTokens + trustTokens + eventsTokens`. The remaining ≈ gap is the bounded per-item difference between the prose lines the memory counters measure and the heavier structured objects the containers ship. A payload whose estimate an agent can't decompose from the reported figures is a bug, not an accounting convention.
@@ -343,7 +346,7 @@ Which memories are non-private is decided at write time, and the default is not 
 |---|---|---|
 | `FLAIR_AGENT_ID` | (none — required) | Must match `flair agent add <id>` |
 | `FLAIR_URL` | `http://127.0.0.1:19926` | Override for remote Flair instances |
-| `FLAIR_KEY_PATH` | `~/.flair/keys/<agent>.key` | Ed25519 PKCS8 key — created by `flair agent add` |
+| `FLAIR_KEY_PATH` | `~/.flair/keys/<agent>.key` | Path to the Ed25519 private key; `flair agent add` creates a raw 32-byte seed. |
 
 The MCP server has no client-side flags beyond these env vars; everything else (timeouts, dedup thresholds, error classification) is opinionated defaults from the underlying [`@tpsdev-ai/flair-client`](../packages/flair-client) package.
 
@@ -351,7 +354,7 @@ The MCP server has no client-side flags beyond these env vars; everything else (
 
 ## What about pi?
 
-pi has no MCP client support, so Flair ships a **native pi extension** instead: [`@tpsdev-ai/pi-flair`](../packages/pi-flair/README.md). Same backend, same agent isolation, zero MCP in the path.
+pi has no MCP client support, so Flair ships a **native pi extension** instead: [`@tpsdev-ai/pi-flair`](../packages/pi-flair/README.md). Same backend. With an ordinary signed identity, writes are owned by that agent; reads admit its own records and other agents' non-private records. Zero MCP in the path.
 
 Wiring is a `packages` entry in pi's own settings (`~/.pi/agent/settings.json`), not an `mcpServers` block:
 
@@ -361,7 +364,7 @@ Wiring is a `packages` entry in pi's own settings (`~/.pi/agent/settings.json`),
 }
 ```
 
-`flair init --client pi` writes exactly that (pinned), or use pi's own installer: `pi install npm:@tpsdev-ai/pi-flair`. `flair doctor` detects pi and checks the wiring — including the one known trap: **an `npm:` spec under the `extensions` settings key is silently ignored by pi** (`extensions` takes local file paths only; package sources belong under `packages` — [#1346](https://github.com/tpsdev-ai/flair/issues/1346)). Doctor calls that misconfiguration out by name, and `flair doctor --fix` moves the entry.
+`flair init --agent my-agent --client pi` writes exactly that (pinned), or use pi's own installer: `pi install npm:@tpsdev-ai/pi-flair`. `flair doctor` detects pi and checks the wiring — including the one known trap: **an `npm:` spec under the `extensions` settings key is silently ignored by pi** (`extensions` takes local file paths only; package sources belong under `packages` — [#1346](https://github.com/tpsdev-ai/flair/issues/1346)). Doctor calls that misconfiguration out by name, and `flair doctor --fix` moves the entry.
 
 One difference from the MCP clients above: pi settings carry no per-package `env` block, so `FLAIR_AGENT_ID` (and `FLAIR_URL` when non-default) must be exported in the environment that launches pi. Doctor reports what it sees in its own shell and says so — it cannot observe the environment of every pi launch.
 
@@ -369,7 +372,7 @@ One difference from the MCP clients above: pi settings carry no per-package `env
 
 ## What about Hermes (Nous Research)?
 
-Hermes uses its own Python-native `MemoryProvider` ABC instead of MCP. It has its own Flair integration in [`packages/hermes-flair/`](../packages/hermes-flair). Same backend, same agent isolation, different plug shape.
+Hermes uses its own Python-native `MemoryProvider` ABC instead of MCP. It has its own Flair integration in [`packages/hermes-flair/`](../packages/hermes-flair). Same backend. With an ordinary signed identity, writes are owned by that agent; reads admit its own records and other agents' non-private records. Different plug shape.
 
 Future MCP-capable agent CLIs (and there are more landing every month) will work out of the box with the MCP server above — no per-framework adapter required from us.
 

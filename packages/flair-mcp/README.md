@@ -23,7 +23,7 @@ cat > .mcp.json << 'EOF'
 EOF
 ```
 
-`npx -y @tpsdev-ai/flair-mcp` fetches and runs the server on demand — no global install needed. (`flair init` wires this for you automatically; see below.)
+`npx -y @tpsdev-ai/flair-mcp` fetches and runs the server on demand — no global install needed. (`flair init --agent <id>` attempts to wire detected clients when wiring is enabled; see below.)
 
 ### Prerequisites
 
@@ -48,7 +48,7 @@ Once configured, Claude Code (or any MCP client) gets these tools:
 | `skill_search` | Find skills that apply to a task. Returns a catalog, not the procedure. |
 | `skill_get` | Retrieve the full skill by ID (disclosure after `skill_search`). |
 | `bootstrap` | Cold-start context — soul + recent memories in one call. |
-| `soul_set` | Set personality or project context (included in every bootstrap). |
+| `soul_set` | Soul writes require verified administrator Basic credentials; Ed25519 agent requests are refused. Operators should use the REST API or CLI. |
 | `soul_get` | Get a personality or project context entry. |
 | `record_usage` | Report that recalled memories were actually used (drives `usageCount`). |
 

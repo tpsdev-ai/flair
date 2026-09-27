@@ -7,6 +7,7 @@ event filtering, MemoryEntry mapping, ISO timestamps.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -330,11 +331,13 @@ class TestSearchMemory:
                     "id": "mem-1",
                     "content": "should be filtered",
                     "tags": ["adk:app:other_user"],  # wrong user
+                    "agentId": "test-agent",
                 },
                 {
                     "id": "mem-2",
                     "content": "should pass",
                     "tags": ["adk:app:user"],
+                    "agentId": "test-agent",
                 },
             ],
         }
@@ -363,8 +366,8 @@ class TestSearchMemory:
         mock_resp.headers = {"content-type": "application/json"}
         mock_resp.json.return_value = {
             "results": [
-                {"id": "mine", "content": "kept", "tags": [wanted]},
-                {"id": "neighbour", "content": "dropped", "tags": [neighbour]},
+                {"id": "mine", "content": "kept", "tags": [wanted], "agentId": "test-agent"},
+                {"id": "neighbour", "content": "dropped", "tags": [neighbour], "agentId": "test-agent"},
             ],
         }
         service._client.request.return_value = mock_resp
@@ -373,6 +376,32 @@ class TestSearchMemory:
             app_name="app", user_id="alice:admin", query="test",
         )
         assert [m.id for m in result.memories] == ["mine"]
+
+    @pytest.mark.asyncio
+    async def test_search_rechecks_owner_identity_like_listing(self, service):
+        """flair#1943 (s1): a hit whose agentId is NOT this service's own agent
+        id is dropped, exactly as list_memories drops it — the compound tag is a
+        per-user retrieval filter, not an identity boundary."""
+        from adk_flair.memory_service import _compound_tag
+
+        tag = _compound_tag("app", "user")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"content-type": "application/json"}
+        mock_resp.json.return_value = {
+            "results": [
+                # right tag, FOREIGN agentId → must be dropped
+                {"id": "foreign", "content": "not mine", "tags": [tag], "agentId": "other-agent"},
+                # right tag, own agentId → kept
+                {"id": "mine", "content": "mine", "tags": [tag], "agentId": "test-agent"},
+            ],
+        }
+        service._client.request.return_value = mock_resp
+
+        result = await service.search_memory(
+            app_name="app", user_id="user", query="test",
+        )
+        assert [m.id for m in result.memories] == ["mine"]  # assertion: only the service's own hit
 
     @pytest.mark.asyncio
     async def test_flair_down_returns_empty_with_warning(self, service, caplog):
@@ -570,6 +599,31 @@ class TestAddMemory:
         assert body["content"] == "direct fact"
         assert body["tags"] == ["adk:app:user"]
         assert body["author"] == "test-agent"
+
+    @pytest.mark.asyncio
+    async def test_skipped_textless_entry_logs_one_warning_on_success(self, service, caplog):
+        """flair#1967: a successful batch that skipped a text-less entry logs one
+        warning with the counts only, never record content."""
+        memories = [
+            MemoryEntry(
+                id="mem-text",
+                content=types.Content(role="user", parts=[types.Part(text="SENTINEL-1967-text")]),
+            ),
+            MemoryEntry(id="mem-empty", content=types.Content(role="user", parts=[])),
+        ]
+        service._client.request.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            text="{}",
+        )
+
+        with caplog.at_level(logging.WARNING):
+            await service.add_memory(app_name="app", user_id="user", memories=memories)
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "skipped 1" in warnings[0].getMessage()
+        assert all("SENTINEL-1967-text" not in r.getMessage() for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_fallback_id_is_content_hash(self, service):
