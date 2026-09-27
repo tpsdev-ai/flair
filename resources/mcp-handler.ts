@@ -27,6 +27,7 @@
 import { databases } from "harper";
 import { randomBytes } from "node:crypto";
 import { TOOLS, listToolDefs, type ResolvedAgent } from "./mcp-tools.js";
+import { checkToolArguments } from "./mcp-tool-arguments.js";
 import { agentRecordIsAdmin } from "./agent-admin.js";
 import { resolveVersion } from "./version.js";
 
@@ -394,6 +395,11 @@ async function handleToolCall(request: any, id: any, params: any): Promise<any> 
     // failed). Deny — do NOT fall back to anonymous or admin.
     return rpcError(id, -32001, "forbidden: token subject is not a provisioned flair agent");
   }
+
+  // The tool implementations are written for their declared argument types;
+  // a value of another type is refused before the tool runs.
+  const argError = checkToolArguments(entry.def.inputSchema, params?.arguments);
+  if (argError) return rpcError(id, -32602, `invalid arguments for ${toolName}: ${argError}`);
 
   try {
     const result = await entry.impl(agent, args);
