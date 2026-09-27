@@ -1102,11 +1102,12 @@ describe("Memory and Relationship ids in request paths are percent-encoded", () 
     }
   });
 
-  test("relationship write addresses exactly its canonical id", async () => {
+  test("relationship write sends its canonical id as one path segment (route check — the id is URL-safe by construction)", async () => {
     // The id is derived (agentId+subject+predicate+object hashed to base64url),
-    // so it is URL-safe by construction; this pins that the write sends it as
-    // ONE segment after /Relationship/ with no query and no fragment, exactly
-    // as get and delete do. All three Relationship verbs are now pinned.
+    // so it is URL-safe by construction; this is a ROUTE check that the write
+    // sends it as ONE segment after /Relationship/ with no query and no
+    // fragment, exactly as get and delete do — NOT an encoding guard (it cannot
+    // go red on an interpolation revert, because the id needs no encoding).
     mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
     globalThis.fetch = mockFetch as any;
     const client = new FlairClient({ agentId: "test" });
@@ -1114,5 +1115,22 @@ describe("Memory and Relationship ids in request paths are percent-encoded", () 
     await client.relationship.write({ subject: "nathan", predicate: "manages", object: "flair" });
     expect(mockFetch.mock.calls.length).toBe(1);
     expect(onlyPathSegment(mockFetch.mock.calls[0], "Relationship")).toBe(expectedId);
+  });
+
+  test("a '.'/'..' id is refused before any request (#1970)", async () => {
+    // Percent-encoding leaves '.'/'..' unchanged and URL normalization would
+    // collapse '/Memory/.' to '/Memory/' and '/Memory/..' to '/', so such an id
+    // cannot address its record: the client refuses it and sends NOTHING.
+    for (const bad of [".", ".."]) {
+      mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+      globalThis.fetch = mockFetch as any;
+      const client = new FlairClient({ agentId: "test" });
+      await expect(client.memory.get(bad)).rejects.toThrow(/dot-segment/); // assertion: refused, naming the rule
+      await expect(client.memory.delete(bad)).rejects.toThrow(/dot-segment/);
+      await expect(client.memory.update(bad, "x")).rejects.toThrow(/dot-segment/);
+      await expect(client.relationship.get(bad)).rejects.toThrow(/dot-segment/);
+      await expect(client.relationship.delete(bad)).rejects.toThrow(/dot-segment/);
+      expect(mockFetch.mock.calls.length).toBe(0); // assertion: nothing sent for the refused Memory/Relationship ids
+    }
   });
 });

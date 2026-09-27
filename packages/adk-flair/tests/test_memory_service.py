@@ -933,6 +933,34 @@ class TestCreateVerbAndConflictFallback:
             assert signed_paths[-1] == sent_path
 
     @pytest.mark.asyncio
+    async def test_conflict_put_fallback_refuses_dot_segment_id(self, service, caplog):
+        """#1970 item 2: an id that is exactly '.' or '..' cannot address its
+        record, so the write refuses BEFORE any request is sent (fail-soft: the
+        refusal is logged, nothing goes out)."""
+        import logging
+
+        from adk_flair.memory_service import FlairWriteError, _encode_record_id
+
+        for bad in (".", ".."):
+            with pytest.raises(ValueError, match="dot-segment"):
+                _encode_record_id(bad)  # assertion: the rule is named
+            service._client.request.reset_mock()
+            caplog.clear()
+            with caplog.at_level(logging.WARNING), pytest.raises(FlairWriteError):
+                await service.add_memory(
+                    app_name="app",
+                    user_id="user",
+                    memories=[
+                        MemoryEntry(
+                            id=bad,
+                            content=types.Content(role="user", parts=[types.Part(text="fact")]),
+                        )
+                    ],
+                )
+            assert service._client.request.call_count == 0
+            assert any("write failed" in r.getMessage() and bad in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
     async def test_non_conflict_error_propagates_with_real_status(self, service, caplog):
         """A non-409 failure does NOT fall back to PUT, and the warning log
         carries the real status (status=404), not the pre-#1336 'status=?' —

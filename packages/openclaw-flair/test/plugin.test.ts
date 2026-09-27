@@ -1605,6 +1605,45 @@ describe("slice 2 round 2 — tombstone, bounds and failed primary writes", () =
     expect(res.details.errors.join(" ")).toMatch(/network down/);
     expect(calls.filter((c) => c.method === "PUT" && c.url.includes("/Memory/old-target")).length).toBe(0);
   });
+
+  test("#1970: a superseded id with reserved URL characters reaches the wire as ONE encoded path segment", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const oldId = "old#1?x/y%z w";
+    const calls = installFetchStub((call) => {
+      if (call.method === "GET" && /\/Memory\//.test(call.url)) return { status: 200, body: { id: oldId, content: "old", agentId: "A" } };
+      return { status: 200, body: {} };
+    });
+    const api = createMockApi();
+    plugin.register(api as any);
+    const store = api._resolveTool("memory_store", { agentId: "A" });
+    const res = await store.execute("1", { text: "remember this", supersedes: oldId });
+    expect(res.details.supersedeClosed).toBe(true);
+
+    const encoded = `/Memory/${encodeURIComponent(oldId)}`;
+    const closePut = calls.find((c) => c.method === "PUT" && new URL(c.url).pathname === encoded);
+    expect(closePut).toBeTruthy(); // assertion: the supersede-close PUT path is the encoded id
+    const u = new URL(closePut!.url);
+    expect(u.pathname.split("/").filter(Boolean).length).toBe(2); // assertion: /Memory/<one segment>
+    expect(u.search).toBe("");
+    expect(u.hash).toBe("");
+  });
+
+  test("#1970: a '.'/'..' supersedes id is refused and no request addresses it", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub(() => ({ status: 200, body: {} }));
+    const api = createMockApi();
+    plugin.register(api as any);
+    const store = api._resolveTool("memory_store", { agentId: "A" });
+    const res = await store.execute("1", { text: "remember this", supersedes: "." });
+    expect(res.details.supersedeClosed).toBe(false);
+    expect(res.details.errors.join(" ")).toMatch(/dot-segment/); // assertion: refused, naming the rule
+    expect(calls.some((c) => {
+      const p = new URL(c.url).pathname;
+      return p === "/Memory/." || p === "/Memory/..";
+    })).toBe(false); // assertion: the dot-segment id was never addressed
+  });
 });
 
 // ── round 3 — caps FAIL CLOSED; they never break a guarantee ─────────────────

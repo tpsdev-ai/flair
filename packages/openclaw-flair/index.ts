@@ -23,7 +23,7 @@ import { createHash, type KeyObject } from "node:crypto";
 import { accessSync, constants as fsConstants } from "node:fs";
 import { dirname } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { FlairClient, loadPrivateKey, resolveKeyPath } from "@tpsdev-ai/flair-client";
+import { FlairClient, encodeRecordId, loadPrivateKey, resolveKeyPath } from "@tpsdev-ai/flair-client";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 
 /** The host tool-context fields this plugin reads. `agentId` is the identity. */
@@ -1095,7 +1095,7 @@ export default {
               try {
                 const old = await client.memory.get(supersedes);
                 if (old) {
-                  await client.request("PUT", `/Memory/${supersedes}`, {
+                  await client.request("PUT", `/Memory/${encodeRecordId(supersedes)}`, {
                     ...old,
                     archived: true,
                     archivedAt: new Date().toISOString(),

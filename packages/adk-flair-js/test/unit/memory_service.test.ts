@@ -996,6 +996,32 @@ describe("Memory id path encoding on the 409 PUT fallback (#1970)", () => {
       expect(ok).toBe(true);
     }
   });
+
+  it("a '.'/'..' id is refused before any request (#1970)", async () => {
+    // Percent-encoding leaves '.'/'..' unchanged and URL normalization would
+    // collapse the segment, so such an id cannot address its record: the write
+    // refuses BEFORE any request (not even the POST). The write path is
+    // fail-soft (it logs), so observe the warning and that nothing went out.
+    let calls = 0;
+    globalThis.fetch = mock(async () => {
+      calls++;
+      return new Response("Conflict", { status: 409 });
+    });
+    const warnings: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.join(" ")); };
+    try {
+      for (const bad of [".", ".."]) {
+        calls = 0;
+        warnings.length = 0;
+        await service.addMemory("app", "user", [{ ...makeMemoryEntry("fact"), id: bad }]);
+        expect(warnings.join(" ")).toMatch(/dot-segment/); // assertion: refused, naming the rule
+        expect(calls).toBe(0); // assertion: nothing was sent
+      }
+    } finally {
+      console.warn = origWarn;
+    }
+  });
 });
 
 // ─── addMemory ──────────────────────────────────────────────────────────────

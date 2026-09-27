@@ -39,6 +39,7 @@ import re
 import threading
 import time
 import uuid
+from urllib.parse import quote
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -266,6 +267,23 @@ def _sign_request(priv_key, agent_id: str, method: str, path: str) -> str:
     sig = priv_key.sign(payload)
     sig_b64 = base64.b64encode(sig).decode("ascii")
     return f"TPS-Ed25519 {agent_id}:{ts}:{nonce}:{sig_b64}"
+
+
+def _encode_record_id(record_id: str) -> str:
+    """Percent-encode a Memory id so it addresses exactly that record as ONE
+    path segment (flair#1970). REFUSES an id that is exactly ``.`` or ``..``:
+    percent-encoding leaves those unchanged and URL normalization collapses
+    ``/Memory/.`` to ``/Memory/`` and ``/Memory/..`` to ``/``, so the sent path
+    would not be the id (nor the signed path). Such an id cannot address its
+    record.
+    """
+    if record_id in (".", ".."):
+        raise ValueError(
+            f"record id {record_id!r} is a URL path dot-segment (\".\" or \"..\"); "
+            "it cannot be addressed as one path segment of /Memory/<id>. "
+            "Use a different id."
+        )
+    return quote(record_id, safe="")
 
 
 # ─── Provider implementation ────────────────────────────────────────────────
@@ -526,7 +544,7 @@ class FlairMemoryProvider(MemoryProvider):
         }
         if tags:
             body["tags"] = tags
-        result = self._request("PUT", f"/Memory/{memory_id}", json_body=body)
+        result = self._request("PUT", f"/Memory/{_encode_record_id(memory_id)}", json_body=body)
         return {"id": memory_id, "result": result}
 
     # ── Optional hooks ───────────────────────────────────────────────────────

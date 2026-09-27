@@ -216,6 +216,23 @@ def _deterministic_record_id(
     return f"{app_name}:{user_id}:{session_id}:{event_id}"
 
 
+def _encode_record_id(record_id: str) -> str:
+    """Percent-encode a Memory id so it addresses exactly that record as ONE
+    path segment (flair#1970). REFUSES an id that is exactly ``.`` or ``..``:
+    percent-encoding leaves those unchanged and URL normalization collapses
+    ``/Memory/.`` to ``/Memory/`` and ``/Memory/..`` to ``/``, so the sent path
+    would not be the id (nor the signed path). Such an id cannot address its
+    record.
+    """
+    if record_id in (".", ".."):
+        raise ValueError(
+            f"record id {record_id!r} is a URL path dot-segment (\".\" or \"..\"); "
+            "it cannot be addressed as one path segment of /Memory/<id>. "
+            "Use a different id."
+        )
+    return quote(record_id, safe="")
+
+
 def _iso_now() -> str:
     """ISO 8601 timestamp with millisecond precision in UTC."""
     now = datetime.now(timezone.utc)
@@ -683,14 +700,18 @@ class FlairMemoryService(BaseMemoryService):
         the pre-#1336 replace/refresh semantics for existing rows. Any other
         error propagates unchanged.
         """
+        # Validate/encode the id BEFORE any request (#1970): a ``.``/``..`` id
+        # cannot address its record, so a refused id sends nothing at all (not
+        # even the POST). ``_request`` signs the very path it sends, so the
+        # signed and sent PUT paths always agree.
+        put_path = f"/Memory/{_encode_record_id(record_id)}"
         try:
             await self._request("POST", "/Memory/", json_body=body)
         except FlairRequestError as exc:
             if exc.status_code != 409:
                 raise
-            # The id is one percent-encoded path segment; ``_request`` signs the
-            # very same path it sends, so the signed and sent paths agree (#1970).
-            await self._request("PUT", f"/Memory/{quote(record_id, safe='')}", json_body=body)
+            # The id is one percent-encoded path segment (#1970).
+            await self._request("PUT", put_path, json_body=body)
 
     # ── BaseMemoryService implementation ─────────────────────────────────────
 

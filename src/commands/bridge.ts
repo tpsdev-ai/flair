@@ -23,6 +23,23 @@ export type BridgeCli = {
 
 let cli: BridgeCli;
 
+/**
+ * Percent-encode a Memory id so it addresses exactly that record as ONE path
+ * segment (flair#1970). REFUSES an id that is exactly `.` or `..`: percent-
+ * encoding leaves those unchanged and URL normalization collapses `/Memory/.`
+ * to `/Memory/` and `/Memory/..` to `/`, so the sent path would not be the id
+ * (nor the signed path). Such an id cannot address its record.
+ */
+function encodeRecordId(id: string): string {
+  if (id === "." || id === "..") {
+    throw new Error(
+      `record id ${JSON.stringify(id)} is a URL path dot-segment ("." or ".."); ` +
+        `it cannot be addressed as one path segment of /Memory/<id>. Use a different id.`,
+    );
+  }
+  return encodeURIComponent(id);
+}
+
 /** Bind shared CLI helpers. cli.ts calls this immediately before register(program). */
 export function bindCli(fns: BridgeCli): void {
   cli = fns;
@@ -170,7 +187,7 @@ export function register(program: Command): void {
         // One percent-encoded path segment, built once: the Ed25519 signature
         // covers the path that is actually PUT, so sign the same encoded path
         // (#1970). Ids of ordinary characters address the same record as before.
-        const memoryPath = `/Memory/${encodeURIComponent(body.id)}`;
+        const memoryPath = `/Memory/${encodeRecordId(body.id)}`;
         if (keyPath) {
           headers["authorization"] = buildEd25519Auth(body.agentId, "PUT", memoryPath, keyPath);
         }
