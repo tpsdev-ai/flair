@@ -129,8 +129,9 @@ const INLINE_POINTER_FIELDS = ["hostSource", "hostSourceScope", "hostSourceVisib
 
 /** Return `record` with every inline pointer-input field removed. Returns the
  *  SAME reference when there is nothing to remove, so a clean record is
- *  byte-identical to today. */
-function stripInlinePointerFields<T>(record: T): T {
+ *  byte-identical to today. The one helper every response path uses to drop
+ *  inline pointer fields independently of the gated join. */
+export function stripInlinePointerFields<T>(record: T): T {
   const r = record as any;
   if (!INLINE_POINTER_FIELDS.some((k) => k in r)) return record;
   const out = { ...r };

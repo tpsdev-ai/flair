@@ -1319,7 +1319,7 @@ export class Memory extends (databases as any).flair.Memory {
       // an existing row, never a reincarnation).
       stripServerStampedFields(content);
       const reindexExisting = content.id
-        ? await (databases as any).flair.Memory.get(content.id).catch(() => null)
+        ? await (databases as any).flair.Memory.get(content.id)
         : null;
       stampInstanceToken(content, reindexExisting);
       // Preserve stored visibility on updates before applying write policy:

@@ -193,7 +193,11 @@ export class FeedMemories extends Resource {
     // caller-supplied server-stamped field (instanceToken, provenance), then
     // PRESERVE the existing row's incarnation token, else generate one.
     stripServerStampedFields(record);
-    const priorById = await (databases as any).flair.Memory.get(record.id).catch(() => null);
+    // flair#1940 A1-iv item 1: a failed existing-row lookup must FAIL the write,
+    // not fall back to a fresh token — rotating the token would hide a still-
+    // stored pointer row that is bound to the stored token (the same fail-closed
+    // rule #1956 applies to put()). No `.catch`: the rejection propagates.
+    const priorById = await (databases as any).flair.Memory.get(record.id);
     record.instanceToken = priorById?.instanceToken ?? randomUUID();
     await (databases as any).flair.Memory.put(record);
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).

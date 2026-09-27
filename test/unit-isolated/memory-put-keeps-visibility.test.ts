@@ -167,4 +167,23 @@ describe("Memory updates preserve stored visibility", () => {
     await makeMemory("priv").patch({ visibility: undefined, content: "patched again" });
     expect(memoryStore.get("priv").visibility).toBe("private");
   });
+
+  test("(rc1) a failed reindex existing-row lookup fails the write and leaves the row and token unchanged", async () => {
+    // The harness's STATIC table get throws for id "boom", the same way a real
+    // failed lookup does. The reindex path's token lookup must NOT swallow it.
+    memoryStore.set("boom", { id: "boom", agentId: "alice", content: "orig", durability: "standard", visibility: "private", instanceToken: "tok-keep" });
+    const r: any = new (Memory as any)();
+    r.id = "boom";
+    r.getContext = () => undefined; // internal caller: the admin gate passes
+    let threw = false;
+    try {
+      const res = await r.put({ id: "boom", agentId: "alice", content: "changed", durability: "standard", _reindex: true });
+      if (res instanceof Response && res.status >= 400) threw = true;
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true); // assertion: a failed lookup fails the write
+    expect(memoryStore.get("boom").content).toBe("orig"); // assertion: the stored row is unchanged
+    expect(memoryStore.get("boom").instanceToken).toBe("tok-keep"); // assertion: the token is not rotated (a bound pointer stays bound)
+  });
 });
