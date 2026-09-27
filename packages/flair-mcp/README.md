@@ -68,7 +68,7 @@ Once configured, Claude Code (or any MCP client) gets these tools:
 Claude Code ↔ stdio ↔ flair-mcp ↔ HTTP ↔ Flair (Harper)
 ```
 
-The MCP server is a thin wrapper around `@tpsdev-ai/flair-client`. All memory is stored in the Flair instance selected by `FLAIR_URL` (defaulting to localhost). The default auth is Ed25519 with a Basic fallback when `FLAIR_ADMIN_USER` and `FLAIR_ADMIN_PASSWORD` are set. The MCP client connects to FLAIR_URL; a paired local instance may separately federate eligible memories.
+The MCP server is a thin wrapper around `@tpsdev-ai/flair-client`. All memory is stored in the Flair instance selected by `FLAIR_URL` (defaulting to localhost). Requests are signed with the agent's Ed25519 key whenever one resolves. Only when no key resolves, and both `FLAIR_ADMIN_USER` and `FLAIR_ADMIN_PASSWORD` are set, does the client send admin Basic auth; a key that cannot be parsed is an error, and a rejected signature is not retried with Basic. The MCP client connects to FLAIR_URL; a paired local instance may separately federate eligible memories.
 
 ## Remote Flair
 
@@ -82,14 +82,14 @@ Point to a remote Flair instance:
       "args": ["-y", "@tpsdev-ai/flair-mcp"],
       "env": {
         "FLAIR_AGENT_ID": "my-project",
-        "FLAIR_URL": "http://your-server:19926"
+        "FLAIR_URL": "https://your-server:19926"
       }
     }
   }
 }
 ```
 
-Copy your key from the server: `scp server:~/.flair/keys/my-project.key ~/.flair/keys/`
+Use HTTPS for a remote instance: when Basic auth is used, the admin credentials travel in a request header. Copy your key from the server: `scp server:~/.flair/keys/my-project.key ~/.flair/keys/`
 
 ## License
 

@@ -52,7 +52,7 @@ LangGraph's `BaseStore` uses hierarchical namespaces (`["users", "profiles"]`) a
 
 1. **Ed25519 keypair** (preferred): pass `agentId` to the constructor; the client also reads `FLAIR_AGENT_ID` from env, but the constructor parameter is required.
 2. **Explicit key path**: `new FlairStore({ agentId, keyPath: "/path/to/key.pem" })`
-3. **Basic auth fallback**: `new FlairStore({ agentId, adminUser, adminPassword })` for standalone deployments.
+3. **Basic auth fallback**: `new FlairStore({ agentId, adminUser, adminPassword })` for standalone deployments. It is used only when no key resolves for the request: a present key wins, and a rejected signature is not retried with Basic. Send Basic auth only over HTTPS or to loopback.
 
 ```typescript
 const store = new FlairStore({
@@ -62,6 +62,8 @@ const store = new FlairStore({
   adminPassword: process.env.FLAIR_ADMIN_PASSWORD,
 });
 ```
+
+If a key for `my-agent` is found, the store signs with it and does not send the admin credentials.
 
 ## What you get
 

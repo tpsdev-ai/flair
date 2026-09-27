@@ -99,7 +99,7 @@ Schedule that command. A running agent uses `flair_catchup` instead — see the 
 ## Not this plugin
 
 - Built-in Flair `/mcp` OAuth — off by default; a different surface
-- Claude Code / Codex `flair-session-start` hook — supported for both; the installer writes it into the target harness's settings.
+- Claude Code / Codex `flair-session-start` hook — supported for both; the installer writes it into the target harness's settings. Codex runs a hook only after you trust it, and records that trust as a hash of the hook in `~/.codex/config.toml`, so the written hook does nothing until you trust it in Codex (and again after it changes).
 - OpenClaw, n8n, Hermes, LangGraph, Pi, ADK packages — other harnesses, same Flair backend
 
 ## Troubleshooting
