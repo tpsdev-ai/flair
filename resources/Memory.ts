@@ -493,6 +493,7 @@ async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<stri
     throw new Error(`supersede-close: record ${oldId} not found`);
   }
   const closed = { ...existing, ...patch };
+  stripUndeclaredMemoryAttributes(closed);
   await withDetachedTxn(ctx, () => (databases as any).flair.Memory.put(closed));
   // flair#1357 — a supersede-close sets `validTo`, which the retrieval filters
   // read, so the lexical index has to see it as eagerly as a content write.
@@ -961,7 +962,9 @@ export class Memory extends (databases as any).flair.Memory {
         try {
           const src = await (databases as any).flair.Memory.get(sourceId);
           if (src) {
-            patchRecord((databases as any).flair.Memory, sourceId, { lastReflected: now }).catch(() => {});
+            const reflectPatch = { lastReflected: now };
+            stripUndeclaredMemoryAttributes(reflectPatch);
+            patchRecord((databases as any).flair.Memory, sourceId, reflectPatch).catch(() => {});
           }
         } catch {}
       }

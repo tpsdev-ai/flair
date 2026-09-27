@@ -24,6 +24,7 @@ import { allowAdmin, invalidateAdminCache } from "./agent-auth.js";
 import { authorizeSoulWrite, refuseSoulWriteContent, soulProvenance } from "./soul-write-policy.js";
 import { reconcileAdminFields } from "./agent-admin.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
+import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { rejectSkillWritePath } from "./skill-write.js";
 
 const DEFAULT_SOUL_KEYS = (agentId: string, displayName: string, role: string, now: string) => ({
@@ -146,6 +147,7 @@ export class AgentSeed extends Resource {
           updatedAt: now,
           archived: false,
         };
+        stripUndeclaredMemoryAttributes(record);
         await (databases as any).flair.Memory.put(record);
         noteMemoryUpsert(record);
         memories.push(record);

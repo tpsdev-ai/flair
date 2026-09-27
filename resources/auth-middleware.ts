@@ -7,6 +7,7 @@ import { resolveReadScope } from "./memory-read-scope.js";
 import { NOT_FOUND } from "./record-type-kit.js";
 import { isForbiddenOwnerMutation, resolveGuardedRecord } from "./record-owner-guard.js";
 import { checkHttpRateLimit } from "./rate-limit.js";
+import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 
 // --- Admin credentials ---
 // Admin auth is sourced exclusively from Harper's own environment variables
@@ -60,7 +61,9 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // document vector, same as the three Memory.ts sites; must match.
     const embedding = await getEmbedding(record.content, "document");
     if (!embedding) return;
-    await patchRecord((databases as any).flair.Memory, memoryId, { embedding });
+    const embedPatch = { embedding };
+    stripUndeclaredMemoryAttributes(embedPatch);
+    await patchRecord((databases as any).flair.Memory, memoryId, embedPatch);
     console.log(`[auto-embed] ${memoryId}: ${embedding.length}d`);
   } catch (err: any) {
     console.error(`[auto-embed] Failed for ${memoryId}: ${err.message}`);

@@ -134,6 +134,7 @@
  * omitting it.
  */
 import { databases } from "harper";
+import { stripUndeclaredMemoryAttributes } from "../memory-declared-attributes.js";
 import type { Migration, RunBatchResult } from "./types.js";
 
 export type BackfilledVisibility = "private" | "shared";
@@ -243,7 +244,9 @@ export function createVisibilityBackfillMigration(getTable: () => MemoryTableLik
           );
         }
 
-        await table.put({ ...existing, visibility: derived });
+        const backfillRow = { ...existing, visibility: derived };
+        stripUndeclaredMemoryAttributes(backfillRow);
+        await table.put(backfillRow);
         touchedIds.push(id);
       }
 

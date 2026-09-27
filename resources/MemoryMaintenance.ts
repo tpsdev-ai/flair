@@ -28,6 +28,7 @@ async function deletePointerRow(memoryId: string): Promise<void> {
 }
 import { isAdmin } from "./agent-auth.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
+import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 
 export class MemoryMaintenance extends Resource {
   /** POST requires auth — either an agent acting on its own memories, or admin. */
@@ -119,6 +120,7 @@ export class MemoryMaintenance extends Resource {
                   archived: true,
                   archivedAt: now.toISOString(),
                 };
+                stripUndeclaredMemoryAttributes(archivedRow);
                 await (databases as any).flair.Memory.update(record.id, archivedRow);
                 // flair#1357 — an `archived` flip changes what the retrieval
                 // conditions (`archived not_equal true`) admit, so the lexical
