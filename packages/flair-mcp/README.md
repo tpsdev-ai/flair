@@ -68,7 +68,7 @@ Once configured, Claude Code (or any MCP client) gets these tools:
 Claude Code ↔ stdio ↔ flair-mcp ↔ HTTP ↔ Flair (Harper)
 ```
 
-The MCP server is a thin wrapper around `@tpsdev-ai/flair-client`. All memory is stored in your local Flair instance. The default auth is Ed25519 with a Basic fallback when `FLAIR_ADMIN_USER` and `FLAIR_ADMIN_PASSWORD` are set. Nothing leaves your machine unless you point `FLAIR_URL` at a remote server.
+The MCP server is a thin wrapper around `@tpsdev-ai/flair-client`. All memory is stored in the Flair instance selected by `FLAIR_URL` (defaulting to localhost). The default auth is Ed25519 with a Basic fallback when `FLAIR_ADMIN_USER` and `FLAIR_ADMIN_PASSWORD` are set. Nothing leaves your machine unless you point `FLAIR_URL` at a remote server.
 
 ## Remote Flair
 

@@ -13,6 +13,6 @@ Store durable decisions, lessons, preferences, and explicit "remember this" fact
 
 If Flair tools fail, use the health skill. Report the configured `FLAIR_URL` and `FLAIR_AGENT_ID` (never secrets) and ask for a reachable Flair origin.
 
-Do not run `flair-session-start` — that hook is Claude-only and is not part of this plugin.
+Do not run `flair-session-start` — that hook is per-harness (Claude Code, Codex) and is not part of this plugin.
 
 Do not invent a dream, consolidate, export, or wipe-all flow. The tools on this server are: `memory_search`, `memory_store`, `memory_update`, `memory_get`, `memory_delete`, `relationship_store`, `bootstrap`, `soul_set`, `soul_get`, `flair_workspace_set`, `flair_orgevent`.

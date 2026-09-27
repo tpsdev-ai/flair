@@ -25,7 +25,7 @@ Do **not** use this to store, update, or delete anything. If tools fail, switch 
 2. Summarize what came back: soul (role, standards, project) plus a handful of relevant memories. Do **not** dump the raw payload.
 3. If the call fails, stop guessing from memory and use the health skill. Ask for a reachable `FLAIR_URL`.
 4. Do **not** write memories, soul, or relationships as a side effect of bootstrap.
-5. Do **not** shell `flair-session-start`. That bin is a Claude Code SessionStart hook and is not part of this plugin.
+5. Do **not** shell `flair-session-start`. That bin is a per-harness SessionStart hook (Claude Code, Codex) and is not part of this plugin.
 
 ## After bootstrap
 

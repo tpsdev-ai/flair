@@ -99,7 +99,7 @@ pi
 
 ### Auto-Capture Warning
 
-When `FLAIR_AUTO_CAPTURE=true`, assistant responses whose content exceeds 100 characters are persisted to Flair memory with **ephemeral durability**. Responses containing recognized secret patterns are skipped. Accepted text is truncated to 4000 characters.
+When `FLAIR_AUTO_CAPTURE=true`, the handler *attempts to store* the inspected assistant entry when serialized content exceeds 100 characters and matches no recognized secret pattern. Accepted text is truncated to 4000 characters.
 
 **Do not enable `FLAIR_AUTO_CAPTURE=true` if your sessions may output:**
 

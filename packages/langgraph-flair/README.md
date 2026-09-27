@@ -50,7 +50,7 @@ LangGraph's `BaseStore` uses hierarchical namespaces (`["users", "profiles"]`) a
 
 `FlairStore` composes a `FlairClient`. Three options:
 
-1. **Ed25519 keypair** (preferred): set `FLAIR_AGENT_ID` and the client auto-resolves your key.
+1. **Ed25519 keypair** (preferred): pass `agentId` to the constructor; the client also reads `FLAIR_AGENT_ID` from env, but the constructor parameter is required.
 2. **Explicit key path**: `new FlairStore({ agentId, keyPath: "/path/to/key.pem" })`
 3. **Basic auth fallback**: `new FlairStore({ agentId, adminUser, adminPassword })` for standalone deployments.
 
@@ -58,7 +58,8 @@ LangGraph's `BaseStore` uses hierarchical namespaces (`["users", "profiles"]`) a
 const store = new FlairStore({
   agentId: "my-agent",
   url: "https://flair.example.com",  // or FLAIR_URL env var
-  adminPassword: process.env.FLAIR_ADMIN_PASS,
+  adminUser: process.env.FLAIR_ADMIN_USER,
+  adminPassword: process.env.FLAIR_ADMIN_PASSWORD,
 });
 ```
 
@@ -73,8 +74,8 @@ const store = new FlairStore({
 ## Limitations (v1)
 
 - LangGraph's `IndexConfig` (custom embedding model, per-field indexing) is ignored. Flair has its own embedding pipeline (`nomic-embed-text-v1.5`, 768-dim) and embeds the full content blob. If you need per-field embeddings, pre-extract and store as separate items.
-- `search.filter` operators (`$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`) are applied client-side after retrieval. Tag-based pre-filtering (the namespace) applies only to non-semantic queries; semantic queries receive no namespace pre-filter from the server. High-fanout filters across many memories will be slower.
-- Namespace-prefix matching uses the full joined-path tag (`lg-ns:users/profiles`). Items in `["users", "profiles", "u123"]` are reachable via the `["users", "profiles"]` prefix because the search routine post-filters parsed namespaces against the requested prefix — but searching by a *single label anywhere in the namespace* (e.g. "all items with `profiles` somewhere") isn't supported. LangGraph's `BaseStore.search` API doesn't expose this surface either, so there's no read path that would benefit; if a future LangGraph extension adds it we'll add a derived index then.
+- `search.filter` operators (`$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`) are applied client-side after retrieval. Neither the tag-based path nor the semantic path applies a namespace pre-filter on the server; both fetch then filter on the client. For non-semantic queries the tag lookup performs an exact match on the joined tag, while semantic results are post-filtered client-side against the requested namespace prefix. High-fanout filters across many memories will be slower.
+- Namespace-prefix matching requests the full joined-path tag (`lg-ns:users/profiles`) from the non-semantic path; that exact-tag lookup does **not** reach descendants. The semantic path post-filters against the prefix, which is the sole route to descendant matches. LangGraph's `BaseStore.search` API doesn't expose a label-only surface either, so there's no read path that would benefit; if a future LangGraph extension exposes it we'd add a derived index then.
 - `listNamespaces` returns namespaces seen in your stored memories (best-effort scan via `batch()`). Empty namespaces aren't enumerable.
 
 ## License
