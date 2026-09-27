@@ -6,7 +6,7 @@ It's also our first dogfood loop on n8n: every K&S review verdict that lands in 
 
 ## Why this workflow earns the worked-example slot
 
-The q3qf positioning table calls out Flair's **agent-knowledge shape** vs n8n's built-in conversation-buffer memory connectors. This workflow is that shape in practice:
+Flair's positioning contrasts its **agent-knowledge shape** with n8n's built-in conversation-buffer memory connectors. This workflow is that shape in practice:
 
 - Captures **reasoning** (multi-paragraph review prose), not turn-by-turn chat
 - Tags every memory with the agent who wrote it, the PR number it's about, and the date — making queries like *"what does Sherlock typically flag in auth code"* or *"Kern's view on schema migrations"* possible six months later

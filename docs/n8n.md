@@ -76,8 +76,8 @@ n8n memory connectors expose a `sessionKey` parameter that scopes the chat histo
 Patterns:
 
 - **"This assistant remembers"** — set Subject to a stable string (`customer-support`, `daily-standup`). Leave Session Sub-Key blank. All runs share memory.
-- **Per-conversation isolation** — set Subject to the conversation owner (`customer:1234`), leave Session Sub-Key blank. Each conversation is isolated by subject.
-- **Per-execution isolation** — set Session Sub-Key to `={{ $execution.id }}`. A distinct subject selects each conversation's or run's chat-history window; it does not restrict access to those memories. (This is most similar to n8n's default `sessionKey={{ $execution.id }}`.)
+- **Per-conversation grouping** — set Subject to the conversation owner (`customer:1234`), leave Session Sub-Key blank. Each conversation's chat history is kept under its own subject.
+- **Per-execution grouping** — set Session Sub-Key to `={{ $execution.id }}`. A distinct subject selects each conversation's or run's chat-history window; it does not restrict access to those memories. (This is most similar to n8n's default `sessionKey={{ $execution.id }}`.)
 
 ## Security
 
