@@ -154,7 +154,7 @@ export const DEFAULT_WORKFLOW_NAME = "CI";
 export const DEFAULT_ADVISORY_ALLOWLIST = ".github/release-auto-tag-advisories.json";
 export const DEFAULT_POLL_SECONDS = 60;
 
-/** Every git spawnSync carries this wall-clock ceiling; a timeout is a FAILURE. */
+/** The pyproject read's two git spawns (ls-tree and show) carry this wall-clock ceiling; a timeout is a FAILURE. */
 export const GIT_TIMEOUT_MS = 10_000;
 
 /**
@@ -176,10 +176,14 @@ export function classifyLsTree(r, path) {
   if (r?.status !== 0) {
     return { kind: "failed", reason: `git ls-tree exited ${r.status}: ${String(r.stderr ?? "").trim()}` };
   }
-  const out = String(r.stdout ?? "").trim();
-  if (out === "") return { kind: "absent" };
-  if (out === path) return { kind: "present" };
-  return { kind: "failed", reason: `git ls-tree printed ${JSON.stringify(out)}, not ${JSON.stringify(path)}` };
+  if (r?.signal) return { kind: "failed", reason: `git ls-tree was stopped by ${r.signal}` };
+  if (typeof r?.stdout !== "string") return { kind: "failed", reason: "git ls-tree produced no output stream" };
+  // EXACT (round 8): git prints the path followed by one LF, or nothing. No trim:
+  // whitespace-only output, extra newlines or leading spaces are FAILED, never
+  // "absent" or "present".
+  if (r.stdout === "") return { kind: "absent" };
+  if (r.stdout === `${path}\n`) return { kind: "present" };
+  return { kind: "failed", reason: `git ls-tree printed ${JSON.stringify(r.stdout)}, not ${JSON.stringify(`${path}\n`)} or nothing` };
 }
 // Condition 7b's allowed surface beyond the version-bearing files: the changelog
 // (the release's own edit), the unreleased fragments (prose about shipped
@@ -658,7 +662,7 @@ export function adkTagName(version) {
  * Membership comes from `git ls-tree --name-only <sha> -- <path>`; NO stderr
  * substring decides anything (the round-6 classifier's `does not exist in` test is
  * gone). The text is read with `git show` ONLY when present, and any failure there
- * is `failed`. Every spawnSync carries a timeout; a timeout is `failed` with
+ * is `failed`. Both spawns carry GIT_TIMEOUT_MS; a timeout is `failed` with
  * "timeout" in the reason.
  */
 export function readAdkPyproject(git, sha) {
@@ -751,7 +755,7 @@ export async function adkWorkAfterVAtSha(reads, deps, { sha, version }) {
       kind: "refuse",
       condition: CONDITION.ADK_PYPROJECT_UNREADABLE,
       summary: [
-        `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${sha} (${read.reason}); bob cannot verify the Python package, so the release is refused`,
+        `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${sha} (${read.reason}); the tagger cannot verify the Python package, so the release is refused`,
       ],
     };
   }
@@ -1215,12 +1219,35 @@ export async function decide({ sha, deps, options = {} }) {
   if (!step9.ok) return refuse(step9);
   if (step9.tolerated?.length) summary.push(`allowlisted non-success checks (do not refuse): ${step9.tolerated.join(", ")}`);
 
+  // The adk pyproject, on the v-ABSENT path too (round 8): the same shared read
+  // and version check the v-at-sha path and the write boundary use, so decide never
+  // returns TAG for an unreadable or mismatched pyproject. (With v at <sha>,
+  // adkWorkAfterVAtSha above already ran it.)
+  if (!vAlreadyAtSha) {
+    const adkRead = readAdkPyproject(deps.git, sha);
+    if (adkRead.kind === "failed") {
+      return refuse(
+        {
+          condition: CONDITION.ADK_PYPROJECT_UNREADABLE,
+          summary: [
+            `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${sha} (${adkRead.reason}); the tagger cannot verify the Python package, so the release is refused`,
+          ],
+        },
+        { adkVerdict: WRITE_VERDICT.REFUSE, adkCondition: CONDITION.ADK_PYPROJECT_UNREADABLE },
+      );
+    }
+    const adkCheck = adkVersionCheck(adkRead.kind === "present" ? adkRead.text : null, version);
+    if (adkCheck.kind === "refuse") {
+      return refuse(adkCheck, { adkVerdict: WRITE_VERDICT.REFUSE, adkCondition: adkCheck.condition });
+    }
+  }
+
   return {
     verdict: VERDICT.TAG,
     condition: "",
     version,
     summary: vAlreadyAtSha
-      ? [...summary, `v${version} is already at ${sha}: the v POST is skipped; the adk tag will be attempted after the v read-back`]
+      ? [...summary, `observed: v${version} resolves to ${sha}; adk-flair-v${version} does not exist yet. The write step re-checks both refs before any POST.`]
       : summary,
     pr: step7.pr,
     ...(vAlreadyAtSha ? { vVerdict: WRITE_VERDICT.SKIP } : {}),
@@ -1320,14 +1347,14 @@ export async function writeTag({ sha, version, deps, options = {} }) {
   // can release without the Python package — and only skips the second tag.
   //
   // A git FAILURE (spawn error / non-zero exit / timeout / an unclear answer) is
-  // REFUSED here, before ANY POST: bob cannot tell whether the pyproject exists,
+  // REFUSED here, before ANY POST: the tagger cannot tell whether the pyproject exists,
   // and treating "could not read it" as "not there" would POST v and skip adk.
   const adkRead = readAdkPyproject(deps.git, sha);
   if (adkRead.kind === "failed") {
     return refuse(CONDITION.ADK_PYPROJECT_UNREADABLE, {
       summary: [
         ...summary,
-        `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${sha} (${adkRead.reason}); bob cannot verify the Python package, so the whole release is refused before any tag`,
+        `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${sha} (${adkRead.reason}); the tagger cannot verify the Python package, so the whole release is refused before any tag`,
       ],
       adkVerdict: WRITE_VERDICT.REFUSE,
       adkCondition: CONDITION.ADK_PYPROJECT_UNREADABLE,
@@ -1376,7 +1403,7 @@ export async function writeTag({ sha, version, deps, options = {} }) {
       const existing = await deps.api.readTagRef(`v${version}`);
       const commit = existing ? await resolveTagCommit(deps.api, existing) : null;
       if (commit === sha) {
-        return { verdict: WRITE_VERDICT.SKIP, condition: "", version, reason: "another run tagged this commit first", summary };
+        return { verdict: WRITE_VERDICT.SKIP, condition: "", version, reason: `POST ${ref} was rejected (${created?.status}); the read-back shows v${version} at ${sha}`, summary };
       }
       return refuse(CONDITION.TAG_CONFLICT, {
         summary: [...summary, `POST ${ref} failed (${created?.status}) and the ref resolves to ${commit ?? "nothing"}`],

@@ -1219,7 +1219,9 @@ describe("release auto-tag — the write boundary (condition 10)", () => {
     });
     const result = await writeTag({ sha: SHA, version: VERSION, deps, options: appOptions });
     expect(result.verdict).toBe(WRITE_VERDICT.SKIP);
-    expect(result.reason).toContain("first");
+    // Round 8: the reason states what was OBSERVED (the rejection and the
+    // read-back), never a cause ("another run tagged it first") it cannot know.
+    expect(result.reason).toBe(`POST refs/tags/v${VERSION} was rejected (422); the read-back shows v${VERSION} at ${SHA}`);
   });
 
   test("condition 10: losing the POST race when the ref points elsewhere REFUSEs tag-conflict", async () => {
@@ -1593,7 +1595,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     expect(result.condition).toBe(CONDITION.ADK_PYPROJECT_UNREADABLE);
     expect(result.adkCondition).toBe(CONDITION.ADK_PYPROJECT_UNREADABLE);
     expect(result.summary).toEqual([
-      `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${SHA} (spawn error: boom); bob cannot verify the Python package, so the whole release is refused before any tag`,
+      `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${SHA} (spawn error: boom); the tagger cannot verify the Python package, so the whole release is refused before any tag`,
     ]); // assertion B: the reason, in the whole text
     expect(posts).toEqual([]); // assertion C: zero POSTs
   });
@@ -1632,7 +1634,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     expect(result.verdict).toBe(WRITE_VERDICT.REFUSE); // assertion B
     expect(result.condition).toBe(CONDITION.ADK_PYPROJECT_UNREADABLE);
     expect(result.summary).toEqual([
-      `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${SHA} (git ls-tree exited 128: fatal: path 'packages/adk-flair/pyproject.toml' does not exist in 'abc'); bob cannot verify the Python package, so the whole release is refused before any tag`,
+      `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${SHA} (git ls-tree exited 128: fatal: path 'packages/adk-flair/pyproject.toml' does not exist in 'abc'); the tagger cannot verify the Python package, so the whole release is refused before any tag`,
     ]); // assertion C: the whole text
     expect(posts).toEqual([]); // assertion D: ZERO POSTs
   });
@@ -1649,7 +1651,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     expect(result.verdict).toBe(WRITE_VERDICT.REFUSE);
     expect(result.condition).toBe(CONDITION.ADK_PYPROJECT_UNREADABLE);
     expect(result.summary).toEqual([
-      `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${SHA} (timeout after ${10_000}ms); bob cannot verify the Python package, so the whole release is refused before any tag`,
+      `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${SHA} (timeout after ${10_000}ms); the tagger cannot verify the Python package, so the whole release is refused before any tag`,
     ]); // assertion C
     expect(posts).toEqual([]); // assertion D: ZERO POSTs
   });
@@ -1757,8 +1759,76 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     expect(readFileSync(bench, "utf8")).toBe('export const TOOL_VERSION = "1.0.0";\n'); // assertion C: NOTHING written
   });
 
+  test("(r8a) classifyLsTree is EXACT: only nothing (absent) or the path plus one LF (present); anything else fails", () => {
+    const P = ADK_PYPROJECT_PATH;
+    expect(classifyLsTree({ status: 0, stdout: "" }, P)).toEqual({ kind: "absent" });
+    expect(classifyLsTree({ status: 0, stdout: `${P}\n` }, P)).toEqual({ kind: "present" });
+    for (const stdout of ["   \n", "\n", `${P}\n\n`, ` ${P}\n`, P, `${P}\r\n`]) {
+      expect(classifyLsTree({ status: 0, stdout }, P).kind, JSON.stringify(stdout)).toBe("failed");
+    }
+    expect(classifyLsTree({ status: 0, signal: "SIGKILL", stdout: "" }, P).kind).toBe("failed");
+    expect(classifyLsTree({ status: 0 }, P).kind).toBe("failed"); // no output stream
+  });
+
+  test("(r8b) DECIDE with v ABSENT and an unreadable pyproject → a structured REFUSE adk-pyproject-unreadable, never TAG", async () => {
+    const { deps } = harness({ api: refApi([], new Map()) });
+    deps.git.lsTree = () => ({ kind: "failed", reason: "spawn error: boom" });
+    const result = await decide({ sha: SHA, deps });
+    expect(result.verdict).toBe(VERDICT.REFUSE);
+    expect(result.condition).toBe(CONDITION.ADK_PYPROJECT_UNREADABLE);
+    expect(result.adkVerdict).toBe(WRITE_VERDICT.REFUSE);
+    expect((result.summary ?? []).at(-1)).toBe(
+      `the on-tree ${ADK_PYPROJECT_PATH} could not be read at ${SHA} (spawn error: boom); the tagger cannot verify the Python package, so the release is refused`,
+    );
+  });
+
+  test("(r8c) DECIDE with v ABSENT and a mismatched pyproject → REFUSE adk-version-mismatch; a matching one still TAGs", async () => {
+    {
+      const { deps } = harness({ api: refApi([], new Map()) });
+      pinPyproject(deps, pyproject("0.1.0"));
+      const result = await decide({ sha: SHA, deps });
+      expect(result.verdict).toBe(VERDICT.REFUSE);
+      expect(result.condition).toBe(CONDITION.ADK_VERSION_MISMATCH);
+      expect((result.summary ?? []).at(-1)).toBe(`the on-tree ${ADK_PYPROJECT_PATH} declares version 0.1.0, not ${VERSION}`);
+    }
+    {
+      const { deps } = harness({ api: refApi([], new Map()) });
+      pinPyproject(deps, pyproject(VERSION));
+      const result = await decide({ sha: SHA, deps });
+      expect(result.verdict).toBe(VERDICT.TAG); // the control: a matching pyproject passes
+    }
+  });
+
+  test("(r8e) check-version-sync names a DYNAMIC version as a policy refusal, not as a missing declaration", () => {
+    const realRoot = resolve(import.meta.dir, "../..");
+    const checker = join(realRoot, "scripts", "check-version-sync.mjs");
+    const root = scratchDir();
+    mkdirSync(join(root, "packages/flair-bench/src"), { recursive: true });
+    mkdirSync(join(root, "packages/adk-flair"), { recursive: true });
+    writeFileSync(join(root, "packages/flair-bench/src/version.ts"), 'export const TOOL_VERSION = "1.0.0";\n');
+    writeFileSync(join(root, "packages/adk-flair/pyproject.toml"), `[project]\nname = "adk-flair"\ndynamic = ["version"]\nversion = "1.0.0"\n`);
+    // verify() inventories every lockstep package.json first: give it a consistent set.
+    for (const pj of ["package.json", "packages/flair-client/package.json", "packages/flair-tool-descriptors/package.json",
+      "packages/flair-mcp/package.json", "packages/openclaw-flair/package.json", "packages/pi-flair/package.json",
+      "packages/n8n-nodes-flair/package.json", "packages/langgraph-flair/package.json", "packages/adk-flair-js/package.json",
+      "packages/flair-bench/package.json"]) {
+      mkdirSync(dirname(join(root, pj)), { recursive: true });
+      writeFileSync(join(root, pj), JSON.stringify({ name: pj, version: "1.0.0" }) + "\n");
+    }
+    const verify = spawnSync(process.execPath, [checker, "1.0.0", "--root", root], { encoding: "utf8" });
+    const out = `${verify.stdout}${verify.stderr}`;
+    expect(verify.status).not.toBe(0);
+    expect(out).toContain("[project] declares version as dynamic, which this checker refuses");
+    expect(out).not.toContain("no [project].version declaration");
+    const write = spawnSync(process.execPath, [checker, "--write", "2.0.0", "--root", root], { encoding: "utf8" });
+    const wout = `${write.stdout}${write.stderr}`;
+    expect(write.status).not.toBe(0);
+    expect(wout).toContain("[project] declares version as dynamic, which this checker refuses to rewrite");
+    expect(wout).not.toContain("could not be read");
+  });
+
   test("(phrases) no recovery/refusal text the module actually EMITS predicts a future outcome", async () => {
-    const phrases = ["will refuse", "completes it", "was created", "was not created", "is written"];
+    const phrases = ["will refuse", "completes it", "was created", "was not created", "is written", "will be attempted", "another run"];
     const adkTag = `adk-flair-v${VERSION}`;
     const emitted: string[] = [];
     const collect = async (api: unknown, pin: string) => {
@@ -1848,26 +1918,9 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     }
 
     expect(emitted.length).toBeGreaterThan(0); // the scan saw real texts
-    // SCAN COMPLETENESS: the fixture list must name every emitting path. The
-    // branches (file:line at this commit) are:
-    //   release-auto-tag.mjs: decide's adk-work refusal (:~1050) + the vAlreadyAtSha
-    //     TAG summary (:1212); writeTag's git-failure refusal (:1315),
-    //     version-mismatch/unsupported refusals (:1328), pre-POST adk-elsewhere,
-    //     rejected-POST (:1422), MISSING (:1427), UNRESOLVED (:1440), ELSEWHERE (:1454);
-    //   check-version-sync.mjs: write()'s refusal (:276) and readDeclared's two
-    //     reasons (:241/:244).
-    const FIXTURES = [
-      "rejected-post",
-      "missing",
-      "unresolved",
-      "elsewhere",
-      "git-fail",
-      "reader",
-      "decide-v-at-sha",
-      "cvs-verify",
-      "cvs-write",
-    ];
-    expect(FIXTURES.length).toBe(9); // the fixtures this scan runs
+    // NOT a completeness check (round 8): this scan covers exactly the fixtures
+    // collected above and below. A new emitting branch needs its own fixture
+    // here; nothing in this test can notice one that was not added.
     const checkVersionSyncMessages: string[] = [];
     {
       // check-version-sync's two messages, collected from real runs.
@@ -1884,10 +1937,6 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
       const b = spawnSync(process.execPath, [checker, "--write", "2.0.0", "--root", root], { encoding: "utf8" });
       checkVersionSyncMessages.push(`${b.stdout}${b.stderr}`);
     }
-    // The population the scan must have seen: the writeText fixtures (6) + the
-    // check-version-sync messages (2). A new emitting path that is NOT added here
-    // makes this assertion drift — the guard the brief asks for.
-    expect(emitted.length + checkVersionSyncMessages.length).toBe(12);
     for (const t of [...emitted, ...checkVersionSyncMessages]) {
       for (const p of phrases) {
         const readBack = /[0-9a-f]{40}/.test(t) || /read back|not found|did not read back/.test(t);
@@ -1896,6 +1945,8 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
       expect(t).not.toContain("will refuse");
       expect(t).not.toContain("completes it");
       expect(t).not.toContain("is written");
+      expect(t).not.toContain("will be attempted");
+      expect(t).not.toContain("another run");
     }
   });
 

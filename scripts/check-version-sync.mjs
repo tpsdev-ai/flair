@@ -242,6 +242,9 @@ function readDeclared(file) {
     if (r.kind === "unsupported") {
       return { ok: false, reason: `${file.path}: present but unsupported: ${r.reason}` };
     }
+    if (r.reason === "dynamic") {
+      return { ok: false, reason: `${file.path}: [project] declares version as dynamic, which this checker refuses (a dynamic version cannot be verified or rewritten)` };
+    }
     return { ok: false, reason: `${file.path}: no [project].version declaration (${r.reason})` };
   }
   const m = matchesIn(src, file.pattern);
@@ -275,7 +278,11 @@ function write(version) {
         const why =
           r.kind === "version"
             ? "a version declaration exists, but the rewrite would not change only [project].version (the tomllib re-verify refused)"
-            : `the [project] version could not be read to rewrite it (${r.reason})`;
+            : r.kind === "unsupported"
+              ? `present but unsupported: ${r.reason}`
+              : r.reason === "dynamic"
+                ? "[project] declares version as dynamic, which this checker refuses to rewrite"
+                : `no [project].version declaration (${r.reason})`;
         console.error(`❌ ${file.path}: the version could not be safely rewritten: ${why}`);
         process.exit(1);
       }
