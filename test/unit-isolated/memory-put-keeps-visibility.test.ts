@@ -143,4 +143,9 @@ describe("Memory updates preserve stored visibility", () => {
     expect((result as Response).status).toBe(400);
     expect(memoryStore.get("pub").durability).toBe("persistent");
   });
+
+  test("an in-process PATCH carrying visibility: undefined keeps the stored value", async () => {
+    await makeMemory("priv").patch({ visibility: undefined, content: "patched again" });
+    expect(memoryStore.get("priv").visibility).toBe("private");
+  });
 });

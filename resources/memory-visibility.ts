@@ -109,7 +109,8 @@ export const EPHEMERAL_DURABILITY = "ephemeral";
  * NOT "refuse ephemeral+shared": on the read side any value other than the
  * literal "private" resolves to non-private (the migration invariant above),
  * so an unknown value on an ephemeral row would leak exactly like "shared".
- * assertValidVisibility refuses unknowns first at both call sites, but this
+ * assertValidVisibility refuses unknowns first at every call site (post, put,
+ * patch), but this
  * guard must stay fail-closed on its own — unknown means refused, not allowed.
  *
  * Absent (`undefined`/`null`) is accepted: it resolves through the

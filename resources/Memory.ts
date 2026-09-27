@@ -324,7 +324,7 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
 }
 
 /** Build the final write response: always `written: true`, always includes
- *  `id`, `visibility`, and layers the dedup collision signal on top when
+ *  `id`, includes `visibility` when the persisted row has one, and layers the dedup collision signal on top when
  *  present. Never a code path where a match suppresses these base fields.
  *
  *  ── Why `visibility` is in the write response (flair#991) ──────────────────
@@ -970,7 +970,7 @@ export class Memory extends (databases as any).flair.Memory {
     // Preserve stored visibility on updates before applying write policy: a
     // null is no change (PATCH merges), and a present value goes through the
     // same validator and ephemeral-tier guard as put().
-    if (content && content.visibility === null) delete content.visibility;
+    if (content && "visibility" in content && content.visibility == null) delete content.visibility;
     if (content && (content.visibility !== undefined || content.durability !== undefined)) {
       const visibilityError = assertValidVisibility(content.visibility);
       if (visibilityError) {

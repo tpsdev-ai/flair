@@ -170,7 +170,7 @@ describe("assertVisibilityAllowedForDurability — ephemeral is private-only (fl
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-describe("the visibility guard stays wired into both write paths", () => {
+describe("the visibility guard stays wired into the write paths (post, put, patch)", () => {
   const src = readFileSync(join(import.meta.dir, "..", "..", "resources", "Memory.ts"), "utf8");
 
   test("Memory.ts imports the validator", () => {
