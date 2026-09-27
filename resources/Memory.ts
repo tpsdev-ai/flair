@@ -20,8 +20,8 @@ import {
   isPointerEchoOf,
   loadStoredPointer,
   projectRowsThroughPointers,
-  MEMORY_HOST_SOURCE_TABLE,
 } from "./memory-host-source.js";
+import { putPointerRow, deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { withSharedWriteTransaction } from "./request-transaction.js";
 import { assertValidDurability } from "./memory-durability.js";
@@ -63,9 +63,6 @@ function hostSourceBadRequest(error: string, message: string): Response {
   });
 }
 
-function hostSourceTable(): any {
-  return (databases as any).flair?.[MEMORY_HOST_SOURCE_TABLE];
-}
 
 /**
  * Write the Memory row joining transaction `c` (0a). Resource.prototype.post
@@ -191,11 +188,10 @@ function hostSourcePersistFailure(message: string): Response {
 function abortRequestTransaction(ctx: any): void {
   const txn = ctx?.transaction;
   if (!txn || typeof txn.abort !== "function") return;
-  try {
-    txn.abort();
-  } catch (err) {
-    console.error("Memory: failed to abort the request transaction after a pointer persist failure", err);
-  }
+  // A failed abort is an ERROR, not a normal response (A1-iv item 4): if the
+  // transaction cannot be aborted, the rollback is not established, so the
+  // failure MUST propagate rather than being swallowed behind a 500 body.
+  txn.abort();
 }
 
 /**
@@ -213,19 +209,11 @@ async function persistPointerRow(
   row: ReturnType<typeof buildPointerRow>,
   ctx: any,
 ): Promise<Response | null> {
-  const table = hostSourceTable();
-  if (!table?.put) {
-    abortRequestTransaction(ctx);
-    return hostSourcePersistFailure("MemoryHostSource table unavailable");
-  }
   try {
-    // Test-only seam (flair#1940 adjudication 0b): force the pointer write ITSELF
-    // to throw so a real-Harper test can assert the atomic rollback. Inert
-    // unless FLAIR_TEST_FAIL_HOST_POINTER_WRITE=1 is set on the instance.
-    if (process.env.FLAIR_TEST_FAIL_HOST_POINTER_WRITE === "1") {
-      throw new Error("test seam: forced host-pointer write failure");
-    }
-    await table.put(row, ctx);
+    // The pointer-table ADAPTER (flair#1940 A1-iv item 6) writes via the real
+    // MemoryHostSource table in production; a test injects a failing adapter
+    // through the registry seam. A missing table throws (fail closed).
+    await putPointerRow(row, ctx);
     return null;
   } catch (err) {
     // Abort the request transaction so NEITHER row commits, then fail the
@@ -243,16 +231,10 @@ async function persistPointerRow(
  *  Returns null on success, a fixed 500 body on failure (after aborting the
  *  request transaction so nothing commits). */
 async function deletePointerRow(memoryId: string, ctx: any): Promise<Response | null> {
-  const table = hostSourceTable();
-  if (!table?.delete) return null;
   try {
-    // Test-only seam (flair#1940 adjudication 0b/3): force the pointer DELETE
-    // itself to throw, so a real-Harper test can assert the atomic rollback.
-    // Inert unless FLAIR_TEST_FAIL_HOST_POINTER_DELETE=1 is set on the instance.
-    if (process.env.FLAIR_TEST_FAIL_HOST_POINTER_DELETE === "1") {
-      throw new Error("test seam: forced host-pointer delete failure");
-    }
-    await table.delete(memoryId, ctx);
+    // The pointer-table ADAPTER (A1-iv item 6); a missing table throws (fail
+    // closed, never a silent skip).
+    await deletePointerRowViaTable(memoryId, ctx);
     return null;
   } catch (err) {
     abortRequestTransaction(ctx);

@@ -9,8 +9,10 @@
  * its pointer. {@link withSharedWriteTransaction} creates that missing
  * transaction with Harper's `transaction(ctx, cb)` (dist/resources/
  * transaction.js), which creates one when absent and owns its commit/abort.
+ * If Harper's transaction function is NOT available, this THROWS — an unwrapped
+ * write could commit the Memory row before its pointer write fails, which A7
+ * forbids. There is no silent fallback.
  */
-import * as harper from "harper";
 
 /** Harper's own `isJoinableScope` (DatabaseTransaction.ts): OPEN and not a
  *  self-committing link. A context with no such transaction needs one. */
@@ -19,34 +21,34 @@ export function isJoinableTransaction(ctx: any): boolean {
   return !!t && t.open === 1 && !t.saveCommits;
 }
 
-/** The `transaction` helper assigned onto the harper package at runtime
- *  (`_assignPackageExport('transaction', …)`; not statically exported, so a
- *  namespace read is used). Undefined under the unit mock. */
+/** The `transaction` helper Harper assigns onto the GLOBAL at load
+ *  (`global.transaction`). Read from the global so it is robust to the
+ *  shared-process `mock.module` race; the unit mock sets the same global. */
 function harperTransaction(): ((ctx: any, cb: (txn: any) => any) => any) | undefined {
-  // Harper assigns the helper onto the GLOBAL at load (`global.transaction`),
-  // and the unit mock sets the same global when it installs (see
-  // test/helpers/memory-search-harness.ts) — reading it here is robust to the
-  // shared-process `mock.module` race, unlike a namespace import which binds
-  // whichever mock won.
   const g = (globalThis as any)?.transaction;
-  if (typeof g === "function") return g;
-  const t = (harper as any)?.transaction;
-  return typeof t === "function" ? t : undefined;
+  return typeof g === "function" ? g : undefined;
 }
 
 /**
  * Run `fn` so every write it performs shares ONE transaction, and hand `fn` the
- * context object the writes must be given. If `ctx` already carries a joinable
- * transaction, `fn` joins it (the request owns commit/abort). Otherwise Harper
- * creates and owns a transaction around `fn` — which is what makes an internal,
- * context-less caller atomic. When no Harper runtime is present (the unit
- * mock), `fn` runs unwrapped so the mock keeps working.
+ * context object the writes must be given. If `ctx` already carries a JOINABLE
+ * (OPEN, not self-committing) transaction, `fn` joins it — the request owns
+ * commit/abort. A CLOSED transaction left on the chain by a drained generator
+ * is NOT joined (that is the detached-transaction discipline in
+ * table-helpers.ts); a fresh, owned transaction is created instead. Otherwise
+ * Harper creates and owns a transaction around `fn` — which is what makes an
+ * internal, context-less caller atomic. When Harper's transaction function is
+ * unavailable this THROWS (no unwrapped fallback).
  */
 export async function withSharedWriteTransaction<T>(ctx: any, fn: (shared: any) => Promise<T>): Promise<T> {
   const shared = ctx ?? {};
   if (isJoinableTransaction(shared)) return fn(shared);
   const txn = harperTransaction();
-  if (!txn) return fn(shared);
+  if (!txn) {
+    throw new Error(
+      "flair: Harper's transaction() is unavailable — refusing to run a Memory/pointer write unwrapped (A7: no silent loss)",
+    );
+  }
   return (await txn(shared, () => fn(shared))) as T;
 }
 

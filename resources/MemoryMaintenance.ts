@@ -20,13 +20,17 @@
 import { Resource, databases } from "harper";
 import { MEMORY_HOST_SOURCE_TABLE } from "./memory-host-source.js";
 
-/** flair#1940 A1' item 6 (A1'' item 2) — pointer cascade where a Memory row is
- *  archived or an orphan pointer is swept. The delete is passed the request
- *  context so it JOINS the request transaction (both tables in database flair).
- *  Failures are NOT swallowed: a throw propagates to the caller's error path. */
+/** flair#1940 A1' item 6 (A1'' item 2, A1-iv item 4) — pointer cascade where a
+ *  Memory row is archived or an orphan pointer is swept. The delete is passed
+ *  the request context so it JOINS the request transaction (both tables in
+ *  database flair). Failures are NOT swallowed: a throw propagates to the
+ *  caller's error path. A missing pointer table is REPORTED (throws), never
+ *  silently skipped — cleanup is hygiene, so its failure must be visible. */
 async function deletePointerRowOrThrow(memoryId: string, ctx: any): Promise<void> {
   const table = (databases as any).flair?.[MEMORY_HOST_SOURCE_TABLE];
-  if (!table?.delete) return;
+  if (!table?.delete) {
+    throw new Error("MemoryHostSource table unavailable");
+  }
   await table.delete(memoryId, ctx);
 }
 import { isAdmin } from "./agent-auth.js";
@@ -158,18 +162,23 @@ export class MemoryMaintenance extends Resource {
       // failing sweep delete is NOT swallowed: it propagates to the caller's
       // error path below (HTTP 500), never silently ignored.
       const pointerTable = (databases as any).flair?.[MEMORY_HOST_SOURCE_TABLE];
+      if (!dryRun && !pointerTable?.search) {
+        // Hygiene: a missing sweep table is REPORTED, never silently skipped.
+        throw new Error("MemoryHostSource table unavailable (orphan sweep)");
+      }
       if (pointerTable?.search && !dryRun) {
         for await (const ptr of pointerTable.search()) {
           const memoryId = ptr?.memoryId;
           if (typeof memoryId !== "string" || memoryId.length === 0) continue;
-          const mem = await (databases as any).flair.Memory.get(memoryId);
+          const mem = await (databases as any).flair.Memory.get(memoryId, ctx);
           if (!mem || mem.archived === true) {
             // 0d: RE-CHECK inside an OWNED transaction before deleting. The
             // first read is outside it, so a new row reusing this id in
             // between must not be orphan-deleted; the conditional re-read
-            // inside the transaction closes that read-to-delete gap.
+            // inside the transaction closes that read-to-delete gap. The
+            // re-read is passed the owned transaction `c` (Gauge pass-5 item 2).
             await withOwnedTransaction(ctx, async (c) => {
-              const again = await (databases as any).flair.Memory.get(memoryId);
+              const again = await (databases as any).flair.Memory.get(memoryId, c);
               if (!again || again.archived === true) {
                 await deletePointerRowOrThrow(memoryId, c);
                 stats.orphans++;
@@ -181,6 +190,22 @@ export class MemoryMaintenance extends Resource {
     } catch (err: any) {
       return new Response(
         JSON.stringify({ error: err.message, stats }),
+        { status: 500, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    // A1-iv item 4 (cleanup is hygiene): if any item's cleanup FAILED, the run
+    // is NOT complete — report a failure naming the counts, never a
+    // "Maintenance complete" success. The work already committed stands; the
+    // response is about the run's honesty.
+    if (stats.errors > 0) {
+      return new Response(
+        JSON.stringify({
+          error: "maintenance_incomplete",
+          message: `${stats.errors} cleanup error(s); see counts`,
+          stats, expired: stats.expired, archived: stats.archived, total: stats.total,
+          errors: stats.errors, orphans: stats.orphans,
+        }),
         { status: 500, headers: { "content-type": "application/json" } },
       );
     }

@@ -273,11 +273,13 @@ type MemoryHitStat @table(database: "flair") {
 # row dies (Memory.delete(), the expiry reaper and the archive path in
 # resources/MemoryMaintenance.ts), each in ONE owned transaction — a failed
 # pointer delete fails the whole operation (c3) — plus an orphan sweep that
-# re-checks inside the transaction before deleting. An orphan is unreadable by
-# construction — the ONLY read path joins pointers INTO Memory results.
+# re-checks inside the transaction before deleting; a cleanup failure makes the
+# maintenance run report a failure, not "complete".
 #
-# hostSource is a host object the writer claims — a claimed external source,
-# signed by the writer's Flair identity; it is not verified host authorship.
+# hostSource is a writer claim attributed to the authenticated agent on agent
+# writes — a claimed external source. Flair does not verify the host object and
+# does not cryptographically sign the pointer body (the Ed25519 request
+# signature covers method and URL, not the body).
 # scopeAtWrite is the record's visibility AT WRITE (null → author-only); the
 # pointer's effective visibility is the NARROWER of it and the record's CURRENT
 # visibility. A partial PUT that omits visibility carries the existing row's
