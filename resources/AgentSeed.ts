@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 /**
  * POST /AgentSeed
  *
@@ -20,7 +21,6 @@
  */
 
 import { Resource, databases } from "harper";
-import { randomUUID } from "node:crypto";
 import { allowAdmin, invalidateAdminCache } from "./agent-auth.js";
 import { authorizeSoulWrite, refuseSoulWriteContent, soulProvenance } from "./soul-write-policy.js";
 import { reconcileAdminFields } from "./agent-admin.js";

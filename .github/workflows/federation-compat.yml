@@ -80,6 +80,16 @@ on:
       - "bun.lock"
   workflow_dispatch:
 
+# Cancel a pull request's superseded runs. A pull_request run cancels any
+# active run in the same workflow and PR group; an older-head rerun can
+# therefore cancel the current head (rerun the current head if that happens).
+# A paths-filtered event that starts no run cannot cancel anything. Distinct
+# non-PR runs use their run IDs as groups, so this concurrency block does not
+# cancel or serialize push-to-main runs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   federation-compat:
     name: Mixed-Version Federation Pairing + Sync

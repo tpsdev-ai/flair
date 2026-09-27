@@ -18,11 +18,14 @@
  *
  * NO-OP-ON-ANY-FAILURE GUARANTEE
  * ------------------------------
- * This hook can never block or break Claude Code startup. Every failure mode —
- * missing FLAIR_AGENT_ID, malformed stdin, Flair unreachable, auth error, a
- * hung daemon, an unexpected throw — degrades to printing `{}` (an empty,
- * inert hook output) and exiting 0. It never throws, never writes to stderr in
- * a way that surfaces to the user, and never exits non-zero.
+ * This hook can never block or break Claude Code startup. Every failure mode
+ * (missing FLAIR_AGENT_ID, malformed stdin, Flair unreachable, auth error, a
+ * hung daemon, an unexpected throw) exits 0. Malformed stdin is treated as
+ * empty input and can still yield bootstrap context. A failed bootstrap yields
+ * a continuity resume hint only when the separate lookup finds eligible prior
+ * entries; otherwise stdout is `{}`. The hook attempts one stderr diagnostic
+ * when bootstrap fails (flair#1943). The Codex command retains stderr and the
+ * Claude Code command discards it; delivery depends on stderr being writable.
  *
  * A hard timeout (FLAIR_HOOK_TIMEOUT_MS, default 8s) wraps the bootstrap call
  * so a stalled Flair daemon can't hang session startup; on timeout we no-op.
@@ -182,10 +185,20 @@ function readStdin(): Promise<string> {
   });
 }
 
-/** Race a promise against a timeout. Rejects with a timeout error if exceeded. */
+/** The hook's OWN bootstrap-timer rejection (flair#1943). A dedicated class so
+ *  the classifier recognises its own timeout by IDENTITY, never by reading a
+ *  message. */
+export class BootstrapTimeoutError extends Error {
+  constructor() {
+    super("bootstrap timeout");
+    this.name = "BootstrapTimeoutError";
+  }
+}
+
+/** Race a promise against a timeout. Rejects with a BootstrapTimeoutError if exceeded. */
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("bootstrap_timeout")), ms);
+    const timer = setTimeout(() => reject(new BootstrapTimeoutError()), ms);
     timer.unref?.();
     promise.then(
       (value) => {
@@ -198,6 +211,63 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
       },
     );
   });
+}
+
+export type BootstrapFailureKind = "auth" | "timeout" | "unreachable" | `http-${number}`;
+
+/**
+ * flair#1943 — classify a bootstrap failure for the one stderr line. Reads a
+ * numeric HTTP status FIRST (`status`, what FlairError carries, then
+ * `status_code`, then `statusCode`); when a status exists the message is never
+ * consulted. With no status, the ONLY timeout is the hook's own bootstrap
+ * timer (a BootstrapTimeoutError) or an error whose name is exactly
+ * `TimeoutError`; everything else is `unreachable`. No kind is ever decided
+ * from message text. Never reads or includes credentials.
+ */
+export function classifyBootstrapFailure(err: unknown): BootstrapFailureKind {
+  const e = err as
+    | { status?: unknown; status_code?: unknown; statusCode?: unknown; name?: unknown }
+    | null;
+  const status = numericStatus(e);
+  if (status !== undefined) return status === 401 || status === 403 ? "auth" : `http-${status}`;
+  if (err instanceof BootstrapTimeoutError) return "timeout";
+  if (typeof e?.name === "string" && e.name === "TimeoutError") return "timeout";
+  return "unreachable";
+}
+
+/** The first NUMERIC HTTP status the error carries, checked `status` →
+ *  `status_code` → `statusCode` (flair#1943). */
+function numericStatus(e: { status?: unknown; status_code?: unknown; statusCode?: unknown } | null): number | undefined {
+  for (const key of ["status", "status_code", "statusCode"] as const) {
+    const v = e?.[key];
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+  }
+  return undefined;
+}
+
+// flair#1943: one no-op 'error' listener per process, so repeated failed
+// runs in one process never add listeners (and never trigger Node's
+// max-listeners warning on stderr).
+let stderrErrorAbsorbed = false;
+
+/** The stderr diagnostic for a failed bootstrap. NAMES the actor, the state and
+ *  the remedy; never contains a key, token, password or Authorization value. */
+function reportBootstrapFailure(err: unknown): void {
+  const kind = classifyBootstrapFailure(err);
+  const line = `flair session-start: bootstrap failed (${kind}); this session starts without bootstrap context. Next: run \`flair doctor\`, and check FLAIR_URL and this agent's key.\n`;
+  try {
+    // Best-effort (flair#1943): a failed stderr write (a closed pipe → EPIPE)
+    // must not change stdout or the exit code. The write may throw
+    // SYNCHRONOUSLY or surface later as an 'error' event on the stream; absorb
+    // both, so the hook still prints its payload and exits 0.
+    if (!stderrErrorAbsorbed) {
+      process.stderr.on("error", () => {});
+      stderrErrorAbsorbed = true;
+    }
+    process.stderr.write(line);
+  } catch {
+    // ignore — the diagnostic is best-effort
+  }
 }
 
 /** Build the SessionStart hook output JSON from a context string. */
@@ -298,8 +368,14 @@ export async function runHook(
       resolveTimeoutMs(),
     );
     context = res && res.context ? String(res.context) : "";
-  } catch {
+  } catch (err) {
     context = ""; // flair unreachable / auth error / timeout → no bootstrap context
+    // flair#1943: keeping stderr open cannot reveal an error never written to
+    // it. Write ONE line to STDERR (never stdout — that is the hook payload),
+    // so a real failure stays visible instead of being swallowed. stdout and
+    // the exit code are unchanged (the no-op payload), so a failure never
+    // blocks the session.
+    reportBootstrapFailure(err);
   }
 
   const resumeHint = await resumeHintDone;

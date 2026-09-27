@@ -1,0 +1,4 @@
+- **The session-start hook attempts one stderr diagnostic when a bootstrap fails, naming the failure kind.**
+  A failed bootstrap exits 0. Stdout carries a continuity resume hint only when the separate lookup finds eligible prior entries; otherwise it carries `{}`. The diagnostic names the kind and the next step (run `flair doctor`, then check FLAIR_URL and this agent's key). The kind is `auth` for an HTTP 401 or 403, `http-<status>` for any other HTTP status, `timeout` when the hook's own bootstrap timer fires or the error is a `TimeoutError`, and `unreachable` otherwise. The diagnostic is a fixed template with only the kind filled in, so it never contains a key, token, password, Authorization value, URL or response body. A failed stderr write is ignored. The Codex command retains stderr and the Claude Code command discards it; delivery depends on stderr being writable.
+
+  (Refs #1943)

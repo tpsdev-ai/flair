@@ -232,11 +232,16 @@ shapes above — not that you should switch POST for PUT.
 `list_memories` raises `FlairRequestError` with `.status_code` for any non-2xx
 response (read that status before guessing), and lets transport errors from
 `httpx` propagate. `add_memory` attempts every text-bearing record, then raises
-`FlairWriteError` (a `FlairRequestError` subclass carrying `written`, `failed`
-and the first failure's `.status_code`) if any write was refused or could not
-be confirmed. After a timeout or connection error the record may or may not
+`FlairWriteError` (a `FlairRequestError` subclass carrying `written`, `total`,
+`failed`, `skipped` and the first failure's `.status_code`) if any write was
+refused or could not be confirmed. `total` counts only records ATTEMPTED —
+text-less entries are skipped and reported separately in `skipped`. `.status_code`
+is an `int`, or `None` when the failure carried no status (a connection error or
+timeout) — the `"?"` sentinel appears only in the message and the `failed` list.
+After a timeout or connection error the record may or may not
 have landed. The `store_memory` tool turns that into `{"error": <message>,
-"written": n, "failed": m}` and reports `"stored"` only when every write was
+"written": n, "failed": m}` and reports
+`"stored"` only when every write was
 acknowledged with a 2xx. `add_session_to_memory` and `add_events_to_memory`
 still log a failed write and continue.
 

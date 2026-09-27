@@ -48,7 +48,6 @@ export type SkipReason =
   // data.agentId. Absent is a skip, not an accept — deriving the
   // requirement from field presence would make the check opt-out.
   | "principal_mismatch"
-  | "principal_mismatch"
   // ─── flair#1940 A1' item 5 (hostSource is NOT federated) ────────────────
   // A record whose data carries a pointer field (hostSource / hostSourceScope
   // / hostSourceVisibility) is refused, never merged. The pointer table
