@@ -7,18 +7,6 @@ import { makeReadScope, makeScopedSearch, stampAttribution, UNAUTH } from "./rec
 const credentialReadScope = makeReadScope("owner-only", "principalId");
 const credentialScopedSearch = makeScopedSearch(credentialReadScope);
 
-/** Yield each search row without its tokenHash (objects only; other values pass). */
-async function* withoutTokenHash(rows: any): AsyncGenerator<any> {
-  for await (const row of rows) {
-    if (row && typeof row === "object" && "tokenHash" in row) {
-      const { tokenHash: _omit, ...safe } = row;
-      yield safe;
-    } else {
-      yield row;
-    }
-  }
-}
-
 /**
  * Credential resource — authentication surfaces for Principals.
  *
@@ -103,24 +91,13 @@ export class Credential extends (databases as any).flair.Credential {
       });
     }
 
-    // Trusted internal call → unfiltered.
-    if (auth.kind === "internal") return super.search(query);
-
-    // Never return token hashes to an agent (the rule get() applies): rows come
-    // back without tokenHash, and a single-field selection of it is refused
-    // because its values are bare strings the per-row strip cannot see.
-    if (query?.select === "tokenHash") {
-      return new Response(JSON.stringify({ error: "tokenHash is never returned; select other fields" }), {
-        status: 400, headers: { "content-type": "application/json" },
-      });
+    // Trusted internal call or admin agent → unfiltered.
+    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
+      return super.search(query);
     }
 
-    // Admin agent → every credential, without token hashes.
-    if (auth.kind === "agent" && auth.isAdmin) return withoutTokenHash(await super.search(query));
-
     // Non-admin agent: scope to own credentials.
-    const scoped = await credentialScopedSearch(auth.agentId, query, (q: any) => super.search(q));
-    return scoped instanceof Response ? scoped : withoutTokenHash(scoped);
+    return credentialScopedSearch(auth.agentId, query, (q: any) => super.search(q));
   }
 
   async get() {

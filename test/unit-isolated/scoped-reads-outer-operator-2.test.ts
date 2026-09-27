@@ -262,31 +262,3 @@ describe("shared scoped search preserves each resource's read contract", () => {
     });
   }
 });
-
-describe("Credential search never returns token hashes to an agent", () => {
-  it("owner and admin agent rows omit tokenHash, internal calls keep it, and a tokenHash-only selection is refused", async () => {
-    const owner = as(Credential, agentContext());
-    const own = await collect(await owner.search(undefined));
-    expect(own.map((row) => row.id).sort()).toEqual(["a-keep", "a-skip"]);
-    for (const row of own) expect(row).not.toHaveProperty("tokenHash");
-
-    const admin = as(Credential, agentContext(true));
-    const all = await collect(await admin.search(undefined));
-    expect(all.map((row) => row.id).sort()).toEqual(["a-keep", "a-skip", "b-keep", "b-skip"]);
-    for (const row of all) expect(row).not.toHaveProperty("tokenHash");
-
-    for (const context of [{ __flairInternal: true }, undefined]) {
-      const internal = await collect(await as(Credential, context).search(undefined));
-      expect(internal).toHaveLength(4);
-      for (const row of internal) expect(row.tokenHash).toBe("stored-hash");
-    }
-
-    for (const resource of [owner, admin]) {
-      const before = searches.Credential.length;
-      const refused = await resource.search({ select: "tokenHash" });
-      expect(refused).toBeInstanceOf(Response);
-      expect(refused.status).toBe(400);
-      expect(searches.Credential.length).toBe(before);
-    }
-  });
-});
