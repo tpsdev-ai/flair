@@ -356,7 +356,14 @@ describe("release-auto-tag workflow — the coupling and the allowlist file", ()
  * macOS clone defaults core.ignorecase to true; CODEOWNERS paths are case-sensitive).
  */
 const CODEOWNERS_ORACLE = mkdtempSync(join(tmpdir(), "codeowners-oracle-"));
-const ORACLE_ENV = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+// Every inherited GIT_* variable is dropped: a git hook can export GIT_DIR and GIT_WORK_TREE, which
+// would make check-ignore read the enclosing repository's .gitignore instead of the oracle's
+// (measured: 2 of these tests fail under both variables without the filter).
+const ORACLE_ENV: Record<string, string> = {
+  ...Object.fromEntries(Object.entries(process.env).filter(([k, v]) => !k.startsWith("GIT_") && v !== undefined)) as Record<string, string>,
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
+};
 {
   const init = spawnSync("git", ["init", "-q", CODEOWNERS_ORACLE], { env: ORACLE_ENV, encoding: "utf8", timeout: 10_000 });
   if (init.status !== 0) throw new Error(`codeowners oracle: git init failed (${init.status}): ${init.stderr}`);
