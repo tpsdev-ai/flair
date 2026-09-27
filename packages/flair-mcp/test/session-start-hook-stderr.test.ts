@@ -12,12 +12,14 @@ const { runHook, classifyBootstrapFailure } = hook;
  * flair#1943 — the session-start hook REPORTS a failed bootstrap on stderr.
  *
  * The same code path serves Claude Code and Codex. The hook keeps its
- * no-op-on-failure stdout contract and stays silent on success; a real failure
- * now writes exactly one line to STDERR naming the failure KIND and the remedy,
- * and never a credential.
+ * no-op-on-failure stdout contract and stays silent on success. The hook
+ * attempts one stderr diagnostic when bootstrap fails, naming the failure KIND
+ * and the remedy, and never a credential; delivery depends on stderr being
+ * writable.
  *
- * The kind is decided ONLY by what the error carries (a numeric HTTP status, or
- * the hook's own timer); message text is never consulted (round 2, item 1).
+ * The kind comes from the first finite numeric status, the hook's own timer
+ * error, or an error whose name is exactly `TimeoutError`; message text is
+ * never consulted.
  */
 
 const NOOP = "{}";
@@ -90,6 +92,18 @@ describe("flair#1943 — the session-start hook reports a failed bootstrap on st
     expect(out).not.toBe(NOOP); // assertion: the context is emitted on stdout
   });
 
+  test("(h5) repeated failed runs in one process add at most one stderr error listener", async () => {
+    const before = process.stderr.listenerCount("error");
+    for (let i = 0; i < 12; i++) {
+      await runCapturingStderr(() => ({
+        bootstrap: async () => {
+          throw new Error("fetch failed");
+        },
+      }));
+    }
+    expect(process.stderr.listenerCount("error")).toBeLessThanOrEqual(before + 1); // assertion: no listener per run
+  });
+
   test("(h4) secrets carried by the THROWN error never reach stderr or stdout", async () => {
     // Case A: a FlairError whose BODY carries a sentinel token.
     const withBody = await runCapturingStderr(() => ({
@@ -139,15 +153,16 @@ describe("flair#1943 — a failed stderr write is best-effort (spawned hook)", (
   /** Spawn the hook with stdin closed after one write. `closeStderr` destroys
    *  the parent's read end of the child's stderr pipe BEFORE the failure line
    *  is written, so the child's stderr.write hits a closed pipe (EPIPE). */
-  function runChild(input: string, env: NodeJS.ProcessEnv, closeStderr: boolean): Promise<{ code: number | null; signal: string | null; out: string }> {
+  function runChild(input: string, env: NodeJS.ProcessEnv, closeStderr: boolean): Promise<{ code: number | null; signal: string | null; out: string; err: string }> {
     return new Promise((resolve) => {
       const child = spawn(process.execPath, [ENTRY], { env, stdio: ["pipe", "pipe", "pipe"] });
       let out = "";
+      let err = "";
       child.stdout.on("data", (d) => (out += d.toString()));
       if (closeStderr) child.stderr.destroy();
-      else child.stderr.resume();
-      child.on("error", () => resolve({ code: -1, signal: null, out }));
-      child.on("close", (code, signal) => resolve({ code, signal, out }));
+      else child.stderr.on("data", (d) => (err += d.toString()));
+      child.on("error", () => resolve({ code: -1, signal: null, out, err }));
+      child.on("close", (code, signal) => resolve({ code, signal, out, err }));
       child.stdin.end(input);
     });
   }
@@ -172,6 +187,7 @@ describe("flair#1943 — a failed stderr write is best-effort (spawned hook)", (
       expect(closed.code).toBe(0); // assertion: a closed stderr does not change the exit code
       expect(closed.out).toBe(open.out); // assertion: stdout byte-equal with stderr open
       expect(closed.out).toBe(NOOP); // assertion: still the inert payload
+      expect(open.err).toContain("bootstrap failed (unreachable)"); // assertion: the open run received the diagnostic
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

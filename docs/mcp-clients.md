@@ -257,8 +257,8 @@ flair hook uninstall --harness codex
 
 `flair doctor` reports this hook when Codex is detected. `flair hook install
 --harness codex` writes `FLAIR_HOOK_HARNESS=codex` and keeps hook stderr
-visible; the session-start hook writes one line to stderr when bootstrap fails
-(auth failures must not be swallowed). After install, **re-approve**
+visible; the session-start hook attempts one stderr diagnostic when bootstrap
+fails (auth failures must not be swallowed). After install, **re-approve**
 the command in Codex with `/hooks` — a wiring change resets trust, and
 untrusted hooks are listed and skipped. `flair hook status --harness codex`
 reports that pending-approval state as configured but delivery not verified.

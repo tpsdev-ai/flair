@@ -18,7 +18,14 @@
  *
  * NO-OP-ON-ANY-FAILURE GUARANTEE
  * ------------------------------
- * This hook can never block or break Claude Code startup. Every failure mode (missing FLAIR_AGENT_ID, malformed stdin, Flair unreachable, auth error, a hung daemon, an unexpected throw) exits 0. stdout is the inert `{}` payload, except that a failed bootstrap still emits the continuity resume hint when that separate lookup succeeds. A failed bootstrap writes one diagnostic line to stderr (flair#1943); the Codex install shows it and the Claude Code install discards it.
+ * This hook can never block or break Claude Code startup. Every failure mode
+ * (missing FLAIR_AGENT_ID, malformed stdin, Flair unreachable, auth error, a
+ * hung daemon, an unexpected throw) exits 0. Malformed stdin is treated as
+ * empty input and can still yield bootstrap context. A failed bootstrap yields
+ * a continuity resume hint only when the separate lookup finds eligible prior
+ * entries; otherwise stdout is `{}`. The hook attempts one stderr diagnostic
+ * when bootstrap fails (flair#1943). The Codex command retains stderr and the
+ * Claude Code command discards it; delivery depends on stderr being writable.
  *
  * A hard timeout (FLAIR_HOOK_TIMEOUT_MS, default 8s) wraps the bootstrap call
  * so a stalled Flair daemon can't hang session startup; on timeout we no-op.
@@ -238,7 +245,12 @@ function numericStatus(e: { status?: unknown; status_code?: unknown; statusCode?
   return undefined;
 }
 
-/** The one stderr line for a failed bootstrap. NAMES the actor, the state and
+// flair#1943: one no-op 'error' listener per process, so repeated failed
+// runs in one process never add listeners (and never trigger Node's
+// max-listeners warning on stderr).
+let stderrErrorAbsorbed = false;
+
+/** The stderr diagnostic for a failed bootstrap. NAMES the actor, the state and
  *  the remedy; never contains a key, token, password or Authorization value. */
 function reportBootstrapFailure(err: unknown): void {
   const kind = classifyBootstrapFailure(err);
@@ -248,7 +260,10 @@ function reportBootstrapFailure(err: unknown): void {
     // must not change stdout or the exit code. The write may throw
     // SYNCHRONOUSLY or surface later as an 'error' event on the stream; absorb
     // both, so the hook still prints its payload and exits 0.
-    process.stderr.on("error", () => {});
+    if (!stderrErrorAbsorbed) {
+      process.stderr.on("error", () => {});
+      stderrErrorAbsorbed = true;
+    }
     process.stderr.write(line);
   } catch {
     // ignore — the diagnostic is best-effort
