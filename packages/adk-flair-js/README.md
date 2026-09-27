@@ -111,7 +111,7 @@ identities never collide and the `:` delimiter stays unambiguous.
 
 - `user_id` is mandatory — empty/missing returns empty, never searches unscoped
 - Every hit is re-verified against the compound tag before mapping to `MemoryEntry`
-- Timeout: HTTPX phase timeouts (connect 500ms, read 1500ms); no enclosing wall-clock deadline, one attempt, no retry
+- Timeout: search passes an AbortController signal to `fetch`, with a default 2,000 ms abort timer configurable through `timeoutMs`; it makes one attempt and does not retry
 - Search failures degrade silently with a structured warning (host, elapsed, phase)
 
 ### Write path
@@ -141,10 +141,9 @@ All users of one ADK app share one Flair principal. The compound tag
 `adk:<app_name>:<user_id>` is a per-user RETRIEVAL FILTER — it selects which
 memories a search returns — and it does NOT isolate one user's memories from
 another's: every user of one ADK app shares one Flair principal, so the tag is
-not a boundary between users. The only boundaries are server-enforced: a
-non-admin agent cannot write as another agent, and `visibility: private`
-memories are owner-only. Memory here is a signal an agent weighs, not a
-guardrail the platform enforces.
+not a boundary between users. The server rejects forged ownership on ordinary
+agent writes. Other ordinary agents cannot read a private memory; admins and
+trusted internal calls can.
 
 ## API
 

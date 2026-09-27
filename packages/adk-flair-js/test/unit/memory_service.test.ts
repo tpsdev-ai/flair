@@ -453,14 +453,17 @@ describe("searchMemory", () => {
         JSON.stringify({
           results: [
             {
+              agentId: "test-agent",
               content: "alice fact",
               tags: ["adk:my-app:alice"],
             },
             {
+              agentId: "test-agent",
               content: "bob fact",
               tags: ["adk:my-app:bob"], // wrong tag — should be dropped
             },
             {
+              agentId: "test-agent",
               content: "alice fact 2",
               tags: ["adk:my-app:alice"],
             },
@@ -496,8 +499,8 @@ describe("searchMemory", () => {
       return new Response(
         JSON.stringify({
           results: [
-            { content: "mine", tags: [wanted] },
-            { content: "neighbour", tags: [neighbour] },
+            { agentId: "test-agent", content: "mine", tags: [wanted] },
+            { agentId: "test-agent", content: "neighbour", tags: [neighbour] },
           ],
         }),
         { status: 200 },
@@ -512,6 +515,26 @@ describe("searchMemory", () => {
 
     const texts = result.memories.map((m) => (m.content?.parts?.[0] as { text?: string })?.text);
     expect(texts).toEqual(["mine"]);
+  });
+
+  it("drops a hit owned by another agent even when it carries the same tag", async () => {
+    const wanted = "adk:my-app:user-1";
+    globalThis.fetch = mock(async () => {
+      return new Response(
+        JSON.stringify({
+          results: [
+            { agentId: "other-agent", content: "foreign", tags: [wanted] },
+            { agentId: "test-agent", content: "mine", tags: [wanted] },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+
+    const result = await service.searchMemory({ appName: "my-app", userId: "user-1", query: "fact" });
+
+    const texts = result.memories.map((m) => (m.content?.parts?.[0] as { text?: string })?.text);
+    expect(texts).toEqual(["mine"]); // assertion: the foreign hit is dropped
   });
 
   it("returns empty on HTTP error", async () => {

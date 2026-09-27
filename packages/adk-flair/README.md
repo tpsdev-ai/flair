@@ -248,10 +248,9 @@ All users of one ADK app share one Flair principal. The compound tag
 `adk:<app_name>:<user_id>` is a per-user **RETRIEVAL FILTER** — it selects which
 memories a search returns — and it does **not** isolate one user's memories from
 another's: every user of one ADK app shares one Flair principal, so the tag is
-not a boundary between users. The only boundaries are server-enforced: a
-non-admin agent cannot write as another agent, and `visibility: private`
-memories are owner-only. Memory here is a signal an agent weighs, not a
-guardrail the platform enforces.
+not a boundary between users. The server rejects forged ownership on ordinary
+agent writes. Other ordinary agents cannot read a private memory; admins and
+trusted internal calls can.
 
 ### Tag encoding
 
@@ -303,7 +302,7 @@ principal.
   them itself.
 - The adapter **re-verifies the compound tag on every search hit** before
   mapping it out — defense-in-depth against filter bypass.
-- `user_id` comes from ADK's session context, never from caller-supplied input.
+- ADK supplies `app_name` and `user_id` from its request or session; direct service callers and `create_flair_tools(...)` choose the values they pass.
 
 ## MemoryEntry mapping
 

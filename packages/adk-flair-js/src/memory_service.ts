@@ -484,6 +484,9 @@ export class FlairMemoryService implements BaseMemoryService {
           // Client-side analogue of Flair's isAllowed defense-in-depth.
           const hitTags = Array.isArray(hit["tags"]) ? (hit["tags"] as unknown[]) : [];
           if (!hitTags.includes(tag)) continue;
+          // Owner re-verification, as listMemories does: another agent's
+          // non-private record can carry the same tag.
+          if (hit["agentId"] !== this._agentId) continue;
 
           memories.push(this._hitToMemoryEntry(hit));
         }
