@@ -5,7 +5,7 @@
   text)"). `FlairWriteError.status_code` is now an `int`, or `None` when the
   failure carried no status (a connection error or timeout) — the `"?"` sentinel
   appears only in the message and the `failed` list; check for `None` before
-  comparing it numerically. A batch in which every entry has no text now raises
+  comparing it numerically. A nonempty batch in which every entry has no text now raises
   `ValueError` instead of returning as if it had written. The `store_memory`
   tool keeps its `{"error", "written", "failed"}` shape.
 

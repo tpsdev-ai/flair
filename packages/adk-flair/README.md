@@ -240,7 +240,7 @@ is an `int`, or `None` when the failure carried no status (a connection error or
 timeout) — the `"?"` sentinel appears only in the message and the `failed` list.
 After a timeout or connection error the record may or may not
 have landed. The `store_memory` tool turns that into `{"error": <message>,
-"written": n, "failed": m}` (plus `"skipped": k` when non-zero) and reports
+"written": n, "failed": m}` and reports
 `"stored"` only when every write was
 acknowledged with a 2xx. `add_session_to_memory` and `add_events_to_memory`
 still log a failed write and continue.
