@@ -973,6 +973,13 @@ class FlairMemoryService(BaseMemoryService):
             if tag not in hit_tags:
                 continue
 
+            # flair#1943: owner-identity recheck, exactly as list_memories does
+            # (line ~1069). The compound tag is a per-user RETRIEVAL FILTER, not
+            # an identity boundary; a hit whose agentId is not this service's
+            # own agent id must be dropped before it becomes a MemoryEntry.
+            if hit.get("agentId") != self._agent_id:
+                continue
+
             memories.append(self._hit_to_memory_entry(hit))
 
         return SearchMemoryResponse(memories=memories)

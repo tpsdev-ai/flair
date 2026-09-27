@@ -76,7 +76,7 @@ asks for it back in a fresh session 2 and prints whether the fact was recalled.
 | HTTP timeout     | `FLAIR_HTTP_TIMEOUT` | (unset — fail-fast defaults, read 1.5s) | Read/write timeout in seconds (float). Set for hosted Flair (below). |
 | Connect timeout  | `FLAIR_HTTP_CONNECT_TIMEOUT` | (unset — derived)     | Connect/pool timeout in seconds (float). Rarely needed on its own. |
 
-All settings can also be passed as constructor arguments:
+All settings can also be passed as constructor arguments, **except the remote-URL opt-in (`FLAIR_ALLOW_REMOTE_URL`), which is read from the environment only**:
 
 ```python
 FlairMemoryService(
@@ -242,12 +242,16 @@ still log a failed write and continue.
 
 ## Security
 
-### Per-user isolation
+### Per-user scope is a retrieval filter, not an isolation boundary
 
-All users of one ADK app share one Flair principal. Per-user isolation is
-enforced by tag-based server-side filtering, not cryptographic key separation.
-A bug in that filter would leak cross-user memories. For key-level isolation,
-use per-org Flair principals (the org layer).
+All users of one ADK app share one Flair principal. The compound tag
+`adk:<app_name>:<user_id>` is a per-user **RETRIEVAL FILTER** — it selects which
+memories a search returns — and it does **not** isolate one user's memories from
+another's: every user of one ADK app shares one Flair principal, so the tag is
+not a boundary between users. The only boundaries are server-enforced: a
+non-admin agent cannot write as another agent, and `visibility: private`
+memories are owner-only. Memory here is a signal an agent weighs, not a
+guardrail the platform enforces.
 
 ### Tag encoding
 
@@ -272,7 +276,8 @@ just documentation — a typo'd `FLAIR_URL` cannot silently exfiltrate queries.
 
 ## Timeouts
 
-The search path has a 2s total budget covering the full lifecycle including DNS:
+The client sets HTTPX **phase timeouts** (connect, read, write, pool); there is
+no enclosing wall-clock deadline over the whole request. The defaults are:
 
 - Connect: 0.5s
 - Read: 1.5s
@@ -287,10 +292,15 @@ on failure (session id, event count, HTTP status).
 
 ADK scopes everything by `{app_name, user_id}`. Flair's model is agentId-keyed.
 The adapter bridges this with a **compound tag** — `adk:<app_name>:<user_id>` —
-on every record, filtered on every search.
+on every record, filtered on every search. The tag is a per-user RETRIEVAL
+FILTER, not an isolation boundary: every user of one ADK app shares one Flair
+principal.
 
 - `user_id` is **mandatory** in the search path — missing/empty returns empty,
-  never searches unscoped.
+  never searches unscoped. The service scopes every read and write by the
+  `app_name` and `user_id` it is given; the ADK runner passes the session's
+  values, and code that calls the service or builds the tools directly chooses
+  them itself.
 - The adapter **re-verifies the compound tag on every search hit** before
   mapping it out — defense-in-depth against filter bypass.
 - `user_id` comes from ADK's session context, never from caller-supplied input.
@@ -317,9 +327,9 @@ dict is its return channel.
 
 ## Idempotent writes
 
-Record ids are deterministic: `{app_name}:{user_id}:{session_id}:{event.id}`.
-Re-ingestion upserts the same record, statelessly. Flair's REM consolidates
-content; it never sees duplicates.
+An event with an id gets a deterministic record id
+(`{app_name}:{user_id}:{session_id}:{event.id}`), so re-ingesting it does not
+duplicate; an event without an id gets a fresh UUID, so re-ingesting it can.
 
 ## custom_metadata
 

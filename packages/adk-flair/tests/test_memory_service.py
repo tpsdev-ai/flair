@@ -330,11 +330,13 @@ class TestSearchMemory:
                     "id": "mem-1",
                     "content": "should be filtered",
                     "tags": ["adk:app:other_user"],  # wrong user
+                    "agentId": "test-agent",
                 },
                 {
                     "id": "mem-2",
                     "content": "should pass",
                     "tags": ["adk:app:user"],
+                    "agentId": "test-agent",
                 },
             ],
         }
@@ -363,8 +365,8 @@ class TestSearchMemory:
         mock_resp.headers = {"content-type": "application/json"}
         mock_resp.json.return_value = {
             "results": [
-                {"id": "mine", "content": "kept", "tags": [wanted]},
-                {"id": "neighbour", "content": "dropped", "tags": [neighbour]},
+                {"id": "mine", "content": "kept", "tags": [wanted], "agentId": "test-agent"},
+                {"id": "neighbour", "content": "dropped", "tags": [neighbour], "agentId": "test-agent"},
             ],
         }
         service._client.request.return_value = mock_resp
@@ -373,6 +375,32 @@ class TestSearchMemory:
             app_name="app", user_id="alice:admin", query="test",
         )
         assert [m.id for m in result.memories] == ["mine"]
+
+    @pytest.mark.asyncio
+    async def test_search_rechecks_owner_identity_like_listing(self, service):
+        """flair#1943 (s1): a hit whose agentId is NOT this service's own agent
+        id is dropped, exactly as list_memories drops it — the compound tag is a
+        per-user retrieval filter, not an identity boundary."""
+        from adk_flair.memory_service import _compound_tag
+
+        tag = _compound_tag("app", "user")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"content-type": "application/json"}
+        mock_resp.json.return_value = {
+            "results": [
+                # right tag, FOREIGN agentId → must be dropped
+                {"id": "foreign", "content": "not mine", "tags": [tag], "agentId": "other-agent"},
+                # right tag, own agentId → kept
+                {"id": "mine", "content": "mine", "tags": [tag], "agentId": "test-agent"},
+            ],
+        }
+        service._client.request.return_value = mock_resp
+
+        result = await service.search_memory(
+            app_name="app", user_id="user", query="test",
+        )
+        assert [m.id for m in result.memories] == ["mine"]  # assertion: only the service's own hit
 
     @pytest.mark.asyncio
     async def test_flair_down_returns_empty_with_warning(self, service, caplog):

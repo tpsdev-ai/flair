@@ -87,7 +87,7 @@ server.start();
 | `FLAIR_KEYFILE` | Yes | — | Path to the Ed25519 keyfile from `flair agent add` (raw seed; base64/PEM also accepted). A leading `~` is expanded. |
 | `FLAIR_ALLOW_REMOTE_URL` | No | — | Set to `1` to allow non-localhost URLs |
 
-All values can also be passed directly to the constructor.
+All values can also be passed directly to the constructor, **except the remote-URL opt-in (`FLAIR_ALLOW_REMOTE_URL`), which is read from the environment only**.
 
 Hosted Flair (non-localhost `FLAIR_URL`) uses the same Ed25519 triple as the
 Python package — agent id, keyfile, server-side `Agent` row with a matching
@@ -100,8 +100,10 @@ an existence signal. Walkthrough:
 ### Scope model
 
 Each ADK app authenticates as **one Flair agent** (its service identity).
-Per-user isolation is enforced by a **compound tag** — `adk:<app_name>:<user_id>`
-— attached to every record and filtered on every search. Reserved characters
+Per-user scope is a **compound tag** — `adk:<app_name>:<user_id>` — attached to
+every record and filtered on every search. It is a per-user **RETRIEVAL FILTER**,
+not an isolation boundary: every user of one ADK app shares one Flair principal,
+so the tag does not isolate one user's memories from another's. Reserved characters
 (`%`, `:`, `_`) in `app_name` or `user_id` are percent-encoded so distinct
 identities never collide and the `:` delimiter stays unambiguous.
 
@@ -109,7 +111,7 @@ identities never collide and the `:` delimiter stays unambiguous.
 
 - `user_id` is mandatory — empty/missing returns empty, never searches unscoped
 - Every hit is re-verified against the compound tag before mapping to `MemoryEntry`
-- Timeout budget: 2s total (connect 500ms, read 1500ms), one attempt, no retry
+- Timeout: HTTPX phase timeouts (connect 500ms, read 1500ms); no enclosing wall-clock deadline, one attempt, no retry
 - Search failures degrade silently with a structured warning (host, elapsed, phase)
 
 ### Write path
@@ -133,12 +135,16 @@ is transmitted as raw text to the Flair instance at the configured URL.
 The Flair operator (which may be you) has full access to this data.
 Do not point `FLAIR_URL` at an instance you do not trust.
 
-### Metadata-level isolation, not cryptographic isolation
+### Metadata-level filtering, not cryptographic isolation
 
-All users of one ADK app share one Flair principal. Per-user isolation is
-enforced by tag-based server-side filtering, not cryptographic key separation.
-A bug in that filter would leak cross-user memories. For key-level isolation,
-use per-org Flair principals (the org layer).
+All users of one ADK app share one Flair principal. The compound tag
+`adk:<app_name>:<user_id>` is a per-user RETRIEVAL FILTER — it selects which
+memories a search returns — and it does NOT isolate one user's memories from
+another's: every user of one ADK app shares one Flair principal, so the tag is
+not a boundary between users. The only boundaries are server-enforced: a
+non-admin agent cannot write as another agent, and `visibility: private`
+memories are owner-only. Memory here is a signal an agent weighs, not a
+guardrail the platform enforces.
 
 ## API
 
