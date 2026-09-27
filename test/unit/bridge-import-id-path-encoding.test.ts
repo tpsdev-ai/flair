@@ -83,6 +83,10 @@ describe("flair bridge import: the signed Memory path equals the sent path (#197
   // Counts EVERY inbound request, before any routing, so a request that went
   // somewhere other than a /Memory/ PUT is still visible.
   let requestCount = 0;
+  // The exact Memory path this case expects the CLI to send (base path
+  // included). The mock accepts a Memory PUT only at this path, so a request
+  // that dropped or added a path segment is not accepted.
+  let expectedMemoryPath = "";
 
   beforeAll(async () => {
     ensureCliBuild();
@@ -121,7 +125,10 @@ describe("flair bridge import: the signed Memory path equals the sent path (#197
       req.on("data", (c) => (body += c));
       req.on("end", () => {
         const url = req.url ?? "";
-        if (req.method === "PUT" && url.includes("/Memory/")) {
+        // Route a Memory PUT ONLY when it names exactly the expected path for
+        // this case, so a request that dropped (or added to) the base's path is
+        // not accepted.
+        if (req.method === "PUT" && expectedMemoryPath !== "" && url === expectedMemoryPath) {
           const auth = String(req.headers["authorization"] ?? "");
           const m = /^TPS-Ed25519 ([^:]+):(\d+):([^:]+):(.+)$/.exec(auth);
           let ok = false;
@@ -157,6 +164,7 @@ describe("flair bridge import: the signed Memory path equals the sent path (#197
   });
 
   it("an id with reserved URL characters is sent as ONE encoded segment, signed as sent", async () => {
+    expectedMemoryPath = `/Memory/${encodeURIComponent(RAW_ID)}`;
     const res = await runCli(
       ["bridge", "import", BRIDGE_NAME, "--agent", AGENT, "--cwd", dir, "--url", mockUrl, "--key", keyPath],
       { HOME: scratch },
@@ -187,6 +195,7 @@ describe("flair bridge import: the signed Memory path equals the sent path (#197
   }, 25_000); // per-case budget > the child deadline (flair#1807)
 
   it("a '.'/'..' record id is refused with ZERO requests to the daemon", async () => {
+    expectedMemoryPath = `/Memory/${encodeURIComponent(RAW_ID)}`;
     for (const bad of [".", ".."]) {
       const before = requestCount;
       writeFileSync(join(dir, "records.jsonl"), JSON.stringify({ id: bad, text: "hello there" }) + "\n");
@@ -204,26 +213,29 @@ describe("flair bridge import: the signed Memory path equals the sent path (#197
     }
   }, 25_000);
 
-  it("a trailing-slash base URL sends and signs exactly one slash", async () => {
-    const beforeSeen = observed.length;
+  it("the base URL's own path is preserved for every base shape", async () => {
     writeFileSync(join(dir, "records.jsonl"), JSON.stringify({ id: RAW_ID, text: "hello there" }) + "\n");
-    // A base URL with a path segment before the trailing slash is what exposes
-    // the signed-vs-sent divergence under the Bun runtime: Bun's fetch COLLAPSES
-    // a bare `//` right after the authority, but keeps `//` after a segment, so
-    // `${mockUrl}/flair/` + `/Memory/<id>` is sent as `/flair//Memory/<id>`
-    // while the signed path is `/Memory/<id>`.
-    const res = await runCli(
-      ["bridge", "import", BRIDGE_NAME, "--agent", AGENT, "--cwd", dir, "--url", `${mockUrl}/flair/`, "--key", keyPath],
-      { HOME: scratch },
-      dir,
-    );
+    const encoded = `/Memory/${encodeURIComponent(RAW_ID)}`;
+    const cases: Array<[string, string]> = [
+      [mockUrl, encoded], // no base path, no slash
+      [`${mockUrl}/`, encoded], // no base path, trailing slash
+      [`${mockUrl}/flair`, `/flair${encoded}`], // base path, no slash
+      [`${mockUrl}/flair/`, `/flair${encoded}`], // base path, trailing slash
+    ];
+    for (const [base, expected] of cases) {
+      const beforeSeen = observed.length;
+      expectedMemoryPath = expected; // the mock 200s ONLY at this path
+      const res = await runCli(
+        ["bridge", "import", BRIDGE_NAME, "--agent", AGENT, "--cwd", dir, "--url", base, "--key", keyPath],
+        { HOME: scratch },
+        dir,
+      );
 
-    const seen = observed.slice(beforeSeen);
-    expect(seen).toHaveLength(1); // assertion: exactly one Memory request
-    // The mock records req.url, which is the request path (not a full URL), so
-    // compare it directly: exactly one slash, the path that was signed.
-    expect(seen[0].path).toBe(`/Memory/${encodeURIComponent(RAW_ID)}`); // assertion: ONE slash, no doubled path
-    expect(seen[0].signatureOk).toBe(true); // assertion: the signature covers the sent path
-    expect(res.code).toBe(0); // assertion: the import succeeded
+      const seen = observed.slice(beforeSeen);
+      expect(seen).toHaveLength(1); // assertion: exactly one Memory request, at the expected path
+      expect(seen[0].path).toBe(expected); // assertion: base path preserved, exactly one slash
+      expect(seen[0].signatureOk).toBe(true); // assertion: the signature covers the sent path
+      expect(res.code).toBe(0); // assertion: the import succeeded
+    }
   }, 25_000);
 });

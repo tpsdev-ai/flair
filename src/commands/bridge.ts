@@ -184,13 +184,14 @@ export function register(program: Command): void {
       const putMemory = async (body: import("../bridges/runtime/import-runner.js").PutMemoryBody): Promise<void> => {
         const headers: Record<string, string> = { "content-type": "application/json" };
         const keyPath: string | null = opts.key ?? resolveKeyPath(body.agentId);
-        // One percent-encoded path segment, built once. Build the FINAL url
-        // before signing so a base URL with a trailing slash (or any
-        // normalization) yields exactly one slash: the Ed25519 signature must
-        // cover the path the request actually carries (#1970), and ids of
-        // ordinary characters address the same record as before.
+        // One percent-encoded path segment, built once. Join the route onto the
+        // base URL's OWN path with exactly one slash between them, preserving any
+        // path the base carries (a base like http://h/flair still addresses
+        // /flair/Memory/<id>). Build the FINAL url once, then sign the path the
+        // request actually carries (#1970); ids of ordinary characters address
+        // the same record as before.
         const memoryPath = `/Memory/${encodeRecordId(body.id)}`;
-        const memoryUrl = new URL(memoryPath, baseUrl);
+        const memoryUrl = new URL(memoryPath.replace(/^\/+/, ""), `${baseUrl.replace(/\/+$/, "")}/`);
         const signedPath = `${memoryUrl.pathname}${memoryUrl.search}`;
         if (keyPath) {
           headers["authorization"] = buildEd25519Auth(body.agentId, "PUT", signedPath, keyPath);

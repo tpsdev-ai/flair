@@ -112,4 +112,27 @@ describe("flair-bench ingest: the signed Memory path equals the sent path (#1970
     expect(signatureCovers(call, bench.agent.publicKey, receivedPath)).toBe(true); // assertion: signed path == sent path
     expect(JSON.parse(call.body!).id).toBe(id);
   });
+
+  test("the base URL's own path is preserved for every base shape", async () => {
+    const id = "rec#1?x/y%z w";
+    const encoded = `/Memory/${encodeURIComponent(id)}`;
+    const cases: Array<[string, string]> = [
+      ["http://h", encoded], // no base path, no slash
+      ["http://h/", encoded], // no base path, trailing slash
+      ["http://h/flair", `/flair${encoded}`], // base path, no slash
+      ["http://h/flair/", `/flair${encoded}`], // base path, trailing slash
+    ];
+    for (const [base, expected] of cases) {
+      captured = [];
+      const bench = client("bench-agent", base);
+      await ingestSessionHistory(bench, sessions(id));
+
+      expect(captured).toHaveLength(1);
+      const call = captured[0];
+      const receivedPath = new URL(call.url).pathname; // derived from the URL, not slicing
+      expect(receivedPath).toBe(expected); // assertion: base path preserved, exactly one slash
+      expect(signatureCovers(call, bench.agent.publicKey, receivedPath)).toBe(true); // assertion: signed path == sent path
+      expect(JSON.parse(call.body!).id).toBe(id);
+    }
+  });
 });

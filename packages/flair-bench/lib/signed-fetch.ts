@@ -64,10 +64,11 @@ export async function signedFetch(
   p: string,
   body?: unknown,
 ): Promise<SignedResponse> {
-  // Build the FINAL url before signing so a base URL with a trailing slash (or
-  // any normalization) yields exactly one slash: the signature must cover the
-  // path the request actually carries (#1970).
-  const url = new URL(p, harper.httpURL);
+  // Join the route onto the base URL's OWN path with exactly one slash between
+  // them, preserving any path the base carries (a base like http://h/flair still
+  // addresses /flair/...). Build the FINAL url once, then sign the path the
+  // request actually carries (#1970).
+  const url = new URL(p.replace(/^\/+/, ""), `${harper.httpURL.replace(/\/+$/, "")}/`);
   const signedPath = `${url.pathname}${url.search}`;
   const res = await fetch(url, {
     method,
