@@ -176,7 +176,7 @@ If you already have the older, unwrapped command, `flair doctor` reports it and
 
 The hook reads Claude Code's SessionStart
 payload on stdin, calls Flair's `bootstrap` (soul + relevant memories +
-predicted context; the bootstrap sends a basename subject hint but loads the agent's full own and recent memories),
+predicted context; the hook sends a basename subject hint, and bootstrap selects a bounded set of the agent's own and recent memories under a token budget),
 and emits it as `hookSpecificOutput.additionalContext` — which Claude Code
 injects into the new session's context. The matcher is omitted, so it fires on
 every session start (`startup`, `resume`, `clear`, `compact`); add
