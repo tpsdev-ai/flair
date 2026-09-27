@@ -1,18 +1,18 @@
 """Flair memory plugin for Hermes — MemoryProvider interface.
 
 Flair is the open-source memory + identity layer for agents. This plugin
-makes Flair the durable memory backend for Hermes agents. Per-agent
-scoping is preserved: each Hermes agent identity maps to a Flair agentId
-and memories are isolated by that agentId end-to-end.
+makes Flair the durable memory backend for Hermes agents. The plugin
+writes under the configured Flair agent ID. Non-admin reads include that
+agent’s records and other agents’ non-private records on the instance.
 
 Why Flair specifically:
   - Agent-authored memory (no LLM-driven extraction by default — the agent
     decides what's worth remembering).
   - Self-hosted, no SaaS dependency. Runs on a Mac mini, Mac Studio, a Pi.
-  - Ed25519 per-agent signing keys: cross-agent reads are refused by the
-    server, not by client convention.
-  - Same backend for memory + identity (soul + agent registry), so the
-    plugin can answer "who am I and what do I know" from one place.
+  - Ed25519 keys authenticate agents and scope non-admin writes; non-admin
+    cross-agent reads of non-private memories are allowed.
+  - Flair also stores Soul and Agent records, but this plugin queries Memory
+    only.
 
 Config (env vars or $HERMES_HOME/flair.json):
   FLAIR_URL          — Flair server URL (default: http://127.0.0.1:19926)
@@ -35,6 +35,7 @@ import base64
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -98,11 +99,10 @@ def _load_config() -> dict:
 SEARCH_SCHEMA = {
     "name": "flair_search",
     "description": (
-        "Semantic search over Flair memories. Results are the agent's own "
-        "records plus other agents' NON-PRIVATE records on the instance "
-        "(private records are owner-only). Returns relevant entries ranked by "
-        "similarity. Use when the agent needs prior context from earlier "
-        "sessions on this topic."
+        "Search Flair memories using the configured retrieval mode. Eligible "
+        "records include the configured agent’s own memories and other agents’ "
+        "non-private memories on this instance. Returns ranked matches up to "
+        "the requested limit."
     ),
     "parameters": {
         "type": "object",
@@ -147,45 +147,85 @@ STORE_SCHEMA = {
 
 # ─── Ed25519 signing ───────────────────────────────────────────────────────
 
+def _format_error(key_path: str) -> ValueError:
+    """The named format error: the path and the accepted formats, never the bytes."""
+    return ValueError(
+        f"flair: could not load an Ed25519 private key from {key_path}: "
+        "expected an exact 32-byte raw seed, an Ed25519 PEM key, or canonical "
+        "standard base64 of PKCS8 DER"
+    )
+
+
+# One PEM block and NOTHING else: BEGIN line, base64 body, END line, anchored.
+_PEM_BLOCK_RE = re.compile(
+    r"\A-----BEGIN [A-Z0-9 ]+-----\r?\n[A-Za-z0-9+/=\r\n]+-----END [A-Z0-9 ]+-----\Z"
+)
+
+
+def _canonical_base64_decode(text: str):
+    """Decode canonical standard base64 (standard alphabet, correctly padded),
+    or None. `validate=True` refuses non-alphabet characters and bad padding;
+    the re-encode comparison refuses a non-canonical (unpadded/mixed) spelling."""
+    try:
+        der = base64.b64decode(text, validate=True)
+    except Exception:
+        return None
+    if base64.b64encode(der).decode("ascii") != text:
+        return None
+    return der
+
+
 def _load_private_key(key_path: str):
     """Load an Ed25519 private key from a Flair-managed file.
 
-    Accepts, in this order (the order bob's key normalizer uses):
-      1. an exact 32-byte raw seed — what `flair agent add` writes;
-      2. a PEM private key;
-      3. strict base64 of a PKCS8 DER private key (standard alphabet, padded,
-         and it must round-trip).
-    Anything else raises a clear error naming the path and the accepted
-    formats — never the key bytes.
+    Checks these formats in order:
+      1. An exact 32-byte file is read as a raw Ed25519 seed — the format
+         `flair agent add` writes. ANY 32-byte file is read as a raw seed (the
+         format is inherently ambiguous at 32 bytes); a 32-byte file is never
+         rejected as malformed.
+      2. Ed25519 PEM: after outer whitespace is stripped, the WHOLE file must be
+         one PEM block (a BEGIN line, a base64 body, an END line). Junk before
+         or after the block is refused.
+      3. Canonical standard base64 of a PKCS8 DER key, after outer whitespace is
+         stripped. The encoding must round-trip (standard alphabet, correctly
+         padded).
+
+    The base64 branch requires canonical standard base64 after outer whitespace
+    is stripped; the decoder decodes text STRICTLY and refuses invalid UTF-8
+    bytes (they are never silently cleaned). Unsupported readable non-32-byte
+    files raise ValueError naming the path and the accepted formats — never the
+    key bytes; file read errors propagate as they are.
     """
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ed25519
 
-    data = Path(key_path).read_bytes()  # BYTES — `flair agent add` writes a raw seed
+    data = Path(key_path).read_bytes()  # file READ errors propagate as they are
 
-    # 1. Exact 32-byte raw seed.
+    # 1. An exact 32-byte file is a raw seed. ANY 32-byte file: documented, not
+    #    a claim that a malformed 32-byte file is rejected.
     if len(data) == 32:
         return ed25519.Ed25519PrivateKey.from_private_bytes(data)
 
-    text = data.decode("utf-8", errors="ignore").strip()
-
-    # 2. PEM.
-    if "-----BEGIN" in text:
-        try:
-            key = serialization.load_pem_private_key(text.encode("utf-8"), password=None)
-            if isinstance(key, ed25519.Ed25519PrivateKey):
-                return key
-        except Exception:
-            pass
-
-    # 3. Strict base64 of PKCS8 DER (canonical: standard alphabet, padded, and
-    #    it must round-trip — so a truncated/garbled value is refused, not repaired).
-    der = None
+    # Strict UTF-8: invalid bytes that are not an exact 32-byte seed are refused.
     try:
-        der = base64.b64decode(text, validate=True)
-    except Exception:
-        der = None
-    if der is not None and base64.b64encode(der).decode("ascii") == text:
+        text = data.decode("utf-8", errors="strict").strip()
+    except UnicodeDecodeError as exc:
+        raise _format_error(key_path) from exc
+
+    # 2. PEM — the WHOLE (whitespace-stripped) file must be one PEM block.
+    if text.startswith("-----BEGIN"):
+        if _PEM_BLOCK_RE.match(text):
+            try:
+                key = serialization.load_pem_private_key(text.encode("utf-8"), password=None)
+                if isinstance(key, ed25519.Ed25519PrivateKey):
+                    return key
+            except Exception:
+                pass
+        raise _format_error(key_path)
+
+    # 3. Canonical standard base64 of PKCS8 DER.
+    der = _canonical_base64_decode(text)
+    if der is not None:
         try:
             key = serialization.load_der_private_key(der, password=None)
             if isinstance(key, ed25519.Ed25519PrivateKey):
@@ -193,11 +233,7 @@ def _load_private_key(key_path: str):
         except Exception:
             pass
 
-    raise ValueError(
-        "flair: could not load an Ed25519 private key from "
-        f"{key_path}: expected a 32-byte raw seed, a PEM key, or strict "
-        "base64 of PKCS8 DER (the formats `flair agent add` and Flair's CLI write)"
-    )
+    raise _format_error(key_path)
 
 
 def _sign_request(priv_key, agent_id: str, method: str, path: str) -> str:
@@ -213,7 +249,7 @@ def _sign_request(priv_key, agent_id: str, method: str, path: str) -> str:
 # ─── Provider implementation ────────────────────────────────────────────────
 
 class FlairMemoryProvider(MemoryProvider):
-    """Flair-backed memory: per-agent-scoped, Ed25519-signed, semantic-searchable."""
+    """Flair-backed, Ed25519-signed memory with Flair’s visibility-based read scope."""
 
     def __init__(self):
         self._config: Optional[dict] = None
@@ -301,8 +337,8 @@ class FlairMemoryProvider(MemoryProvider):
         # to avoid corrupting the agent's representation of itself.
         self._is_primary = agent_context in ("primary", "")
 
-        # Warm bootstrap: fetch recent + permanent memories synchronously so
-        # the first turn's prompt has context. Cheap (single GET).
+        # Fetch a limited Memory collection without a recency sort, then place
+        # returned permanent rows first.
         self._bootstrap_text = self._fetch_bootstrap()
         logger.info(
             "flair: initialized (agent=%s, url=%s, primary=%s, bootstrap=%d chars)",
@@ -324,7 +360,7 @@ class FlairMemoryProvider(MemoryProvider):
         if not self._bootstrap_text:
             return ""
         return (
-            "## Flair memory (recent + persistent)\n\n"
+            "## Flair memory (collection results)\n\n"
             f"{self._bootstrap_text}\n\n"
             "_Use `flair_search <query>` for prior context on a specific topic, "
             "and `flair_store` to persist new facts you want to remember next session._"
@@ -430,7 +466,7 @@ class FlairMemoryProvider(MemoryProvider):
         return resp.text
 
     def _fetch_bootstrap(self) -> str:
-        """Pull the most recent memories + permanent ones for system-prompt seed."""
+        """Fetch a limited Memory collection without a recency sort, then place returned permanent rows first."""
         try:
             rows = self._request("GET", f"/Memory/?agentId={self._agent_id}&limit={self._config.get('bootstrap_limit', DEFAULT_BOOTSTRAP_LIMIT)}")
             if not isinstance(rows, list) or not rows:
@@ -480,8 +516,8 @@ class FlairMemoryProvider(MemoryProvider):
         content: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Mirror Hermes's built-in MEMORY.md/USER.md writes into Flair so the
-        agent's permanent recall stays consistent across restarts."""
+        """For a primary-context Hermes `add`, attempt a persistent Flair write;
+        failures are logged and do not update Flair."""
         if not self._is_primary or self._is_breaker_open():
             return
         if action != "add":

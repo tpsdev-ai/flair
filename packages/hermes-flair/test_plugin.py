@@ -4,7 +4,7 @@ Tests run without Hermes installed by stubbing the two Hermes-side imports
 (`agent.memory_provider` and `tools.registry`). Real-Hermes integration is
 covered by the plugin's appearance in upstream Hermes CI once landed.
 
-Run: python -m pytest plugins/hermes-flair/test_plugin.py -v
+Run: `python -m pytest packages/hermes-flair/test_plugin.py -v`
 """
 
 from __future__ import annotations
@@ -183,6 +183,78 @@ def test_load_private_key_rejects_unknown_format_with_clear_error(tmp_path):
     assert "32-byte raw seed" in msg  # names the accepted formats
 
 
+def _pem_text() -> str:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    return ed25519.Ed25519PrivateKey.generate().private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("ascii")
+
+
+def test_load_private_key_accepts_a_whole_pem_block(tmp_path):
+    path = tmp_path / "whole.pem"
+    path.write_text(_pem_text(), encoding="utf-8")
+    key = flair_plugin._load_private_key(str(path))
+    assert key.sign(b"x") is not None
+
+
+def test_load_private_key_rejects_invalid_utf8_inserted_into_base64(tmp_path):
+    # Invalid UTF-8 inserted into otherwise-valid canonical base64: the old
+    # errors="ignore" decode silently dropped the byte and LOADED the key; a
+    # strict decode must REFUSE with the named error, never clean it.
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    der = ed25519.Ed25519PrivateKey.generate().private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    encoded = base64.b64encode(der)
+    raw = encoded[:5] + b"\xff" + encoded[5:]  # insert an invalid UTF-8 byte
+    assert len(raw) != 32
+    path = tmp_path / "bad-utf8.key"
+    path.write_bytes(raw)
+    with pytest.raises(ValueError) as ei:
+        flair_plugin._load_private_key(str(path))
+    assert str(path) in str(ei.value)  # names the path
+
+
+def test_load_private_key_rejects_junk_before_a_pem_block(tmp_path):
+    path = tmp_path / "junk-before.pem"
+    path.write_text("junk line\n" + _pem_text(), encoding="utf-8")
+    with pytest.raises(ValueError) as ei:
+        flair_plugin._load_private_key(str(path))
+    assert str(path) in str(ei.value)
+
+
+def test_load_private_key_rejects_junk_after_a_pem_block(tmp_path):
+    path = tmp_path / "junk-after.pem"
+    path.write_text(_pem_text() + "\nJUNK", encoding="utf-8")
+    with pytest.raises(ValueError) as ei:
+        flair_plugin._load_private_key(str(path))
+    assert str(path) in str(ei.value)
+
+
+def test_canonical_base64_requires_padding_that_round_trips():
+    # A payload length that needs '=' padding: 47 bytes -> one pad char.
+    payload = bytes(range(47))
+    encoded = base64.b64encode(payload).decode("ascii")
+    assert encoded.endswith("=")  # assertion: this length is padded
+    assert flair_plugin._canonical_base64_decode(encoded) == payload  # assertion: padded round-trips
+    # The unpadded spelling is non-canonical and refused.
+    assert flair_plugin._canonical_base64_decode(encoded.rstrip("=")) is None  # assertion
+
+
+def test_load_private_key_file_read_error_propagates(tmp_path):
+    # A missing file is a read error, NOT the named format error.
+    with pytest.raises(FileNotFoundError):
+        flair_plugin._load_private_key(str(tmp_path / "does-not-exist.key"))
+
+
 def test_default_url_is_port_19926(monkeypatch):
     assert flair_plugin.DEFAULT_URL == "http://127.0.0.1:19926"
     monkeypatch.delenv("FLAIR_URL", raising=False)
@@ -259,6 +331,15 @@ def test_store_schema_durability_enum(configured_provider):
     store = next(s for s in configured_provider.get_tool_schemas() if s["name"] == "flair_store")
     durability = store["parameters"]["properties"]["durability"]
     assert set(durability["enum"]) == {"permanent", "persistent", "standard", "ephemeral"}
+
+
+def test_search_description_names_the_read_scope(configured_provider):
+    search = next(s for s in configured_provider.get_tool_schemas() if s["name"] == "flair_search")
+    desc = search["description"]
+    # assertion: the description names the configured agent's own memories ...
+    assert "own memories" in desc
+    # ... and other agents' non-private memories on the instance.
+    assert "non-private memories" in desc
 
 
 # ─── Tool call dispatch ────────────────────────────────────────────────────
