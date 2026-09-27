@@ -107,9 +107,10 @@ done
 
 # Promotability is a WHITELIST (F2 of #1671, A1c): the promote block is
 # emitted ONLY for a version that is exactly `<major>.<minor>.<patch>`; every
-# other version string emits no promote block on the PASS path. A blacklist
-# (matching a `-<prerelease>` part) misses `1.2.3--`, whose first `-` is a valid
-# SemVer prerelease token, and would wrongly promote it; the whitelist cannot.
+# other version string emits no promote block on the PASS path.
+# A blacklist that recognizes only `-` followed by an alphanumeric
+# prerelease identifier misses `1.2.3--` (whose identifier is `-`) and
+# would emit promotion commands for that input; the whitelist cannot.
 # release-publish.yml rejects build-metadata tags during tag validation;
 # accepted prerelease tags use the `next` staging dist-tag.
 is_release() {
