@@ -132,18 +132,18 @@ function requireRecordPrincipal(): boolean {
 // ─── Conflict resolution ─────────────────────────────────────────────────────
 
 /**
+ * The row written is `record.data`, but the row checked (and merged against) is
+ * `record.id`. The payload must carry that same id, or the record is not applied.
+ */
+export function payloadIdMismatch(record: { id: string; data?: Record<string, any> | null }): boolean {
+  return !record.data || record.data.id !== record.id;
+}
+
+/**
  * Field-level Last-Write-Wins merge.
  * For each field, the value with the later `updatedAt` wins.
  * Records with no local counterpart are accepted directly.
  */
-/**
- * The row written is `record.data`, but the row checked (and merged against) is
- * `record.id`. They must name the same row, or the record is not applied.
- */
-export function payloadIdMismatch(record: { id: string; data?: Record<string, any> | null }): boolean {
-  return !!record.data && record.data.id !== undefined && record.data.id !== record.id;
-}
-
 export function mergeRecord(local: Record<string, any> | null, remote: SyncRecord): Record<string, any> {
   if (!local) return remote.data;
 

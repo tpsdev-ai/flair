@@ -178,11 +178,11 @@ describe("the visibility guard stays wired into both write paths", () => {
     expect(src).toContain("assertValidVisibility");
   });
 
-  test("it is called once per write path — post() and put()", () => {
+  test("it is called once per write path — post(), put() and patch()", () => {
     const calls = src.match(/assertValidVisibility\(content\.visibility\)/g) ?? [];
-    // Two default-visibility sites exist (post at ~647, put at ~841). Each needs
-    // its own guard: they are separate entry points, and REST reaches both.
-    expect(calls.length).toBe(2);
+    // post() and put() each have a default-visibility site and a guard; patch()
+    // merges (no default) but still validates a present value. REST reaches all three.
+    expect(calls.length).toBe(3);
   });
 
   test("every durability-default site is preceded by a guard", () => {
@@ -191,10 +191,11 @@ describe("the visibility guard stays wired into both write paths", () => {
     // what makes a NEW unguarded path fail rather than pass unnoticed.
     const defaults = src.match(/defaultVisibilityForDurability\(content\.durability\)/g) ?? [];
     const guards = src.match(/assertValidVisibility\(content\.visibility\)/g) ?? [];
-    expect(guards.length).toBe(defaults.length);
+    // patch() has a guard but no default site (it merges), so guards = defaults + 1.
+    expect(guards.length).toBe(defaults.length + 1);
   });
 
-  test("the flair#1257 ephemeral-private guard is wired into both write paths", () => {
+  test("the flair#1257 ephemeral-private guard is wired into all three write paths", () => {
     // Same shape and same limitation as the tripwire above: detects DELETION,
     // not misbehaviour — the behavioural 400s live in the integration lane
     // (ephemeral-visibility-guard-e2e.test.ts, which is also where the
@@ -205,7 +206,8 @@ describe("the visibility guard stays wired into both write paths", () => {
     // trailing "(". put()'s call must see the EFFECTIVE durability — the
     // pre-existing row's when the update payload omits it — or a partial PUT
     // flipping a stored ephemeral row to shared sails past the guard.
-    expect(calls.length).toBe(2);
+    // patch() also checks the effective durability and visibility.
+    expect(calls.length).toBe(3);
     expect(src).toContain("content.durability ?? preExisting?.durability");
   });
 });

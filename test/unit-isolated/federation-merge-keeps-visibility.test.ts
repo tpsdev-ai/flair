@@ -30,10 +30,11 @@ describe("mergeRecord preserves stored visibility", () => {
 });
 
 describe("the sync loop applies a record only when its payload id is the envelope id", () => {
-  test("payloadIdMismatch detects a payload naming a different row", () => {
+  test("payloadIdMismatch applies a record only when its payload carries the envelope id", () => {
     expect(payloadIdMismatch({ id: "m1", data: { id: "m2" } })).toBe(true);
     expect(payloadIdMismatch({ id: "m1", data: { id: "m1" } })).toBe(false);
-    expect(payloadIdMismatch({ id: "m1", data: { content: "no id" } })).toBe(false);
+    expect(payloadIdMismatch({ id: "m1", data: { content: "no id" } })).toBe(true);
+    expect(payloadIdMismatch({ id: "m1" })).toBe(true);
   });
 
   test("the sync loop checks it before reading or writing the row", () => {

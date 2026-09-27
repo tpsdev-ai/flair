@@ -341,9 +341,9 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
  *  Read from `content`, not from `base`: `content.visibility` is the value
  *  that was actually persisted a few lines earlier, and assigning after the
  *  `...base` spread means the persisted value wins over anything the storage
- *  layer echoes back. Omitted (not `null`) when unset, which happens only on
- *  the put()-over-an-existing-record path where a partial merge carried no
- *  visibility — reporting `null` there would read as "no one but the owner",
+ *  layer echoes back. Omitted (not `null`) when unset, which happens only for
+ *  an existing record that has no stored writable visibility — reporting `null`
+ *  there would read as "no one but the owner",
  *  the opposite of what an absent field means to `isPrivateVisibility()`. */
 function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | null): any {
   const base = result && typeof result === "object" && !Array.isArray(result) ? result : {};
@@ -967,6 +967,30 @@ export class Memory extends (databases as any).flair.Memory {
     stripClientVersionPassthrough(content);
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
+    // Preserve stored visibility on updates before applying write policy: a
+    // null is no change (PATCH merges), and a present value goes through the
+    // same validator and ephemeral-tier guard as put().
+    if (content && content.visibility === null) delete content.visibility;
+    if (content && (content.visibility !== undefined || content.durability !== undefined)) {
+      const visibilityError = assertValidVisibility(content.visibility);
+      if (visibilityError) {
+        return new Response(
+          JSON.stringify({ error: "invalid_visibility", message: visibilityError }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+      const stored = await super.get();
+      const tierError = assertVisibilityAllowedForDurability(
+        content.durability ?? stored?.durability,
+        content.visibility ?? stored?.visibility,
+      );
+      if (tierError) {
+        return new Response(
+          JSON.stringify({ error: "invalid_visibility_for_durability", message: tierError }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+    }
     // ── flair#1542 + residual (Kern #1543 review 5135715289): reject skill patches ──
     // patch() routes past put() (and thus past the SkillScan gate + forced
     // durability), so a skill write on this verb would land unscanned. There are

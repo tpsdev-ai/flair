@@ -1,6 +1,7 @@
 /**
- * Memory updates preserve the record's stored visibility unless the write
- * explicitly changes it. Isolated: owns the harper mock for Memory.ts.
+ * Memory updates (PUT, PATCH and reindex) preserve the record's stored
+ * visibility unless the write explicitly sets a new one. Isolated: owns the
+ * harper mock for Memory.ts.
  */
 import { describe, expect, test, beforeEach, mock } from "bun:test";
 
@@ -29,6 +30,13 @@ class BaseMemory {
   // Harper PUT semantics: the stored row IS the content (full replacement).
   async put(content: any) {
     memoryStore.set(content.id, { ...content });
+  }
+  // Harper PATCH semantics: merge the body into the stored row.
+  async patch(content: any) {
+    const id = (this as any).id;
+    const merged = { ...(memoryStore.get(id) ?? {}), ...content };
+    for (const k of Object.keys(merged)) if (merged[k] === undefined) delete merged[k];
+    memoryStore.set(id, merged);
   }
   search() {
     async function* gen() { for (const r of memoryStore.values()) yield r; }
@@ -114,5 +122,25 @@ describe("Memory updates preserve stored visibility", () => {
     }
     expect(threw).toBe(true);
     expect(memoryStore.get("boom").content).toBe("x"); // nothing written
+  });
+
+  test("a PATCH with visibility null keeps the stored value", async () => {
+    await makeMemory("priv").patch({ visibility: null, content: "patched" });
+    expect(memoryStore.get("priv").visibility).toBe("private");
+    expect(memoryStore.get("priv").content).toBe("patched");
+  });
+
+  test("a PATCH with an invalid visibility is refused", async () => {
+    const result = await makeMemory("priv").patch({ visibility: "prvate" });
+    expect(result).toBeInstanceOf(Response);
+    expect((result as Response).status).toBe(400);
+    expect(memoryStore.get("priv").visibility).toBe("private");
+  });
+
+  test("a PATCH moving a shared record to ephemeral is refused", async () => {
+    const result = await makeMemory("pub").patch({ durability: "ephemeral" });
+    expect(result).toBeInstanceOf(Response);
+    expect((result as Response).status).toBe(400);
+    expect(memoryStore.get("pub").durability).toBe("persistent");
   });
 });
