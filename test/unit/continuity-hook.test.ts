@@ -148,9 +148,13 @@ function row(opts: {
   };
 }
 
-// ─── Memory PUT path encoding (flair#1970) ──────────────────────────────────
+// ─── Memory PUT path shape (flair#1970) ────────────────────────────────────
 
-describe("capture: journal PUT sends the id as one encoded path segment (#1970)", () => {
+// ROUTE/SHAPE check — NOT the encoding guard. A journal row's id is URL-safe
+// by construction, so this cannot go red on a raw-interpolation revert; the
+// encoder + `.`/`..` refusal are guarded by the extracted builder's own tests
+// (packages/flair-mcp/test/record-id-path.test.ts).
+describe("capture: journal PUT addresses the row as one segment after /Memory/ (#1970, route check)", () => {
   test("the row id reaches the wire as exactly one segment after /Memory/", async () => {
     seedSession(dir, AGENT, HARNESS_SESSION);
     const { calls, deps } = captureDeps();
@@ -160,9 +164,8 @@ describe("capture: journal PUT sends the id as one encoded path segment (#1970)"
     const [call] = calls;
     expect(call.method).toBe("PUT");
     const id = call.body.id as string;
-    // The exact wire shape: one percent-encoded segment, no query, no fragment,
-    // and the signed-for path is byte-identical to what is sent (the client
-    // signs the path it is handed — see continuity-capture-hook.ts).
+    // One segment, no query, no fragment. (The encoder itself is proven with a
+    // reserved-character id in record-id-path.test.ts.)
     expect(call.path).toBe(`/Memory/${encodeURIComponent(id)}`);
     const parts = call.path.split("/").filter(Boolean);
     expect(parts.length).toBe(2); // assertion: /Memory/<one segment>
