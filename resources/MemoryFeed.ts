@@ -1,9 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { Resource, databases } from "harper";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 import { computeContentHash, findExistingMemoryByContentHash } from "./memory-feed-lib.js";
 import { FORBIDDEN, UNAUTH, stampAttribution } from "./record-type-kit.js";
 import { guardAuthorityFields, stripAuthorityFields } from "./authority-field-guard.js";
-import { assertValidVisibility, assertVisibilityAllowedForDurability, PRIVATE_VISIBILITY } from "./memory-visibility.js";
+import { assertValidVisibility, assertVisibilityAllowedForDurability, PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, refuseSkillWriteSource, skillScanGate } from "./skill-write.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
@@ -52,6 +53,15 @@ export class FeedMemories extends Resource {
       const existingRecord = await (databases as any).flair.Memory.get(content.id);
       if (existingRecord && existingRecord.agentId !== content.agentId) {
         return FORBIDDEN("forbidden: cannot write a feed memory owned by another agent");
+      }
+      // Preserve stored visibility on updates before applying write policy
+      // (the same rule as Memory.put; only the two writable values).
+      if (
+        existingRecord &&
+        (content.visibility === undefined || content.visibility === null) &&
+        (existingRecord.visibility === PRIVATE_VISIBILITY || existingRecord.visibility === SHARED_VISIBILITY)
+      ) {
+        content.visibility = existingRecord.visibility;
       }
     }
 
@@ -145,7 +155,7 @@ export class FeedMemories extends Resource {
 
     const record = {
       ...content,
-      id: content.id ?? `${agentId}-${Date.now()}`,
+      id: content.id ?? `${agentId}-${Date.now()}-${randomUUID()}`,
       agentId,
       content: body,
       contentHash,

@@ -826,6 +826,13 @@ jobs:
         # live tests here (not skipping) keeps this step's signal about the unit
         # suite alone; the live tests get their own step below.
         run: pytest packages/adk-flair/tests -m "not live_flair" -v
+      - name: hermes-flair plugin unit tests (hermetic Python, flair#1953)
+        # The hermes-flair plugin had no pytest step. Its test file stubs the
+        # Hermes-side imports, so it needs only pytest (from the adk-flair
+        # [test] extra above) plus cryptography for real Ed25519 key fixtures.
+        run: |
+          python -m pip install "cryptography>=41"
+          pytest packages/hermes-flair/test_plugin.py -v
       # ── Tier 2: live tests via ephemeral Harper boot (see job comment) ─────
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
         with:

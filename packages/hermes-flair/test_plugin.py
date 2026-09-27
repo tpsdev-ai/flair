@@ -4,7 +4,7 @@ Tests run without Hermes installed by stubbing the two Hermes-side imports
 (`agent.memory_provider` and `tools.registry`). Real-Hermes integration is
 covered by the plugin's appearance in upstream Hermes CI once landed.
 
-Run: python -m pytest plugins/hermes-flair/test_plugin.py -v
+Run: `python -m pytest packages/hermes-flair/test_plugin.py -v`
 """
 
 from __future__ import annotations
@@ -143,6 +143,187 @@ def test_load_private_key_round_trip(ed25519_key_file):
     assert isinstance(sig, bytes) and len(sig) == 64  # Ed25519 sig is 64 bytes
 
 
+def test_load_private_key_raw_seed_written_by_flair_agent_add(tmp_path):
+    """`flair agent add` writes a raw 32-byte seed (src/commands/agent.ts).
+    The plugin must load THAT file and sign a request that verifies with the
+    matching public key."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    priv = ed25519.Ed25519PrivateKey.generate()
+    seed = priv.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    assert len(seed) == 32
+    path = tmp_path / "hermes.key"
+    path.write_bytes(seed)  # exactly how `flair agent add` writes it
+
+    key = flair_plugin._load_private_key(str(path))
+    auth = flair_plugin._sign_request(key, "alpha", "GET", "/Memory/abc")
+    agent_id, ts, nonce, sig_b64 = auth[len("TPS-Ed25519 "):].split(":")
+    payload = f"{agent_id}:{ts}:{nonce}:GET:/Memory/abc".encode("utf-8")
+    # Verifies with the matching public key (raises on failure).
+    key.public_key().verify(base64.b64decode(sig_b64), payload)
+    assert key.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    ) == priv.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+
+
+def test_load_private_key_rejects_unknown_format_with_clear_error(tmp_path):
+    path = tmp_path / "garbage.key"
+    path.write_bytes(b"not-a-key")
+    with pytest.raises(ValueError) as ei:
+        flair_plugin._load_private_key(str(path))
+    msg = str(ei.value)
+    assert str(path) in msg  # names the path
+    assert "32-byte raw seed" in msg  # names the accepted formats
+
+
+def _pem_text() -> str:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    return ed25519.Ed25519PrivateKey.generate().private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("ascii")
+
+
+def test_load_private_key_accepts_a_whole_pem_block(tmp_path):
+    path = tmp_path / "whole.pem"
+    path.write_text(_pem_text(), encoding="utf-8")
+    key = flair_plugin._load_private_key(str(path))
+    assert key.sign(b"x") is not None
+
+
+def test_load_private_key_rejects_invalid_utf8_inserted_into_base64(tmp_path):
+    # Invalid UTF-8 inserted into otherwise-valid canonical base64: the old
+    # errors="ignore" decode silently dropped the byte and LOADED the key; a
+    # strict decode must REFUSE with the named error, never clean it.
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    der = ed25519.Ed25519PrivateKey.generate().private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    encoded = base64.b64encode(der)
+    raw = encoded[:5] + b"\xff" + encoded[5:]  # insert an invalid UTF-8 byte
+    assert len(raw) != 32
+    path = tmp_path / "bad-utf8.key"
+    path.write_bytes(raw)
+    with pytest.raises(ValueError) as ei:
+        flair_plugin._load_private_key(str(path))
+    assert str(path) in str(ei.value)  # names the path
+
+
+def test_load_private_key_rejects_junk_before_a_pem_block(tmp_path):
+    path = tmp_path / "junk-before.pem"
+    path.write_text("junk line\n" + _pem_text(), encoding="utf-8")
+    with pytest.raises(ValueError) as ei:
+        flair_plugin._load_private_key(str(path))
+    assert str(path) in str(ei.value)
+
+
+def test_load_private_key_rejects_junk_after_a_pem_block(tmp_path):
+    path = tmp_path / "junk-after.pem"
+    path.write_text(_pem_text() + "\nJUNK", encoding="utf-8")
+    with pytest.raises(ValueError) as ei:
+        flair_plugin._load_private_key(str(path))
+    assert str(path) in str(ei.value)
+
+
+def test_canonical_base64_requires_padding_that_round_trips():
+    # A payload length that needs '=' padding: 47 bytes -> one pad char.
+    payload = bytes(range(47))
+    encoded = base64.b64encode(payload).decode("ascii")
+    assert encoded.endswith("=")  # assertion: this length is padded
+    assert flair_plugin._canonical_base64_decode(encoded) == payload  # assertion: padded round-trips
+    # The unpadded spelling is non-canonical and refused.
+    assert flair_plugin._canonical_base64_decode(encoded.rstrip("=")) is None  # assertion
+
+
+def test_round_trip_guard_refuses_a_pad_bit_alias():
+    # Same bytes, non-canonical spelling: the unused low bits of the last data
+    # character are set. b64decode(validate=True) accepts it; only the
+    # round-trip comparison refuses it.
+    payload = bytes(range(47))
+    encoded = base64.b64encode(payload).decode("ascii")
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    last = encoded[-2]
+    alias = encoded[:-2] + alphabet[alphabet.index(last) | 1] + encoded[-1]
+    assert alias != encoded
+    assert base64.b64decode(alias, validate=True) == payload  # assertion: decodes to the same bytes
+    assert flair_plugin._canonical_base64_decode(alias) is None  # assertion: the guard refuses it
+
+
+def test_invalid_utf8_error_does_not_chain_the_key_bytes(tmp_path):
+    import traceback
+
+    path = tmp_path / "bad.key"
+    path.write_bytes(bytes([0xFF] * 40) + b"\n")
+    with pytest.raises(ValueError) as ei:
+        flair_plugin._load_private_key(str(path))
+    assert ei.value.__cause__ is None  # assertion: nothing chained
+    assert ei.value.__context__ is None  # assertion: the decode error (and its bytes) is not kept
+    rendered = "".join(traceback.format_exception(ei.value))
+    assert "0xff" not in rendered and "\\xff" not in rendered  # assertion: no key byte in the traceback
+
+
+def test_format_error_frames_hold_no_key_bytes(tmp_path):
+    import traceback
+
+    path = tmp_path / "pem-junk.key"
+    path.write_text(_pem_text() + "\nJUNK", encoding="utf-8")
+    with pytest.raises(ValueError) as ei:
+        flair_plugin._load_private_key(str(path))
+    rendered = "".join(
+        traceback.TracebackException.from_exception(ei.value, capture_locals=True).format()
+    )
+    assert "PRIVATE KEY" not in rendered  # assertion: no frame local holds the key text
+    assert "JUNK" not in rendered
+
+
+def test_crypto_import_failure_happens_before_the_key_is_read(tmp_path, monkeypatch):
+    import builtins
+
+    path = tmp_path / "any.key"
+    path.write_bytes(bytes(32))
+    real_import = builtins.__import__
+
+    def failing_import(name, *args, **kwargs):
+        if name.startswith("cryptography"):
+            raise ImportError("simulated: cryptography unavailable")
+        return real_import(name, *args, **kwargs)
+
+    reads = []
+    real_read = flair_plugin.Path.read_bytes
+    monkeypatch.setattr(flair_plugin.Path, "read_bytes", lambda self: reads.append(self) or real_read(self))
+    monkeypatch.setattr(builtins, "__import__", failing_import)
+    with pytest.raises(ImportError):
+        flair_plugin._load_private_key(str(path))
+    assert reads == []  # assertion: the key file was never read before the import failed
+
+
+def test_load_private_key_file_read_error_propagates(tmp_path):
+    # A missing file is a read error, NOT the named format error.
+    with pytest.raises(FileNotFoundError):
+        flair_plugin._load_private_key(str(tmp_path / "does-not-exist.key"))
+
+
+def test_default_url_is_port_19926(monkeypatch):
+    assert flair_plugin.DEFAULT_URL == "http://127.0.0.1:19926"
+    monkeypatch.delenv("FLAIR_URL", raising=False)
+    cfg = flair_plugin._load_config()
+    assert cfg["url"] == "http://127.0.0.1:19926"  # Flair's default port
+
+
 def test_sign_request_format(ed25519_key_file):
     key = flair_plugin._load_private_key(str(ed25519_key_file))
     auth = flair_plugin._sign_request(key, "alpha", "GET", "/Memory/abc")
@@ -212,6 +393,15 @@ def test_store_schema_durability_enum(configured_provider):
     store = next(s for s in configured_provider.get_tool_schemas() if s["name"] == "flair_store")
     durability = store["parameters"]["properties"]["durability"]
     assert set(durability["enum"]) == {"permanent", "persistent", "standard", "ephemeral"}
+
+
+def test_search_description_names_the_read_scope(configured_provider):
+    search = next(s for s in configured_provider.get_tool_schemas() if s["name"] == "flair_search")
+    desc = search["description"]
+    # assertion: the description names the configured agent's own memories ...
+    assert "own memories" in desc
+    # ... and other agents' non-private memories on the instance.
+    assert "non-private memories" in desc
 
 
 # ─── Tool call dispatch ────────────────────────────────────────────────────
