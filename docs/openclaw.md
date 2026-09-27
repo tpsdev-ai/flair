@@ -38,8 +38,7 @@ In your OpenClaw agent config, add the Flair plugin:
         "openclaw-flair": {
           "enabled": true,
           "hooks": {
-            "allowPromptInjection": true,
-            "allowConversationAccess": true
+              "allowPromptInjection": true
           },
           "config": {
             "url": "http://127.0.0.1:19926",
@@ -54,6 +53,8 @@ In your OpenClaw agent config, add the Flair plugin:
     }
 }
 ```
+
+The `allowConversationAccess` hook is only used when `autoCapture` is `true`, so the example shows it absent.
 
 An optional `agentId` in `config` is an **allow-list**: it restricts which agents may be served but never substitutes for the host's per-invocation identity, which comes from host context on every call.
 ### 5. Restart the gateway

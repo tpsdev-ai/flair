@@ -1,6 +1,5 @@
 /**
- * mcp-tools.ts — the 12 curated flair tools for the Model-2 custom /mcp handler.
- *
+ * mcp-tools.ts — the 17 curated flair tools for the Model-2 custom /mcp handler.
  * Curated BY CONSTRUCTION: this module implements a fixed set of tools, each a
  * thin wrapper over the existing flair Resource handler. No business logic is
  * re-implemented — the wrapped handlers (Memory / SemanticSearch /
@@ -1482,7 +1481,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   },
 });
 
-/** The tool definitions for a tools/list response (exactly the 12 curated tools). */
+/** The tool definitions for a tools/list response (exactly the 17 curated tools). */
 export function listToolDefs(): McpToolDef[] {
   return Object.values(TOOLS).map((t) => t.def);
 }
