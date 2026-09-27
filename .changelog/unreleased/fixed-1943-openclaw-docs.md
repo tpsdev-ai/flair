@@ -1,14 +1,1 @@
-- **Fixed six OpenClaw integration and config claims the code contradicts.**
-
-  Replaced the config block with the working ``openclaw-flair`` package shape
-   (````memory``` ```slots``` and ``hooks.allowPromptInjection```); added
-   ``agentId``` as an optional allow-list only. Clarified that
-   ``memory_search``` returns bootstrap context (not a token budget),
-   requires ``allowPromptInjection``` opt-in and runs at prompt build
-  (no topic filter). The adaptive recent window widens to 7d and 30d
-   rather than clamping to last 24h. A verified agent can read all its
-  own records (private included) and other agents' non-private records --
-  grants do not expand that scope. Writes carry an agentId field (tags
-  are optional). For each resolved home, ``.flair``` then ``~/.tps/...``
-  are checked before moving to the next. Host workspace files load
-  ``SOUL.md`` not Flair.
+- **The OpenClaw and Claude Code integration docs now match the code.** The OpenClaw config example uses the `openclaw-flair` package shape (the memory slot and `hooks.allowPromptInjection`), with `agentId` only as an optional allow-list. The `memory_search` tool is a semantic search. Automatic context is a separate `before_prompt_build` hook: it needs `autoRecall` and the host's `hooks.allowPromptInjection`, passes no conversation topic, and returns context only when there is some. The recent window starts at 48 hours and widens to 7 and 30 days, rather than a fixed 24 hours. A verified agent can read all its own records (private included) and other agents' non-private records; grants do not expand that scope. Writes carry an `agentId` field (tags are optional), and a separate agent ID gives ownership, not isolation. Key lookup checks `.flair` and then the legacy directory for each resolved home before moving to the next. The host's own workspace files load each agent's `SOUL.md` and `AGENTS.md`; the plugin does not load or anchor those files.

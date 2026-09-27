@@ -74,12 +74,11 @@ The Flair plugin adds these tools to your OpenClaw agent:
 
 ### Automatic Bootstrap
 
-On each new conversation, the plugin injects relevant context from Flair:
+With `autoRecall` on (the default) and the host's `hooks.allowPromptInjection` enabled, the plugin handles `before_prompt_build`: it requests bootstrap context from Flair, up to `maxBootstrapTokens` and without passing a conversation topic, and returns it as `prependContext` when the context is non-empty. The context can include:
 - Soul entries (persistent personality and project context)
-- Recent memories (an adaptive recent window, widening if the agent is quiet)
-- Bootstrap context up to a configured budget
+- Recent memories (an adaptive window: 48 hours, widening to 7 and then 30 days when fewer than three are found)
 
-With `hooks.allowPromptInjection` enabled, `before_prompt_build` requests budgeted bootstrap context without passing a conversation topic.
+Without `hooks.allowPromptInjection` the plugin contributes no context and logs `prompt context disabled: policy` at startup.
 
 ## Multi-Agent
 
