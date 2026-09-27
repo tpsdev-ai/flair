@@ -93,13 +93,16 @@ export class BaseMemory {
       if (override !== undefined) return override;
     }
     const row = harnessState.memoryStore.get(id) ?? null;
-    // Harper's `get(target)` honours `target.select` exactly like search():
-    // only the selected attributes the row carries, in select order. Mirror it
-    // here (flair#1940 round 11) so a caller-selected by-id read can be driven
-    // at the handler level, the same way the `search` mock below mirrors
-    // `search({select})`.
-    const select = Array.isArray(target?.select) ? target.select : null;
-    if (select && row && typeof row === "object") {
+    // Harper's `get(target)` honours `target.property` / `target.select` exactly
+    // like search(): a single property (or a string select) returns that field's
+    // value; an array select returns only the selected attributes the row
+    // carries, in select order. Mirror it here (flair#1940 rounds 11-12) so a
+    // caller-selected by-id read can be driven at the handler level, the same
+    // way the `search` mock below mirrors `search({select})`.
+    if (target?.property) return row?.[target.property];
+    const select = target?.select;
+    if (typeof select === "string") return row?.[select];
+    if (Array.isArray(select) && row && typeof row === "object") {
       const projected: any = {};
       for (const key of select) if (key in row) projected[key] = row[key];
       return projected;

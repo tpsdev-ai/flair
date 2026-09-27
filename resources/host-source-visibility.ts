@@ -124,11 +124,11 @@ export function pointerOutcomeFor(
   return isPrivateVisibility(effective) ? "withheld" : "pointer";
 }
 
-/** The pointer-input keys a Memory row must never carry on output (A1' item 1).
- *  A supported write strips them before persist; a RAW writer can leave one on
- *  the row, so the named non-admin reads (Memory.get, Memory.search,
- *  SemanticSearch) strip them too. Other Memory projections do not render
- *  pointers in this slice. */
+/** The pointer-input keys the named non-admin read paths remove from their
+ *  output (A1' item 1). A supported write strips them before persist; a RAW
+ *  writer can leave one on the row, so the named non-admin reads (Memory.get,
+ *  Memory.search, SemanticSearch) strip them. Other Memory projections do not
+ *  render pointers in this slice and do not run this strip. */
 const INLINE_POINTER_FIELDS = ["hostSource", "hostSourceScope", "hostSourceVisibility"] as const;
 
 /** Return `record` with every inline pointer-input field removed. Returns the
@@ -157,10 +157,14 @@ export function stripInlinePointerFields<T>(record: T): T {
  */
 export function projectHostSource<T>(record: T, readerAgentId: string | null | undefined, pointer?: PointerRow | null): T {
   if (!record || typeof record !== "object") return record;
-  const r = record as any;
   const decision = pointerOutcomeFor(record, readerAgentId, pointer);
   if (decision === "none") return stripInlinePointerFields(record);
-  const out = stripInlinePointerFields(record) as any;
+  // Always write the rendering onto a FRESH object: `stripInlinePointerFields`
+  // returns the SAME reference when there is nothing to strip, so assigning
+  // `hostSource` onto it would mutate the caller's (possibly stored) row. A
+  // materialized read is a copy in production, but the gated join must not
+  // depend on that — the pointer decision reads the STORED row unchanged.
+  const out: any = { ...(stripInlinePointerFields(record) as any) };
   if (decision === "withheld") {
     out.hostSource = HOST_SOURCE_WITHHELD;
   } else {

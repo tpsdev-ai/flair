@@ -157,11 +157,16 @@ export async function loadPointerRows(ids: readonly string[]): Promise<Map<strin
  * the non-admin reader; an admin/operator read is the named exception (see
  * MemoryHostSource.ts).
  *
- * EVERY shape is stripped: the join needs the row's `id` and `instanceToken`
- * to render a pointer, so a result that carries neither (a caller-selected
- * projection that omitted them, or a single-property result) is returned with
- * any inline pointer field removed rather than passed through — an inline
- * pointer field on the Memory row must never reach a non-admin reader.
+ * The join runs on the FULL stored row, not on whatever the caller asked for:
+ * the handler reads without the caller's `select`/`property`, so the join
+ * always sees the stored `id`, `agentId`, `instanceToken`, `archived` and
+ * `visibility`
+ * — a selection cannot drop them and cannot move the decision. An inline
+ * pointer field on the Memory row is therefore removed (or replaced by the
+ * gated rendering) before the caller's selection is applied to the projected
+ * row, so no inline pointer field reaches a non-admin reader. (The two
+ * selection shapes and the 400-on-other-shape refusal live in
+ * caller-selection.ts; the handler applies them in Memory.get/Memory.search.)
  */
 export async function projectRowsThroughPointers<T extends { id?: unknown }>(
   rows: readonly T[],

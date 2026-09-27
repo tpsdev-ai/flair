@@ -12,6 +12,7 @@ import {
   harnessState,
   resetHarnessState,
   installMemoryHarperMock,
+  databasesMock,
 } from "../helpers/memory-search-harness";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
@@ -714,9 +715,12 @@ describe("item 9 — archiving a row does not write the projected pointer back",
 // can leave a pointer field inline on the Memory row; the gated join renders a
 // pointer ONLY through a bound MemoryHostSource row (it needs the row's id and
 // instanceToken), so a selection that omits them must render nothing AND must
-// not carry the inline field. Every non-admin shape is covered here: a search
-// result with no `id`, a by-id result with no `agentId`, and a single-property
-// result.
+// not carry the inline field. The shapes covered HERE are the array-selected
+// ones: (s1) a search whose array select omits `id`, (s2) a by-id get whose
+// array select omits `agentId`/`instanceToken`, and (s3) a by-id get whose array
+// select names only `hostSource`. The single-field (scalar) shape, the
+// unselected full-row shape, the archived-row case and the 400-on-unsupported-
+// shape case are covered in round 12 below.
 
 describe("round 11 — every non-admin read shape strips inline pointer fields", () => {
   const INLINE = JSON.stringify(POINTER);
@@ -747,7 +751,108 @@ describe("round 11 — every non-admin read shape strips inline pointer fields",
     seedMemory({ id: "mem-s3", agentId: "agent-a", visibility: "shared", hostSource: INLINE });
     const res: any = await makeMemory(agentCtx("agent-a")).get({ id: "mem-s3", select: ["hostSource"] });
 
-    expect(res instanceof Response).toBe(false); // assertion: no 404 that would confirm the row
+    expect(res instanceof Response).toBe(false); // assertion: the seeded row returns an object; a missing id would return 404
     expect(res?.hostSource).toBeUndefined(); // assertion: no inline value
+  });
+});
+
+// ─── round 12: the pointer decision reads the STORED row; the selection ───────
+// ─── shapes only the OUTPUT ──────────────────────────────────────────────────
+//
+// A caller-controlled `select` must not move the pointer decision. The decision
+// now reads the STORED row, so two shapes that read the caller-shaped row before
+// are closed here: (t1) a search whose selection omits `archived` on an ARCHIVED
+// row renders nothing, and (t2) a SCALAR select of `hostSource` honours the same
+// gated rendering as the full row. (t3) shows a clean row is byte-identical to
+// origin/main's own projection, and (t4) an unsupported shape is a 400 with no
+// read.
+
+describe("round 12 — the pointer decision reads the STORED row; the selection shapes the output", () => {
+  const INLINE = JSON.stringify(POINTER);
+  // The raw Harper projection the mock produces and origin/main returns for a
+  // clean row (origin/main's get()/search() hand the caller-shaped target to
+  // super.get/super.search and return it; there is no other shaping).
+  const rawHarper = (databasesMock as any).flair.Memory;
+
+  it("(t1) a search selecting fields WITHOUT `archived` renders nothing for an ARCHIVED row, exactly like the full row", async () => {
+    const row = seedMemory({ id: "mem-t1", agentId: "agent-a", visibility: "shared", archived: true });
+    pointerStore.set(row.id, {
+      memoryId: row.id, hostSource: INLINE, scopeAtWrite: "shared",
+      authorId: "agent-a", memoryInstanceToken: row.instanceToken,
+    });
+    // Sanity: the FULL-row read renders nothing for the archived row.
+    const full: any = await makeMemory(agentCtx("agent-b")).get(row.id);
+    expect(full.hostSource).toBeUndefined(); // assertion: the full row renders no pointer
+
+    const out: any[] = [];
+    for await (const r of await makeMemory(agentCtx("agent-b")).search({
+      select: ["id", "agentId", "instanceToken", "visibility", "hostSource"],
+    })) out.push(r);
+
+    expect(out.length).toBe(1); // assertion: the shared row is readable
+    expect("hostSource" in out[0]).toBe(false); // assertion: the selection renders nothing (the decision saw archived)
+    expect(out[0].hostSource).toBeUndefined(); // assertion
+  });
+
+  it("(t2) a SCALAR select of hostSource honours the gated rendering — no value when unbound, the gated object when bound", async () => {
+    // (a) A raw writer left hostSource inline and there is NO pointer row: the
+    // gated join renders nothing, so the scalar read must return no value — not
+    // the raw stored string.
+    seedMemory({ id: "mem-t2a", agentId: "agent-a", visibility: "shared", hostSource: INLINE });
+    const unbound: any = await makeMemory(agentCtx("agent-b")).get({ id: "mem-t2a", select: "hostSource" });
+    expect(unbound instanceof Response).toBe(false); // assertion: a record read, not a denial
+    expect(unbound).toBeUndefined(); // assertion: no value — not the raw inline string
+
+    // (b) A BOUND pointer read by its author: the scalar read returns the gated
+    // object, the same value the full-row read carries.
+    const row = seedMemory({ id: "mem-t2b", agentId: "agent-a", visibility: "shared" });
+    pointerStore.set(row.id, {
+      memoryId: row.id, hostSource: INLINE, scopeAtWrite: "shared",
+      authorId: "agent-a", memoryInstanceToken: row.instanceToken,
+    });
+    const full: any = await makeMemory(agentCtx("agent-a")).get(row.id);
+    const scalar: any = await makeMemory(agentCtx("agent-a")).get({ id: row.id, select: "hostSource" });
+    expect(scalar).toEqual(POINTER); // assertion: the gated rendering
+    expect(scalar).toEqual(full.hostSource); // assertion: the same value the full-row read carries
+  });
+
+  it("(t3) a selected read of a CLEAN row matches the raw Harper projection in both shapes", async () => {
+    seedMemory({ id: "mem-t3", agentId: "agent-a", visibility: "shared", content: "clean body" });
+    const head = () => makeMemory(agentCtx("agent-b"));
+
+    // origin/main's output = the raw Harper projection (the mock's own get/search).
+    const mainArray = await (rawHarper as any).get({ id: "mem-t3", select: ["content", "agentId"] });
+    const mainScalar = await (rawHarper as any).get({ id: "mem-t3", select: "content" });
+    const headArray = await head().get({ id: "mem-t3", select: ["content", "agentId"] });
+    const headScalar = await head().get({ id: "mem-t3", select: "content" });
+    expect(headArray).toEqual(mainArray); // assertion: array shape identical to main
+    expect(headScalar).toEqual(mainScalar); // assertion: scalar shape identical to main
+    expect(headArray).toEqual({ content: "clean body", agentId: "agent-a" }); // quoted value (same on main)
+    expect(headScalar).toBe("clean body"); // quoted value (same on main)
+
+    const mainSearch: any[] = [];
+    for await (const r of rawHarper.search({ select: ["content", "agentId"] })) mainSearch.push(r);
+    const headSearch: any[] = [];
+    for await (const r of await head().search({ select: ["content", "agentId"] })) headSearch.push(r);
+    expect(headSearch).toEqual(mainSearch); // assertion: search array shape identical to main
+  });
+
+  it("(t4) an unsupported selection shape is refused with 400 before any read", async () => {
+    seedMemory({ id: "mem-t4", agentId: "agent-a", visibility: "shared" });
+    let reads = 0;
+    harnessState.getOverride = () => { reads++; return undefined; };
+    harnessState.pointerSearchCalls = 0;
+    try {
+      const g: any = await makeMemory(agentCtx("agent-b")).get({ id: "mem-t4", select: 123 });
+      expect(g instanceof Response).toBe(true); // assertion: a refusal
+      expect(g.status).toBe(400); // assertion: 400
+      const s: any = await makeMemory(agentCtx("agent-b")).search({ select: { nested: true } });
+      expect(s instanceof Response).toBe(true); // assertion: a refusal
+      expect(s.status).toBe(400); // assertion: 400
+      expect(reads).toBe(0); // assertion: no read was issued
+      expect(harnessState.pointerSearchCalls).toBe(0); // assertion: the pointer table was not read either
+    } finally {
+      harnessState.getOverride = null;
+    }
   });
 });
