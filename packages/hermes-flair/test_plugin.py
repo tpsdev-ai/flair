@@ -271,7 +271,7 @@ def test_invalid_utf8_error_does_not_chain_the_key_bytes(tmp_path):
     with pytest.raises(ValueError) as ei:
         flair_plugin._load_private_key(str(path))
     assert ei.value.__cause__ is None  # assertion: nothing chained
-    assert ei.value.__suppress_context__ is True
+    assert ei.value.__context__ is None  # assertion: the decode error (and its bytes) is not kept
     rendered = "".join(traceback.format_exception(ei.value))
     assert "0xff" not in rendered and "\\xff" not in rendered  # assertion: no key byte in the traceback
 

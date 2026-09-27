@@ -207,12 +207,14 @@ def _load_private_key(key_path: str):
         return ed25519.Ed25519PrivateKey.from_private_bytes(data)
 
     # Strict UTF-8: invalid bytes that are not an exact 32-byte seed are refused.
+    # The decode error holds the file's bytes, so the named error is raised
+    # AFTER the except block: nothing is chained or kept as __context__.
     try:
         text = data.decode("utf-8", errors="strict").strip()
     except UnicodeDecodeError:
-        # `from None`: the decode error holds the file's bytes, and a chained
-        # traceback would print them.
-        raise _format_error(key_path) from None
+        text = None
+    if text is None:
+        raise _format_error(key_path)
 
     # 2. PEM — the WHOLE (whitespace-stripped) file must be one PEM block.
     if text.startswith("-----BEGIN"):
