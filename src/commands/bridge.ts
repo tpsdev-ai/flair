@@ -182,13 +182,15 @@ export function register(program: Command): void {
       // for an empty or dry-run import, and including a bare trailing "?" or "#"
       // (new URL reports those as an empty search/hash, but the join would drop
       // the base's path). The route's own query string is what gets signed. #1970.
-      {
-        const parsedBase = new URL(baseUrl);
-        if (parsedBase.href.includes("?") || parsedBase.href.includes("#")) {
-          console.error(`Bridge import failed: refusing base URL "${baseUrl}": a Flair base URL must not carry a query string or fragment.`);
-          process.exit(1);
-        }
+      const parsedBase = new URL(baseUrl);
+      if (parsedBase.href.includes("?") || parsedBase.href.includes("#")) {
+        console.error(`Bridge import failed: refusing base URL "${baseUrl}": a Flair base URL must not carry a query string or fragment.`);
+        process.exit(1);
       }
+      // Routes join against the PARSED base, which new URL() has normalized (for
+      // example surrounding whitespace removed), so the path sent is the path the
+      // base names.
+      const joinBase = `${parsedBase.href.replace(/\/+$/, "")}/`;
 
       const ctx = makeContext({ bridge: name });
 
@@ -205,7 +207,7 @@ export function register(program: Command): void {
         // request actually carries (#1970); ids of ordinary characters address
         // the same record as before.
         const memoryPath = `/Memory/${encodeRecordId(body.id)}`;
-        const memoryUrl = new URL(memoryPath.replace(/^\/+/, ""), `${baseUrl.replace(/\/+$/, "")}/`);
+        const memoryUrl = new URL(memoryPath.replace(/^\/+/, ""), joinBase);
         const signedPath = `${memoryUrl.pathname}${memoryUrl.search}`;
         if (keyPath) {
           headers["authorization"] = buildEd25519Auth(body.agentId, "PUT", signedPath, keyPath);

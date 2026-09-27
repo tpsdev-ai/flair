@@ -75,7 +75,9 @@ export async function signedFetch(
   if (parsedBase.href.includes("?") || parsedBase.href.includes("#")) {
     throw new Error(`signedFetch: refusing base URL "${harper.httpURL}": a base URL must not carry a query string or fragment.`);
   }
-  const url = new URL(p.replace(/^\/+/, ""), `${harper.httpURL.replace(/\/+$/, "")}/`);
+  // Join against the PARSED base, which new URL() has normalized (for example
+  // surrounding whitespace removed), so the path sent is the path the base names.
+  const url = new URL(p.replace(/^\/+/, ""), `${parsedBase.href.replace(/\/+$/, "")}/`);
   const signedPath = `${url.pathname}${url.search}`;
   const res = await fetch(url, {
     method,

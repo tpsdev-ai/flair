@@ -121,6 +121,7 @@ describe("flair-bench ingest: the signed Memory path equals the sent path (#1970
       ["http://h/", encoded], // no base path, trailing slash
       ["http://h/flair", `/flair${encoded}`], // base path, no slash
       ["http://h/flair/", `/flair${encoded}`], // base path, trailing slash
+      ["http://h/flair ", `/flair${encoded}`], // base path, trailing whitespace (new URL trims it)
     ];
     for (const [base, expected] of cases) {
       captured = [];

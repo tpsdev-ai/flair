@@ -221,6 +221,7 @@ describe("flair bridge import: the signed Memory path equals the sent path (#197
       [`${mockUrl}/`, encoded], // no base path, trailing slash
       [`${mockUrl}/flair`, `/flair${encoded}`], // base path, no slash
       [`${mockUrl}/flair/`, `/flair${encoded}`], // base path, trailing slash
+      [`${mockUrl}/flair `, `/flair${encoded}`], // base path, trailing whitespace (new URL trims it)
     ];
     for (const [base, expected] of cases) {
       const beforeSeen = observed.length;
