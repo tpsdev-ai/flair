@@ -133,8 +133,9 @@ export function assertVisibilityAllowedForDurability(
   return (
     `ephemeral memories are private-only (continuity journal tier, flair#1257): ` +
     `durability "${EPHEMERAL_DURABILITY}" cannot be written with visibility ${JSON.stringify(visibility)}. ` +
-    `Omit visibility (the durability-keyed default is "${PRIVATE_VISIBILITY}") or set it to ` +
-    `"${PRIVATE_VISIBILITY}"; for a memory other agents should read, use durability ` +
+    `Set visibility to "${PRIVATE_VISIBILITY}" (for a new memory, omitting it also gives ` +
+    `"${PRIVATE_VISIBILITY}"; an update keeps the record's stored visibility); for a memory ` +
+    `other agents should read, use durability ` +
     `"standard", "persistent", or "permanent".`
   );
 }

@@ -136,7 +136,7 @@ function requireRecordPrincipal(): boolean {
  * For each field, the value with the later `updatedAt` wins.
  * Records with no local counterpart are accepted directly.
  */
-function mergeRecord(local: Record<string, any> | null, remote: SyncRecord): Record<string, any> {
+export function mergeRecord(local: Record<string, any> | null, remote: SyncRecord): Record<string, any> {
   if (!local) return remote.data;
 
   const merged = { ...local };
@@ -147,7 +147,11 @@ function mergeRecord(local: Record<string, any> | null, remote: SyncRecord): Rec
   // Field-level LWW is the spec target but record-level is sufficient
   // for the initial implementation and avoids per-field clock tracking.
   if (remoteUpdated > localUpdated) {
-    Object.assign(merged, remote.data);
+    // Preserve stored visibility on updates before applying write policy: an
+    // incoming null or missing visibility never replaces the local value.
+    const incoming = { ...remote.data };
+    if (incoming.visibility === null || incoming.visibility === undefined) delete incoming.visibility;
+    Object.assign(merged, incoming);
     merged.updatedAt = remoteUpdated;
   }
 

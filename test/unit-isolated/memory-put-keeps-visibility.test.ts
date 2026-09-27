@@ -24,7 +24,9 @@ class BaseMemory {
     return memoryStore.get(id) ?? null;
   }
   static async get(id: any) {
-    return memoryStore.get(typeof id === "string" ? id : id?.id) ?? null;
+    const key = typeof id === "string" ? id : id?.id;
+    if (key === "boom") throw new Error("storage unavailable");
+    return memoryStore.get(key) ?? null;
   }
   // Harper PUT semantics: the stored row IS the content (full replacement).
   async put(content: any) {
@@ -93,5 +95,26 @@ describe("PUT without visibility keeps the existing record's visibility", () => 
   test("a NEW record still gets the durability-keyed default", async () => {
     await makeMemory("fresh").put({ id: "fresh", agentId: "alice", content: "new", durability: "standard" });
     expect(memoryStore.get("fresh").visibility).toBe("private");
+  });
+
+  test("a _reindex payload that omits visibility keeps the stored value", async () => {
+    const r: any = new (Memory as any)();
+    r.id = "priv";
+    r.getContext = () => undefined; // internal caller: the admin gate passes
+    await r.put({ id: "priv", agentId: "alice", content: "owner-only note", durability: "standard", _reindex: true });
+    expect(memoryStore.get("priv").visibility).toBe("private");
+  });
+
+  test("a failed existing-record lookup fails the write instead of treating it as a create", async () => {
+    memoryStore.set("boom", { id: "boom", agentId: "alice", content: "x", durability: "standard", visibility: "private" });
+    let threw = false;
+    try {
+      const result = await makeMemory("boom").put({ id: "boom", agentId: "alice", content: "y", durability: "standard" });
+      if (result instanceof Response && result.status >= 400) threw = true;
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
+    expect(memoryStore.get("boom").content).toBe("x"); // nothing written
   });
 });

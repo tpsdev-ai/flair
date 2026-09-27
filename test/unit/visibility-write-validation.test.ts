@@ -116,7 +116,7 @@ describe("assertVisibilityAllowedForDurability — ephemeral is private-only (fl
     // Actor + state + remedy: names the tier, the refused value, and both exits.
     expect(err).toContain("private-only");
     expect(err).toContain('"shared"');
-    expect(err).toContain("Omit visibility");
+    expect(err).toContain("Set visibility to");
     expect(err).toContain("1257");
   });
 

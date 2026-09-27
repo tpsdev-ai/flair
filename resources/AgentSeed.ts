@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 /**
  * POST /AgentSeed
  *
@@ -134,7 +135,9 @@ export class AgentSeed extends Resource {
         // are written via skill_store, not seeded as onboarding memories).
         const skillDenial = rejectSkillWritePath(def);
         if (skillDenial) return skillDenial;
-        const id = `seed-${agentId}-${i}-${Date.now()}`;
+        // A random suffix makes the id collision-proof: this raw-table write
+        // must never replace an existing record.
+        const id = `seed-${agentId}-${i}-${Date.now()}-${randomUUID().slice(0, 8)}`;
         const record = {
           id,
           agentId,

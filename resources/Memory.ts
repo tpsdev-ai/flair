@@ -1009,6 +1009,14 @@ export class Memory extends (databases as any).flair.Memory {
         });
       }
       delete content._reindex;
+      // Preserve stored visibility on updates before applying write policy:
+      // a reindex payload that omits it keeps the record's stored value.
+      if (content.visibility === undefined || content.visibility === null) {
+        const stored = await super.get();
+        if (stored && (stored.visibility === PRIVATE_VISIBILITY || stored.visibility === SHARED_VISIBILITY)) {
+          content.visibility = stored.visibility;
+        }
+      }
       const reindexed = await super.put(content);
       noteMemoryUpsert(content);
       noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
@@ -1088,15 +1096,14 @@ export class Memory extends (databases as any).flair.Memory {
     // `{...existing, ...patch}` payload, and must never have their stored
     // visibility overwritten by a default recomputed from that merged content
     // — only a genuinely NEW id gets the default stamped.
+    // A lookup failure is NOT "no record": treating it as a create would
+    // apply create-time defaults to an existing row. Let it fail the write.
     const preExisting = content.id
-      ? await (databases as any).flair.Memory.get(content.id).catch(() => null)
+      ? await (databases as any).flair.Memory.get(content.id)
       : null;
 
-    // A write that omits visibility on an EXISTING record keeps the record's
-    // stored visibility: PUT replaces the whole row, so an omitted field would
-    // otherwise be dropped. Placed before the guards below so they see the
-    // effective value (e.g. an ephemeral durability with a carried "shared" is
-    // refused, not stored). Only the two writable values are carried.
+    // Preserve stored visibility on updates before applying write policy
+    // (only the two writable values; the guards below see the result).
     if (
       preExisting &&
       (content.visibility === undefined || content.visibility === null) &&
