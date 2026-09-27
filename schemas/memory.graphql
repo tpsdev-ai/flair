@@ -84,7 +84,15 @@ type Memory @table(database: "flair") {
   validFrom: String @indexed   # ISO timestamp — when this fact became true
   validTo: String @indexed     # ISO timestamp — when this fact stopped being true (null = still valid)
   _safetyFlags: [String]       # content safety flags from scanContent()
-  provenance: String           # JSON blob (memory-provenance slice 1; claimed.client added by flair#718): { v, verified: { agentId, timestamp }, claimed?: { model, client } }
+  provenance: String           # JSON blob (memory-provenance slice 1; claimed.client added by flair#718): { v, verified: { agentId, timestamp, receivedAt }, claimed?: { model, client } }
+                               # Server-STAMPED (receivedAt is the server's receipt time, never client-writable — flair#1940 A4).
+  hostSource: String           # JSON blob (flair#1940 slice 1 / A1): versioned { v: 1, host, kind, id, url? } — a host-object pointer
+                               # (e.g. an openclaw run, a cursor launch, a codex turn). SERVER-VALIDATED at post()/put() against a closed
+                               # host/kind set and an id/url grammar (A2), stored as the canonical (NFC, fixed key order) form, and
+                               # REDACTED to "withheld" on read when the reader may read the record but not the pointer (A3).
+                               # NEVER inside provenance (A5). Nullable by design — existing rows read back hostSource = null, unchanged
+                               # behavior (clean-upgrade-path gate, same idiom as provenance above). Readers parse/validate and never
+                               # render the raw string. NOT YET IMPLEMENTED IN THIS PARTIAL: A3 visibility (see report).
                                # Nullable by design — existing rows read back provenance = null, unchanged behavior (clean-upgrade-path gate).
                                # Same idiom as Soul.metadata below. Stamped server-side in resources/Memory.ts; never client-writable.
   originatorInstanceId: String @indexed  # federation-edge-hardening slice 1: WRITE-TIME instance identity, stamped server-side in

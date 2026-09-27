@@ -12,6 +12,7 @@ import { invalidEntitiesResponse } from "./entity-vocab.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveAllowedOwners } from "./memory-read-scope.js";
 import { assertValidVisibility, assertVisibilityAllowedForDurability } from "./memory-visibility.js";
+import { validateHostSource } from "./host-source.js";
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
 import {
@@ -899,10 +900,27 @@ export class Memory extends (databases as any).flair.Memory {
       if (vec) { content.embedding = vec; content.embeddingModel = getModelId(); }
     }
 
+    // ── flair#1940 slice 1 (A2): validate+canonicalise hostSource before
+    // anything is stored. Reject, never truncate/coerce. ──
+    if (content.hostSource !== undefined && content.hostSource !== null) {
+      const hs = validateHostSource(content.hostSource);
+      if (!hs.ok) {
+        return new Response(
+          JSON.stringify({ error: "invalid_host_source", message: hs.error }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+      content.hostSource = hs.canonical;
+    }
+
     // Write-time provenance stamp (memory-provenance slice 1) — see
     // buildProvenance's doc above. Stamped last, right before persist, so it
     // reflects the final resolved `content.createdAt`.
     content.provenance = buildProvenance(auth, content.createdAt, content);
+    // flair#1940 A4: `receivedAt` is SERVER-stamped inside provenance above; a
+    // client-supplied top-level `receivedAt` is IGNORED (stripped here so it is
+    // never persisted as a row field).
+    delete content.receivedAt;
     // flair#718 authorship-provenance: `claimedClient` is a WRITE-BODY-ONLY
     // passthrough — buildProvenance above already folded it into
     // `provenance.claimed.client` (sanitized/capped). Strip it from the row
@@ -1254,12 +1272,28 @@ export class Memory extends (databases as any).flair.Memory {
       // archivedBy should be set by the caller (CLI stamps req.tpsAgent via query param)
     }
 
+    // ── flair#1940 slice 1 (A2): validate+canonicalise hostSource before
+    // anything is stored. Reject, never truncate/coerce. ──
+    if (content.hostSource !== undefined && content.hostSource !== null) {
+      const hs = validateHostSource(content.hostSource);
+      if (!hs.ok) {
+        return new Response(
+          JSON.stringify({ error: "invalid_host_source", message: hs.error }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+      content.hostSource = hs.canonical;
+    }
+
     // Write-time provenance stamp (memory-provenance slice 1) — see
     // buildProvenance's doc above post(). Applies to every put() (fresh
     // create AND update/patch) — never gated on preExisting, so an update
     // always gets a freshly-stamped provenance reflecting the CURRENT
     // authenticated actor performing this write.
     content.provenance = buildProvenance(auth, content.createdAt, content);
+    // flair#1940 A4: a client-supplied `receivedAt` is IGNORED (stripped; the
+    // server's receipt time lives inside provenance, stamped above).
+    delete content.receivedAt;
     // flair#718 authorship-provenance — see post()'s identical comment above:
     // strip the write-body-only `claimedClient` passthrough now that it's
     // folded into `provenance.claimed.client`. Never persisted as a row field.
