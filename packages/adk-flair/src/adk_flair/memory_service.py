@@ -928,6 +928,13 @@ class FlairMemoryService(BaseMemoryService):
             raise ValueError(
                 f"add_memory: all {skipped} memories in the batch have no text; nothing was written"
             )
+        # flair#1967: a successful batch that skipped text-less entries says so,
+        # with counts only (never record content or ids).
+        if skipped:
+            logger.warning(
+                "adk-flair: add_memory skipped %d text-less entries (written=%d)",
+                skipped, written,
+            )
 
     async def search_memory(
         self,

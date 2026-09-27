@@ -7,6 +7,7 @@ event filtering, MemoryEntry mapping, ISO timestamps.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -598,6 +599,31 @@ class TestAddMemory:
         assert body["content"] == "direct fact"
         assert body["tags"] == ["adk:app:user"]
         assert body["author"] == "test-agent"
+
+    @pytest.mark.asyncio
+    async def test_skipped_textless_entry_logs_one_warning_on_success(self, service, caplog):
+        """flair#1967: a successful batch that skipped a text-less entry logs one
+        warning with the counts only, never record content."""
+        memories = [
+            MemoryEntry(
+                id="mem-text",
+                content=types.Content(role="user", parts=[types.Part(text="SENTINEL-1967-text")]),
+            ),
+            MemoryEntry(id="mem-empty", content=types.Content(role="user", parts=[])),
+        ]
+        service._client.request.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            text="{}",
+        )
+
+        with caplog.at_level(logging.WARNING):
+            await service.add_memory(app_name="app", user_id="user", memories=memories)
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "skipped 1" in warnings[0].getMessage()
+        assert all("SENTINEL-1967-text" not in r.getMessage() for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_fallback_id_is_content_hash(self, service):

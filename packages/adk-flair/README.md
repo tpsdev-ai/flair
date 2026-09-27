@@ -235,7 +235,7 @@ response (read that status before guessing), and lets transport errors from
 `FlairWriteError` (a `FlairRequestError` subclass carrying `written`, `total`,
 `failed`, `skipped` and the first failure's `.status_code`) if any write was
 refused or could not be confirmed. `total` counts only records ATTEMPTED —
-text-less entries are skipped and reported separately in `skipped`. `.status_code`
+text-less entries are skipped: a failed write reports them in `skipped`, and a successful one logs a single warning with their count.` `.status_code`
 is an `int`, or `None` when the failure carried no status (a connection error or
 timeout) — the `"?"` sentinel appears only in the message and the `failed` list.
 After a timeout or connection error the record may or may not
