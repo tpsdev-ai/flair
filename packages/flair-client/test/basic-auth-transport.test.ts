@@ -98,4 +98,21 @@ describe("flair#1951 — admin Basic credentials are refused over plain http to 
     const authHeader = `Basic ${Buffer.from(`${ADMIN_USER}:${ADMIN_PASS}`).toString("base64")}`;
     expect(message).not.toContain(authHeader); // assertion: no Authorization header value
   });
+
+  test("(b6) a path that does not start with / is refused and makes NO request, even on loopback", async () => {
+    const client = basicClient("http://localhost:19926");
+
+    await expect(client.request("GET", "@other.test/Health")).rejects.toThrow('must start with "/"');
+    expect(mockFetch).not.toHaveBeenCalled(); // assertion: no request was made
+  });
+
+  test("(b7) the request goes to the URL that was checked (FLAIR_URL's host)", async () => {
+    const client = basicClient("http://127.0.0.1:19926");
+
+    await client.request("GET", "/Health");
+
+    const url = String(mockFetch.mock.calls[0]?.[0]);
+    expect(new URL(url).host).toBe("127.0.0.1:19926"); // assertion: same host as FLAIR_URL
+  });
 });
+

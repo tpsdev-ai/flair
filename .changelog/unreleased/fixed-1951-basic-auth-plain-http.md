@@ -1,13 +1,15 @@
 - **FlairClient refuses to send admin Basic credentials over plain http to a non-loopback host, before any request is made.**
   When no Ed25519 key resolves and `FLAIR_ADMIN_USER`/`FLAIR_ADMIN_PASSWORD` are
-  set, the client previously attached an admin Basic `Authorization` header to
-  whatever `FLAIR_URL` it was given — including a remote `http://` origin, where
-  anyone on the path can read the password. It now parses `FLAIR_URL` and
-  REFUSES (an error naming the host and the remedy: use an `https://` URL, or an
-  Ed25519 key) when the scheme is `http:` and the host is not loopback
-  (`localhost`, `127.0.0.0/8`, `::1`/`[::1]`), before any request is sent. https,
-  loopback http, and signed (Ed25519) requests are unchanged. Every caller of
-  the client — flair-mcp, langgraph-flair, pi-flair and the wake runner — is
-  covered.
+  set, the client attaches an admin Basic `Authorization` header. It now checks
+  the URL the request will actually go to, and refuses (an error naming the host
+  and the remedy: use an `https://` URL, or an Ed25519 key) when that URL's scheme
+  is `http:` and its host is not loopback (`localhost`, `127.0.0.0/8`, `::1`), when
+  it cannot be parsed, or when its host differs from `FLAIR_URL`'s. A request path
+  must start with `/`. https, loopback http, and signed (Ed25519) requests are
+  otherwise unchanged. This covers every package that sends through FlairClient
+  (flair-mcp, langgraph-flair, pi-flair, the wake runner, the n8n nodes, and
+  openclaw-flair, which only signs). Admin requests that do not go through
+  FlairClient (n8n's credential test, CLI admin commands) are not covered by this
+  change.
 
   (Closes #1951)

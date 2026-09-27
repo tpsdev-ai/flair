@@ -49,12 +49,19 @@ function isLoopbackHostname(hostname: string): boolean {
  * The message names the actor, the state and the remedy, and NEVER includes the
  * credentials.
  */
-function assertBasicAuthTransportAllowed(url: string): void {
+function assertBasicAuthTransportAllowed(target: string, base: string): void {
+  // Checks the FINAL URL the request will go to, and fails closed when it or
+  // the base cannot be parsed or when they name different hosts.
   let parsed: URL;
+  let baseParsed: URL;
   try {
-    parsed = new URL(url);
+    parsed = new URL(target);
+    baseParsed = new URL(base);
   } catch {
-    return; // unparseable URL: let fetch surface its own error
+    throw new Error("flair-client: refusing to send admin Basic credentials: the request URL could not be parsed");
+  }
+  if (parsed.host !== baseParsed.host) {
+    throw new Error("flair-client: refusing to send admin Basic credentials: the request URL's host differs from FLAIR_URL's");
   }
   if (parsed.protocol !== "http:") return; // https (and anything else) unaffected
   if (isLoopbackHostname(parsed.hostname)) return; // loopback http unaffected
@@ -200,6 +207,10 @@ export class FlairClient {
     body?: unknown,
     opts: { signal?: AbortSignal } = {},
   ): Promise<T> {
+    if (!path.startsWith("/")) {
+      throw new Error('flair-client: a request path must start with "/"');
+    }
+    const target = `${this.url}${path}`;
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       // flair#1383: the server refuses clients older than 0.18.0 on write paths.
@@ -213,7 +224,7 @@ export class FlairClient {
     } else if (this.basicAuth) {
       // flair#1951: never send admin Basic credentials over plain http to a
       // non-loopback host. Refuse BEFORE any request is made.
-      assertBasicAuthTransportAllowed(this.url);
+      assertBasicAuthTransportAllowed(target, this.url);
       headers["Authorization"] = this.basicAuth;
       // Basic-only snapshot — do not spread a prior inspectKeyLookup result.
       // A 401 here is about admin credentials, not key-file paths (review on #1390).
@@ -231,7 +242,7 @@ export class FlairClient {
       ? anySignal(timeoutSignal, opts.signal)
       : { signal: timeoutSignal, cleanup: () => {} };
     try {
-      const res = await fetch(`${this.url}${path}`, {
+      const res = await fetch(target, {
         method,
         headers,
         body: body !== undefined ? JSON.stringify(body) : undefined,
