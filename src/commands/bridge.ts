@@ -191,6 +191,13 @@ export function register(program: Command): void {
         // request actually carries (#1970); ids of ordinary characters address
         // the same record as before.
         const memoryPath = `/Memory/${encodeRecordId(body.id)}`;
+        // A Flair base URL is an origin with an optional path. A query string or
+        // fragment on the base is refused before any request (it is the route's
+        // own query string that is signed). #1970.
+        const parsedBase = new URL(baseUrl);
+        if (parsedBase.search || parsedBase.hash) {
+          throw new Error(`refusing base URL "${baseUrl}": a Flair base URL must not carry a query string or fragment.`);
+        }
         const memoryUrl = new URL(memoryPath.replace(/^\/+/, ""), `${baseUrl.replace(/\/+$/, "")}/`);
         const signedPath = `${memoryUrl.pathname}${memoryUrl.search}`;
         if (keyPath) {

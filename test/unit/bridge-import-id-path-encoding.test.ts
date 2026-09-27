@@ -238,4 +238,20 @@ describe("flair bridge import: the signed Memory path equals the sent path (#197
       expect(res.code).toBe(0); // assertion: the import succeeded
     }
   }, 25_000);
+
+  it("a base URL with a query string or fragment is refused with ZERO requests", async () => {
+    writeFileSync(join(dir, "records.jsonl"), JSON.stringify({ id: RAW_ID, text: "hello there" }) + "\n");
+    for (const base of [`${mockUrl}/?tenant=1`, `${mockUrl}/#frag`]) {
+      const before = requestCount;
+      const res = await runCli(
+        ["bridge", "import", BRIDGE_NAME, "--agent", AGENT, "--cwd", dir, "--url", base, "--key", keyPath],
+        { HOME: scratch },
+        dir,
+      );
+      expect(requestCount).toBe(before); // assertion: nothing was sent
+      expect(res.code).not.toBe(0); // assertion: the import refused the base
+      expect(res.stderr).toContain(base); // assertion: the base URL is named
+      expect(res.stderr).toMatch(/query string or fragment/); // assertion: the rule is named
+    }
+  }, 25_000);
 });

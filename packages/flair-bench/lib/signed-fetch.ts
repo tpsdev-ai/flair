@@ -67,7 +67,12 @@ export async function signedFetch(
   // Join the route onto the base URL's OWN path with exactly one slash between
   // them, preserving any path the base carries (a base like http://h/flair still
   // addresses /flair/...). Build the FINAL url once, then sign the path the
-  // request actually carries (#1970).
+  // request actually carries (#1970). A base URL with a query string or fragment
+  // is refused before any request; the route's own query is what gets signed.
+  const parsedBase = new URL(harper.httpURL);
+  if (parsedBase.search || parsedBase.hash) {
+    throw new Error(`signedFetch: refusing base URL "${harper.httpURL}": a base URL must not carry a query string or fragment.`);
+  }
   const url = new URL(p.replace(/^\/+/, ""), `${harper.httpURL.replace(/\/+$/, "")}/`);
   const signedPath = `${url.pathname}${url.search}`;
   const res = await fetch(url, {

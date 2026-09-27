@@ -14,7 +14,7 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import nacl from "tweetnacl";
 import { ingestSessionHistory, encodeRecordId } from "../lib/ingest";
-import { mkAgent } from "../lib/signed-fetch";
+import { mkAgent, signedFetch } from "../lib/signed-fetch";
 import type { BenchClient, SessionHistory } from "../lib/types";
 
 interface Captured {
@@ -39,11 +39,11 @@ function sessions(id: string): SessionHistory[] {
 }
 
 /** Verify the Ed25519 TPS signature over `sentPath` with the agent's public key (base64). */
-function signatureCovers(call: Captured, publicKeyB64: string, sentPath: string): boolean {
+function signatureCovers(call: Captured, publicKeyB64: string, sentPath: string, method = "PUT"): boolean {
   const m = /^TPS-Ed25519 ([^:]+):(\d+):([^:]+):(.+)$/.exec(call.authorization ?? "");
   if (!m) return false;
   const [, agent, ts, nonce, sigB64] = m;
-  const payload = Buffer.from(`${agent}:${ts}:${nonce}:PUT:${sentPath}`, "utf-8");
+  const payload = Buffer.from(`${agent}:${ts}:${nonce}:${method}:${sentPath}`, "utf-8");
   return nacl.sign.detached.verify(payload, Buffer.from(sigB64, "base64"), Buffer.from(publicKeyB64, "base64"));
 }
 
@@ -134,5 +134,35 @@ describe("flair-bench ingest: the signed Memory path equals the sent path (#1970
       expect(signatureCovers(call, bench.agent.publicKey, receivedPath)).toBe(true); // assertion: signed path == sent path
       expect(JSON.parse(call.body!).id).toBe(id);
     }
+  });
+
+  test("a base URL with a query string or fragment is refused before any request", async () => {
+    for (const base of ["http://h/?tenant=1", "http://h/#frag"]) {
+      captured = [];
+      const bench = client("bench-agent", base);
+      const err = await signedFetch(
+        bench.harper,
+        bench.agent,
+        "PUT",
+        `/Memory/${encodeRecordId("plain")}`,
+        { id: "plain", agentId: bench.agent.id, content: "x", durability: "standard" },
+      ).catch((e) => e);
+      expect(String(err)).toMatch(/query string or fragment/); // assertion: the rule is named
+      expect(String(err)).toContain(base); // assertion: the base URL is named
+      expect(captured).toHaveLength(0); // assertion: no request was sent
+    }
+  });
+
+  test("a route with its own query string sends and signs pathname+search", async () => {
+    captured = [];
+    const bench = client("bench-agent");
+    await signedFetch(bench.harper, bench.agent, "POST", "/SemanticSearch?x=1", { q: "hello" });
+
+    expect(captured).toHaveLength(1);
+    const call = captured[0];
+    const u = new URL(call.url);
+    expect(u.pathname).toBe("/SemanticSearch"); // assertion: pathname only
+    expect(u.search).toBe("?x=1"); // assertion: the route's own query survives
+    expect(signatureCovers(call, bench.agent.publicKey, "/SemanticSearch?x=1", "POST")).toBe(true); // assertion: signed pathname+search
   });
 });
