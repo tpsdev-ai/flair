@@ -70,9 +70,10 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
 // ─── HTTP middleware ──────────────────────────────────────────────────────────
 
 // Flair's clients use exactly these HTTP methods. Harper routes other methods
-// to resource handlers as well, so each one would need its own audit on every
-// table; refusing them here, before any other branch, keeps every table's
-// surface to the methods its handlers are written and tested for.
+// to resource handlers as well; refusing them here, before any other branch of
+// the default REST middleware, keeps the tables it serves to the methods their
+// handlers are written and tested for. (Separately mounted routes such as /mcp
+// and OAuth discovery have their own dispatch chains and method handling.)
 const ALLOWED_HTTP_METHODS: ReadonlySet<string> = new Set([
   "GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE",
 ]);
@@ -82,7 +83,9 @@ server.http(async (request: any, nextLayer: any) => {
   // Before the public-path passthrough and before any auth branch, so no path
   // and no caller (anonymous, agent or admin) can reach a handler through any
   // other method.
-  const httpMethod = String(request.method ?? "").toUpperCase();
+  // Exact match: HTTP methods are case-sensitive, and these are the spellings
+  // Flair's clients send.
+  const httpMethod = String(request.method ?? "");
   if (!ALLOWED_HTTP_METHODS.has(httpMethod)) {
     return new Response(JSON.stringify({
       error: "method_not_allowed",

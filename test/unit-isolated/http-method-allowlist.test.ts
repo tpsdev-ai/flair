@@ -45,13 +45,14 @@ describe("HTTP method allowlist", () => {
     expect(typeof mw).toBe("function");
   });
 
-  for (const method of ["QUERY", "query", "SEARCH", "PROPFIND", "TRACE", "CONNECT", ""]) {
+  for (const method of ["PROPFIND", "SEARCH", "TRACE", "CONNECT", "get", "Delete", "post", ""]) {
     it(`refuses ${JSON.stringify(method)} with 405 on a table, a public path and an admin request, before any other branch`, async () => {
       for (const [path, headers, user] of [
         ["/Credential/", {}, undefined],
         ["/Memory/", {}, undefined],
         ["/health", {}, undefined],
         ["/Presence", {}, undefined],
+        ["/OAuthToken", {}, undefined],
         ["/Asset/", ADMIN_BASIC, superUser],
       ] as const) {
         const before = passed;
@@ -68,7 +69,7 @@ describe("HTTP method allowlist", () => {
     });
   }
 
-  for (const method of ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE", "get", "Delete"]) {
+  for (const method of ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]) {
     it(`lets ${method} through to the next branch (the public /health passthrough)`, async () => {
       const before = passed;
       const res = await mw(request(method, "/health"), next);
