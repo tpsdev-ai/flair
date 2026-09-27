@@ -1,2 +1,2 @@
-- **Native `/mcp` tool calls check their arguments against each tool's declared input schema.**
-  A `tools/call` whose arguments are not a JSON object, omit a required argument, carry a value of a type the tool does not declare, or give an `id` that is not a non-empty string is refused with JSON-RPC error `-32602` before the tool runs. An unrecognised visibility string still gets `invalid_visibility` from the Memory resource.
+- **Native `/mcp` tool calls check declared argument types and required properties before the tool runs.**
+  A `tools/call` whose arguments are not a JSON object, omit a required argument, carry a value of a type the tool's input schema does not declare, or (for a tool that declares an `id`) give an `id` that is not a non-empty string is refused with JSON-RPC error `-32602`. An optional argument given as `null` is treated as absent. An unrecognised visibility string still gets `invalid_visibility` from the `memory_store` tool.

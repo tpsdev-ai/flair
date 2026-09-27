@@ -461,7 +461,7 @@ describe("tools/call — scopes to the resolved agent (no forging)", () => {
         ));
         const body = await parse(res);
         if (typeof bad === "string") {
-          // An unrecognised string value: the Memory resource's 400 invalid_visibility.
+          // An unrecognised string value: the memory_store wrapper's invalid_visibility.
           const payload = body.result.structuredContent ?? body.result;
           expect(JSON.stringify(payload)).toContain("invalid_visibility");
         } else {
@@ -1018,6 +1018,24 @@ describe("tools/call — arguments must match the tool's declared types", () => 
   it("conforming arguments still reach the tool (null optionals are treated as absent)", async () => {
     lastCall = null;
     const body = await call("memory_search", { query: "hi", limit: 3, includeTrust: null });
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("SemanticSearch.post");
+  });
+
+  it("a null optional argument is not forwarded to the resource", async () => {
+    lastCall = null;
+    const body = await call("memory_store", { content: "x", tags: null, type: null });
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("Memory.post");
+    // Exactly what an omitted argument gives: the wrapper's default for type,
+    // and no tags value (never null).
+    expect(lastCall?.args?.tags).toBeUndefined();
+    expect(lastCall?.args?.type).toBe("session");
+  });
+
+  it("an undeclared id on a tool without an id argument is left to the tool, as before", async () => {
+    lastCall = null;
+    const body = await call("memory_search", { query: "hi", id: 42 });
     expect(body.error).toBeUndefined();
     expect(lastCall?.resource).toBe("SemanticSearch.post");
   });

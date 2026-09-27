@@ -1,6 +1,7 @@
 /**
  * Runtime check of a native /mcp `tools/call` arguments object against the
- * tool's declared inputSchema, before the tool runs. JSON-RPC arguments are
+ * declared argument types and required properties of the tool's inputSchema,
+ * before the tool runs. JSON-RPC arguments are
  * untyped at runtime; the tool implementations are written for the declared
  * types, so a value of another type is refused here instead of reaching them.
  *
@@ -11,8 +12,11 @@
  *   - every present, non-null property matches its declared `type` (string,
  *     number, integer, boolean, array, object; a type list allows any of them),
  *     and an array's items match `items.type` when it declares one;
- *   - an `id` argument is a non-empty string (ids address one record).
- * Properties the schema does not declare are left to the tool, as before.
+ *   - when the schema declares an `id` argument, it is a non-empty string (ids
+ *     address one record).
+ * Properties the schema does not declare, and enum values, are left to the
+ * tool, as before. withoutNullArguments() then drops null-valued properties so
+ * a tool never forwards a null where its schema declares a type.
  */
 
 type JsonType = "string" | "number" | "integer" | "boolean" | "array" | "object" | "null";
@@ -59,8 +63,21 @@ export function checkToolArguments(schema: any, args: unknown): string | null {
       if (bad >= 0) return `argument "${name}" item ${bad} must be of type ${prop.items.type}`;
     }
   }
-  if (obj.id !== undefined && obj.id !== null && (typeof obj.id !== "string" || obj.id.length === 0)) {
+  if ("id" in props && obj.id !== undefined && obj.id !== null
+      && (typeof obj.id !== "string" || obj.id.length === 0)) {
     return `argument "id" must be a non-empty string`;
   }
   return null;
+}
+
+/** The arguments without null- or undefined-valued properties: an optional
+ *  argument given as null is treated as absent (required ones were already
+ *  checked to be present). Returns {} for absent arguments. */
+export function withoutNullArguments(args: unknown): Record<string, unknown> {
+  if (typeof args !== "object" || args === null || Array.isArray(args)) return {};
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args as Record<string, unknown>)) {
+    if (v !== null && v !== undefined) out[k] = v;
+  }
+  return out;
 }
