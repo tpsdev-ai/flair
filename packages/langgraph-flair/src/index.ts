@@ -113,7 +113,20 @@ const ESCAPE = "."; // LangGraph forbids "." in labels, so it is our escape char
  * contain `.` (LangGraph's own rule — `.` is reserved as the escape char).
  */
 function isInvalidLabel(label: unknown): boolean {
-  return typeof label !== "string" || label.length === 0 || label.includes(ESCAPE);
+  return typeof label !== "string" || label.length === 0 || label.includes(ESCAPE) || !isWellFormed(label);
+}
+
+// An unpaired UTF-16 surrogate cannot be percent-encoded into a request path,
+// so a label or key containing one could never reach the server. (Written as a
+// regex rather than String.prototype.isWellFormed, which needs Node 20.)
+const UNPAIRED_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+function isWellFormed(s: string): boolean {
+  return !UNPAIRED_SURROGATE.test(s);
+}
+
+/** A key is usable only when it is a well-formed string. */
+function isInvalidKey(key: unknown): boolean {
+  return typeof key !== "string" || !isWellFormed(key);
 }
 
 /**
@@ -140,7 +153,7 @@ function assertValidNamespace(namespace: string[]): void {
   namespace.forEach((label, i) => {
     if (isInvalidLabel(label)) {
       throw new Error(
-        `FlairStore: refusing namespace label at index ${i}: LangGraph forbids "." in namespace labels, and every label must be a non-empty string. No id or tag was written.`,
+        `FlairStore: refusing namespace label at index ${i}: LangGraph forbids "." in namespace labels, and every label must be a non-empty, well-formed string (no unpaired surrogate). No id or tag was written.`,
       );
     }
   });
@@ -352,7 +365,7 @@ export class FlairStore {
   }
 
   private async doGet(op: GetOperation): Promise<Item | null> {
-    if (op.namespace.some(isInvalidLabel)) return null;
+    if (op.namespace.some(isInvalidLabel) || isInvalidKey(op.key)) return null;
     const id = memoryId(this.agentId, op.namespace, op.key);
     const mem = await this.client.memory.get(id);
     if (!mem) return null;
@@ -361,6 +374,11 @@ export class FlairStore {
 
   private async doPut(op: PutOperation): Promise<void> {
     assertValidNamespace(op.namespace);
+    if (isInvalidKey(op.key)) {
+      throw new Error(
+        "FlairStore: refusing key: it must be a well-formed string (no unpaired surrogate), because it is sent in a request path. No id was written.",
+      );
+    }
     const id = memoryId(this.agentId, op.namespace, op.key);
     if (op.value === null) {
       await this.client.memory.delete(id);

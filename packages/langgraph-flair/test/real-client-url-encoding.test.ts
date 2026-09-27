@@ -2,10 +2,10 @@
  * real-client-url-encoding.test.ts — flair#1939 item 1 (round 3): FlairStore is
  * driven through the REAL FlairClient, mocking only global fetch, so a namespace
  * label or key containing URL-significant characters must still reach the
- * server as ONE /Memory/<id> path segment. Before flair#1969 the client
- * interpolated the id raw into the path, so `#`, `?`, `/`, `%` and a space split
- * the segment and the item never round-tripped. This test FAILS on the
- * pre-#1969 client (the merge base of the round-3 head).
+ * server as ONE /Memory/<id> path segment. Before flair#1969, the client
+ * inserted raw ids into Memory request paths; URL parsing could change the
+ * requested id or path. This test fails with the client at 9680948b, the first
+ * parent of the round-three merge commit.
  */
 import { describe, it, expect, afterEach } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
@@ -15,7 +15,7 @@ import { FlairStore } from "../src/index";
 const { privateKey } = generateKeyPairSync("ed25519");
 const PRIVATE_KEY_PEM = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
 
-// Both the namespace label and the key carry every URL-significant character.
+// The label and key each contain `#`, `?`, `%`, `/`, a space, and `:`.
 const LABEL = "a#b?c%d/e f:g";
 const KEY = "k#l?m%n/o p:q";
 const AGENT = "lg-enc-agent";

@@ -119,6 +119,21 @@ describe("flair#1939 round 2 — namespace label encoding is lossless", () => {
     expect(client.stats).toEqual({ writes: 0, deletes: 0, gets: 0, lists: 0, searches: 0 }); // assertion: nothing sent
   });
 
+  it("(e8) a label or key with an unpaired surrogate is refused and nothing reaches the backend", async () => {
+    const { store, client } = storeWith();
+    for (const [ns, key] of [
+      [["x\uD800"], "k"],
+      [["safe"], "x\uD800"],
+      [["y\uDC00z"], "k"],
+    ] as Array<[string[], string]>) {
+      await expect(store.put(ns, key, { v: 1 })).rejects.toThrow(/well-formed/); // assertion: put refuses
+      await expect(store.delete(ns, key)).rejects.toThrow(/well-formed/); // assertion: delete refuses
+      expect(await store.get(ns, key)).toBeNull(); // assertion: get returns null
+    }
+    expect(await store.search(["x\uD800"])).toEqual([]); // assertion: search returns []
+    expect(client.stats).toEqual({ writes: 0, deletes: 0, gets: 0, lists: 0, searches: 0 }); // assertion: nothing sent
+  });
+
   it("(e6) a row written in the old form for a plain label is still returned", async () => {
     const { store } = storeWith([
       {
