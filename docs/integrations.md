@@ -2,7 +2,7 @@
 
 Where Flair already runs. Each integration can reach one shared Flair memory store; signed requests identify an agent, while other verified agents may read its non-private records, and n8n uses admin Basic auth.
 
-> **The point.** Memory should follow the agent across orchestrators. An integration that signs with a per-agent Ed25519 key and points at the same Flair instance follows the same identity and read-scope rules: signed per-agent writes, and reads of your own records plus other agents' non-private records. n8n is the exception: it authenticates with the Harper admin password, whose authority covers the whole instance, private records included. Choose the integration for your harness with its authentication and recall behavior in mind.
+> **The point.** Memory should follow the agent across orchestrators. An integration that signs with a per-agent Ed25519 key and points at the same Flair instance follows the same identity and read-scope rules: signed per-agent writes, and reads of your own records plus other agents' non-private records. n8n always uses administrator Basic authentication; stdio MCP, Pi, LangGraph, and the wake runner can also use it when no signing key resolves. It authenticates with the Harper admin password, whose authority covers the whole instance, private records included. Choose the integration for your harness with its authentication and recall behavior in mind.
 
 ---
 
@@ -237,13 +237,15 @@ flair init --agent my-agent --client pi        # writes a pinned "packages" entr
 pi install npm:@tpsdev-ai/pi-flair
 ```
 
-Which produces:
+`flair init` writes a pinned package entry:
 
 ```json
 {
   "packages": ["npm:@tpsdev-ai/pi-flair@<version>"]
 }
 ```
+
+`pi install npm:@tpsdev-ai/pi-flair` records the unpinned source `npm:@tpsdev-ai/pi-flair` instead.
 
 **Known trap:** the `extensions` settings key takes local file paths only — an `npm:` spec there is *silently ignored* by pi, so the tools never register ([#1346](https://github.com/tpsdev-ai/flair/issues/1346)). Package sources belong under `packages`. `flair doctor` detects pi, verifies the wiring, calls this exact misconfiguration out, and `flair doctor --fix` moves the entry.
 
