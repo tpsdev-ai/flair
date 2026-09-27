@@ -9,7 +9,7 @@
  * per-source scoping — see resources/AttentionQuery.ts's module doc), so the
  * MCP surface inherits the SAME security model as the signed-REST path. There
  * is no raw CRUD surface — the only way to reach the datastore through /mcp is
- * via one of these 14 semantic tools.
+ * via one of these 17 semantic tools.
  *
  *   memory_search · memory_store · memory_update · memory_get · memory_delete ·
  *   memory_basement · memory_restore · skill_store · skill_search · skill_get ·

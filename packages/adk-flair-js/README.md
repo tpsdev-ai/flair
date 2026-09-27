@@ -109,7 +109,7 @@ identities never collide and the `:` delimiter stays unambiguous.
 
 - `user_id` is mandatory — empty/missing returns empty, never searches unscoped
 - Every hit is re-verified against the compound tag before mapping to `MemoryEntry`
-- Timeout budget: 2s total (connect 500ms, read 1500ms), one attempt, no retry
+- Timeout: one abort timer per search request, set by the constructor's `timeoutMs` (default 2000 ms); one attempt, no retry
 - Search failures degrade silently with a structured warning (host, elapsed, phase)
 
 ### Write path

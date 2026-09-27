@@ -1,8 +1,8 @@
 # Flair integrations
 
-Where Flair already runs. Each integration shown here is a working surface — the same memory, federated across all of them, scoped per-agent by Ed25519 keys.
+Where Flair already runs. Each integration shown here is a working surface — the same memory, scoped per agent wherever the integration signs with that agent's Ed25519 key; n8n is the exception (see its row).
 
-> **The point.** Memory should follow the agent across orchestrators. Every entry below pulls from the same Flair instance, sees the same `agentId` namespace, respects the same identity and read-scope rules: signed per-agent writes, and reads of your own records plus other agents' non-private records. Pick whichever harness you're shipping in; the memory layer doesn't care.
+> **The point.** Memory should follow the agent across orchestrators. An integration that signs with a per-agent Ed25519 key and points at the same Flair instance follows the same identity and read-scope rules: signed per-agent writes, and reads of your own records plus other agents' non-private records. n8n is the exception: it authenticates with the Harper admin password, whose authority covers the whole instance, private records included. Pick whichever harness you're shipping in; the memory layer doesn't care.
 
 ---
 
@@ -22,7 +22,7 @@ Where Flair already runs. Each integration shown here is a working surface — t
 | **OpenClaw** | [`openclaw-flair`](#openclaw) | Ed25519 | Native plugin (context-engine slot left intact) |
 | **n8n** | [`n8n-nodes-flair`](#n8n) | FlairApi credential | Three nodes (chat memory, search, store) |
 | **Hermes Agent** | [`hermes-flair`](#hermes-agent) | Ed25519 | Python `MemoryProvider` |
-| **Pi agent** | [`pi-flair`](#pi-agent) | Ed25519 | Native pi extension (pi has no MCP support); wired when `flair init` runs after an agent is registered; `flair doctor` checks it |
+| **Pi agent** | [`pi-flair`](#pi-agent) | Ed25519 | Native pi extension (pi has no MCP support); wired by a `flair init --agent <id>` run that selects pi (`--client pi`, or detection when no client is named); `--client none` skips wiring |
 | **Google ADK** (Python) | [`adk-flair`](../packages/adk-flair/README.md) | Ed25519 | `BaseMemoryService`; see [hosted auth](#hosted-flair-auth--your-agent-got-a-404) if you just got a 404 |
 | **Google ADK** (JS/TS) | [`@tpsdev-ai/adk-flair`](../packages/adk-flair-js/README.md) | Ed25519 | Same identity model as the Python package |
 
@@ -80,7 +80,7 @@ A verified agent that is not allowed the row gets 404, never 403. Anonymous by-i
 | **adk-flair-js** (JS/TS) | `FLAIR_URL` | `FLAIR_AGENT_ID` | `FLAIR_KEYFILE` | Reads `timeoutMs` from constructor, not `FLAIR_HTTP_TIMEOUT` — [adk-flair-js README](../packages/adk-flair-js/README.md) |
 | **flair-mcp** / Cursor plugin | `FLAIR_URL` | `FLAIR_AGENT_ID` | `FLAIR_KEY_PATH` (optional; auto-resolved) | Key must be on the **npx host** |
 | **Hermes / pi** | `FLAIR_URL` | `FLAIR_AGENT_ID` | `FLAIR_KEY_PATH` or client `keyPath` | Same Ed25519 model |
-| **LangGraph** | `FLAIR_URL` | `FLAIR_AGENT_ID` | `config.keyPath` only (client auto-candidates do not read `FLAIR_KEY_PATH`) | Same Ed25519 model |
+| **LangGraph** | `FLAIR_URL` | `FLAIR_AGENT_ID` | `config.keyPath`, else the client's automatic candidates (`FLAIR_KEY_DIR`, then the standard key paths); `FLAIR_KEY_PATH` is not read` | Same Ed25519 model |
 
 n8n still uses Harper admin Basic auth — it is not this path. See [n8n.md](n8n.md#security).
 

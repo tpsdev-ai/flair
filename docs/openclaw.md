@@ -54,7 +54,7 @@ In your OpenClaw agent config, add the Flair plugin:
 }
 ```
 
-The `allowConversationAccess` hook is only used when `autoCapture` is `true`, so the example shows it absent.
+`allowConversationAccess` is required to enable auto-capture (the plugin also reads it for a startup warning and status), so this example, with `autoCapture: false`, leaves it out.
 
 An optional `agentId` in `config` is an **allow-list**: it restricts which agents may be served but never substitutes for the host's per-invocation identity, which comes from host context on every call.
 ### 5. Restart the gateway
