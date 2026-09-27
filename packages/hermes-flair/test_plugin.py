@@ -276,6 +276,20 @@ def test_invalid_utf8_error_does_not_chain_the_key_bytes(tmp_path):
     assert "0xff" not in rendered and "\\xff" not in rendered  # assertion: no key byte in the traceback
 
 
+def test_format_error_frames_hold_no_key_bytes(tmp_path):
+    import traceback
+
+    path = tmp_path / "pem-junk.key"
+    path.write_text(_pem_text() + "\nJUNK", encoding="utf-8")
+    with pytest.raises(ValueError) as ei:
+        flair_plugin._load_private_key(str(path))
+    rendered = "".join(
+        traceback.TracebackException.from_exception(ei.value, capture_locals=True).format()
+    )
+    assert "PRIVATE KEY" not in rendered  # assertion: no frame local holds the key text
+    assert "JUNK" not in rendered
+
+
 def test_load_private_key_file_read_error_propagates(tmp_path):
     # A missing file is a read error, NOT the named format error.
     with pytest.raises(FileNotFoundError):

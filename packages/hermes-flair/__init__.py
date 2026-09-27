@@ -196,10 +196,23 @@ def _load_private_key(key_path: str):
     files raise ValueError naming the path and the accepted formats — never the
     key bytes; file read errors propagate as they are.
     """
+    data = Path(key_path).read_bytes()  # file READ errors propagate as they are
+    key = _parse_private_key(data)
+    # The raising frame must not hold the key bytes (a traceback that captures
+    # locals would render them), so drop them before any error is raised.
+    del data
+    if key is None:
+        raise _format_error(key_path)
+    return key
+
+
+def _parse_private_key(data: bytes):
+    """Parse key bytes per _load_private_key's rules; return the key or None.
+    Never raises for a malformed key, so no exception carries this frame."""
+
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ed25519
 
-    data = Path(key_path).read_bytes()  # file READ errors propagate as they are
 
     # 1. An exact 32-byte file is a raw seed. ANY 32-byte file: documented, not
     #    a claim that a malformed 32-byte file is rejected.
@@ -207,14 +220,14 @@ def _load_private_key(key_path: str):
         return ed25519.Ed25519PrivateKey.from_private_bytes(data)
 
     # Strict UTF-8: invalid bytes that are not an exact 32-byte seed are refused.
-    # The decode error holds the file's bytes, so the named error is raised
-    # AFTER the except block: nothing is chained or kept as __context__.
+    # The decode error holds the file's bytes; it is caught here and never
+    # escapes, so nothing is chained or kept as __context__.
     try:
         text = data.decode("utf-8", errors="strict").strip()
     except UnicodeDecodeError:
         text = None
     if text is None:
-        raise _format_error(key_path)
+        return None
 
     # 2. PEM — the WHOLE (whitespace-stripped) file must be one PEM block.
     if text.startswith("-----BEGIN"):
@@ -225,7 +238,7 @@ def _load_private_key(key_path: str):
                     return key
             except Exception:
                 pass
-        raise _format_error(key_path)
+        return None
 
     # 3. Canonical standard base64 of PKCS8 DER.
     der = _canonical_base64_decode(text)
@@ -237,7 +250,7 @@ def _load_private_key(key_path: str):
         except Exception:
             pass
 
-    raise _format_error(key_path)
+    return None
 
 
 def _sign_request(priv_key, agent_id: str, method: str, path: str) -> str:
