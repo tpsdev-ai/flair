@@ -364,11 +364,14 @@ const ORACLE_ENV: Record<string, string> = {
   GIT_CONFIG_GLOBAL: "/dev/null",
   GIT_CONFIG_NOSYSTEM: "1",
 };
+afterAll(() => rmSync(CODEOWNERS_ORACLE, { recursive: true, force: true }));
 {
   const init = spawnSync("git", ["init", "-q", CODEOWNERS_ORACLE], { env: ORACLE_ENV, encoding: "utf8", timeout: 10_000 });
   if (init.status !== 0) throw new Error(`codeowners oracle: git init failed (${init.status}): ${init.stderr}`);
+  // git init copies the template's info/exclude, which check-ignore reads as its own ignore source
+  // (core.excludesFile does not cover it): the only pattern the oracle may see is the one under test.
+  rmSync(join(CODEOWNERS_ORACLE, ".git", "info", "exclude"), { force: true });
 }
-afterAll(() => rmSync(CODEOWNERS_ORACLE, { recursive: true, force: true }));
 
 function codeownersMatches(pattern: string, path: string): boolean {
   if (pattern.startsWith("!") || /[[\]]/.test(pattern)) {
