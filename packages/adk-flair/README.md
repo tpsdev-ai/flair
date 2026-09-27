@@ -283,8 +283,9 @@ no enclosing wall-clock deadline over the whole request. The defaults are:
 - Write: 1.0s
 - Pool: 0.5s
 
-One attempt, no retry on the turn path. A hung Flair will never add seconds to
-every turn. Write paths use the same timeout budget and log structured warnings
+One attempt, no retry on the turn path. The phase timeouts do not bound the
+total request duration: a server that keeps sending response data within the
+read timeout can keep a request open longer. Write paths use the same timeout budget and log structured warnings
 on failure (session id, event count, HTTP status).
 
 ## Scope mapping
