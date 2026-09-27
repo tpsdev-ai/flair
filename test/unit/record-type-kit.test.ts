@@ -34,6 +34,7 @@ const {
   makeAuthGate,
   makeReadScope,
   makeByIdReadGate,
+  makeScopedSearch,
   resolveAuthGate,
   stampAttribution,
   buildProvenance,
@@ -539,5 +540,51 @@ describe("makeByIdReadGate — the read scope is evaluated on the full stored ro
     const res: any = await gate.call(self("reader"), shaped("shared-1", { select: ["content"] }), superGet);
     expect(res instanceof Response).toBe(true);
     expect(res.status).toBe(404);
+  });
+});
+
+// ─── makeScopedSearch: query composition ────────────────────────────────────
+
+describe("makeScopedSearch — the scope is the outermost AND; caller conditions are kept", () => {
+  const scope = { attribute: "agentId", comparator: "equals", value: "me" };
+  const readScope = async () => ({ condition: scope, isAllowed: () => true });
+  const compose = async (query: any) => {
+    let seen: any;
+    await makeScopedSearch(readScope)("me", query, (q: any) => (seen = q));
+    return seen;
+  };
+  const a = { attribute: "x", comparator: "equals", value: 1 };
+  const b = { attribute: "y", comparator: "equals", value: 2 };
+
+  it("no query, an empty array or empty conditions → just the scope", async () => {
+    for (const q of [undefined, [], { conditions: [] }, { operator: "or" }]) {
+      expect(await compose(q)).toMatchObject({ conditions: [scope], operator: "and" });
+    }
+  });
+
+  it("one caller condition sits directly under the outer AND, whatever the caller's operator", async () => {
+    expect(await compose({ operator: "or", conditions: [a] })).toMatchObject({ conditions: [scope, a], operator: "and" });
+    expect(await compose([a])).toMatchObject({ conditions: [scope, a], operator: "and" });
+  });
+
+  it("a single condition object (not an array) is kept", async () => {
+    expect(await compose({ conditions: a })).toMatchObject({ conditions: [scope, a], operator: "and" });
+  });
+
+  it("iterable conditions (a Set) are kept, in the conditions property and as a bare query", async () => {
+    expect(await compose({ conditions: new Set([a]) })).toMatchObject({ conditions: [scope, a], operator: "and" });
+    expect(await compose({ operator: "or", conditions: new Set([a, b]) })).toMatchObject({
+      conditions: [scope, { conditions: [a, b], operator: "or" }],
+      operator: "and",
+    });
+    expect(await compose(new Set([a]))).toMatchObject({ conditions: [scope, a], operator: "and" });
+  });
+
+  it("several caller conditions keep the caller's operator inside their own group", async () => {
+    expect(await compose({ operator: "or", conditions: [a, b], limit: 5 })).toMatchObject({
+      conditions: [scope, { conditions: [a, b], operator: "or" }],
+      operator: "and",
+      limit: 5,
+    });
   });
 });

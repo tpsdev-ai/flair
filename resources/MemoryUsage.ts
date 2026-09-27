@@ -43,6 +43,12 @@
  */
 import { databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
+import { makeByIdReadGate, makeReadScope, makeScopedSearch } from "./record-type-kit.js";
+
+// Owner-only read scope through the shared by-id gate and scoped search.
+const usageReadScope = makeReadScope("owner-only", "agentId");
+const usageByIdReadGate = makeByIdReadGate(usageReadScope);
+const usageScopedSearch = makeScopedSearch(usageReadScope);
 
 const FORBIDDEN = (msg: string) =>
   new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
@@ -58,29 +64,14 @@ export class MemoryUsage extends (databases as any).flair.MemoryUsage {
   allowRead() { return allowVerified((this as any).getContext?.()); }
 
   async get(target?: any) {
-    if (!target || (typeof target === "object" && target.isCollection)) {
-      return this.search(target);
-    }
-    const auth = await resolveAgentAuth((this as any).getContext?.());
-    if (auth.kind === "anonymous") return NOT_FOUND();
-    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) return super.get(target);
-    const record = await super.get(target);
-    if (!record || record.agentId !== auth.agentId) return NOT_FOUND();
-    return record;
+    return usageByIdReadGate.call(this, target, (t: any) => super.get(t));
   }
 
   async search(query?: any) {
     const auth = await resolveAgentAuth((this as any).getContext?.());
     if (auth.kind === "anonymous") return UNAUTH();
     if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) return super.search(query);
-    const scope = { attribute: "agentId", comparator: "equals", value: auth.agentId };
-    if (query && typeof query === "object" && !Array.isArray(query)) {
-      const existing = query.conditions ?? [];
-      query.conditions = Array.isArray(existing) ? [scope, ...existing] : [scope, existing];
-      return super.search(query);
-    }
-    const conditions = Array.isArray(query) && query.length > 0 ? [scope, ...query] : [scope];
-    return super.search(conditions);
+    return usageScopedSearch(auth.agentId, query, (q: any) => super.search(q));
   }
 
   // Append-only ledger: rows are created via RecordUsage's RAW table call
