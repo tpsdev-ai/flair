@@ -12,6 +12,13 @@
 /scripts/check-version-sync.mjs @heskew
 /.github/release-auto-tag-advisories.json @heskew
 
+# The shared Renovate preset (#1930). Renovate reads it from the default branch
+# for every repo that extends it (flair, cli, bob), and it holds the controls every
+# dependency PR relies on — automerge off, the 7-day cooldown, strict internal
+# checks, digest pinning — so changing it takes the same human as the release
+# trust root.
+/.github/renovate-preset.json @heskew
+
 # …and the ownership map itself. Without this line the catch-all rule above
 # makes the reviewers team the owner of CODEOWNERS, so a collaborator with merge
 # access and that team's approval could delete the entries just above, then

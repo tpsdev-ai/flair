@@ -45,7 +45,7 @@ Some `dependencies` entries are exact-pinned (`harper@5.2.8`, `commander@14.0.3`
 
   Note the corollary, measured during flair#893: an optional peer that is simply *absent* installs silently — npm prints no warning at all — so it cannot be relied on to prompt anyone to install it. Anything a user must install for a feature to work needs to be documented, or detected and reported at runtime.
 - `bun.lock` is committed and `bun install --frozen-lockfile` is run in CI (`.github/workflows/test.yml`, ~121). That lockfile gate fails when package.json and bun.lock disagree; `scripts/check-workspace-deps.mjs` compares each recognized internal `@tpsdev-ai/*` dependency's literal declared version to the version the target package ships, and accepts `workspace:` declarations (e.g. `workspace:*` at `packages/cursor-wake-runner/package.json`, line 22; skip at `scripts/check-workspace-deps.mjs`, line 59).
-- Pin updates happen via deliberate, test-gated PRs — never auto-merged. **Renovate is enabled** (`.github/renovate.json`) to *propose* these updates on a schedule, but it respects the bake-time cooldown (`minimumReleaseAge: "7 days"`, matching `FLAIR_DEP_MIN_AGE_DAYS`) and opens PRs only — `automerge` is off, so every bump flows through the full test suite + K&S review. Renovate uses `rangeStrategy: "pin"` so it proposes exact-version bumps (never re-widens to ranges) and shares the keep-current allow-list with `check-dep-ages.mjs`. Vulnerability alerts bypass the cooldown so security fixes aren't delayed.
+- Pin updates happen via deliberate, test-gated PRs — never auto-merged. **Renovate is enabled** (the shared org preset at `.github/renovate-preset.json`, with `.github/renovate.json` holding only flair-specific exceptions) to *propose* these updates on a schedule, but it respects the bake-time cooldown (`minimumReleaseAge: "7 days"`, matching `FLAIR_DEP_MIN_AGE_DAYS`) and opens PRs only — `automerge` is off, so every bump flows through the full test suite + K&S review. Renovate uses `rangeStrategy: "pin"` so it proposes exact-version bumps (never re-widens to ranges) and shares the keep-current allow-list with `check-dep-ages.mjs`. Vulnerability alerts bypass the Renovate cooldown, so Renovate can propose an advisory fix immediately; the CI age gate can still hold a fresh pinned npm production dependency.
 
 ### 3. Internal dep version lockstep
 
@@ -109,9 +109,11 @@ Run it locally with `node scripts/audit-gate.mjs --explain`.
 
 ## Automation
 
-### `.github/renovate.json` — deliberate, cooldown-gated update proposals
+### The shared org preset — `.github/renovate-preset.json` (`.github/renovate.json` holds only flair-specific exceptions)
 
-Renovate opens PRs to propose dependency updates so we don't drift behind upstream indefinitely — but on our terms, not the registry's. It is configured to never auto-merge (`automerge: false`), to pin (`rangeStrategy: "pin"`, consistent with §2), and to respect the bake-time cooldown (`minimumReleaseAge: "7 days"`, matching `FLAIR_DEP_MIN_AGE_DAYS` in `check-dep-ages.mjs`) so it only proposes versions that have already cleared the detection window. Non-major updates are grouped; majors land as isolated PRs. The keep-current allow-list (`harper`, `harper-fabric-embeddings`, `@harperfast/oauth`) mirrors the script's `DEFAULT_KEEP_CURRENT` — keep the two in lockstep when either changes. Vulnerability alerts bypass the cooldown. Every Renovate PR still runs the full CI suite (including the bake-time and workspace-deps gates) and is K&S-reviewed before merge.
+Renovate opens PRs to propose dependency updates so we don't drift behind upstream indefinitely — but on our terms, not the registry's. The org preset (`.github/renovate-preset.json`) is common to all tpsdev-ai repos; `.github/renovate.json` holds only flair-specific overrides (workspace-internal dep exclusions, keep-current allow-list)
+
+Renovate is configured to never auto-merge (`automerge: false`), to pin (`rangeStrategy: "pin"`, consistent with §2), and to respect the bake-time cooldown (`minimumReleaseAge: "7 days"` by default, matching `FLAIR_DEP_MIN_AGE_DAYS` in `check-dep-ages.mjs`), so by default it proposes only versions that have cleared the detection window — the two named exceptions are vulnerability fixes and the keep-current list below. Non-major updates are grouped per ecosystem (npm/Bun, Python, GitHub Actions, Docker); a manager outside those four gets no ecosystem-wide group from the four explicit rules (groups inherited from config:recommended may still apply); majors land as isolated PRs. The keep-current allow-list (`harper`, `harper-fabric-embeddings`, `@harperfast/oauth`) mirrors the script's `DEFAULT_KEEP_CURRENT` — keep the two in lockstep when either changes. Vulnerability alerts bypass the cooldown: Renovate can propose an advisory fix immediately. Flair's CI age gate (`check-dep-ages.mjs`) can still block a fresh pinned npm production dependency; other fresh versions follow the 7-day cooldown unless an explicit exception, such as the keep-current list, applies. The control for the fast-track is not the cooldown: it is `automerge: false` plus the full CI suite (including the bake-time and workspace-deps gates) and a K&S review on every Renovate PR. Docker image digests in Dockerfiles and compose files land in the docker group; images in workflow `container:`/`services:` are proposed by the github-actions manager and land in the github-actions group. The preset is in the CODEOWNERS trust root (`@heskew`): Renovate reads it from the default branch for every repo that extends it, so a change to it takes the same human as a change to the release tagger.
 
 ### `scripts/check-workspace-deps.mjs` (already shipped, PR #368)
 
@@ -119,7 +121,7 @@ Fails any PR where a workspace package declares an internal `@tpsdev-ai/*` dep a
 
 ### `scripts/check-dep-ages.mjs` (this PR)
 
-Fails any PR with an external pinned production dep version published less than `FLAIR_DEP_MIN_AGE_DAYS` ago (default 7). Queries the npm registry's `time` map. Workspace-internal deps exempt. Wired into the `test-unit` job.
+Fails any PR with an external pinned production dep version published less than `FLAIR_DEP_MIN_AGE_DAYS` ago (default 7). Queries the npm registry's `time` map. Workspace-internal deps exempt. Wired into the `test-unit` job. Its limits, stated: it covers npm production dependencies only (not the Python, Docker or GitHub Actions updates the Renovate preset proposes), and it reads the same registry publish timestamp Renovate does, so it is a second line against the cooldown being removed from the config — not against a release whose publish date lies.
 
 Configurable:
 
@@ -172,6 +174,17 @@ chmod +x scripts/check-dep-ages.mjs
 ```
 
 The script has no external dependencies — node 18+ is enough.
+
+To adopt the same Renovate preset in your repo, make your `.github/renovate.json`:
+
+```json
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>tpsdev-ai/flair//.github/renovate-preset"]
+}
+```
+
+Add `packageRules` only for your own exceptions. The preset carries no `@tpsdev-ai/**` exclusion: a repo whose own release process bumps tpsdev-ai workspace packages adds the same `{ "matchPackageNames": ["@tpsdev-ai/**"], "enabled": false }` rule flair keeps in `.github/renovate.json`, otherwise their non-major updates join the non-major npm group (major updates stay isolated, like every other major).
 
 ---
 

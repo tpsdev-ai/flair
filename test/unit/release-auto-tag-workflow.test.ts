@@ -384,6 +384,50 @@ describe("release-auto-tag workflow — the trust root is owned by the repo admi
   });
 });
 
+describe("CODEOWNERS — the shared Renovate preset is in the trust root (#1930)", () => {
+  test("/.github/renovate-preset.json is owned by @heskew and sits below the catch-all", () => {
+    const rules = readFileSync(join(REPO, ".github", "CODEOWNERS"), "utf8")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith("#"))
+      .map((line) => {
+        const [pattern, ...owners] = line.split(/\s+/);
+        return { pattern: pattern ?? "", owners: owners.join(" ") };
+      });
+    // Last matching rule wins: the EFFECTIVE owner of the file is the owner of
+    // the last rule whose pattern matches it. Patterns are CODEOWNERS globs
+    // (gitignore-style), so a later "/.github/*" or "*.json" rule would override
+    // the specific one — match every rule, not only the exact path.
+    const toRegex = (pattern: string): RegExp => {
+      const anchored = pattern.startsWith("/");
+      let body = (anchored ? pattern.slice(1) : pattern).replace(/[.+^${}()|[\]\\]/g, "\\$&");
+      // "**/" matches zero or more directories; any other "**" matches anything; "*" stays within one segment.
+      body = body
+        .replace(/\*\*\//g, "\u0001")
+        .replace(/\*\*/g, "\u0000")
+        .replace(/\*/g, "[^/]*")
+        .replace(/\?/g, "[^/]")
+        .replace(/\u0001/g, "(?:.*/)?")
+        .replace(/\u0000/g, ".*");
+      if (body.endsWith("/")) body += ".*";
+      const prefix = anchored ? "^" : "^(?:.*/)?";
+      // A pattern without a wildcard can name a directory: it matches the path itself or anything below it.
+      return new RegExp(prefix + body + "(?:/.*)?$");
+    };
+    const path = ".github/renovate-preset.json";
+    const matches = rules.filter((r) => toRegex(r.pattern).test(path));
+    expect(matches.at(-1)?.pattern, "the preset's own rule is the last match").toBe("/.github/renovate-preset.json");
+    expect(matches.at(-1)?.owners).toBe("@heskew");
+    // The matcher itself can fire: a later glob that covers the file would win.
+    expect(toRegex("/.github/*").test(path)).toBe(true);
+    expect(toRegex("*.json").test(path)).toBe(true);
+    expect(toRegex("/docs/*").test(path)).toBe(false);
+    // "**/" includes the zero-directory case: git matches "/.github/**/renovate-preset.json" to the preset.
+    expect(toRegex("/.github/**/renovate-preset.json").test(path)).toBe(true);
+    expect(toRegex("**/renovate-preset.json").test(path)).toBe(true);
+  });
+});
+
 describe("release-auto-tag workflow — credential isolation and the reporter's shell", () => {
   test("isolation is the JOB BOUNDARY: `write` has a fresh default-branch checkout, and no step restores a shared tree", () => {
     // The single-job design restored the workspace between the decision and the
