@@ -509,6 +509,15 @@ describe("makeScopedSearch — the scope is the outermost AND; caller conditions
     expect(await compose({ conditions: a })).toMatchObject({ conditions: [scope, a], operator: "and" });
   });
 
+  it("iterable conditions (a Set) are kept, in the conditions property and as a bare query", async () => {
+    expect(await compose({ conditions: new Set([a]) })).toMatchObject({ conditions: [scope, a], operator: "and" });
+    expect(await compose({ operator: "or", conditions: new Set([a, b]) })).toMatchObject({
+      conditions: [scope, { conditions: [a, b], operator: "or" }],
+      operator: "and",
+    });
+    expect(await compose(new Set([a]))).toMatchObject({ conditions: [scope, a], operator: "and" });
+  });
+
   it("several caller conditions keep the caller's operator inside their own group", async () => {
     expect(await compose({ operator: "or", conditions: [a, b], limit: 5 })).toMatchObject({
       conditions: [scope, { conditions: [a, b], operator: "or" }],

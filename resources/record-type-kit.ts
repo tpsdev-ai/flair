@@ -337,9 +337,18 @@ export function makeScopedSearch(
     const agentCondition = scope.condition;
 
     // The caller's conditions as an array. Harper accepts `conditions` as an
-    // array or as a single condition object; both are kept.
+    // array, any other iterable of conditions (it applies Array.from), or a
+    // single condition object; all are kept.
+    const isConditionIterable = (v: any): boolean =>
+      !!v && typeof v === "object" && typeof v[Symbol.iterator] === "function" && !(v instanceof URLSearchParams);
     const callerConditions = (list: any): any[] =>
-      Array.isArray(list) ? list : list && typeof list === "object" ? [list] : [];
+      Array.isArray(list)
+        ? list
+        : isConditionIterable(list)
+          ? Array.from(list)
+          : list && typeof list === "object"
+            ? [list]
+            : [];
 
     // The scope is always the OUTERMOST `and`, so a caller-supplied
     // `operator: "or"` can only combine the caller's own conditions and never
@@ -352,6 +361,12 @@ export function makeScopedSearch(
         : conds.length === 1
           ? [agentCondition, conds[0]]
           : [agentCondition, { conditions: conds, operator: operator || "and" }];
+
+    // A bare iterable of conditions (not a RequestTarget, which is itself a
+    // URLSearchParams and carries its conditions on `.conditions`).
+    if (isConditionIterable(query) && !("conditions" in query)) {
+      return superSearch({ conditions: compose(Array.from(query), "and"), operator: "and" });
+    }
 
     if (query && typeof query === "object" && !Array.isArray(query)) {
       // Preserve other query properties (select, limit, sort, ...) but never a
