@@ -18,6 +18,989 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.57.0] - 2026-09-27
+
+### Added
+
+- **`FLAIR_RETRIEVAL_MODE` selects hybrid, vector-only or bm25-only retrieval for benchmarking; the default (hybrid) is unchanged and `FLAIR_HYBRID_RETRIEVAL` keeps its meaning.**
+
+  It is a benchmark measurement knob, not a shipped toggle: there is no CLI
+  flag and no default change. `bm25-only` ranks on the BM25 lexical leg alone —
+  no vector leg and no query embedding — so a harness can measure BM25 recall
+  against hybrid and vector-only on the same corpus.
+
+- **A release PR that merges green on main now tags itself.** Tagging used to end
+  with a hand-pushed `vX.Y.Z`; that step is automatic now, so `release-publish`
+  stages the tarballs (publishing still waits on the maintainer's npm 2FA
+  approval) without anyone remembering to push a tag. The tag is written with a
+  GitHub App token, because a tag pushed with `GITHUB_TOKEN` would not start
+  `release-publish` at all.
+
+  > **Heads-up:** a repo admin installs the GitHub App and splits the release-tag
+  > rulesets after this merges. Until then a release refuses loudly with
+  > condition `app-not-configured` and opens an issue instead of tagging.
+
+### Changed
+
+- **The post-publish canary's promote command is bound to one package-set digest, and prereleases are never promoted to `latest`.**
+
+  The canary's `PASS` verdict used to print a separate sha256 check per
+  lockstep package. It now re-derives the same package-set digest the release
+  run's pack job certified (a single sha256 over the canonical, sorted list of
+  `<name>@<version> <sha256>` lines) and requires the paste-time re-derivation
+  to equal it before any tag can move; a mismatch — or a package whose published
+  tarball cannot be re-hashed — is a refusal, never a match.
+
+  The canary's sha step asserts the dispatched `package-set-digest` against the
+  re-derived digest before any verdict, so a digest that does not match the
+  certified set is a `FAIL` verdict (with both digests named), never a promote.
+
+  A SemVer prerelease is never promoted: its `PASS` prints a note that the
+  version lives on `next` and that `latest` moves only for a version that is
+  exactly a `<major>.<minor>.<patch>` (a whole-string match; a prerelease
+  label, build metadata, or any other text is not promoted), and prints no
+ `dist-tag add` lines at all. The `FAIL`
+  verdict (deprecate every lockstep package, the CLI first) is unchanged.
+
+  A `+build` (build-metadata) version is **not** a SemVer prerelease: release-publish.yml stages it on `staged` (the no-`-` branch of the version rule), never `next`, and the canary never promotes it to `latest` either — `latest` still moves only for an exact `<major>.<minor>.<patch>`.
+
+  (Refs #1671)
+
+- **Every CLI command resolves the admin password through one resolver, and a file-plus-flag conflict is now a usage error.**
+
+  `backup`, `federation sync`/`verify`/`instance`, `memory add`,
+  `rem restore --apply`, `soul set`/`get`/`list`, and `agent add` now resolve
+  `--admin-pass-file` and `--admin-pass` through `resolveAdminPassFromSources`
+  — the same resolver `federation token`/`pair` already use. Precedence for the
+  common case is unchanged: an explicit option (file or flag) overrides
+  `FLAIR_ADMIN_PASS` / `HDB_ADMIN_PASSWORD`, and `FLAIR_ADMIN_PASS` stays the CI
+  form. What changed: on 0.56.0, passing both `--admin-pass-file` and
+  `--admin-pass` let the flag win silently; that combination is now a usage
+  error, and the command sends nothing. A missing, empty, or
+  group-/world-readable file is refused naming the path and its mode.
+
+  > **Heads-up:** if a script or unit file passes `--admin-pass-file` together
+  > with `--admin-pass`, it now exits non-zero before any request. Pass exactly
+  > one; prefer `--admin-pass-file`.
+
+  (Refs #1910)
+
+- **Capture-guarantee tests now cover every callback each README sentence names, and an abort during shutdown records nothing for an unknown run.**
+
+  The openclaw-flair capture tests now drive the paths their README guarantees
+  name: the per-run signing test writes from `llm_input`, `agent_end` and
+  `llm_output` for interleaved agents and checks each write is signed by the
+  agent whose callback produced it; the post-abort drop tests cover a callback
+  after a `model_call_ended` abort and after `gateway_stop`, not only a failed
+  `agent_end`; and the overflow case shows the documented best-effort residual —
+  an abort of a never-admitted run records nothing, evicts no live record, and
+  that run's next callback is admitted once room frees.
+
+  `abortRun` also gets a guard: while `gateway_stop` has stopped the
+  registration, an abort for a run the registry never saw records nothing and
+  returns after the rate-limited line.
+
+  (Refs #1892)
+
+- Renovate's configuration has been split into a **shared org preset** (`.github/renovate-preset.json`) and a **per-repo overrides file** (`.github/renovate.json`). The preset establishes the common policy: pin version updates, enforce a 7-day bake-time cooldown (matching `check-dep-ages.mjs`), group non-major updates per ecosystem (npm, Python, Docker, GitHub Actions) so each stays small enough to diagnose (managers outside those four keep only the groups config:recommended supplies), and propose Docker image digest pins via Renovate's `docker:pinDigests` preset (Dockerfiles, compose files and workflow container/service images; in current Renovate the preset exempts argocd, devcontainer, helmv3 and pyenv) — a pin protects an image once its PR is merged. The per-repo file extends the preset and holds only Flair-specific exceptions (workspace-internal `@tpsdev-ai/*` dep exclusions, keep-current allow-list for Harper). CLI and bob repos can extend the same preset via `github>tpsdev-ai/flair//.github/renovate-preset`. See the [supply-chain policy](https://github.com/tpsdev-ai/flair/blob/main/docs/supply-chain-policy.md) for details and the PR body for the full config diff. The preset is owned by the CODEOWNERS trust root (`@heskew`), because Renovate reads it from the default branch for every repo that extends it.
+
+- **`flair-bootstrap`, `flair-sync`, `flair-sync-soul`, `migrate-memories`, and `flair-activity` refuse to run without an explicit agent identity.**
+
+  Each resolves `--agent <id>` or `FLAIR_AGENT_ID` and exits non-zero, naming
+  both remedies, before reading a key file or making a request — no shipped
+  default identity can sign as a principal the caller did not choose. The
+  watchdog's mail alert takes its sender from `FLAIR_AGENT_ID` /
+  `HARPER_WATCHDOG_AGENT_ID` and skips, logging the same remedy, when neither is
+  set; `repro-resource-busy` and `flair-client` already refused and continue to,
+  reads included. A CI guard fails any new default under `scripts/`.
+
+  (Refs #1822)
+
+- **The CLI spawn-budget gate now sees `Bun.spawn`/`Bun.spawnSync` and named aliases, so an untimed Bun spawn of the CLI entry fails too.**
+
+  The gate reads `Bun.spawn`'s `(argv, options)` shape as well as node's
+  `(cmd, argv, options)`, and matches a literal CLI entry or a file-local
+  `join(…, "cli.ts")`. Every offender that cannot be budgeted yet is held in a
+  reviewed baseline file (`scripts/ci/cli-spawn-budgets.baseline.json`) keyed on
+  file + enclosing helper/case + normalized call fingerprint + kind — never
+  `file:line`; one entry covers one call; a stale entry fails the gate, so the
+  list can only shrink; and a new offender fails even if a matching entry is
+  added in the same change. The ONE exception is the one-time seed: while the base
+  has no baseline file but descends from the seed-introduction anchor, the PR's
+  copy is the initial list (logged); the next PR that touches the gate removes
+  it. The six sites #1825 named now carry a `timeout`; the
+  rest are baselined with a reason each.
+
+  (Refs #1825)
+
+### Fixed
+
+- **The canary promote block prints a restore line for a package whose `dist-tag add` FAILED, and says
+  so when the check cannot read the state.**
+
+  A failed `npm dist-tag add` can still have applied the tag server-side (npm may
+  exit non-zero after the write), so that package is now reported as ATTEMPTED with
+  its state UNKNOWN and gets a restore line like every moved package; only packages
+  never attempted are listed as not moved. When the convergence check exits because
+  it could not READ the current state, the block no longer says every package moved —
+  it says the state is unknown and prints the restore lines. The emitted text also
+  stops claiming a stale PASS is refused: the preflight is an EQUALITY check of the
+  certified package-set digest, not a freshness check.
+
+  (Refs #1671)
+
+- **The canary promote block stops on a FAILED `dist-tag ls`, not just an empty one.**
+  A read whose `npm` exits non-zero is treated as unmeasurable and stops the block
+  before the first tag moves, naming the package; a value is stripped of CR and
+  surrounding whitespace and must be a version, so a malformed read can never
+  contaminate a restore line.
+
+  > **Heads-up:** if a canary promote block stops saying "unmeasurable is FAIL" or
+  > "is not a version", nothing moved — re-read the tag and promote again.
+
+- **The canary's promote block now PRINTS a rollback for a partially-moved `latest` instead of deleting it, and its rollback text matches the commands under it.**
+
+  When a `npm dist-tag add` fails mid-promote, the block printed
+  `npm dist-tag rm <pkg> latest` for the already-moved packages — which DELETES
+  their `latest` rather than restoring it. The block now reads each package's
+  current `latest` BEFORE the first move, and on failure prints
+  `npm dist-tag add <pkg>@<previous> latest` (a RESTORE line) for every package it
+  ATTEMPTED to move, and lists the packages NEVER attempted separately by name; it
+  never removes a tag. The package whose add FAILED is reported as ATTEMPTED with
+  its state UNKNOWN and gets a restore line too, because npm can apply a tag
+  server-side and still exit non-zero; and when
+  the final check cannot READ the state it says so instead of claiming every
+  package moved. A failed pre-move `dist-tag ls` stops before any move.
+
+  (Refs #1671)
+
+- **Supply-chain policy §2 no longer overstates how dependencies are pinned and checked.** Corrections: production `dependencies` mix exact pins and ranges, and the `overrides` block is mostly ranges with one exact alias (`npm:empty-npm-package@1.0.0`); the age gate (`check-dep-ages.mjs`) checks the publish age of external entries in the `dependencies` field whose version starts with a digit and skips workspace-internal packages and the keep-current list; the frozen-lockfile install catches manifest/lockfile inconsistency, and `check-workspace-deps.mjs` compares the literal versions of internal `@tpsdev-ai/*` dependencies while accepting `workspace:` declarations. `packages/flair-bench` declares `optionalDependencies`; the root declares none. Peer dependencies are described as installed: npm and Bun install non-optional peers by default (our workspace install records them in `bun.lock`); they are never bundled into published tarballs.
+
+- **adk-flair's `store_memory` tool no longer reports an unconfirmed memory write as stored.**
+
+  `FlairMemoryService.add_memory` caught every exception from a direct memory
+  write, logged a warning and returned normally, and the request helper treated
+  any status below 400 (a redirect included) as success. So the `store_memory`
+  tool could answer `{"status": "stored"}` when Flair had refused the record,
+  was unreachable, or never confirmed it. Now only a 2xx confirms a request.
+  `add_memory` attempts every text-bearing record and then raises
+  `FlairWriteError` (a subclass of `FlairRequestError`) carrying `written`,
+  `failed` (a list of `(record_id, status)`) and the first failure's
+  `status_code`, with a message such as `3 of 4 memories written; 1 refused
+  (status 403)`. After a timeout or connection error the record may or may not
+  have landed. The `store_memory` tool returns `{"error": <message>,
+  "written": n, "failed": m}` instead of `"stored"`.
+  `add_session_to_memory` and `add_events_to_memory` still log and continue.
+
+  (Refs #1938)
+
+- **A parent-prefix search in the LangGraph store returns items in descendant namespaces, and namespace labels use a reversible stored encoding.**
+  The non-semantic search matches whole namespace labels against the requested prefix and reads the agent's full item set with no candidate cap, so it no longer drops descendants or returns a short page when more matches exist. Labels containing `/` or `:` are escaped in stored ids and tags. Earlier items under valid labels without `/` or `:` keep their ids and tags; items stored under labels containing either character must be deleted by id and written again. The semantic path still checks the requested namespace prefix after retrieving candidates. An unpaired surrogate in a namespace label or key makes `put` and `delete` throw and makes `get` return null before any request. Such a label in a `search` prefix or `listNamespaces` match condition matches nothing before any request; it cannot be percent-encoded in a Memory ID path.
+
+  (Closes #1939)
+
+- **README claims in pi-flair, langgraph-flair, flair-mcp, cursor-wake-runner and cursor-flair are corrected to match the actual code.** Auto-capture no longer claims to save all assistant responses or secrets (it skips recognized secret patterns and content of 100 characters or fewer, truncating accepted text to 4000 chars). The Flair client URL is configurable and supports admin Basic auth fallback when Ed25519 keys are unavailable. LangGraph's `listNamespaces` no longer presents itself as a public method—it is supported through the `batch()` dispatch. Neither the tag-based nor the semantic search path applies a namespace pre-filter on the server; both filter on the client. Non-empty tag searches miss descendants; semantic prefix filtering can keep them; empty-prefix listing spans namespaces, up to its candidate limit. FlairStore composes rather than inherits FlairClient. Admin Basic auth is used only when no key resolves, is not a retry after a rejected signature, and belongs only on HTTPS or loopback. The cursor hook-install supports Claude Code and Codex; Codex runs the hook only after you trust it. The MCP server's engines field declares `>=22`, not `>=22.18`. (Refs #1943)
+
+- **ADK and Hermes descriptions now clarify the audited behaviors.**
+  The ADK app/user tag is described as a retrieval filter within one Flair principal; re-ingestion reuses record IDs when the app, user, session, and nonempty event IDs are unchanged; missing event IDs receive fresh UUIDs; the key-file formats each loader accepts are listed; listing and search are described with the filters each sends. Hermes describes its returned-row ordering and that it attempts to mirror add operations only.
+
+  (Refs #1943)
+
+- **ADK search drops hits from a foreign agent id, and the ADK READMEs state only what ships.**
+  Python `search_memory` and JS `searchMemory` now recheck that each hit's `agentId` is this service's own
+  agent identity, as listing already did: the compound tag `adk:<app_name>:<user_id>` is a per-user
+  RETRIEVAL FILTER, not an isolation boundary. The Python README describes HTTPX phase timeouts and its
+  UUID fallback for events without ids; the JS README describes its `fetch` abort timer. Both READMEs say
+  the service scopes reads and writes by the `app_name`/`user_id` it is given, that the remote-URL opt-in is
+  read from the environment only, and that other ordinary agents cannot read a private memory while admins
+  and trusted internal calls can.
+
+  (Refs #1943)
+
+- **Updates documentation for the native MCP endpoint, integrations, OpenClaw, Claude Code, and ADK JS.**
+
+    `README.md`: the native `/mcp` endpoint no longer states a stale tool count; its tools are what the JSON-RPC `tools/list` method returns. The n8n nodes are described with their real port types.
+
+    `docs/integrations.md`: integrations that sign with a per-agent Ed25519 key follow the same identity and read-scope rules, and n8n, which uses the Harper admin password, is named as the exception. With `--agent <id>` and wiring enabled, `flair init` attempts Pi wiring when Pi is explicitly selected or detected. ADK Python reads `FLAIR_HTTP_TIMEOUT`; ADK JS reads the constructor's `timeoutMs`. LangGraph requires `config.agentId` and can authenticate with an in-memory key, an explicit or automatically found keyfile, or Basic-auth fallback; its automatic lookup does not read `FLAIR_KEY_PATH`.
+
+    `docs/openclaw.md`: the example leaves out `allowConversationAccess`, which is required to enable auto-capture.
+
+    `docs/claude-code.md`: a successful write is not suppressed by a dedup match; eligible creates use writer-overridable match thresholds.
+
+- **Corrected setup, authentication, and dedup guidance.**
+  Client wiring examples include an agent ID, and the README links to the integrations catalog without a fixed harness count. Authentication guidance distinguishes ordinary signed agents from administrator roles and Basic credentials, including n8n's administrator password. Dedup matches are reported while fresh IDs create records and reused IDs update records. The Pi and Claude Code guides clarify their setup paths.
+
+  (Refs #1943)
+
+- **Five docs pages now accurately describe what the code does:** Pi requires a configured `FLAIR_AGENT_ID` (no auto-detect), the server may report a dedup collision when its conservative check finds a match but the write always proceeds, `langgraph-flair` is an npm package (not pip), the MCP handler serves 17 tools not 9, the bootstrap hook sends a basename subject hint and bootstrap selects a bounded set of the agent's own and recent memories under a token budget, a lost subprocess exits on reparenting to PID 1 or stdin close/end, `flair init --agent <id>` (not bare `flair init`) creates the one personal identity, the Model-2 handler list includes AttentionQuery and RecordUsage, and `hermes-flair` upgrades by reinstalling the Hermes plugin, not through pip.
+
+- **The MCP client guide, the flair-mcp README and the native-OAuth note describe what ships.**
+  Client-wiring examples pass `--agent`; `flair agent add` is described as writing a raw 32-byte seed; the structured bootstrap payload is attributed to HTTP and native `/mcp`, with stdio returning a text block; a failed hook bootstrap is described as a stderr diagnostic plus an optional resume hint; read scope is described as own plus other agents' non-private records; and the native OAuth note describes the shipped configuration.
+
+  (Refs #1943)
+
+- **Doc corrections clarify n8n tag and subject reads, OpenClaw identity, and wake-runner authentication.**
+
+  The subject field remains indexed in Flair's schema, while the Search node filters its retrieved rows client-side; FlairWrite passes content and four write options, and the server conditionally reports similarity matches on new-ID writes without suppressing them.
+
+   (Refs #1943)
+
+- **The OpenClaw and Claude Code integration docs now match the code.** The OpenClaw config example uses the `openclaw-flair` package shape (the memory slot and `hooks.allowPromptInjection`), with `agentId` only as an optional allow-list. The `memory_search` tool is a semantic search. Automatic context is a separate `before_prompt_build` hook: it needs `autoRecall` and the host's `hooks.allowPromptInjection`, passes no conversation topic, and returns context only when there is some. The recent window starts at 48 hours and widens to 7 and 30 days, rather than a fixed 24 hours. A verified agent can read all its own records (private included) and other agents' non-private records; grants do not expand that scope. Writes carry an `agentId` field (tags are optional), and a separate agent ID gives ownership, not isolation. Key lookup checks `.flair` and then the legacy directory for each resolved home before moving to the next. The host's own workspace files load each agent's `SOUL.md` and `AGENTS.md`; the plugin does not load or anchor those files.
+
+- **The session-start hook attempts one stderr diagnostic when a bootstrap fails, naming the failure kind.**
+  A failed bootstrap exits 0. Stdout carries a continuity resume hint only when the separate lookup finds eligible prior entries; otherwise it carries `{}`. The diagnostic names the kind and the next step (run `flair doctor`, then check FLAIR_URL and this agent's key). The kind is `auth` for an HTTP 401 or 403, `http-<status>` for any other HTTP status, `timeout` when the hook's own bootstrap timer fires or the error is a `TimeoutError`, and `unreachable` otherwise. The diagnostic is a fixed template with only the kind filled in, so it never contains a key, token, password, Authorization value, URL or response body. A failed stderr write is ignored. The Codex command retains stderr and the Claude Code command discards it; delivery depends on stderr being writable.
+
+  (Refs #1943)
+
+- **FlairClient refuses to send admin Basic credentials over plain http to a non-loopback host, before any request is made.**
+  When no Ed25519 key resolves and `FLAIR_ADMIN_USER`/`FLAIR_ADMIN_PASSWORD` are
+  set, the client attaches an admin Basic `Authorization` header. It now checks
+  the URL the request will actually go to, and refuses (an error naming a remedy,
+  and the host when both FLAIR_URL and the request URL parse) when that URL's scheme
+  is `http:` and its host is not loopback (`localhost`, `127.0.0.0/8`, `::1`), when
+  it cannot be parsed, or when its host differs from `FLAIR_URL`'s. A request path
+  must start with `/`. https, loopback http, and signed (Ed25519) requests are
+  otherwise unchanged. This covers every package that sends through FlairClient
+  (flair-mcp, langgraph-flair, pi-flair, the wake runner, the n8n nodes, and
+  openclaw-flair, which only signs). Admin requests that do not go through
+  FlairClient (n8n's credential test, CLI admin commands) are not covered by this
+  change.
+
+  (Closes #1951)
+
+- **The hermes-flair plugin now loads the raw-seed key `flair agent add` writes, defaults to Flair's port 19926, and describes search honestly.**
+  `_load_private_key` reads bytes and treats every exact 32-byte file as a raw seed. It also
+  accepts Ed25519 PEM and canonical base64 PKCS8 DER after stripping outer whitespace; the
+  decoder decodes text strictly, so invalid UTF-8 bytes are refused, and a PEM file must be
+  one whole block (junk before or after the block is refused). Unsupported readable
+  non-32-byte files raise a format `ValueError` naming the path; file read errors propagate.
+  The default URL moves to `http://127.0.0.1:19926`, matching Flair's own default port. The
+  `flair_search` tool description now names the read scope. The README states the accepted key
+  formats, the real default port, and the collection-only startup.
+
+  (Refs #1953)
+
+- **`FlairWriteError` now counts attempted records and reports skipped text-less ones, and its `status_code` is an `int` or `None`.**
+  `add_memory` sets `total` to the records it ATTEMPTED, so text-less entries are
+  excluded from `total` and reported in a new `skipped` count (named in the
+  message, e.g. "1 of 2 memories written; 1 refused (status 403); 1 skipped (no
+  text)"). `FlairWriteError.status_code` is now an `int`, or `None` when the
+  failure carried no status (a connection error or timeout) — the `"?"` sentinel
+  appears only in the message and the `failed` list; check for `None` before
+  comparing it numerically. A nonempty batch in which every entry has no text now raises
+  `ValueError` instead of returning as if it had written. The `store_memory`
+  tool keeps its `{"error", "written", "failed"}` shape.
+
+  (Closes #1954)
+
+- **ADK JS stores events that have no id as separate records instead of overwriting one another.**
+  The memory service gives an event with a missing or empty `id` a random UUID in its record id, as the Python package does; events with a non-empty `id` keep their deterministic `app:user:session:eventId` record id. The Python `FlairWriteError.status_code` is annotated as `int | None`.
+
+  (Refs #1967)
+
+- **ADK Python logs skipped text-less entries on a successful write, and the concierge example rejects empty input.**
+  `add_memory` logs one warning with the count of skipped text-less entries when every attempted write succeeds; a failed write still reports them in `FlairWriteError.skipped`. The team-concierge example's `record_decision` and `record_personal` tools return an error for empty input instead of writing.
+
+  (Refs #1967)
+
+- **Asset, Credential, Relationship and MemoryCandidate collection reads use the shared scoped-search helper.**
+  Each composes the caller's owner scope with the query's own conditions the same way Memory reads do: the scope is the outermost condition, and every caller condition is kept. Anonymous denials, admin and internal reads, and by-id reads are unchanged.
+
+- **By-id reads are scoped on the full stored record.**
+  A by-id read that asks for a selection or a single property is checked with the table's read-scope rule on the full stored record, exactly like an unselected read, before the selected value is returned. This covers every table whose by-id reads use the shared read gate.
+
+- **flair-client percent-encodes Memory and Relationship ids in request paths.**
+  `memory.write`, `get`, `update` and `delete`, and `relationship.write`, `get` and `delete`, send the id as one encoded path segment, as Soul requests already did, so an id containing characters such as `#`, `?`, `%`, `/` or a space addresses exactly that record. The server decodes the segment, so ids made only of ordinary characters address the same records as before.
+
+- **`flair doctor` says UNVERIFIED when it could not run the pairing-role check, and its prune remedy names the form that deletes.**
+
+  `flair doctor` reads the instance's identity rows and its role list as two
+  separate reads. A consistent instance prints one green line naming its
+  identity; when the role list is unreadable the pairing-role line prints as
+  UNVERIFIED instead, saying which check did not run and why. A check that did
+  not run is never silent, and never green.
+
+  An instance with several `Instance` rows AND an unreadable role list prints
+  both facts: the row finding with its remedy, and the pairing-role UNVERIFIED
+  line naming what could not be read.
+
+  The remedy line names both forms of the command that resolves several
+  `Instance` rows — `flair federation instance prune --keep <id>`, and the same
+  command with `--apply` — because `prune` is a dry run until `--apply` is
+  passed. When several rows and the pairing role are both present, the two
+  remedies print in the order they work: the prune first, then
+  `flair init --remote`, which refuses while the table still holds more than one
+  row.
+
+  (Refs #1883)
+
+- **`flair doctor` reports two instance-identity mismatches, each with the one command that fixes it.**
+
+  A second `Instance` row (no canonical identity, so the cleanup sweep cannot
+  know whether the instance is a hub) and the `flair_pair_initiator` role on an
+  instance whose identity row is not a hub.
+
+  Both are read from the instance itself. If that read does not happen the check
+  reports UNVERIFIED rather than passing, and a consistent instance prints one
+  green line naming its identity.
+
+- **`flair federation token` and `pair` read the admin password from an owner-only file, keeping it out of shell history and `ps`.**
+
+  Both commands now take `--admin-pass-file <path>`, read in-process through the
+  same reader `flair backup` uses: the file must be owner-only (mode 0600), and a
+  group- or world-readable file is refused with a message naming the path and the
+  mode. An explicit `--admin-pass-file` or `--admin-pass` overrides
+  `FLAIR_ADMIN_PASS` (explicit beats ambient, as for every other `--admin-pass`);
+  combining the file and the flag is a usage error. `--admin-pass` still works,
+  but the `--help` text warns that it lands in shell history and the process
+  list. The federation docs now show the file form in every token-minting and
+  pairing snippet.
+
+  (Refs #1873)
+
+- **The pairing-cleanup sweep follows the identity row's role on every tick, and drops orphan bootstrap users too.**
+
+  Two defects, one fact about the instance. The sweep read the instance role ONCE, when the module
+  loaded — before a hub's identity row is seeded, since the seed runs after the
+  server has started — so a fresh hub saw "not a hub", disabled cleanup for the
+  life of the process, and never re-read. It re-reads on every tick now, so a
+  hub whose row appears after startup starts sweeping with no restart.
+
+  Second, the sweep walks the `pair-bootstrap-*` users themselves
+  (`list_users`), so a user whose token record is gone — invisible to a
+  token-only sweep — is dropped as well. A live, unexpired token still keeps its
+  user.
+
+  More than one `Instance` row is logged as an error naming its remedy, never
+  "first row wins".
+
+- **The pairing cleanup pauses when the Instance table holds a row it cannot name.**
+
+  The cleanup sweep's own reader skipped an `Instance` entry with no usable id,
+  so a table holding a hub row and a malformed row looked like a single hub and
+  the sweep ran, dropping bootstrap users and deleting pairing tokens. It now
+  reads through the same strict reader `init` and the server use: an entry
+  without a usable id makes the read unreadable, and the sweep pauses for that
+  tick instead of acting on part of the table.
+  (`test/unit/federation-cleanup.test.ts`)
+
+- **The pairing-cleanup sweep confirms each expired-token delete from Harper's result.**
+
+  Harper answers a `delete` with HTTP 200 and names the records it removed in
+  `deleted_hashes` and any it did NOT remove in `skipped_hashes`. The sweep logs
+  "deleted expired token" only when the result names the token as removed and
+  not as skipped. Otherwise it logs that the delete was NOT confirmed, naming the
+  first 8 characters of the token id; a record still in the table is still a
+  candidate, so the next tick retries it. The sweep's lines about one token or
+  its bootstrap user name it by its first 8 characters, and the full token id is
+  cut out of the delete's error text and out of the consumer id the audit line
+  logs. The same rule confirms the
+  deletes of `flair federation instance prune` and the role update of
+  `flair init --remote`.
+  (`test/unit/federation-cleanup.test.ts`, `test/unit/instance-identity-row.test.ts`)
+
+- **Delete operations send the `hash_values` list Harper requires, so expired pairing tokens are actually removed.**
+
+  Harper's delete schema requires `hash_values` (a list; `ids` is the equivalent
+  alias) and refuses a singular `hash_value` with a 400. The cleanup sweep's
+  expired-token delete used the singular form, so the record was never actually
+  deleted: every tick retried the refused call and logged the same error. The new
+  `flair federation instance prune` deletes rows with the list form, confirmed
+  against a live Harper.
+
+  > **Heads-up:** two rollback deletes in `flair federation token` — the two that
+  > undo the `PairingToken` insert when the bootstrap (`add_user`) fails, on the
+  > network path and on the non-OK path — still send the singular key, and their
+  > failure is swallowed, so the row they were meant to remove survives. Neither
+  > is fixed here (flair#1895).
+
+- **`flair init --remote` confirms the identity row it wrote, so an absent or wrong hub identity is never reported as reconciled.**
+
+  `flair init --remote` used to write its hub identity row blind: it inserted the
+  row and went on. It now re-reads after the write, and that read must hold
+  exactly one row — the one just written, with `role=hub`. A re-read that comes
+  back EMPTY (the insert never landed) or holds one DIFFERENT row (the role
+  update went elsewhere) fails the command and names the rows it found, because
+  "the write did not land" and "the write landed on another row" want different
+  operator responses.
+
+  (Refs #1883)
+
+- **The instance-identity readers see every row and never invent one, and a failure to read is an error.**
+
+  Four ways the instance could still end up with two identity rows, or with a
+  reader reporting an identity it does not have (flair#1883).
+
+  **The read is unconditional.** The CLI's readers (`flair init --remote`,
+  `flair doctor`, `flair federation instance list` and `prune`) read
+  `flair.Instance` over the ops API with one unconditional statement —
+  `SELECT id, role, publicKey, status, createdAt FROM flair.Instance` — because
+  a `search_by_conditions` needs at least one condition, and a condition is
+  exactly what hides a row. The pairing paths (`GET /FederationInstance` and
+  `POST /FederationPair`) and the cleanup sweep read every row with an
+  unfiltered search. (`createdAt` is REQUIRED by the schema —
+  `createdAt: String! @indexed` — so no legal row omits it; the date-shaped
+  `createdAt > "1970-01-01"` "select all" is the pattern the Agent and Memory
+  readers carry (`src/commands/agent.ts`, `src/commands/memory.ts`), and a row
+  that compares below it would be invisible to any read shaped that way.)
+
+  **A failed read is not first boot.** `GET /FederationInstance` used to log a
+  read error and fall through to its create branch, minting a fresh identity row
+  on every call while the store was unreadable — the same defect, entered from the
+  server side. It now answers 503 and creates nothing: only a successful read
+  that returns zero rows creates.
+
+  **After it writes, init re-reads.** The read-then-insert window is real, and a
+  concurrent `GET /FederationInstance` lands in it. Both the create and the
+  role-update paths now re-read and, on finding several rows, fail with the
+  refusal that names every row and the prune — instead of reporting a successful
+  init over a table that has no single identity.
+
+  **`prune` refuses an unknown `--keep` at every row count, and says what a delete
+  costs.** An id that names no row is refused whatever the table holds: with zero
+  or one row there is nothing to delete either, but a typo would otherwise read as
+  a successful prune of the row the operator meant to keep. And a prune that is
+  about to delete rows warns that a paired peer must re-pair when the identity it
+  pinned is one of them.
+
+  (Refs #1883)
+
+- **A hub's federation identity is ONE Instance row, and `flair init --remote` reconciles it instead of inserting a second.**
+
+  `GET /FederationInstance` find-or-creates a row (`role: spoke`), and
+  `flair init --remote` used to INSERT a hub row of its own under a fresh random
+  id — so a hub that had answered a read carried two rows and no canonical
+  identity, and every reader that took "the first row of the search" answered
+  from whichever row the table yielded first. Init now reads the rows first:
+
+  - no row → create one with `role: "hub"`;
+  - exactly one row → set THAT row's role to `hub`, keeping its id and key (the
+    identity peers already know);
+  - more than one row → refuse, naming every row (id, role, created) and the
+    command that resolves it.
+
+  Re-running is a no-op. `flair federation instance list` shows the rows and
+  `flair federation instance prune --keep <id>` deletes the rest (dry-run by
+  default; `--apply` to act). Both accept `--admin-pass-file`, which reads the
+  admin password from an owner-only file so it stays out of `ps` and shell
+  history, as well as `--admin-pass` and `FLAIR_ADMIN_PASS`.
+  (`test/unit/federation-instance-admin-pass-file.test.ts`)
+
+- **`flair federation instance prune` verifies each delete, so it never prints a row it did not remove.**
+
+  Harper answers a `delete` with HTTP 200 and reports the ids it removed in
+  `deleted_hashes`, naming an id it did NOT remove in `skipped_hashes` — the same
+  contract `updateInstanceRole` already checks. `deleteInstanceRow` took the
+  status alone as success, so a skipped row was still reported as deleted: the
+  operator read "deleted" for a row that was still there, and the instance kept
+  two identities. The delete result is now checked, and a skipped id is an error
+  naming what the server skipped instead of a line claiming a deletion.
+
+  (Refs #1883)
+
+- **A reader with several identity rows refuses instead of picking one, and a read that established nothing is not a read that found none.**
+
+  The two paths a pairing peer pins from — `GET /FederationInstance`, and the hub
+  identity in the `POST /FederationPair` response that a pairing spoke PINS as
+  its hub peer — still reported the first row of an unordered search, so which
+  identity they answered with depended on the table's own ordering. Both now
+  answer a 409 naming the prune that resolves them. `GET /FederationInstance`
+  (admin only) also names every row. `POST /FederationPair` is public and
+  refuses before the pairing token or a re-pairing peer's key is checked, so
+  its answer names no row, and the hub's log carries each row's id, role and
+  created time. The pairing refusal
+  happens BEFORE the one-time token is consumed, before the peer is read and
+  before any peer is written: a refused pairing leaves the token usable and the
+  table unchanged. (Two other server readers still take the first
+  row of the table; that is a separate defect, tracked as flair#1896.)
+
+  The prune's warning says that any row being deleted may be the identity a
+  paired peer pinned, and that such peers must re-pair. It cannot know which row
+  a peer pinned: while several rows existed, `POST /FederationPair` answered
+  with the first row of an unordered search (it is a 409 now), so a peer that
+  paired in that state may have pinned any of them.
+
+  A 200 from the ops API whose body is not a row list — invalid JSON, or a shape
+  the reader does not know — was read as zero rows, so `flair init --remote` could
+  create an identity on a read that established nothing, and `flair doctor` could
+  report "no rows" for a table it never saw. Unreadable is its own outcome and
+  follows the failed-read path: it throws, and only a successful read of zero rows
+  may create. The same holds for a row the reader cannot name (an entry with no
+  usable id): dropping it would read the table as "the rows I could name", so the
+  whole read is unreadable and `flair doctor` reports UNVERIFIED rather than
+  "no rows".
+
+  (Refs #1883)
+
+- **A failed `flair federation token` now really deletes the pairing token it minted.** The rollback used to send the singular `hash_value`, which Harper refuses with a 400, so the token stayed in the table and outlived the bootstrap user it was minted for. It now sends `hash_values` and reports whether Harper confirmed the delete, naming the token by its 8-character prefix only.
+
+  (Refs #1895)
+
+- **The combined abort signal removes both listeners as soon as either input aborts.**
+
+  `anySignal`'s hand-linked fallback (the Node < 20.3 path) now removes the
+  listener it holds on EACH input the moment either signal aborts, and the
+  client runs the returned cleanup in a `finally` that wraps the whole request
+  lifecycle — so a caller's long-lived signal cannot accumulate a listener
+  across requests, on success, timeout, a response error or a JSON error.
+
+  (Refs #1751)
+
+- **The client's caller abort signal works on every Node version the package allows.**
+
+  `AbortSignal.any` landed in Node 20.3, but this package floors `engines.node`
+  at 18, so a caller passing the new optional `signal` on Node 18 / 20.0–20.2
+  hit `TypeError: AbortSignal.any is not a function` before the fetch started.
+  The client now uses `AbortSignal.any` when it is present and otherwise links
+  the per-request timeout signal and the caller signal by hand, honouring an
+  already-aborted input and forwarding its abort reason.
+
+  (Refs #1751)
+
+- **`/HealthDetail` reports a refusal, not a coin-toss pick, when several Instance rows exist, and marks a failed read unreadable, not absent.**
+
+  Before this, `federation.instance` answered with whatever row `flair.Instance.search` happened to yield first — an arbitrary pick when the table held more than one row — and a read that threw was swallowed as "absent", so a storage failure made the detail read as a healthy, identity-less instance rather than as unreadable.
+
+  It now reads the Instance rows the same way `GET /FederationInstance` does (through the strict reader that refuses a row it cannot name) and decides the answer from every row it can see: exactly one row is reported as `{ id, role, status }`, with an absent `role` or `status` reported as `null`; no rows is `null` (unchanged); several rows is a refusal that names the prune command instead of the row the search yielded first; and a read that fails, or a row the reader cannot name, is reported as `{ unreadable: true }` — never `null` and never a pick.
+
+  For an admin, the several-rows refusal also lists every row's `id`, `role` and `createdAt`; a non-admin sees only the count and the prune command.
+
+   (Refs #1896)
+
+- **Flair's REST middleware accepts only the HTTP methods its clients use.**
+  Requests to Flair's REST resources with `GET`, `HEAD`, `OPTIONS`, `POST`, `PUT`, `PATCH` or `DELETE` are handled as before; any other method, in any spelling, gets `405` with an `Allow` header before any path or authentication branch of that middleware. Separately mounted routes (`/mcp`, OAuth discovery) keep their own method handling.
+
+- **Concurrent first-boot `GET /FederationInstance` requests create exactly one identity row, and every caller is answered with it.**
+
+  The read-mint-write runs under a Flair-owned filesystem bakery lock in the
+  STORE's root (`<rootPath>/flair-locks/instance-create/`, NOT `$HOME/.flair`), so it serialises **every HTTP worker of
+  one Harper process** — not just one — and separate processes that share the same
+  Flair home. The holder rule is Lamport's bakery on files: a contender writes a
+  complete claim (tmp then atomic rename), takes the next ticket
+  (`1 + max visible ticket`), and holds once its ticket is the smallest live one.
+  No timing assumption — only atomic create, atomic rename within one directory,
+  and live-pid detection. The lock lives with the STORE it protects, so an
+  UNUSABLE keystore (a FILE `$HOME/.flair`) no longer blocks identity creation —
+  flair#1233's contract: the row is still created and reads answer 200 with
+  `signingKeyAvailable:false` (test: `test/integration/federation-status-keystore-1233.test.ts`).
+
+  The detached write completes in its own Harper immediate transaction before the
+  lock is released, so the confirming re-read sees the row the same request wrote;
+  a re-read that finds NONE is refused rather than answered from the local object.
+  A contender that cannot take the lock within the deadline refuses (5xx) naming
+  the blocking claim when known — the live holder, or a contender still choosing;
+  the deadline covers the choosing state too, and every exit (a hold, a refusal, or
+  a throw from a hook) releases whatever claim this contender created. This is a
+  documented fail-closed mode, not a retry. Residual: a claim whose pid is reused,
+  or a dead worker thread inside a live process, blocks contenders until the
+  deadline — refusals until the process restarts (a recognised claim whose body is
+  missing, invalid, or disagrees with the pid in its filename is such a blocker,
+  never reclaimed by another contender).
+
+  `flair init --remote` does not take the lock yet — the CLI writer joining the
+  same lock, and a store-enforced one-row invariant, remain desirable (slice 2).
+
+  The two-thread `GET /FederationInstance` race test in `test/integration/` is a
+  TRIPWIRE for the lock and the write seam: with no lock it ran red in 43 of 50
+  rounds, with the lock 0 of 50. It is evidence about this code, not a promise
+  that a future Harper commit-timing change would be caught by it.
+
+  (Refs #1897)
+
+- **A local Memory, Soul, Agent or Relationship POST/PUT with no originator now stamps no originator identity instead of an arbitrary one; PATCH is exempt.**
+
+  The write-time `originatorInstanceId` stamp resolves this instance's own
+  identity from the `Instance` table for a local Memory, Soul, Agent or
+  Relationship POST or PUT that carries no originator yet (PATCH routes past the
+  stamp on all four resources and is unchanged); Message uses the same
+  resolution for its org scope. It used to take the first row of an unordered
+  search and cache it, so on an instance whose table holds several rows — a
+  legacy install, or the state `flair init --remote`'s detected race leaves —
+  those writes were stamped with an arbitrary identity, one peers may never have
+  pinned. It now decides through the same shared rule the federation
+  readers use:
+
+  - one row → cached and returned, as before;
+  - no row, or a read that fails → null, uncached, as before;
+  - several rows → null, so the write stamps nothing.
+
+  A null `originatorInstanceId` is the defined local-origin state, so the write
+  still succeeds: the stamp does not throw (that would fail every local write on
+  such an instance and could lose writes on upgrade) and does not pick a row.
+  One error naming the row count and the prune remedy is logged once per refusal
+  window, and the refusal is remembered for at most a minute, so a write in that
+  state does not re-read the table every call and `flair federation instance
+  prune` takes effect without a restart. The read goes through the same strict reader
+  `GET /FederationInstance` uses, so an entry with no usable id is an unreadable
+  read (null) rather than a smaller list.
+
+  (Refs #1896)
+
+- **`memory_search`'s `tools/list` description now states it covers other agents' non-private memories.**
+  Every MCP client that lists tools sees the corrected read scope: the caller's own
+  memories plus every other agent's non-private memories on the instance — no per-owner
+  grant required.
+
+- **Native `/mcp` tool calls check declared argument types and required properties before the tool runs.**
+  When supplied, `arguments` must be a JSON object; omitted `arguments` are treated as `{}`. A `tools/call` whose arguments omit a required argument, carry a value of a type the tool's input schema does not declare, or (for a tool that declares an `id`) give an `id` that is not a non-empty string is refused with JSON-RPC error `-32602`. An optional argument given as `null` is treated as absent. An unrecognised visibility string still gets `invalid_visibility` from the `memory_store` tool.
+
+- **Every capture path that asks for room purges first; a failed scan no longer strands a run, and `gateway_stop` clears the map.**
+
+  Three leftovers from round 5, each a question asked in the wrong order.
+
+  The abort path asked "is there room" WITHOUT purging the aged records that
+  already qualified for removal, so a map full of them refused an abort that must
+  be recorded — and that run's next callback was then admitted by admission's own
+  purge, starting a capture write after the abort. The abort path now purges
+  first, exactly as admission does.
+
+  The entity scan ran between the reservation (`count++`, `hashes.add`,
+  `inFlight++`) and the `try` that releases it, so a throw stranded `inFlight`
+  above 0 and the record could never become removable — a slot held for the life
+  of the process. The scan is now computed before the reservation, so nothing
+  that can throw sits between taking the reservation and the block that releases
+  it.
+
+  `gateway_stop` cleared the sweep timer but left the run records reachable; it
+  now aborts every run's controller and drops the map as well.
+
+  (Refs #1751)
+
+- **Capture capacity is one budget: a run holds a slot from admission until its record is removable.**
+
+  The per-run capture state and its retired/aborted tombstones no longer have
+  separate caps. A run holds ONE slot in a single budget (default 10,000) from
+  admission until its record is removable — retired or aborted, with no write in
+  flight, and past `tombstoneMinAgeMs` (1 hour); retiring or aborting a run
+  changes its phase IN PLACE, with no new room needed. Admission removes what the
+  age rule already allows and admits only below the cap; it NEVER evicts a live
+  record (an idle run retires through the idle rule), and when the budget is full
+  it refuses (`capture-capacity: full`, logged once) and mutates nothing. An
+  abort for a run that was never admitted is always recorded — see the abort
+  overflow in the round-5 entry — so a later callback for that failed run cannot
+  be admitted.
+
+  (Refs #1751)
+
+- **The capture caps fail closed instead of breaking a guarantee.**
+
+  Four follow-ups to the per-run capture state (flair#1884 round 3). At capacity,
+  capture is now SKIPPED with a one-time log line, never satisfied by evicting
+  something whose eviction breaks retirement or abort. (1) The retired/aborted
+  run tombstone is kept at least `tombstoneMinAgeMs` (1 hour); the cap evicts
+  only tombstones older than that, and a set full of younger entries refuses a
+  new run (`capture-capacity: tombstones`) rather than re-admit a late callback.
+  (2) The live-state cap never evicts a state with a write in flight; when every
+  state is in flight a new run is refused (`capture-capacity: live-states`).
+  (3) The tombstone gates ADMISSION only — an abort acts on any state still in
+  the map, so a run idle-retired with a write in flight is still aborted and its
+  late result discarded. (4) The client's combined abort signal now returns a
+  cleanup that removes both listeners, and the request calls it on every path;
+  a caller's long-lived signal no longer gains a listener per request.
+
+  (Refs #1751)
+
+- **Auto-capture now normalises block-shaped messages, uses the client's UUID memory ids, and reports machine-readable store outcomes.**
+
+  The capture paths (agent_end, llm_input, llm_output) read a host message's
+  content through one function: text blocks are concatenated in order, and
+  image, thinking and tool blocks contribute nothing (their contents never
+  reach a memory). `memory_store` no longer hand-builds a `Date.now()` id — it
+  uses the client's canonical UUID path, so two writes in one millisecond can
+  no longer overwrite each other — and returns a machine-readable outcome
+  (`written`, `id`, `supersedeClosed`, `errors`, `deduplicated`, plus
+  `matchedId` when a near-duplicate was found): `written` is true only after
+  the primary write succeeded, a partial success (memory written,
+  supersede-close failed) is reported as exactly that, a deduplicated write
+  reports `deduplicated: true` with the `matchedId` it collided with, and an
+  unresolved identity returns `{ written: false, reason: "no-identity" }`
+  instead of silently returning.
+
+  (Refs #1751)
+
+- **Auto-capture state is now per run; a retired or aborted run admits no new write.**
+
+  Capture state is keyed by agent **and run id** (a callback whose hook carries
+  no run id is refused with a one-time log), so two concurrent runs of one agent
+  no longer share a budget or a dedup set. The excerpt and the cap slot are
+  reserved synchronously before any `await`, so a concurrent callback or the
+  `agent_end` rescan dedups against the reservation instead of writing twice;
+  the reservation is released if the write fails. A successful `agent_end` ends
+  a run without deleting its state (`agent_end` can arrive before `llm_output`
+  for the same run); the state retires only once the run has ended with no
+  in-flight writes and 30 s have passed, and a run that has seen no `agent_end`
+  retires after 30 min idle. Retired and aborted run ids go into a bounded
+  tombstone, consulted first, so a late callback is dropped with a one-time log
+  naming the run and can never recreate it and capture again. One sweep
+  evaluates every run on each callback and on an unref'd interval timer (cleared
+  on `gateway_stop`); it caps the live-state map, the tombstone and the
+  one-time-log set, evicting the oldest and logging each state eviction with the
+  run id. The plugin owns one `AbortController` per run: a failed `agent_end`,
+  `gateway_stop`, or a `model_call_ended` with `failureKind: "aborted"` aborts
+  it. On abort the run's signal reaches every in-flight capture fetch, **no new
+  capture write starts**, a result that resolves after the abort is discarded,
+  and reservations are released — this cannot undo a write Flair has already
+  received, so a request already in flight may still land.
+
+  (Refs #1751)
+
+- **Capture capacity is now ONE map: one record per run, one removal rule, no separate tombstone set.**
+
+  Four rounds of fixes kept leaking at the boundary between the live-state map,
+  the retired/aborted tombstone set and the budget counters, so round 5 replaces
+  all three with ONE `Map<runKey, RunRecord>`. A record's phase is `live`,
+  `ended`, `aborted` or `retired`, and the budget IS the map's size; retiring and
+  aborting change the phase IN PLACE and never add an entry. A single predicate
+  is the only thing that frees a slot — retired or aborted, with no write in
+  flight, and aged past `tombstoneMinAgeMs` — and the sweep and admission both
+  use it. An abort for a run that was never admitted ALWAYS gets an aborted
+  record, even at the cap, using an overflow of at most `abortOverflowCap`
+  (1,000): recording nothing there let that failed run's next callback be
+  admitted and captured. When even the overflow is full the abort records nothing
+  and logs once (`capture-capacity: abort-overflow`) — a documented residual,
+  since admission is refused while the budget and its overflow are full.
+
+  (Refs #1751)
+
+- **A callback that arrives during shutdown is refused, so no capture write starts after `gateway_stop`.**
+
+  `gateway_stop` aborts every in-flight run and clears the run map so its records
+  stop being reachable — but a callback arriving after the clear found no record
+  and was ADMITTED as a new run: the same failed-run re-admission the abort
+  tombstones exist to prevent. With the sweep timer stopped as well, nothing was
+  left to retire that record, so the run could capture again and start a write
+  after the abort.
+
+  The stop now sets a flag FIRST, before the aborts and before the clear, and the
+  capture gate refuses every callback while it is set: a late `llm_input`,
+  `llm_output` or `agent_end` is dropped with one log line, admits no record and
+  starts no write. A later registration builds a new map and its own gate, so the
+  flag needs no clearing.
+
+  (Refs #1751)
+
+- **openclaw-flair: an identity-less callback now warns once per callback source, not once per callback.**
+
+  A host that keeps delivering `agent_end` / `llm_input` / `llm_output` without an
+  agent identity used to produce one warning line per delivery — an unbounded run
+  of identical lines about a host the plugin already refuses. Those lines now go
+  through the plugin's bounded one-time log, keyed by the callback source, so at
+  most one line is written per hook however many identity-less callbacks arrive.
+  The refusal itself is unchanged: no identity still makes zero requests, and
+  nothing is inherited from the environment.
+
+  The plugin README's auto-capture guarantees now state each claim once, with the
+  test that proves it: the best-effort bound sits inside the abort/retention claim
+  it qualifies rather than beside it, the per-run claim is proven by two tests
+  that fail if the session cap or the dedup set is shared across two concurrent
+  runs of one agent and if a write is signed by an agent other than the one whose
+  callback produced it, and the retention claim is proven just inside the
+  retention minimum, not only past it.
+
+  (Refs #1884)
+
+- **A refused Flair callback now logs once per agent, site and error class, so a later different failure is no longer silenced.**
+
+  The plugin's bounded one-time-log path keyed refusals by the agent alone, so
+  after an agent's first refusal every later one for that agent was silent —
+  including a different failure, such as an HTTP 500 on a capture write after a
+  missing key, which is exactly the line an operator needs. The key is now the
+  agent, the callback site and the error's class: a Flair failure by its status
+  (its message embeds the client-assigned memory id, so the message alone would
+  make every retry look like a new failure), anything else by its name and
+  truncated message. Distinct failures each log once; repeats of one do not. The
+  line itself, the bounded log-once set and every refusal path are unchanged.
+
+  (Refs #1751)
+
+- **Callback refusals are logged once per agent, and the capture-off guarantee
+  says what it actually means.**
+
+  A callback with a valid identity but no usable key used to log the same refusal
+  line on every occurrence — `agent_end`, `llm_input`, `llm_output`, and the
+  prompt hook's recall read. Those lines now go through the bounded one-time path,
+  keyed by the agent they refused: one line per agent, however many callbacks
+  arrive. The refusals themselves are unchanged, and each still makes no outgoing
+  request.
+
+  The plugin README's "capture is off by default" guarantee no longer claims zero
+  reads. With `autoCapture` unset no capture hook is registered and no capture
+  write happens, however the turn runs; recall is a separate feature, and its own
+  hook may still make a bootstrap read. The test cited for that guarantee now
+  proves the claim it makes.
+
+  (Refs #1751)
+
+- **Memory updates now keep a record's stored `private` or `shared` visibility unless the write sets a new one**, on PUT, PATCH, the feed write path, the admin reindex path and the federation merge. PUT and the feed carry only `private` or `shared` when an update omits visibility; PATCH, the reindex path and the federation merge keep whatever value is stored. A PATCH that sets visibility or durability is checked by the visibility validator and the ephemeral-tier guard; a PATCH with a null or undefined visibility is no change. A failed existing-record lookup now fails the write. Ids generated by the feed and by agent seeding include a random UUID. A federation record is applied only when its payload carries its envelope's id.
+
+- **The token-id redactor defines each rebuilt key as an own property, so a JSON-parsed `__proto__` key stays an own key.** (Refs #1907)
+
+- **The release tagger reads the candidate commit as data, and the write job re-derives the decision (flair#1890 round 3).**
+
+  Two hardening items on the automatic release tagger.
+
+  **No candidate code runs at all.** Condition 6 used to execute the release commit's own version-sync script, so that script could write the step's verdict output (`verdict=TAG`) or a substituted sha and the write job would act on it. The candidate's WHOLE tree is now extracted with `git archive <sha>` into a scratch directory and checked by the DEFAULT branch's checker, which sees every file the candidate has rather than only its own inventory; a candidate's own script is never executed, in any job.
+
+  **The write job trusts nothing from `decide`.** It binds the target commit independently (the triggering run's own head sha, or its own nightly recomputation) and re-runs conditions 1-9 for that commit before it mints the App token. `decide`'s outputs only gate whether `write` starts and feed the refusal report — they never choose what gets tagged.
+
+- **The release shape check reads the release commit's own diff, and allows only
+  the lockfile this repo tracks.** Condition 7b listed a release PR's changed
+  files through the pull-request files API, which caps at 3,000 files and answers
+  a first-page 404 with an empty list — so a truncated list, or a 404, passed the
+  subset check vacuously. The list now comes from
+  `git diff --name-status -M <sha>^1 <sha>` on the release commit itself:
+  complete, no API, and a rename is reported with both of its paths, so a release
+  cannot move a file out of the trust root and still pass. An empty diff is
+  refused — a release changes at least its version-bearing files. And the
+  lockfile allowance is no longer the list of lockfile names in general but the
+  lockfile(s) this repo tracks at its own root (`bun.lock`), so a release cannot
+  swap in one the repo does not use.
+
+- **The ownership map owns itself: `CODEOWNERS` is now owned by the repo admin.**
+  The catch-all rule made the reviewers team the owner of `.github/CODEOWNERS`
+  itself, so a collaborator with merge access and that team's approval could
+  delete the `@heskew` entries — and then change the tagger, its workflow, its
+  version checker or the advisory allowlist in a later pull request. The file now
+  carries `/.github/CODEOWNERS @heskew`, below the catch-all, so changing who
+  owns the trust root takes the same human as changing the trust root.
+
+- **Release auto-tagging decides and writes in separate jobs, and refuses three edges it used to guess at.**
+
+  Four items from review of the automatic release tagger.
+
+  **The decision and the tag write are separate jobs.** The candidate's own
+  version-sync script used to run in the job that decided, which shared a
+  workspace with the step that mints the GitHub App token, so a merged commit
+  could plant a git hook or re-point `.git` and have a later git command run it
+  with the token in reach — restoring the working tree never covered that. No
+  candidate code runs at all now: condition 6 extracts the candidate's tree as
+  data. `decide` (conditions 1-9) holds no App credential at all; `write` is a
+  separate job on a fresh runner with a fresh default-branch checkout, and it
+  alone mints the token, re-checks condition 10 and creates the tag. Every
+  checkout sets `persist-credentials: false`, and the refusal reporter reads the
+  write job's outputs before the decide job's.
+
+  **The trigger's path guard tolerates the `@<ref>` suffix** that GitHub reports
+  in `workflow_run.path`, so the exact comparison no longer fails on every normal
+  CI completion.
+
+  **An empty check list is not "all checks green".** Condition 9 now requires a
+  check run from the CI workflow's check suite present on the commit — the suite
+  that woke the tagger, or a completed CI suite on that commit for the nightly —
+  and otherwise refuses with `checks-missing` instead of tagging a commit the CI
+  workflow never ran on.
+
+  **The nightly finds the release commit, or refuses.** It walks the version
+  file's own git history instead of a fixed 200-commit window, so a version
+  change any distance back is found; when the walk cannot find it, the run
+  refuses with `version-origin-not-found` rather than skipping silently.
+
+- **The release tagger refuses to tag from a stale `main`.** The second fetch of
+  `main` in the tag job — taken after the re-derivation's up-to-30-minute wait —
+  now has an id, and the tag step's condition requires that fetch to have
+  succeeded. Under `always()` alone, a failed fetch left `origin/main` at its
+  older value while the tag step still ran, so condition 10 could tag the release
+  that had been superseded during the wait. The fetch runs regardless of the App
+  token mint, so the separate path that reports a failed mint as
+  `app-not-configured` is unchanged.
+
+- **A release PR must be a single commit, and the tagger refuses one that is not (flair#1890 round 7).**
+
+  Condition 7b compares the tagged commit's diff against its first parent, which
+  is the whole release PR only under a squash merge; the repository also allows
+  rebase merges, where an earlier commit of the same PR lands before the tip and
+  7b never sees its files. The tagger now reads the release PR's commit count
+  from the pulls API and refuses `release-pr-not-single-commit` unless it is
+  exactly 1 — in the decision and again at the tag write, so a multi-commit
+  release can never be tagged on the strength of the tip's diff alone.
+
+- **A release PR can no longer carry a change to the release tagger, and the checker scans the whole candidate tree.** The tagger trusts the default branch — its workflow, its version checker and its advisory allowlist all execute from there — so those files are now owned by the repo admin in `CODEOWNERS`, and a release PR that touches anything outside the release surface (the version-bearing files, `CHANGELOG.md`, `.changelog/unreleased/*`, the lockfile) is refused as `release-pr-shape`. Condition 6 extracts the candidate commit as data (`git archive`) instead of materialising only the checker's inventory, so a version declaration the inventory does not list is found rather than hidden. Nothing from the candidate is executed.
+
+- **Integration, MemoryUsage and MemoryGrant reads use the shared read-scope helpers, and the shared scoped search keeps every caller condition.**
+  Their collection reads apply the read scope as the outermost condition of the query, as Memory, Message and WorkspaceState already do, and their by-id reads go through the shared by-id gate. The shared scoped search now keeps `conditions` given as any iterable or a single object and places a lone caller condition directly under the scope, so a caller's conditions only narrow the rows an agent may read and a single-condition query is accepted.
+
+- **Pairing-token ids now reach every sweep and rollback log line only as their 8-character prefix, or `[redacted]` for an id too short to cut.**
+
+  The redaction is deep and comes from one shared redactor: a string field at any
+  depth, an array element and an object KEY are all redacted. A token id shorter
+  than 12 characters is replaced in full — a prefix that is most of the id is not
+  a redaction — and every id the sweep has read in a pass joins the secret list,
+  so a caller-supplied `consumedBy` or a Harper error that embeds a DIFFERENT
+  token id is cut too. The sweep's two table-level error lines go through the
+  same redactor.
+
+  (Refs #1902)
+
+- **The CLI spawn-budget gate builds no regular expression from source text, so a file it scans cannot inject a pattern (flair#1825).**
+
+  The `signal:`-identifier check matched a variable name with a *dynamic*
+  `new RegExp(...)` built from that name, escaping only `$`. It now scans with
+  fixed literal patterns that capture any identifier and compares the captured
+  name with `===` — nothing from the scanned file reaches a regex engine.
+  (`test/unit/check-cli-spawn-budgets-gate-1825.test.ts`, round 7 item 3 and
+  round 8 item 2.)
+
+  (Refs #1825)
+
+- **The spawn-budget gate's SEED output states exactly what the seed predicate guarantees (flair#1825).**
+
+  On a descendant base it printed that the base "resolves to" the seed-introduction
+  commit and that "any other base without the file is refused" — both false for a
+  base that DESCENDS from the anchor (the predicate is `isAncestor`, not equality).
+  It now names the ACTUAL base sha, says the base DESCENDS from the anchor, and
+  says only a base that does not descend from it (or cannot be read) is refused.
+  (`test/unit/check-cli-spawn-budgets-gate-1825.test.ts`, round 10.)
+
+  (Refs #1825)
+
+- **The CLI spawn-budget gate's wait-bound rules are exact, closing the last classifier gaps (flair#1825).**
+
+  A `fetch` is bounded only when its OWN options carry a real deadline: `signal:
+  AbortSignal.timeout(<literal>)` where `<literal>` is a strict positive-integer
+  literal, or an identifier that is `const`-declared in the same file to exactly
+  that expression AND never reassigned (a `let`/`var`, or any second assignment, is
+  unbounded). A bare `signal`, an unknown signal value, a deadline that merely
+  appears later in the case, or a deadline the case reaches only by proximity does
+  NOT count. Test: `test/unit/check-cli-spawn-budgets-gate-1825.test.ts` (round 6
+  (a)/(b); round 7 item 3).
+
+  A `timeout:` literal is the ONE strict token `[1-9][0-9]{0,14}(?:_[0-9]{1,3})*` —
+  no leading zero, no leading/trailing/double underscore, at most 15 digits — and
+  the SAME rule applies to spawn timeouts, case budgets and `AbortSignal.timeout`
+  arguments alike: `0` is neither a spawn timeout nor a budget, and `1e999`,
+  `10000-10000`, `1__000`, `_1000` and a 310-digit literal are all unknown →
+  unbounded / no-budget. The count is of the digits AFTER underscores are removed,
+  so `1_000_000_000_000_000` (16 digits) is unknown and `999_999_999_999_999`
+  (15) is a deadline. A spawn's `timeout:` is read from the OPTIONS argument ONLY —
+  an argv element never decides it. Tests: round 7 item 4; round 9 items 1-2.
+
+  `fetch(` is a METHOD DEFINITION — and skipped — ONLY when the significant token
+  before `fetch` is `{`, `,`, `;` or the keyword `async` (object-literal/class-body
+  position) AND the `{` follows the closing paren on the same line; everything else,
+  including `await fetch("x")` with a trailing block, is a call. Tests: round 7 item 1.
+
+  A one-line function body contributes its waits exactly like a multiline one
+  (test: round 7 item 2). A case with no explicit budget that reaches a CLI-entry
+  spawn is an offender (test: round 7 item 5).
+
+  (Refs #1825; further classifier gaps go to #1921.)
+
+- **A unit test that leaves a scratch directory behind now fails the unit lane (flair#1889).**
+
+  Eight unit-test files take their scratch directory from the shared helper
+  `tempDir()` in `test/helpers/temp-dir.ts`, which registers the directory's
+  removal in the same call — a test cannot obtain one without its cleanup, and
+  the removal runs through bun's test hooks, not a process-exit hook (bun's test
+  runner does not run Node's `exit` listener). They are, under `test/unit/`,
+  `changelog-fragments`, `changelog-release-notes`, `first-publish-check`,
+  `first-run-hostile-verdict`, `release-sh-break-glass`, `secrets-push`,
+  `temp-dir` and `version-check`. Other unit tests give their scratch directory
+  their own hook-based cleanup, and the unit-lane guard covers them: it
+  snapshots the `flair-*` names in the OS temp directory before and after the
+  lane and fails when one appears, naming the new prefixes and their counts.
+
+  (Refs #1889)
+
 ## [0.56.0] - 2026-09-24
 
 ### Changed
