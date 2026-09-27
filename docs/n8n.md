@@ -70,7 +70,7 @@ The agent now answers using both its current chat history (from Flair Chat Memor
 
 n8n memory connectors expose a `sessionKey` parameter that scopes the chat history. Flair has a richer model:
 
-- **Subject** (required) — the entity / conversation / topic the memory is about. Indexed in Flair's schema; efficient to filter on. Default: `={{ $workflow.name }}`.
+- **Subject** (required) — the entity / conversation / topic the memory is about. Matching is client-side by subject comparison, with no ordering applied. Default: `={{ $workflow.name }}`.
 - **Session Sub-Key** (optional) — appended to the subject as `<subject>:<sessionKey>`. Use the n8n execution id (`={{ $execution.id }}`) for per-run isolation, or a customer/user id for per-customer scoping, or leave blank to share across runs.
 
 Patterns:
@@ -91,9 +91,9 @@ For production deployments where untrusted workflow inputs reach Flair, wait for
 
 If any of those don't hold, use Flair's CLI / SDK clients (which support per-agent Ed25519 today) and wait for the n8n credential update.
 
-## Get By Tag — coming soon
+## Get By Tag
 
-The Flair Search node currently exposes Semantic Search and Get By Subject. **Get By Tag** is deferred until `flair-client.memory.list` exposes a `tags` filter. Workaround for now: use Semantic Search and let the model filter results by tags in the response.
+The Flair Search node currently exposes Semantic Search and Get By Subject. **Get By Tag** is not yet exposed as an operation. The `memory.list` client does support the `tags` filter — use it directly via the SDK for agent-driven tag filtering.
 
 ## Worked examples
 

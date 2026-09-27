@@ -108,7 +108,7 @@ command also works; do not point an automation at "start a crew agent" directly
 — that path has no idempotent agentId and can double-launch.
 
 Identity:
-  FLAIR_AGENT_ID     required. Own feed only — there is no --participant flag.
+  FLAIR_AGENT_ID     required. A signed runner drains its own feed; with admin Basic credentials and no key, selects the feed by ID (no --participant flag).
   FLAIR_URL          Flair HTTP origin (default http://localhost:19926)
   FLAIR_KEY_PATH     Ed25519 key (default ~/.flair/keys/<id>.key)
 

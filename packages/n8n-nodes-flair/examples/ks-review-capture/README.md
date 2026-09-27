@@ -80,12 +80,12 @@ Notes on each step:
 
 - **Filter expansion**: add `host`, `ember`, or any agent to the `containedInList` value to capture more sources. Pair with a `kind:` tag-update in the Format step so the search story stays clean.
 - **Branch durability by value (recommended over blanket-tiering)**: the Format step is a Code node, so you can keep the stream cheap by default and only elevate the records worth keeping. Leave routine/coordination mail (canary pings, acks, "loop healthy") at `ephemeral`, and bump the genuinely high-value subset — e.g. a multi-paragraph verdict, or any mail that mentions a PR number — to `standard` (or, sparingly, `persistent`). This keeps the durable tier curated instead of flooded. See the durability warning above for why blanket `persistent` is the wrong default.
-- **Deeper formatting**: the Format step is also where you can pull more structure out of the body (e.g., bullet-point analysis vs paragraph prose) or set `validFrom`/`validTo` for time-bounded reasoning.
+- **Deeper formatting**: the Format step is also where you can pull more structure out of the body (e.g., bullet-point analysis vs paragraph prose). The downstream FlairWrite node forwards only `type`, `durability`, `tags`, and `subject`.
 - **Cross-instance**: this workflow writes to *one* Flair instance. The hub-spoke federation pair (local ↔ Fabric) propagates the writes without further n8n changes — every memory captured here becomes searchable from every federated peer.
 
 ## Operational notes
 
-- The dedup index is workflow-static-data scoped, so re-importing the workflow (new ID) starts fresh. If you want hard de-duplication across imports, key the dedup off `mail.id` directly into Flair using `flair.memory.write` with a deterministic ID or a `foreignId` tag, and let Flair's content-hash dedup handle it.
+- The dedup index is workflow-static-data scoped, so re-importing the workflow (new ID) starts fresh. To add a dedup signal, write to Flair with a deterministic ID via `flair.memory.write` — Flair's content hash reports collisions but never suppresses the write.
 - The schedule trigger is 5 min on purpose — fast enough for review-mail freshness, slow enough that the inbox listing isn't burning CPU.
 - If Flint's inbox is full (the 100-message hard cap), TPS bounces inbound mail; this workflow only sees what's actually delivered. The inbox-cap is a separate operational concern (see `reference_flint_inbox_cap`).
 

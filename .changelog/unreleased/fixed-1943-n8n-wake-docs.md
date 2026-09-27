@@ -1,0 +1,5 @@
+- **Doc corrections: the n8n nodes, wake-runner, and auth docs describe what the code actually does.**
+
+  The node README removes "ordered by recency" from the Flair Search Get By Subject claim (the node requests no ordering, and the client filters locally), and replaces the "coming in a follow-up" language with a note that the `memory.list` client supports the `tags` filter (the node does not yet expose it). docs/n8n.md replaces "Indexed in Flair's schema" with "Matching is client-side by subject comparison" for the same reason. The ks-review-capture example changes `validFrom`/`validTo` to note the FlairWrite node only forwards type, durability, tags, and subject, and corrects the hard dedup claim to report collisions without suppressing the write. docs/auth.md adds that OpenClaw identity comes from the host context with `agentId` as an optional allow-list. The wake-runner README adds a security note that admin Basic auth belongs only on HTTPS or loopback; its help text string clarifies that admin credentials with no key select the feed by ID.
+
+   (Refs #1943)
