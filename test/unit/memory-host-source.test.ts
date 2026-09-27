@@ -281,3 +281,41 @@ describe("A1'' item 1 — shipped attributes survive the guarded write", () => {
     expect(stored.type).toBe("session"); // assertion: the declared field is kept
   });
 });
+
+// ─── A1'' item 4: the join compares the reader with the pointer row's authorId ──
+
+describe("A1'' item 4 — the join trusts the pointer row's authorId", () => {
+  async function collectSearch(agentId: string): Promise<any[]> {
+    const out: any[] = [];
+    for await (const r of await makeMemory(agentCtx(agentId)).search()) out.push(r);
+    return out;
+  }
+
+  it("(j2) search returns the author's own pointer and 'withheld' to a non-author", async () => {
+    // No provenance on the row — the SemanticSearch default select omits it,
+    // so a provenance-based join would withhold the pointer from its own
+    // author. The pointer row's authorId is what decides.
+    const row = seedMemory({ id: "mem-j2", agentId: "agent-a", visibility: "shared", provenance: undefined });
+    pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a" });
+
+    const asAuthor = await collectSearch("agent-a");
+    expect(asAuthor.find((r) => r.id === row.id)?.hostSource).toBe(JSON.stringify(POINTER)); // assertion: the author sees it
+    const asOther = await collectSearch("agent-b");
+    expect(asOther.find((r) => r.id === row.id)?.hostSource).toBe("withheld"); // assertion: a non-author is withheld
+  });
+
+  it("(j3) a batched multi-row search does ONE pointer query with correct per-row outcomes", async () => {
+    const rows = [0, 1, 2].map((i) => seedMemory({ id: `mem-j3-${i}`, agentId: "agent-a", visibility: "shared", provenance: undefined }));
+    for (const row of rows) {
+      pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a" });
+    }
+    harnessState.pointerSearchCalls = 0;
+    const asAuthor = await collectSearch("agent-a");
+    expect(harnessState.pointerSearchCalls).toBe(1); // assertion: ONE pointer query for the whole set
+    expect(asAuthor.filter((r) => r.hostSource === JSON.stringify(POINTER)).length).toBe(3); // assertion: all three pointers for the author
+    harnessState.pointerSearchCalls = 0;
+    const asOther = await collectSearch("agent-b");
+    expect(harnessState.pointerSearchCalls).toBe(1); // assertion: ONE pointer query
+    expect(asOther.every((r) => r.hostSource === "withheld")).toBe(true); // assertion: every row withheld for a non-author
+  });
+});

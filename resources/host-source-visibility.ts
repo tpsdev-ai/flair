@@ -18,11 +18,15 @@
  *
  * The rule (A3): a pointer is content, never wider than its record.
  *   - Default (scopeAtWrite absent/null): the pointer is visible ONLY to the
- *     record's author.
+ *     pointer row's AUTHOR (`authorId`).
  *   - Opted in: the pointer row stored the record's visibility AS IT WAS AT
  *     WRITE (`scopeAtWrite`); the pointer's EFFECTIVE visibility is the
  *     NARROWER of that stored value and the record's CURRENT visibility, so a
  *     later widening of the record never widens the pointer.
+ *
+ * A1'' item 4: the reader is compared with the POINTER ROW's `authorId`
+ * (server-stamped from the authenticated principal at Memory write time),
+ * never with Memory provenance.
  *
  * The decision is made HERE, on the server, in the read projection — no client
  * or MCP layer can un-redact. Every read surface that returns Memory records
@@ -41,20 +45,6 @@ export interface PointerRow {
   scopeAtWrite?: string | null;
   authorId?: string | null;
   receivedAt?: string | null;
-}
-
-/** The server-stamped, authenticated author id from provenance — NEVER a
- *  writer-supplied field (A6: attribution is the server's, not the claim's). */
-export function hostSourceAuthor(record: any): string | null {
-  const raw = record?.provenance;
-  if (typeof raw !== "string" || raw.length === 0) return null;
-  try {
-    const p = JSON.parse(raw);
-    const id = p?.verified?.agentId;
-    return typeof id === "string" && id.length > 0 ? id : null;
-  } catch {
-    return null;
-  }
 }
 
 /** The NARROWER of two visibilities (A3): "private" wins over anything else. */
@@ -95,7 +85,12 @@ export function pointerOutcomeFor(
   pointer: PointerRow | null | undefined,
 ): "none" | "pointer" | "withheld" {
   if (!pointer || typeof pointer.hostSource !== "string" || pointer.hostSource.length === 0) return "none";
-  const author = hostSourceAuthor(record);
+  // A1'' item 4: the author is the POINTER row's `authorId`, stamped from the
+  // authenticated principal at Memory write time (resources/Memory.ts). The
+  // projection NEVER uses Memory provenance — that is why SemanticSearch and
+  // search can show an author their pointer without selecting a provenance
+  // column.
+  const author = typeof pointer.authorId === "string" && pointer.authorId.length > 0 ? pointer.authorId : null;
   const isAuthor = author !== null && readerAgentId != null && author === readerAgentId;
   if (isAuthor) return "pointer";
   const scopeAtWrite = pointer.scopeAtWrite;

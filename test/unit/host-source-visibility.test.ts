@@ -9,7 +9,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   HOST_SOURCE_WITHHELD,
-  hostSourceAuthor,
   narrowerVisibility,
   pointerOutcomeFor,
   projectHostSource,
@@ -81,12 +80,14 @@ describe("A3 — the read projection, both directions", () => {
     expect(out.hostSource).not.toContain("#frag");
   });
 
-  test("the author id is read from provenance, never the record's agentId field", () => {
-    // agentId says one thing, provenance says another (a forged field): the
-    // server-stamped provenance author decides.
+  test("the author id is the POINTER row's authorId, never Memory provenance", () => {
+    // A1'' item 4: the pointer row's authorId is server-stamped at Memory write
+    // time; the projection compares the reader with THAT. Provenance (which a
+    // default SemanticSearch select omits) is irrelevant to the join.
     const forged: any = { agentId: "agent-b", visibility: "shared", provenance: prov("agent-a") };
-    expect(hostSourceAuthor(forged)).toBe("agent-a"); // assertion
-    expect(projectHostSource(forged, "agent-b", pointer()).hostSource).toBe(HOST_SOURCE_WITHHELD); // b is not the author
+    // provenance says agent-a, the pointer row says agent-b: the pointer wins.
+    expect(projectHostSource(forged, "agent-b", pointer({ authorId: "agent-b" })).hostSource).toBe(POINTER); // assertion: b IS the pointer author
+    expect(projectHostSource(forged, "agent-a", pointer({ authorId: "agent-b" })).hostSource).toBe(HOST_SOURCE_WITHHELD); // assertion: a is not
   });
 
   test("narrowerVisibility: private wins", () => {
