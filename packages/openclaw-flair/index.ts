@@ -1078,6 +1078,10 @@ export default {
           let memId: string | null = null;
           try {
             const client = clientFor(ctx.agentId);
+            // #1970: validate the supersede id and build its path BEFORE the
+            // primary write, so a refused id (a URL path dot-segment) can never
+            // let a request out first. The SAME built path is reused for the PUT.
+            const supersedePath = supersedes ? `/Memory/${encodeRecordId(supersedes)}` : null;
             // D11: no hand-built id. The client's canonical UUID path owns
             // memory ids (`agentId-<uuid>`), so two writes in the same
             // millisecond never address the same record.
@@ -1091,11 +1095,11 @@ export default {
             memId = typeof (result as any).id === "string" ? (result as any).id : null;
             const errors: string[] = [];
             let supersedeClosed: true | false | "not-found" = false;
-            if (supersedes) {
+            if (supersedes && supersedePath) {
               try {
                 const old = await client.memory.get(supersedes);
                 if (old) {
-                  await client.request("PUT", `/Memory/${encodeRecordId(supersedes)}`, {
+                  await client.request("PUT", supersedePath, {
                     ...old,
                     archived: true,
                     archivedAt: new Date().toISOString(),

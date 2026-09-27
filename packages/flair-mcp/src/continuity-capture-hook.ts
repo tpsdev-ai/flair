@@ -85,6 +85,11 @@ export interface CaptureDeps {
   sessionDir?: string;
   env?: Record<string, string | undefined>;
   now?: () => Date;
+  /** Test seam (flair#1970): the row whose `id` becomes the `/Memory/<id>` path
+   *  segment. Its id is URL-safe by construction, so a test drives the REAL
+   *  request path with a dot-segment id through this override and checks that
+   *  no request is sent when the id is refused. Production never sets it. */
+  buildRow?: (agentId: string, state: unknown, plan: unknown, now: Date) => { id: string };
   /** Debug-level warn sink (default: one stderr line). Never stdout. */
   warn?: (message: string) => void;
 }
@@ -176,7 +181,7 @@ export async function runCapture(rawInput: string, deps: CaptureDeps = {}): Prom
   const state = bumpSeq(sessionDir, agentId, harnessSessionId, now());
   if (!state) return { wrote: false, reason: "no-state" };
 
-  const row = buildJournalRow(agentId, state, plan, now());
+  const row = (deps.buildRow ?? buildJournalRow)(agentId, state, plan, now());
   const makeClient = deps.makeClient ?? defaultClientFactory;
   try {
     const client = await makeClient(agentId);

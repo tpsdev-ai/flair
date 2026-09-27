@@ -472,6 +472,21 @@ def test_encode_record_id_refuses_dot_segments(monkeypatch):
             flair_plugin._encode_record_id(bad)
 
 
+def test_store_memory_refuses_dot_segment_id_before_any_request(configured_provider):
+    """#1970 item 3: driven through the REAL request path (`_store_memory` builds
+    and sends `PUT /Memory/<id>`), each dot-segment id is refused with the
+    request seam untouched — nothing is sent."""
+    for bad in (".", ".."):
+        with patch.object(
+            configured_provider,
+            "_request",
+            side_effect=AssertionError("a request must not be sent for a refused id"),
+        ) as spy:
+            with pytest.raises(ValueError, match="dot-segment"):
+                configured_provider._store_memory("x", "standard", [], memory_id=bad)
+            assert not spy.called  # assertion: the request spy is untouched
+
+
 def test_handle_tool_call_store_skipped_in_non_primary_context(ed25519_key_file, monkeypatch):
     monkeypatch.setenv("FLAIR_AGENT_ID", "test-agent")
     monkeypatch.setenv("FLAIR_KEY_PATH", str(ed25519_key_file))

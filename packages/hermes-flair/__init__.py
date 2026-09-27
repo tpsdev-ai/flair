@@ -531,10 +531,19 @@ class FlairMemoryProvider(MemoryProvider):
             return result["results"]
         return []
 
-    def _store_memory(self, content: str, durability: str, tags: List[str]) -> Dict[str, Any]:
+    def _store_memory(
+        self,
+        content: str,
+        durability: str,
+        tags: List[str],
+        memory_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         if durability not in ("permanent", "persistent", "standard", "ephemeral"):
             durability = "standard"
-        memory_id = f"{self._agent_id}-{int(time.time() * 1000)}"
+        # #1970: the id is generated, but a caller may pin it (a test drives the
+        # REAL request path with a dot-segment id to prove nothing is sent).
+        if memory_id is None:
+            memory_id = f"{self._agent_id}-{int(time.time() * 1000)}"
         body = {
             "id": memory_id,
             "agentId": self._agent_id,

@@ -1629,20 +1629,20 @@ describe("slice 2 round 2 — tombstone, bounds and failed primary writes", () =
     expect(u.hash).toBe("");
   });
 
-  test("#1970: a '.'/'..' supersedes id is refused and no request addresses it", async () => {
+  test("#1970: a '.'/'..' supersedes id is refused BEFORE any request, naming the id and the rule", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
-    const calls = installFetchStub(() => ({ status: 200, body: {} }));
     const api = createMockApi();
     plugin.register(api as any);
     const store = api._resolveTool("memory_store", { agentId: "A" });
-    const res = await store.execute("1", { text: "remember this", supersedes: "." });
-    expect(res.details.supersedeClosed).toBe(false);
-    expect(res.details.errors.join(" ")).toMatch(/dot-segment/); // assertion: refused, naming the rule
-    expect(calls.some((c) => {
-      const p = new URL(c.url).pathname;
-      return p === "/Memory/." || p === "/Memory/..";
-    })).toBe(false); // assertion: the dot-segment id was never addressed
+    for (const bad of [".", ".."]) {
+      const calls = installFetchStub(() => ({ status: 200, body: {} }));
+      const res = await store.execute("1", { text: "remember this", supersedes: bad });
+      expect(calls).toHaveLength(0); // assertion: ZERO fetch calls — nothing went out
+      expect(res.details.written).toBe(false); // assertion: the primary write did not happen
+      expect(res.details.errors.join(" ")).toMatch(/dot-segment/); // assertion: the rule is named
+      expect(res.details.errors.join(" ")).toContain(bad); // assertion: the id is named
+    }
   });
 });
 

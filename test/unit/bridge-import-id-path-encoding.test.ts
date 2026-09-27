@@ -181,4 +181,18 @@ describe("flair bridge import: the signed Memory path equals the sent path (#197
 
     expect(res.code).toBe(0);
   }, 25_000); // per-case budget > the child deadline (flair#1807)
+
+  it("a '.'/'..' record id is refused with ZERO requests to the daemon", async () => {
+    for (const bad of [".", ".."]) {
+      const before = observed.length;
+      writeFileSync(join(dir, "records.jsonl"), JSON.stringify({ id: bad, text: "hello there" }) + "\n");
+      const res = await runCli(
+        ["bridge", "import", BRIDGE_NAME, "--agent", AGENT, "--cwd", dir, "--url", mockUrl, "--key", keyPath],
+        { HOME: scratch },
+        dir,
+      );
+      expect(observed.length).toBe(before); // assertion: the daemon received NOTHING for a dot-segment id
+      expect(res.code).not.toBe(0); // assertion: the import refused the id
+    }
+  }, 25_000);
 });
