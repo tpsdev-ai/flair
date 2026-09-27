@@ -493,45 +493,32 @@ describe("round 9: post-separator digit cap + options-only timeout (flair#1825)"
 
 describe("round 10: the SEED stdout says exactly what it guarantees (flair#1825)", () => {
   const root = join(import.meta.dirname, "..", "..");
-  const hasAnchor = (() => {
+  // The seed path runs only while the base has NO baseline file, and origin/main
+  // has carried scripts/ci/cli-spawn-budgets.baseline.json since #1920. So this
+  // case runs the real gate against a FIXED base instead: the main commit just
+  // before the baseline file landed, which descends from the anchor and lacks
+  // the file. History does not move, so the case keeps covering the SEED output
+  // however main changes. The dead seed path's removal is tracked in #1921.
+  const PRE_BASELINE_BASE = "d37879362bff85b6b2b4091741900b738e3ec99f";
+  const hasCommit = (sha: string) => {
     try {
-      execFileSync("git", ["cat-file", "-e", `${SEED_INTRODUCTION_BASE}^{commit}`], { cwd: root, stdio: "ignore" });
+      execFileSync("git", ["cat-file", "-e", `${sha}^{commit}`], { cwd: root, stdio: "ignore" });
       return true;
     } catch {
       return false;
     }
-  })();
-  // The seed path runs only while the base has NO baseline file. origin/main
-  // has carried scripts/ci/cli-spawn-budgets.baseline.json since #1920, so on
-  // any checkout where origin/main has it this case cannot arise; the dead
-  // seed path's removal is tracked in #1921. Check the precondition instead of
-  // assuming it: a full-history clone previously failed here, while CI's
-  // shallow checkout skipped it for lack of the anchor.
-  const baseHasBaseline = (() => {
-    try {
-      execFileSync("git", ["cat-file", "-e", "origin/main:scripts/ci/cli-spawn-budgets.baseline.json"], { cwd: root, stdio: "ignore" });
-      return true;
-    } catch {
-      return false;
-    }
-  })();
-  const skipReason = !hasAnchor
-    ? " — skipped: anchor object not in this checkout"
-    : baseHasBaseline
-      ? " — skipped: origin/main already has the baseline file, so the seed path cannot run (#1921)"
-      : "";
-  it.skipIf(!hasAnchor || baseHasBaseline)(`the SEED text names the ACTUAL base sha and says it DESCENDS from the anchor${skipReason}`, () => {
-    // The real CI case: origin/main is a DESCENDANT of the anchor and has no
-    // baseline file → the seed path fires (Sherlock's repro).
+  };
+  const available = hasCommit(SEED_INTRODUCTION_BASE) && hasCommit(PRE_BASELINE_BASE);
+  it.skipIf(!available)(`the SEED text names the ACTUAL base sha and says it DESCENDS from the anchor${available ? "" : " — skipped: the anchor or the pre-baseline commit is not in this checkout"}`, () => {
     const r = spawnSync("node", [join(root, "scripts", "ci", "check-cli-spawn-budgets.mjs")], {
       cwd: root,
       encoding: "utf8",
-      env: { ...process.env, CLI_SPAWN_BUDGETS_BASE_REF: "origin/main" },
+      env: { ...process.env, CLI_SPAWN_BUDGETS_BASE_REF: PRE_BASELINE_BASE },
     });
     const out = `${r.stdout}${r.stderr}`;
-    const baseSha = execFileSync("git", ["rev-parse", "origin/main"], { cwd: root, encoding: "utf8" }).trim();
+    expect(r.status, out).toBe(0);
     expect(out).toContain("SEED");
-    expect(out).toContain(baseSha); // names the ACTUAL base sha
+    expect(out).toContain(PRE_BASELINE_BASE); // names the ACTUAL base sha
     expect(out).toContain("DESCENDS from");
     expect(out).not.toContain("resolves to");
     expect(out).not.toContain("Any other base");
