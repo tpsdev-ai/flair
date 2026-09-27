@@ -1641,7 +1641,7 @@ describe("slice 2 round 2 — tombstone, bounds and failed primary writes", () =
       expect(calls).toHaveLength(0); // assertion: ZERO fetch calls — nothing went out
       expect(res.details.written).toBe(false); // assertion: the primary write did not happen
       expect(res.details.errors.join(" ")).toMatch(/dot-segment/); // assertion: the rule is named
-      expect(res.details.errors.join(" ")).toContain(bad); // assertion: the id is named
+      expect(res.details.errors.join(" ")).toContain(`record id ${JSON.stringify(bad)}`); // assertion: the id is named literally
     }
   });
 });

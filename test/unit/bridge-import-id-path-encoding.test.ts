@@ -80,6 +80,9 @@ describe("flair bridge import: the signed Memory path equals the sent path (#197
   let server: Server;
   let mockUrl: string;
   const observed: Observed[] = [];
+  // Counts EVERY inbound request, before any routing, so a request that went
+  // somewhere other than a /Memory/ PUT is still visible.
+  let requestCount = 0;
 
   beforeAll(async () => {
     ensureCliBuild();
@@ -113,11 +116,12 @@ describe("flair bridge import: the signed Memory path equals the sent path (#197
     writeFileSync(join(dir, "records.jsonl"), JSON.stringify({ id: RAW_ID, text: "hello there" }) + "\n");
 
     server = createServer((req: IncomingMessage, res: ServerResponse) => {
+      requestCount += 1; // count EVERY inbound request, before routing
       let body = "";
       req.on("data", (c) => (body += c));
       req.on("end", () => {
         const url = req.url ?? "";
-        if (req.method === "PUT" && url.startsWith("/Memory/")) {
+        if (req.method === "PUT" && url.includes("/Memory/")) {
           const auth = String(req.headers["authorization"] ?? "");
           const m = /^TPS-Ed25519 ([^:]+):(\d+):([^:]+):(.+)$/.exec(auth);
           let ok = false;
@@ -184,15 +188,42 @@ describe("flair bridge import: the signed Memory path equals the sent path (#197
 
   it("a '.'/'..' record id is refused with ZERO requests to the daemon", async () => {
     for (const bad of [".", ".."]) {
-      const before = observed.length;
+      const before = requestCount;
       writeFileSync(join(dir, "records.jsonl"), JSON.stringify({ id: bad, text: "hello there" }) + "\n");
       const res = await runCli(
         ["bridge", "import", BRIDGE_NAME, "--agent", AGENT, "--cwd", dir, "--url", mockUrl, "--key", keyPath],
         { HOME: scratch },
         dir,
       );
-      expect(observed.length).toBe(before); // assertion: the daemon received NOTHING for a dot-segment id
+      // Count EVERY inbound request, not just PUTs under /Memory/: a request
+      // that went elsewhere must still show up here.
+      expect(requestCount).toBe(before); // assertion: the daemon received NOTHING for a dot-segment id
       expect(res.code).not.toBe(0); // assertion: the import refused the id
+      expect(res.stderr).toContain("dot-segment"); // assertion: the refusal rule is named
+      expect(res.stderr).toContain(`record id ${JSON.stringify(bad)}`); // assertion: the id is named literally
     }
+  }, 25_000);
+
+  it("a trailing-slash base URL sends and signs exactly one slash", async () => {
+    const beforeSeen = observed.length;
+    writeFileSync(join(dir, "records.jsonl"), JSON.stringify({ id: RAW_ID, text: "hello there" }) + "\n");
+    // A base URL with a path segment before the trailing slash is what exposes
+    // the signed-vs-sent divergence under the Bun runtime: Bun's fetch COLLAPSES
+    // a bare `//` right after the authority, but keeps `//` after a segment, so
+    // `${mockUrl}/flair/` + `/Memory/<id>` is sent as `/flair//Memory/<id>`
+    // while the signed path is `/Memory/<id>`.
+    const res = await runCli(
+      ["bridge", "import", BRIDGE_NAME, "--agent", AGENT, "--cwd", dir, "--url", `${mockUrl}/flair/`, "--key", keyPath],
+      { HOME: scratch },
+      dir,
+    );
+
+    const seen = observed.slice(beforeSeen);
+    expect(seen).toHaveLength(1); // assertion: exactly one Memory request
+    // The mock records req.url, which is the request path (not a full URL), so
+    // compare it directly: exactly one slash, the path that was signed.
+    expect(seen[0].path).toBe(`/Memory/${encodeURIComponent(RAW_ID)}`); // assertion: ONE slash, no doubled path
+    expect(seen[0].signatureOk).toBe(true); // assertion: the signature covers the sent path
+    expect(res.code).toBe(0); // assertion: the import succeeded
   }, 25_000);
 });

@@ -64,9 +64,14 @@ export async function signedFetch(
   p: string,
   body?: unknown,
 ): Promise<SignedResponse> {
-  const res = await fetch(`${harper.httpURL}${p}`, {
+  // Build the FINAL url before signing so a base URL with a trailing slash (or
+  // any normalization) yields exactly one slash: the signature must cover the
+  // path the request actually carries (#1970).
+  const url = new URL(p, harper.httpURL);
+  const signedPath = `${url.pathname}${url.search}`;
+  const res = await fetch(url, {
     method,
-    headers: { Authorization: ed25519Header(agent, method, p), "Content-Type": "application/json" },
+    headers: { Authorization: ed25519Header(agent, method, signedPath), "Content-Type": "application/json" },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();

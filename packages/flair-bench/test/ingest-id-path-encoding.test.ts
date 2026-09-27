@@ -27,9 +27,9 @@ interface Captured {
 const originalFetch = globalThis.fetch;
 let captured: Captured[] = [];
 
-function client(agentId: string): BenchClient {
+function client(agentId: string, httpURL = "http://bench.local"): BenchClient {
   return {
-    harper: { httpURL: "http://bench.local", opsURL: "http://bench.local:ops", admin: { username: "a", password: "b" } },
+    harper: { httpURL, opsURL: "http://bench.local:ops", admin: { username: "a", password: "b" } },
     agent: mkAgent(agentId),
   };
 }
@@ -73,7 +73,9 @@ describe("flair-bench ingest: the signed Memory path equals the sent path (#1970
 
     expect(captured).toHaveLength(1);
     const call = captured[0];
-    const sentPath = call.url.slice(bench.harper.httpURL.length);
+    // Derive the received path from the URL itself — not by slicing the base, so
+    // a trailing-slash base cannot hide a doubled slash.
+    const sentPath = new URL(call.url).pathname;
 
     // One segment after /Memory/, decoding back to exactly the id — no query,
     // no fragment. On bc400d52 the raw id is interpolated, so decodeURIComponent
@@ -96,5 +98,18 @@ describe("flair-bench ingest: the signed Memory path equals the sent path (#1970
       await expect(ingestSessionHistory(client("bench-agent"), sessions(bad))).rejects.toThrow(/dot-segment/);
       expect(captured).toHaveLength(0); // assertion: no request was sent
     }
+  });
+
+  test("a trailing-slash base URL still sends ONE slash, signed as sent", async () => {
+    const id = "rec#1?x/y%z w";
+    const bench = client("bench-agent", "http://bench.local/");
+    await ingestSessionHistory(bench, sessions(id));
+
+    expect(captured).toHaveLength(1);
+    const call = captured[0];
+    const receivedPath = new URL(call.url).pathname; // derived from the URL, not slicing
+    expect(receivedPath).toBe(`/Memory/${encodeURIComponent(id)}`); // assertion: exactly one slash
+    expect(signatureCovers(call, bench.agent.publicKey, receivedPath)).toBe(true); // assertion: signed path == sent path
+    expect(JSON.parse(call.body!).id).toBe(id);
   });
 });

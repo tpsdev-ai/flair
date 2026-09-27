@@ -36,7 +36,7 @@ describe("capture PUT path: Memory id encoding (#1970)", () => {
   test("a '.'/'..' id is refused (nothing to send)", () => {
     for (const bad of [".", ".."]) {
       expect(() => memoryPutPath(bad)).toThrow(/dot-segment/); // assertion: the rule is named
-      expect(() => memoryPutPath(bad)).toThrow(new RegExp(JSON.stringify(bad).slice(1, -1)));
+      expect(() => memoryPutPath(bad)).toThrow(`record id ${JSON.stringify(bad)}`); // assertion: the id is named literally
     }
   });
 });
