@@ -114,5 +114,18 @@ describe("flair#1951 — admin Basic credentials are refused over plain http to 
     const url = String(mockFetch.mock.calls[0]?.[0]);
     expect(new URL(url).host).toBe("127.0.0.1:19926"); // assertion: same host as FLAIR_URL
   });
+
+  test("(b8) the remote-http refusal names the host and the remedy, never the credentials", async () => {
+    const remote = basicClient("http://flair.example.test:19926");
+    let message = "";
+    try {
+      await remote.request("GET", "/Health");
+    } catch (e) {
+      message = String((e as Error).message);
+    }
+    expect(message).toContain("flair.example.test");
+    expect(message).toContain("use an https:// FLAIR_URL, or an Ed25519 key");
+    expect(message).not.toContain(ADMIN_PASS);
+  });
 });
 

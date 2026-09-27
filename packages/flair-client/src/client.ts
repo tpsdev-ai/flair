@@ -58,10 +58,16 @@ function assertBasicAuthTransportAllowed(target: string, base: string): void {
     parsed = new URL(target);
     baseParsed = new URL(base);
   } catch {
-    throw new Error("flair-client: refusing to send admin Basic credentials: the request URL could not be parsed");
+    throw new Error(
+      "flair-client: refusing to send admin Basic credentials: the request URL could not be parsed; " +
+        "check FLAIR_URL, or use an Ed25519 key for this agent",
+    );
   }
   if (parsed.host !== baseParsed.host) {
-    throw new Error("flair-client: refusing to send admin Basic credentials: the request URL's host differs from FLAIR_URL's");
+    throw new Error(
+      `flair-client: refusing to send admin Basic credentials to ${parsed.host}: it is not FLAIR_URL's host ` +
+        `(${baseParsed.host}); pass a request path that starts with "/", or use an Ed25519 key for this agent`,
+    );
   }
   if (parsed.protocol !== "http:") return; // https (and anything else) unaffected
   if (isLoopbackHostname(parsed.hostname)) return; // loopback http unaffected
