@@ -1449,7 +1449,12 @@ export class Memory extends (databases as any).flair.Memory {
     // the Memory row below. A client-supplied `hostSourceVisibility` is dropped
     // (never read). Reject, never truncate/coerce.
     const pointerInputs = extractPointerInputs(content);
-    const pointer = buildPointerForWrite({ inputs: pointerInputs, memoryId: content.id ?? "", visibility: content.visibility, auth });
+    // A1'' item 5: a partial PUT (one that omits `visibility`, e.g. a
+    // memory_update full put) must stamp scopeAtWrite from the record's
+    // EFFECTIVE visibility — the existing row's when the body omits it — not
+    // from an undefined body value that would wrongly yield author-only.
+    const effectiveVisibility = content.visibility ?? preExisting?.visibility;
+    const pointer = buildPointerForWrite({ inputs: pointerInputs, memoryId: content.id ?? "", visibility: effectiveVisibility, auth });
     if (pointer.denial) return pointer.denial;
 
     // Write-time provenance stamp (memory-provenance slice 1) — see

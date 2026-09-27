@@ -63,13 +63,14 @@ export function renderHostSourceUrl(url: string): string {
   }
 }
 
-/** The canonical hostSource JSON to RENDER: the full pointer, with any URL
- *  reduced to scheme/host/path (query + fragment stripped, A3). */
-function renderableCanonical(stored: string): string {
+/** The canonical hostSource VALUE to RENDER: the full pointer, with any URL
+ *  reduced to scheme/host/path (query + fragment stripped, A3). A1'' item 6:
+ *  reads return the validated OBJECT (not the stored canonical string), so a
+ *  read-then-full-update round trip hands the validator a value it accepts. */
+function renderableCanonical(stored: string): { v: 1; host: string; kind: string; id: string; url?: string } | typeof HOST_SOURCE_WITHHELD {
   const parsed = parseHostSource(stored);
   if (!parsed) return HOST_SOURCE_WITHHELD; // a stored value that will not re-validate never renders raw
-  const out = parsed.url !== undefined ? { ...parsed, url: renderHostSourceUrl(parsed.url) } : parsed;
-  return JSON.stringify(out);
+  return parsed.url !== undefined ? { ...parsed, url: renderHostSourceUrl(parsed.url) } : parsed;
 }
 
 /**

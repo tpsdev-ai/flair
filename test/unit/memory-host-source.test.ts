@@ -65,7 +65,7 @@ describe("A1' — the gated join for Memory.get / Memory.search", () => {
     pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a" });
 
     const asAuthor: any = await makeMemory(agentCtx("agent-a")).get(row.id);
-    expect(asAuthor.hostSource).toBe(JSON.stringify(POINTER)); // assertion: the author gets the pointer
+    expect(asAuthor.hostSource).toEqual(POINTER); // assertion: the author gets the validated object
 
     const asOther: any = await makeMemory(agentCtx("agent-b")).get(row.id);
     expect(asOther.hostSource).toBe("withheld"); // assertion: a non-author gets withheld
@@ -79,7 +79,7 @@ describe("A1' — the gated join for Memory.get / Memory.search", () => {
     const row = seedMemory({ visibility: "shared" });
     pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: "shared", authorId: "agent-a" });
     const opted: any = await makeMemory(agentCtx("agent-b")).get(row.id);
-    expect(opted.hostSource).toBe(JSON.stringify(POINTER)); // assertion: opted-in reader sees it
+    expect(opted.hostSource).toEqual(POINTER); // assertion: opted-in reader sees it
 
     // Opted in while PRIVATE, then the record is widened to shared.
     const row2 = seedMemory({ visibility: "shared" });
@@ -299,7 +299,7 @@ describe("A1'' item 4 — the join trusts the pointer row's authorId", () => {
     pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a" });
 
     const asAuthor = await collectSearch("agent-a");
-    expect(asAuthor.find((r) => r.id === row.id)?.hostSource).toBe(JSON.stringify(POINTER)); // assertion: the author sees it
+    expect(asAuthor.find((r) => r.id === row.id)?.hostSource).toEqual(POINTER); // assertion: the author sees it
     const asOther = await collectSearch("agent-b");
     expect(asOther.find((r) => r.id === row.id)?.hostSource).toBe("withheld"); // assertion: a non-author is withheld
   });
@@ -312,10 +312,40 @@ describe("A1'' item 4 — the join trusts the pointer row's authorId", () => {
     harnessState.pointerSearchCalls = 0;
     const asAuthor = await collectSearch("agent-a");
     expect(harnessState.pointerSearchCalls).toBe(1); // assertion: ONE pointer query for the whole set
-    expect(asAuthor.filter((r) => r.hostSource === JSON.stringify(POINTER)).length).toBe(3); // assertion: all three pointers for the author
+    expect(asAuthor.filter((r) => r.hostSource && typeof r.hostSource === "object").length).toBe(3); // assertion: all three pointers for the author
     harnessState.pointerSearchCalls = 0;
     const asOther = await collectSearch("agent-b");
     expect(harnessState.pointerSearchCalls).toBe(1); // assertion: ONE pointer query
     expect(asOther.every((r) => r.hostSource === "withheld")).toBe(true); // assertion: every row withheld for a non-author
+  });
+});
+
+// ─── A1'' item 5: partial PUT — scopeAtWrite from the effective visibility ─────
+
+describe("A1'' item 5 — partial PUT stamps scopeAtWrite from the effective visibility", () => {
+  it("(p1) a PUT that omits visibility takes scopeAtWrite from the existing row", async () => {
+    seedMemory({ id: "mem-p1", agentId: "agent-a", visibility: "shared" });
+    const m = makeMemory(agentCtx("agent-a"));
+    await m.put({ id: "mem-p1", agentId: "agent-a", content: "a short note", hostSource: POINTER, hostSourceScope: "record" });
+    expect(pointerStore.get("mem-p1")?.scopeAtWrite).toBe("shared"); // assertion: the existing row's visibility, not null
+  });
+});
+
+// ─── A1'' item 6: round trip — reads return the validated object ──────────────
+
+describe("A1'' item 6 — a read-then-full-put round trip preserves the pointer", () => {
+  it("(rt1) get returns the pointer object, and writing the read row back keeps it", async () => {
+    const row = seedMemory({ id: "mem-rt1", agentId: "agent-a", visibility: "shared" });
+    pointerStore.set(row.id, { memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a" });
+    const m = makeMemory(agentCtx("agent-a"));
+
+    const read: any = await m.get(row.id);
+    expect(read.hostSource).toEqual(POINTER); // assertion: get returns the validated OBJECT, not the stored string
+
+    // A full-row update that writes the read row back (hostSource is the object)
+    // must not be refused — the validator accepts the object it returned.
+    const res: any = await m.put({ ...read });
+    expect((res as Response)?.status).toBeUndefined(); // assertion: not a refusal
+    expect(pointerStore.get(row.id)?.hostSource).toBe(JSON.stringify(POINTER)); // assertion: the pointer is preserved
   });
 });

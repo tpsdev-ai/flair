@@ -17,6 +17,7 @@ import {
 } from "../../resources/host-source-visibility.ts";
 
 const POINTER = '{"v":1,"host":"openclaw","kind":"run","id":"run-aaaaaaaa"}';
+const POINTER_OBJ = { v: 1, host: "openclaw", kind: "run", id: "run-aaaaaaaa" } as const;
 
 function prov(agentId: string | null): string {
   return JSON.stringify({ v: 1, verified: { agentId, timestamp: "2026-01-01T00:00:00.000Z", receivedAt: "2026-01-01T00:00:00.000Z" } });
@@ -40,7 +41,7 @@ function pointer(extra: Partial<PointerRow> = {}): PointerRow {
 describe("A3 — the read projection, both directions", () => {
   test("not opted in: the author sees the pointer", () => {
     const out = projectHostSource(record(), "agent-a", pointer());
-    expect(out.hostSource).toBe(POINTER); // assertion: author gets the pointer
+    expect(out.hostSource).toEqual(POINTER_OBJ); // assertion: author gets the validated object
   });
 
   test("not opted in: another reader gets 'withheld'", () => {
@@ -50,7 +51,7 @@ describe("A3 — the read projection, both directions", () => {
 
   test("opted in (shared at write): a reader of the record gets the pointer", () => {
     const out = projectHostSource(record({ visibility: "shared" }), "agent-b", pointer({ scopeAtWrite: "shared" }));
-    expect(out.hostSource).toBe(POINTER); // assertion: opted in → reader sees it
+    expect(out.hostSource).toEqual(POINTER_OBJ); // assertion: opted in → reader sees it
   });
 
   test("opted in but private at write: another reader still gets 'withheld'", () => {
@@ -75,9 +76,9 @@ describe("A3 — the read projection, both directions", () => {
   test("a URL renders as scheme/host/path only (query + fragment stripped)", () => {
     const stored = '{"v":1,"host":"cursor","kind":"launch","id":"x","url":"https://example.test/a/b?tok=secret#frag"}';
     const out = projectHostSource(record({ visibility: "shared" }), "agent-b", pointer({ hostSource: stored, scopeAtWrite: "shared" }));
-    expect(out.hostSource).toBe('{"v":1,"host":"cursor","kind":"launch","id":"x","url":"https://example.test/a/b"}'); // assertion
-    expect(out.hostSource).not.toContain("secret");
-    expect(out.hostSource).not.toContain("#frag");
+    expect(out.hostSource).toEqual({ v: 1, host: "cursor", kind: "launch", id: "x", url: "https://example.test/a/b" }); // assertion
+    expect(JSON.stringify(out.hostSource)).not.toContain("secret");
+    expect(JSON.stringify(out.hostSource)).not.toContain("#frag");
   });
 
   test("the author id is the POINTER row's authorId, never Memory provenance", () => {
@@ -86,7 +87,7 @@ describe("A3 — the read projection, both directions", () => {
     // default SemanticSearch select omits) is irrelevant to the join.
     const forged: any = { agentId: "agent-b", visibility: "shared", provenance: prov("agent-a") };
     // provenance says agent-a, the pointer row says agent-b: the pointer wins.
-    expect(projectHostSource(forged, "agent-b", pointer({ authorId: "agent-b" })).hostSource).toBe(POINTER); // assertion: b IS the pointer author
+    expect(projectHostSource(forged, "agent-b", pointer({ authorId: "agent-b" })).hostSource).toEqual(POINTER_OBJ); // assertion: b IS the pointer author
     expect(projectHostSource(forged, "agent-a", pointer({ authorId: "agent-b" })).hostSource).toBe(HOST_SOURCE_WITHHELD); // assertion: a is not
   });
 

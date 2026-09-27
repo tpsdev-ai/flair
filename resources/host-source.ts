@@ -56,10 +56,21 @@ function nfc(s: string): string {
  * any violation, naming the field and the reason.
  */
 export function validateHostSource(input: unknown): HostSourceResult {
-  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+  // A1'' item 6: accept the canonical JSON STRING too, so a value read back
+  // from a Memory row (or echoed by a client) round-trips through the write
+  // validator unchanged. An object is validated as before.
+  let raw: unknown = input;
+  if (typeof input === "string") {
+    try {
+      raw = JSON.parse(input);
+    } catch {
+      return { ok: false, error: "hostSource must be an object or its canonical JSON string" };
+    }
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     return { ok: false, error: "hostSource must be an object" };
   }
-  const obj = input as HostSourceInput;
+  const obj = raw as HostSourceInput;
   // Unknown top-level keys and any v other than 1 are refused (A2).
   const allowed = new Set(["v", "host", "kind", "id", "url"]);
   for (const key of Object.keys(obj)) {
