@@ -160,6 +160,20 @@ class TestStoreMemoryToolSurfacesWriteFailure:
         assert "refused (status 403)" in result["error"]
 
     @pytest.mark.asyncio
+    async def test_redirect_is_not_a_confirmed_write(self, service):
+        # A 302 is below 400. Before the fix it read as success, and the tool
+        # answered "stored" for a write Flair never acknowledged.
+        service._client.request.return_value = _mock_response(302, "Found")
+        store = create_flair_tools(service, app_name="app", user_id="user")[0]
+
+        result = await store(subject="s", description="a fact")
+
+        assert result.get("status") != "stored"
+        assert result["written"] == 0
+        assert result["failed"] == 1
+        assert "status 302" in result["error"]
+
+    @pytest.mark.asyncio
     async def test_successful_write_still_returns_stored(self, service):
         service._client.request.return_value = _mock_response(201)
         store = create_flair_tools(service, app_name="app", user_id="user")[0]

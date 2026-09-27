@@ -128,12 +128,14 @@ class FlairWriteError(FlairRequestError):
 
     A subclass of :class:`FlairRequestError`, so every existing
     ``except FlairRequestError`` keeps catching a failed write — the README
-    already promises the write path raises it. What it adds is honest batch
-    accounting: ``written`` is how many records landed, and ``failed`` lists
-    ``(record_id, status)`` for each that did not (status ``"?"`` when the
-    failure carried none, e.g. a connection error). ``status_code`` is the
-    first failure's status, so callers that read ``.status_code`` (as the
-    write-path logging does) keep working.
+    already promises ``add_memory`` raises it. What it adds is batch
+    accounting: ``written`` counts the records whose write Flair acknowledged
+    with a 2xx, and ``failed`` lists ``(record_id, status)`` for each attempt
+    that was refused or could not be confirmed (status ``"?"`` when the failure
+    carried none, e.g. a connection error or timeout, where the record may or
+    may not have landed). Entries with no text are skipped and appear in
+    neither list. ``status_code`` is the first failure's status, so callers
+    that read ``.status_code`` keep working.
     """
 
     def __init__(
@@ -642,7 +644,10 @@ class FlairMemoryService(BaseMemoryService):
             )
             raise
 
-        if resp.status_code >= 400:
+        # Only a 2xx confirms the request. httpx does not follow redirects, so a
+        # 3xx (or any other non-2xx) would otherwise read as success and a write
+        # could be reported as stored without landing (flair#1938).
+        if not 200 <= resp.status_code < 300:
             raise FlairRequestError(
                 method, path, resp.status_code, resp.reason_phrase
             )
@@ -899,10 +904,10 @@ class FlairMemoryService(BaseMemoryService):
                 written, app_name, user_id,
             )
 
-        # A failed write must never be reported as stored (flair#1938): after
-        # attempting every record, surface the partial batch honestly. If the
-        # whole batch landed, this is a no-op and add_memory keeps returning
-        # None as before.
+        # A failed or unconfirmed write must never be reported as stored
+        # (flair#1938): after attempting every text-bearing record, surface the
+        # partial batch. If every attempted write was acknowledged, this is a
+        # no-op and add_memory keeps returning None as before.
         if failed:
             raise FlairWriteError(written, len(memories), failed)
 

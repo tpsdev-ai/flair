@@ -229,12 +229,16 @@ usually means you are not the owner the server thinks you are — the three
 shapes above — not that you should switch POST for PUT.
 
 `search_memory` swallows transport failures to empty (ADK's contract).
-`list_memories` and the write path raise `FlairRequestError` with
-`.status_code` — read that status before guessing. A failed write is never
-reported as stored: when any record in a `store_memory` batch fails to write,
-the tool returns `{"error": <message>, "written": n, "failed": m}`, and
-`add_memory` raises `FlairWriteError` — a `FlairRequestError` subclass carrying
-`written`, `failed` and the first failure's `.status_code`.
+`list_memories` raises `FlairRequestError` with `.status_code` for any non-2xx
+response (read that status before guessing), and lets transport errors from
+`httpx` propagate. `add_memory` attempts every text-bearing record, then raises
+`FlairWriteError` (a `FlairRequestError` subclass carrying `written`, `failed`
+and the first failure's `.status_code`) if any write was refused or could not
+be confirmed. After a timeout or connection error the record may or may not
+have landed. The `store_memory` tool turns that into `{"error": <message>,
+"written": n, "failed": m}` and reports `"stored"` only when every write was
+acknowledged with a 2xx. `add_session_to_memory` and `add_events_to_memory`
+still log a failed write and continue.
 
 ## Security
 
