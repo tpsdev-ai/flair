@@ -48,13 +48,17 @@ export type SkipReason =
   // data.agentId. Absent is a skip, not an accept — deriving the
   // requirement from field presence would make the check opt-out.
   | "principal_mismatch"
+  | "principal_mismatch"
   // ─── flair#1940 A1' item 5 (hostSource is NOT federated) ────────────────
   // A record whose data carries a pointer field (hostSource / hostSourceScope
   // / hostSourceVisibility) is refused, never merged. The pointer table
   // (MemoryHostSource) is absent from FEDERATION_TABLE_POLICY, so it is never
   // in the sync's table set either (an inbound "MemoryHostSource" row skips as
   // "unknown_table").
-  | "pointer_not_federated";
+  | "pointer_not_federated"
+  // Emitted by FederationSync.post before the row is read: the payload's id is
+  // missing or is not the envelope's id, so the record is not applied.
+  | "id_mismatch";
 
 /**
  * Static policy for every table FederationSync will merge.

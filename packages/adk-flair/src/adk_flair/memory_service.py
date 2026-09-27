@@ -30,7 +30,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -121,6 +121,42 @@ class FlairRequestError(RuntimeError):
         self.path = path
         self.status_code = status_code
         self.reason = reason
+
+
+class FlairWriteError(FlairRequestError):
+    """One or more records in an ``add_memory`` batch failed to write.
+
+    A subclass of :class:`FlairRequestError`, so every existing
+    ``except FlairRequestError`` keeps catching a failed write — the README
+    already promises ``add_memory`` raises it. What it adds is batch
+    accounting: ``written`` counts the records whose write Flair acknowledged
+    with a 2xx, and ``failed`` lists ``(record_id, status)`` for each attempt
+    that was refused or could not be confirmed (status ``"?"`` when the failure
+    carried none, e.g. a connection error or timeout, where the record may or
+    may not have landed). Entries with no text are skipped and appear in
+    neither list. ``status_code`` is the first failure's status, so callers
+    that read ``.status_code`` keep working.
+    """
+
+    def __init__(
+        self, written: int, total: int, failed: List[Tuple[str, Any]]
+    ):
+        self.written = written
+        self.total = total
+        self.failed = failed
+        first_status = failed[0][1] if failed else "?"
+        self.status_code = first_status
+        # Attribute-compatibility with FlairRequestError. A batch failure has
+        # no single method/path/reason, so these stay None rather than being
+        # fabricated from an arbitrary member of the batch.
+        self.method = None
+        self.path = None
+        self.reason = None
+        RuntimeError.__init__(
+            self,
+            f"{written} of {total} memories written; "
+            f"{len(failed)} refused (status {first_status})",
+        )
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
@@ -608,7 +644,10 @@ class FlairMemoryService(BaseMemoryService):
             )
             raise
 
-        if resp.status_code >= 400:
+        # Only a 2xx confirms the request. httpx does not follow redirects, so a
+        # 3xx (or any other non-2xx) would otherwise read as success and a write
+        # could be reported as stored without landing (flair#1938).
+        if not 200 <= resp.status_code < 300:
             raise FlairRequestError(
                 method, path, resp.status_code, resp.reason_phrase
             )
@@ -823,6 +862,7 @@ class FlairMemoryService(BaseMemoryService):
         subject_value = _resolve_subject(subject, custom_metadata)
 
         written = 0
+        failed: List[Tuple[str, Any]] = []
         for mem in memories:
             content_text = self._extract_content_text(mem.content)
             if not content_text:
@@ -851,6 +891,7 @@ class FlairMemoryService(BaseMemoryService):
                 written += 1
             except Exception as exc:
                 status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None) or "?"
+                failed.append((record_id, status))
                 logger.warning(
                     "adk-flair: direct memory write failed for id %s "
                     "(status=%s, written=%d/%d)",
@@ -862,6 +903,13 @@ class FlairMemoryService(BaseMemoryService):
                 "adk-flair: wrote %d direct memories (app=%s, user=%s)",
                 written, app_name, user_id,
             )
+
+        # A failed or unconfirmed write must never be reported as stored
+        # (flair#1938): after attempting every text-bearing record, surface the
+        # partial batch. If every attempted write was acknowledged, this is a
+        # no-op and add_memory keeps returning None as before.
+        if failed:
+            raise FlairWriteError(written, len(memories), failed)
 
     async def search_memory(
         self,

@@ -59,7 +59,7 @@ import httpx
 from google.adk.memory.memory_entry import MemoryEntry
 from google.genai import types
 
-from adk_flair.memory_service import FlairMemoryService
+from adk_flair.memory_service import FlairMemoryService, FlairWriteError
 
 logger = logging.getLogger("adk_flair")
 
@@ -202,6 +202,14 @@ def create_flair_tools(
             # Validation (metadata caps, over-long subject): surface the
             # actionable message so the model can shrink the payload & retry.
             return {"error": str(exc)}
+        except FlairWriteError as exc:
+            # A failed write is never "stored" (flair#1938). Report the
+            # partial batch so the model knows what landed and what did not.
+            return {
+                "error": str(exc),
+                "written": exc.written,
+                "failed": len(exc.failed),
+            }
         return {"status": "stored", "subject": subject}
 
     async def search_memory(query: str, limit: int = 5) -> dict:

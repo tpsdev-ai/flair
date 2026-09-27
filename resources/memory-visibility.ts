@@ -70,8 +70,8 @@ export function isPrivateVisibility(visibility: string | null | undefined): bool
  * would fall back to the durability-keyed default, which for a permanent or
  * persistent write is `shared` — the same wrong outcome, arrived at quietly.
  *
- * `undefined`/`null` are accepted: omitting the field is how a caller asks for
- * the durability-keyed default, and that is a documented, intentional path.
+ * `undefined`/`null` are accepted: on a new record, omitting the field asks for
+ * the durability-keyed default; on an update, it keeps the stored visibility.
  */
 export function assertValidVisibility(visibility: unknown): string | null {
   if (visibility === undefined || visibility === null) return null;
@@ -80,8 +80,9 @@ export function assertValidVisibility(visibility: unknown): string | null {
   }
   return (
     `visibility must be ${WRITABLE_VISIBILITIES.map((v) => `"${v}"`).join(" or ")} ` +
-    `(got: ${JSON.stringify(visibility)}). Omit it to use the durability-keyed default: ` +
-    `permanent/persistent -> shared, standard/ephemeral -> private.`
+    `(got: ${JSON.stringify(visibility)}). Omit it to use the durability-keyed default on a new ` +
+    `memory (permanent/persistent -> shared, standard/ephemeral -> private); on an update, ` +
+    `omitting it keeps a stored private or shared visibility.`
   );
 }
 
@@ -108,7 +109,8 @@ export const EPHEMERAL_DURABILITY = "ephemeral";
  * NOT "refuse ephemeral+shared": on the read side any value other than the
  * literal "private" resolves to non-private (the migration invariant above),
  * so an unknown value on an ephemeral row would leak exactly like "shared".
- * assertValidVisibility refuses unknowns first at both call sites, but this
+ * assertValidVisibility refuses unknowns first at every call site (post, put,
+ * patch), but this
  * guard must stay fail-closed on its own — unknown means refused, not allowed.
  *
  * Absent (`undefined`/`null`) is accepted: it resolves through the
@@ -133,8 +135,9 @@ export function assertVisibilityAllowedForDurability(
   return (
     `ephemeral memories are private-only (continuity journal tier, flair#1257): ` +
     `durability "${EPHEMERAL_DURABILITY}" cannot be written with visibility ${JSON.stringify(visibility)}. ` +
-    `Omit visibility (the durability-keyed default is "${PRIVATE_VISIBILITY}") or set it to ` +
-    `"${PRIVATE_VISIBILITY}"; for a memory other agents should read, use durability ` +
+    `Set visibility to "${PRIVATE_VISIBILITY}" (for a new memory, omitting it also gives ` +
+    `"${PRIVATE_VISIBILITY}"; an update keeps the record's stored visibility); for a memory ` +
+    `other agents should read, use durability ` +
     `"standard", "persistent", or "permanent".`
   );
 }

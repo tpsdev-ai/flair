@@ -45,8 +45,8 @@ for each already-wired client (`~/.claude.json`, `~/.claude/settings.json`,
 `~/.codex/config.toml`, `~/.codex/hooks.json`, and the other auto-wired clients).
 Pass `--all` to also see `flair-client` (normally hidden as a
 transitive dependency). **Other integrations upgrade in their own ecosystem, not via
-`flair upgrade`:** `pi-flair` (pi's plugin manager), `langgraph-flair` / `hermes-flair`
-(pip / your Python package manager), `n8n-nodes-flair` (n8n's Community Nodes UI).
+`flair upgrade`:** `pi-flair` (pi's plugin manager), `langgraph-flair` (an npm module), `hermes-flair`
+(reinstall the plugin from a flair checkout: `hermes plugins install path:<flair>/packages/hermes-flair`), `n8n-nodes-flair` (n8n's Community Nodes UI).
 
 If the running instance's exec path is a **plain extracted tree** (npm pack +
 `npm install --omit=dev`, typically under systemd — no git checkout, not the
