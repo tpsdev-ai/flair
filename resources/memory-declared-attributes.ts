@@ -117,3 +117,15 @@ export function stripUndeclaredMemoryAttributes(content: unknown): string[] {
   }
   return removed;
 }
+
+/**
+ * flair#1940 A1'' item 8 — the SAME declare-only whitelist applied to an
+ * INBOUND federated Memory row before it is merged and written. A dirty pushed
+ * row (a legacy direct-insert, or a raw writer that slipped a pointer field
+ * past the writers) must not carry a pointer attribute onto the merged Memory
+ * row; the named federation bookkeeping fields survive. Named seam so the
+ * inbound direction is testable (resources/Federation.ts calls this).
+ */
+export function stripInboundMemoryRow(row: unknown): string[] {
+  return stripUndeclaredMemoryAttributes(row);
+}

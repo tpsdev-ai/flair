@@ -53,6 +53,11 @@ function sanitizeClaim(value: unknown): string | undefined {
  *   already computed by this point (never client-suppliable) — the same
  *   "stamp a dynamic attribute the server controls" mechanism as e.g. the
  *   `embeddingModel = getModelId()` stamp in resources/Memory.ts.
+ * - The host pointer (`hostSource`) is NOT provenance (flair#1940 A5): it lives
+ *   in its own `MemoryHostSource` table, is never part of this `{ v, verified,
+ *   claimed }` blob, and is written on the Memory write path in the same
+ *   transaction as the Memory row (t1/t2). `provenance` therefore stays a field
+ *   the server controls and is never client-writable.
  * - `claimed.model` is an OPTIONAL, UNVERIFIED passthrough: included only
  *   when the incoming write payload itself already carries a non-empty
  *   string `model` field (sanitized via sanitizeClaim above). Never

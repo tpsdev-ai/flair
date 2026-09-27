@@ -10,10 +10,12 @@
  *     server-stamped authorId/receivedAt) (A1' items 1, 3);
  *   - the ONE batched pointer read the gated join uses (A1' item 4: never one
  *     query per row);
- *   - the federation refusal predicate (A1' item 5).
+ *   - the federation refusal predicate (A1' item 5); BOTH directions apply the
+ *     writers' declared-attribute whitelist (A1'' item 8), so a dirty row
+ *     cannot carry a pointer field either way (f1-out/f1-in).
  */
 import { databases } from "harper";
-import { parseHostSource, validateHostSource } from "./host-source.js";
+import { validateHostSource } from "./host-source.js";
 import type { PointerRow } from "./host-source-visibility.js";
 
 /** The table name, so callers and tests never re-type it as a literal. */
@@ -83,34 +85,33 @@ function pointerTable(): any {
   return (databases as any).flair?.[MEMORY_HOST_SOURCE_TABLE];
 }
 
-/** Reduce a URL to scheme/host/path (drop query + fragment), or leave a
- *  non-parseable value unchanged. Mirrors host-source-visibility.ts's render. */
-function renderedUrl(url: string | undefined): string | undefined {
-  if (url === undefined) return undefined;
-  try {
-    const u = new URL(url);
-    return `${u.protocol}//${u.host}${u.pathname}`;
-  } catch {
-    return url;
-  }
-}
-
 /**
- * flair#1940 A1'' item 6 (adjudication B) — is an incoming hostSource an ECHO of
- * the STORED pointer? A read renders the pointer OBJECT with any URL reduced to
- * scheme/host/path (query + fragment stripped) and without the stored
- * scopeAtWrite, so a read-then-full-PUT echoes that rendered object. Detect it
- * by comparing v/host/kind/id and the RENDERED urls: an echo must not replace
- * (and thereby narrow / de-query) the stored pointer.
+ * flair#1940 A1'' item 6 (adjudication B, hardened in round 5/adjudication 0e)
+ * — is an incoming hostSource an ECHO of the STORED pointer? Preservation (do
+ * not replace the stored row) is a NARROW, unforgeable case:
+ *   - the current writer MUST be the stored pointer row's `authorId` — a
+ *     different writer echoing the value must not keep another agent's
+ *     pointer; and
+ *   - the incoming value must match the stored canonical EXACTLY, full URL
+ *     included. Matching after DROPPING the query and fragment was forgeable:
+ *     a value with a DIFFERENT query rendered identically and was wrongly
+ *     treated as an echo, so a real change was masked. A different query is a
+ *     new value, not an echo.
+ * (A rendered read strips the URL, so a client that wants the stored pointer
+ * kept echoes the stored value itself, not the stripped render.)
  */
-export function isPointerEchoOf(input: unknown, storedCanonical: string | null | undefined): boolean {
-  const stored = parseHostSource(storedCanonical);
-  if (!stored) return false;
+export function isPointerEchoOf(
+  input: unknown,
+  storedPointer: PointerRow | null | undefined,
+  writerAuthorId: string | null | undefined,
+): boolean {
+  if (!storedPointer || typeof storedPointer.hostSource !== "string") return false;
+  const author =
+    typeof storedPointer.authorId === "string" && storedPointer.authorId.length > 0 ? storedPointer.authorId : null;
+  if (author === null || writerAuthorId == null || author !== writerAuthorId) return false;
   const incoming = validateHostSource(input);
   if (!incoming.ok) return false;
-  const a = incoming.value;
-  if (a.v !== stored.v || a.host !== stored.host || a.kind !== stored.kind || a.id !== stored.id) return false;
-  return renderedUrl(a.url) === renderedUrl(stored.url);
+  return incoming.canonical === storedPointer.hostSource;
 }
 
 /**

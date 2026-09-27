@@ -32,6 +32,7 @@ async function deletePointerRowOrThrow(memoryId: string, ctx: any): Promise<void
 import { isAdmin } from "./agent-auth.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
+import { withOwnedTransaction } from "./request-transaction.js";
 
 export class MemoryMaintenance extends Resource {
   /** POST requires auth — either an agent acting on its own memories, or admin. */
@@ -87,15 +88,20 @@ export class MemoryMaintenance extends Resource {
         ) {
           if (!dryRun) {
             try {
-              // Memory.delete() cascades its pointer row in the SAME request
-              // transaction (resources/Memory.ts) — no separate delete here.
-              await (databases as any).flair.Memory.delete(record.id);
+              // A1'' item 2 (0c): the raw expiry delete runs in its OWN
+              // transaction together with the pointer delete, so a failed
+              // pointer delete aborts both and nothing is deleted.
+              await withOwnedTransaction(ctx, async (c) => {
+                await (databases as any).flair.Memory.delete(record.id, c);
+                await deletePointerRowOrThrow(record.id, c);
+              });
               // flair#1357 — ephemeral expiry removes the row from what the
               // lexical leg may score.
               noteMemoryDelete(record.id);
               stats.expired++;
-            } catch {
+            } catch (err) {
               stats.errors++;
+              console.error("MemoryMaintenance: expiry delete failed (aborted, nothing deleted)", err);
             }
           } else {
             stats.expired++;
@@ -123,19 +129,21 @@ export class MemoryMaintenance extends Resource {
                   archivedAt: now.toISOString(),
                 };
                 stripUndeclaredMemoryAttributes(archivedRow);
-                await (databases as any).flair.Memory.update(record.id, archivedRow);
-                // A1'' item 2: an archived record is not readable, so its
-                // pointer must go too. The delete joins this request's
-                // transaction; a failure is not swallowed (throws to the
-                // caller's error path below).
-                await deletePointerRowOrThrow(record.id, ctx);
+                // A1'' item 2 (0c): the archive write and its pointer delete
+                // share ONE OWNED transaction; a failed pointer delete cannot
+                // still commit the archived row.
+                await withOwnedTransaction(ctx, async (c) => {
+                  await (databases as any).flair.Memory.update(record.id, archivedRow, c);
+                  await deletePointerRowOrThrow(record.id, c);
+                });
                 // flair#1357 — an `archived` flip changes what the retrieval
                 // conditions (`archived not_equal true`) admit, so the lexical
                 // index has to see it, not just content writes.
                 noteMemoryUpsert(archivedRow);
                 stats.archived++;
-              } catch {
+              } catch (err) {
                 stats.errors++;
+                console.error("MemoryMaintenance: archive failed (aborted, nothing archived)", err);
               }
             } else {
               stats.archived++;
@@ -156,8 +164,17 @@ export class MemoryMaintenance extends Resource {
           if (typeof memoryId !== "string" || memoryId.length === 0) continue;
           const mem = await (databases as any).flair.Memory.get(memoryId);
           if (!mem || mem.archived === true) {
-            await deletePointerRowOrThrow(memoryId, ctx);
-            stats.orphans++;
+            // 0d: RE-CHECK inside an OWNED transaction before deleting. The
+            // first read is outside it, so a new row reusing this id in
+            // between must not be orphan-deleted; the conditional re-read
+            // inside the transaction closes that read-to-delete gap.
+            await withOwnedTransaction(ctx, async (c) => {
+              const again = await (databases as any).flair.Memory.get(memoryId);
+              if (!again || again.archived === true) {
+                await deletePointerRowOrThrow(memoryId, c);
+                stats.orphans++;
+              }
+            });
           }
         }
       }

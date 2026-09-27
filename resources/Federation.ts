@@ -21,6 +21,7 @@ import { readAllInstanceRows } from "./instance-identity-rows.js";
 import { findOrCreateInstance } from "./instance-create-lock.js";
 import { withDetachedTxnAsync } from "./table-helpers.js";
 import { isSkillWrite } from "./skill-write.js";
+import { stripInboundMemoryRow } from "./memory-declared-attributes.js";
 import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
 import { createPersistentNonceStore, initNonceStoreCleanup } from "./federation-nonce-store.js";
@@ -812,6 +813,16 @@ export class FederationSync extends Resource {
 
         const mergedData = mergeRecord(local, record);
 
+        // ── flair#1940 A1'' item 8: the SAME declared-attribute whitelist the
+        // writers apply. A dirty pushed row (a legacy direct-insert, or a raw
+        // writer that slipped a pointer field past the writers) must not carry
+        // a pointer attribute onto the merged Memory row here either. The named
+        // federation bookkeeping fields (_originatorInstanceId, _syncedFrom,
+        // _syncedAt, meta, kind) are on the whitelist and survive.
+        if (record.table === "Memory") {
+          stripInboundMemoryRow(mergedData);
+        }
+
         // ── flair#1542: skills are not federated ──
         // A skill-tagged Memory is a local, gated artifact (SkillScan + forced
         // durability on the write path). Merging a pushed skill-tagged row RAW
@@ -850,6 +861,12 @@ export class FederationSync extends Resource {
         mergedData._originatorInstanceId = decision.originator;
         mergedData._syncedFrom = instanceId;
         mergedData._syncedAt = new Date().toISOString();
+        // Re-assert the whitelist AFTER stamping the bookkeeping fields, so a
+        // dirty inbound row cannot smuggle a pointer field through this merge
+        // even if it also carried one of the allowed keys.
+        if (record.table === "Memory") {
+          stripInboundMemoryRow(mergedData);
+        }
 
         await table.put(mergedData);
         // embedding-space-guard slice 1: a federation-merged Memory can carry a

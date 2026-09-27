@@ -21,6 +21,7 @@ import {
   MEMORY_HOST_SOURCE_TABLE,
 } from "./memory-host-source.js";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
+import { withSharedWriteTransaction } from "./request-transaction.js";
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
 import {
@@ -64,6 +65,24 @@ function hostSourceTable(): any {
   return (databases as any).flair?.[MEMORY_HOST_SOURCE_TABLE];
 }
 
+/**
+ * Write the Memory row joining transaction `c` (0a). Resource.prototype.post
+ * uses the instance's OWN `#context`, which an internal caller (a direct
+ * `new Memory().post(...)`) does not have, and the base table has no `post` —
+ * so the base collection `create(id, record, context)` is used, which honours
+ * an explicit context and joins `c.transaction`. Returns the new id. Falls
+ * back to the static post for the unit mock (which models post, not create).
+ */
+async function writeMemoryRowPost(cls: any, content: any, c: any): Promise<string> {
+  if (typeof cls?.create === "function") {
+    const created = await cls.create(content.id ?? null, content, c);
+    if (typeof created === "string") return created;
+    return created?.getId?.() ?? created?.id ?? content.id ?? "";
+  }
+  const r: any = await (databases as any).flair.Memory.post(content, c);
+  return r?.id ?? content.id ?? "";
+}
+
 /** The authenticated author id for a pointer row, or "" when there is no
  *  principal (internal write). NEVER the body. */
 function pointerAuthorId(auth: AgentAuthVerdict): string {
@@ -98,7 +117,11 @@ function buildPointerForWrite(args: {
   // scope-less (author-only) pointer and lose the URL's query/fragment. No
   // hostSourceScope opt-in is treated as an echo too: the client is echoing,
   // not opting in anew.
-  if (inputs.hostSourceScope === undefined && storedPointer && isPointerEchoOf(inputs.hostSource, storedPointer.hostSource)) {
+  if (
+    inputs.hostSourceScope === undefined &&
+    storedPointer &&
+    isPointerEchoOf(inputs.hostSource, storedPointer, pointerAuthorId(auth))
+  ) {
     return { row: null };
   }
   let scopeAtWrite: string | null = null;
@@ -176,6 +199,12 @@ async function persistPointerRow(
     return hostSourcePersistFailure("MemoryHostSource table unavailable");
   }
   try {
+    // Test-only seam (flair#1940 adjudication 0b): force the pointer write ITSELF
+    // to throw so a real-Harper test can assert the atomic rollback. Inert
+    // unless FLAIR_TEST_FAIL_HOST_POINTER_WRITE=1 is set on the instance.
+    if (process.env.FLAIR_TEST_FAIL_HOST_POINTER_WRITE === "1") {
+      throw new Error("test seam: forced host-pointer write failure");
+    }
     await table.put(row, ctx);
     return null;
   } catch (err) {
@@ -197,6 +226,12 @@ async function deletePointerRow(memoryId: string, ctx: any): Promise<Response | 
   const table = hostSourceTable();
   if (!table?.delete) return null;
   try {
+    // Test-only seam (flair#1940 adjudication 0b/3): force the pointer DELETE
+    // itself to throw, so a real-Harper test can assert the atomic rollback.
+    // Inert unless FLAIR_TEST_FAIL_HOST_POINTER_DELETE=1 is set on the instance.
+    if (process.env.FLAIR_TEST_FAIL_HOST_POINTER_DELETE === "1") {
+      throw new Error("test seam: forced host-pointer delete failure");
+    }
     await table.delete(memoryId, ctx);
     return null;
   } catch (err) {
@@ -1139,15 +1174,22 @@ export class Memory extends (databases as any).flair.Memory {
     // A1' item 1: persist ONLY declared Memory attributes — an undeclared key
     // (including a pointer field a raw writer tried to slip in) is dropped.
     stripUndeclaredMemoryAttributes(content);
-    const result = await super.post(content);
-    // A1' item 2: write the pointer row, in the SAME request transaction, so
-    // the row and its pointer commit together or not at all. A pointer that
-    // cannot be persisted removes the just-written row and fails the write.
-    if (pointer.row) {
-      pointer.row.memoryId = (result as any)?.id ?? content.id ?? "";
-      const persistDenial = await persistPointerRow(pointer.row, ctx);
-      if (persistDenial) return persistDenial;
-    }
+    // A1' item 2 (adjudication 0a): the Memory row and its pointer row share ONE
+    // transaction. With a request context they join its open transaction; with
+    // NO context (an internal direct call, e.g. new Memory().post(...))
+    // withSharedWriteTransaction creates one, so a failed pointer write rolls
+    // the Memory row back too instead of leaving it pointer-less.
+    const postResult = await withSharedWriteTransaction(ctx, async (c) => {
+      const newId = await writeMemoryRowPost((this as any).constructor, content, c);
+      if (pointer.row) {
+        pointer.row.memoryId = newId;
+        const persistDenial = await persistPointerRow(pointer.row, c);
+        if (persistDenial) return persistDenial;
+      }
+      return null;
+    });
+    if (postResult instanceof Response) return postResult;
+    const result: any = {};
     // flair#1357 — read-your-write for the lexical leg. The table change feed
     // (resources/bm25-index-service.ts) is the CORRECTNESS mechanism; this
     // synchronous hook is what makes a store immediately searchable rather
@@ -1560,14 +1602,19 @@ export class Memory extends (databases as any).flair.Memory {
     // ── Write the new/updated record FIRST ──────────────────────────────────
     // A1' item 1: persist ONLY declared Memory attributes (see post()).
     stripUndeclaredMemoryAttributes(content);
-    const result = await super.put(content);
-    // A1' item 2: write the pointer row, in the SAME request transaction (see
-    // post()). A pointer that cannot be persisted fails the whole put.
-    if (pointer.row) {
-      pointer.row.memoryId = (result as any)?.id ?? content.id ?? "";
-      const persistDenial = await persistPointerRow(pointer.row, ctx);
-      if (persistDenial) return persistDenial;
-    }
+    // A1' item 2 (adjudication 0a): share ONE transaction with the pointer row
+    // (see post()).
+    const putResult = await withSharedWriteTransaction(ctx, async (c) => {
+      const r: any = await (databases as any).flair.Memory.put(content, c);
+      if (pointer.row) {
+        pointer.row.memoryId = r?.id ?? content.id ?? "";
+        const persistDenial = await persistPointerRow(pointer.row, c);
+        if (persistDenial) return persistDenial;
+      }
+      return r;
+    });
+    if (putResult instanceof Response) return putResult;
+    const result: any = putResult;
     // flair#1357 — read-your-write for the lexical leg (see post()).
     noteMemoryUpsert(content);
     noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
@@ -1600,18 +1647,22 @@ export class Memory extends (databases as any).flair.Memory {
       return FORBIDDEN("forbidden: cannot delete memory owned by another agent");
     }
     // Durability controls retention, not the owner's authority to delete.
-    const deleted = await super.delete(id);
-    noteMemoryDelete(id);
-    const deletedId = typeof id === "string" ? id : record?.id;
-    if (typeof deletedId === "string" && deletedId.length > 0) {
-      await clearHitStats(deletedId, ctx).catch(() => {});
-      // A1' item 6 (A1'' item 2): cascade — the pointer row dies with its
-      // Memory row, in the SAME request transaction. A failing pointer delete
-      // fails the WHOLE delete: the request transaction is aborted and a 500
-      // returned, so neither row is deleted. Failures are NOT swallowed.
-      const pointerDenial = await deletePointerRow(deletedId, ctx);
-      if (pointerDenial) return pointerDenial;
-    }
-    return deleted;
+    // A1' item 2 (adjudication 0a/0c): the Memory delete and its pointer
+    // delete share ONE transaction; with no request context
+    // withSharedWriteTransaction creates one. A failing pointer delete aborts
+    // it, so nothing is deleted; failures are NOT swallowed.
+    const deleteResult = await withSharedWriteTransaction(ctx, async (c) => {
+      const d = await (databases as any).flair.Memory.delete(id, c);
+      noteMemoryDelete(id);
+      const deletedId = typeof id === "string" ? id : record?.id;
+      if (typeof deletedId === "string" && deletedId.length > 0) {
+        const pointerDenial = await deletePointerRow(deletedId, c);
+        if (pointerDenial) return pointerDenial;
+      }
+      return d;
+    });
+    if (deleteResult instanceof Response) return deleteResult;
+    if (typeof id === "string") await clearHitStats(id, ctx).catch(() => {});
+    return deleteResult;
   }
 }

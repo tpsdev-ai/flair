@@ -14,10 +14,14 @@
  *
  * WRITE — there are NO REST write verbs. post/put/patch and delete are refused
  * for EVERY caller (admin included), with a message naming the Memory write
- * path (A1'' item 3). A pointer row is written ONLY by Memory's write path
- * (POST/PUT /Memory), through the table object, inside the same request
- * transaction as the Memory row; authorId is stamped there from the
- * authenticated principal, never the body.
+ * path (A1'' item 3) — proved over real HTTP for non-admin AND admin (r4-http).
+ * A pointer row is written ONLY by Memory's write path (POST/PUT /Memory),
+ * through the table object, in the SAME transaction as the Memory row (a
+ * request's open one, or one created when an internal caller has no request
+ * context), so the two commit together or not at all (real-Harper t1/t2);
+ * authorId is stamped there from the authenticated principal, never the body.
+ * A superuser Harper operation against the table (an operator export, backup
+ * or reseed) is the operator path, not gated by this resource.
  */
 import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";

@@ -22,6 +22,7 @@ export const harnessState = {
   pointerSearchCalls: 0,
   failNextPointerPut: false,
   failNextPointerDelete: false,
+  getOverride: null as null | ((id: string) => any),
 };
 
 export function resetHarnessState(): void {
@@ -31,6 +32,7 @@ export function resetHarnessState(): void {
   harnessState.pointerSearchCalls = 0;
   harnessState.failNextPointerPut = false;
   harnessState.failNextPointerDelete = false;
+  harnessState.getOverride = null;
 }
 
 export function matchesCondition(record: any, cond: any): boolean {
@@ -44,19 +46,62 @@ export function matchesCondition(record: any, cond: any): boolean {
   return true;
 }
 
+/**
+ * 0a/0c mock transaction. When a write is handed a context whose
+ * `transaction` is one THIS helper created (it carries a `staged` array), the
+ * write is STAGED and only applied on `commit()`; `abort()` discards it. This
+ * is what lets the unit lane prove "no row after a failed pointer write"
+ * without a Harper runtime. A test's own hand-built transaction (no `staged`)
+ * is treated as joinable but writes straight through — the mock cannot roll a
+ * Map back, so those tests assert the abort flag, not DB state.
+ */
+export function mockTransaction(ctx: any, cb: (txn: any) => any): any {
+  const context = ctx && typeof ctx === "object" ? ctx : {};
+  if (context.transaction && context.transaction.open === 1) return cb(context.transaction);
+  const staged: Array<() => void> = [];
+  const txn: any = {
+    open: 1,
+    saveCommits: false,
+    staged,
+    aborted: false,
+    abort() { this.open = 0; this.aborted = true; staged.length = 0; },
+    commit() { this.open = 0; for (const f of staged) f(); staged.length = 0; },
+  };
+  context.transaction = txn;
+  let result: any;
+  try { result = cb(txn); } catch (e) { txn.abort(); throw e; }
+  if (result && typeof result.then === "function") {
+    return result.then((r: any) => { txn.commit(); return r; }, (e: any) => { txn.abort(); throw e; });
+  }
+  txn.commit();
+  return result;
+}
+
+/** Stage `apply` into `ctx`'s mock transaction when it has one (see
+ *  mockTransaction); otherwise run it now. */
+function stageOrRun(ctx: any, apply: () => void): void {
+  const txn = ctx?.transaction;
+  if (txn && txn.open === 1 && Array.isArray(txn.staged)) txn.staged.push(apply);
+  else apply();
+}
+
 export class BaseMemory {
   async get(target?: any) {
     const id = typeof target === "string" ? target : target?.id;
+    if (harnessState.getOverride && typeof id === "string") {
+      const override = harnessState.getOverride(id);
+      if (override !== undefined) return override;
+    }
     return harnessState.memoryStore.get(id) ?? null;
   }
-  async put(content: any) {
-    harnessState.memoryStore.set(content.id, { ...content });
+  async put(content: any, ctx?: any) {
+    stageOrRun(ctx, () => harnessState.memoryStore.set(content.id, { ...content }));
     return { ...content };
   }
-  async post(content: any) {
+  async post(content: any, ctx?: any) {
     const id = content.id ?? `mem-${Math.random().toString(36).slice(2)}`;
     content.id = id;
-    harnessState.memoryStore.set(id, { ...content });
+    stageOrRun(ctx, () => harnessState.memoryStore.set(id, { ...content }));
     return { ...content };
   }
   async patch(content: any) {
@@ -65,12 +110,12 @@ export class BaseMemory {
     harnessState.memoryStore.set(id, { ...prev, ...content });
     return { ...harnessState.memoryStore.get(id) };
   }
-  async update(id: string, row: any) {
-    harnessState.memoryStore.set(id, { ...row });
+  async update(id: string, row: any, ctx?: any) {
+    stageOrRun(ctx, () => harnessState.memoryStore.set(id, { ...row }));
     return { ...row };
   }
-  async delete(id: any) {
-    harnessState.memoryStore.delete(typeof id === "string" ? id : id?.id);
+  async delete(id: any, ctx?: any) {
+    stageOrRun(ctx, () => harnessState.memoryStore.delete(typeof id === "string" ? id : id?.id));
     return { ok: true };
   }
   search(query?: any) {
@@ -95,20 +140,20 @@ export class BaseMemory {
   static get(t?: any) {
     return new BaseMemory().get(t);
   }
-  static put(c: any) {
-    return new BaseMemory().put(c);
+  static put(c: any, ctx?: any) {
+    return new BaseMemory().put(c, ctx);
   }
-  static post(c: any) {
-    return new BaseMemory().post(c);
+  static post(c: any, ctx?: any) {
+    return new BaseMemory().post(c, ctx);
   }
   static patch(c: any) {
     return new BaseMemory().patch(c);
   }
-  static update(id: string, row: any) {
-    return new BaseMemory().update(id, row);
+  static update(id: string, row: any, ctx?: any) {
+    return new BaseMemory().update(id, row, ctx);
   }
-  static delete(id: any) {
-    return new BaseMemory().delete(id);
+  static delete(id: any, ctx?: any) {
+    return new BaseMemory().delete(id, ctx);
   }
   static search(q?: any) {
     return new BaseMemory().search(q);
@@ -229,10 +274,14 @@ export const databasesMock = {
 /** Register the shared harper mock and import the resource classes. Call ONCE
  *  at a test file's top level (mock.module must precede the resource import). */
 export async function installMemoryHarperMock() {
+  // Robust to the shared-process mock race: request-transaction.ts reads the
+  // helper off the global (as Harper itself assigns it), not the mock namespace.
+  (globalThis as any).transaction = mockTransaction;
   mock.module("harper", () => ({
     server: { http: () => {}, getUser: async () => null },
     databases: databasesMock,
     Resource: class {},
+    transaction: mockTransaction,
   }));
   const { Memory } = await import("../../resources/Memory.ts");
   const { MemoryHostSource } = await import("../../resources/MemoryHostSource.ts");

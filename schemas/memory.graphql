@@ -239,29 +239,42 @@ type MemoryHitStat @table(database: "flair") {
 # (patch, feed ingest, consolidation, federation sync, admin export) can carry
 # or leak it: the Memory schema declares no hostSource attribute at all.
 #
-# Writes are NOT a REST surface for agents: Memory.post()/put() write the row in
-# the SAME request transaction as the Memory row (A1' item 2 — the row and its
-# pointer commit together or not at all), and this resource's own post()/put()
-# stamp authorId from the AUTHENTICATED principal, never the body (A1' item 3).
+# Writes are NOT a REST surface for any caller: Memory.post()/put() write the row
+# in the SAME transaction as the Memory row — a request's open transaction, or
+# one created with transaction(ctx, cb) when an internal caller has no request
+# context — so the row and its pointer commit together or not at all (real-
+# Harper t1/t2: a failed pointer write leaves no row, and a failed PUT leaves
+# the pre-existing row byte-identical). This resource refuses its OWN
+# post()/put()/patch()/delete() for EVERY caller (r4-http), so no REST caller
+# can plant a pointer; a superuser Harper operation against the table (an
+# operator export, backup or reseed) is the operator path.
 #
 # Reads are ADMIN-ONLY (A1' item 3): a non-admin direct GET or search of this
 # table gets nothing (the resource class gates allowRead/get/search). The author
 # reads their own pointer only through the gated join INTO Memory results (A1'
-# item 4), never from this table directly.
+# item 4), never from this table directly. Bootstrap does not render pointers in
+# this slice.
 #
-# NOT federated (A1' item 5): the table is absent from FEDERATION_TABLE_POLICY,
-# so it is never in the sync's table set, and an inbound row carrying a pointer
-# field is REFUSED (resources/federation-classify.ts).
+# NOT federated (A1' item 5/A1'' item 8): the table is absent from
+# FEDERATION_TABLE_POLICY, so it is never in the sync's table set, an inbound row
+# carrying a pointer field is REFUSED (resources/federation-classify.ts), and
+# BOTH directions apply the writers' declared-attribute whitelist, so a dirty row
+# cannot carry a pointer field either way (f1-out/f1-in).
 #
-# Cascade (A1' item 6): the pointer row is deleted where the Memory row dies
-# (Memory.delete(), the expiry reaper and the archive path in
-# resources/MemoryMaintenance.ts), plus an orphan sweep. An orphan is unreadable
-# by construction — the ONLY read path joins pointers INTO Memory results.
+# Cascade (A1' item 6 / A1'' item 2): the pointer row is deleted where the Memory
+# row dies (Memory.delete(), the expiry reaper and the archive path in
+# resources/MemoryMaintenance.ts), each in ONE owned transaction — a failed
+# pointer delete fails the whole operation (c3) — plus an orphan sweep that
+# re-checks inside the transaction before deleting. An orphan is unreadable by
+# construction — the ONLY read path joins pointers INTO Memory results.
 #
-# hostSource is the writer's claim, signed by the writer's Flair identity; it is
-# not verified host authorship. scopeAtWrite is the record's visibility AT WRITE
-# (null → author-only); the pointer's effective visibility is the NARROWER of it
-# and the record's CURRENT visibility. receivedAt is server-stamped.
+# hostSource is a host object the writer claims — a claimed external source,
+# signed by the writer's Flair identity; it is not verified host authorship.
+# scopeAtWrite is the record's visibility AT WRITE (null → author-only); the
+# pointer's effective visibility is the NARROWER of it and the record's CURRENT
+# visibility. A partial PUT that omits visibility carries the existing row's
+# visibility into the written row, so a PRIVATE memory is never silently widened
+# (p2). receivedAt is server-stamped.
 type MemoryHostSource @table(database: "flair") @export {
   memoryId: ID @primaryKey      # the Memory.id this pointer belongs to
   hostSource: String!           # canonical v1 JSON: { v:1, host, kind, id, url? }
