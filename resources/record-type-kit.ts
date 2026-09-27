@@ -281,8 +281,20 @@ export function makeByIdReadGate(
       return superGet(target);
     }
 
-    // Non-admin agent: scoped per the table's own read-scope model.
-    const record = await superGet(target);
+    // Non-admin agent: scoped per the table's own read-scope model. The scope
+    // is evaluated on the FULL stored row: a target that asks for a selection
+    // or a single property is re-read without that shaping for the check, and
+    // the shaped result is returned only once the row passes.
+    const shaped =
+      typeof target === "object" && target !== null && (target.select != null || target.property != null);
+    let unshaped: any = target;
+    if (shaped) {
+      const Ctor = (target as any).constructor;
+      if (typeof Ctor !== "function") return NOT_FOUND(); // fail closed: cannot re-read unshaped
+      unshaped = new Ctor();
+      unshaped.id = targetId;
+    }
+    const record = await superGet(unshaped);
     if (!record) {
       // Row did not load: either it genuinely does not exist, OR — the #1181
       // failure — a by-id read reached here on an unloaded instance and
@@ -303,7 +315,7 @@ export function makeByIdReadGate(
       return NOT_FOUND();
     }
 
-    return record;
+    return shaped ? superGet(target) : record;
   };
 }
 
