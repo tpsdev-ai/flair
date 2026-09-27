@@ -136,6 +136,14 @@ function requireRecordPrincipal(): boolean {
  * For each field, the value with the later `updatedAt` wins.
  * Records with no local counterpart are accepted directly.
  */
+/**
+ * The row written is `record.data`, but the row checked (and merged against) is
+ * `record.id`. They must name the same row, or the record is not applied.
+ */
+export function payloadIdMismatch(record: { id: string; data?: Record<string, any> | null }): boolean {
+  return !!record.data && record.data.id !== undefined && record.data.id !== record.id;
+}
+
 export function mergeRecord(local: Record<string, any> | null, remote: SyncRecord): Record<string, any> {
   if (!local) return remote.data;
 
@@ -147,8 +155,7 @@ export function mergeRecord(local: Record<string, any> | null, remote: SyncRecor
   // Field-level LWW is the spec target but record-level is sufficient
   // for the initial implementation and avoids per-field clock tracking.
   if (remoteUpdated > localUpdated) {
-    // Preserve stored visibility on updates before applying write policy: an
-    // incoming null or missing visibility never replaces the local value.
+    // Preserve stored visibility on updates before applying write policy.
     const incoming = { ...remote.data };
     if (incoming.visibility === null || incoming.visibility === undefined) delete incoming.visibility;
     Object.assign(merged, incoming);
@@ -729,6 +736,10 @@ export class FederationSync extends Resource {
 
     for (const record of records as SyncRecord[]) {
       try {
+        if (payloadIdMismatch(record)) {
+          recordSkip("id_mismatch");
+          continue;
+        }
         const table = (record.table in tableMap)
           ? tableMap[record.table as FederationSyncTable]
           : undefined;

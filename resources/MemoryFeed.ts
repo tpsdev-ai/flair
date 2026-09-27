@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Resource, databases } from "harper";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 import { computeContentHash, findExistingMemoryByContentHash } from "./memory-feed-lib.js";
@@ -154,7 +155,7 @@ export class FeedMemories extends Resource {
 
     const record = {
       ...content,
-      id: content.id ?? `${agentId}-${Date.now()}`,
+      id: content.id ?? `${agentId}-${Date.now()}-${randomUUID()}`,
       agentId,
       content: body,
       contentHash,

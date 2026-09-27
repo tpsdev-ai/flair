@@ -1,8 +1,6 @@
 /**
- * A PUT that omits `visibility` on an existing record keeps the record's
- * stored visibility. Harper's PUT replaces the whole row, so without the carry
- * an omitted field was dropped from the stored row. Isolated: owns the harper
- * mock for Memory.ts.
+ * Memory updates preserve the record's stored visibility unless the write
+ * explicitly changes it. Isolated: owns the harper mock for Memory.ts.
  */
 import { describe, expect, test, beforeEach, mock } from "bun:test";
 
@@ -67,7 +65,7 @@ beforeEach(() => {
   memoryStore.set("pub", { id: "pub", agentId: "alice", content: "shared note", durability: "persistent", visibility: "shared" });
 });
 
-describe("PUT without visibility keeps the existing record's visibility", () => {
+describe("Memory updates preserve stored visibility", () => {
   test("a private record stays private", async () => {
     const result = await makeMemory("priv").put({ id: "priv", agentId: "alice", content: "edited note", durability: "standard" });
     expect(result).not.toBeInstanceOf(Response);
@@ -97,7 +95,7 @@ describe("PUT without visibility keeps the existing record's visibility", () => 
     expect(memoryStore.get("fresh").visibility).toBe("private");
   });
 
-  test("a _reindex payload that omits visibility keeps the stored value", async () => {
+  test("a _reindex update keeps the stored visibility", async () => {
     const r: any = new (Memory as any)();
     r.id = "priv";
     r.getContext = () => undefined; // internal caller: the admin gate passes

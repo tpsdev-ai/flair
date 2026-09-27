@@ -1,7 +1,6 @@
 /**
- * FeedMemories.post writes the RAW Memory table (a full-row put). An update of
- * an existing record that omits visibility keeps the record's stored value.
- * Isolated: owns the harper mock for MemoryFeed.ts.
+ * FeedMemories updates preserve the record's stored visibility unless the
+ * write explicitly changes it. Isolated: owns the harper mock for MemoryFeed.ts.
  */
 import { describe, expect, test, beforeEach, mock } from "bun:test";
 
@@ -46,7 +45,7 @@ beforeEach(() => {
 });
 
 describe("FeedMemories.post preserves stored visibility on an update", () => {
-  test("a changed-content update that omits visibility keeps the stored value", async () => {
+  test("a changed-content update keeps the stored visibility", async () => {
     const result = await feed().post({ id: "owned", agentId: "alice", content: "edited note" });
     expect(result).not.toBeInstanceOf(Response);
     expect(memoryStore.get("owned").content).toBe("edited note");
@@ -56,5 +55,19 @@ describe("FeedMemories.post preserves stored visibility on an update", () => {
   test("an explicit visibility still wins", async () => {
     await feed().post({ id: "owned", agentId: "alice", content: "now shared", visibility: "shared" });
     expect(memoryStore.get("owned").visibility).toBe("shared");
+  });
+
+  test("two feed writes without an id in the same millisecond create two records", async () => {
+    const realNow = Date.now;
+    Date.now = () => 1790000000000;
+    try {
+      await feed().post({ agentId: "alice", content: "first note" });
+      await feed().post({ agentId: "alice", content: "second note" });
+    } finally {
+      Date.now = realNow;
+    }
+    const mine = [...memoryStore.values()].filter((r) => r.id !== "owned");
+    expect(mine.length).toBe(2);
+    expect(new Set(mine.map((r) => r.id)).size).toBe(2);
   });
 });

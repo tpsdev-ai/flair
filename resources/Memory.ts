@@ -1096,8 +1096,7 @@ export class Memory extends (databases as any).flair.Memory {
     // `{...existing, ...patch}` payload, and must never have their stored
     // visibility overwritten by a default recomputed from that merged content
     // — only a genuinely NEW id gets the default stamped.
-    // A lookup failure is NOT "no record": treating it as a create would
-    // apply create-time defaults to an existing row. Let it fail the write.
+    // A lookup failure fails the write (it is not the same as "no record").
     const preExisting = content.id
       ? await (databases as any).flair.Memory.get(content.id)
       : null;

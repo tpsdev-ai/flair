@@ -70,8 +70,8 @@ export function isPrivateVisibility(visibility: string | null | undefined): bool
  * would fall back to the durability-keyed default, which for a permanent or
  * persistent write is `shared` — the same wrong outcome, arrived at quietly.
  *
- * `undefined`/`null` are accepted: omitting the field is how a caller asks for
- * the durability-keyed default, and that is a documented, intentional path.
+ * `undefined`/`null` are accepted: on a new record, omitting the field asks for
+ * the durability-keyed default; on an update, it keeps the stored visibility.
  */
 export function assertValidVisibility(visibility: unknown): string | null {
   if (visibility === undefined || visibility === null) return null;
@@ -80,8 +80,9 @@ export function assertValidVisibility(visibility: unknown): string | null {
   }
   return (
     `visibility must be ${WRITABLE_VISIBILITIES.map((v) => `"${v}"`).join(" or ")} ` +
-    `(got: ${JSON.stringify(visibility)}). Omit it to use the durability-keyed default: ` +
-    `permanent/persistent -> shared, standard/ephemeral -> private.`
+    `(got: ${JSON.stringify(visibility)}). Omit it to use the durability-keyed default on a new ` +
+    `memory (permanent/persistent -> shared, standard/ephemeral -> private); on an update, ` +
+    `omitting it keeps the stored visibility.`
   );
 }
 
