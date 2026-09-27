@@ -6,8 +6,8 @@
 > Do NOT enable in production until Sherlock signs off on live enablement.
 
 This is the **Model 2** native-MCP path: a custom in-process `/mcp` JSON-RPC
-handler guarded by `@harperfast/oauth`'s `withMCPAuth`, serving the 9 curated
-flair tools with a per-agent OAuth identity. It is distinct from the
+handler guarded by `@harperfast/oauth`'s `withMCPAuth`, serving the 17 tools in `resources/mcp-tools.ts`
+with a per-agent OAuth identity. It is distinct from the
 native-application-MCP surface (design A / `FLAIR_MCP_ENABLED`); Model 2 does not
 use Harper's native MCP transport, so it is not blocked by the Harper native-MCP
 gating gaps.
@@ -18,12 +18,10 @@ gating gaps.
   Streamable HTTP: `initialize` / `tools/list` / `tools/call` / `ping`. On
   `tools/call` it resolves the verified token `sub` → a flair `Agent`, then
   dispatches to the curated tool.
-- `resources/mcp-tools.ts` — the 9 curated tools (memory_search, memory_store,
-  memory_get, memory_delete, bootstrap, soul_set, soul_get, flair_workspace_set,
-  flair_orgevent), each a thin wrapper over the existing resource handler
+- `resources/mcp-tools.ts` — the 17 tools in `resources/mcp-tools.ts`, each a thin wrapper over the existing resource handler
   (Memory / SemanticSearch / BootstrapMemories / Soul / WorkspaceState /
   OrgEvent). No raw CRUD surface — the only path to the datastore through `/mcp`
-  is one of these 9 semantic tools. Curated **by construction**.
+  is one of the 17 tools in `resources/mcp-tools.ts`. Curated **by construction**.
 - `resources/mcp-oauth.ts` — registers `server.http(withMCPAuth(mcpHandler),
   { urlPath: '/mcp' })` **only when `FLAIR_MCP_OAUTH` is on.** `/mcp` runs on its
   own dispatch chain; flair's default auth-middleware does not run for it.

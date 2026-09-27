@@ -1,0 +1,1 @@
+- **Six docs pages now accurately describe what the code does:** Pi requires a configured `FLAIR_AGENT_ID` (no auto-detect), duplicate writes are never suppressed, `langgraph-flair` is an npm package (not pip), the MCP handler serves 17 tools not 9, the bootstrap hook still loads the full agent memories despite a project hint, and the parent-exit watcher is shipped.

@@ -24,7 +24,7 @@ Flair runs Harper v5 (a Node.js HTTP+storage runtime) plus a small CLI/MCP layer
 - **Embedding cache.** First semantic search per cold daemon loads `nomic-embed-text-v1.5` into memory (~270 MB). Subsequent searches reuse it. If you disable embeddings (text-only search), strip ~270 MB.
 - **HNSW index.** In-memory vector index over the agent's memories. Grows linearly with memory count; expect ~1 KB per memory plus the 768-dim vector (~1.5 KB).
 - **Harper transaction log.** Bounded by retention window; grows during writes, compacts on idle.
-- **MCP clients.** Each `flair-mcp` subprocess holds ~40–50 MB. Long-lived MCP host (Claude Code) restarts spawn fresh ones; orphaned ones from the host crashing should be cleaned up by the parent-exit watcher (PR pending).
+- **MCP clients.** Each `flair-mcp` subprocess holds ~40–50 MB. Long-lived MCP host (Claude Code) restarts spawn fresh ones; orphaned ones are cleaned up by the parent-exit watcher and stdin close/end handlers shipped with the server.
 
 ## Scaling expectations
 
