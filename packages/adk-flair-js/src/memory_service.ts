@@ -383,7 +383,8 @@ export class FlairMemoryService implements BaseMemoryService {
       const text = extractText(event.content);
       if (!text) continue; // filter no-text events (Vertex parity)
 
-      const recordId = `${appName}:${userId}:${session.id}:${event.id}`;
+      const eventId = event.id || crypto.randomUUID();
+      const recordId = `${appName}:${userId}:${session.id}:${eventId}`;
       const body: Record<string, unknown> = {
         id: recordId,
         agentId: this._agentId,
@@ -400,7 +401,7 @@ export class FlairMemoryService implements BaseMemoryService {
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         console.warn(
-          `[adk-flair] write failed for session ${session.id} event ${event.id} ` +
+          `[adk-flair] write failed for session ${session.id} event ${eventId} ` +
           `(written=${written}/${events.length}): ${msg}`
         );
       }
@@ -484,6 +485,9 @@ export class FlairMemoryService implements BaseMemoryService {
           // Client-side analogue of Flair's isAllowed defense-in-depth.
           const hitTags = Array.isArray(hit["tags"]) ? (hit["tags"] as unknown[]) : [];
           if (!hitTags.includes(tag)) continue;
+          // Owner re-verification, as listMemories does: another agent's
+          // non-private record can carry the same tag.
+          if (hit["agentId"] !== this._agentId) continue;
 
           memories.push(this._hitToMemoryEntry(hit));
         }
@@ -542,7 +546,8 @@ export class FlairMemoryService implements BaseMemoryService {
       const text = extractText(event.content);
       if (!text) continue;
 
-      const recordId = `${appName}:${userId}:${sessionId}:${event.id}`;
+      const eventId = event.id || crypto.randomUUID();
+      const recordId = `${appName}:${userId}:${sessionId}:${eventId}`;
       const body: Record<string, unknown> = {
         id: recordId,
         agentId: this._agentId,
@@ -561,7 +566,7 @@ export class FlairMemoryService implements BaseMemoryService {
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         console.warn(
-          `[adk-flair] write failed for session ${sessionId} event ${event.id} ` +
+          `[adk-flair] write failed for session ${sessionId} event ${eventId} ` +
           `(written=${written}/${eventList.length}): ${msg}`
         );
       }

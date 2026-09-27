@@ -154,7 +154,7 @@ export class FlairSearch implements INodeType {
       },
       {
         displayName:
-          "Get By Tag is not yet available — flair-client.memory.list does not yet expose a tag filter (tracked in q3qf spec §6). Workaround: use Semantic Search and let the model filter results by tags in the response.",
+          "Get By Tag is not yet available in this node; `flair-client.memory.list` supports a `tags` filter for SDK callers.",
         name: "tagNotice",
         type: "notice",
         default: "",
@@ -191,7 +191,7 @@ export class FlairSearch implements INodeType {
     const subject = this.getNodeParameter("subject", itemIndex) as string;
     const tool = new DynamicStructuredTool({
       name: "flair_get_by_subject",
-      description: `Get memories about subject "${subject}" from Flair, ordered by recency.`,
+      description: `Get memories about subject "${subject}" from Flair.`,
       schema: z.object({}),
       func: async () => {
         const results = await runGetBySubject(flair, subject, limit);

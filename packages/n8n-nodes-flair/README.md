@@ -7,8 +7,8 @@ n8n community node — use [Flair](https://github.com/tpsdev-ai/flair) as your A
 - **Flair Chat Memory** — n8n AI Agent Memory port. Stores chat history in Flair, replayable across runs and readable from Claude Code, OpenClaw, and any other Flair client. LangChain `BufferWindowMemory` under the hood.
 - **Flair Search** — n8n AI Agent Tool port. Two operations:
   - *Semantic Search* — finds memories ranked by similarity to a natural-language query.
-  - *Get By Subject* — lists memories filtered by subject, ordered by recency.
-  - *Get By Tag* — coming in a follow-up once `flair-client.memory.list` exposes a `tags` filter.
+  - *Get By Subject* — lists memories filtered by subject.
+  - *Get By Tag* — not yet an operation in the `FlairSearch` node. The `memory.list` client supports the `tags` filter.
 
 ## Installation
 

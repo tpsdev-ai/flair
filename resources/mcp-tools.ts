@@ -1,6 +1,5 @@
 /**
- * mcp-tools.ts — the 12 curated flair tools for the Model-2 custom /mcp handler.
- *
+ * mcp-tools.ts — the 17 curated flair tools for the Model-2 custom /mcp handler.
  * Curated BY CONSTRUCTION: this module implements a fixed set of tools, each a
  * thin wrapper over the existing flair Resource handler. No business logic is
  * re-implemented — the wrapped handlers (Memory / SemanticSearch /
@@ -10,7 +9,7 @@
  * per-source scoping — see resources/AttentionQuery.ts's module doc), so the
  * MCP surface inherits the SAME security model as the signed-REST path. There
  * is no raw CRUD surface — the only way to reach the datastore through /mcp is
- * via one of these 14 semantic tools.
+ * via one of these 17 semantic tools.
  *
  *   memory_search · memory_store · memory_update · memory_get · memory_delete ·
  *   memory_basement · memory_restore · skill_store · skill_search · skill_get ·
@@ -1482,7 +1481,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   },
 });
 
-/** The tool definitions for a tools/list response (exactly the 12 curated tools). */
+/** The tool definitions for a tools/list response (exactly the 17 curated tools). */
 export function listToolDefs(): McpToolDef[] {
   return Object.values(TOOLS).map((t) => t.def);
 }

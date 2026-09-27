@@ -76,7 +76,7 @@ asks for it back in a fresh session 2 and prints whether the fact was recalled.
 | HTTP timeout     | `FLAIR_HTTP_TIMEOUT` | (unset — fail-fast defaults, read 1.5s) | Read/write timeout in seconds (float). Set for hosted Flair (below). |
 | Connect timeout  | `FLAIR_HTTP_CONNECT_TIMEOUT` | (unset — derived)     | Connect/pool timeout in seconds (float). Rarely needed on its own. |
 
-All settings can also be passed as constructor arguments:
+All settings can also be passed as constructor arguments, **except the remote-URL opt-in (`FLAIR_ALLOW_REMOTE_URL`), which is read from the environment only**:
 
 ```python
 FlairMemoryService(
@@ -232,22 +232,30 @@ shapes above — not that you should switch POST for PUT.
 `list_memories` raises `FlairRequestError` with `.status_code` for any non-2xx
 response (read that status before guessing), and lets transport errors from
 `httpx` propagate. `add_memory` attempts every text-bearing record, then raises
-`FlairWriteError` (a `FlairRequestError` subclass carrying `written`, `failed`
-and the first failure's `.status_code`) if any write was refused or could not
-be confirmed. After a timeout or connection error the record may or may not
+`FlairWriteError` (a `FlairRequestError` subclass carrying `written`, `total`,
+`failed`, `skipped` and the first failure's `.status_code`) if any write was
+refused or could not be confirmed. `total` counts only records ATTEMPTED —
+text-less entries are skipped and reported separately in `skipped`. `.status_code`
+is an `int`, or `None` when the failure carried no status (a connection error or
+timeout) — the `"?"` sentinel appears only in the message and the `failed` list.
+After a timeout or connection error the record may or may not
 have landed. The `store_memory` tool turns that into `{"error": <message>,
-"written": n, "failed": m}` and reports `"stored"` only when every write was
+"written": n, "failed": m}` and reports
+`"stored"` only when every write was
 acknowledged with a 2xx. `add_session_to_memory` and `add_events_to_memory`
 still log a failed write and continue.
 
 ## Security
 
-### Per-user isolation
+### Per-user scope is a retrieval filter, not an isolation boundary
 
-All users of one ADK app share one Flair principal. Per-user isolation is
-enforced by tag-based server-side filtering, not cryptographic key separation.
-A bug in that filter would leak cross-user memories. For key-level isolation,
-use per-org Flair principals (the org layer).
+All users of one ADK app share one Flair principal. The compound tag
+`adk:<app_name>:<user_id>` is a per-user **RETRIEVAL FILTER** — it selects which
+memories a search returns — and it does **not** isolate one user's memories from
+another's: every user of one ADK app shares one Flair principal, so the tag is
+not a boundary between users. The server rejects forged ownership on ordinary
+agent writes. Other ordinary agents cannot read a private memory; admins and
+trusted internal calls can.
 
 ### Tag encoding
 
@@ -272,28 +280,35 @@ just documentation — a typo'd `FLAIR_URL` cannot silently exfiltrate queries.
 
 ## Timeouts
 
-The search path has a 2s total budget covering the full lifecycle including DNS:
+The client sets HTTPX **phase timeouts** (connect, read, write, pool); there is
+no enclosing wall-clock deadline over the whole request. The defaults are:
 
 - Connect: 0.5s
 - Read: 1.5s
 - Write: 1.0s
 - Pool: 0.5s
 
-One attempt, no retry on the turn path. A hung Flair will never add seconds to
-every turn. Write paths use the same timeout budget and log structured warnings
+One attempt, no retry on the turn path. The phase timeouts do not bound the
+total request duration: a server that keeps sending response data within the
+read timeout can keep a request open longer. Write paths use the same timeout budget and log structured warnings
 on failure (session id, event count, HTTP status).
 
 ## Scope mapping
 
 ADK scopes everything by `{app_name, user_id}`. Flair's model is agentId-keyed.
 The adapter bridges this with a **compound tag** — `adk:<app_name>:<user_id>` —
-on every record, filtered on every search.
+on every record, filtered on every search. The tag is a per-user RETRIEVAL
+FILTER, not an isolation boundary: every user of one ADK app shares one Flair
+principal.
 
 - `user_id` is **mandatory** in the search path — missing/empty returns empty,
-  never searches unscoped.
+  never searches unscoped. The service scopes every read and write by the
+  `app_name` and `user_id` it is given; the ADK runner passes the session's
+  values, and code that calls the service or builds the tools directly chooses
+  them itself.
 - The adapter **re-verifies the compound tag on every search hit** before
   mapping it out — defense-in-depth against filter bypass.
-- `user_id` comes from ADK's session context, never from caller-supplied input.
+- ADK supplies `app_name` and `user_id` from its request or session; direct service callers and `create_flair_tools(...)` choose the values they pass.
 
 ## MemoryEntry mapping
 
@@ -317,9 +332,9 @@ dict is its return channel.
 
 ## Idempotent writes
 
-Record ids are deterministic: `{app_name}:{user_id}:{session_id}:{event.id}`.
-Re-ingestion upserts the same record, statelessly. Flair's REM consolidates
-content; it never sees duplicates.
+An event with an id gets a deterministic record id
+(`{app_name}:{user_id}:{session_id}:{event.id}`), so re-ingesting it does not
+duplicate; an event without an id gets a fresh UUID, so re-ingesting it can.
 
 ## custom_metadata
 

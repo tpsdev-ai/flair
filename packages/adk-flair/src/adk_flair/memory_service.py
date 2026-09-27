@@ -130,33 +130,41 @@ class FlairWriteError(FlairRequestError):
     ``except FlairRequestError`` keeps catching a failed write — the README
     already promises ``add_memory`` raises it. What it adds is batch
     accounting: ``written`` counts the records whose write Flair acknowledged
-    with a 2xx, and ``failed`` lists ``(record_id, status)`` for each attempt
+    with a 2xx, ``total`` is the number of records ATTEMPTED (text-less
+    entries ``add_memory`` skips are excluded from ``total`` and counted in
+    ``skipped``), and ``failed`` lists ``(record_id, status)`` for each attempt
     that was refused or could not be confirmed (status ``"?"`` when the failure
     carried none, e.g. a connection error or timeout, where the record may or
-    may not have landed). Entries with no text are skipped and appear in
-    neither list. ``status_code`` is the first failure's status, so callers
-    that read ``.status_code`` keep working.
+    may not have landed). ``status_code`` is the first failure's status as an
+    ``int``, or ``None`` when that status is unknown (the ``"?"`` sentinel lives
+    only in the message and the ``failed`` list). Check for ``None`` before
+    comparing ``status_code`` numerically.
     """
 
+    status_code: int | None
+
     def __init__(
-        self, written: int, total: int, failed: List[Tuple[str, Any]]
+        self, written: int, total: int, failed: List[Tuple[str, Any]], skipped: int = 0
     ):
         self.written = written
         self.total = total
         self.failed = failed
+        self.skipped = skipped
         first_status = failed[0][1] if failed else "?"
-        self.status_code = first_status
+        self.status_code = first_status if isinstance(first_status, int) else None
         # Attribute-compatibility with FlairRequestError. A batch failure has
         # no single method/path/reason, so these stay None rather than being
         # fabricated from an arbitrary member of the batch.
         self.method = None
         self.path = None
         self.reason = None
-        RuntimeError.__init__(
-            self,
+        message = (
             f"{written} of {total} memories written; "
-            f"{len(failed)} refused (status {first_status})",
+            f"{len(failed)} refused (status {first_status})"
         )
+        if skipped:
+            message += f"; {skipped} skipped (no text)"
+        RuntimeError.__init__(self, message)
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
@@ -862,11 +870,15 @@ class FlairMemoryService(BaseMemoryService):
         subject_value = _resolve_subject(subject, custom_metadata)
 
         written = 0
+        skipped = 0
+        attempted = 0
         failed: List[Tuple[str, Any]] = []
         for mem in memories:
             content_text = self._extract_content_text(mem.content)
             if not content_text:
+                skipped += 1
                 continue
+            attempted += 1
 
             record_id = mem.id or hashlib.sha256(content_text.encode()).hexdigest()[:32]
             body: Dict[str, Any] = {
@@ -895,7 +907,7 @@ class FlairMemoryService(BaseMemoryService):
                 logger.warning(
                     "adk-flair: direct memory write failed for id %s "
                     "(status=%s, written=%d/%d)",
-                    record_id, status, written, len(memories),
+                    record_id, status, written, attempted,
                 )
 
         if written:
@@ -909,7 +921,13 @@ class FlairMemoryService(BaseMemoryService):
         # partial batch. If every attempted write was acknowledged, this is a
         # no-op and add_memory keeps returning None as before.
         if failed:
-            raise FlairWriteError(written, len(memories), failed)
+            raise FlairWriteError(written, attempted, failed, skipped)
+        # A batch whose every entry had no text wrote nothing; returning
+        # normally would read as success to the caller.
+        if attempted == 0 and skipped:
+            raise ValueError(
+                f"add_memory: all {skipped} memories in the batch have no text; nothing was written"
+            )
 
     async def search_memory(
         self,
@@ -971,6 +989,13 @@ class FlairMemoryService(BaseMemoryService):
             # This is the client-side analogue of Flair's isAllowed defense-in-depth.
             hit_tags: List[str] = hit.get("tags") or []
             if tag not in hit_tags:
+                continue
+
+            # flair#1943: owner-identity recheck, exactly as list_memories does
+            # (line ~1069). The compound tag is a per-user RETRIEVAL FILTER, not
+            # an identity boundary; a hit whose agentId is not this service's
+            # own agent id must be dropped before it becomes a MemoryEntry.
+            if hit.get("agentId") != self._agent_id:
                 continue
 
             memories.append(self._hit_to_memory_entry(hit))

@@ -205,4 +205,4 @@ const context = await flair.bootstrap({ maxTokens: 4000 })
 - **Use durability wisely.** Most things are `standard`. Only promote to `persistent` for things that should survive months.
 - **Search is semantic.** "deployment issues" finds memories about "CI pipeline failures" — you don't need exact keywords.
 - **Temporal queries work.** "What happened today" and "what did we ship recently" are understood.
-- **Dedup is automatic.** Writing the same fact twice won't create duplicates (0.7 similarity threshold).
+- **Dedup is a report, not a write guard.** A successful create is stored even when it matches an earlier memory. For eligible creates, the server checks the top active candidate from the same agent using writer-overridable cosine and Jaccard thresholds, and returns `deduplicated` and `matchedId` on a match.

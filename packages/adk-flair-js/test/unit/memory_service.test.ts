@@ -453,14 +453,17 @@ describe("searchMemory", () => {
         JSON.stringify({
           results: [
             {
+              agentId: "test-agent",
               content: "alice fact",
               tags: ["adk:my-app:alice"],
             },
             {
+              agentId: "test-agent",
               content: "bob fact",
               tags: ["adk:my-app:bob"], // wrong tag — should be dropped
             },
             {
+              agentId: "test-agent",
               content: "alice fact 2",
               tags: ["adk:my-app:alice"],
             },
@@ -496,8 +499,8 @@ describe("searchMemory", () => {
       return new Response(
         JSON.stringify({
           results: [
-            { content: "mine", tags: [wanted] },
-            { content: "neighbour", tags: [neighbour] },
+            { agentId: "test-agent", content: "mine", tags: [wanted] },
+            { agentId: "test-agent", content: "neighbour", tags: [neighbour] },
           ],
         }),
         { status: 200 },
@@ -512,6 +515,26 @@ describe("searchMemory", () => {
 
     const texts = result.memories.map((m) => (m.content?.parts?.[0] as { text?: string })?.text);
     expect(texts).toEqual(["mine"]);
+  });
+
+  it("drops a hit owned by another agent even when it carries the same tag", async () => {
+    const wanted = "adk:my-app:user-1";
+    globalThis.fetch = mock(async () => {
+      return new Response(
+        JSON.stringify({
+          results: [
+            { agentId: "other-agent", content: "foreign", tags: [wanted] },
+            { agentId: "test-agent", content: "mine", tags: [wanted] },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+
+    const result = await service.searchMemory({ appName: "my-app", userId: "user-1", query: "fact" });
+
+    const texts = result.memories.map((m) => (m.content?.parts?.[0] as { text?: string })?.text);
+    expect(texts).toEqual(["mine"]); // assertion: the foreign hit is dropped
   });
 
   it("returns empty on HTTP error", async () => {
@@ -720,6 +743,63 @@ describe("addSessionToMemory", () => {
     expect(calls[0].url).toBe("http://localhost:19926/Memory/");
     expect((calls[0].body as Record<string, unknown>).id).toBe("ws-app:ws-user:sess-ws:evt-ws");
   });
+  it("two events with no id in one session produce different record IDs (Refs #1967)", async () => {
+     // Without an id, each event gets its own random UUID.
+     // Neither record id may contain the literal "undefined".
+    const calls: Array<{ body: Record<string, unknown> }> = [];
+    globalThis.fetch = mock(async (url, init) => {
+      calls.push({
+        body: JSON.parse((init as RequestInit).body as string) as Record<string, unknown>,
+        });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        });
+
+    // Build events with `id: undefined`.
+    const session = makeSession({
+      id: "sess-noid",
+      appName: "my-app",
+      userId: "user-1",
+      events: [
+          { id: undefined, invocationId: "inv-1", author: "user", actions: {} as import("@google/adk").Event["actions"], timestamp: Date.now(), content: { role: "user", parts: [{ text: "first" }] } as import("@google/genai").Content },
+          { id: undefined, invocationId: "inv-2", author: "user", actions: {} as import("@google/adk").Event["actions"], timestamp: Date.now(), content: { role: "user", parts: [{ text: "second" }] } as import("@google/genai").Content },
+        ],
+        });
+
+    await service.addSessionToMemory(session);
+
+       // Two distinct record ids, neither contains "undefined"
+    const ids = calls.map(c => c.body.id as string);
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).not.toBe(ids[1]);
+    expect(ids[0]).not.toContain("undefined");
+    expect(ids[1]).not.toContain("undefined");
+        });
+
+  it("addEventsToMemory: two events with no id produce different record IDs (Refs #1967)", async () => {
+     // Same test for the addEventsToMemory write path
+    const calls: Array<{ body: Record<string, unknown> }> = [];
+    globalThis.fetch = mock(async (url, init) => {
+      calls.push({
+        body: JSON.parse((init as RequestInit).body as string) as Record<string, unknown>,
+        });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        });
+
+    // Build events with `id: undefined`.
+    const events = [
+        { id: undefined, invocationId: "inv-1", author: "user", actions: {} as import("@google/adk").Event["actions"], timestamp: Date.now(), content: { role: "user", parts: [{ text: "first" }] } as import("@google/genai").Content },
+        { id: undefined, invocationId: "inv-2", author: "user", actions: {} as import("@google/adk").Event["actions"], timestamp: Date.now(), content: { role: "user", parts: [{ text: "second" }] } as import("@google/genai").Content },
+      ];
+    // Pass `sess-noid` directly as the session ID to `addEventsToMemory`.
+      await service.addEventsToMemory("my-app", "user-1", events, "sess-noid");
+
+       // Two distinct record ids, neither contains "undefined"
+    const ids = calls.map(c => c.body.id as string);
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).not.toBe(ids[1]);
+    expect(ids[0]).not.toContain("undefined");
+    expect(ids[1]).not.toContain("undefined");
+        });
 });
 
 // ─── Create verb + conflict fallback (flair#1336 parity) ────────────────────
