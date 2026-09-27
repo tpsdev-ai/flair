@@ -113,16 +113,20 @@ git tag v0.11.0 && git push origin v0.11.0
 > `v` tag is still written and the adk step is skipped ((b)). An
 > `adk-flair-v<version>` already at another commit refuses
 > `adk-tag-exists-elsewhere` before the `v` tag is written ((d)); a second POST
-> rejected for lack of permission refuses `adk-ref-write-rejected` with the `v` tag
-> left in place ((e)); a MISSING adk read-back after the POST is its OWN refusal —
-> the ref did not read back, the `v` tag stays, re-run the workflow on this commit
-> ((i2)) — distinct from a read-back that resolves ELSEWHERE ((i)).
+> rejected for lack of permission refuses `adk-ref-write-rejected`, and the text
+> reports what THIS run read back for BOTH refs and the check that confirms
+> completion ((e)). The post-POST read-back has THREE refusals, each reporting only
+> what this run observed: the adk ref did not read back at all (MISSING, (i2)); it
+> read back but could not be resolved to a commit (UNRESOLVED, (i3)); or it
+> resolves elsewhere (ELSEWHERE, (i)). None states what a future run will do.
 >
-> The writer (`scripts/check-version-sync.mjs --write`) rewrites the
-> `[project].version` line only after re-verifying with `tomllib`: it refuses
-> (writes nothing) unless the new document's `project.version` equals the
-> requested version AND the two parsed documents are otherwise deep-equal, and it
-> preserves line endings ((w), (x), (m)).
+> The writer (`scripts/check-version-sync.mjs --write`) precomputes the two
+> `SOURCE_VERSION_FILES` edits — `packages/flair-bench/src/version.ts` and
+> `packages/adk-flair/pyproject.toml` — verifies the pyproject edit with `tomllib`
+> (refused unless only `project.version` changed) and the flair-bench edit with its
+> own declaration check (exactly one `TOOL_VERSION = "…"` match), writes NOTHING if
+> either fails, and leaves the `package.json` bumps to `release.sh` ((w), (x2), (m),
+> (h), all-or-nothing).
 >
 > Re-run states (`decide`): with the `v` tag already at `<sha>` and the adk tag
 > absent, the run is a TAG with the `v` step marked SKIP ((n)); with BOTH tags at

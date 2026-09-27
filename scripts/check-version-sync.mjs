@@ -57,7 +57,11 @@ import { readFileSync, writeFileSync, statSync, readdirSync } from "node:fs";
 import { join, dirname, resolve, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
-import { projectVersionFromPyproject, replaceProjectVersion } from "./ci/pyproject-version.mjs";
+import {
+  projectVersionFromPyproject,
+  readProjectVersion,
+  replaceProjectVersion,
+} from "./ci/pyproject-version.mjs";
 
 // cli#1890 condition 6: the release tagger extracts the WHOLE candidate commit
 // as DATA (`git archive <sha>` into a scratch dir) and runs THIS file — the
@@ -262,9 +266,14 @@ function write(version) {
     if (file.project) {
       const next = replaceProjectVersion(src, version);
       if (next === null) {
-        console.error(
-          `❌ ${file.path}: no [project].version declaration to rewrite to ${version}; NOTHING was written.`,
-        );
+        // A DECLARATION EXISTS but the rewrite was refused: say it could not be
+        // safely rewritten, and why — not "no declaration".
+        const r = readProjectVersion(src);
+        const why =
+          r.kind === "version"
+            ? "a version declaration exists, but the rewrite would not change only [project].version (the tomllib re-verify refused)"
+            : `the [project] version could not be read to rewrite it (${r.reason})`;
+        console.error(`❌ ${file.path}: the version could not be safely rewritten: ${why}`);
         process.exit(1);
       }
       edits.push({ abs, path: file.path, label: file.label, next });
