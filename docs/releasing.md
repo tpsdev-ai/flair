@@ -113,7 +113,8 @@ git tag v0.11.0 && git push origin v0.11.0
 > tagger's adk step is skipped ((b)), but `scripts/check-version-sync.mjs` lists the
 > pyproject as a source file and refuses when it is missing, so today such a release
 > refuses at `version-sync`. Removing the Python package from the repo means removing
-> it from the checker's source list in the same change; a release is then tagged `v`
+> it, in the same change, from the checker's source list and from the paths
+> `scripts/release.sh` stages for the release commit; a release is then tagged `v`
 > alone. An
 > `adk-flair-v<version>` already at another commit refuses
 > `adk-tag-exists-elsewhere` before the `v` tag is written ((d)); a second POST

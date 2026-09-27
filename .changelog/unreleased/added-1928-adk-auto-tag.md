@@ -4,7 +4,8 @@
   `v<version>`, so the PyPI publish no longer waits for a hand-pushed tag. The tagger
   skips the second tag when the file is absent, but the version-sync checker lists
   the pyproject as a source file, so removing the Python package also removes it
-  there, and only then is a release tagged `v` alone; the `[project]` version is read with Python's `tomllib` — the SAME
+  there and from the paths `scripts/release.sh` stages, and only then is a release
+  tagged `v` alone; the `[project]` version is read with Python's `tomllib` — the SAME
   reader `.github/workflows/adk-flair-publish.yml` decides with — so a
   `version =` line inside a multi-line string or array is never mistaken for the
   project version. The reader fails CLOSED: a TOML parse error, a `python3`
