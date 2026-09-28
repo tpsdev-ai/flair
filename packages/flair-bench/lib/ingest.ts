@@ -16,6 +16,24 @@
 import type { BenchClient, IngestOptions, IngestResult, SessionHistory } from "./types.js";
 import { signedFetch } from "./signed-fetch.js";
 
+/**
+ * Percent-encode an event id so it reaches the server as ONE path segment that
+ * decodes back to the id, addressing exactly that record (flair#1970). REFUSES
+ * an id that is exactly "." or "..": percent-encoding leaves those unchanged
+ * and URL normalization collapses `/Memory/.` to `/Memory/` and `/Memory/..`
+ * to `/`, so the sent path would not be the id (nor the signed path). Such an
+ * id cannot address its record, so it is an error, not a request.
+ */
+export function encodeRecordId(id: string): string {
+  if (id === "." || id === "..") {
+    throw new Error(
+      `record id ${JSON.stringify(id)} is a URL path dot-segment ("." or ".."); ` +
+        `it cannot be addressed as one path segment of /Memory/<id>. Use a different id.`,
+    );
+  }
+  return encodeURIComponent(id);
+}
+
 function toIso(t: string | number | undefined): { iso: string; synthetic: boolean } {
   if (t === undefined) return { iso: new Date().toISOString(), synthetic: true };
   if (typeof t === "number") return { iso: new Date(t).toISOString(), synthetic: false };
@@ -56,7 +74,7 @@ export async function ingestSessionHistory(
       batch.map(async (ev) => {
         const { iso, synthetic } = toIso(ev.createdAt);
         if (synthetic) syntheticTimestamps = true;
-        const path = `/Memory/${ev.id}`;
+        const path = `/Memory/${encodeRecordId(ev.id)}`;
         const res = await signedFetch(harper, agent, "PUT", path, {
           id: ev.id,
           agentId: agent.id,

@@ -880,11 +880,85 @@ class TestCreateVerbAndConflictFallback:
         assert service._client.request.call_count == 2
         first, second = service._client.request.call_args_list
         assert (first[0][0], first[0][1]) == ("POST", "/Memory/")
-        assert (second[0][0], second[0][1]) == ("PUT", "/Memory/app:user:sess-1:evt-1")
+        # #1970: the id is one percent-encoded path segment (':' → %3A); the
+        # server decodes it, so the record addressed is unchanged.
+        assert (second[0][0], second[0][1]) == ("PUT", "/Memory/app%3Auser%3Asess-1%3Aevt-1")
         assert second[1]["json"] == first[1]["json"]
 
         warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
         assert not any("write failed" in str(w).lower() for w in warnings)
+
+    @pytest.mark.asyncio
+    async def test_conflict_put_fallback_percent_encodes_id(self, service):
+        """#1970: the 409 fallback PUT sends the id as ONE percent-encoded
+        path segment that decodes back to the id (no query, no fragment), and
+        the Ed25519 signature covers exactly the path that is sent.
+
+        Before #1970 the raw id was interpolated into the path, so `#`
+        truncated it (fragment), `?` started a query and `/` split it into
+        extra segments."""
+        from urllib.parse import unquote
+
+        signed_paths = []
+
+        def _record_sign(_key, _agent, _method, path):
+            signed_paths.append(path)
+            return "TPS-Ed25519 x:0:0:AA"
+
+        for rid in ["a#b", "x?y=1", "a/b/c", "50%", "sp ace"]:
+            service._client.request.reset_mock()
+            service._client.request.side_effect = [
+                _mock_response(409, "Conflict"),
+                _mock_response(200),
+            ]
+            signed_paths.clear()
+            with patch("adk_flair.memory_service._sign_request", side_effect=_record_sign):
+                await service.add_memory(
+                    app_name="app", user_id="user",
+                    memories=[MemoryEntry(
+                        id=rid,
+                        content=types.Content(role="user", parts=[types.Part(text="fact")]),
+                    )],
+                )
+            assert service._client.request.call_count == 2
+            method, sent_path = service._client.request.call_args_list[1][0][:2]
+            assert method == "PUT"
+            assert sent_path.startswith("/Memory/")
+            segment = sent_path[len("/Memory/"):]
+            assert "/" not in segment  # assertion: one segment only
+            assert "?" not in segment
+            assert "#" not in segment
+            assert unquote(segment) == rid
+            # Where the site signs, the signed path equals the sent path.
+            assert signed_paths[-1] == sent_path
+
+    @pytest.mark.asyncio
+    async def test_conflict_put_fallback_refuses_dot_segment_id(self, service, caplog):
+        """#1970 item 2: an id that is exactly '.' or '..' cannot address its
+        record, so the write refuses BEFORE any request is sent (fail-soft: the
+        refusal is logged, nothing goes out)."""
+        import logging
+
+        from adk_flair.memory_service import FlairWriteError, _encode_record_id
+
+        for bad in (".", ".."):
+            with pytest.raises(ValueError, match="dot-segment"):
+                _encode_record_id(bad)  # assertion: the rule is named
+            service._client.request.reset_mock()
+            caplog.clear()
+            with caplog.at_level(logging.WARNING), pytest.raises(FlairWriteError):
+                await service.add_memory(
+                    app_name="app",
+                    user_id="user",
+                    memories=[
+                        MemoryEntry(
+                            id=bad,
+                            content=types.Content(role="user", parts=[types.Part(text="fact")]),
+                        )
+                    ],
+                )
+            assert service._client.request.call_count == 0
+            assert any("write failed" in r.getMessage() and bad in r.getMessage() for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_non_conflict_error_propagates_with_real_status(self, service, caplog):

@@ -7,6 +7,7 @@ import {
   makeAuthGate,
   makeByIdReadGate,
   makeReadScope,
+  makeScopedSearch,
   resolveAuthGate,
   stampAttribution,
 } from "./record-type-kit.js";
@@ -15,6 +16,7 @@ import { RECORD_TYPES } from "./record-types.js";
 // Kit parameters read FROM RECORD_TYPES.Asset (single source of truth), same
 // composition MemoryCandidate.ts uses.
 const assetReadScope = makeReadScope(RECORD_TYPES.Asset.readScope, RECORD_TYPES.Asset.ownerField);
+const assetScopedSearch = makeScopedSearch(assetReadScope);
 const assetByIdReadGate = makeByIdReadGate(assetReadScope);
 const assetAuthGate = makeAuthGate();
 
@@ -69,16 +71,7 @@ export class Asset extends (databases as any).flair.Asset {
     if (gate.kind === "denied") return gate.response;
     if (gate.kind === "unfiltered") return super.search(query);
 
-    const scope = await assetReadScope(gate.agentId);
-    const agentCondition = scope.condition;
-    if (!query?.conditions) {
-      return super.search({ conditions: [agentCondition], ...(query || {}) });
-    }
-    return super.search({
-      ...query,
-      conditions: [agentCondition, { conditions: query.conditions, operator: query.operator || "and" }],
-      operator: "and",
-    });
+    return assetScopedSearch(gate.agentId, query, (q: any) => super.search(q));
   }
 
   async post(content: any) {

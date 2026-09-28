@@ -27,6 +27,23 @@ const LOCALHOST_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 const ALLOW_REMOTE_ENV = "FLAIR_ALLOW_REMOTE_URL";
 const DEFAULT_FLAIR_URL = "http://localhost:19926";
 
+/**
+ * Percent-encode a Memory id so it addresses exactly that record as ONE path
+ * segment (flair#1970). REFUSES an id that is exactly `.` or `..`: percent-
+ * encoding leaves those unchanged and URL normalization collapses
+ * `/Memory/.` to `/Memory/` and `/Memory/..` to `/`, so the sent path would not
+ * be the id (nor the signed path). Such an id cannot address its record.
+ */
+function encodeRecordId(id: string): string {
+  if (id === "." || id === "..") {
+    throw new Error(
+      `record id ${JSON.stringify(id)} is a URL path dot-segment ("." or ".."); ` +
+        `it cannot be addressed as one path segment of /Memory/<id>. Use a different id.`,
+    );
+  }
+  return encodeURIComponent(id);
+}
+
 // customMetadata caps (flair#1332, Sherlock hard requirements — mirrors the
 // Python package). REJECT, never truncate — a truncated blob silently corrupts
 // the store-and-return round-trip guarantee, which is the entire contract of
@@ -911,6 +928,11 @@ export class FlairMemoryService implements BaseMemoryService {
     recordId: string,
     body: Record<string, unknown>,
   ): Promise<void> {
+    // Validate/encode the id BEFORE any request (#1970): a `.`/`..` id cannot
+    // address its record, so a refused id sends nothing at all (not even the
+    // POST). `_sendJson` signs the very path it sends, so the signed and sent
+    // PUT paths always agree.
+    const putPath = `/Memory/${encodeRecordId(recordId)}`;
     const resp = await this._sendJson("POST", "/Memory/", body);
     if (resp.ok) return;
     if (resp.status !== 409) {
@@ -919,7 +941,8 @@ export class FlairMemoryService implements BaseMemoryService {
         `HTTP ${resp.status}${text ? `: ${text.slice(0, 200)}` : ""}`
       );
     }
-    const putResp = await this._sendJson("PUT", `/Memory/${recordId}`, body);
+    // The id is one percent-encoded path segment (#1970).
+    const putResp = await this._sendJson("PUT", putPath, body);
     if (!putResp.ok) {
       const text = await putResp.text().catch(() => "");
       throw new Error(
