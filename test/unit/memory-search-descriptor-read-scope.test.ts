@@ -106,4 +106,18 @@ describe("flair#1870 — memory_search descriptor wording tracks Memory's read m
     expect(description).toContain("non-admin callers");
     expect(description).toMatch(/administrator\b[^.]{0,80}\baccess\b/);
   });
+
+  test("both memory_delete output-shape copies delete by ID when authorized", () => {
+    // The memory_search pins above still pass on this PR's first head
+    // (d70c85fd), which already had the qualified search text. That head's
+    // memory_delete output shape still began "Deletes the caller's own memory",
+    // so this phrase is what proves the round-2 fix. Both copies are the
+    // descriptor outputShape and the /mcp contract summary.
+    const phrase = "Deletes a memory by ID when authorized";
+    const descriptor = TOOL_DESCRIPTORS.find((d) => d.name === "memory_delete");
+    expect(descriptor).toBeDefined();
+    expect(descriptor!.outputShape).toContain(phrase);
+    const summary = TOOLS["memory_delete"]?.contract?.summary;
+    expect(summary).toContain(phrase);
+  });
 });

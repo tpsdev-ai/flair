@@ -312,10 +312,10 @@ Clients on this page talk to the stdio server `@tpsdev-ai/flair-mcp`. Its `tools
 | `skill_get` | Fetch one skill's full procedure by id. Non-admin callers can retrieve their own and other agents' non-private skills; administrators can also retrieve private skills |
 | `memory_update` | Update a memory by id. Overwrites in place, or pass `preserveHistory` to write a superseding version. Optional `usedMemoryIds` |
 | `memory_get` | Fetch a specific memory by ID |
-| `memory_delete` | Delete one of your own memories |
+| `memory_delete` | Delete a memory by ID. Non-admin callers can delete only their own memories; administrators can also delete other agents' memories |
 | `relationship_store` | Assert a subject-predicate-object triple (for example "nathan manages flair"). Asserting the same triple again updates that row |
 | `bootstrap` | Session-start context: soul, memories, and predicted context. Pass `subjects` for predictive loading |
-| `soul_set` | Advertised as setting a soul entry. The server refuses runtime Soul writes, including this tool's Ed25519 call; operators use `flair soul set` |
+| `soul_set` | Advertised as setting a soul entry. Verified administrator Basic credentials are accepted; Ed25519 agent calls, including this tool's, are refused. Operators use `flair soul set` |
 | `soul_get` | Get a soul entry |
 | `flair_workspace_set` | Set this agent's workspace state (ref, label, provider, task, phase, summary) in the Office Space |
 | `flair_orgevent` | Publish an org-wide coordination event (claim, release, or status), attributed to the caller |
