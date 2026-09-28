@@ -83,7 +83,16 @@ fragment directory is empty (nothing to release) or when someone hand-wrote an e
 
 ### Phase 2 — tag the release
 
-After the release PR is merged to `main`, push the version tag:
+After a release PR merges to `main`, [Release auto-tag](../.github/workflows/release-auto-tag.yml)
+normally creates its tag after a successful push CI run, subject to the release checks.
+If an allowlisted advisory job fails that CI run, the immediate path is skipped and
+nightly recovery makes the tag instead. It runs at **04:23 UTC daily**, so expect up
+to **24 hours plus run time**. It uses completed CI runs regardless of their overall
+conclusion and tolerates only exact names in [the advisory allowlist](../.github/release-auto-tag-advisories.json).
+All other release conditions must pass, and it targets the version still declared
+on `main`, so a newer version supersedes a missed release.
+
+To tag by hand, push the version tag:
 
 ```bash
 git checkout main && git pull
