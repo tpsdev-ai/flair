@@ -328,6 +328,22 @@ def _sign_request(
     return f"TPS-Ed25519 {agent_id}:{ts}:{nonce}:{sig_b64}"
 
 
+def _merged_raw_path(base_url: str, path: str) -> str:
+    """flair#1987 — the raw path (path + query) httpx will send for ``path``
+    when the client's base URL is ``base_url``.
+
+    Mirrors ``httpx.Client`` (``_enforce_trailing_slash`` + ``_merge_url``):
+    the base URL's OWN path is kept, with exactly one slash before the route
+    (whether or not the base ends in ``"/"``). An ordinary base (an origin
+    with no path) yields exactly the route. Signing this instead of the bare
+    route means a deployment served under a path signs the path it sends.
+    """
+    base_raw = httpx.URL(base_url).raw_path
+    if not base_raw.endswith(b"/"):
+        base_raw += b"/"
+    return (base_raw + httpx.URL(path).raw_path.lstrip(b"/")).decode("ascii")
+
+
 def _is_localhost(host: str) -> bool:
     """Check whether a host string is a localhost address."""
     return host.lower() in _LOCALHOST_HOSTS
@@ -634,7 +650,21 @@ class FlairMemoryService(BaseMemoryService):
             )
             self._url_logged = True
 
-        auth = _sign_request(self._private_key, self._agent_id, method, path)
+        # flair#1987: the request is signed over the raw path (path + query) it
+        # actually carries. The client's base URL may have a path (a deployment
+        # served under a prefix), so the signed path is the base's own path
+        # joined with the route — exactly the raw path httpx will send. A base
+        # URL that carries a query string or fragment is refused before any
+        # request: the join drops the base's path for a bare trailing "?" or
+        # "#", so there is no request path to sign.
+        parsed_base = httpx.URL(self._url)
+        if "?" in str(parsed_base) or "#" in str(parsed_base):
+            raise ValueError(
+                f"adk-flair: refusing base URL {self._url!r}: a base URL must not "
+                "carry a query string or fragment."
+            )
+        signed_path = _merged_raw_path(self._url, path)
+        auth = _sign_request(self._private_key, self._agent_id, method, signed_path)
         headers = {"Authorization": auth}
         if json_body is not None:
             headers["Content-Type"] = "application/json"
