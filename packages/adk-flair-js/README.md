@@ -118,23 +118,26 @@ identities never collide and the `:` delimiter stays unambiguous.
 
 - Record IDs: an event with a non-empty `id` gets a deterministic record id.
   Tuples with no colon in any component keep the historical event-join
-  `app:user:session:eventId`, so re-ingesting those updates the same row. An
-  event with a missing or empty `id` gets a random UUID in that position, so
-  each ingestion stores it as a new record. When any component contains `:`,
-  each component percent-encodes `%` as `%25`, `|` as `%7C`, and `:` as
-  `%3A`, and the parts are joined with `|`. That id contains no `:`. The old
-  event-join always contains at least three `:`, so the new id is not an
-  event-join row the previous encoder stored. The first re-ingestion after
-  upgrading can leave both the old row and the new one for a colon-bearing
-  event.
+  `app:user:session:eventId`. Re-ingesting one of those updates the same row
+  only when that row already has a complete event stamp for the tuple
+  (`sessionId`, the compound tag, and the `adk-event:` tag). An unstamped
+  pre-upgrade row is not replaced automatically; the existing row is kept
+  and the conflict is reported. An event with a missing or empty `id` gets
+  a random UUID in that position, so each ingestion stores it as a new
+  record. When any component contains `:`, each component percent-encodes
+  `%` as `%25`, `|` as `%7C`, and `:` as `%3A`, and the parts are joined with
+  `|`. That id contains no `:`. The old event-join always contains at least
+  three `:`, so the new id is not an event-join row the previous encoder
+  stored. The first re-ingestion after upgrading can leave both the old row
+  and the new one for a colon-bearing event.
   Direct `addMemory()` writes use the entry's `id` when supplied, else the
   first 32 hex chars of the content's SHA-256. A create conflict on that id
   keeps the existing row and reports the conflict.
 - Creates ride `POST /Memory/` (the create verb) with the id in the body. A
-  `409` replaces the row only when it is verified to be the same event tuple
-  (`PUT /Memory/{id}`); otherwise the row is kept and the conflict is
-  reported. A PUT-shaped create 404s on Harper deployments where PUT is
-  update-only (flair#1336)
+  `409` replaces the row only when it has a complete event stamp matching
+  this tuple (`PUT /Memory/{id}`); otherwise the row is kept and the
+  conflict is reported. A PUT-shaped create 404s on Harper deployments
+  where PUT is update-only (flair#1336)
 - Write failures log a structured warning (session id, event count, HTTP status)
 - No-text events are filtered (Vertex parity)
 

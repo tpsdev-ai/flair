@@ -4,5 +4,6 @@
   contains no `:`. The old event-join always contains at least three `:`, so
   a new id is not an event-join row the previous encoder stored. Tuples with
   no colon in any component keep the historical event-join id. A create
-  conflict replaces the row only when it is the same event tuple; an occupied
-  caller-chosen id is kept and reported.
+  conflict replaces the row only when it has a complete event stamp for that
+  tuple. An unstamped pre-upgrade row is not replaced automatically; it is
+  kept and the conflict is reported. An occupied caller-chosen id is kept.

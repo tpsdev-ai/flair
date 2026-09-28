@@ -43,11 +43,12 @@ export function eventTag(eventId: string): string {
 }
 
 /**
- * True when `row` is verified to be this (app, user, session, event).
+ * True when `row` has a complete event stamp for this tuple.
  *
- * New writes stamp `sessionId` and an `adk-event:` tag. A historical
- * separator-free row has neither, but its id is the unambiguous event join
- * and its scope tag is the compound tag. Anything else is not verified.
+ * A complete stamp is `sessionId` equal to this session and tags that include
+ * both the compound tag and this event's `adk-event:` tag. A missing stamp
+ * (a pre-upgrade event, or a direct-memory row that shares the id) is not a
+ * match. A contradictory stamp is not a match. The id alone is not a stamp.
  */
 export function rowIsSameEventTuple(
   row: Record<string, unknown>,
@@ -57,13 +58,9 @@ export function rowIsSameEventTuple(
   eventId: string,
 ): boolean {
   const tags = Array.isArray(row["tags"]) ? row["tags"] : [];
+  if (row["sessionId"] !== sessionId) return false;
   if (!tags.includes(compoundTag(appName, userId))) return false;
-  if (row["sessionId"] === sessionId && tags.includes(eventTag(eventId))) return true;
-  const parts = [appName, userId, sessionId, eventId];
-  if (parts.every((part) => !part.includes(":"))) {
-    return row["id"] === parts.join(":");
-  }
-  return false;
+  return tags.includes(eventTag(eventId));
 }
 
 /**
@@ -682,8 +679,8 @@ export class FlairMemoryService implements BaseMemoryService {
    *
    * Record ids mirror the Python package: `entry.id` when the caller supplies
    * one (FlairMemoryEntry input), else the first 32 hex chars of the content's
-   * SHA-256 — deterministic, so re-adding identical content replaces rather
-   * than duplicates.
+   * SHA-256. The id is deterministic, so a re-add addresses the same row; a
+   * create conflict keeps that row and reports the conflict.
    */
   async addMemory(
     appName: string,
@@ -972,7 +969,7 @@ export class FlairMemoryService implements BaseMemoryService {
   }
 
   /**
-   * Create one Memory record, replacing it only for the same event tuple.
+   * Create one Memory record, replacing it only for a matching stamp.
    *
    * Creates via `POST /Memory/` — Harper's collection create verb — with the
    * id in the body. The previous shape, `PUT /Memory/{id}`, is update-only on
@@ -981,10 +978,11 @@ export class FlairMemoryService implements BaseMemoryService {
    * Harper 5.2.x, where PUT upserts). Mirrors the Python package's #1339 fix.
    *
    * A 409 from POST means the id is already occupied. The existing row is
-   * read and replaced only when `eventTuple` is verified to be that row
-   * (re-ingestion of the same app, user, session, and event). A caller-chosen
-   * id, or any row that is not that tuple, is kept and the conflict is
-   * thrown. Any other error propagates unchanged.
+   * read and replaced only when it has a complete event stamp for
+   * `eventTuple` (`sessionId` plus the compound tag and this event's tag).
+   * An unstamped pre-upgrade row, a contradictory stamp, or a caller-chosen
+   * id is kept and the conflict is thrown. Any other error propagates
+   * unchanged.
    */
   private async _writeRecord(
     recordId: string,
@@ -1015,12 +1013,12 @@ export class FlairMemoryService implements BaseMemoryService {
       return;
     }
     throw new Error(
-      `HTTP 409 conflict: record ${JSON.stringify(recordId)} is occupied by a ` +
-      "different event tuple; kept the existing row"
+      `HTTP 409 conflict: record ${JSON.stringify(recordId)} has no matching ` +
+      "event stamp; kept the existing row"
     );
   }
 
-  /** GET the occupied row. False when it cannot be verified. */
+  /** GET the occupied row. True only for a complete matching event stamp. */
   private async _occupiedRowIsEventTuple(
     path: string,
     eventTuple: [string, string, string, string],

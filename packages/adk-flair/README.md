@@ -334,17 +334,21 @@ dict is its return channel.
 
 An event with an id gets a deterministic record id. Tuples with no colon in
 any component keep the historical event-join
-(`{app_name}:{user_id}:{session_id}:{event.id}`), so re-ingesting those
-updates the same row. An event without an id gets a fresh UUID, so
-re-ingesting it can store another row. When any component contains `:`, each
-component percent-encodes `%` as `%25`, `|` as `%7C`, and `:` as `%3A`, and
-the parts are joined with `|`. That id contains no `:`. The old event-join
-always contains at least three `:`, so the new id is not an event-join row
-the previous encoder stored. The first re-ingestion after upgrading can
-leave both the old row and the new one for a colon-bearing event. A create
-conflict replaces the existing row only when that row is verified to be the
-same event tuple; otherwise the row is kept and the conflict is reported.
-A caller-chosen id on `add_memory()` is never replaced on conflict.
+(`{app_name}:{user_id}:{session_id}:{event.id}`). Re-ingesting one of those
+updates the same row only when that row already has a complete event stamp
+for the tuple: `sessionId` plus the compound tag and the `adk-event:` tag.
+An unstamped pre-upgrade row is not replaced automatically; the existing row
+is kept and the conflict is reported. An event without an id gets a fresh
+UUID, so re-ingesting it can store another row. When any component contains
+`:`, each component percent-encodes `%` as `%25`, `|` as `%7C`, and `:` as
+`%3A`, and the parts are joined with `|`. That id contains no `:`. The old
+event-join always contains at least three `:`, so the new id is not an
+event-join row the previous encoder stored. The first re-ingestion after
+upgrading can leave both the old row and the new one for a colon-bearing
+event. A create conflict replaces the existing row only when that row has a
+complete event stamp matching this tuple; otherwise the row is kept and the
+conflict is reported. A caller-chosen id on `add_memory()` is never replaced
+on conflict.
 
 ## custom_metadata
 

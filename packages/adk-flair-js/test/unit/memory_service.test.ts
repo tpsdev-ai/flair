@@ -61,9 +61,9 @@ function makeSession(opts: {
 
 /**
  * The legacy event-join id is occupied. A POST of `expectedId` gets 409, the
- * row is verified as this tuple, and the fallback PUTs that id, never the
+ * row has a complete event stamp, and the fallback PUTs that id, never the
  * legacy row. Restoring the old `:` join posts the legacy id; the conflict
- * read cannot verify it as this tuple, so the occupied row is kept.
+ * read has no matching stamp, so the occupied row is kept.
  */
 async function assertColonWritePreservesLegacy(
   installFetch: (fetchMock: typeof globalThis.fetch) => void,
@@ -765,8 +765,9 @@ describe("addSessionToMemory", () => {
   it("posts a disjoint id for a colon-bearing session and keeps the legacy row", async () => {
     // ("pre:post","user","sess","evt") and ("pre","post:user","sess","evt")
     // both used to store "pre:post:user:sess:evt". That row is occupied.
-    // Restoring the old join at the addSessionToMemory call site posts it
-    // and PUTs the occupied row. addEventsToMemory is not called here.
+    // Restoring the old join at the addSessionToMemory call site posts it;
+    // the conflict read has no matching stamp, so the occupied row is kept.
+    // addEventsToMemory is not called here.
     await assertColonWritePreservesLegacy(
       (fetchMock) => { globalThis.fetch = fetchMock; },
       () => service.addSessionToMemory(makeSession({
@@ -785,6 +786,85 @@ describe("addSessionToMemory", () => {
       "pre|post%3Auser|sess|evt",
       "pre", "post:user", "sess", "evt",
     );
+  });
+
+  it("keeps an occupied direct id that has no event stamp", async () => {
+    // The row's id and compound tag match this event. It is a direct-memory
+    // row: no sessionId and no adk-event tag. Replacing it on that match
+    // PUTs after the GET.
+    const recordId = "app:user:sess-1:evt-1";
+    const calls: string[] = [];
+    globalThis.fetch = mock(async (url, init) => {
+      const method = (init as RequestInit).method ?? "GET";
+      calls.push(method);
+      if (method === "POST") return new Response("Conflict", { status: 409 });
+      if (method === "GET") {
+        return new Response(JSON.stringify({
+          id: recordId,
+          content: "direct fact",
+          tags: ["adk:app:user"],
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+    const warnings: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+    try {
+      await service.addSessionToMemory(makeSession({
+        id: "sess-1", appName: "app", userId: "user",
+        events: [makeEvent({ id: "evt-1", text: "overwrite" })],
+      }));
+    } finally {
+      console.warn = origWarn;
+    }
+    expect(calls).toEqual(["POST", "GET"]);
+    const warning = warnings.join(" ");
+    expect(warning).toContain("write failed");
+    expect(warning).toContain("conflict");
+    expect(warning).toContain("kept the existing row");
+  });
+
+  it("keeps a row whose stamp contradicts this event", async () => {
+    // Id and compound tag match. One row has this session and another
+    // event's tag; the other has this event's tag and another session.
+    // Either half-match still PUTs when an unstamped id is accepted.
+    const recordId = "app:user:sess-1:evt-1";
+    const rows = [
+      { id: recordId, sessionId: "sess-1", tags: ["adk:app:user", eventTag("other-evt")] },
+      { id: recordId, sessionId: "other-sess", tags: ["adk:app:user", eventTag("evt-1")] },
+    ];
+    for (const row of rows) {
+      const calls: string[] = [];
+      globalThis.fetch = mock(async (url, init) => {
+        const method = (init as RequestInit).method ?? "GET";
+        calls.push(method);
+        if (method === "POST") return new Response("Conflict", { status: 409 });
+        if (method === "GET") {
+          return new Response(JSON.stringify(row), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      });
+      const warnings: string[] = [];
+      const origWarn = console.warn;
+      console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+      try {
+        await service.addSessionToMemory(makeSession({
+          id: "sess-1", appName: "app", userId: "user",
+          events: [makeEvent({ id: "evt-1", text: "overwrite" })],
+        }));
+      } finally {
+        console.warn = origWarn;
+      }
+      expect(calls).toEqual(["POST", "GET"]);
+      const warning = warnings.join(" ");
+      expect(warning).toContain("write failed");
+      expect(warning).toContain("conflict");
+      expect(warning).toContain("kept the existing row");
+    }
   });
 
   it("filters no-text events", async () => {
@@ -1004,10 +1084,8 @@ describe("create verb and conflict fallback", () => {
   });
 
   it("409 conflict falls back to PUT /Memory/{id} with the SAME body, no warning", async () => {
-    // The trap a naive PUT→POST swap walks into: without the fallback,
-    // every re-save of an already-ingested session event fails with 409 on
-    // every deployment where the old PUT path worked. The GET must show the
-    // same separator-free event tuple before the PUT.
+    // The GET must show a complete stamp (sessionId, compound tag, and this
+    // event's tag) before the PUT. An unstamped pre-upgrade row is kept.
     const recordId = "app:user:sess-1:evt-1";
     const calls: Array<{ method: string; url: string; body?: Record<string, unknown> }> = [];
     globalThis.fetch = mock(async (url, init) => {
@@ -1020,7 +1098,11 @@ describe("create verb and conflict fallback", () => {
       });
       if (method === "POST") return new Response("Conflict", { status: 409 });
       if (method === "GET") {
-        return new Response(JSON.stringify({ id: recordId, tags: ["adk:app:user"] }), {
+        return new Response(JSON.stringify({
+          id: recordId,
+          sessionId: "sess-1",
+          tags: ["adk:app:user", eventTag("evt-1")],
+        }), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
@@ -1111,11 +1193,12 @@ describe("Memory id path encoding on the 409 PUT fallback (#1970)", () => {
     // segments and `%`/space were malformed. Each id must instead reach the
     // wire as exactly one segment after /Memory/ that decodes back to the id.
     // Direct addMemory does not replace an occupied id. These event ids have
-    // no `:`, so the session write's GET verifies the historical event-join
-    // and the fallback PUT still encodes the full record id as one segment.
+    // no `:`. The session write's GET returns a complete stamp, and the
+    // fallback PUT encodes the full record id as one segment.
     const eventIds = ["a#b", "x?y=1", "a/b/c", "50%", "sp ace"];
     const calls: Array<{ method: string; url: string; auth: string }> = [];
     let recordId = "";
+    let stampedEventId = "";
     globalThis.fetch = mock(async (url, init) => {
       const method = (init as RequestInit).method ?? "GET";
       calls.push({
@@ -1125,7 +1208,11 @@ describe("Memory id path encoding on the 409 PUT fallback (#1970)", () => {
       });
       if (method === "POST") return new Response("Conflict", { status: 409 });
       if (method === "GET") {
-        return new Response(JSON.stringify({ id: recordId, tags: ["adk:app:user"] }), {
+        return new Response(JSON.stringify({
+          id: recordId,
+          sessionId: "sess",
+          tags: [compoundTag("app", "user"), eventTag(stampedEventId)],
+        }), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
@@ -1137,6 +1224,7 @@ describe("Memory id path encoding on the 409 PUT fallback (#1970)", () => {
 
     for (const eventId of eventIds) {
       recordId = `app:user:sess:${eventId}`;
+      stampedEventId = eventId;
       calls.length = 0;
       await service.addSessionToMemory(makeSession({
         id: "sess",
@@ -1349,8 +1437,9 @@ describe("addEventsToMemory", () => {
 
   it("posts a disjoint id for a colon-bearing event and keeps the legacy row", async () => {
     // Same occupied legacy row as the session-write test. Restoring the old
-    // join at the addEventsToMemory call site posts that id and PUTs the
-    // occupied row. addSessionToMemory is not called here.
+    // join at the addEventsToMemory call site posts that id; the conflict
+    // read has no matching stamp, so the occupied row is kept.
+    // addSessionToMemory is not called here.
     await assertColonWritePreservesLegacy(
       (fetchMock) => { globalThis.fetch = fetchMock; },
       () => service.addEventsToMemory(

@@ -221,23 +221,22 @@ def _event_tag(event_id: str) -> str:
 def _row_is_same_event_tuple(
     row: Mapping[str, Any], app_name: str, user_id: str, session_id: str, event_id: str
 ) -> bool:
-    """True when ``row`` is verified to be this (app, user, session, event).
+    """True when ``row`` has a complete event stamp for this tuple.
 
-    New writes stamp ``sessionId`` and an ``adk-event:`` tag. A historical
-    separator-free row has neither, but its id is the unambiguous event join
-    and its scope tag is the compound tag. Anything else is not verified.
+    A complete stamp is ``sessionId`` equal to this session and tags that
+    include both the compound tag and this event's ``adk-event:`` tag.
+    A missing stamp (a pre-upgrade event, or a direct-memory row that shares
+    the id) is not a match. A contradictory stamp is not a match. The id
+    alone is not a stamp.
     """
     tags = row.get("tags") or []
     if not isinstance(tags, list):
         return False
+    if row.get("sessionId") != session_id:
+        return False
     if _compound_tag(app_name, user_id) not in tags:
         return False
-    if row.get("sessionId") == session_id and _event_tag(event_id) in tags:
-        return True
-    parts = (app_name, user_id, session_id, event_id)
-    if all(":" not in part for part in parts):
-        return row.get("id") == ":".join(parts)
-    return False
+    return _event_tag(event_id) in tags
 
 
 def _escape_record_id_component(value: str) -> str:
@@ -260,8 +259,7 @@ def _deterministic_record_id(
     and the parts are joined with ``|``. That id contains no ``:``. The old
     join of four components always contains at least three ``:`` — including
     ids already stored for tuples that themselves contained ``:`` — so the
-    new id is outside that set. A create-conflict replace therefore cannot
-    land on a row the old encoder stored for a different tuple.
+    new id is outside that set.
     """
     parts = (app_name, user_id, session_id, event_id)
     if any(":" in part for part in parts):
@@ -740,7 +738,7 @@ class FlairMemoryService(BaseMemoryService):
         *,
         event_tuple: Optional[Tuple[str, str, str, str]] = None,
     ) -> None:
-        """Create one Memory record, replacing it only for the same event tuple.
+        """Create one Memory record, replacing it only for a matching stamp.
 
         Creates via ``POST /Memory/`` — Harper's collection create verb —
         with the id in the body. The previous shape, ``PUT /Memory/{id}``,
@@ -749,10 +747,11 @@ class FlairMemoryService(BaseMemoryService):
         not reproducible on stock Harper 5.2.x, where PUT upserts).
 
         A 409 from POST means the id is already occupied. The existing row
-        is read and replaced only when ``event_tuple`` is verified to be
-        that row (re-ingestion of the same app, user, session, and event).
-        A caller-chosen id, or any row that is not that tuple, is kept and
-        the conflict is raised. Any other error propagates unchanged.
+        is read and replaced only when it has a complete event stamp for
+        ``event_tuple`` (``sessionId`` plus the compound tag and this
+        event's tag). An unstamped pre-upgrade row, a contradictory stamp,
+        or a caller-chosen id is kept and the conflict is raised. Any other
+        error propagates unchanged.
         """
         # Validate/encode the id BEFORE any request (#1970): a ``.``/``..`` id
         # cannot address its record, so a refused id sends nothing at all (not
@@ -774,13 +773,13 @@ class FlairMemoryService(BaseMemoryService):
             "POST",
             put_path,
             409,
-            "occupied by a different record; existing row kept",
+            "no matching event stamp; existing row kept",
         )
 
     async def _occupied_row_is_event_tuple(
         self, path: str, event_tuple: Tuple[str, str, str, str]
     ) -> bool:
-        """GET the occupied row. False when it cannot be verified."""
+        """GET the occupied row. True only for a complete matching event stamp."""
         try:
             row = await self._request("GET", path)
         except Exception:
