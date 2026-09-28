@@ -863,6 +863,7 @@ describe("MemoryBootstrap.post() — verbatim soul duplicates collapse (flair#14
     expect(res.soul).toEqual({ identity: "SAME_SOUL_BODY" });
     expect(res.context.split("SAME_SOUL_BODY").length - 1).toBe(1);
   });
+
   function seedSoul(agentId: string, key: string, value: string) {
     soulStore.set(`${agentId}:${key}`, { id: `${agentId}:${key}`, agentId, key, value });
   }
