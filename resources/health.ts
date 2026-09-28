@@ -147,6 +147,9 @@ export function currentSearchReadiness(detail = false): SearchReadiness {
   return resolveSearchReadiness({
     resources,
     memoryTable: db.flair?.Memory,
+    // Public /Health omits summary so doc counts stay off the unauthenticated
+    // body. `reason` still carries a skipped warm or a stale marker;
+    // bm25SearchLagReason reads it when summary is absent.
     bm25: detail ? full : { state: full.state, reason: full.reason },
     hybridEnabled: hybridEnabled(),
     retrievalMode: retrievalMode(),

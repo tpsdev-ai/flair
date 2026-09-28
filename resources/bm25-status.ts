@@ -126,16 +126,25 @@ export function bm25DisabledWarning(
 
 /**
  * Lag text for searchReady. A caller that already has a summary (HealthDetail)
- * passes it through; a caller with only a state (public /Health) gets the
- * same facts without doc counts.
+ * passes it through; public /Health passes `state` and `reason` only, so doc
+ * counts stay off the unauthenticated body. A skipped warm or a stale marker
+ * records that reason while state is `empty` — name it, the same sentence
+ * `formatBm25IndexSummary` puts on the detail summary. An in-flight build
+ * still says a text search waits, even if a leftover reason is present.
  */
-export function bm25SearchLagReason(bm25: { state?: string; summary?: string } | null | undefined): string {
+export function bm25SearchLagReason(
+  bm25: { state?: string; summary?: string; reason?: string } | null | undefined,
+): string {
   const summary = bm25?.summary?.trim() ?? "";
   if (summary.length > 0) {
     return summary.startsWith("bm25 index:") ? summary : `bm25 index: ${summary}`;
   }
   if (bm25?.state === "building") {
     return "bm25 index: building — a text search waits for this build";
+  }
+  const reason = (bm25?.reason ?? "").trim();
+  if (reason.length > 0) {
+    return `bm25 index: not built yet — ${reason}; a text search rebuilds it`;
   }
   return "bm25 index not built yet — builds in the background after startup, or on the first text search";
 }

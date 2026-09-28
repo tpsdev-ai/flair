@@ -101,6 +101,21 @@ describe("resolveSearchReadiness (flair#1326)", () => {
     expect(r.searchReadyReason).not.toMatch(/scans the corpus/i);
   });
 
+  test("public /Health shape (reason, no summary) names a skipped warm or stale marker", () => {
+    const skipped = "background build skipped: Memory table was not ready within 30s; a text search builds it";
+    const r = resolveSearchReadiness({
+      resources: mounted,
+      memoryTable,
+      bm25: { state: "empty", reason: skipped },
+      hybridEnabled: true,
+    });
+    expect(r.searchReady).toBe(false);
+    expect(r.ok).toBe(true);
+    expect(r.status).toBe(200);
+    expect(r.searchReadyReason).toBe(`bm25 index: not built yet — ${skipped}; a text search rebuilds it`);
+    expect(r.searchReadyReason).not.toMatch(/builds in the background after startup/);
+  });
+
   test("BM25 still building → names the in-flight build, does not claim search-ready", () => {
     const r = resolveSearchReadiness({
       resources: mounted,
