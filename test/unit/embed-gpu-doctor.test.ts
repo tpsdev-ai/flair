@@ -4,6 +4,7 @@ import { EMBED_GPU_FALLBACK_MSG } from "../../resources/embed-gpu.ts";
 import {
   EMBED_GPU_DOCTOR_MARKER,
   EMBED_GPU_DETECTED_MESSAGE,
+  EMBED_GPU_UNCONFIRMED_DOCTOR_MESSAGE,
   describeEmbedGpuDoctorFinding,
 } from "../../src/lib/embed-gpu-doctor.ts";
 import {
@@ -89,6 +90,20 @@ describe("describeEmbedGpuDoctorFinding (flair#1437 — doctor line)", () => {
       gpuLayers: 0,
       source: "default",
     })).toBeNull();
+  });
+
+  it("unconfirmed readback is not the CPU fallback sentence", () => {
+    const finding = describeEmbedGpuDoctorFinding({
+      backend: "unconfirmed",
+      gpuLayers: null,
+      source: "detected",
+    });
+    expect(finding).not.toBeNull();
+    expect(finding!.isIssue).toBe(false);
+    expect(finding!.message).toBe(EMBED_GPU_DETECTED_MESSAGE);
+    expect(finding!.message).not.toContain("did not engage");
+    expect(EMBED_GPU_UNCONFIRMED_DOCTOR_MESSAGE).not.toContain("did not engage");
+    expect(EMBED_GPU_UNCONFIRMED_DOCTOR_MESSAGE).not.toContain("running CPU");
   });
 
   it("Metal engaged (no fallback) is silent", () => {

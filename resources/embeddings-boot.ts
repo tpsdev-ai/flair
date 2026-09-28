@@ -88,10 +88,10 @@ import { availableParallelism } from "node:os";
 import { resolveModelsDir } from "./embeddings-provider.js";
 import {
   applyEmbedGpuChoice,
-  captureIoDuring,
   formatEmbedGpuLogLine,
-  getEmbedGpuStatement,
+  formatEmbedGpuRequestLine,
   previewEmbedGpuStatement,
+  probeLoadedAddonGpuType,
   resolveEmbedGpuChoice,
   setEmbedGpuStatement,
 } from "./embed-gpu.js";
@@ -226,25 +226,25 @@ export async function registerEmbeddingsBackend(): Promise<void> {
       threads,
       gpuLayers: choice.gpuLayers,
     };
-    const needsMetalConfirm = choice.gpuLayers > 0 && choice.metalUsable;
-    if (!needsMetalConfirm) {
-      const statement = applyEmbedGpuChoice(choice, "");
+    // gpuLayers 0 is a CPU request — nothing was asked of the GPU.
+    // Any positive offload is read back from the engine after warmup.
+    // Captured stdio is not the signal (flair#2031).
+    if (choice.gpuLayers <= 0) {
+      const statement = applyEmbedGpuChoice(choice);
       console.log(formatEmbedGpuLogLine(statement));
       await register({ logicalName: LOGICAL_NAME, kind: "embedding", config });
     } else {
       setEmbedGpuStatement(previewEmbedGpuStatement(choice));
-      console.log(formatEmbedGpuLogLine(getEmbedGpuStatement()));
-      const { log } = await captureIoDuring(async () => {
-        const engine = await register({
-          logicalName: LOGICAL_NAME,
-          kind: "embedding",
-          config,
-        });
-        if (engine && typeof engine.ensureReady === "function") {
-          await engine.ensureReady();
-        }
+      console.log(formatEmbedGpuRequestLine(choice));
+      const engine = await register({
+        logicalName: LOGICAL_NAME,
+        kind: "embedding",
+        config,
       });
-      const statement = applyEmbedGpuChoice(choice, log);
+      if (engine && typeof engine.ensureReady === "function") {
+        await engine.ensureReady();
+      }
+      const statement = applyEmbedGpuChoice(choice, engine, probeLoadedAddonGpuType);
       console.log(formatEmbedGpuLogLine(statement));
     }
   } catch (err) {

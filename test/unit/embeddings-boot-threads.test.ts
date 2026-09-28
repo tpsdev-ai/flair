@@ -149,6 +149,9 @@ describe("embeddings-boot register() gpuLayers plumbing (flair#1437)", () => {
     expect(src).toContain("gpuLayers: choice.gpuLayers");
     expect(src).toContain("applyEmbedGpuChoice");
     expect(src).toContain("formatEmbedGpuLogLine");
+    expect(src).toContain("probeLoadedAddonGpuType");
+    // Engagement is the engine after warmup, not a captured stdio scrape.
+    expect(src).not.toContain("captureIoDuring");
     // The omit-when-unset pin is gone — a synthesized silent default is the bug.
     expect(src).not.toContain("...(gpuLayers !== undefined ? { gpuLayers } : {})");
   });

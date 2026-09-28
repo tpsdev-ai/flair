@@ -22,8 +22,8 @@ import {
 /**
  * flair#1437 — stated gpuLayers default. These cases are the product
  * contract: detect a *usable* Metal backend (not merely the platform),
- * derive 99/0, honor FLAIR_EMBED_GPU_LAYERS, and fail loud when offload
- * was requested but Metal did not engage.
+ * derive 99/0, honor FLAIR_EMBED_GPU_LAYERS, and state Metal, CPU, or
+ * unconfirmed from the engine — never from an empty log capture.
  */
 describe("detectUsableMetalBackend (flair#1437)", () => {
   it("rejects non-darwin platforms even when the prebuilt would resolve", () => {
@@ -192,12 +192,13 @@ describe("confirmMetalEngagement / fail-loud (flair#1437)", () => {
     expect(r.statement.fallback).toBeUndefined();
   });
 
-  it("forced GPU on a no-GPU box STATE fallback — never a silent CPU-under-GPU-claim", () => {
+  it("forced GPU on a no-GPU box STATE fallback when the engine says CPU", () => {
     const r = confirmMetalEngagement({
       requestedGpuLayers: 99,
       metalUsable: false,
       warmupLog: "",
       source: "env",
+      engine: { getGpuType: () => false },
     });
     expect(r.engaged).toBe(false);
     expect(r.statement.backend).toBe("cpu");
@@ -206,23 +207,38 @@ describe("confirmMetalEngagement / fail-loud (flair#1437)", () => {
     expect(r.statement.fallback).toBe(EMBED_GPU_FALLBACK_MSG);
   });
 
-  it("usable Metal + both log markers → backend=metal, gpuLayers=99, no fallback", () => {
+  it("engine readback Metal + 99 layers → backend=metal, no fallback", () => {
+    const r = confirmMetalEngagement({
+      requestedGpuLayers: 99,
+      metalUsable: true,
+      warmupLog: "",
+      source: "detected",
+      engine: { gpu: "metal", gpuLayers: 99 },
+    });
+    expect(r.engaged).toBe(true);
+    expect(r.statement).toEqual({ backend: "metal", gpuLayers: 99, source: "detected" });
+  });
+
+  it("log markers alone do not engage Metal", () => {
     const r = confirmMetalEngagement({
       requestedGpuLayers: 99,
       metalUsable: true,
       warmupLog: metalLog,
       source: "detected",
     });
-    expect(r.engaged).toBe(true);
-    expect(r.statement).toEqual({ backend: "metal", gpuLayers: 99, source: "detected" });
+    expect(r.engaged).toBe(false);
+    expect(r.statement.backend).toBe("unconfirmed");
+    expect(r.statement.gpuLayers).toBeNull();
+    expect(r.statement.fallback).toBeUndefined();
   });
 
-  it("usable Metal + missing ggml_metal_init confirmation → STATE fallback", () => {
+  it("engine readback CPU → not engaged, fallback sentence", () => {
     const r = confirmMetalEngagement({
       requestedGpuLayers: 99,
       metalUsable: true,
-      warmupLog: "harper started\nno metal here",
-      source: "detected",
+      warmupLog: metalLog,
+      source: "env",
+      engine: { gpu: false, gpuLayers: 0 },
     });
     expect(r.engaged).toBe(false);
     expect(r.statement.backend).toBe("cpu");
@@ -240,24 +256,25 @@ describe("stated snapshot + Health field (flair#1437)", () => {
     _resetEmbedGpuStatementForTests();
   });
 
-  it("preview of a Metal-derived choice does not claim metal before confirmation", () => {
+  it("preview of a Metal-derived choice does not claim metal or CPU before readback", () => {
     const preview = previewEmbedGpuStatement({
       gpuLayers: 99,
       source: "detected",
       metalUsable: true,
     });
-    expect(preview.backend).toBe("cpu");
-    expect(preview.gpuLayers).toBe(99);
+    expect(preview.backend).toBe("unconfirmed");
+    expect(preview.gpuLayers).toBeNull();
     expect(preview.fallback).toBeUndefined();
   });
 
-  it("applyEmbedGpuChoice stores the confirmed statement for /Health", () => {
+  it("applyEmbedGpuChoice stores the engine readback for /Health", () => {
     const statement = applyEmbedGpuChoice(
       { gpuLayers: 99, source: "detected", metalUsable: true },
-      "ggml_metal_init: ok\ncompute buffer size = 1",
+      { llama: { gpu: "metal" }, gpuLayers: 99 },
     );
     expect(getEmbedGpuStatement()).toEqual(statement);
     expect(statement.backend).toBe("metal");
+    expect(statement.gpuLayers).toBe(99);
   });
 
   it("withEmbedGpuHealth always attaches embedding {backend,gpuLayers,source}", () => {
@@ -267,8 +284,11 @@ describe("stated snapshot + Health field (flair#1437)", () => {
     expect(body.ok).toBe(true);
   });
 
-  it("Health field carries fallback when forced-GPU did not engage", () => {
-    applyEmbedGpuChoice({ gpuLayers: 99, source: "env", metalUsable: false }, "");
+  it("Health field carries fallback when the engine says CPU", () => {
+    applyEmbedGpuChoice(
+      { gpuLayers: 99, source: "env", metalUsable: false },
+      { gpu: false },
+    );
     const body = withEmbedGpuHealth({ ok: true });
     expect(body.embedding.backend).toBe("cpu");
     expect(body.embedding.gpuLayers).toBe(0);
