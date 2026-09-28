@@ -332,6 +332,20 @@ describe("api-reference-schema-coverage", () => {
   });
 });
 
+test("R2 annotation names the fragment and continuation line", () => {
+  const dir = fixture({ distCli: fakeCli(3) });
+  const file = ".changelog/unreleased/fixed-indent.md";
+  writeFileSync(join(dir, file), "- entry\n\n" + " ".repeat(3) + "bad\n");
+  const res = spawnSync("node", [join(dir, SCRIPT_REL)], { cwd: dir, encoding: "utf8", timeout: 10000, env: { ...process.env, GITHUB_ACTIONS: "true" } });
+  expect(res.error).toBeUndefined();
+  expect(res.status).toBe(1);
+  const annotations = res.stdout.split("\n").filter((line) => line.startsWith("::error file=") && line.includes("continuation indent"));
+  expect(annotations).toHaveLength(2);
+  for (const line of annotations) {
+    expect(line).toContain("::error file=" + file + ",line=3::" + file + ":3: continuation indent 3; expected 2 spaces or at least 4 for nested content (fenced code exempt).");
+  }
+});
+
 describe("cleanup", () => {
   test("removes fixtures", () => {
     for (const d of created) rmSync(d, { recursive: true, force: true });

@@ -338,7 +338,7 @@ defineCheck("changelog-unreleased", null, () => {
   try {
     fragments = readFragments();
   } catch (err) {
-    return [{ file: `${FRAGMENT_DIR_REL}/`, line: 1, msg: `${err?.message ?? err}` }];
+    return [{ file: err?.file ?? `${FRAGMENT_DIR_REL}/`, line: err?.line ?? 1, msg: `${err?.message ?? err}` }];
   }
   const hasContent = fragments.length > 0;
 
@@ -635,7 +635,7 @@ defineCheck("changelog-lede-length", "changelog fragment", () => {
   try {
     fragments = readFragments();
   } catch (err) {
-    return [{ file: `${FRAGMENT_DIR_REL}/`, line: 1, msg: `${err?.message ?? err}` }];
+    return [{ file: err?.file ?? `${FRAGMENT_DIR_REL}/`, line: err?.line ?? 1, msg: `${err?.message ?? err}` }];
   }
   if (fragments.length === 0) {
     return { failures: [], scanned: null };

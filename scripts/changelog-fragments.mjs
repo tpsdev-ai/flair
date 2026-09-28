@@ -81,7 +81,42 @@ export const UNRELEASED_NOTE = [
 
 // ─── Fragment reading ─────────────────────────────────────────────────────────
 
-export class FragmentError extends Error {}
+export class FragmentError extends Error {
+  constructor(message, file, line = 1) {
+    super(message);
+    this.file = file;
+    this.line = line;
+  }
+}
+
+// One walker owns fence state, indentation validation and entry recognition.
+function walkEntryLines(text, relPath) {
+  const entries = [];
+  let fence = "";
+  let container = 0;
+  for (const [index, line] of text.split("\n").entries()) {
+    const indent = line.match(/^ */)[0].length;
+    if (fence) {
+      const marker = indent === container ? line.slice(container).match(/^(`{3,}|~{3,})( *)$/) : null;
+      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length) fence = "";
+      continue;
+    }
+    const entry = line.startsWith("- ");
+    if (entry) {
+      entries.push(line);
+      container = 2;
+    } else {
+      if (relPath && line.trim() && indent !== 2 && indent < 4) {
+        throw new FragmentError(`${relPath}:${index + 1}: continuation indent ${indent}; expected 2 spaces or at least 4 for nested content (fenced code exempt).`, relPath, index + 1);
+      }
+      if (line.trim() && indent === 0) container = 0;
+    }
+    const content = entry ? line.slice(2) : indent === container ? line.slice(container) : "";
+    const marker = content.match(/^(`{3,}|~{3,})/);
+    if (marker) fence = marker[1];
+  }
+  return entries;
+}
 
 // `<category>-<slug>.md` → { category, slug }. Throws with the offending name and
 // the remedy — a fragment that cannot be placed must never be silently skipped.
@@ -136,28 +171,7 @@ export function validateFragmentBody(relPath, body) {
   // already runs on every PR, so putting it here means the author hears it while
   // the change is still theirs to fix.
   //
-  // Fenced code blocks are stripped before counting: fragments routinely quote
-  // terminal output, and a line like `- foo` inside a fence is content, not a
-  // second entry.
-  // Fence markers are INDENTED in practice: a fenced block inside a fragment is
-  // continuation content under the entry's '- ', so it carries the two-space
-  // indent. An unanchored `^```` matched nothing and the strip silently did
-  // nothing — caught by the fenced-block test below failing, not by review.
-  let fence = "";
-  const withoutFences = body.split("\n").map((line, index) => {
-    const marker = line.trimStart().match(/^(`{3,}|~{3,})(.*)$/);
-    if (fence) {
-      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = "";
-      return "";
-    }
-    if (index && line.trim() && !line.startsWith("- ")) {
-      const indent = line.match(/^ */)[0].length;
-      if (indent !== 2 && indent < 4) throw new FragmentError(`${relPath}:${index + 1}: continuation indent ${indent}; expected 2 spaces or at least 4 for nested content (fenced code exempt).`);
-    }
-    if (marker && (marker[1][0] !== "`" || !marker[2].includes("`"))) { fence = marker[1]; return ""; }
-    return line;
-  }).join("\n");
-  const entries = (withoutFences.match(/^- /gm) ?? []).length;
+  const entries = walkEntryLines(body, relPath).length;
   if (entries > 1) {
     throw new FragmentError(
       `${relPath}: holds ${entries} top-level '- ' entries; a fragment is ONE changelog entry. ` +
@@ -264,7 +278,7 @@ export function assemble(fragments) {
 // release step to report "N entries" against the fragment count — if those two
 // numbers ever disagree, something was dropped.
 export function countEntries(section) {
-  return section.split("\n").filter((l) => l.startsWith("- ")).length;
+  return walkEntryLines(section).length;
 }
 
 // ─── CHANGELOG.md surgery ─────────────────────────────────────────────────────
@@ -286,7 +300,7 @@ export function locateUnreleased(lines) {
 // promote REPLACES that body: they would be silently discarded at the version
 // cut. Detect them by their list marker (prose edits to the note are fine).
 export function strayUnreleasedEntries(body) {
-  return body.split("\n").filter((l) => l.startsWith("- "));
+  return walkEntryLines(body);
 }
 
 export function promote(version, { date, changelogPath = CHANGELOG_PATH, dir = FRAGMENT_DIR } = {}) {

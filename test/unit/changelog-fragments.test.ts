@@ -11,7 +11,8 @@
 // exactly once.
 
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, cpSync, realpathSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
 
@@ -479,4 +480,82 @@ describe("lede length — 25 words, one sentence (flair#1392)", () => {
   test("a fragment with no bold run is not this rule's business", () => {
     expect(ledeLengthViolation("fixed-plain.md", "- A plain entry with no bold lede at all.\n")).toBeNull();
   });
+});
+
+describe("R2 fence walker", () => {
+  for (const char of ["`", "~"]) {
+    const fence = char.repeat(3);
+
+    test("R2 B1 first-line code " + char, () => {
+      const body = ["- " + fence, " ".repeat(3) + "code", " ".repeat(2) + fence, " ".repeat(2) + "after"].join("\n");
+      expect(() => validateFragmentBody("first.md", body)).not.toThrow();
+      expect(countEntries(body)).toBe(1);
+    });
+
+    test("R2 B1 after first-line closure " + char, () => {
+      const body = ["- " + fence, " ".repeat(2) + fence, " ".repeat(3) + "bad"].join("\n");
+      expect(() => validateFragmentBody("first.md", body)).toThrow("first.md:3: continuation indent 3;");
+    });
+
+    test("R2 B2 literal opener hides nothing " + char, () => {
+      const body = ["- entry", " ".repeat(6) + fence, " ".repeat(3) + "bad"].join("\n");
+      expect(() => validateFragmentBody("deep.md", body)).toThrow("deep.md:3: continuation indent 3;");
+      expect(countEntries(["- entry", " ".repeat(6) + fence, "- second"].join("\n"))).toBe(2);
+    });
+
+    test("R2 B2 literal closer keeps code fenced " + char, () => {
+      const body = ["- entry", " ".repeat(2) + fence, " ".repeat(6) + fence, " ".repeat(3) + "code", "- literal", " ".repeat(2) + fence].join("\n");
+      expect(() => validateFragmentBody("deep.md", body)).not.toThrow();
+      expect(countEntries(body)).toBe(1);
+    });
+
+    test("R2 B3 validator and assembly agree " + char, () => {
+      const dir = tmp();
+      const body = ["- entry", " ".repeat(2) + fence, "- literal", " ".repeat(2) + fence].join("\n");
+      expect(() => validateFragmentBody("fixed-fence.md", body)).not.toThrow();
+      write(dir, "fixed-fence.md", body);
+      expect(countEntries(assemble(readFragments(dir)))).toBe(1);
+      expect(strayUnreleasedEntries(body)).toEqual(["- entry"]);
+    });
+
+    for (const command of ["check", "promote"]) {
+      test("R2 B3 gate " + command + " " + char, () => {
+        // Node resolves import.meta.url through macOS /var symlinks.
+        const root = realpathSync(tmp());
+        const dir = join(root, ".changelog", "unreleased");
+        mkdirSync(dir, { recursive: true });
+        mkdirSync(join(root, "scripts"));
+        const script = join(root, "scripts", "changelog-fragments.mjs");
+        cpSync(join(import.meta.dir, "../../scripts/changelog-fragments.mjs"), script);
+        const body = ["- entry", " ".repeat(2) + fence, "- literal", " ".repeat(2) + fence].join("\n");
+        write(dir, "fixed-fence.md", body);
+        const changelog = join(root, "CHANGELOG.md");
+        writeFileSync(changelog, "# Changelog\n\n## [Unreleased]\n\n" + UNRELEASED_NOTE + "\n");
+        const args = command === "check" ? ["check"] : ["promote", "0.31.0", "--date=2026-07-28"];
+        const res = spawnSync("node", [script, ...args], { cwd: root, encoding: "utf8", timeout: 10000 });
+        expect(res.error).toBeUndefined();
+        expect(res.stderr).toBe("");
+        expect(res.status).toBe(0);
+        expect(res.stdout.trim()).not.toBe("");
+        expect(res.stdout).toContain(command === "check" ? "1 fragment(s), 1 entr(ies)" : "promoted 1 entr(ies)");
+        if (command === "promote") {
+          expect(readFileSync(changelog, "utf8")).toContain(body);
+          expect(readdirSync(dir)).toEqual([]);
+        }
+      });
+    }
+
+    test("R2 delimiter contract " + char, () => {
+      const body = ["- " + fence + char + "info", " ".repeat(2) + fence, " ".repeat(2) + (char === "~" ? "`" : "~").repeat(4), " ".repeat(2) + fence + char + "tail", " ".repeat(2) + fence + char + "\t", "- literal", " ".repeat(2) + fence + char.repeat(2) + " ".repeat(2)].join("\n");
+      expect(() => validateFragmentBody("rules.md", body)).not.toThrow();
+      expect(countEntries(body)).toBe(1);
+      for (const indent of [0, 1, 3]) {
+        expect(() => validateFragmentBody("rules.md", body + "\n" + " ".repeat(indent) + "bad")).toThrow("rules.md:8: continuation indent " + indent + ";");
+      }
+      for (const indent of [2, 4, 6]) {
+        expect(() => validateFragmentBody("rules.md", body + "\n" + " ".repeat(indent) + "good")).not.toThrow();
+      }
+      expect(strayUnreleasedEntries([fence, "- literal", fence, "- real"].join("\n"))).toEqual(["- real"]);
+    });
+  }
 });
