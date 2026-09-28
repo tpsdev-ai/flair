@@ -67,6 +67,23 @@ afterAll(async () => {
 });
 
 describe("durability enum validation — write-side rejection (flair#1238)", () => {
+  test("PATCH rejects invalid durability without writing", async () => {
+    const id = `dur-patch-${randomUUID()}`;
+    const record = { id, agentId: agent.id, content: "durability patch fixture", durability: "standard", visibility: "private", createdAt: new Date().toISOString() };
+    const seeded = await adminOp(harper, { operation: "insert", database: "flair", table: "Memory", records: [record] });
+    expect(seeded.status).toBe(200);
+    const readStored = async () => {
+      const read = await adminOp(harper, { operation: "search_by_id", database: "flair", table: "Memory", ids: [id], get_attributes: ["*"] });
+      expect(read.status).toBe(200);
+      return read.json();
+    };
+    const before = await readStored();
+    expect(before).toHaveLength(1);
+    const res = await authFetch(harper, agent, "PATCH", `/Memory/${id}`, { durability: "not-a-tier" });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("invalid_durability");
+    expect(await readStored()).toEqual(before);
+  }, 30_000);
   test("positive control: a present-but-unknown durability is refused with 400", async () => {
     const res = await authFetch(harper, agent, "POST", "/Memory", {
       id: `dur-unknown-${randomUUID()}`,

@@ -972,6 +972,13 @@ export class Memory extends (databases as any).flair.Memory {
     // same validator and ephemeral-tier guard as put().
     if (content && "visibility" in content && content.visibility == null) delete content.visibility;
     if (content && (content.visibility !== undefined || content.durability !== undefined)) {
+      const durabilityError = assertValidDurability(content.durability);
+      if (durabilityError) {
+        return new Response(
+          JSON.stringify({ error: "invalid_durability", message: durabilityError }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
       const visibilityError = assertValidVisibility(content.visibility);
       if (visibilityError) {
         return new Response(

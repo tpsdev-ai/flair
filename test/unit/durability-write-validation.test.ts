@@ -62,7 +62,7 @@ describe("assertValidDurability — write-side rejection (flair#1238)", () => {
 // enough — a validator nobody calls is not a control (the visibility guard proved
 // this: neutering it inside Memory.post() broke nothing, 3869 tests still passed).
 //
-// This scan fails the build if either write path stops calling it. Same shape as
+// This scan fails the build if any write path stops calling it. Same shape as
 // visibility-write-validation.test.ts and claimed-zero-authority-tripwire.test.ts,
 // and same limitation, stated plainly: it detects DELETION, not misbehaviour. A
 // behavioural assertion (unknown durability → 400) needs the REST surface against
@@ -71,7 +71,7 @@ describe("assertValidDurability — write-side rejection (flair#1238)", () => {
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-describe("the durability guard stays wired into both write paths", () => {
+describe("the durability guard stays wired into all write paths", () => {
   const src = readFileSync(join(import.meta.dir, "..", "..", "resources", "Memory.ts"), "utf8");
 
   test("Memory.ts imports the validator", () => {
@@ -79,10 +79,12 @@ describe("the durability guard stays wired into both write paths", () => {
     expect(src).toContain("assertValidDurability");
   });
 
-  test("it is called once per write path — post() and put()", () => {
+  test("it is called once per write path — post(), patch() and put()", () => {
     const calls = src.match(/assertValidDurability\(content\.durability\)/g) ?? [];
-    // Two write paths exist (post and put). Each needs its own guard: they are
+    // Three write paths exist (post, patch and put). Each needs its own guard: they are
     // separate entry points, and REST reaches both.
-    expect(calls.length).toBe(2);
+    expect(calls.length).toBe(3);
+    const patchBody = src.slice(src.indexOf("  async patch("), src.indexOf("  async put("));
+    expect(patchBody).toContain("assertValidDurability(content.durability)");
   });
 });
