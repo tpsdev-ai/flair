@@ -327,10 +327,13 @@ function sameFile(a, b) {
 
 const isDirect = process.argv[1] !== undefined && sameFile(process.argv[1], fileURLToPath(import.meta.url));
 if (isDirect) {
+  // Assign exitCode and return. process.exit() skips flushing stdio, so a
+  // workflow that reads stdout through a pipe can observe exit 0 and an empty
+  // baseline (flair#1757).
   try {
-    process.exit(main(process.argv.slice(2)));
+    process.exitCode = main(process.argv.slice(2));
   } catch (err) {
     console.error(`::error::${err instanceof Error ? err.message : err}`);
-    process.exit(1);
+    process.exitCode = 1;
   }
 }

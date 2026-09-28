@@ -149,6 +149,28 @@ describe("select-migration-baseline CLI", () => {
     expect(result.stderr).toContain("baseline 0.54.0 (newest non-deprecated version < 0.54.2)");
   });
 
+  test("a piped CLI run delivers the full baseline line", () => {
+    const dir = tempDir("baseline-pipe");
+    const fixture = join(dir, "versions.json");
+    writeFileSync(fixture, JSON.stringify(NEWEST_LOWER_DEPRECATED));
+    // Command substitution in the lanes reads stdout through a pipe. The CLI
+    // must let that write finish instead of exiting before the pipe drains.
+    const result = spawnSync(
+      "bash",
+      [
+        "-c",
+        'set -o pipefail; "$1" "$2" --fixture "$3" 0.54.2 | cat',
+        "bash",
+        process.execPath,
+        SCRIPT,
+        fixture,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("0.54.0\n");
+  });
+
   test("the all-deprecated fixture prints no baseline, not a chosen baseline", () => {
     const dir = tempDir("baseline-none");
     const fixture = join(dir, "versions.json");
