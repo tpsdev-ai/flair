@@ -28,34 +28,27 @@ const ALLOW_REMOTE_ENV = "FLAIR_ALLOW_REMOTE_URL";
 const DEFAULT_FLAIR_URL = "http://localhost:19926";
 
 /**
- * Percent-encode a Memory id so it addresses exactly that record as ONE path
- * segment (flair#1970). REFUSES an id that is exactly `.` or `..`: percent-
- * encoding leaves those unchanged and URL normalization collapses
- * `/Memory/.` to `/Memory/` and `/Memory/..` to `/`, so the sent path would not
- * be the id (nor the signed path). Such an id cannot address its record.
- */
-/**
- * Percent-encode `%` and `:` so a component cannot contain a raw separator.
+ * Percent-encode `%`, `|`, and `:` so the component can be joined on `|`.
  *
- * `%` is encoded first so a literal `%3A` cannot be mistaken for an encoded
- * `:`. A component that contains neither character is unchanged. Mirrors
- * `_escape_record_id_component` in the Python package.
+ * `%` is encoded first so a literal `%7C` or `%3A` cannot be mistaken for an
+ * encoded `|` or `:`. Mirrors `_escape_record_id_component` in the Python package.
  */
 function escapeRecordIdComponent(value: string): string {
-  return value.replace(/%/g, "%25").replace(/:/g, "%3A");
+  return value.replace(/%/g, "%25").replace(/\|/g, "%7C").replace(/:/g, "%3A");
 }
 
 /**
  * Deterministic record id for idempotent re-ingestion.
  *
- * Separator-free tuples keep the historical join `app:user:session:event`
- * (`%` and every other non-`:` character included) so existing records stay
- * addressable. When any component contains `:`, every component is
- * percent-encoded and the id is prefixed with `:`. Encoded components contain
- * no raw `:`, so that id has four colons; a legacy id has exactly three, and
- * the two cannot collide. The prefix is required: encoding alone maps
- * `("a:b", ...)` and the separator-free `("a%3Ab", ...)` to the same string.
- * Mirrors `_deterministic_record_id` in the Python package.
+ * Tuples with no colon in any component keep the historical join
+ * `app:user:session:event`, so those stored rows stay addressable. When any
+ * component contains `:`, every component is percent-encoded and the parts
+ * are joined with `|`. That id contains no `:`. The old join of four
+ * components always contains at least three `:` — including ids already
+ * stored for tuples that themselves contained `:` — so the new id is outside
+ * that set. A create-conflict replace therefore cannot land on a row the old
+ * encoder stored for a different tuple. Mirrors `_deterministic_record_id`
+ * in the Python package.
  */
 export function deterministicRecordId(
   appName: string,
@@ -65,11 +58,18 @@ export function deterministicRecordId(
 ): string {
   const parts = [appName, userId, sessionId, eventId];
   if (parts.some((part) => part.includes(":"))) {
-    return `:${parts.map(escapeRecordIdComponent).join(":")}`;
+    return parts.map(escapeRecordIdComponent).join("|");
   }
   return parts.join(":");
 }
 
+/**
+ * Percent-encode a Memory id so it addresses exactly that record as ONE path
+ * segment (flair#1970). REFUSES an id that is exactly `.` or `..`: percent-
+ * encoding leaves those unchanged and URL normalization collapses
+ * `/Memory/.` to `/Memory/` and `/Memory/..` to `/`, so the sent path would not
+ * be the id (nor the signed path). Such an id cannot address its record.
+ */
 function encodeRecordId(id: string): string {
   if (id === "." || id === "..") {
     throw new Error(

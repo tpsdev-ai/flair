@@ -1,5 +1,6 @@
-- **ADK memory record ids no longer collide when a component contains `:`.**
-  App, user, session, and event values that include a colon are percent-encoded
-  (`%` as `%25`, `:` as `%3A`) and the id is prefixed with `:`, in both
-  `adk-flair` and `adk-flair-js`. Values without a colon keep the same id as
-  before, so existing records stay addressable.
+- **ADK record ids for colon-bearing tuples sit outside historical ids.**
+  When an app, user, session, or event value contains `:`, both adk-flair
+  packages percent-encode the components and join them with `|`. The result
+  contains no `:`. The old join always contains at least three `:`, so a new
+  id is not a row the previous encoder stored. Tuples with no colon in any
+  component keep the historical id.

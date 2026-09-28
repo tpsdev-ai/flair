@@ -210,12 +210,12 @@ def _compound_tag(app_name: str, user_id: str) -> str:
 
 
 def _escape_record_id_component(value: str) -> str:
-    """Percent-encode ``%`` and ``:`` so a component cannot contain a raw separator.
+    """Percent-encode ``%``, ``|``, and ``:`` so the component can be joined on ``|``.
 
-    ``%`` is encoded first so a literal ``%3A`` cannot be mistaken for an
-    encoded ``:``. A component that contains neither character is unchanged.
+    ``%`` is encoded first so a literal ``%7C`` or ``%3A`` cannot be mistaken
+    for an encoded ``|`` or ``:``.
     """
-    return value.replace("%", "%25").replace(":", "%3A")
+    return value.replace("%", "%25").replace("|", "%7C").replace(":", "%3A")
 
 
 def _deterministic_record_id(
@@ -223,18 +223,18 @@ def _deterministic_record_id(
 ) -> str:
     """Deterministic record id for idempotent re-ingestion.
 
-    Separator-free tuples keep the historical join
-    ``app:user:session:event`` (``%`` and every other non-``:`` character
-    included) so existing records stay addressable. When any component
-    contains ``:``, every component is percent-encoded and the id is
-    prefixed with ``:``. Encoded components contain no raw ``:``, so that
-    id has four colons; a legacy id has exactly three, and the two cannot
-    collide. The prefix is required: encoding alone maps ``("a:b", ...)``
-    and the separator-free ``("a%3Ab", ...)`` to the same string.
+    Tuples with no colon in any component keep the historical join
+    ``app:user:session:event``, so those stored rows stay addressable.
+    When any component contains ``:``, every component is percent-encoded
+    and the parts are joined with ``|``. That id contains no ``:``. The old
+    join of four components always contains at least three ``:`` — including
+    ids already stored for tuples that themselves contained ``:`` — so the
+    new id is outside that set. A create-conflict replace therefore cannot
+    land on a row the old encoder stored for a different tuple.
     """
     parts = (app_name, user_id, session_id, event_id)
     if any(":" in part for part in parts):
-        return ":" + ":".join(_escape_record_id_component(part) for part in parts)
+        return "|".join(_escape_record_id_component(part) for part in parts)
     return ":".join(parts)
 
 

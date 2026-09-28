@@ -127,7 +127,7 @@ class TestDeterministicRecordId:
         assert rid == "app:user:sess:evt"
 
     def test_separator_free_ids_match_the_historical_join(self):
-        """No ':' in any component → the id is unchanged, including '%' and '_'."""
+        """Tuples with no ':' in any component keep the historical join."""
         from adk_flair.memory_service import _deterministic_record_id
         # Pinned literals — the JS suite asserts the same strings.
         cases = [
@@ -136,15 +136,20 @@ class TestDeterministicRecordId:
             (("a%b", "c_d", "e", "f"), "a%b:c_d:e:f"),
             (("a%3Ab", "c", "d", "e"), "a%3Ab:c:d:e"),
             (("100%", "user", "sess", "evt"), "100%:user:sess:evt"),
+            (("a|b", "c", "d", "e"), "a|b:c:d:e"),
             (("", "", "", ""), ":::"),
         ]
         for parts, expected in cases:
             assert _deterministic_record_id(*parts) == expected
 
     def test_colon_placement_produces_distinct_ids(self):
-        """Tuples that differ only in where a ':' falls must not share an id."""
+        """Tuples that differ only in where a ':' falls must not share an id.
+
+        The old join of all four is the one stored id ``pre:post:user:sess:evt``.
+        Each new id contains no ':'. The old join always contains at least
+        three, so none of these is an id that encoder could have stored.
+        """
         from adk_flair.memory_service import _deterministic_record_id
-        # These four all joined to "pre:post:user:sess:evt" before the escape.
         shifted = [
             ("pre:post", "user", "sess", "evt"),
             ("pre", "post:user", "sess", "evt"),
@@ -153,23 +158,32 @@ class TestDeterministicRecordId:
         ]
         ids = [_deterministic_record_id(*parts) for parts in shifted]
         assert len(set(ids)) == len(shifted)
+        legacy = "pre:post:user:sess:evt"
+        assert legacy.count(":") >= 3
+        for rid in ids:
+            assert ":" not in rid
+            assert rid != legacy
         # Pinned literals — the JS suite asserts the same strings.
         assert ids == [
-            ":pre%3Apost:user:sess:evt",
-            ":pre:post%3Auser:sess:evt",
-            ":pre:post:user%3Asess:evt",
-            ":pre:post:user:sess%3Aevt",
+            "pre%3Apost|user|sess|evt",
+            "pre|post%3Auser|sess|evt",
+            "pre|post|user%3Asess|evt",
+            "pre|post|user|sess%3Aevt",
         ]
 
     def test_encoded_colon_does_not_collide_with_a_literal_percent_sequence(self):
-        """The fail-open trap: encoding ':' as '%3A' must not match a stored literal."""
+        """Encoding ':' as '%3A' must not match a separator-free literal, and '|' is escaped."""
         from adk_flair.memory_service import _deterministic_record_id
         encoded = _deterministic_record_id("a:b", "c%d", "e:f", "g%3A")
         literal = _deterministic_record_id("a%3Ab", "c%25d", "e%3Af", "g%253A")
+        piped = _deterministic_record_id("a|b", "c:d", "e", "f")
         assert encoded != literal
-        assert encoded == ":a%3Ab:c%25d:e%3Af:g%253A"
+        assert encoded == "a%3Ab|c%25d|e%3Af|g%253A"
+        assert ":" not in encoded
         # No raw ':' in the literal tuple, so the historical join is kept.
         assert literal == "a%3Ab:c%25d:e%3Af:g%253A"
+        assert piped == "a%7Cb|c%3Ad|e|f"
+        assert piped != "a|b:c:d:e"
 
 
 # ─── URL protection ─────────────────────────────────────────────────────────
@@ -555,6 +569,31 @@ class TestAddSessionToMemory:
         warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
         assert any("write failed" in w.lower() for w in warnings)
 
+    @pytest.mark.asyncio
+    async def test_colon_bearing_write_posts_disjoint_id_and_keeps_legacy_row(self, service):
+        """Session write posts an id the old join could not have stored.
+
+        ``("pre:post", "user", "sess", "evt")`` and
+        ``("pre", "post:user", "sess", "evt")`` both used to store
+        ``pre:post:user:sess:evt``. That row is occupied. The 409 fallback
+        must replace the new id, not that row. Restoring the old join at
+        the session call site posts the legacy id and PUTs the occupied row.
+        """
+        await _assert_colon_write_preserves_legacy(
+            service,
+            lambda: service.add_session_to_memory(
+                _make_session("pre:post", "user", "sess", [_make_event("evt", "hello")])
+            ),
+            "pre%3Apost|user|sess|evt",
+        )
+        await _assert_colon_write_preserves_legacy(
+            service,
+            lambda: service.add_session_to_memory(
+                _make_session("pre", "post:user", "sess", [_make_event("evt", "hello")])
+            ),
+            "pre|post%3Auser|sess|evt",
+        )
+
 
 # ─── add_events_to_memory ───────────────────────────────────────────────────
 
@@ -578,6 +617,31 @@ class TestAddEventsToMemory:
         )
 
         assert service._client.request.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_colon_bearing_write_posts_disjoint_id_and_keeps_legacy_row(self, service):
+        """Incremental-event write posts an id the old join could not have stored.
+
+        Same occupied legacy row as the session-write test. Restoring the old
+        join at the add_events_to_memory call site posts that id and PUTs the
+        occupied row. The session-write test does not call this entrypoint.
+        """
+        await _assert_colon_write_preserves_legacy(
+            service,
+            lambda: service.add_events_to_memory(
+                app_name="pre:post", user_id="user",
+                events=[_make_event("evt", "hello")], session_id="sess",
+            ),
+            "pre%3Apost|user|sess|evt",
+        )
+        await _assert_colon_write_preserves_legacy(
+            service,
+            lambda: service.add_events_to_memory(
+                app_name="pre", user_id="post:user",
+                events=[_make_event("evt", "hello")], session_id="sess",
+            ),
+            "pre|post%3Auser|sess|evt",
+        )
 
     @pytest.mark.asyncio
     async def test_custom_metadata_is_stored_not_warned(self, service, caplog):
@@ -863,6 +927,43 @@ def _mock_response(status_code: int, reason: str = "") -> MagicMock:
         headers={"content-type": "application/json"},
         text="{}",
     )
+
+
+async def _assert_colon_write_preserves_legacy(service, write, expected_id):
+    """POST expected_id, 409-replace that id, and never address the legacy row.
+
+    ``write`` is a zero-arg callable returning the awaitable under test.
+    The legacy id is occupied: any request that names it gets 409, and a
+    second 409 from the PUT fallback fails the write. A restored old join
+    therefore cannot pass.
+    """
+    from urllib.parse import quote
+
+    legacy_id = "pre:post:user:sess:evt"
+    legacy_path = "/Memory/" + quote(legacy_id, safe="")
+
+    def respond(method, path, **kwargs):
+        body_id = (kwargs.get("json") or {}).get("id")
+        if body_id == legacy_id or path == legacy_path:
+            return _mock_response(409, "Conflict")
+        if method == "POST":
+            return _mock_response(409, "Conflict")
+        return _mock_response(200)
+
+    service._client.request.reset_mock(side_effect=True)
+    service._client.request.side_effect = respond
+    await write()
+
+    assert service._client.request.call_count == 2, service._client.request.call_args_list
+    first, second = service._client.request.call_args_list
+    assert (first[0][0], first[0][1]) == ("POST", "/Memory/")
+    assert first[1]["json"]["id"] == expected_id
+    assert ":" not in first[1]["json"]["id"]
+    assert first[1]["json"]["id"] != legacy_id
+    assert second[0][0] == "PUT"
+    assert second[0][1] == "/Memory/" + quote(expected_id, safe="")
+    assert second[0][1] != legacy_path
+    assert second[1]["json"]["id"] == expected_id
 
 
 class TestCreateVerbAndConflictFallback:

@@ -59,6 +59,45 @@ function makeSession(opts: {
   };
 }
 
+/**
+ * The legacy id is occupied. A POST of `expectedId` gets 409 and must PUT
+ * that id, never the legacy row. Restoring the old `:` join posts the
+ * legacy id and the fallback PUTs the occupied row.
+ */
+async function assertColonWritePreservesLegacy(
+  installFetch: (fetchMock: typeof globalThis.fetch) => void,
+  write: () => Promise<void>,
+  expectedId: string,
+): Promise<void> {
+  const legacyId = "pre:post:user:sess:evt";
+  const legacyUrl = `http://localhost:19926/Memory/${encodeURIComponent(legacyId)}`;
+  const calls: Array<{ method: string; url: string; body: Record<string, unknown> }> = [];
+  installFetch(mock(async (url, init) => {
+    const method = (init as RequestInit).method ?? "GET";
+    const body = JSON.parse((init as RequestInit).body as string) as Record<string, unknown>;
+    const target = String(url);
+    calls.push({ method, url: target, body });
+    if (body.id === legacyId || target === legacyUrl) {
+      return new Response("Conflict", { status: 409 });
+    }
+    if (method === "POST") return new Response("Conflict", { status: 409 });
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }));
+
+  await write();
+
+  expect(calls).toHaveLength(2);
+  expect(calls[0].method).toBe("POST");
+  expect(calls[0].url).toBe("http://localhost:19926/Memory/");
+  expect(calls[0].body.id).toBe(expectedId);
+  expect(String(calls[0].body.id).includes(":")).toBe(false);
+  expect(calls[0].body.id).not.toBe(legacyId);
+  expect(calls[1].method).toBe("PUT");
+  expect(calls[1].url).toBe(`http://localhost:19926/Memory/${encodeURIComponent(expectedId)}`);
+  expect(calls[1].url).not.toBe(legacyUrl);
+  expect(calls[1].body.id).toBe(expectedId);
+}
+
 function makeMemoryEntry(text: string, id?: string): import("@google/adk").MemoryEntry {
   return {
     content: { role: "user", parts: [{ text }] } as import("@google/genai").Content,
@@ -78,6 +117,7 @@ describe("deterministicRecordId", () => {
       [["a%b", "c_d", "e", "f"], "a%b:c_d:e:f"],
       [["a%3Ab", "c", "d", "e"], "a%3Ab:c:d:e"],
       [["100%", "user", "sess", "evt"], "100%:user:sess:evt"],
+      [["a|b", "c", "d", "e"], "a|b:c:d:e"],
       [["", "", "", ""], ":::"],
     ];
     for (const [parts, expected] of cases) {
@@ -86,7 +126,9 @@ describe("deterministicRecordId", () => {
   });
 
   it("gives distinct ids to tuples that differ only in where ':' falls", () => {
-    // These four all joined to "pre:post:user:sess:evt" before the escape.
+    // The old join of all four is the one stored id "pre:post:user:sess:evt".
+    // Each new id contains no ':'. The old join always contains at least
+    // three, so none of these is an id that encoder could have stored.
     const shifted: string[][] = [
       ["pre:post", "user", "sess", "evt"],
       ["pre", "post:user", "sess", "evt"],
@@ -95,22 +137,32 @@ describe("deterministicRecordId", () => {
     ];
     const ids = shifted.map((parts) => deterministicRecordId(parts[0], parts[1], parts[2], parts[3]));
     expect(new Set(ids).size).toBe(shifted.length);
+    const legacy = "pre:post:user:sess:evt";
+    expect(legacy.split(":").length - 1).toBeGreaterThanOrEqual(3);
+    for (const rid of ids) {
+      expect(rid.includes(":")).toBe(false);
+      expect(rid).not.toBe(legacy);
+    }
     // Pinned literals — the Python suite asserts the same strings.
     expect(ids).toEqual([
-      ":pre%3Apost:user:sess:evt",
-      ":pre:post%3Auser:sess:evt",
-      ":pre:post:user%3Asess:evt",
-      ":pre:post:user:sess%3Aevt",
+      "pre%3Apost|user|sess|evt",
+      "pre|post%3Auser|sess|evt",
+      "pre|post|user%3Asess|evt",
+      "pre|post|user|sess%3Aevt",
     ]);
   });
 
   it("does not let an encoded colon collide with a literal percent sequence", () => {
     const encoded = deterministicRecordId("a:b", "c%d", "e:f", "g%3A");
     const literal = deterministicRecordId("a%3Ab", "c%25d", "e%3Af", "g%253A");
+    const piped = deterministicRecordId("a|b", "c:d", "e", "f");
     expect(encoded).not.toBe(literal);
-    expect(encoded).toBe(":a%3Ab:c%25d:e%3Af:g%253A");
+    expect(encoded).toBe("a%3Ab|c%25d|e%3Af|g%253A");
+    expect(encoded.includes(":")).toBe(false);
     // No raw ':' in the literal tuple, so the historical join is kept.
     expect(literal).toBe("a%3Ab:c%25d:e%3Af:g%253A");
+    expect(piped).toBe("a%7Cb|c%3Ad|e|f");
+    expect(piped).not.toBe("a|b:c:d:e");
   });
 });
 
@@ -688,6 +740,29 @@ describe("addSessionToMemory", () => {
     expect((calls[1].body as Record<string, unknown>).id).toBe("my-app:user-1:sess-1:evt-2");
   });
 
+  it("posts a disjoint id for a colon-bearing session and keeps the legacy row", async () => {
+    // ("pre:post","user","sess","evt") and ("pre","post:user","sess","evt")
+    // both used to store "pre:post:user:sess:evt". That row is occupied.
+    // Restoring the old join at the addSessionToMemory call site posts it
+    // and PUTs the occupied row. addEventsToMemory is not called here.
+    await assertColonWritePreservesLegacy(
+      (fetchMock) => { globalThis.fetch = fetchMock; },
+      () => service.addSessionToMemory(makeSession({
+        id: "sess", appName: "pre:post", userId: "user",
+        events: [makeEvent({ id: "evt", text: "hello" })],
+      })),
+      "pre%3Apost|user|sess|evt",
+    );
+    await assertColonWritePreservesLegacy(
+      (fetchMock) => { globalThis.fetch = fetchMock; },
+      () => service.addSessionToMemory(makeSession({
+        id: "sess", appName: "pre", userId: "post:user",
+        events: [makeEvent({ id: "evt", text: "hello" })],
+      })),
+      "pre|post%3Auser|sess|evt",
+    );
+  });
+
   it("filters no-text events", async () => {
     const calls: Array<{ body: unknown }> = [];
     globalThis.fetch = mock(async (url, init) => {
@@ -1179,6 +1254,30 @@ describe("addEventsToMemory", () => {
     expect(calls[0].method).toBe("POST");
     expect(calls[0].url).toBe("http://localhost:19926/Memory/");
     expect((calls[0].body as Record<string, unknown>).id).toBe("my-app:user-1:sess-2:evt-1");
+  });
+
+  it("posts a disjoint id for a colon-bearing event and keeps the legacy row", async () => {
+    // Same occupied legacy row as the session-write test. Restoring the old
+    // join at the addEventsToMemory call site posts that id and PUTs the
+    // occupied row. addSessionToMemory is not called here.
+    await assertColonWritePreservesLegacy(
+      (fetchMock) => { globalThis.fetch = fetchMock; },
+      () => service.addEventsToMemory(
+        "pre:post", "user",
+        [makeEvent({ id: "evt", text: "hello" })],
+        "sess",
+      ),
+      "pre%3Apost|user|sess|evt",
+    );
+    await assertColonWritePreservesLegacy(
+      (fetchMock) => { globalThis.fetch = fetchMock; },
+      () => service.addEventsToMemory(
+        "pre", "post:user",
+        [makeEvent({ id: "evt", text: "hello" })],
+        "sess",
+      ),
+      "pre|post%3Auser|sess|evt",
+    );
   });
 });
 

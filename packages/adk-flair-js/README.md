@@ -116,7 +116,7 @@ identities never collide and the `:` delimiter stays unambiguous.
 
 ### Write path
 
-- Record IDs: an event with a non-empty `id` uses `app:user:session:eventId`, so re-ingestion upserts; an event with a missing or empty `id` gets a random UUID in that position, so each ingestion stores it as a new record. If any component contains `:`, each component percent-encodes `%` as `%25` and `:` as `%3A`, and the id is prefixed with `:`, so two tuples that differ only in where a colon falls cannot share a record. Components without `:` keep that historical join, including when they contain `%`.
+- Record IDs: an event with a non-empty `id` uses `app:user:session:eventId`, so re-ingestion upserts; an event with a missing or empty `id` gets a random UUID in that position, so each ingestion stores it as a new record. Tuples with no colon in any component keep that historical join. When any component contains `:`, each component percent-encodes `%` as `%25`, `|` as `%7C`, and `:` as `%3A`, and the parts are joined with `|`. That id contains no `:`. The old join always contains at least three, so the new id is not a row the previous encoder stored, and a create-conflict replace cannot overwrite a different tuple's existing record.
   Direct `addMemory()` writes use the entry's `id` when supplied, else the
   first 32 hex chars of the content's SHA-256 (re-adds replace, not duplicate)
 - Creates ride `POST /Memory/` (the create verb) with the id in the body; a

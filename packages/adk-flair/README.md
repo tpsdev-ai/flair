@@ -335,10 +335,12 @@ dict is its return channel.
 An event with an id gets a deterministic record id
 (`{app_name}:{user_id}:{session_id}:{event.id}`), so re-ingesting it does not
 duplicate; an event without an id gets a fresh UUID, so re-ingesting it can.
-If any component contains `:`, each component percent-encodes `%` as `%25` and
-`:` as `%3A`, and the id is prefixed with `:`, so two tuples that differ only
-in where a colon falls cannot share a record. Components without `:` keep the
-historical join, including when they contain `%`.
+Tuples with no colon in any component keep that historical join. When any
+component contains `:`, each component percent-encodes `%` as `%25`, `|` as
+`%7C`, and `:` as `%3A`, and the parts are joined with `|`. That id contains
+no `:`. The old join always contains at least three, so the new id is not a
+row the previous encoder stored, and a create-conflict replace cannot
+overwrite a different tuple's existing record.
 
 ## custom_metadata
 
