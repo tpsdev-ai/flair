@@ -121,33 +121,38 @@ actually running:
   upgrade prompts; a non-interactive upgrade states the gap and withholds
   ✅. Pass `--install-hooks` to consent without a prompt, then `flair
   doctor` exits 0.
-- **On a failed restart OR a failed verification**, `flair upgrade`
-  reinstalls the previously installed `@tpsdev-ai/flair` and restarts it
-  when that failure is evidence against the new version — then exits
+- **On a failed restart OR a failed verification**, these keep and
+  rollback outcomes apply only when the upgrade swapped `@tpsdev-ai/flair`
+  itself. A plugin-only upgrade whose restart fails has nothing to roll
+  back: `@tpsdev-ai/flair` was not changed. When Flair itself was swapped,
+  `flair upgrade` reinstalls the previously installed package and restarts
+  it when that failure is evidence against the new version — then exits
   nonzero with a clear report of what failed. Before the swap, including
   with `--no-verify`, it probes `/Health` once (flair#1740). A refused
   connection means no listener accepted it. That does not show that no
-  process was running. The new version stays installed, including when the
-  previous version cannot be read, and the command tells you to run
-  `flair start`. A timeout or a non-2xx answer is indeterminate, not
-  stopped, and still rolls back. When the registry reports that the
-  previous version is deprecated, that version is not reinstalled; if the
-  lookup fails, or the `deprecated` field is null, rollback still
-  proceeds. If a rollback's own restart fails, the command exits nonzero
-  and names that installed version as known-broken for this attempt.
+  process was running. When Flair itself was swapped, the new version
+  stays installed, including when the previous version cannot be read,
+  and the command tells you to run `flair start`. A timeout or a non-2xx
+  answer is indeterminate, not stopped, and still rolls back. When the
+  registry reports that the previous version is deprecated, that version
+  is not reinstalled; if the lookup fails, or the `deprecated` field is
+  null, rollback still proceeds. If a rollback put a previous version in
+  place and that version's restart fails, the command exits nonzero and
+  names that version known-broken for this attempt. When no previous tree
+  was restored, the headline is neutral: it does not call a rollback
+  version known-broken, and it does not say the rollback restart failed.
   Recovery matches the install lane and both filesystem results: whether
   the previous tree was restored, and whether a live tree was set aside
   at `.upgrade-failed`. A restore can succeed when nothing was at the
   live path, and that message does not claim a tree was moved there.
-  When no previous tree was restored, the headline does not say the
-  rollback restart failed. npm-global recovery offers
-  `npm view @tpsdev-ai/flair version` as a candidate to check, not a
-  guaranteed non-deprecated release. The message also says whether a
-  pre-upgrade data snapshot was restored. Until flair#905 the rollback
-  was wired to the *verification* leg only. If the rollback itself fails
-  verification, it says so loudly and points at the concrete pre-upgrade
-  snapshot path (see "Pre-upgrade snapshot" below) instead of retrying
-  in a loop — see [Downgrade](#downgrade) for the restore procedure.
+  npm-global recovery offers `npm view @tpsdev-ai/flair version` as a
+  candidate to check, not a guaranteed non-deprecated release. The
+  message also says whether a pre-upgrade data snapshot was restored.
+  Until flair#905 the rollback was wired to the *verification* leg
+  only. If the rollback itself fails verification, it says so loudly
+  and points at the concrete pre-upgrade snapshot path (see
+  "Pre-upgrade snapshot" below) instead of retrying in a loop — see
+  [Downgrade](#downgrade) for the restore procedure.
 
 ### Pre-upgrade snapshot (opt-in for same-engine, unconditional on engine change)
 

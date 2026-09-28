@@ -22,7 +22,7 @@ import { decideAfterRestartFailure, decideDeprecatedRollback, formatKnownBrokenR
 import { ownedPinRefreshShouldReport, refreshOwnedPins } from "../lib/owned-pins.js";
 import { extractSnapshotSafely, validateSnapshotArchive } from "../lib/safe-snapshot-extract.js";
 import { collectUpgradeExecPathWarning, findFlairPackageDir, resolveNpmGlobalFlairPackage, resolveServingFlairPackage } from "../lib/upgrade-exec-path.js";
-import { PlainTreeUpgradePlan, UPGRADE_FAILED_SUFFIX, applyPlainTreeUpgrade, decidePlainTreeRollback, discardPlainTreePrevious, findSystemdUnitsForTree, formatPlainTreeBanner, formatPlainTreePlan, formatPlainTreeScopeFooter, planPlainTreeUpgrade, resolvePlainTreeListingTarget, resolvePlainTreeTarget, restartSystemdUnits, restorePlainTreePrevious, treeSibling } from "../lib/upgrade-plain-tree.js";
+import { PlainTreeUpgradePlan, UPGRADE_FAILED_SUFFIX, decidePlainTreeRollback, discardPlainTreePrevious, findSystemdUnitsForTree, formatPlainTreeBanner, formatPlainTreePlan, formatPlainTreeScopeFooter, planPlainTreeUpgrade, resolvePlainTreeListingTarget, resolvePlainTreeTarget, restartSystemdUnits, restorePlainTreePrevious, treeSibling } from "../lib/upgrade-plain-tree.js";
 import { probeInstance } from "../probe.js";
 import * as render from "../render.js";
 import { FLAIR_PKG_NAME, primeVersionCheckCache } from "../version-check.js";
@@ -62,6 +62,8 @@ export type UpgradeCli = {
   restartAfterUpgrade: (...args: any[]) => any;
   /** `npm install -g <spec>`. Injected so the upgrade command can be driven without touching a real prefix. */
   runPackageInstall: (spec: string) => void;
+  /** Plain-tree swap. Injected so a command test can leave `.upgrade-prev` absent. */
+  applyPlainTreeUpgrade: (plan: PlainTreeUpgradePlan) => Promise<void>;
   shouldPrintUpgradeLine: (...args: any[]) => any;
   shouldRunFleetVerify: (...args: any[]) => any;
   startFlairProcess: (...args: any[]) => any;
@@ -165,6 +167,10 @@ function resolveUpgradeRestartVerify(...args: any[]): any {
 
 function restartAfterUpgrade(...args: any[]): any {
   return cli.restartAfterUpgrade(...args);
+}
+
+function applyPlainTreeUpgrade(plan: PlainTreeUpgradePlan): Promise<void> {
+  return cli.applyPlainTreeUpgrade(plan);
 }
 
 function runPackageInstall(spec: string): void {
@@ -1725,10 +1731,12 @@ program
           await restartAfterUpgrade(port, upgradeDataDir, rolledBackCli.ok ? rolledBackCli : null);
         }
       } catch (err: any) {
-        // The version we just reinstalled failed to start. `flair start` on
-        // it is not a recovery that can succeed (flair#1740) — name it as
-        // known-broken and point at a reinstall of the version this upgrade
-        // had reached, which is not this package.
+        // npm-global is the lane that reinstalled `toVersion`. A plain-tree
+        // restore moved a previous tree back; that is not an npm reinstall.
+        // When no previous tree was restored, no rollback version is on disk,
+        // so the headline stays neutral and does not call a version
+        // known-broken. Known-broken is only for a version this rollback
+        // actually put in place, and only for this attempt.
         const lane: RollbackRecoveryLane = treePlan
           ? {
               kind: "plain-tree",

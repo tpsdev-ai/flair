@@ -20,10 +20,11 @@
  */
 
 import { describe, test, expect, mock, spyOn, afterAll, afterEach, setDefaultTimeout } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { treeSibling, UPGRADE_FAILED_SUFFIX, UPGRADE_PREV_SUFFIX } from "../../src/lib/upgrade-plain-tree.ts";
 
 setDefaultTimeout(30_000);
 
@@ -132,15 +133,14 @@ async function closedPortUrl(): Promise<string> {
   return `http://127.0.0.1:${port}`;
 }
 
-async function runUpgrade(args: string[]): Promise<{ code: number; out: string }> {
-  const logs: string[] = [];
-  const errs: string[] = [];
+async function runUpgrade(args: string[]): Promise<{ code: number; out: string; lines: string[] }> {
+  const lines: string[] = [];
   let code = 0;
   const logSpy = spyOn(console, "log").mockImplementation((...a: unknown[]) => {
-    logs.push(a.map((x) => String(x)).join(" "));
+    lines.push(a.map((x) => String(x)).join(" "));
   });
   const errSpy = spyOn(console, "error").mockImplementation((...a: unknown[]) => {
-    errs.push(a.map((x) => String(x)).join(" "));
+    lines.push(a.map((x) => String(x)).join(" "));
   });
   const exitSpy = spyOn(process, "exit").mockImplementation(((c?: number) => {
     code = c ?? 0;
@@ -155,7 +155,7 @@ async function runUpgrade(args: string[]): Promise<{ code: number; out: string }
     errSpy.mockRestore();
     exitSpy.mockRestore();
   }
-  return { code, out: `${logs.join("\n")}\n${errs.join("\n")}` };
+  return { code, out: lines.join("\n"), lines };
 }
 
 async function pointRegistry(deprecatePrevious: boolean): Promise<void> {
@@ -251,5 +251,44 @@ describe("flair upgrade restart failure (flair#1740)", () => {
     expect(out).not.toContain("Rolling back @tpsdev-ai/flair to 0.54.1");
     expect(installs).toEqual(["@tpsdev-ai/flair@0.54.2"]);
     expect(restartCalls).toBe(1);
+  });
+
+  test("plain-tree with no previous tree emits a neutral full message", async () => {
+    bindSeams();
+    rebindCli({
+      applyPlainTreeUpgrade: async () => {},
+    });
+    await pointRegistry(false);
+    process.env.FLAIR_URL = await startHealth(200);
+
+    const tree = realpathSync(mkdtempSync(join(TEST_HOME, "tree-")));
+    mkdirSync(join(tree, "dist"), { recursive: true });
+    writeFileSync(
+      join(tree, "package.json"),
+      JSON.stringify({ name: "@tpsdev-ai/flair", version: "0.54.1" }),
+    );
+    writeFileSync(join(tree, "dist", "cli.js"), "#!/usr/bin/env node\n");
+
+    const previousDir = treeSibling(tree, UPGRADE_PREV_SUFFIX);
+    const failedDir = treeSibling(tree, UPGRADE_FAILED_SUFFIX);
+    const { code, lines } = await runUpgrade(["--no-verify", "--tree", tree]);
+    const start = lines.findIndex((line) => line.includes("Rolling back @tpsdev-ai/flair to 0.54.1"));
+    const message = lines.slice(start).join("\n");
+    expect(message).toBe([
+      "\nRolling back @tpsdev-ai/flair to 0.54.1...",
+      "   (no previous tree to restore)",
+      `❌ Restart failed. No previous tree was restored: ${START_ERROR}`,
+      `   The previous tree was not restored (nothing at ${previousDir}), so @tpsdev-ai/flair@0.54.1 is not what this rollback installed.`,
+      `   The live tree is still at ${tree}. It was not moved to ${failedDir}.`,
+      "   Do not run `flair start` expecting @tpsdev-ai/flair@0.54.1; that version was not restored.",
+      `   Recovery (plain-tree): do not npm install -g. There is no previous tree to move back onto ${tree}.`,
+      `   Inspect the tree at ${tree}, then run \`flair doctor\`.`,
+      "   No pre-upgrade data snapshot was restored by this rollback.",
+    ].join("\n"));
+    expect(code).toBe(1);
+    expect(message).not.toContain("KNOWN-BROKEN");
+    expect(message).not.toContain("was not swapped");
+    expect(installs).toEqual([]);
+    expect(restartCalls).toBe(2);
   });
 });

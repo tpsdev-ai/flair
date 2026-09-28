@@ -4822,6 +4822,7 @@ bindUpgradeCli({
   runPackageInstall: (spec: string) => {
     execFileSync("npm", ["install", "-g", spec], { stdio: "pipe" });
   },
+  applyPlainTreeUpgrade,
   shouldPrintUpgradeLine,
   shouldRunFleetVerify,
   startFlairProcess,

@@ -267,7 +267,7 @@ describe("formatKnownBrokenRollbackRestart (flair#1740)", () => {
       snapshotRestored: false,
     }).join("\n");
     expect(text).toBe([
-      `❌❌ KNOWN-BROKEN: restart failed, and the previous tree was not restored: ${START_ERROR}`,
+      `❌ Restart failed. No previous tree was restored: ${START_ERROR}`,
       "   The previous tree was not restored (nothing at /opt/flair.upgrade-prev), so @tpsdev-ai/flair@0.54.1 is not what this rollback installed.",
       "   The live tree is still at /opt/flair. It was not moved to /opt/flair.upgrade-failed.",
       "   Do not run `flair start` expecting @tpsdev-ai/flair@0.54.1; that version was not restored.",
@@ -275,7 +275,9 @@ describe("formatKnownBrokenRollbackRestart (flair#1740)", () => {
       "   Inspect the tree at /opt/flair, then run `flair doctor`.",
       "   No pre-upgrade data snapshot was restored by this rollback.",
     ].join("\n"));
+    expect(text).not.toContain("KNOWN-BROKEN");
     expect(text).not.toContain("rollback restart failed");
+    expect(text).not.toContain("was not swapped");
     expect(text).not.toContain("is installed and known-broken");
     expect(text).not.toContain("was set aside");
     expect(text).not.toContain("npm install -g @tpsdev-ai/flair@0.54.2");

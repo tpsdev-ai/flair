@@ -147,12 +147,13 @@ export type RollbackRecoveryLane =
     };
 
 /**
- * The rollback's own restart failed on this attempt. `flair start` on the
- * version now on disk is not a recovery for that attempt. The recovery
- * command matches the install lane. Plain-tree text reports two filesystem
- * results separately: whether the previous tree was restored, and whether a
- * live tree was renamed to `.upgrade-failed`. Say whether a pre-upgrade data
- * snapshot was restored.
+ * The rollback's own restart failed on this attempt. When a previous version
+ * was actually put back, `flair start` on it is not a recovery for that
+ * attempt, and the headline says known-broken. When no previous tree was
+ * restored, the headline stays neutral: nothing was put back to call
+ * known-broken. Plain-tree text reports two filesystem results separately:
+ * whether the previous tree was restored, and whether a live tree was renamed
+ * to `.upgrade-failed`. Say whether a pre-upgrade data snapshot was restored.
  */
 export function formatKnownBrokenRollbackRestart(input: {
   toVersion: string;
@@ -167,7 +168,7 @@ export function formatKnownBrokenRollbackRestart(input: {
   const lines: string[] = [];
   if (input.lane.kind === "plain-tree" && !input.lane.restored) {
     lines.push(
-      `❌❌ KNOWN-BROKEN: restart failed, and the previous tree was not restored: ${input.error}`,
+      `❌ Restart failed. No previous tree was restored: ${input.error}`,
       `   The previous tree was not restored (nothing at ${input.lane.previousDir}), so ${installed} is not what this rollback installed.`,
       `   The live tree is still at ${input.lane.treeDir}. It was not moved to ${input.lane.failedDir}.`,
       `   Do not run \`flair start\` expecting ${installed}; that version was not restored.`,

@@ -888,6 +888,6 @@ describe("decidePlainTreeRollback", () => {
     const decision = decidePlainTreeRollback(false);
     expect(decision.kind).toBe("skip");
     if (decision.kind !== "skip") return;
-    expect(decision.reason).toContain("not swapped");
+    expect(decision.reason).toBe("no previous tree to restore");
   });
 });

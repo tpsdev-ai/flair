@@ -904,6 +904,6 @@ export function decidePlainTreeRollback(previousDirExists: boolean): PlainTreeRo
   if (previousDirExists) return { kind: "restore" };
   return {
     kind: "skip",
-    reason: "no previous tree to restore (the live tree was not swapped)",
+    reason: "no previous tree to restore",
   };
 }
