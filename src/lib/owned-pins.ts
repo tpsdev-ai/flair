@@ -27,6 +27,7 @@ import {
 import {
   checkSessionStartHook,
   isFlairHookCommand,
+  SESSION_START_HOOK_INVOCATION_RE,
   readClientMcpBlock,
 } from "../doctor-client.js";
 import {
@@ -410,8 +411,21 @@ export function repinSessionStartHookGuarded(
   };
   const wouldWrite = flairCliVersion();
   const command = checkSessionStartHook(homeDir, resolved.path).command;
-  const existing = command ? wiringPinString(decodeWiringSpec(parseInstallerHookForm(command)?.pkgSpec ?? `${FLAIR_MCP_PACKAGE}@unknown`, FLAIR_MCP_PACKAGE)) : null;
-  if (pinWriteWouldLowerOrIsUnknown(existing, wouldWrite)) {
+  const form = command ? parseInstallerHookForm(command) : null;
+  // A form supplies the exact span the writer replaces. For a rejected form,
+  // the status-only match may recover an unreadable pin for a HOLD; it cannot
+  // authorize a write. The writer still validates the full command in-lock.
+  const invocation = form ? undefined : command?.match(SESSION_START_HOOK_INVOCATION_RE)?.[0];
+  const spec = form?.pkgSpec
+    ?? invocation?.slice("npx -y -p ".length, -" flair-session-start".length);
+  const existing = spec ? wiringPinString(decodeWiringSpec(spec, FLAIR_MCP_PACKAGE)) : null;
+  // A comparable pin in a non-installer command is a shape refusal, not an
+  // unknown pin. Let the writer retain its "not one of the installer forms"
+  // classification. Unreadable pins retain their raw-value hold diagnostic.
+  if (
+    pinWriteWouldLowerOrIsUnknown(existing, wouldWrite)
+    && (form !== null || comparePinVersions(existing, wouldWrite) === null)
+  ) {
     return {
       target: resolved,
       action: "hold",
