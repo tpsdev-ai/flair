@@ -21,7 +21,7 @@
  * resolve. Adding `import x from "semver"` to any canary script turns this red.
  */
 
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 
@@ -108,7 +108,13 @@ function canaryScriptClosure(overrides: Readonly<Record<string, string>> = {}): 
     if (!existsSync(full)) continue;
     const text = stripComments(overrides[sh] ?? readFileSync(full, "utf8"));
     moduleQueue.push(...nodeScriptsInvoked(text, sh));
-    if (/\bnode\s+(?:--[\w-]+(?:=\S+)?\s+)*(?:-[ep]\b|--(?:eval|print)\b|-\s*<)/.test(text)) throw new Error("inline Node body in " + sh);
+    // Whitelist, not blacklist: every `node` invocation must run a .mjs/.js file, optionally
+    // after long flags. Any other form (-e, -p, -pe, --eval, --print, stdin, a heredoc) is an
+    // inline body the dependency walk cannot inspect.
+    for (const m of text.matchAll(/(?:^|[\s;&|(`])node(?=[ \t])([^\n]*)/g)) {
+      const rest = m[1].trim();
+      if (!/^(?:--[\w-]+(?:=\S+)?\s+)*"?[^\s"'<()]+\.[mc]?js"?(?=$|[\s;&|)`])/.test(rest)) throw new Error("inline Node body in " + sh + ": node " + rest);
+    }
     shellQueue.push(...shellScriptsReferenced(text));
   }
 
@@ -137,14 +143,18 @@ function canaryScriptClosure(overrides: Readonly<Record<string, string>> = {}): 
   return { shellScripts: [...shellSeen], modules: [...moduleSeen], specifierCount, bare };
 }
 
-test.each(["node -e 'require(\"semver\")'", "node --eval 'require(\"semver\")'", "node -p 'require(\"semver\")'", "node - <<'JS'\nrequire(\"semver\")\nJS"])("rejects inline Node in a shell fixture: %s", (inline: string) => {
+test.each(["node -e 'require(\"semver\")'", "node --eval 'require(\"semver\")'", "node -p 'require(\"semver\")'", "node - <<'JS'\nrequire(\"semver\")\nJS", "node -pe '21+21'", "node -- <<'JS'\n21+21\nJS", "node <<'JS'\n21+21\nJS"])("rejects inline Node in a shell fixture: %s", (inline: string) => {
   const shell = "scripts/ci/check-instance-boot.sh";
   const fixture = readFileSync(join(REPO_ROOT, shell), "utf8") + "\n" + inline + "\n";
   expect(() => canaryScriptClosure({ [shell]: fixture })).toThrow("inline Node body");
 });
 
 describe("post-publish canary scripts are dependency-free (flair#1856)", () => {
-  const closure = canaryScriptClosure();
+  // Built in a hook, not at describe time: a throw here must FAIL these tests, not drop them.
+  let closure: Closure;
+  beforeAll(() => {
+    closure = canaryScriptClosure();
+  });
 
   test("the walk reached the canary's scripts (positive control)", () => {
     // A zero-length closure would make the assertion below vacuously true — the
