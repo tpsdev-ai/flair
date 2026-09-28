@@ -155,7 +155,9 @@ The moment the staged packages are approved, dispatch the
 | ----- | ----- |
 | `version` | the version just approved, exact (e.g. `vX.Y.Z` without the `v`) |
 | `expected_sha256` | the published tarball's sha256 (64 hex). The canary computes it from the registry with `node scripts/ci/registry-tarball-sha256.mjs <ver>`. |
-| `package_set_digest` | the release run's certified package-set digest (64 hex), printed in the release run's pack summary. It can also be recomputed from that run's pack-job lines (`<name>@<version>   <sha256>   <file>`) by feeding `<name>=<sha256>` lines to `node scripts/ci/package-set-digest.mjs --version <ver>`. The canary re-derives the digest from the tarballs it verified and refuses a mismatch before any verdict. |
+| `package_set_digest` | the certified package-set digest (64 lowercase hex), printed as `package-set-digest=<digest>` in the log of the release run's "Pack publishable packages and write the release manifest" step. It can also be recomputed from that step's lines (`<name>@<version>  <sha256>  <basename>`) by feeding `<name>=<sha256>` lines to `node scripts/ci/package-set-digest.mjs --version <ver>`. The canary re-derives the digest from the tarballs it verified and refuses a mismatch before any verdict. |
+
+For example, after all staged packages are public: `gh workflow run canary.yml --ref main -f 'version=<ver>' -f 'expected_sha256=<flair-tarball-sha256>' -f 'package_set_digest=<package-set-digest>'`.
 
 The canary runs on clean `ubuntu-latest` and `macos-latest` runners and is
 **credential-less**: it installs `@tpsdev-ai/flair@<ver>` by exact version from the
