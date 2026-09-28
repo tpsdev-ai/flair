@@ -535,6 +535,25 @@ describe("makeByIdReadGate — the read scope is evaluated on the full stored ro
     expect(res).toBe("shared text");
   });
 
+  it("the decision never reuses the caller's target or its class", async () => {
+    // A target whose class installs a selection when constructed: the decision
+    // must still see the full stored row (here: private, so another agent gets 404).
+    class SelectingTarget {
+      id?: string;
+      select: string[] = ["id", "agentId", "content"];
+    }
+    const gate = makeByIdReadGate(makeReadScope("open-within-org"));
+    const res: any = await gate.call(self("reader"), Object.assign(new SelectingTarget(), { id: "priv-1" }), superGet);
+    expect(res instanceof Response).toBe(true); // assertion: denied on the full row
+    expect(res.status).toBe(404);
+  });
+
+  it("an unshaped read returns the full stored row after the check", async () => {
+    const gate = makeByIdReadGate(makeReadScope("open-within-org"));
+    const res: any = await gate.call(self("reader"), Object.assign(new FakeTarget(), { id: "shared-1" }), superGet);
+    expect(res).toEqual({ id: "shared-1", agentId: "owner", visibility: "shared", content: "shared text" });
+  });
+
   it("owner-only mode: a shaped read of another agent's row is 404", async () => {
     const gate = makeByIdReadGate(makeReadScope("owner-only"));
     const res: any = await gate.call(self("reader"), shaped("shared-1", { select: ["content"] }), superGet);
