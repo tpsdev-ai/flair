@@ -567,13 +567,13 @@ export class Memory extends (databases as any).flair.Memory {
   allowRead() { return memoryAuthGate.call(this); }
 
   /**
-   * Override get() to scope by-id reads the same way search() scopes
-   * collection reads (memory-soul-read-gate fix). Missing records and records
-   * outside the caller's read scope both return 404, never 403, so a denied
-   * caller can't use get() to enumerate other agents'
-   * memory ids. Wired through record-type-kit.ts's makeByIdReadGate, scoped
-   * with Memory's own "open-within-org" read-scope resolver above — same
-   * dispatch shape Relationship.ts/WorkspaceState.ts's get() overrides use.
+   * Override get() to apply Memory's open-within-org scope to by-id reads,
+   * as search() does for collection reads. For a verified non-admin agent,
+   * a missing record and one outside its read scope both return 404; this
+   * does not disclose whether another agent's private record exists.
+   * Anonymous HTTP requests are denied by allowRead(), while administrator
+   * and trusted internal reads are unfiltered. Wired through
+   * record-type-kit.ts's makeByIdReadGate.
    */
   async get(target?: any, opts?: { includeTrust?: boolean }) {
     // Collection / query reads — the `GET /Memory/?<query>` form and the bare

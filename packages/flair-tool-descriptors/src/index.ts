@@ -636,7 +636,7 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
   },
   {
     "name": "flair_catchup",
-    "description": "Drain YOUR OWN catch-up feed — org events directed to you (or broadcast) after your durable watermark. Returns a page plus a `nextAfter` cursor: page with `after`, then advance the watermark with `ack`. The feed is selected by the configured `FLAIR_AGENT_ID`, with no tool argument to change it; ordinary signed callers are restricted to their own feed, while administrator Basic credentials can select that configured feed. At-least-once: an event may arrive twice (re-delivery is safe), an acked event does not re-deliver, and an un-acked event survives a restart.",
+    "description": "Drain the catch-up feed for the configured `FLAIR_AGENT_ID`: directed or broadcast org events after the effective cursor. Omit `after` to start at that agent's durable watermark, or pass `after` to choose an exclusive cursor. Pass `ack` to advance the watermark before this call reads a page; the response includes `nextAfter` for paging. The tool has no argument to change the agent id. Agent requests are signed for the configured id; verified administrator Basic credentials may read that configured feed. Unacknowledged events remain eligible after restart; acknowledged events are skipped by default, but an explicit older `after` can replay them.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -654,7 +654,7 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
         }
       }
     },
-    "outputShape": "{ events: OrgEvent[], after, nextAfter, watermark, hasMore, pageSize, acked? } — the caller's own directed + broadcast events after its durable watermark, paged; `ack` advances the watermark monotonically (at-least-once — re-delivery is safe).",
+    "outputShape": "{ events: OrgEvent[], after, nextAfter, watermark, hasMore, pageSize, acked? } — the configured agent's directed and broadcast events after the effective cursor; `ack` advances that agent's durable watermark monotonically.",
     "native": false
   },
   {

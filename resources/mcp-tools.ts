@@ -561,9 +561,10 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
 // retrievable via memory_get and memory_search(includeArchived:true)). Restore
 // is the deliberate, GLOBAL inverse — it un-retires the memory for EVERY
 // session, not a session-local view (that is drawers, Deliverable B, which does
-// not exist yet). Reads use owner plus visibility (Memory.get()'s read-scope
-// gate); mutations require ownership unless the caller has administrator
-// authority (Memory.put()'s ownership gate, stampAttribution).
+// not exist yet). Non-admin agent reads use Memory.get()'s owner-and-
+// visibility scope; administrator and trusted internal reads are unfiltered.
+// Mutating another agent's record requires administrator or trusted internal
+// authority (Memory.put()'s stampAttribution gate).
 async function memoryBasement(agent: ResolvedAgent, args: any) {
   const Cls = await handler("Memory");
   const id = args?.id;
