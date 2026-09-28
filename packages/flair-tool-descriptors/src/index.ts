@@ -99,7 +99,7 @@ export function descriptorNames(descriptors: readonly ToolDescriptor[]): string[
 export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
   {
     "name": "memory_search",
-    "description": "Search memories by meaning. Understands temporal queries like 'what happened today'. Scoped to your agent's own and other agents' non-private memories.",
+    "description": "Search memories by meaning. Understands temporal queries like 'what happened today'. Non-admin callers are scoped to their own and other agents' non-private memories; administrator requests may have broader access.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -128,7 +128,7 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
         "query"
       ]
     },
-    "outputShape": "{ results: MemoryRecord[] } — semantic hits scoped to the caller's own and other agents' non-private memories; each hit carries content, never the raw embedding.",
+    "outputShape": "{ results: MemoryRecord[] } — semantic hits subject to the caller's read scope; each hit carries content, never the raw embedding.",
     "annotations": {
       "readOnlyHint": true
     },
@@ -183,7 +183,7 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
             "private",
             "shared"
           ],
-          "description": "Writer-controlled sharing intent. Omit to use the server's durability-keyed default: permanent/persistent -> shared, standard/ephemeral -> private. private — owner-only, never visible to another agent, even one holding a memory grant. shared — visible to the owner and every other agent on this instance. The visibility the write actually landed on is returned in the result."
+          "description": "Writer-controlled sharing intent. Omit to use the server's durability-keyed default: permanent/persistent -> shared, standard/ephemeral -> private. private — readable by its owner and administrators; other non-admin agents cannot read it, including through a memory grant. shared — visible to the owner and every other agent on this instance. The visibility the write actually landed on is returned in the result."
         },
         "usedMemoryIds": {
           "type": "array",
@@ -237,7 +237,7 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
   },
   {
     "name": "skill_search",
-    "description": "Find skills (reusable capabilities/procedures) that apply to a task. Ranks skill-tagged memories by their `trigger` ('when to use') against your task text. Returns a lightweight CATALOG — id, name, trigger, description, tags, agentId — NOT the full procedure (fetch that with skill_get). Scoped to your own + shared skills; another agent's private skill is never returned.",
+    "description": "Find skills (reusable capabilities/procedures) that apply to a task. Ranks skill-tagged memories by their `trigger` ('when to use') against your task text. Returns a lightweight CATALOG — id, name, trigger, description, tags, agentId — NOT the full procedure (fetch that with skill_get). Non-admin callers can retrieve their own and other agents' non-private skills; administrators can also retrieve private skills.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -254,14 +254,14 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
         "task"
       ]
     },
-    "outputShape": "{ results: SkillCard[] } — the skill catalog (lightweight id/name/trigger/description/tags/agentId, ranked by trigger match); the full procedure and the raw embedding are never on a card. Scoped to the caller's own + non-private skills; another agent's private skill is never returned.",
+    "outputShape": "{ results: SkillCard[] } — the skill catalog (lightweight id/name/trigger/description/tags/agentId, ranked by trigger match); the full procedure and the raw embedding are never on a card. Non-admin callers can retrieve their own and other agents' non-private skills; administrators can also retrieve private skills.",
     "annotations": {
       "readOnlyHint": true
     }
   },
   {
     "name": "skill_get",
-    "description": "Retrieve a full skill by ID — the complete procedure (`content`) plus trigger and metadata. The disclosure step after skill_search's catalog. Read-scoped: you can only get your own or a shared skill, never another agent's private skill. A non-skill id returns not-found. The raw embedding vector is never returned.",
+    "description": "Retrieve a full skill by ID — the complete procedure (`content`) plus trigger and metadata. The disclosure step after skill_search's catalog. Reads follow the caller's authorization: non-admin callers can retrieve their own and other agents' non-private skills; administrators can also retrieve private skills. A non-skill id returns not-found. The raw embedding vector is never returned.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -274,7 +274,7 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
         "id"
       ]
     },
-    "outputShape": "The full skill record { id, agentId, content, trigger, tags, durability, metadata, createdAt, ... } for a skill readable under the caller's read-scope — embedding + embeddingModel always stripped. A non-owner cannot read another agent's private skill, and a readable non-skill id is not found (both 404).",
+    "outputShape": "The full skill record { id, agentId, content, trigger, tags, durability, metadata, createdAt, ... } for a skill readable under the caller's read-scope — embedding + embeddingModel always stripped. A non-admin caller cannot read another agent's private skill; administrators retain access. A readable non-skill id is reported as not found.",
     "annotations": {
       "readOnlyHint": true
     }
@@ -316,7 +316,7 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
   },
   {
     "name": "memory_basement",
-    "description": "Send a memory to the basement (archive it). Sets archived=true and stamps archivedAt. The memory is removed from bootstrap and default search but remains retrievable via memory_get and memory_search(includeArchived:true). Deliberate and GLOBAL — this is a visibility flag, not a deletion: provenance and history are untouched. Scoped to your own memories only.",
+    "description": "Send a memory to the basement (archive it). Sets archived=true and stamps archivedAt. The memory is removed from bootstrap and default search but remains retrievable via memory_get and memory_search(includeArchived:true). Deliberate and GLOBAL — this is a visibility flag, not a deletion: provenance and history are untouched. Non-admin callers can modify only their own memories; administrators can also modify other agents' memories.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -334,7 +334,7 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
   },
   {
     "name": "memory_restore",
-    "description": "Restore a basemented (archived) memory. Clears archived and archivedAt. Deliberate and GLOBAL — this un-retires the memory for EVERY session, not a session-local view (per-session reuse is drawers, which do not exist yet). Scoped to your own memories only.",
+    "description": "Restore a basemented (archived) memory. Clears archived and archivedAt. Deliberate and GLOBAL — this un-retires the memory for EVERY session, not a session-local view (per-session reuse is drawers, which do not exist yet). Non-admin callers can modify only their own memories; administrators can also modify other agents' memories.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -384,7 +384,7 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
   },
   {
     "name": "memory_delete",
-    "description": "Delete a memory by ID. You can only delete your own memories.",
+    "description": "Delete a memory by ID. Non-admin callers can delete only their own memories; administrators can also delete other agents' memories.",
     "inputSchema": {
       "type": "object",
       "properties": {

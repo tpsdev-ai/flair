@@ -93,11 +93,11 @@ describe("flair#1870 — memory_search descriptor wording tracks Memory's read m
     }
   });
 
-  test("memory_search's description and outputShape state the open-within-org scope", () => {
+  test("memory_search's description names the non-admin scope and its outputShape names the caller's read scope", () => {
     const search = TOOL_DESCRIPTORS.find((d) => d.name === "memory_search");
     expect(search).toBeDefined();
     expect(search!.description).toContain("non-private");
-    expect(search!.outputShape).toContain("non-private");
+    expect(search!.outputShape).toContain("subject to the caller's read scope");
     expect(search!.description).not.toContain(GRANT_CLAIM);
     expect(search!.outputShape).not.toContain(GRANT_CLAIM);
   });

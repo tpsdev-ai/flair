@@ -283,7 +283,9 @@ function hookOutput(context: string): string {
 /**
  * Core hook logic, with injectable dependencies so it can be unit-tested
  * without a live Flair daemon. Returns the exact string to print to stdout.
- * NEVER throws — every failure path returns NOOP_OUTPUT.
+ * A failed bootstrap can still return a continuity resume hint. Without
+ * bootstrap context or a resume hint, this returns NOOP_OUTPUT. The entry
+ * point catches unexpected exceptions.
  *
  * @param rawInput   the raw stdin string (may be empty / malformed)
  * @param makeClient factory for the bootstrap client (defaults to FlairClient)
@@ -372,9 +374,9 @@ export async function runHook(
     context = ""; // flair unreachable / auth error / timeout → no bootstrap context
     // flair#1943: keeping stderr open cannot reveal an error never written to
     // it. Write ONE line to STDERR (never stdout — that is the hook payload),
-    // so a real failure stays visible instead of being swallowed. stdout and
-    // the exit code are unchanged (the no-op payload), so a failure never
-    // blocks the session.
+    // so a real failure stays visible instead of being swallowed. A failed
+    // bootstrap contributes no bootstrap context; a continuity resume hint may
+    // still be returned. The entry point preserves a successful exit.
     reportBootstrapFailure(err);
   }
 

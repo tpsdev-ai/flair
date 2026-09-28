@@ -306,10 +306,10 @@ Clients on this page talk to the stdio server `@tpsdev-ai/flair-mcp`. Its `tools
 | Tool | What it does |
 |---|---|
 | `memory_search` | Semantic search across the caller's own and other agents' non-private memories |
-| `memory_store` | Save a memory (type, durability, tags, visibility), attributed to the authenticated agent. Optional `usedMemoryIds` cites memories that informed the write |
+| `memory_store` | Save a memory (type, durability, tags, visibility), under the configured agent ID, subject to server authorization. Optional `usedMemoryIds` cites memories that informed the write |
 | `skill_store` | Write a skill-tagged memory. `trigger` is the recall text; `content` is the procedure. Durability is forced to persistent, and SkillScan rejects a dangerous payload before embed |
 | `skill_search` | Rank skills by their trigger against a task. Returns a catalog (id, name, trigger, description, tags, agentId), not the procedure |
-| `skill_get` | Fetch one skill's full procedure by id. Own skills and shared skills only; a private skill owned by someone else is not returned |
+| `skill_get` | Fetch one skill's full procedure by id. Non-admin callers can retrieve their own and other agents' non-private skills; administrators can also retrieve private skills |
 | `memory_update` | Update a memory by id. Overwrites in place, or pass `preserveHistory` to write a superseding version. Optional `usedMemoryIds` |
 | `memory_get` | Fetch a specific memory by ID |
 | `memory_delete` | Delete one of your own memories |
@@ -322,9 +322,9 @@ Clients on this page talk to the stdio server `@tpsdev-ai/flair-mcp`. Its `tools
 | `flair_catchup` | Drain this agent's own org-event catch-up feed. Page with `after`; advance the watermark with `ack` |
 | `record_usage` | Report that recalled memories were actually used (`memoryId` or `memoryIds`, plus optional `attribution`). Drives `usageCount` / `usageBoost` |
 
-Writes are scoped per-agent (your `FLAIR_AGENT_ID`) and enforced by Flair's server, not by client convention — you can't write as another agent. Reads are more open by design: any agent on the same Flair instance can read any other agent's **non-private** memories, with no grant to set up (open-within-org read; see [SECURITY.md](../SECURITY.md)).
+For ordinary signed agents, Flair enforces write ownership server-side: they can write only under their authenticated agent ID. Administrator credentials and administrator agent roles have broader authority. Reads are more open by design: any agent on the same Flair instance can read any other agent's **non-private** memories, with no grant to set up (open-within-org read; see [SECURITY.md](../SECURITY.md)).
 
-Which memories are non-private is decided at write time, and the default is not "shared". `memory_store` defaults `durability` to `standard`, and the server derives visibility from durability — `permanent`/`persistent` → `shared`, `standard`/`ephemeral` → `private` — so **a bare `memory_store` call writes an owner-only memory that no other agent can read.** Pass `visibility: "shared"` (or `"private"`, to be explicit) to say what you mean; the tool reports the visibility the write actually landed on so an agent can confirm it rather than assume.
+Which memories are non-private is decided at write time, and the default is not "shared". `memory_store` defaults `durability` to `standard`, and the server derives visibility from durability — `permanent`/`persistent` → `shared`, `standard`/`ephemeral` → `private` — so **a bare `memory_store` call creates a private memory: ordinary agents other than its owner cannot read it; administrators retain access.** Pass `visibility: "shared"` (or `"private"`, to be explicit) to say what you mean; the tool reports the visibility the write actually landed on so an agent can confirm it rather than assume.
 
 ### Reading the `bootstrap` payload
 
