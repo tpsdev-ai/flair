@@ -131,13 +131,14 @@ identities never collide and the `:` delimiter stays unambiguous.
   stored. The first re-ingestion after upgrading can leave both the old row
   and the new one for a colon-bearing event.
   Direct `addMemory()` writes use the entry's `id` when supplied, else the
-  first 32 hex chars of the content's SHA-256. A create conflict on that id
-  keeps the existing row and reports the conflict.
+  first 32 hex chars of the content's SHA-256. Re-adding that id replaces
+  the row.
 - Creates ride `POST /Memory/` (the create verb) with the id in the body. A
-  `409` replaces the row only when it has a complete event stamp matching
-  this tuple (`PUT /Memory/{id}`); otherwise the row is kept and the
-  conflict is reported. A PUT-shaped create 404s on Harper deployments
-  where PUT is update-only (flair#1336)
+  `409` on an event write replaces the row only when it has a complete event
+  stamp matching this tuple (`PUT /Memory/{id}`); otherwise the row is kept
+  and the conflict is reported. A `409` on a direct `addMemory()` replaces
+  the row. A PUT-shaped create 404s on Harper deployments where PUT is
+  update-only (flair#1336)
 - Write failures log a structured warning (session id, event count, HTTP status)
 - No-text events are filtered (Vertex parity)
 

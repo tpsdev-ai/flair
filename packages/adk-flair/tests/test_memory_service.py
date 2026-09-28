@@ -797,24 +797,30 @@ class TestAddMemory:
         assert body["author"] == "test-agent"
 
     @pytest.mark.asyncio
-    async def test_occupied_direct_id_is_kept(self, service):
-        """A caller-chosen id that already holds another event tuple is not replaced.
+    async def test_direct_readd_replaces_occupied_id(self, service, caplog):
+        """Re-adding a caller-chosen id replaces the row. No stamp check.
 
-        Direct writes have no event tuple to verify, so a 409 keeps the row
-        and reports the conflict. No GET and no PUT. Restoring an unconditional
-        PUT turns this red.
+        The GET body would fail the event-write stamp check. add_memory must
+        not read it: POST then PUT, no warning. Routing this through the
+        event fail-closed path turns the test red.
         """
-        from adk_flair.memory_service import FlairWriteError
+        from urllib.parse import quote
 
         occupied = "pre:post:user:sess:evt"
 
         def respond(method, path, **kwargs):
             if method == "POST":
                 return _mock_response(409, "Conflict")
+            if method == "GET":
+                return _json_response({
+                    "id": occupied,
+                    "sessionId": "other-sess",
+                    "tags": ["adk:app:user", "adk-event:other-evt"],
+                })
             return _mock_response(200)
 
         service._client.request.side_effect = respond
-        with pytest.raises(FlairWriteError) as excinfo:
+        with caplog.at_level(logging.WARNING):
             await service.add_memory(
                 app_name="app",
                 user_id="user",
@@ -824,10 +830,14 @@ class TestAddMemory:
                 )],
             )
 
-        assert excinfo.value.failed == [(occupied, 409)]
         methods = [c[0][0] for c in service._client.request.call_args_list]
-        assert methods == ["POST"]
-        assert service._client.request.call_args_list[0][1]["json"]["id"] == occupied
+        assert methods == ["POST", "PUT"]
+        post, put = service._client.request.call_args_list
+        assert post[1]["json"]["id"] == occupied
+        assert post[1]["json"]["content"] == "overwrite"
+        assert put[1]["json"] == post[1]["json"]
+        assert put[0][1] == "/Memory/" + quote(occupied, safe="")
+        assert not any("write failed" in r.getMessage().lower() for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_skipped_textless_entry_logs_one_warning_on_success(self, service, caplog):

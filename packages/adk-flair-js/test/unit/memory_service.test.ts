@@ -1347,9 +1347,10 @@ describe("addMemory", () => {
     expect(called).toBe(false);
   });
 
-  it("keeps an occupied caller-chosen id that holds another event tuple", async () => {
-    // Direct addMemory has no event tuple, so a 409 never reads or replaces.
-    // Restoring an unconditional PUT turns this red.
+  it("re-adds a caller-chosen id by replacing the row", async () => {
+    // The GET body would fail the event-write stamp check. addMemory must
+    // not read it: POST then PUT, no warning. Routing this through the
+    // event fail-closed path turns the test red.
     const occupied = "pre:post:user:sess:evt";
     const calls: Array<{ method: string; url: string; body?: Record<string, unknown> }> = [];
     globalThis.fetch = mock(async (url, init) => {
@@ -1361,12 +1362,15 @@ describe("addMemory", () => {
         body: raw ? JSON.parse(raw as string) as Record<string, unknown> : undefined,
       });
       if (method === "POST") return new Response("Conflict", { status: 409 });
-      return new Response(JSON.stringify({
-        id: occupied,
-        content: "original event",
-        sessionId: "sess",
-        tags: [compoundTag("pre:post", "user"), eventTag("evt")],
-      }), { status: 200, headers: { "content-type": "application/json" } });
+      if (method === "GET") {
+        return new Response(JSON.stringify({
+          id: occupied,
+          content: "original event",
+          sessionId: "other-sess",
+          tags: ["adk:app:user", eventTag("other-evt")],
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
     });
 
     const warnings: string[] = [];
@@ -1380,11 +1384,12 @@ describe("addMemory", () => {
       console.warn = origWarn;
     }
 
-    expect(calls.map((c) => c.method)).toEqual(["POST"]);
+    expect(calls.map((c) => c.method)).toEqual(["POST", "PUT"]);
     expect(calls[0].body?.id).toBe(occupied);
-    const warning = warnings.join(" ");
-    expect(warning).toContain("conflict");
-    expect(warning).toContain("kept the existing row");
+    expect(calls[0].body?.content).toBe("overwrite");
+    expect(calls[1].body).toEqual(calls[0].body);
+    expect(calls[1].url).toBe(`http://localhost:19926/Memory/${encodeURIComponent(occupied)}`);
+    expect(warnings.filter((w) => w.includes("write failed"))).toEqual([]);
   });
 });
 

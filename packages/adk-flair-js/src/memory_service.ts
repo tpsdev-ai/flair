@@ -679,8 +679,8 @@ export class FlairMemoryService implements BaseMemoryService {
    *
    * Record ids mirror the Python package: `entry.id` when the caller supplies
    * one (FlairMemoryEntry input), else the first 32 hex chars of the content's
-   * SHA-256. The id is deterministic, so a re-add addresses the same row; a
-   * create conflict keeps that row and reports the conflict.
+   * SHA-256. The id is deterministic, so re-adding identical content addresses
+   * the same row and replaces it.
    */
   async addMemory(
     appName: string,
@@ -969,7 +969,7 @@ export class FlairMemoryService implements BaseMemoryService {
   }
 
   /**
-   * Create one Memory record, replacing it only for a matching stamp.
+   * Create one Memory record.
    *
    * Creates via `POST /Memory/` — Harper's collection create verb — with the
    * id in the body. The previous shape, `PUT /Memory/{id}`, is update-only on
@@ -977,12 +977,12 @@ export class FlairMemoryService implements BaseMemoryService {
    * (flair#1336, observed on hosted Harper Fabric; not reproducible on stock
    * Harper 5.2.x, where PUT upserts). Mirrors the Python package's #1339 fix.
    *
-   * A 409 from POST means the id is already occupied. The existing row is
-   * read and replaced only when it has a complete event stamp for
+   * A 409 from POST means the id is already occupied. A direct write (no
+   * `eventTuple`) replaces that row with PUT and does not read it. An event
+   * write replaces the row only when it has a complete event stamp for
    * `eventTuple` (`sessionId` plus the compound tag and this event's tag).
-   * An unstamped pre-upgrade row, a contradictory stamp, or a caller-chosen
-   * id is kept and the conflict is thrown. Any other error propagates
-   * unchanged.
+   * An unstamped pre-upgrade row or a contradictory stamp is kept and the
+   * conflict is thrown. Any other error propagates unchanged.
    */
   private async _writeRecord(
     recordId: string,
@@ -1002,7 +1002,7 @@ export class FlairMemoryService implements BaseMemoryService {
         `HTTP ${resp.status}${text ? `: ${text.slice(0, 200)}` : ""}`
       );
     }
-    if (eventTuple && await this._occupiedRowIsEventTuple(putPath, eventTuple)) {
+    const replaceOccupied = async (): Promise<void> => {
       const putResp = await this._sendJson("PUT", putPath, body);
       if (!putResp.ok) {
         const text = await putResp.text().catch(() => "");
@@ -1010,6 +1010,15 @@ export class FlairMemoryService implements BaseMemoryService {
           `HTTP ${putResp.status}${text ? `: ${text.slice(0, 200)}` : ""}`
         );
       }
+    };
+    // Direct writes never enter the stamp check. A caller-chosen id replaces
+    // the occupied row, which is the addMemory re-add contract.
+    if (!eventTuple) {
+      await replaceOccupied();
+      return;
+    }
+    if (await this._occupiedRowIsEventTuple(putPath, eventTuple)) {
+      await replaceOccupied();
       return;
     }
     throw new Error(

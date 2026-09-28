@@ -345,10 +345,10 @@ UUID, so re-ingesting it can store another row. When any component contains
 event-join always contains at least three `:`, so the new id is not an
 event-join row the previous encoder stored. The first re-ingestion after
 upgrading can leave both the old row and the new one for a colon-bearing
-event. A create conflict replaces the existing row only when that row has a
-complete event stamp matching this tuple; otherwise the row is kept and the
-conflict is reported. A caller-chosen id on `add_memory()` is never replaced
-on conflict.
+event. A create conflict on an event write replaces the existing row only
+when that row has a complete event stamp matching this tuple; otherwise the
+row is kept and the conflict is reported. A direct `add_memory()` re-add of
+the same id replaces that row.
 
 ## custom_metadata
 

@@ -738,7 +738,7 @@ class FlairMemoryService(BaseMemoryService):
         *,
         event_tuple: Optional[Tuple[str, str, str, str]] = None,
     ) -> None:
-        """Create one Memory record, replacing it only for a matching stamp.
+        """Create one Memory record.
 
         Creates via ``POST /Memory/`` — Harper's collection create verb —
         with the id in the body. The previous shape, ``PUT /Memory/{id}``,
@@ -746,11 +746,12 @@ class FlairMemoryService(BaseMemoryService):
         does not exist yet (flair#1336, observed on hosted Harper Fabric;
         not reproducible on stock Harper 5.2.x, where PUT upserts).
 
-        A 409 from POST means the id is already occupied. The existing row
-        is read and replaced only when it has a complete event stamp for
-        ``event_tuple`` (``sessionId`` plus the compound tag and this
-        event's tag). An unstamped pre-upgrade row, a contradictory stamp,
-        or a caller-chosen id is kept and the conflict is raised. Any other
+        A 409 from POST means the id is already occupied. A direct write
+        (no ``event_tuple``) replaces that row with PUT and does not read
+        it. An event write replaces the row only when it has a complete
+        event stamp for ``event_tuple`` (``sessionId`` plus the compound
+        tag and this event's tag). An unstamped pre-upgrade row or a
+        contradictory stamp is kept and the conflict is raised. Any other
         error propagates unchanged.
         """
         # Validate/encode the id BEFORE any request (#1970): a ``.``/``..`` id
@@ -764,9 +765,12 @@ class FlairMemoryService(BaseMemoryService):
         except FlairRequestError as exc:
             if exc.status_code != 409:
                 raise
-        if event_tuple is not None and await self._occupied_row_is_event_tuple(
-            put_path, event_tuple
-        ):
+        # Direct writes never enter the stamp check. A caller-chosen id
+        # replaces the occupied row, which is the add_memory re-add contract.
+        if event_tuple is None:
+            await self._request("PUT", put_path, json_body=body)
+            return
+        if await self._occupied_row_is_event_tuple(put_path, event_tuple):
             await self._request("PUT", put_path, json_body=body)
             return
         raise FlairRequestError(
