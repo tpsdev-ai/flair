@@ -113,7 +113,7 @@ describe("within-org-read-open — private/shared visibility + centralized read-
     // A by-id read that asks for a selection is scoped on the full stored row,
     // exactly like an unselected read (record-type-kit.ts makeByIdReadGate).
     test("a selected by-id read of another agent's PRIVATE memory is a 404 with no content", async () => {
-      const res = await authFetch(harper, stranger, "GET", `/Memory/${idPrivate}?select(content,)`);
+      const res = await authFetch(harper, stranger, "GET", `/Memory/${idPrivate}?select(content,agentId)`);
       expect(res.status, `stranger selected GET private → ${res.status} (expected 404)`).toBe(404);
       expect(await res.text()).not.toContain("explicitly private note");
     }, 30_000);
@@ -137,10 +137,10 @@ describe("within-org-read-open — private/shared visibility + centralized read-
     }, 30_000);
 
     test("a selected by-id read still works for the owner and for a shared memory", async () => {
-      const own = await authFetch(harper, owner, "GET", `/Memory/${idPrivate}?select(content,)`);
+      const own = await authFetch(harper, owner, "GET", `/Memory/${idPrivate}?select(content,agentId)`);
       expect(own.status, `owner selected GET private → ${own.status}`).toBe(200);
       expect(await own.text()).toContain("explicitly private note");
-      const shared = await authFetch(harper, stranger, "GET", `/Memory/${idShared}?select(content,)`);
+      const shared = await authFetch(harper, stranger, "GET", `/Memory/${idShared}?select(content,agentId)`);
       expect(shared.status, `stranger selected GET shared → ${shared.status}`).toBe(200);
       expect(await shared.text()).toContain("explicitly shared finding");
     }, 30_000);
