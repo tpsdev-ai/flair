@@ -813,7 +813,7 @@ export type VersionDeprecationResult =
 /**
  * Read the npm `deprecated` field for one exact version (flair#1740).
  *
- * A rollback must not reinstall a version npm has marked deprecated. Only a
+ * A rollback must not return to a version npm has marked deprecated. Only a
  * positive string refuses the rollback. A missing field or a blank string is
  * `active`. A present null is not that absence: it is `unavailable`, same as
  * any other non-string, so the lookup does not claim the version is active.
