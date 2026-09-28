@@ -150,13 +150,27 @@ export function detectPersistedAdminUser(dataDir: string): boolean {
 
 export function initAdminPassRefusalMessage(
   reason: InitAdminPasswordRefuseReason,
-  opts: { dataDir?: string; httpPort?: number; adminPassPath?: string; socketPath?: string } = {},
+  opts: {
+    dataDir?: string;
+    httpPort?: number;
+    adminPassPath?: string;
+    socketPath?: string;
+    /**
+     * Foreign-instance only. Default true keeps the historical `flair stop`
+     * line. Pass false when that command cannot identify the process (the
+     * data directory was deleted, or it does not record the listener) —
+     * the caller prints `kill` instead (flair#1749).
+     */
+    offerFlairStop?: boolean;
+  } = {},
 ): string {
   if (reason === "foreign-instance") {
     const port = opts.httpPort ?? 19926;
+    const head =
+      `A Harper instance is already answering on port ${port} and this data directory has no persisted admin user.`;
+    if (opts.offerFlairStop === false) return head;
     return (
-      `A Harper instance is already answering on port ${port} and this data directory has no persisted admin user. ` +
-      `Stop that process before initializing a new instance:\n  ${INIT_STOP_FOREIGN_COMMAND}`
+      `${head} Stop that process before initializing a new instance:\n  ${INIT_STOP_FOREIGN_COMMAND}`
     );
   }
   if (reason === "reset-without-socket") {

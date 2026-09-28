@@ -31,6 +31,7 @@ import { httpCorsAccessList } from "../lib/http-bind.js";
 import { resolveHome } from "../lib/home.js";
 import {
   foreignOccupiedListenerDetail,
+  pidsVerifiedOnAnsweredPort,
   staleHarperBeforeAuthNotice,
   type OccupiedHarperListener,
 } from "../lib/init-occupied-listener.js";
@@ -216,6 +217,17 @@ function seedFederationInstanceViaOpsApi(...args: any[]): any {
 
 function readOccupiedListener(port: number): OccupiedHarperListener {
   return cli.readOccupiedListener(port);
+}
+
+/**
+ * Listener for an operations-port 401. Pids are kept only when they were
+ * verified to hold THIS port. The HTTP port's pids are not an input — a
+ * different owner there must not be named or killed.
+ */
+function operationsPortListener(port: number): OccupiedHarperListener {
+  const holders = readOccupiedListener(port);
+  const verified = holders.pids.length > 0 ? holders.pids : null;
+  return { ...holders, pids: pidsVerifiedOnAnsweredPort(holders.pids, verified) };
 }
 
 function shouldShowInlineSecretWarning(...args: any[]): any {
@@ -611,11 +623,20 @@ program
         adminPassPath,
       });
       // The port is already taken and this data dir has no admin user.
-      // Name the listener (pid, data dir, kill) before exiting. Do not
-      // signal it — flair stop cannot see a process whose pidfile was deleted
-      // with the data dir (flair#1749).
+      // The unauthenticated /health probe already ran. Name that port's
+      // listener and exit before any Authorization header is sent. Do not
+      // signal it. `flair stop` only when the listener's data directory
+      // still records the pid; a deleted directory cannot be identified
+      // that way (flair#1749).
       if (reason === "foreign-instance") {
-        console.error(`${message}\n${foreignOccupiedListenerDetail(readOccupiedListener(httpPort))}`);
+        const listener = readOccupiedListener(httpPort);
+        const head = initAdminPassRefusalMessage(reason, {
+          dataDir,
+          httpPort,
+          adminPassPath,
+          offerFlairStop: listener.flairStopApplies,
+        });
+        console.error(`${head}\n${foreignOccupiedListenerDetail(listener, dataDir)}`);
       } else {
         console.error(message);
       }
@@ -727,20 +748,26 @@ program
     mkdirSync(dataDir, { recursive: true });
     readyOpsSocketPosture(dataDir);
 
-    // Set only on the "port already answering, so this init did not start
-    // Harper" path. A later ops-API 401 names that listener (flair#1749)
-    // instead of blaming this init's admin password. Undefined when init
-    // started Harper itself, which keeps today's credential hint.
-    let occupiedListener: OccupiedHarperListener | undefined;
+    // True only when the port was already answering and the HTTP listener's
+    // data directory was not a different one (that case exits below, before
+    // any authenticated request). A later ops 401 then attributes the
+    // operations port, not this HTTP listener (flair#1749).
+    let skippedOwnStart = false;
     if (!opts.skipStart) {
       if (alreadyRunning) {
         console.log(`Harper already running on port ${httpPort} — skipping start`);
-        // Before waitForHealth sends this init's admin password: if the
-        // listener's data directory is not this one, say so. Do not signal
-        // the process — the notice prints `kill`, it does not run it.
-        occupiedListener = readOccupiedListener(httpPort);
-        const notice = staleHarperBeforeAuthNotice(dataDir, occupiedListener);
-        if (notice) console.error(notice);
+        // A different data directory is identified here, from the process
+        // holding the HTTP port that answered /health. Stop before
+        // waitForHealth, which would send Authorization. A different
+        // directory does not prove the passwords differ, and this init
+        // does not signal the process.
+        const httpListener = readOccupiedListener(httpPort);
+        const notice = staleHarperBeforeAuthNotice(dataDir, httpListener);
+        if (notice) {
+          console.error(notice);
+          process.exit(1);
+        }
+        skippedOwnStart = true;
       }
 
       if (!alreadyRunning) {
@@ -1044,9 +1071,14 @@ program
         console.log(`Keypair written: ${privPath} ✓`);
       }
 
-      // Seed agent via operations API
+      // Seed agent via operations API. A 401 names the process verified to
+      // hold the operations port — not the HTTP port's holder, which can be
+      // a different process and is not assumed to have caused the rejection.
+      // An unverified holder stays unattributed. Init started Harper itself
+      // → no listener, and that 401 keeps the credential hint.
       console.log(`Seeding agent '${agentId}' via operations API...`);
-      await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, adminUser, adminPass, occupiedListener);
+      const opsListener = skippedOwnStart ? operationsPortListener(opsPort) : undefined;
+      await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, adminUser, adminPass, opsListener);
       console.log(`Agent '${agentId}' registered ✓`);
 
       // Verify Ed25519 auth

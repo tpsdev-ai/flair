@@ -202,6 +202,7 @@ import {
 } from "./lib/daemon-liveness.js";
 import { readProcessStartTimeMs } from "./lib/process-start-time.js";
 import {
+  flairStopCanIdentify,
   occupiedListenerAuthFailure,
   type OccupiedHarperListener,
 } from "./lib/init-occupied-listener.js";
@@ -3259,10 +3260,14 @@ export async function seedAgentViaOpsApi(
   adminUser: string,
   adminPass?: string,
   /**
-   * Set only when `flair init` skipped starting Harper because this port was
-   * already answering (flair#1749). A 401 then names that listener instead
-   * of blaming this init's admin password. Omit it when init started Harper
-   * itself — that 401 keeps the credential hint.
+   * Set only when `flair init` skipped starting Harper and did not already
+   * stop for a foreign data directory (flair#1749). Must be the process
+   * verified to hold THIS operations port — not the HTTP port's listener.
+   * A 401 then names that process, or the unattributed fallback when it
+   * could not be verified. Omit it when init started Harper itself — that
+   * 401 keeps the credential hint. A different data directory does not
+   * prove the passwords differ, and the HTTP holder is not assumed to be
+   * the process that rejected this request.
    */
   occupiedListener?: OccupiedHarperListener,
 ): Promise<void> {
@@ -5010,7 +5015,14 @@ function canonicalizeExistingPath(p: string): string {
   }
 }
 
-/** Best-effort ROOTPATH from `/proc/<pid>/environ`. */
+/**
+ * Best-effort ROOTPATH for a live pid.
+ *
+ * Linux reads `/proc/<pid>/environ`. macOS has no proc environ file; `ps -Eww`
+ * appends the environment to the command and is best-effort (truncated, or
+ * hidden). Any other platform, or a failed read, is "could not read" — callers
+ * use the unattributed fallback rather than inventing a data directory.
+ */
 function readProcessRootPath(pid: number): { rootPath: string | null; environReadable: boolean } {
   if (process.platform === "linux") {
     try {
@@ -5020,14 +5032,48 @@ function readProcessRootPath(pid: number): { rootPath: string | null; environRea
       return { rootPath: null, environReadable: false };
     }
   }
+  if (process.platform === "darwin") {
+    return readDarwinProcessRootPath(pid);
+  }
   return { rootPath: null, environReadable: false };
 }
 
+/** `ps -Eww` environment tail. Null when ROOTPATH is absent or the read failed. */
+function readDarwinProcessRootPath(pid: number): { rootPath: string | null; environReadable: boolean } {
+  try {
+    const out = execFileSync("ps", ["-Eww", "-p", String(pid), "-o", "command="], {
+      encoding: "utf-8",
+      timeout: 2000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const match = String(out).match(/(?:^|\s)ROOTPATH=(\S+)/);
+    if (!match) return { rootPath: null, environReadable: true };
+    return { rootPath: match[1], environReadable: true };
+  } catch {
+    return { rootPath: null, environReadable: false };
+  }
+}
+
+function readRecordedDaemonPids(dataDir: string): { recordedPid: number | null; sidecarPid: number | null } {
+  let recordedPid: number | null = null;
+  let sidecarPid: number | null = null;
+  try {
+    const n = Number(readFileSync(join(dataDir, "hdb.pid"), "utf-8").trim());
+    if (Number.isInteger(n) && n > 0) recordedPid = n;
+  } catch { /* deleted directory, or no pidfile */ }
+  try {
+    const raw = JSON.parse(readFileSync(join(dataDir, "flair-daemon.json"), "utf-8")) as { pid?: unknown };
+    const n = Number(raw?.pid);
+    if (Number.isInteger(n) && n > 0) sidecarPid = n;
+  } catch { /* no sidecar */ }
+  return { recordedPid, sidecarPid };
+}
+
 /**
- * Who is already listening on the HTTP port `flair init` declined to start
- * (flair#1749). Best-effort: lsof for the pid, `/proc/<pid>/environ` for
- * ROOTPATH. Empty lists mean "could not read", not "nobody". Never signals
- * the process.
+ * Who is listening on `port` (flair#1749). The caller passes the port that
+ * answered — the HTTP port for the pre-auth foreign check, the operations
+ * port for a later 401. lsof pids are the only ones that may be named.
+ * Empty pids mean the holder could not be verified. Never signals.
  */
 function readOccupiedListener(port: number): OccupiedHarperListener {
   const pids = resolveListenerPids(port) ?? [];
@@ -5036,7 +5082,11 @@ function readOccupiedListener(port: number): OccupiedHarperListener {
     const { rootPath } = readProcessRootPath(pid);
     if (rootPath && !dataDirs.includes(rootPath)) dataDirs.push(rootPath);
   }
-  return { port, pids, dataDirs };
+  const flairStopApplies = dataDirs.some((dir) => {
+    const recorded = readRecordedDaemonPids(dir);
+    return flairStopCanIdentify({ ...recorded, listenerPids: pids });
+  });
+  return { port, pids, dataDirs, flairStopApplies };
 }
 
 /**
