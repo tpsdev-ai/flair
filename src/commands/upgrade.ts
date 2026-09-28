@@ -36,6 +36,8 @@ import { create as tarCreate } from "tar";
 import type { UpgradeStatus } from "../lib/upgrade-status.js";
 import { classifyInstalledVersion, formatUpgradeStatusLine } from "../lib/upgrade-status.js";
 import { resolveHome } from "../lib/home.js";
+import { cliPackageDir, readPackageVersion } from "../lib/package-dir.js";
+import { computeTreeDivergence, formatTreeDivergenceLines, resolveInstanceRuntimeForDataDir } from "../lib/tree-divergence.js";
 
 export type UpgradeCli = {
   decideAfterRollbackVerify: (...args: any[]) => any;
@@ -1233,6 +1235,29 @@ program
       const unknownFindings = findings.filter((f) => f.status === "unknown");
       for (const f of unknownFindings) {
         console.log(`\n❔ ${f.name}: could not parse installed version ${JSON.stringify(f.installed)} — not reporting it as up to date.`);
+      }
+      // flair#2034 §2: NEVER claim convergence while the CLI and the running
+      // instance are different install trees. `flair upgrade` targets the
+      // RUNNING tree; reporting "Everything is up to date" about it, to an
+      // operator whose CLI is in a different tree, is the lie this issue is
+      // about. Name the divergence and the remedy instead.
+      let treeDivergenceLines: string[] = [];
+      try {
+        const refs = resolveInstanceRuntimeForDataDir(defaultDataDir());
+        treeDivergenceLines = formatTreeDivergenceLines(
+          computeTreeDivergence({
+            cliDir: cliPackageDir(),
+            cliVersion: readPackageVersion(cliPackageDir()),
+            runningDir: refs.workingDirectory,
+          }),
+        );
+      } catch {
+        treeDivergenceLines = [];
+      }
+      if (treeDivergenceLines.length > 0) {
+        for (const line of treeDivergenceLines) console.log(`  ${line}`);
+        console.log("\nNo upgrades available for the RUNNING tree from this CLI — resolve the divergence above first.");
+        return;
       }
       console.log(anyAhead || unknownFindings.length > 0 ? "\nNo upgrades available." : "\n✅ Everything is up to date.");
       return;

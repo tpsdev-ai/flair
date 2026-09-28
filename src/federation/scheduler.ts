@@ -892,3 +892,123 @@ export function formatStatusReport(s: SchedulerStatus, a: DriverAssessment): For
   // `ok` reflects only whether the headline claims a working driver.
   return { lines, ok: a.verdict !== "driver-stalled" && a.verdict !== "driver-inactive" && a.verdict !== "no-driver" };
 }
+
+// ─── runtime rewrite (flair#2034 §2) ────────────────────────────────────────
+//
+// After a Node minor bump the shim's baked NODE_BIN/FLAIR_BIN point at the old
+// runtime tree, and `flair init` never rewrote them. This regenerates the shim
+// and the platform unit against the runtime in use NOW, idempotently, and only
+// when they already exist (a machine that never enabled federation sync is left
+// alone). Operator-set values the generator does not own — the installed
+// interval, FLAIR_TARGET and FLAIR_ADMIN_PASS_FILE — are read back from the
+// existing unit and preserved. Nothing here touches instance data.
+
+export interface RewriteFederationRuntimeOpts {
+  /** The node binary to bake. Defaults to resolveNodeBin(). */
+  nodeBin?: string;
+  /** The flair CLI script to bake. Defaults to resolveFlairBin(). */
+  flairBin?: string;
+  homeOverride?: string;
+  templateRootOverride?: string;
+  shimPathOverride?: string;
+  launchdPlistOverride?: string;
+  /** The systemd SERVICE unit path (the one that execs the shim). */
+  systemdServiceOverride?: string;
+  /** Overrides the installed interval; otherwise the installed value is preserved. */
+  intervalSeconds?: number;
+  platformOverride?: SchedulerPlatform;
+  read?: (p: string) => string;
+  exists?: (p: string) => boolean;
+  writeFile?: (p: string, contents: string, mode: number) => void;
+}
+
+export interface RewriteFederationRuntimeResult {
+  platform: SchedulerPlatform;
+  shimPath: string;
+  shimRewritten: boolean;
+  unitPath: string;
+  unitRewritten: boolean;
+  intervalSeconds: number;
+  /** True when nothing existed to rewrite. */
+  skipped: boolean;
+}
+
+function installedEnvValue(plat: SchedulerPlatform, text: string, key: string): string {
+  if (plat === "darwin") {
+    const m = new RegExp(`<key>${key}</key>\\s*<string>([^<]*)</string>`).exec(text);
+    return m ? m[1] : "";
+  }
+  const m = new RegExp(`^Environment=${key}=(.*)$`, "m").exec(text);
+  return m ? m[1].trim() : "";
+}
+
+export function rewriteFederationSchedulerRuntime(
+  opts: RewriteFederationRuntimeOpts = {},
+): RewriteFederationRuntimeResult {
+  const read = opts.read ?? ((p: string) => readFileSync(p, "utf-8"));
+  const exists = opts.exists ?? existsSync;
+  const write = opts.writeFile ?? writeFileWithDir;
+  const plat = detectPlatform(opts.platformOverride);
+  const shimPath = opts.shimPathOverride ?? SHIM_PATH_DEFAULT;
+  const unitPath = plat === "darwin"
+    ? (opts.launchdPlistOverride ?? LAUNCHD_PLIST_PATH)
+    : (opts.systemdServiceOverride ?? SYSTEMD_SERVICE_PATH);
+
+  const haveShim = exists(shimPath);
+  const haveUnit = exists(unitPath);
+  if (!haveShim && !haveUnit) {
+    return { platform: plat, shimPath, shimRewritten: false, unitPath, unitRewritten: false, intervalSeconds: DEFAULT_INTERVAL_SECONDS, skipped: true };
+  }
+
+  const nodeBin = resolveNodeBin(opts.nodeBin);
+  const flairBin = resolveFlairBin(opts.flairBin).path;
+  const home = opts.homeOverride ?? resolveHome();
+
+  // Preserve the installed interval and the operator-set target / pass-file.
+  let unitText = "";
+  if (haveUnit) {
+    try { unitText = read(unitPath); } catch { unitText = ""; }
+  }
+  const installedInterval = unitText ? parseInstalledInterval(plat, unitText) : null;
+  const intervalSeconds = opts.intervalSeconds ?? installedInterval ?? DEFAULT_INTERVAL_SECONDS;
+  const target = unitText ? installedEnvValue(plat, unitText, "FLAIR_TARGET") : "";
+  const adminPassFile = unitText ? installedEnvValue(plat, unitText, "FLAIR_ADMIN_PASS_FILE") : "";
+
+  const subs: FederationSchedulerSubstitutions = {
+    FLAIR_BIN: flairBin,
+    NODE_BIN: nodeBin,
+    SHIM_PATH: shimPath,
+    HOME: home,
+    INTERVAL_SECONDS: String(intervalSeconds),
+    ADMIN_PASS_FILE: adminPassFile,
+    FLAIR_TARGET: target,
+  };
+  const templateRoot = opts.templateRootOverride ?? defaultTemplateRoot();
+
+  let shimRewritten = false;
+  if (haveShim) {
+    const next = renderTemplate(readTemplate(templateRoot, "bin/flair-federation-sync.sh.tmpl"), subs);
+    let prev = "";
+    try { prev = read(shimPath); } catch { prev = ""; }
+    if (prev !== next) {
+      write(shimPath, next, 0o700);
+      try { chmodSync(shimPath, 0o700); } catch { /* best effort on non-POSIX */ }
+      shimRewritten = true;
+    }
+  }
+
+  let unitRewritten = false;
+  if (haveUnit) {
+    const tmpl = plat === "darwin"
+      ? `launchd/${LAUNCHD_LABEL}.plist.tmpl`
+      : `systemd/${SYSTEMD_SERVICE_UNIT}.tmpl`;
+    const raw = readTemplate(templateRoot, tmpl);
+    const next = plat === "darwin" ? renderPlistTemplate(raw, subs) : renderTemplate(raw, subs);
+    if (unitText !== next) {
+      write(unitPath, next, 0o600);
+      unitRewritten = true;
+    }
+  }
+
+  return { platform: plat, shimPath, shimRewritten, unitPath, unitRewritten, intervalSeconds, skipped: false };
+}

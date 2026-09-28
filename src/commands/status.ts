@@ -11,6 +11,8 @@ import { resolveAdminUser } from "../lib/auth-resolve.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
 import * as render from "../render.js";
 import { checkVersion, formatVersionNudge, FLAIR_PKG_NAME } from "../version-check.js";
+import { cliPackageDir } from "../lib/package-dir.js";
+import { computeTreeDivergence, formatTreeDivergenceLines, resolveInstanceRuntimeForDataDir } from "../lib/tree-divergence.js";
 import { resolveRegistryNotice } from "../lib/npm-registry.js";
 import { hostname } from "node:os";
 import { join } from "node:path";
@@ -412,6 +414,31 @@ const statusCmd = program
       const color = versionNudge.severity === "red" ? render.c.red : render.c.yellow;
       console.log(`\n  ${render.wrap(color, "⚠")} ${render.wrap(color, versionNudge.message)}`);
     }
+
+    // flair#2034 §2: name a CLI-vs-instance tree divergence (the CLI and the
+    // running instance in different install trees). When that is the state, the
+    // "is behind — run: flair upgrade" hint is misleading — upgrade targets the
+    // RUNNING tree — so the divergence message replaces it.
+    let treeDivergenceLines: string[] = [];
+    try {
+      const refs = resolveInstanceRuntimeForDataDir(defaultDataDir());
+      const runningVersion = typeof (healthData as any)?.version === "string" ? (healthData as any).version : null;
+      treeDivergenceLines = formatTreeDivergenceLines(
+        computeTreeDivergence({
+          cliDir: cliPackageDir(),
+          cliVersion: __pkgVersion,
+          runningDir: refs.workingDirectory,
+          runningVersion,
+        }),
+      );
+    } catch {
+      treeDivergenceLines = [];
+    }
+    if (treeDivergenceLines.length === 0 && versionNudge) {
+      const color = versionNudge.severity === "red" ? render.c.red : render.c.yellow;
+      console.log(`\n  ${render.wrap(color, "⚠")} ${render.wrap(color, versionNudge.message)}`);
+    }
+    for (const line of treeDivergenceLines) console.log(`  ${line}`);
 
     if (scopedWarnings.length > 0) {
       console.log(`\n${render.wrap(render.c.bold, "Warnings")}  ${render.wrap(render.c.dim, `(${scopedWarnings.length})`)}`);

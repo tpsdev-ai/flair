@@ -45,7 +45,7 @@
  * extracted program/working-directory paths ever reach a message, and the
  * extractor below reads exactly those keys rather than returning the document.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { unescapeXml } from "./xml-escape.js";
 
 /**
@@ -208,6 +208,67 @@ export function diagnoseLaunchdPlistPaths(
   }
 
   return null;
+}
+
+export interface PlistNodePathMismatch {
+  /** The node binary the plist pins. */
+  plistNodeBin: string;
+  /** What `node` resolves to now (the runtime this CLI runs under). */
+  currentNodeBin: string;
+  message: string;
+  remedy: string[];
+}
+
+/**
+ * Does this plist pin a node binary that is NOT the runtime in use now, even
+ * though the pinned one still exists on disk?
+ *
+ * `diagnoseLaunchdPlistPaths` only fires once the old tree is DELETED. A node
+ * minor bump that leaves the old tree in place is the common case, and it is
+ * exactly the one that produces the silent two-tree divergence of flair#2034
+ * §2: launchd keeps running the service from the old tree while the CLI on
+ * PATH comes from the new one. This compares the two node paths by realpath,
+ * so a version-manager symlink that resolves to the SAME runtime is a match
+ * (nothing to do), and only a genuinely different runtime is flagged.
+ *
+ * A MISSING pinned path is left to `diagnoseLaunchdPlistPaths` (it names the
+ * missing file more precisely); this returns null in that case.
+ */
+export function diagnoseLaunchdNodePath(
+  plistPath: string,
+  currentNodeBin: string,
+  deps: {
+    read?: (p: string) => string;
+    exists?: (p: string) => boolean;
+    realpath?: (p: string) => string;
+  } = {},
+): PlistNodePathMismatch | null {
+  const exists = deps.exists ?? existsSync;
+  const realpath = deps.realpath ?? ((p: string) => realpathSync(p));
+  const refs = readPlistProgramRefs(plistPath, deps.read);
+  if (!refs) return null;
+  const plistNodeBin = refs.programArguments.find((a) => a.startsWith("/") && /(^|[/\\])node$/.test(a)) ?? null;
+  if (!plistNodeBin) return null; // a hand-written plist with no node arg is not ours to judge
+  if (!exists(plistNodeBin)) return null; // the missing path is the other diagnosis
+
+  const norm = (p: string) => {
+    try {
+      return realpath(p);
+    } catch {
+      return p;
+    }
+  };
+  if (norm(plistNodeBin) === norm(currentNodeBin)) return null;
+
+  return {
+    plistNodeBin,
+    currentNodeBin,
+    message:
+      `the launchd plist at ${plistPath} pins node ${plistNodeBin}, but node resolves to ` +
+      `${currentNodeBin} now. Both exist and they are DIFFERENT runtimes, so launchd keeps ` +
+      `running the service from the old install tree while the CLI runs from the current one.`,
+    remedy: ["flair init", "flair restart"],
+  };
 }
 
 // ─── launchctl job state ──────────────────────────────────────────────────

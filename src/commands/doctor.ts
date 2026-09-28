@@ -30,6 +30,10 @@ import { mcpClientPinFindings, refreshOwnedPins, repinSessionStartHookGuarded, s
 import * as render from "../render.js";
 import { checkVersion, formatVersionNudge, probeInstanceVersion, FLAIR_PKG_NAME } from "../version-check.js";
 import { resolveRegistryNotice } from "../lib/npm-registry.js";
+import { cliPackageDir } from "../lib/package-dir.js";
+import { computeTreeDivergence, formatTreeDivergenceLines, resolveInstanceRuntimeForDataDir } from "../lib/tree-divergence.js";
+import { rewriteFederationSchedulerRuntime } from "../federation/scheduler.js";
+import { preferVersionManagerAlias } from "../lib/node-alias-path.js";
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 
@@ -289,6 +293,41 @@ program
           `  ${render.icons.warn} ${render.wrap(render.c.yellow, `local CLI is ${__pkgVersion}, instance is ${versionSubject} — they differ. ` +
             `Commands run through the CLI; the instance serves the data.`)}`,
         );
+      }
+    }
+
+    // flair#2034 §2: CLI-vs-instance install-TREE divergence. Two different
+    // trees, not just two versions — the instance is served from a tree the
+    // current runtime does not own. Name both trees and the remedy.
+    let treeDivergenceLines: string[] = [];
+    try {
+      const refs = resolveInstanceRuntimeForDataDir(defaultDataDir());
+      treeDivergenceLines = formatTreeDivergenceLines(
+        computeTreeDivergence({
+          cliDir: cliPackageDir(),
+          cliVersion: __pkgVersion,
+          runningDir: refs.workingDirectory,
+          runningVersion: typeof versionSubject === "string" ? versionSubject : null,
+        }),
+      );
+    } catch {
+      treeDivergenceLines = [];
+    }
+    for (const line of treeDivergenceLines) console.log(`  ${render.wrap(render.c.yellow, line)}`);
+    if (treeDivergenceLines.length > 0) {
+      issues++;
+      if (autoFix) {
+        if (dryRun) {
+          console.log(`  ${render.icons.info} ${render.wrap(render.c.dim, "[dry-run] would rewrite the launchd/systemd unit against the current runtime and re-point the federation-sync shim")}`);
+        } else {
+          try {
+            const r = rewriteFederationSchedulerRuntime({ nodeBin: preferVersionManagerAlias(process.execPath) });
+            console.log(`  ${render.icons.ok} ${render.wrap(render.c.green, r.skipped ? "nothing to rewrite (no unit/shim)" : `rewrote the federation-sync scheduler (shim ${r.shimRewritten ? "updated" : "current"}, unit ${r.unitRewritten ? "updated" : "current"}); run \`flair init && flair restart\` to re-point the instance`)}`);
+            fixed++;
+          } catch (err: any) {
+            console.log(`  ${render.icons.error} ${render.wrap(render.c.red, `could not rewrite the federation-sync scheduler: ${err?.message ?? err}`)}`);
+          }
+        }
       }
     }
 

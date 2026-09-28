@@ -21,6 +21,8 @@ import {
 import { mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
 import { opsSocketPathRefusal } from "../lib/socket-path-limit.js";
 import * as render from "../render.js";
+import { rewriteFederationSchedulerRuntime } from "../federation/scheduler.js";
+import { preferVersionManagerAlias } from "../lib/node-alias-path.js";
 import { execSync, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -985,7 +987,7 @@ program
             adminPass,
             adminUser,
             modelsDir,
-            execPath: process.execPath,
+            execPath: preferVersionManagerAlias(process.execPath),
             harperBinPath,
             workingDirectory: flairPackageDir(),
             httpPort: httpBind.bindValue,
@@ -1003,6 +1005,19 @@ program
               : "Launchd service registered ✓",
           );
         }
+      }
+
+      // flair#2034 §2: a Node bump moves the runtime paths baked into the
+      // federation-sync shim/unit when it was enabled. init re-points them at
+      // the runtime in use now. Idempotent, and a no-op when federation sync
+      // was never enabled. Never touches instance data.
+      try {
+        const fed = rewriteFederationSchedulerRuntime({ nodeBin: preferVersionManagerAlias(process.execPath) });
+        if (fed.shimRewritten || fed.unitRewritten) {
+          console.log("Federation sync scheduler re-pointed at the current Node runtime ✓");
+        }
+      } catch (err: any) {
+        console.warn(`Could not re-point the federation sync scheduler: ${err?.message ?? err}`);
       }
     }
 
