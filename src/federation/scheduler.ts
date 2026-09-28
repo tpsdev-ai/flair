@@ -933,13 +933,23 @@ export interface RewriteFederationRuntimeResult {
   skipped: boolean;
 }
 
+// Literal patterns only: the env keys are a fixed set, so there is no reason to
+// build a RegExp from a variable (and doing so trips the ReDoS audit).
+const PLIST_ENV_RE: Record<string, RegExp> = {
+  FLAIR_TARGET: /<key>FLAIR_TARGET<\/key>\s*<string>([^<]*)<\/string>/,
+  FLAIR_ADMIN_PASS_FILE: /<key>FLAIR_ADMIN_PASS_FILE<\/key>\s*<string>([^<]*)<\/string>/,
+};
+const SYSTEMD_ENV_RE: Record<string, RegExp> = {
+  FLAIR_TARGET: /^Environment=FLAIR_TARGET=(.*)$/m,
+  FLAIR_ADMIN_PASS_FILE: /^Environment=FLAIR_ADMIN_PASS_FILE=(.*)$/m,
+};
+
 function installedEnvValue(plat: SchedulerPlatform, text: string, key: string): string {
-  if (plat === "darwin") {
-    const m = new RegExp(`<key>${key}</key>\\s*<string>([^<]*)</string>`).exec(text);
-    return m ? m[1] : "";
-  }
-  const m = new RegExp(`^Environment=${key}=(.*)$`, "m").exec(text);
-  return m ? m[1].trim() : "";
+  const re = plat === "darwin" ? PLIST_ENV_RE[key] : SYSTEMD_ENV_RE[key];
+  if (!re) return "";
+  const m = re.exec(text);
+  if (!m) return "";
+  return plat === "darwin" ? m[1] : m[1].trim();
 }
 
 export function rewriteFederationSchedulerRuntime(
