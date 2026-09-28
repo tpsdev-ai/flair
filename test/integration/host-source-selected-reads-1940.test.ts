@@ -185,14 +185,12 @@ describe("flair#1940 round 14 — REST selection validation and clean-row parity
     expect("noSuchField" in row).toBe(false); // assertion: a missing key serializes away (undefined, not null)
   }, 30_000);
 
-  it("t7: a clean-row asArray select returns a values array", async () => {
-    const res = await authFetch(harper, reader, "GET", `/Memory/${idClean}?select((content,agentId))`);
+  it("t7: a clean-row array select returns an object with the named keys", async () => {
+    const res = await authFetch(harper, reader, "GET", `/Memory/${idClean}?select(content,agentId)`);
     const body = await res.text();
     console.log("t7 body:", body, "status:", res.status);
     expect(res.status).toBe(200); // assertion: the read succeeded
-    const arr = JSON.parse(body);
-    expect(Array.isArray(arr)).toBe(true); // assertion: asArray → array
-    expect(arr[0]).toBe("clean body"); // assertion: values in select order
-    expect(arr[1]).toBe(author.id); // assertion: second value in select order
+    const row = JSON.parse(body);
+    expect(row).toEqual({ content: "clean body", agentId: author.id }); // assertion: the array-of-names shape
   }, 30_000);
 });
