@@ -1710,8 +1710,10 @@ export class Memory extends (databases as any).flair.Memory {
     // call is removed.
     stripUndeclaredMemoryAttributes(content);
     // A1' item 2 (adjudication 0a): share ONE transaction with the pointer row
-    // (see post()). Pinned by test/unit/memory-host-source.test.ts (r20-atomic)
-    // for the context-less owned-transaction path.
+    // (see post()). The shared helper's owned-transaction branch is pinned by
+    // test/unit/memory-host-source.test.ts (r20-atomic, which drives POST);
+    // request-context PUT rollback is pinned by
+    // test/integration/host-source-atomicity-1940.test.ts (t2).
     const putResult = await withSharedWriteTransaction(ctx, async (c) => {
       const r: any = await (databases as any).flair.Memory.put(content, c);
       if (pointer.row) {

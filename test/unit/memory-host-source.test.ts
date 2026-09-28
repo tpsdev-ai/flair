@@ -783,7 +783,7 @@ describe("round 18 — a non-admin contextual read ignores the caller's selectio
   });
 });
 
-// ─── round 20: pin the two properties a mutation can strip silently ──────────
+// ─── round 20: an explicit failure control and verb-level probes ────────────
 //
 // (1) CONTEXT-LESS INTERNAL WRITE ATOMICITY — request-transaction.ts's
 //     withSharedWriteTransaction owns a transaction when the caller carries no
