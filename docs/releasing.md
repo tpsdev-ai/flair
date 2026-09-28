@@ -149,12 +149,13 @@ cannot be re-staged under a different tag.
 
 The moment the staged packages are approved, dispatch the
 [`post-publish canary`](../.github/workflows/canary.yml) (Actions → "Post-publish canary
-— install + boot a published version") with two inputs:
+— install + boot a published version") with three inputs:
 
 | Input | Value |
 | ----- | ----- |
 | `version` | the version just approved, exact (e.g. `vX.Y.Z` without the `v`) |
 | `expected_sha256` | the published tarball's sha256 (64 hex). The canary computes it from the registry with `node scripts/ci/registry-tarball-sha256.mjs <ver>`. |
+| `package_set_digest` | the release run's certified package-set digest (64 hex), printed in the release run's pack summary. It can also be recomputed from that run's pack-job lines (`<name>@<version>   <sha256>   <file>`) by feeding `<name>=<sha256>` lines to `node scripts/ci/package-set-digest.mjs --version <ver>`. The canary re-derives the digest from the tarballs it verified and refuses a mismatch before any verdict. |
 
 The canary runs on clean `ubuntu-latest` and `macos-latest` runners and is
 **credential-less**: it installs `@tpsdev-ai/flair@<ver>` by exact version from the
