@@ -19,8 +19,9 @@
  *
  * What it skips: OPTIONAL peers (`peerDependenciesMeta[peer].optional === true`).
  *
- * Fail closed: a declared non-optional peer with NO resolution in the lock is a
- * failure (a peer the lock resolves nowhere cannot be vouched for).
+ * Fail closed: every workspace listed in bun.lock is a required input. Missing,
+ * unreadable or malformed manifests, an unreadable packages/ directory, and
+ * non-optional peers with no lock resolution are failures.
  *
  * Uses the `semver` implementation the repo already depends on — no new dep.
  *
@@ -30,7 +31,7 @@
  *
  * Exit codes:
  *   0 — every non-optional peer's lock resolution satisfies its declared range
- *   1 — at least one violation, or the lock could not be read
+ *   1 — at least one violation, or a required input could not be read or parsed
  */
 
 import { readFileSync, readdirSync } from "node:fs";
@@ -65,39 +66,70 @@ function readBunLock(repoRoot) {
     text = readFileSync(path, "utf8");
   } catch (err) {
     throw new Error(
-      `cannot read ${path} (${err instanceof Error ? err.message : String(err)}). The peer check needs the lockfile.`,
+      `cannot read ${path} (${err instanceof Error ? err.message : String(err)}). Maintainer: restore a readable bun.lock from version control, or regenerate it with bun install, then rerun the peer check.`,
     );
   }
   try {
     return JSON.parse(text.replace(/,(\s*[}\]])/g, "$1"));
   } catch (err) {
     throw new Error(
-      `${path} is not parsable (${err instanceof Error ? err.message : String(err)}).`,
+      `${path} is not parsable (${err instanceof Error ? err.message : String(err)}). Maintainer: repair bun.lock or regenerate it with bun install, then rerun the peer check.`,
     );
   }
 }
 
-/** The root package plus every packages/<dir>/package.json that parses. */
-function workspacePackages(repoRoot) {
+/** Lock-listed manifests are required; also check additional packages/* manifests. */
+function workspacePackages(repoRoot, lock) {
+  const workspaces = lock?.workspaces;
+  if (!workspaces || typeof workspaces !== "object" || Array.isArray(workspaces) ||
+      !Object.hasOwn(workspaces, "")) {
+    throw new Error(
+      `${join(repoRoot, "bun.lock")} has an invalid or missing workspaces inventory (including the root workspace). Maintainer: regenerate bun.lock with bun install from a complete checkout, then rerun the peer check.`,
+    );
+  }
+  const required = new Set(Object.keys(workspaces).map((dir) => join(dir, "package.json")));
+  const packagesDir = join(repoRoot, "packages");
+  let entries;
+  try {
+    entries = readdirSync(packagesDir, { withFileTypes: true });
+  } catch (err) {
+    throw new Error(
+      `cannot read ${packagesDir} (${err instanceof Error ? err.message : String(err)}). Maintainer: restore the packages/ directory and its read/search permissions, then rerun the peer check.`,
+    );
+  }
+  const paths = new Set(required);
+  for (const entry of entries) {
+    if (entry.isDirectory() || entry.isSymbolicLink()) {
+      paths.add(join("packages", entry.name, "package.json"));
+    }
+  }
   const out = [];
-  const readIfPresent = (path, rel) => {
+  for (const rel of [...paths].sort()) {
+    const path = join(repoRoot, rel);
+    let text;
+    try {
+      text = readFileSync(path, "utf8");
+    } catch (err) {
+      // Non-JS directories need no manifest unless bun.lock lists them.
+      if (!required.has(rel) && err?.code === "ENOENT") continue;
+      throw new Error(
+        `cannot read ${path} (${err instanceof Error ? err.message : String(err)}). Maintainer: restore this workspace's readable package.json from version control; if the workspace was intentionally removed, regenerate bun.lock with bun install, then rerun the peer check.`,
+      );
+    }
     let pkg;
     try {
-      pkg = JSON.parse(readFileSync(path, "utf8"));
-    } catch {
-      return; // not a package.json — skip
+      pkg = JSON.parse(text);
+    } catch (err) {
+      throw new Error(
+        `${path} is not parsable (${err instanceof Error ? err.message : String(err)}). Maintainer: repair package.json to valid JSON, then rerun the peer check.`,
+      );
     }
-    if (pkg && typeof pkg.name === "string") out.push({ name: pkg.name, path: rel, pkg });
-  };
-  readIfPresent(join(repoRoot, "package.json"), "package.json");
-  let entries = [];
-  try {
-    entries = readdirSync(join(repoRoot, "packages"));
-  } catch {
-    entries = [];
-  }
-  for (const entry of entries.sort()) {
-    readIfPresent(join(repoRoot, "packages", entry, "package.json"), `packages/${entry}/package.json`);
+    if (!pkg || Array.isArray(pkg) || typeof pkg.name !== "string" || !pkg.name.trim()) {
+      throw new Error(
+        `${path} is not a package object with a non-empty name. Maintainer: repair package.json to include the workspace's name, then rerun the peer check.`,
+      );
+    }
+    out.push({ name: pkg.name, path: rel, pkg });
   }
   return out;
 }
@@ -124,7 +156,7 @@ export function resolvedPeerVersion(lock, workspaceName, peer) {
 export function findPeerViolations(repoRoot) {
   const lock = readBunLock(repoRoot);
   const violations = [];
-  for (const { name, path, pkg } of workspacePackages(repoRoot)) {
+  for (const { name, path, pkg } of workspacePackages(repoRoot, lock)) {
     const peers = pkg.peerDependencies ?? {};
     const meta = pkg.peerDependenciesMeta ?? {};
     for (const [peer, range] of Object.entries(peers)) {

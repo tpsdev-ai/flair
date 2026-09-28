@@ -2,7 +2,7 @@
  * openclaw-flair — identity core (slice 1) tests.
  *
  * The mock models the REAL host registration contract and is typed against the
- * plugin API from the `openclaw` devDep (`OpenClawPluginApi`):
+ * plugin API from the installed `openclaw` peer (`OpenClawPluginApi`):
  *   - tools are registered as FACTORIES `(ctx) => tool`, resolved per call with
  *     an immutable `ctx.agentId`;
  *   - prompt/context policy and conversation access are host config gates
@@ -16,9 +16,9 @@
  * requests" is asserted directly, and the signer id is read off the
  * `Authorization` header of anything that IS sent.
  *
- * Typed against the plugin API in `openclaw@2026.7.1` (the devDependency in
- * this tree). Parity with 2026.8.1 / 2026.9.6 is proven only by the real-host
- * drills, not by this mock.
+ * A lockfile install supplies the `openclaw` peer version resolved in bun.lock.
+ * The mock is typed against that installed peer's API; its simulated behavior
+ * does not establish runtime parity with supported hosts. That requires real-host drills.
  */
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";

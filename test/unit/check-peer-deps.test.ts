@@ -11,7 +11,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { findPeerViolations, resolvedPeerVersion } from "../../scripts/check-peer-deps.mjs";
 import { tempDir } from "../helpers/temp-dir.ts";
@@ -34,7 +34,9 @@ function buildFixture(pkgs: FixturePkg[], packages: Record<string, unknown>): st
   const root = tempDir("flair-peer-check-");
   writeFileSync(join(root, "package.json"), `${JSON.stringify({ name: "fixture-root" }, null, 2)}\n`);
   mkdirSync(join(root, "packages"), { recursive: true });
+  const workspaces: Record<string, unknown> = { "": { name: "fixture-root" } };
   for (const p of pkgs) {
+    workspaces[`packages/${p.dir}`] = { name: p.name, ...(p.json ?? {}) };
     mkdirSync(join(root, "packages", p.dir), { recursive: true });
     writeFileSync(
       join(root, "packages", p.dir, "package.json"),
@@ -44,7 +46,7 @@ function buildFixture(pkgs: FixturePkg[], packages: Record<string, unknown>): st
   // Trailing comma => the lock parser must tolerate bun's JSONC, not just JSON.
   writeFileSync(
     join(root, "bun.lock"),
-    `{\n  "lockfileVersion": 1,\n  "packages": ${JSON.stringify(packages, null, 2)},\n}\n`,
+    `{\n  "lockfileVersion": 1,\n  "workspaces": ${JSON.stringify(workspaces, null, 2)},\n  "packages": ${JSON.stringify(packages, null, 2)},\n}\n`,
   );
   return root;
 }
@@ -106,8 +108,8 @@ describe("check-peer-deps — locked peer resolution vs the declared range", () 
   });
 
   test("a prerelease below the floor does NOT satisfy a plain `>=` range (the repo's range edge)", () => {
-    // openclaw publishes `2026.8.1-beta.N` before `2026.8.1`; semver excludes
-    // prereleases from a stable range, so this must fail rather than pass.
+    // Synthetic prerelease: semver excludes prereleases from a stable range,
+    // so this must fail rather than pass.
     const root = buildFixture([adapter({ openclaw: ">=2026.8.1" })], {
       openclaw: res("openclaw", "2026.8.1-beta.1"),
     });
@@ -148,6 +150,121 @@ describe("check-peer-deps — locked peer resolution vs the declared range", () 
     expect(resolvedPeerVersion(lock, "ws-b", "foo")).toBe("1.0.0");
     expect(resolvedPeerVersion(lock, "ws-a", "missing")).toBeUndefined();
     expect(resolvedPeerVersion(null, "ws-a", "foo")).toBeUndefined();
+  });
+});
+
+describe("check-peer-deps — required workspace inputs fail closed", () => {
+  function expectInputFailure(root: string, path: string, state: string, remedy: string) {
+    expect(() => findPeerViolations(root)).toThrow(path);
+    const r = runCli(root);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(path);
+    expect(r.stderr).toContain(state);
+    expect(r.stderr).toContain("Maintainer:");
+    expect(r.stderr).toContain(remedy);
+    expect(r.stdout).not.toContain("✓");
+  }
+
+  for (const rel of ["package.json", "packages/adapter/package.json"]) {
+    test(`an unreadable ${rel} fails with its path and repair instruction`, () => {
+      const root = buildFixture([adapter({})], {});
+      const path = join(root, rel);
+      // A directory in place of the file makes readFileSync fail even as root.
+      rmSync(path);
+      mkdirSync(path);
+      expectInputFailure(root, path, "cannot read", "restore this workspace's readable package.json");
+    });
+
+    test(`a malformed ${rel} fails with its path and repair instruction`, () => {
+      const root = buildFixture([adapter({})], {});
+      const path = join(root, rel);
+      writeFileSync(path, '{ "name": ');
+      expectInputFailure(root, path, "not parsable", "repair package.json to valid JSON");
+    });
+
+    test(`a missing ${rel} fails with its path and repair instruction`, () => {
+      const root = buildFixture([adapter({})], {});
+      const path = join(root, rel);
+      rmSync(path);
+      expectInputFailure(root, path, "cannot read", "restore this workspace's readable package.json");
+    });
+  }
+
+  test("a lock-listed workspace whose whole directory is missing fails", () => {
+    const root = buildFixture([adapter({})], {});
+    rmSync(join(root, "packages/adapter"), { recursive: true });
+    expectInputFailure(root, join(root, "packages/adapter/package.json"), "cannot read", "regenerate bun.lock with bun install");
+  });
+
+  for (const state of ["missing", "not a directory"]) {
+    test(`packages/ that is ${state} fails with its path and repair instruction`, () => {
+      const root = buildFixture([], {});
+      const path = join(root, "packages");
+      rmSync(path, { recursive: true });
+      if (state === "not a directory") writeFileSync(path, "not a directory");
+      expectInputFailure(root, path, "cannot read", "restore the packages/ directory");
+    });
+  }
+
+  test("an empty manifest scan cannot report success", () => {
+    const root = buildFixture([], {});
+    const path = join(root, "package.json");
+    rmSync(path);
+    expectInputFailure(root, path, "cannot read", "restore this workspace's readable package.json");
+  });
+
+  for (const manifest of [null, {}, { name: "" }]) {
+    test(`a manifest with no workspace name (${JSON.stringify(manifest)}) fails`, () => {
+      const root = buildFixture([adapter({})], {});
+      const path = join(root, "packages/adapter/package.json");
+      writeFileSync(path, JSON.stringify(manifest));
+      expectInputFailure(root, path, "not a package object with a non-empty name", "repair package.json");
+    });
+  }
+
+  for (const workspaces of [undefined, null, {}, [], { "packages/adapter": { name: "@x/adapter" } }]) {
+    test(`an invalid workspace inventory (${JSON.stringify(workspaces)}) cannot report success`, () => {
+      const root = buildFixture([adapter({})], {});
+      const path = join(root, "bun.lock");
+      writeFileSync(path, JSON.stringify({ workspaces, packages: {} }));
+      expectInputFailure(root, path, "invalid or missing workspaces inventory", "regenerate bun.lock with bun install");
+    });
+  }
+
+  for (const state of ["missing", "malformed"]) {
+    test(`a ${state} lockfile fails with its path and repair instruction`, () => {
+      const root = buildFixture([], {});
+      const path = join(root, "bun.lock");
+      if (state === "missing") rmSync(path);
+      else writeFileSync(path, '{ "workspaces": ');
+      expectInputFailure(root, path, state === "missing" ? "cannot read" : "not parsable", "bun install");
+    });
+  }
+
+  test("also checks additional manifests while ignoring non-JS directories", () => {
+    const root = buildFixture([], {});
+    mkdirSync(join(root, "packages/python-only"));
+    expect(findPeerViolations(root)).toEqual([]);
+    mkdirSync(join(root, "packages/unlisted"));
+    writeFileSync(join(root, "packages/unlisted/package.json"), JSON.stringify({
+      name: "@x/unlisted", peerDependencies: { foo: ">=1.0.0" },
+    }));
+    expect(findPeerViolations(root)).toEqual([
+      { from: "@x/unlisted", path: "packages/unlisted/package.json", peer: "foo", range: ">=1.0.0", version: null },
+    ]);
+    writeFileSync(join(root, "packages/unlisted/package.json"), "invalid JSON");
+    expectInputFailure(root, join(root, "packages/unlisted/package.json"), "not parsable", "repair package.json");
+  });
+
+  test("checks peer declarations in the root manifest", () => {
+    const root = buildFixture([], {});
+    const path = join(root, "package.json");
+    const pkg = JSON.parse(readFileSync(path, "utf8"));
+    pkg.peerDependencies = { foo: ">=1.0.0" };
+    writeFileSync(path, JSON.stringify(pkg));
+    expect(findPeerViolations(root)).toEqual([
+      { from: "fixture-root", path: "package.json", peer: "foo", range: ">=1.0.0", version: null },
+    ]);
   });
 });
 
