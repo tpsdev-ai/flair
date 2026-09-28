@@ -782,3 +782,71 @@ describe("round 18 — a non-admin contextual read ignores the caller's selectio
     expect((harnessState.lastBaseSearchQuery as any)?.select).toBeUndefined(); // assertion: no selection reached the base read
   });
 });
+
+// ─── round 20: pin the two properties a mutation can strip silently ──────────
+//
+// (1) CONTEXT-LESS INTERNAL WRITE ATOMICITY — request-transaction.ts's
+//     withSharedWriteTransaction owns a transaction when the caller carries no
+//     joinable one, so a context-less internal create (the docstring's named
+//     `new Memory().post(...)`) whose pointer write fails rolls the Memory row
+//     back with it. Making the joinability check unconditional (`return
+//     fn(shared)`, the owned branch dead) must fail (r20-atomic) below.
+// (2) GUARD WIRING AT THE WRITE VERBS — each of the four
+//     `stripUndeclaredMemoryAttributes(content)` call sites (Memory.post, the
+//     normal Memory.put branch, Memory.put's `_reindex` branch, Memory.patch)
+//     drops an undeclared key from the row. Removing any one call must fail the
+//     matching verb case below.
+
+describe("round 20 — (1) a CONTEXT-LESS internal create owns its transaction", () => {
+  it("(r20-atomic) new Memory().post(...) with NO request context fails its pointer write and commits NO Memory row", async () => {
+    harnessState.failNextPointerPut = true;
+    const m: any = new (Memory as any)();
+    m.getContext = () => ({}); // internal caller: no request context at all — the docstring's named path
+    const res: any = await m.post({ id: "mem-r20-atomic", content: "x", hostSource: POINTER, hostSourceScope: "record" });
+    // CONTROL, judged BEFORE the rollback claim: the injected failure actually
+    // loaded and fired — the one-shot flag was consumed and the 500 IS the
+    // pointer-persist failure — so the rollback below can only pass because it did.
+    expect(harnessState.failNextPointerPut).toBe(false); // assertion: the injected pointer failure fired
+    expect((res as Response)?.status).toBe(500); // assertion: the write failed
+    expect((await (res as Response).json()).error).toBe("host_source_persist_failed"); // assertion: it failed on the POINTER write
+    expect(memoryStore.has("mem-r20-atomic")).toBe(false); // assertion: the owned transaction rolled the Memory row back
+    expect(harnessState.pointerStore.has("mem-r20-atomic")).toBe(false); // assertion: no pointer row
+  });
+});
+
+describe("round 20 — (2) the guard is wired at each of the four write verbs", () => {
+  const UNDECLARED = "undeclaredProbe";
+  const clean = (verb: string, id: string) => {
+    const stored: any = memoryStore.get(id);
+    expect(stored?.[UNDECLARED], `${verb}: undeclared key persisted`).toBeUndefined(); // assertion: no undeclared key on the row
+    expect(stored?.hostSource, `${verb}: pointer key persisted`).toBeUndefined(); // assertion: no pointer key on the row
+  };
+
+  it("(r20-post) Memory.post — create verb, resources/Memory.ts:1220", async () => {
+    const m = makeMemory(agentCtx("agent-a"));
+    await m.post({ id: "mem-r20-post", agentId: "agent-a", content: "x", [UNDECLARED]: "SENTINEL", hostSource: POINTER, hostSourceScope: "record" });
+    clean("post", "mem-r20-post");
+  });
+
+  it("(r20-put) Memory.put — normal create/update branch, resources/Memory.ts:1700", async () => {
+    seedMemory({ id: "mem-r20-put", agentId: "agent-a", visibility: "shared" });
+    const m = makeMemory(agentCtx("agent-a"));
+    await m.put({ id: "mem-r20-put", agentId: "agent-a", content: "x", visibility: "shared", [UNDECLARED]: "SENTINEL", hostSource: POINTER, hostSourceScope: "record" });
+    clean("put", "mem-r20-put");
+  });
+
+  it("(r20-put-reindex) Memory.put — `_reindex` admin branch, resources/Memory.ts:1370", async () => {
+    seedMemory({ id: "mem-r20-reindex", agentId: "agent-a", type: "session" });
+    const m: any = new (Memory as any)();
+    m.getContext = () => ({}); // the _reindex bypass needs no agent actor (admin/internal)
+    await m.put({ _reindex: true, id: "mem-r20-reindex", agentId: "agent-a", content: "x", type: "session", [UNDECLARED]: "SENTINEL", hostSource: POINTER });
+    clean("put(_reindex)", "mem-r20-reindex");
+  });
+
+  it("(r20-patch) Memory.patch — update verb, resources/Memory.ts:1291", async () => {
+    seedMemory({ id: "mem-r20-patch", agentId: "agent-a", visibility: "shared" });
+    const m = makeMemory(agentCtx("agent-a"));
+    await m.patch({ id: "mem-r20-patch", agentId: "agent-a", content: "x", [UNDECLARED]: "SENTINEL", hostSource: POINTER });
+    clean("patch", "mem-r20-patch");
+  });
+});

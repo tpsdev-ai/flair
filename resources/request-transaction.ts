@@ -12,6 +12,11 @@
  * If Harper's transaction function is NOT available, this THROWS — an unwrapped
  * write could commit the Memory row before its pointer write fails, which A7
  * forbids. There is no silent fallback.
+ *
+ * Pinned by test/unit/memory-host-source.test.ts (r20-atomic) for the owned
+ * transaction the context-less path needs, and by
+ * test/unit/host-pointer-round7.test.ts (tx1) for the throw — each fails if the
+ * branch it names is removed.
  */
 
 /** Harper's own `isJoinableScope` (DatabaseTransaction.ts): OPEN and not a
@@ -39,6 +44,10 @@ function harperTransaction(): ((ctx: any, cb: (txn: any) => any) => any) | undef
  * Harper creates and owns a transaction around `fn` — which is what makes an
  * internal, context-less caller atomic. When Harper's transaction function is
  * unavailable this THROWS (no unwrapped fallback).
+ *
+ * Pinned by test/unit/memory-host-source.test.ts (r20-atomic) — the owned
+ * branch for a context-less internal create — and by
+ * test/unit/host-pointer-round7.test.ts (tx1) — the missing-function throw.
  */
 export async function withSharedWriteTransaction<T>(ctx: any, fn: (shared: any) => Promise<T>): Promise<T> {
   const shared = ctx ?? {};

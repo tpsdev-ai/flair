@@ -1217,12 +1217,16 @@ export class Memory extends (databases as any).flair.Memory {
     // A1' item 1: the guard keeps declared Memory attributes and the explicit
     // `UNDECLARED_ALLOWED` fields, so an undeclared key (including a pointer
     // field a raw writer tried to slip in) is dropped.
+    // Pinned by test/unit/memory-host-source.test.ts (r20-post) — RED if this
+    // call is removed.
     stripUndeclaredMemoryAttributes(content);
     // A1' item 2 (adjudication 0a): the Memory row and its pointer row share ONE
     // transaction. With a request context they join its open transaction; with
     // NO context (an internal direct call, e.g. new Memory().post(...))
     // withSharedWriteTransaction creates one, so a failed pointer write rolls
     // the Memory row back too instead of leaving it pointer-less.
+    // Pinned by test/unit/memory-host-source.test.ts (r20-atomic) — RED if the
+    // owned-transaction branch is bypassed.
     const postResult = await withSharedWriteTransaction(ctx, async (c) => {
       const newId = await writeMemoryRowPost((this as any).constructor, content, c);
       if (pointer.row) {
@@ -1287,6 +1291,8 @@ export class Memory extends (databases as any).flair.Memory {
     // onto the row (the pointer is written ONLY by post()/put() and the table
     // resource). These paths discard the supplied pointer input and create no
     // pointer row; an existing pointer row stays bound to the updated Memory.
+    // Pinned by test/unit/memory-host-source.test.ts (r20-patch) — RED if this
+    // guard call is removed.
     extractPointerInputs(content);
     stripUndeclaredMemoryAttributes(content);
     // A1-iv item 3: strip server-stamped fields on patch too (a PATCH body may
@@ -1367,6 +1373,9 @@ export class Memory extends (databases as any).flair.Memory {
         });
       }
       delete content._reindex;
+      // A1' item 1: the reindex branch is a Memory writer too — persist ONLY
+      // declared attributes. Pinned by test/unit/memory-host-source.test.ts
+      // (r20-put-reindex) — RED if this call is removed.
       stripUndeclaredMemoryAttributes(content);
       // A1-iv items 1/3: strip a client-supplied server-stamped field, then
       // PRESERVE the existing row's incarnation token (reindex is a re-PUT of
@@ -1697,9 +1706,12 @@ export class Memory extends (databases as any).flair.Memory {
 
     // ── Write the new/updated record FIRST ──────────────────────────────────
     // A1' item 1: persist ONLY declared Memory attributes (see post()).
+    // Pinned by test/unit/memory-host-source.test.ts (r20-put) — RED if this
+    // call is removed.
     stripUndeclaredMemoryAttributes(content);
     // A1' item 2 (adjudication 0a): share ONE transaction with the pointer row
-    // (see post()).
+    // (see post()). Pinned by test/unit/memory-host-source.test.ts (r20-atomic)
+    // for the context-less owned-transaction path.
     const putResult = await withSharedWriteTransaction(ctx, async (c) => {
       const r: any = await (databases as any).flair.Memory.put(content, c);
       if (pointer.row) {
