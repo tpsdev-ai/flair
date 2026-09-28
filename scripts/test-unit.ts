@@ -117,6 +117,7 @@ export function unitPlan(root: string): UnitStep[] {
   for (const [label, config] of typecheckConfigs) {
     steps.push({ name: `typecheck: ${label}`, cwd: root, args: ["x", "tsc", "--noEmit", "-p", config], files: [] });
   }
+  steps.push({ name: "emit server for boundary guard", cwd: root, args: ["x", "tsc", "-p", "tsconfig.json", "--noCheck"], files: [] });
   steps.push({
     name: "root unit tests",
     cwd: root,
