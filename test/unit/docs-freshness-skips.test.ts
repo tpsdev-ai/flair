@@ -36,7 +36,7 @@ function makeFixture(opts: {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "flair-docs-freshness-")));
 
   mkdirSync(join(dir, "scripts"), { recursive: true });
-  for (const f of ["docs-freshness-check.mjs", "changelog-fragments.mjs", "published-paths.mjs"]) {
+  for (const f of ["docs-freshness-check.mjs", "changelog-fragments.mjs", "changelog-release-notes.mjs", "changelog-extract.mjs", "published-paths.mjs"]) {
     cpSync(join(REPO_ROOT, "scripts", f), join(dir, "scripts", f));
   }
 

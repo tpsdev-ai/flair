@@ -57,6 +57,10 @@ import { readFileSync, writeFileSync, statSync, readdirSync } from "node:fs";
 import { join, dirname, resolve, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import {
+  readProjectVersion,
+  replaceProjectVersion,
+} from "./ci/pyproject-version.mjs";
 
 // cli#1890 condition 6: the release tagger extracts the WHOLE candidate commit
 // as DATA (`git archive <sha>` into a scratch dir) and runs THIS file — the
@@ -109,10 +113,13 @@ const SOURCE_VERSION_FILES = [
   {
     path: "packages/adk-flair/pyproject.toml",
     label: "version",
-    // Matches: version = "X.Y.Z"  (TOML string)
+    // The `[project]` table's own `version = "X.Y.Z"` (TOML string), read and
+    // written through the SHARED helper (scripts/ci/pyproject-version.mjs) the
+    // auto-tagger uses — a `[tool.x]` version line above `[project]` must not be
+    // mistaken for the package version.
     // The adk-flair package tracks flair's minor while 0.x (compat-signal
     // policy), so this must be bumped in lockstep with every release.
-    pattern: /(^version\s*=\s*")([^"]*)(")/gm,
+    project: true,
   },
 ];
 
@@ -227,6 +234,19 @@ function matchesIn(src, pattern) {
 function readDeclared(file) {
   const abs = join(REPO_ROOT, file.path);
   const src = readFileSync(abs, "utf8");
+  if (file.project) {
+    // Round 7, item 4: report the READER's actual reason — a present but
+    // unsupported file is a different message from no declaration.
+    const r = readProjectVersion(src);
+    if (r.kind === "version") return { ok: true, version: r.version };
+    if (r.kind === "unsupported") {
+      return { ok: false, reason: `${file.path}: present but unsupported: ${r.reason}` };
+    }
+    if (r.reason === "dynamic") {
+      return { ok: false, reason: `${file.path}: [project] declares version as dynamic, which this checker refuses (a dynamic version cannot be verified or rewritten)` };
+    }
+    return { ok: false, reason: `${file.path}: no [project].version declaration (${r.reason})` };
+  }
   const m = matchesIn(src, file.pattern);
   if (m.length === 0) {
     return { ok: false, reason: `no ${file.label} declaration matched in ${file.path}` };
@@ -241,20 +261,50 @@ function readDeclared(file) {
 }
 
 function write(version) {
+  // ALL-OR-NOTHING (flair#1928 round 5, item 4): compute EVERY replacement
+  // first; if ANY refuses, write NOTHING and exit non-zero naming the refusal.
+  // A half-bumped tree (flair-bench bumped, the pyproject refused) is worse than
+  // no bump at all.
+  const edits = [];
   for (const file of SOURCE_VERSION_FILES) {
     const abs = join(REPO_ROOT, file.path);
     const src = readFileSync(abs, "utf8");
+    if (file.project) {
+      const next = replaceProjectVersion(src, version);
+      if (next === null) {
+        // A DECLARATION EXISTS but the rewrite was refused: say it could not be
+        // safely rewritten, and why — not "no declaration".
+        const r = readProjectVersion(src);
+        const why =
+          r.kind === "version"
+            ? "a version declaration exists, but the rewrite would not change only [project].version (the tomllib re-verify refused)"
+            : r.kind === "unsupported"
+              ? `present but unsupported: ${r.reason}`
+              : r.reason === "dynamic"
+                ? "[project] declares version as dynamic, which this checker refuses to rewrite"
+                : `no [project].version declaration (${r.reason})`;
+        console.error(`❌ ${file.path}: the version could not be safely rewritten: ${why}`);
+        process.exit(1);
+      }
+      edits.push({ abs, path: file.path, label: file.label, next });
+      continue;
+    }
     const n = matchesIn(src, file.pattern).length;
     if (n !== 1) {
       console.error(
-        n === 0
+        (n === 0
           ? `❌ ${file.path}: no ${file.label} declaration to rewrite. The pattern in scripts/check-version-sync.mjs no longer matches this file.`
-          : `❌ ${file.path}: ${n} ${file.label} declarations, expected exactly 1. Refusing to rewrite an ambiguous file.`,
+          : `❌ ${file.path}: ${n} ${file.label} declarations, expected exactly 1. Refusing to rewrite an ambiguous file.`) +
+          ` NOTHING was written.`,
       );
       process.exit(1);
     }
-    writeFileSync(abs, src.replace(file.pattern, `$1${version}$3`));
-    console.log(`  ✓ ${file.path} ${file.label} → ${version}`);
+    edits.push({ abs, path: file.path, label: file.label, next: src.replace(file.pattern, `$1${version}$3`) });
+  }
+  // Every replacement is known-good: write them all.
+  for (const e of edits) {
+    writeFileSync(e.abs, e.next);
+    console.log(`  ✓ ${e.path} ${e.label} → ${version}`);
   }
 }
 

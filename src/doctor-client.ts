@@ -342,7 +342,7 @@ export type ContinuityHookEvent = (typeof CONTINUITY_HOOK_EVENTS)[number];
  *              without Stop journals actions but never intent, and vice
  *              versa). A stale-form face; fixable.
  * stale      — both present but at least one is not the current form (unsilenced,
- *              hand-altered invocation, or a drifted PostToolUse matcher).
+ *              hand-altered invocation, a drifted PostToolUse matcher, or a non-version pin).
  */
 export type ContinuityHookState = "installed" | "absent" | "partial" | "stale";
 
@@ -351,9 +351,10 @@ export interface ContinuityHookEventReport {
   command?: string;
   /** PostToolUse only — the matcher on the group carrying our entry. */
   matcher?: string;
-  /** Present AND the exact shape we write today (silenced wrapper, unpinned
-   *  npx invocation, and — for PostToolUse — the expected matcher). */
+  /** Present with a silenced invocation, a bare or resolved version spec,
+   *  and — for PostToolUse — the expected matcher. */
   currentForm: boolean;
+  reason?: string;
 }
 
 export interface ContinuityCaptureHookReport {
@@ -389,7 +390,11 @@ function continuityEventReport(config: any, event: ContinuityHookEvent): Continu
     CONTINUITY_INVOCATION_RE.test(command) &&
     hookCommandIsSilenced(command);
   const matcherOk = event !== "PostToolUse" || matcher === CONTINUITY_POST_TOOL_USE_MATCHER;
-  return { present: true, command, matcher, currentForm: shapeOk && matcherOk };
+  const spec = decodeWiringSpec(command, FLAIR_MCP_PACKAGE);
+  const pinOk = spec?.token.kind === "none" || spec?.token.kind === "version";
+  const reason = !spec || pinOk ? undefined
+    : "pin " + (spec?.token.kind ?? "malformed") + ": " + (spec?.token.value ?? "missing package");
+  return { present: true, command, matcher, currentForm: shapeOk && matcherOk && pinOk, reason };
 }
 
 /**
@@ -416,6 +421,28 @@ export function checkContinuityCaptureHooks(homeDir: string, settingsPath?: stri
   else if (postToolUse.currentForm && stop.currentForm) state = "installed";
   else state = "stale";
   return { path, postToolUse, stop, state };
+}
+
+/**
+ * Advice uses the same decision as the continuity writer, for both events.
+ * Include an absent sibling: an unreadable CLI version also refuses additions.
+ * Only the execution banner becomes an advice label; the writer's reason stays.
+ */
+export function continuityWriteBlockers(report: ContinuityCaptureHookReport): string[] {
+  const blockers: string[] = [];
+  for (const [event, entry] of [
+    ["PostToolUse", report.postToolUse],
+    ["Stop", report.stop],
+  ] as const) {
+    const label = `${event} continuity capture hook`;
+    const decision = decideContinuityWrite(entry.present ? entry.command ?? "" : null, label);
+    if (decision.action !== "write") {
+      blockers.push(
+        (decision.line ?? `${label}: ${decision.action}`).replace(": holding — ", ": held — "),
+      );
+    }
+  }
+  return blockers;
 }
 
 export type ContinuityMutationAction = "add" | "update" | "noop";

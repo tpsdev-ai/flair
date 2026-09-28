@@ -201,6 +201,15 @@ import {
   type InstanceMatch,
 } from "./lib/daemon-liveness.js";
 import { readProcessStartTimeMs } from "./lib/process-start-time.js";
+import { readInitListenerRootPath } from "./lib/init-listener-environ.js";
+import {
+  listenerFromLookup,
+  occupiedListenerAuthFailure,
+  stableAnsweredHolder,
+  type OccupiedHarperListener,
+  type OccupiedListenerLookup,
+  type OperationsPortAttribution,
+} from "./lib/init-occupied-listener.js";
 import {
   bindCli as bindFederationCli,
   register as registerFederation,
@@ -3144,6 +3153,12 @@ interface OpsSeedRequest {
   id: string;
   /** Kind-specific 401 message (the existing hint text is preserved). */
   auth401Message: (text: string) => string;
+  /**
+   * When set, the 401 is an operator sentence (flair#1749: the port was
+   * already held by a Harper this init did not start). Print it without a
+   * stack. Unset keeps today's thrown Error.
+   */
+  auth401Friendly?: boolean;
   /** Kind-specific generic non-ok message (the existing text is preserved). */
   httpErrorMessage: (status: number, text: string) => string;
 }
@@ -3209,7 +3224,11 @@ async function opsSeedInsertWithRetry(req: OpsSeedRequest): Promise<void> {
       }
       // flair#1790 review C2: 401 FIRST. An auth failure must never be masked by
       // a body that happens to carry a "duplicate"/"already exists" marker.
-      if (res.status === 401) throw new Error(req.auth401Message(text));
+      if (res.status === 401) {
+        const err = new Error(req.auth401Message(text));
+        if (req.auth401Friendly) (err as { flairFriendly?: boolean }).flairFriendly = true;
+        throw err;
+      }
       // THEN the idempotent duplicate path: an unconditional 409, then the
       // marker match for the remaining non-OK shapes.
       const duplicate = res.status === 409 || text.includes("duplicate") || text.includes("already exists");
@@ -3244,6 +3263,18 @@ export async function seedAgentViaOpsApi(
   pubKeyB64url: string,
   adminUser: string,
   adminPass?: string,
+  /**
+   * Set only when `flair init` skipped starting Harper and did not already
+   * stop for a foreign data directory (flair#1749). `before` is who held
+   * THIS operations port immediately before the insert — not the HTTP
+   * port's listener. On a 401, `reread` runs and a pid is named only
+   * when both reads are the same sole PID. Several holders, or a holder
+   * that changed during the request, stay unattributed. Omit this when init
+   * started Harper itself — that 401 keeps the credential hint. A different
+   * data directory does not prove the passwords differ, and the HTTP holder
+   * is not assumed to be the process that rejected this request.
+   */
+  occupiedListener?: OperationsPortAttribution,
 ): Promise<void> {
   const url = typeof opsPortOrUrl === "number"
     ? `http://127.0.0.1:${opsPortOrUrl}/`
@@ -3283,8 +3314,23 @@ export async function seedAgentViaOpsApi(
     noun: "agent",
     tableName: "flair.Agent",
     id: agentId,
-    auth401Message: (text) =>
-      `Operations API insert failed (401): ${text}${opsAuth401Hint(auth === undefined ? undefined : adminUser)}`,
+    auth401Message: (text) => {
+      if (!occupiedListener) {
+        return `Operations API insert failed (401): ${text}${opsAuth401Hint(auth === undefined ? undefined : adminUser)}`;
+      }
+      let after: OccupiedHarperListener;
+      try {
+        after = occupiedListener.reread();
+      } catch {
+        after = { port: occupiedListener.before.port, pids: [], dataDirs: [] };
+      }
+      return occupiedListenerAuthFailure({
+        lead: "Operations API insert failed (401): ",
+        bodyText: text,
+        listener: stableAnsweredHolder(occupiedListener.before, after),
+      });
+    },
+    auth401Friendly: occupiedListener !== undefined,
     httpErrorMessage: (status, text) => `Operations API insert failed (${status}): ${text}`,
   });
 }
@@ -4468,6 +4514,7 @@ bindInitCli({
   runSoulWizard,
   seedAgentViaOpsApi,
   seedFederationInstanceViaOpsApi,
+  readOccupiedListener,
   shouldShowInlineSecretWarning,
   verifyAuditLog,
   verifySemanticSearch,
@@ -4982,7 +5029,14 @@ function canonicalizeExistingPath(p: string): string {
   }
 }
 
-/** Best-effort ROOTPATH from `/proc/<pid>/environ`. */
+/**
+ * ROOTPATH for daemon sidecar recovery (flair#1454 / #1478).
+ *
+ * Linux reads `/proc/<pid>/environ`. Every other platform, including macOS,
+ * is "could not read". Init's occupied-listener check uses
+ * `readInitListenerRootPath` instead — a `ps` parse must not feed this
+ * self-heal path.
+ */
 function readProcessRootPath(pid: number): { rootPath: string | null; environReadable: boolean } {
   if (process.platform === "linux") {
     try {
@@ -4993,6 +5047,33 @@ function readProcessRootPath(pid: number): { rootPath: string | null; environRea
     }
   }
   return { rootPath: null, environReadable: false };
+}
+
+/**
+ * Test seam for the pre-auth observation. When set, pid and ROOTPATH reads
+ * replace `lsof` and `/proc` so a test can name a listener without the
+ * host's tools. Production leaves this unset. Never a reason to offer
+ * `flair stop`.
+ */
+let occupiedListenerLookupForTests: OccupiedListenerLookup | null = null;
+
+export function setOccupiedListenerLookupForTests(lookup: OccupiedListenerLookup | null): void {
+  occupiedListenerLookupForTests = lookup;
+}
+
+/**
+ * Who is listening on `port` (flair#1749). The pre-auth path calls this
+ * once, on the HTTP port. A later operations-port 401 calls it again
+ * before the insert and after the 401 — that pair is the attribution,
+ * not this single read. ROOTPATH comes from init's Linux `/proc` reader,
+ * not the sidecar reader. An unreadable directory is omitted. Never signals.
+ */
+function readOccupiedListener(port: number): OccupiedHarperListener {
+  const lookup = occupiedListenerLookupForTests ?? {
+    pids: resolveListenerPids,
+    rootPath: readInitListenerRootPath,
+  };
+  return listenerFromLookup(port, lookup);
 }
 
 /**

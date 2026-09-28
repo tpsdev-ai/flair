@@ -29,6 +29,12 @@ import { join, resolve } from "node:path";
 import nacl from "tweetnacl";
 import { httpCorsAccessList } from "../lib/http-bind.js";
 import { resolveHome } from "../lib/home.js";
+import {
+  foreignOccupiedListenerDetail,
+  staleHarperBeforeAuthNotice,
+  type OccupiedHarperListener,
+  type OperationsPortAttribution,
+} from "../lib/init-occupied-listener.js";
 
 export type InitCli = {
   api: (...args: any[]) => any;
@@ -63,6 +69,7 @@ export type InitCli = {
   runSoulWizard: (...args: any[]) => any;
   seedAgentViaOpsApi: (...args: any[]) => any;
   seedFederationInstanceViaOpsApi: (...args: any[]) => any;
+  readOccupiedListener: (port: number) => OccupiedHarperListener;
   shouldShowInlineSecretWarning: (...args: any[]) => any;
   verifyAuditLog: (...args: any[]) => any;
   verifySemanticSearch: (...args: any[]) => any;
@@ -206,6 +213,22 @@ function seedAgentViaOpsApi(...args: any[]): any {
 
 function seedFederationInstanceViaOpsApi(...args: any[]): any {
   return cli.seedFederationInstanceViaOpsApi(...args);
+}
+
+function readOccupiedListener(port: number): OccupiedHarperListener {
+  return cli.readOccupiedListener(port);
+}
+
+/**
+ * Operations-port attribution for a later 401. `before` is taken now;
+ * `reread` runs only if the insert is rejected, so a holder that changed
+ * during the request is not named. The HTTP port's pids are not an input.
+ */
+function operationsPortAttribution(port: number): OperationsPortAttribution {
+  return {
+    before: readOccupiedListener(port),
+    reread: () => readOccupiedListener(port),
+  };
 }
 
 function shouldShowInlineSecretWarning(...args: any[]): any {
@@ -595,11 +618,29 @@ program
     const refuseIfNeeded = (fileExists: boolean) => {
       const reason = resolveInitAdminPasswordRefuseReason(fileExists, passwordCtx);
       if (!reason) return;
-      console.error(initAdminPassRefusalMessage(reason, {
+      const message = initAdminPassRefusalMessage(reason, {
         dataDir,
         httpPort,
         adminPassPath,
-      }));
+      });
+      // The port is already taken and this data dir has no admin user.
+      // The unauthenticated /health probe already ran. This is one read of
+      // that port's listener — not the before-and-after 401 attribution.
+      // Name it and exit before any Authorization header is sent. Do not
+      // signal it. `flair stop` cannot be promised to act on this listener
+      // (flair#1749).
+      if (reason === "foreign-instance") {
+        const listener = readOccupiedListener(httpPort);
+        const head = initAdminPassRefusalMessage(reason, {
+          dataDir,
+          httpPort,
+          adminPassPath,
+          offerFlairStop: false,
+        });
+        console.error(`${head}\n${foreignOccupiedListenerDetail(listener, dataDir)}`);
+      } else {
+        console.error(message);
+      }
       process.exit(1);
     };
 
@@ -708,9 +749,30 @@ program
     mkdirSync(dataDir, { recursive: true });
     readyOpsSocketPosture(dataDir);
 
+    // True only when the port was already answering and the single pre-auth
+    // read did not include a different data directory (that case exits
+    // below, before any authenticated request). An unreadable directory,
+    // including every macOS lookup, does not count as different. A later
+    // ops 401 is a separate before-and-after read of the operations port,
+    // not this HTTP observation (flair#1749).
+    let skippedOwnStart = false;
     if (!opts.skipStart) {
       if (alreadyRunning) {
         console.log(`Harper already running on port ${httpPort} — skipping start`);
+        // One read of the HTTP port that answered /health. When that read
+        // includes a ROOTPATH other than this init's, stop before
+        // waitForHealth, which would send Authorization. An unreadable
+        // directory is not treated as foreign. This is not the
+        // before-and-after check used for an operations-port 401. A
+        // different directory does not prove the passwords differ, and
+        // this init does not signal the process.
+        const httpListener = readOccupiedListener(httpPort);
+        const notice = staleHarperBeforeAuthNotice(dataDir, httpListener);
+        if (notice) {
+          console.error(notice);
+          process.exit(1);
+        }
+        skippedOwnStart = true;
       }
 
       if (!alreadyRunning) {
@@ -1014,9 +1076,16 @@ program
         console.log(`Keypair written: ${privPath} ✓`);
       }
 
-      // Seed agent via operations API
+      // Seed agent via operations API. Unlike the pre-auth observation,
+      // which is one read, a 401 names a pid only when the read before the
+      // insert and the read after the rejection are the same sole PID. The
+      // HTTP port's holder is not an input and is not assumed to have caused
+      // the rejection. Several holders, or a holder that changed during the
+      // request, stay unattributed. Init started Harper itself → no listener,
+      // and that 401 keeps the credential hint.
       console.log(`Seeding agent '${agentId}' via operations API...`);
-      await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, adminUser, adminPass);
+      const opsListener = skippedOwnStart ? operationsPortAttribution(opsPort) : undefined;
+      await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, adminUser, adminPass, opsListener);
       console.log(`Agent '${agentId}' registered ✓`);
 
       // Verify Ed25519 auth

@@ -141,6 +141,10 @@ jobs:
       # binds its own target and re-derives its own verdict (round 3), so a
       # forged value here changes nothing.
       sha: ${{ steps.decide.outputs.sha }}
+      # The v ref's verdict from `decide` (round 4, item 3): the reporter falls
+      # back to it when `write` was skipped, so it never prints `v: REFUSE` for a
+      # ref that already exists (a same-sha re-run reports v_verdict=SKIP).
+      v_verdict: ${{ steps.decide.outputs.v_verdict }}
     steps:
       - name: Check out the default branch's tree
         # The decision script always runs from the default branch's tree. <sha> is
@@ -152,6 +156,15 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Pin Python (the tomllib reader the reader and PyPI use)
+        # The version is read by Python's tomllib (round 4, item 1). Pin the
+        # interpreter this job reads the pyproject with, before any step that
+        # reads it: the reader fails closed if tomllib is missing, and a floating
+        # `python3` makes the decision depend on the runner's image.
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
 
       - name: Assert the workflow_run trigger came from the CI workflow at the pinned path
         # A second workflow named `CI` would otherwise decide releases. Fails LOUDLY
@@ -245,8 +258,8 @@ jobs:
     name: Write the tag
     needs: decide
     # `decide`'s verdict is ONLY the start gate: a REFUSE/SKIP never reaches this
-    # job, and a dry dispatch never does. Everything `write` ACTS on below it
-    # re-derives itself, so a forged `decide` output cannot choose what is tagged.
+    # job, and a dry dispatch never does. A same-sha re-run still returns TAG (the
+    # adk tag has to be finished — round 2), so this gate lets it through.
     if: needs.decide.outputs.verdict == 'TAG' && github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     # The ONLY job that references the release-tag environment: the App id
@@ -267,6 +280,14 @@ jobs:
       verdict: ${{ steps.write.outputs.verdict || steps.redecide.outputs.verdict }}
       condition: ${{ steps.write.outputs.condition || steps.redecide.outputs.condition }}
       version: ${{ steps.write.outputs.version || steps.redecide.outputs.version }}
+      # The adk-flair verdict from the write boundary (slice 3 of #1928). A REFUSE
+      # here (version mismatch, an adk tag elsewhere, or a rejected second POST)
+      # must make the job red and reach the reporter, exactly like a v REFUSE.
+      adk_verdict: ${{ steps.write.outputs.adk_verdict }}
+      adk_condition: ${{ steps.write.outputs.adk_condition }}
+      # The v ref's verdict from the write boundary: TAGGED on a first pass, SKIP
+      # on a same-sha re-run (round 2). Empty → the reporter reads it as REFUSE.
+      v_verdict: ${{ steps.write.outputs.v_verdict }}
     steps:
       - name: Check out the default branch's tree
         # A FRESH workspace, and the default branch's tree: the credential
@@ -276,6 +297,13 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Pin Python (the tomllib reader the reader and PyPI use)
+        # Round 4, item 3: `write` re-reads the pyproject (the re-derivation and
+        # condition 10), so it pins the same interpreter BEFORE any such step.
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
 
       - name: Fetch the real main
         # The re-derivation re-checks release intent against origin/main, and the
@@ -390,12 +418,14 @@ jobs:
             --output "$GITHUB_OUTPUT"
 
       - name: Enforce (the write job goes red on REFUSE)
-        # A REFUSE found by this job's re-derivation OR at the write boundary must
-        # be red, and it reaches the reporter through this job's outputs.
-        if: always() && (steps.write.outputs.verdict == 'REFUSE' || steps.redecide.outputs.verdict == 'REFUSE')
+        # A REFUSE found by this job's re-derivation, at the v write boundary, OR
+        # by the adk write (slice 3 of #1928) must be red; it reaches the reporter
+        # through this job's outputs.
+        if: always() && (steps.write.outputs.verdict == 'REFUSE' || steps.write.outputs.adk_verdict == 'REFUSE' || steps.redecide.outputs.verdict == 'REFUSE')
         env:
           VERDICT: ${{ steps.write.outputs.verdict || steps.redecide.outputs.verdict }}
-          CONDITION: ${{ steps.write.outputs.condition || steps.redecide.outputs.condition }}
+          # The adk condition wins when the adk write refused; else the v condition.
+          CONDITION: ${{ steps.write.outputs.adk_verdict == 'REFUSE' && steps.write.outputs.adk_condition || steps.write.outputs.condition || steps.redecide.outputs.condition }}
           VERSION: ${{ steps.write.outputs.version || steps.redecide.outputs.version }}
         run: |
           set -euo pipefail
@@ -412,7 +442,8 @@ jobs:
     # excluded, so a dry run writes nothing.
     if: >-
       always()
-      && (needs.write.outputs.verdict || needs.decide.outputs.verdict) == 'REFUSE'
+      && ((needs.write.outputs.verdict || needs.decide.outputs.verdict) == 'REFUSE'
+      || needs.write.outputs.adk_verdict == 'REFUSE')
       && github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     # `issues: write` and NOTHING else. No checkout: this job executes no repo code.
@@ -428,8 +459,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          CONDITION: ${{ needs.write.outputs.condition || needs.decide.outputs.condition }}
+          CONDITION: ${{ needs.write.outputs.adk_verdict == 'REFUSE' && needs.write.outputs.adk_condition || needs.write.outputs.condition || needs.decide.outputs.condition }}
           VERSION: ${{ needs.write.outputs.version || needs.decide.outputs.version }}
+          # A line PER REF: never claim nothing was tagged when the v ref exists.
+          # Read write's v verdict, falling back to decide's when write was
+          # skipped (round 4, item 3).
+          V_VERDICT: ${{ needs.write.outputs.v_verdict || needs.decide.outputs.v_verdict }}
+          ADK_VERDICT: ${{ needs.write.outputs.adk_verdict }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -451,8 +487,10 @@ jobs:
             printf '\n'
             printf '%s\n' "- condition: ${CONDITION}"
             printf '%s\n' "- version: v${VERSION}"
+            printf '%s\n' "- v${VERSION}: ${V_VERDICT:-REFUSE}"
+            printf '%s\n' "- adk-flair-v${VERSION}: ${ADK_VERDICT:-not attempted}"
             printf '%s\n' "- run: ${RUN_URL}"
             printf '\n'
-            printf '%s\n' "Nothing was tagged. Conditions and the fixed condition ids: scripts/release-auto-tag.mjs. Workflow: .github/workflows/release-auto-tag.yml."
+            printf '%s\n' "The refs above say what happened. Conditions and the fixed condition ids: scripts/release-auto-tag.mjs. Workflow: .github/workflows/release-auto-tag.yml."
           } > "$body_file"
           gh issue create --repo "$REPO" --title "$title" --body-file "$body_file"

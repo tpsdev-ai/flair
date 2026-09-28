@@ -99,6 +99,78 @@ git checkout main && git pull
 git tag v0.11.0 && git push origin v0.11.0
 ```
 
+> The [`release-auto-tag`](../.github/workflows/release-auto-tag.yml) workflow
+> normally pushes this tag for you once a release PR merges green (see
+> [#1928](https://github.com/tpsdev-ai/flair/issues/1928)); the hand-push above is
+> the manual fallback. When the release commit's tree carries
+> `packages/adk-flair/pyproject.toml` whose `[project].version` equals the version
+> being tagged, the auto-tagger ALSO creates `adk-flair-v<version>` from the same
+> commit — so the PyPI publish run then needs only the environment gate its owner
+> keeps or drops (no hand-pushed `adk-flair-v` tag).
+>
+> The project version is read with Python's `tomllib` — the SAME reader
+> `.github/workflows/adk-flair-publish.yml` decides with — by handing the file to
+> `python3` on stdin, in isolated mode (`-I`: no working-directory module can
+> shadow the standard library) with an environment of `PATH` only, so no token
+> reaches the interpreter ((r9e)). It fails CLOSED: a TOML parse error, a `python3` without
+> `tomllib` (older than 3.11), or a `[project]` that is not a table is
+> `unsupported`, and the tagger refuses `adk-pyproject-unsupported` naming the
+> reason ((s), (v)); a `dynamic = [ … "version" … ]` or a missing
+> `[project].version` is NONE and refuses `adk-version-mismatch` ((t)); a
+> `[project].version` that differs from the version being tagged refuses
+> `adk-version-mismatch` BEFORE either tag is written ((p), (q), (g)) — a
+> `version =` line inside a multi-line string or array is never read as the
+> project version. With NO `packages/adk-flair/pyproject.toml` the
+> tagger's adk step is skipped ((b)), but `scripts/check-version-sync.mjs` lists the
+> pyproject as a source file and refuses when it is missing, so today such a release
+> refuses at `version-sync`. Removing the Python package from the repo means removing
+> it, in the same change, from the checker's source list and from the paths
+> `scripts/release.sh` stages for the release commit; a release is then tagged `v`
+> alone. An
+> `adk-flair-v<version>` already at another commit refuses
+> `adk-tag-exists-elsewhere` before the `v` tag is written ((d)); a second POST
+> rejected for lack of permission refuses `adk-ref-write-rejected`, and the text
+> reports what THIS run read back for BOTH refs and the next step ((e)): for a 403
+> the text names the App's bypass-actor setting on the `adk-flair-v*` ruleset as the
+> first thing to check (the usual cause; the code sees only the status), then a
+> re-run; for any other status, a re-run ((r9a)). A read of the adk ref that FAILS
+> (the API answers neither found nor not found) refuses `adk-ref-unreadable` instead
+> of throwing: before any tag is written at the pre-check and on a same-commit re-run
+> ((r9b), (r9f), (r9g)), and with the `v` tag in place at the re-read and the
+> read-back ((r9c), (r9d)). After a REJECTED adk POST the refusal stays
+> `adk-ref-write-rejected`, and the text reports the adk read-back as
+> `not read: <reason>`; when the adk read-back cannot be resolved, the text reports its raw
+> ref type and SHA (or `not found`), so it names BOTH refs' read-back values on every
+> branch. The post-POST read-back has THREE refusals, each reporting only
+> what this run observed: the adk ref did not read back at all (MISSING, (i2)); it
+> read back but could not be resolved to a commit (UNRESOLVED, (i3)); or it
+> resolves elsewhere (ELSEWHERE, (i)). None states what a future run will do. The
+> membership+read of the pyproject is ONE function (`readAdkPyproject`): a
+> `git ls-tree` that does not answer exactly "absent" or "the path" (non-zero exit,
+> spawn error, timeout, unexpected output) or a failed `git show` refuses
+> `adk-pyproject-unreadable` — before any POST, on BOTH the decide and write paths
+> ((r1)-(r4)); no stderr substring decides anything.
+>
+> The writer (`scripts/check-version-sync.mjs --write`) precomputes the two
+> `SOURCE_VERSION_FILES` edits — `packages/flair-bench/src/version.ts` and
+> `packages/adk-flair/pyproject.toml` — verifies the pyproject edit with `tomllib`
+> (refused unless only `project.version` changed) and the flair-bench edit with its
+> own declaration check (exactly one `TOOL_VERSION = "…"` match), writes NOTHING if
+> either fails, and leaves the `package.json` bumps to `release.sh` ((w), (x2), (m),
+> (h), all-or-nothing).
+>
+> Re-run states (`decide`): with the `v` tag already at `<sha>` and the adk tag
+> absent, the run is a TAG with the `v` step marked SKIP ((n)); with BOTH tags at
+> `<sha>` it is a SKIP, so no write job starts on later runs ((o)). Once `v` is
+> known to sit at the sha, EVERY later refusal carries `v_verdict=SKIP`, so the
+> refusal issue never prints `v: REFUSE` for an existing ref — fed from `decide`'s
+> outputs when `write` was skipped — and that is asserted on the RENDERED issue
+> line, not the wiring (`test/unit/release-auto-tag-workflow.test.ts`). The App
+> must be listed as a bypass actor on the `adk-flair-v*` tag ruleset (id 24044018)
+> for that second POST to be allowed. Each guarantee names its test:
+> `test/unit/release-auto-tag.test.ts` and
+> `test/unit/release-auto-tag-workflow.test.ts`.
+
 The tag push triggers the [`release-publish`](../.github/workflows/release-publish.yml)
 workflow, which:
 
@@ -344,3 +416,51 @@ The maintainer who approves staged packages must have 2FA enabled on their npm a
   npm itself; local approvers need a recent npm.
 - Node **≥ 22.14**.
 - Trusted publishing runs on GitHub-hosted runners only (no self-hosted support yet).
+
+## Automated promote — slice 1 (flair#1928)
+
+After the npm approval, a maintainer today pastes the promote block from a
+checkout. Slice 1 lands the four pieces the privileged promote job (slice 2) will
+stand on; it holds no npm credential (the poll runs on the automatic
+`GITHUB_TOKEN` with `actions: write`, `contents: read` and `deployments: read`).
+
+- **The certified digest travels with the release attempt.** The `release-attempt`
+  deployment marker carries a `payload` of `package_set_digest`, `manifest_sha256`
+  and `version`, taken from the values `stage-publish` re-derived from the artifact
+  it staged. It is written BEFORE anything is staged, so a missing or mismatched
+  digest refuses the stage (nothing staged).
+- **A machine surface for the promote block.** `scripts/ci/canary-verdict.sh
+  --emit bash` prints ONLY the executable promote block — byte-identical to the
+  text between the fences a human sees (one definition). A FAIL or a non-release
+  version has no promote block: `--emit bash` exits 3 with one stderr line.
+- **The unprivileged poll.** `release-promote-poll.yml` runs every 10 minutes
+  (`schedule` only — there is no manual trigger, because `gh workflow run --ref <branch>` runs that branch's copy of the workflow, and a guard inside the file cannot bind it to main) and holds NO npm credential: no `environment`,
+  no repo secret — it runs on the automatic `GITHUB_TOKEN` with `actions: write`,
+  `contents: read` and `deployments: read`. It checks out ONLY the default branch
+  at the run's own sha (never a tag's tree), and brings exactly what the package
+  derivation reads (`scripts/ci`, the root `package.json` and
+  `packages/*/package.json`); that derivation FAILS CLOSED — a non-zero exit or an
+  empty list is an error exit that names the cause, never a silent "ready". It
+  reads every `release-attempt` / `promoted` marker across ALL pages
+  (`--paginate`, flattened), and for each pending marker takes the version from the
+  MARKER PAYLOAD (never main's `package.json`, which moves on after a release;
+  never the ref alone — the ref must equal `v<payload.version>` or the marker is
+  refused). It requires EVERY lockstep package `<name>@<version>` to be public and
+  to re-derive the certified package-set digest (ALL-form: one missing/odd package
+  is NOT READY, exit 0, the package named), and on READY dispatches
+  `release-promote.yml --ref v<version>`, gated behind that workflow existing
+  (slice 2). Every run is a schedule run of the default branch's copy of the file, so
+  `github.sha` is always a main sha. **The poll's outputs are
+  never an input to what gets promoted** — the privileged job re-derives everything
+  it acts on. (`test/unit/release-promote-poll-workflow.test.ts`.)
+- **Trust-root ownership.** `.github/CODEOWNERS` puts `/scripts/ci/canary-verdict.sh`,
+  `/scripts/ci/package-set-digest.mjs`, `/scripts/ci/registry-tarball-sha256.mjs`,
+  `/scripts/ci/registry-latest-skew.mjs`, `/scripts/ci/lockstep-packages.mjs`,
+  `/.github/workflows/canary.yml` and `/.github/workflows/release-promote*.yml`
+  under the trust root (`@heskew`); the test resolves EFFECTIVE ownership (last
+  matching rule wins) for each protected path.
+  (`test/unit/release-auto-tag-workflow.test.ts`.)
+
+Not in this slice: the privileged `release-promote.yml`, the `release-promote`
+environment, `NPM_TOKEN`, the machinery-recency guard, and the refusal issue with
+restore lines — all slice 2.
