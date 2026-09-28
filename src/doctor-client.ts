@@ -423,6 +423,28 @@ export function checkContinuityCaptureHooks(homeDir: string, settingsPath?: stri
   return { path, postToolUse, stop, state };
 }
 
+/**
+ * Advice uses the same decision as the continuity writer, for both events.
+ * Include an absent sibling: an unreadable CLI version also refuses additions.
+ * Only the execution banner becomes an advice label; the writer's reason stays.
+ */
+export function continuityWriteBlockers(report: ContinuityCaptureHookReport): string[] {
+  const blockers: string[] = [];
+  for (const [event, entry] of [
+    ["PostToolUse", report.postToolUse],
+    ["Stop", report.stop],
+  ] as const) {
+    const label = `${event} continuity capture hook`;
+    const decision = decideContinuityWrite(entry.present ? entry.command ?? "" : null, label);
+    if (decision.action !== "write") {
+      blockers.push(
+        (decision.line ?? `${label}: ${decision.action}`).replace(": holding — ", ": held — "),
+      );
+    }
+  }
+  return blockers;
+}
+
 export type ContinuityMutationAction = "add" | "update" | "noop";
 
 export interface ContinuityHookInstall {

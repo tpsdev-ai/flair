@@ -7,10 +7,11 @@ import {
   buildContinuityCaptureHookCommand,
   buildSessionStartHookCommand,
   checkContinuityCaptureHooks,
+  computeContinuityHookInstall,
   CONTINUITY_CAPTURE_HOOK_MARKER,
   CONTINUITY_POST_TOOL_USE_MATCHER,
 } from "../../src/doctor-client.ts";
-import { mcpServerSpec } from "../../src/lib/mcp-spec.ts";
+import { flairCliVersion, mcpServerSpec } from "../../src/lib/mcp-spec.ts";
 
 const root = join(import.meta.dir, "../..");
 const cli = join(root, "src/cli.ts");
@@ -41,7 +42,11 @@ interface HookGroup {
   hooks: Array<{ type: "command"; command: string }>;
 }
 
-function fixture(postToolUse: string | null, stop: string | null) {
+function fixture(
+  postToolUse: string | null,
+  stop: string | null,
+  matcher: string = CONTINUITY_POST_TOOL_USE_MATCHER,
+) {
   const home = realpathSync(tempDir("flair-doctor-1819-"));
   const bin = join(home, "bin");
   mkdirSync(bin);
@@ -61,7 +66,7 @@ function fixture(postToolUse: string | null, stop: string | null) {
   };
   if (postToolUse !== null) {
     hooks.PostToolUse = [{
-      matcher: CONTINUITY_POST_TOOL_USE_MATCHER,
+      matcher,
       hooks: [{ type: "command", command: postToolUse }],
     }];
   }
@@ -259,3 +264,97 @@ test("R2 state comment includes non-version pins", () => {
   const text = readFileSync(join(root, "src/doctor-client.ts"), "utf8");
   expect(text).toContain("hand-altered invocation, a drifted PostToolUse matcher, or a non-version pin).");
 });
+
+// A current sibling keeps the ahead pin as the only reason to hold the pair.
+function r3Fixture(postPin: string = "99.0.0", stopPin: string = flairCliVersion()) {
+  return fixture(command(postPin), command(stopPin), "Read");
+}
+
+function writerHoldAdvice(f: ReturnType<typeof fixture>): string {
+  const planned = computeContinuityHookInstall(JSON.parse(f.bytes), agent, url);
+  expect(planned.changed).toBe(false);
+  expect(planned.decision?.action).toBe("hold");
+  const line = planned.decision?.line;
+  if (typeof line !== "string") throw new Error("Expected the writer's hold reason");
+  return line.replace(": holding — ", ": held — ");
+}
+
+test("R3 doctor report holds an ahead PostToolUse pin with matcher drift", () => {
+  const f = r3Fixture();
+  const report = checkContinuityCaptureHooks(f.home);
+  expect(report.state).toBe("stale");
+  expect(report.postToolUse.currentForm).toBe(false);
+  expect(report.stop.currentForm).toBe(true);
+  const block = doctorBlock(f.doctor());
+  expect(block).not.toContain("flair doctor --fix");
+  expect(block).toContain("held");
+  expect(block).toContain("manually");
+  expect(block).toContain(writerHoldAdvice(f));
+  expect(block).toContain("AHEAD of this CLI " + flairCliVersion());
+  expect(readFileSync(f.settings)).toEqual(Buffer.from(f.bytes, "utf8"));
+}, 25_000);
+
+test("R3 doctor dry-run holds an ahead PostToolUse pin without writing", () => {
+  const f = r3Fixture();
+  const stdout = f.doctor(["--fix", "--dry-run"]);
+  expect(stdout).not.toContain("Would rewrite the continuity capture hooks");
+  const block = doctorBlock(stdout);
+  expect(block).not.toContain("flair doctor --fix");
+  expect(block).toContain("held");
+  expect(block).toContain("manually");
+  expect(block).toContain(writerHoldAdvice(f));
+  expect(readFileSync(f.settings)).toEqual(Buffer.from(f.bytes, "utf8"));
+}, 25_000);
+
+test("R3 hook status holds an ahead PostToolUse pin without reinstall advice", () => {
+  const f = r3Fixture();
+  const line = outputLine(f.run(["hook", "status"]), "continuity capture:");
+  expect(line).toContain("continuity capture: stale");
+  expect(line).not.toContain("install --continuity");
+  expect(line).not.toContain("re-run:");
+  expect(line).toContain("held");
+  expect(line).toContain("manually");
+  expect(line).toContain(writerHoldAdvice(f));
+  expect(readFileSync(f.settings)).toEqual(Buffer.from(f.bytes, "utf8"));
+}, 25_000);
+
+test("R3 doctor repair advice distinguishes behind and equal pins from ahead", () => {
+  for (const pin of ["0.0.1", flairCliVersion()]) {
+    const f = r3Fixture(pin);
+    const planned = computeContinuityHookInstall(JSON.parse(f.bytes), agent, url);
+    expect(planned.decision).toBeNull();
+    expect(planned.changed).toBe(true);
+    expect(checkContinuityCaptureHooks(f.home).state).toBe("stale");
+    const block = doctorBlock(f.doctor());
+    expect(block).toContain("flair doctor --fix");
+    expect(block).not.toContain("manually");
+    expect(f.doctor(["--fix", "--dry-run"])).toContain("Would rewrite the continuity capture hooks");
+    const status = outputLine(f.run(["hook", "status"]), "continuity capture:");
+    expect(status).toContain("re-run: flair hook install --continuity");
+    expect(readFileSync(f.settings)).toEqual(Buffer.from(f.bytes, "utf8"));
+  }
+
+  // Paired negative control: this test must also fail on the old advice gate.
+  const ahead = r3Fixture();
+  const block = doctorBlock(ahead.doctor());
+  expect(block).not.toContain("flair doctor --fix");
+  expect(block).toContain(writerHoldAdvice(ahead));
+  expect(ahead.doctor(["--fix", "--dry-run"])).not.toContain("Would rewrite the continuity capture hooks");
+  expect(readFileSync(ahead.settings)).toEqual(Buffer.from(ahead.bytes, "utf8"));
+}, 180_000);
+
+test("R3 doctor and hook status hold when only Stop is ahead", () => {
+  const f = r3Fixture(flairCliVersion(), "99.0.0");
+  const reason = writerHoldAdvice(f);
+  expect(reason).toContain("Stop continuity capture hook:");
+  const block = doctorBlock(f.doctor());
+  expect(block).not.toContain("flair doctor --fix");
+  expect(block).toContain(reason);
+  const stdout = f.doctor(["--fix", "--dry-run"]);
+  expect(stdout).not.toContain("Would rewrite the continuity capture hooks");
+  expect(doctorBlock(stdout)).toContain(reason);
+  const status = outputLine(f.run(["hook", "status"]), "continuity capture:");
+  expect(status).not.toContain("install --continuity");
+  expect(status).toContain(reason);
+  expect(readFileSync(f.settings)).toEqual(Buffer.from(f.bytes, "utf8"));
+}, 75_000);

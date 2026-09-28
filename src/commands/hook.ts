@@ -16,7 +16,7 @@ import { Command } from "commander";
 
 import * as render from "../render.js";
 import { unpinnedSpecWarning } from "../lib/mcp-spec.js";
-import { probeSessionStartHookDelivery, readClientMcpBlock } from "../doctor-client.js";
+import { continuityWriteBlockers, probeSessionStartHookDelivery, readClientMcpBlock } from "../doctor-client.js";
 import {
   installHook,
   uninstallHook,
@@ -203,7 +203,15 @@ export function register(program: Command): void {
           console.log(`  ${render.icons.info} continuity capture: not enabled ${render.wrap(render.c.dim, `(opt-in: ${hookInstallHint(harness, "--continuity")})`)}`);
         } else {
           const missing = !cont.postToolUse.present ? "PostToolUse missing" : !cont.stop.present ? "Stop missing" : "stale form";
-          console.log(`  ${render.icons.warn} continuity capture: ${cont.state} (${missing}) ${render.wrap(render.c.dim, cont.postToolUse.reason || cont.stop.reason ? "— resolve the non-version pin manually" : `— re-run: ${hookInstallHint(harness, "--continuity")}`)}`);
+          const blockers = continuityWriteBlockers(cont);
+          let advice = `— re-run: ${hookInstallHint(harness, "--continuity")}`;
+          if (blockers.length > 0) {
+            const resolution = cont.postToolUse.reason || cont.stop.reason
+              ? "resolve the non-version pin manually"
+              : "rewrite held; resolve the listed pin(s) manually";
+            advice = `— ${resolution}; ${blockers.join(" ")}`;
+          }
+          console.log(`  ${render.icons.warn} continuity capture: ${cont.state} (${missing}) ${render.wrap(render.c.dim, advice)}`);
         }
       };
 
