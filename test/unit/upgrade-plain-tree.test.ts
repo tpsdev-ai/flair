@@ -34,6 +34,7 @@ import {
   unitTextMentionsTree,
   findSystemdUnitsForTree,
   systemdRestartArgs,
+  stopSystemdUnits,
   applyPlainTreeUpgrade,
   restorePlainTreePrevious,
   discardPlainTreePrevious,
@@ -42,6 +43,7 @@ import {
   treeSibling,
   PACKED_ROOT_NAMES,
   UPGRADE_NEXT_SUFFIX,
+  UPGRADE_FAILED_SUFFIX,
   UPGRADE_PREV_SUFFIX,
   isNpmGlobalTree,
   isSymlink,
@@ -711,6 +713,20 @@ describe("systemd unit discovery", () => {
     expect(systemdRestartArgs({ name: "flair.service", path: "/x", scope: "user" }))
       .toEqual(["--user", "restart", "flair.service"]);
   });
+
+  test("snapshot restore stops system and user units, and propagates a failed stop", () => {
+    const units = [
+      { name: "flair.service", path: "/x", scope: "system" as const },
+      { name: "flair-user.service", path: "/y", scope: "user" as const },
+    ];
+    const calls: Array<[string, string[]]> = [];
+    stopSystemdUnits(units, (bin, args) => { calls.push([bin, args]); return ""; });
+    expect(calls).toEqual([
+      ["systemctl", ["stop", "flair.service"]],
+      ["systemctl", ["--user", "stop", "flair-user.service"]],
+    ]);
+    expect(() => stopSystemdUnits(units, () => { throw new Error("stop failed"); })).toThrow("stop failed");
+  });
 });
 
 describe("apply + restore (injected pack/install)", () => {
@@ -771,8 +787,10 @@ describe("apply + restore (injected pack/install)", () => {
     expect(JSON.parse(readFileSync(join(plan.previousDir, "package.json"), "utf-8")).version).toBe("0.36.0");
     expect(existsSync(plan.stagingDir)).toBe(false);
 
-    expect(restorePlainTreePrevious(plan)).toBe(true);
+    const failed = treeSibling(tree, UPGRADE_FAILED_SUFFIX);
+    expect(restorePlainTreePrevious(plan)).toEqual({ restored: true, liveTreeSetAside: true });
     expect(JSON.parse(readFileSync(join(tree, "package.json"), "utf-8")).version).toBe("0.36.0");
+    expect(JSON.parse(readFileSync(join(failed, "package.json"), "utf-8")).version).toBe("0.50.0");
     expect(readFileSync(join(tree, "flair"), "utf-8")).toContain("operator launcher");
     expect(existsSync(plan.previousDir)).toBe(false);
   });
@@ -814,7 +832,22 @@ describe("apply + restore (injected pack/install)", () => {
       fromVersion: "0.36.0",
       toVersion: "0.50.0",
     });
-    expect(restorePlainTreePrevious(plan)).toBe(false);
+    expect(restorePlainTreePrevious(plan)).toEqual({ restored: false });
+  });
+
+  test("restore succeeds without moving a live tree when the live path is absent", () => {
+    const tree = join(tmp, "spoke");
+    const plan = planPlainTreeUpgrade({
+      treeDir: tree,
+      fromVersion: "0.36.0",
+      toVersion: "0.50.0",
+    });
+    writeFlairTree(plan.previousDir, { version: "0.36.0" });
+    const failed = treeSibling(tree, UPGRADE_FAILED_SUFFIX);
+    expect(restorePlainTreePrevious(plan)).toEqual({ restored: true, liveTreeSetAside: false });
+    expect(existsSync(failed)).toBe(false);
+    expect(existsSync(plan.previousDir)).toBe(false);
+    expect(JSON.parse(readFileSync(join(tree, "package.json"), "utf-8")).version).toBe("0.36.0");
   });
 
   test("discardPlainTreePrevious removes the sibling after verify", () => {
@@ -870,6 +903,6 @@ describe("decidePlainTreeRollback", () => {
     const decision = decidePlainTreeRollback(false);
     expect(decision.kind).toBe("skip");
     if (decision.kind !== "skip") return;
-    expect(decision.reason).toContain("not swapped");
+    expect(decision.reason).toBe("no previous tree to restore");
   });
 });

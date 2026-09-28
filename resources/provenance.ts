@@ -53,6 +53,11 @@ function sanitizeClaim(value: unknown): string | undefined {
  *   already computed by this point (never client-suppliable) — the same
  *   "stamp a dynamic attribute the server controls" mechanism as e.g. the
  *   `embeddingModel = getModelId()` stamp in resources/Memory.ts.
+ * - The host pointer (`hostSource`) is NOT provenance (flair#1940 A5): it lives
+ *   in its own `MemoryHostSource` table, is never part of this `{ v, verified,
+ *   claimed }` blob, and is written on the Memory write path in the same
+ *   transaction as the Memory row (t1/t2). `provenance` therefore stays a field
+ *   the server controls and is never client-writable.
  * - `claimed.model` is an OPTIONAL, UNVERIFIED passthrough: included only
  *   when the incoming write payload itself already carries a non-empty
  *   string `model` field (sanitized via sanitizeClaim above). Never
@@ -85,13 +90,16 @@ function sanitizeClaim(value: unknown): string | undefined {
 export function buildProvenance(auth: AgentAuthVerdict, createdAt: string, content: any): string {
   const provenance: {
     v: 1;
-    verified: { agentId: string | null; timestamp: string };
+    verified: { agentId: string | null; timestamp: string; receivedAt: string };
     claimed?: { model?: string; client?: string };
   } = {
     v: 1,
     verified: {
       agentId: auth.kind === "agent" ? auth.agentId : null,
       timestamp: createdAt,
+      // flair#1940 A4: the server's RECEIPT time, stamped from the server clock —
+      // never client-writable (content is consulted only for `claimed.*`).
+      receivedAt: new Date().toISOString(),
     },
   };
   const model = sanitizeClaim(content?.model);

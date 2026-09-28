@@ -298,4 +298,22 @@ describe("federation sync push — private-visibility filter", () => {
     expect(isPrivateVisibility(null)).toBe(false);
     expect(isPrivateVisibility(undefined)).toBe(false);
   });
+
+  // ─── flair#1940 A1'' item 8 (f1-out): the outbound Memory read projects the
+  // declared-attribute whitelist, so a dirty row's pointer field never leaves.
+  it("(f1-out) the outbound Memory query projects the Memory whitelist, never ['*']", async () => {
+    installMock([
+      { id: "mem-dirty", agentId: "a1", content: "x", visibility: "shared", hostSource: "{\"v\":1}", undeclaredProbe: "SENTINEL", updatedAt: "2025-06-01T00:00:00.000Z", createdAt: "2025-06-01T00:00:00.000Z" },
+    ]);
+    const { runFederationSyncOnce } = await import("../../src/cli");
+    await runFederationSyncOnce({ adminPass: "test-admin-pass", opsPort: "9925" });
+
+    const memQuery = capturedCalls.find(
+      (c) => c.body?.operation === "search_by_conditions" && c.body.table === "Memory" && c.body.conditions?.[0]?.search_type === "greater_than",
+    );
+    expect(memQuery).toBeDefined(); // assertion: the Memory pull happened
+    expect(memQuery!.body.get_attributes).not.toEqual(["*"]); // assertion: not the wide-open projection
+    expect(memQuery!.body.get_attributes).toContain("agentId"); // assertion: a declared attribute is named
+    expect(memQuery!.body.get_attributes).not.toContain("hostSource"); // assertion: a pointer field is NOT projected
+  });
 });

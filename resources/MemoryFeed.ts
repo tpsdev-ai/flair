@@ -8,6 +8,9 @@ import { assertValidVisibility, assertVisibilityAllowedForDurability, PRIVATE_VI
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, refuseSkillWriteSource, skillScanGate } from "./skill-write.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
+import { extractPointerInputs } from "./memory-host-source.js";
+import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
+import { buildProvenance } from "./provenance.js";
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -179,7 +182,30 @@ export class FeedMemories extends Resource {
       record.visibility = PRIVATE_VISIBILITY;
     }
 
+    // flair#1940 A1' item 1: the feed ingest is a Memory writer too. Drop any
+    // pointer inputs (hostSource/hostSourceScope/hostSourceVisibility) and every
+    // undeclared attribute here. These paths discard the supplied pointer input
+    // and create no pointer row; an existing pointer row stays bound to the
+    // updated Memory.
+    extractPointerInputs(record);
+    stripUndeclaredMemoryAttributes(record);
     stripAuthorityFields(record, "Memory");
+    // A1-iv items 1/3: the feed ingest is a Memory writer too — strip a
+    // caller-supplied server-stamped field (instanceToken, provenance), then
+    // PRESERVE the existing row's incarnation token, else generate one.
+    stripServerStampedFields(record);
+    // flair#1940 A1-iv item 1: a failed existing-row lookup must FAIL the write,
+    // not fall back to a fresh token — rotating the token would hide a still-
+    // stored pointer row that is bound to the stored token (the same fail-closed
+    // rule #1956 applies to put()). No `.catch`: the rejection propagates.
+    const priorById = await (databases as any).flair.Memory.get(record.id);
+    record.instanceToken = priorById?.instanceToken ?? randomUUID();
+    // Feed re-ingestion keeps the same incarnation and its original provenance.
+    // Restore only the stored stamp, never the submitted copy. New/unstamped
+    // rows get trusted caller identity and server time, not body timestamps.
+    record.provenance = typeof priorById?.provenance === "string"
+      ? priorById.provenance
+      : buildProvenance(auth, now, content);
     await (databases as any).flair.Memory.put(record);
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).
     noteMemoryUpsert(record);

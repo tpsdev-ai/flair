@@ -33,7 +33,7 @@ const add = (file: string, sites: string[], reason: string) => {
 };
 
 // ── GATED skill-writer sinks (run SkillScan + forced durability) ──
-add("Memory", ["writer:super.post#1", "writer:super.put#2"],
+add("Memory", ["writer:(databases as any).flair.Memory.post#1", "writer:(databases as any).flair.Memory.put#2"],
   "Skill-writer: routes through the SkillScan gate + forced durability in Memory.post()/put() (flair#1542).");
 add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"],
   "Skill-writer: runs the SkillScan gate + forced durability in FeedMemories.post() before the raw put (flair#1542).");
@@ -55,7 +55,7 @@ add("Memory", ["writer:(databases as any).flair.Memory.put#1"],
   "closeSupersededRecord: read-modify-write close of an existing record (stamps validTo), preserves existing content/tags — not a new skill write.");
 add("Memory", ["writer:patchRecord#1"],
   "derivedFrom/lastReflected bookkeeping patch — never writes skill content.");
-add("Memory", ["writer:super.delete#1"],
+add("Memory", ["writer:(databases as any).flair.Memory.delete#1"],
   "Memory.delete(): removal, not a write.");
 add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2"],
   "Read-only table alias (get/search) — no write through this handle.");
@@ -63,6 +63,8 @@ add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(
 // ── Non-skill writers in other modules ──
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.delete#1", "writer:(databases as any).flair.Memory.update#1"],
   "Maintenance (archive/expiry) — non-skill.");
+add("MemoryMaintenance", ["writer:table.delete#1"],
+  "A1': MemoryHostSource pointer cascade — a different table, never skill content.");
 add("MemoryReflect", ["writer:patchRecordSilent#1"],
   "lastReflected stamp — non-skill.");
 add("MemoryReindex", ["writer:Memory.put#1"],

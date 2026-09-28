@@ -266,7 +266,6 @@ export class HealthDetail extends Resource {
           .sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
         if (sorted[0]) stats.lastWrite = sorted[0].createdAt;
       }
-      if (expired > 0) warnings.push({ level: "warn", message: `${expired} memories have expired validTo but aren't archived` });
       // Hash-fallback coverage — tiered by percentage. Thresholds are
       // first-pass defaults; Kern's review on ops-n4n may tune them.
       if (memoriesList.length > 0) {
@@ -510,6 +509,7 @@ export class HealthDetail extends Resource {
     } catch { stats.oauth = null; }
 
     // ── REM ──
+    let nightlyRunFailed = false;
     try {
       const logsDir = join(homedir(), ".flair", "logs");
       const remLog = join(logsDir, "rem.jsonl");
@@ -577,6 +577,7 @@ export class HealthDetail extends Resource {
 
       const nightlyRecords = await tailJsonl(nightlyLog);
       const lastNightlyRec = nightlyRecords[nightlyRecords.length - 1];
+      nightlyRunFailed = lastNightlyRec?.status === "failed";
       const lastNightlyAt = lastNightlyRec ? (lastNightlyRec.at ?? lastNightlyRec.ts ?? lastNightlyRec.timestamp ?? null) : null;
 
       let pendingCandidates: number | null = null;
@@ -614,6 +615,25 @@ export class HealthDetail extends Resource {
         }
       }
     } catch { stats.rem = null; }
+
+    // Build this after REM discovery, including its unavailable-state fallback.
+    // Health does not read the scheduler's next-run time. The existing audit
+    // row does carry status; do not expose raw errors through HealthDetail.
+    if (stats.memories?.expired > 0) {
+      const nightlyHint = stats.rem?.nightlyEnabled === true
+        ? nightlyRunFailed
+          ? "nightly is enabled, but its last logged run failed — inspect ~/.flair/logs/rem-nightly.jsonl on the server"
+          : "nightly is enabled"
+        : stats.rem?.nightlyEnabled === false
+          ? "automate: flair rem nightly enable (includes validTo archival)"
+          : "nightly state is unknown — check: flair rem nightly status";
+      warnings.push({
+        level: "warn",
+        message: `${stats.memories.expired} memories have expired validTo but aren't archived\n` +
+          "    clear now: flair rem light (archives expired validTo; preview: --dry-run)\n" +
+          `    ${nightlyHint}`,
+      });
+    }
 
     // ── Dedup clusters (flair-quality Slice 1c) ──
     // Cheap read: a single small stat file, not a recomputation. The

@@ -556,6 +556,13 @@ export interface FetchRegistryDeps extends ResolveNpmRegistryDeps {
   timeoutMs?: number;
   /** Injectable fetch — tests mock `globalThis.fetch`. */
   fetchImpl?: typeof fetch;
+  /** Optional npm reader for fetchVersionDeprecation; defaults to runNpmViewJson. */
+  npmViewJson?: (
+    spec: string,
+    field: string,
+    registryUrl: string,
+    timeoutMs: number,
+  ) => Promise<{ ok: boolean; data?: unknown; message: string }>;
   /** Called with the validated registry as soon as it is resolved. */
   onRegistry?: (res: RegistryResolution) => void;
 }
@@ -629,14 +636,63 @@ function runNpmViewJson(
           const message = String(stderr || err.message || "npm view failed").trim();
           return resolve({ ok: false, message });
         }
-        try {
-          resolve({ ok: true, data: JSON.parse(String(stdout).trim()), message: "" });
-        } catch {
-          resolve({ ok: false, message: "npm view returned non-JSON output" });
-        }
+        const parsed = parseNpmViewStdout(String(stdout));
+        resolve(parsed);
       },
     );
   });
+}
+
+/** Parse trimmed stdout as JSON; distinguish empty output from invalid JSON. */
+export function parseNpmViewStdout(stdout: string): JsonFetchResult {
+  const text = stdout.trim();
+  if (text === "") return { ok: false, message: "npm view returned empty output" };
+  try {
+    return { ok: true, data: JSON.parse(text), message: "" };
+  } catch {
+    return { ok: false, message: "npm view returned malformed JSON" };
+  }
+}
+
+/** Remove characters in U+0000-U+001F and U+007F-U+009F. */
+export function stripControlChars(value: string): string {
+  return value.replace(/[\u0000-\u001F\u007F\u0080-\u009F]/g, "");
+}
+
+/** Accept a non-array object whose name and version equal the requested values. */
+export function isExactVersionDocument(
+  data: unknown,
+  packageName: string,
+  version: string,
+): data is { version: string; name: string; deprecated?: unknown } {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+  const doc = data as { name?: unknown; version?: unknown };
+  if (doc.version !== version) return false;
+  if (doc.name !== packageName) return false;
+  return true;
+}
+
+/**
+ * Empty-output errors and blank strings yield active; nonblank strings yield
+ * deprecated. Other errors and non-string values yield unavailable.
+ * Deprecation messages have control characters removed and a fallback if empty.
+ */
+export function deprecationFromNpmView(parsed: JsonFetchResult):
+  | { kind: "active" }
+  | { kind: "deprecated"; message: string }
+  | { kind: "unavailable"; message: string } {
+  if (!parsed.ok) {
+    if (parsed.message === "npm view returned empty output") return { kind: "active" };
+    return { kind: "unavailable", message: parsed.message };
+  }
+  // Non-string JSON values yield unavailable, including null.
+  if (typeof parsed.data !== "string") {
+    return { kind: "unavailable", message: "npm view deprecated field was not a string" };
+  }
+  const raw = parsed.data;
+  const cleaned = stripControlChars(raw).trim();
+  if (!raw.trim()) return { kind: "active" };
+  return { kind: "deprecated", message: cleaned || "npm marked this version deprecated" };
 }
 
 /** True when this registry should be queried through npm rather than fetch(). */
@@ -728,4 +784,86 @@ export async function fetchDeclaredDependencies(
       ? (depsField as Record<string, string>)
       : null;
   return { kind: "ok", dependencies, registry };
+}
+
+export type VersionDeprecationResult =
+  /** The lookup returned a nonblank deprecation string. */
+  | { kind: "deprecated"; message: string; registry: RegistryResolution }
+  /** The lookup found an absent field, empty npm output, or a blank string. */
+  | { kind: "active"; registry: RegistryResolution }
+  /** The supplied version failed isStrictSemver before registry resolution. */
+  | { kind: "invalid"; value: string }
+  | { kind: "refused"; message: string }
+  /** The returned lookup result could not establish deprecation status. */
+  | { kind: "unavailable"; message: string; registry: RegistryResolution };
+
+/**
+ * Query deprecation for a strict semver version using the resolved registry.
+ * HTTP responses must pass isExactVersionDocument; npm output goes through
+ * deprecationFromNpmView. Absent HTTP fields and blank strings yield active;
+ * nonblank strings yield deprecated. Non-string fields yield unavailable.
+ * Registry resolution errors return refused; invalid versions return invalid.
+ * decideDeprecatedRollback refuses only a reported deprecated result.
+ */
+export async function fetchVersionDeprecation(
+  packageName: string,
+  version: string,
+  deps: FetchRegistryDeps = {},
+): Promise<VersionDeprecationResult> {
+  if (!isStrictSemver(version)) return { kind: "invalid", value: version };
+
+  let registry: RegistryResolution;
+  try {
+    registry = await resolveNpmRegistryDetailed(packageName, deps);
+  } catch (err) {
+    if (err instanceof RegistryRefusalError) return { kind: "refused", message: err.message };
+    return { kind: "refused", message: err instanceof Error ? err.message : String(err) };
+  }
+  deps.onRegistry?.(registry);
+
+  const timeoutMs = deps.timeoutMs ?? 5000;
+
+  if (await useNpmTransport(registry, deps)) {
+    const view = deps.npmViewJson ?? runNpmViewJson;
+    const out = await view(`${packageName}@${version}`, "deprecated", registry.url, timeoutMs);
+    const field = deprecationFromNpmView(out);
+    if (field.kind === "unavailable") return { kind: "unavailable", message: field.message, registry };
+    if (field.kind === "deprecated") return { kind: "deprecated", message: field.message, registry };
+    return { kind: "active", registry };
+  }
+
+  const out = await fetchRegistryJson(`${registry.url}/${packageName}/${version}`, timeoutMs, deps.fetchImpl);
+  if (!out.ok) return { kind: "unavailable", message: out.message, registry };
+  if (!isExactVersionDocument(out.data, packageName, version)) {
+    return {
+      kind: "unavailable",
+      message: `registry response was not a version document for ${packageName}@${version}`,
+      registry,
+    };
+  }
+  const deprecated = out.data.deprecated;
+  if (!Object.prototype.hasOwnProperty.call(out.data, "deprecated")) {
+    return { kind: "active", registry };
+  }
+  if (typeof deprecated === "string" && !deprecated.trim()) return { kind: "active", registry };
+  if (deprecated === null) {
+    return {
+      kind: "unavailable",
+      message: `registry deprecated field for ${packageName}@${version} was null`,
+      registry,
+    };
+  }
+  if (typeof deprecated !== "string") {
+    return {
+      kind: "unavailable",
+      message: `registry deprecated field for ${packageName}@${version} was not a string`,
+      registry,
+    };
+  }
+  const cleaned = stripControlChars(deprecated).trim();
+  return {
+    kind: "deprecated",
+    message: cleaned || "npm marked this version deprecated",
+    registry,
+  };
 }

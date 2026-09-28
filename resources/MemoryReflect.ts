@@ -75,6 +75,7 @@ import {
   type ReflectMemoryInput,
 } from "./memory-reflect-lib.js";
 import { reflectModelsGenerate } from "./memory-reflect-models.js";
+import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 
 /** Same path `flair rem pause` writes. Duplicated across the src/ boundary. */
 const REM_PAUSE_FLAG = resolve(homedir(), ".flair", "rem.paused");
@@ -343,7 +344,9 @@ export class ReflectMemories extends Resource {
         if (shouldStampLastReflected({ execute, generateSucceeded: true })) {
           const now = new Date().toISOString();
           for (const memory of memories) {
-            patchRecordSilent((databases as any).flair.Memory, memory.id, { lastReflected: now });
+            const reflectPatch = { lastReflected: now };
+            stripUndeclaredMemoryAttributes(reflectPatch);
+            patchRecordSilent((databases as any).flair.Memory, memory.id, reflectPatch);
           }
         }
 

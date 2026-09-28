@@ -1,5 +1,5 @@
 import { Resource, databases, server } from "harper";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import nacl from "tweetnacl";
 import { allowAdmin } from "./agent-auth.js";
 import {
@@ -21,6 +21,7 @@ import { readAllInstanceRows } from "./instance-identity-rows.js";
 import { findOrCreateInstance } from "./instance-create-lock.js";
 import { withDetachedTxnAsync } from "./table-helpers.js";
 import { isSkillWrite } from "./skill-write.js";
+import { stripInboundMemoryRow, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
 import { createPersistentNonceStore, initNonceStoreCleanup } from "./federation-nonce-store.js";
@@ -832,6 +833,16 @@ export class FederationSync extends Resource {
 
         const mergedData = mergeRecord(local, record);
 
+        // ── flair#1940 A1'' item 8: the SAME declared-attribute whitelist the
+        // writers apply. A dirty pushed row (a legacy direct-insert, or a raw
+        // writer that slipped a pointer field past the writers) must not carry
+        // a pointer attribute onto the merged Memory row here either. The named
+        // federation bookkeeping fields (_originatorInstanceId, _syncedFrom,
+        // _syncedAt, meta, kind) are on the whitelist and survive.
+        if (record.table === "Memory") {
+          stripInboundMemoryRow(mergedData);
+        }
+
         // ── flair#1542: skills are not federated ──
         // A skill-tagged Memory is a local, gated artifact (SkillScan + forced
         // durability on the write path). Merging a pushed skill-tagged row RAW
@@ -870,6 +881,33 @@ export class FederationSync extends Resource {
         mergedData._originatorInstanceId = decision.originator;
         mergedData._syncedFrom = instanceId;
         mergedData._syncedAt = new Date().toISOString();
+        // Re-assert the whitelist AFTER stamping the bookkeeping fields, so a
+        // dirty inbound row cannot smuggle a pointer field through this merge
+        // even if it also carried one of the allowed keys.
+        if (record.table === "Memory") {
+          stripInboundMemoryRow(mergedData);
+          // A1-iv items 1/3: a federated receive is a LOCAL incarnation — the
+          // token is OURS, never the peer's. Drop a peer-supplied server-stamped
+          // field, then PRESERVE the local row's token on a merge (a new row
+          // gets a locally-generated one).
+          //
+          // Round 22: `provenance` is NOT a local incarnation stamp — it is the
+          // ORIGINATOR's signed stamp and must survive the merge. Capture the
+          // value mergeRecord SELECTED (the inbound data for a new row; the
+          // merge's LWW choice for an update — NOT always local.provenance)
+          // before stripping, then restore it in the same per-record apply.
+          // Pinned by test/unit-isolated/federation-merge-provenance.test.ts —
+          // RED if this capture/restore is removed.
+          const mergedProvenance = mergedData.provenance;
+          stripServerStampedFields(mergedData);
+          if (typeof mergedProvenance === "string") {
+            mergedData.provenance = mergedProvenance;
+          }
+          mergedData.instanceToken =
+            local && typeof local.instanceToken === "string" && local.instanceToken.length > 0
+              ? local.instanceToken
+              : randomUUID();
+        }
 
         await table.put(mergedData);
         // embedding-space-guard slice 1: a federation-merged Memory can carry a

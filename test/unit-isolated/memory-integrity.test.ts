@@ -193,6 +193,27 @@ class BaseMemory {
   static search(query: any) {
     return memorySearchGen(query);
   }
+  // flair#1940: the Memory write path reaches the row table through its STATIC
+  // callables (databases.flair.Memory.post/delete), mirroring how Memory.ts's
+  // own pre-existing fetches use the static `get`. Real Harper's table is
+  // static-callable, so the double must be too.
+  static async post(content: any, _ctx?: any) {
+    return new BaseMemory().post(content);
+  }
+  static async patch(content: any) {
+    const id = content?.id ?? content;
+    const prev = memoryStore.get(id) ?? {};
+    memoryStore.set(id, { ...prev, ...content });
+    return memoryStore.get(id);
+  }
+  static async update(id: string, row: any) {
+    memoryStore.set(id, { ...row });
+    return { ...row };
+  }
+  static async delete(id: any) {
+    memoryStore.delete(typeof id === "string" ? id : id?.id);
+    return { ok: true };
+  }
 }
 
 const databasesMock = {
@@ -268,6 +289,23 @@ const FINDING_A_REWORDED =
   "Federation replication direction is controlled by a per-pair sends/receives knob inside the pairing configuration.";
 
 // ─── Pure Jaccard / cosine co-gate math (Harper-free, no mocking needed) ─────
+// flair#1940: Harper assigns `transaction` onto the global at load, and the
+// Memory write path creates one when a caller has no request context, refusing
+// to run a write unwrapped. Provide it in this isolated mock.
+(globalThis as any).transaction = (ctx: any, cb: (txn: any) => any) => {
+  if (ctx?.transaction && ctx.transaction.open === 1) return cb(ctx.transaction);
+  const txn: any = { open: 1, saveCommits: false, abort() { this.open = 0; }, commit() { this.open = 0; } };
+  const c = ctx && typeof ctx === "object" ? ctx : {};
+  c.transaction = txn;
+  let r: any;
+  try { r = cb(txn); } catch (e) { txn.abort(); throw e; }
+  if (r && typeof r.then === "function") {
+    return r.then((v: any) => { txn.commit(); return v; }, (e: any) => { txn.abort(); throw e; });
+  }
+  txn.commit();
+  return r;
+};
+
 describe("dedup co-gate — pure math (resources/dedup.ts)", () => {
   it("topic collision: shares vocabulary but is substantively distinct → LOW jaccard", () => {
     const j = jaccardSimilarity(tokenize(FINDING_A), tokenize(FINDING_B_DISTINCT));

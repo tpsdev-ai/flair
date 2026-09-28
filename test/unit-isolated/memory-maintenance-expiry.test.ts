@@ -19,6 +19,8 @@ const FUTURE = new Date(Date.now() + 3600_000).toISOString();
 const AGENT = "agent-1";
 
 let memoryStore: Map<string, any>;
+let pointerStore: Map<string, any>;
+let failNextMemoryRead: boolean;
 
 function fromStore(): AsyncIterable<any> {
   async function* gen() {
@@ -30,6 +32,13 @@ function fromStore(): AsyncIterable<any> {
 const databasesMock = {
   flair: {
     Memory: {
+      get: async (id: string) => {
+        if (failNextMemoryRead) {
+          failNextMemoryRead = false;
+          throw new Error("injected first orphan read failure");
+        }
+        return memoryStore.get(id) ?? null;
+      },
       search: () => fromStore(),
       delete: async (id: string) => {
         memoryStore.delete(id);
@@ -39,6 +48,12 @@ const databasesMock = {
         memoryStore.set(id, { ...memoryStore.get(id), ...data });
         return data;
       },
+    },
+    MemoryHostSource: {
+      search: () => (async function* () { yield* pointerStore.values(); })(),
+      get: async () => null,
+      put: async (row: any) => row,
+      delete: async (id: string) => { pointerStore.delete(id); return { ok: true }; },
     },
     Agent: { get: async () => null, search: async () => [] },
   },
@@ -68,9 +83,46 @@ const adminCtx = () => ({ tpsAgent: "admin", tpsAgentIsAdmin: true });
 
 beforeEach(() => {
   memoryStore = new Map();
+  pointerStore = new Map();
+  failNextMemoryRead = false;
 });
 
+// flair#1940: Harper assigns `transaction` onto the global at load, and the
+// Memory write path creates one when a caller has no request context, refusing
+// to run a write unwrapped. Provide it in this isolated mock.
+(globalThis as any).transaction = (ctx: any, cb: (txn: any) => any) => {
+  if (ctx?.transaction && ctx.transaction.open === 1) return cb(ctx.transaction);
+  const txn: any = { open: 1, saveCommits: false, abort() { this.open = 0; }, commit() { this.open = 0; } };
+  const c = ctx && typeof ctx === "object" ? ctx : {};
+  c.transaction = txn;
+  let r: any;
+  try { r = cb(txn); } catch (e) { txn.abort(); throw e; }
+  if (r && typeof r.then === "function") {
+    return r.then((v: any) => { txn.commit(); return v; }, (e: any) => { txn.abort(); throw e; });
+  }
+  txn.commit();
+  return r;
+};
+
 describe("MemoryMaintenance expiry — ephemeral-only (flair#1265)", () => {
+  it("(r23-orphan-read) counts an initial Memory read failure and cleans later orphan rows", async () => {
+    pointerStore.set("unreadable", { memoryId: "unreadable" });
+    pointerStore.set("later-orphan", { memoryId: "later-orphan" });
+    failNextMemoryRead = true;
+
+    const response = await makeMaintenance(adminCtx()).post({});
+    expect(response).toBeInstanceOf(Response);
+    expect(response.status).toBe(500);
+    const out = await response.json();
+    expect(failNextMemoryRead).toBe(false); // control: the first read actually failed
+    expect(pointerStore.has("later-orphan")).toBe(false); // continuation is the regression
+    expect(pointerStore.has("unreadable")).toBe(true);
+    expect(out.error).toBe("maintenance_incomplete");
+    expect(out.errors).toBe(1);
+    expect(out.stats.errors).toBe(1);
+    expect(out.orphans).toBe(1);
+  });
+
   it("deletes an ephemeral row whose expiresAt is in the past", async () => {
     seed("eph-expired", { durability: "ephemeral", expiresAt: PAST });
 

@@ -28,6 +28,7 @@
  * re-reading the row itself (invariant IV: state lives IN the data).
  */
 import { databases } from "harper";
+import { stripUndeclaredMemoryAttributes } from "../memory-declared-attributes.js";
 import type { Migration, RunBatchResult } from "./types.js";
 
 export const SYNTHETIC_MIGRATION_ID = "synthetic-ci-schema-stamp";
@@ -98,7 +99,9 @@ export function createSyntheticTestMigration(getTable: () => MemoryTableLike = d
         if (!existing) continue;
         if (existing.source === SYNTHETIC_TARGET_MARKER) continue; // already stamped — idempotent skip
 
-        await table.put({ ...existing, source: SYNTHETIC_TARGET_MARKER });
+        const synthRow = { ...existing, source: SYNTHETIC_TARGET_MARKER };
+        stripUndeclaredMemoryAttributes(synthRow);
+        await table.put(synthRow);
         touchedIds.push(id);
       }
 

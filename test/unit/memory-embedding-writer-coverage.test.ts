@@ -53,8 +53,10 @@ add("Federation", ["writer:table.put#1"], "LATCH",
   "Federation sync-in LWW merge (applyMergedRecordToTable) — a remote-win copies the REMOTE embeddingModel; must trip the latch via noteWriteStamp.");
 
 // ── GATED: Memory.ts's own post()/put() write path (calls noteWriteStamp) ──
-add("Memory", ["writer:super.post#1"], "GATED", "Memory.post() write — stamps + noteWriteStamp (slice 1).");
-add("Memory", ["writer:super.put#2"], "GATED", "Memory.put() main write — stamps + noteWriteStamp (slice 1).");
+// The writes go through the base TABLE (`databases.flair.Memory`) with the
+// shared request context so a direct/internal caller is atomic (A1'' 0a).
+add("Memory", ["writer:(databases as any).flair.Memory.post#1"], "GATED", "Memory.post() write — stamps + noteWriteStamp (slice 1).");
+add("Memory", ["writer:(databases as any).flair.Memory.put#2"], "GATED", "Memory.put() main write — stamps + noteWriteStamp (slice 1).");
 add("Memory", ["writer:super.put#1"], "GATED", "Memory.put() _reindex re-PUT — noteWriteStamp (slice 1); current-space re-embed.");
 
 // ── ECHO: re-writes an EXISTING local row's own stamp (no new space) ──
@@ -80,8 +82,15 @@ add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"], "NON_EMBED",
   "Feed rows — the record carries no embedding/embeddingModel.");
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.update#1", "writer:(databases as any).flair.Memory.delete#1"], "NON_EMBED",
   "Archive/expiry maintenance — partial update (archive fields) / delete; never touches the stamp.");
-add("Memory", ["writer:patchRecord#1", "writer:super.patch#1", "writer:super.delete#1"], "NON_EMBED",
-  "derivedFrom/lastReflected patch, patch(), delete() — never write embeddingModel.");
+// flair#1940 A1-iv item 6: Memory.ts no longer touches the MemoryHostSource
+// table directly — pointer writes/deletes go through the host-pointer ADAPTER
+// (resources/host-pointer-adapter.ts -> resources/host-pointer/registry.ts),
+// which the conservative sink enumeration does not match. No Memory.ts table
+// write site remains.
+add("MemoryMaintenance", ["writer:table.delete#1"], "OTHER_TABLE",
+  "MemoryHostSource pointer cascade (A1') — not the Memory table, never an embeddingModel.");
+add("Memory", ["writer:patchRecord#1", "writer:super.patch#1", "writer:(databases as any).flair.Memory.delete#1"], "NON_EMBED",
+  "derivedFrom/lastReflected patch, patch(), and delete() — never write embeddingModel.");
 add("MemoryReflect", ["writer:patchRecordSilent#1"], "NON_EMBED", "lastReflected stamp — partial, non-embedding.");
 add("hit-tracking", [
   "writer:this.pending.delete#1",

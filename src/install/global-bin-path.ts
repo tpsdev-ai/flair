@@ -20,11 +20,11 @@
 // never "check your PATH". If we cannot VALIDATE the directory (the flair
 // bin is really there), we say nothing rather than print a wrong fix.
 //
-// Everything here is pure and dependency-injected except
+// Filesystem checks use existsSync/realpathSync. The only subprocess is in
 // resolveNpmGlobalPrefix (spawns `npm prefix -g` for doctor).
 
 import { join } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 
 // ─── path membership ────────────────────────────────────────────────────────
 
@@ -55,6 +55,8 @@ export function npmGlobalBinDir(prefix: string, platform: NodeJS.Platform = proc
  * Is `dir` one of the entries of `pathEnv`? Trailing slashes are ignored on
  * both sides; win32 compares case-insensitively with either separator and
  * splits on ";". Empty entries (historical "cwd" semantics) never match.
+ * Otherwise, compare real paths so version-manager aliases count too.
+ * Unresolvable paths (including broken links and unreadable entries) are ignored.
  */
 export function isDirOnPath(
   dir: string,
@@ -65,10 +67,25 @@ export function isDirOnPath(
   const win32 = platform === "win32";
   const delim = win32 ? ";" : ":";
   const want = normalizeEntry(dir, win32);
-  return pathEnv
-    .split(delim)
-    .filter((e) => e.trim() !== "")
-    .some((e) => normalizeEntry(e, win32) === want);
+  if (!want) return false;
+  const entries = pathEnv.split(delim).filter((e) => e.trim() !== "");
+  // Preserve string matches, including paths that cannot currently be resolved.
+  if (entries.some((e) => normalizeEntry(e, win32) === want)) return true;
+
+  let realDir: string;
+  try {
+    realDir = normalizeEntry(realpathSync(dir.trim()), win32);
+  } catch {
+    return false;
+  }
+  return entries.some((e) => {
+    try {
+      return normalizeEntry(realpathSync(e.trim()), win32) === realDir;
+    } catch {
+      // A stale or inaccessible PATH entry must not hide a later valid alias.
+      return false;
+    }
+  });
 }
 
 // ─── the fix, per shell ─────────────────────────────────────────────────────

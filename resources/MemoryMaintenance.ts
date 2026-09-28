@@ -3,7 +3,7 @@
  *
  * POST /MemoryMaintenance — runs cleanup tasks:
  *   1. Delete expired ephemeral memories (expiresAt < now)
- *   2. Archive old session memories (> 30 days, standard durability)
+ *   2. Archive validTo-expired memories and old session memories (> 30 days, standard durability)
  *   3. Report stats
  *
  * Designed to run periodically (daily cron, scheduler, or REM nightly cycle).
@@ -18,8 +18,24 @@
  */
 
 import { Resource, databases } from "harper";
+import { MEMORY_HOST_SOURCE_TABLE } from "./memory-host-source.js";
+
+/** Maintenance creates an owned transaction for each expiry or archive item;
+ *  the Memory and pointer operations join that owned transaction (both tables
+ *  in database flair). Failures are NOT swallowed: a throw propagates to the
+ *  caller's error path. A missing pointer table is REPORTED (throws), never
+ *  silently skipped — cleanup is hygiene, so its failure must be visible. */
+async function deletePointerRowOrThrow(memoryId: string, ctx: any): Promise<void> {
+  const table = (databases as any).flair?.[MEMORY_HOST_SOURCE_TABLE];
+  if (!table?.delete) {
+    throw new Error("MemoryHostSource table unavailable");
+  }
+  await table.delete(memoryId, ctx);
+}
 import { isAdmin } from "./agent-auth.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
+import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
+import { withOwnedTransaction } from "./request-transaction.js";
 
 export class MemoryMaintenance extends Resource {
   /** POST requires auth — either an agent acting on its own memories, or admin. */
@@ -55,7 +71,7 @@ export class MemoryMaintenance extends Resource {
     }
 
     const now = new Date();
-    const stats = { expired: 0, archived: 0, total: 0, errors: 0, agent: targetAgent || "all" };
+    const stats = { expired: 0, archived: 0, total: 0, errors: 0, orphans: 0, agent: targetAgent || "all" };
 
     try {
       for await (const record of (databases as any).flair.Memory.search()) {
@@ -75,13 +91,20 @@ export class MemoryMaintenance extends Resource {
         ) {
           if (!dryRun) {
             try {
-              await (databases as any).flair.Memory.delete(record.id);
+              // A1'' item 2 (0c): the raw expiry delete runs in its OWN
+              // transaction together with the pointer delete, so a failed
+              // pointer delete aborts both and nothing is deleted.
+              await withOwnedTransaction(ctx, async (c) => {
+                await (databases as any).flair.Memory.delete(record.id, c);
+                await deletePointerRowOrThrow(record.id, c);
+              });
               // flair#1357 — ephemeral expiry removes the row from what the
               // lexical leg may score.
               noteMemoryDelete(record.id);
               stats.expired++;
-            } catch {
+            } catch (err) {
               stats.errors++;
+              console.error("MemoryMaintenance: expiry delete failed (aborted, nothing deleted)", err);
             }
           } else {
             stats.expired++;
@@ -89,43 +112,108 @@ export class MemoryMaintenance extends Resource {
           continue;
         }
 
-        // 2. Archive old standard session memories (> 30 days). These are
-        // low-value session notes that weren't promoted to persistent.
+        // 2. Archive memories whose validity ended, plus old standard session
+        // notes (> 30 days) that weren't promoted to persistent. Use one
+        // archive path so a row meeting both criteria is counted only once.
         // Soft-archive removes them from search results but keeps the data.
-        if (
-          record.durability === "standard" &&
-          record.type === "session" &&
-          !record.archived &&
-          record.createdAt
-        ) {
-          const ageMs = now.getTime() - new Date(record.createdAt).getTime();
-          const ageDays = ageMs / (24 * 3600_000);
-          if (ageDays > 30) {
-            if (!dryRun) {
-              try {
-                const archivedRow = {
-                  ...record,
-                  archived: true,
-                  archivedAt: now.toISOString(),
-                };
-                await (databases as any).flair.Memory.update(record.id, archivedRow);
-                // flair#1357 — an `archived` flip changes what the retrieval
-                // conditions (`archived not_equal true`) admit, so the lexical
-                // index has to see it, not just content writes.
-                noteMemoryUpsert(archivedRow);
-                stats.archived++;
-              } catch {
-                stats.errors++;
-              }
-            } else {
+        const validToExpired = record.validTo && new Date(record.validTo) < now;
+        const oldSession = record.durability === "standard" &&
+          record.type === "session" && record.createdAt &&
+          now.getTime() - new Date(record.createdAt).getTime() > 30 * 24 * 3600_000;
+        if (!record.archived && (validToExpired || oldSession)) {
+          if (!dryRun) {
+            try {
+              const archivedRow = {
+                ...record,
+                archived: true,
+                archivedAt: now.toISOString(),
+              };
+              stripUndeclaredMemoryAttributes(archivedRow);
+              // A1'' item 2 (0c): the archive write and its pointer delete
+              // share ONE OWNED transaction; a failed pointer delete cannot
+              // still commit the archived row.
+              await withOwnedTransaction(ctx, async (c) => {
+                await (databases as any).flair.Memory.update(record.id, archivedRow, c);
+                await deletePointerRowOrThrow(record.id, c);
+              });
+              // flair#1357 — an `archived` flip changes what the retrieval
+              // conditions (`archived not_equal true`) admit, so the lexical
+              // index has to see it, not just content writes.
+              noteMemoryUpsert(archivedRow);
               stats.archived++;
+            } catch (err) {
+              stats.errors++;
+              console.error("MemoryMaintenance: archive failed (aborted, nothing archived)", err);
             }
+          } else {
+            stats.archived++;
+          }
+        }
+      }
+
+      // 3. Orphan sweep: pointer rows whose Memory is MISSING or ARCHIVED. An
+      // orphan is unreadable by construction (the only read path joins pointers
+      // INTO Memory results), but it should not be left behind either. A
+      // failed row read or delete is counted and the sweep continues; the
+      // incomplete run is reported below (HTTP 500), never silently ignored.
+      const pointerTable = (databases as any).flair?.[MEMORY_HOST_SOURCE_TABLE];
+      if (!dryRun && !pointerTable?.search) {
+        // Hygiene: a missing sweep table is REPORTED, never silently skipped.
+        throw new Error("MemoryHostSource table unavailable (orphan sweep)");
+      }
+      if (pointerTable?.search && !dryRun) {
+        for await (const ptr of pointerTable.search()) {
+          const memoryId = ptr?.memoryId;
+          if (typeof memoryId !== "string" || memoryId.length === 0) continue;
+          try {
+            const mem = await (databases as any).flair.Memory.get(memoryId, ctx);
+            if (mem && mem.archived !== true) continue;
+            // 0d: RE-CHECK inside an OWNED transaction before deleting. The
+            // first read is outside it, so a new row reusing this id in
+            // between must not be orphan-deleted; the conditional re-read
+            // inside the transaction closes that read-to-delete gap. The
+            // re-read is passed the owned transaction `c` (Gauge pass-5 item 2).
+            //
+            // Round 22: one orphan's failure must abort only THAT orphan, not
+            // the whole sweep — catch it, count stats.errors, and continue (the
+            // item loops above already work this way). stats.orphans counts a
+            // row only AFTER its owned transaction COMMITS (the count moves out
+            // of the callback). Pinned by test/unit/memory-host-source.test.ts
+            // (r22-orphan-continues) — RED if the try/catch is removed.
+            let committed = false;
+            await withOwnedTransaction(ctx, async (c) => {
+              const again = await (databases as any).flair.Memory.get(memoryId, c);
+              if (!again || again.archived === true) {
+                await deletePointerRowOrThrow(memoryId, c);
+                committed = true;
+              }
+            });
+            if (committed) stats.orphans++;
+          } catch (err) {
+            stats.errors++;
+            console.error("MemoryMaintenance: orphan sweep failed (continuing)", err);
           }
         }
       }
     } catch (err: any) {
       return new Response(
         JSON.stringify({ error: err.message, stats }),
+        { status: 500, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    // A1-iv item 4 (cleanup is hygiene): if any item's cleanup FAILED, the run
+    // is NOT complete — report a failure naming the counts, never a
+    // "Maintenance complete" success. The work already committed stands; the
+    // response is about the run's honesty.
+    if (stats.errors > 0) {
+      return new Response(
+        JSON.stringify({
+          error: "maintenance_incomplete",
+          message: `${stats.errors} cleanup error(s); see counts`,
+          stats, expired: stats.expired, archived: stats.archived, total: stats.total,
+          errors: stats.errors, orphans: stats.orphans,
+        }),
         { status: 500, headers: { "content-type": "application/json" } },
       );
     }
@@ -140,6 +228,7 @@ export class MemoryMaintenance extends Resource {
       archived: stats.archived,
       total: stats.total,
       errors: stats.errors,
+      orphans: stats.orphans,
     };
   }
 }
