@@ -556,6 +556,17 @@ export interface FetchRegistryDeps extends ResolveNpmRegistryDeps {
   timeoutMs?: number;
   /** Injectable fetch — tests mock `globalThis.fetch`. */
   fetchImpl?: typeof fetch;
+  /**
+   * Injectable `npm view` JSON reader. Production uses `runNpmViewJson`.
+   * Tests pass this so a malformed `deprecated` field can be classified
+   * without spawning npm.
+   */
+  npmViewJson?: (
+    spec: string,
+    field: string,
+    registryUrl: string,
+    timeoutMs: number,
+  ) => Promise<{ ok: boolean; data?: unknown; message: string }>;
   /** Called with the validated registry as soon as it is resolved. */
   onRegistry?: (res: RegistryResolution) => void;
 }
@@ -658,19 +669,19 @@ export function stripControlChars(value: string): string {
 
 /**
  * A registry body is an exact-version document only when it is an object whose
- * `version` is the version we asked for. An HTTP 200 with no such document
- * (empty object, error payload, a different version) is not "this version is
- * active".
+ * `name` and `version` are the package and version we asked for. An HTTP 200
+ * with no such document (empty object, missing name, a different version) is
+ * not "this version is active".
  */
 export function isExactVersionDocument(
   data: unknown,
   packageName: string,
   version: string,
-): data is { version: string; name?: string; deprecated?: unknown } {
+): data is { version: string; name: string; deprecated?: unknown } {
   if (!data || typeof data !== "object" || Array.isArray(data)) return false;
   const doc = data as { name?: unknown; version?: unknown };
   if (doc.version !== version) return false;
-  if (doc.name !== undefined && doc.name !== packageName) return false;
+  if (doc.name !== packageName) return false;
   return true;
 }
 
@@ -687,7 +698,10 @@ export function deprecationFromNpmView(parsed: JsonFetchResult):
     if (parsed.message === "npm view returned empty output") return { kind: "active" };
     return { kind: "unavailable", message: parsed.message };
   }
-  if (typeof parsed.data !== "string") return { kind: "active" };
+  // A present value that is not a string is malformed, not "not deprecated".
+  if (typeof parsed.data !== "string") {
+    return { kind: "unavailable", message: "npm view deprecated field was not a string" };
+  }
   const raw = parsed.data;
   const cleaned = stripControlChars(raw).trim();
   if (!raw.trim()) return { kind: "active" };
@@ -825,7 +839,8 @@ export async function fetchVersionDeprecation(
   const timeoutMs = deps.timeoutMs ?? 5000;
 
   if (await useNpmTransport(registry, deps)) {
-    const out = await runNpmViewJson(`${packageName}@${version}`, "deprecated", registry.url, timeoutMs);
+    const view = deps.npmViewJson ?? runNpmViewJson;
+    const out = await view(`${packageName}@${version}`, "deprecated", registry.url, timeoutMs);
     const field = deprecationFromNpmView(out);
     if (field.kind === "unavailable") return { kind: "unavailable", message: field.message, registry };
     if (field.kind === "deprecated") return { kind: "deprecated", message: field.message, registry };
@@ -842,7 +857,16 @@ export async function fetchVersionDeprecation(
     };
   }
   const deprecated = out.data.deprecated;
-  if (typeof deprecated !== "string" || !deprecated.trim()) return { kind: "active", registry };
+  if (deprecated == null || (typeof deprecated === "string" && !deprecated.trim())) {
+    return { kind: "active", registry };
+  }
+  if (typeof deprecated !== "string") {
+    return {
+      kind: "unavailable",
+      message: `registry deprecated field for ${packageName}@${version} was not a string`,
+      registry,
+    };
+  }
   const cleaned = stripControlChars(deprecated).trim();
   return {
     kind: "deprecated",

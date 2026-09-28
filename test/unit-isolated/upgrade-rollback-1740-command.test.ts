@@ -8,11 +8,12 @@
  *     classifyUpgradePriorLiveness — not a boolean the test hands in
  *
  * `--no-verify` skips the credential preflight. Prior liveness still runs.
- * A closed port must keep the new version (exit 0). Hard-coding
- * `priorLiveness: "running"` at the decideAfterRestartFailure call site in
- * src/commands/upgrade.ts makes the stopped case roll back and fail this file.
- * On origin/main the same case rolls back (there is no keep path), so these
- * assertions are red there too. The pure helper tests stay in
+ * A closed port must keep the new version (exit 0). This file imports
+ * `rebindCli`, which is not on the round-1 head, so the file cannot load
+ * there and cannot itself be the red-on-base proof. The behavioural red is
+ * a call-site mutation: hard-coding `priorLiveness: "running"` in
+ * decideAfterRestartFailure's argument makes the stopped case exit 1.
+ * That failure is quoted in the PR. The pure helper tests stay in
  * test/unit/upgrade-rollback-1740.test.ts and do not see that hard-code.
  *
  * Isolated: mock.module is process-global, and this imports src/cli.ts.
@@ -187,7 +188,8 @@ describe("flair upgrade restart failure (flair#1740)", () => {
 
     expect(code).toBe(0);
     expect(out).toContain("@tpsdev-ai/flair@0.54.2 is installed");
-    expect(out).toContain("was not running before this upgrade");
+    expect(out).toContain("no listener accepted it");
+    expect(out).toContain("does not show that no process was running");
     expect(out).toContain("Next: flair start");
     expect(out).not.toContain("Rolling back");
     expect(out).not.toContain("KNOWN-BROKEN");

@@ -1626,8 +1626,9 @@ program
       }
     };
 
-      const rollbackTo = async (toVersion: string, reason: string): Promise<never> => {
+    const rollbackTo = async (toVersion: string, reason: string): Promise<never> => {
       let rollbackSnapshotRestored = false;
+      let plainTreeRestored = false;
       const deprecation = decideDeprecatedRollback({
         toVersion,
         lookup: await readRollbackDeprecation(toVersion),
@@ -1647,6 +1648,7 @@ program
             if (!restorePlainTreePrevious(treePlan)) {
               throw new Error(`no previous tree at ${treePlan.previousDir} to restore`);
             }
+            plainTreeRestored = true;
             console.log(`  ✅ restored previous tree from ${treePlan.previousDir}`);
           } else {
             console.log(`   (${rollbackDecision.reason})`);
@@ -1730,6 +1732,8 @@ program
               kind: "plain-tree",
               treeDir: treePlan.treeDir,
               failedDir: treeSibling(treePlan.treeDir, UPGRADE_FAILED_SUFFIX),
+              previousDir: treePlan.previousDir,
+              restored: plainTreeRestored,
             }
           : { kind: "npm-global" };
         for (const line of formatKnownBrokenRollbackRestart({

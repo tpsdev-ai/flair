@@ -125,17 +125,20 @@ actually running:
   reinstalls the previously installed `@tpsdev-ai/flair` and restarts it
   when that failure is evidence against the new version — then exits
   nonzero with a clear report of what failed. Before the swap, including
-  with `--no-verify`, it probes `/Health` once (flair#1740). Connection
-  refused means the instance was stopped or never started: the new version
-  stays installed, including when the previous version cannot be read, and
-  the command tells you to run `flair start`. A timeout or a non-2xx answer
-  is indeterminate, not stopped, and still rolls back. When the registry
-  says the previous version is deprecated, that version is not reinstalled;
-  if the lookup fails, rollback still proceeds. If a rollback's own restart fails, the command exits nonzero
-  and names that installed version as known-broken. Recovery matches the
-  install lane (npm-global `npm install -g`, or moving the plain-tree
-  `.upgrade-failed` directory back) and says whether a pre-upgrade data
-  snapshot was restored. Until flair#905 the rollback was wired to the
+  with `--no-verify`, it probes `/Health` once (flair#1740). A refused
+  connection means no listener accepted it. That does not show that no
+  process was running. The new version stays installed, including when the
+  previous version cannot be read, and the command tells you to run
+  `flair start`. A timeout or a non-2xx answer is indeterminate, not
+  stopped, and still rolls back. When the registry reports that the
+  previous version is deprecated, that version is not reinstalled; if the
+  lookup fails, rollback still proceeds. If a rollback's own restart
+  fails, the command exits nonzero and names that installed version as
+  known-broken. Recovery matches the install lane and what the plain-tree
+  restore actually did: npm-global uses `npm install -g`; when the previous
+  tree was restored, the upgraded tree is at `.upgrade-failed`; when it
+  was missing, the message says the live tree was not moved. The message
+  also says whether a pre-upgrade data snapshot was restored. Until flair#905 the rollback was wired to the
   *verification* leg only. If the rollback itself fails verification, it
   says so loudly and points at the concrete pre-upgrade snapshot path
   (see "Pre-upgrade snapshot" below) instead of retrying in a loop — see

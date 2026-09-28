@@ -42,7 +42,8 @@ describe("decideAfterRestartFailure (flair#1740)", () => {
     if (decision.kind !== "keep") return;
     const text = decision.lines.join("\n");
     expect(text).toContain("@tpsdev-ai/flair@0.54.2 is installed");
-    expect(text).toContain("was not running before this upgrade");
+    expect(text).toContain("no listener accepted it");
+    expect(text).toContain("does not show that no process was running");
     expect(text).toContain("nothing was rolled back");
     expect(text).toContain(START_ERROR);
     expect(text).toContain("flair start");
@@ -196,18 +197,47 @@ describe("formatKnownBrokenRollbackRestart (flair#1740)", () => {
         kind: "plain-tree",
         treeDir: "/opt/flair",
         failedDir: "/opt/flair.upgrade-failed",
+        previousDir: "/opt/flair.upgrade-prev",
+        restored: true,
       },
       snapshotRestored: true,
       snapshotPath: "/tmp/snap.tar.gz",
     }).join("\n");
-    expect(text).toContain("plain-tree");
+    expect(text).toContain("the previous tree was restored");
     expect(text).toContain("/opt/flair.upgrade-failed");
-    expect(text).toContain("do not npm install -g");
+    expect(text).toContain("Do not npm install -g");
     expect(text).not.toContain("npm install -g @tpsdev-ai/flair@0.54.2");
     expect(text).toContain("A pre-upgrade data snapshot was restored");
     expect(text).toContain("/tmp/snap.tar.gz");
     expect(text).not.toContain("No pre-upgrade data snapshot was restored");
     expect(text).not.toContain("Start it with: flair start");
+  });
+
+  test("plain-tree recovery with no previous tree does not claim the old version or .upgrade-failed", () => {
+    const text = formatKnownBrokenRollbackRestart({
+      toVersion: "0.54.1",
+      error: START_ERROR,
+      recoveryVersion: "0.54.2",
+      lane: {
+        kind: "plain-tree",
+        treeDir: "/opt/flair",
+        failedDir: "/opt/flair.upgrade-failed",
+        previousDir: "/opt/flair.upgrade-prev",
+        restored: false,
+      },
+      snapshotRestored: false,
+    }).join("\n");
+    expect(text).toContain("The previous tree was not restored");
+    expect(text).toContain("/opt/flair.upgrade-prev");
+    expect(text).toContain("is not what this rollback installed");
+    expect(text).toContain("The live tree is still at /opt/flair");
+    expect(text).toContain("was not moved to /opt/flair.upgrade-failed");
+    expect(text).toContain("do not npm install -g");
+    expect(text).toContain("There is no previous tree to move back");
+    expect(text).toContain("flair doctor");
+    expect(text).not.toContain("is installed and known-broken");
+    expect(text).not.toContain("was set aside");
+    expect(text).not.toContain("npm install -g @tpsdev-ai/flair@0.54.2");
   });
 
   test("npm-global with no distinct recovery version points at npm view", () => {
