@@ -535,6 +535,41 @@ describe("makeByIdReadGate — the read scope is evaluated on the full stored ro
     expect(res).toBe("shared text");
   });
 
+  it("the decision never reuses the caller's target or its class", async () => {
+    // A target whose class installs a selection when constructed: the decision
+    // must still see the full stored row (here: private, so another agent gets 404).
+    class SelectingTarget {
+      id?: string;
+      select: string[] = ["id", "agentId", "content"];
+    }
+    const gate = makeByIdReadGate(makeReadScope("open-within-org"));
+    const res: any = await gate.call(self("reader"), Object.assign(new SelectingTarget(), { id: "priv-1" }), superGet);
+    expect(res instanceof Response).toBe(true); // assertion: denied on the full row
+    expect(res.status).toBe(404);
+  });
+
+  it("the decision read gets a fresh plain object with only the id, never the caller's target", async () => {
+    const seen: any[] = [];
+    const recording = async (t: any) => { seen.push(t); return superGet(t); };
+    const gate = makeByIdReadGate(makeReadScope("open-within-org"));
+    const caller = Object.assign(new FakeTarget(), { id: "shared-1" });
+    const res: any = await gate.call(self("reader"), caller, recording);
+    expect(res).toEqual({ id: "shared-1", agentId: "owner", visibility: "shared", content: "shared text" });
+    expect(seen[0]).not.toBe(caller); // assertion: not the caller's target
+    expect(Object.getPrototypeOf(seen[0])).toBe(Object.prototype); // a plain object
+    expect(seen[0]).toEqual({ id: "shared-1" }); // carrying only the id
+  });
+
+  it("a target with no id still reads the loaded instance's unselected row", async () => {
+    // Harper's default instance mode loads the resource by id before get(); a
+    // target without an id then gets that loaded record. Model it here.
+    const loaded = { id: "shared-1", agentId: "owner", visibility: "shared", content: "shared text" };
+    const instanceGet = async (t: any) => (t?.id == null ? loaded : superGet(t));
+    const gate = makeByIdReadGate(makeReadScope("open-within-org"));
+    const res: any = await gate.call(self("reader"), {}, instanceGet);
+    expect(res).toEqual(loaded); // assertion: the authorized row, as before this change
+  });
+
   it("owner-only mode: a shaped read of another agent's row is 404", async () => {
     const gate = makeByIdReadGate(makeReadScope("owner-only"));
     const res: any = await gate.call(self("reader"), shaped("shared-1", { select: ["content"] }), superGet);

@@ -1,0 +1,2 @@
+- **The by-id read gate checks the unselected row through its own target.**
+  For a non-admin by-id read, the shared gate passes `super.get` a fresh plain object it builds itself (carrying only the id, or nothing when the target has no id) and applies the read scope to the unselected row that returns, rather than to a target derived from the caller's. A caller-shaped result (a selection or a single property) is still returned only after that row passes.

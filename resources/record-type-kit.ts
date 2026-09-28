@@ -282,19 +282,17 @@ export function makeByIdReadGate(
     }
 
     // Non-admin agent: scoped per the table's own read-scope model. The scope
-    // is evaluated on the FULL stored row: a target that asks for a selection
-    // or a single property is re-read without that shaping for the check, and
-    // the shaped result is returned only once the row passes.
+    // is evaluated on the UNSELECTED row: the gate passes super.get a fresh plain
+    // object it builds itself, carrying only the id (or nothing, when the target
+    // has no id), and checks the row that returns. In Harper's default instance
+    // mode the resource is loaded by id before get runs, and get returns that
+    // whole record when the target carries no select or property. The caller's
+    // target, and anything its class does when constructed, never shapes the row
+    // the decision sees. A target that asks for a selection or a single property
+    // gets that shaped result only once the unselected row passes.
     const shaped =
       typeof target === "object" && target !== null && (target.select != null || target.property != null);
-    let unshaped: any = target;
-    if (shaped) {
-      const Ctor = (target as any).constructor;
-      if (typeof Ctor !== "function") return NOT_FOUND(); // fail closed: cannot re-read unshaped
-      unshaped = new Ctor();
-      unshaped.id = targetId;
-    }
-    const record = await superGet(unshaped);
+    const record = await superGet(targetId != null ? { id: targetId } : {});
     if (!record) {
       // Row did not load: either it genuinely does not exist, OR — the #1181
       // failure — a by-id read reached here on an unloaded instance and

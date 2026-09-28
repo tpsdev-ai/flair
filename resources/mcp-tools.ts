@@ -561,10 +561,10 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
 // retrievable via memory_get and memory_search(includeArchived:true)). Restore
 // is the deliberate, GLOBAL inverse — it un-retires the memory for EVERY
 // session, not a session-local view (that is drawers, Deliverable B, which does
-// not exist yet). Both are writes scoped to the caller's own lane: the read
-// uses Memory.get()'s read-scope gate and the write uses Memory.put()'s
-// ownership gate (stampAttribution), so a caller can neither read nor write
-// another agent's memory here.
+// not exist yet). Non-admin agent reads use Memory.get()'s owner-and-
+// visibility scope; administrator and trusted internal reads are unfiltered.
+// Mutating another agent's record requires administrator or trusted internal
+// authority (Memory.put()'s stampAttribution gate).
 async function memoryBasement(agent: ResolvedAgent, args: any) {
   const Cls = await handler("Memory");
   const id = args?.id;
@@ -1296,7 +1296,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   memory_get: {
         impl: memoryGet,
     contract: {
-      summary: "The full memory record { id, agentId, content, durability, createdAt, ... } for the caller's own id — embedding + embeddingModel stripped by default.",
+      summary: "The full memory record { id, agentId, content, durability, createdAt, ... } for the requested ID, subject to the caller's read scope; embedding and embeddingModel are stripped by default.",
       requiredFields: ["id", "agentId", "content", "createdAt"],
       fieldTypes: { id: "string", agentId: "string", content: "string" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,

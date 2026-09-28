@@ -523,9 +523,9 @@ class MemoryApi {
     const rows: Memory[] = Array.isArray(result) ? result : ((result as { results?: Memory[] })?.results ?? []);
 
     const memories = rows.filter((memory) => {
-      // Keep the agent-scoped contract: the server's read scope also admits
-      // shared memories granted to this agent, but list() is an own-memory
-      // listing (the old explicit agentId condition had the same effect).
+      // The server admits own and other agents' non-private records; this
+      // listing additionally restricts results to the configured owner (the
+      // old explicit agentId condition had the same effect).
       if (memory.agentId !== this.client.agentId) return false;
       if (opts.subject !== undefined && memory.subject !== opts.subject) return false;
       if (opts.type !== undefined && memory.type !== opts.type) return false;
