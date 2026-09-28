@@ -127,6 +127,15 @@ describe("flair#1940 round 17 — a non-admin Memory read drops the caller's sel
     expect(req.url).toBe("/Memory/x.notAnAttribute"); // assertion: not a property, so not stripped
   });
 
+  it("drops an ENCODED dotted declared suffix — Harper decides on the DECODED path", async () => {
+    const mw = await loadMiddleware();
+    for (const given of ["/Memory/x%2Econtent", "/Memory/x%2econtent", "/Memory/x%2Econtent?limit=5"] as const) {
+      const req = makeRequest(given);
+      await mw(req, nextLayer);
+      expect(req.url, given).toBe(given.includes("?") ? "/Memory/x?limit=5" : "/Memory/x"); // assertion: `%2E` is a dot to Harper too
+    }
+  });
+
   it("drops the selection on a COLLECTION read too", async () => {
     const mw = await loadMiddleware();
     const req = makeRequest("/Memory/?select(id)&offset=1&limit=2");

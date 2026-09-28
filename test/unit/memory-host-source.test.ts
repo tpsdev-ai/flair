@@ -738,3 +738,47 @@ describe("round 17 — the by-id gate reads unshaped for a non-admin and passthr
   });
 
 });
+
+// ─── round 18: a non-admin contextual read keeps the full-row join boundary ──
+//
+// Flint's round-18 ruling: whatever target shape reaches Memory.get/search
+// in-process, a NON-admin caller gets the gated, pointer-projected row. The
+// resource drops a caller selection (a key deletion, never a selection parser)
+// so the base read is unselected and the join sees the STORED row — a shaped
+// base value could omit `instanceToken`/`visibility`/`archived` and move the
+// pointer decision. Admin/trusted-internal reads are unchanged (n4 above).
+
+describe("round 18 — a non-admin contextual read ignores the caller's selection (the join sees the stored row)", () => {
+  it("(q1) a non-admin by-id get with a selection returns the FULL gated row; no selection reaches the base read", async () => {
+    const row = seedMemory({ id: "mem-q1", agentId: "agent-a", visibility: "shared", content: "full body", subject: "subj" });
+    pointerStore.set(row.id, {
+      memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: "shared",
+      authorId: "agent-a", memoryInstanceToken: row.instanceToken, receivedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const res: any = await makeMemory(agentCtx("agent-a")).get({ id: row.id, select: ["content"] });
+    expect(res instanceof Response).toBe(false); // assertion: the read succeeded
+    expect(res.content).toBe("full body"); // assertion: the requested field is there
+    expect(res.agentId).toBe("agent-a"); // assertion: an UNselected field is present (full stored row)
+    expect(res.instanceToken).toBe(row.instanceToken); // assertion: the join's binding key reached the projection
+    expect(res.hostSource).toEqual(POINTER); // assertion: the gated pointer rendered from the STORED row
+    expect((harnessState.lastBaseGetTarget as any)?.select).toBeUndefined(); // assertion: no selection reached the base read
+  });
+
+  it("(q2) a non-admin collection search with a selection returns FULL rows; the selection is dropped before the base read", async () => {
+    const row = seedMemory({ id: "mem-q2", agentId: "agent-a", visibility: "shared", content: "full body" });
+    pointerStore.set(row.id, {
+      memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: "shared",
+      authorId: "agent-a", memoryInstanceToken: row.instanceToken, receivedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const stream: any = await makeMemory(agentCtx("agent-a")).search({
+      conditions: [{ attribute: "agentId", value: "agent-a" }],
+      select: ["id"],
+    });
+    const rows: any[] = [];
+    for await (const r of stream) rows.push(r);
+    expect(rows.length).toBe(1); // assertion: the scoped read returned the row
+    expect(rows[0].agentId).toBe("agent-a"); // assertion: an UNselected field is present (full stored row)
+    expect(rows[0].hostSource).toEqual(POINTER); // assertion: the gated pointer rendered from the STORED row
+    expect((harnessState.lastBaseSearchQuery as any)?.select).toBeUndefined(); // assertion: no selection reached the base read
+  });
+});

@@ -64,7 +64,21 @@ function hostSourceBadRequest(error: string, message: string): Response {
   });
 }
 
-
+/**
+ * flair#1940 round 18 — drop a caller `select`/`property` from a non-admin
+ * collection read so the gated pointer join sees the stored rows. This is NOT a
+ * selection parser: it removes the two keys and leaves every other query
+ * property (conditions, operator, sort, limit, offset, ...) exactly as sent. A
+ * query without a selection is returned unchanged.
+ */
+function withoutCallerSelection(query: any): any {
+  if (!query || typeof query !== "object") return query;
+  if ((query as any).select === undefined && (query as any).property === undefined) return query;
+  const copy: any = Array.isArray(query) ? query.slice() : { ...query };
+  delete copy.select;
+  delete copy.property;
+  return copy;
+}
 
 /**
  * Write the Memory row joining transaction `c` (0a). Resource.prototype.post
@@ -803,18 +817,32 @@ export class Memory extends (databases as any).flair.Memory {
 
     const ctx = (this as any).getContext?.();
     const auth = await resolveAgentAuth(ctx);
-    const result = await memoryByIdReadGate.call(this, target, (t: any) => super.get(t));
+    // flair#1940 round 18 (design ruling): a non-admin read ignores the caller's
+    // `select`/`property` whatever the target shape — the same contract the auth
+    // middleware enforces for a REST read, applied here for a direct contextual
+    // read. Read the FULL stored row through the shared by-id gate (which builds
+    // its own plain id-only target) so the pointer decision below always sees
+    // the stored `id`, `agentId`, `instanceToken`, `archived` and `visibility`.
+    // A shaped read — a caller target carrying a selection, or a class that
+    // installs one — can never hand the join an already-projected value. Trusted
+    // internal and admin reads keep their target unchanged.
+    const nonAdminAgent = auth.kind === "agent" && !auth.isAdmin;
+    let readTarget: any = target;
+    if (nonAdminAgent) {
+      const targetId = typeof target === "string" ? target : (target as any)?.id;
+      readTarget = targetId != null ? { id: targetId } : {};
+    }
+    const result = await memoryByIdReadGate.call(this, readTarget, (t: any) => super.get(t));
     // flair#1940 A3 (by-ID surface): the pointer is projected for THIS reader
     // BEFORE the trust block is attached. Admin/internal stay unfiltered (they
     // read the unredacted row, like every other field); a non-admin agent is
-    // the reader the withheld rule protects. This is the UNSELECTED non-admin
-    // path — a selected non-admin read was answered above — so the FULL stored
-    // row goes through the helper: the gated join renders a pointer ONLY when
-    // the row carries its `id` and `instanceToken`, and an inline pointer field
-    // on the Memory row is stripped from the returned object.
+    // the reader the withheld rule protects. The FULL stored row goes through
+    // the helper: the gated join renders a pointer ONLY when the row carries
+    // its `id` and `instanceToken`, and an inline pointer field on the Memory
+    // row is stripped from the returned object.
     let projected = result;
     if (result && typeof result === "object" && !(result instanceof Response)) {
-      if (auth.kind === "agent" && !auth.isAdmin) {
+      if (nonAdminAgent) {
         // A1' item 4 / A1-iv item 2: the gated join, through the ONE reader
         // helper (projectRowsThroughPointers) — pointer | "withheld" | nothing.
         projected = (await projectRowsThroughPointers([result as any], auth.agentId))[0];
@@ -878,11 +906,15 @@ export class Memory extends (databases as any).flair.Memory {
     // (never one per row), then project each row. The set is materialized so
     // the batch is a single call.
     const readerAgentId = gate.agentId;
-    // flair#1940 round 17 (design ruling): a non-admin HTTP Memory read ignores
-    // the caller's `select`/`property` — the middleware drops the selection from
-    // the request URL before Harper parses it. This path returns the authorized,
-    // pointer-projected row; the hit-stat overlay still runs on the full row.
-    const source = memoryScopedSearch(readerAgentId, query, (q) =>
+    // flair#1940 round 18 (design ruling): a non-admin read ignores the caller's
+    // `select`/`property`. For a REST read the auth middleware drops the
+    // selection from the request URL before Harper parses it; for a direct
+    // contextual read the selection is dropped here, before the scoped search,
+    // so the gated pointer join below always sees the stored rows. This is a key
+    // deletion, not a selection parser: the read runs on the same conditions,
+    // operator, sort, limit and offset, unselected, and the hit-stat overlay
+    // still runs on the full row.
+    const source = memoryScopedSearch(readerAgentId, withoutCallerSelection(query), (q) =>
       withDetachedTxn(ctx, () => super.search(q)),
     );
     const joined = (async function* joinPointerBatch() {

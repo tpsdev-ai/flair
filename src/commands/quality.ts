@@ -66,17 +66,20 @@ export const QUALITY_RECALL_SAMPLE_SIZE = 10;
 export const QUALITY_RECALL_K = 5;
 
 /**
- * Fields the recall spot-check and the quality-snapshot lookup actually
- * read. Harper REST `select(...)` (same syntax adk-flair-js's listMemories
- * already uses) projects these server-side so the nightly sweep never
- * pulls embedding vectors inline — the defect in flair#1360 was an
- * unfiltered `GET /Memory?agentId=…` that returned every row's 768-d
- * vector (~66 MB × 2 per `--emit` run on a 3k-row store) just to sample
- * 10 memories. `archived` is projected so the planner can drop basemented
- * rows before sampling (flair#857 — SemanticSearch excludes them, so an
- * archived row in the sample is a guaranteed miss). `type` is intentionally
- * omitted: it is not a declared Memory column (see schemas/memory.graphql);
- * snapshot exclusion keys off `subject` (`quality-snapshot/…`).
+ * Fields the recall spot-check and the quality-snapshot lookup READ from the
+ * list response. The request still carries a Harper REST `select(...)` (the same
+ * syntax adk-flair-js's listMemories uses), but a non-admin Memory read IGNORES
+ * the caller's selection (flair#1940): the response is the FULL stored row,
+ * which can include the 768-d embedding vector (the inline cost flair#1360
+ * measured on an unfiltered `GET /Memory?agentId=…` — ~66 MB × 2 per `--emit`
+ * run on a 3k-row store). The select is retained because a reader that does
+ * honour it (an admin) gets the projection, and it documents the fields the
+ * planner maps; the planner must not assume the response is reduced to them.
+ * `archived` is named so the planner can drop basemented rows before sampling
+ * (flair#857 — SemanticSearch excludes them, so an archived row in the sample
+ * is a guaranteed miss). `type` is intentionally omitted: it is not a declared
+ * Memory column (see schemas/memory.graphql); snapshot exclusion keys off
+ * `subject` (`quality-snapshot/…`).
  */
 
 export const QUALITY_MEMORY_LIST_SELECT = ["id", "subject", "content", "createdAt", "archived"] as const;
@@ -104,7 +107,9 @@ export type QualityApi = (
 
 /**
  * Harper REST collection path for the recall spot-check's sample fetch:
- * agent-scoped, projected (never `embedding`), recency-sorted, bounded.
+ * agent-scoped, recency-sorted, bounded. The server returns the FULL stored
+ * row — a non-admin Memory read ignores the selection (see the field-list
+ * note above) — so `limit` is what bounds the fetch, not the `select`.
  * `limit(start,end)` is Harper's offset window — same as
  * packages/adk-flair-js/src/memory_service.ts.
  */
@@ -120,7 +125,8 @@ export function qualityRecallSamplePath(
 
 /**
  * Harper REST collection path for the previous quality-snapshot lookup:
- * same projection as the sample fetch (never `embedding`). Subject is
+ * the same field list as the sample fetch (the server returns the full
+ * stored row; a non-admin read ignores the selection). Subject is
  * passed as a query equals (indexed) plus a client-side re-filter —
  * Memory.search() historically did not turn bare query params into
  * conditions beyond the signed agent scope, so the client-side filter
@@ -754,9 +760,10 @@ export function computeQualityReport(
  * The I/O half of the recall spot-check (Slice 1d): fetch a sample of
  * `agentId`'s own memories and, for each, search for a cue derived from it.
  * Reuses the EXACT read path `flair memory search` / `flair memory list`
- * use — `api()` (→ authedRequest's 5-tier resolver) for both the
- * projected, bounded `GET /Memory?…&select(…)&limit(…)` sample fetch
- * (flair#1360 — never the unfiltered collection with embeddings inline)
+ * use — `api()` (→ authedRequest's 5-tier resolver) for the
+ * bounded `GET /Memory?…&select(…)&limit(…)` sample fetch (flair#1360;
+ * the server returns the full stored row because a non-admin read ignores
+ * the selection, so `limit` bounds the fetch, not the `select`)
  * and the `POST /SemanticSearch` queries — so this has zero new endpoint
  * and zero new auth mechanism; it is scoped to `agentId`'s own memories
  * exactly as those commands already are. Never throws: every failure mode
@@ -1241,8 +1248,9 @@ export function register(program: Command): void {
 // from /HealthDetail at all — it's the one metric in this file that requires
 // live QUERIES, because it's checking whether querying itself still works.
 // For a sample of the querying agent's OWN memories (fetchRecallSpotCheckData
-// below, a projected+bounded GET /Memory — flair#1360: never the unfiltered
-// collection with embeddings inline), a CUE is derived from each memory
+// below, a bounded GET /Memory — flair#1360; the server returns the full stored
+// row because a non-admin read ignores the selection, so `limit` bounds the
+// fetch), a CUE is derived from each memory
 // (deriveRecallCue — its `subject` if present, else the leading ~8 words /
 // first sentence of `content`; a PARTIAL cue, never the full content) and
 // searched for through the EXACT SAME authenticated read path `flair memory

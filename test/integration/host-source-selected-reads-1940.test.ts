@@ -133,6 +133,16 @@ describe("flair#1940 round 17 — a non-admin Memory read ignores the caller's s
     expect(body.hostSource).toEqual(POINTER); // assertion: the gated pointer value
   }, 30_000);
 
+  it("by-id: an ENCODED dotted property (`%2Econtent`) also returns the FULL gated row", async () => {
+    const res = await authFetch(harper, reader, "GET", `/Memory/${idFull}%2Econtent`);
+    const body = await res.json();
+    console.log("by-id encoded-property body:", JSON.stringify(body), "status:", res.status);
+    expect(res.status).toBe(200); // assertion: the read succeeded
+    expect(typeof body).toBe("object"); // assertion: not a bare property value
+    expect(body.agentId).toBe(author.id); // assertion: the full row, not the encoded single property
+    expect(body.hostSource).toEqual(POINTER); // assertion: the gated pointer value
+  }, 30_000);
+
   it("collection: a request WITH `select(id)` returns FULL rows, and limit still applies", async () => {
     const res = await authFetch(harper, reader, "GET", "/Memory/?select(id)&limit(0,1)&sort(createdAt)");
     const body = await res.json();

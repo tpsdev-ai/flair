@@ -32,13 +32,22 @@ function stripMemorySelection(rawUrl: string): string {
   let query = q === -1 ? "" : rawUrl.slice(q + 1);
 
   // Path form: Harper reads a trailing `.<declared>` on the id as `property`.
-  // Drop that suffix so the id addresses the full row; a suffix that is not a
-  // declared Memory attribute stays part of the id, as Harper's own rule has it.
+  // Harper decides on the DECODED path — RequestTarget decodes the path
+  // (`this.id = decodeURIComponent(path)`) and Resource.parsePath then splits at
+  // the first dot — so the middleware must decide on the decoded segment too, or
+  // it misses a percent-encoded dot: `%2E` (and `%2e`) IS a dot to Harper. Drop
+  // that suffix so the id addresses the full row; a suffix that is not a
+  // declared Memory attribute stays part of the id, exactly as Harper's own rule
+  // leaves it (a content-type extension such as `json` is not a declared
+  // attribute, so it is left for Harper to read as a content type).
   const slash = pathPart.lastIndexOf("/");
   const seg = pathPart.slice(slash + 1);
-  const dot = seg.indexOf(".");
-  if (dot > -1 && DECLARED_MEMORY_ATTRIBUTE_SET.has(seg.slice(dot + 1))) {
-    pathPart = `${pathPart.slice(0, slash + 1)}${seg.slice(0, dot)}`;
+  const decodedSeg = decodePathSegment(seg);
+  const dot = decodedSeg.indexOf(".");
+  if (dot > -1 && DECLARED_MEMORY_ATTRIBUTE_SET.has(decodedSeg.slice(dot + 1))) {
+    // Rebuild the id from its decoded form. Harper decodes the path it is handed,
+    // so this re-encoded segment addresses the SAME id, without the property.
+    pathPart = `${pathPart.slice(0, slash + 1)}${encodeURIComponent(decodedSeg.slice(0, dot))}`;
   }
 
   // Query form: drop every `select(...)` token and every `property` parameter.
@@ -54,6 +63,17 @@ function stripMemorySelection(rawUrl: string): string {
 
   if (q === -1) return pathPart;
   return query === "" ? pathPart : `${pathPart}?${query}`;
+}
+
+/** Decode a path segment the way Harper does before its property parse; fall
+ *  back to the raw segment when it is not valid percent-encoding (Harper rejects
+ *  the malformed request; the middleware must not crash on it). */
+function decodePathSegment(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
 }
 
 // [start, end) ranges of every `select(...)` call in a query string, accounting
