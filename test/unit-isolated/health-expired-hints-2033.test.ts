@@ -93,7 +93,9 @@ mock.module("../../resources/bm25.js", () => ({
   hybridEnabled: () => false, retrievalMode: () => "vector",
 }));
 mock.module("../../resources/bm25-index-service.js", () => ({
-  bm25IndexEnabled: () => false, bm25IndexStatus: () => ({}),
+  bm25IndexEnabled: () => false,
+  bm25IndexInRetrievalPath: () => false,
+  bm25IndexStatus: () => ({}),
   noteMemoryUpsert: () => {}, noteMemoryDelete: () => {},
 }));
 mock.module("../../resources/embedding-space-guard.js", () => ({ normalizeStamp: (s: string) => s }));
