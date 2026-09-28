@@ -242,6 +242,7 @@ export function register(program: Command): void {
     .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
     .option("--admin-pass <pass>", "Admin password — sign as admin while --agent names whose memories to search (flair#1500: a flag-pinned agent with no key no longer falls back to FLAIR_ADMIN_PASS)")
     .option("--q <query>", "search query (alias for positional arg)")
+    .option("--json", "Output raw JSON array")
     .option("--limit <n>", "Max results", "5")
     .option("--tag <tag>")
     .option("--include-archived", "Include basemented (archived) memories in results (default: excluded)")
@@ -261,6 +262,11 @@ export function register(program: Command): void {
       if (opts.includeArchived) body.includeArchived = true;
       const baseUrl = resolveBaseUrl(opts);
       const res = await api("POST", "/SemanticSearch", body, { baseUrl, agentId, agentIdSource: source, explicitAdminPass: opts.adminPass });
+      if (opts.json) {
+        const results = res.results || res || [];
+        console.log(render.asJSON(Array.isArray(results) ? results : []));
+        return;
+      }
       console.log(JSON.stringify(res, null, 2));
     });
   // ─── flair memory basement / restore ────────────────────────────────────────
