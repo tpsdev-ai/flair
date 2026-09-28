@@ -4,6 +4,7 @@ import { getEmbedding } from "./embeddings-provider.js";
 import { isAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
 import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { resolveReadScope } from "./memory-read-scope.js";
+import { parseCallerSelection } from "./caller-selection.js";
 import { NOT_FOUND } from "./record-type-kit.js";
 import { isForbiddenOwnerMutation, resolveGuardedRecord } from "./record-owner-guard.js";
 import { checkHttpRateLimit } from "./rate-limit.js";
@@ -659,6 +660,19 @@ server.http(async (request: any, nextLayer: any) => {
         const pathParts = url.pathname.split("/").filter(Boolean);
         const memId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
         if (memId) {
+          // flair#1940 round 13 — validate the REST selection shape BEFORE the
+          // scope read below. Harper parses the query into select/property and
+          // dispatches to Memory.get only after this middleware runs, so an
+          // unsupported selection must be refused here: otherwise this
+          // Memory.get (and the subsequent Harper dispatch) runs before the
+          // resource's own by-id selection check can answer 400. The resource
+          // check stays for direct/in-process calls.
+          const selection = parseCallerSelection(
+            url.searchParams.get("select") ?? undefined,
+            url.searchParams.get("property") ?? undefined,
+            { surface: "byId" },
+          );
+          if (selection instanceof Response) return selection;
           const record = await (databases as any).flair.Memory.get(memId);
           if (record && record.agentId && record.agentId !== agentId) {
             // Centralized read-scope (Layer 1): the owner's records at any

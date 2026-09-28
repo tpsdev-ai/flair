@@ -53,6 +53,20 @@ declare module "harper" {
     static connect?(): AsyncIterable<any>;
   }
   /**
+   * Harper's query / by-id target (#1975, #1940). The resource builds a FRESH
+   * one carrying only the id for an unselected scope read. Only the members
+   * Flair consumes are declared; the real class extends URLSearchParams.
+   */
+  export class RequestTarget extends URLSearchParams {
+    id?: any;
+    isCollection?: any;
+    pathname?: any;
+    search?: any;
+    select?: any;
+    property?: any;
+    constructor(target?: any);
+  }
+  /**
    * Wrap bytes as a Harper Blob for out-of-record storage.
    * Consumed by resources/Asset.ts (images-in-Flair slice 1).
    * Mirrors harper's createBlob(source, { type }) — only the shapes Flair uses.

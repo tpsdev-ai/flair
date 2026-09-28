@@ -1,4 +1,5 @@
 import { databases } from "harper";
+import * as harperRuntime from "harper";
 import { randomUUID } from "node:crypto";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
@@ -68,6 +69,39 @@ function hostSourceBadRequest(error: string, message: string): Response {
     status: 400,
     headers: { "content-type": "application/json" },
   });
+}
+
+/**
+ * flair#1940 round 13 — build the UNSELECTED read query for a non-admin
+ * collection read that carried a `select`/`property`. The caller's selection
+ * shapes only the OUTPUT, so the scope read must run on the SAME conditions,
+ * operator, limit, offset and sort. A plain `{ ...query }` is WRONG for an
+ * array query: spreading the array turns its conditions into numeric-keyed
+ * properties, so makeScopedSearch's object branch sees no `conditions` and
+ * silently drops the caller's filter. Preserve array and iterable conditions
+ * explicitly, carrying any non-selection scalar props (limit/offset/sort).
+ */
+function unselectedReadQuery(query: any): any {
+  if (Array.isArray(query)) {
+    const rest: any = { conditions: Array.from(query) };
+    for (const key of Object.keys(query)) {
+      if (key === "select" || key === "property" || /^\d+$/.test(key)) continue;
+      rest[key] = (query as any)[key];
+    }
+    return rest;
+  }
+  const isConditionIterable =
+    !!query && typeof query === "object" && typeof query[Symbol.iterator] === "function" && !(query instanceof URLSearchParams);
+  if (isConditionIterable && !("conditions" in query)) {
+    return { conditions: Array.from(query) };
+  }
+  if (query && typeof query === "object") {
+    const rest: any = { ...query };
+    delete rest.select;
+    delete rest.property;
+    return rest;
+  }
+  return query;
 }
 
 
@@ -818,12 +852,21 @@ export class Memory extends (databases as any).flair.Memory {
     // absent row gets. An unsupported selection shape is refused with 400 before
     // any read.
     if (auth.kind === "agent" && !auth.isAdmin && carriesSelection(target)) {
-      const selection = parseCallerSelection((target as any).select, (target as any).property);
+      const selection = parseCallerSelection((target as any).select, (target as any).property, { surface: "byId" });
       if (selection instanceof Response) return selection; // 400, no read
       const targetId = typeof target === "string" ? target : (target as any)?.id;
-      const Ctor = (target as any).constructor;
-      if (typeof Ctor !== "function") return NOT_FOUND(); // fail closed: cannot rebuild the unshaped target
-      const unshaped: any = new Ctor();
+      // Build the unshaped read target from a FRESH `RequestTarget` carrying only
+      // the id — never from `target.constructor`. A caller-supplied constructor
+      // could install `select`/`property` that omit `visibility`/`archived`, so
+      // the scope predicate (memory-read-scope.ts) would treat another agent's
+      // private row as non-private and render an archived row's pointer. A
+      // fresh target carries no such shaping. Same construction the shared
+      // by-id gate uses (#1975). Resolved from the runtime namespace so a test
+      // mock that does not model the class cannot fail the named-export link;
+      // when the class is absent (non-Harper test env) fall back to a PLAIN
+      // id-only object — still never the read target's own constructor.
+      const RequestTargetCtor: any = (harperRuntime as any).RequestTarget;
+      const unshaped: any = typeof RequestTargetCtor === "function" ? new RequestTargetCtor() : {};
       unshaped.id = targetId;
       const record = await memoryByIdReadGate.call(this, unshaped, (t: any) => super.get(t));
       if (record instanceof Response) return record;
@@ -928,13 +971,10 @@ export class Memory extends (databases as any).flair.Memory {
     let selection: CallerSelection = { shape: "none" };
     let readQuery = query;
     if (carriesSelection(query)) {
-      const parsed = parseCallerSelection((query as any).select, (query as any).property);
+      const parsed = parseCallerSelection((query as any).select, (query as any).property, { surface: "collection" });
       if (parsed instanceof Response) return parsed; // 400, no read
       selection = parsed;
-      const rest: any = { ...query };
-      delete rest.select;
-      delete rest.property;
-      readQuery = rest;
+      readQuery = unselectedReadQuery(query);
     }
     const source = memoryScopedSearch(readerAgentId, readQuery, (q) => withDetachedTxn(ctx, () => super.search(q)));
     const joined = (async function* joinPointerBatch() {

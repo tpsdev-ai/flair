@@ -13,8 +13,9 @@
  * reach Harper's default allow-decision (super_user passthrough), reachable by
  * the forged-loopback super_user and, once the global gate is non-rejecting, by
  * a genuinely anonymous remote caller. So allowRead/get/search gate on the
- * authenticated principal: internal calls and admin agents pass; a non-admin
- * agent gets NOTHING (get/search), never a 403 existence oracle. The author
+ * authenticated principal: internal calls and admin agents pass; a non-admin by-id
+ * get returns 404; search returns 403; neither reveals whether a particular
+ * pointer row exists. The author
  * reads their own pointer only through the gated join INTO Memory results
  * (resources/Memory.ts) — never from this table directly.
  *

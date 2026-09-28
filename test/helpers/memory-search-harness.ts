@@ -23,6 +23,11 @@ export const harnessState = {
   failNextPointerPut: false,
   failNextPointerDelete: false,
   getOverride: null as null | ((id: string) => any),
+  // flair#1940 round 13 (blocker 6): observe what the HANDLER passes to the base
+  // table read — proof that the by-id/collection scope read is UNSELECTED.
+  baseSearchCalls: 0,
+  lastBaseGetTarget: null as any,
+  lastBaseSearchQuery: null as any,
 };
 
 export function resetHarnessState(): void {
@@ -33,6 +38,9 @@ export function resetHarnessState(): void {
   harnessState.failNextPointerPut = false;
   harnessState.failNextPointerDelete = false;
   harnessState.getOverride = null;
+  harnessState.baseSearchCalls = 0;
+  harnessState.lastBaseGetTarget = null;
+  harnessState.lastBaseSearchQuery = null;
 }
 
 export function matchesCondition(record: any, cond: any): boolean {
@@ -87,6 +95,7 @@ function stageOrRun(ctx: any, apply: () => void): void {
 
 export class BaseMemory {
   async get(target?: any) {
+    harnessState.lastBaseGetTarget = target;
     const id = typeof target === "string" ? target : target?.id;
     if (harnessState.getOverride && typeof id === "string") {
       const override = harnessState.getOverride(id);
@@ -134,6 +143,8 @@ export class BaseMemory {
     return { ok: true };
   }
   search(query?: any) {
+    harnessState.baseSearchCalls++;
+    harnessState.lastBaseSearchQuery = query;
     const topLevel = Array.isArray(query) ? { conditions: query, operator: "and" } : query || {};
     const conds = Array.isArray(topLevel.conditions) ? topLevel.conditions : [];
     const op = topLevel.operator || "and";
@@ -300,6 +311,40 @@ export const databasesMock = {
   },
 };
 
+/** flair#1940 round 13 — a minimal stand-in for Harper's `RequestTarget`. The
+ *  resource builds a FRESH one carrying only the id for an unselected scope read
+ *  (#1975); extends URLSearchParams like the real class so `instanceof` checks
+ *  behave the same. */
+export class MockRequestTarget extends URLSearchParams {
+  id: any;
+  isCollection: any;
+  pathname: any;
+  search: any;
+  constructor(target?: any) {
+    super();
+    if (target === undefined) return; // fresh instance: id/isCollection left unset
+    const t = String(target);
+    const qi = t.indexOf("?");
+    if (qi > -1) {
+      this.pathname = t.slice(0, qi);
+      const s = t.slice(qi + 1);
+      this.search = s;
+      new URLSearchParams(s).forEach((v, k) => this.append(k, v));
+    } else {
+      this.pathname = t;
+    }
+    let path = this.pathname ?? "";
+    if (path.startsWith("/")) path = path.slice(1);
+    if (path.endsWith("/")) {
+      this.isCollection = true;
+      this.id = null;
+    } else {
+      this.isCollection = false;
+      this.id = decodeURIComponent(path.split("/").pop() ?? "");
+    }
+  }
+}
+
 /** Register the shared harper mock and import the resource classes. Call ONCE
  *  at a test file's top level (mock.module must precede the resource import). */
 export async function installMemoryHarperMock() {
@@ -311,6 +356,7 @@ export async function installMemoryHarperMock() {
     databases: databasesMock,
     Resource: class {},
     transaction: mockTransaction,
+    RequestTarget: MockRequestTarget,
   }));
   const { Memory } = await import("../../resources/Memory.ts");
   const { MemoryHostSource } = await import("../../resources/MemoryHostSource.ts");
