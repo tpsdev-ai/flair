@@ -902,9 +902,8 @@ export class Memory extends (databases as any).flair.Memory {
     // makeScopedSearch (record-type-kit.ts) — same correct composition
     // MemoryCandidate.search() already applies — so a caller-supplied
     // `operator: "or"` cannot boolean-inject past the owner scope.
-    // A1' item 4: fetch pointers for the WHOLE result set in ONE batched query
-    // (never one per row), then project each row. The set is materialized so
-    // the batch is a single call.
+    // Fetch pointers once per bounded chunk, then yield its projected rows
+    // before consuming the next chunk (never one pointer query per row).
     const readerAgentId = gate.agentId;
     // flair#1940 round 18 (design ruling): a non-admin read ignores the caller's
     // `select`/`property`. For a REST read the auth middleware drops the
@@ -1373,9 +1372,10 @@ export class Memory extends (databases as any).flair.Memory {
     const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (__ownerDenial) return __ownerDenial;
     // Reindex migration bypass: admin-only escape hatch used by the
-    // MemoryReindex admin endpoint to re-PUT each existing record byte-for-byte
+    // MemoryReindex admin endpoint to re-PUT declared and named retained fields
     // (no updatedAt bump, no embedding regen, no safety rescan) so Harper
-    // repopulates secondary indices. Because this skips content safety and
+    // repopulates secondary indices. Other undeclared fields are stripped and
+    // an absent incarnation token is generated. Because this skips safety and
     // auditability, it must be gated to admins. Internal calls (no auth
     // context) pass through, matching the pattern used in delete().
     if (content._reindex === true) {
@@ -1389,8 +1389,8 @@ export class Memory extends (databases as any).flair.Memory {
         });
       }
       delete content._reindex;
-      // A1' item 1: the reindex branch is a Memory writer too — persist ONLY
-      // declared attributes. Pinned by test/unit/memory-host-source.test.ts
+      // A1' item 1: the reindex branch keeps declared and named retained
+      // attributes. Pinned by test/unit/memory-host-source.test.ts
       // (r20-put-reindex) — RED if this call is removed.
       stripUndeclaredMemoryAttributes(content);
       // A1-iv items 1/3: strip a client-supplied server-stamped field, then
@@ -1401,8 +1401,9 @@ export class Memory extends (databases as any).flair.Memory {
         ? await (databases as any).flair.Memory.get(content.id)
         : null;
       stampInstanceToken(content, reindexExisting);
-      // Reindex is a byte-for-byte re-PUT of an EXISTING row: keep the STORED
-      // provenance. The body's copy was stripped above so it cannot be forged;
+      // Keep the EXISTING row's STORED provenance byte-for-byte. The rest of
+      // the row is filtered above and may gain an absent incarnation token.
+      // The body's provenance was stripped above so it cannot be forged;
       // restoring it from `reindexExisting` (never from the submitted value)
       // keeps provenance byte-identical across a corpus-wide reindex.
       // Pinned by test/unit/memory-host-source.test.ts (r20-put-reindex) — RED
@@ -1786,12 +1787,13 @@ export class Memory extends (databases as any).flair.Memory {
     // delete share ONE transaction; with no request context
     // withSharedWriteTransaction creates one. A failing pointer delete aborts
     // it, so nothing is deleted; failures are NOT swallowed.
-    // Round 22: the lexical-index delete hook runs ONLY after the shared
-    // transaction has SUCCEEDED (the pointer delete is part of the same
-    // scope). Firing it inside the callback marked the row deleted in the
-    // (warmed) BM25 index even when a later pointer-delete abort left the
+    // The lexical-index delete hook runs after the shared write succeeds.
+    // An owned transaction has committed then; for a request-owned transaction
+    // the hook still runs BEFORE that request's commit. Firing it inside the
+    // callback marked the row deleted in the warmed BM25 index even when a
+    // later pointer-delete abort left the
     // Memory row in place, so the surviving row vanished from lexical recall.
-    // Pinned by test/unit/memory-host-source.test.ts (r22-delete-bm25) — RED if
+    // Pinned by test/unit-isolated/memory-delete-bm25.test.ts (r22-delete-bm25) — RED if
     // the call is moved back inside the transaction callback.
     const deleteResult = await withSharedWriteTransaction(ctx, async (c) => {
       const d = await (databases as any).flair.Memory.delete(id, c);

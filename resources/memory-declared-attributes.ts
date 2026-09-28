@@ -1,6 +1,6 @@
 /**
  * memory-declared-attributes.ts — the declared Memory attributes guard
- * (flair#1940 slice 1 / A1' item 1). PURE: zero imports, so it is unit-
+ * (flair#1940 slice 1 / A1' item 1). PURE: data-only imports, so it is unit-
  * testable and callable from every Memory writer.
  *
  * WHY: Harper stores an attribute that is not DECLARED in the schema (the
@@ -26,78 +26,11 @@
  * so the whitelist can never silently fall behind the schema.
  */
 
-/** Every DECLARED attribute of `type Memory` in schemas/memory.graphql, in
- *  schema order. Keep in sync with the schema (the drift test enforces it). */
-export const DECLARED_MEMORY_ATTRIBUTES = Object.freeze([
-  "id",
-  "agentId",
-  "content",
-  "contentHash",
-  "trigger",
-  "visibility",
-  "embedding",
-  "embeddingModel",
-  "tags",
-  "durability",
-  "source",
-  "type",
-  "createdAt",
-  "updatedAt",
-  "instanceToken",
-  "expiresAt",
-  "retrievalCount",
-  "lastRetrieved",
-  "usageCount",
-  "promotionStatus",
-  "promotedAt",
-  "promotedBy",
-  "archived",
-  "archivedAt",
-  "archivedBy",
-  "parentId",
-  "derivedFrom",
-  "sessionId",
-  "lastReflected",
-  "supersedes",
-  "subject",
-  "summary",
-  "validFrom",
-  "validTo",
-  "_safetyFlags",
-  "provenance",
-  "originatorInstanceId",
-  "metadata",
-  "entities",
-] as const);
+import { DECLARED_MEMORY_ATTRIBUTES, MEMORY_ATTRIBUTES } from "../src/lib/memory-attributes.js";
+export { DECLARED_MEMORY_ATTRIBUTES, UNDECLARED_ALLOWED } from "../src/lib/memory-attributes.js";
 
-const DECLARED = new Set<string>(DECLARED_MEMORY_ATTRIBUTES as readonly string[]);
-
-/** Pre-existing UNDECLARED attributes the codebase deliberately stores on a
- *  Memory row and must keep (the guard's job is the POINTER, not these).
- *  This is an EXPLICIT, NAMED list measured against a live store (A1'' item 1)
- *  — never derived from the schema, because the schema is not the source of
- *  truth for what is on disk:
- *    - `meta`   — the continuity-journal payload {seq, processUUID, sessionId,
- *                 hook} written by the capture path (PUT /Memory/<id>,
- *                 flair#1257 slice 3); Kern's slice-2 ruling settled that it
- *                 round-trips as an undeclared field, and
- *                 test/integration/continuity-rem-promotion-1257.test.ts pins
- *                 that. It is not a flat String, so declaring it would change
- *                 the stored shape.
- *    - `kind`   — carried on a couple of older rows.
- *    - `_originatorInstanceId`, `_syncedFrom`, `_syncedAt` — federation
- *                 bookkeeping stamped by the RECEIVER at merge time
- *                 (resources/Federation.ts's mergeRecord) on every synced row.
- *  Any OTHER undeclared key (in particular any pointer input) is stripped. */
-export const UNDECLARED_ALLOWED = Object.freeze([
-  "meta",
-  "kind",
-  "_originatorInstanceId",
-  "_syncedFrom",
-  "_syncedAt",
-] as const);
-
-const ALLOWED_UNDECLARED = new Set<string>(UNDECLARED_ALLOWED as readonly string[]);
+const DECLARED = new Set<string>(DECLARED_MEMORY_ATTRIBUTES);
+const ALLOWED = new Set<string>(MEMORY_ATTRIBUTES);
 
 /** True when `key` is a declared Memory attribute. */
 export function isDeclaredMemoryAttribute(key: string): boolean {
@@ -115,7 +48,7 @@ export function stripUndeclaredMemoryAttributes(content: unknown): string[] {
   const obj = content as Record<string, unknown>;
   const removed: string[] = [];
   for (const key of Object.keys(obj)) {
-    if (!DECLARED.has(key) && !ALLOWED_UNDECLARED.has(key)) {
+    if (!ALLOWED.has(key)) {
       delete obj[key];
       removed.push(key);
     }

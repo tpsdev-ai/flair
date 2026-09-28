@@ -158,8 +158,8 @@ export class MemoryMaintenance extends Resource {
       // 3. Orphan sweep: pointer rows whose Memory is MISSING or ARCHIVED. An
       // orphan is unreadable by construction (the only read path joins pointers
       // INTO Memory results), but it should not be left behind either. A
-      // failing sweep delete is NOT swallowed: it propagates to the caller's
-      // error path below (HTTP 500), never silently ignored.
+      // failed row read or delete is counted and the sweep continues; the
+      // incomplete run is reported below (HTTP 500), never silently ignored.
       const pointerTable = (databases as any).flair?.[MEMORY_HOST_SOURCE_TABLE];
       if (!dryRun && !pointerTable?.search) {
         // Hygiene: a missing sweep table is REPORTED, never silently skipped.
@@ -169,8 +169,9 @@ export class MemoryMaintenance extends Resource {
         for await (const ptr of pointerTable.search()) {
           const memoryId = ptr?.memoryId;
           if (typeof memoryId !== "string" || memoryId.length === 0) continue;
-          const mem = await (databases as any).flair.Memory.get(memoryId, ctx);
-          if (!mem || mem.archived === true) {
+          try {
+            const mem = await (databases as any).flair.Memory.get(memoryId, ctx);
+            if (mem && mem.archived !== true) continue;
             // 0d: RE-CHECK inside an OWNED transaction before deleting. The
             // first read is outside it, so a new row reusing this id in
             // between must not be orphan-deleted; the conditional re-read
@@ -184,19 +185,17 @@ export class MemoryMaintenance extends Resource {
             // of the callback). Pinned by test/unit/memory-host-source.test.ts
             // (r22-orphan-continues) — RED if the try/catch is removed.
             let committed = false;
-            try {
-              await withOwnedTransaction(ctx, async (c) => {
-                const again = await (databases as any).flair.Memory.get(memoryId, c);
-                if (!again || again.archived === true) {
-                  await deletePointerRowOrThrow(memoryId, c);
-                  committed = true;
-                }
-              });
-              if (committed) stats.orphans++;
-            } catch (err) {
-              stats.errors++;
-              console.error("MemoryMaintenance: orphan sweep delete failed (continuing)", err);
-            }
+            await withOwnedTransaction(ctx, async (c) => {
+              const again = await (databases as any).flair.Memory.get(memoryId, c);
+              if (!again || again.archived === true) {
+                await deletePointerRowOrThrow(memoryId, c);
+                committed = true;
+              }
+            });
+            if (committed) stats.orphans++;
+          } catch (err) {
+            stats.errors++;
+            console.error("MemoryMaintenance: orphan sweep failed (continuing)", err);
           }
         }
       }

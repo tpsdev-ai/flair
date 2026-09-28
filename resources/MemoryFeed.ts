@@ -10,6 +10,7 @@ import { enforceSkillDurability, refuseSkillWriteSource, skillScanGate } from ".
 import { noteMemoryUpsert } from "./bm25-index-service.js";
 import { extractPointerInputs } from "./memory-host-source.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
+import { buildProvenance } from "./provenance.js";
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -199,6 +200,12 @@ export class FeedMemories extends Resource {
     // rule #1956 applies to put()). No `.catch`: the rejection propagates.
     const priorById = await (databases as any).flair.Memory.get(record.id);
     record.instanceToken = priorById?.instanceToken ?? randomUUID();
+    // Feed re-ingestion keeps the same incarnation and its original provenance.
+    // Restore only the stored stamp, never the submitted copy. New/unstamped
+    // rows get trusted caller identity and server time, not body timestamps.
+    record.provenance = typeof priorById?.provenance === "string"
+      ? priorById.provenance
+      : buildProvenance(auth, now, content);
     await (databases as any).flair.Memory.put(record);
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).
     noteMemoryUpsert(record);

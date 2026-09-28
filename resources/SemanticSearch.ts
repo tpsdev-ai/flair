@@ -291,7 +291,7 @@ export class SemanticSearch extends Resource {
       // flair#744 slice 1: the trust block needs `provenance`, which the
       // default projection omits. Widen the select ONLY when the caller opts
       // in — passing undefined otherwise keeps the default (no `provenance`)
-      // so a non-trust recall response stays byte-identical.
+      // so a non-trust recall uses DEFAULT_SELECT without provenance.
       //
       // flair#1332: same idiom for the client-writable `metadata` JSON blob
       // (ADK custom_metadata store-and-return). DEFAULT_SELECT deliberately
@@ -299,14 +299,14 @@ export class SemanticSearch extends Resource {
       // serves every consumer, and none of the others should pay result-size
       // for an opaque blob they never read); adk-flair opts in per-request
       // with `includeMetadata: true`. `subject` needs no widening — it is
-      // already in DEFAULT_SELECT. Neither flag ⇒ select stays undefined ⇒
-      // response bytes unchanged.
+      // already in DEFAULT_SELECT. Without these flags the core uses its
+      // default projection, including instanceToken for the pointer join.
       // flair#1546: `includeTrigger` opts the skill recall signal into the
       // projection. DEFAULT_SELECT deliberately omits `trigger` (a skill-only
       // column — the shared retrieval core must not grow it for every consumer,
       // same K&S projection ruling as `metadata`), so skill_search opts it in
-      // per-request to return the trigger in its lightweight catalog. Neither
-      // flag ⇒ select stays undefined ⇒ response bytes unchanged.
+      // per-request to return the trigger in its lightweight catalog. With no
+      // projection flag, select stays undefined and the core uses DEFAULT_SELECT.
       // flair#1940 A3: the gated pointer join also needs `instanceToken`, which
       // DEFAULT_SELECT already carries (see semantic-retrieval-core.ts), so both
       // the default and this widened projection hand the join what it binds on.

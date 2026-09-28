@@ -19,8 +19,10 @@
  * mirrors the raw `table.put` + latch statements; this file instead exercises
  * the strip-and-restore that only the real apply path performs.
  */
-import { describe, it, expect, beforeEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
 import nacl from "tweetnacl";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { signBody, signBodyFresh } from "../../resources/federation-crypto.js";
 
 const PEER_ID = "inst-remote";
@@ -69,6 +71,14 @@ mock.module("harper", () => ({
     },
   },
 }));
+
+let senderSeed: Uint8Array;
+mock.module("../../src/keystore.ts", () => ({
+  keystore: { getPrivateKeySeed: () => senderSeed },
+  keyPath: () => { throw new Error("round-trip fixture must use the in-memory key"); },
+}));
+const originalFetch = globalThis.fetch;
+afterEach(() => { globalThis.fetch = originalFetch; });
 
 const { FederationSync } = await import("../../resources/Federation.ts");
 
@@ -164,5 +174,91 @@ describe("flair#1940 round 22 — the federated merge preserves provenance", () 
     const res: any = await postSync({ instanceId: PEER_ID, records: [record], lamportClock: 3 }, secretKey);
     expect(res.merged).toBe(1); // control: the record merged (its contentHash differs, so not a no-op)
     expect(memoryStore.get("m-old")?.provenance).toBe("LOCAL-PROVENANCE"); // assertion: the merge kept local, so local provenance survives
+  });
+});
+
+
+describe("round 23 — sender projection through signed federation receive", () => {
+  it.each([false, true])("(r23-federation-roundtrip) meta and kind survive sync (update=%s)", async (update) => {
+    const { secretKey, publicKey } = keypair();
+    senderSeed = secretKey.slice(0, 32);
+    peerStore.set(PEER_ID, { id: PEER_ID, publicKey, role: "hub", status: "connected" });
+    const row = {
+      id: "roundtrip", agentId: "agent-a", content: "remote content", contentHash: "remote-hash",
+      visibility: "shared", updatedAt: "2026-09-02T00:00:00.000Z", createdAt: "2026-09-01T00:00:00.000Z",
+      provenance: JSON.stringify({ v: 1, verified: { agentId: "agent-a" } }),
+      meta: { seq: 7, processUUID: "capture-process", custom: { nested: ["kept", 8] } },
+      kind: "session",
+      _originatorInstanceId: "previous-origin", _syncedFrom: "previous-peer", _syncedAt: "previous-time",
+      instanceToken: "remote-token",
+      hostSource: "POINTER-MUST-NOT-LEAVE", hostSourceScope: "record", hostSourceVisibility: "shared",
+      undeclaredProbe: "MUST-NOT-LEAVE",
+    };
+    if (update) memoryStore.set(row.id, {
+      ...row, content: "local content", contentHash: "local-hash", updatedAt: "2026-09-01T00:00:00.000Z",
+      meta: { seq: 1 }, kind: "old-kind", instanceToken: "local-token",
+    });
+    const sent: any[] = [];
+    let projectionCalls = 0;
+    globalThis.fetch = mock(async (urlInput: string | URL | Request, init?: RequestInit) => {
+      const url = String(urlInput);
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      if (url.endsWith("/FederationPeers")) return Response.json({ peers: [
+        { id: "hub", role: "hub", status: "connected", endpoint: "http://roundtrip-hub:9926", lastSyncAt: "2026-08-01T00:00:00.000Z" },
+      ] });
+      if (url.endsWith("/FederationInstance")) return Response.json({ id: PEER_ID, publicKey, role: "spoke" });
+      if (body?.operation === "search_by_conditions") {
+        if (body.table !== "Memory") return Response.json([]);
+        // The REAL sender query passes Harper's ops validation and projection.
+        // A fetch mock returning the entire row would hide this regression.
+        projectionCalls++;
+        const projected = execFileSync("node", [fileURLToPath(new URL("../helpers/harper-memory-projection.cjs", import.meta.url))], {
+          input: JSON.stringify({ query: body, rows: body.conditions[0].search_type === "greater_than" ? [row] : [] }),
+          encoding: "utf8", timeout: 10_000,
+        });
+        return Response.json(JSON.parse(projected));
+      }
+      if (url.endsWith("/FederationSync")) {
+        sent.push(...structuredClone(body.records));
+        const result = await new (FederationSync as any)().post(body);
+        return result instanceof Response ? result : Response.json(result);
+      }
+      if (body?.operation === "search_by_value" && body.table === "Peer") {
+        return Response.json([{ id: "hub", role: "hub", status: "connected" }]);
+      }
+      if (body?.operation === "update" || body?.operation === "upsert") return Response.json({ update_hashes: ["hub"] });
+      throw new Error(`Unexpected round-trip fetch: ${url} ${body?.operation}`);
+    }) as any;
+    const { runFederationSyncOnce } = await import("../../src/cli.ts");
+    const result = await runFederationSyncOnce({
+      target: "http://roundtrip-local:9926", opsTarget: "http://roundtrip-local:9925", adminPass: "fixture-password",
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.pushed).toBe(1);
+    expect(result.skipped).toBe(0);
+    expect(projectionCalls).toBe(2);
+    expect(sent).toHaveLength(1);
+    const outbound = sent[0].data;
+    expect(outbound.meta).toEqual(row.meta);
+    expect(outbound.kind).toBe(row.kind);
+    for (const field of ["_originatorInstanceId", "_syncedFrom", "_syncedAt"] as const) {
+      expect(outbound[field]).toBe(row[field]);
+    }
+    for (const field of ["hostSource", "hostSourceScope", "hostSourceVisibility", "undeclaredProbe"]) {
+      expect(outbound).not.toHaveProperty(field);
+    }
+    const stored = memoryStore.get(row.id);
+    expect(stored.content).toBe(row.content);
+    expect(stored.meta).toEqual(row.meta);
+    expect(stored.kind).toBe(row.kind);
+    expect(stored.provenance).toBe(row.provenance);
+    expect(stored._originatorInstanceId).toBe(PEER_ID);
+    expect(stored._syncedFrom).toBe(PEER_ID);
+    expect(stored._syncedAt).not.toBe(row._syncedAt);
+    expect(stored.instanceToken).not.toBe(row.instanceToken);
+    if (update) expect(stored.instanceToken).toBe("local-token");
+    for (const field of ["hostSource", "hostSourceScope", "hostSourceVisibility", "undeclaredProbe"]) {
+      expect(stored).not.toHaveProperty(field);
+    }
   });
 });

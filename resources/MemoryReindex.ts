@@ -11,8 +11,10 @@
  *   compares per-agent primary counts against per-agent secondary-index counts
  *   (an equals lookup on agentId). Any agent whose secondary count is below
  *   its primary count has unindexed records. Re-PUT every record with the
- *   _reindex escape hatch so Memory.put() preserves every field byte-for-byte
- *   (no updatedAt bump, no embedding regen, no safety rescan).
+ *   _reindex escape hatch: Memory.put() retains declared and named allowed
+ *   fields, restores stored provenance and preserves an existing incarnation
+ *   token (or generates an absent one). Other undeclared fields are stripped.
+ *   No updatedAt bump, embedding regeneration or safety rescan is performed.
  *
  * Why this exists: Harper's background runIndexing() pass populates secondary
  * indices only on schema changes that add a new indexed attribute. If that
@@ -126,8 +128,9 @@ export class MemoryReindex extends Resource {
       };
     }
 
-    // Pass 3: re-PUT every primary-store record with _reindex=true so Memory.put()
-    // preserves every field byte-for-byte. The re-PUT forces Harper to re-insert
+    // Pass 3: re-PUT every primary-store record with _reindex=true, retaining
+    // declared/named fields and stored provenance, stripping other undeclared
+    // fields and generating an absent token. The re-PUT forces Harper to re-insert
     // into all secondary indices. Cheaper-than-sound variants (only re-PUT records
     // that appear missing) would miss rows the primary scan sees fine but that
     // Harper's read path can't locate via any index path.
