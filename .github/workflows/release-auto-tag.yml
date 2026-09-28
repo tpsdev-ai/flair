@@ -18,7 +18,7 @@ name: Release auto-tag
 #     It also recovers a tag missed because an allowlisted advisory failed CI.
 #     Scheduled daily at 04:23 UTC: expect up to 24 hours plus run time.
 #     Completed CI runs need not have succeeded overall; only exact names in
-#      .github/release-auto-tag-advisories.json receive the advisory exception.
+#     .github/release-auto-tag-advisories.json receive the advisory exception.
 #     Recovery considers the version still declared on main; a newer version
 #     supersedes the missed release.
 #   - `workflow_dispatch`: ALWAYS a dry run — it decides against a named commit
