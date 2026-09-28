@@ -1,25 +1,26 @@
 /**
- * host-source-selected-reads-1940.test.ts — flair#1940 slice 1, round 15.
+ * host-source-selected-reads-1940.test.ts — flair#1940 slice 1, round 17.
  *
- * Real-Harper coverage of the round-15 narrowed selection contract: on a
- * non-admin `Memory.get` / `Memory.search`, a selection is accepted ONLY as an
- * array of plain Memory schema attribute names. For an accepted array on a
- * clean row the handler output equals Harper's own select output (the same
- * attributes, in order); every other REST shape (`select(*)`, a scalar, an
- * unknown name, a trailing or doubled comma, a path property, ...) is refused
- * with 400 BEFORE the scope pre-read (never the pre-read's 404).
- *
- * Response bodies are quoted in the logs / assertion messages.
+ * Real-Harper coverage of the round-17 contract: a non-admin HTTP Memory read
+ * IGNORES the caller's `select(...)`/`property`. The auth middleware strips the
+ * selection from the request URL before Harper parses it, so the read returns
+ * the authorized, pointer-projected row — with EXACT gated values, not just
+ * keys — for by-id and collection reads, and pagination still applies. An admin
+ * read keeps its selection (control). Response bodies are quoted in the logs.
  *
  * Raw `insert` via the ops API seeds the rows, so a supported write path cannot
- * rewrite the flags / fields being probed.
+ * rewrite the fields being probed.
  */
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import nacl from "tweetnacl";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import nacl from "tweetnacl";
+import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
 
-interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
+interface TestAgent {
+  id: string;
+  publicKey: string;
+  secretKey: Uint8Array;
+}
 
 function mkAgent(id: string): TestAgent {
   const kp = nacl.sign.keyPair();
@@ -32,20 +33,35 @@ function ed25519Header(agent: TestAgent, method: string, path: string): string {
   const sig = nacl.sign.detached(new TextEncoder().encode(payload), agent.secretKey);
   return `TPS-Ed25519 ${agent.id}:${ts}:${nonce}:${Buffer.from(sig).toString("base64")}`;
 }
-async function authFetch(harper: HarperInstance, agent: TestAgent, method: string, path: string): Promise<Response> {
-  return fetch(`${harper.httpURL}${path}`, { method, headers: { Authorization: ed25519Header(agent, method, path) } });
+async function authFetch(
+  harper: HarperInstance,
+  agent: TestAgent,
+  method: string,
+  path: string,
+): Promise<Response> {
+  return fetch(`${harper.httpURL}${path}`, {
+    method,
+    headers: { Authorization: ed25519Header(agent, method, path) },
+  });
 }
 async function adminOp(harper: HarperInstance, op: Record<string, any>): Promise<Response> {
   return fetch(harper.opsURL, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`) },
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`),
+    },
     body: JSON.stringify(op),
   });
 }
-async function seedAgent(harper: HarperInstance, agent: TestAgent): Promise<void> {
+async function seedAgent(harper: HarperInstance, agent: TestAgent, role = "agent"): Promise<void> {
   const res = await adminOp(harper, {
-    operation: "insert", database: "flair", table: "Agent",
-    records: [{ id: agent.id, name: agent.id, role: "agent", publicKey: agent.publicKey, createdAt: new Date().toISOString() }],
+    operation: "insert",
+    database: "flair",
+    table: "Agent",
+    records: [
+      { id: agent.id, name: agent.id, role, publicKey: agent.publicKey, createdAt: new Date().toISOString() },
+    ],
   });
   expect(res.status).toBe(200); // assertion: setup seeded the agent
 }
@@ -58,135 +74,84 @@ let harper: HarperInstance;
 const author = mkAgent("hsr-author");
 const reader = mkAgent("hsr-reader");
 const admin = mkAgent("hsr-admin");
-const POINTER = { v: 1, host: "openclaw", kind: "run", id: "run-r12aaaa" };
+const POINTER = { v: 1, host: "openclaw", kind: "run", id: "run-r17aaaa" };
 const CANON = JSON.stringify(POINTER);
 
-const idArchived = "hsr-archived-shared";       // t1: archived, bound pointer
-const idUnbound = "hsr-inline-unbound";         // t2a: inline hostSource, no pointer row
-const idBound = "hsr-bound-author";             // t2b: bound pointer, no inline field
-const idPrivate = "hsr-private-other";          // round 14 t5: private, owned by `author`
-const idClean = "hsr-clean-shared";             // round 15: clean shared row
-let CLEAN_CREATED_AT = "";                      // the clean row's writer-supplied createdAt
+const idFull = "hsr-full-shared"; // shared, bound pointer, hit stat
+const idOther = "hsr-other-shared"; // shared, no pointer
+const HIT_AT = "2026-03-01T00:00:00.000Z";
 
 beforeAll(async () => {
   harper = await startHarper();
   await seedAgent(harper, author);
   await seedAgent(harper, reader);
-  // A role "admin" Agent, so a read through it takes the UNCHANGED admin branch
-  // — Harper's own native select projection (the independent comparison for t7).
-  const adminSeed = await adminOp(harper, {
-    operation: "insert", database: "flair", table: "Agent",
-    records: [{ id: admin.id, name: admin.id, role: "admin", publicKey: admin.publicKey, createdAt: new Date().toISOString() }],
-  });
-  expect(adminSeed.status).toBe(200); // assertion: setup seeded the admin agent
+  await seedAgent(harper, admin, "admin");
 
-  const tokArchived = randomUUID();
-  const tokUnbound = randomUUID();
-  const tokBound = randomUUID();
+  const tok = randomUUID();
   await insertRow(harper, "Memory", {
-    id: idArchived, agentId: author.id, content: "archived shared note", contentHash: "h",
-    visibility: "shared", archived: true, instanceToken: tokArchived, createdAt: new Date().toISOString(),
+    id: idFull, agentId: author.id, content: "full body", subject: "the subject",
+    contentHash: "h", visibility: "shared", archived: false,
+    instanceToken: tok, createdAt: "2026-01-01T00:00:00.000Z",
   });
   await insertRow(harper, "MemoryHostSource", {
-    memoryId: idArchived, hostSource: CANON, scopeAtWrite: "shared",
-    authorId: author.id, memoryInstanceToken: tokArchived, receivedAt: new Date().toISOString(),
+    memoryId: idFull, hostSource: CANON, scopeAtWrite: "shared",
+    authorId: author.id, memoryInstanceToken: tok, receivedAt: new Date().toISOString(),
   });
-
   await insertRow(harper, "Memory", {
-    id: idUnbound, agentId: author.id, content: "inline pointer note", contentHash: "h",
-    visibility: "shared", archived: false, hostSource: CANON, instanceToken: tokUnbound, createdAt: new Date().toISOString(),
+    id: idOther, agentId: author.id, content: "other body", contentHash: "h",
+    visibility: "shared", archived: false, instanceToken: randomUUID(),
+    createdAt: "2026-02-01T00:00:00.000Z",
   });
-
-  await insertRow(harper, "Memory", {
-    id: idBound, agentId: author.id, content: "bound pointer note", contentHash: "h",
-    visibility: "shared", archived: false, instanceToken: tokBound, createdAt: new Date().toISOString(),
-  });
-  await insertRow(harper, "MemoryHostSource", {
-    memoryId: idBound, hostSource: CANON, scopeAtWrite: "shared",
-    authorId: author.id, memoryInstanceToken: tokBound, receivedAt: new Date().toISOString(),
-  });
-
-  await insertRow(harper, "Memory", {
-    id: idPrivate, agentId: author.id, content: "author private note", contentHash: "h",
-    visibility: "private", archived: false, instanceToken: randomUUID(), createdAt: new Date().toISOString(),
-  });
-
-  CLEAN_CREATED_AT = new Date().toISOString();
-  await insertRow(harper, "Memory", {
-    id: idClean, agentId: author.id, content: "clean body", contentHash: "h",
-    visibility: "shared", archived: false, instanceToken: randomUUID(), createdAt: CLEAN_CREATED_AT,
-  });
+  // A stored hit stat, so a read overlay is observable.
+  await insertRow(harper, "MemoryHitStat", { id: idFull, retrievalCount: 7, lastRetrieved: HIT_AT });
 }, 240_000);
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);
 });
 
-describe("flair#1940 round 15 — an accepted REST array equals Harper's own select; other shapes are 400 (real Harper, REST)", () => {
-  it("t7: a clean-row accepted array equals Harper's own native select output", async () => {
-    const res = await authFetch(harper, reader, "GET", `/Memory/${idClean}?select(content,createdAt)`);
-    const body = await res.text();
-    // The comparison is an ACTUAL native Harper read, not a value built by hand:
-    // an admin read takes the unchanged branch, so Harper itself projects the
-    // same row with the same select. The non-admin handler output must equal it.
-    const native = await authFetch(harper, admin, "GET", `/Memory/${idClean}?select(content,createdAt)`);
-    const nativeBody = await native.text();
-    console.log("t7 handler body:", body, "| native Harper body:", nativeBody, "status:", res.status, native.status);
+describe("flair#1940 round 17 — a non-admin Memory read ignores the caller's selection (real Harper, REST)", () => {
+  it("by-id: a request WITH `select(content)` returns the FULL gated row (Harper cannot reapply it)", async () => {
+    const res = await authFetch(harper, reader, "GET", `/Memory/${idFull}?select(content)`);
+    const body = await res.json();
+    console.log("by-id select body:", JSON.stringify(body), "status:", res.status);
     expect(res.status).toBe(200); // assertion: the read succeeded
-    expect(native.status).toBe(200); // assertion: the native admin read succeeded
-    expect(body).toBe(nativeBody); // assertion: the handler output == Harper's OWN native select output
+    expect(body.content).toBe("full body"); // assertion: the requested field is there
+    expect(body.agentId).toBe(author.id); // assertion: an UNselected field is present too (full row)
+    expect(body.subject).toBe("the subject"); // assertion: full row
+    expect(body.visibility).toBe("shared"); // assertion: full row
+    expect(body.hostSource).toEqual(POINTER); // assertion: the exact gated pointer value
+    expect(body.retrievalCount).toBe(7); // assertion: the stored hit stat is overlaid
   }, 30_000);
 
-  it("t6: a name not in the Memory schema is refused 400 over REST", async () => {
-    const res = await authFetch(harper, reader, "GET", `/Memory/${idClean}?select(content,noSuchField)`);
-    const body = await res.text();
-    console.log("t6 body:", body, "status:", res.status);
-    expect(res.status).toBe(400); // assertion: refused
+  it("by-id: a `.content` property suffix returns the FULL gated row", async () => {
+    const res = await authFetch(harper, reader, "GET", `/Memory/${idFull}.content`);
+    const body = await res.json();
+    console.log("by-id property body:", JSON.stringify(body), "status:", res.status);
+    expect(res.status).toBe(200); // assertion: the read succeeded
+    expect(body.agentId).toBe(author.id); // assertion: the full row, not the single property
+    expect(body.hostSource).toEqual(POINTER); // assertion: the gated pointer value
   }, 30_000);
 
-  it("t5: an unsupported REST selection is refused 400 BEFORE the scope pre-read (not 404)", async () => {
-    // A PRIVATE row owned by another agent would make the middleware's scope
-    // pre-read answer 404. A 400 here proves the middleware validated the
-    // parsed `?select(*)` selection and refused it BEFORE any Memory read — the
-    // ordering fix for the pre-read. (If the pre-read ran first, this would be
-    // the 404 the t5-ctrl control below shows.)
-    const res = await authFetch(harper, reader, "GET", `/Memory/${idPrivate}?select(*)`);
-    const body = await res.text();
-    console.log("t5 body:", body, "status:", res.status);
-    expect(res.status).toBe(400); // assertion: the selection refusal, NOT the pre-read's 404
+  it("collection: a request WITH `select(id)` returns FULL rows, and limit still applies", async () => {
+    const res = await authFetch(harper, reader, "GET", "/Memory/?select(id)&limit(0,1)&sort(createdAt)");
+    const body = await res.json();
+    console.log("collection select body:", JSON.stringify(body), "status:", res.status);
+    expect(res.status).toBe(200); // assertion: the read succeeded
+    expect(Array.isArray(body)).toBe(true); // assertion: a collection
+    expect(body.length).toBe(1); // assertion: limit applied
+    expect(body[0].id).toBe(idFull); // assertion: sort(createdAt) applied (oldest first)
+    expect(body[0].content).toBe("full body"); // assertion: the FULL row, not the id-only selection
+    expect(body[0].agentId).toBe(author.id); // assertion: an unselected field is present
+    expect(body[0].hostSource).toEqual(POINTER); // assertion: the gated pointer value
+    expect(body[0].retrievalCount).toBe(7); // assertion: the stored hit stat is overlaid
   }, 30_000);
 
-  it("t5-ctrl: an ACCEPTED array selection on that private row still reaches the scope pre-read (404)", async () => {
-    const res = await authFetch(harper, reader, "GET", `/Memory/${idPrivate}?select(content,agentId)`);
-    const body = await res.text();
-    console.log("t5-ctrl body:", body, "status:", res.status);
-    expect(res.status).toBe(404); // assertion: the private row is denied by the scope pre-read
-  }, 30_000);
-
-  it("t2: a by-id SCALAR select is refused 400 over REST", async () => {
-    const res = await authFetch(harper, reader, "GET", `/Memory/${idBound}?select(hostSource)`);
-    const body = await res.text();
-    console.log("t2 body:", body, "status:", res.status);
-    expect(res.status).toBe(400); // assertion: a scalar selection is refused
-  }, 30_000);
-
-  it("t1: an accepted array on the archived shared row returns the named keys (collection read)", async () => {
-    const res = await authFetch(harper, reader, "GET", "/Memory/?select(id,content)");
-    const body = await res.text();
-    console.log("t1 body:", body);
-    expect(res.status).toBe(200); // assertion: the collection read succeeded
-    const rows = JSON.parse(body) as any[];
-    const archived = rows.find((r) => r.id === idArchived);
-    expect(archived).toBeDefined(); // assertion: the archived shared row WAS returned
-    expect(archived.content).toBe("archived shared note"); // assertion: the selected key is returned
-    expect(archived.id).toBe(idArchived); // assertion: the selected key is returned
-  }, 30_000);
-
-  it("t1-ctrl: the FULL-row collection read of the archived row still returns it", async () => {
-    const res = await authFetch(harper, reader, "GET", "/Memory/");
-    const body = await res.text();
-    const row = (JSON.parse(body) as any[]).find((r) => r.id === idArchived);
-    expect(row).toBeDefined(); // assertion: the archived shared row was returned
-    expect(row.content).toBe("archived shared note"); // assertion: the full-row read still works
+  it("admin control: an admin read DOES honour its selection", async () => {
+    const res = await authFetch(harper, admin, "GET", `/Memory/${idFull}?select(content)`);
+    const body = await res.json();
+    console.log("admin select body:", JSON.stringify(body), "status:", res.status);
+    expect(res.status).toBe(200); // assertion: the read succeeded
+    expect(body).toBe("full body"); // assertion: the admin selection IS applied (control: a scalar select of one attribute)
   }, 30_000);
 });

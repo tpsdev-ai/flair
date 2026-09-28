@@ -157,17 +157,13 @@ export async function loadPointerRows(ids: readonly string[]): Promise<Map<strin
  * the non-admin reader; an admin/operator read is the named exception (see
  * MemoryHostSource.ts).
  *
- * The join runs on the FULL stored row, not on whatever the caller asked for:
- * the handler reads without the caller's `select`/`property`, so the join
+ * The join runs on the FULL stored row, not on whatever the caller asked for.
+ * A non-admin HTTP Memory read ignores the caller's `select`/`property` (the
+ * middleware drops it from the request URL before Harper parses it), so the join
  * always sees the stored `id`, `agentId`, `instanceToken`, `archived` and
- * `visibility`
- * — a selection cannot drop them and cannot move the decision. An inline
- * pointer field on the Memory row is therefore removed (or replaced by the
- * gated rendering) before the caller's selection is applied to the projected
- * row, so no inline pointer field reaches a non-admin reader. (The selection
- * contract — none, or an array of plain Memory schema attribute names, and a
- * 400 for every other shape — lives in caller-selection.ts; the handler
- * applies it in Memory.get/Memory.search.)
+ * `visibility`. An inline pointer field on the Memory row is therefore removed
+ * (or replaced by the gated rendering) before the projected row is returned, so
+ * no inline pointer field reaches a non-admin reader.
  */
 export async function projectRowsThroughPointers<T extends { id?: unknown }>(
   rows: readonly T[],

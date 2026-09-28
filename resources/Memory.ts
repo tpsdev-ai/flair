@@ -47,13 +47,6 @@ import {
   UNAUTH,
   NOT_FOUND,
 } from "./record-type-kit.js";
-import {
-  applyCallerSelection,
-  carriesSelection,
-  parseCallerSelection,
-  selectionBadRequest,
-  type CallerSelection,
-} from "./caller-selection.js";
 import { RECORD_TYPES } from "./record-types.js";
 import { attachTrust } from "./trust-block.js";
 import { recordCitations } from "./usage-recording.js";
@@ -71,46 +64,6 @@ function hostSourceBadRequest(error: string, message: string): Response {
   });
 }
 
-/**
- * flair#1940 round 13 — build the UNSELECTED read query for a non-admin
- * collection read that carried a `select`/`property`. The caller's selection
- * shapes only the OUTPUT, so the scope read must run on the SAME conditions,
- * operator, limit, offset and sort. A plain `{ ...query }` is WRONG for an
- * array query: spreading the array turns its conditions into numeric-keyed
- * properties, so makeScopedSearch's object branch sees no `conditions` and
- * silently drops the caller's filter. Preserve array and iterable conditions
- * explicitly, carrying any non-selection scalar props (limit/offset/sort).
- */
-function unselectedReadQuery(query: any): any {
-  if (Array.isArray(query)) {
-    const rest: any = { conditions: Array.from(query) };
-    for (const key of Object.keys(query)) {
-      if (key === "select" || key === "property" || /^\d+$/.test(key)) continue;
-      rest[key] = (query as any)[key];
-    }
-    return rest;
-  }
-  const isConditionIterable =
-    !!query && typeof query === "object" && typeof query[Symbol.iterator] === "function" && !(query instanceof URLSearchParams);
-  if (isConditionIterable && !("conditions" in query)) {
-    // UNREACHABLE for a selection-carrying query: search() refuses a
-    // non-array iterable that carries a selection before it builds the read
-    // query (round 16, blocker 3). Kept as documentation of the shape.
-    const rest: any = { conditions: Array.from(query) };
-    for (const key of Object.keys(query)) {
-      if (key === "select" || key === "property" || /^\d+$/.test(key)) continue;
-      rest[key] = (query as any)[key];
-    }
-    return rest;
-  }
-  if (query && typeof query === "object") {
-    const rest: any = { ...query };
-    delete rest.select;
-    delete rest.property;
-    return rest;
-  }
-  return query;
-}
 
 
 /**
@@ -850,47 +803,6 @@ export class Memory extends (databases as any).flair.Memory {
 
     const ctx = (this as any).getContext?.();
     const auth = await resolveAgentAuth(ctx);
-    // flair#1940 rounds 12/15 (Flint's design ruling): the pointer decision reads
-    // the STORED row; the caller's selection shapes only the OUTPUT. So on a
-    // non-admin by-id read that carries a selection, read the FULL row (never
-    // the caller-shaped one), project it through the gated join, and apply the
-    // selection LAST. The unshaped read target is a PLAIN object carrying only
-    // the id — the SAME shape the shared by-id gate now builds itself (#1995).
-    // It is never the caller's target and never its constructor. The selection
-    // must be an array of plain Memory schema attribute names; every other shape
-    // is refused with 400 before any read.
-    if (auth.kind === "agent" && !auth.isAdmin && carriesSelection(target)) {
-      const selection = parseCallerSelection((target as any).select, (target as any).property);
-      if (selection instanceof Response) return selection; // 400, no read
-      const targetId = typeof target === "string" ? target : (target as any)?.id;
-      // Build the unshaped read target as a PLAIN object carrying only the id —
-      // never the caller's target and never its constructor. A caller-supplied
-      // constructor could install `select`/`property` that omit
-      // `visibility`/`archived`, so the scope predicate (memory-read-scope.ts)
-      // would treat another agent's private row as non-private and render an
-      // archived row's pointer. A plain id-only object carries no such shaping —
-      // the same construction the shared by-id gate uses (#1995).
-      const unshaped: any = targetId != null ? { id: targetId } : {};
-      const record = await memoryByIdReadGate.call(this, unshaped, (t: any) => super.get(t));
-      if (record instanceof Response) return record;
-      // A1-iv item 2: the gated join, through the ONE reader helper — pointer |
-      // "withheld" | nothing. The join sees the STORED id/agentId/instanceToken/
-      // archived/visibility, whatever the caller selected.
-      const projectedRow =
-        record && typeof record === "object"
-          ? (await projectRowsThroughPointers([record as any], auth.agentId))[0]
-          : record;
-      // round 16 (blocker 4): overlay hit stats and the opt-in trust block on
-      // the FULL projected row FIRST, then apply the caller's selection LAST, so
-      // the output carries EXACTLY the requested keys.
-      let row: any = projectedRow;
-      if (row && typeof row === "object" && typeof (row as any).agentId === "string") {
-        const withHits = await applyHitStats(row, ctx);
-        row = attachTrust(withHits as any, wantsTrust(target, opts));
-      }
-      return applyCallerSelection(row, selection);
-    }
-
     const result = await memoryByIdReadGate.call(this, target, (t: any) => super.get(t));
     // flair#1940 A3 (by-ID surface): the pointer is projected for THIS reader
     // BEFORE the trust block is attached. Admin/internal stay unfiltered (they
@@ -966,53 +878,23 @@ export class Memory extends (databases as any).flair.Memory {
     // (never one per row), then project each row. The set is materialized so
     // the batch is a single call.
     const readerAgentId = gate.agentId;
-    // flair#1940 rounds 12/15 (Flint's design ruling): a non-admin read decides
-    // pointer rendering on the STORED rows; the caller's selection shapes only
-    // the OUTPUT. Strip the caller's select from the read (same conditions,
-    // operator, limit, offset and sort), project the full rows through the
-    // gated join, then apply the selection to the projected rows. The selection
-    // must be an array of plain Memory schema attribute names; every other shape
-    // is refused with 400 before any read.
-    let selection: CallerSelection = { shape: "none" };
-    let readQuery = query;
-    if (carriesSelection(query)) {
-      // round 16 (blocker 3): a non-array iterable query that carries a
-      // selection is not a supported shape. Only a plain array of conditions, or
-      // a plain object query, may carry the accepted array selection — refuse
-      // anything else before the base read.
-      if (
-        query &&
-        typeof query === "object" &&
-        typeof (query as any)[Symbol.iterator] === "function" &&
-        !Array.isArray(query) &&
-        !(query instanceof URLSearchParams)
-      ) {
-        return selectionBadRequest(
-          "an iterable query with a selection is not supported on a non-admin Memory read",
-        );
-      }
-      const parsed = parseCallerSelection((query as any).select, (query as any).property);
-      if (parsed instanceof Response) return parsed; // 400, no read
-      selection = parsed;
-      readQuery = unselectedReadQuery(query);
-    }
-    const source = memoryScopedSearch(readerAgentId, readQuery, (q) => withDetachedTxn(ctx, () => super.search(q)));
+    // flair#1940 round 17 (design ruling): a non-admin HTTP Memory read ignores
+    // the caller's `select`/`property` — the middleware drops the selection from
+    // the request URL before Harper parses it. This path returns the authorized,
+    // pointer-projected row; the hit-stat overlay still runs on the full row.
+    const source = memoryScopedSearch(readerAgentId, query, (q) =>
+      withDetachedTxn(ctx, () => super.search(q)),
+    );
     const joined = (async function* joinPointerBatch() {
       const rows: any[] = [];
       // memoryScopedSearch returns a Promise of the iterable (its scopedSearch
       // is async); await it before iterating.
       for await (const row of await (source as any)) rows.push(row);
       // A1-iv item 2: project through the ONE reader helper (one batched
-      // pointer query for the whole set), then apply the caller's selection to
-      // each projected row — the pointer decision already ran on the full row.
+      // pointer query for the whole set).
       const projected = await projectRowsThroughPointers(rows, readerAgentId);
       for (const row of projected) {
-        // round 16 (blocker 4): the hit-stat overlay runs on the FULL projected
-        // row and the caller's selection is applied LAST, so the output carries
-        // EXACTLY the requested keys — the overlay (which can add retrievalCount
-        // / lastRetrieved) never adds an unrequested one.
-        const overlaid = await applyHitStats(row, ctx);
-        yield applyCallerSelection(overlaid, selection);
+        yield await applyHitStats(row, ctx);
       }
     })();
     return joined;

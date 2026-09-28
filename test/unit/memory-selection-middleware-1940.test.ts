@@ -1,21 +1,20 @@
 /**
- * memory-selection-middleware-1940.test.ts — flair#1940 slice 1, round 15.
+ * memory-selection-middleware-1940.test.ts — flair#1940 slice 1, round 17.
  *
- * The auth middleware validates a non-admin `/Memory/<id>` REST selection
- * BEFORE its Memory pre-read (the scope read that answers 404 for another
- * agent's private row). Round 15 narrows what it accepts: a selection is ONLY
- * an array of plain Memory schema attribute names; every other REST shape
- * (`select(*)`, a scalar, an empty list, the `((a,b))` asArray form, a trailing
- * or doubled comma, an unknown name, a path property) is refused with 400
- * BEFORE the pre-read runs.
+ * Flint's round-17 design ruling: a non-admin HTTP Memory read does NOT honour a
+ * caller `select(...)`/`property`. The auth middleware normalizes the request
+ * URL — dropping `select(...)` and `property`, keeping conditions, operator,
+ * sort, limit and offset — after authentication establishes the caller is not an
+ * admin and BEFORE any Memory row is read or the next layer runs. Harper builds
+ * its REST target from this URL afterwards, so the original selection cannot be
+ * reapplied.
  *
  * `auth-middleware.ts` is a side-effect module that calls `server.http(fn)`; the
  * harper mock captures that callback so these tests invoke the middleware
- * directly with a REAL Ed25519-signed request and count
- * `databases.flair.Memory.get` calls — proving the refusal comes first.
+ * directly with a REAL Ed25519-signed request and inspect the URL it passes on.
  */
-import { mock, describe, it, expect, beforeEach } from "bun:test";
-import { generateKeyPairSync, sign as edSign, randomUUID } from "node:crypto";
+import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { generateKeyPairSync, randomUUID, sign as edSign } from "node:crypto";
 import { agentStore, middlewareCapture } from "../helpers/harper-mock.js";
 
 let memoryGetCalls = 0;
@@ -25,16 +24,25 @@ mock.module("harper", () => ({
     flair: {
       Agent: {
         get: async (id: string) => agentStore.get(id) ?? null,
-        search: async function* () {},
+        // isAdmin() reads the admin set from this search; yield the stored agents
+        // so an agent seeded with role "admin" resolves as an admin.
+        search: async function* () {
+          for (const a of agentStore.values()) yield a;
+        },
       },
       Memory: {
-        get: async (_id: string) => { memoryGetCalls++; return null; },
+        get: async (_id: string) => {
+          memoryGetCalls++;
+          return null;
+        },
       },
     },
   },
   server: {
     getUser: async (_user: string, _pass: string | null, _request: any) => null,
-    http: (fn: any, _opts?: any) => { middlewareCapture.value = fn; },
+    http: (fn: any, _opts?: any) => {
+      middlewareCapture.value = fn;
+    },
   },
   Resource: class {},
   RequestTarget: class {},
@@ -43,25 +51,27 @@ mock.module("harper", () => ({
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
 const PUBLIC_B64 = Buffer.from((publicKey.export({ format: "jwk" }) as any).x, "base64url").toString("base64");
 
-function authHeader(method: string, url: string): string {
+function authHeader(agentId: string, method: string, url: string): string {
   const u = new URL(url, "http://localhost");
   const ts = Date.now().toString();
   const nonce = randomUUID();
-  const payload = `agent-3:${ts}:${nonce}:${method}:${u.pathname}${u.search}`;
+  const payload = `${agentId}:${ts}:${nonce}:${method}:${u.pathname}${u.search}`;
   const sig = edSign(null, Buffer.from(payload), privateKey);
-  return `TPS-Ed25519 agent-3:${ts}:${nonce}:${sig.toString("base64")}`;
+  return `TPS-Ed25519 ${agentId}:${ts}:${nonce}:${sig.toString("base64")}`;
 }
 
-function makeRequest(url: string, method = "GET"): any {
+function makeRequest(url: string, method = "GET", agentId = "agent-3"): any {
   const headers = new Map<string, string>();
-  headers.set("authorization", authHeader(method, url));
+  headers.set("authorization", authHeader(agentId, method, url));
   headers.set("host", "localhost");
   return {
     url,
     method,
     headers: {
       get: (n: string) => headers.get(n.toLowerCase()) ?? null,
-      set: (n: string, v: string) => { headers.set(n.toLowerCase(), v); },
+      set: (n: string, v: string) => {
+        headers.set(n.toLowerCase(), v);
+      },
       asObject: {},
     },
   };
@@ -80,57 +90,58 @@ async function loadMiddleware() {
 
 beforeEach(() => {
   agentStore.clear();
-  agentStore.set("agent-3", { id: "agent-3", publicKey: PUBLIC_B64, status: "active" });
+  agentStore.set("agent-3", { id: "agent-3", publicKey: PUBLIC_B64, status: "active", role: "agent" });
   memoryGetCalls = 0;
 });
 
-describe("flair#1940 round 15 — the middleware refuses a non-array selection BEFORE its Memory pre-read", () => {
-  it("an accepted array of Memory schema names runs the pre-read", async () => {
+describe("flair#1940 round 17 — a non-admin Memory read drops the caller's selection", () => {
+  it("drops `select(...)` and keeps limit/sort; no Memory row is read", async () => {
     const mw = await loadMiddleware();
-    const res: Response = await mw(makeRequest("/Memory/x?select(id,agentId,content)"), nextLayer);
-    expect(res.status).toBe(200); // assertion: an accepted selection reaches the handler
-    expect(memoryGetCalls).toBe(1); // assertion: the middleware pre-read ran once
+    const req = makeRequest("/Memory/x?select(id,content)&limit=5&sort=createdAt");
+    const res: Response = await mw(req, nextLayer);
+    expect(res.status).toBe(200); // assertion: passed to the next layer
+    expect(req.url).toBe("/Memory/x?limit=5&sort=createdAt"); // assertion: select stripped, options kept
+    expect(req.url).not.toContain("select("); // assertion: nothing for Harper to reapply
+    expect(memoryGetCalls).toBe(0); // assertion: the middleware read NO Memory row
   });
 
-  it("every other REST selection shape is a 400 with ZERO Memory reads", async () => {
+  it("drops a wildcard `select(*)`, a `property` param, and a declared dotted suffix", async () => {
     const mw = await loadMiddleware();
-    const refused = [
-      "/Memory/x?select(*)",                     // wildcard
-      "/Memory/x?select(content)",               // scalar
-      "/Memory/x?select()",                      // empty
-      "/Memory/x?select((a,b))",                 // asArray option attached
-      "/Memory/x?select(a,b,)",                  // trailing comma
-      "/Memory/x?select(a,,b)",                  // doubled comma
-      "/Memory/x?select(content,noSuchField)",   // name not in the schema
-      "/Memory/x.hostSource",                    // path property
-      "/Memory/x?select(id),select(*)",          // a successive select re-assigns to a wildcard
-    ];
-    for (const path of refused) {
-      memoryGetCalls = 0;
-      const res: Response = await mw(makeRequest(path), nextLayer);
-      expect(res.status, path).toBe(400); // assertion: refused
-      expect(memoryGetCalls, path).toBe(0); // assertion: the pre-read did NOT run
+    for (const [given, want] of [
+      ["/Memory/x?select(*)", "/Memory/x"],
+      ["/Memory/x?property=content", "/Memory/x"],
+      ["/Memory/x?property=content&limit=3", "/Memory/x?limit=3"],
+      ["/Memory/x.content", "/Memory/x"],
+      ["/Memory/x?select(a),select(b)", "/Memory/x"],
+    ] as const) {
+      const req = makeRequest(given);
+      await mw(req, nextLayer);
+      expect(req.url, given).toBe(want); // assertion: the selection was stripped
     }
   });
 
-  // round 16 (blocker 1): Harper DECODES the path before property parsing, so an
-  // encoded dot is a property Harper would apply — the middleware must refuse it
-  // BEFORE the pre-read, exactly like the literal-dot form.
-  it("an ENCODED dot property (%2E) is a 400 with ZERO Memory reads", async () => {
+  it("leaves an UNKNOWN dotted suffix in the id (Harper owns path interpretation)", async () => {
     const mw = await loadMiddleware();
-    memoryGetCalls = 0;
-    const res: Response = await mw(makeRequest("/Memory/x%2EhostSource"), nextLayer);
-    expect(res.status).toBe(400); // assertion: refused
-    expect(memoryGetCalls).toBe(0); // assertion: the pre-read did NOT run
+    const req = makeRequest("/Memory/x.notAnAttribute");
+    await mw(req, nextLayer);
+    expect(req.url).toBe("/Memory/x.notAnAttribute"); // assertion: not a property, so not stripped
   });
 
-  // round 16 (blocker 1): a content-type extension is NOT a property — Harper
-  // strips it before property parsing — so it must NOT be refused.
-  it("a content-type extension (.json) is NOT a property and runs the pre-read", async () => {
+  it("drops the selection on a COLLECTION read too", async () => {
     const mw = await loadMiddleware();
-    memoryGetCalls = 0;
-    const res: Response = await mw(makeRequest("/Memory/x.json"), nextLayer);
-    expect(res.status).toBe(200); // assertion: not refused
-    expect(memoryGetCalls).toBe(1); // assertion: the pre-read ran
+    const req = makeRequest("/Memory/?select(id)&offset=1&limit=2");
+    await mw(req, nextLayer);
+    expect(req.url).toBe("/Memory/?offset=1&limit=2"); // assertion: collection select stripped, options kept
   });
+
+  it("leaves a non-GET request untouched", async () => {
+    const mw = await loadMiddleware();
+    const req = makeRequest("/Memory/x?select(id)", "POST");
+    await mw(req, nextLayer);
+    expect(req.url).toBe("/Memory/x?select(id)"); // assertion: a write is not a read
+  });
+
+  // An admin read keeps its selection; the admin control is covered end-to-end by
+  // the real-Harper integration test (host-source-selected-reads-1940.test.ts),
+  // which does not depend on the per-process admin cache.
 });

@@ -3,12 +3,89 @@ import { server, databases } from "harper";
 import { getEmbedding } from "./embeddings-provider.js";
 import { isAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
 import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
-import { resolveReadScope } from "./memory-read-scope.js";
-import { parseCallerSelection, restSelection } from "./caller-selection.js";
-import { NOT_FOUND } from "./record-type-kit.js";
 import { isForbiddenOwnerMutation, resolveGuardedRecord } from "./record-owner-guard.js";
 import { checkHttpRateLimit } from "./rate-limit.js";
-import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
+import { stripUndeclaredMemoryAttributes, DECLARED_MEMORY_ATTRIBUTES } from "./memory-declared-attributes.js";
+
+// --- Non-admin Memory read: ignore the caller's selection --------------------
+//
+// flair#1940 round 17. A non-admin HTTP Memory read returns the authorized,
+// pointer-projected row; a caller `select(...)` or `property` is dropped from the
+// request URL before Harper parses it, while conditions, operator, sort, limit
+// and offset are left exactly as sent. These helpers are the whole of that
+// normalization.
+
+const DECLARED_MEMORY_ATTRIBUTE_SET = new Set<string>(
+  DECLARED_MEMORY_ATTRIBUTES as readonly string[],
+);
+
+function isMemoryReadPath(pathname: string): boolean {
+  return pathname === "/Memory" || pathname === "/Memory/" || pathname.startsWith("/Memory/");
+}
+
+// Drop a caller's `select(...)` and `property` from a Memory read URL, keeping
+// conditions, operator, sort, limit and offset. Returns the input unchanged when
+// the URL carries no selection.
+function stripMemorySelection(rawUrl: string): string {
+  const q = rawUrl.indexOf("?");
+  let pathPart = q === -1 ? rawUrl : rawUrl.slice(0, q);
+  let query = q === -1 ? "" : rawUrl.slice(q + 1);
+
+  // Path form: Harper reads a trailing `.<declared>` on the id as `property`.
+  // Drop that suffix so the id addresses the full row; a suffix that is not a
+  // declared Memory attribute stays part of the id, as Harper's own rule has it.
+  const slash = pathPart.lastIndexOf("/");
+  const seg = pathPart.slice(slash + 1);
+  const dot = seg.indexOf(".");
+  if (dot > -1 && DECLARED_MEMORY_ATTRIBUTE_SET.has(seg.slice(dot + 1))) {
+    pathPart = `${pathPart.slice(0, slash + 1)}${seg.slice(0, dot)}`;
+  }
+
+  // Query form: drop every `select(...)` token and every `property` parameter.
+  for (const [start, end] of selectSpans(query).reverse()) {
+    query = query.slice(0, start) + query.slice(end);
+  }
+  query = query
+    .split("&")
+    .filter((p) => p !== "" && p !== "property" && !p.startsWith("property="))
+    .join("&");
+  // A run of separators left by removing `select(...)` tokens carries nothing.
+  if (/^[,;]*$/.test(query)) query = "";
+
+  if (q === -1) return pathPart;
+  return query === "" ? pathPart : `${pathPart}?${query}`;
+}
+
+// [start, end) ranges of every `select(...)` call in a query string, accounting
+// for Harper's nested-list form `select((a,b))`.
+function selectSpans(query: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  const marker = "select(";
+  let from = 0;
+  for (;;) {
+    const idx = query.indexOf(marker, from);
+    if (idx < 0) break;
+    const before = idx > 0 ? query[idx - 1] : "";
+    if (before && /[A-Za-z0-9_$-]/.test(before)) {
+      from = idx + marker.length;
+      continue;
+    }
+    let depth = 1;
+    let i = idx + marker.length;
+    for (; i < query.length; i++) {
+      const ch = query[i];
+      if (ch === "(") depth++;
+      else if (ch === ")") {
+        depth--;
+        if (depth === 0) break;
+      }
+    }
+    if (i >= query.length) break;
+    spans.push([idx, i + 1]);
+    from = i + 1;
+  }
+  return spans;
+}
 
 // --- Admin credentials ---
 // Admin auth is sourced exclusively from Harper's own environment variables
@@ -653,53 +730,20 @@ server.http(async (request: any, nextLayer: any) => {
   // body-level enforcement since it receives the parsed data from Harper's REST
   // layer. The middleware's job is identity verification (done above).
 
-  // ── Memory GET: non-admin can only read own memories (by ID) ────────────────
-  if (!request.tpsAgentIsAdmin && method === "GET") {
-    if (url.pathname.startsWith("/Memory/")) {
-      try {
-        const pathParts = url.pathname.split("/").filter(Boolean);
-        const memId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
-        if (memId) {
-          // flair#1940 round 15 — validate the narrowed selection before the
-          // scope read below. Harper turns `?select(...)` into `target.select`
-          // and `/Memory/<id>.<name>` into `target.property`; a non-admin read
-          // accepts a selection only as an array of plain Memory schema
-          // attribute names, and every other shape (a scalar, a `property`, an
-          // empty/wildcard/virtual/unknown name, a trailing or doubled comma, a
-          // `select` object, attached options) is refused here, BEFORE the
-          // pre-read. The resource's own check stays for direct/in-process
-          // calls.
-          const rest = restSelection(url.pathname, url.search);
-          const selection = parseCallerSelection(
-            rest?.select ?? url.searchParams.get("select") ?? undefined,
-            rest?.property ?? url.searchParams.get("property") ?? undefined,
-          );
-          if (selection instanceof Response) return selection;
-          const record = await (databases as any).flair.Memory.get(memId);
-          if (record && record.agentId && record.agentId !== agentId) {
-            // Centralized read-scope (Layer 1): the owner's records at any
-            // visibility plus every other agent's non-private records; grants
-            // are not consulted on reads (resolveReadScope()). This
-            // used to be a `visibility === "office"` bypass (any authenticated
-            // agent, no grant needed) — that's gone; the private-exclusion is
-            // now enforced the same way every other read path enforces it.
-            //
-            // Denial is the SAME 404 the resource layer returns (flair#1264):
-            // Memory.get() deliberately answers NOT_FOUND for a cross-agent
-            // private id so a denied caller can't distinguish "doesn't exist"
-            // from "exists but not yours" — a 403 here, worse yet one naming
-            // the owning agent, confirmed the id exists AND disclosed its
-            // owner, defeating that anti-enumeration contract one layer up.
-            // Reuses record-type-kit's NOT_FOUND so the two layers cannot
-            // drift apart in shape.
-            const scope = await resolveReadScope(agentId);
-            if (!scope.isAllowed(record)) {
-              return NOT_FOUND();
-            }
-          }
-        }
-      } catch { /* record not found or table error — let resource handle */ }
-    }
+  // ── Memory read: a non-admin read ignores the caller's selection ─────────────
+  // flair#1940 round 17 (design ruling): a non-admin HTTP Memory read does NOT
+  // honour a caller `select(...)` or `property`. As soon as authentication has
+  // established that the caller is not an admin — and BEFORE anything reads a
+  // Memory row or hands the request to the next layer — the request URL is
+  // normalized to drop the caller's selection, keeping conditions, operator,
+  // sort, limit and offset exactly as sent. Harper builds its REST target from
+  // this URL AFTER this middleware, so the original selection cannot be
+  // reapplied. An admin read (and an in-process read) is unchanged. The by-id
+  // read-scope denial is enforced by the resource layer (memoryByIdReadGate),
+  // which returns the same 404 this middleware used to return.
+  if (!request.tpsAgentIsAdmin && method === "GET" && isMemoryReadPath(url.pathname)) {
+    const stripped = stripMemorySelection(request.url);
+    if (stripped !== request.url) request.url = stripped;
   }
 
   // ── Embedding backfill ─────────────────────────────────────────────────────
