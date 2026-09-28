@@ -274,6 +274,11 @@ export const CONTINUITY_CAPTURE_HOOK_MARKER = "flair-continuity-capture";
 const CONTINUITY_INVOCATION_RE =
   /npx -y -p @tpsdev-ai\/flair-mcp(?:@[^\s"']+)? flair-continuity-capture/;
 
+// Share whole-command recognition with the writer. A matching invocation
+// substring alone cannot establish the current form; pin direction is separate.
+const CONTINUITY_PACKAGE_COMMAND_RE =
+  /^(?:sh -c ')?FLAIR_AGENT_ID=[^\s'"]+(?: FLAIR_URL=[^\s'"]+)? npx -y (?:-p )?(@tpsdev-ai\/flair-mcp(?:@[^\s"']+)?) flair-continuity-capture(?: >\/dev\/null 2>\/dev\/null \|\| true')?$/;
+
 /**
  * The PostToolUse matcher written alongside our hook entry — the EXACT
  * mutating-tool allowlist the capture binary enforces internally
@@ -387,6 +392,7 @@ function continuityEventReport(config: any, event: ContinuityHookEvent): Continu
   const matcher: string | undefined = typeof found.group?.matcher === "string" ? found.group.matcher : undefined;
   const shapeOk =
     hook?.type === "command" &&
+    CONTINUITY_PACKAGE_COMMAND_RE.test(command) &&
     CONTINUITY_INVOCATION_RE.test(command) &&
     hookCommandIsSilenced(command);
   const matcherOk = event !== "PostToolUse" || matcher === CONTINUITY_POST_TOOL_USE_MATCHER;
@@ -473,7 +479,12 @@ export interface ContinuityHookInstall {
  *                       never repins a BEHIND entry UP; it repairs shape only.
  */
 function decideContinuityWrite(existingCommand: string | null, entryLabel: string): PinWriteDecision {
-  const pinText = existingCommand === null ? null : existingCommand.match(/^(?:sh -c ')?FLAIR_AGENT_ID=[^\s'"]+(?: FLAIR_URL=[^\s'"]+)? npx -y (?:-p )?(@tpsdev-ai\/flair-mcp(?:@[^\s"']+)?) flair-continuity-capture(?: >\/dev\/null 2>\/dev\/null \|\| true')?$/)?.[1] ?? `${FLAIR_MCP_PACKAGE}@unknown`;
+  // No package reference means a shape repair, not an unreadable pin (#1819).
+  // Keep the unknown sentinel for package-bearing commands whose argument we
+  // cannot locate safely; never decode the whole command as a pin (#1848).
+  const pinText = existingCommand === null || !existingCommand.includes(FLAIR_MCP_PACKAGE)
+    ? null
+    : existingCommand.match(CONTINUITY_PACKAGE_COMMAND_RE)?.[1] ?? `${FLAIR_MCP_PACKAGE}@unknown`;
   const decision = decidePinWrite({
     pkg: FLAIR_MCP_PACKAGE,
     entry: entryLabel,

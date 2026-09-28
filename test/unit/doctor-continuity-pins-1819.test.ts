@@ -358,3 +358,94 @@ test("R3 doctor and hook status hold when only Stop is ahead", () => {
   expect(status).toContain(reason);
   expect(readFileSync(f.settings)).toEqual(Buffer.from(f.bytes, "utf8"));
 }, 75_000);
+
+
+// PR #2027 must preserve #1819's distinction between no package and an
+// unreadable package pin. Exercise advice and the actual repair together.
+for (const event of events) {
+  const missing = "sh -c 'FLAIR_AGENT_ID=fixture FLAIR_URL=" + url
+    + " " + CONTINUITY_CAPTURE_HOOK_MARKER + " >/dev/null 2>/dev/null || true'";
+
+  test("R4 missing package repairs shape and preserves the sibling " + event, () => {
+    const sibling = command("0.0.1");
+    const f = fixture(event === "PostToolUse" ? missing : sibling, event === "Stop" ? missing : sibling);
+    const original = JSON.parse(f.bytes);
+    const expected = JSON.parse(f.bytes);
+    expected.hooks[event][0].hooks[0].command = command();
+
+    const planned = computeContinuityHookInstall(original, agent, url);
+    expect(planned.decision).toBeNull();
+    expect(planned.changed).toBe(true);
+    expect(planned.actions[event]).toBe("update");
+    expect(planned.actions[event === "PostToolUse" ? "Stop" : "PostToolUse"]).toBe("noop");
+    expect(planned.newConfig).toEqual(expected);
+    expect(original).toEqual(JSON.parse(f.bytes));
+
+    const block = doctorBlock(f.doctor());
+    expect(block).toContain("an entry is not the current form");
+    expect(block).toContain("flair doctor --fix");
+    expect(block).not.toContain("manually");
+    const dry = f.doctor(["--fix", "--dry-run"]);
+    expect(dry).toContain("Would rewrite the continuity capture hooks");
+    expect(doctorBlock(dry)).not.toContain("manually");
+    const status = outputLine(f.run(["hook", "status"]), "continuity capture:");
+    expect(status).toContain("re-run: flair hook install --continuity");
+    expect(status).not.toContain("manually");
+    expect(readFileSync(f.settings, "utf8")).toBe(f.bytes);
+
+    const fixed = f.doctor(["--fix"]);
+    expect(fixed).toContain("wired the continuity capture hooks");
+    expect(JSON.parse(readFileSync(f.settings, "utf8"))).toEqual(expected);
+    expect(checkContinuityCaptureHooks(f.home).state).toBe("installed");
+  }, 120_000);
+
+  test("R4 unrecognized command with a package still holds " + event, () => {
+    // Even a behind pin cannot authorize a write through a rejected shape.
+    const rejected = command("0.0.1").replace("npx -y -p", "FLAIR_AGENT_ID=other npx -y -p");
+    const f = fixture(event === "PostToolUse" ? rejected : command(), event === "Stop" ? rejected : command());
+    const planned = computeContinuityHookInstall(JSON.parse(f.bytes), agent, url);
+    expect(planned.changed).toBe(false);
+    expect(planned.decision?.action).toBe("hold");
+    expect(planned.decision?.line).toContain(event + " continuity capture hook:");
+    expect(planned.newConfig).toEqual(JSON.parse(f.bytes));
+    const report = checkContinuityCaptureHooks(f.home);
+    expect(report.state).toBe("stale");
+    expect((event === "PostToolUse" ? report.postToolUse : report.stop).currentForm).toBe(false);
+    const reason = writerHoldAdvice(f);
+
+    for (const args of [[], ["--fix", "--dry-run"], ["--fix"]]) {
+      const stdout = f.doctor(args);
+      const block = doctorBlock(stdout);
+      expect(block).toContain("manually");
+      expect(block).toContain(event + " continuity capture hook: held");
+      expect(block).toContain(reason);
+      expect(block).not.toContain("flair doctor --fix");
+      expect(stdout).not.toContain("Would rewrite the continuity capture hooks");
+      expect(readFileSync(f.settings, "utf8")).toBe(f.bytes);
+    }
+    const status = outputLine(f.run(["hook", "status"]), "continuity capture:");
+    expect(status).toContain("manually");
+    expect(status).toContain(reason);
+    expect(status).not.toContain("re-run:");
+    expect(readFileSync(f.settings, "utf8")).toBe(f.bytes);
+  }, 120_000);
+
+  for (const pin of ["99.0.0", "latest"]) {
+    test("R4 missing package cannot bypass the sibling hold " + event + " " + pin, () => {
+      const protectedEvent = event === "PostToolUse" ? "Stop" : "PostToolUse";
+      const f = fixture(event === "PostToolUse" ? missing : command(pin), event === "Stop" ? missing : command(pin));
+      const planned = computeContinuityHookInstall(JSON.parse(f.bytes), agent, url);
+      expect(planned.changed).toBe(false);
+      expect(planned.decision?.action).toBe("hold");
+      expect(planned.decision?.line).toContain(protectedEvent + " continuity capture hook:");
+      expect(planned.decision?.line).toContain(pin);
+      expect(planned.newConfig).toEqual(JSON.parse(f.bytes));
+      const stdout = f.doctor(["--fix"]);
+      const block = doctorBlock(stdout);
+      expect(block).toContain("manually");
+      expect(block).toContain(protectedEvent + " continuity capture hook: held");
+      expect(block).not.toContain("flair doctor --fix");
+      expect(readFileSync(f.settings, "utf8")).toBe(f.bytes);
+    }, 30_000);
+  }
+}
