@@ -171,7 +171,7 @@ describe("decideDeprecatedRollback (flair#1740)", () => {
 });
 
 describe("formatKnownBrokenRollbackRestart (flair#1740)", () => {
-  test("npm-global recovery reinstalls the reached version and does not claim a snapshot restore", () => {
+  test("npm-global recovery warns the reached version failed and offers a checked alternative", () => {
     const text = formatKnownBrokenRollbackRestart({
       toVersion: "0.54.1",
       error: START_ERROR,
@@ -183,12 +183,15 @@ describe("formatKnownBrokenRollbackRestart (flair#1740)", () => {
       `❌❌ KNOWN-BROKEN: rollback restart failed: ${START_ERROR}`,
       "   @tpsdev-ai/flair@0.54.1 is installed and known-broken — it did not start on this attempt.",
       "   Do not run `flair start` on @tpsdev-ai/flair@0.54.1; it did not start on this attempt.",
-      "   Recovery (npm-global): reinstall the version this upgrade had reached (it failed restart or verification in this run — check `flair doctor` after installing):",
+      "   Recovery (npm-global): @tpsdev-ai/flair@0.54.2 already failed restart or verification in this run. Reinstalling it may repeat that failure:",
       "   npm install -g @tpsdev-ai/flair@0.54.2",
-      "   Or check a candidate (not guaranteed non-deprecated): npm view @tpsdev-ai/flair version",
+      "   Or choose a different, non-deprecated release: npm view @tpsdev-ai/flair versions",
+      "   Check its status with npm view @tpsdev-ai/flair@<version> deprecated, then install it: npm install -g @tpsdev-ai/flair@<version>",
+      "   After either install, check the instance: flair doctor",
       "   No pre-upgrade data snapshot was restored by this rollback.",
     ].join("\n"));
-    expect(text).not.toContain("non-deprecated release");
+    expect(text).toContain("@tpsdev-ai/flair@0.54.2 already failed restart or verification in this run");
+    expect(text).toContain("different, non-deprecated release");
     expect(text).not.toContain("cannot start");
     expect(text).not.toContain("Start it with: flair start");
     expect(text).not.toContain("plain-tree");

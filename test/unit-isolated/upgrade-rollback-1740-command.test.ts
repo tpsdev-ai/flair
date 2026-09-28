@@ -211,8 +211,11 @@ describe("flair upgrade restart failure (flair#1740)", () => {
     expect(out).toContain("Rolling back @tpsdev-ai/flair to 0.54.1");
     expect(out).toContain("KNOWN-BROKEN");
     expect(out).toContain("npm install -g @tpsdev-ai/flair@0.54.2");
+    expect(out).toContain("@tpsdev-ai/flair@0.54.2 already failed restart or verification in this run");
+    expect(out).toContain("Reinstalling it may repeat that failure");
     expect(out).toContain("did not start on this attempt");
-    expect(out).toContain("not guaranteed non-deprecated");
+    expect(out).toContain("different, non-deprecated release");
+    expect(out).toContain("npm view @tpsdev-ai/flair@<version> deprecated");
     expect(out).not.toContain("cannot start");
     expect(out).not.toContain("Flair is NOT running");
     expect(out).toContain("No pre-upgrade data snapshot was restored");

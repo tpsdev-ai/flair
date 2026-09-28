@@ -179,9 +179,11 @@ export function formatKnownBrokenRollbackRestart(input: {
       }
     } else if (input.recoveryVersion && input.recoveryVersion !== input.toVersion) {
       lines.push(
-        `   Recovery (npm-global): reinstall the version this upgrade had reached (it failed restart or verification in this run — check \`flair doctor\` after installing):`,
+        `   Recovery (npm-global): ${FLAIR_PKG}@${input.recoveryVersion} already failed restart or verification in this run. Reinstalling it may repeat that failure:`,
         `   npm install -g ${FLAIR_PKG}@${input.recoveryVersion}`,
-        `   Or check a candidate (not guaranteed non-deprecated): npm view ${FLAIR_PKG} version`,
+        `   Or choose a different, non-deprecated release: npm view ${FLAIR_PKG} versions`,
+        `   Check its status with npm view ${FLAIR_PKG}@<version> deprecated, then install it: npm install -g ${FLAIR_PKG}@<version>`,
+        `   After either install, check the instance: flair doctor`,
       );
     } else {
       lines.push(
