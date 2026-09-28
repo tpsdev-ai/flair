@@ -173,7 +173,7 @@ const store = new FlairStore({ agentId: "my-langgraph-agent" });
 const agent = createReactAgent({ llm, tools, store });
 ```
 
-Maps LangGraph namespaces to Flair tags, keys to ids, values to JSON content. Non-empty search queries call Flair's SemanticSearch endpoint; server retrieval mode and embedding availability determine whether vector or keyword retrieval is used. Filter operators applied client-side. Full mapping table: [`packages/langgraph-flair/README.md`](../packages/langgraph-flair/README.md).
+Maps LangGraph namespaces to Flair tags, keys to ids, values to JSON content. Non-empty search queries call Flair's `/SemanticSearch` endpoint. The server selects hybrid (BM25 plus vector), vector-only, or BM25-only retrieval; embedding availability affects whether the vector leg can run. Filter operators applied client-side. Full mapping table: [`packages/langgraph-flair/README.md`](../packages/langgraph-flair/README.md).
 
 This package contains the TypeScript adapter; it does not include a Python implementation.
 

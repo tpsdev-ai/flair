@@ -43,7 +43,7 @@ LangGraph's `BaseStore` uses hierarchical namespaces (`["users", "profiles"]`) a
 | `namespace: ["users", "profiles"]` | `tags: ["lg-ns:users/profiles"]` |
 | `key: "user123"` | id suffix: `lg:<agentId>:users/profiles:user123` |
 | `value: { name: "Alice" }` | `content: '{"name":"Alice"}'` |
-| `search.query: "..."` | Non-empty search queries call Flair's SemanticSearch endpoint; server retrieval mode and embedding availability determine whether vector or keyword retrieval is used. |
+| `search.query: "..."` | Non-empty search queries call Flair's `/SemanticSearch` endpoint. The server selects hybrid (BM25 plus vector), vector-only, or BM25-only retrieval; embedding availability affects whether the vector leg can run. |
 | `search.filter: { age: { $gte: 18 } }` | applied client-side after retrieval |
 
 ## Authentication
