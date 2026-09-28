@@ -98,6 +98,16 @@ jobs:
         # that workspace package ships. Local dev hides it (bun symlinks);
         # only consumers of the published tarball see the staleness.
         run: node scripts/check-workspace-deps.mjs
+      - name: "Check workspace peer deps resolve within their declared ranges"
+        # `bun install --frozen-lockfile` refuses only a manifest/lockfile
+        # mismatch; it does NOT check that a RESOLVED peer satisfies the range a
+        # package declares for it. So raising a peer floor without refreshing
+        # bun.lock passes every gate while the workspace keeps installing a
+        # version below the declared minimum (flair#1936: openclaw-flair declared
+        # openclaw >=2026.8.1 against a lock pinning openclaw@2026.7.1). Optional
+        # peers are skipped; a declared non-optional peer with no resolution
+        # fails closed.
+        run: node scripts/check-peer-deps.mjs
       - name: "Check version declarations in sync"
         # The release version is declared outside package.json too (e.g.
         # flair-bench's TOOL_VERSION constant). release.sh preflights this, but
