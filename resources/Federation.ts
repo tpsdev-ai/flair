@@ -65,10 +65,12 @@ export { canonicalize, signBody, verifyBodySignature, signBodyFresh, verifyBodyS
  * - Conflict resolution (record-level LWW using updatedAt)
  * - Per-record signature verification using locally pinned originator keys
  *
- * Peer public key propagation is not implemented. PeerAnnouncement and
- * SyncFrame are unused protocol declarations, not a working broadcast path.
- * Record signatures remain supported; requiring them is an operator opt-in.
- * Completing key distribution and changing the default require separate work.
+ * Pairing exchanges and pins both participants' public keys. Cross-peer
+ * public-key broadcasts are not implemented; PeerAnnouncement and SyncFrame
+ * are unused protocol declarations.
+ * Per-record signature enforcement defaults to verify-if-present; requiring
+ * signatures is an operator opt-in via
+ * FLAIR_FEDERATION_REQUIRE_RECORD_SIGNATURES=true.
  */
 
 // ─── Sync frame types ────────────────────────────────────────────────────────

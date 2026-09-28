@@ -1,4 +1,5 @@
 - **Federation documentation distinguishes implemented behavior from protocol placeholders.**
-  Clarify HTTP push, record-level merging, optional record signatures, and missing peer key propagation.
+  Clarify HTTP push, record-level timestamp merging, and verify-if-present record signatures.
+  Pairing exchanges and pins both participants' public keys; cross-peer public-key broadcasts remain unimplemented.
 
-  (Closes #1453)
+  (Refs #1453)
