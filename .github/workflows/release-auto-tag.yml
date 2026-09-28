@@ -15,6 +15,12 @@ name: Release auto-tag
 #   - `schedule` (nightly): one decision, on the commit that introduced the
 #     version main's HEAD declares. It does not depend on any workflow NAME, so
 #     it is also where a renamed `CI` is caught (condition `ci-renamed`).
+#     It also recovers a tag missed because an allowlisted advisory failed CI.
+#     Scheduled daily at 04:23 UTC: expect up to 24 hours plus run time.
+#     Completed CI runs need not have succeeded overall; only exact names in
+#     .github/release-auto-tag-advisories.json receive the advisory exception.
+#     Recovery considers the version still declared on main; a newer version
+#     supersedes the missed release.
 #   - `workflow_dispatch`: ALWAYS a dry run — it decides against a named commit
 #     on main and prints the verdict without creating anything. There is no
 #     non-dry dispatch, so write access to this repo is not a new way to start a

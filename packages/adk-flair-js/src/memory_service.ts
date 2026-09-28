@@ -19,13 +19,72 @@ import type { Event } from "@google/adk";
 import type { Content } from "@google/genai";
 import * as crypto from "node:crypto";
 import { loadEd25519Key, signRequest } from "./signing.js";
-import { compoundTag } from "./tag.js";
+import { compoundTag, sanitizeTagSegment } from "./tag.js";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 const LOCALHOST_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 const ALLOW_REMOTE_ENV = "FLAIR_ALLOW_REMOTE_URL";
 const DEFAULT_FLAIR_URL = "http://localhost:19926";
+
+/**
+ * Percent-encode `%`, `|`, and `:` so the component can be joined on `|`.
+ *
+ * `%` is encoded first so a literal `%7C` or `%3A` cannot be mistaken for an
+ * encoded `|` or `:`. Mirrors `_escape_record_id_component` in the Python package.
+ */
+function escapeRecordIdComponent(value: string): string {
+  return value.replace(/%/g, "%25").replace(/\|/g, "%7C").replace(/:/g, "%3A");
+}
+
+/** Tag that names the event id inside an event-tuple stamp. */
+export function eventTag(eventId: string): string {
+  return `adk-event:${sanitizeTagSegment(eventId)}`;
+}
+
+/**
+ * True when `row` has a complete event stamp for this tuple.
+ *
+ * A complete stamp is `sessionId` equal to this session and tags that include
+ * both the compound tag and this event's `adk-event:` tag. A missing stamp
+ * (a pre-upgrade event, or a direct-memory row that shares the id) is not a
+ * match. A contradictory stamp is not a match. The id alone is not a stamp.
+ */
+export function rowIsSameEventTuple(
+  row: Record<string, unknown>,
+  appName: string,
+  userId: string,
+  sessionId: string,
+  eventId: string,
+): boolean {
+  const tags = Array.isArray(row["tags"]) ? row["tags"] : [];
+  if (row["sessionId"] !== sessionId) return false;
+  if (!tags.includes(compoundTag(appName, userId))) return false;
+  return tags.includes(eventTag(eventId));
+}
+
+/**
+ * Deterministic record id for idempotent re-ingestion.
+ *
+ * Tuples with no colon in any component keep the historical join
+ * `app:user:session:event`, so those stored rows stay addressable. When any
+ * component contains `:`, every component is percent-encoded and the parts
+ * are joined with `|`. That id contains no `:`. The old event-join of four
+ * components always contains at least three `:`, so the new id is outside
+ * that set. Mirrors `_deterministic_record_id` in the Python package.
+ */
+export function deterministicRecordId(
+  appName: string,
+  userId: string,
+  sessionId: string,
+  eventId: string,
+): string {
+  const parts = [appName, userId, sessionId, eventId];
+  if (parts.some((part) => part.includes(":"))) {
+    return parts.map(escapeRecordIdComponent).join("|");
+  }
+  return parts.join(":");
+}
 
 /**
  * Percent-encode a Memory id so it addresses exactly that record as ONE path
@@ -401,19 +460,20 @@ export class FlairMemoryService implements BaseMemoryService {
       if (!text) continue; // filter no-text events (Vertex parity)
 
       const eventId = event.id || crypto.randomUUID();
-      const recordId = `${appName}:${userId}:${session.id}:${eventId}`;
+      const recordId = deterministicRecordId(appName, userId, session.id, eventId);
       const body: Record<string, unknown> = {
         id: recordId,
         agentId: this._agentId,
         content: text,
         type: "session",
         durability: "standard",
-        tags: [tag],
+        tags: [tag, eventTag(eventId)],
+        sessionId: session.id,
         createdAt: epochMsToIso(event.timestamp),
       };
 
       try {
-        await this._writeRecord(recordId, body);
+        await this._writeRecord(recordId, body, [appName, userId, session.id, eventId]);
         written++;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -564,21 +624,22 @@ export class FlairMemoryService implements BaseMemoryService {
       if (!text) continue;
 
       const eventId = event.id || crypto.randomUUID();
-      const recordId = `${appName}:${userId}:${sessionId}:${eventId}`;
+      const recordId = deterministicRecordId(appName, userId, sessionId, eventId);
       const body: Record<string, unknown> = {
         id: recordId,
         agentId: this._agentId,
         content: text,
         type: "session",
         durability: "standard",
-        tags: [tag],
+        tags: [tag, eventTag(eventId)],
+        sessionId,
         createdAt: epochMsToIso(event.timestamp),
       };
       if (metadataJson !== null) body["metadata"] = metadataJson;
       if (subjectValue !== null) body["subject"] = subjectValue;
 
       try {
-        await this._writeRecord(recordId, body);
+        await this._writeRecord(recordId, body, [appName, userId, sessionId, eventId]);
         written++;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -618,8 +679,8 @@ export class FlairMemoryService implements BaseMemoryService {
    *
    * Record ids mirror the Python package: `entry.id` when the caller supplies
    * one (FlairMemoryEntry input), else the first 32 hex chars of the content's
-   * SHA-256 — deterministic, so re-adding identical content replaces rather
-   * than duplicates.
+   * SHA-256. The id is deterministic, so re-adding identical content addresses
+   * the same row and replaces it.
    */
   async addMemory(
     appName: string,
@@ -888,19 +949,18 @@ export class FlairMemoryService implements BaseMemoryService {
   private async _sendJson(
     method: string,
     path: string,
-    body: Record<string, unknown>,
+    body?: Record<string, unknown>,
   ): Promise<Response> {
     const authHeader = signRequest(this._privateKey, this._agentId, method, path);
+    const headers: Record<string, string> = { "Authorization": authHeader };
+    if (body !== undefined) headers["Content-Type"] = "application/json";
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this._timeoutMs);
     try {
       return await fetch(`${this._url}${path}`, {
         method,
-        headers: {
-          "Authorization": authHeader,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
     } finally {
@@ -909,7 +969,7 @@ export class FlairMemoryService implements BaseMemoryService {
   }
 
   /**
-   * Create-or-replace one Memory record.
+   * Create one Memory record.
    *
    * Creates via `POST /Memory/` — Harper's collection create verb — with the
    * id in the body. The previous shape, `PUT /Memory/{id}`, is update-only on
@@ -917,16 +977,17 @@ export class FlairMemoryService implements BaseMemoryService {
    * (flair#1336, observed on hosted Harper Fabric; not reproducible on stock
    * Harper 5.2.x, where PUT upserts). Mirrors the Python package's #1339 fix.
    *
-   * A 409 from POST means the record already exists — re-ingestion of a
-   * deterministic id (addSessionToMemory re-saves a growing session's earlier
-   * events every time) or a caller-supplied id being rewritten. Fall back to
-   * `PUT /Memory/{id}` for exactly that case, preserving the pre-#1336
-   * replace/refresh semantics for existing rows. Any other error propagates
-   * unchanged (the write-path warning logs carry the real HTTP status).
+   * A 409 from POST means the id is already occupied. A direct write (no
+   * `eventTuple`) replaces that row with PUT and does not read it. An event
+   * write replaces the row only when it has a complete event stamp for
+   * `eventTuple` (`sessionId` plus the compound tag and this event's tag).
+   * An unstamped pre-upgrade row or a contradictory stamp is kept and the
+   * conflict is thrown. Any other error propagates unchanged.
    */
   private async _writeRecord(
     recordId: string,
     body: Record<string, unknown>,
+    eventTuple?: [string, string, string, string],
   ): Promise<void> {
     // Validate/encode the id BEFORE any request (#1970): a `.`/`..` id cannot
     // address its record, so a refused id sends nothing at all (not even the
@@ -941,14 +1002,47 @@ export class FlairMemoryService implements BaseMemoryService {
         `HTTP ${resp.status}${text ? `: ${text.slice(0, 200)}` : ""}`
       );
     }
-    // The id is one percent-encoded path segment (#1970).
-    const putResp = await this._sendJson("PUT", putPath, body);
-    if (!putResp.ok) {
-      const text = await putResp.text().catch(() => "");
-      throw new Error(
-        `HTTP ${putResp.status}${text ? `: ${text.slice(0, 200)}` : ""}`
-      );
+    const replaceOccupied = async (): Promise<void> => {
+      const putResp = await this._sendJson("PUT", putPath, body);
+      if (!putResp.ok) {
+        const text = await putResp.text().catch(() => "");
+        throw new Error(
+          `HTTP ${putResp.status}${text ? `: ${text.slice(0, 200)}` : ""}`
+        );
+      }
+    };
+    // Direct writes never enter the stamp check. A caller-chosen id replaces
+    // the occupied row, which is the addMemory re-add contract.
+    if (!eventTuple) {
+      await replaceOccupied();
+      return;
     }
+    if (await this._occupiedRowIsEventTuple(putPath, eventTuple)) {
+      await replaceOccupied();
+      return;
+    }
+    throw new Error(
+      `HTTP 409 conflict: record ${JSON.stringify(recordId)} has no matching ` +
+      "event stamp; kept the existing row"
+    );
+  }
+
+  /** GET the occupied row. True only for a complete matching event stamp. */
+  private async _occupiedRowIsEventTuple(
+    path: string,
+    eventTuple: [string, string, string, string],
+  ): Promise<boolean> {
+    let resp: Response;
+    try {
+      resp = await this._sendJson("GET", path);
+    } catch {
+      return false;
+    }
+    if (!resp.ok) return false;
+    const row = await resp.json().catch(() => null);
+    if (!row || typeof row !== "object" || Array.isArray(row)) return false;
+    const [appName, userId, sessionId, eventId] = eventTuple;
+    return rowIsSameEventTuple(row as Record<string, unknown>, appName, userId, sessionId, eventId);
   }
 
   /**
