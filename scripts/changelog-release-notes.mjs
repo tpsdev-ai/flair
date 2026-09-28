@@ -34,6 +34,19 @@ const ISSUE_REF_RE = /(?:([\w.-]+\/[\w.-]+)|flair)?#(\d+)/g;
 const ISSUE_CITE_RE = / \((?:flair)?#\d+/;
 const HEADS_UP_RE = /^\s*>\s*\*\*Heads-up:\*\*/i;
 
+export function operatorRemedyViolation(entryText) {
+  const prose = String(entryText).replace(/^[ \t]*(```|~~~)[^\n]*\n[\s\S]*?^[ \t]*\1[^\n]*$/gm, "");
+  if (extractHeadsUps(prose).length) return null;
+  const bold = prose.match(/^- \*\*[\s\S]*?\*\*/);
+  const plain = prose.replace(/^- /, "").trim();
+  const body = collapseWs(bold ? prose.slice(bold[0].length) : plain.slice(firstSentence(plain).length));
+  const action = /(?:^|[.!?]\s+)(?:please\s+)?(?:set|run|add|remove)\s+(?:`[^`]+`|FLAIR_[A-Z0-9_]+|--[a-z][\w-]*)/i;
+  const obligation = /\byou must\s+(?:set|run|add|remove)\b|\bbefore upgrading\s*[,:\u2014-]?\s*(?:set|run|add|remove)\b/i;
+  return action.test(body) || obligation.test(body)
+    ? "operator remedy would be omitted from release notes; put it in a > **Heads-up:** block"
+    : null;
+}
+
 export function collapseWs(s) {
   return String(s).replace(/\s+/g, " ").trim();
 }

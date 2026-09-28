@@ -370,6 +370,12 @@ echo "📰 Assembling changelog fragments..."
   echo "❌ Changelog assembly failed — fix the fragments before releasing."; exit 1;
 }
 
+# Preview published release notes.
+echo "📰 Rendered GitHub release notes:"
+(cd "$ROOT" && node scripts/changelog-release-notes.mjs "$VERSION") || {
+  echo "❌ Release-note rendering failed."; exit 1;
+}
+
 # 2. Bump versions in all package.json files
 echo "📦 Bumping all packages to v${VERSION}..."
 for pkg in "${PACKAGES[@]}"; do

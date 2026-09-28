@@ -38,6 +38,9 @@ including the leading `- ` and a 2-space indent on continuation lines:
 keeps that lede, up to three issue links, and any Heads-up lines — nothing else.
 A long lede *is* the dump; move detail into the body. The docs-freshness gate
 fails naming the fragment, its word count, and this rule.
+The gate also requires a Heads-up for explicit reader instructions in the body:
+set/run/add/remove followed by code, an environment variable or flag, and
+"you must"/"before upgrading" instructions using those verbs.
 
 Assembly is a pure join — no reflow, no re-indent, no rewrapping — so tables and
 nested code blocks survive verbatim. The flip side is that a fragment which is
