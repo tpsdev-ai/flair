@@ -22,6 +22,7 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { readPlistProgramRefs } from "./launchd-management.js";
+import { resolveHome } from "./home.js";
 
 export interface InstanceRuntimeRefs {
   /** The node binary the unit execs, when the unit names one. */
@@ -213,7 +214,7 @@ export function resolveInstanceRuntimeForDataDir(
   } = {},
 ): InstanceRuntimeRefs {
   const platform = opts.platform ?? process.platform;
-  const home = opts.homeDir ?? (process.env.HOME ?? "");
+  const home = opts.homeDir ?? resolveHome();
   const exists = opts.exists ?? existsSync;
   if (platform === "darwin") {
     const dir = opts.launchAgentsDir ?? join(home, "Library", "LaunchAgents");

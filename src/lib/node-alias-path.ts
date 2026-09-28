@@ -24,6 +24,7 @@
  */
 import { existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
+import { resolveHome } from "./home.js";
 
 export type VersionManager = "mise" | "nvm" | "fnm" | "volta" | "asdf";
 
@@ -57,7 +58,7 @@ export function parseNodeVersion(nodePath: string): string | null {
  * by existence + realpath equality.
  */
 export function aliasCandidates(nodeBin: string, hooks: AliasHooks = {}): AliasCandidate[] {
-  const home = hooks.home ?? (hooks.env?.HOME ?? process.env.HOME ?? "");
+  const home = hooks.home ?? resolveHome();
   const env = hooks.env ?? process.env;
   const version = parseNodeVersion(nodeBin);
   const out: AliasCandidate[] = [];
