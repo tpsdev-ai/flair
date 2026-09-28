@@ -254,7 +254,7 @@ if [[ "$MODE" == "--publish" ]]; then
 
   # Attempt all leaf publishes, collecting failures instead of stopping early.
   # Report every failed package and refuse to tag a partial release (flair#953).
-  # A successful tag requires every package in this release to publish.
+  # A tag created by this script requires every package in this release to publish.
   SOFT_FAILED=()
   soft_publish() {
     local dir="$1" name="$2" hint="${3:-}"
