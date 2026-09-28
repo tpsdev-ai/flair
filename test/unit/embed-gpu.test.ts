@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   METAL_PREBUILT,
   EMBED_GPU_FALLBACK_MSG,
+  EMBED_GPU_UNCONFIRMED_MSG,
   detectUsableMetalBackend,
   resolveEmbedGpuChoice,
   resolveEmbedGpuLayers,
@@ -12,7 +13,10 @@ import {
   confirmMetalEngagement,
   applyEmbedGpuChoice,
   previewEmbedGpuStatement,
+  setEmbedGpuStatement,
   getEmbedGpuStatement,
+  embedGpuStatusWarning,
+  embedGpuStatusNotice,
   formatEmbedGpuLogLine,
   withEmbedGpuHealth,
   captureIoDuring,
@@ -265,6 +269,30 @@ describe("stated snapshot + Health field (flair#1437)", () => {
     expect(preview.backend).toBe("unconfirmed");
     expect(preview.gpuLayers).toBeNull();
     expect(preview.fallback).toBeUndefined();
+    expect(preview.pending).toBe(true);
+  });
+
+  it("/Health distinguishes warmup from finished no-readback, and apply clears pending", () => {
+    const choice = { gpuLayers: 99, source: "env" as const, metalUsable: true };
+    setEmbedGpuStatement(previewEmbedGpuStatement(choice));
+    const duringWarmup = withEmbedGpuHealth({ ok: true });
+    expect(duringWarmup.embedding).toEqual({
+      backend: "unconfirmed", gpuLayers: null, source: "env", pending: true,
+    });
+    expect(embedGpuStatusWarning(duringWarmup.embedding)).toContain("pending (warmup in progress)");
+    expect(embedGpuStatusNotice(duringWarmup.embedding)).toEqual({
+      level: "info", message: "requested GPU offload; Metal engagement pending (warmup in progress)",
+    });
+
+    applyEmbedGpuChoice(choice, {});
+    const afterWarmup = withEmbedGpuHealth({ ok: true });
+    expect(afterWarmup.embedding).toEqual({
+      backend: "unconfirmed", gpuLayers: null, source: "env",
+    });
+    expect(embedGpuStatusWarning(afterWarmup.embedding)).toBe(EMBED_GPU_UNCONFIRMED_MSG);
+    expect(embedGpuStatusNotice(afterWarmup.embedding)).toEqual({
+      level: "warn", message: EMBED_GPU_UNCONFIRMED_MSG,
+    });
   });
 
   it("applyEmbedGpuChoice stores the engine readback for /Health", () => {
@@ -301,6 +329,19 @@ describe("stated snapshot + Health field (flair#1437)", () => {
     expect(statement.backend).toBe("cpu");
     expect(statement.gpuLayers).toBe(0);
     expect(statement.source).toBe("default");
+  });
+
+  it("reading /Health before boot publishes a preview does not invent warmup", () => {
+    const saved = process.env.FLAIR_EMBED_GPU_LAYERS;
+    try {
+      process.env.FLAIR_EMBED_GPU_LAYERS = "99";
+      expect(getEmbedGpuStatement({ usable: true })).toEqual({
+        backend: "unconfirmed", gpuLayers: null, source: "env",
+      });
+    } finally {
+      if (saved === undefined) delete process.env.FLAIR_EMBED_GPU_LAYERS;
+      else process.env.FLAIR_EMBED_GPU_LAYERS = saved;
+    }
   });
 });
 

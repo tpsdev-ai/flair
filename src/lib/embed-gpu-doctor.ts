@@ -4,8 +4,9 @@
  * flair#1761; readback flair#2031).
  *
  * /Health carries `embedding.fallback` only when the engine itself reports
- * CPU after a GPU request, and `embedding.backend === "unconfirmed"` when
- * the engine exposed no GPU type or layer count. Operators read `flair
+ * CPU after a GPU request, and `embedding.backend === "unconfirmed"` during
+ * warmup or when the engine exposed no GPU type or layer count. The pending
+ * marker distinguishes the normal warmup window. Operators read `flair
  * doctor`, not Health. This is the single decision: given the public Health
  * embedding field, what (if anything) doctor prints, and whether it weighs
  * on doctor's exit code.
@@ -58,13 +59,22 @@ export function describeEmbedGpuDoctorFinding(
   if (embedding == null || typeof embedding !== "object" || Array.isArray(embedding)) {
     return null;
   }
-  const record = embedding as { fallback?: unknown; source?: unknown; backend?: unknown };
+  const record = embedding as { fallback?: unknown; source?: unknown; backend?: unknown; pending?: unknown };
   const fallback = record.fallback;
   const cpuFallback =
     typeof fallback === "string" && fallback.includes(EMBED_GPU_DOCTOR_MARKER);
   const unconfirmed = record.backend === "unconfirmed";
   if (!cpuFallback && !unconfirmed) return null;
   const source = record.source;
+
+  if (unconfirmed && !cpuFallback && record.pending === true) {
+    return {
+      isIssue: false,
+      icon: "warn",
+      message: "GPU offload was requested; embedding engine warmup is still running.",
+      fixHint: "Re-run flair doctor after warmup completes.",
+    };
+  }
 
   if (source === "detected") {
     // The Metal default requested offload for the operator; nothing was

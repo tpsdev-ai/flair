@@ -239,19 +239,25 @@ export async function registerEmbeddingsBackend(): Promise<void> {
       // GPU type comes from the binding this warmup dlopens. Do not open
       // another llama-addon afterwards — a second binary can report CPU
       // while this one is on Metal (flair#2031).
-      const { value: engine, gpuType } = await readGpuTypeFromWarmup(async () => {
-        const created = await register({
-          logicalName: LOGICAL_NAME,
-          kind: "embedding",
-          config,
+      try {
+        const { value: engine, gpuType } = await readGpuTypeFromWarmup(async () => {
+          const created = await register({
+            logicalName: LOGICAL_NAME,
+            kind: "embedding",
+            config,
+          });
+          if (created && typeof created.ensureReady === "function") {
+            await created.ensureReady();
+          }
+          return created;
         });
-        if (created && typeof created.ensureReady === "function") {
-          await created.ensureReady();
-        }
-        return created;
-      });
-      const statement = applyEmbedGpuChoice(choice, engine, () => gpuType);
-      console.log(formatEmbedGpuLogLine(statement));
+        const statement = applyEmbedGpuChoice(choice, engine, () => gpuType);
+        console.log(formatEmbedGpuLogLine(statement));
+      } catch (err) {
+        // A failed warmup has ended; it must not leave Health pending forever.
+        applyEmbedGpuChoice(choice);
+        throw err;
+      }
     }
   } catch (err) {
     // Not installed, or globalThis.models isn't ready (module loaded outside

@@ -107,7 +107,7 @@ mock.module("../../resources/search-readiness.js", () => ({
 }));
 mock.module("../../resources/embed-gpu.js", () => ({
   withEmbedGpuHealth: (body: object) => ({ ...body, embedding: {} }),
-  embedGpuStatusWarning: (embedding: unknown) => {
+  embedGpuStatusNotice: (embedding: unknown) => {
     expect(embedding).toEqual({});
     return null;
   },

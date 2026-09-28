@@ -6,7 +6,11 @@
   (`FLAIR_EMBED_GPU_LAYERS=0`, or the non-Metal default) is reported as CPU
   without a readback. The GPU type is `getGpuType()` on the native binding
   warmup already opened; a second addon is not loaded for the check. A
-  derived Metal default stays an advisory doctor warning.
+  derived Metal default stays an advisory doctor warning. During warmup,
+  `/Health` marks the preview `pending: true` and HealthDetail says
+  "pending (warmup in progress)". Doctor treats that window as advisory,
+  including an explicit GPU request, and asks for a recheck after warmup;
+  a finished explicit request without readback remains blocking.
 
   > **Heads-up:** an Apple Silicon host that previously showed "Metal did not
   > engage; running CPU" under launchd while ggml was on Metal now follows

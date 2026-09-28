@@ -42,6 +42,9 @@ export const EMBED_GPU_FALLBACK_MSG =
 export const EMBED_GPU_UNCONFIRMED_MSG =
   "requested GPU offload; Metal engagement unconfirmed";
 
+export const EMBED_GPU_PENDING_MSG =
+  "requested GPU offload; Metal engagement pending (warmup in progress)";
+
 export type EmbedGpuBackend = "metal" | "cpu" | "unconfirmed";
 export type EmbedGpuSource = "detected" | "env" | "default";
 
@@ -54,6 +57,8 @@ export interface EmbedGpuStatement {
    */
   gpuLayers: number | null;
   source: EmbedGpuSource;
+  /** Set only by the pre-readback preview; absent after warmup applies a result. */
+  pending?: true;
   /** Present only when the engine reported CPU after a GPU offload request. */
   fallback?: string;
 }
@@ -424,7 +429,7 @@ export function previewEmbedGpuStatement(choice: EmbedGpuChoice): EmbedGpuStatem
   if (choice.gpuLayers <= 0) {
     return { backend: "cpu", gpuLayers: 0, source: choice.source };
   }
-  return { backend: "unconfirmed", gpuLayers: null, source: choice.source };
+  return { backend: "unconfirmed", gpuLayers: null, source: choice.source, pending: true };
 }
 
 export function applyEmbedGpuChoice(
@@ -449,7 +454,12 @@ export function setEmbedGpuStatement(next: EmbedGpuStatement): void {
 
 export function getEmbedGpuStatement(detect: MetalDetectInput = {}): EmbedGpuStatement {
   if (stated) return stated;
-  return previewEmbedGpuStatement(resolveEmbedGpuChoice(process.env, detect));
+  const choice = resolveEmbedGpuChoice(process.env, detect);
+  // No warmup preview has been published yet. A missing backend must not
+  // announce "warmup in progress" just because Health was read first.
+  return choice.gpuLayers > 0
+    ? { backend: "unconfirmed", gpuLayers: null, source: choice.source }
+    : previewEmbedGpuStatement(choice);
 }
 
 export function _resetEmbedGpuStatementForTests(): void {
@@ -488,8 +498,19 @@ export function formatEmbedGpuRequestLine(choice: EmbedGpuChoice): string {
 export function embedGpuStatusWarning(statement: EmbedGpuStatement): string | null {
   if (statement.backend === "metal") return null;
   if (statement.fallback) return statement.fallback;
+  if (statement.backend === "unconfirmed" && statement.pending) return EMBED_GPU_PENDING_MSG;
   if (statement.backend === "unconfirmed") return EMBED_GPU_UNCONFIRMED_MSG;
   return null;
+}
+
+/** HealthDetail notice for `flair status`; warmup is informational. */
+export function embedGpuStatusNotice(
+  statement: EmbedGpuStatement,
+): { level: "info" | "warn"; message: string } | null {
+  const message = embedGpuStatusWarning(statement);
+  return message
+    ? { level: statement.backend === "unconfirmed" && statement.pending ? "info" : "warn", message }
+    : null;
 }
 
 /** Attach the stated embedding field to a /Health or /HealthDetail body. */
