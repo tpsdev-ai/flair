@@ -12,7 +12,6 @@
 
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
 
@@ -546,18 +545,13 @@ describe("continuation indentation convention", () => {
     expect(() => validateFragmentBody("README example", parts[1].slice(0, end))).not.toThrow();
   });
 
-  test("accepts every fragment on the main commit this PR is based on", () => {
-    // Pin the corpus so unrelated future fragments cannot change this regression.
-    const base = "6df652b0396da1dded7f254c8c323f8937cf1a46";
-    const cwd = join(import.meta.dir, "../..");
-    const git = (...args: string[]) => execFileSync("git", args, {
-      cwd, encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "pipe"],
-    });
-    const paths = git("ls-tree", "-r", "--name-only", base, "--", ".changelog/unreleased/")
-      .trim().split("\n").filter((path) => path.endsWith(".md") && !path.endsWith("/README.md"));
-    expect(paths.length).toBeGreaterThan(0);
-    for (const path of paths) {
-      expect(() => validateFragmentBody(path, git("show", base + ":" + path))).not.toThrow();
+  test("accepts every fragment in this checkout", () => {
+    // The fragments the release will assemble, read from the working tree (no git history
+    // needed, so a shallow CI checkout runs it too). An odd indent in any of them fails here.
+    const dir = join(import.meta.dir, "../../.changelog/unreleased");
+    const names = readdirSync(dir).filter((name) => name.endsWith(".md") && name !== "README.md");
+    for (const name of names) {
+      expect(() => validateFragmentBody(name, readFileSync(join(dir, name), "utf8"))).not.toThrow();
     }
   });
 
