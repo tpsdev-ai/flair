@@ -529,7 +529,8 @@ class TestAddSessionToMemory:
         first_call = service._client.request.call_args_list[0]
         body = first_call[1]["json"]
         assert body["agentId"] == "test-agent"
-        assert body["tags"] == ["adk:app:user"]
+        assert body["tags"] == ["adk:app:user", "adk-event:evt-1"]
+        assert body["sessionId"] == "sess-1"
         assert body["content"] == "hello world"
         assert body["id"] == "app:user:sess-1:evt-1"
 
@@ -585,6 +586,7 @@ class TestAddSessionToMemory:
                 _make_session("pre:post", "user", "sess", [_make_event("evt", "hello")])
             ),
             "pre%3Apost|user|sess|evt",
+            "pre:post", "user", "sess", "evt",
         )
         await _assert_colon_write_preserves_legacy(
             service,
@@ -592,6 +594,7 @@ class TestAddSessionToMemory:
                 _make_session("pre", "post:user", "sess", [_make_event("evt", "hello")])
             ),
             "pre|post%3Auser|sess|evt",
+            "pre", "post:user", "sess", "evt",
         )
 
 
@@ -633,6 +636,7 @@ class TestAddEventsToMemory:
                 events=[_make_event("evt", "hello")], session_id="sess",
             ),
             "pre%3Apost|user|sess|evt",
+            "pre:post", "user", "sess", "evt",
         )
         await _assert_colon_write_preserves_legacy(
             service,
@@ -641,6 +645,7 @@ class TestAddEventsToMemory:
                 events=[_make_event("evt", "hello")], session_id="sess",
             ),
             "pre|post%3Auser|sess|evt",
+            "pre", "post:user", "sess", "evt",
         )
 
     @pytest.mark.asyncio
@@ -708,6 +713,39 @@ class TestAddMemory:
         assert body["content"] == "direct fact"
         assert body["tags"] == ["adk:app:user"]
         assert body["author"] == "test-agent"
+
+    @pytest.mark.asyncio
+    async def test_occupied_direct_id_is_kept(self, service):
+        """A caller-chosen id that already holds another event tuple is not replaced.
+
+        Direct writes have no event tuple to verify, so a 409 keeps the row
+        and reports the conflict. No GET and no PUT. Restoring an unconditional
+        PUT turns this red.
+        """
+        from adk_flair.memory_service import FlairWriteError
+
+        occupied = "pre:post:user:sess:evt"
+
+        def respond(method, path, **kwargs):
+            if method == "POST":
+                return _mock_response(409, "Conflict")
+            return _mock_response(200)
+
+        service._client.request.side_effect = respond
+        with pytest.raises(FlairWriteError) as excinfo:
+            await service.add_memory(
+                app_name="app",
+                user_id="user",
+                memories=[MemoryEntry(
+                    id=occupied,
+                    content=types.Content(role="user", parts=[types.Part(text="overwrite")]),
+                )],
+            )
+
+        assert excinfo.value.failed == [(occupied, 409)]
+        methods = [c[0][0] for c in service._client.request.call_args_list]
+        assert methods == ["POST"]
+        assert service._client.request.call_args_list[0][1]["json"]["id"] == occupied
 
     @pytest.mark.asyncio
     async def test_skipped_textless_entry_logs_one_warning_on_success(self, service, caplog):
@@ -929,18 +967,27 @@ def _mock_response(status_code: int, reason: str = "") -> MagicMock:
     )
 
 
-async def _assert_colon_write_preserves_legacy(service, write, expected_id):
-    """POST expected_id, 409-replace that id, and never address the legacy row.
+def _json_response(payload, status_code: int = 200, reason: str = "OK") -> MagicMock:
+    resp = _mock_response(status_code, reason)
+    resp.json.return_value = payload
+    resp.text = json.dumps(payload)
+    return resp
+
+
+async def _assert_colon_write_preserves_legacy(service, write, expected_id, app, user, session, event):
+    """POST expected_id, verify the row, replace that id, never the legacy row.
 
     ``write`` is a zero-arg callable returning the awaitable under test.
-    The legacy id is occupied: any request that names it gets 409, and a
-    second 409 from the PUT fallback fails the write. A restored old join
-    therefore cannot pass.
+    The legacy event-join id is occupied. A restored old join posts that id;
+    the conflict read cannot verify it as this tuple, so the occupied row is
+    kept and the test fails.
     """
     from urllib.parse import quote
+    from adk_flair.memory_service import _compound_tag, _event_tag
 
     legacy_id = "pre:post:user:sess:evt"
     legacy_path = "/Memory/" + quote(legacy_id, safe="")
+    expected_path = "/Memory/" + quote(expected_id, safe="")
 
     def respond(method, path, **kwargs):
         body_id = (kwargs.get("json") or {}).get("id")
@@ -948,22 +995,29 @@ async def _assert_colon_write_preserves_legacy(service, write, expected_id):
             return _mock_response(409, "Conflict")
         if method == "POST":
             return _mock_response(409, "Conflict")
+        if method == "GET" and path == expected_path:
+            return _json_response({
+                "id": expected_id,
+                "sessionId": session,
+                "tags": [_compound_tag(app, user), _event_tag(event)],
+            })
         return _mock_response(200)
 
     service._client.request.reset_mock(side_effect=True)
     service._client.request.side_effect = respond
     await write()
 
-    assert service._client.request.call_count == 2, service._client.request.call_args_list
-    first, second = service._client.request.call_args_list
+    assert service._client.request.call_count == 3, service._client.request.call_args_list
+    first, second, third = service._client.request.call_args_list
     assert (first[0][0], first[0][1]) == ("POST", "/Memory/")
     assert first[1]["json"]["id"] == expected_id
     assert ":" not in first[1]["json"]["id"]
     assert first[1]["json"]["id"] != legacy_id
-    assert second[0][0] == "PUT"
-    assert second[0][1] == "/Memory/" + quote(expected_id, safe="")
-    assert second[0][1] != legacy_path
-    assert second[1]["json"]["id"] == expected_id
+    assert (second[0][0], second[0][1]) == ("GET", expected_path)
+    assert third[0][0] == "PUT"
+    assert third[0][1] == expected_path
+    assert third[0][1] != legacy_path
+    assert third[1]["json"]["id"] == expected_id
 
 
 class TestCreateVerbAndConflictFallback:
@@ -1015,21 +1069,29 @@ class TestCreateVerbAndConflictFallback:
         This is the trap a naive PUT→POST swap walks into: without the
         fallback, every re-save of an already-ingested session event fails
         with 409 on every deployment where the old PUT path worked."""
-        service._client.request.side_effect = [
-            _mock_response(409, "Conflict"),
-            _mock_response(200),
-        ]
+        record_id = "app:user:sess-1:evt-1"
+
+        def respond(method, path, **kwargs):
+            if method == "POST":
+                return _mock_response(409, "Conflict")
+            if method == "GET":
+                # Historical separator-free row: the id is the event join.
+                return _json_response({"id": record_id, "tags": ["adk:app:user"]})
+            return _mock_response(200)
+
+        service._client.request.side_effect = respond
 
         session = _make_session("app", "user", "sess-1", [_make_event("evt-1", "hello")])
         await service.add_session_to_memory(session)
 
-        assert service._client.request.call_count == 2
-        first, second = service._client.request.call_args_list
+        assert service._client.request.call_count == 3
+        first, second, third = service._client.request.call_args_list
         assert (first[0][0], first[0][1]) == ("POST", "/Memory/")
+        assert (second[0][0], second[0][1]) == ("GET", "/Memory/app%3Auser%3Asess-1%3Aevt-1")
         # #1970: the id is one percent-encoded path segment (':' → %3A); the
         # server decodes it, so the record addressed is unchanged.
-        assert (second[0][0], second[0][1]) == ("PUT", "/Memory/app%3Auser%3Asess-1%3Aevt-1")
-        assert second[1]["json"] == first[1]["json"]
+        assert (third[0][0], third[0][1]) == ("PUT", "/Memory/app%3Auser%3Asess-1%3Aevt-1")
+        assert third[1]["json"] == first[1]["json"]
 
         warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
         assert not any("write failed" in str(w).lower() for w in warnings)
@@ -1051,30 +1113,33 @@ class TestCreateVerbAndConflictFallback:
             signed_paths.append(path)
             return "TPS-Ed25519 x:0:0:AA"
 
-        for rid in ["a#b", "x?y=1", "a/b/c", "50%", "sp ace"]:
-            service._client.request.reset_mock()
-            service._client.request.side_effect = [
-                _mock_response(409, "Conflict"),
-                _mock_response(200),
-            ]
+        for event_id in ["a#b", "x?y=1", "a/b/c", "50%", "sp ace"]:
+            record_id = f"app:user:sess:{event_id}"
+
+            def respond(method, path, **kwargs):
+                if method == "POST":
+                    return _mock_response(409, "Conflict")
+                if method == "GET":
+                    return _json_response({"id": record_id, "tags": ["adk:app:user"]})
+                return _mock_response(200)
+
+            service._client.request.reset_mock(side_effect=True)
+            service._client.request.side_effect = respond
             signed_paths.clear()
             with patch("adk_flair.memory_service._sign_request", side_effect=_record_sign):
-                await service.add_memory(
-                    app_name="app", user_id="user",
-                    memories=[MemoryEntry(
-                        id=rid,
-                        content=types.Content(role="user", parts=[types.Part(text="fact")]),
-                    )],
+                await service.add_session_to_memory(
+                    _make_session("app", "user", "sess", [_make_event(event_id, "fact")])
                 )
-            assert service._client.request.call_count == 2
-            method, sent_path = service._client.request.call_args_list[1][0][:2]
+            methods = [c[0][0] for c in service._client.request.call_args_list]
+            assert methods == ["POST", "GET", "PUT"]
+            method, sent_path = service._client.request.call_args_list[2][0][:2]
             assert method == "PUT"
             assert sent_path.startswith("/Memory/")
             segment = sent_path[len("/Memory/"):]
             assert "/" not in segment  # assertion: one segment only
             assert "?" not in segment
             assert "#" not in segment
-            assert unquote(segment) == rid
+            assert unquote(segment) == record_id
             # Where the site signs, the signed path equals the sent path.
             assert signed_paths[-1] == sent_path
 

@@ -332,15 +332,19 @@ dict is its return channel.
 
 ## Idempotent writes
 
-An event with an id gets a deterministic record id
-(`{app_name}:{user_id}:{session_id}:{event.id}`), so re-ingesting it does not
-duplicate; an event without an id gets a fresh UUID, so re-ingesting it can.
-Tuples with no colon in any component keep that historical join. When any
-component contains `:`, each component percent-encodes `%` as `%25`, `|` as
-`%7C`, and `:` as `%3A`, and the parts are joined with `|`. That id contains
-no `:`. The old join always contains at least three, so the new id is not a
-row the previous encoder stored, and a create-conflict replace cannot
-overwrite a different tuple's existing record.
+An event with an id gets a deterministic record id. Tuples with no colon in
+any component keep the historical event-join
+(`{app_name}:{user_id}:{session_id}:{event.id}`), so re-ingesting those
+updates the same row. An event without an id gets a fresh UUID, so
+re-ingesting it can store another row. When any component contains `:`, each
+component percent-encodes `%` as `%25`, `|` as `%7C`, and `:` as `%3A`, and
+the parts are joined with `|`. That id contains no `:`. The old event-join
+always contains at least three `:`, so the new id is not an event-join row
+the previous encoder stored. The first re-ingestion after upgrading can
+leave both the old row and the new one for a colon-bearing event. A create
+conflict replaces the existing row only when that row is verified to be the
+same event tuple; otherwise the row is kept and the conflict is reported.
+A caller-chosen id on `add_memory()` is never replaced on conflict.
 
 ## custom_metadata
 

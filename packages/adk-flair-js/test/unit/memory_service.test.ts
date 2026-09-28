@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, mock, spyOn } from "bun:test";
-import { FlairMemoryService, deterministicRecordId } from "../../src/memory_service.js";
+import { FlairMemoryService, deterministicRecordId, eventTag } from "../../src/memory_service.js";
 import { compoundTag, sanitizeTagSegment, desanitizeTagSegment } from "../../src/tag.js";
 import { loadEd25519Key, signRequest, expandHome } from "../../src/signing.js";
 import * as crypto from "node:crypto";
@@ -60,42 +60,58 @@ function makeSession(opts: {
 }
 
 /**
- * The legacy id is occupied. A POST of `expectedId` gets 409 and must PUT
- * that id, never the legacy row. Restoring the old `:` join posts the
- * legacy id and the fallback PUTs the occupied row.
+ * The legacy event-join id is occupied. A POST of `expectedId` gets 409, the
+ * row is verified as this tuple, and the fallback PUTs that id, never the
+ * legacy row. Restoring the old `:` join posts the legacy id; the conflict
+ * read cannot verify it as this tuple, so the occupied row is kept.
  */
 async function assertColonWritePreservesLegacy(
   installFetch: (fetchMock: typeof globalThis.fetch) => void,
   write: () => Promise<void>,
   expectedId: string,
+  appName: string,
+  userId: string,
+  sessionId: string,
+  eventId: string,
 ): Promise<void> {
   const legacyId = "pre:post:user:sess:evt";
   const legacyUrl = `http://localhost:19926/Memory/${encodeURIComponent(legacyId)}`;
-  const calls: Array<{ method: string; url: string; body: Record<string, unknown> }> = [];
+  const expectedUrl = `http://localhost:19926/Memory/${encodeURIComponent(expectedId)}`;
+  const calls: Array<{ method: string; url: string; body?: Record<string, unknown> }> = [];
   installFetch(mock(async (url, init) => {
     const method = (init as RequestInit).method ?? "GET";
-    const body = JSON.parse((init as RequestInit).body as string) as Record<string, unknown>;
+    const raw = (init as RequestInit).body;
+    const body = raw ? JSON.parse(raw as string) as Record<string, unknown> : undefined;
     const target = String(url);
     calls.push({ method, url: target, body });
-    if (body.id === legacyId || target === legacyUrl) {
+    if (body?.id === legacyId || target === legacyUrl) {
       return new Response("Conflict", { status: 409 });
     }
     if (method === "POST") return new Response("Conflict", { status: 409 });
+    if (method === "GET" && target === expectedUrl) {
+      return new Response(JSON.stringify({
+        id: expectedId,
+        sessionId,
+        tags: [compoundTag(appName, userId), eventTag(eventId)],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
     return new Response(JSON.stringify({ ok: true }), { status: 200 });
   }));
 
   await write();
 
-  expect(calls).toHaveLength(2);
+  expect(calls).toHaveLength(3);
   expect(calls[0].method).toBe("POST");
   expect(calls[0].url).toBe("http://localhost:19926/Memory/");
-  expect(calls[0].body.id).toBe(expectedId);
-  expect(String(calls[0].body.id).includes(":")).toBe(false);
-  expect(calls[0].body.id).not.toBe(legacyId);
-  expect(calls[1].method).toBe("PUT");
-  expect(calls[1].url).toBe(`http://localhost:19926/Memory/${encodeURIComponent(expectedId)}`);
-  expect(calls[1].url).not.toBe(legacyUrl);
-  expect(calls[1].body.id).toBe(expectedId);
+  expect(calls[0].body?.id).toBe(expectedId);
+  expect(String(calls[0].body?.id).includes(":")).toBe(false);
+  expect(calls[0].body?.id).not.toBe(legacyId);
+  expect(calls[1].method).toBe("GET");
+  expect(calls[1].url).toBe(expectedUrl);
+  expect(calls[2].method).toBe("PUT");
+  expect(calls[2].url).toBe(expectedUrl);
+  expect(calls[2].url).not.toBe(legacyUrl);
+  expect(calls[2].body?.id).toBe(expectedId);
 }
 
 function makeMemoryEntry(text: string, id?: string): import("@google/adk").MemoryEntry {
@@ -734,7 +750,13 @@ describe("addSessionToMemory", () => {
     // (flair#1336 parity; see the create-verb describe block below).
     expect(calls[0].method).toBe("POST");
     expect(calls[0].url).toBe("http://localhost:19926/Memory/");
-    expect(calls[0].body).toMatchObject({ id: "my-app:user-1:sess-1:evt-1", tags: ["adk:my-app:user-1"], type: "session", durability: "standard" });
+    expect(calls[0].body).toMatchObject({
+      id: "my-app:user-1:sess-1:evt-1",
+      tags: ["adk:my-app:user-1", "adk-event:evt-1"],
+      sessionId: "sess-1",
+      type: "session",
+      durability: "standard",
+    });
     // Second call
     expect(calls[1].method).toBe("POST");
     expect((calls[1].body as Record<string, unknown>).id).toBe("my-app:user-1:sess-1:evt-2");
@@ -752,6 +774,7 @@ describe("addSessionToMemory", () => {
         events: [makeEvent({ id: "evt", text: "hello" })],
       })),
       "pre%3Apost|user|sess|evt",
+      "pre:post", "user", "sess", "evt",
     );
     await assertColonWritePreservesLegacy(
       (fetchMock) => { globalThis.fetch = fetchMock; },
@@ -760,6 +783,7 @@ describe("addSessionToMemory", () => {
         events: [makeEvent({ id: "evt", text: "hello" })],
       })),
       "pre|post%3Auser|sess|evt",
+      "pre", "post:user", "sess", "evt",
     );
   });
 
@@ -982,17 +1006,26 @@ describe("create verb and conflict fallback", () => {
   it("409 conflict falls back to PUT /Memory/{id} with the SAME body, no warning", async () => {
     // The trap a naive PUT→POST swap walks into: without the fallback,
     // every re-save of an already-ingested session event fails with 409 on
-    // every deployment where the old PUT path worked.
-    const calls: Array<{ method: string; url: string; body: Record<string, unknown> }> = [];
+    // every deployment where the old PUT path worked. The GET must show the
+    // same separator-free event tuple before the PUT.
+    const recordId = "app:user:sess-1:evt-1";
+    const calls: Array<{ method: string; url: string; body?: Record<string, unknown> }> = [];
     globalThis.fetch = mock(async (url, init) => {
+      const method = (init as RequestInit).method ?? "GET";
+      const raw = (init as RequestInit).body;
       calls.push({
-        method: (init as RequestInit).method ?? "GET",
+        method,
         url: String(url),
-        body: JSON.parse((init as RequestInit).body as string) as Record<string, unknown>,
+        body: raw ? JSON.parse(raw as string) as Record<string, unknown> : undefined,
       });
-      return calls.length === 1
-        ? new Response("Conflict", { status: 409 })
-        : new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (method === "POST") return new Response("Conflict", { status: 409 });
+      if (method === "GET") {
+        return new Response(JSON.stringify({ id: recordId, tags: ["adk:app:user"] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
     });
 
     const warnings: string[] = [];
@@ -1008,14 +1041,16 @@ describe("create verb and conflict fallback", () => {
       console.warn = origWarn;
     }
 
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(3);
     expect(calls[0].method).toBe("POST");
     expect(calls[0].url).toBe("http://localhost:19926/Memory/");
-    expect(calls[1].method).toBe("PUT");
+    expect(calls[1].method).toBe("GET");
+    expect(calls[1].url).toBe("http://localhost:19926/Memory/app%3Auser%3Asess-1%3Aevt-1");
+    expect(calls[2].method).toBe("PUT");
     // #1970: the id is one percent-encoded path segment (':' → %3A); the
     // server decodes it, so the record addressed is unchanged.
-    expect(calls[1].url).toBe("http://localhost:19926/Memory/app%3Auser%3Asess-1%3Aevt-1");
-    expect(calls[1].body).toEqual(calls[0].body);
+    expect(calls[2].url).toBe("http://localhost:19926/Memory/app%3Auser%3Asess-1%3Aevt-1");
+    expect(calls[2].body).toEqual(calls[0].body);
     // Idempotent re-ingestion must neither throw nor warn.
     expect(warnings.filter((w) => w.includes("write failed"))).toEqual([]);
   });
@@ -1075,38 +1110,54 @@ describe("Memory id path encoding on the 409 PUT fallback (#1970)", () => {
     // it (became a fragment), `?` started a query, `/` split it into extra
     // segments and `%`/space were malformed. Each id must instead reach the
     // wire as exactly one segment after /Memory/ that decodes back to the id.
-    const ids = ["a#b", "x?y=1", "a/b/c", "50%", "sp ace"];
+    // Direct addMemory does not replace an occupied id. These event ids have
+    // no `:`, so the session write's GET verifies the historical event-join
+    // and the fallback PUT still encodes the full record id as one segment.
+    const eventIds = ["a#b", "x?y=1", "a/b/c", "50%", "sp ace"];
     const calls: Array<{ method: string; url: string; auth: string }> = [];
+    let recordId = "";
     globalThis.fetch = mock(async (url, init) => {
+      const method = (init as RequestInit).method ?? "GET";
       calls.push({
-        method: (init as RequestInit).method ?? "GET",
+        method,
         url: String(url),
         auth: ((init as RequestInit).headers as Record<string, string>)["Authorization"],
       });
-      return calls.length === 1
-        ? new Response("Conflict", { status: 409 })
-        : new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (method === "POST") return new Response("Conflict", { status: 409 });
+      if (method === "GET") {
+        return new Response(JSON.stringify({ id: recordId, tags: ["adk:app:user"] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
     });
 
     const publicKey = crypto.createPublicKey(loadEd25519Key(keyfilePath));
 
-    for (const id of ids) {
+    for (const eventId of eventIds) {
+      recordId = `app:user:sess:${eventId}`;
       calls.length = 0;
-      await service.addMemory("app", "user", [{ ...makeMemoryEntry("fact"), id }]);
-      expect(calls.map((c) => c.method)).toEqual(["POST", "PUT"]);
+      await service.addSessionToMemory(makeSession({
+        id: "sess",
+        appName: "app",
+        userId: "user",
+        events: [makeEvent({ id: eventId, text: "fact" })],
+      }));
+      expect(calls.map((c) => c.method)).toEqual(["POST", "GET", "PUT"]);
 
-      const u = new URL(calls[1].url);
+      const u = new URL(calls[2].url);
       const parts = u.pathname.split("/").filter(Boolean);
       expect(parts.length).toBe(2); // assertion: /Memory/<one segment>
       expect(parts[0]).toBe("Memory");
       expect(u.search).toBe("");
       expect(u.hash).toBe("");
-      expect(decodeURIComponent(parts[1])).toBe(id);
+      expect(decodeURIComponent(parts[1])).toBe(recordId);
 
       // Where the site signs, the signed path equals the sent path: the
       // Authorization payload covers METHOD:pathname, so verify it over the
       // path that arrived.
-      const m = /^TPS-Ed25519 ([^:]+):(\d+):([^:]+):(.+)$/.exec(calls[1].auth);
+      const m = /^TPS-Ed25519 ([^:]+):(\d+):([^:]+):(.+)$/.exec(calls[2].auth);
       expect(m).not.toBeNull();
       const [, agent, ts, nonce, sigB64] = m!;
       const ok = crypto.verify(
@@ -1207,6 +1258,46 @@ describe("addMemory", () => {
     await service.addMemory("my-app", "user-1", []);
     expect(called).toBe(false);
   });
+
+  it("keeps an occupied caller-chosen id that holds another event tuple", async () => {
+    // Direct addMemory has no event tuple, so a 409 never reads or replaces.
+    // Restoring an unconditional PUT turns this red.
+    const occupied = "pre:post:user:sess:evt";
+    const calls: Array<{ method: string; url: string; body?: Record<string, unknown> }> = [];
+    globalThis.fetch = mock(async (url, init) => {
+      const method = (init as RequestInit).method ?? "GET";
+      const raw = (init as RequestInit).body;
+      calls.push({
+        method,
+        url: String(url),
+        body: raw ? JSON.parse(raw as string) as Record<string, unknown> : undefined,
+      });
+      if (method === "POST") return new Response("Conflict", { status: 409 });
+      return new Response(JSON.stringify({
+        id: occupied,
+        content: "original event",
+        sessionId: "sess",
+        tags: [compoundTag("pre:post", "user"), eventTag("evt")],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+
+    const warnings: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+    try {
+      await service.addMemory("app", "user", [
+        { ...makeMemoryEntry("overwrite"), id: occupied },
+      ]);
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(calls.map((c) => c.method)).toEqual(["POST"]);
+    expect(calls[0].body?.id).toBe(occupied);
+    const warning = warnings.join(" ");
+    expect(warning).toContain("conflict");
+    expect(warning).toContain("kept the existing row");
+  });
 });
 
 // ─── addEventsToMemory ──────────────────────────────────────────────────────
@@ -1268,6 +1359,7 @@ describe("addEventsToMemory", () => {
         "sess",
       ),
       "pre%3Apost|user|sess|evt",
+      "pre:post", "user", "sess", "evt",
     );
     await assertColonWritePreservesLegacy(
       (fetchMock) => { globalThis.fetch = fetchMock; },
@@ -1277,6 +1369,7 @@ describe("addEventsToMemory", () => {
         "sess",
       ),
       "pre|post%3Auser|sess|evt",
+      "pre", "post:user", "sess", "evt",
     );
   });
 });

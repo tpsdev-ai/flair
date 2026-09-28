@@ -209,6 +209,37 @@ def _compound_tag(app_name: str, user_id: str) -> str:
     return f"{_TAG_PREFIX}:{_sanitize_tag_segment(app_name)}:{_sanitize_tag_segment(user_id)}"
 
 
+def _event_tag(event_id: str) -> str:
+    """Tag that names the event id inside an event-tuple stamp.
+
+    ``%``, ``:``, and ``_`` are encoded the same way as a compound-tag
+    segment, so two event ids cannot share a tag.
+    """
+    return f"adk-event:{_sanitize_tag_segment(event_id)}"
+
+
+def _row_is_same_event_tuple(
+    row: Mapping[str, Any], app_name: str, user_id: str, session_id: str, event_id: str
+) -> bool:
+    """True when ``row`` is verified to be this (app, user, session, event).
+
+    New writes stamp ``sessionId`` and an ``adk-event:`` tag. A historical
+    separator-free row has neither, but its id is the unambiguous event join
+    and its scope tag is the compound tag. Anything else is not verified.
+    """
+    tags = row.get("tags") or []
+    if not isinstance(tags, list):
+        return False
+    if _compound_tag(app_name, user_id) not in tags:
+        return False
+    if row.get("sessionId") == session_id and _event_tag(event_id) in tags:
+        return True
+    parts = (app_name, user_id, session_id, event_id)
+    if all(":" not in part for part in parts):
+        return row.get("id") == ":".join(parts)
+    return False
+
+
 def _escape_record_id_component(value: str) -> str:
     """Percent-encode ``%``, ``|``, and ``:`` so the component can be joined on ``|``.
 
@@ -703,9 +734,13 @@ class FlairMemoryService(BaseMemoryService):
         return resp.text
 
     async def _write_memory_record(
-        self, record_id: str, body: Dict[str, Any]
+        self,
+        record_id: str,
+        body: Dict[str, Any],
+        *,
+        event_tuple: Optional[Tuple[str, str, str, str]] = None,
     ) -> None:
-        """Create-or-replace one Memory record.
+        """Create one Memory record, replacing it only for the same event tuple.
 
         Creates via ``POST /Memory/`` — Harper's collection create verb —
         with the id in the body. The previous shape, ``PUT /Memory/{id}``,
@@ -713,12 +748,11 @@ class FlairMemoryService(BaseMemoryService):
         does not exist yet (flair#1336, observed on hosted Harper Fabric;
         not reproducible on stock Harper 5.2.x, where PUT upserts).
 
-        A 409 from POST means the record already exists — re-ingestion of a
-        deterministic id (add_session_to_memory re-saves a growing session's
-        earlier events every time) or a caller-supplied id being rewritten.
-        Fall back to ``PUT /Memory/{id}`` for exactly that case, preserving
-        the pre-#1336 replace/refresh semantics for existing rows. Any other
-        error propagates unchanged.
+        A 409 from POST means the id is already occupied. The existing row
+        is read and replaced only when ``event_tuple`` is verified to be
+        that row (re-ingestion of the same app, user, session, and event).
+        A caller-chosen id, or any row that is not that tuple, is kept and
+        the conflict is raised. Any other error propagates unchanged.
         """
         # Validate/encode the id BEFORE any request (#1970): a ``.``/``..`` id
         # cannot address its record, so a refused id sends nothing at all (not
@@ -727,11 +761,33 @@ class FlairMemoryService(BaseMemoryService):
         put_path = f"/Memory/{_encode_record_id(record_id)}"
         try:
             await self._request("POST", "/Memory/", json_body=body)
+            return
         except FlairRequestError as exc:
             if exc.status_code != 409:
                 raise
-            # The id is one percent-encoded path segment (#1970).
+        if event_tuple is not None and await self._occupied_row_is_event_tuple(
+            put_path, event_tuple
+        ):
             await self._request("PUT", put_path, json_body=body)
+            return
+        raise FlairRequestError(
+            "POST",
+            put_path,
+            409,
+            "occupied by a different record; existing row kept",
+        )
+
+    async def _occupied_row_is_event_tuple(
+        self, path: str, event_tuple: Tuple[str, str, str, str]
+    ) -> bool:
+        """GET the occupied row. False when it cannot be verified."""
+        try:
+            row = await self._request("GET", path)
+        except Exception:
+            return False
+        if not isinstance(row, dict):
+            return False
+        return _row_is_same_event_tuple(row, *event_tuple)
 
     # ── BaseMemoryService implementation ─────────────────────────────────────
 
@@ -753,8 +809,9 @@ class FlairMemoryService(BaseMemoryService):
             if not text:
                 continue
 
+            event_id = event.id or str(uuid.uuid4())
             record_id = _deterministic_record_id(
-                app_name, user_id, session_id, event.id or str(uuid.uuid4())
+                app_name, user_id, session_id, event_id
             )
             body = {
                 "id": record_id,
@@ -762,11 +819,16 @@ class FlairMemoryService(BaseMemoryService):
                 "content": text,
                 "type": "session",
                 "durability": "standard",
-                "tags": [tag],
+                "tags": [tag, _event_tag(event_id)],
+                "sessionId": session_id,
                 "createdAt": _iso_now(),
             }
             try:
-                await self._write_memory_record(record_id, body)
+                await self._write_memory_record(
+                    record_id,
+                    body,
+                    event_tuple=(app_name, user_id, session_id, event_id),
+                )
                 written += 1
             except Exception as exc:
                 status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None) or "?"
@@ -827,7 +889,8 @@ class FlairMemoryService(BaseMemoryService):
                 "content": text,
                 "type": "session",
                 "durability": "standard",
-                "tags": [tag],
+                "tags": [tag, _event_tag(event_id)],
+                "sessionId": sid,
                 "createdAt": _iso_now(),
             }
             if metadata_json is not None:
@@ -835,7 +898,11 @@ class FlairMemoryService(BaseMemoryService):
             if subject_value is not None:
                 body["subject"] = subject_value
             try:
-                await self._write_memory_record(record_id, body)
+                await self._write_memory_record(
+                    record_id,
+                    body,
+                    event_tuple=(app_name, user_id, sid, event_id),
+                )
                 written += 1
             except Exception as exc:
                 status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None) or "?"

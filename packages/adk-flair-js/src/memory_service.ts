@@ -19,7 +19,7 @@ import type { Event } from "@google/adk";
 import type { Content } from "@google/genai";
 import * as crypto from "node:crypto";
 import { loadEd25519Key, signRequest } from "./signing.js";
-import { compoundTag } from "./tag.js";
+import { compoundTag, sanitizeTagSegment } from "./tag.js";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -37,18 +37,44 @@ function escapeRecordIdComponent(value: string): string {
   return value.replace(/%/g, "%25").replace(/\|/g, "%7C").replace(/:/g, "%3A");
 }
 
+/** Tag that names the event id inside an event-tuple stamp. */
+export function eventTag(eventId: string): string {
+  return `adk-event:${sanitizeTagSegment(eventId)}`;
+}
+
+/**
+ * True when `row` is verified to be this (app, user, session, event).
+ *
+ * New writes stamp `sessionId` and an `adk-event:` tag. A historical
+ * separator-free row has neither, but its id is the unambiguous event join
+ * and its scope tag is the compound tag. Anything else is not verified.
+ */
+export function rowIsSameEventTuple(
+  row: Record<string, unknown>,
+  appName: string,
+  userId: string,
+  sessionId: string,
+  eventId: string,
+): boolean {
+  const tags = Array.isArray(row["tags"]) ? row["tags"] : [];
+  if (!tags.includes(compoundTag(appName, userId))) return false;
+  if (row["sessionId"] === sessionId && tags.includes(eventTag(eventId))) return true;
+  const parts = [appName, userId, sessionId, eventId];
+  if (parts.every((part) => !part.includes(":"))) {
+    return row["id"] === parts.join(":");
+  }
+  return false;
+}
+
 /**
  * Deterministic record id for idempotent re-ingestion.
  *
  * Tuples with no colon in any component keep the historical join
  * `app:user:session:event`, so those stored rows stay addressable. When any
  * component contains `:`, every component is percent-encoded and the parts
- * are joined with `|`. That id contains no `:`. The old join of four
- * components always contains at least three `:` — including ids already
- * stored for tuples that themselves contained `:` — so the new id is outside
- * that set. A create-conflict replace therefore cannot land on a row the old
- * encoder stored for a different tuple. Mirrors `_deterministic_record_id`
- * in the Python package.
+ * are joined with `|`. That id contains no `:`. The old event-join of four
+ * components always contains at least three `:`, so the new id is outside
+ * that set. Mirrors `_deterministic_record_id` in the Python package.
  */
 export function deterministicRecordId(
   appName: string,
@@ -444,12 +470,13 @@ export class FlairMemoryService implements BaseMemoryService {
         content: text,
         type: "session",
         durability: "standard",
-        tags: [tag],
+        tags: [tag, eventTag(eventId)],
+        sessionId: session.id,
         createdAt: epochMsToIso(event.timestamp),
       };
 
       try {
-        await this._writeRecord(recordId, body);
+        await this._writeRecord(recordId, body, [appName, userId, session.id, eventId]);
         written++;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -607,14 +634,15 @@ export class FlairMemoryService implements BaseMemoryService {
         content: text,
         type: "session",
         durability: "standard",
-        tags: [tag],
+        tags: [tag, eventTag(eventId)],
+        sessionId,
         createdAt: epochMsToIso(event.timestamp),
       };
       if (metadataJson !== null) body["metadata"] = metadataJson;
       if (subjectValue !== null) body["subject"] = subjectValue;
 
       try {
-        await this._writeRecord(recordId, body);
+        await this._writeRecord(recordId, body, [appName, userId, sessionId, eventId]);
         written++;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -924,19 +952,18 @@ export class FlairMemoryService implements BaseMemoryService {
   private async _sendJson(
     method: string,
     path: string,
-    body: Record<string, unknown>,
+    body?: Record<string, unknown>,
   ): Promise<Response> {
     const authHeader = signRequest(this._privateKey, this._agentId, method, path);
+    const headers: Record<string, string> = { "Authorization": authHeader };
+    if (body !== undefined) headers["Content-Type"] = "application/json";
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this._timeoutMs);
     try {
       return await fetch(`${this._url}${path}`, {
         method,
-        headers: {
-          "Authorization": authHeader,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
     } finally {
@@ -945,7 +972,7 @@ export class FlairMemoryService implements BaseMemoryService {
   }
 
   /**
-   * Create-or-replace one Memory record.
+   * Create one Memory record, replacing it only for the same event tuple.
    *
    * Creates via `POST /Memory/` — Harper's collection create verb — with the
    * id in the body. The previous shape, `PUT /Memory/{id}`, is update-only on
@@ -953,16 +980,16 @@ export class FlairMemoryService implements BaseMemoryService {
    * (flair#1336, observed on hosted Harper Fabric; not reproducible on stock
    * Harper 5.2.x, where PUT upserts). Mirrors the Python package's #1339 fix.
    *
-   * A 409 from POST means the record already exists — re-ingestion of a
-   * deterministic id (addSessionToMemory re-saves a growing session's earlier
-   * events every time) or a caller-supplied id being rewritten. Fall back to
-   * `PUT /Memory/{id}` for exactly that case, preserving the pre-#1336
-   * replace/refresh semantics for existing rows. Any other error propagates
-   * unchanged (the write-path warning logs carry the real HTTP status).
+   * A 409 from POST means the id is already occupied. The existing row is
+   * read and replaced only when `eventTuple` is verified to be that row
+   * (re-ingestion of the same app, user, session, and event). A caller-chosen
+   * id, or any row that is not that tuple, is kept and the conflict is
+   * thrown. Any other error propagates unchanged.
    */
   private async _writeRecord(
     recordId: string,
     body: Record<string, unknown>,
+    eventTuple?: [string, string, string, string],
   ): Promise<void> {
     // Validate/encode the id BEFORE any request (#1970): a `.`/`..` id cannot
     // address its record, so a refused id sends nothing at all (not even the
@@ -977,14 +1004,38 @@ export class FlairMemoryService implements BaseMemoryService {
         `HTTP ${resp.status}${text ? `: ${text.slice(0, 200)}` : ""}`
       );
     }
-    // The id is one percent-encoded path segment (#1970).
-    const putResp = await this._sendJson("PUT", putPath, body);
-    if (!putResp.ok) {
-      const text = await putResp.text().catch(() => "");
-      throw new Error(
-        `HTTP ${putResp.status}${text ? `: ${text.slice(0, 200)}` : ""}`
-      );
+    if (eventTuple && await this._occupiedRowIsEventTuple(putPath, eventTuple)) {
+      const putResp = await this._sendJson("PUT", putPath, body);
+      if (!putResp.ok) {
+        const text = await putResp.text().catch(() => "");
+        throw new Error(
+          `HTTP ${putResp.status}${text ? `: ${text.slice(0, 200)}` : ""}`
+        );
+      }
+      return;
     }
+    throw new Error(
+      `HTTP 409 conflict: record ${JSON.stringify(recordId)} is occupied by a ` +
+      "different event tuple; kept the existing row"
+    );
+  }
+
+  /** GET the occupied row. False when it cannot be verified. */
+  private async _occupiedRowIsEventTuple(
+    path: string,
+    eventTuple: [string, string, string, string],
+  ): Promise<boolean> {
+    let resp: Response;
+    try {
+      resp = await this._sendJson("GET", path);
+    } catch {
+      return false;
+    }
+    if (!resp.ok) return false;
+    const row = await resp.json().catch(() => null);
+    if (!row || typeof row !== "object" || Array.isArray(row)) return false;
+    const [appName, userId, sessionId, eventId] = eventTuple;
+    return rowIsSameEventTuple(row as Record<string, unknown>, appName, userId, sessionId, eventId);
   }
 
   /**
