@@ -10,8 +10,9 @@
  *     fs-extra) and the lane died later inside Harper.
  *   - launchd adopt-then-upgrade (test.yml) started from versions strictly
  *     below HEAD, then capped the pool at `dist-tags.latest` when that tag
- *     was itself below HEAD. After 0.54.1 shipped broken, `latest` stayed at
- *     0.53.0, so the cap excluded 0.54.1 because of the tag.
+ *     was itself below HEAD. The old publish path moved `latest` when 0.54.1
+ *     shipped; after `latest` was moved back to 0.53.0, the launchd lane's
+ *     cap excluded 0.54.1.
  *
  * Both lanes now call this helper. Deprecation is the signal the helper
  * honours. The launchd `dist-tags.latest` cap is not reapplied.
