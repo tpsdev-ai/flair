@@ -121,24 +121,27 @@ actually running:
   upgrade prompts; a non-interactive upgrade states the gap and withholds
   ✅. Pass `--install-hooks` to consent without a prompt, then `flair
   doctor` exits 0.
-- **On a failed restart OR a failed verification**, these keep and
-  rollback outcomes apply only when the upgrade swapped `@tpsdev-ai/flair`
-  itself. A plugin-only upgrade whose restart fails has nothing to roll
-  back: `@tpsdev-ai/flair` was not changed. When Flair itself was swapped,
-  `flair upgrade` reinstalls the previously installed package and restarts
-  it when that failure is evidence against the new version — then exits
-  nonzero with a clear report of what failed. Before the swap, including
-  with `--no-verify`, it probes `/Health` once (flair#1740). A refused
-  connection means no listener accepted it. That does not show that no
-  process was running. When Flair itself was swapped, the new version
-  stays installed, including when the previous version cannot be read,
-  and the command tells you to run `flair start`. A timeout or a non-2xx
-  answer is indeterminate, not stopped. Rollback needs a known previous
-  version and is refused when the registry reports that version
-  deprecated. When the previous version is unknown, the decision is
-  `no-target` and the command exits without rolling back. If the lookup
-  fails, or the `deprecated` field is null, rollback still proceeds. If a rollback put a previous version in
-  place and that version's restart fails, the command exits nonzero and
+- **On a failed post-upgrade restart**, the keep, rollback, and
+  `no-target` outcomes apply only when the upgrade swapped
+  `@tpsdev-ai/flair` itself. A plugin-only upgrade whose restart fails
+  has nothing to roll back: `@tpsdev-ai/flair` was not changed. Before
+  the swap, including with `--no-verify`, it probes `/Health` once
+  (flair#1740). A refused connection means no listener accepted it. That
+  does not show that no process was running. When Flair itself was
+  swapped, the new version stays installed, including when the previous
+  version cannot be read, and the command tells you to run `flair start`.
+  A timeout or a non-2xx answer is indeterminate, not stopped. Rollback
+  needs a known previous version and is refused when the registry
+  reports that version deprecated. When the previous version is unknown,
+  the decision is `no-target` and the command exits without rolling
+  back. If the lookup fails, or the `deprecated` field is null, rollback
+  still proceeds. Post-restart verification failures follow the existing
+  `decideAfterVerify` decision: an unknown previous version yields
+  `cannot-rollback`, not `no-target`. When that restart-failure decision
+  rolls back, `flair upgrade` reinstalls the previously installed package
+  and restarts it, then exits nonzero with a clear report of what failed.
+  If a rollback put a previous version in place and that version's
+  restart fails, the command exits nonzero and
   names that version known-broken for this attempt. When no previous tree
   was restored, the headline is neutral: it does not call a rollback
   version known-broken, and it does not say the rollback restart failed.
