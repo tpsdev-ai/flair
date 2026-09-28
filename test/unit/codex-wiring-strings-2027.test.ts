@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { wireCodex } from "../../src/install/clients.ts";
+import { repinCodexPin, wireCodex } from "../../src/install/clients.ts";
 import { readClientMcpBlock } from "../../src/doctor-client.ts";
 import { withHome } from "../../src/lib/home.ts";
 import { FLAIR_MCP_PACKAGE as pkg, flairCliVersion, mcpServerSpec } from "../../src/lib/mcp-spec.ts";
@@ -92,12 +92,32 @@ for (const [label, args] of forms) {
       fixture(raw, (home, path) => {
         expect(readOwnedPins(home).find((f) => f.target.id === "codex")?.pin).toBe(pin);
         expect(mcpClientPinFindings(home).find((f) => f.reading.target.id === "codex")?.reading.pin).toBe(pin);
+        if (pin === "9.9.9") {
+          // Wiring has its own guard; exercise the pin-only writer's guard too.
+          const refresh = repinCodexPin(path, "Codex");
+          expect(refresh.kind).toBe("hold");
+          expect(refresh.line).toContain(`keeping pinned ${pin}`);
+          expect(refresh.line).toContain("never lowered");
+          expect(readFileSync(path, "utf8")).toBe(raw);
+        }
         const result = wireCodex(env);
         expect(result.message).toContain("holding");
         expect(result.message).toContain(pin);
         expect(result.message).not.toContain("@unknown");
         expect(readFileSync(path, "utf8")).toBe(raw);
         expect(readFileSync(`${path}.bak`, "utf8")).toBe(raw);
+        if (pin === "9.9.9") {
+          const doctor = offlineDoctor(home);
+          for (const args of [[], ["--fix", "--dry-run"], ["--fix"]]) {
+            const report = doctor(args);
+            const heldLine = report.split("\n").find((line) => line.includes("MCP server (codex):"));
+            expect(heldLine).toContain(`pinned to flair-mcp@${pin}`);
+            expect(heldLine).toContain(`ahead of the installed CLI ${flairCliVersion()} — held`);
+            expect(report).not.toContain("Would re-pin the MCP server block");
+            expect(report).not.toContain("re-pinned Codex");
+            expect(readFileSync(path, "utf8")).toBe(raw);
+          }
+        }
       });
     });
   }
