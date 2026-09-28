@@ -1609,11 +1609,10 @@ program
      * new packages and then failed to start them left the operator on the new
      * version with nothing running and no rollback.
      *
-     * flair#1740: that rollback is evidence against the new version only when
-     * an instance was actually running before the upgrade. The caller does
-     * not enter here for a stopped or never-started install. And a version
-     * npm marks deprecated is never the rollback target — reinstalling it
-     * can put the operator back on a known-broken publish.
+     * flair#1740: the caller enters here when prior /Health was running or
+     * indeterminate. A refused connection does not. A version the registry
+     * reports as deprecated is not the rollback target. A failed lookup, or
+     * a null `deprecated` field, is not that report, so rollback still runs.
      */
     const readRollbackDeprecation = async (version: string): Promise<DeprecationLookup> => {
       try {
@@ -1629,6 +1628,7 @@ program
     const rollbackTo = async (toVersion: string, reason: string): Promise<never> => {
       let rollbackSnapshotRestored = false;
       let plainTreeRestored = false;
+      let plainTreeLiveSetAside = false;
       const deprecation = decideDeprecatedRollback({
         toVersion,
         lookup: await readRollbackDeprecation(toVersion),
@@ -1645,10 +1645,12 @@ program
         if (treePlan) {
           const rollbackDecision = decidePlainTreeRollback(existsSync(treePlan.previousDir));
           if (rollbackDecision.kind === "restore") {
-            if (!restorePlainTreePrevious(treePlan)) {
+            const restored = restorePlainTreePrevious(treePlan);
+            if (!restored.restored) {
               throw new Error(`no previous tree at ${treePlan.previousDir} to restore`);
             }
             plainTreeRestored = true;
+            plainTreeLiveSetAside = restored.liveTreeSetAside;
             console.log(`  ✅ restored previous tree from ${treePlan.previousDir}`);
           } else {
             console.log(`   (${rollbackDecision.reason})`);
@@ -1734,6 +1736,7 @@ program
               failedDir: treeSibling(treePlan.treeDir, UPGRADE_FAILED_SUFFIX),
               previousDir: treePlan.previousDir,
               restored: plainTreeRestored,
+              liveTreeSetAside: plainTreeLiveSetAside,
             }
           : { kind: "npm-global" };
         for (const line of formatKnownBrokenRollbackRestart({
@@ -1817,7 +1820,6 @@ program
       }
     } catch (err: any) {
       console.error(`❌ restart failed: ${err.message}`);
-      console.error("   Flair is NOT running.");
       const restartDecision = decideAfterRestartFailure({
         priorLiveness: priorLiveness.kind,
         flairWasSwapped,
@@ -1825,9 +1827,9 @@ program
         installedVersion: expectedFlairVersion,
         startError: err?.message ?? String(err),
       });
-      // Confirmed-stopped: the install stands, even when the previous version
+      // Connection refused keeps the install, even when the previous version
       // string was unreadable. Exit 0 — the upgrade completed; `flair start`
-      // is the follow-up, not a rollback. Indeterminate does not land here.
+      // is the follow-up. Running or indeterminate rolls back below.
       if (restartDecision.kind === "keep") {
         for (const line of restartDecision.lines) console.error(line);
         process.exit(0);

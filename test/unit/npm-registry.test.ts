@@ -528,6 +528,26 @@ describe("fetchVersionDeprecation", () => {
     expect(res.kind).toBe("active");
   });
 
+  test("a present null deprecated field is unavailable, not active", async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({
+        name: "@tpsdev-ai/flair",
+        version: "0.54.2",
+        deprecated: null,
+      }), { status: 200 })) as unknown as typeof fetch;
+    const res = await fetchVersionDeprecation("@tpsdev-ai/flair", "0.54.2", {
+      env: {},
+      readConfig: reader({}),
+      readConfigMap: noEntries,
+      fetchImpl,
+      timeoutMs: 1000,
+    });
+    expect(res.kind).toBe("unavailable");
+    if (res.kind === "unavailable") {
+      expect(res.message).toContain("was null");
+    }
+  });
+
   test("a blank deprecated string is not a deprecation", async () => {
     const fetchImpl = (async () =>
       new Response(JSON.stringify({ name: "@tpsdev-ai/flair", version: "0.54.2", deprecated: "  " }), { status: 200 })) as unknown as typeof fetch;

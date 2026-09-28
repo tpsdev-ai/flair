@@ -814,9 +814,10 @@ export type VersionDeprecationResult =
  * Read the npm `deprecated` field for one exact version (flair#1740).
  *
  * A rollback must not reinstall a version npm has marked deprecated. Only a
- * positive string refuses the rollback; a missing field is `active`, and a
- * lookup failure is `unavailable` so the caller can keep today's rollback
- * when the registry cannot be asked.
+ * positive string refuses the rollback. A missing field or a blank string is
+ * `active`. A present null is not that absence: it is `unavailable`, same as
+ * any other non-string, so the lookup does not claim the version is active.
+ * A lookup failure is also `unavailable`.
  *
  * Same registry, scheme, and transport rules as `fetchDeclaredDependencies`.
  */
@@ -857,8 +858,16 @@ export async function fetchVersionDeprecation(
     };
   }
   const deprecated = out.data.deprecated;
-  if (deprecated == null || (typeof deprecated === "string" && !deprecated.trim())) {
+  if (!Object.prototype.hasOwnProperty.call(out.data, "deprecated")) {
     return { kind: "active", registry };
+  }
+  if (typeof deprecated === "string" && !deprecated.trim()) return { kind: "active", registry };
+  if (deprecated === null) {
+    return {
+      kind: "unavailable",
+      message: `registry deprecated field for ${packageName}@${version} was null`,
+      registry,
+    };
   }
   if (typeof deprecated !== "string") {
     return {

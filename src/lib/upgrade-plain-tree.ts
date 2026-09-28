@@ -812,21 +812,27 @@ export async function applyPlainTreeUpgrade(
  * Put `.upgrade-prev` back at the live tree path. Used by upgrade rollback
  * when restart or verify fails after a swap.
  *
- * Returns whether a previous tree was restored. `false` means there was
- * nothing to restore (swap never completed) — the caller must say so.
+ * `restored: false` means there was nothing to restore (swap never completed).
+ * `liveTreeSetAside` is true only when a directory at the live path was
+ * renamed to `.upgrade-failed`. A restore can succeed with nothing to set
+ * aside — the caller must not claim that move happened.
  */
-export function restorePlainTreePrevious(plan: Pick<PlainTreeUpgradePlan, "treeDir" | "previousDir">): boolean {
+export function restorePlainTreePrevious(plan: Pick<PlainTreeUpgradePlan, "treeDir" | "previousDir">):
+  | { restored: false }
+  | { restored: true; liveTreeSetAside: boolean } {
   const treeDir = canonicalPath(plan.treeDir);
   const previousDir = plan.previousDir;
-  if (!existsSync(previousDir)) return false;
+  if (!existsSync(previousDir)) return { restored: false };
 
   const failedDir = treeSibling(treeDir, UPGRADE_FAILED_SUFFIX);
+  let liveTreeSetAside = false;
   if (existsSync(treeDir)) {
     if (existsSync(failedDir)) rmSync(failedDir, { recursive: true, force: true });
     renameSync(treeDir, failedDir);
+    liveTreeSetAside = true;
   }
   renameSync(previousDir, treeDir);
-  return true;
+  return { restored: true, liveTreeSetAside };
 }
 
 /** Drop the displaced previous tree after a successful verify (saves a second copy). */

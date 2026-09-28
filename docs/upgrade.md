@@ -132,17 +132,22 @@ actually running:
   `flair start`. A timeout or a non-2xx answer is indeterminate, not
   stopped, and still rolls back. When the registry reports that the
   previous version is deprecated, that version is not reinstalled; if the
-  lookup fails, rollback still proceeds. If a rollback's own restart
-  fails, the command exits nonzero and names that installed version as
-  known-broken. Recovery matches the install lane and what the plain-tree
-  restore actually did: npm-global uses `npm install -g`; when the previous
-  tree was restored, the upgraded tree is at `.upgrade-failed`; when it
-  was missing, the message says the live tree was not moved. The message
-  also says whether a pre-upgrade data snapshot was restored. Until flair#905 the rollback was wired to the
-  *verification* leg only. If the rollback itself fails verification, it
-  says so loudly and points at the concrete pre-upgrade snapshot path
-  (see "Pre-upgrade snapshot" below) instead of retrying in a loop — see
-  [Downgrade](#downgrade) for the restore procedure.
+  lookup fails, or the `deprecated` field is null, rollback still
+  proceeds. If a rollback's own restart fails, the command exits nonzero
+  and names that installed version as known-broken for this attempt.
+  Recovery matches the install lane and both filesystem results: whether
+  the previous tree was restored, and whether a live tree was set aside
+  at `.upgrade-failed`. A restore can succeed when nothing was at the
+  live path, and that message does not claim a tree was moved there.
+  When no previous tree was restored, the headline does not say the
+  rollback restart failed. npm-global recovery offers
+  `npm view @tpsdev-ai/flair version` as a candidate to check, not a
+  guaranteed non-deprecated release. The message also says whether a
+  pre-upgrade data snapshot was restored. Until flair#905 the rollback
+  was wired to the *verification* leg only. If the rollback itself fails
+  verification, it says so loudly and points at the concrete pre-upgrade
+  snapshot path (see "Pre-upgrade snapshot" below) instead of retrying
+  in a loop — see [Downgrade](#downgrade) for the restore procedure.
 
 ### Pre-upgrade snapshot (opt-in for same-engine, unconditional on engine change)
 

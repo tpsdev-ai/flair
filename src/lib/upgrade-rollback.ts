@@ -127,7 +127,7 @@ export function decideDeprecatedRollback(input: {
       `   Original failure: ${input.reason}`,
       `   Do not reinstall ${FLAIR_PKG}@${input.toVersion}.`,
       `   Check the instance: flair status`,
-      `   If you need a different release, install a non-deprecated version (\`npm view ${FLAIR_PKG} version\`) instead of returning to ${input.toVersion}.`,
+      `   If you need a different release, check a candidate (\`npm view ${FLAIR_PKG} version\` — not guaranteed non-deprecated) instead of returning to ${input.toVersion}.`,
     ],
   };
 }
@@ -142,12 +142,17 @@ export type RollbackRecoveryLane =
       previousDir: string;
       /** True only when that previous tree was actually moved back onto treeDir. */
       restored: boolean;
+      /** True only when a live tree was renamed onto failedDir during that restore. */
+      liveTreeSetAside: boolean;
     };
 
 /**
- * The rollback's own restart failed. The version now on disk is known-broken:
- * `flair start` on it is not a recovery that can succeed. The recovery command
- * matches the install lane. Say whether a pre-upgrade data snapshot was restored.
+ * The rollback's own restart failed on this attempt. `flair start` on the
+ * version now on disk is not a recovery for that attempt. The recovery
+ * command matches the install lane. Plain-tree text reports two filesystem
+ * results separately: whether the previous tree was restored, and whether a
+ * live tree was renamed to `.upgrade-failed`. Say whether a pre-upgrade data
+ * snapshot was restored.
  */
 export function formatKnownBrokenRollbackRestart(input: {
   toVersion: string;
@@ -159,11 +164,10 @@ export function formatKnownBrokenRollbackRestart(input: {
   snapshotPath?: string | null;
 }): string[] {
   const installed = `${FLAIR_PKG}@${input.toVersion}`;
-  const lines = [
-    `❌❌ KNOWN-BROKEN: rollback restart failed: ${input.error}`,
-  ];
+  const lines: string[] = [];
   if (input.lane.kind === "plain-tree" && !input.lane.restored) {
     lines.push(
+      `❌❌ KNOWN-BROKEN: restart failed, and the previous tree was not restored: ${input.error}`,
       `   The previous tree was not restored (nothing at ${input.lane.previousDir}), so ${installed} is not what this rollback installed.`,
       `   The live tree is still at ${input.lane.treeDir}. It was not moved to ${input.lane.failedDir}.`,
       `   Do not run \`flair start\` expecting ${installed}; that version was not restored.`,
@@ -172,34 +176,41 @@ export function formatKnownBrokenRollbackRestart(input: {
     );
   } else {
     lines.push(
-      `   ${installed} is installed and known-broken — it failed to start after the rollback.`,
-      `   Do not run \`flair start\` on ${installed}; this version cannot start.`,
+      `❌❌ KNOWN-BROKEN: rollback restart failed: ${input.error}`,
+      `   ${installed} is installed and known-broken — it did not start on this attempt.`,
+      `   Do not run \`flair start\` on ${installed}; it did not start on this attempt.`,
     );
     if (input.lane.kind === "plain-tree") {
       lines.push(
-        `   Recovery (plain-tree): the previous tree was restored. Do not npm install -g. The rolled-back tree is now at ${input.lane.treeDir}.`,
-        `   The upgraded tree was set aside at ${input.lane.failedDir}.`,
+        `   Recovery (plain-tree): the previous tree was restored to ${input.lane.treeDir}. Do not npm install -g.`,
       );
-      if (input.recoveryVersion && input.recoveryVersion !== input.toVersion) {
-        lines.push(
-          `   Move ${input.lane.failedDir} back onto ${input.lane.treeDir} to return to ${FLAIR_PKG}@${input.recoveryVersion}.`,
-        );
+      if (input.lane.liveTreeSetAside) {
+        lines.push(`   The live tree was set aside at ${input.lane.failedDir}.`);
+        if (input.recoveryVersion && input.recoveryVersion !== input.toVersion) {
+          lines.push(
+            `   Move ${input.lane.failedDir} back onto ${input.lane.treeDir} to return to ${FLAIR_PKG}@${input.recoveryVersion}.`,
+          );
+        } else {
+          lines.push(
+            `   Move ${input.lane.failedDir} back onto ${input.lane.treeDir} to return to the version this upgrade had reached.`,
+          );
+        }
       } else {
         lines.push(
-          `   Move ${input.lane.failedDir} back onto ${input.lane.treeDir} to return to the version this upgrade had reached.`,
+          `   No live tree was moved to ${input.lane.failedDir}. Nothing was at ${input.lane.treeDir} to move.`,
         );
       }
     } else if (input.recoveryVersion && input.recoveryVersion !== input.toVersion) {
       lines.push(
         `   Recovery (npm-global): reinstall the version this upgrade had reached (it failed restart or verification in this run — check \`flair doctor\` after installing):`,
         `   npm install -g ${FLAIR_PKG}@${input.recoveryVersion}`,
-        `   Or install another non-deprecated release: npm view ${FLAIR_PKG} version`,
+        `   Or check a candidate (not guaranteed non-deprecated): npm view ${FLAIR_PKG} version`,
       );
     } else {
       lines.push(
-        `   Recovery (npm-global): install a non-deprecated release (this installed version cannot start):`,
+        `   Recovery (npm-global): install another release (this installed version did not start on this attempt):`,
         `   npm view ${FLAIR_PKG} version`,
-        `   npm install -g ${FLAIR_PKG}@<that-version>`,
+        `   Check that candidate (not guaranteed non-deprecated), then: npm install -g ${FLAIR_PKG}@<that-version>`,
       );
     }
   }
