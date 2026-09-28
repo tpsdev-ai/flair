@@ -3,25 +3,40 @@
  * select-migration-baseline.mjs — newest non-deprecated npm version strictly
  * below HEAD (flair#1757).
  *
- * Migration lanes used to pick max(version) where version < HEAD. `npm
- * deprecate` does not remove a version from `versions`, so a known-broken
- * publish (0.54.1: global install omits fs-extra) was installed and the lane
- * died later inside Harper. This helper refuses that version at selection
- * time.
+ * What each lane selected before this helper:
+ *   - downgrade-and-revert (migration-ci-lanes.yml) picked the newest
+ *     published x.y.z strictly below HEAD. `npm deprecate` leaves the version
+ *     in `versions`, so that rule installed 0.54.1 (global install omits
+ *     fs-extra) and the lane died later inside Harper.
+ *   - launchd adopt-then-upgrade (test.yml) started from versions strictly
+ *     below HEAD, then capped the pool at `dist-tags.latest` when that tag
+ *     was itself below HEAD. After 0.54.1 shipped broken, `latest` stayed at
+ *     0.53.0, so the cap excluded 0.54.1 because of the tag.
+ *
+ * Both lanes now call this helper. Deprecation is the signal the helper
+ * honours. The launchd `dist-tags.latest` cap is not reapplied.
  *
  * Usage:
  *   node scripts/ci/select-migration-baseline.mjs <head-version>
  *   node scripts/ci/select-migration-baseline.mjs --fixture <file> <head-version>
  *
- * stdout: the chosen x.y.z baseline, and nothing else
- * stderr: each deprecated version skipped (and why), then the chosen baseline
+ * stdout: the chosen x.y.z baseline, and nothing else. Empty when no baseline
+ *         qualifies.
+ * stderr when a baseline is chosen:
+ *   `skipped deprecated <version>: <why>` for each deprecated version NEWER
+ *   than the chosen baseline (those are the ones version order would have
+ *   preferred; an older deprecation was not passed over), then
+ *   `baseline <version> (newest non-deprecated version < <head>)`.
+ * stderr when every candidate is deprecated, or none qualify:
+ *   `no baseline: ...` (the CLI prefixes `::error::`). That run prints
+ *   `no baseline`, not a chosen baseline. Deprecated versions below HEAD are
+ *   still listed: each was passed over and nothing replaced it.
  * exit 1: no baseline, or the registry/usage check did not run — the lane
- *         must not install
+ *         must not install.
  *
  * Deprecated fields are read newest-first and the walk stops at the first
  * non-deprecated version below HEAD. Older publishes cannot win once that
- * version exists, so they are not queried. The skip log is the set version
- * order would have preferred over the baseline.
+ * version exists, so they are not queried.
  *
  * NO REPOSITORY DEPENDENCIES. Both lanes invoke this with node before any
  * package install of the baseline itself. Every import here is a node builtin.
@@ -82,6 +97,11 @@ export function deprecationReason(record) {
  *   skipped: Array<{ version: string, reason: string }>,
  *   message: string,
  * }}
+ *
+ * `skipped` is the set that was passed over. When a baseline is chosen, that
+ * is the deprecated versions newer than it. When none qualifies, every
+ * deprecated version below HEAD is in `skipped`, and `message` starts with
+ * "no baseline" — there is no chosen-baseline line.
  */
 export function selectMigrationBaseline(records, headVersion) {
   if (!isStrictXyz(headVersion)) {
@@ -121,10 +141,13 @@ export function selectMigrationBaseline(records, headVersion) {
 
   usable.sort(compareStrictSemver);
   const baseline = usable[usable.length - 1];
+  // Passed over: deprecated and newer than the version we kept. An older
+  // deprecation lost on version order to a usable publish, so it is not a skip.
+  const passedOver = skipped.filter((skip) => compareStrictSemver(skip.version, baseline) > 0);
   return {
     status: "ok",
     baseline,
-    skipped,
+    skipped: passedOver,
     message: `baseline ${baseline} (newest non-deprecated version < ${headVersion})`,
   };
 }
@@ -151,7 +174,11 @@ export function collectCandidateRecords(versions, headVersion, readDeprecated) {
   return records;
 }
 
-/** stderr lines: skipped deprecated versions, then the selection message. */
+/**
+ * stderr lines. A chosen baseline yields skip lines (newer deprecations only)
+ * and then `baseline <version> ...`. An all-deprecated result yields skip lines
+ * and then a message that starts with `no baseline`, with no chosen-baseline line.
+ */
 export function formatSelection(selection) {
   const lines = selection.skipped.map((skip) => `skipped deprecated ${skip.version}: ${skip.reason}`);
   lines.push(selection.message);

@@ -355,8 +355,10 @@ jobs:
           # Newest non-deprecated publish strictly below this PR's version
           # (flair#1757). `versions` still lists a deprecated build — 0.54.1
           # shipped broken — and installing it fails inside Harper instead of
-          # at selection. The helper prints the chosen baseline and every
-          # deprecated version it skipped to get there.
+          # at selection. This lane used to cap the pool at dist-tags.latest when
+          # that tag was below HEAD; the helper uses deprecation instead. It
+          # prints the chosen baseline and each deprecated version newer than
+          # that baseline. An all-deprecated registry prints `no baseline`.
           if ! BASELINE_VERSION="$(node "$GITHUB_WORKSPACE/scripts/ci/select-migration-baseline.mjs" "$HEAD_VERSION")"; then
             exit 1
           fi

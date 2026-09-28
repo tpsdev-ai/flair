@@ -3,9 +3,13 @@
  *
  * Version order alone installed 0.54.1 (deprecated: the global install omits
  * fs-extra) and the lane died later with `Cannot find module 'fs-extra'`.
- * The helper must pick the previous non-deprecated version, and an
- * all-deprecated candidate set must report "no baseline" by name so the lane
- * does not install.
+ * The helper must pick the previous non-deprecated version. "Skipped" means
+ * passed over: a deprecated version newer than the chosen baseline. An older
+ * deprecation (0.52.0, when the baseline is 0.54.0) is not a skip.
+ *
+ * stderr when a baseline is chosen: those skip lines, then `baseline <version>`.
+ * stderr when every candidate is deprecated: `no baseline`, not a chosen
+ * baseline line.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -59,7 +63,7 @@ describe("selectMigrationBaseline (flair#1757)", () => {
     const selected = selectMigrationBaseline(NEWEST_LOWER_DEPRECATED, "0.54.2");
     expect(selected.status).toBe("ok");
     expect(selected.baseline).toBe("0.54.0");
-    expect(selected.skipped.map((skip) => skip.version)).toEqual(["0.54.1", "0.52.0"]);
+    expect(selected.skipped.map((skip) => skip.version)).toEqual(["0.54.1"]);
     expect(selected.skipped[0]?.reason).toBe(BROKEN_0541);
   });
 
@@ -86,16 +90,21 @@ describe("selectMigrationBaseline (flair#1757)", () => {
     expect(NO_BASELINE).toBe("no baseline");
     expect(selected.baseline).toBeNull();
     expect(selected.message.startsWith("no baseline")).toBe(true);
+    expect(selected.message).not.toMatch(/^baseline /);
     expect(selected.message).toContain("0.54.1");
     expect(selected.message).toContain("Broken publish: fs-extra is missing");
     expect(selected.skipped.map((skip) => skip.version)).toEqual(["0.54.1", "0.53.0"]);
+    const log = formatSelection(selected).join("\n");
+    expect(log).toContain("no baseline:");
+    expect(log).not.toMatch(/^baseline /m);
   });
 
-  test("the selection log names each skipped deprecation and the chosen baseline", () => {
+  test("the selection log names only deprecations newer than the chosen baseline", () => {
     const selected = selectMigrationBaseline(NEWEST_LOWER_DEPRECATED, "0.54.2");
     const log = formatSelection(selected).join("\n");
     expect(log).toContain(`skipped deprecated 0.54.1: ${BROKEN_0541}`);
-    expect(log).toContain("skipped deprecated 0.52.0: ancient yank");
+    expect(log).not.toContain("0.52.0");
+    expect(log).not.toContain("ancient yank");
     expect(log).toContain("baseline 0.54.0 (newest non-deprecated version < 0.54.2)");
   });
 
@@ -135,10 +144,12 @@ describe("select-migration-baseline CLI", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toBe("0.54.0\n");
     expect(result.stderr).toContain(`skipped deprecated 0.54.1: ${BROKEN_0541}`);
+    expect(result.stderr).not.toContain("0.52.0");
+    expect(result.stderr).not.toContain("ancient yank");
     expect(result.stderr).toContain("baseline 0.54.0 (newest non-deprecated version < 0.54.2)");
   });
 
-  test("the all-deprecated fixture exits without a version and says no baseline", () => {
+  test("the all-deprecated fixture prints no baseline, not a chosen baseline", () => {
     const dir = tempDir("baseline-none");
     const fixture = join(dir, "versions.json");
     writeFileSync(fixture, JSON.stringify(ALL_DEPRECATED));
@@ -146,7 +157,9 @@ describe("select-migration-baseline CLI", () => {
     expect(result.status).toBe(1);
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain("::error::no baseline:");
+    expect(result.stderr).not.toMatch(/^baseline /m);
     expect(result.stderr).toContain("skipped deprecated 0.54.1: Broken publish: fs-extra is missing");
+    expect(result.stderr).toContain("skipped deprecated 0.53.0: rolled back");
   });
 });
 
