@@ -49,11 +49,18 @@ function nodeScriptsInvoked(text: string, shell = ""): string[] {
   return [...out];
 }
 
-/** Repo-relative paths of every literal `scripts/...*.sh` referenced in `text`. */
-function shellScriptsReferenced(text: string): string[] {
+/**
+ * Repo-relative paths of every shell script referenced in `text`: a literal
+ * `scripts/...*.sh`, or a sibling `"$SCRIPT_DIR/...*.sh"` resolved against `shell`.
+ */
+function shellScriptsReferenced(text: string, shell = ""): string[] {
   const out = new Set<string>();
   for (const m of text.matchAll(/\b(scripts\/[A-Za-z0-9._/-]+\.sh)\b/g)) {
     out.add(m[1]!);
+  }
+  for (const m of text.matchAll(/"\$SCRIPT_DIR\/([A-Za-z0-9._/-]+\.sh)"/g)) {
+    if (!shell) throw new Error("sibling shell script without a shell path");
+    out.add(join(dirname(shell), m[1]!));
   }
   return [...out];
 }
@@ -106,7 +113,9 @@ function canaryScriptClosure(overrides: Readonly<Record<string, string>> = {}): 
     shellSeen.add(sh);
     const full = join(REPO_ROOT, sh);
     if (!existsSync(full)) continue;
-    const text = stripComments(overrides[sh] ?? readFileSync(full, "utf8"));
+    // Join backslash-newline continuations first, so a command split across lines is
+    // scanned as the one command the shell runs.
+    const text = stripComments(overrides[sh] ?? readFileSync(full, "utf8")).replace(/\\\n/g, " ");
     moduleQueue.push(...nodeScriptsInvoked(text, sh));
     // Whitelist, not blacklist: every `node` command must run a script in exactly one of the
     // two forms nodeScriptsInvoked() records (`scripts/...` or "$SCRIPT_DIR/..."), with no
@@ -118,7 +127,7 @@ function canaryScriptClosure(overrides: Readonly<Record<string, string>> = {}): 
       const rest = m[1].trim();
       if (!/^(?:scripts\/[A-Za-z0-9._/-]+\.(?:mjs|cjs|js|ts)|"\$SCRIPT_DIR\/[A-Za-z0-9._/-]+\.mjs")(?=$|[\s;&|)`])/.test(rest)) throw new Error("inline Node body in " + sh + ": node " + rest);
     }
-    shellQueue.push(...shellScriptsReferenced(text));
+    shellQueue.push(...shellScriptsReferenced(text, sh));
   }
 
   const moduleSeen = new Set<string>();
@@ -153,6 +162,18 @@ test.each(["node -e 'require(\"semver\")'", "node --eval 'require(\"semver\")'",
   expect(() => canaryScriptClosure({ [shell]: fixture })).toThrow("inline Node body");
 });
 
+test("a sibling shell script called through $SCRIPT_DIR is walked and guarded", () => {
+  const helper = "scripts/ci/doctor-advisory.sh";
+  const fixture = readFileSync(join(REPO_ROOT, helper), "utf8") + "\nnode -e 'require(\"semver\")'\n";
+  expect(() => canaryScriptClosure({ [helper]: fixture })).toThrow("inline Node body in " + helper);
+});
+
+test("a command continued across lines is scanned as one command", () => {
+  const shell = "scripts/ci/check-instance-boot.sh";
+  const fixture = readFileSync(join(REPO_ROOT, shell), "utf8") + "\nnode \\\n  -p '6*7'\n";
+  expect(() => canaryScriptClosure({ [shell]: fixture })).toThrow("inline Node body");
+});
+
 test("a walked module that does not exist fails the walk", () => {
   const shell = "scripts/ci/check-instance-boot.sh";
   const fixture = readFileSync(join(REPO_ROOT, shell), "utf8") + "\nnode scripts/ci/does-not-exist-1859.mjs\n";
@@ -174,6 +195,7 @@ describe("post-publish canary scripts are dependency-free (flair#1856)", () => {
     expect(closure.modules).toContain("scripts/ci/boot-probe.mjs");
     expect(closure.shellScripts).toContain("scripts/ci/check-instance-boot.sh");
     expect(closure.shellScripts).toContain("scripts/ci/canary-verdict.sh");
+    expect(closure.shellScripts).toContain("scripts/ci/doctor-advisory.sh");
     // ...and it actually parsed imports out of them, rather than reading files
     // whose specifiers the regex never saw.
     expect(closure.specifierCount).toBeGreaterThan(10);
