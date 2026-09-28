@@ -28,7 +28,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { loadPrivateKey, resolveKeyPath } from "@tpsdev-ai/flair-client";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 
 /** The one file the A1 regression test plants under a root-owned directory. */
 const A1_TMP_KEY = "/tmp/ocf-a1-916.key";
