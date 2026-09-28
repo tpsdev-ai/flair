@@ -124,16 +124,20 @@ actually running:
 - **On a failed restart OR a failed verification**, `flair upgrade`
   reinstalls the previously installed `@tpsdev-ai/flair` and restarts it
   when that failure is evidence against the new version — then exits
-  nonzero with a clear report of what failed. A restart failure rolls back
-  only if Flair was running before the upgrade (flair#1740). If it was
-  stopped or had never started, the new version stays installed — a failed
-  start is not evidence against it — and the command tells you to run
-  `flair start`. Rollback also refuses a previous version that npm marks
-  deprecated. If a rollback's own restart fails, the command exits nonzero
-  and names that installed version as known-broken, with a reinstall
-  command rather than `flair start`. Until flair#905 the rollback was wired
-  to the *verification* leg only. If the rollback itself fails verification,
-  it says so loudly and points at the concrete pre-upgrade snapshot path
+  nonzero with a clear report of what failed. Before the swap, including
+  with `--no-verify`, it probes `/Health` once (flair#1740). Connection
+  refused means the instance was stopped or never started: the new version
+  stays installed, including when the previous version cannot be read, and
+  the command tells you to run `flair start`. A timeout or a non-2xx answer
+  is indeterminate, not stopped, and still rolls back. When the registry
+  says the previous version is deprecated, that version is not reinstalled;
+  if the lookup fails, rollback still proceeds. If a rollback's own restart fails, the command exits nonzero
+  and names that installed version as known-broken. Recovery matches the
+  install lane (npm-global `npm install -g`, or moving the plain-tree
+  `.upgrade-failed` directory back) and says whether a pre-upgrade data
+  snapshot was restored. Until flair#905 the rollback was wired to the
+  *verification* leg only. If the rollback itself fails verification, it
+  says so loudly and points at the concrete pre-upgrade snapshot path
   (see "Pre-upgrade snapshot" below) instead of retrying in a loop — see
   [Downgrade](#downgrade) for the restore procedure.
 

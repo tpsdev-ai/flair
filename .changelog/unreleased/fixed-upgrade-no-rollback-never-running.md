@@ -1,9 +1,12 @@
-- **`flair upgrade` no longer rolls back when Flair was not running.** A failed
-  post-upgrade start rolls the package back only if an instance was up
-  beforehand. A previous version npm marks deprecated is never reinstalled. If
-  a rollback's own restart fails, the command exits nonzero and names that
-  version as known-broken, with a reinstall command instead of `flair start`.
+- **`flair upgrade` keeps a stopped install's new version.** A failed
+  post-upgrade start rolls back only when `/Health` showed the instance up,
+  or when that probe was indeterminate. `--no-verify` is included. Connection
+  refused still keeps the new version when the previous version cannot be
+  read. A registry deprecation is not reinstalled; a failed lookup still
+  rolls back. A failed rollback restart exits nonzero, names that version
+  known-broken, and gives lane-specific recovery, including whether a
+  snapshot was restored.
 
-  > **Heads-up:** Upgrading a stopped or never-started install keeps the new
-  > version when the post-upgrade start fails. It does not reinstall the
-  > previous package.
+  > **Heads-up:** A stopped or never-started install, including with
+  > `--no-verify`, keeps the new version when the post-upgrade start fails.
+  > An unresponsive `/Health` is not treated as stopped.

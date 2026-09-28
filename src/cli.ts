@@ -4819,6 +4819,9 @@ bindUpgradeCli({
   resolveInstanceServingPid,
   resolveUpgradeRestartVerify,
   restartAfterUpgrade,
+  runPackageInstall: (spec: string) => {
+    execFileSync("npm", ["install", "-g", spec], { stdio: "pipe" });
+  },
   shouldPrintUpgradeLine,
   shouldRunFleetVerify,
   startFlairProcess,

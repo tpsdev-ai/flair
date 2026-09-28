@@ -1,13 +1,9 @@
 // upgrade-rollback-1740.test.ts — flair#1740.
 //
-// `flair upgrade` used to treat "restart failed" and "there was nothing
-// running to restart" as the same condition, and rolled a successful install
-// back to a previous version that had never been healthy (published 0.54.1).
-// These decisions are pure so the never-running case fails without a Harper.
-//
-// The never-running assertion is the regression: on the pre-fix behavior a
-// swapped package with a known previous version always rolled back, so
-// `kind === "keep"` fails against that behavior.
+// Pure decisions. Command-boundary coverage (install / health / restart) lives
+// in test/unit-isolated/upgrade-rollback-1740-command.test.ts — hard-coding
+// priorLiveness at the command call site leaves THESE tests green and fails
+// THAT file.
 import { describe, test, expect } from "bun:test";
 import {
   decideAfterRestartFailure,
@@ -20,7 +16,7 @@ const START_ERROR = "Harper at port 19926 did not respond within 60000ms (120 at
 describe("decideAfterRestartFailure (flair#1740)", () => {
   test("was running, restart fails → rollback to the previous version", () => {
     const decision = decideAfterRestartFailure({
-      wasRunning: true,
+      priorLiveness: "running",
       flairWasSwapped: true,
       previousVersion: "0.54.1",
       installedVersion: "0.54.2",
@@ -30,12 +26,13 @@ describe("decideAfterRestartFailure (flair#1740)", () => {
     if (decision.kind === "rollback") {
       expect(decision.toVersion).toBe("0.54.1");
       expect(decision.reason).toContain(START_ERROR);
+      expect(decision.reason).not.toContain("indeterminate");
     }
   });
 
-  test("was not running, restart fails → no rollback; names the install, the prior state, the start error, and flair start", () => {
+  test("confirmed stopped, restart fails → no rollback; names the install, the prior state, the start error, and flair start", () => {
     const decision = decideAfterRestartFailure({
-      wasRunning: false,
+      priorLiveness: "stopped",
       flairWasSwapped: true,
       previousVersion: "0.54.1",
       installedVersion: "0.54.2",
@@ -52,23 +49,51 @@ describe("decideAfterRestartFailure (flair#1740)", () => {
     expect(text).not.toContain("Rolling back");
   });
 
-  test("a stopped install with an unknown installed version still keeps the upgrade and names flair start", () => {
+  test("confirmed stopped with an unreadable previous version still keeps the new version", () => {
     const decision = decideAfterRestartFailure({
-      wasRunning: false,
+      priorLiveness: "stopped",
       flairWasSwapped: true,
-      previousVersion: "0.54.1",
-      installedVersion: null,
+      previousVersion: null,
+      installedVersion: "0.54.2",
       startError: START_ERROR,
     });
     expect(decision.kind).toBe("keep");
     if (decision.kind === "keep") {
+      expect(decision.lines.join("\n")).toContain("@tpsdev-ai/flair@0.54.2 is installed");
       expect(decision.lines.join("\n")).toContain("Next: flair start");
     }
   });
 
-  test("flair itself was not swapped → no rollback target (unchanged)", () => {
+  test("indeterminate /Health is not stopped — known previous version still rolls back", () => {
     const decision = decideAfterRestartFailure({
-      wasRunning: false,
+      priorLiveness: "indeterminate",
+      flairWasSwapped: true,
+      previousVersion: "0.54.1",
+      installedVersion: "0.54.2",
+      startError: START_ERROR,
+    });
+    expect(decision.kind).toBe("rollback");
+    if (decision.kind === "rollback") {
+      expect(decision.toVersion).toBe("0.54.1");
+      expect(decision.reason).toContain("indeterminate");
+      expect(decision.reason).toContain("not confirmed stopped");
+    }
+  });
+
+  test("indeterminate /Health with an unreadable previous version does not pretend the install was a keep", () => {
+    const decision = decideAfterRestartFailure({
+      priorLiveness: "indeterminate",
+      flairWasSwapped: true,
+      previousVersion: null,
+      installedVersion: "0.54.2",
+      startError: START_ERROR,
+    });
+    expect(decision.kind).toBe("no-target");
+  });
+
+  test("flair itself was not swapped → no rollback target, even if confirmed stopped", () => {
+    const decision = decideAfterRestartFailure({
+      priorLiveness: "stopped",
       flairWasSwapped: false,
       previousVersion: "0.54.1",
       installedVersion: "0.54.1",
@@ -77,9 +102,9 @@ describe("decideAfterRestartFailure (flair#1740)", () => {
     expect(decision.kind).toBe("no-target");
   });
 
-  test("previous version unknown → no rollback target, even if nothing was running", () => {
+  test("running, previous version unknown → no rollback target", () => {
     const decision = decideAfterRestartFailure({
-      wasRunning: false,
+      priorLiveness: "running",
       flairWasSwapped: true,
       previousVersion: null,
       installedVersion: "0.54.2",
@@ -108,6 +133,21 @@ describe("decideDeprecatedRollback (flair#1740)", () => {
     expect(text).not.toContain("Rolling back @tpsdev-ai/flair to 0.54.1");
   });
 
+  test("control characters in the deprecation message are not printed", () => {
+    const decision = decideDeprecatedRollback({
+      toVersion: "0.54.1",
+      lookup: { kind: "deprecated", message: "broken\u0001publish\u001b[31m" },
+      installedVersion: "0.54.2",
+      reason: "restart failed",
+    });
+    expect(decision.kind).toBe("refuse");
+    if (decision.kind !== "refuse") return;
+    const text = decision.lines.join("\n");
+    expect(text).toContain("brokenpublish");
+    expect(text).not.toContain("\u0001");
+    expect(text).not.toContain("\u001b");
+  });
+
   test("version npm does not mark deprecated → rollback proceeds", () => {
     expect(decideDeprecatedRollback({
       toVersion: "0.54.0",
@@ -128,30 +168,54 @@ describe("decideDeprecatedRollback (flair#1740)", () => {
 });
 
 describe("formatKnownBrokenRollbackRestart (flair#1740)", () => {
-  test("rollback restart failure names the installed version as known-broken and a recovery that is not flair start", () => {
-    const lines = formatKnownBrokenRollbackRestart({
+  test("npm-global recovery reinstalls the reached version and does not claim a snapshot restore", () => {
+    const text = formatKnownBrokenRollbackRestart({
       toVersion: "0.54.1",
       error: START_ERROR,
       recoveryVersion: "0.54.2",
-    });
-    const text = lines.join("\n");
+      lane: { kind: "npm-global" },
+      snapshotRestored: false,
+    }).join("\n");
     expect(text).toContain("KNOWN-BROKEN");
     expect(text).toContain("@tpsdev-ai/flair@0.54.1 is installed and known-broken");
-    expect(text).toContain(START_ERROR);
     expect(text).toContain("npm install -g @tpsdev-ai/flair@0.54.2");
+    expect(text).toContain("No pre-upgrade data snapshot was restored");
     expect(text).not.toContain("Start it with: flair start");
-    expect(text).toContain("cannot start");
+    expect(text).not.toContain("plain-tree");
   });
 
-  test("with no distinct recovery version, points at a non-deprecated release instead of flair start", () => {
+  test("plain-tree recovery names the set-aside tree and does not tell the operator to npm install -g", () => {
+    const text = formatKnownBrokenRollbackRestart({
+      toVersion: "0.54.1",
+      error: START_ERROR,
+      recoveryVersion: "0.54.2",
+      lane: {
+        kind: "plain-tree",
+        treeDir: "/opt/flair",
+        failedDir: "/opt/flair.upgrade-failed",
+      },
+      snapshotRestored: true,
+      snapshotPath: "/tmp/snap.tar.gz",
+    }).join("\n");
+    expect(text).toContain("plain-tree");
+    expect(text).toContain("/opt/flair.upgrade-failed");
+    expect(text).toContain("do not npm install -g");
+    expect(text).not.toContain("npm install -g @tpsdev-ai/flair@0.54.2");
+    expect(text).toContain("A pre-upgrade data snapshot was restored");
+    expect(text).toContain("/tmp/snap.tar.gz");
+    expect(text).not.toContain("No pre-upgrade data snapshot was restored");
+    expect(text).not.toContain("Start it with: flair start");
+  });
+
+  test("npm-global with no distinct recovery version points at npm view", () => {
     const text = formatKnownBrokenRollbackRestart({
       toVersion: "0.54.1",
       error: START_ERROR,
       recoveryVersion: null,
+      lane: { kind: "npm-global" },
+      snapshotRestored: false,
     }).join("\n");
-    expect(text).toContain("known-broken");
     expect(text).toContain("npm view @tpsdev-ai/flair version");
     expect(text).toContain("npm install -g @tpsdev-ai/flair@<that-version>");
-    expect(text).not.toContain("Start it with: flair start");
   });
 });

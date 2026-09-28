@@ -3,21 +3,21 @@
  * against the new version (flair#1740).
  *
  * "Restart failed" and "there was nothing running to restart" are not the
- * same condition. The first, on an instance that was up before the upgrade,
- * means the new version is bad and rolling back is right. The second means
- * the upgrade succeeded and the pre-existing state was already down — rolling
- * back can return the operator to a known-broken publish (0.54.1).
+ * same condition. Confirmed-stopped (connection refused) keeps the new
+ * package. A running instance still rolls back. An indeterminate /Health
+ * probe is not "stopped" — rollback is not waived.
  *
- * Pure: no I/O. The command records whether /Health answered before the
- * package swap, and asks the registry whether the rollback target is
- * deprecated. This module only decides.
+ * Pure: no I/O. The command classifies prior liveness and asks the registry
+ * whether the rollback target is deprecated. This module only decides.
  */
 
 const FLAIR_PKG = "@tpsdev-ai/flair";
 
+/** Matches classifyUpgradePriorLiveness. Indeterminate is not stopped. */
+export type PriorLivenessKind = "running" | "stopped" | "indeterminate";
+
 export interface RestartFailureInput {
-  /** True when the pre-upgrade /Health probe got a 2xx. False when nothing was up. */
-  wasRunning: boolean;
+  priorLiveness: PriorLivenessKind;
   /** True when this upgrade actually replaced @tpsdev-ai/flair. */
   flairWasSwapped: boolean;
   /** Previously installed version, or null when it could not be read. */
@@ -32,20 +32,21 @@ export type RestartFailureDecision =
   | { kind: "rollback"; toVersion: string; reason: string }
   /** Upgrade stands. The new version stays installed; start is a follow-up. */
   | { kind: "keep"; lines: string[] }
-  /** @tpsdev-ai/flair was not swapped, or the previous version is unknown. */
+  /** @tpsdev-ai/flair was not swapped, or (when not confirmed-stopped) the previous version is unknown. */
   | { kind: "no-target" };
 
 /**
  * What to do when the post-upgrade restart throws.
  *
- * A stopped or never-started install does not roll back: the start failure
- * is not evidence against the version that was just installed. An instance
- * that was running keeps today's rollback (subject to the deprecation gate
- * inside the rollback itself).
+ * Confirmed-stopped keeps the new version even when the previous version
+ * string is unreadable — there is nothing healthy to restore, and a failed
+ * start is not evidence against the install. Running and indeterminate both
+ * roll back when a previous version is known. Indeterminate does not take
+ * the keep path.
  */
 export function decideAfterRestartFailure(input: RestartFailureInput): RestartFailureDecision {
-  if (!input.flairWasSwapped || !input.previousVersion) return { kind: "no-target" };
-  if (!input.wasRunning) {
+  if (!input.flairWasSwapped) return { kind: "no-target" };
+  if (input.priorLiveness === "stopped") {
     return {
       kind: "keep",
       lines: formatNotRunningRestartFailure({
@@ -54,14 +55,18 @@ export function decideAfterRestartFailure(input: RestartFailureInput): RestartFa
       }),
     };
   }
+  if (!input.previousVersion) return { kind: "no-target" };
+  const priorNote = input.priorLiveness === "indeterminate"
+    ? " (prior /Health was indeterminate, not confirmed stopped)"
+    : "";
   return {
     kind: "rollback",
     toVersion: input.previousVersion,
-    reason: `restart failed: ${input.startError}`,
+    reason: `restart failed: ${input.startError}${priorNote}`,
   };
 }
 
-/** Lines for a restart failure that must not undo the install (flair#1740). */
+/** Lines for a confirmed-stopped restart failure that must not undo the install. */
 export function formatNotRunningRestartFailure(input: {
   installedVersion: string | null;
   startError: string;
@@ -79,8 +84,8 @@ export function formatNotRunningRestartFailure(input: {
 
 /**
  * Registry answer for "does npm mark this exact version deprecated?".
- * `unknown` is a failed lookup — not evidence of deprecation — so rollback
- * proceeds as it does today. Only a positive `deprecated` string refuses.
+ * `unknown` is a failed or unusable lookup — not evidence of deprecation —
+ * so rollback proceeds. Only a positive `deprecated` string refuses.
  */
 export type DeprecationLookup =
   | { kind: "deprecated"; message: string }
@@ -91,10 +96,15 @@ export type DeprecatedRollbackDecision =
   | { kind: "proceed" }
   | { kind: "refuse"; lines: string[] };
 
+/** Drop C0/C1 controls and DEL so a registry string cannot rewrite the terminal. */
+export function stripControlChars(value: string): string {
+  return value.replace(/[\u0000-\u001F\u007F\u0080-\u009F]/g, "");
+}
+
 /**
- * Never roll back onto a version npm has marked deprecated (flair#1740).
- * Called from every rollback, including post-restart verification failure,
- * not only the restart-threw path.
+ * Refuse rollback when the registry reports a deprecation. A failed lookup
+ * (`unknown`) is not a deprecation and does not refuse — offline still rolls
+ * back. The printed message is control-stripped.
  */
 export function decideDeprecatedRollback(input: {
   toVersion: string;
@@ -103,7 +113,8 @@ export function decideDeprecatedRollback(input: {
   reason: string;
 }): DeprecatedRollbackDecision {
   if (input.lookup.kind !== "deprecated") return { kind: "proceed" };
-  const message = input.lookup.message.trim() || "npm marked this version deprecated";
+  const cleaned = stripControlChars(input.lookup.message).trim();
+  const message = cleaned || "npm marked this version deprecated";
   const installed = input.installedVersion
     ? `${FLAIR_PKG}@${input.installedVersion}`
     : "the upgraded version";
@@ -121,16 +132,23 @@ export function decideDeprecatedRollback(input: {
   };
 }
 
+export type RollbackRecoveryLane =
+  | { kind: "npm-global" }
+  | { kind: "plain-tree"; treeDir: string; failedDir: string };
+
 /**
  * The rollback's own restart failed. The version now on disk is known-broken:
- * telling the operator to `flair start` it is not a recovery that can succeed.
- * Exit nonzero around these lines.
+ * `flair start` on it is not a recovery that can succeed. The recovery command
+ * matches the install lane. Say whether a pre-upgrade data snapshot was restored.
  */
 export function formatKnownBrokenRollbackRestart(input: {
   toVersion: string;
   error: string;
   /** Version the upgrade had reached before this rollback, when it differs. */
   recoveryVersion: string | null;
+  lane: RollbackRecoveryLane;
+  snapshotRestored: boolean;
+  snapshotPath?: string | null;
 }): string[] {
   const installed = `${FLAIR_PKG}@${input.toVersion}`;
   const lines = [
@@ -138,18 +156,37 @@ export function formatKnownBrokenRollbackRestart(input: {
     `   ${installed} is installed and known-broken — it failed to start after the rollback.`,
     `   Do not run \`flair start\` on ${installed}; this version cannot start.`,
   ];
-  if (input.recoveryVersion && input.recoveryVersion !== input.toVersion) {
+  if (input.lane.kind === "plain-tree") {
     lines.push(
-      `   Recovery: reinstall the version this upgrade had reached before the rollback:`,
+      `   Recovery (plain-tree): do not npm install -g. The rolled-back tree is now at ${input.lane.treeDir}.`,
+      `   The upgraded tree was set aside at ${input.lane.failedDir}.`,
+    );
+    if (input.recoveryVersion && input.recoveryVersion !== input.toVersion) {
+      lines.push(
+        `   Move ${input.lane.failedDir} back onto ${input.lane.treeDir} to return to ${FLAIR_PKG}@${input.recoveryVersion}.`,
+      );
+    } else {
+      lines.push(
+        `   Move ${input.lane.failedDir} back onto ${input.lane.treeDir} to return to the version this upgrade had reached.`,
+      );
+    }
+  } else if (input.recoveryVersion && input.recoveryVersion !== input.toVersion) {
+    lines.push(
+      `   Recovery (npm-global): reinstall the version this upgrade had reached before the rollback:`,
       `   npm install -g ${FLAIR_PKG}@${input.recoveryVersion}`,
     );
   } else {
     lines.push(
-      `   Recovery: install a non-deprecated release (this installed version cannot start):`,
+      `   Recovery (npm-global): install a non-deprecated release (this installed version cannot start):`,
       `   npm view ${FLAIR_PKG} version`,
       `   npm install -g ${FLAIR_PKG}@<that-version>`,
     );
   }
-  lines.push(`   Your data in ~/.flair was not touched by the package rollback.`);
+  if (input.snapshotRestored) {
+    lines.push(`   A pre-upgrade data snapshot was restored before this restart failed.`);
+    if (input.snapshotPath) lines.push(`   Snapshot: ${input.snapshotPath}`);
+  } else {
+    lines.push(`   No pre-upgrade data snapshot was restored by this rollback.`);
+  }
   return lines;
 }
