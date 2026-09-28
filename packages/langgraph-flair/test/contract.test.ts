@@ -1,9 +1,9 @@
 /**
  * contract.test.ts — flair#1943, the LangGraph slice.
  *
- * FlairStore is a LangGraph `BaseStore`. This file pins the contract four ways:
+ * FlairStore is a LangGraph `BaseStore`. This file pins the contract with four checks:
  *
- *   (t1) a RUNTIME method-presence check: every method name declared on
+ *   (t1) a runtime method-presence check: every method name declared on
  *        `BaseStore.prototype` is a function on `FlairStore.prototype`.
  *   (t2) the TYPE CHECKER accepts `const s: BaseStore = new FlairStore({...})`.
  *        CI enforces it: from `packages/langgraph-flair` the unit lane runs
