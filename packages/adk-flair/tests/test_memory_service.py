@@ -126,6 +126,51 @@ class TestDeterministicRecordId:
         rid = _deterministic_record_id("app", "user", "sess", "evt")
         assert rid == "app:user:sess:evt"
 
+    def test_separator_free_ids_match_the_historical_join(self):
+        """No ':' in any component → the id is unchanged, including '%' and '_'."""
+        from adk_flair.memory_service import _deterministic_record_id
+        # Pinned literals — the JS suite asserts the same strings.
+        cases = [
+            (("app", "user", "sess", "evt"), "app:user:sess:evt"),
+            (("my-app", "user-1", "sess-1", "evt-1"), "my-app:user-1:sess-1:evt-1"),
+            (("a%b", "c_d", "e", "f"), "a%b:c_d:e:f"),
+            (("a%3Ab", "c", "d", "e"), "a%3Ab:c:d:e"),
+            (("100%", "user", "sess", "evt"), "100%:user:sess:evt"),
+            (("", "", "", ""), ":::"),
+        ]
+        for parts, expected in cases:
+            assert _deterministic_record_id(*parts) == expected
+
+    def test_colon_placement_produces_distinct_ids(self):
+        """Tuples that differ only in where a ':' falls must not share an id."""
+        from adk_flair.memory_service import _deterministic_record_id
+        # These four all joined to "pre:post:user:sess:evt" before the escape.
+        shifted = [
+            ("pre:post", "user", "sess", "evt"),
+            ("pre", "post:user", "sess", "evt"),
+            ("pre", "post", "user:sess", "evt"),
+            ("pre", "post", "user", "sess:evt"),
+        ]
+        ids = [_deterministic_record_id(*parts) for parts in shifted]
+        assert len(set(ids)) == len(shifted)
+        # Pinned literals — the JS suite asserts the same strings.
+        assert ids == [
+            ":pre%3Apost:user:sess:evt",
+            ":pre:post%3Auser:sess:evt",
+            ":pre:post:user%3Asess:evt",
+            ":pre:post:user:sess%3Aevt",
+        ]
+
+    def test_encoded_colon_does_not_collide_with_a_literal_percent_sequence(self):
+        """The fail-open trap: encoding ':' as '%3A' must not match a stored literal."""
+        from adk_flair.memory_service import _deterministic_record_id
+        encoded = _deterministic_record_id("a:b", "c%d", "e:f", "g%3A")
+        literal = _deterministic_record_id("a%3Ab", "c%25d", "e%3Af", "g%253A")
+        assert encoded != literal
+        assert encoded == ":a%3Ab:c%25d:e%3Af:g%253A"
+        # No raw ':' in the literal tuple, so the historical join is kept.
+        assert literal == "a%3Ab:c%25d:e%3Af:g%253A"
+
 
 # ─── URL protection ─────────────────────────────────────────────────────────
 

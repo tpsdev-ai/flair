@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, mock, spyOn } from "bun:test";
-import { FlairMemoryService } from "../../src/memory_service.js";
+import { FlairMemoryService, deterministicRecordId } from "../../src/memory_service.js";
 import { compoundTag, sanitizeTagSegment, desanitizeTagSegment } from "../../src/tag.js";
 import { loadEd25519Key, signRequest, expandHome } from "../../src/signing.js";
 import * as crypto from "node:crypto";
@@ -66,6 +66,53 @@ function makeMemoryEntry(text: string, id?: string): import("@google/adk").Memor
     timestamp: new Date().toISOString(),
   };
 }
+
+// ─── Deterministic record ids ───────────────────────────────────────────────
+
+describe("deterministicRecordId", () => {
+  it("keeps the historical join when no component contains ':'", () => {
+    // Pinned literals — the Python suite asserts the same strings.
+    const cases: Array<[string[], string]> = [
+      [["app", "user", "sess", "evt"], "app:user:sess:evt"],
+      [["my-app", "user-1", "sess-1", "evt-1"], "my-app:user-1:sess-1:evt-1"],
+      [["a%b", "c_d", "e", "f"], "a%b:c_d:e:f"],
+      [["a%3Ab", "c", "d", "e"], "a%3Ab:c:d:e"],
+      [["100%", "user", "sess", "evt"], "100%:user:sess:evt"],
+      [["", "", "", ""], ":::"],
+    ];
+    for (const [parts, expected] of cases) {
+      expect(deterministicRecordId(parts[0], parts[1], parts[2], parts[3])).toBe(expected);
+    }
+  });
+
+  it("gives distinct ids to tuples that differ only in where ':' falls", () => {
+    // These four all joined to "pre:post:user:sess:evt" before the escape.
+    const shifted: string[][] = [
+      ["pre:post", "user", "sess", "evt"],
+      ["pre", "post:user", "sess", "evt"],
+      ["pre", "post", "user:sess", "evt"],
+      ["pre", "post", "user", "sess:evt"],
+    ];
+    const ids = shifted.map((parts) => deterministicRecordId(parts[0], parts[1], parts[2], parts[3]));
+    expect(new Set(ids).size).toBe(shifted.length);
+    // Pinned literals — the Python suite asserts the same strings.
+    expect(ids).toEqual([
+      ":pre%3Apost:user:sess:evt",
+      ":pre:post%3Auser:sess:evt",
+      ":pre:post:user%3Asess:evt",
+      ":pre:post:user:sess%3Aevt",
+    ]);
+  });
+
+  it("does not let an encoded colon collide with a literal percent sequence", () => {
+    const encoded = deterministicRecordId("a:b", "c%d", "e:f", "g%3A");
+    const literal = deterministicRecordId("a%3Ab", "c%25d", "e%3Af", "g%253A");
+    expect(encoded).not.toBe(literal);
+    expect(encoded).toBe(":a%3Ab:c%25d:e%3Af:g%253A");
+    // No raw ':' in the literal tuple, so the historical join is kept.
+    expect(literal).toBe("a%3Ab:c%25d:e%3Af:g%253A");
+  });
+});
 
 // ─── Tag helpers ────────────────────────────────────────────────────────────
 

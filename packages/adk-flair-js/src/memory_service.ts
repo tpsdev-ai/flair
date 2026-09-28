@@ -34,6 +34,42 @@ const DEFAULT_FLAIR_URL = "http://localhost:19926";
  * `/Memory/.` to `/Memory/` and `/Memory/..` to `/`, so the sent path would not
  * be the id (nor the signed path). Such an id cannot address its record.
  */
+/**
+ * Percent-encode `%` and `:` so a component cannot contain a raw separator.
+ *
+ * `%` is encoded first so a literal `%3A` cannot be mistaken for an encoded
+ * `:`. A component that contains neither character is unchanged. Mirrors
+ * `_escape_record_id_component` in the Python package.
+ */
+function escapeRecordIdComponent(value: string): string {
+  return value.replace(/%/g, "%25").replace(/:/g, "%3A");
+}
+
+/**
+ * Deterministic record id for idempotent re-ingestion.
+ *
+ * Separator-free tuples keep the historical join `app:user:session:event`
+ * (`%` and every other non-`:` character included) so existing records stay
+ * addressable. When any component contains `:`, every component is
+ * percent-encoded and the id is prefixed with `:`. Encoded components contain
+ * no raw `:`, so that id has four colons; a legacy id has exactly three, and
+ * the two cannot collide. The prefix is required: encoding alone maps
+ * `("a:b", ...)` and the separator-free `("a%3Ab", ...)` to the same string.
+ * Mirrors `_deterministic_record_id` in the Python package.
+ */
+export function deterministicRecordId(
+  appName: string,
+  userId: string,
+  sessionId: string,
+  eventId: string,
+): string {
+  const parts = [appName, userId, sessionId, eventId];
+  if (parts.some((part) => part.includes(":"))) {
+    return `:${parts.map(escapeRecordIdComponent).join(":")}`;
+  }
+  return parts.join(":");
+}
+
 function encodeRecordId(id: string): string {
   if (id === "." || id === "..") {
     throw new Error(
@@ -401,7 +437,7 @@ export class FlairMemoryService implements BaseMemoryService {
       if (!text) continue; // filter no-text events (Vertex parity)
 
       const eventId = event.id || crypto.randomUUID();
-      const recordId = `${appName}:${userId}:${session.id}:${eventId}`;
+      const recordId = deterministicRecordId(appName, userId, session.id, eventId);
       const body: Record<string, unknown> = {
         id: recordId,
         agentId: this._agentId,
@@ -564,7 +600,7 @@ export class FlairMemoryService implements BaseMemoryService {
       if (!text) continue;
 
       const eventId = event.id || crypto.randomUUID();
-      const recordId = `${appName}:${userId}:${sessionId}:${eventId}`;
+      const recordId = deterministicRecordId(appName, userId, sessionId, eventId);
       const body: Record<string, unknown> = {
         id: recordId,
         agentId: this._agentId,

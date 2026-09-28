@@ -209,11 +209,33 @@ def _compound_tag(app_name: str, user_id: str) -> str:
     return f"{_TAG_PREFIX}:{_sanitize_tag_segment(app_name)}:{_sanitize_tag_segment(user_id)}"
 
 
+def _escape_record_id_component(value: str) -> str:
+    """Percent-encode ``%`` and ``:`` so a component cannot contain a raw separator.
+
+    ``%`` is encoded first so a literal ``%3A`` cannot be mistaken for an
+    encoded ``:``. A component that contains neither character is unchanged.
+    """
+    return value.replace("%", "%25").replace(":", "%3A")
+
+
 def _deterministic_record_id(
     app_name: str, user_id: str, session_id: str, event_id: str
 ) -> str:
-    """Deterministic record id for idempotent re-ingestion."""
-    return f"{app_name}:{user_id}:{session_id}:{event_id}"
+    """Deterministic record id for idempotent re-ingestion.
+
+    Separator-free tuples keep the historical join
+    ``app:user:session:event`` (``%`` and every other non-``:`` character
+    included) so existing records stay addressable. When any component
+    contains ``:``, every component is percent-encoded and the id is
+    prefixed with ``:``. Encoded components contain no raw ``:``, so that
+    id has four colons; a legacy id has exactly three, and the two cannot
+    collide. The prefix is required: encoding alone maps ``("a:b", ...)``
+    and the separator-free ``("a%3Ab", ...)`` to the same string.
+    """
+    parts = (app_name, user_id, session_id, event_id)
+    if any(":" in part for part in parts):
+        return ":" + ":".join(_escape_record_id_component(part) for part in parts)
+    return ":".join(parts)
 
 
 def _encode_record_id(record_id: str) -> str:
