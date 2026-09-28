@@ -178,7 +178,10 @@ describe("formatKnownBrokenRollbackRestart (flair#1740)", () => {
     }).join("\n");
     expect(text).toContain("KNOWN-BROKEN");
     expect(text).toContain("@tpsdev-ai/flair@0.54.1 is installed and known-broken");
+    expect(text).toContain("it failed restart or verification in this run");
+    expect(text).toContain("check `flair doctor` after installing");
     expect(text).toContain("npm install -g @tpsdev-ai/flair@0.54.2");
+    expect(text).toContain("Or install another non-deprecated release: npm view @tpsdev-ai/flair version");
     expect(text).toContain("No pre-upgrade data snapshot was restored");
     expect(text).not.toContain("Start it with: flair start");
     expect(text).not.toContain("plain-tree");

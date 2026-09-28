@@ -172,8 +172,9 @@ export function formatKnownBrokenRollbackRestart(input: {
     }
   } else if (input.recoveryVersion && input.recoveryVersion !== input.toVersion) {
     lines.push(
-      `   Recovery (npm-global): reinstall the version this upgrade had reached before the rollback:`,
+      `   Recovery (npm-global): reinstall the version this upgrade had reached (it failed restart or verification in this run — check \`flair doctor\` after installing):`,
       `   npm install -g ${FLAIR_PKG}@${input.recoveryVersion}`,
+      `   Or install another non-deprecated release: npm view ${FLAIR_PKG} version`,
     );
   } else {
     lines.push(
