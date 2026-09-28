@@ -15,6 +15,38 @@ const { wireClaudeCodeJson, wireCodex } = await import("../../src/install/client
 const { fixContinuityCaptureHooks, upgradeSessionStartHookCommand } = await import("../../src/doctor-client.ts");
 const { repinSessionStartHookGuarded } = await import("../../src/lib/owned-pins.ts");
 delete process.env.FLAIR_TEST_CRITICAL_BARRIER;
+for (const [real, decoy, expected] of [
+  ["9.9.9", "0.0.1", "held"],
+  ["0.0.1", "9.9.9", "written"],
+] as const) {
+  test(`json: ignores a non-args decoy ${real}/${decoy}`, () => {
+    const root = realpathSync(tempDir("flair-1848-json-decoy-"));
+    withHome(root, () => {
+      const spec = `${pkg}@${real}`;
+      const raw = JSON.stringify({
+        mcpServers: {
+          flair: { description: `${pkg}@${decoy}`, command: "npx", args: ["-y", spec] },
+        },
+      });
+      const path = join(root, ".claude.json");
+      writeFileSync(path, raw);
+      seen.length = 0;
+
+      const env = { FLAIR_AGENT_ID: "new", FLAIR_URL: "http://127.0.0.1:19926" };
+      expect(wireClaudeCodeJson(env).kind).toBe(expected);
+      const inputs = seen.filter(Boolean);
+      expect(inputs.length).toBeGreaterThan(0);
+      expect(inputs.every((text) => text === spec)).toBe(true);
+
+      const after = readFileSync(path, "utf8");
+      if (expected === "held") expect(after).toBe(raw);
+      else {
+        expect(JSON.parse(after).mcpServers.flair.args).toEqual(["-y", mcpServerSpec()]);
+        expect(JSON.parse(after).mcpServers.flair.env).toEqual(env);
+      }
+    });
+  });
+}
 for (const [kind, version] of ["json", "codex", "continuity", "hook", "legacy"].flatMap((kind) =>
   (kind === "legacy" ? [""] : ["0.0.1", "9.9.9", "unknown"]).map((version) => [kind, version]))) {
   test(`${kind}: guard input and write outcome ${version}`, () => {

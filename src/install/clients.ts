@@ -737,8 +737,16 @@ function codexArgs(section: string) {
   // initial locator. Count keys again with that whole value removed.
   const outsideBody = outside.slice(bodyStart).split(/^[ \t]*\[/m)[0]!;
   if ([...outsideBody.matchAll(/^[ \t]*(?:args|"args"|'args')[ \t]*=/gm)].length !== 1) return null;
+  // Only recognize a direct npx invocation. Resolve its package operand
+  // after known boolean flags and an optional end-of-options marker; unknown
+  // options may consume a value, so hold rather than guess their arity.
+  const commands = [...outsideBody.matchAll(/^[ \t]*(?:command|"command"|'command')[ \t]*=[ \t]*(.*)$/gm)];
+  if (commands.length !== 1 || !/^(?:"npx"|'npx')[ \t]*(?:#.*)?\r?$/.test(commands[0]![1]!)) return null;
+  let packageIndex = 0;
+  while (["-y", "--yes"].includes(parsed.values[packageIndex]?.value ?? "")) packageIndex++;
+  if (parsed.values[packageIndex]?.value === "--") packageIndex++;
   const packages = parsed.values.filter((arg) => argNamesFlairPackage(arg.value));
-  if (packages.length !== 1) return null;
+  if (packages.length !== 1 || packages[0] !== parsed.values[packageIndex]) return null;
   // An escape can decode into a token terminator. Never let the generic pin
   // decoder approve only the version-looking prefix of that argument.
   const spec = packages[0]!;

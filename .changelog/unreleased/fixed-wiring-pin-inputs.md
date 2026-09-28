@@ -5,7 +5,10 @@
   commands outside the writer's recognized forms report stale with held/manual
   advice instead of appearing wired. Codex wiring and doctor decode the actual
   TOML package argument, including literal/basic strings, escapes and multiline
-  args, while ambiguous entries stay held. Continuity reporting and repairs
-  share one package capture and the command builder's env-value validation.
+  args, while ambiguous entries stay held. Codex pin refreshes require a
+  recognized npx command with Flair as its package operand; unsupported
+  invocations are held without changing the configuration. Continuity reporting
+  and repairs share one package capture and the command builder's env-value
+  validation.
 
   (Closes #1848)
