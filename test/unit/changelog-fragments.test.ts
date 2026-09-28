@@ -328,6 +328,21 @@ describe("locateUnreleased", () => {
 // runs on every PR, so moving the rule here is what makes the author hear it
 // while the change is still theirs.
 describe("validateFragmentBody — one entry per fragment", () => {
+  test.each([0, 1, 3])("rejects continuation indent %i", (indent) => {
+    const dir = tmp();
+    write(dir, "fixed-indent.md", "- **Indent.**\n\n" + " ".repeat(indent) + "Continuation.");
+    expect(() => readFragments(dir)).toThrow(`fixed-indent.md:3: continuation indent ${indent}; expected 2 spaces or at least 4 for nested content (fenced code exempt).`);
+  });
+  test("accepts the README example, nesting and fences", () => {
+    const example = readFileSync(".changelog/unreleased/README.md", "utf8").split("```markdown\n")[1].split("\n```")[0];
+    expect(() => validateFragmentBody("example.md", example)).not.toThrow();
+    for (const indent of [2, 4, 5]) expect(() => validateFragmentBody("nested.md", "- **Nested.**\n" + " ".repeat(indent) + "> Content.")).not.toThrow();
+    for (const fence of ["`".repeat(3), "~".repeat(3), "`".repeat(4)]) {
+      const body = ["- **Fenced.**", " ".repeat(2) + fence, " ".repeat(3) + "code", "- literal", " ".repeat(2) + fence, " ".repeat(2) + "After."].join("\n");
+      expect(() => validateFragmentBody("fence.md", body)).not.toThrow();
+      expect(() => validateFragmentBody("fence.md", body + "\n" + " ".repeat(3) + "Wrong.")).toThrow(/fence.md:7: continuation indent 3/);
+    }
+  });
   test("accepts a single entry with indented continuation lines", () => {
     expect(() => validateFragmentBody("f.md", "- **A thing changed.** Why it did:\n  more detail here\n  and more")).not.toThrow();
   });

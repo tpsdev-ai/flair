@@ -143,7 +143,20 @@ export function validateFragmentBody(relPath, body) {
   // continuation content under the entry's '- ', so it carries the two-space
   // indent. An unanchored `^```` matched nothing and the strip silently did
   // nothing — caught by the fenced-block test below failing, not by review.
-  const withoutFences = body.replace(/^[ \t]*```[\s\S]*?^[ \t]*```/gm, "");
+  let fence = "";
+  const withoutFences = body.split("\n").map((line, index) => {
+    const marker = line.trimStart().match(/^(`{3,}|~{3,})(.*)$/);
+    if (fence) {
+      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = "";
+      return "";
+    }
+    if (index && line.trim() && !line.startsWith("- ")) {
+      const indent = line.match(/^ */)[0].length;
+      if (indent !== 2 && indent < 4) throw new FragmentError(`${relPath}:${index + 1}: continuation indent ${indent}; expected 2 spaces or at least 4 for nested content (fenced code exempt).`);
+    }
+    if (marker && (marker[1][0] !== "`" || !marker[2].includes("`"))) { fence = marker[1]; return ""; }
+    return line;
+  }).join("\n");
   const entries = (withoutFences.match(/^- /gm) ?? []).length;
   if (entries > 1) {
     throw new FragmentError(
