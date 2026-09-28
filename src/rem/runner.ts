@@ -599,6 +599,17 @@ export function deriveSettledContinuityTags(
  * Pure orchestration; all I/O goes through injected dependencies.
  */
 export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
+  // Validate stage response envelopes before their existing error handlers.
+  const apiCall = opts.apiCall;
+  opts = { ...opts, apiCall: async (method, path, body) => {
+    const raw = await apiCall(method, path, body);
+    const stage = ["/MemoryMaintenance", "/ReflectMemories", "/AutoPromoteCandidates", "/MemoryDedupStats"];
+    if (method === "POST" && stage.includes(path) &&
+        (!raw || typeof raw !== "object" || Array.isArray(raw))) {
+      throw new Error("unexpected " + path + " response shape: expected an object");
+    }
+    return raw;
+  } };
   const startedAt = opts.nowOverride ?? new Date();
   const startedMs = startedAt.getTime();
   const logPath = opts.logPath ?? REM_NIGHTLY_LOG;

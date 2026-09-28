@@ -14,21 +14,11 @@ If you've never set up Flair before, do step 1 first. If Flair is already runnin
 
 ## Step 1 — Install Flair (do once)
 
-```bash
-# Install Flair globally
-npm install -g @tpsdev-ai/flair
-
-# Initialize the local Harper-backed server
-flair init
-
-# Provision an agent identity. Pick a name — typically per-project, per-purpose,
-# or "me" if you want one durable identity across everything.
-flair agent add my-project
-# → writes ~/.flair/keys/my-project.key (a raw 32-byte Ed25519 seed) and registers the agent
-
-# Sanity check
-flair status
-```
+Follow [the laptop quickstart](quickstart.md) through agent setup and
+verification. Its `flair init --agent local` path creates the agent identity
+and attempts to wire detected clients when wiring is enabled.
+For the manual snippets below, replace `my-project` with the agent ID you
+created (`local` if you followed the quickstart unchanged).
 
 > **`flair: command not found` right after installing?** Your npm global prefix's bin dir isn't on PATH (common with a user prefix like `~/.npm-global`) — run `export PATH="$(npm prefix -g)/bin:$PATH"`, persist that line in your shell profile, and `flair doctor` will print the exact line for your shell any time.
 

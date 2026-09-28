@@ -17,7 +17,7 @@ import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -43,6 +43,40 @@ def _client_timeout(svc) -> httpx.Timeout:
     """The timeout config of the ACTUALLY CREATED httpx client — the
     acceptance criterion is observability in the client, not in a field."""
     return svc._http.timeout
+
+
+def _mock_http_client(base_url: str = "http://localhost:19926") -> MagicMock:
+    """A mocked httpx client for the flair#1987 request path.
+
+    ``_request`` now builds the final request ONCE with the client's
+    ``build_request`` and sends THAT request. This double answers both:
+    ``build_request`` returns a REAL request (via a scratch client) merged onto
+    ``base_url``, so ``request.url.raw_path`` is the path httpx would send;
+    ``send`` records the call on ``.request`` (keeping call_args/count
+    assertions) and returns whatever ``.request`` is configured to return.
+    """
+    scratch = httpx.Client(base_url=base_url)
+    client = MagicMock()
+    client.request = AsyncMock()
+
+    def build_request(method, url, **kwargs):
+        req = scratch.build_request(method, url, **kwargs)
+        req.extensions["test_method"] = method
+        req.extensions["test_route"] = url
+        req.extensions["test_json"] = kwargs.get("json")
+        return req
+
+    async def send(request, **kwargs):
+        return await client.request(
+            request.extensions["test_method"],
+            request.extensions["test_route"],
+            headers=dict(request.headers),
+            json=request.extensions.get("test_json"),
+        )
+
+    client.build_request = build_request
+    client.send = send
+    return client
 
 
 # ─── Resolution: param / env / default precedence ───────────────────────────
@@ -154,7 +188,7 @@ class TestTimeoutResolution:
         """The first-request WARNING line carries the effective timeouts, so a
         false-fail is diagnosable from the agent's own output."""
         svc = _make_service({}, timeout=30.0)
-        svc._client = MagicMock()
+        svc._client = _mock_http_client("http://localhost:19926")
         resp = MagicMock(status_code=200, headers={"content-type": "application/json"})
         resp.json.return_value = {}
 

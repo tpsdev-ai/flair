@@ -81,7 +81,13 @@ export const UNRELEASED_NOTE = [
 
 // ─── Fragment reading ─────────────────────────────────────────────────────────
 
-export class FragmentError extends Error {}
+export class FragmentError extends Error {
+  constructor(message, file, line = 1) {
+    super(message);
+    this.file = file;
+    this.line = line;
+  }
+}
 
 // `<category>-<slug>.md` → { category, slug }. Throws with the offending name and
 // the remedy — a fragment that cannot be placed must never be silently skipped.
@@ -123,6 +129,23 @@ export function validateFragmentBody(relPath, body) {
         `### heading verbatim. Indent continuation lines by 2 spaces.`,
     );
   }
+  // A whitespace convention, independent of Markdown syntax or fence state.
+  const lines = body.split("\n");
+  for (let index = 1; index < lines.length; index++) {
+    const leading = lines[index].match(/^[ \t]*/)[0];
+    const indent = lines[index].match(/^ */)[0].length;
+    const hasTab = leading.includes("\t");
+    if (hasTab || indent % 2 !== 0) {
+      throw new FragmentError(
+        `${relPath}:${index + 1}: continuation indent ${indent}; ` +
+          (hasTab ? "tabs are not allowed; " : "") +
+          "indent continuation lines by an even number of spaces: 2 for the entry, 4 or more for nested content.",
+        relPath,
+        index + 1,
+      );
+    }
+  }
+
   // One entry per file, checked HERE rather than only at assembly.
   //
   // `promote` already refused a multi-entry fragment, but promote runs once, at
@@ -222,9 +245,9 @@ export function readFragments(dir = FRAGMENT_DIR) {
       );
     }
     const { category, slug } = parseFragmentName(name);
-    const body = readFileSync(full, "utf8").replace(/\s+$/, "");
+    const body = readFileSync(full, "utf8");
     validateFragmentBody(`${FRAGMENT_DIR_REL}/${name}`, body);
-    out.push({ name, path: full, category, slug, body });
+    out.push({ name, path: full, category, slug, body: body.replace(/\s+$/, "") });
   }
   return out;
 }

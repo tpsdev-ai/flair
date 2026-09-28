@@ -43,6 +43,8 @@ from urllib.parse import quote
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import httpx
+
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
 
@@ -493,11 +495,36 @@ class FlairMemoryProvider(MemoryProvider):
     def _request(self, method: str, path: str, *, json_body: Optional[dict] = None) -> Any:
         if self._priv_key is None:
             raise RuntimeError("flair: provider not initialized")
-        auth = _sign_request(self._priv_key, self._agent_id, method, path)
-        headers = {"Authorization": auth}
-        if json_body is not None:
-            headers["Content-Type"] = "application/json"
-        resp = self._http().request(method, path, headers=headers, json=json_body)
+        # flair#1987: the request is built ONCE and the signature covers exactly
+        # the path that request carries. The client's base URL may have a path
+        # (a deployment served under a prefix); httpx merges the route onto it,
+        # so signing the built request's own raw path (path + query) can never
+        # disagree with what is sent. A base URL that carries a query string or
+        # fragment is refused before any request: with a base query, httpx can
+        # append the route to the query instead of the path, and a base fragment
+        # is carried into the built URL. Refusing both keeps the base a pure path
+        # prefix.
+        parsed_base = httpx.URL(self._url)
+        if "?" in str(parsed_base) or "#" in str(parsed_base):
+            raise ValueError(
+                f"flair: refusing base URL {self._url!r}: a base URL must not "
+                "carry a query string or fragment."
+            )
+        # _request accepts ROUTES only. A fully qualified URL bypasses the
+        # configured base and can address another origin, so a path with a
+        # scheme or host is refused before building.
+        route = httpx.URL(path)
+        if route.scheme or route.host:
+            raise ValueError(
+                f"flair: refusing {path!r} as a request path: _request "
+                "accepts routes (paths), not absolute URLs."
+            )
+        request = self._http().build_request(method, path, json=json_body)
+        request.headers["Authorization"] = _sign_request(
+            self._priv_key, self._agent_id, method,
+            request.url.raw_path.decode("ascii"),
+        )
+        resp = self._http().send(request)
         if resp.status_code >= 400:
             raise RuntimeError(f"flair {method} {path} → {resp.status_code} {resp.text[:200]}")
         ctype = resp.headers.get("content-type", "")

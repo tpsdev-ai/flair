@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=132 options=579
+# commands=132 options=581
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -1830,10 +1830,13 @@ flair memory write-task-summary
       description: Agent the summary belongs to
       attr: agent
       mandatory: true
+    --ref <ref>
+      description: Task reference (optional)
+      attr: ref
     --beads <ops-id>
-      description: Bead/PR/task identifier this summary is about
+      description: Deprecated alias for --ref
       attr: beads
-      mandatory: true
+      hidden: true
     --outcome <s>
       description: Outcome of the task: merged | rejected | abandoned
       attr: outcome
@@ -1866,6 +1869,9 @@ flair memory search
     --q <query>
       description: search query (alias for positional arg)
       attr: q
+    --json
+      description: Output raw JSON array
+      attr: json
     --limit <n>
       description: Max results
       attr: limit
@@ -4710,7 +4716,7 @@ session-reset harness; standalone-callable by operators)
 
 Options:
   --agent <id>           Agent the summary belongs to
-  --beads <ops-id>       Bead/PR/task identifier this summary is about
+  --ref <ref>            Task reference (optional)
   --outcome <s>          Outcome of the task: merged | rejected | abandoned
   --summary <text>       Multi-sentence dense compression (populates
                          Memory.summary; will be the agent's read-time view)
@@ -4736,6 +4742,7 @@ Options:
                        memories to search (flair#1500: a flag-pinned agent with
                        no key no longer falls back to FLAIR_ADMIN_PASS)
   --q <query>          search query (alias for positional arg)
+  --json               Output raw JSON array
   --limit <n>          Max results (default: "5")
   --tag <tag>
   --include-archived   Include basemented (archived) memories in results

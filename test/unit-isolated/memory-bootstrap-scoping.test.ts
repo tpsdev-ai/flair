@@ -853,6 +853,17 @@ describe("MemoryBootstrap.post() — org-event watermark path (flair#931)", () =
 // soul entries must collapse to one, so the always-on budget is not spent
 // re-saying the same thing.
 describe("MemoryBootstrap.post() — verbatim soul duplicates collapse (flair#1431)", () => {
+  it.each([false, true])("keeps the priority winner when reversed=%s", async (reverse) => {
+    reset();
+    const agentId = "agent-soul-1730";
+    const keys = ["identity", "identity-file"];
+    if (reverse) keys.reverse();
+    for (const key of keys) seedSoul(agentId, key, "SAME_SOUL_BODY");
+    const res: any = await makeBootstrap(agentCtx(agentId)).post({ agentId, maxTokens: 6000, includeContext: true });
+    expect(res.soul).toEqual({ identity: "SAME_SOUL_BODY" });
+    expect(res.context.split("SAME_SOUL_BODY").length - 1).toBe(1);
+  });
+
   function seedSoul(agentId: string, key: string, value: string) {
     soulStore.set(`${agentId}:${key}`, { id: `${agentId}:${key}`, agentId, key, value });
   }

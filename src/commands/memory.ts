@@ -11,7 +11,7 @@
  * Do not import src/cli.ts from here — that would cycle and pull the
  * non-strict entry into the strict check.
  */
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import * as render from "../render.js";
 import { resolveAdminUser } from "../lib/auth-resolve.js";
 import type { ResolvedSigningIdentity } from "../lib/signing-identity.js";
@@ -163,7 +163,7 @@ export function register(program: Command): void {
   // before resetting the session.
   //
   // The shape of this row matters: tags=['task-summary','auto-on-reset'] +
-  // subject='task:<beads-id>' + summary populated. Slice 3+4 (harness
+  // subject='task:<reference>' + summary when supplied. Slice 3+4 (harness
   // integrations) will call this as part of the reset pipeline; slice 5+6
   // (operator surfaces) will surface promote/restore controls. Today, this
   // command is independently useful — operator can capture a manual summary
@@ -175,13 +175,15 @@ export function register(program: Command): void {
   memory.command("write-task-summary")
     .description("Capture a structured task summary as a persistent Memory row (used by session-reset harness; standalone-callable by operators)")
     .requiredOption("--agent <id>", "Agent the summary belongs to")
-    .requiredOption("--beads <ops-id>", "Bead/PR/task identifier this summary is about")
+    .option("--ref <ref>", "Task reference (optional)")
+    .addOption(new Option("--beads <ops-id>", "Deprecated alias for --ref").hideHelp())
     .requiredOption("--outcome <s>", "Outcome of the task: merged | rejected | abandoned")
     .option("--summary <text>", "Multi-sentence dense compression (populates Memory.summary; will be the agent's read-time view)")
     .option("--files-touched <csv>", "Comma-separated list of files touched during the task (becomes part of content)")
     .option("--lessons <text>", "Lessons learned during the task (becomes part of content)")
     .option("--derived-from <csv>", "Comma-separated list of source Memory IDs this summary was distilled from")
     .action(async (opts: any) => {
+      opts.beads = opts.ref ?? opts.beads ?? "unreferenced";
       const validOutcomes = new Set(["merged", "rejected", "abandoned"]);
       if (!validOutcomes.has(opts.outcome)) {
         console.error(`Error: --outcome must be one of: merged, rejected, abandoned (got: ${opts.outcome})`);
@@ -242,6 +244,7 @@ export function register(program: Command): void {
     .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
     .option("--admin-pass <pass>", "Admin password — sign as admin while --agent names whose memories to search (flair#1500: a flag-pinned agent with no key no longer falls back to FLAIR_ADMIN_PASS)")
     .option("--q <query>", "search query (alias for positional arg)")
+    .option("--json", "Output raw JSON array")
     .option("--limit <n>", "Max results", "5")
     .option("--tag <tag>")
     .option("--include-archived", "Include basemented (archived) memories in results (default: excluded)")
@@ -261,6 +264,11 @@ export function register(program: Command): void {
       if (opts.includeArchived) body.includeArchived = true;
       const baseUrl = resolveBaseUrl(opts);
       const res = await api("POST", "/SemanticSearch", body, { baseUrl, agentId, agentIdSource: source, explicitAdminPass: opts.adminPass });
+      if (opts.json) {
+        const results = res.results || res || [];
+        console.log(render.asJSON(Array.isArray(results) ? results : []));
+        return;
+      }
       console.log(JSON.stringify(res, null, 2));
     });
   // ─── flair memory basement / restore ────────────────────────────────────────

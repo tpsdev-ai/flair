@@ -199,6 +199,34 @@ export class FlairClient {
   }
 
   /**
+   * flair#1987 — the FINAL request URL: `path` joined onto the base URL's OWN
+   * path with exactly one slash between them (whether or not the base ends in
+   * "/"). Parsed with `new URL` so the path sent is the path the base names.
+   *
+   * A base URL whose serialized form carries a query string or fragment is
+   * refused BEFORE any request: even a bare trailing "?" or "#" changes
+   * relative URL resolution and can discard the base's path. An ordinary base
+   * (an origin with no path) addresses exactly the URLs it did before.
+   */
+  private requestUrl(path: string): URL {
+    let base: URL;
+    try {
+      base = new URL(this.url);
+    } catch {
+      throw new Error(`flair-client: cannot parse the base URL "${this.url}"`);
+    }
+    // A bare trailing "?" or "#" reports no search/hash but still changes how
+    // the route is joined and can discard the base's path, so refuse ANY query
+    // or fragment delimiter.
+    if (base.href.includes("?") || base.href.includes("#")) {
+      throw new Error(
+        `flair-client: refusing base URL "${this.url}": a base URL must not carry a query string or fragment.`,
+      );
+    }
+    return new URL(path.replace(/^\/+/, ""), `${base.href.replace(/\/+$/, "")}/`);
+  }
+
+  /**
    * Make an authenticated request to Flair.
    *
    * `opts.signal` is an optional caller-owned abort signal (e.g. a plugin's
@@ -216,7 +244,14 @@ export class FlairClient {
     if (!path.startsWith("/")) {
       throw new Error('flair-client: a request path must start with "/"');
     }
-    const target = `${this.url}${path}`;
+    // flair#1987: build the FINAL request URL once, joined onto the base URL's
+    // OWN path, and sign exactly the path that URL carries. Signing the route
+    // alone would cover "/Memory/<id>" while a deployment served under a path
+    // sent "/<prefix>/Memory/<id>" — the server then refuses the signature
+    // (it verifies over pathname+query, see resources/agent-auth.ts).
+    const url = this.requestUrl(path);
+    const target = url.toString();
+    const signedPath = `${url.pathname}${url.search}`;
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       // flair#1383: the server refuses clients older than 0.18.0 on write paths.
@@ -226,7 +261,7 @@ export class FlairClient {
     };
     const key = this.resolveKey();
     if (key) {
-      headers["Authorization"] = signRequest(this.agentId, key, method, path);
+      headers["Authorization"] = signRequest(this.agentId, key, method, signedPath);
     } else if (this.basicAuth) {
       // flair#1951: never send admin Basic credentials over plain http to a
       // non-loopback host. Refuse BEFORE any request is made.
