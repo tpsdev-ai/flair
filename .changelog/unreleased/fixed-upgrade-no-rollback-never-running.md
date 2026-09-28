@@ -17,5 +17,7 @@
   > **Heads-up:** After a refused pre-upgrade `/Health` connection, a failed
   > restart keeps the new version only when Flair itself was swapped, exits
   > successfully, and prints `flair start`. Timeouts remain indeterminate.
+  > A pre-upgrade snapshot leaves an instance with a refused `/Health` connection
+  > stopped; it no longer starts the old version before the package swap.
   > Engine-change rollback retains pre-restore data beside the data directory;
   > keep this copy to recover post-snapshot writes with the engine that wrote them.

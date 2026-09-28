@@ -101,12 +101,16 @@ install is refused rather than overwritten.
 ### Restart, verification and rollback
 
 In the local upgrade path, `--no-restart` skips restart and post-restart
-verification. With restart enabled, the pre-install `/Health` probe also runs
-under `--no-verify`.
+verification. With restart enabled, the pre-install `/Health` probe runs, also
+under `--no-verify`. With `--no-restart`, it runs only when a pre-upgrade
+snapshot is needed, to decide whether that snapshot restarts the old instance.
 
-The probe labels a successful HTTP response `running`. A caught error with
-`ECONNREFUSED` or `ConnectionRefused` in its collected codes or top-level text
-is `stopped`; other responses and caught errors are `indeterminate`.
+The probe labels a successful HTTP response `running`. A caught error is
+`stopped` when every failure in it, including each `cause` and aggregated
+error, is a connection refusal: a string code must be `ECONNREFUSED` or
+`ConnectionRefused`, and an uncoded failure with no nested failures must
+contain one of them in its text. Other responses and caught errors are
+`indeterminate`.
 The `stopped` label does not establish whether a process exists.
 
 After a thrown restart error, `decideAfterRestartFailure` selects:
@@ -199,23 +203,23 @@ To capture one first: `flair snapshot create` (physical) or `flair backup` (logi
 - **Retention:** keeps the newest 3 snapshots, prunes older ones automatically after
   each successful snapshot — whether taken via `--snapshot` or `flair snapshot create`
   (below); both draw from the same `~/.flair/upgrade-snapshots/` pool.
-- **Consistency:** when a snapshot is taken (`--snapshot`, or `flair snapshot create`),
-  Flair is briefly stopped, snapshotted, and immediately restarted on the same version
-  before anything else happens — a plain file copy of a *running* Harper's data
-  directory isn't guaranteed point-in-time consistent (Harper 5.x stores tables in
-  RocksDB — an LSM engine whose WAL, MANIFEST, and SST files can be
-  mid-write/mid-compaction), so the snapshot always happens against a quiesced
-  directory. During an upgrade this means a short stop/start blip even with
-  `--no-restart` — the snapshot's correctness doesn't depend on whether you want a
-  restart *after* the upgrade, those are separate questions. (A native Harper backup
-  operation, `get_backup`, was evaluated and rejected here — see the code comment
+- **Consistency:** a snapshot uses a stopped, quiesced data directory — a plain
+  file copy of a *running* Harper's data directory isn't guaranteed point-in-time
+  consistent (Harper 5.x stores tables in RocksDB, whose WAL, MANIFEST, and SST
+  files can be mid-write/mid-compaction). `flair snapshot create` restarts Flair
+  afterward. During an upgrade, the old version is restarted after the snapshot
+  only if the pre-install `/Health` probe did not refuse the connection. A refused
+  connection leaves it stopped through the package swap. An instance that answered
+  or had indeterminate liveness has a short stop/start blip even with
+  `--no-restart`; that flag controls the restart *after* the upgrade. (A native
+  Harper backup operation, `get_backup`, was evaluated and rejected here — see the code comment
   above `createDataSnapshot` in `src/cli.ts` for why: it backs up one table/schema at a
   time over the running HTTP API, not the whole data directory, and would be strictly
   less complete than a plain file copy.)
 - **Failure is a hard stop when requested:** if you passed `--snapshot` and the
   snapshot itself fails (disk full, permissions, etc.), the upgrade aborts before any
-  package changes — no packages are swapped, Flair is restarted on the version it was
-  already running.
+  package changes. Flair is restarted on the old version only if the pre-install
+  `/Health` probe did not refuse the connection.
 
 #### `flair snapshot` — the standalone command
 

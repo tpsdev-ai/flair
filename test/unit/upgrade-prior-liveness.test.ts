@@ -70,4 +70,29 @@ describe("classifyUpgradePriorLiveness", () => {
     expect(isConnectionRefused(new Error("The operation was aborted due to timeout"))).toBe(false);
     expect(isConnectionRefused(new Error("Unable to connect. Is the computer able to access the url?"))).toBe(false);
   });
+
+  const refused = (message: string) => Object.assign(new Error(message), { code: "ECONNREFUSED" });
+  const timeout = () => new Error("The operation was aborted due to timeout");
+  const probeThrowing = (err: unknown) => classifyUpgradePriorLiveness("http://127.0.0.1:9", {
+    fetchImpl: (async () => { throw err; }) as unknown as typeof fetch,
+  });
+
+  test("an uncoded nested refusal is read like uncoded top-level text", async () => {
+    const wrapped = new TypeError("fetch failed", { cause: new Error("connect ECONNREFUSED 127.0.0.1:9") });
+    expect(isConnectionRefused(wrapped)).toBe(true);
+    expect(isConnectionRefused(new AggregateError([refused("a"), new Error("connect ECONNREFUSED ::1:9")], "fetch failed"))).toBe(true);
+    expect(await probeThrowing(wrapped)).toEqual({ kind: "stopped" });
+  });
+
+  test("an aggregate with any non-refusal failure, coded or uncoded, is not stopped", async () => {
+    const mixed = new AggregateError([refused("a"), timeout()], "fetch failed");
+    expect(isConnectionRefused(mixed)).toBe(false);
+    const codedMixed = Object.assign(
+      new AggregateError([refused("a"), Object.assign(new Error("b"), { code: "ETIMEDOUT" })], "connect failed"),
+      { code: "ECONNREFUSED" },
+    );
+    expect(isConnectionRefused(codedMixed)).toBe(false);
+    expect(isConnectionRefused(new Error("connect ECONNREFUSED 127.0.0.1:9", { cause: timeout() }))).toBe(false);
+    expect(await probeThrowing(mixed)).toEqual({ kind: "indeterminate", reason: "fetch failed" });
+  });
 });

@@ -13,32 +13,44 @@ export interface PriorLivenessOptions {
 
 const DEFAULT_TIMEOUT_MS = 3000;
 
-/** Collect string code fields through cause and array-valued errors, skipping cycles. */
-export function errorCodes(err: unknown): string[] {
-  const codes: string[] = [];
+const REFUSED_TOKENS = ["ECONNREFUSED", "ConnectionRefused"];
+
+function namesRefusal(text: string): boolean {
+  return REFUSED_TOKENS.some((token) => text.includes(token));
+}
+
+/**
+ * Walk cause and array-valued errors, skipping cycles. Every string code must
+ * be ECONNREFUSED or ConnectionRefused. Every uncoded failure without nested
+ * failures must contain one of them in its text; an uncoded wrapper defers to
+ * its nested failures. Any other code or leaf text does not match.
+ */
+export function isConnectionRefused(err: unknown): boolean {
+  let matched = false;
   const seen = new Set<unknown>();
   const stack: unknown[] = [err];
   while (stack.length > 0) {
     const cur = stack.pop();
-    if (!cur || typeof cur !== "object" || seen.has(cur)) continue;
-    seen.add(cur);
-    const e = cur as { code?: unknown; cause?: unknown; errors?: unknown[] };
-    if (typeof e.code === "string") codes.push(e.code);
-    if (e.cause !== undefined) stack.push(e.cause);
-    if (Array.isArray(e.errors)) stack.push(...e.errors);
+    const isObject = !!cur && typeof cur === "object";
+    if (isObject) {
+      if (seen.has(cur)) continue;
+      seen.add(cur);
+    }
+    const e = (isObject ? cur : {}) as { code?: unknown; cause?: unknown; errors?: unknown };
+    const nested = [
+      ...(e.cause !== undefined ? [e.cause] : []),
+      ...(Array.isArray(e.errors) ? e.errors : []),
+    ];
+    if (typeof e.code === "string") {
+      if (!REFUSED_TOKENS.includes(e.code)) return false;
+      matched = true;
+    } else if (nested.length === 0) {
+      if (!namesRefusal(cur instanceof Error ? cur.message : String(cur ?? ""))) return false;
+      matched = true;
+    }
+    stack.push(...nested);
   }
-  return codes;
-}
-
-/**
- * Match ECONNREFUSED or ConnectionRefused in collected codes or in the
- * top-level error text. Other text and codes do not match.
- */
-export function isConnectionRefused(err: unknown): boolean {
-  const codes = errorCodes(err);
-  if (codes.includes("ECONNREFUSED") || codes.includes("ConnectionRefused")) return true;
-  const message = err instanceof Error ? err.message : String(err ?? "");
-  return message.includes("ECONNREFUSED") || message.includes("ConnectionRefused");
+  return matched;
 }
 
 function errorText(err: unknown): string {

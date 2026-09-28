@@ -28,9 +28,13 @@ mock.module("node:os", () => {
   const actual = { ...require("node:os") };
   return { ...actual, homedir: () => TEST_HOME };
 });
+let healthRefused = false;
 const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
   const url = new URL(input instanceof Request ? input.url : String(input));
-  if (url.pathname === "/Health") return new Response("ok");
+  if (url.pathname === "/Health") {
+    if (healthRefused) throw Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" });
+    return new Response("ok");
+  }
   if (url.hostname !== "registry.npmjs.org") throw new Error(`Unexpected request: ${url}`);
   return Response.json({ name: "@tpsdev-ai/flair", version: url.pathname.endsWith("/0.54.1") ? "0.54.1" : "0.54.2" });
 }) as typeof fetch);
@@ -291,6 +295,56 @@ describe("engine-change rollback data retention", () => {
       findSpy.mockRestore();
       restartSpy.mockRestore();
       stopSpy.mockRestore();
+    }
+  });
+
+  test.each([
+    ["a requested snapshot", ["--snapshot", "--no-engine-snapshot"], true],
+    ["an engine-change snapshot", [], true],
+    ["a snapshot with --no-restart", ["--no-restart"], false],
+  ])("keeps a previously stopped instance stopped through %s", async (_label, snapshotArgs, shouldRestart) => {
+    const fixture = await prepareDataRollback();
+    healthRefused = true;
+    rebindCli({
+      startFlairProcess: async () => {
+        fixture.events.push("snapshot-restart");
+        healthRefused = false;
+      },
+    });
+    try {
+      const { code, out } = await runUpgrade(["--no-verify", ...snapshotArgs]);
+      expect(out).toContain("✅ Snapshot:");
+      expect(code).toBe(0);
+      expect(out).toContain(shouldRestart ? "Next: flair start" : "Run: flair restart");
+      expect(fixture.events).toEqual(shouldRestart ? ["stop", "restart"] : ["stop"]);
+      expect(healthRefused).toBe(true);
+      expect(restartCalls).toBe(shouldRestart ? 1 : 0);
+    } finally {
+      healthRefused = false;
+    }
+  });
+
+  test("a failed snapshot also leaves a previously stopped instance stopped", async () => {
+    const fixture = await prepareDataRollback();
+    healthRefused = true;
+    rebindCli({
+      stopFlairProcess: async () => {
+        fixture.events.push("stop");
+        rmSync(fixture.dataDir, { recursive: true });
+      },
+      startFlairProcess: async () => {
+        fixture.events.push("snapshot-restart");
+      },
+    });
+    try {
+      const { code, out } = await runUpgrade(["--no-verify", "--snapshot"]);
+      expect(code).toBe(1);
+      expect(out).toContain("snapshot failed:");
+      expect(out).toContain("Aborting upgrade — no packages were changed");
+      expect(fixture.events).toEqual(["stop"]);
+      expect(restartCalls).toBe(0);
+    } finally {
+      healthRefused = false;
     }
   });
 });

@@ -591,24 +591,29 @@ export const UPGRADE_SNAPSHOT_NUDGE_LINES: readonly string[] = [
 ];
 
 /**
- * Run the stop → snapshot → prune → restart dance for a pre-upgrade snapshot.
+ * Run the stop → snapshot → prune → conditional restart sequence for a
+ * pre-upgrade snapshot.
  * Extracted from the upgrade action so the --snapshot and engine-version-change
  * branches share the same mechanism (flair#1047).
  *
  * On snapshot failure: aborts the upgrade (process.exit(1)), restarting Flair
- * first if it was stopped. On restart-after-snapshot failure: also exits.
+ * first only if the initial /Health probe did not refuse. On restart-after-
+ * snapshot failure: also exits.
  */
 
-async function runUpgradeSnapshot(port: number, dataDir: string): Promise<string> {
+async function runUpgradeSnapshot(port: number, dataDir: string, restartAfterSnapshot: boolean): Promise<string> {
   // Consistency: a running Harper's data dir can be mid-write, and a
   // plain file copy of a live database directory isn't guaranteed
   // point-in-time consistent (Harper 5.x = RocksDB: WAL/SST/MANIFEST
-  // can tear under a live copy). Stopping first — then immediately
-  // restarting the OLD version, before any package changes — gives a
-  // quiesced, safe-to-copy directory with only a brief blip, even for
+  // can tear under a live copy). Stopping first gives a quiesced,
+  // safe-to-copy directory. When restartAfterSnapshot is true (the initial
+  // /Health probe did not refuse the connection), the OLD version is then
+  // restarted before any package changes — a brief blip, even for
   // --no-restart (the snapshot's correctness doesn't depend on
   // whether the caller wants a restart AFTER the upgrade — those are
-  // orthogonal). See docs/upgrade.md for the native-backup alternative
+  // orthogonal). A refused probe leaves the instance stopped, so the
+  // restart-failure decision's `stopped` reading still holds after the
+  // package swap. See docs/upgrade.md for the native-backup alternative
   // considered and rejected (Harper's `get_backup` op backs up one
   // table/schema at a time over the running HTTP API — not the whole
   // data dir — and rejecting it here means this path never depends on
@@ -629,17 +634,19 @@ async function runUpgradeSnapshot(port: number, dataDir: string): Promise<string
   } catch (err: any) {
     console.error(`❌ snapshot failed: ${err.message}`);
     console.error("   Aborting upgrade — no packages were changed.");
-    if (stoppedForSnapshot) {
+    if (stoppedForSnapshot && restartAfterSnapshot) {
       try { await startFlairProcess(port, dataDir); } catch { /* best effort — surface the original snapshot error, not this */ }
     }
     process.exit(1);
   }
-  try {
-    await startFlairProcess(port, dataDir);
-  } catch (err: any) {
-    console.error(`❌ failed to restart Flair after the pre-upgrade snapshot: ${err.message}`);
-    console.error(`   The snapshot itself succeeded (${snapshotPath}) — no packages were changed. Check: flair doctor`);
-    process.exit(1);
+  if (restartAfterSnapshot) {
+    try {
+      await startFlairProcess(port, dataDir);
+    } catch (err: any) {
+      console.error(`❌ failed to restart Flair after the pre-upgrade snapshot: ${err.message}`);
+      console.error(`   The snapshot itself succeeded (${snapshotPath}) — no packages were changed. Check: flair doctor`);
+      process.exit(1);
+    }
   }
   if (!snapshotPath) throw new Error("pre-upgrade snapshot finished without a path");
   return snapshotPath;
@@ -1353,7 +1360,9 @@ program
     // never restarts Flair onto a different port.
     const baseUrl = `http://127.0.0.1:${upgradePort}`;
 
-    // Probe prior /Health when shouldRestart is true, including --no-verify.
+    // Probe prior /Health, including under --no-verify: the pre-upgrade
+    // snapshot and the restart-failure decision both read it. A --no-restart
+    // upgrade probes only if a snapshot is needed.
     // The separate credential preflight runs when shouldVerify is true and
     // exits only when isCredentialOnlyFailure(preflight) is true.
     let priorLiveness: PriorLiveness = { kind: "indeterminate", reason: "prior /Health was not probed" };
@@ -1442,6 +1451,9 @@ program
       engineVersionChanging,
       !!opts.noEngineSnapshot,
     );
+    if (!shouldRestart && (snapshotDecision === "snapshot" || snapshotDecision === "engine-version-change")) {
+      priorLiveness = await classifyUpgradePriorLiveness(baseUrl, { timeoutMs: 3000 });
+    }
     let snapshotPath: string | null = null;
     if (snapshotDecision === "nudge") {
       // Non-blocking nudge only — never prompt/block here, this must stay
@@ -1462,10 +1474,10 @@ program
       console.log(`\nHarper engine version changing (${fromLabel} → ${toLabel}) — snapshotting data before upgrade...`);
       console.log(render.wrap(render.c.dim, "The tested-downgrade guarantee does not hold across engine version boundaries."));
       console.log(render.wrap(render.c.dim, "Pass --no-engine-snapshot to skip this (not recommended)."));
-      snapshotPath = await runUpgradeSnapshot(upgradePort, upgradeDataDir);
+      snapshotPath = await runUpgradeSnapshot(upgradePort, upgradeDataDir, priorLiveness.kind !== "stopped");
     } else if (snapshotDecision === "snapshot") {
       console.log("\nSnapshotting data before upgrade...");
-      snapshotPath = await runUpgradeSnapshot(upgradePort, upgradeDataDir);
+      snapshotPath = await runUpgradeSnapshot(upgradePort, upgradeDataDir, priorLiveness.kind !== "stopped");
     }
 
     // Perform upgrade. `latest` comes from the npm registry's HTTP
