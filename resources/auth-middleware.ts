@@ -660,19 +660,19 @@ server.http(async (request: any, nextLayer: any) => {
         const pathParts = url.pathname.split("/").filter(Boolean);
         const memId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
         if (memId) {
-          // flair#1940 round 14 — validate Harper's PARSED REST selection and
-          // path-property forms BEFORE the scope read below, not only the named
-          // URL parameters. Harper turns `?select(...)` into `target.select`
-          // (a selection the handler refuses with 400) and `/Memory/<id>.<name>`
-          // into `target.property`; neither is a named `select`/`property`
-          // parameter, so the pre-read used to run before the handler's 400
-          // (ordering gap). The resource's own check stays for direct/in-process
+          // flair#1940 round 15 — validate the narrowed selection before the
+          // scope read below. Harper turns `?select(...)` into `target.select`
+          // and `/Memory/<id>.<name>` into `target.property`; a non-admin read
+          // accepts a selection only as an array of plain Memory schema
+          // attribute names, and every other shape (a scalar, a `property`, an
+          // empty/wildcard/virtual/unknown name, a trailing or doubled comma, a
+          // `select` object, attached options) is refused here, BEFORE the
+          // pre-read. The resource's own check stays for direct/in-process
           // calls.
           const rest = restSelection(url.pathname, url.search);
           const selection = parseCallerSelection(
             rest?.select ?? url.searchParams.get("select") ?? undefined,
             rest?.property ?? url.searchParams.get("property") ?? undefined,
-            { surface: "byId" },
           );
           if (selection instanceof Response) return selection;
           const record = await (databases as any).flair.Memory.get(memId);

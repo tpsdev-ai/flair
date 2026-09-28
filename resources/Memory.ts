@@ -851,17 +851,17 @@ export class Memory extends (databases as any).flair.Memory {
 
     const ctx = (this as any).getContext?.();
     const auth = await resolveAgentAuth(ctx);
-    // flair#1940 round 12 (Flint's design ruling): the pointer decision reads the
-    // STORED row; the caller's selection shapes only the OUTPUT. So on a
-    // non-admin by-id read that carries a `select`/`property`, read the FULL row
-    // (never the caller-shaped one), project it through the gated join, and
-    // apply the selection LAST. The unshaped read target is a PLAIN object
-    // carrying only the id — the SAME shape the shared by-id gate now builds
-    // itself (#1995). It is never the caller's target and never its
-    // constructor. An unsupported selection shape is refused with 400 before
-    // any read.
+    // flair#1940 rounds 12/15 (Flint's design ruling): the pointer decision reads
+    // the STORED row; the caller's selection shapes only the OUTPUT. So on a
+    // non-admin by-id read that carries a selection, read the FULL row (never
+    // the caller-shaped one), project it through the gated join, and apply the
+    // selection LAST. The unshaped read target is a PLAIN object carrying only
+    // the id — the SAME shape the shared by-id gate now builds itself (#1995).
+    // It is never the caller's target and never its constructor. The selection
+    // must be an array of plain Memory schema attribute names; every other shape
+    // is refused with 400 before any read.
     if (auth.kind === "agent" && !auth.isAdmin && carriesSelection(target)) {
-      const selection = parseCallerSelection((target as any).select, (target as any).property, { surface: "byId" });
+      const selection = parseCallerSelection((target as any).select, (target as any).property);
       if (selection instanceof Response) return selection; // 400, no read
       const targetId = typeof target === "string" ? target : (target as any)?.id;
       // Build the unshaped read target as a PLAIN object carrying only the id —
@@ -966,16 +966,17 @@ export class Memory extends (databases as any).flair.Memory {
     // (never one per row), then project each row. The set is materialized so
     // the batch is a single call.
     const readerAgentId = gate.agentId;
-    // flair#1940 round 12 (Flint's design ruling): a non-admin read decides
+    // flair#1940 rounds 12/15 (Flint's design ruling): a non-admin read decides
     // pointer rendering on the STORED rows; the caller's selection shapes only
-    // the OUTPUT. Strip the caller's select/property from the read (same
-    // conditions, operator, limit, offset and sort), project the full rows
-    // through the gated join, then apply the selection to the projected rows. An
-    // unsupported selection shape is refused with 400 before any read.
+    // the OUTPUT. Strip the caller's select from the read (same conditions,
+    // operator, limit, offset and sort), project the full rows through the
+    // gated join, then apply the selection to the projected rows. The selection
+    // must be an array of plain Memory schema attribute names; every other shape
+    // is refused with 400 before any read.
     let selection: CallerSelection = { shape: "none" };
     let readQuery = query;
     if (carriesSelection(query)) {
-      const parsed = parseCallerSelection((query as any).select, (query as any).property, { surface: "collection" });
+      const parsed = parseCallerSelection((query as any).select, (query as any).property);
       if (parsed instanceof Response) return parsed; // 400, no read
       selection = parsed;
       readQuery = unselectedReadQuery(query);

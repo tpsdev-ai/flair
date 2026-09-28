@@ -1,20 +1,18 @@
 /**
- * host-source-selected-reads-1940.test.ts — flair#1940 slice 1, round 12.
+ * host-source-selected-reads-1940.test.ts — flair#1940 slice 1, round 15.
  *
- * Real-Harper coverage of the round-12 rule: on a non-admin `Memory.get` /
- * `Memory.search`, the pointer decision reads the STORED row and the caller's
- * `select`/`property` shapes only the OUTPUT. Two shapes are exercised over
- * REST against a spawned Harper:
- *   t1  a COLLECTION GET whose selection omits `archived`, against an ARCHIVED
- *       shared row whose pointer is bound: it must render nothing, exactly like
- *       the full-row read;
- *   t2  the BY-ID scalar selection Harper supports, against a row carrying an
- *       UNBOUND inline pointer: it must return no value; the same scalar read of
- *       a BOUND pointer by its author returns the gated pointer.
- * Response bodies are quoted in the assertions' failure messages / the logs.
+ * Real-Harper coverage of the round-15 narrowed selection contract: on a
+ * non-admin `Memory.get` / `Memory.search`, a selection is accepted ONLY as an
+ * array of plain Memory schema attribute names. For an accepted array on a
+ * clean row the handler output equals Harper's own select output (the same
+ * attributes, in order); every other REST shape (`select(*)`, a scalar, an
+ * unknown name, a trailing or doubled comma, a path property, ...) is refused
+ * with 400 BEFORE the scope pre-read (never the pre-read's 404).
+ *
+ * Response bodies are quoted in the logs / assertion messages.
  *
  * Raw `insert` via the ops API seeds the rows, so a supported write path cannot
- * rewrite the archived flag / inline field being probed.
+ * rewrite the flags / fields being probed.
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
@@ -66,7 +64,8 @@ const idArchived = "hsr-archived-shared";       // t1: archived, bound pointer
 const idUnbound = "hsr-inline-unbound";         // t2a: inline hostSource, no pointer row
 const idBound = "hsr-bound-author";             // t2b: bound pointer, no inline field
 const idPrivate = "hsr-private-other";          // round 14 t5: private, owned by `author`
-const idClean = "hsr-clean-shared";             // round 14 t6/t7: clean shared row
+const idClean = "hsr-clean-shared";             // round 15: clean shared row
+let CLEAN_CREATED_AT = "";                      // the clean row's server-set createdAt
 
 beforeAll(async () => {
   harper = await startHarper();
@@ -104,9 +103,10 @@ beforeAll(async () => {
     visibility: "private", archived: false, instanceToken: randomUUID(), createdAt: new Date().toISOString(),
   });
 
+  CLEAN_CREATED_AT = new Date().toISOString();
   await insertRow(harper, "Memory", {
     id: idClean, agentId: author.id, content: "clean body", contentHash: "h",
-    visibility: "shared", archived: false, instanceToken: randomUUID(), createdAt: new Date().toISOString(),
+    visibility: "shared", archived: false, instanceToken: randomUUID(), createdAt: CLEAN_CREATED_AT,
   });
 }, 240_000);
 
@@ -114,51 +114,28 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
 });
 
-describe("flair#1940 round 12 — selected reads decide on the stored row (real Harper, REST)", () => {
-  it("t1: a collection select that OMITS `archived` renders no pointer for an ARCHIVED row", async () => {
-    const path = "/Memory/?select(id,agentId,instanceToken,visibility,hostSource)";
-    const res = await authFetch(harper, reader, "GET", path);
+describe("flair#1940 round 15 — an accepted REST array equals Harper's own select; other shapes are 400 (real Harper, REST)", () => {
+  it("t7: a clean-row accepted array equals Harper's own select output", async () => {
+    const res = await authFetch(harper, reader, "GET", `/Memory/${idClean}?select(content,createdAt)`);
     const body = await res.text();
-    console.log("t1 body:", body);
-    expect(res.status).toBe(200); // assertion: the collection read succeeded
-    const rows = JSON.parse(body) as any[];
-    const archived = rows.find((r) => r.id === idArchived);
-    expect(archived).toBeDefined(); // assertion: the archived shared row WAS returned
-    expect(archived.hostSource).toBeUndefined(); // assertion: no pointer, though the selection omitted `archived`
-    // Positive control in the same response: a NON-archived bound row IS rendered.
-    const bound = rows.find((r) => r.id === idBound);
-    expect(bound?.hostSource).toEqual(POINTER); // assertion: the selection does not suppress a live pointer
+    // Harper's own select output for this row is exactly the named attributes in
+    // order (the row carries both) — what a native projection returns.
+    const harperNative = JSON.stringify({ content: "clean body", createdAt: CLEAN_CREATED_AT });
+    console.log("t7 handler body:", body, "| Harper's own select output:", harperNative, "status:", res.status);
+    expect(res.status).toBe(200); // assertion: the read succeeded
+    expect(body).toBe(harperNative); // assertion: the handler output == Harper's own select output
   }, 30_000);
 
-  it("t1-ctrl: the FULL-row collection read of the archived row renders no pointer either", async () => {
-    const res = await authFetch(harper, reader, "GET", "/Memory/");
+  it("t6: a name not in the Memory schema is refused 400 over REST", async () => {
+    const res = await authFetch(harper, reader, "GET", `/Memory/${idClean}?select(content,noSuchField)`);
     const body = await res.text();
-    const row = (JSON.parse(body) as any[]).find((r) => r.id === idArchived);
-    expect(row).toBeDefined(); // assertion: the archived shared row was returned
-    expect(row.hostSource).toBeUndefined(); // assertion: the full-row read renders nothing
+    console.log("t6 body:", body, "status:", res.status);
+    expect(res.status).toBe(400); // assertion: refused
   }, 30_000);
 
-  it("t2: the by-id scalar select of hostSource returns no value on an UNBOUND inline pointer", async () => {
-    const res = await authFetch(harper, reader, "GET", `/Memory/${idUnbound}?select(hostSource)`);
-    const body = await res.text();
-    console.log("t2 unbound body:", JSON.stringify(body), "status:", res.status);
-    expect(body.trim()).toBe(""); // assertion: no value returned
-    expect(body).not.toContain(POINTER.id); // assertion: the raw inline pointer did not leak
-  }, 30_000);
-
-  it("t2b: the same scalar select of a BOUND pointer by its author returns the gated pointer", async () => {
-    const res = await authFetch(harper, author, "GET", `/Memory/${idBound}?select(hostSource)`);
-    const body = await res.text();
-    console.log("t2b bound body:", body, "status:", res.status);
-    expect(res.status).toBe(200); // assertion: the author's scalar read succeeded
-    expect(body).toContain(POINTER.id); // assertion: the gated pointer is rendered
-  }, 30_000);
-});
-
-describe("flair#1940 round 14 — REST selection validation and clean-row parity (real Harper, REST)", () => {
   it("t5: an unsupported REST selection is refused 400 BEFORE the scope pre-read (not 404)", async () => {
     // A PRIVATE row owned by another agent would make the middleware's scope
-    // pre-read answer 404. A 400 here proves the middleware validated Harper's
+    // pre-read answer 404. A 400 here proves the middleware validated the
     // parsed `?select(*)` selection and refused it BEFORE any Memory read — the
     // ordering fix for the pre-read. (If the pre-read ran first, this would be
     // the 404 the t5-ctrl control below shows.)
@@ -168,29 +145,37 @@ describe("flair#1940 round 14 — REST selection validation and clean-row parity
     expect(res.status).toBe(400); // assertion: the selection refusal, NOT the pre-read's 404
   }, 30_000);
 
-  it("t5-ctrl: a SUPPORTED selection on that private row still reaches the scope pre-read (404)", async () => {
-    const res = await authFetch(harper, reader, "GET", `/Memory/${idPrivate}?select(content)`);
+  it("t5-ctrl: an ACCEPTED array selection on that private row still reaches the scope pre-read (404)", async () => {
+    const res = await authFetch(harper, reader, "GET", `/Memory/${idPrivate}?select(content,agentId)`);
     const body = await res.text();
     console.log("t5-ctrl body:", body, "status:", res.status);
     expect(res.status).toBe(404); // assertion: the private row is denied by the scope pre-read
   }, 30_000);
 
-  it("t6: a clean-row array select with a missing key matches Harper's shape", async () => {
-    const res = await authFetch(harper, reader, "GET", `/Memory/${idClean}?select(content,noSuchField)`);
+  it("t2: a by-id SCALAR select is refused 400 over REST", async () => {
+    const res = await authFetch(harper, reader, "GET", `/Memory/${idBound}?select(hostSource)`);
     const body = await res.text();
-    console.log("t6 body:", body, "status:", res.status);
-    expect(res.status).toBe(200); // assertion: the read succeeded
-    const row = JSON.parse(body);
-    expect(row.content).toBe("clean body"); // assertion: the present key keeps its value
-    expect("noSuchField" in row).toBe(false); // assertion: a missing key serializes away (undefined, not null)
+    console.log("t2 body:", body, "status:", res.status);
+    expect(res.status).toBe(400); // assertion: a scalar selection is refused
   }, 30_000);
 
-  it("t7: a clean-row array select returns an object with the named keys", async () => {
-    const res = await authFetch(harper, reader, "GET", `/Memory/${idClean}?select(content,agentId)`);
+  it("t1: an accepted array on the archived shared row returns the named keys (collection read)", async () => {
+    const res = await authFetch(harper, reader, "GET", "/Memory/?select(id,content)");
     const body = await res.text();
-    console.log("t7 body:", body, "status:", res.status);
-    expect(res.status).toBe(200); // assertion: the read succeeded
-    const row = JSON.parse(body);
-    expect(row).toEqual({ content: "clean body", agentId: author.id }); // assertion: the array-of-names shape
+    console.log("t1 body:", body);
+    expect(res.status).toBe(200); // assertion: the collection read succeeded
+    const rows = JSON.parse(body) as any[];
+    const archived = rows.find((r) => r.id === idArchived);
+    expect(archived).toBeDefined(); // assertion: the archived shared row WAS returned
+    expect(archived.content).toBe("archived shared note"); // assertion: the selected key is returned
+    expect(archived.id).toBe(idArchived); // assertion: the selected key is returned
+  }, 30_000);
+
+  it("t1-ctrl: the FULL-row collection read of the archived row still returns it", async () => {
+    const res = await authFetch(harper, reader, "GET", "/Memory/");
+    const body = await res.text();
+    const row = (JSON.parse(body) as any[]).find((r) => r.id === idArchived);
+    expect(row).toBeDefined(); // assertion: the archived shared row was returned
+    expect(row.content).toBe("archived shared note"); // assertion: the full-row read still works
   }, 30_000);
 });
