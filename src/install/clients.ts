@@ -297,7 +297,14 @@ function codexWiringPin(raw: string): string {
   const unknown = `${FLAIR_MCP_PACKAGE}@unknown`;
   const headers = [...raw.matchAll(CODEX_FLAIR_HEADER_RE)];
   if (headers.length !== 1 || headers[0]!.index !== raw.indexOf("[mcp_servers.flair]")) return unknown;
-  if (/"{3}|'{3}/.test(raw)) return unknown;
+  const before = raw.slice(0, headers[0]!.index!);
+  for (const quote of ['"', "'"]) {
+    if (countText(before, quote.repeat(3)) % 2 === 1) return unknown;
+  }
+  // Match the section the writer replaces, including Flair's subtables.
+  // Multiline strings in later, unrelated tables cannot change its pin.
+  const section = codexFlairSectionText(raw);
+  if (section === null || /"{3}|'{3}/.test(section)) return unknown;
   const body = raw.slice(headers[0]!.index! + headers[0]![0].length).split(/^[ \t]*\[/m)[0]!;
   const args = body.split("\n").filter((line) => /^[ \t]*args[ \t]*=/.test(line));
   const spec = args.length === 1 ? args[0]!.match(CODEX_ARGS_LINE_RE)?.[1] : undefined;
