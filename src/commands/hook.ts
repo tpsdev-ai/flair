@@ -203,7 +203,7 @@ export function register(program: Command): void {
           console.log(`  ${render.icons.info} continuity capture: not enabled ${render.wrap(render.c.dim, `(opt-in: ${hookInstallHint(harness, "--continuity")})`)}`);
         } else {
           const missing = !cont.postToolUse.present ? "PostToolUse missing" : !cont.stop.present ? "Stop missing" : "stale form";
-          console.log(`  ${render.icons.warn} continuity capture: ${cont.state} (${missing}) ${render.wrap(render.c.dim, `— re-run: ${hookInstallHint(harness, "--continuity")}`)}`);
+          console.log(`  ${render.icons.warn} continuity capture: ${cont.state} (${missing}) ${render.wrap(render.c.dim, cont.postToolUse.reason || cont.stop.reason ? "— resolve the non-version pin manually" : `— re-run: ${hookInstallHint(harness, "--continuity")}`)}`);
         }
       };
 

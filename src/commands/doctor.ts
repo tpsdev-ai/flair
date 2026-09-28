@@ -1337,8 +1337,8 @@ program
             continuity.postToolUse.reason && "PostToolUse " + continuity.postToolUse.reason,
             continuity.stop.reason && "Stop " + continuity.stop.reason,
           ].filter(Boolean).join("; ");
-          console.log(`  ${render.icons.warn} Continuity capture hooks: ${continuity.state} — ${pinDetail || continuityDetail}`);
-          if (autoFix) {
+          console.log(`  ${render.icons.warn} Continuity capture hooks: ${continuity.state} — ${continuityDetail}${pinDetail ? "; " + pinDetail : ""}`);
+          if (autoFix && !pinDetail) {
             if (dryRun) {
               console.log(`     ${render.wrap(render.c.dim, "Would rewrite the continuity capture hooks in")} ${continuity.path}`);
             } else {
@@ -1358,7 +1358,7 @@ program
               }
             }
           } else {
-            console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(rewrites both entries to the current form — same agent, same instance)")}`);
+            console.log(pinDetail ? "     Resolve the listed non-version pin(s) manually; doctor cannot rewrite them." : `     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(rewrites both entries to the current form — same agent, same instance)")}`);
           }
           issues++;
         }

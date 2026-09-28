@@ -342,7 +342,7 @@ export type ContinuityHookEvent = (typeof CONTINUITY_HOOK_EVENTS)[number];
  *              without Stop journals actions but never intent, and vice
  *              versa). A stale-form face; fixable.
  * stale      — both present but at least one is not the current form (unsilenced,
- *              hand-altered invocation, or a drifted PostToolUse matcher).
+ *              hand-altered invocation, a drifted PostToolUse matcher, or a non-version pin).
  */
 export type ContinuityHookState = "installed" | "absent" | "partial" | "stale";
 
@@ -392,7 +392,7 @@ function continuityEventReport(config: any, event: ContinuityHookEvent): Continu
   const matcherOk = event !== "PostToolUse" || matcher === CONTINUITY_POST_TOOL_USE_MATCHER;
   const spec = decodeWiringSpec(command, FLAIR_MCP_PACKAGE);
   const pinOk = spec?.token.kind === "none" || spec?.token.kind === "version";
-  const reason = pinOk ? undefined
+  const reason = !spec || pinOk ? undefined
     : "pin " + (spec?.token.kind ?? "malformed") + ": " + (spec?.token.value ?? "missing package");
   return { present: true, command, matcher, currentForm: shapeOk && matcherOk && pinOk, reason };
 }
