@@ -568,9 +568,9 @@ export class Memory extends (databases as any).flair.Memory {
 
   /**
    * Override get() to scope by-id reads the same way search() scopes
-   * collection reads (memory-soul-read-gate fix). Never distinguishes
-   * "doesn't exist" from "exists but not yours" — both return 404, never
-   * 403, so a denied caller can't use get() to enumerate other agents'
+   * collection reads (memory-soul-read-gate fix). Missing records and records
+   * outside the caller's read scope both return 404, never 403, so a denied
+   * caller can't use get() to enumerate other agents'
    * memory ids. Wired through record-type-kit.ts's makeByIdReadGate, scoped
    * with Memory's own "open-within-org" read-scope resolver above — same
    * dispatch shape Relationship.ts/WorkspaceState.ts's get() overrides use.
