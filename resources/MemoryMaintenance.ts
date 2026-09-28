@@ -3,7 +3,7 @@
  *
  * POST /MemoryMaintenance — runs cleanup tasks:
  *   1. Delete expired ephemeral memories (expiresAt < now)
- *   2. Archive old session memories (> 30 days, standard durability)
+ *   2. Archive validTo-expired memories and old session memories (> 30 days, standard durability)
  *   3. Report stats
  *
  * Designed to run periodically (daily cron, scheduler, or REM nightly cycle).
@@ -89,37 +89,33 @@ export class MemoryMaintenance extends Resource {
           continue;
         }
 
-        // 2. Archive old standard session memories (> 30 days). These are
-        // low-value session notes that weren't promoted to persistent.
+        // 2. Archive memories whose validity ended, plus old standard session
+        // notes (> 30 days) that weren't promoted to persistent. Use one
+        // archive path so a row meeting both criteria is counted only once.
         // Soft-archive removes them from search results but keeps the data.
-        if (
-          record.durability === "standard" &&
-          record.type === "session" &&
-          !record.archived &&
-          record.createdAt
-        ) {
-          const ageMs = now.getTime() - new Date(record.createdAt).getTime();
-          const ageDays = ageMs / (24 * 3600_000);
-          if (ageDays > 30) {
-            if (!dryRun) {
-              try {
-                const archivedRow = {
-                  ...record,
-                  archived: true,
-                  archivedAt: now.toISOString(),
-                };
-                await (databases as any).flair.Memory.update(record.id, archivedRow);
-                // flair#1357 — an `archived` flip changes what the retrieval
-                // conditions (`archived not_equal true`) admit, so the lexical
-                // index has to see it, not just content writes.
-                noteMemoryUpsert(archivedRow);
-                stats.archived++;
-              } catch {
-                stats.errors++;
-              }
-            } else {
+        const validToExpired = record.validTo && new Date(record.validTo) < now;
+        const oldSession = record.durability === "standard" &&
+          record.type === "session" && record.createdAt &&
+          now.getTime() - new Date(record.createdAt).getTime() > 30 * 24 * 3600_000;
+        if (!record.archived && (validToExpired || oldSession)) {
+          if (!dryRun) {
+            try {
+              const archivedRow = {
+                ...record,
+                archived: true,
+                archivedAt: now.toISOString(),
+              };
+              await (databases as any).flair.Memory.update(record.id, archivedRow);
+              // flair#1357 — an `archived` flip changes what the retrieval
+              // conditions (`archived not_equal true`) admit, so the lexical
+              // index has to see it, not just content writes.
+              noteMemoryUpsert(archivedRow);
               stats.archived++;
+            } catch {
+              stats.errors++;
             }
+          } else {
+            stats.archived++;
           }
         }
       }

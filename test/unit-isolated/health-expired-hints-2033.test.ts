@@ -3,7 +3,7 @@
  * All runtime I/O is mocked; no Harper, HOME files, network or service manager.
  * Run in its own process because module mocks are process-global.
  */
-import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, mock, setSystemTime, spyOn, test } from "bun:test";
 
 const NOW = Date.parse("2026-09-28T12:00:00Z");
 const HOME = "/fixture/flair-2033";
@@ -52,10 +52,18 @@ mock.module("node:fs", () => ({
 mock.module("harper", () => ({
   Resource: class {},
   databases: { flair: {
-    Memory: { search: async function* () {
-      if (memoryReadError) throw new Error("memory read failed");
-      yield* rows;
-    } },
+    Memory: {
+      search: async function* () {
+        if (memoryReadError) throw new Error("memory read failed");
+        yield* rows;
+      },
+      update: async (id: string, row: Record<string, unknown>) => {
+        const index = rows.findIndex((r) => r.id === id);
+        if (index < 0) throw new Error("update requires an existing row");
+        rows[index] = structuredClone(row);
+      },
+      delete: async () => { throw new Error("validTo cleanup must not delete"); },
+    },
     Agent: { search: async function* () { yield { id: "fixture-agent" }; } },
     MemoryCandidate: { search: async function* () {} },
   } },
@@ -64,6 +72,7 @@ mock.module("harper", () => ({
 }));
 mock.module("../../resources/agent-auth.js", () => ({
   allowVerified: async () => true,
+  isAdmin: async () => false,
   resolveAgentAuth: async () => ({ kind: "internal" }),
 }));
 mock.module("../../resources/build-info.js", () => ({ resolveBuildInfo: () => null }));
@@ -79,6 +88,7 @@ mock.module("../../resources/bm25.js", () => ({
 }));
 mock.module("../../resources/bm25-index-service.js", () => ({
   bm25IndexEnabled: () => false, bm25IndexStatus: () => ({}),
+  noteMemoryUpsert: () => {}, noteMemoryDelete: () => {},
 }));
 mock.module("../../resources/embedding-space-guard.js", () => ({ normalizeStamp: (s: string) => s }));
 mock.module("../../resources/embeddings-provider.js", () => ({ getModelId: () => "fixture-model" }));
@@ -111,6 +121,7 @@ mock.module("../../src/lib/npm-registry.js", () => ({
   resolveRegistryNotice: async () => ({}),
 }));
 
+const { MemoryMaintenance } = await import("../../resources/MemoryMaintenance.ts");
 const { HealthDetail } = await import("../../resources/health.ts");
 const { Command } = await import("commander");
 const { bindCli, register } = await import("../../src/commands/status.ts");
@@ -129,17 +140,16 @@ beforeEach(() => {
     { id: "invalid", validTo: "invalid" },
     { id: "open" },
   ].map((r) => ({ embeddingModel: "fixture-model", ...r }));
-  spyOn(Date, "now").mockReturnValue(NOW);
+  setSystemTime(NOW);
   spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network access"));
 });
 afterEach(() => {
   try { expect(globalThis.fetch).not.toHaveBeenCalled(); }
-  finally { mock.restore(); }
+  finally { mock.restore(); setSystemTime(); }
 });
 
-const CLEAR = "clear now: flair rem light (preview: --dry-run)";
-const ENABLE = "automate: flair rem nightly enable";
-const LIMIT = "note: REM maintenance does not yet clean up rows solely because validTo expired";
+const CLEAR = "clear now: flair rem light (archives expired validTo; preview: --dry-run)";
+const ENABLE = "automate: flair rem nightly enable (includes validTo archival)";
 
 function expiryWarning(detail: Record<string, any>): string {
   const warnings = detail.warnings as Array<{ level: string; message: string }>;
@@ -148,7 +158,7 @@ function expiryWarning(detail: Record<string, any>): string {
   expect(found[0].level).toBe("warn");
   expect(found[0].message).toStartWith("1 memories have expired validTo but aren't archived\n");
   expect(found[0].message).toContain(CLEAR);
-  expect(found[0].message).toContain(LIMIT);
+  expect(found[0].message).not.toContain("does not yet clean up");
   return found[0].message;
 }
 
@@ -204,7 +214,7 @@ for (const scenario of cases) {
         expect(expiryWarning(parsed)).toBe(warning);
       } else {
         expect(output).toContain(warning);
-        expect(output.split("expired validTo")).toHaveLength(2);
+        expect(output.split("memories have expired validTo")).toHaveLength(2);
       }
     }
   });
@@ -252,4 +262,27 @@ test("failed memory scan: no invented count or expiry remedy", async () => {
   const detail = await new HealthDetail().get();
   expect(detail.memories).toBeNull();
   expect(JSON.stringify(detail.warnings)).not.toContain("expired validTo");
+});
+
+test("maintenance archival clears the health count without removing rows", async () => {
+  const resource = new MemoryMaintenance();
+  resource.getContext = () => ({ request: { tpsAgentIsAdmin: true } });
+  const before = await new HealthDetail().get();
+  expect(before.memories.expired).toBe(1);
+  expiryWarning(before);
+  const originalRows = structuredClone(rows);
+  const result = await resource.post({});
+  if (result instanceof Response) throw new Error(await result.text());
+  const after = await new HealthDetail().get();
+  expect(after.memories.expired).toBe(0);
+  expect(result.archived).toBe(1);
+  expect(after.memories.archived).toBe(before.memories.archived + 1);
+  expect(after.memories.total).toBe(before.memories.total);
+  expect(rows.find((r) => r.id === "expired")).toEqual({
+    ...originalRows.find((r) => r.id === "expired"),
+    archived: true, archivedAt: new Date(NOW).toISOString(),
+  });
+  expect(rows.filter((r) => r.id !== "expired")).toEqual(originalRows.filter((r) => r.id !== "expired"));
+  expect(JSON.stringify(after.warnings)).not.toContain("expired validTo");
+  expect(JSON.stringify(after.warnings)).not.toContain(CLEAR);
 });

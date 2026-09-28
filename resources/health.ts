@@ -624,14 +624,13 @@ export class HealthDetail extends Resource {
           ? "nightly is enabled, but its last logged run failed — inspect ~/.flair/logs/rem-nightly.jsonl on the server"
           : "nightly is enabled"
         : stats.rem?.nightlyEnabled === false
-          ? "automate: flair rem nightly enable"
+          ? "automate: flair rem nightly enable (includes validTo archival)"
           : "nightly state is unknown — check: flair rem nightly status";
       warnings.push({
         level: "warn",
         message: `${stats.memories.expired} memories have expired validTo but aren't archived\n` +
-          "    clear now: flair rem light (preview: --dry-run)\n" +
-          `    ${nightlyHint}\n` +
-          "    note: REM maintenance does not yet clean up rows solely because validTo expired",
+          "    clear now: flair rem light (archives expired validTo; preview: --dry-run)\n" +
+          `    ${nightlyHint}`,
       });
     }
 
