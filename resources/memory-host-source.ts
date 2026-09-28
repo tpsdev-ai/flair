@@ -157,15 +157,19 @@ export async function loadPointerRows(ids: readonly string[]): Promise<Map<strin
  * the non-admin reader; an admin/operator read is the named exception (see
  * MemoryHostSource.ts).
  *
- * The join runs on the FULL stored row, not on whatever the caller asked for.
- * Every non-admin read ignores the caller's `select`/`property`: the auth
- * middleware drops the selection from a REST request URL before Harper parses
- * it, and `Memory.get`/`Memory.search` drop it for a direct contextual read
- * before the base read. The join therefore always sees the stored `id`,
- * `agentId`, `instanceToken`, `archived` and `visibility`. An inline pointer
- * field on the Memory row is removed (or replaced by the gated rendering)
- * before the projected row is returned, so no inline pointer field reaches a
- * non-admin reader.
+ * What the join receives differs by reader path, and both carry the binding
+ * fields it reads (`id`, `agentId`, `instanceToken`, `archived`,
+ * `visibility`). For a non-admin `Memory.get`/`Memory.search`, the join runs
+ * on the FULL stored row, not on whatever the caller asked for: those reads
+ * ignore the caller's `select`/`property` — the auth middleware drops the
+ * selection from a REST request URL before Harper parses it, and the direct
+ * contextual read drops it before the base read. `SemanticSearch` instead
+ * hands the join its server-owned retrieval projection (`DEFAULT_SELECT`,
+ * optionally widened with `provenance`/`metadata`/`trigger`), which is fixed
+ * server-side and not caller-shaped either; the binding fields are in that
+ * projection as well as in the full row. An inline pointer field on the Memory
+ * row is removed (or replaced by the gated rendering) before the projected row
+ * is returned, so no inline pointer field reaches a non-admin reader.
  */
 export async function projectRowsThroughPointers<T extends { id?: unknown }>(
   rows: readonly T[],

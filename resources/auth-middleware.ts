@@ -758,7 +758,9 @@ server.http(async (request: any, nextLayer: any) => {
   // normalized to drop the caller's selection, keeping conditions, operator,
   // sort, limit and offset exactly as sent. Harper builds its REST target from
   // this URL AFTER this middleware, so the original selection cannot be
-  // reapplied. An admin read (and an in-process read) is unchanged. The by-id
+  // reapplied. An admin read and a trusted internal read are unchanged, while a
+  // direct contextual non-admin read now ignores the selection too (the same
+  // contract, applied in `Memory.get`/`Memory.search`). The by-id
   // read-scope denial is enforced by the resource layer (memoryByIdReadGate),
   // which returns the same 404 this middleware used to return.
   if (!request.tpsAgentIsAdmin && method === "GET" && isMemoryReadPath(url.pathname)) {
