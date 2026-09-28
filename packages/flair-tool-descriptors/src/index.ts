@@ -397,7 +397,7 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
         "id"
       ]
     },
-    "outputShape": "Deletes the caller's own memory at any durability tier (success echo is thin). Cross-owner deletion returns { error, status:403 } for a non-admin; a deleted row round-trips as gone via memory_get.",
+    "outputShape": "Deletes a memory by ID when authorized, at any durability tier (success echo is thin). Cross-owner deletion returns { error, status:403 } for a non-admin; a deleted row round-trips as gone via memory_get.",
     "annotations": {
       "destructiveHint": true
     }

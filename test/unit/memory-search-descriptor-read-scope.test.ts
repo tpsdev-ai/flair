@@ -100,5 +100,10 @@ describe("flair#1870 — memory_search descriptor wording tracks Memory's read m
     expect(search!.outputShape).toContain("subject to the caller's read scope");
     expect(search!.description).not.toContain(GRANT_CLAIM);
     expect(search!.outputShape).not.toContain(GRANT_CLAIM);
+    // "non-private" and the absence of "granted" both still hold for the old
+    // admin-blind sentence. These two are what a revert of that sentence fails.
+    const description = search!.description.toLowerCase();
+    expect(description).toContain("non-admin callers");
+    expect(description).toMatch(/administrator\b[^.]{0,80}\baccess\b/);
   });
 });

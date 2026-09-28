@@ -1311,7 +1311,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   memory_delete: {
         impl: memoryDelete,
     contract: {
-      summary: "Deletes the caller's own memory at any durability tier (success echo is thin). Cross-owner deletion returns { error, status:403 } for a non-admin; a deleted row round-trips as gone via memory_get.",
+      summary: "Deletes a memory by ID when authorized, at any durability tier (success echo is thin). Cross-owner deletion returns { error, status:403 } for a non-admin; a deleted row round-trips as gone via memory_get.",
       invariants: { fullyResolved: true },
       errorShape: { trigger: "a non-admin deletes another agent's memory", fields: ["error", "status"] },
     },
