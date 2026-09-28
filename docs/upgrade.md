@@ -122,16 +122,20 @@ actually running:
   ✅. Pass `--install-hooks` to consent without a prompt, then `flair
   doctor` exits 0.
 - **On a failed restart OR a failed verification**, `flair upgrade`
-  automatically reinstalls the previously-running `@tpsdev-ai/flair` version,
-  restarts again, and re-verifies — then exits nonzero with a clear report of
-  what failed. Until flair#905 the rollback was wired to the *verification* leg
-  only: an upgrade that installed new packages and then failed to start them
-  exited 1 and left the operator on the new version with nothing running, which
-  is the single outcome this transaction exists to prevent. If the
-  rollback itself fails verification, it says so loudly and points at the
-  concrete pre-upgrade snapshot path (see "Pre-upgrade snapshot" below)
-  instead of retrying in a loop — see [Downgrade](#downgrade) for the
-  restore procedure.
+  reinstalls the previously installed `@tpsdev-ai/flair` and restarts it
+  when that failure is evidence against the new version — then exits
+  nonzero with a clear report of what failed. A restart failure rolls back
+  only if Flair was running before the upgrade (flair#1740). If it was
+  stopped or had never started, the new version stays installed — a failed
+  start is not evidence against it — and the command tells you to run
+  `flair start`. Rollback also refuses a previous version that npm marks
+  deprecated. If a rollback's own restart fails, the command exits nonzero
+  and names that installed version as known-broken, with a reinstall
+  command rather than `flair start`. Until flair#905 the rollback was wired
+  to the *verification* leg only. If the rollback itself fails verification,
+  it says so loudly and points at the concrete pre-upgrade snapshot path
+  (see "Pre-upgrade snapshot" below) instead of retrying in a loop — see
+  [Downgrade](#downgrade) for the restore procedure.
 
 ### Pre-upgrade snapshot (opt-in for same-engine, unconditional on engine change)
 

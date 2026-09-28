@@ -21,6 +21,7 @@ import {
   RegistryRefusalError,
   createRegistryNoticePrinter,
   fetchLatestVersion,
+  fetchVersionDeprecation,
   formatRegistryLine,
   isStrictSemver,
   packageScope,
@@ -487,6 +488,82 @@ describe("fetchLatestVersion", () => {
       timeoutMs: 1000,
     });
     expect(res.kind).toBe("unavailable");
+  });
+});
+
+describe("fetchVersionDeprecation", () => {
+  test("a deprecated version document returns the npm message", async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({
+        version: "0.54.1",
+        deprecated: "broken publish — missing Harper transitive deps",
+      }), { status: 200 })) as unknown as typeof fetch;
+    const res = await fetchVersionDeprecation("@tpsdev-ai/flair", "0.54.1", {
+      env: {},
+      readConfig: reader({}),
+      readConfigMap: noEntries,
+      fetchImpl,
+      timeoutMs: 1000,
+    });
+    expect(res.kind).toBe("deprecated");
+    if (res.kind === "deprecated") {
+      expect(res.message).toBe("broken publish — missing Harper transitive deps");
+    }
+  });
+
+  test("a version document with no deprecated field is active", async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ version: "0.54.2", dependencies: {} }), { status: 200 })) as unknown as typeof fetch;
+    const res = await fetchVersionDeprecation("@tpsdev-ai/flair", "0.54.2", {
+      env: {},
+      readConfig: reader({}),
+      readConfigMap: noEntries,
+      fetchImpl,
+      timeoutMs: 1000,
+    });
+    expect(res.kind).toBe("active");
+  });
+
+  test("a blank deprecated string is not a deprecation", async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ version: "0.54.2", deprecated: "  " }), { status: 200 })) as unknown as typeof fetch;
+    const res = await fetchVersionDeprecation("@tpsdev-ai/flair", "0.54.2", {
+      env: {},
+      readConfig: reader({}),
+      readConfigMap: noEntries,
+      fetchImpl,
+      timeoutMs: 1000,
+    });
+    expect(res.kind).toBe("active");
+  });
+
+  test("a non-2xx answer is unavailable, not deprecated", async () => {
+    const fetchImpl = (async () => new Response("nope", { status: 503 })) as unknown as typeof fetch;
+    const res = await fetchVersionDeprecation("@tpsdev-ai/flair", "0.54.1", {
+      env: {},
+      readConfig: reader({}),
+      readConfigMap: noEntries,
+      fetchImpl,
+      timeoutMs: 1000,
+    });
+    expect(res.kind).toBe("unavailable");
+  });
+
+  test("a non-semver version is invalid and never fetched", async () => {
+    let called = false;
+    const fetchImpl = (async () => {
+      called = true;
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    const res = await fetchVersionDeprecation("@tpsdev-ai/flair", "https://attacker.example/x.tgz", {
+      env: {},
+      readConfig: reader({}),
+      readConfigMap: noEntries,
+      fetchImpl,
+      timeoutMs: 1000,
+    });
+    expect(res.kind).toBe("invalid");
+    expect(called).toBe(false);
   });
 });
 

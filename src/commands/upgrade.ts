@@ -16,7 +16,8 @@ import { defaultKeysDir } from "../lib/auth-resolve.js";
 import { renderVerifiedSummary } from "../lib/doctor-run.js";
 import { isDetached, renderDetachedWarning } from "../lib/launchd-management.js";
 import { FLAIR_MCP_PACKAGE, clearFlairCliVersionCache } from "../lib/mcp-spec.js";
-import { createRegistryNoticePrinter, fetchLatestVersion, isStrictSemver } from "../lib/npm-registry.js";
+import { createRegistryNoticePrinter, fetchLatestVersion, fetchVersionDeprecation, isStrictSemver } from "../lib/npm-registry.js";
+import { decideAfterRestartFailure, decideDeprecatedRollback, formatKnownBrokenRollbackRestart, type DeprecationLookup } from "../lib/upgrade-rollback.js";
 import { ownedPinRefreshShouldReport, refreshOwnedPins } from "../lib/owned-pins.js";
 import { extractSnapshotSafely, validateSnapshotArchive } from "../lib/safe-snapshot-extract.js";
 import { collectUpgradeExecPathWarning, findFlairPackageDir, resolveNpmGlobalFlairPackage, resolveServingFlairPackage } from "../lib/upgrade-exec-path.js";
@@ -1365,9 +1366,14 @@ program
     // a failure mode this issue was never about. Only the specific
     // "server responded, credentials didn't work" case is structurally
     // doomed in a way a fresh install/restart can't fix on its own — so
-    // only that case aborts. (If a down instance turns out to ALSO lack
-    // credentials, that surfaces the normal way: post-restart verification
-    // fails and rolls back, same as any other post-restart failure.)
+    // only that case aborts. A down instance is not aborted: `flair upgrade`
+    // may be how the operator fixes code that never started. A failed
+    // post-upgrade start in that case must NOT roll back (flair#1740) — the
+    // same preflight's /Health result is what tells "was running" from
+    // "nothing was up". No second probe: --no-verify still skips this
+    // entirely, and when it does, `instanceWasRunningBeforeUpgrade` stays
+    // true so restart-failure rollback is unchanged on that opt-out path.
+    let instanceWasRunningBeforeUpgrade = true;
     if (shouldVerify) {
       const preflight = await probeInstance(baseUrl, {
         // A short, bounded budget — this instance is presumed already
@@ -1378,6 +1384,7 @@ program
         pollIntervalMs: 300,
         authedGet: (path) => verifyAuthedGet(baseUrl, path, defaultKeysDir()),
       });
+      instanceWasRunningBeforeUpgrade = preflight.healthy === true;
       if (isCredentialOnlyFailure(preflight)) {
         console.error(`❌ pre-flight check failed: ${preflight.error}`);
         console.error("   Nothing has been touched — no packages were installed, no restart happened.");
@@ -1585,10 +1592,37 @@ program
      * `docs/upgrade.md`'s "install → restart → verify → rollback-on-failure, in
      * one step" was only ever true for the verify leg. An upgrade that installed
      * new packages and then failed to start them left the operator on the new
-     * version with nothing running and no rollback, which is the one outcome the
-     * whole transaction exists to prevent.
+     * version with nothing running and no rollback.
+     *
+     * flair#1740: that rollback is evidence against the new version only when
+     * an instance was actually running before the upgrade. The caller does
+     * not enter here for a stopped or never-started install. And a version
+     * npm marks deprecated is never the rollback target — reinstalling it
+     * can put the operator back on a known-broken publish.
      */
+    const readRollbackDeprecation = async (version: string): Promise<DeprecationLookup> => {
+      try {
+        const res = await fetchVersionDeprecation(FLAIR_PKG_NAME, version);
+        if (res.kind === "deprecated") return { kind: "deprecated", message: res.message };
+        if (res.kind === "active") return { kind: "active" };
+        return { kind: "unknown" };
+      } catch {
+        return { kind: "unknown" };
+      }
+    };
+
     const rollbackTo = async (toVersion: string, reason: string): Promise<never> => {
+      const deprecation = decideDeprecatedRollback({
+        toVersion,
+        lookup: await readRollbackDeprecation(toVersion),
+        installedVersion: expectedFlairVersion,
+        reason,
+      });
+      if (deprecation.kind === "refuse") {
+        for (const line of deprecation.lines) console.error(line);
+        process.exit(1);
+      }
+
       console.log(`\nRolling back @tpsdev-ai/flair to ${toVersion}...`);
       try {
         if (treePlan) {
@@ -1670,9 +1704,17 @@ program
           await restartAfterUpgrade(port, upgradeDataDir, rolledBackCli.ok ? rolledBackCli : null);
         }
       } catch (err: any) {
-        console.error(`❌ rollback restart failed: ${err.message}`);
-        console.error(`   @tpsdev-ai/flair@${toVersion} is installed but NOT running. Start it with: flair start`);
-        console.error("   Then check: flair status");
+        // The version we just reinstalled failed to start. `flair start` on
+        // it is not a recovery that can succeed (flair#1740) — name it as
+        // known-broken and point at a reinstall of the version this upgrade
+        // had reached, which is not this package.
+        for (const line of formatKnownBrokenRollbackRestart({
+          toVersion,
+          error: err?.message ?? String(err),
+          recoveryVersion: expectedFlairVersion,
+        })) {
+          console.error(line);
+        }
         process.exit(1);
       }
 
@@ -1745,8 +1787,22 @@ program
     } catch (err: any) {
       console.error(`❌ restart failed: ${err.message}`);
       console.error("   Flair is NOT running. Your data in ~/.flair was not touched by this upgrade.");
-      if (flairWasSwapped && previousFlairVersion) {
-        await rollbackTo(previousFlairVersion, `restart failed: ${err.message}`);
+      const restartDecision = decideAfterRestartFailure({
+        wasRunning: instanceWasRunningBeforeUpgrade,
+        flairWasSwapped,
+        previousVersion: previousFlairVersion,
+        installedVersion: expectedFlairVersion,
+        startError: err?.message ?? String(err),
+      });
+      // Stopped or never started: the install stands. A failed start is not
+      // evidence against the new version (flair#1740). Exit 0 — the upgrade
+      // completed; `flair start` is the follow-up, not a rollback.
+      if (restartDecision.kind === "keep") {
+        for (const line of restartDecision.lines) console.error(line);
+        process.exit(0);
+      }
+      if (restartDecision.kind === "rollback") {
+        await rollbackTo(restartDecision.toVersion, restartDecision.reason);
       }
       // Not reached when a rollback ran — rollbackTo always exits. Say WHICH of
       // the two "no rollback" cases this is; "nothing to roll back" is not the

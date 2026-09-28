@@ -729,3 +729,66 @@ export async function fetchDeclaredDependencies(
       : null;
   return { kind: "ok", dependencies, registry };
 }
+
+export type VersionDeprecationResult =
+  /** npm's version document carries a non-empty `deprecated` string. */
+  | { kind: "deprecated"; message: string; registry: RegistryResolution }
+  /** The version document was read and is not deprecated. */
+  | { kind: "active"; registry: RegistryResolution }
+  /** `version` is not strict semver, so it was not sent to the registry. */
+  | { kind: "invalid"; value: string }
+  | { kind: "refused"; message: string }
+  /** Offline, timeout, non-2xx, or npm error. Not evidence of deprecation. */
+  | { kind: "unavailable"; message: string; registry: RegistryResolution };
+
+/**
+ * Read the npm `deprecated` field for one exact version (flair#1740).
+ *
+ * A rollback must not reinstall a version npm has marked deprecated. Only a
+ * positive string refuses the rollback; a missing field is `active`, and a
+ * lookup failure is `unavailable` so the caller can keep today's rollback
+ * when the registry cannot be asked.
+ *
+ * Same registry, scheme, and transport rules as `fetchDeclaredDependencies`.
+ */
+export async function fetchVersionDeprecation(
+  packageName: string,
+  version: string,
+  deps: FetchRegistryDeps = {},
+): Promise<VersionDeprecationResult> {
+  if (!isStrictSemver(version)) return { kind: "invalid", value: version };
+
+  let registry: RegistryResolution;
+  try {
+    registry = await resolveNpmRegistryDetailed(packageName, deps);
+  } catch (err) {
+    if (err instanceof RegistryRefusalError) return { kind: "refused", message: err.message };
+    return { kind: "refused", message: err instanceof Error ? err.message : String(err) };
+  }
+  deps.onRegistry?.(registry);
+
+  const timeoutMs = deps.timeoutMs ?? 5000;
+
+  if (await useNpmTransport(registry, deps)) {
+    const out = await runNpmViewJson(`${packageName}@${version}`, "deprecated", registry.url, timeoutMs);
+    // A missing `deprecated` field makes npm print nothing. Empty stdout is
+    // "not deprecated", not a transport failure. A real npm error (non-zero)
+    // stays unavailable so we do not invent a deprecation.
+    if (!out.ok) {
+      if (out.message === "npm view returned non-JSON output") return { kind: "active", registry };
+      return { kind: "unavailable", message: out.message, registry };
+    }
+    if (typeof out.data === "string" && out.data.trim()) {
+      return { kind: "deprecated", message: out.data.trim(), registry };
+    }
+    return { kind: "active", registry };
+  }
+
+  const out = await fetchRegistryJson(`${registry.url}/${packageName}/${version}`, timeoutMs, deps.fetchImpl);
+  if (!out.ok) return { kind: "unavailable", message: out.message, registry };
+  const deprecated = (out.data as { deprecated?: unknown } | null)?.deprecated;
+  if (typeof deprecated === "string" && deprecated.trim()) {
+    return { kind: "deprecated", message: deprecated.trim(), registry };
+  }
+  return { kind: "active", registry };
+}
