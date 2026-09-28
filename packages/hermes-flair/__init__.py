@@ -271,22 +271,6 @@ def _sign_request(priv_key, agent_id: str, method: str, path: str) -> str:
     return f"TPS-Ed25519 {agent_id}:{ts}:{nonce}:{sig_b64}"
 
 
-def _merged_raw_path(base_url: str, path: str) -> str:
-    """flair#1987 — the raw path (path + query) httpx will send for ``path``
-    when the client's base URL is ``base_url``.
-
-    Mirrors ``httpx.Client`` (``_enforce_trailing_slash`` + ``_merge_url``):
-    the base URL's OWN path is kept, with exactly one slash before the route
-    (whether or not the base ends in ``"/"``). An ordinary base (an origin
-    with no path) yields exactly the route. Signing this instead of the bare
-    route means a deployment served under a path signs the path it sends.
-    """
-    base_raw = httpx.URL(base_url).raw_path
-    if not base_raw.endswith(b"/"):
-        base_raw += b"/"
-    return (base_raw + httpx.URL(path).raw_path.lstrip(b"/")).decode("ascii")
-
-
 def _encode_record_id(record_id: str) -> str:
     """Percent-encode a Memory id so it addresses exactly that record as ONE
     path segment (flair#1970). REFUSES an id that is exactly ``.`` or ``..``:
@@ -511,25 +495,35 @@ class FlairMemoryProvider(MemoryProvider):
     def _request(self, method: str, path: str, *, json_body: Optional[dict] = None) -> Any:
         if self._priv_key is None:
             raise RuntimeError("flair: provider not initialized")
-        # flair#1987: the request is signed over the raw path (path + query) it
-        # actually carries. The client's base URL may have a path (a deployment
-        # served under a prefix), so the signed path is the base's own path
-        # joined with the route — exactly the raw path httpx will send. A base
-        # URL that carries a query string or fragment is refused before any
-        # request: the join drops the base's path for a bare trailing "?" or
-        # "#", so there is no request path to sign.
+        # flair#1987: the request is built ONCE and the signature covers exactly
+        # the path that request carries. The client's base URL may have a path
+        # (a deployment served under a prefix); httpx merges the route onto it,
+        # so signing the built request's own raw path (path + query) can never
+        # disagree with what is sent. A base URL that carries a query string or
+        # fragment is refused before any request: the merge drops the base's
+        # path for a bare trailing "?" or "#", so there is no request path to
+        # sign.
         parsed_base = httpx.URL(self._url)
         if "?" in str(parsed_base) or "#" in str(parsed_base):
             raise ValueError(
                 f"flair: refusing base URL {self._url!r}: a base URL must not "
                 "carry a query string or fragment."
             )
-        signed_path = _merged_raw_path(self._url, path)
-        auth = _sign_request(self._priv_key, self._agent_id, method, signed_path)
-        headers = {"Authorization": auth}
-        if json_body is not None:
-            headers["Content-Type"] = "application/json"
-        resp = self._http().request(method, path, headers=headers, json=json_body)
+        # _request accepts ROUTES only. An absolute URL bypasses the base
+        # entirely (httpx honors it and ignores base_url), which could make the
+        # signed path and the sent path diverge — refuse it before building.
+        route = httpx.URL(path)
+        if route.scheme or route.host:
+            raise ValueError(
+                f"flair: refusing {path!r} as a request path: _request "
+                "accepts routes (paths), not absolute URLs."
+            )
+        request = self._http().build_request(method, path, json=json_body)
+        request.headers["Authorization"] = _sign_request(
+            self._priv_key, self._agent_id, method,
+            request.url.raw_path.decode("ascii"),
+        )
+        resp = self._http().send(request)
         if resp.status_code >= 400:
             raise RuntimeError(f"flair {method} {path} → {resp.status_code} {resp.text[:200]}")
         ctype = resp.headers.get("content-type", "")

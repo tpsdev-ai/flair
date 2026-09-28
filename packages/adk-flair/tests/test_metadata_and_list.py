@@ -32,6 +32,40 @@ from google.genai import types
 # ─── Fixtures (mirrors test_memory_service.py's mock-client service) ─────────
 
 
+def _mock_http_client(base_url: str = "http://localhost:19926") -> MagicMock:
+    """A mocked httpx client for the flair#1987 request path.
+
+    ``_request`` now builds the final request ONCE with the client's
+    ``build_request`` and sends THAT request. This double answers both:
+    ``build_request`` returns a REAL request (via a scratch client) merged onto
+    ``base_url``, so ``request.url.raw_path`` is the path httpx would send;
+    ``send`` records the call on ``.request`` (keeping call_args/count
+    assertions) and returns whatever ``.request`` is configured to return.
+    """
+    scratch = httpx.Client(base_url=base_url)
+    client = MagicMock()
+    client.request = AsyncMock()
+
+    def build_request(method, url, **kwargs):
+        req = scratch.build_request(method, url, **kwargs)
+        req.extensions["test_method"] = method
+        req.extensions["test_route"] = url
+        req.extensions["test_json"] = kwargs.get("json")
+        return req
+
+    async def send(request, **kwargs):
+        return await client.request(
+            request.extensions["test_method"],
+            request.extensions["test_route"],
+            headers=dict(request.headers),
+            json=request.extensions.get("test_json"),
+        )
+
+    client.build_request = build_request
+    client.send = send
+    return client
+
+
 @pytest.fixture
 def service():
     """FlairMemoryService with a mock HTTP client and signing."""
@@ -52,8 +86,7 @@ def service():
             agent_id="test-agent",
             keyfile="/fake/keyfile",
         )
-        svc._client = MagicMock()
-        svc._client.request = AsyncMock()
+        svc._client = _mock_http_client("http://localhost:19926")
         svc._client.request.return_value = MagicMock(
             status_code=200,
             headers={"content-type": "application/json"},

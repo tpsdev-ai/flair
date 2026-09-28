@@ -126,3 +126,48 @@ async def test_route_with_its_own_query_signs_pathname_plus_search(monkeypatch, 
     received_path = req.url.raw_path.decode("ascii")
     assert received_path == signed_path
     _assert_signature_covers(req, pub, received_path, "POST")  # assertion: signed pathname+search
+
+
+# "?" and "#" inside a record id: percent-encoding keeps the id as ONE path
+# segment instead of splitting it into a query/fragment.
+_RESERVED_ID = "a/b%c d?e#f"
+
+
+@pytest.mark.parametrize(
+    "abs_url",
+    ["http://h/Memory/abc", "https://h/flair/Memory/abc", "//h/Memory/abc"],
+)
+async def test_absolute_url_as_route_is_refused_before_any_request(monkeypatch, abs_url):
+    priv, _ = _keypair()
+    svc = _make_service(monkeypatch, "http://h/flair", priv)
+    captured: list = []
+    _attach_transport(svc, captured)
+    try:
+        with pytest.raises(ValueError, match="absolute"):  # assertion: an absolute route is refused
+            await svc._request("GET", abs_url)
+    finally:
+        await svc._client.aclose()
+
+    assert captured == []  # assertion: no request was sent
+
+
+async def test_reserved_id_is_exactly_one_encoded_segment_signed_as_sent(monkeypatch):
+    """An id containing "/", "%", a space, "?" and "#" reaches the server as
+    exactly ONE percent-encoded path segment, and the signature covers exactly
+    the captured path."""
+    priv, pub = _keypair()
+    svc = _make_service(monkeypatch, "http://h/flair", priv)
+    captured: list = []
+    _attach_transport(svc, captured)
+    encoded = ms._encode_record_id(_RESERVED_ID)
+    try:
+        await svc._request("PUT", f"/Memory/{encoded}")
+    finally:
+        await svc._client.aclose()
+
+    assert len(captured) == 1
+    req = captured[0]
+    received_path = req.url.raw_path.decode("ascii")
+    segments = [seg for seg in received_path.split("/") if seg]
+    assert segments == ["flair", "Memory", encoded]  # assertion: exactly ONE encoded id segment
+    _assert_signature_covers(req, pub, received_path, "PUT")  # assertion: signed path == captured path

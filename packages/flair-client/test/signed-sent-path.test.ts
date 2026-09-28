@@ -22,7 +22,7 @@ interface Captured {
 }
 let captured: Captured[] = [];
 
-const { FlairClient } = await import("../src/client.js");
+const { FlairClient, encodeRecordId } = await import("../src/client.js");
 
 function makeClient(url: string) {
   const kp = generateKeyPairSync("ed25519");
@@ -113,6 +113,30 @@ describe("flair#1987 — FlairClient signs the path it sends when the base URL h
       expect(u.pathname).toBe(signedPath.split("?")[0]); // assertion: pathname only
       expect(u.search).toBe("?x=1"); // assertion: the route's own query survives
       expect(signatureCovers(call, publicKey, signedPath, "POST")).toBe(true); // assertion: signed pathname+search
+    }
+  });
+
+  test("an id with reserved URL characters reaches the server as exactly one encoded segment, signed as sent", async () => {
+    // "/", "%", a space, "?" and "#" — the characters that would otherwise
+    // split the id across path segments or turn it into a query/fragment.
+    const id = "a/b%c d?e#f";
+    const encoded = encodeRecordId(id);
+    const cases: Array<[string, string]> = [
+      ["http://h", `/Memory/${encoded}`],
+      ["http://h/flair", `/flair/Memory/${encoded}`],
+    ];
+    for (const [base, expectedPath] of cases) {
+      captured = [];
+      const { client, publicKey } = makeClient(base);
+      await client.memory.write("payload", { id });
+
+      expect(captured).toHaveLength(1);
+      const call = captured[0];
+      const u = new URL(call.url);
+      const segments = u.pathname.split("/").filter(Boolean);
+      expect(segments.filter((s) => s === encoded)).toHaveLength(1); // assertion: exactly ONE encoded id segment
+      expect(u.pathname).toBe(expectedPath); // assertion: the id is one segment, nothing split off
+      expect(signatureCovers(call, publicKey, `${u.pathname}${u.search}`, "PUT")).toBe(true); // assertion: signed path == captured path
     }
   });
 });
