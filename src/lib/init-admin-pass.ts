@@ -157,9 +157,10 @@ export function initAdminPassRefusalMessage(
     socketPath?: string;
     /**
      * Foreign-instance only. Default true keeps the historical `flair stop`
-     * line. Pass false when that command cannot identify the process (the
-     * data directory was deleted, or it does not record the listener) —
-     * the caller prints `kill` instead (flair#1749).
+     * line from before the occupied-listener detail. `flair init` passes
+     * false: those messages do not offer `flair stop`, because that command
+     * only signals a verified sidecar-backed daemon and cannot be promised
+     * for a listener this init did not start (flair#1749).
      */
     offerFlairStop?: boolean;
   } = {},

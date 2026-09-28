@@ -1,29 +1,28 @@
 /**
  * flair#1749 — `flair init` and a Harper it did not start.
  *
- * A different data directory is identified before any authenticated request
- * only when that directory was read, and that stub sees no Authorization
- * header. An operations-port 401 names a process only when the same single
- * pid held that port before the insert and after the 401. `flair stop` has
- * no `--data-dir`; it is offered once, and only when the default data
- * directory records the listener. Init's ROOTPATH lookup is not the sidecar
- * reader's. The self-started seed keeps today's credential hint. Init does
- * not signal a process it did not start.
+ * The pre-auth check is one read. It names a different data directory only
+ * when that read returned one, and the stub's health request carries no
+ * Authorization. The lookup in those tests is injected, so they do not call
+ * the host's lsof, /proc, or ps. An operations-port 401 is a different
+ * check: the same single pid before the insert and after the 401. These
+ * messages do not offer `flair stop`. The self-started seed keeps today's
+ * credential hint. Init does not signal a process it did not start.
  */
 import { describe, test, expect, afterEach } from "bun:test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { seedAgentViaOpsApi } from "../../src/cli.js";
-import { flairDataDir } from "../../src/lib/flair-paths.js";
-import { parsePsCommandRootPath, readInitListenerRootPath } from "../../src/lib/init-listener-environ.js";
+import { program, seedAgentViaOpsApi, setOccupiedListenerLookupForTests } from "../../src/cli.js";
+import { listenerRootPathOnPlatform } from "../../src/lib/init-listener-environ.js";
+import { parseNullSeparatedEnviron, extractRootPath } from "../../src/lib/daemon-liveness.js";
 import {
   describeOccupiedListener,
   DIFFERENT_DIR_DOES_NOT_PROVE_PASSWORD,
-  flairStopCanIdentify,
   foreignOccupiedListenerDetail,
   HTTP_HOLDER_DID_NOT_NECESSARILY_REJECT,
+  listenerFromLookup,
   occupiedListenerAuthFailure,
   stableAnsweredHolder,
   staleHarperBeforeAuthNotice,
@@ -183,14 +182,63 @@ function runInit(
   });
 }
 
-function writeDaemonRecord(dir: string, pid: number): void {
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "hdb.pid"), `${pid}\n`);
-  writeFileSync(join(dir, "flair-daemon.json"), JSON.stringify({ pid }) + "\n");
+const ISOLATED_ENV_KEYS = [
+  "HOME",
+  "FLAIR_ADMIN_PASS",
+  "HDB_ADMIN_PASSWORD",
+  "FLAIR_URL",
+  "FLAIR_TARGET",
+  "FLAIR_OPS_PORT",
+  "FLAIR_OPS_TARGET",
+  "FLAIR_ADMIN_USER",
+  "FLAIR_SOCKET_GROUP",
+  "ROOTPATH",
+] as const;
+
+/** In-process init. The caller injects the listener lookup first. */
+async function runInitInProcess(args: string[], home: string): Promise<{ stdout: string; stderr: string }> {
+  const saved = ISOLATED_ENV_KEYS.map((key) => [key, process.env[key]] as const);
+  const origExit = process.exit;
+  const origLog = console.log;
+  const origErr = console.error;
+  let stdout = "";
+  let stderr = "";
+  process.env.HOME = home;
+  for (const key of ISOLATED_ENV_KEYS) {
+    if (key !== "HOME") delete process.env[key];
+  }
+  console.log = (...parts: unknown[]) => {
+    stdout += parts.map((part) => String(part)).join(" ") + "\n";
+  };
+  console.error = (...parts: unknown[]) => {
+    stderr += parts.map((part) => String(part)).join(" ") + "\n";
+  };
+  process.exit = ((code?: number) => {
+    throw new Error(`process.exit(${code ?? 0})`);
+  }) as typeof process.exit;
+  try {
+    await program.parseAsync(["node", "flair", "init", ...args]);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!message.includes("process.exit")) throw err;
+  } finally {
+    process.exit = origExit;
+    console.log = origLog;
+    console.error = origErr;
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    setOccupiedListenerLookupForTests(null);
+  }
+  return { stdout, stderr };
 }
 
-function flairStopCount(output: string): number {
-  return output.split("flair stop").length - 1;
+function expectHealthLoggedThenNoAuthorization(
+  requests: { method: string; url: string; authorization: string | null }[],
+): void {
+  expect(requests.some((req) => req.method === "GET" && req.url === "/health")).toBe(true);
+  expect(requests.every((req) => req.authorization === null)).toBe(true);
 }
 
 const SKIP_INIT_EXTRAS = [
@@ -205,7 +253,6 @@ const listenerBase = {
   port: 19926,
   pids: [] as number[],
   dataDirs: [] as string[],
-  flairStopApplies: false,
 };
 
 describe("flair#1749 — init and a Harper this init did not start", () => {
@@ -222,10 +269,11 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     mkdirSync(keysDir, { recursive: true });
 
     const listener = await startStub(staleDataDir, "both", logPath);
-    // The listener's own directory records the pid. `flair stop` does not
-    // look there — this is not the default data directory.
-    writeDaemonRecord(staleDataDir, listener.pid);
-    const { code, stdout, stderr } = await runInit([
+    setOccupiedListenerLookupForTests({
+      pids: () => [listener.pid],
+      rootPath: () => ({ rootPath: staleDataDir, environReadable: true }),
+    });
+    const { stdout, stderr } = await runInitInProcess([
       "--agent", "canary",
       "--port", String(listener.httpPort),
       "--ops-port", String(listener.opsPort),
@@ -233,11 +281,10 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
       "--keys-dir", keysDir,
       "--admin-pass", "this-init-password",
       ...SKIP_INIT_EXTRAS,
-    ], isolatedEnv(home));
+    ], home);
     const output = stdout + stderr;
     const requests = readStubLog(logPath);
 
-    expect(code).not.toBe(0);
     expect(output).toContain("Harper already running");
     expect(output).toContain(DIFFERENT_DIR_DOES_NOT_PROVE_PASSWORD);
     expect(output).not.toContain("Waiting for Harper health check");
@@ -246,13 +293,12 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     expect(output).not.toContain("admin credentials differ");
     expect(output).not.toContain("wrong password");
     expect(output).not.toContain("wrong username");
-    expect(flairStopCount(output)).toBe(0);
+    expect(output).not.toContain("flair stop");
     expect(output).not.toContain("this-init-password");
     expect(output).toContain(staleDataDir);
     expect(output).toContain(`pid ${listener.pid}`);
     expect(output).toContain(`kill ${listener.pid}`);
-    expect(requests.length).toBeGreaterThan(0);
-    expect(requests.every((req) => req.authorization === null)).toBe(true);
+    expectHealthLoggedThenNoAuthorization(requests);
     expect(requests.some((req) => req.method === "POST")).toBe(false);
     expect(children[0]?.exitCode).toBe(null);
     expect(children[0]?.killed).toBe(false);
@@ -269,60 +315,30 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     mkdirSync(staleDataDir, { recursive: true });
 
     const listener = await startStub(staleDataDir, "both", logPath);
-    writeDaemonRecord(staleDataDir, listener.pid);
-    const { code, stdout, stderr } = await runInit([
+    setOccupiedListenerLookupForTests({
+      pids: () => [listener.pid],
+      rootPath: () => ({ rootPath: staleDataDir, environReadable: true }),
+    });
+    const { stdout, stderr } = await runInitInProcess([
       "--agent", "canary",
       "--port", String(listener.httpPort),
       "--ops-port", String(listener.opsPort),
       "--data-dir", dataDir,
       "--no-mcp",
       "--skip-soul",
-    ], isolatedEnv(home));
+    ], home);
     const output = stdout + stderr;
     const requests = readStubLog(logPath);
 
-    expect(code).not.toBe(0);
     expect(output).toContain("already answering on port");
-    expect(flairStopCount(output)).toBe(0);
+    expect(output).not.toContain("flair stop");
     expect(output).toContain(`kill ${listener.pid}`);
     expect(output).not.toContain("wrong password");
     expect(output).not.toContain("Operations API insert failed");
     expect(output).not.toContain("admin password will not match");
     expect(output).toContain(staleDataDir);
     expect(output).toContain(`pid ${listener.pid}`);
-    expect(requests.every((req) => req.authorization === null)).toBe(true);
-    expect(children[0]?.exitCode).toBe(null);
-  }, CASE_BUDGET_MS);
-
-  test("default data directory: flair stop is offered once and acts on that listener", async () => {
-    scratch = mkdtempSync(join(tmpdir(), "flair-1749-"));
-    const home = join(scratch, "home");
-    const defaultDir = flairDataDir(home);
-    const dataDir = join(scratch, "other");
-    const logPath = join(scratch, "requests.log");
-    mkdirSync(home, { recursive: true });
-    mkdirSync(dataDir, { recursive: true });
-
-    const listener = await startStub(defaultDir, "both", logPath);
-    writeDaemonRecord(defaultDir, listener.pid);
-    const { code, stdout, stderr } = await runInit([
-      "--agent", "canary",
-      "--port", String(listener.httpPort),
-      "--ops-port", String(listener.opsPort),
-      "--data-dir", dataDir,
-      "--no-mcp",
-      "--skip-soul",
-    ], isolatedEnv(home));
-    const output = stdout + stderr;
-    const requests = readStubLog(logPath);
-
-    expect(code).not.toBe(0);
-    expect(output).toContain("already answering on port");
-    expect(output).toContain(defaultDir);
-    expect(output).toContain(`pid ${listener.pid}`);
-    expect(output).toContain(`kill ${listener.pid}`);
-    expect(flairStopCount(output)).toBe(1);
-    expect(requests.every((req) => req.authorization === null)).toBe(true);
+    expectHealthLoggedThenNoAuthorization(requests);
     expect(children[0]?.exitCode).toBe(null);
   }, CASE_BUDGET_MS);
 
@@ -407,7 +423,6 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
       port: 19925,
       pids: [42],
       dataDirs: ["/var/stale-harper"],
-      flairStopApplies: false,
     };
     try {
       await seedAgentViaOpsApi(19925, "canary", "pubkey", "admin", "this-init-password", {
@@ -441,13 +456,11 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
       port: 19925,
       pids: [42],
       dataDirs: ["/var/before"],
-      flairStopApplies: true,
     };
     const after: OccupiedHarperListener = {
       port: 19925,
       pids: [99],
       dataDirs: ["/var/after"],
-      flairStopApplies: true,
     };
     try {
       await seedAgentViaOpsApi(19925, "canary", "pubkey", "admin", "this-init-password", {
@@ -476,7 +489,6 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
       port: 19925,
       pids: [42, 43],
       dataDirs: ["/var/a", "/var/b"],
-      flairStopApplies: true,
     };
     try {
       await seedAgentViaOpsApi(19925, "canary", "pubkey", "admin", "this-init-password", {
@@ -517,41 +529,30 @@ describe("occupied-listener messages (flair#1749)", () => {
     );
   });
 
-  test("flair stop is offered only when the data directory still records the pid", () => {
-    const withStop = occupiedListenerAuthFailure({
+  test("the 401 message names one stable holder and does not offer flair stop", () => {
+    const msg = occupiedListenerAuthFailure({
       lead: "Operations API insert failed (401): ",
       bodyText: "Login failed",
-      listener: { port: 19925, pids: [42], dataDirs: ["/var/still-there"], flairStopApplies: true },
+      listener: { port: 19925, pids: [42], dataDirs: ["/var/still-there"] },
     });
-    expect(flairStopCount(withStop)).toBe(1);
-    expect(withStop).toContain("kill 42");
-    const deleted = occupiedListenerAuthFailure({
-      lead: "Operations API insert failed (401): ",
-      bodyText: "Login failed",
-      listener: { port: 19925, pids: [42], dataDirs: ["/var/deleted"], flairStopApplies: false },
-    });
-    expect(deleted).not.toContain("flair stop");
-    expect(deleted).toContain("kill 42");
-    expect(flairStopCanIdentify({ recordedPid: 42, sidecarPid: 42, listenerPids: [42] })).toBe(true);
-    expect(flairStopCanIdentify({ recordedPid: null, sidecarPid: null, listenerPids: [42] })).toBe(false);
-    expect(flairStopCanIdentify({ recordedPid: 42, sidecarPid: 99, listenerPids: [42] })).toBe(false);
+    expect(msg).not.toContain("flair stop");
+    expect(msg).toContain("kill 42");
   });
 
   test("a holder change and several holders stay unattributed", () => {
     const changed = stableAnsweredHolder(
-      { port: 19925, pids: [111], dataDirs: ["/old"], flairStopApplies: true },
-      { port: 19925, pids: [222], dataDirs: ["/new"], flairStopApplies: true },
+      { port: 19925, pids: [111], dataDirs: ["/old"] },
+      { port: 19925, pids: [222], dataDirs: ["/new"] },
     );
     expect(changed.pids).toEqual([]);
-    expect(changed.flairStopApplies).toBe(false);
     const many = stableAnsweredHolder(
-      { port: 19925, pids: [111, 222], dataDirs: ["/a"], flairStopApplies: true },
-      { port: 19925, pids: [111, 222], dataDirs: ["/a"], flairStopApplies: true },
+      { port: 19925, pids: [111, 222], dataDirs: ["/a"] },
+      { port: 19925, pids: [111, 222], dataDirs: ["/a"] },
     );
     expect(many.pids).toEqual([]);
     const stable = stableAnsweredHolder(
-      { port: 19925, pids: [222], dataDirs: ["/data"], flairStopApplies: false },
-      { port: 19925, pids: [222], dataDirs: ["/data"], flairStopApplies: false },
+      { port: 19925, pids: [222], dataDirs: ["/data"] },
+      { port: 19925, pids: [222], dataDirs: ["/data"] },
     );
     expect(stable.pids).toEqual([222]);
     const msg = occupiedListenerAuthFailure({
@@ -579,7 +580,6 @@ describe("occupied-listener messages (flair#1749)", () => {
       port: 19926,
       pids: [7],
       dataDirs: ["/data/other"],
-      flairStopApplies: false,
     });
     expect(notice).toContain("pid 7");
     expect(notice).toContain("/data/other");
@@ -592,9 +592,9 @@ describe("occupied-listener messages (flair#1749)", () => {
     expect(notice).not.toContain("wrong password");
   });
 
-  test("the up-front refusal qualifies a foreign directory and omits flair stop when the directory is gone", () => {
+  test("the up-front refusal qualifies a foreign directory and does not offer flair stop", () => {
     const msg = foreignOccupiedListenerDetail(
-      { port: 19926, pids: [7], dataDirs: ["/data/other"], flairStopApplies: false },
+      { port: 19926, pids: [7], dataDirs: ["/data/other"] },
       "/data/this-init",
     );
     expect(msg).toContain("pid 7");
@@ -612,61 +612,64 @@ describe("occupied-listener messages (flair#1749)", () => {
     const msg = occupiedListenerAuthFailure({
       lead: "Operations API insert failed (401): ",
       bodyText: "Login failed",
-      listener: { port: 19925, pids: [7, 8], dataDirs: ["/data/other"], flairStopApplies: false },
+      listener: { port: 19925, pids: [7, 8], dataDirs: ["/data/other"] },
     });
     expect(msg).not.toMatch(/\bkill \d+/);
   });
 });
 
 describe("init ROOTPATH lookup (flair#1749)", () => {
-  test("a ps ROOTPATH with a space is the whole path, not the prefix", () => {
+  test("linux environ keeps a ROOTPATH that contains a space", () => {
     const path = "/Users/John Doe/.flair";
-    const parsed = parsePsCommandRootPath(
-      `bun stub.js ROOTPATH=${path} HOME=/Users/John Doe`,
-    );
-    expect(parsed.environReadable).toBe(true);
-    expect(parsed.rootPath).toBe(path);
-    expect(parsed.rootPath).not.toBe("/Users/John");
+    const raw = `PATH=/usr/bin\0ROOTPATH=${path}\0HOME=/Users/John Doe\0`;
+    const rootPath = extractRootPath(parseNullSeparatedEnviron(raw));
+    expect(rootPath).toBe(path);
+    const read = listenerRootPathOnPlatform("linux", () => ({ rootPath, environReadable: true }));
+    expect(read.rootPath).toBe(path);
     expect(staleHarperBeforeAuthNotice(path, {
       port: 19926,
       pids: [7],
-      dataDirs: [parsed.rootPath!],
-      flairStopApplies: false,
+      dataDirs: [read.rootPath!],
     })).toBe(null);
   });
 
-  test("the pre-auth lookup of a readable ROOTPATH is that directory", () => {
-    const parsed = parsePsCommandRootPath("bun stub.js ROOTPATH=/data/stale HOME=/tmp");
-    expect(parsed).toEqual({ rootPath: "/data/stale", environReadable: true });
-    const notice = staleHarperBeforeAuthNotice("/data/this-init", {
-      port: 19926,
-      pids: [9],
-      dataDirs: [parsed.rootPath!],
-      flairStopApplies: false,
+  test("an injected readable ROOTPATH is the pre-auth directory", () => {
+    const listener = listenerFromLookup(19926, {
+      pids: () => [9],
+      rootPath: () => ({ rootPath: "/data/stale", environReadable: true }),
     });
+    const notice = staleHarperBeforeAuthNotice("/data/this-init", listener);
     expect(notice).toContain("/data/stale");
     expect(notice).toContain("pid 9");
+    expect(notice).toContain("kill 9");
+    expect(notice).not.toContain("flair stop");
     expect(notice).not.toContain("a Harper instance this init did not start");
   });
 
   test("an unavailable ROOTPATH lookup is not a foreign directory", () => {
-    expect(parsePsCommandRootPath(null)).toEqual({ rootPath: null, environReadable: false });
-    const missing = readInitListenerRootPath(2_000_000_000);
-    expect(missing.environReadable).toBe(false);
-    expect(missing.rootPath).toBe(null);
-    expect(staleHarperBeforeAuthNotice("/data/this-init", {
-      port: 19926,
-      pids: [9],
-      dataDirs: [],
-      flairStopApplies: false,
-    })).toBe(null);
+    let linuxRead = false;
+    const darwin = listenerRootPathOnPlatform("darwin", () => {
+      linuxRead = true;
+      return { rootPath: "/should-not-be-used", environReadable: true };
+    });
+    expect(linuxRead).toBe(false);
+    expect(darwin).toEqual({ rootPath: null, environReadable: false });
+    const listener = listenerFromLookup(19926, {
+      pids: () => [9],
+      rootPath: () => darwin,
+    });
+    expect(listener.dataDirs).toEqual([]);
+    expect(staleHarperBeforeAuthNotice("/data/this-init", listener)).toBe(null);
+    const src = readFileSync(join(import.meta.dir, "..", "..", "src", "lib", "init-listener-environ.ts"), "utf-8");
+    expect(src).not.toContain("execFileSync");
+    expect(src).not.toMatch(/["']ps["']/);
   });
 
-  test("sidecar recovery does not use init's ps lookup", () => {
+  test("sidecar recovery does not use init's listener lookup", () => {
     const cliSrc = readFileSync(join(import.meta.dir, "..", "..", "src", "cli.ts"), "utf-8");
     const rootPathFn = cliSrc.slice(
       cliSrc.indexOf("function readProcessRootPath"),
-      cliSrc.indexOf("function readRecordedDaemonPids"),
+      cliSrc.indexOf("let occupiedListenerLookupForTests"),
     );
     expect(rootPathFn).toContain("/proc/");
     expect(rootPathFn).not.toContain("darwin");
@@ -676,9 +679,9 @@ describe("init ROOTPATH lookup (flair#1749)", () => {
       cliSrc.indexOf("function inspectServingFlairPackage"),
     );
     expect(occupiedFn).toContain("readInitListenerRootPath");
-    expect(occupiedFn).toContain("defaultDataDir()");
+    expect(occupiedFn).not.toContain("defaultDataDir()");
     expect(occupiedFn).not.toContain("readProcessRootPath");
-    expect(occupiedFn).not.toContain("dataDirs.some");
+    expect(occupiedFn).not.toContain("flair stop");
     const afterGather = cliSrc.slice(cliSrc.indexOf("async function gatherDaemonEvidence"));
     expect(afterGather).toContain("readProcessRootPath");
     expect(afterGather).not.toContain("readInitListenerRootPath");

@@ -10,17 +10,21 @@
  *   rejected an operations-port request. Those ports are resolved separately
  *   and can have different owners.
  *
- * Init can name a different data directory only when it could read one.
- * An unreadable ROOTPATH is not proof of a foreign instance.
+ * Init can name a different data directory only when that one read could
+ * read one. An unreadable ROOTPATH is not proof of a foreign instance.
+ * On macOS the directory is unavailable, so init does not refuse before
+ * auth from a parsed ROOTPATH.
  *
- * A pid is named, and `kill` is printed, only when the failure can be tied
- * to one stable holder of the port that answered (the same single pid before
- * the request and after it). Several holders, or a holder that changed
- * during the request, stay "a Harper instance this init did not start".
- * `flair stop` has no `--data-dir` and always acts on the default data
- * directory, so it is offered only when that directory still records this
- * listener — once, not also from the refusal head. Any other directory gets
- * the process remedy. Init never signals a process it did not start.
+ * That pre-auth observation is a single read. It is not the operations-port
+ * 401 check. A 401 names a pid only when the read before the insert and the
+ * read after the 401 are the same single pid. Several holders, or a holder
+ * that changed during the request, stay "a Harper instance this init did
+ * not start".
+ *
+ * These messages do not offer `flair stop`. That command only signals a
+ * verified, sidecar-backed daemon, so init cannot promise it will act on
+ * this listener. The remedy is `kill <pid>` when one process is named.
+ * Init never signals a process it did not start.
  */
 import { canonicalLexicalPath } from "./daemon-liveness.js";
 
@@ -29,11 +33,11 @@ export interface OccupiedHarperListener {
   /** The port this attribution was read from — the port that answered. */
   port: number;
   /**
-   * PIDs listening on `port` at this read. A message names a pid only when
-   * this list has exactly one entry, and an operations-port 401 names it
+   * PIDs from this one read. The pre-auth message names a pid only when
+   * this list has exactly one entry. An operations-port 401 names a pid
    * only when the read before the insert and the read after the 401 agree
-   * on that same pid. Empty, or more than one, is the unattributed fallback:
-   * do not suggest `kill` for every pid in the list.
+   * on that same single pid. Empty, or more than one, is the unattributed
+   * fallback: do not suggest `kill` for every pid in the list.
    */
   pids: number[];
   /**
@@ -41,15 +45,26 @@ export interface OccupiedHarperListener {
    * could not read a directory — that is not a foreign data directory.
    */
   dataDirs: string[];
-  /**
-   * True only when bare `flair stop` will act on this listener. That command
-   * has no `--data-dir` and always reads the default data directory, so this
-   * is true only when THAT directory's pidfile and sidecar name a pid
-   * holding this port. A record in the listener's own directory does not
-   * qualify when that directory is not the default. False after the default
-   * directory was deleted.
-   */
-  flairStopApplies: boolean;
+}
+
+/** Pid list and ROOTPATH reads for one observation. Tests inject both. */
+export interface OccupiedListenerLookup {
+  pids(port: number): number[] | null;
+  rootPath(pid: number): { rootPath: string | null; environReadable: boolean };
+}
+
+/**
+ * One observation of who is listening. An unreadable ROOTPATH is omitted,
+ * so it cannot become a pre-auth refusal. Does not decide `flair stop`.
+ */
+export function listenerFromLookup(port: number, lookup: OccupiedListenerLookup): OccupiedHarperListener {
+  const pids = lookup.pids(port) ?? [];
+  const dataDirs: string[] = [];
+  for (const pid of pids) {
+    const read = lookup.rootPath(pid);
+    if (read.environReadable && read.rootPath && !dataDirs.includes(read.rootPath)) dataDirs.push(read.rootPath);
+  }
+  return { port, pids, dataDirs };
 }
 
 /**
@@ -65,10 +80,10 @@ export interface OperationsPortAttribution {
 /**
  * The process a 401 can be tied to.
  *
- * One pid, the same pid on both sides of the request: that holder. Zero
- * pids, several pids, or a different pid after the request: nobody. The
- * fallback does not keep data directories or `flair stop` from a set of
- * processes the 401 was not tied to.
+ * One pid, the same pid on both sides of the insert: that holder. Zero
+ * pids, several pids, or a different pid after the 401: nobody. The
+ * fallback does not keep data directories from a set of processes the 401
+ * was not tied to. This is not the pre-auth observation, which is one read.
  */
 export function stableAnsweredHolder(
   before: OccupiedHarperListener,
@@ -79,29 +94,13 @@ export function stableAnsweredHolder(
     after.pids.length === 1 &&
     before.pids[0] === after.pids[0];
   if (!sameSingle) {
-    return { port: after.port, pids: [], dataDirs: [], flairStopApplies: false };
+    return { port: after.port, pids: [], dataDirs: [] };
   }
   return {
     port: after.port,
     pids: [after.pids[0]],
     dataDirs: after.dataDirs,
-    flairStopApplies: after.flairStopApplies,
   };
-}
-
-/**
- * `flair stop` identifies a daemon from the data directory's pidfile and
- * sidecar. Both must name a pid that holds the port. A missing directory
- * (the deleted-`~/.flair` orphan) does not qualify.
- */
-export function flairStopCanIdentify(input: {
-  recordedPid: number | null;
-  sidecarPid: number | null;
-  listenerPids: readonly number[];
-}): boolean {
-  if (input.recordedPid === null || input.sidecarPid === null) return false;
-  if (input.recordedPid !== input.sidecarPid) return false;
-  return input.listenerPids.includes(input.recordedPid);
 }
 
 const UNATTRIBUTED = "a Harper instance this init did not start";
@@ -134,12 +133,13 @@ function foreignDataDirs(expectedDataDir: string, dataDirs: readonly string[]): 
 }
 
 /**
- * Printed when init could read a ROOTPATH for the HTTP listener and it is a
- * different directory. Init exits on it — before the authenticated health
- * request and before the operations insert. A different directory is not
- * proof the passwords differ. Returns null when the directory matches or
- * could not be read: an unreadable lookup is not a foreign instance, and
- * init must not claim it exited because the process had another directory.
+ * Printed from the single pre-auth read of the HTTP listener, when that
+ * read included a ROOTPATH other than this init's data directory. Init
+ * exits on it — before the authenticated health request and before the
+ * operations insert. This is not the before-and-after 401 attribution.
+ * A different directory is not proof the passwords differ. Returns null
+ * when the directory matches or could not be read: an unreadable lookup
+ * is not a foreign instance.
  */
 export function staleHarperBeforeAuthNotice(
   expectedDataDir: string,
@@ -180,14 +180,12 @@ export function foreignOccupiedListenerDetail(
 }
 
 /**
- * The operations-API 401 after init skipped its own start and did not
- * already know the HTTP listener was a different data directory.
- *
- * `listener` must be the process verified to hold the operations port (the
- * port that answered). An empty pid list is the unattributed fallback — do
- * not pass the HTTP port's pids through. The rejection is not, by itself,
- * proof that those passwords differ from a different directory, and it is
- * not proof the HTTP listener caused it.
+ * The operations-API 401 after init skipped its own start. Unlike the
+ * pre-auth notice, which is one read, `listener` here is the before-and-after
+ * attribution for the operations port: the same single pid on both sides,
+ * or the unattributed fallback. Do not pass the HTTP port's pids through.
+ * The rejection is not proof the passwords differ, and it is not proof the
+ * HTTP listener caused it. The message does not offer `flair stop`.
  */
 export function occupiedListenerAuthFailure(input: {
   /** Existing status lead, including the trailing space before the body. */
@@ -210,14 +208,12 @@ export function occupiedListenerAuthFailure(input: {
 }
 
 /**
- * `kill` only for the one pid the failure was tied to. `flair stop` only
- * when that command will act on this listener (the default data directory
- * records it). The two are not both required: a non-default directory gets
- * the process remedy and does not get `flair stop`.
+ * `kill` only for the one pid this message named. No `flair stop`: that
+ * command only signals a verified sidecar-backed daemon, and init cannot
+ * promise it will act on a listener this init did not start.
  */
 function appendRemedy(lines: string[], listener: OccupiedHarperListener): void {
   if (listener.pids.length === 1) lines.push(`  kill ${listener.pids[0]}`);
-  if (listener.flairStopApplies) lines.push(`  flair stop`);
   for (const dir of listener.dataDirs) {
     lines.push(`  flair init --data-dir ${commandArg(dir)}`);
   }

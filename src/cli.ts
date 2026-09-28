@@ -203,10 +203,11 @@ import {
 import { readProcessStartTimeMs } from "./lib/process-start-time.js";
 import { readInitListenerRootPath } from "./lib/init-listener-environ.js";
 import {
-  flairStopCanIdentify,
+  listenerFromLookup,
   occupiedListenerAuthFailure,
   stableAnsweredHolder,
   type OccupiedHarperListener,
+  type OccupiedListenerLookup,
   type OperationsPortAttribution,
 } from "./lib/init-occupied-listener.js";
 import {
@@ -3321,7 +3322,7 @@ export async function seedAgentViaOpsApi(
       try {
         after = occupiedListener.reread();
       } catch {
-        after = { port: occupiedListener.before.port, pids: [], dataDirs: [], flairStopApplies: false };
+        after = { port: occupiedListener.before.port, pids: [], dataDirs: [] };
       }
       return occupiedListenerAuthFailure({
         lead: "Operations API insert failed (401): ",
@@ -5048,42 +5049,31 @@ function readProcessRootPath(pid: number): { rootPath: string | null; environRea
   return { rootPath: null, environReadable: false };
 }
 
-function readRecordedDaemonPids(dataDir: string): { recordedPid: number | null; sidecarPid: number | null } {
-  let recordedPid: number | null = null;
-  let sidecarPid: number | null = null;
-  try {
-    const n = Number(readFileSync(join(dataDir, "hdb.pid"), "utf-8").trim());
-    if (Number.isInteger(n) && n > 0) recordedPid = n;
-  } catch { /* deleted directory, or no pidfile */ }
-  try {
-    const raw = JSON.parse(readFileSync(join(dataDir, "flair-daemon.json"), "utf-8")) as { pid?: unknown };
-    const n = Number(raw?.pid);
-    if (Number.isInteger(n) && n > 0) sidecarPid = n;
-  } catch { /* no sidecar */ }
-  return { recordedPid, sidecarPid };
+/**
+ * Test seam for the pre-auth observation. When set, pid and ROOTPATH reads
+ * replace `lsof` and `/proc` so a test can name a listener without the
+ * host's tools. Production leaves this unset. Never a reason to offer
+ * `flair stop`.
+ */
+let occupiedListenerLookupForTests: OccupiedListenerLookup | null = null;
+
+export function setOccupiedListenerLookupForTests(lookup: OccupiedListenerLookup | null): void {
+  occupiedListenerLookupForTests = lookup;
 }
 
 /**
- * Who is listening on `port` (flair#1749). The caller passes the port that
- * answered — the HTTP port for the pre-auth foreign check, the operations
- * port for a later 401. ROOTPATH comes from init's reader, not the sidecar
- * reader. A directory init could not read is omitted.
- *
- * `flair stop` has no `--data-dir` and always reads `defaultDataDir()`.
- * Offer it only when that directory's pidfile and sidecar name a pid
- * holding this port. A pidfile in the listener's own ROOTPATH does not
- * count when that path is not the default. Never signals.
+ * Who is listening on `port` (flair#1749). The pre-auth path calls this
+ * once, on the HTTP port. A later operations-port 401 calls it again
+ * before the insert and after the 401 — that pair is the attribution,
+ * not this single read. ROOTPATH comes from init's Linux `/proc` reader,
+ * not the sidecar reader. An unreadable directory is omitted. Never signals.
  */
 function readOccupiedListener(port: number): OccupiedHarperListener {
-  const pids = resolveListenerPids(port) ?? [];
-  const dataDirs: string[] = [];
-  for (const pid of pids) {
-    const { rootPath } = readInitListenerRootPath(pid);
-    if (rootPath && !dataDirs.includes(rootPath)) dataDirs.push(rootPath);
-  }
-  const recorded = readRecordedDaemonPids(defaultDataDir());
-  const flairStopApplies = flairStopCanIdentify({ ...recorded, listenerPids: pids });
-  return { port, pids, dataDirs, flairStopApplies };
+  const lookup = occupiedListenerLookupForTests ?? {
+    pids: resolveListenerPids,
+    rootPath: readInitListenerRootPath,
+  };
+  return listenerFromLookup(port, lookup);
 }
 
 /**

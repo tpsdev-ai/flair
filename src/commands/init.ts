@@ -624,12 +624,11 @@ program
         adminPassPath,
       });
       // The port is already taken and this data dir has no admin user.
-      // The unauthenticated /health probe already ran. Name that port's
-      // listener and exit before any Authorization header is sent. Do not
-      // signal it. `flair stop` has no --data-dir and always uses the
-      // default data directory, so the detail offers it only when that
-      // directory records this listener — once. The refusal head does not
-      // print it again. Otherwise the remedy is the process (flair#1749).
+      // The unauthenticated /health probe already ran. This is one read of
+      // that port's listener — not the before-and-after 401 attribution.
+      // Name it and exit before any Authorization header is sent. Do not
+      // signal it, and do not offer `flair stop`: that command only signals
+      // a verified sidecar-backed daemon (flair#1749).
       if (reason === "foreign-instance") {
         const listener = readOccupiedListener(httpPort);
         const head = initAdminPassRefusalMessage(reason, {
@@ -750,21 +749,23 @@ program
     mkdirSync(dataDir, { recursive: true });
     readyOpsSocketPosture(dataDir);
 
-    // True only when the port was already answering and init did not read a
-    // different data directory for that listener (that case exits below,
-    // before any authenticated request). An unreadable directory does not
-    // count as different. A later ops 401 then attributes the operations
-    // port, not this HTTP listener (flair#1749).
+    // True only when the port was already answering and the single pre-auth
+    // read did not include a different data directory (that case exits
+    // below, before any authenticated request). An unreadable directory,
+    // including every macOS lookup, does not count as different. A later
+    // ops 401 is a separate before-and-after read of the operations port,
+    // not this HTTP observation (flair#1749).
     let skippedOwnStart = false;
     if (!opts.skipStart) {
       if (alreadyRunning) {
         console.log(`Harper already running on port ${httpPort} — skipping start`);
-        // When init can read a ROOTPATH on the HTTP port that answered
-        // /health, and that directory is not this init's, stop before
+        // One read of the HTTP port that answered /health. When that read
+        // includes a ROOTPATH other than this init's, stop before
         // waitForHealth, which would send Authorization. An unreadable
-        // directory is not treated as foreign. A different directory does
-        // not prove the passwords differ, and this init does not signal
-        // the process.
+        // directory is not treated as foreign. This is not the
+        // before-and-after check used for an operations-port 401. A
+        // different directory does not prove the passwords differ, and
+        // this init does not signal the process.
         const httpListener = readOccupiedListener(httpPort);
         const notice = staleHarperBeforeAuthNotice(dataDir, httpListener);
         if (notice) {
@@ -1075,13 +1076,13 @@ program
         console.log(`Keypair written: ${privPath} ✓`);
       }
 
-      // Seed agent via operations API. A 401 names a process only when the
-      // same single pid held the operations port before the insert and
-      // after the rejection. The HTTP port's holder is not an input and is
-      // not assumed to have caused the rejection. Several holders, or a
-      // holder that changed during the request, stay unattributed. Init
-      // started Harper itself → no listener, and that 401 keeps the
-      // credential hint.
+      // Seed agent via operations API. Unlike the pre-auth observation,
+      // which is one read, a 401 names a process only when the same single
+      // pid held the operations port before the insert and after the
+      // rejection. The HTTP port's holder is not an input and is not
+      // assumed to have caused the rejection. Several holders, or a holder
+      // that changed during the request, stay unattributed. Init started
+      // Harper itself → no listener, and that 401 keeps the credential hint.
       console.log(`Seeding agent '${agentId}' via operations API...`);
       const opsListener = skippedOwnStart ? operationsPortAttribution(opsPort) : undefined;
       await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, adminUser, adminPass, opsListener);
