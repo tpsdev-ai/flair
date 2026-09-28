@@ -639,9 +639,8 @@ class FlairMemoryService(BaseMemoryService):
         # (a deployment served under a prefix); httpx merges the route onto it,
         # so signing the built request's own raw path (path + query) can never
         # disagree with what is sent. A base URL that carries a query string or
-        # fragment is refused before any request: the merge drops the base's
-        # path for a bare trailing "?" or "#", so there is no request path to
-        # sign.
+        # fragment is refused before any request: the join does not produce a
+        # single well-defined request path to sign.
         parsed_base = httpx.URL(self._url)
         if "?" in str(parsed_base) or "#" in str(parsed_base):
             raise ValueError(
@@ -658,13 +657,13 @@ class FlairMemoryService(BaseMemoryService):
                 "accepts routes (paths), not absolute URLs."
             )
 
+        t0 = time.monotonic()
         request = self._http.build_request(method, path, json=json_body)
         request.headers["Authorization"] = _sign_request(
             self._private_key, self._agent_id, method,
             request.url.raw_path.decode("ascii"),
         )
 
-        t0 = time.monotonic()
         try:
             resp = await self._http.send(request)
         except httpx.ConnectError as exc:
