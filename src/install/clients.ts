@@ -91,6 +91,7 @@ import { decidePinWrite, type PinWriteDecision } from "../lib/pin-write-guard.js
 import { pinWriteWouldLowerOrIsUnknown, comparePinVersions } from "../lib/upgrade-status.js";
 import { withConfigCriticalSection, type ConfigSectionOptions } from "../lib/config-critical-section.js";
 import { backupBytesTo, encodeConfig, encodeText, parseSettingsBytes } from "../lib/settings-bytes.js";
+import { readTomlStringArray } from "../lib/toml-string-array.js";
 
 /**
  * The JSON.parse reason embedded in the shared parser's
@@ -293,7 +294,7 @@ function codexFlairSectionText(raw: string): string | null {
   return nextHeader === -1 ? after : after.slice(0, "[mcp_servers.flair]".length + nextHeader);
 }
 
-function codexWiringPin(raw: string): string {
+export function codexWiringPin(raw: string): string {
   const unknown = `${FLAIR_MCP_PACKAGE}@unknown`;
   const headers = [...raw.matchAll(CODEX_FLAIR_HEADER_RE)];
   if (headers.length !== 1 || headers[0]!.index !== raw.indexOf("[mcp_servers.flair]")) return unknown;
@@ -304,11 +305,12 @@ function codexWiringPin(raw: string): string {
   // Match the section the writer replaces, including Flair's subtables.
   // Multiline strings in later, unrelated tables cannot change its pin.
   const section = codexFlairSectionText(raw);
-  if (section === null || /"{3}|'{3}/.test(section)) return unknown;
-  const body = raw.slice(headers[0]!.index! + headers[0]![0].length).split(/^[ \t]*\[/m)[0]!;
-  const args = body.split("\n").filter((line) => /^[ \t]*args[ \t]*=/.test(line));
-  const spec = args.length === 1 ? args[0]!.match(CODEX_ARGS_LINE_RE)?.[1] : undefined;
-  return spec !== undefined && argNamesFlairPackage(spec) ? spec : unknown;
+  if (section === null) return unknown;
+  const args = codexArgs(section);
+  // Only the captured args value may contain multiline string delimiters.
+  // A fence elsewhere can hide a fake header/assignment from this scanner.
+  if (!args || /"{3}|'{3}/.test(args.outside)) return unknown;
+  return args.spec.value;
 }
 function codexFlairSectionHasCurrentPin(raw: string): boolean {
   return codexWiringPin(raw) === mcpServerSpec();
@@ -720,8 +722,32 @@ function countFlairPackageTokens(text: string): number {
 }
 
 const CODEX_FLAIR_HEADER_RE = /^\[mcp_servers\.flair\]\s*$/gm;
-/** A builder-emitted single-line args element: `args = ["-y", "<spec>"]`. */
-const CODEX_ARGS_LINE_RE = /^[ \t]*args[ \t]*=[ \t]*\[[ \t]*"-y"[ \t]*,[ \t]*"([^"]*)"[ \t]*\][ \t]*$/m;
+/** Capture the actual package string, decoded independently of TOML quoting. */
+function codexArgs(section: string) {
+  const bodyStart = section.indexOf("\n") + 1;
+  const body = section.slice(bodyStart).split(/^[ \t]*\[/m)[0]!;
+  const assignments = [...body.matchAll(/^[ \t]*(?:args|"args"|'args')[ \t]*=[ \t]*/gm)];
+  if (assignments.length !== 1) return null;
+  const assignment = assignments[0]!;
+  const valueStart = bodyStart + assignment.index! + assignment[0].length;
+  const parsed = readTomlStringArray(section, valueStart);
+  if (!parsed) return null;
+  const outside = section.slice(0, valueStart) + section.slice(parsed.end);
+  // An array opening on its own line can look like a table boundary to the
+  // initial locator. Count keys again with that whole value removed.
+  const outsideBody = outside.slice(bodyStart).split(/^[ \t]*\[/m)[0]!;
+  if ([...outsideBody.matchAll(/^[ \t]*(?:args|"args"|'args')[ \t]*=/gm)].length !== 1) return null;
+  const packages = parsed.values.filter((arg) => argNamesFlairPackage(arg.value));
+  if (packages.length !== 1) return null;
+  // An escape can decode into a token terminator. Never let the generic pin
+  // decoder approve only the version-looking prefix of that argument.
+  const spec = packages[0]!;
+  if (decodeWiringSpec(spec.value, FLAIR_MCP_PACKAGE)?.raw !== spec.value) return null;
+  return {
+    spec,
+    outside,
+  };
+}
 /**
  * A top-level header that CONTINUES the `[mcp_servers.flair]` section: the
  * exact header itself or one of its dotted subtables (`[mcp_servers.flair.env]`,
@@ -762,10 +788,10 @@ function activeCodexIdentity(section: string): string | null {
 /**
  * Decide the pin-only re-pin for an already-wired Codex `[mcp_servers.flair]`
  * TOML section, from the raw file text. Changes ONLY the `@tpsdev-ai/flair-mcp`
- * string span inside the single-line `args` element; every other byte of
+ * string span inside the `args` element; every other byte of
  * config.toml — env tables, other args, other servers, comments, quoting and
  * line endings — is identical. Fail-closed HOLDs (bytes untouched) when the
- * shape is not the builder-emitted one (flair#1834 A2 design item 3).
+ * table or package argument is ambiguous (flair#1834 A2 design item 3).
  */
 export function decideCodexPinOnly(raw: string, label: string): PinOnlyDecision {
   const display = "~/.codex/config.toml";
@@ -801,23 +827,24 @@ export function decideCodexPinOnly(raw: string, label: string): PinOnlyDecision 
     consumed += line.length + 1;
   }
   const section = raw.slice(headerIdx, sectionEnd);
-  // 3b. No multiline-string fence ANYWHERE between the header and the section
-  //     end (flair#1834 A2 round 4). A `"""` / `'''` string that opens AND
+  const args = codexArgs(section);
+  // 3b. No multiline-string fence outside the parsed args value between the
+  //     header and section end (flair#1834 A2 round 4). A string that opens AND
   //     closes inside the section can carry a line that looks like a flair
   //     sub-table header and an `args` line; the scan above accepts that fake
   //     sub-table as part of the section and the args match then rewrites the
   //     STRING's content — a wrong-span write. The editor never interprets a
-  //     line that could be inside a multiline string, so any such fence HOLDs
-  //     with the bytes untouched (the reason names the fence).
-  if (countText(section, '"""') > 0) return hold('a """ multiline string appears in [mcp_servers.flair] — refusing to rewrite it');
-  if (countText(section, "'''") > 0) return hold("a ''' multiline string appears in [mcp_servers.flair] — refusing to rewrite it");
+  //     line that could be inside an unrelated multiline string, so those
+  //     fences HOLD with the bytes untouched (the reason names the fence).
+  const outside = args?.outside ?? section;
+  if (countText(outside, '"""') > 0) return hold('a """ multiline string appears in [mcp_servers.flair] — refusing to rewrite it');
+  if (countText(outside, "'''") > 0) return hold("a ''' multiline string appears in [mcp_servers.flair] — refusing to rewrite it");
   // 4. Exactly one package token, and it is the args element.
-  const tokens = countFlairPackageTokens(section);
+  const tokens = args ? countFlairPackageTokens(outside) + 1 : countFlairPackageTokens(section);
   if (tokens === 0) return hold("no identifiable package argument in [mcp_servers.flair]");
   if (tokens > 1) return hold("the package appears more than once in [mcp_servers.flair] — refusing to rewrite it");
-  const argsMatch = section.match(CODEX_ARGS_LINE_RE);
-  if (!argsMatch || argsMatch.index === undefined) return hold("the [mcp_servers.flair] args is not a single-line double-quoted element");
-  const spec = argsMatch[1]!;
+  if (!args) return hold("the [mcp_servers.flair] args has no unambiguous package string");
+  const spec = args.spec.value;
   if (!(spec === FLAIR_MCP_PACKAGE || spec.startsWith(`${FLAIR_MCP_PACKAGE}@`))) {
     return hold("the package string in [mcp_servers.flair] is not on the args line — refusing to rewrite it");
   }
@@ -830,10 +857,10 @@ export function decideCodexPinOnly(raw: string, label: string): PinOnlyDecision 
   const newSpec = mcpServerSpec();
   if (spec === newSpec) return { result: { kind: "noop", oldPin: spec, newPin: newSpec, noIdentity: false, line: `${label}: already pinned to ${newSpec}` } };
   // 6. Replace ONLY the quoted spec span on the args line.
-  const lineAbsStart = headerIdx + argsMatch.index;
-  const lineAbsEnd = lineAbsStart + argsMatch[0]!.length;
-  const newLine = argsMatch[0]!.replace(`"${spec}"`, () => `"${newSpec}"`);
-  const newRaw = raw.slice(0, lineAbsStart) + newLine + raw.slice(lineAbsEnd);
+  const specStart = headerIdx + args.spec.start;
+  const specEnd = headerIdx + args.spec.end;
+  const replacement = args.spec.quote + newSpec + args.spec.quote;
+  const newRaw = raw.slice(0, specStart) + replacement + raw.slice(specEnd);
   const noIdentity = activeCodexIdentity(section) === null;
   return { result: { kind: "repinned", oldPin: spec, newPin: newSpec, noIdentity, line: null }, write: encodeText(newRaw) };
 }

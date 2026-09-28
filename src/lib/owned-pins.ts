@@ -20,6 +20,7 @@ import { withHome } from "./home.js";
 import {
   ALL_CLIENTS,
   clientConfigPath,
+  codexWiringPin,
   repinCodexPin,
   repinJsonMcpPin,
   type ClientId,
@@ -163,7 +164,9 @@ export function readOwnedPin(target: OwnedPinTarget, homeDir: string): OwnedPinR
     entryExists: block.entryExists,
     // Read the pin whenever the ENTRY exists — an entry without an identity is
     // still a pin we own and may refresh (flair#1834 A1 item 1).
-    pin: block.entryExists ? wiringPinString(decodeWiringSpec(text, FLAIR_MCP_PACKAGE)) : null,
+    pin: block.entryExists
+      ? wiringPinString(decodeWiringSpec(target.id === "codex" ? codexWiringPin(text) : text, FLAIR_MCP_PACKAGE))
+      : null,
   };
 }
 

@@ -277,7 +277,22 @@ const CONTINUITY_INVOCATION_RE =
 // Share whole-command recognition with the writer. A matching invocation
 // substring alone cannot establish the current form; pin direction is separate.
 const CONTINUITY_PACKAGE_COMMAND_RE =
-  /^(?:sh -c ')?FLAIR_AGENT_ID=[^\s'"]+(?: FLAIR_URL=[^\s'"]+)? npx -y (?:-p )?(@tpsdev-ai\/flair-mcp(?:@[^\s"']+)?) flair-continuity-capture(?: >\/dev\/null 2>\/dev\/null \|\| true')?$/;
+  /^FLAIR_AGENT_ID=([^\s'"]+)(?: FLAIR_URL=([^\s'"]+))? npx -y (?:-p )?(@tpsdev-ai\/flair-mcp(?:@[^\s"']+)?) flair-continuity-capture$/;
+
+/** The report and writer must decode the same package argument. */
+function continuityPackageArgument(command: string | null): string | null {
+  if (command === null || !command.includes(FLAIR_MCP_PACKAGE)) return null;
+  const prefix = "sh -c '";
+  const suffix = " >/dev/null 2>/dev/null || true'";
+  const invocation = command.startsWith(prefix) && command.endsWith(suffix)
+    ? command.slice(prefix.length, -suffix.length)
+    : command;
+  const match = invocation.match(CONTINUITY_PACKAGE_COMMAND_RE);
+  if (!match || !isHookCommandValueSafe(match[1]!) || (match[2] !== undefined && !isHookCommandValueSafe(match[2]))) {
+    return `${FLAIR_MCP_PACKAGE}@unknown`;
+  }
+  return match[3]!;
+}
 
 /**
  * The PostToolUse matcher written alongside our hook entry — the EXACT
@@ -390,13 +405,13 @@ function continuityEventReport(config: any, event: ContinuityHookEvent): Continu
   const hook = found.group.hooks[found.hookIndex];
   const command: string = typeof hook?.command === "string" ? hook.command : "";
   const matcher: string | undefined = typeof found.group?.matcher === "string" ? found.group.matcher : undefined;
+  const pinText = continuityPackageArgument(command);
   const shapeOk =
     hook?.type === "command" &&
-    CONTINUITY_PACKAGE_COMMAND_RE.test(command) &&
     CONTINUITY_INVOCATION_RE.test(command) &&
     hookCommandIsSilenced(command);
   const matcherOk = event !== "PostToolUse" || matcher === CONTINUITY_POST_TOOL_USE_MATCHER;
-  const spec = decodeWiringSpec(command, FLAIR_MCP_PACKAGE);
+  const spec = decodeWiringSpec(pinText ?? "", FLAIR_MCP_PACKAGE);
   const pinOk = spec?.token.kind === "none" || spec?.token.kind === "version";
   const reason = !spec || pinOk ? undefined
     : "pin " + (spec?.token.kind ?? "malformed") + ": " + (spec?.token.value ?? "missing package");
@@ -482,9 +497,7 @@ function decideContinuityWrite(existingCommand: string | null, entryLabel: strin
   // No package reference means a shape repair, not an unreadable pin (#1819).
   // Keep the unknown sentinel for package-bearing commands whose argument we
   // cannot locate safely; never decode the whole command as a pin (#1848).
-  const pinText = existingCommand === null || !existingCommand.includes(FLAIR_MCP_PACKAGE)
-    ? null
-    : existingCommand.match(CONTINUITY_PACKAGE_COMMAND_RE)?.[1] ?? `${FLAIR_MCP_PACKAGE}@unknown`;
+  const pinText = continuityPackageArgument(existingCommand);
   const decision = decidePinWrite({
     pkg: FLAIR_MCP_PACKAGE,
     entry: entryLabel,

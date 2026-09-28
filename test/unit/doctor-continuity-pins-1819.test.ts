@@ -8,6 +8,7 @@ import {
   buildSessionStartHookCommand,
   checkContinuityCaptureHooks,
   computeContinuityHookInstall,
+  isHookCommandValueSafe,
   CONTINUITY_CAPTURE_HOOK_MARKER,
   CONTINUITY_POST_TOOL_USE_MATCHER,
 } from "../../src/doctor-client.ts";
@@ -449,3 +450,80 @@ for (const event of events) {
     }, 30_000);
   }
 }
+
+// B2: report, dry-run and actual writer classify the same captured argument.
+// Matcher drift makes even a valid version command require a shape repair.
+const parityCases: Array<{ label: string; command: string; pin: string | null; held?: boolean; reason?: string }> = [
+  { label: "behind", command: command("0.0.1"), pin: "0.0.1" },
+  { label: "current", command: command(flairCliVersion()), pin: flairCliVersion() },
+  { label: "bare", command: command(), pin: null },
+  { label: "unsilenced", command: command("0.0.1").slice(7, -" >/dev/null 2>/dev/null || true'".length), pin: "0.0.1" },
+  { label: "legacy without -p", command: command("0.0.1").replace(" -p ", " "), pin: "0.0.1" },
+  { label: "safe builder values", command: buildContinuityCaptureHookCommand("a.Z_0:/-", url, "0.0.1"), pin: "0.0.1" },
+  { label: "ahead", command: command("99.0.0"), pin: "99.0.0", held: true },
+  { label: "tag", command: command("latest"), pin: "latest", held: true, reason: "pin range-or-tag: latest" },
+  { label: "source", command: command("file:adapter"), pin: "file:adapter", held: true, reason: "pin unsupported: file:adapter" },
+  { label: "missing package", command: `sh -c 'FLAIR_AGENT_ID=fixture FLAIR_URL=${url} ${CONTINUITY_CAPTURE_HOOK_MARKER} >/dev/null 2>/dev/null || true'`, pin: null },
+  { label: "unmatched wrapper", command: command("0.0.1").slice(7), pin: "unknown", held: true, reason: "pin malformed: unknown" },
+  { label: "duplicate assignment", command: command("0.0.1").replace("npx", "FLAIR_AGENT_ID=other npx"), pin: "unknown", held: true, reason: "pin malformed: unknown" },
+];
+for (const value of ["@tpsdev-ai/flair-mcp@latest", "fixture;true", "$(true)", "fixture=other"]) {
+  for (const field of ["FLAIR_AGENT_ID", "FLAIR_URL"]) {
+    parityCases.push({
+      label: `builder-rejected ${field} ${value}`,
+      command: command("0.0.1").replace(`${field}=${field === "FLAIR_AGENT_ID" ? agent : url}`, `${field}=${value}`),
+      pin: "unknown", held: true, reason: "pin malformed: unknown",
+    });
+  }
+}
+
+for (const event of events) {
+  for (const c of parityCases) {
+    test(`B2 report/dry-run/writer parity ${event}: ${c.label}`, () => {
+      const sibling = command("0.0.1");
+      const f = fixture(event === "PostToolUse" ? c.command : sibling, event === "Stop" ? c.command : sibling, "Read");
+      const report = checkContinuityCaptureHooks(f.home);
+      const entry = event === "PostToolUse" ? report.postToolUse : report.stop;
+      expect(report.state).toBe("stale");
+      expect(entry.reason).toBe(c.reason);
+      const planned = computeContinuityHookInstall(JSON.parse(f.bytes), agent, url);
+      expect(planned.changed).toBe(!c.held);
+      expect(planned.decision?.action ?? null).toBe(c.held ? "hold" : null);
+      const reported = doctorBlock(f.doctor());
+      const dry = f.doctor(["--fix", "--dry-run"]);
+      expect(readFileSync(f.settings, "utf8")).toBe(f.bytes);
+      if (c.held) {
+        const advice = writerHoldAdvice(f);
+        expect(reported).toContain(advice);
+        expect(doctorBlock(dry)).toContain(advice);
+        expect(dry).not.toContain("Would rewrite the continuity capture hooks");
+        expect(reported).not.toContain("flair doctor --fix");
+        expect(planned.decision?.line).toContain(c.pin!);
+        if (c.reason) expect(reported).toContain(c.reason);
+      } else {
+        expect(entry.reason).toBeUndefined();
+        expect(reported).toContain("flair doctor --fix");
+        expect(dry).toContain("Would rewrite the continuity capture hooks");
+        expect(planned.newConfig.hooks[event][0].hooks[0].command).toBe(command(c.pin));
+      }
+      const fixed = f.doctor(["--fix"]);
+      if (c.held) {
+        expect(doctorBlock(fixed)).toContain(writerHoldAdvice(f));
+        expect(readFileSync(f.settings, "utf8")).toBe(f.bytes);
+      } else {
+        expect(fixed).toContain("wired the continuity capture hooks");
+        expect(JSON.parse(readFileSync(f.settings, "utf8"))).toEqual(planned.newConfig);
+        expect(checkContinuityCaptureHooks(f.home).state).toBe("installed");
+      }
+    }, 90_000);
+  }
+}
+
+test("B2 command recognition uses the builder's env value contract", () => {
+  for (const value of ["@tpsdev-ai/flair-mcp@latest", "fixture;true", "$(true)", "fixture=other"]) {
+    expect(isHookCommandValueSafe(value)).toBe(false);
+    expect(() => buildContinuityCaptureHookCommand(value, url)).toThrow();
+    expect(() => buildContinuityCaptureHookCommand(agent, value)).toThrow();
+  }
+  expect(() => buildContinuityCaptureHookCommand("a.Z_0:/-", url)).not.toThrow();
+});
