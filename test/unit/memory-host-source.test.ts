@@ -961,26 +961,56 @@ describe("round 13/15 — the unselected read keeps the caller's conditions; the
     expect(g.status).toBe(400); // assertion: 400
   });
 
-  it("(b2c) an ITERABLE query that also carries a select keeps its conditions (and limit/offset/sort)", async () => {
-    // The accepted non-array iterable branch used to keep only the conditions and
-    // drop the read options, so a bounded/sorted scope read silently became an
-    // unbounded one.
+  it("(b2c) an ITERABLE query that carries a select is REFUSED with 400 before the base read", async () => {
+    // round 16 (blocker 3): the accepted contract is a plain array of conditions,
+    // or a plain object query. A non-array iterable (a Set) that carries a
+    // selection is not a supported shape — it is refused before the base read.
     seedMemory({ id: "mem-b2c-a", agentId: "agent-a", visibility: "shared", content: "keep" });
-    seedMemory({ id: "mem-b2c-b", agentId: "agent-b", visibility: "shared", content: "drop" });
     const iter: any = new Set([{ attribute: "agentId", comparator: "equals", value: "agent-a" }]);
     iter.select = ["id", "agentId"];
     iter.limit = 5;
-    iter.offset = 0;
-    iter.sort = { attribute: "createdAt", descending: true };
-    const out: any[] = [];
-    for await (const r of await makeMemory(agentCtx("agent-b")).search(iter)) out.push(r);
-    expect(out.map((r) => r.id)).toEqual(["mem-b2c-a"]); // assertion: the caller's iterable condition survived
-    const base = harnessState.lastBaseSearchQuery as any;
-    expect(Array.isArray(base?.conditions)).toBe(true); // assertion: conditions reached the base read
-    expect(base.limit).toBe(5); // assertion: limit preserved
-    expect(base.offset).toBe(0); // assertion: offset preserved
-    expect(base.sort).toEqual({ attribute: "createdAt", descending: true }); // assertion: sort preserved
-    expect(base.select).toBeUndefined(); // assertion: the caller's select did not reach the base read
+    const res: any = await makeMemory(agentCtx("agent-b")).search(iter);
+    expect(res instanceof Response).toBe(true); // assertion: refused
+    expect(res.status).toBe(400); // assertion: 400
+    expect(harnessState.lastBaseSearchQuery).toBeNull(); // assertion: the base read did NOT run
+  });
+
+  // round 16 (blocker 2): presence is key-based, and the array must be plain.
+  it("(b2d) an explicitly NULL select is PRESENT and refused with 400", async () => {
+    seedMemory({ id: "mem-b2d", agentId: "agent-a", visibility: "shared", content: "x" });
+    const res: any = await makeMemory(agentCtx("agent-b")).get({ id: "mem-b2d", select: null });
+    expect(res instanceof Response).toBe(true); // assertion: refused
+    expect(res.status).toBe(400); // assertion: 400
+  });
+
+  it("(b2e) a NON-ENUMERABLE option attached to the selection array is refused with 400", async () => {
+    seedMemory({ id: "mem-b2e", agentId: "agent-a", visibility: "shared", content: "x" });
+    const select: any = ["id", "agentId"];
+    Object.defineProperty(select, "asArray", { value: true, enumerable: false });
+    const res: any = await makeMemory(agentCtx("agent-b")).get({ id: "mem-b2e", select });
+    expect(res instanceof Response).toBe(true); // assertion: refused
+    expect(res.status).toBe(400); // assertion: 400
+  });
+
+  it("(b2f) a SYMBOL option attached to the selection array is refused with 400", async () => {
+    seedMemory({ id: "mem-b2f", agentId: "agent-a", visibility: "shared", content: "x" });
+    const select: any = ["id", "agentId"];
+    (select as any)[Symbol("asArray")] = true;
+    const res: any = await makeMemory(agentCtx("agent-b")).get({ id: "mem-b2f", select });
+    expect(res instanceof Response).toBe(true); // assertion: refused
+    expect(res.status).toBe(400); // assertion: 400
+  });
+
+  // round 16 (blocker 4): the selection is the LAST output step, so the opt-in
+  // trust block (added by an overlay) never appears in a selected output.
+  it("(b4t) an accepted selection returns EXACTLY its keys even with opt-in trust", async () => {
+    seedMemory({ id: "mem-b4t", agentId: "agent-a", visibility: "shared", content: "hello" });
+    const res: any = await makeMemory(agentCtx("agent-b")).get({
+      id: "mem-b4t",
+      select: ["id", "agentId"],
+      includeTrust: true,
+    });
+    expect(Object.keys(res).sort()).toEqual(["agentId", "id"]); // assertion: exactly the requested keys, no `trust`
   });
 
   it("(b3d) a `forceNulls` select (an option attached to the array) is refused with 400", async () => {

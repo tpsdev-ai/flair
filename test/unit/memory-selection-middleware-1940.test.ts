@@ -112,4 +112,25 @@ describe("flair#1940 round 15 — the middleware refuses a non-array selection B
       expect(memoryGetCalls, path).toBe(0); // assertion: the pre-read did NOT run
     }
   });
+
+  // round 16 (blocker 1): Harper DECODES the path before property parsing, so an
+  // encoded dot is a property Harper would apply — the middleware must refuse it
+  // BEFORE the pre-read, exactly like the literal-dot form.
+  it("an ENCODED dot property (%2E) is a 400 with ZERO Memory reads", async () => {
+    const mw = await loadMiddleware();
+    memoryGetCalls = 0;
+    const res: Response = await mw(makeRequest("/Memory/x%2EhostSource"), nextLayer);
+    expect(res.status).toBe(400); // assertion: refused
+    expect(memoryGetCalls).toBe(0); // assertion: the pre-read did NOT run
+  });
+
+  // round 16 (blocker 1): a content-type extension is NOT a property — Harper
+  // strips it before property parsing — so it must NOT be refused.
+  it("a content-type extension (.json) is NOT a property and runs the pre-read", async () => {
+    const mw = await loadMiddleware();
+    memoryGetCalls = 0;
+    const res: Response = await mw(makeRequest("/Memory/x.json"), nextLayer);
+    expect(res.status).toBe(200); // assertion: not refused
+    expect(memoryGetCalls).toBe(1); // assertion: the pre-read ran
+  });
 });

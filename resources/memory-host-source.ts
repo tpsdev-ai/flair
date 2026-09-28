@@ -164,9 +164,10 @@ export async function loadPointerRows(ids: readonly string[]): Promise<Map<strin
  * — a selection cannot drop them and cannot move the decision. An inline
  * pointer field on the Memory row is therefore removed (or replaced by the
  * gated rendering) before the caller's selection is applied to the projected
- * row, so no inline pointer field reaches a non-admin reader. (The two
- * selection shapes and the 400-on-other-shape refusal live in
- * caller-selection.ts; the handler applies them in Memory.get/Memory.search.)
+ * row, so no inline pointer field reaches a non-admin reader. (The selection
+ * contract — none, or an array of plain Memory schema attribute names, and a
+ * 400 for every other shape — lives in caller-selection.ts; the handler
+ * applies it in Memory.get/Memory.search.)
  */
 export async function projectRowsThroughPointers<T extends { id?: unknown }>(
   rows: readonly T[],

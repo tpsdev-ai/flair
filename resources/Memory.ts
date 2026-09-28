@@ -51,6 +51,7 @@ import {
   applyCallerSelection,
   carriesSelection,
   parseCallerSelection,
+  selectionBadRequest,
   type CallerSelection,
 } from "./caller-selection.js";
 import { RECORD_TYPES } from "./record-types.js";
@@ -92,11 +93,9 @@ function unselectedReadQuery(query: any): any {
   const isConditionIterable =
     !!query && typeof query === "object" && typeof query[Symbol.iterator] === "function" && !(query instanceof URLSearchParams);
   if (isConditionIterable && !("conditions" in query)) {
-    // A bare iterable of conditions can also carry the read options (operator,
-    // limit, offset, sort) as properties. Copy every non-selection, non-index
-    // property so the scope read runs on the SAME query the caller asked for.
-    // Dropping them would change limit/offset/sort (an unbounded or differently
-    // ordered scope read) while the caller-shaped output stayed the same.
+    // UNREACHABLE for a selection-carrying query: search() refuses a
+    // non-array iterable that carries a selection before it builds the read
+    // query (round 16, blocker 3). Kept as documentation of the shape.
     const rest: any = { conditions: Array.from(query) };
     for (const key of Object.keys(query)) {
       if (key === "select" || key === "property" || /^\d+$/.test(key)) continue;
@@ -881,14 +880,15 @@ export class Memory extends (databases as any).flair.Memory {
         record && typeof record === "object"
           ? (await projectRowsThroughPointers([record as any], auth.agentId))[0]
           : record;
-      const selected = applyCallerSelection(projectedRow, selection);
-      // Match main's post-read shaping: the opt-in trust block is attached only
-      // to an object that still carries `agentId` after the selection.
-      if (selected && typeof selected === "object" && typeof (selected as any).agentId === "string") {
-        const withHits = await applyHitStats(selected, ctx);
-        return attachTrust(withHits as any, wantsTrust(target, opts));
+      // round 16 (blocker 4): overlay hit stats and the opt-in trust block on
+      // the FULL projected row FIRST, then apply the caller's selection LAST, so
+      // the output carries EXACTLY the requested keys.
+      let row: any = projectedRow;
+      if (row && typeof row === "object" && typeof (row as any).agentId === "string") {
+        const withHits = await applyHitStats(row, ctx);
+        row = attachTrust(withHits as any, wantsTrust(target, opts));
       }
-      return selected;
+      return applyCallerSelection(row, selection);
     }
 
     const result = await memoryByIdReadGate.call(this, target, (t: any) => super.get(t));
@@ -976,6 +976,21 @@ export class Memory extends (databases as any).flair.Memory {
     let selection: CallerSelection = { shape: "none" };
     let readQuery = query;
     if (carriesSelection(query)) {
+      // round 16 (blocker 3): a non-array iterable query that carries a
+      // selection is not a supported shape. Only a plain array of conditions, or
+      // a plain object query, may carry the accepted array selection — refuse
+      // anything else before the base read.
+      if (
+        query &&
+        typeof query === "object" &&
+        typeof (query as any)[Symbol.iterator] === "function" &&
+        !Array.isArray(query) &&
+        !(query instanceof URLSearchParams)
+      ) {
+        return selectionBadRequest(
+          "an iterable query with a selection is not supported on a non-admin Memory read",
+        );
+      }
       const parsed = parseCallerSelection((query as any).select, (query as any).property);
       if (parsed instanceof Response) return parsed; // 400, no read
       selection = parsed;
@@ -991,9 +1006,16 @@ export class Memory extends (databases as any).flair.Memory {
       // pointer query for the whole set), then apply the caller's selection to
       // each projected row — the pointer decision already ran on the full row.
       const projected = await projectRowsThroughPointers(rows, readerAgentId);
-      for (const row of projected) yield applyCallerSelection(row, selection);
+      for (const row of projected) {
+        // round 16 (blocker 4): the hit-stat overlay runs on the FULL projected
+        // row and the caller's selection is applied LAST, so the output carries
+        // EXACTLY the requested keys — the overlay (which can add retrievalCount
+        // / lastRetrieved) never adds an unrequested one.
+        const overlaid = await applyHitStats(row, ctx);
+        yield applyCallerSelection(overlaid, selection);
+      }
     })();
-    return overlayHitStatsResult(joined, ctx);
+    return joined;
   }
 
   async post(content: any, context?: any) {

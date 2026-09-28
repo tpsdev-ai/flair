@@ -57,6 +57,7 @@ async function insertRow(harper: HarperInstance, table: string, record: Record<s
 let harper: HarperInstance;
 const author = mkAgent("hsr-author");
 const reader = mkAgent("hsr-reader");
+const admin = mkAgent("hsr-admin");
 const POINTER = { v: 1, host: "openclaw", kind: "run", id: "run-r12aaaa" };
 const CANON = JSON.stringify(POINTER);
 
@@ -65,12 +66,19 @@ const idUnbound = "hsr-inline-unbound";         // t2a: inline hostSource, no po
 const idBound = "hsr-bound-author";             // t2b: bound pointer, no inline field
 const idPrivate = "hsr-private-other";          // round 14 t5: private, owned by `author`
 const idClean = "hsr-clean-shared";             // round 15: clean shared row
-let CLEAN_CREATED_AT = "";                      // the clean row's server-set createdAt
+let CLEAN_CREATED_AT = "";                      // the clean row's writer-supplied createdAt
 
 beforeAll(async () => {
   harper = await startHarper();
   await seedAgent(harper, author);
   await seedAgent(harper, reader);
+  // A role "admin" Agent, so a read through it takes the UNCHANGED admin branch
+  // — Harper's own native select projection (the independent comparison for t7).
+  const adminSeed = await adminOp(harper, {
+    operation: "insert", database: "flair", table: "Agent",
+    records: [{ id: admin.id, name: admin.id, role: "admin", publicKey: admin.publicKey, createdAt: new Date().toISOString() }],
+  });
+  expect(adminSeed.status).toBe(200); // assertion: setup seeded the admin agent
 
   const tokArchived = randomUUID();
   const tokUnbound = randomUUID();
@@ -115,15 +123,18 @@ afterAll(async () => {
 });
 
 describe("flair#1940 round 15 — an accepted REST array equals Harper's own select; other shapes are 400 (real Harper, REST)", () => {
-  it("t7: a clean-row accepted array equals Harper's own select output", async () => {
+  it("t7: a clean-row accepted array equals Harper's own native select output", async () => {
     const res = await authFetch(harper, reader, "GET", `/Memory/${idClean}?select(content,createdAt)`);
     const body = await res.text();
-    // Harper's own select output for this row is exactly the named attributes in
-    // order (the row carries both) — what a native projection returns.
-    const harperNative = JSON.stringify({ content: "clean body", createdAt: CLEAN_CREATED_AT });
-    console.log("t7 handler body:", body, "| Harper's own select output:", harperNative, "status:", res.status);
+    // The comparison is an ACTUAL native Harper read, not a value built by hand:
+    // an admin read takes the unchanged branch, so Harper itself projects the
+    // same row with the same select. The non-admin handler output must equal it.
+    const native = await authFetch(harper, admin, "GET", `/Memory/${idClean}?select(content,createdAt)`);
+    const nativeBody = await native.text();
+    console.log("t7 handler body:", body, "| native Harper body:", nativeBody, "status:", res.status, native.status);
     expect(res.status).toBe(200); // assertion: the read succeeded
-    expect(body).toBe(harperNative); // assertion: the handler output == Harper's own select output
+    expect(native.status).toBe(200); // assertion: the native admin read succeeded
+    expect(body).toBe(nativeBody); // assertion: the handler output == Harper's OWN native select output
   }, 30_000);
 
   it("t6: a name not in the Memory schema is refused 400 over REST", async () => {

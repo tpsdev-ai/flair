@@ -27,6 +27,12 @@ describe("round 15 — restSelection reads Harper's REST selection and path-prop
     expect(asArr?.select).toEqual(["a", "b"]); // assertion: nested-list names
     expect((asArr?.select as any).asArray).toBe(true); // assertion: nested list → asArray option
     expect(restSelection("/Memory/x.hostSource", "")).toEqual({ property: "hostSource" }); // assertion: path property
+    // round 16 (blocker 1): Harper DECODES the path before property parsing, so
+    // an encoded dot is a dot — the middleware must see the same property.
+    expect(restSelection("/Memory/x%2EhostSource", "")).toEqual({ property: "hostSource" }); // assertion: encoded dot decoded
+    // ... and a content-type extension is NOT a property (Harper strips it).
+    expect(restSelection("/Memory/x.json", "")).toBeNull(); // assertion: .json is a content type, not a property
+    expect(restSelection("/Memory/x.cbor", "")).toBeNull(); // assertion: .cbor too
     expect(restSelection("/Memory/x", "")).toBeNull(); // assertion: neither form → null
   });
 

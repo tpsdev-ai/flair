@@ -36,6 +36,12 @@ export type CallerSelection =
 
 const DECLARED = new Set<string>(DECLARED_MEMORY_ATTRIBUTES as readonly string[]);
 
+// Harper's content-type extensions (Resource.ts EXTENSION_TYPES). A `.<ext>`
+// suffix on a path segment requests a content type, NOT a property — Harper
+// strips it before property parsing, so the middleware must not read it as a
+// `property` either.
+const EXTENSION_TYPES = new Set(["json", "cbor", "msgpack", "csv"]);
+
 /** The ONLY accepted selection name: a plain, DECLARED Memory schema attribute.
  *  Not the wildcard `*`, not a virtual `$...` resolver, not nested. */
 function isAcceptedName(name: unknown): name is string {
@@ -59,10 +65,16 @@ export function selectionBadRequest(
   );
 }
 
-/** True when a by-id target or a collection query carries a selection. Mirrors
- *  record-type-kit.ts makeByIdReadGate's own shaped-target test. */
+/** True when a by-id target or a collection query carries a selection. PRESENCE
+ *  is key-based: an explicitly null `select`/`property` is PRESENT (and therefore
+ *  refused downstream), never mistaken for absent. Mirrors record-type-kit.ts
+ *  makeByIdReadGate's own shaped-target test. */
 export function carriesSelection(holder: any): boolean {
-  return !!holder && typeof holder === "object" && (holder.select != null || holder.property != null);
+  return (
+    !!holder &&
+    typeof holder === "object" &&
+    (holder.select !== undefined || holder.property !== undefined)
+  );
 }
 
 /**
@@ -78,8 +90,10 @@ export function carriesSelection(holder: any): boolean {
  * a non-array `select`, or an array with attached options.
  */
 export function parseCallerSelection(select: unknown, property: unknown): CallerSelection | Response {
-  const hasSelect = select !== undefined && select !== null;
-  const hasProperty = property !== undefined && property !== null;
+  // PRESENCE is key-based: an explicitly `null` select/property is PRESENT (and
+  // therefore refused below), never mistaken for absent (round 16, blocker 2).
+  const hasSelect = select !== undefined;
+  const hasProperty = property !== undefined;
   if (!hasSelect && !hasProperty) return { shape: "none" };
   if (hasProperty) {
     return selectionBadRequest("`property` is not supported on a non-admin Memory read");
@@ -93,9 +107,12 @@ export function parseCallerSelection(select: unknown, property: unknown): Caller
   if (select.length === 0) {
     return selectionBadRequest("an empty selection is not supported on a non-admin Memory read");
   }
-  // Options attached to the selection array (`asArray`, `forceNulls`, an
-  // `operator`, ...) are refused: a plain array carries only its indices.
-  if (Object.keys(select).length !== select.length) {
+  // Options attached to the selection array are refused. Use OWN property names
+  // AND symbols (not just enumerable string keys): a non-enumerable option, or
+  // one set under a Symbol, is still an attached option. A plain array carries
+  // only its numeric indices (and `length`).
+  const attached = Object.getOwnPropertyNames(select).some((k) => k !== "length" && !/^\d+$/.test(k));
+  if (attached || Object.getOwnPropertySymbols(select).length > 0) {
     return selectionBadRequest("options attached to the selection array are not supported");
   }
   for (const name of select) {
@@ -154,7 +171,11 @@ export function restSelection(pathname: string, search: string): { select?: any;
       out.select = parts.length === 1 ? parts[0] : parts;
     }
   }
-  const dot = pathPropertyName(pathname);
+  // Harper DECODES the path before property parsing (RequestTarget.ts:128 —
+  // `this.id = decodeURIComponent(path)` — then Resource.ts:409 parsePath). So
+  // `%2E` is a dot to Harper, and the middleware must decide on the DECODED
+  // path or it will miss a property Harper would apply.
+  const dot = pathPropertyName(decodePath(pathname));
   if (dot !== null) out.property = dot;
   return out.select !== undefined || out.property !== undefined ? out : null;
 }
@@ -193,12 +214,28 @@ function selectArgs(search: string): string[] {
 }
 
 /** The `.<name>` property on the last path segment (`/Memory/<id>.<name>`), or
- *  null. Mirrors Resource.ts `parsePath` (everything after the FIRST dot). */
-function pathPropertyName(pathname: string): string | null {
-  const seg = pathname.split("/").filter(Boolean).pop() ?? "";
+ *  null. Mirrors Resource.ts `parsePath` on the DECODED path: a `.<name>` is a
+ *  property, EXCEPT a content-type extension (`json`/`cbor`/`msgpack`/`csv`),
+ *  which asks for a content type and is stripped before property parsing — so
+ *  `.<ext>` is never a `property`. */
+function pathPropertyName(decodedPathname: string): string | null {
+  const seg = decodedPathname.split("/").filter(Boolean).pop() ?? "";
   const dot = seg.indexOf(".");
   if (dot < 0 || dot === seg.length - 1) return null;
-  return decodeName(seg.slice(dot + 1));
+  const property = seg.slice(dot + 1);
+  if (EXTENSION_TYPES.has(property)) return null; // content-type request, not a property
+  return property;
+}
+
+/** Decode a pathname the way Harper does before property parsing; fall back to
+ *  the raw path when it is not valid percent-encoding (Harper would reject the
+ *  malformed request; the middleware should not crash on it). */
+function decodePath(pathname: string): string {
+  try {
+    return decodeURIComponent(pathname);
+  } catch {
+    return pathname;
+  }
 }
 
 function decodeName(raw: string): string {
