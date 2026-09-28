@@ -368,7 +368,7 @@ class MemoryApi {
     // row (resources/Memory.ts). Absent = omitted, zero behavior change.
     if (this.client.claimedClient) record.claimedClient = this.client.claimedClient;
 
-    const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${encodeURIComponent(id)}`, record, {
+    const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${encodeRecordId(id)}`, record, {
       signal: opts.signal,
     });
     // Merge the server response (deduplicated/matchedId/matchConfidence/
@@ -401,7 +401,7 @@ class MemoryApi {
   async update(id: string, content: string, opts: { preserveHistory?: boolean; usedMemoryIds?: string[] } = {}): Promise<Memory> {
     const existing = await this.get(id);
     if (!existing) {
-      throw new FlairError("PUT", `/Memory/${encodeURIComponent(id)}`, 404, `memory ${id} not found`);
+      throw new FlairError("PUT", `/Memory/${encodeRecordId(id)}`, 404, `memory ${id} not found`);
     }
 
     if (opts.preserveHistory) {
@@ -446,7 +446,7 @@ class MemoryApi {
       // `supersedes` being set also makes the server bypass the dedup gate
       // for this write (it's an intentional version link, not an ambiguous
       // new write).
-      const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${encodeURIComponent(newId)}`, record);
+      const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${encodeRecordId(newId)}`, record);
       return { ...record, ...(response ?? {}) } as unknown as Memory;
     }
 
@@ -459,7 +459,7 @@ class MemoryApi {
     if (Array.isArray(opts.usedMemoryIds) && opts.usedMemoryIds.length > 0) {
       merged.usedMemoryIds = opts.usedMemoryIds;
     }
-    const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${encodeURIComponent(id)}`, merged);
+    const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${encodeRecordId(id)}`, merged);
     return { ...merged, id, ...(response ?? {}) } as unknown as Memory;
   }
 
@@ -485,7 +485,7 @@ class MemoryApi {
 
   /** Get a memory by ID. */
   async get(id: string): Promise<Memory | null> {
-    try { return await this.client.request("GET", `/Memory/${encodeURIComponent(id)}`); }
+    try { return await this.client.request("GET", `/Memory/${encodeRecordId(id)}`); }
     catch (e) {
       if (e instanceof FlairError && e.status === 404) return null;
       throw e;
@@ -548,7 +548,7 @@ class MemoryApi {
 
   /** Delete a memory. */
   async delete(id: string): Promise<void> {
-    await this.client.request("DELETE", `/Memory/${encodeURIComponent(id)}`);
+    await this.client.request("DELETE", `/Memory/${encodeRecordId(id)}`);
   }
 }
 
@@ -593,6 +593,30 @@ class MemoryApi {
 export function canonicalRelationshipId(agentId: string, subject: string, predicate: string, object: string): string {
   const material = [agentId, subject, predicate, object].join("\u0000").toLowerCase();
   return createHash("sha256").update(material, "utf8").digest().subarray(0, 16).toString("base64url");
+}
+
+/**
+ * The one encoder for a record id used as the single dynamic path segment of a
+ * `/Memory/<id>` or `/Relationship/<id>` request (flair#1970). Percent-encoding
+ * makes an id with reserved URL characters (`#`, `?`, `/`, `%`, space, …) reach
+ * the server as ONE path segment that decodes back to the id, so it addresses
+ * exactly that record.
+ *
+ * REFUSES an id that is exactly `.` or `..`: percent-encoding leaves those
+ * unchanged, and URL normalization collapses `/Memory/.` to `/Memory/` and
+ * `/Memory/..` to `/`, so the sent path would not be the id (nor the signed
+ * path). Such an id cannot address its record, so it is an error, not a
+ * request. Exported so every in-repo caller that builds the same path can share
+ * one rule.
+ */
+export function encodeRecordId(id: string): string {
+  if (id === "." || id === "..") {
+    throw new Error(
+      `record id ${JSON.stringify(id)} is a URL path dot-segment ("." or ".."); ` +
+        `it cannot be addressed as one path segment of /Memory/<id> or /Relationship/<id>. Use a different id.`,
+    );
+  }
+  return encodeURIComponent(id);
 }
 
 class RelationshipApi {
@@ -650,14 +674,14 @@ class RelationshipApi {
     if (input.validTo !== undefined) record.validTo = input.validTo;
     if (input.source !== undefined) record.source = input.source;
 
-    const response = await this.client.request<Record<string, unknown>>("PUT", `/Relationship/${encodeURIComponent(id)}`, record);
+    const response = await this.client.request<Record<string, unknown>>("PUT", `/Relationship/${encodeRecordId(id)}`, record);
     return { ...record, id, agentId: this.client.agentId, ...(response ?? {}) } as unknown as Relationship;
   }
 
   /** Get a relationship by canonical id (or any id, e.g. one openclaw wrote
    *  under its own convention). Returns null on 404 (not found / not yours). */
   async get(id: string): Promise<Relationship | null> {
-    try { return await this.client.request("GET", `/Relationship/${encodeURIComponent(id)}`); }
+    try { return await this.client.request("GET", `/Relationship/${encodeRecordId(id)}`); }
     catch (e) {
       if (e instanceof FlairError && e.status === 404) return null;
       throw e;
@@ -666,7 +690,7 @@ class RelationshipApi {
 
   /** Delete a relationship by id. */
   async delete(id: string): Promise<void> {
-    await this.client.request("DELETE", `/Relationship/${encodeURIComponent(id)}`);
+    await this.client.request("DELETE", `/Relationship/${encodeRecordId(id)}`);
   }
 }
 

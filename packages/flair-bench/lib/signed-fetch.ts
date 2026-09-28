@@ -64,9 +64,24 @@ export async function signedFetch(
   p: string,
   body?: unknown,
 ): Promise<SignedResponse> {
-  const res = await fetch(`${harper.httpURL}${p}`, {
+  // Join the route onto the base URL's OWN path with exactly one slash between
+  // them, preserving any path the base carries (a base like http://h/flair still
+  // addresses /flair/...). Build the FINAL url once, then sign the path the
+  // request actually carries (#1970). A base URL with a query string or fragment
+  // is refused before any request; the route's own query is what gets signed.
+  const parsedBase = new URL(harper.httpURL);
+  // A bare trailing "?" or "#" reports an empty search/hash but still makes the
+  // join drop the base's path, so refuse ANY query or fragment delimiter.
+  if (parsedBase.href.includes("?") || parsedBase.href.includes("#")) {
+    throw new Error(`signedFetch: refusing base URL "${harper.httpURL}": a base URL must not carry a query string or fragment.`);
+  }
+  // Join against the PARSED base, which new URL() has normalized (for example
+  // surrounding whitespace removed), so the path sent is the path the base names.
+  const url = new URL(p.replace(/^\/+/, ""), `${parsedBase.href.replace(/\/+$/, "")}/`);
+  const signedPath = `${url.pathname}${url.search}`;
+  const res = await fetch(url, {
     method,
-    headers: { Authorization: ed25519Header(agent, method, p), "Content-Type": "application/json" },
+    headers: { Authorization: ed25519Header(agent, method, signedPath), "Content-Type": "application/json" },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();

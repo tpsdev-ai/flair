@@ -72,16 +72,44 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
 
 // ─── HTTP middleware ──────────────────────────────────────────────────────────
 
+// Flair's clients use exactly these HTTP methods. Harper routes other methods
+// to resource handlers as well; refusing them here, before any other branch of
+// the default REST middleware, keeps the tables it serves to the methods their
+// handlers are written and tested for. (Separately mounted routes such as /mcp
+// and OAuth discovery have their own dispatch chains and method handling.)
+const ALLOWED_HTTP_METHODS: ReadonlySet<string> = new Set([
+  "GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE",
+]);
+
 server.http(async (request: any, nextLayer: any) => {
+  // ── HTTP method allowlist, FIRST ───────────────────────────────────────────
+  // Before the public-path passthrough and before any auth branch, so no path
+  // and no caller (anonymous, agent or admin) can reach a handler through any
+  // other method.
+  // Exact match: HTTP methods are case-sensitive, and these are the spellings
+  // Flair's clients send.
+  const httpMethod = String(request.method ?? "");
+  if (!ALLOWED_HTTP_METHODS.has(httpMethod)) {
+    return new Response(JSON.stringify({
+      error: "method_not_allowed",
+      detail: `Flair accepts ${[...ALLOWED_HTTP_METHODS].join(", ")}.`,
+    }), {
+      status: 405,
+      headers: { "content-type": "application/json", allow: [...ALLOWED_HTTP_METHODS].join(", ") },
+    });
+  }
+
   const url = new URL(request.url, "http://" + (request.headers.get("host") || "localhost"));
 
-  // ── Rate limiting, FIRST ───────────────────────────────────────────────────
+  // ── Rate limiting, right after the method check ────────────────────────────
   // Before the public-path passthrough below (the OAuth endpoints all sit on it,
   // so a hook placed after it would never run for them), and before anything
-  // reads a credential.
+  // reads a credential. A request refused by the method check above never
+  // reaches the limiter, and consumes no budget.
   //
   // Ordering is a security property, not tidiness. The counter is consumed for
-  // every request to a throttled endpoint whether or not the credential that
+  // every request to a throttled endpoint that passes the method check, whether
+  // or not the credential that
   // came with it was any good — if only failures were counted, "did this consume
   // budget" would answer "was that credential valid", which is a cleaner
   // enumeration oracle than the 400 the endpoint already returns. Because the

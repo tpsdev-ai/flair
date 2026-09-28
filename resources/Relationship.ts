@@ -7,6 +7,7 @@ import {
   buildProvenance,
   makeAuthGate,
   makeReadScope,
+  makeScopedSearch,
   makeByIdReadGate,
   resolveAuthGate,
   stampAttribution,
@@ -23,6 +24,7 @@ import { RECORD_TYPES } from "./record-types.js";
 // `.ownerField` against RECORD_TYPES.Relationship — not for any other
 // runtime consumer.
 export const relationshipReadScope = makeReadScope(RECORD_TYPES.Relationship.readScope, RECORD_TYPES.Relationship.ownerField);
+const relationshipScopedSearch = makeScopedSearch(relationshipReadScope);
 const relationshipByIdReadGate = makeByIdReadGate(relationshipReadScope);
 // See makeAuthGate's doc (record-type-kit.ts): must be wired as a genuine
 // prototype method below, never a class-field assignment — Harper's
@@ -88,16 +90,7 @@ export class Relationship extends (databases as any).flair.Relationship {
     if (gate.kind === "unfiltered") return super.search(query);
 
     // Non-admin agent: scope to own relationships.
-    const scope = await relationshipReadScope(gate.agentId);
-    const agentCondition = scope.condition;
-    if (!query?.conditions) {
-      return super.search({ conditions: [agentCondition], ...(query || {}) });
-    }
-    return super.search({
-      ...query,
-      conditions: [agentCondition, { conditions: query.conditions, operator: query.operator || "and" }],
-      operator: "and",
-    });
+    return relationshipScopedSearch(gate.agentId, query, (q: any) => super.search(q));
   }
 
   /**

@@ -460,8 +460,16 @@ describe("tools/call — scopes to the resolved agent (no forging)", () => {
           { sub: "sub-bob" },
         ));
         const body = await parse(res);
-        const payload = body.result.structuredContent ?? body.result;
-        expect(JSON.stringify(payload)).toContain("invalid_visibility");
+        if (typeof bad === "string") {
+          // An unrecognised string value: the memory_store wrapper's invalid_visibility.
+          const payload = body.result.structuredContent ?? body.result;
+          expect(JSON.stringify(payload)).toContain("invalid_visibility");
+        } else {
+          // A non-string value never reaches the tool: tools/call refuses an
+          // argument that does not match the declared type.
+          expect(body.error?.code).toBe(-32602);
+          expect(String(body.error?.message)).toContain('"visibility"');
+        }
         // The load-bearing half: nothing reached the Memory resource. A guard
         // that reports an error AFTER writing has prevented nothing.
         expect(lastCall).toBeNull();
@@ -962,5 +970,104 @@ describe("body size cap", () => {
     // Empty body → not valid JSON-RPC → parse error, not a size rejection.
     const body = JSON.parse(res.body);
     expect(body.error.code).toBe(-32700);
+  });
+});
+
+// ─── tools/call argument types ───────────────────────────────────────────────
+describe("tools/call — arguments must match the tool's declared types", () => {
+  // A helper, not an inline assignment: TypeScript would otherwise narrow
+  // lastCall to null for the rest of the test.
+  function resetLastCall() { lastCall = null; }
+
+  beforeEach(() => {
+    credentials = [{ principalId: "agt_bob", kind: "idp", idpSubject: "sub-bob", status: "active" }];
+  });
+
+  async function call(name: string, args: any) {
+    const res = await mcpHandler(post(
+      { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name, arguments: args } },
+      { sub: "sub-bob" },
+    ));
+    return parse(res);
+  }
+
+  const ID_TOOLS = ["memory_get", "memory_update", "memory_basement", "memory_restore", "memory_delete", "skill_get"];
+  for (const name of ID_TOOLS) {
+    it(`${name}: a non-string or empty id is refused before the tool runs`, async () => {
+      for (const id of [42, true, ["m1"], { m: 1 }, ""]) {
+        resetLastCall();
+        const body = await call(name, { id, content: "x" });
+        expect(body.error?.code).toBe(-32602);
+        expect(String(body.error?.message)).toContain(`invalid arguments for ${name}`);
+        expect(lastCall).toBeNull();
+      }
+    });
+  }
+
+  it("a mistyped optional argument, a mistyped array item and a non-object arguments value are refused", async () => {
+    for (const [name, args] of [
+      ["memory_search", { query: "hi", limit: "3" }],
+      ["memory_store", { content: "x", tags: ["a", 1] }],
+      ["memory_search", ["hi"]],
+      ["memory_search", { query: { text: "hi" } }],
+      ["memory_search", {}],
+    ] as const) {
+      resetLastCall();
+      const body = await call(name, args);
+      expect(body.error?.code).toBe(-32602);
+      expect(lastCall).toBeNull();
+    }
+  });
+
+  it("conforming arguments still reach the tool (null optionals are treated as absent)", async () => {
+    resetLastCall();
+    const body = await call("memory_search", { query: "hi", limit: 3, includeTrust: null });
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("SemanticSearch.post");
+  });
+
+  it("a null optional argument is not forwarded to the resource", async () => {
+    resetLastCall();
+    const body = await call("memory_store", { content: "x", tags: null, type: null });
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("Memory.post");
+    // Exactly what an omitted argument gives: the wrapper's default for type,
+    // and no tags value (never null).
+    expect(lastCall?.args?.tags).toBeUndefined();
+    expect(lastCall?.args?.type).toBe("session");
+  });
+
+  it("an undeclared id on a tool without an id argument is left to the tool, as before", async () => {
+    resetLastCall();
+    const body = await call("memory_search", { query: "hi", id: 42 });
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("SemanticSearch.post");
+  });
+});
+
+describe("checkToolArguments — every native tool's declared property types are enforced", () => {
+  it("refuses a wrong-typed value and accepts a right-typed one for every declared property", async () => {
+    const { TOOLS } = await import("../../resources/mcp-tools.ts");
+    const { checkToolArguments } = await import("../../resources/mcp-tool-arguments.ts");
+    const sample: Record<string, any> = { string: "s", number: 1, integer: 1, boolean: true, array: [], object: {} };
+    const wrong: Record<string, any> = { string: 1, number: "1", integer: 1.5, boolean: "true", array: {}, object: [] };
+    let checked = 0;
+    for (const [name, t] of Object.entries<any>(TOOLS)) {
+      const schema = t.def.inputSchema ?? {};
+      const base: Record<string, any> = {};
+      for (const req of schema.required ?? []) {
+        const type = schema.properties?.[req]?.type;
+        base[req] = sample[Array.isArray(type) ? type[0] : type] ?? "s";
+      }
+      expect(checkToolArguments(schema, base), `${name} base`).toBeNull();
+      for (const [prop, def] of Object.entries<any>(schema.properties ?? {})) {
+        const type = Array.isArray(def.type) ? def.type[0] : def.type;
+        if (!(type in wrong)) continue;
+        expect(checkToolArguments(schema, { ...base, [prop]: sample[type] }), `${name}.${prop} right`).toBeNull();
+        expect(checkToolArguments(schema, { ...base, [prop]: wrong[type] }), `${name}.${prop} wrong`).not.toBeNull();
+        checked++;
+      }
+    }
+    expect(checked).toBeGreaterThan(40);
   });
 });

@@ -133,8 +133,9 @@ describe("canary-verdict — a SemVer prerelease is never promoted (A1c, #1671)"
 
   test("F2: only an exact <major>.<minor>.<patch> is promoted; every other label prints the note, no dist-tag", () => {
     // A whitelist (F2 of #1671, A1c): is_release matches ONLY <major>.<minor>.<patch>.
-    // A blacklist (matching a -<prerelease> part) misses 1.2.3-- (whose first - is a valid
-    // SemVer prerelease token) and build metadata (1.2.3+build) — both would wrongly promote.
+    // A blacklist that recognizes only - followed by an alphanumeric prerelease
+    // identifier misses 1.2.3-- (whose identifier is -), and one that looks only for
+    // a - label misses build metadata (1.2.3+build); both would wrongly promote.
     const rel = run(["pass", "1.2.3", RUN_URL, "--os", "ubuntu-latest", "--package-set-digest", CERTIFIED_DIGEST]);
     expect(rel.status).toBe(0);
     expect(rel.stderr).toBe("");

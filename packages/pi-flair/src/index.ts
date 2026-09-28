@@ -2,17 +2,18 @@
  * Pi Extension for Flair Memory Access
  *
  * Adds Flair memory tools to pi sessions:
- *   - memory_search(agentId, query, limit)  — semantic search
- *   - memory_store(agentId, content, durability) — save memories
- *   - bootstrap(agentId, maxTokens) — cold-start context
+ *   - memory_search(query, limit?) — semantic search
+ *   - memory_store(content, durability?, tags?) — save memories
+ *   - bootstrap(maxTokens?) — cold-start context
  *
- * Configuration:
- *   - flair_url (default: http://127.0.0.1:19926)
- *   - agentId (required, via FLAIR_AGENT_ID env var)
- *   - max_recall_results (default: 5)
- *   - max_bootstrap_tokens (default: 4000)
- *   - auto_capture (default: false) — auto-save session context to memory
- *   - auto_recall (default: false) — auto-load bootstrap on session start
+ * Configuration (environment variables read by getConfig):
+ *   - FLAIR_AGENT_ID (required)
+ *   - FLAIR_URL (default: http://127.0.0.1:19926)
+ *   - FLAIR_KEY_PATH
+ *   - FLAIR_MAX_RECALL_RESULTS (default: 5)
+ *   - FLAIR_MAX_BOOTSTRAP_TOKENS (default: 4000)
+ *   - FLAIR_AUTO_CAPTURE (default: false) — "true" attempts to store a qualifying assistant entry at turn end
+ *   - FLAIR_AUTO_RECALL (default: false) — "true" auto-loads bootstrap on session start
  *
  * Usage:
  *   1. Install: pi install npm:@tpsdev-ai/pi-flair
@@ -22,13 +23,14 @@
  *      {
  *        "packages": ["npm:@tpsdev-ai/pi-flair"]
  *      }
- *   3. Or use environment variables:
+ *   3. After installing the extension, configure its required identity in the
+ *   environment that launches Pi:
  *      export FLAIR_AGENT_ID=my-agent
  *      export FLAIR_URL=http://127.0.0.1:19926
  *   4. Restart pi
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { FlairClient, FlairError, type FlairClientConfig, type BootstrapResult } from "@tpsdev-ai/flair-client";
 
@@ -103,21 +105,6 @@ function getConfig(pi: ExtensionAPI): PluginConfig {
     auto_capture: process.env.FLAIR_AUTO_CAPTURE === "true",
     auto_recall: process.env.FLAIR_AUTO_RECALL === "true", // default false (user must explicitly opt-in)
   };
-}
-
-function getAgentId(config: PluginConfig, ctx: ExtensionContext): string {
-  if (config.agentId) return config.agentId;
-  // Try to infer from working directory
-  const cwd = ctx.cwd;
-  const lastSlash = cwd.lastIndexOf("/");
-  let agentId: string;
-  if (lastSlash >= 0) {
-    agentId = cwd.slice(lastSlash + 1);
-  } else {
-    agentId = cwd;
-  }
-  console.warn(`Flair: agentId not configured, falling back to cwd segment "${agentId}". Set FLAIR_AGENT_ID to silence this warning.`);
-  return agentId;
 }
 
 function createFlairClient(config: PluginConfig): FlairClient {
@@ -244,7 +231,7 @@ export default function (pi: ExtensionAPI) {
             "permanent — inviolable facts, identity, explicit never-forget (e.g., 'my name is Nathan')\n" +
             "persistent — key decisions and lessons to recall weeks later (e.g., 'PR review process')\n" +
             "standard — default working memory, recent context (e.g., 'discussed auth flow today')\n" +
-            "ephemeral — scratch state, auto-expires 72h (e.g., 'currently debugging issue #42')",
+            "ephemeral — scratch state; this tool's writes receive a server-configured expiresAt (24 hours by default); search and bootstrap skip expired rows (e.g., 'currently debugging issue #42')",
         }),
       ),
       tags: Type.Optional(Type.Array(Type.String(), { description: "Array of tag strings" })),

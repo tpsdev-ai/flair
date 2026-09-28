@@ -23,6 +23,23 @@ export type BridgeCli = {
 
 let cli: BridgeCli;
 
+/**
+ * Percent-encode a Memory id so it addresses exactly that record as ONE path
+ * segment (flair#1970). REFUSES an id that is exactly `.` or `..`: percent-
+ * encoding leaves those unchanged and URL normalization collapses `/Memory/.`
+ * to `/Memory/` and `/Memory/..` to `/`, so the sent path would not be the id
+ * (nor the signed path). Such an id cannot address its record.
+ */
+function encodeRecordId(id: string): string {
+  if (id === "." || id === "..") {
+    throw new Error(
+      `record id ${JSON.stringify(id)} is a URL path dot-segment ("." or ".."); ` +
+        `it cannot be addressed as one path segment of /Memory/<id>. Use a different id.`,
+    );
+  }
+  return encodeURIComponent(id);
+}
+
 /** Bind shared CLI helpers. cli.ts calls this immediately before register(program). */
 export function bindCli(fns: BridgeCli): void {
   cli = fns;
@@ -159,6 +176,22 @@ export function register(program: Command): void {
       }
 
       const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
+
+      // A Flair base URL is an origin with an optional path; a query string or
+      // fragment on the base is refused before anything is imported — including
+      // for an empty or dry-run import, and including a bare trailing "?" or "#"
+      // (new URL reports those as an empty search/hash, but the join would drop
+      // the base's path). The route's own query string is what gets signed. #1970.
+      const parsedBase = new URL(baseUrl);
+      if (parsedBase.href.includes("?") || parsedBase.href.includes("#")) {
+        console.error(`Bridge import failed: refusing base URL "${baseUrl}": a Flair base URL must not carry a query string or fragment.`);
+        process.exit(1);
+      }
+      // Routes join against the PARSED base, which new URL() has normalized (for
+      // example surrounding whitespace removed), so the path sent is the path the
+      // base names.
+      const joinBase = `${parsedBase.href.replace(/\/+$/, "")}/`;
+
       const ctx = makeContext({ bridge: name });
 
       // Memory POST: Ed25519-signed when an agent key is available, fall back
@@ -167,17 +200,26 @@ export function register(program: Command): void {
       const putMemory = async (body: import("../bridges/runtime/import-runner.js").PutMemoryBody): Promise<void> => {
         const headers: Record<string, string> = { "content-type": "application/json" };
         const keyPath: string | null = opts.key ?? resolveKeyPath(body.agentId);
+        // One percent-encoded path segment, built once. Join the route onto the
+        // base URL's OWN path with exactly one slash between them, preserving any
+        // path the base carries (a base like http://h/flair still addresses
+        // /flair/Memory/<id>). Build the FINAL url once, then sign the path the
+        // request actually carries (#1970); ids of ordinary characters address
+        // the same record as before.
+        const memoryPath = `/Memory/${encodeRecordId(body.id)}`;
+        const memoryUrl = new URL(memoryPath.replace(/^\/+/, ""), joinBase);
+        const signedPath = `${memoryUrl.pathname}${memoryUrl.search}`;
         if (keyPath) {
-          headers["authorization"] = buildEd25519Auth(body.agentId, "PUT", `/Memory/${body.id}`, keyPath);
+          headers["authorization"] = buildEd25519Auth(body.agentId, "PUT", signedPath, keyPath);
         }
-        const res = await fetch(`${baseUrl}/Memory/${encodeURIComponent(body.id)}`, {
+        const res = await fetch(memoryUrl, {
           method: "PUT",
           headers,
           body: JSON.stringify(body),
         });
         if (!res.ok) {
           const text = await res.text().catch(() => "");
-          throw new Error(`PUT /Memory/${body.id} → ${res.status}: ${text || res.statusText}`);
+          throw new Error(`PUT ${signedPath} → ${res.status}: ${text || res.statusText}`);
         }
       };
 

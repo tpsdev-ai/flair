@@ -10,6 +10,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import type { FlairClient } from "@tpsdev-ai/flair-client";
+import { encodeRecordId } from "./record-id-path.js";
 import {
   STDIO_TOOL_DESCRIPTORS,
   toStdioMcpToolDef,
@@ -310,7 +311,7 @@ const skill_store: StdioHandler = async (
       tags,
       claimedClient: flair.claimedClient,
     });
-    const result = await flair.request<Record<string, unknown>>("PUT", `/Memory/${id}`, body);
+    const result = await flair.request<Record<string, unknown>>("PUT", `/Memory/${encodeRecordId(id)}`, body);
     const writtenId = typeof result?.id === "string" && result.id.length > 0 ? result.id : id;
     const preview = content.length > 120 ? content.slice(0, 120) + "..." : content;
     const lines = [

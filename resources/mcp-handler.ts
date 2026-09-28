@@ -27,6 +27,7 @@
 import { databases } from "harper";
 import { randomBytes } from "node:crypto";
 import { TOOLS, listToolDefs, type ResolvedAgent } from "./mcp-tools.js";
+import { checkToolArguments, withoutNullArguments } from "./mcp-tool-arguments.js";
 import { agentRecordIsAdmin } from "./agent-admin.js";
 import { resolveVersion } from "./version.js";
 
@@ -395,8 +396,15 @@ async function handleToolCall(request: any, id: any, params: any): Promise<any> 
     return rpcError(id, -32001, "forbidden: token subject is not a provisioned flair agent");
   }
 
+  // The tool implementations are written for their declared argument types;
+  // a value of another type is refused before the tool runs, and a null
+  // optional argument is treated as absent rather than forwarded.
+  const argError = checkToolArguments(entry.def.inputSchema, params?.arguments);
+  if (argError) return rpcError(id, -32602, `invalid arguments for ${toolName}: ${argError}`);
+  const toolArgs = withoutNullArguments(args);
+
   try {
-    const result = await entry.impl(agent, args);
+    const result = await entry.impl(agent, toolArgs);
     // MCP tools/call result: content blocks. Surface the handler's JSON payload
     // as a text block (structuredContent carries the raw object for programmatic
     // clients). A handler-level error object (from unwrap of a Response) is
