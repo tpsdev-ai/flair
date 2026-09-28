@@ -1116,8 +1116,8 @@ class TestCreateVerbAndConflictFallback:
     """flair#1336: creates must use POST /Memory/ (the create verb), never a
     bare PUT /Memory/{id} — PUT-shaped creates 404 on Harper deployments
     where PUT is update-only (observed on hosted Harper Fabric). A 409 from
-    POST falls back to PUT only when the occupied row has a complete event
-    stamp for the tuple being written."""
+    an event write falls back to PUT only when the occupied row has a
+    complete event stamp for the tuple being written."""
 
     @pytest.mark.asyncio
     async def test_all_write_entrypoints_create_via_post_collection(self, service):

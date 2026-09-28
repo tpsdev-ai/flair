@@ -1192,9 +1192,9 @@ describe("Memory id path encoding on the 409 PUT fallback (#1970)", () => {
     // it (became a fragment), `?` started a query, `/` split it into extra
     // segments and `%`/space were malformed. Each id must instead reach the
     // wire as exactly one segment after /Memory/ that decodes back to the id.
-    // Direct addMemory does not replace an occupied id. These event ids have
-    // no `:`. The session write's GET returns a complete stamp, and the
-    // fallback PUT encodes the full record id as one segment.
+    // Direct writes replace on conflict. This test exercises the event path:
+    // these event ids have no `:`, the session write's GET returns a complete
+    // stamp, and the fallback PUT encodes the full record id as one segment.
     const eventIds = ["a#b", "x?y=1", "a/b/c", "50%", "sp ace"];
     const calls: Array<{ method: string; url: string; auth: string }> = [];
     let recordId = "";

@@ -139,7 +139,7 @@ identities never collide and the `:` delimiter stays unambiguous.
   and the conflict is reported. A `409` on a direct `addMemory()` replaces
   the row. A PUT-shaped create 404s on Harper deployments where PUT is
   update-only (flair#1336)
-- Write failures log a structured warning (session id, event count, HTTP status)
+- An event-write failure logs a warning with the session id, the event id, and how many events in the batch were written. A direct-write failure logs a warning with the record id, not a session id, and how many memories were written. Neither warning promises an HTTP status: a transport failure has none.
 - No-text events are filtered (Vertex parity)
 
 ## Security
