@@ -101,16 +101,20 @@ describe("resolveSearchReadiness (flair#1326)", () => {
     expect(r.searchReadyReason).not.toMatch(/scans the corpus/i);
   });
 
-  test("public lag names a skipped background warm without exposing its error", () => {
+  test("public /Health lag reports a skipped warm without publishing its configuration or error", () => {
+    const rawReason = "background build skipped: FLAIR_BM25_INDEX=0, retrieval mode bm25-only, private table error";
     const readiness = resolveSearchReadiness({
       resources: mounted,
       memoryTable,
-      bm25: { state: "empty", reason: "background build skipped: private table error; a text search builds it" },
+      bm25: { state: "empty", reason: rawReason },
       retrievalMode: "hybrid",
     });
     const body = buildPublicHealthBody(readiness, { version: "dev", buildCommit: null });
     expect(body.searchReady).toBe(false);
     expect(body.searchReadyReason).toBe("bm25 index not built yet — background build was skipped; a text search builds it");
+    expect(JSON.stringify(body)).not.toContain(rawReason);
+    expect(JSON.stringify(body)).not.toContain("FLAIR_BM25_INDEX");
+    expect(JSON.stringify(body)).not.toContain("retrieval mode");
     expect(JSON.stringify(body)).not.toContain("private table error");
   });
 

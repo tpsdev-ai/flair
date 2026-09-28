@@ -122,17 +122,29 @@ describe("bm25SearchLagReason (flair#2032)", () => {
   });
 
   test("public lag (reason, no summary) names a skipped warm instead of the startup sentence", () => {
-    const skipped = "background build skipped: Memory table was not ready within 30s; a text search builds it";
+    const skipped = "background build skipped: Memory table was not ready within 30s";
     const lag = bm25SearchLagReason({ state: "empty", reason: skipped });
     expect(lag).toBe("bm25 index not built yet — background build was skipped; a text search builds it");
-    expect(lag).not.toMatch(/builds in the background after startup/);
+    expect(lag).not.toContain("Memory table");
   });
 
   test("public lag (reason, no summary) names a stale marker instead of the startup sentence", () => {
     const stale = "unhandled feed event type reload";
     const lag = bm25SearchLagReason({ state: "empty", reason: stale });
     expect(lag).toBe("bm25 index not built yet — previous index became stale; a text search rebuilds it");
-    expect(lag).not.toMatch(/builds in the background after startup/);
+    expect(lag).not.toContain("reload");
+  });
+
+  test("detail summary retains the exact skipped or stale cause", () => {
+    for (const reason of [
+      "background build skipped: Memory table was not ready within 30s",
+      "unhandled feed event type reload",
+    ]) {
+      const summary = formatBm25IndexSummary({ ...base, state: "empty", reason }, NOW);
+      expect(summary).toBe(`not built yet — ${reason}; a text search rebuilds it`);
+      expect(bm25SearchLagReason({ state: "empty", reason, summary }))
+        .toBe(`bm25 index: ${summary}`);
+    }
   });
 
   test("a building line still wins when a leftover reason is present and summary is absent", () => {

@@ -427,14 +427,14 @@ async function warmWhenReady(serial: number): Promise<void> {
     ready = await waitForMemorySearch();
   } catch (err: any) {
     if (serial !== warmSerial || state !== "empty") return;
-    disabledReason = BM25_BOOT_WARM_SKIPPED_PREFIX + " " + String(err?.message ?? err) + "; a text search builds it";
+    disabledReason = `${BM25_BOOT_WARM_SKIPPED_PREFIX} ${String(err?.message ?? err)}`;
     return;
   }
   if (serial !== warmSerial) return;
   if (!bm25IndexEnabled() || !bm25IndexInRetrievalPath()) return;
   if (!ready) {
     if (state === "empty") {
-      disabledReason = BM25_BOOT_WARM_SKIPPED_PREFIX + " Memory table was not ready within 30s; a text search builds it";
+      disabledReason = `${BM25_BOOT_WARM_SKIPPED_PREFIX} Memory table was not ready within 30s`;
     }
     return;
   }
