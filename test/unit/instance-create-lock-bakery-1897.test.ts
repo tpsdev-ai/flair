@@ -4,6 +4,9 @@
 // S-a: a contender that has taken its stamp/marker and is then PAUSED must never
 //      hold concurrently with a contender that ran through and held. RED before
 //      (the stamp+grace lock): both hold while both have read zero → two mints.
+//      Order is asserted by POSITION in the append-only events log, never by the
+//      millisecond `t` stamps: a handoff inside one millisecond tied them
+//      (flair#2029).
 // S-b: a visible claim that cannot be PARSED is a live blocker — the contender
 //      waits; it is never skipped. RED before: an unparsable claim was skipped,
 //      so the contender held at once.
@@ -14,6 +17,7 @@ import { Worker } from "node:worker_threads";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { acquireInstanceCreateLock, instanceCreateLockDir } from "../../resources/instance-create-lock.js";
+import { appendEvent } from "../helpers/events-jsonl-1897.js";
 
 const ROOT = join(import.meta.dirname, "..", "..");
 const MODULE = join(ROOT, "resources", "instance-create-lock.ts");
@@ -86,20 +90,25 @@ describe("filesystem bakery lock — the two schedules (flair#1897 round 4)", ()
     expect(readJsonl(eventsFile).some((e) => e.ev === "hold")).toBe(false);
 
     await new Promise((r) => setTimeout(r, 200));
-    const resumedAt = Date.now();
+    // The resume is an EVENT in the same log, appended by the same writer BEFORE
+    // A is released, so everything A's release causes lands after it.
+    appendEvent(eventsFile, "test", "resume");
     writeFileSync(resumeFile, "go"); // release A
 
     const [a, b] = await Promise.all([pa, pb]);
     const rows = readJsonl(tableFile);
     const events = readJsonl(eventsFile);
-    const bHold = events.find((e) => e.tid === b.tid && e.ev === "hold");
-    const aHold = events.find((e) => e.tid === a.tid && e.ev === "hold");
-    const bRelease = events.find((e) => e.tid === b.tid && e.ev === "release");
-    expect(bHold).toBeDefined();
-    expect(aHold).toBeDefined();
-    // B held only AFTER A was released, and A only after B released → serialised.
-    expect(bHold!.t).toBeGreaterThan(resumedAt);
-    expect(aHold!.t).toBeGreaterThan(bRelease!.t);
+    const at = (tid: unknown, ev: string) => events.findIndex((e) => e.tid === tid && e.ev === ev);
+    const resume = at("test", "resume");
+    const bHold = at(b.tid, "hold");
+    const bReread = at(b.tid, "reread"); // B's last step UNDER the lock
+    const aHold = at(a.tid, "hold");
+    expect(resume).toBeGreaterThanOrEqual(0); // (the chain below implies the rest exist)
+    // B held only AFTER A was released; B minted, and A held only after B's
+    // critical section ended → serialised.
+    expect(bHold).toBeGreaterThan(resume);
+    expect(bReread).toBeGreaterThan(bHold);
+    expect(aHold).toBeGreaterThan(bReread);
     expect(rows.length).toBe(1);
   }, 60_000);
 

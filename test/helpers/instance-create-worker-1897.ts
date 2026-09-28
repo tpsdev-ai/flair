@@ -6,10 +6,18 @@
 //
 // Shared Int32Array indices: [1] = the first worker to read has HELD;
 //                            [2] = how many workers have finished their first read.
+//
+// Events (one JSON line each, through the shared O_APPEND writer): the LINE
+// ORDER is the ordering witness, never the `t` stamp (flair#2029). In the bakery
+// schedules, written UNDER the lock: "hold" + "firstread" (the first read) and
+// "reread" (the minter's confirming re-read, its last step before release).
+// "returned" is written AFTER findOrCreateInstance returned, i.e. after the lock
+// was released, so a sibling may already hold: it is NOT a lock-order witness.
 import { parentPort, workerData, threadId as _tid } from "node:worker_threads";
 import { appendFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { appendEvent } from "./events-jsonl-1897.ts";
 
 const { modulePath, tableFile, home, wantWorkers, schedule, sab, eventsFile, putDelayMs } = workerData as {
   modulePath: string;
@@ -39,7 +47,7 @@ function readRows(): any[] {
   }
 }
 function record(ev: string, extra: Record<string, unknown> = {}): void {
-  appendFileSync(eventsFile, JSON.stringify({ tid: _tid, ev, t: Date.now(), ...extra }) + "\n");
+  appendEvent(eventsFile, _tid, ev, extra);
 }
 function mintRow(n: number) {
   const now = new Date().toISOString();
@@ -126,6 +134,8 @@ if (schedule === "realm-chain") {
         record("hold");
         record("firstread", { n: rows.length });
         Atomics.store(flags, 1, 1); // the first reader has HELD
+      } else {
+        record("reread", { n: rows.length }); // still UNDER the lock
       }
       return rows;
     },
@@ -141,6 +151,6 @@ if (schedule === "realm-chain") {
     },
     log: () => {},
   });
-  record("release");
+  record("returned"); // after the lock was released (see the header)
   parentPort?.postMessage({ kind: "done", outcome, tid: _tid, firstCount });
 }
