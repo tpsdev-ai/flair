@@ -3,9 +3,11 @@
  * against the new version (flair#1740).
  *
  * "Restart failed" and "there was nothing running to restart" are not the
- * same condition. Confirmed-stopped (connection refused) keeps the new
- * package. A running instance still rolls back. An indeterminate /Health
- * probe is not "stopped" — rollback is not waived.
+ * same condition. A refused connection keeps the new package when
+ * @tpsdev-ai/flair was swapped. It does not show that no process was
+ * running. Running or indeterminate rolls back only when that package was
+ * swapped and the previous version is known. An indeterminate probe is
+ * not a refused connection, so it does not waive rollback.
  *
  * Pure: no I/O. The command classifies prior liveness and asks the registry
  * whether the rollback target is deprecated. This module only decides.
@@ -38,11 +40,13 @@ export type RestartFailureDecision =
 /**
  * What to do when the post-upgrade restart throws.
  *
- * Confirmed-stopped keeps the new version even when the previous version
- * string is unreadable — there is nothing healthy to restore, and a failed
- * start is not evidence against the install. Running and indeterminate both
- * roll back when a previous version is known. Indeterminate does not take
- * the keep path.
+ * When @tpsdev-ai/flair was swapped, a refused connection keeps the new
+ * version even when the previous version string is unreadable. A failed
+ * start is not evidence against that install. Running and indeterminate
+ * both roll back when a previous version is known. If Flair was not
+ * swapped, or the previous version is unknown after a running or
+ * indeterminate probe, the decision is no-target. Indeterminate does
+ * not take the keep path.
  */
 export function decideAfterRestartFailure(input: RestartFailureInput): RestartFailureDecision {
   if (!input.flairWasSwapped) return { kind: "no-target" };

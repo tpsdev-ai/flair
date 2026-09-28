@@ -1615,8 +1615,11 @@ program
      * new packages and then failed to start them left the operator on the new
      * version with nothing running and no rollback.
      *
-     * flair#1740: the caller enters here when prior /Health was running or
-     * indeterminate. A refused connection does not. A version the registry
+     * flair#1740: the restart-failure decision enters here when prior
+     * /Health was running or indeterminate and the previous version is
+     * known. A refused connection does not take that decision's rollback.
+     * Verification also reaches this function, through decideAfterVerify,
+     * and that path does not consult prior liveness. A version the registry
      * reports as deprecated is not the rollback target. A failed lookup, or
      * a null `deprecated` field, is not that report, so rollback still runs.
      */
@@ -1837,7 +1840,10 @@ program
       });
       // Connection refused keeps the install, even when the previous version
       // string was unreadable. Exit 0 — the upgrade completed; `flair start`
-      // is the follow-up. Running or indeterminate rolls back below.
+      // is the follow-up. Running or indeterminate rolls back below when the
+      // previous version is known. no-target is the other result: Flair was
+      // not swapped, or the previous version is unknown after a running or
+      // indeterminate probe.
       if (restartDecision.kind === "keep") {
         for (const line of restartDecision.lines) console.error(line);
         process.exit(0);

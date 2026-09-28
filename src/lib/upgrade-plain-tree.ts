@@ -812,7 +812,8 @@ export async function applyPlainTreeUpgrade(
  * Put `.upgrade-prev` back at the live tree path. Used by upgrade rollback
  * when restart or verify fails after a swap.
  *
- * `restored: false` means there was nothing to restore (swap never completed).
+ * `restored: false` means the saved tree is absent. That does not prove
+ * the swap never completed.
  * `liveTreeSetAside` is true only when a directory at the live path was
  * renamed to `.upgrade-failed`. A restore can succeed with nothing to set
  * aside — the caller must not claim that move happened.
