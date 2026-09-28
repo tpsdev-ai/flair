@@ -352,10 +352,10 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
   }, CASE_BUDGET_MS);
 
   test("default-directory listener recorded by pidfile and sidecar does not offer flair stop", async () => {
-    // At 8baa0a85, defaultDataDir()'s hdb.pid and flair-daemon.json both naming
-    // a pid in the listener list set flairStopApplies, and this refusal printed
-    // `flair stop`. This assertion fails on that commit. A non-default
-    // directory never produced the offer, so the cases above would pass there.
+    // The remedy removed in 191627a0 printed `flair stop` when defaultDataDir()'s
+    // hdb.pid and flair-daemon.json both named a pid from the listener lookup.
+    // Restoring that read beside the current lookup seam fails the assertion
+    // below. That seam is not in 8baa0a85, so this test was not run there.
     scratch = mkdtempSync(join(tmpdir(), "flair-1749-"));
     const home = join(scratch, "home");
     const defaultDir = flairDataDir(home);
