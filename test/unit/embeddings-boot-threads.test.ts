@@ -149,7 +149,11 @@ describe("embeddings-boot register() gpuLayers plumbing (flair#1437)", () => {
     expect(src).toContain("gpuLayers: choice.gpuLayers");
     expect(src).toContain("applyEmbedGpuChoice");
     expect(src).toContain("formatEmbedGpuLogLine");
-    expect(src).toContain("probeLoadedAddonGpuType");
+    expect(src).toContain("readGpuTypeFromWarmup");
+    // The warmed binding is the readback. Do not rediscover or dlopen another addon.
+    expect(src).not.toContain("probeLoadedAddonGpuType");
+    expect(src).not.toContain("process.dlopen");
+    expect(src).not.toContain("llama-addon.node");
     // Engagement is the engine after warmup, not a captured stdio scrape.
     expect(src).not.toContain("captureIoDuring");
     // The omit-when-unset pin is gone — a synthesized silent default is the bug.

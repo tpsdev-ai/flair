@@ -2,7 +2,9 @@
   `flair status` and `/Health` report three states: Metal with the offloaded
   layer count when the engine says so, CPU only when the engine says no GPU,
   and unconfirmed (not `backend: cpu`, not `gpuLayers: 0`) when the engine
-  exposes no readback. A derived Metal default stays an advisory doctor warning.
+  exposes no readback. The GPU type is `getGpuType()` on the native binding
+  warmup already opened; a second addon is not loaded for the check. A
+  derived Metal default stays an advisory doctor warning.
 
   > **Heads-up:** an Apple Silicon host that previously showed "Metal did not
   > engage; running CPU" under launchd while ggml was on Metal now follows

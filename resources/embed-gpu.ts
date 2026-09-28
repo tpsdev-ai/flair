@@ -12,7 +12,10 @@
  * `LlamaModel.gpuLayers` (the `n_gpu_layers` the model was constructed with;
  * 0 when GPU support is disabled). HFE's `EmbeddingEngine` does not re-export
  * those getters; it forwards `config.gpuLayers` unchanged into `AddonModel`
- * and loads the same native binding. An empty stdout/stderr capture is not
+ * and dlopens one native binding during warmup. Readback calls `getGpuType()`
+ * on that binding object. It does not search `bins/` or dlopen a second
+ * module — a different binary can report CPU while the warmed addon is on
+ * Metal. An empty stdout/stderr capture is not
  * evidence of CPU — ggml writes `ggml_metal_init` to fd 2 via libc, which
  * under launchd never reaches Node's streams. The launchd stderr log is not
  * consulted either (host-specific, stale across restarts).
@@ -20,9 +23,7 @@
  * `parseMetalEngaged` remains the ingest-throughput bench's log gate (#1597).
  * It is not the product engagement decision.
  */
-import { existsSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
 
 export const METAL_PREBUILT = "@node-llama-cpp/mac-arm64-metal";
 
@@ -248,7 +249,8 @@ function readGpuTypeProperty(obj: Record<string, unknown>): unknown {
  * Binding-level readback used when the engine object does not expose
  * `gpu` / `gpuLayers` (HFE's `EmbeddingEngine`).
  *
- * `gpuType` is `getGpuType()` after warmup. `loadedGpuLayers` is the
+ * `gpuType` is `getGpuType()` on the binding warmup already opened — not a
+ * second addon. `loadedGpuLayers` is the
  * `gpuLayers` value passed into `AddonModel` — the same number
  * `LlamaModel.gpuLayers` returns when a GPU device is present. It is
  * reported only after the binding says Metal. A CPU binding forces 0.
@@ -268,79 +270,73 @@ export function readBindingGpuEngagement(
   return { available: false };
 }
 
+type AddonGpuBinding = { getGpuType?: () => unknown };
+
+/** Exports object from the addon HFE dlopened during this warmup. */
+let capturedBinding: AddonGpuBinding | undefined;
+
+export function _resetCapturedAddonBindingForTests(): void {
+  capturedBinding = undefined;
+}
+
 /**
- * `getGpuType()` on the native addon HFE already loaded. Does not call
- * `init` or `loadBackends` — repeating those re-registers ggml devices and
- * can abort the process. Missing addon or a throw is `undefined` (unconfirmed),
- * not CPU. Never reads a launchd log file.
+ * While the hook is installed, remember the native binding each
+ * `process.dlopen` produces when that module exports `getGpuType`. That is
+ * HFE's `loadAddon` during `ensureReady`. The hook forwards to the previous
+ * `dlopen`; it does not choose a path, does not load a second addon, and
+ * does not call `init` or `loadBackends`.
+ *
+ * The restore function puts `process.dlopen` back. The captured exports
+ * object stays readable so `readCapturedAddonGpuType` can run after restore.
  */
-export function probeLoadedAddonGpuType(): unknown {
-  const addonPath = findLlamaAddonPath();
-  if (!addonPath) return undefined;
+export function beginAddonBindingCapture(): () => void {
+  capturedBinding = undefined;
+  const orig = process.dlopen;
+  const wrapped: typeof process.dlopen = (module, filename, flags) => {
+    const loaded = module as { exports: unknown };
+    const result = flags === undefined
+      ? orig.call(process, loaded, filename)
+      : orig.call(process, loaded, filename, flags);
+    const exports = loaded.exports as AddonGpuBinding | undefined;
+    if (exports && typeof exports.getGpuType === "function") {
+      capturedBinding = exports;
+    }
+    return result;
+  };
+  process.dlopen = wrapped;
+  return () => {
+    if (process.dlopen === wrapped) process.dlopen = orig;
+  };
+}
+
+/**
+ * `getGpuType()` on the binding captured during warmup. Does not dlopen.
+ * Missing capture or a throw is `undefined` (unconfirmed), not CPU.
+ */
+export function readCapturedAddonGpuType(): unknown {
+  const binding = capturedBinding;
+  if (!binding || typeof binding.getGpuType !== "function") return undefined;
   try {
-    const mod = { exports: {} } as unknown as NodeJS.Module;
-    process.dlopen(mod, addonPath);
-    const binding = mod.exports as { getGpuType?: () => unknown };
-    if (typeof binding?.getGpuType !== "function") return undefined;
     return binding.getGpuType();
   } catch {
     return undefined;
   }
 }
 
-function findLlamaAddonPath(): string | undefined {
-  let requireFromHfe: NodeRequire;
+/**
+ * Run warmup (HFE `register` + `ensureReady`) and read GPU type from the
+ * binding that warmup opened. No second `dlopen`.
+ */
+export async function readGpuTypeFromWarmup<T>(
+  warmup: () => Promise<T>,
+): Promise<{ value: T; gpuType: unknown }> {
+  const end = beginAddonBindingCapture();
   try {
-    const fromHere = createRequire(import.meta.url);
-    const hfe = fromHere.resolve("harper-fabric-embeddings");
-    requireFromHfe = createRequire(hfe);
-  } catch {
-    return undefined;
+    const value = await warmup();
+    return { value, gpuType: readCapturedAddonGpuType() };
+  } finally {
+    end();
   }
-  for (const spec of addonCandidates()) {
-    try {
-      const pkgJson = requireFromHfe.resolve(`${spec}/package.json`);
-      const binsDir = join(dirname(pkgJson), "bins");
-      if (!existsSync(binsDir)) continue;
-      for (const entry of readdirSync(binsDir)) {
-        const addon = join(binsDir, entry, "llama-addon.node");
-        if (existsSync(addon)) return addon;
-      }
-    } catch {
-      continue;
-    }
-  }
-  return undefined;
-}
-
-function addonCandidates(): string[] {
-  const host = hostAddonPackage();
-  const rest = [
-    "@node-llama-cpp/mac-arm64-metal",
-    "@node-llama-cpp/linux-x64",
-    "@node-llama-cpp/mac-x64",
-    "@node-llama-cpp/linux-arm64",
-    "@node-llama-cpp/win-x64",
-    "@node-llama-cpp/win-arm64",
-    "@node-llama-cpp/linux-armv7l",
-  ];
-  return host ? [host, ...rest.filter((spec) => spec !== host)] : rest;
-}
-
-function hostAddonPackage(): string | undefined {
-  if (process.platform === "darwin" && process.arch === "arm64") {
-    return "@node-llama-cpp/mac-arm64-metal";
-  }
-  if (process.platform === "darwin") return "@node-llama-cpp/mac-x64";
-  if (process.platform === "linux" && process.arch === "arm64") {
-    return "@node-llama-cpp/linux-arm64";
-  }
-  if (process.platform === "linux") return "@node-llama-cpp/linux-x64";
-  if (process.platform === "win32" && process.arch === "arm64") {
-    return "@node-llama-cpp/win-arm64";
-  }
-  if (process.platform === "win32") return "@node-llama-cpp/win-x64";
-  return undefined;
 }
 
 function safeProbe(probe: () => unknown): unknown {
@@ -359,10 +355,10 @@ function safeProbe(probe: () => unknown): unknown {
  * statement. `metalUsable` is platform detection, not engagement evidence.
  *
  * When `engine` exposes `gpu` + `gpuLayers` (or `getGpuType()` + `gpuLayers`),
- * that pair wins. Otherwise `probeGpuType` — boot passes
- * `probeLoadedAddonGpuType` — is combined with `requestedGpuLayers`, which
- * is the count HFE passed to `AddonModel`. No probe and no engine fields
- * is unconfirmed.
+ * that pair wins. Otherwise `probeGpuType` — boot passes a reader of the
+ * binding captured during warmup — is combined with `requestedGpuLayers`,
+ * the count HFE passed to `AddonModel`. No probe and no engine fields is
+ * unconfirmed. `probeGpuType` must not open a second native addon.
  */
 export function confirmMetalEngagement(opts: {
   requestedGpuLayers: number;
@@ -374,9 +370,8 @@ export function confirmMetalEngagement(opts: {
   capturedLog?: string;
   engine?: unknown;
   /**
-   * Binding `getGpuType()` seam. Production passes `probeLoadedAddonGpuType`
-   * after warmup. Omitted → no native probe (a stub engine with no fields
-   * stays unconfirmed).
+   * `getGpuType()` of the binding warmup already opened. Omitted when the
+   * engine object itself has no readback → unconfirmed. Must not dlopen.
    */
   probeGpuType?: () => unknown;
 }): { engaged: boolean; statement: EmbedGpuStatement } {

@@ -91,7 +91,7 @@ import {
   formatEmbedGpuLogLine,
   formatEmbedGpuRequestLine,
   previewEmbedGpuStatement,
-  probeLoadedAddonGpuType,
+  readGpuTypeFromWarmup,
   resolveEmbedGpuChoice,
   setEmbedGpuStatement,
 } from "./embed-gpu.js";
@@ -236,15 +236,21 @@ export async function registerEmbeddingsBackend(): Promise<void> {
     } else {
       setEmbedGpuStatement(previewEmbedGpuStatement(choice));
       console.log(formatEmbedGpuRequestLine(choice));
-      const engine = await register({
-        logicalName: LOGICAL_NAME,
-        kind: "embedding",
-        config,
+      // GPU type comes from the binding this warmup dlopens. Do not open
+      // another llama-addon afterwards — a second binary can report CPU
+      // while this one is on Metal (flair#2031).
+      const { value: engine, gpuType } = await readGpuTypeFromWarmup(async () => {
+        const created = await register({
+          logicalName: LOGICAL_NAME,
+          kind: "embedding",
+          config,
+        });
+        if (created && typeof created.ensureReady === "function") {
+          await created.ensureReady();
+        }
+        return created;
       });
-      if (engine && typeof engine.ensureReady === "function") {
-        await engine.ensureReady();
-      }
-      const statement = applyEmbedGpuChoice(choice, engine, probeLoadedAddonGpuType);
+      const statement = applyEmbedGpuChoice(choice, engine, () => gpuType);
       console.log(formatEmbedGpuLogLine(statement));
     }
   } catch (err) {

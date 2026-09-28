@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { EMBED_GPU_FALLBACK_MSG, EMBED_GPU_UNCONFIRMED_MSG } from "../../resources/embed-gpu.ts";
 import {
@@ -6,8 +8,11 @@ import {
   applyEmbedGpuChoice,
   embedGpuStatusWarning,
   formatEmbedGpuLogLine,
+  readCapturedAddonGpuType,
+  readGpuTypeFromWarmup,
   withEmbedGpuHealth,
   setEmbedGpuStatement,
+  _resetCapturedAddonBindingForTests,
   _resetEmbedGpuStatementForTests,
 } from "../../resources/embed-gpu.ts";
 import {
@@ -259,6 +264,72 @@ describe("launchd false negative (flair#2031)", () => {
     const body = withEmbedGpuHealth({ ok: true });
     expect(body.embedding.backend).not.toBe("cpu");
     expect(body.embedding.gpuLayers).not.toBe(0);
+  });
+});
+
+describe("warmed addon binding (flair#2031 — no second dlopen)", () => {
+  const warmedPath = "/opt/hfe/warmed-metal/bins/llama-addon.node";
+  const otherPath = "/opt/other/cpu/bins/llama-addon.node";
+
+  afterEach(() => {
+    _resetCapturedAddonBindingForTests();
+  });
+
+  it("uses the binding warmup opened; a different binary's CPU report does not win", async () => {
+    const realDlopen = process.dlopen;
+    const opened: string[] = [];
+    process.dlopen = ((module: { exports: unknown }, filename: string) => {
+      opened.push(String(filename));
+      if (String(filename) === warmedPath) {
+        module.exports = { getGpuType: () => "metal" };
+        return;
+      }
+      module.exports = { getGpuType: () => false };
+    }) as typeof process.dlopen;
+    try {
+      const { gpuType } = await readGpuTypeFromWarmup(async () => {
+        const mod = { exports: {} };
+        process.dlopen(mod, warmedPath);
+      });
+      expect(gpuType).toBe("metal");
+      expect(opened).toEqual([warmedPath]);
+
+      const afterWarmup = opened.length;
+      expect(readCapturedAddonGpuType()).toBe("metal");
+      expect(opened.length).toBe(afterWarmup);
+
+      const decoy = { exports: {} as { getGpuType?: () => unknown } };
+      process.dlopen(decoy, otherPath);
+      expect(decoy.exports.getGpuType?.()).toBe(false);
+
+      const r = confirmMetalEngagement({
+        requestedGpuLayers: 99,
+        metalUsable: true,
+        source: "detected",
+        warmupLog: "",
+        engine: hfeEngine(),
+        probeGpuType: readCapturedAddonGpuType,
+      });
+      expect(r.statement.backend).toBe("metal");
+      expect(r.statement.gpuLayers).toBe(99);
+      expect(r.statement.fallback).toBeUndefined();
+      expect(embedGpuStatusWarning(r.statement) ?? "").not.toContain("did not engage");
+      expect(opened.filter((p) => p === otherPath)).toEqual([otherPath]);
+    } finally {
+      process.dlopen = realDlopen;
+      _resetCapturedAddonBindingForTests();
+    }
+  });
+
+  it("product sources do not rediscover bins/llama-addon.node or dlopen a second addon", () => {
+    const embed = readFileSync(join(import.meta.dir, "..", "..", "resources", "embed-gpu.ts"), "utf8");
+    const boot = readFileSync(join(import.meta.dir, "..", "..", "resources", "embeddings-boot.ts"), "utf8");
+    expect(embed).not.toContain("llama-addon.node");
+    expect(embed).not.toContain("probeLoadedAddonGpuType");
+    expect(boot).not.toContain("probeLoadedAddonGpuType");
+    expect(boot).not.toContain("process.dlopen");
+    expect(boot).not.toContain("llama-addon.node");
+    expect(boot).toContain("readGpuTypeFromWarmup");
   });
 });
 
