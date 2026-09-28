@@ -1362,7 +1362,7 @@ program
             if (blockers.length > 0) {
               const advice = pinDetail
                 ? "Resolve the listed non-version pin(s) manually; doctor cannot rewrite them."
-                : "Continuity hook rewrite held; resolve the listed pin(s) manually.";
+                : "Continuity hook rewrite held or refused; resolve the listed reason(s) manually.";
               console.log(`     ${advice} ${blockers.join(" ")}`);
             } else {
               console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(rewrites both entries to the current form — same agent, same instance)")}`);

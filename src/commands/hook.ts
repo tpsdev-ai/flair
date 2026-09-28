@@ -208,7 +208,7 @@ export function register(program: Command): void {
           if (blockers.length > 0) {
             const resolution = cont.postToolUse.reason || cont.stop.reason
               ? "resolve the non-version pin manually"
-              : "rewrite held; resolve the listed pin(s) manually";
+              : "rewrite held or refused; resolve the listed reason(s) manually";
             advice = `— ${resolution}; ${blockers.join(" ")}`;
           }
           console.log(`  ${render.icons.warn} continuity capture: ${cont.state} (${missing}) ${render.wrap(render.c.dim, advice)}`);
