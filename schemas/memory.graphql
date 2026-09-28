@@ -42,8 +42,22 @@ type Memory @table(database: "flair") {
   tags: [String] @indexed
   durability: String @indexed
   source: String
+  type: String                # flair#1940 A1'' item 1: declared from MEASURED data, not derived from the schema. A live
+                               # store (3,963 Memory rows) really carries `type` on 62% of rows — the client filters
+                               # on it and MemoryMaintenance archives `type === "session"`. Declaring it here is what
+                               # lets the declared-only whitelist (resources/memory-declared-attributes.ts) KEEP it on a
+                               # full-row write instead of stripping it. Nullable/additive — existing rows keep their
+                               # value, rows without it stay without it.
   createdAt: String! @indexed
   updatedAt: String
+  instanceToken: String @indexed  # flair#1940 A1-iv: a server-stamped row INCARNATION token (UUID). The named
+                               # application create paths stamp a local `instanceToken`; existing legacy rows may have
+                               # none. Memory's REST write paths remove client-supplied `instanceToken` and
+                               # `provenance`. The named update paths retain a stored token when their existing-row read
+                               # succeeds. The host-pointer join binds on it: a pointer is returned only when
+                               # memoryId, authorId === agentId, instanceToken and "not archived" all hold, so a
+                               # deleted-and-recreated id (which gets a NEW token) can never re-bind a stale pointer.
+                               # Nullable/additive: existing rows read back null (clean-upgrade-path gate).
   expiresAt: String @indexed
   retrievalCount: Int          # Observable search-hit counter. Authoritative increments live on
                                # MemoryHitStat (resources/hit-tracking.ts, flair#1528); GET/search
@@ -84,9 +98,14 @@ type Memory @table(database: "flair") {
   validFrom: String @indexed   # ISO timestamp — when this fact became true
   validTo: String @indexed     # ISO timestamp — when this fact stopped being true (null = still valid)
   _safetyFlags: [String]       # content safety flags from scanContent()
-  provenance: String           # JSON blob (memory-provenance slice 1; claimed.client added by flair#718): { v, verified: { agentId, timestamp }, claimed?: { model, client } }
-                               # Nullable by design — existing rows read back provenance = null, unchanged behavior (clean-upgrade-path gate).
-                               # Same idiom as Soul.metadata below. Stamped server-side in resources/Memory.ts; never client-writable.
+  provenance: String           # JSON blob (memory-provenance slice 1; claimed.client added by flair#718): { v, verified: { agentId, timestamp, receivedAt }, claimed?: { model, client } }
+                               # Server-STAMPED (receivedAt is the server's receipt time, never client-writable — flair#1940 A4).
+  # flair#1940 A1' — The Memory schema does not declare a pointer attribute.
+  # Supported Memory writes store accepted pointers in `MemoryHostSource`
+  # (below); the named non-admin reads use its gated join. Client and adapter
+  # transport is outside this slice. The three write-body inputs (hostSource,
+  # hostSourceScope, hostSourceVisibility) are consumed by Memory.post()/put()
+  # and are never persisted here.
   originatorInstanceId: String @indexed  # federation-edge-hardening slice 1: WRITE-TIME instance identity, stamped server-side in
                                # resources/Memory.ts from resources/instance-identity.ts's localInstanceId() — never client-writable.
                                # Nullable (existing rows read null = clean upgrade). Distinct from the legacy _originatorInstanceId
@@ -219,6 +238,62 @@ type MemoryHitStat @table(database: "flair") {
   id: ID @primaryKey           # Memory.id
   retrievalCount: Int
   lastRetrieved: String
+}
+
+# MemoryHostSource — the host pointer, IN ITS OWN TABLE (flair#1940 slice 1 /
+# A1', confirmed by Kern and Sherlock). The pointer is a host-object pointer —
+# versioned JSON { v: 1, host, kind, id, url? } — The Memory schema does not
+# declare a pointer attribute. Supported Memory writes store accepted pointers in
+# `MemoryHostSource`; the named non-admin reads use its gated join. Client and
+# adapter transport is outside this slice.
+#
+# Writes are NOT a REST surface for any caller: Memory.post()/put() write the row
+# in the SAME transaction as the Memory row — a request's open transaction, or
+# one created with transaction(ctx, cb) when an internal caller has no request
+# context — so the row and its pointer commit together or not at all (real-
+# Harper t1/t2: a failed pointer write leaves no row, and a failed PUT leaves
+# the pre-existing row byte-identical). This resource refuses its OWN
+# post()/put()/patch()/delete() for EVERY caller (r4-http), so no REST caller
+# can plant a pointer; a superuser Harper operation against the table (an
+# operator export, backup or reseed) is the operator path.
+#
+# Direct resource reads permit admin agents and trusted in-process callers;
+# non-admin agents cannot read this table directly. The author
+# reads their own pointer only through the gated join INTO Memory results (A1'
+# item 4), never from this table directly. Bootstrap does not render pointers in
+# this slice.
+#
+# NOT federated (A1' item 5/A1'' item 8): the table is absent from
+# FEDERATION_TABLE_POLICY, so it is never in the sync's table set, an inbound row
+# carrying a pointer field is REFUSED (resources/federation-classify.ts). The
+# outbound reader projects declared Memory attributes. The inbound merge removes
+# undeclared attributes except the named bookkeeping fields (f1-out/f1-in).
+#
+# Cascade (A1' item 6 / A1'' item 2): `Memory.delete` and maintenance expiry or
+# age-based archival delete the pointer with their Memory operation. `MemoryArchive`
+# basement/restore retains the pointer row; the join suppresses it while the Memory
+# is archived. `Memory.delete` joins a request transaction when present; maintenance
+# uses an owned transaction per item (c3). An orphan sweep re-checks inside the
+# transaction before deleting; a cleanup failure makes the maintenance run report a
+# failure, not "complete".
+#
+# hostSource is a writer claim attributed to the authenticated agent on agent
+# writes — a claimed external source. Flair does not verify the host object and
+# does not cryptographically sign the pointer body (the Ed25519 request
+# signature covers method and URL, not the body).
+# scopeAtWrite is the record's visibility AT WRITE (null → author-only). The join
+# takes the narrower of the stored pointer scope and the Memory row's current
+# visibility. A partial PUT carries the stored visibility it read at the start of
+# the request (p2). receivedAt is server-stamped.
+type MemoryHostSource @table(database: "flair") @export {
+  memoryId: ID @primaryKey      # the Memory.id this pointer belongs to
+  hostSource: String!           # canonical v1 JSON: { v:1, host, kind, id, url? }
+  scopeAtWrite: String          # the record's visibility at write when the write opted in; null = author-only
+  authorId: String! @indexed    # server-stamped from the authenticated principal, NEVER the body
+  memoryInstanceToken: String   # the Memory row's server-stamped `instanceToken` at pointer-write time (A1-iv). The
+                               # join returns this pointer only when it still equals the Memory row's token, so a
+                               # deleted-and-recreated id (new token) never re-binds it.
+  receivedAt: String!           # server receipt time
 }
 
 # MemoryCandidate — staged distillations from the FLAIR-NIGHTLY-REM cycle.

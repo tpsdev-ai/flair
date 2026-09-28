@@ -35,6 +35,7 @@ import {
   ADMIN_PASS_HELP,
 } from "../lib/auth-resolve.js";
 import { DEFAULT_INTERVAL_SECONDS as FEDERATION_SYNC_DEFAULT_INTERVAL } from "../federation/scheduler.js";
+import { FEDERATION_MEMORY_SELECT } from "../lib/federation-memory-attributes.js";
 import {
   decideInstancePrune,
   formatInstanceRow,
@@ -772,7 +773,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
           res = await fetch(`${opsEndpoint}/`, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: auth },
-            body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table, operator: "and", conditions: [query], get_attributes: ["*"] }),
+            body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table, operator: "and", conditions: [query], get_attributes: table === "Memory" ? [...FEDERATION_MEMORY_SELECT] : ["*"] }),
             signal: AbortSignal.timeout(15_000),
           });
         } catch (err: any) {

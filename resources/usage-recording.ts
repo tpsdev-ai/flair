@@ -46,6 +46,7 @@
  * onto recordUsageContribution() — do not "unify" the two surfaces.
  */
 import { databases } from "harper";
+import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { withDetachedTxn } from "./table-helpers.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import type { ReadScope, ScopableRecord } from "./memory-read-scope.js";
@@ -134,9 +135,9 @@ export async function recordUsageContribution(
   // count (RecordUsage.ts module doc's "WHY THIS IS ITS OWN ENDPOINT").
   const fresh = await withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(memoryId)).catch(() => null);
   if (!fresh) return; // deleted between the checks above and now — no-op
-  await withDetachedTxn(ctx, () =>
-    (databases as any).flair.Memory.put({ ...fresh, usageCount: (fresh.usageCount ?? 0) + 1 }),
-  );
+  const usageRow = { ...fresh, usageCount: (fresh.usageCount ?? 0) + 1 };
+  stripUndeclaredMemoryAttributes(usageRow);
+  await withDetachedTxn(ctx, () => (databases as any).flair.Memory.put(usageRow));
 }
 
 /**

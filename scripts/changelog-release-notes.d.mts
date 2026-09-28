@@ -9,6 +9,7 @@ export function fallbackLede(entryText: string): string;
 export function ledeForEntry(entryText: string): string;
 export function extractIssueRefs(entryText: string, limit?: number): string[];
 export function extractHeadsUps(entryText: string): string[];
+export function operatorRemedyViolation(entryText: string): string | null;
 
 export interface ChangelogCategory {
   heading: string;

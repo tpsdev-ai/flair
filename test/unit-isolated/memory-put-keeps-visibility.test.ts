@@ -27,6 +27,8 @@ class BaseMemory {
     if (key === "boom") throw new Error("storage unavailable");
     return memoryStore.get(key) ?? null;
   }
+  static async put(content: any) { memoryStore.set(content.id, { ...content }); return undefined; }
+  static async delete(id: any) { memoryStore.delete(typeof id === "string" ? id : id?.id); return { ok: true }; }
   // Harper PUT semantics: the stored row IS the content (full replacement).
   async put(content: any) {
     memoryStore.set(content.id, { ...content });
@@ -72,6 +74,23 @@ beforeEach(() => {
   memoryStore.set("priv", { id: "priv", agentId: "alice", content: "owner-only note", durability: "standard", visibility: "private" });
   memoryStore.set("pub", { id: "pub", agentId: "alice", content: "shared note", durability: "persistent", visibility: "shared" });
 });
+
+// flair#1940: Harper assigns `transaction` onto the global at load, and the
+// Memory write path creates one when a caller has no request context, refusing
+// to run a write unwrapped. Provide it in this isolated mock.
+(globalThis as any).transaction = (ctx: any, cb: (txn: any) => any) => {
+  if (ctx?.transaction && ctx.transaction.open === 1) return cb(ctx.transaction);
+  const txn: any = { open: 1, saveCommits: false, abort() { this.open = 0; }, commit() { this.open = 0; } };
+  const c = ctx && typeof ctx === "object" ? ctx : {};
+  c.transaction = txn;
+  let r: any;
+  try { r = cb(txn); } catch (e) { txn.abort(); throw e; }
+  if (r && typeof r.then === "function") {
+    return r.then((v: any) => { txn.commit(); return v; }, (e: any) => { txn.abort(); throw e; });
+  }
+  txn.commit();
+  return r;
+};
 
 describe("Memory updates preserve stored visibility", () => {
   test("a private record stays private", async () => {
@@ -147,5 +166,24 @@ describe("Memory updates preserve stored visibility", () => {
   test("an in-process PATCH carrying visibility: undefined keeps the stored value", async () => {
     await makeMemory("priv").patch({ visibility: undefined, content: "patched again" });
     expect(memoryStore.get("priv").visibility).toBe("private");
+  });
+
+  test("(rc1) a failed reindex existing-row lookup fails the write and leaves the row and token unchanged", async () => {
+    // The harness's STATIC table get throws for id "boom", the same way a real
+    // failed lookup does. The reindex path's token lookup must NOT swallow it.
+    memoryStore.set("boom", { id: "boom", agentId: "alice", content: "orig", durability: "standard", visibility: "private", instanceToken: "tok-keep" });
+    const r: any = new (Memory as any)();
+    r.id = "boom";
+    r.getContext = () => undefined; // internal caller: the admin gate passes
+    let threw = false;
+    try {
+      const res = await r.put({ id: "boom", agentId: "alice", content: "changed", durability: "standard", _reindex: true });
+      if (res instanceof Response && res.status >= 400) threw = true;
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true); // assertion: a failed lookup fails the write
+    expect(memoryStore.get("boom").content).toBe("orig"); // assertion: the stored row is unchanged
+    expect(memoryStore.get("boom").instanceToken).toBe("tok-keep"); // assertion: the token is not rotated (a bound pointer stays bound)
   });
 });

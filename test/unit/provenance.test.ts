@@ -144,3 +144,13 @@ describe("buildProvenance — both fields together", () => {
     expect(prov.claimed.client).toBeUndefined();
   });
 });
+
+describe("flair#1940 A4 — server receipt time", () => {
+  it("stamps receivedAt from the SERVER clock, and IGNORES a client-supplied receivedAt", () => {
+    const before = Date.now();
+    const p = parse(buildProvenance(AGENT, NOW, { receivedAt: "1999-01-01T00:00:00.000Z" }));
+    expect(typeof p.verified.receivedAt).toBe("string"); // assertion: present
+    expect(p.verified.receivedAt).not.toBe("1999-01-01T00:00:00.000Z"); // assertion: the client value is ignored
+    expect(new Date(p.verified.receivedAt).getTime()).toBeGreaterThanOrEqual(before - 5000); // server clock
+  });
+});

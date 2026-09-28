@@ -90,6 +90,16 @@ export class MemoryArchive extends Resource {
       delete merged.archivedBy;
     }
 
+    // flair#1940 A3 (item 9): the record we read was PROJECTED — for the author
+    // it carries the canonical pointer with the URL query/fragment STRIPPED,
+    // and for a non-author it may read "withheld". Writing any of that back
+    // would replace the stored pointer (losing the full URL) or store a bogus
+    // value, and would re-derive the scope. Omit every pointer field from the
+    // write-back so the stored pointer row, its full URL and its scope stand.
+    delete merged.hostSource;
+    delete merged.hostSourceScope;
+    delete merged.hostSourceVisibility;
+
     // Write back — Memory.put()'s ownership gate applies (stampAttribution), so
     // a non-admin caller cannot flip another agent's memory (403).
     const result = await Memory.put(merged, ctx);

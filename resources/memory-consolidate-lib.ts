@@ -5,6 +5,8 @@
 // Harper; this module has no Harper dependency, so
 // test/unit/memory-consolidate.test.ts exercises the real shipped code.
 
+import { stripInlinePointerFields } from "./host-source-visibility.js";
+
 export function parseDuration(s: string): number {
   const m = s.match(/^(\d+)([dhm])$/);
   if (!m) return 30 * 86400_000;
@@ -36,7 +38,8 @@ export interface Candidate {
  * freshly-created memory is never an archive candidate regardless of retrieval
  * count: archival only considers memories that have had a fair chance to be read.
  */
-export function evaluate(record: any, now: number, olderThanMs: number): Candidate {
+export function evaluate(rawRecord: any, now: number, olderThanMs: number): Candidate {
+  const record = stripInlinePointerFields(rawRecord) as any;
   const ageMs = record.createdAt ? now - new Date(record.createdAt).getTime() : 0;
   const count = record.retrievalCount ?? 0;
 

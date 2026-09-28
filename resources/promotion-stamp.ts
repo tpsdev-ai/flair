@@ -1,5 +1,6 @@
 import { withDetachedTxn } from "./table-helpers.js";
 import { databases } from "harper";
+import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
 
 // Called only after the promotion workflow has authorized and written a Memory
@@ -12,6 +13,7 @@ export async function stampMemoryPromotion(id: string, reviewerId: string, decid
   const stored = await withDetachedTxn(enumerationContext, () => table.get(id));
   if (!stored) throw new Error(`Promotion memory ${id} was not written`);
   const row = { ...stored, promotionStatus: "approved", promotedBy: reviewerId, promotedAt: decidedAt };
+  stripUndeclaredMemoryAttributes(row);
   await withDetachedTxn(enumerationContext, () => table.put(row));
   noteMemoryUpsert(row);
 }

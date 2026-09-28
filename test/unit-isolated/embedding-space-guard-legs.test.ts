@@ -108,6 +108,7 @@ class BaseMemory {
   search(query: any) { return memorySearchGen(query); }
   static async get(id: any) { return memoryStore.get(id) ?? null; }
   static async put(content: any) { const rec = { ...content }; memoryStore.set(content.id, rec); return rec; }
+  static async post(content: any, _ctx?: any) { return new BaseMemory().post(content); }
   static search(query: any) { return memorySearchGen(query); }
 }
 
@@ -165,6 +166,23 @@ beforeEach(() => {
   _resetLocalInstanceIdCacheForTests();
   _resetGuardForTests(); // default table getter reads databasesMock; default modelId getter is the mocked CURRENT
 });
+
+// flair#1940: Harper assigns `transaction` onto the global at load, and the
+// Memory write path creates one when a caller has no request context, refusing
+// to run a write unwrapped. Provide it in this isolated mock.
+(globalThis as any).transaction = (ctx: any, cb: (txn: any) => any) => {
+  if (ctx?.transaction && ctx.transaction.open === 1) return cb(ctx.transaction);
+  const txn: any = { open: 1, saveCommits: false, abort() { this.open = 0; }, commit() { this.open = 0; } };
+  const c = ctx && typeof ctx === "object" ? ctx : {};
+  c.transaction = txn;
+  let r: any;
+  try { r = cb(txn); } catch (e) { txn.abort(); throw e; }
+  if (r && typeof r.then === "function") {
+    return r.then((v: any) => { txn.commit(); return v; }, (e: any) => { txn.abort(); throw e; });
+  }
+  txn.commit();
+  return r;
+};
 
 describe("embedding-space-guard — both runtime legs (mutation test)", () => {
   it("(d) a uniform corpus — including today's BARE-name stamp — does NOT trip", async () => {
