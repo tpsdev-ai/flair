@@ -202,6 +202,10 @@ import {
 } from "./lib/daemon-liveness.js";
 import { readProcessStartTimeMs } from "./lib/process-start-time.js";
 import {
+  occupiedListenerAuthFailure,
+  type OccupiedHarperListener,
+} from "./lib/init-occupied-listener.js";
+import {
   bindCli as bindFederationCli,
   register as registerFederation,
   signRequestBody,
@@ -3144,6 +3148,12 @@ interface OpsSeedRequest {
   id: string;
   /** Kind-specific 401 message (the existing hint text is preserved). */
   auth401Message: (text: string) => string;
+  /**
+   * When set, the 401 is an operator sentence (flair#1749: the port was
+   * already held by a Harper this init did not start). Print it without a
+   * stack. Unset keeps today's thrown Error.
+   */
+  auth401Friendly?: boolean;
   /** Kind-specific generic non-ok message (the existing text is preserved). */
   httpErrorMessage: (status: number, text: string) => string;
 }
@@ -3209,7 +3219,11 @@ async function opsSeedInsertWithRetry(req: OpsSeedRequest): Promise<void> {
       }
       // flair#1790 review C2: 401 FIRST. An auth failure must never be masked by
       // a body that happens to carry a "duplicate"/"already exists" marker.
-      if (res.status === 401) throw new Error(req.auth401Message(text));
+      if (res.status === 401) {
+        const err = new Error(req.auth401Message(text));
+        if (req.auth401Friendly) (err as { flairFriendly?: boolean }).flairFriendly = true;
+        throw err;
+      }
       // THEN the idempotent duplicate path: an unconditional 409, then the
       // marker match for the remaining non-OK shapes.
       const duplicate = res.status === 409 || text.includes("duplicate") || text.includes("already exists");
@@ -3244,6 +3258,13 @@ export async function seedAgentViaOpsApi(
   pubKeyB64url: string,
   adminUser: string,
   adminPass?: string,
+  /**
+   * Set only when `flair init` skipped starting Harper because this port was
+   * already answering (flair#1749). A 401 then names that listener instead
+   * of blaming this init's admin password. Omit it when init started Harper
+   * itself — that 401 keeps the credential hint.
+   */
+  occupiedListener?: OccupiedHarperListener,
 ): Promise<void> {
   const url = typeof opsPortOrUrl === "number"
     ? `http://127.0.0.1:${opsPortOrUrl}/`
@@ -3283,8 +3304,14 @@ export async function seedAgentViaOpsApi(
     noun: "agent",
     tableName: "flair.Agent",
     id: agentId,
-    auth401Message: (text) =>
-      `Operations API insert failed (401): ${text}${opsAuth401Hint(auth === undefined ? undefined : adminUser)}`,
+    auth401Message: (text) => occupiedListener
+      ? occupiedListenerAuthFailure({
+          lead: "Operations API insert failed (401): ",
+          bodyText: text,
+          listener: occupiedListener,
+        })
+      : `Operations API insert failed (401): ${text}${opsAuth401Hint(auth === undefined ? undefined : adminUser)}`,
+    auth401Friendly: occupiedListener !== undefined,
     httpErrorMessage: (status, text) => `Operations API insert failed (${status}): ${text}`,
   });
 }
@@ -4468,6 +4495,7 @@ bindInitCli({
   runSoulWizard,
   seedAgentViaOpsApi,
   seedFederationInstanceViaOpsApi,
+  readOccupiedListener,
   shouldShowInlineSecretWarning,
   verifyAuditLog,
   verifySemanticSearch,
@@ -4993,6 +5021,22 @@ function readProcessRootPath(pid: number): { rootPath: string | null; environRea
     }
   }
   return { rootPath: null, environReadable: false };
+}
+
+/**
+ * Who is already listening on the HTTP port `flair init` declined to start
+ * (flair#1749). Best-effort: lsof for the pid, `/proc/<pid>/environ` for
+ * ROOTPATH. Empty lists mean "could not read", not "nobody". Never signals
+ * the process.
+ */
+function readOccupiedListener(port: number): OccupiedHarperListener {
+  const pids = resolveListenerPids(port) ?? [];
+  const dataDirs: string[] = [];
+  for (const pid of pids) {
+    const { rootPath } = readProcessRootPath(pid);
+    if (rootPath && !dataDirs.includes(rootPath)) dataDirs.push(rootPath);
+  }
+  return { port, pids, dataDirs };
 }
 
 /**

@@ -29,6 +29,11 @@ import { join, resolve } from "node:path";
 import nacl from "tweetnacl";
 import { httpCorsAccessList } from "../lib/http-bind.js";
 import { resolveHome } from "../lib/home.js";
+import {
+  foreignOccupiedListenerDetail,
+  staleHarperBeforeAuthNotice,
+  type OccupiedHarperListener,
+} from "../lib/init-occupied-listener.js";
 
 export type InitCli = {
   api: (...args: any[]) => any;
@@ -63,6 +68,7 @@ export type InitCli = {
   runSoulWizard: (...args: any[]) => any;
   seedAgentViaOpsApi: (...args: any[]) => any;
   seedFederationInstanceViaOpsApi: (...args: any[]) => any;
+  readOccupiedListener: (port: number) => OccupiedHarperListener;
   shouldShowInlineSecretWarning: (...args: any[]) => any;
   verifyAuditLog: (...args: any[]) => any;
   verifySemanticSearch: (...args: any[]) => any;
@@ -206,6 +212,10 @@ function seedAgentViaOpsApi(...args: any[]): any {
 
 function seedFederationInstanceViaOpsApi(...args: any[]): any {
   return cli.seedFederationInstanceViaOpsApi(...args);
+}
+
+function readOccupiedListener(port: number): OccupiedHarperListener {
+  return cli.readOccupiedListener(port);
 }
 
 function shouldShowInlineSecretWarning(...args: any[]): any {
@@ -595,11 +605,20 @@ program
     const refuseIfNeeded = (fileExists: boolean) => {
       const reason = resolveInitAdminPasswordRefuseReason(fileExists, passwordCtx);
       if (!reason) return;
-      console.error(initAdminPassRefusalMessage(reason, {
+      const message = initAdminPassRefusalMessage(reason, {
         dataDir,
         httpPort,
         adminPassPath,
-      }));
+      });
+      // The port is already taken and this data dir has no admin user.
+      // Name the listener (pid, data dir, kill) before exiting. Do not
+      // signal it — flair stop cannot see a process whose pidfile was deleted
+      // with the data dir (flair#1749).
+      if (reason === "foreign-instance") {
+        console.error(`${message}\n${foreignOccupiedListenerDetail(readOccupiedListener(httpPort))}`);
+      } else {
+        console.error(message);
+      }
       process.exit(1);
     };
 
@@ -708,9 +727,20 @@ program
     mkdirSync(dataDir, { recursive: true });
     readyOpsSocketPosture(dataDir);
 
+    // Set only on the "port already answering, so this init did not start
+    // Harper" path. A later ops-API 401 names that listener (flair#1749)
+    // instead of blaming this init's admin password. Undefined when init
+    // started Harper itself, which keeps today's credential hint.
+    let occupiedListener: OccupiedHarperListener | undefined;
     if (!opts.skipStart) {
       if (alreadyRunning) {
         console.log(`Harper already running on port ${httpPort} — skipping start`);
+        // Before waitForHealth sends this init's admin password: if the
+        // listener's data directory is not this one, say so. Do not signal
+        // the process — the notice prints `kill`, it does not run it.
+        occupiedListener = readOccupiedListener(httpPort);
+        const notice = staleHarperBeforeAuthNotice(dataDir, occupiedListener);
+        if (notice) console.error(notice);
       }
 
       if (!alreadyRunning) {
@@ -1016,7 +1046,7 @@ program
 
       // Seed agent via operations API
       console.log(`Seeding agent '${agentId}' via operations API...`);
-      await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, adminUser, adminPass);
+      await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, adminUser, adminPass, occupiedListener);
       console.log(`Agent '${agentId}' registered ✓`);
 
       // Verify Ed25519 auth
