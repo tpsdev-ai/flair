@@ -762,9 +762,9 @@ describe("round 11 — every non-admin read shape strips inline pointer fields",
 // now reads the STORED row, so two shapes that read the caller-shaped row before
 // are closed here: (t1) a search whose selection omits `archived` on an ARCHIVED
 // row renders nothing, and (t2) a SCALAR select of `hostSource` honours the same
-// gated rendering as the full row. (t3) shows a clean row is byte-identical to
-// origin/main's own projection, and (t4) an unsupported shape is a 400 with no
-// read.
+// gated rendering as the full row. (t3) shows a clean row matches the test Harper
+// mock's projection of present plain fields AND that the base read is handed an
+// UNSELECTED target/query, and (t4) an unsupported shape is a 400 with no read.
 
 describe("round 12 — the pointer decision reads the STORED row; the selection shapes the output", () => {
   const INLINE = JSON.stringify(POINTER);
