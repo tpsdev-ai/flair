@@ -3,8 +3,9 @@
  * federation reader may project (flair#1940 slice 1, A1'' item 8).
  *
  * The outbound reader projects declared Memory attributes. The inbound merge
- * removes undeclared attributes except the named bookkeeping fields.
- * even though the pointer now lives in its own, unfederated table.
+ * removes undeclared attributes except the named bookkeeping fields, so a host
+ * pointer can never ride a federated Memory row even though the pointer now
+ * lives in its own, unfederated table.
  *
  * The CLI build (tsconfig.cli, rootDir src) cannot import from resources/, so
  * this list is mirrored here; `test/unit/federation-memory-whitelist-1940.test.ts`

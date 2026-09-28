@@ -28,6 +28,12 @@ export const harnessState = {
   baseSearchCalls: 0,
   lastBaseGetTarget: null as any,
   lastBaseSearchQuery: null as any,
+  // flair#1940 round 22 (fix 3): how many rows the base search generator has
+  // actually YIELDED, and the size of each batched pointer query. Together
+  // they prove a chunked pointer join streams (yields before the source is
+  // exhausted) and keeps every pointer query bounded.
+  baseSearchYields: 0,
+  pointerQuerySizes: [] as number[],
 };
 
 export function resetHarnessState(): void {
@@ -41,6 +47,8 @@ export function resetHarnessState(): void {
   harnessState.baseSearchCalls = 0;
   harnessState.lastBaseGetTarget = null;
   harnessState.lastBaseSearchQuery = null;
+  harnessState.baseSearchYields = 0;
+  harnessState.pointerQuerySizes = [];
 }
 
 export function matchesCondition(record: any, cond: any): boolean {
@@ -170,7 +178,10 @@ export class BaseMemory {
       });
     }
     async function* gen() {
-      for (const r of records) yield r;
+      for (const r of records) {
+        harnessState.baseSearchYields++;
+        yield r;
+      }
     }
     return gen();
   }
@@ -226,6 +237,7 @@ function mhsDelete(id: any) {
 function mhsSearch(query?: any) {
   harnessState.pointerSearchCalls++;
   const conds = Array.isArray(query?.conditions) ? query.conditions : [];
+  harnessState.pointerQuerySizes.push(conds.length);
   const op = query?.operator || "and";
   // Harper refuses an `or` with fewer than two conditions — mirror that so a
   // single-id lookup that wrongly emits an `or` fails here rather than in CI.

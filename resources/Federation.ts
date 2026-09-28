@@ -890,7 +890,19 @@ export class FederationSync extends Resource {
           // token is OURS, never the peer's. Drop a peer-supplied server-stamped
           // field, then PRESERVE the local row's token on a merge (a new row
           // gets a locally-generated one).
+          //
+          // Round 22: `provenance` is NOT a local incarnation stamp — it is the
+          // ORIGINATOR's signed stamp and must survive the merge. Capture the
+          // value mergeRecord SELECTED (the inbound data for a new row; the
+          // merge's LWW choice for an update — NOT always local.provenance)
+          // before stripping, then restore it in the same per-record apply.
+          // Pinned by test/unit-isolated/federation-merge-provenance.test.ts —
+          // RED if this capture/restore is removed.
+          const mergedProvenance = mergedData.provenance;
           stripServerStampedFields(mergedData);
+          if (typeof mergedProvenance === "string") {
+            mergedData.provenance = mergedProvenance;
+          }
           mergedData.instanceToken =
             local && typeof local.instanceToken === "string" && local.instanceToken.length > 0
               ? local.instanceToken

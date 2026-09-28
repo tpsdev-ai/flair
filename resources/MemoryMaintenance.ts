@@ -176,13 +176,27 @@ export class MemoryMaintenance extends Resource {
             // between must not be orphan-deleted; the conditional re-read
             // inside the transaction closes that read-to-delete gap. The
             // re-read is passed the owned transaction `c` (Gauge pass-5 item 2).
-            await withOwnedTransaction(ctx, async (c) => {
-              const again = await (databases as any).flair.Memory.get(memoryId, c);
-              if (!again || again.archived === true) {
-                await deletePointerRowOrThrow(memoryId, c);
-                stats.orphans++;
-              }
-            });
+            //
+            // Round 22: one orphan's failure must abort only THAT orphan, not
+            // the whole sweep — catch it, count stats.errors, and continue (the
+            // item loops above already work this way). stats.orphans counts a
+            // row only AFTER its owned transaction COMMITS (the count moves out
+            // of the callback). Pinned by test/unit/memory-host-source.test.ts
+            // (r22-orphan-continues) — RED if the try/catch is removed.
+            let committed = false;
+            try {
+              await withOwnedTransaction(ctx, async (c) => {
+                const again = await (databases as any).flair.Memory.get(memoryId, c);
+                if (!again || again.archived === true) {
+                  await deletePointerRowOrThrow(memoryId, c);
+                  committed = true;
+                }
+              });
+              if (committed) stats.orphans++;
+            } catch (err) {
+              stats.errors++;
+              console.error("MemoryMaintenance: orphan sweep delete failed (continuing)", err);
+            }
           }
         }
       }

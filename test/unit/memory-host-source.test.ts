@@ -836,11 +836,16 @@ describe("round 20 — (2) the guard is wired at each of the four write verbs", 
   });
 
   it("(r20-put-reindex) Memory.put — `_reindex` admin branch, resources/Memory.ts:1370", async () => {
-    seedMemory({ id: "mem-r20-reindex", agentId: "agent-a", type: "session" });
+    const seeded = seedMemory({ id: "mem-r20-reindex", agentId: "agent-a", type: "session" });
     const m: any = new (Memory as any)();
     m.getContext = () => ({}); // the _reindex bypass needs no agent actor (admin/internal)
-    await m.put({ _reindex: true, id: "mem-r20-reindex", agentId: "agent-a", content: "x", type: "session", [UNDECLARED]: "SENTINEL", hostSource: POINTER });
+    // The real reindex re-PUTs the WHOLE stored row ({...record, _reindex:true}),
+    // provenance included; the writer strips server-stamped fields, so only the
+    // explicit STORED-value restore keeps provenance.
+    await m.put({ ...seeded, _reindex: true, [UNDECLARED]: "SENTINEL", hostSource: POINTER });
     clean("put(_reindex)", "mem-r20-reindex");
+    // fix 1 (round 22): a corpus-wide reindex must not erase provenance.
+    expect(memoryStore.get("mem-r20-reindex")?.provenance).toBe(seeded.provenance); // assertion: stored provenance is byte-identical after a full-row re-PUT
   });
 
   it("(r20-patch) Memory.patch — update verb, resources/Memory.ts:1291", async () => {
@@ -848,5 +853,79 @@ describe("round 20 — (2) the guard is wired at each of the four write verbs", 
     const m = makeMemory(agentCtx("agent-a"));
     await m.patch({ id: "mem-r20-patch", agentId: "agent-a", content: "x", [UNDECLARED]: "SENTINEL", hostSource: POINTER });
     clean("patch", "mem-r20-patch");
+  });
+});
+
+// ─── round 22: provenance survival, streaming join, orphan-sweep resilience ──
+
+describe("round 22 — (1) a reindex keeps the STORED provenance", () => {
+  it("(r22-reindex-provenance) `_reindex` restores the STORED value, never the submitted one", async () => {
+    const seeded = seedMemory({ id: "mem-r22-reindex", agentId: "agent-a", type: "session" });
+    const m: any = new (Memory as any)();
+    m.getContext = () => ({});
+    // A FORGED provenance in the body is stripped; the STORED value is restored.
+    await m.put({ _reindex: true, id: "mem-r22-reindex", agentId: "agent-a", content: "x", type: "session", provenance: "FORGED-PROVENANCE" });
+    expect(memoryStore.get("mem-r22-reindex")?.provenance).toBe(seeded.provenance); // assertion: the stored provenance survives
+    expect(memoryStore.get("mem-r22-reindex")?.provenance).not.toBe("FORGED-PROVENANCE"); // assertion: the submitted value is never restored
+  });
+});
+
+describe("round 22 — (3) the non-admin pointer join streams in fixed-size chunks", () => {
+  it("(r22-search-chunks) a search larger than one chunk yields before source exhaustion and keeps every pointer query bounded", async () => {
+    const N = 205; // one 200-row chunk + a 5-row tail
+    const ids: string[] = [];
+    for (let i = 0; i < N; i++) {
+      const id = `mem-chunk-${String(i).padStart(3, "0")}`;
+      ids.push(id);
+      seedMemory({ id, agentId: "agent-a", visibility: "shared" });
+    }
+    harnessState.pointerSearchCalls = 0;
+    const out: any[] = [];
+    let yieldsAtFirstRow = -1;
+    for await (const row of await makeMemory(agentCtx("agent-b")).search()) {
+      if (out.length === 0) yieldsAtFirstRow = harnessState.baseSearchYields;
+      out.push(row);
+    }
+    // CONTROL: the base source really did hold all N rows.
+    expect(out.length).toBe(N); // assertion: every scoped row is returned
+    // STREAMING: the first result was produced after reading only the first
+    // chunk, NOT after exhausting the whole source (the buffered code reads all
+    // N before its first yield).
+    expect(yieldsAtFirstRow).toBeLessThan(N); // assertion: yielded before source exhaustion
+    expect(yieldsAtFirstRow).toBeLessThanOrEqual(200); // assertion: exactly the first chunk was read
+    // BOUNDED: more than one pointer query, and every one is <= the chunk size.
+    expect(harnessState.pointerQuerySizes.length).toBeGreaterThan(1); // assertion: the set is processed in chunks
+    expect(harnessState.pointerQuerySizes.every((n) => n <= 200)).toBe(true); // assertion: every pointer query is bounded
+    // ORDER + PROJECTION preserved.
+    expect(out.map((r) => r.id)).toEqual(ids); // assertion: result order is the source order
+    expect(out[0].hostSource).toBeUndefined(); // assertion: no pointer field is invented when no pointer row exists
+  });
+});
+
+describe("round 22 — (5) one orphan's failure does not stop the sweep", () => {
+  const maint = () => {
+    const m: any = new (MemoryMaintenance as any)();
+    m.getContext = () => ({ request: { tpsAgent: "agent-a" } });
+    return m;
+  };
+
+  it("(r22-orphan-continues) a failing early orphan is counted and the sweep cleans a later one", async () => {
+    // Two orphan pointer rows (each with NO Memory row). The FIRST orphan's
+    // pointer delete fails; the sweep must count the error and CONTINUE.
+    pointerStore.set("mem-orphan-1", { memoryId: "mem-orphan-1", hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a", memoryInstanceToken: null });
+    pointerStore.set("mem-orphan-2", { memoryId: "mem-orphan-2", hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "agent-a", memoryInstanceToken: null });
+    harnessState.failNextPointerDelete = true;
+    const resp: any = await maint().post({});
+    // The errors>0 branch returns a 500 Response (the success path returns a
+    // plain object), so read the body off the Response.
+    expect(resp instanceof Response).toBe(true); // assertion: an incomplete run is a 500, not a silent success
+    expect(resp.status).toBe(500);
+    const out: any = await resp.json();
+    expect(harnessState.failNextPointerDelete).toBe(false); // control: the injected pointer failure fired
+    expect(out.error).toBe("maintenance_incomplete"); // assertion: an honest partial, not a generic 500
+    expect(out.errors).toBe(1); // assertion: the failed orphan is counted in stats.errors
+    expect(out.orphans).toBe(1); // assertion: the later orphan is still swept (counted only after commit)
+    expect(pointerStore.has("mem-orphan-1")).toBe(true); // assertion: the failed orphan's pointer survives
+    expect(pointerStore.has("mem-orphan-2")).toBe(false); // assertion: the later orphan was cleaned
   });
 });

@@ -8,6 +8,7 @@
  * strips it (f1-in, here).
  */
 import { describe, it, expect } from "bun:test";
+import { readFileSync } from "node:fs";
 import { FEDERATION_MEMORY_ATTRIBUTES } from "../../src/lib/federation-memory-attributes";
 import {
   DECLARED_MEMORY_ATTRIBUTES,
@@ -48,5 +49,16 @@ describe("flair#1940 A1'' item 8 — the federation Memory whitelist", () => {
     expect([...FEDERATION_MEMORY_ATTRIBUTES].sort()).toEqual(
       [...DECLARED_MEMORY_ATTRIBUTES, ...UNDECLARED_ALLOWED].sort(),
     ); // assertion: the CLI mirror and the resource whitelist cannot drift
+  });
+
+  it("(f1-comment) the module doc comment carries no orphaned 'even though' fragment", () => {
+    const src = readFileSync(
+      new URL("../../src/lib/federation-memory-attributes.ts", import.meta.url),
+      "utf8",
+    );
+    const offending = src
+      .split("\n")
+      .filter((line) => /^\s*\* even though\b/.test(line));
+    expect(offending).toEqual([]); // assertion: no doc-comment line begins with the orphaned fragment
   });
 });

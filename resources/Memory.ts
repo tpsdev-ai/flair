@@ -917,17 +917,33 @@ export class Memory extends (databases as any).flair.Memory {
     const source = memoryScopedSearch(readerAgentId, withoutCallerSelection(query), (q) =>
       withDetachedTxn(ctx, () => super.search(q)),
     );
+    // A1-iv item 2 + round 22: stream in FIXED-SIZE chunks. Each chunk is
+    // projected through the ONE reader helper (ONE batched pointer query for
+    // that chunk) and yielded BEFORE the next chunk is read, so a non-admin
+    // listing no longer buffers the reader's whole readable corpus and every
+    // pointer query stays bounded. Result order and the per-row projection are
+    // preserved (rows are yielded in source order, each through
+    // applyHitStats). Pinned by test/unit/memory-host-source.test.ts
+    // (r22-search-chunks) — RED if the chunked flush is reverted to one
+    // whole-set buffer.
+    const POINTER_JOIN_CHUNK = 200;
     const joined = (async function* joinPointerBatch() {
-      const rows: any[] = [];
+      let rows: any[] = [];
+      const flush = async function* () {
+        const batch = rows;
+        rows = [];
+        const projected = await projectRowsThroughPointers(batch, readerAgentId);
+        for (const row of projected) {
+          yield await applyHitStats(row, ctx);
+        }
+      };
       // memoryScopedSearch returns a Promise of the iterable (its scopedSearch
       // is async); await it before iterating.
-      for await (const row of await (source as any)) rows.push(row);
-      // A1-iv item 2: project through the ONE reader helper (one batched
-      // pointer query for the whole set).
-      const projected = await projectRowsThroughPointers(rows, readerAgentId);
-      for (const row of projected) {
-        yield await applyHitStats(row, ctx);
+      for await (const row of await (source as any)) {
+        rows.push(row);
+        if (rows.length >= POINTER_JOIN_CHUNK) yield* flush();
       }
+      if (rows.length > 0) yield* flush();
     })();
     return joined;
   }
@@ -1385,6 +1401,15 @@ export class Memory extends (databases as any).flair.Memory {
         ? await (databases as any).flair.Memory.get(content.id)
         : null;
       stampInstanceToken(content, reindexExisting);
+      // Reindex is a byte-for-byte re-PUT of an EXISTING row: keep the STORED
+      // provenance. The body's copy was stripped above so it cannot be forged;
+      // restoring it from `reindexExisting` (never from the submitted value)
+      // keeps provenance byte-identical across a corpus-wide reindex.
+      // Pinned by test/unit/memory-host-source.test.ts (r20-put-reindex) — RED
+      // if this restore is removed.
+      if (reindexExisting && typeof reindexExisting.provenance === "string") {
+        content.provenance = reindexExisting.provenance;
+      }
       // Preserve stored visibility on updates before applying write policy:
       // a reindex payload that omits it keeps the record's stored value.
       if (content.visibility === undefined || content.visibility === null) {
@@ -1761,9 +1786,15 @@ export class Memory extends (databases as any).flair.Memory {
     // delete share ONE transaction; with no request context
     // withSharedWriteTransaction creates one. A failing pointer delete aborts
     // it, so nothing is deleted; failures are NOT swallowed.
+    // Round 22: the lexical-index delete hook runs ONLY after the shared
+    // transaction has SUCCEEDED (the pointer delete is part of the same
+    // scope). Firing it inside the callback marked the row deleted in the
+    // (warmed) BM25 index even when a later pointer-delete abort left the
+    // Memory row in place, so the surviving row vanished from lexical recall.
+    // Pinned by test/unit/memory-host-source.test.ts (r22-delete-bm25) — RED if
+    // the call is moved back inside the transaction callback.
     const deleteResult = await withSharedWriteTransaction(ctx, async (c) => {
       const d = await (databases as any).flair.Memory.delete(id, c);
-      noteMemoryDelete(id);
       const deletedId = typeof id === "string" ? id : record?.id;
       if (typeof deletedId === "string" && deletedId.length > 0) {
         const pointerDenial = await deletePointerRow(deletedId, c);
@@ -1772,6 +1803,12 @@ export class Memory extends (databases as any).flair.Memory {
       return d;
     });
     if (deleteResult instanceof Response) return deleteResult;
+    // Use the RESOLVED deleted id (a by-record delete carries only `id`, so the
+    // stored row's id is the fallback). Only after the shared write succeeded.
+    const resolvedDeletedId = typeof id === "string" ? id : record?.id;
+    if (typeof resolvedDeletedId === "string" && resolvedDeletedId.length > 0) {
+      noteMemoryDelete(resolvedDeletedId);
+    }
     if (typeof id === "string") await clearHitStats(id, ctx).catch(() => {});
     return deleteResult;
   }
