@@ -252,17 +252,9 @@ if [[ "$MODE" == "--publish" ]]; then
   echo "  Publishing @tpsdev-ai/flair..."
   (cd "$ROOT" && npm publish) || { echo "❌ flair publish failed"; exit 1; }
 
-  # The five leaf packages below soft-fail so a break-glass publish of the core
-  # three isn't blocked by, say, flair-bench's one-time Trusted Publisher
-  # bootstrap (docs/releasing.md). That is a reasonable trade — but it used to
-  # end with `git tag` and `✅ published and tagged` regardless, which is not
-  # (flair#953). A partial publish rendered identically to a complete one, and
-  # the tag then said a release shipped that a consumer cannot install: the root
-  # package pins its internal deps at the exact version, so a missing leaf is a
-  # broken install, not a missing extra.
-  #
-  # They still soft-fail individually. What changed is that the failures are
-  # counted, named at the end, and block the tag.
+  # Attempt all leaf publishes, collecting failures instead of stopping early.
+  # Report every failed package and refuse to tag a partial release (flair#953).
+  # A successful tag requires every package in this release to publish.
   SOFT_FAILED=()
   soft_publish() {
     local dir="$1" name="$2" hint="${3:-}"
@@ -278,10 +270,8 @@ if [[ "$MODE" == "--publish" ]]; then
   soft_publish "packages/n8n-nodes-flair" "@tpsdev-ai/n8n-nodes-flair"
   soft_publish "packages/langgraph-flair" "@tpsdev-ai/langgraph-flair" "may need build step"
   soft_publish "packages/adk-flair-js"     "@tpsdev-ai/adk-flair"     "may need build step"
-  # Until the one-time bootstrap in docs/releasing.md is done (first manual
-  # publish + npm Trusted Publisher registration), this is expected to fail on a
-  # brand-new install of the package.
-  soft_publish "packages/flair-bench"     "@tpsdev-ai/flair-bench"     "may need build step, or first-publish bootstrap — see docs/releasing.md"
+  # Like the other leaf packages, flair-bench may need a build step.
+  soft_publish "packages/flair-bench"     "@tpsdev-ai/flair-bench"     "may need build step"
 
   if (( ${#SOFT_FAILED[@]} > 0 )); then
     echo ""
