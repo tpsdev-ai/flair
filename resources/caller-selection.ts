@@ -172,7 +172,9 @@ export function restSelection(pathname: string, search: string): { select?: any;
       asArray = true;
       inner = inner.slice(1, -1);
     }
-    const names = inner.length ? inner.split(",").map(decodeName) : [];
+    // A trailing (or doubled) comma is a separator artifact, not an empty name —
+    // Harper parses `select(content,)` as the single selection `content`.
+    const names = inner.length ? inner.split(",").map(decodeName).filter((n) => n.length > 0) : [];
     if (asArray) (names as any).asArray = true;
     out.select = names.length === 1 && !asArray ? names[0] : names;
   }

@@ -18,6 +18,7 @@ describe("round 14 — restSelection reads Harper's REST selection and path-prop
     expect(asArr?.select).toEqual(["a", "b"]); // assertion: nested list names
     expect((asArr?.select as any).asArray).toBe(true); // assertion: nested list → asArray
     expect(restSelection("/Memory/x.hostSource", "")).toEqual({ property: "hostSource" }); // assertion: path property
+    expect(restSelection("/Memory/x", "?select(content,)")).toEqual({ select: "content" }); // assertion: trailing comma is a separator artifact
     expect(restSelection("/Memory/x", "")).toBeNull(); // assertion: neither form → null
   });
 
