@@ -48,7 +48,8 @@ export type EmbedGpuSource = "detected" | "env" | "default";
 export interface EmbedGpuStatement {
   backend: EmbedGpuBackend;
   /**
-   * Offloaded layers the engine reported.
+   * Layer count requested of the engine when it reported Metal (`99` = all
+   * layers; llama.cpp caps it at the model's layer count), 0 for CPU.
    * `null` when engagement is unconfirmed — never a fabricated 0.
    */
   gpuLayers: number | null;
@@ -250,9 +251,9 @@ function readGpuTypeProperty(obj: Record<string, unknown>): unknown {
  * `gpu` / `gpuLayers` (HFE's `EmbeddingEngine`).
  *
  * `gpuType` is `getGpuType()` on the binding warmup already opened — not a
- * second addon. `loadedGpuLayers` is the
- * `gpuLayers` value passed into `AddonModel` — the same number
- * `LlamaModel.gpuLayers` returns when a GPU device is present. It is
+ * second addon. `loadedGpuLayers` is the requested
+ * `gpuLayers` value passed into `AddonModel` (llama.cpp caps it at the
+ * model's layer count, so `99` means all layers). It is
  * reported only after the binding says Metal. A CPU binding forces 0.
  * `undefined` (no device enumerated) is unavailable, not CPU.
  */

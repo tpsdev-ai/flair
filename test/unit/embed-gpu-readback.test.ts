@@ -355,3 +355,54 @@ describe("doctor unconfirmed wording (flair#2031)", () => {
     expect(rendered.issueDelta).toBe(1);
   });
 });
+
+describe("documented contract: CPU request and layer count (flair#2031 docs)", () => {
+  it("a CPU request states cpu / 0 without consulting the engine or the warmed binding", () => {
+    let probed = 0;
+    const engine = {
+      get llama() {
+        probed++;
+        return { gpu: "metal" };
+      },
+      gpuLayers: 99,
+    };
+    const r = confirmMetalEngagement({
+      requestedGpuLayers: 0,
+      metalUsable: true,
+      source: "env",
+      engine,
+      probeGpuType: () => {
+        probed++;
+        return "metal";
+      },
+    });
+    expect(r.statement).toEqual({ backend: "cpu", gpuLayers: 0, source: "env" });
+    expect(probed).toBe(0);
+  });
+
+  it("a Metal readback states the requested layer count", () => {
+    const r = confirmMetalEngagement({
+      requestedGpuLayers: 7,
+      metalUsable: true,
+      source: "env",
+      engine: hfeEngine(),
+      probeGpuType: () => "metal",
+    });
+    expect(r.statement).toEqual({ backend: "metal", gpuLayers: 7, source: "env" });
+  });
+
+  it("docs scope the binding readback to offload requests and call gpuLayers the requested count", () => {
+    const root = join(import.meta.dir, "..", "..");
+    const docs = [
+      readFileSync(join(root, "docs", "api-reference.md"), "utf8"),
+      readFileSync(join(root, "docs", "deployment.md"), "utf8"),
+      readFileSync(join(root, ".changelog", "unreleased", "fixed-2031-metal-readback.md"), "utf8"),
+    ];
+    for (const doc of docs) {
+      expect(doc).not.toContain("offloaded `gpuLayers`");
+      expect(doc).not.toContain("offloaded layer count");
+      expect(doc).not.toContain("is the backend reported by the native binding");
+      expect(doc).toContain("without a readback");
+    }
+  });
+});
