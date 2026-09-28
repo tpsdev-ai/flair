@@ -283,7 +283,6 @@ function formatMemory(m: any, agentId?: string): string {
   // The pointer lives in MemoryHostSource and is joined only into Memory.get/
   // search/SemanticSearch results; the bootstrap citation (A6) arrives in slice
   // 4. So this surface leaves the record unchanged.
-  void agentId;
   const tag = m.durability === "permanent" ? "🔒" : m.durability === "persistent" ? "📌" : "📝";
   const date = m.createdAt ? ` (${m.createdAt.slice(0, 10)})` : "";
   const chain = m.supersedes ? " [supersedes earlier decision]" : "";
