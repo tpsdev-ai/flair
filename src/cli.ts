@@ -201,10 +201,13 @@ import {
   type InstanceMatch,
 } from "./lib/daemon-liveness.js";
 import { readProcessStartTimeMs } from "./lib/process-start-time.js";
+import { readInitListenerRootPath } from "./lib/init-listener-environ.js";
 import {
   flairStopCanIdentify,
   occupiedListenerAuthFailure,
+  stableAnsweredHolder,
   type OccupiedHarperListener,
+  type OperationsPortAttribution,
 } from "./lib/init-occupied-listener.js";
 import {
   bindCli as bindFederationCli,
@@ -3261,15 +3264,16 @@ export async function seedAgentViaOpsApi(
   adminPass?: string,
   /**
    * Set only when `flair init` skipped starting Harper and did not already
-   * stop for a foreign data directory (flair#1749). Must be the process
-   * verified to hold THIS operations port — not the HTTP port's listener.
-   * A 401 then names that process, or the unattributed fallback when it
-   * could not be verified. Omit it when init started Harper itself — that
-   * 401 keeps the credential hint. A different data directory does not
-   * prove the passwords differ, and the HTTP holder is not assumed to be
-   * the process that rejected this request.
+   * stop for a foreign data directory (flair#1749). `before` is who held
+   * THIS operations port immediately before the insert — not the HTTP
+   * port's listener. On a 401, `reread` runs and a process is named only
+   * when both reads are the same single pid. Several holders, or a holder
+   * that changed during the request, stay unattributed. Omit this when init
+   * started Harper itself — that 401 keeps the credential hint. A different
+   * data directory does not prove the passwords differ, and the HTTP holder
+   * is not assumed to be the process that rejected this request.
    */
-  occupiedListener?: OccupiedHarperListener,
+  occupiedListener?: OperationsPortAttribution,
 ): Promise<void> {
   const url = typeof opsPortOrUrl === "number"
     ? `http://127.0.0.1:${opsPortOrUrl}/`
@@ -3309,13 +3313,22 @@ export async function seedAgentViaOpsApi(
     noun: "agent",
     tableName: "flair.Agent",
     id: agentId,
-    auth401Message: (text) => occupiedListener
-      ? occupiedListenerAuthFailure({
-          lead: "Operations API insert failed (401): ",
-          bodyText: text,
-          listener: occupiedListener,
-        })
-      : `Operations API insert failed (401): ${text}${opsAuth401Hint(auth === undefined ? undefined : adminUser)}`,
+    auth401Message: (text) => {
+      if (!occupiedListener) {
+        return `Operations API insert failed (401): ${text}${opsAuth401Hint(auth === undefined ? undefined : adminUser)}`;
+      }
+      let after: OccupiedHarperListener;
+      try {
+        after = occupiedListener.reread();
+      } catch {
+        after = { port: occupiedListener.before.port, pids: [], dataDirs: [], flairStopApplies: false };
+      }
+      return occupiedListenerAuthFailure({
+        lead: "Operations API insert failed (401): ",
+        bodyText: text,
+        listener: stableAnsweredHolder(occupiedListener.before, after),
+      });
+    },
     auth401Friendly: occupiedListener !== undefined,
     httpErrorMessage: (status, text) => `Operations API insert failed (${status}): ${text}`,
   });
@@ -5016,12 +5029,12 @@ function canonicalizeExistingPath(p: string): string {
 }
 
 /**
- * Best-effort ROOTPATH for a live pid.
+ * ROOTPATH for daemon sidecar recovery (flair#1454 / #1478).
  *
- * Linux reads `/proc/<pid>/environ`. macOS has no proc environ file; `ps -Eww`
- * appends the environment to the command and is best-effort (truncated, or
- * hidden). Any other platform, or a failed read, is "could not read" — callers
- * use the unattributed fallback rather than inventing a data directory.
+ * Linux reads `/proc/<pid>/environ`. Every other platform, including macOS,
+ * is "could not read". Init's occupied-listener check uses
+ * `readInitListenerRootPath` instead — a `ps` parse must not feed this
+ * self-heal path.
  */
 function readProcessRootPath(pid: number): { rootPath: string | null; environReadable: boolean } {
   if (process.platform === "linux") {
@@ -5032,26 +5045,7 @@ function readProcessRootPath(pid: number): { rootPath: string | null; environRea
       return { rootPath: null, environReadable: false };
     }
   }
-  if (process.platform === "darwin") {
-    return readDarwinProcessRootPath(pid);
-  }
   return { rootPath: null, environReadable: false };
-}
-
-/** `ps -Eww` environment tail. Null when ROOTPATH is absent or the read failed. */
-function readDarwinProcessRootPath(pid: number): { rootPath: string | null; environReadable: boolean } {
-  try {
-    const out = execFileSync("ps", ["-Eww", "-p", String(pid), "-o", "command="], {
-      encoding: "utf-8",
-      timeout: 2000,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const match = String(out).match(/(?:^|\s)ROOTPATH=(\S+)/);
-    if (!match) return { rootPath: null, environReadable: true };
-    return { rootPath: match[1], environReadable: true };
-  } catch {
-    return { rootPath: null, environReadable: false };
-  }
 }
 
 function readRecordedDaemonPids(dataDir: string): { recordedPid: number | null; sidecarPid: number | null } {
@@ -5072,20 +5066,23 @@ function readRecordedDaemonPids(dataDir: string): { recordedPid: number | null; 
 /**
  * Who is listening on `port` (flair#1749). The caller passes the port that
  * answered — the HTTP port for the pre-auth foreign check, the operations
- * port for a later 401. lsof pids are the only ones that may be named.
- * Empty pids mean the holder could not be verified. Never signals.
+ * port for a later 401. ROOTPATH comes from init's reader, not the sidecar
+ * reader. A directory init could not read is omitted.
+ *
+ * `flair stop` has no `--data-dir` and always reads `defaultDataDir()`.
+ * Offer it only when that directory's pidfile and sidecar name a pid
+ * holding this port. A pidfile in the listener's own ROOTPATH does not
+ * count when that path is not the default. Never signals.
  */
 function readOccupiedListener(port: number): OccupiedHarperListener {
   const pids = resolveListenerPids(port) ?? [];
   const dataDirs: string[] = [];
   for (const pid of pids) {
-    const { rootPath } = readProcessRootPath(pid);
+    const { rootPath } = readInitListenerRootPath(pid);
     if (rootPath && !dataDirs.includes(rootPath)) dataDirs.push(rootPath);
   }
-  const flairStopApplies = dataDirs.some((dir) => {
-    const recorded = readRecordedDaemonPids(dir);
-    return flairStopCanIdentify({ ...recorded, listenerPids: pids });
-  });
+  const recorded = readRecordedDaemonPids(defaultDataDir());
+  const flairStopApplies = flairStopCanIdentify({ ...recorded, listenerPids: pids });
   return { port, pids, dataDirs, flairStopApplies };
 }
 
