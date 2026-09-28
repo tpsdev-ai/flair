@@ -121,6 +121,11 @@ flair memory add --agent local "Harper v5 sandbox blocks node:module but process
 
 Flair embedded the text locally on write. No network calls.
 
+### Task summaries
+Use `flair memory write-task-summary --agent local --outcome merged --summary "Finished the task"` to save a persistent task summary and print its memory id.
+The optional `--ref <ref>` accepts a task, issue, or PR reference; omitted references use `unreferenced`. Outcomes are `merged`, `rejected`, or `abandoned`.
+Existing `--beads` callers remain supported as a deprecated alias; `--ref` takes precedence.
+
 ### Who can read it
 
 `visibility: private` means **only `local` can read this memory** — no other agent on the instance can search it, fetch it by id, or receive it in a bootstrap.
