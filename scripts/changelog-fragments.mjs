@@ -89,35 +89,6 @@ export class FragmentError extends Error {
   }
 }
 
-// One walker owns fence state, indentation validation and entry recognition.
-function walkEntryLines(text, relPath) {
-  const entries = [];
-  let fence = "";
-  let container = 0;
-  for (const [index, line] of text.split("\n").entries()) {
-    const indent = line.match(/^ */)[0].length;
-    if (fence) {
-      const marker = indent === container ? line.slice(container).match(/^(`{3,}|~{3,})( *)$/) : null;
-      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length) fence = "";
-      continue;
-    }
-    const entry = line.startsWith("- ");
-    if (entry) {
-      entries.push(line);
-      container = 2;
-    } else {
-      if (relPath && line.trim() && indent !== 2 && indent < 4) {
-        throw new FragmentError(`${relPath}:${index + 1}: continuation indent ${indent}; expected 2 spaces or at least 4 for nested content (fenced code exempt).`, relPath, index + 1);
-      }
-      if (line.trim() && indent === 0) container = 0;
-    }
-    const content = entry ? line.slice(2) : indent === container ? line.slice(container) : "";
-    const marker = content.match(/^(`{3,}|~{3,})/);
-    if (marker) fence = marker[1];
-  }
-  return entries;
-}
-
 // `<category>-<slug>.md` → { category, slug }. Throws with the offending name and
 // the remedy — a fragment that cannot be placed must never be silently skipped.
 export function parseFragmentName(filename) {
@@ -158,6 +129,23 @@ export function validateFragmentBody(relPath, body) {
         `### heading verbatim. Indent continuation lines by 2 spaces.`,
     );
   }
+  // A whitespace convention, independent of Markdown syntax or fence state.
+  const lines = body.split("\n");
+  for (let index = 1; index < lines.length; index++) {
+    const leading = lines[index].match(/^[ \t]*/)[0];
+    const indent = lines[index].match(/^ */)[0].length;
+    const hasTab = leading.includes("\t");
+    if (hasTab || indent % 2 !== 0) {
+      throw new FragmentError(
+        `${relPath}:${index + 1}: continuation indent ${indent}; ` +
+          (hasTab ? "tabs are not allowed; " : "") +
+          "indent continuation lines by an even number of spaces: 2 for the entry, 4 or more for nested content.",
+        relPath,
+        index + 1,
+      );
+    }
+  }
+
   // One entry per file, checked HERE rather than only at assembly.
   //
   // `promote` already refused a multi-entry fragment, but promote runs once, at
@@ -171,7 +159,15 @@ export function validateFragmentBody(relPath, body) {
   // already runs on every PR, so putting it here means the author hears it while
   // the change is still theirs to fix.
   //
-  const entries = walkEntryLines(body, relPath).length;
+  // Fenced code blocks are stripped before counting: fragments routinely quote
+  // terminal output, and a line like `- foo` inside a fence is content, not a
+  // second entry.
+  // Fence markers are INDENTED in practice: a fenced block inside a fragment is
+  // continuation content under the entry's '- ', so it carries the two-space
+  // indent. An unanchored `^```` matched nothing and the strip silently did
+  // nothing — caught by the fenced-block test below failing, not by review.
+  const withoutFences = body.replace(/^[ \t]*```[\s\S]*?^[ \t]*```/gm, "");
+  const entries = (withoutFences.match(/^- /gm) ?? []).length;
   if (entries > 1) {
     throw new FragmentError(
       `${relPath}: holds ${entries} top-level '- ' entries; a fragment is ONE changelog entry. ` +
@@ -249,9 +245,9 @@ export function readFragments(dir = FRAGMENT_DIR) {
       );
     }
     const { category, slug } = parseFragmentName(name);
-    const body = readFileSync(full, "utf8").replace(/\s+$/, "");
+    const body = readFileSync(full, "utf8");
     validateFragmentBody(`${FRAGMENT_DIR_REL}/${name}`, body);
-    out.push({ name, path: full, category, slug, body });
+    out.push({ name, path: full, category, slug, body: body.replace(/\s+$/, "") });
   }
   return out;
 }
@@ -278,7 +274,7 @@ export function assemble(fragments) {
 // release step to report "N entries" against the fragment count — if those two
 // numbers ever disagree, something was dropped.
 export function countEntries(section) {
-  return walkEntryLines(section).length;
+  return section.split("\n").filter((l) => l.startsWith("- ")).length;
 }
 
 // ─── CHANGELOG.md surgery ─────────────────────────────────────────────────────
@@ -300,7 +296,7 @@ export function locateUnreleased(lines) {
 // promote REPLACES that body: they would be silently discarded at the version
 // cut. Detect them by their list marker (prose edits to the note are fine).
 export function strayUnreleasedEntries(body) {
-  return walkEntryLines(body);
+  return body.split("\n").filter((l) => l.startsWith("- "));
 }
 
 export function promote(version, { date, changelogPath = CHANGELOG_PATH, dir = FRAGMENT_DIR } = {}) {

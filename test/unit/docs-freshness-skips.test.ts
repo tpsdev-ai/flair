@@ -14,7 +14,7 @@
 
 import { describe, expect, test, beforeAll } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -33,7 +33,7 @@ function makeFixture(opts: {
   distCli?: string | null;
 } = {}): string {
   const { quickstart = true, git = true, distCli = null } = opts;
-  const dir = mkdtempSync(join(tmpdir(), "flair-docs-freshness-"));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "flair-docs-freshness-")));
 
   mkdirSync(join(dir, "scripts"), { recursive: true });
   for (const f of ["docs-freshness-check.mjs", "changelog-fragments.mjs", "published-paths.mjs"]) {
@@ -332,7 +332,7 @@ describe("api-reference-schema-coverage", () => {
   });
 });
 
-test("R2 annotation names the fragment and continuation line", () => {
+test("annotation names the fragment and continuation line", () => {
   const dir = fixture({ distCli: fakeCli(3) });
   const file = ".changelog/unreleased/fixed-indent.md";
   writeFileSync(join(dir, file), "- entry\n\n" + " ".repeat(3) + "bad\n");
@@ -342,7 +342,7 @@ test("R2 annotation names the fragment and continuation line", () => {
   const annotations = res.stdout.split("\n").filter((line) => line.startsWith("::error file=") && line.includes("continuation indent"));
   expect(annotations).toHaveLength(2);
   for (const line of annotations) {
-    expect(line).toContain("::error file=" + file + ",line=3::" + file + ":3: continuation indent 3; expected 2 spaces or at least 4 for nested content (fenced code exempt).");
+    expect(line).toContain("::error file=" + file + ",line=3::" + file + ":3: continuation indent 3; indent continuation lines by an even number of spaces: 2 for the entry, 4 or more for nested content.");
   }
 });
 

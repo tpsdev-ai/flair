@@ -11,8 +11,8 @@
 // exactly once.
 
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, cpSync, realpathSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
 
@@ -329,21 +329,6 @@ describe("locateUnreleased", () => {
 // runs on every PR, so moving the rule here is what makes the author hear it
 // while the change is still theirs.
 describe("validateFragmentBody — one entry per fragment", () => {
-  test.each([0, 1, 3])("rejects continuation indent %i", (indent) => {
-    const dir = tmp();
-    write(dir, "fixed-indent.md", "- **Indent.**\n\n" + " ".repeat(indent) + "Continuation.");
-    expect(() => readFragments(dir)).toThrow(`fixed-indent.md:3: continuation indent ${indent}; expected 2 spaces or at least 4 for nested content (fenced code exempt).`);
-  });
-  test("accepts the README example, nesting and fences", () => {
-    const example = readFileSync(".changelog/unreleased/README.md", "utf8").split("```markdown\n")[1].split("\n```")[0];
-    expect(() => validateFragmentBody("example.md", example)).not.toThrow();
-    for (const indent of [2, 4, 5]) expect(() => validateFragmentBody("nested.md", "- **Nested.**\n" + " ".repeat(indent) + "> Content.")).not.toThrow();
-    for (const fence of ["`".repeat(3), "~".repeat(3), "`".repeat(4)]) {
-      const body = ["- **Fenced.**", " ".repeat(2) + fence, " ".repeat(3) + "code", "- literal", " ".repeat(2) + fence, " ".repeat(2) + "After."].join("\n");
-      expect(() => validateFragmentBody("fence.md", body)).not.toThrow();
-      expect(() => validateFragmentBody("fence.md", body + "\n" + " ".repeat(3) + "Wrong.")).toThrow(/fence.md:7: continuation indent 3/);
-    }
-  });
   test("accepts a single entry with indented continuation lines", () => {
     expect(() => validateFragmentBody("f.md", "- **A thing changed.** Why it did:\n  more detail here\n  and more")).not.toThrow();
   });
@@ -482,80 +467,104 @@ describe("lede length — 25 words, one sentence (flair#1392)", () => {
   });
 });
 
-describe("R2 fence walker", () => {
-  for (const char of ["`", "~"]) {
-    const fence = char.repeat(3);
-
-    test("R2 B1 first-line code " + char, () => {
-      const body = ["- " + fence, " ".repeat(3) + "code", " ".repeat(2) + fence, " ".repeat(2) + "after"].join("\n");
-      expect(() => validateFragmentBody("first.md", body)).not.toThrow();
-      expect(countEntries(body)).toBe(1);
-    });
-
-    test("R2 B1 after first-line closure " + char, () => {
-      const body = ["- " + fence, " ".repeat(2) + fence, " ".repeat(3) + "bad"].join("\n");
-      expect(() => validateFragmentBody("first.md", body)).toThrow("first.md:3: continuation indent 3;");
-    });
-
-    test("R2 B2 literal opener hides nothing " + char, () => {
-      const body = ["- entry", " ".repeat(6) + fence, " ".repeat(3) + "bad"].join("\n");
-      expect(() => validateFragmentBody("deep.md", body)).toThrow("deep.md:3: continuation indent 3;");
-      expect(countEntries(["- entry", " ".repeat(6) + fence, "- second"].join("\n"))).toBe(2);
-    });
-
-    test("R2 B2 literal closer keeps code fenced " + char, () => {
-      const body = ["- entry", " ".repeat(2) + fence, " ".repeat(6) + fence, " ".repeat(3) + "code", "- literal", " ".repeat(2) + fence].join("\n");
-      expect(() => validateFragmentBody("deep.md", body)).not.toThrow();
-      expect(countEntries(body)).toBe(1);
-    });
-
-    test("R2 B3 validator and assembly agree " + char, () => {
-      const dir = tmp();
-      const body = ["- entry", " ".repeat(2) + fence, "- literal", " ".repeat(2) + fence].join("\n");
-      expect(() => validateFragmentBody("fixed-fence.md", body)).not.toThrow();
-      write(dir, "fixed-fence.md", body);
-      expect(countEntries(assemble(readFragments(dir)))).toBe(1);
-      expect(strayUnreleasedEntries(body)).toEqual(["- entry"]);
-    });
-
-    for (const command of ["check", "promote"]) {
-      test("R2 B3 gate " + command + " " + char, () => {
-        // Node resolves import.meta.url through macOS /var symlinks.
-        const root = realpathSync(tmp());
-        const dir = join(root, ".changelog", "unreleased");
-        mkdirSync(dir, { recursive: true });
-        mkdirSync(join(root, "scripts"));
-        const script = join(root, "scripts", "changelog-fragments.mjs");
-        cpSync(join(import.meta.dir, "../../scripts/changelog-fragments.mjs"), script);
-        const body = ["- entry", " ".repeat(2) + fence, "- literal", " ".repeat(2) + fence].join("\n");
-        write(dir, "fixed-fence.md", body);
-        const changelog = join(root, "CHANGELOG.md");
-        writeFileSync(changelog, "# Changelog\n\n## [Unreleased]\n\n" + UNRELEASED_NOTE + "\n");
-        const args = command === "check" ? ["check"] : ["promote", "0.31.0", "--date=2026-07-28"];
-        const res = spawnSync("node", [script, ...args], { cwd: root, encoding: "utf8", timeout: 10000 });
-        expect(res.error).toBeUndefined();
-        expect(res.stderr).toBe("");
-        expect(res.status).toBe(0);
-        expect(res.stdout.trim()).not.toBe("");
-        expect(res.stdout).toContain(command === "check" ? "1 fragment(s), 1 entr(ies)" : "promoted 1 entr(ies)");
-        if (command === "promote") {
-          expect(readFileSync(changelog, "utf8")).toContain(body);
-          expect(readdirSync(dir)).toEqual([]);
-        }
-      });
+describe("continuation indentation convention", () => {
+  test.each([1, 3, 5])("refuses odd indent %i with the exact diagnostic", (indent) => {
+    const dir = tmp();
+    const file = ".changelog/unreleased/fixed-indent.md";
+    write(dir, "fixed-indent.md", "- **Indent.**\n\n" + " ".repeat(indent) + "Continuation.");
+    let failure: unknown;
+    try {
+      readFragments(dir);
+    } catch (err) {
+      failure = err;
     }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe(
+      `${file}:3: continuation indent ${indent}; ` +
+        "indent continuation lines by an even number of spaces: 2 for the entry, 4 or more for nested content.",
+    );
+    expect((failure as { file: string }).file).toBe(file);
+    expect((failure as { line: number }).line).toBe(3);
+  });
 
-    test("R2 delimiter contract " + char, () => {
-      const body = ["- " + fence + char + "info", " ".repeat(2) + fence, " ".repeat(2) + (char === "~" ? "`" : "~").repeat(4), " ".repeat(2) + fence + char + "tail", " ".repeat(2) + fence + char + "\t", "- literal", " ".repeat(2) + fence + char.repeat(2) + " ".repeat(2)].join("\n");
-      expect(() => validateFragmentBody("rules.md", body)).not.toThrow();
-      expect(countEntries(body)).toBe(1);
-      for (const indent of [0, 1, 3]) {
-        expect(() => validateFragmentBody("rules.md", body + "\n" + " ".repeat(indent) + "bad")).toThrow("rules.md:8: continuation indent " + indent + ";");
-      }
-      for (const indent of [2, 4, 6]) {
-        expect(() => validateFragmentBody("rules.md", body + "\n" + " ".repeat(indent) + "good")).not.toThrow();
-      }
-      expect(strayUnreleasedEntries([fence, "- literal", fence, "- real"].join("\n"))).toEqual(["- real"]);
+  test.each([0, 2, 4, 6])("accepts even indent %i", (indent) => {
+    expect(() => validateFragmentBody(
+      "even.md", "- **Entry.**\n" + " ".repeat(indent) + "Continuation.",
+    )).not.toThrow();
+  });
+
+  test.each(["`", "~"])("checks indentation inside a %s fence too", (marker) => {
+    const fence = marker.repeat(3);
+    const lines = [
+      "- **Code.**",
+      " ".repeat(2) + fence,
+      " ".repeat(2) + "code",
+      " ".repeat(4) + "nested",
+      " ".repeat(6) + "deeper",
+      " ".repeat(2) + fence,
+    ];
+    expect(() => validateFragmentBody("code.md", lines.join("\n"))).not.toThrow();
+    for (const indent of [1, 3, 5]) {
+      lines[2] = " ".repeat(indent) + "code";
+      expect(() => validateFragmentBody("code.md", lines.join("\n"))).toThrow(
+        `code.md:3: continuation indent ${indent}; ` +
+          "indent continuation lines by an even number of spaces: 2 for the entry, 4 or more for nested content.",
+      );
+    }
+  });
+
+  test.each(["\t", " \t", "  \t"])("refuses a tab in leading whitespace %j", (leading) => {
+    const indent = leading.indexOf("\t");
+    expect(() => validateFragmentBody("tab.md", "- **Entry.**\n" + leading + "Text.")).toThrow(
+      `tab.md:2: continuation indent ${indent}; tabs are not allowed; ` +
+        "indent continuation lines by an even number of spaces: 2 for the entry, 4 or more for nested content.",
+    );
+  });
+
+  test("checks whitespace-only lines and permits tabs after content", () => {
+    expect(() => validateFragmentBody("blank.md", "- entry\n" + " ".repeat(3) + "\n  end"))
+      .toThrow("blank.md:2: continuation indent 3;");
+    expect(() => validateFragmentBody("blank.md", "- entry\n\t\n  end"))
+      .toThrow("tabs are not allowed");
+    expect(() => validateFragmentBody("content.md", "- entry\n  text\ttext")).not.toThrow();
+  });
+
+  test("checks trailing whitespace before readFragments trims the body", () => {
+    const dir = tmp();
+    for (const leading of [" ".repeat(1), " ".repeat(3), " ".repeat(5), "\t"]) {
+      write(dir, "fixed-tail.md", "- **Entry.**\n" + leading + "\n");
+      expect(() => readFragments(dir)).toThrow("fixed-tail.md:2: continuation indent");
+    }
+  });
+
+  test("accepts the README example", () => {
+    const readme = readFileSync(join(import.meta.dir, "../../.changelog/unreleased/README.md"), "utf8");
+    const parts = readme.split("```markdown\n");
+    expect(parts).toHaveLength(2);
+    const end = parts[1].indexOf("\n```");
+    expect(end).toBeGreaterThan(0);
+    expect(() => validateFragmentBody("README example", parts[1].slice(0, end))).not.toThrow();
+  });
+
+  test("accepts every fragment on the main commit this PR is based on", () => {
+    // Pin the corpus so unrelated future fragments cannot change this regression.
+    const base = "6df652b0396da1dded7f254c8c323f8937cf1a46";
+    const cwd = join(import.meta.dir, "../..");
+    const git = (...args: string[]) => execFileSync("git", args, {
+      cwd, encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "pipe"],
     });
-  }
+    const paths = git("ls-tree", "-r", "--name-only", base, "--", ".changelog/unreleased/")
+      .trim().split("\n").filter((path) => path.endsWith(".md") && !path.endsWith("/README.md"));
+    expect(paths.length).toBeGreaterThan(0);
+    for (const path of paths) {
+      expect(() => validateFragmentBody(path, git("show", base + ":" + path))).not.toThrow();
+    }
+  });
+
+  test("entry counting retains main's behavior", () => {
+    const body = ["- entry", "  ```", "- literal", "  ```"].join("\n");
+    expect(() => validateFragmentBody("count.md", body)).not.toThrow();
+    expect(countEntries(body)).toBe(2);
+    expect(strayUnreleasedEntries(body)).toEqual(["- entry", "- literal"]);
+  });
 });

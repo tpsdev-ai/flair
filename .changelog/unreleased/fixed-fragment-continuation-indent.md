@@ -1,5 +1,7 @@
-- **Changelog validation checks continuation indentation.**
-  Outside fenced code, continuation lines require two spaces or at least four for nested content, with file and line diagnostics.
-  Validation, assembly and stray-entry detection share fence handling, including fences opened directly after the list marker. Docs-freshness annotations point to the offending continuation line.
+- **Changelog validation rejects odd continuation indentation and leading tabs.**
+  Every line after the first is checked, including lines inside fenced code.
+  Use an even number of leading spaces: two for entry text, four or more for
+  nested content. Unindented lines pass this check. Errors name the file, line
+  and indent; docs-freshness annotations point to the offending line.
 
   (Closes #2007)
