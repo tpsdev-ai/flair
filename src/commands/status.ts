@@ -160,6 +160,12 @@ function oauthDetailLines(o: any): string[] {
 
 const LOCAL_FLAIR_PROBE_PORTS = [9926, 19926, 19925];
 
+/** The BM25 line /HealthDetail already formatted. Null on an older server. */
+export function formatBm25StatusLine(bm25: { summary?: unknown } | null | undefined): string | null {
+  if (!bm25 || typeof bm25.summary !== "string") return null;
+  const summary = bm25.summary.trim();
+  return summary.length > 0 ? summary : null;
+}
 
 /**
  * The unreachable-path guidance for a localhost target, as printable lines.
@@ -452,6 +458,9 @@ const statusCmd = program
       }
       if (healthData?.lastWrite) console.log(render.kv("Last write", render.relativeTime(healthData.lastWrite)));
     }
+
+    const bm25Line = formatBm25StatusLine(healthData?.bm25);
+    if (bm25Line) console.log(render.kv("BM25 index", bm25Line));
 
     if (agents && agents.count > 0) {
       console.log(`\n${render.wrap(render.c.bold, "Agents")}`);
@@ -895,6 +904,9 @@ statusCmd
       console.log(`Expired:      ${memories.expired ?? 0}`);
       if (healthData?.lastWrite) console.log(`Last write:   ${relativeTime(healthData.lastWrite)} (${healthData.lastWrite})`);
     }
+
+    const bm25DeepLine = formatBm25StatusLine(healthData?.bm25);
+    if (bm25DeepLine) console.log(`BM25 index:   ${bm25DeepLine}`);
 
     const agents = healthData?.agents;
     if (agents && agents.count > 0) {

@@ -82,11 +82,11 @@ function resolveVersion(): string {
  *
  * flair#1326: `ok: true` used to mean only "this resource answered." That
  * is a green light that lies when search routes are not mounted yet, or
- * when the hybrid BM25 index is still cold (first search after restart
- * scans the corpus; the lag grows with store size). `searchReady` is
+ * when the BM25 index is still empty or building (a text search waits for
+ * the background build; the wait grows with store size). `searchReady` is
  * always present. When search cannot be served at all, this endpoint
- * returns HTTP 503 and `ok: false`. When the process is live but recall
- * is still cold, it stays 200 and names the lag on `searchReadyReason`.
+ * returns HTTP 503 and `ok: false`. When the process is live but the index
+ * is not ready, it stays 200 and names the lag on `searchReadyReason`.
  *
  * Rich stats (memory counts, agent names, etc.) are behind /HealthDetail
  * which requires authentication. This prevents information leakage on
@@ -130,16 +130,23 @@ export class Health extends Resource {
   }
 }
 
-/** Same sources /Health and /HealthDetail consult so they cannot disagree. */
-export function currentSearchReadiness(): SearchReadiness {
+/**
+ * Same sources /Health and /HealthDetail consult so they cannot disagree.
+ *
+ * `detail` includes the progress summary (doc counts) on the lag reason.
+ * Public /Health leaves it off — corpus size stays on the authenticated
+ * /HealthDetail `bm25` object, which is what `flair status` prints.
+ */
+export function currentSearchReadiness(detail = false): SearchReadiness {
   // Fail-open when the registry is missing (Sherlock on #1406 / flair#1411):
   // do not 503 forever. resolveSearchReadiness warns once and names the
   // degradation; we do not treat "registry should always be here" as a given.
   const resources = (server as { resources?: ResourceRegistry }).resources ?? null;
+  const full = bm25IndexStatus();
   return resolveSearchReadiness({
     resources,
     memoryTable: db.flair?.Memory,
-    bm25: bm25IndexStatus(),
+    bm25: detail ? full : { state: full.state, reason: full.reason },
     hybridEnabled: hybridEnabled(),
     retrievalMode: retrievalMode(),
     bm25IndexEnabled: bm25IndexEnabled(),
@@ -184,7 +191,9 @@ export class HealthDetail extends Resource {
     // flair#1326: same search-ready signal as public /Health. HealthDetail
     // stays HTTP 200 (it is a stats dump, not a traffic gate); the field
     // and a warning name the lag so `flair status` / operators can see it.
-    const readiness = currentSearchReadiness();
+    const readiness = currentSearchReadiness(true);
+    const bm25 = bm25IndexStatus();
+    stats.bm25 = bm25;
     const embeddingBody = withEmbedGpuHealth({ ok: true });
     stats.embedding = embeddingBody.embedding;
     if (embeddingBody.embedding.fallback) {
@@ -201,6 +210,10 @@ export class HealthDetail extends Resource {
     if (!readiness.searchReady && readiness.searchReadyReason) {
       stats.searchReadyReason = readiness.searchReadyReason;
       warnings.push({ level: "warn", message: readiness.searchReadyReason });
+    } else if (bm25.state === "disabled" && bm25.summary) {
+      // The index is answering via the per-query scan. searchReady stays
+      // true (recall works); the line says why the fast path is off.
+      warnings.push({ level: "warn", message: `bm25 index: ${bm25.summary}` });
     }
 
     const ctx = (this as any).getContext?.();

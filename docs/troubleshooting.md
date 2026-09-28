@@ -8,11 +8,16 @@ flair doctor
 
 ## Common Issues
 
-### BM25 cold-start warning
+### BM25 index status
 
-`bm25 index not built (cold boot; first search scans the corpus)` after a
-restart is normal: the first text search using BM25 warms that worker's index,
-so it can take longer and the warning clears once the build succeeds.
+`flair status` prints the lexical index for the Harper worker that answered:
+
+- `building 312/817 docs (38%) · started 4s ago` — the background build (started after embeddings boot) is in progress. A text search waits for that build.
+- `ready · 817 docs · built in 1.2s · 3m ago` — the index is serving.
+- `disabled — <reason>` — the index is off and search uses a per-query scan. The reason is the feed error, a failed build, or `FLAIR_BM25_INDEX is off`.
+- `not built yet — builds in the background after startup, or on the first text search` — the warm has not started. A text search builds it too.
+
+With `THREADS_COUNT` greater than 1 the line names the worker it describes (`worker 3 of 4`). Each worker has its own index; the line is not a cluster total.
 
 ### Pre-0.18.0 flair-client / flair-mcp silently drops writes
 

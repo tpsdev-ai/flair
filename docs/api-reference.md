@@ -94,7 +94,7 @@ is `GET /Name/<id>` unless noted.
 | Method | Path | Auth | Notes |
 |--------|------|------|-------|
 | GET | `/Health`, `/health` | Public | Liveness. `searchReady` is always present; HTTP 503 / `ok: false` when search cannot be served. `embedding: { backend, gpuLayers, source }` states the resolved embed device (flair#1437); `fallback` is present when GPU was requested but Metal did not engage. |
-| GET | `/HealthDetail` | Ed25519 | Rich stats (counts, agents, migration). |
+| GET | `/HealthDetail` | Ed25519 | Rich stats (counts, agents, migration). `bm25.summary` is this worker's lexical index: `building N/M docs`, `ready · N docs`, or `disabled — reason`. |
 | GET | `/AgentCard/<agentId>` | Public | A2A agent-card; field-allowlisted. |
 | GET | `/a2a`, `/A2AAdapter` | Public | A2A discovery. |
 | POST | `/a2a`, `/A2AAdapter` | Ed25519 | JSON-RPC actions (writes OrgEvents, reads tasks). GET-only is public; POST is not. |

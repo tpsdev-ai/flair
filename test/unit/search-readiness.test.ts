@@ -3,9 +3,10 @@
  *
  * /Health used to answer {ok:true} as soon as the Health resource was
  * loaded. That is a green light that lies when /Memory and /SemanticSearch
- * are still Harper catch-all 404s, and again after restart when the hybrid
- * BM25 index is still empty (first search scans the corpus; the lag grows
- * with store size). The decision lives in resources/search-readiness.ts so
+ * are still Harper catch-all 404s, and again after restart while the BM25
+ * index is still empty or building (a text search waits for the background
+ * build; the wait grows with store size). The decision lives in
+ * resources/search-readiness.ts so
  * this file drives the shipped function — no Harper, no 66k-row store.
  */
 import { beforeEach, describe, expect, test } from "bun:test";
@@ -84,7 +85,7 @@ describe("resolveSearchReadiness (flair#1326)", () => {
     expect(r.searchReadyReason).toBe(SEARCH_READY_REASON_REGISTRY_UNAVAILABLE_TABLE_ONLY);
   });
 
-  test("cold BM25 index after restart → 200 liveness, searchReady false names the lag", () => {
+  test("empty BM25 index after restart → 200 liveness, searchReady false says what clears it", () => {
     const r = resolveSearchReadiness({
       resources: mounted,
       memoryTable,
@@ -94,11 +95,13 @@ describe("resolveSearchReadiness (flair#1326)", () => {
     expect(r.ok).toBe(true);
     expect(r.status).toBe(200);
     expect(r.searchReady).toBe(false);
-    expect(r.searchReadyReason).toMatch(/bm25 index not built/i);
-    expect(r.searchReadyReason).toMatch(/first search scans the corpus/i);
+    expect(r.searchReadyReason).toMatch(/not built yet/i);
+    expect(r.searchReadyReason).toMatch(/text search/i);
+    expect(r.searchReadyReason).not.toMatch(/cold boot/i);
+    expect(r.searchReadyReason).not.toMatch(/scans the corpus/i);
   });
 
-  test("BM25 still building → names the in-flight scan, does not claim search-ready", () => {
+  test("BM25 still building → names the in-flight build, does not claim search-ready", () => {
     const r = resolveSearchReadiness({
       resources: mounted,
       memoryTable,
@@ -108,7 +111,35 @@ describe("resolveSearchReadiness (flair#1326)", () => {
     expect(r.searchReady).toBe(false);
     expect(r.ok).toBe(true);
     expect(r.status).toBe(200);
-    expect(r.searchReadyReason).toMatch(/bm25 index building/i);
+    expect(r.searchReadyReason).toMatch(/bm25 index: building/i);
+    expect(r.searchReadyReason).toMatch(/waits for this build/i);
+    expect(r.searchReadyReason).not.toMatch(/scans the corpus/i);
+  });
+
+  test("building with a progress summary uses that line (flair#2032)", () => {
+    const r = resolveSearchReadiness({
+      resources: mounted,
+      memoryTable,
+      bm25: {
+        state: "building",
+        summary: "building 312/817 docs (38%) · started 4s ago",
+      },
+      hybridEnabled: true,
+    });
+    expect(r.searchReady).toBe(false);
+    expect(r.searchReadyReason).toBe("bm25 index: building 312/817 docs (38%) · started 4s ago");
+  });
+
+  test("a failed build is still serving via the scan, so searchReady stays true (flair#2032)", () => {
+    const r = resolveSearchReadiness({
+      resources: mounted,
+      memoryTable,
+      bm25: { state: "failed", reason: "build failed: disk gone" },
+      hybridEnabled: true,
+    });
+    expect(r.searchReady).toBe(true);
+    expect(r.ok).toBe(true);
+    expect(r.status).toBe(200);
   });
 
   test("BM25 ready + routes mounted → searchReady true, registry-verified reason", () => {
@@ -158,7 +189,8 @@ describe("resolveSearchReadiness (flair#1326)", () => {
     expect(r.searchReady).toBe(false);
     expect(r.ok).toBe(true);
     expect(r.status).toBe(200);
-    expect(r.searchReadyReason).toContain("bm25 index not built");
+    expect(r.searchReadyReason).toMatch(/not built yet/);
+    expect(r.searchReadyReason).not.toMatch(/cold boot/i);
   });
 
   test("retrievalMode is authoritative over the legacy hybridEnabled boolean", () => {
@@ -172,7 +204,8 @@ describe("resolveSearchReadiness (flair#1326)", () => {
       retrievalMode: "bm25-only",
     });
     expect(r.searchReady).toBe(false);
-    expect(r.searchReadyReason).toContain("bm25 index not built");
+    expect(r.searchReadyReason).toMatch(/not built yet/);
+    expect(r.searchReadyReason).not.toMatch(/cold boot/i);
   });
 
   test("FLAIR_BM25_INDEX off: empty is the kill-switch steady state, not cold lag", () => {
@@ -286,7 +319,7 @@ describe("buildPublicHealthBody (flair#1326)", () => {
         searchReady: false,
         ok: true,
         status: 200,
-        searchReadyReason: "bm25 index not built (cold boot; first search scans the corpus)",
+        searchReadyReason: "bm25 index not built yet — builds in the background after startup, or on the first text search",
       },
       identity,
     );

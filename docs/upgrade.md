@@ -36,10 +36,12 @@ flair status
 flair doctor
 ```
 
-After a restart, `flair status` may show
-`bm25 index not built (cold boot; first search scans the corpus)`: this is a
-normal cold start; the first text search using BM25 warms that worker's index,
-so it can take longer and the warning clears once the build succeeds.
+After a restart, `flair status` shows the BM25 index building in the
+background (`building 312/817 docs (38%) · started 4s ago`) and then
+`ready · 817 docs · built in 1.2s · 3m ago`. A text search issued while it
+is building waits for that build. `disabled — <reason>` means search is on
+the per-query scan; the reason says why. With `THREADS_COUNT` greater than
+1 the line names the worker it describes.
 
 `flair upgrade` checks and upgrades the npm-global packages (`@tpsdev-ai/flair`,
 `@tpsdev-ai/flair-mcp`) and, if present, the `openclaw-flair` plugin (via
