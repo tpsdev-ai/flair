@@ -1,14 +1,16 @@
 /**
  * contract.test.ts — flair#1943, the LangGraph slice.
  *
- * FlairStore is a LangGraph `BaseStore`. This file pins the contract three ways:
+ * FlairStore is a LangGraph `BaseStore`. This file pins the contract four ways:
  *
- *   (t1) every method name declared on `BaseStore.prototype` is a function on
- *        `FlairStore.prototype` — the structural-interface check.
+ *   (t1) a RUNTIME method-presence check: every method name declared on
+ *        `BaseStore.prototype` is a function on `FlairStore.prototype`.
  *   (t2) the TYPE CHECKER accepts `const s: BaseStore = new FlairStore({...})`.
- *        There is no CI type gate that covers this package's test directory
- *        (the workspace `tsc` gate type-checks its `src/**` only), so this is
- *        enforced by running `bunx tsc --noEmit` on this file.
+ *        CI enforces it: from `packages/langgraph-flair` the unit lane runs
+ *        `bunx tsc --noEmit --strict --target ES2022 --module ESNext
+ *        --moduleResolution Bundler --types node,bun-types --esModuleInterop
+ *        --skipLibCheck test/contract.test.ts`
+ *        (scripts/test-unit.ts, after the flair-client build).
  *   (t3) a compiled `StateGraph` receives FlairStore via `compile({ store })`;
  *        a node writes through the store LangGraph hands it and a later node
  *        reads the value back through `get` and `search`.
@@ -20,7 +22,7 @@
  * over a plain row array.
  */
 import { describe, it, expect } from "bun:test";
-import { BaseStore } from "@langchain/langgraph-checkpoint";
+import { BaseStore, type ListNamespacesOperation } from "@langchain/langgraph-checkpoint";
 import { StateGraph, Annotation, START, END } from "@langchain/langgraph";
 import { FlairStore } from "../src/index";
 
@@ -135,7 +137,7 @@ describe("(t4) listNamespaces equals the equivalent batch operation", () => {
         maxDepth: 2,
         limit: 5,
         offset: 0,
-      } as any,
+      } as ListNamespacesOperation,
     ]))[0];
 
     expect(viaMethod).toEqual(viaBatch); // assertion: identical results

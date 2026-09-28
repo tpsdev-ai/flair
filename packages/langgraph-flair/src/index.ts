@@ -7,10 +7,7 @@
  * retrieve the items when authorized; new items default to private and are
  * excluded from federation.
  *
- * FlairStore defines its own get, put, delete, search, and batch methods. The
- * convenience methods call dispatch directly, while batch dispatches its
- * supplied operations concurrently through Promise.all. Namespace enumeration
- * is available only as a batch operation.
+ * FlairStore defines get, put, delete, search, batch, and listNamespaces. The first four dispatch directly; batch dispatches concurrently through Promise.all; listNamespaces builds and submits a batch operation.
  *
  * # Mapping
  *
@@ -56,8 +53,13 @@
  */
 
 import { FlairClient } from "@tpsdev-ai/flair-client";
+// Type-only: `Operation` and `OperationResults` appear only in `batch`'s public
+// signature, so this adds nothing at runtime and the peer package stays an
+// optional runtime dependency.
+import type { Operation, OperationResults } from "@langchain/langgraph-checkpoint";
 
-// The item and operation types are declared locally; this module imports
+// Item types are declared locally; the operation types in `batch`'s signature
+// come from the peer package as TYPE-ONLY imports (above). This module imports
 // FlairClient and does not import or extend BaseStore.
 
 interface Item {
@@ -99,7 +101,7 @@ interface ListNamespacesOperation {
   offset: number;
 }
 
-type Operation =
+type FlairOperation =
   | GetOperation
   | SearchOperation
   | PutOperation
@@ -221,16 +223,16 @@ export function namespaceMatchesCondition(condition: any, namespace: string[]): 
   return path.every((label: unknown, i: number) => label === "*" || namespace[start + i] === label);
 }
 
-function isGet(op: Operation): op is GetOperation {
+function isGet(op: FlairOperation): op is GetOperation {
   return "key" in op && !("value" in op);
 }
-function isPut(op: Operation): op is PutOperation {
+function isPut(op: FlairOperation): op is PutOperation {
   return "key" in op && "value" in op;
 }
-function isSearch(op: Operation): op is SearchOperation {
+function isSearch(op: FlairOperation): op is SearchOperation {
   return "namespacePrefix" in op;
 }
-function isListNs(op: Operation): op is ListNamespacesOperation {
+function isListNs(op: FlairOperation): op is ListNamespacesOperation {
   return !("namespace" in op) && !("namespacePrefix" in op);
 }
 
@@ -324,13 +326,14 @@ export class FlairStore {
   }
 
   /** Dispatches the supplied operations concurrently and returns their results in input order. */
-  // The result is typed `any`: LangGraph's `OperationResults` is keyed on its own
-  // operation types, and because this module declares its operation types
-  // locally (see the module comment), TypeScript cannot relate the two mapped
-  // types across the generic boundary. A precise mapped return would block the
-  // class from satisfying `BaseStore`; `any` keeps the contract in place.
-  async batch<Op extends Operation[]>(operations: Op): Promise<any> {
-    return Promise.all(operations.map((op) => this.dispatch(op)));
+  // The signature uses the peer package's `Operation`/`OperationResults`
+  // (type-only imports), exactly as `BaseStore.batch` declares them, so the
+  // published return type stays precise instead of `any`. The single cast is
+  // confined to the dispatcher result: `dispatch` returns `unknown` because its
+  // branches produce different shapes, and the mapped `OperationResults<Op>` is
+  // determined by the input operations.
+  async batch<Op extends Operation[]>(operations: Op): Promise<OperationResults<Op>> {
+    return Promise.all(operations.map((op) => this.dispatch(op))) as OperationResults<Op>;
   }
   // Convenience methods for get, put, delete, and search; each calls the
   // private dispatcher directly. `listNamespaces`, `start`, and `stop` are
@@ -390,7 +393,7 @@ export class FlairStore {
 
   // ── private dispatch ─────────────────────────────────────────────────────
 
-  private async dispatch(op: Operation): Promise<unknown> {
+  private async dispatch(op: FlairOperation): Promise<unknown> {
     if (isGet(op)) return this.doGet(op);
     if (isPut(op)) return this.doPut(op);
     if (isSearch(op)) return this.doSearch(op);

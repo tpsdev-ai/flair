@@ -128,6 +128,23 @@ export function unitPlan(root: string): UnitStep[] {
     steps.push({ name: relative(root, file), cwd: root, args: ["test", file], files: [file] });
   }
   steps.push({ name: "build flair-client", cwd: join(root, "packages/flair-client"), args: ["run", "build"], files: [] });
+  // flair#1943: the langgraph-flair contract test asserts
+  // `const s: BaseStore = new FlairStore(...)` — a TYPE-LEVEL check no other step
+  // covers. The package tsconfig includes `src/**` only, and `bun test` strips
+  // types without checking them, so a broken structural contract could still
+  // report a green lane. Type-check that one file here, against the peer
+  // package's types. It runs after the flair-client build because the file
+  // imports this package's `src`, which imports flair-client's emitted types.
+  steps.push({
+    name: "typecheck: langgraph-flair contract (BaseStore assignability)",
+    cwd: join(root, "packages/langgraph-flair"),
+    args: [
+      "x", "tsc", "--noEmit", "--strict", "--target", "ES2022", "--module", "ESNext",
+      "--moduleResolution", "Bundler", "--types", "node,bun-types", "--esModuleInterop",
+      "--skipLibCheck", "test/contract.test.ts",
+    ],
+    files: [],
+  });
   for (const pkg of ["flair-tool-descriptors", "flair-mcp", "flair-client", "langgraph-flair", "n8n-nodes-flair", "openclaw-flair", "pi-flair", "flair-bench", "adk-flair-js", "cursor-wake-runner"]) {
     const dir = pkg === "adk-flair-js" ? "test/unit" : "test";
     const cwd = join(root, "packages", pkg);
