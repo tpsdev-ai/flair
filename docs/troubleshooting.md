@@ -8,6 +8,12 @@ flair doctor
 
 ## Common Issues
 
+### BM25 cold-start warning
+
+`bm25 index not built (cold boot; first search scans the corpus)` after a
+restart is normal: the first text search using BM25 warms that worker's index,
+so it can take longer and the warning clears once the build succeeds.
+
 ### Pre-0.18.0 flair-client / flair-mcp silently drops writes
 
 **Symptoms:** `memory_store` comes back as if it stored something (`written: false`, a `mergedWith` id, or a "deduplicated" record you did not write) and **zero rows** appear for the writing agent. The match it folded into can be **another agent's `shared` memory**. `flair doctor` after this server version names the pin.

@@ -36,6 +36,11 @@ flair status
 flair doctor
 ```
 
+After a restart, `flair status` may show
+`bm25 index not built (cold boot; first search scans the corpus)`: this is a
+normal cold start; the first text search using BM25 warms that worker's index,
+so it can take longer and the warning clears once the build succeeds.
+
 `flair upgrade` checks and upgrades the npm-global packages (`@tpsdev-ai/flair`,
 `@tpsdev-ai/flair-mcp`) and, if present, the `openclaw-flair` plugin (via
 `openclaw plugins install --force --pin`, not `npm install -g` — it needs OpenClaw's
