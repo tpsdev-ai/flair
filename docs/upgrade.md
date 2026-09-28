@@ -133,10 +133,11 @@ actually running:
   process was running. When Flair itself was swapped, the new version
   stays installed, including when the previous version cannot be read,
   and the command tells you to run `flair start`. A timeout or a non-2xx
-  answer is indeterminate, not stopped, and still rolls back. When the
-  registry reports that the previous version is deprecated, that version
-  is not reinstalled; if the lookup fails, or the `deprecated` field is
-  null, rollback still proceeds. If a rollback put a previous version in
+  answer is indeterminate, not stopped. Rollback needs a known previous
+  version and is refused when the registry reports that version
+  deprecated. When the previous version is unknown, the decision is
+  `no-target` and the command exits without rolling back. If the lookup
+  fails, or the `deprecated` field is null, rollback still proceeds. If a rollback put a previous version in
   place and that version's restart fails, the command exits nonzero and
   names that version known-broken for this attempt. When no previous tree
   was restored, the headline is neutral: it does not call a rollback

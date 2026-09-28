@@ -1,11 +1,13 @@
 /**
  * upgrade-rollback-1740-command.test.ts — flair#1740 command boundary.
  *
- * Drives the real `flair upgrade` action with three seams under test control:
+ * Drives the real `flair upgrade` action with seams under test control:
  *   - install: rebindCli({ runPackageInstall }) records the spec; npm is never run
  *   - restart: rebindCli({ restartAfterUpgrade }) throws the Harper timeout
  *   - health: a real /Health server (or a closed port) classified by
  *     classifyUpgradePriorLiveness — not a boolean the test hands in
+ *   - plain-tree swap: rebindCli({ applyPlainTreeUpgrade }) leaves
+ *     `.upgrade-prev` absent for the missing-previous-tree case
  *
  * `--no-verify` skips the credential preflight. Prior liveness still runs.
  * A closed port must keep the new version (exit 0). This file imports
