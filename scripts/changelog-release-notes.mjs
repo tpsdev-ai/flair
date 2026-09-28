@@ -34,15 +34,30 @@ const ISSUE_REF_RE = /(?:([\w.-]+\/[\w.-]+)|flair)?#(\d+)/g;
 const ISSUE_CITE_RE = / \((?:flair)?#\d+/;
 const HEADS_UP_RE = /^\s*>\s*\*\*Heads-up:\*\*/i;
 
+// Non-exhaustive prose heuristic used when reading unreleased fragments.
+// Listed forms: sentence-start [please] set/run/add/remove + inline code,
+// FLAIR_* or --flag; "you must"/"before upgrading" + those verbs; and
+// sentence-start "After upgrading, run"/"To upgrade, run".
+// Scan outside the lede, fenced examples and rendered Heads-up blocks.
 export function operatorRemedyViolation(entryText) {
-  const prose = String(entryText).replace(/^[ \t]*(```|~~~)[^\n]*\n[\s\S]*?^[ \t]*\1[^\n]*$/gm, "");
-  if (extractHeadsUps(prose).length) return null;
+  let inHeadsUp = false;
+  const prose = String(entryText)
+    .replace(/^[ \t]*(```|~~~)[^\n]*\n[\s\S]*?^[ \t]*\1[^\n]*$/gm, "")
+    .split("\n")
+    .map((line) => {
+      // Match extractHeadsUps: only contiguous quote lines continue the block.
+      if (HEADS_UP_RE.test(line)) inHeadsUp = true;
+      else if (!/^\s*>/.test(line)) inHeadsUp = false;
+      return inHeadsUp ? "" : line;
+    })
+    .join("\n");
   const bold = prose.match(/^- \*\*[\s\S]*?\*\*/);
   const plain = prose.replace(/^- /, "").trim();
   const body = collapseWs(bold ? prose.slice(bold[0].length) : plain.slice(firstSentence(plain).length));
   const action = /(?:^|[.!?]\s+)(?:please\s+)?(?:set|run|add|remove)\s+(?:`[^`]+`|FLAIR_[A-Z0-9_]+|--[a-z][\w-]*)/i;
   const obligation = /\byou must\s+(?:set|run|add|remove)\b|\bbefore upgrading\s*[,:\u2014-]?\s*(?:set|run|add|remove)\b/i;
-  return action.test(body) || obligation.test(body)
+  const prefixed = /(?:^|[.!?]\s+)(?:after upgrading|to upgrade),\s+run\b/i;
+  return action.test(body) || obligation.test(body) || prefixed.test(body)
     ? "operator remedy would be omitted from release notes; put it in a > **Heads-up:** block"
     : null;
 }
