@@ -10,7 +10,7 @@
  * credential hint. Init does not signal a process it did not start.
  */
 import { describe, test, expect, afterEach } from "bun:test";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -438,7 +438,11 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
       expect(output).toContain("a Harper instance this init did not start");
       expect(output).not.toMatch(/\bkill \d+/);
     }
-    if (process.platform === "linux" || process.platform === "darwin") {
+    const hasLsof = (() => {
+      try { execFileSync("lsof", ["-v"], { stdio: "ignore" }); return true; }
+      catch (e: any) { return e?.code !== "ENOENT"; }
+    })();
+    if ((process.platform === "linux" || process.platform === "darwin") && hasLsof) {
       expect(output).toContain(`pid ${opsHolder.pid}`);
       expect(output).toContain(`kill ${opsHolder.pid}`);
     }
