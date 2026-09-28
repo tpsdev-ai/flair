@@ -500,17 +500,19 @@ class FlairMemoryProvider(MemoryProvider):
         # (a deployment served under a prefix); httpx merges the route onto it,
         # so signing the built request's own raw path (path + query) can never
         # disagree with what is sent. A base URL that carries a query string or
-        # fragment is refused before any request: the join does not produce a
-        # single well-defined request path to sign.
+        # fragment is refused before any request: with a base query, httpx can
+        # append the route to the query instead of the path, and a base fragment
+        # is carried into the built URL. Refusing both keeps the base a pure path
+        # prefix.
         parsed_base = httpx.URL(self._url)
         if "?" in str(parsed_base) or "#" in str(parsed_base):
             raise ValueError(
                 f"flair: refusing base URL {self._url!r}: a base URL must not "
                 "carry a query string or fragment."
             )
-        # _request accepts ROUTES only. An absolute URL bypasses the base
-        # entirely (httpx honors it and ignores base_url), which could make the
-        # signed path and the sent path diverge — refuse it before building.
+        # _request accepts ROUTES only. A fully qualified URL bypasses the
+        # configured base and can address another origin, so a path with a
+        # scheme or host is refused before building.
         route = httpx.URL(path)
         if route.scheme or route.host:
             raise ValueError(

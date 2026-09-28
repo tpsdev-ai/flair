@@ -204,8 +204,8 @@ export class FlairClient {
    * "/"). Parsed with `new URL` so the path sent is the path the base names.
    *
    * A base URL whose serialized form carries a query string or fragment is
-   * refused BEFORE any request: the join drops the base's path for a bare
-   * trailing "?" or "#", so there is no request path to sign. An ordinary base
+   * refused BEFORE any request: even a bare trailing "?" or "#" changes
+   * relative URL resolution and can discard the base's path. An ordinary base
    * (an origin with no path) addresses exactly the URLs it did before.
    */
   private requestUrl(path: string): URL {
@@ -215,8 +215,9 @@ export class FlairClient {
     } catch {
       throw new Error(`flair-client: cannot parse the base URL "${this.url}"`);
     }
-    // A bare trailing "?" or "#" reports no search/hash but still makes the
-    // join drop the base's path, so refuse ANY query or fragment delimiter.
+    // A bare trailing "?" or "#" reports no search/hash but still changes how
+    // the route is joined and can discard the base's path, so refuse ANY query
+    // or fragment delimiter.
     if (base.href.includes("?") || base.href.includes("#")) {
       throw new Error(
         `flair-client: refusing base URL "${this.url}": a base URL must not carry a query string or fragment.`,
