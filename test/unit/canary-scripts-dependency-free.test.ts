@@ -37,10 +37,14 @@ function stripComments(text: string): string {
 }
 
 /** Repo-relative paths of every `node scripts/...` invocation in `text`. */
-function nodeScriptsInvoked(text: string): string[] {
+function nodeScriptsInvoked(text: string, shell = ""): string[] {
   const out = new Set<string>();
   for (const m of text.matchAll(/\bnode\s+(scripts\/[A-Za-z0-9._/-]+\.(?:mjs|cjs|js|ts))\b/g)) {
     out.add(m[1]!);
+  }
+  for (const m of text.matchAll(/\bnode\s+"\$SCRIPT_DIR\/([A-Za-z0-9._/-]+\.mjs)"/g)) {
+    if (!shell) throw new Error("sibling Node script without a shell path");
+    out.add(join(dirname(shell), m[1]!));
   }
   return [...out];
 }
@@ -89,7 +93,7 @@ interface Closure {
  * node scripts those helpers call, and the transitive relative-import graph of
  * every module reached.
  */
-function canaryScriptClosure(): Closure {
+function canaryScriptClosure(overrides: Readonly<Record<string, string>> = {}): Closure {
   const workflow = stripComments(readFileSync(CANARY_YML, "utf8"));
 
   const moduleQueue = nodeScriptsInvoked(workflow);
@@ -102,8 +106,9 @@ function canaryScriptClosure(): Closure {
     shellSeen.add(sh);
     const full = join(REPO_ROOT, sh);
     if (!existsSync(full)) continue;
-    const text = stripComments(readFileSync(full, "utf8"));
-    moduleQueue.push(...nodeScriptsInvoked(text));
+    const text = stripComments(overrides[sh] ?? readFileSync(full, "utf8"));
+    moduleQueue.push(...nodeScriptsInvoked(text, sh));
+    if (/\bnode\s+(?:--[\w-]+(?:=\S+)?\s+)*(?:-[ep]\b|--(?:eval|print)\b|-\s*<)/.test(text)) throw new Error("inline Node body in " + sh);
     shellQueue.push(...shellScriptsReferenced(text));
   }
 
@@ -132,6 +137,12 @@ function canaryScriptClosure(): Closure {
   return { shellScripts: [...shellSeen], modules: [...moduleSeen], specifierCount, bare };
 }
 
+test.each(["node -e 'require(\"semver\")'", "node --eval 'require(\"semver\")'", "node -p 'require(\"semver\")'", "node - <<'JS'\nrequire(\"semver\")\nJS"])("rejects inline Node in a shell fixture: %s", (inline: string) => {
+  const shell = "scripts/ci/check-instance-boot.sh";
+  const fixture = readFileSync(join(REPO_ROOT, shell), "utf8") + "\n" + inline + "\n";
+  expect(() => canaryScriptClosure({ [shell]: fixture })).toThrow("inline Node body");
+});
+
 describe("post-publish canary scripts are dependency-free (flair#1856)", () => {
   const closure = canaryScriptClosure();
 
@@ -140,6 +151,7 @@ describe("post-publish canary scripts are dependency-free (flair#1856)", () => {
     // exact failure mode (a check that scans nothing and reports green).
     expect(closure.modules.length).toBeGreaterThanOrEqual(5);
     expect(closure.modules).toContain("scripts/ci/registry-tarball-sha256.mjs");
+    expect(closure.modules).toContain("scripts/ci/boot-probe.mjs");
     expect(closure.shellScripts).toContain("scripts/ci/check-instance-boot.sh");
     expect(closure.shellScripts).toContain("scripts/ci/canary-verdict.sh");
     // ...and it actually parsed imports out of them, rather than reading files
