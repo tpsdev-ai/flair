@@ -163,7 +163,7 @@ export function register(program: Command): void {
   // before resetting the session.
   //
   // The shape of this row matters: tags=['task-summary','auto-on-reset'] +
-  // subject='task:<reference>' + summary populated. Slice 3+4 (harness
+  // subject='task:<reference>' + summary when supplied. Slice 3+4 (harness
   // integrations) will call this as part of the reset pipeline; slice 5+6
   // (operator surfaces) will surface promote/restore controls. Today, this
   // command is independently useful — operator can capture a manual summary

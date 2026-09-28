@@ -46,6 +46,6 @@ test("documented tools equal tools/list from the built stdio server", async () =
     child.stdin.write('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"docs","version":"1"}}}\n{"jsonrpc":"2.0","method":"notifications/initialized"}\n{"jsonrpc":"2.0","id":2,"method":"tools/list"}\n');
   });
   const doc = readFileSync(join(root, "docs/mcp-clients.md"), "utf8").split("## What the MCP server exposes\n")[1]?.split("### Reading the")[0] ?? "";
-  const documented = [...doc.matchAll(/^\| \x60([a-z_]+)\x60 \|/gm)].map((m) => m[1]);
+  const documented = [...doc.matchAll(/^\| \x60([^\x60]+)\x60 \|/gm)].map((m) => m[1]);
   expect(names.length).toBeGreaterThan(0); expect(documented).toEqual(names);
 }, 150000);
