@@ -13,7 +13,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -149,26 +149,51 @@ describe("select-migration-baseline CLI", () => {
     expect(result.stderr).toContain("baseline 0.54.0 (newest non-deprecated version < 0.54.2)");
   });
 
-  test("a piped CLI run delivers the full baseline line", () => {
+  test("a backpressured pipe delivers the full baseline line", async () => {
     const dir = tempDir("baseline-pipe");
     const fixture = join(dir, "versions.json");
+    const preload = join(dir, "hold-stdout.cjs");
     writeFileSync(fixture, JSON.stringify(NEWEST_LOWER_DEPRECATED));
-    // Command substitution in the lanes reads stdout through a pipe. The CLI
-    // must let that write finish instead of exiting before the pipe drains.
-    const result = spawnSync(
-      "bash",
+    // A plain 7-byte write fits in the kernel pipe, so process.exit() still
+    // delivers it. Cork stdout before the CLI writes. process.exit() does not
+    // emit beforeExit, so the corked line is dropped. A normal exit does, the
+    // preload uncorks, and the full line is written.
+    writeFileSync(
+      preload,
       [
-        "-c",
-        'set -o pipefail; "$1" "$2" --fixture "$3" 0.54.2 | cat',
-        "bash",
-        process.execPath,
-        SCRIPT,
-        fixture,
-      ],
-      { encoding: "utf8" },
+        "process.stdout.cork();",
+        "process.on('beforeExit', () => { process.stdout.uncork(); });",
+        "",
+      ].join("\n"),
     );
-    expect(result.status).toBe(0);
-    expect(result.stdout).toBe("0.54.0\n");
+    // The lanes run `node`, and that is the runtime whose process.exit() drops
+    // a corked stdout write. bun flushes it, so spawning the test runner
+    // (process.execPath under bun test) stays green either way.
+    const child = spawn("node", [
+      "-r", preload,
+      SCRIPT,
+      "--fixture", fixture,
+      "0.54.2",
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    const stdoutChunks: Buffer[] = [];
+    const stdout = child.stdout;
+    const stderr = child.stderr;
+    if (!stdout || !stderr) throw new Error("child stdio was not piped");
+    stdout.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
+    stderr.on("data", () => {});
+    const status = await new Promise<number | null>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error("baseline child hung"));
+      }, 5000);
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        resolve(code);
+      });
+    });
+    const out = Buffer.concat(stdoutChunks).toString("utf8");
+    expect(status).toBe(0);
+    expect(out).toBe("0.54.0\n");
   });
 
   test("the all-deprecated fixture prints no baseline, not a chosen baseline", () => {
