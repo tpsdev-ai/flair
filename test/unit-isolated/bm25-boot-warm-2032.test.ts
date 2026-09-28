@@ -138,6 +138,7 @@ describe("flair#2032 — BM25 boot warm and build status", () => {
     feedPush = null;
     delete process.env.FLAIR_BM25_INDEX;
     delete process.env.THREADS_COUNT;
+    delete process.env.FLAIR_RETRIEVAL_MODE;
     svc.__resetBm25IndexForTests();
   });
 
@@ -146,6 +147,7 @@ describe("flair#2032 — BM25 boot warm and build status", () => {
     svc.__resetBm25IndexForTests();
     delete process.env.FLAIR_BM25_INDEX;
     delete process.env.THREADS_COUNT;
+    delete process.env.FLAIR_RETRIEVAL_MODE;
   });
 
   it("after startup with N memories and no query, status reaches ready with N docs", async () => {
@@ -339,5 +341,35 @@ describe("flair#2032 — BM25 boot warm and build status", () => {
     const status = svc.bm25IndexStatus();
     expect(status.state).toBe("disabled");
     expect(status.summary).toBe("disabled — FLAIR_BM25_INDEX is off");
+  });
+
+  it("vector-only retrieval does not warm an index nothing reads", async () => {
+    seed(4);
+    process.env.FLAIR_RETRIEVAL_MODE = "vector-only";
+    svc.scheduleBm25BootWarm();
+    await new Promise((r) => setTimeout(r, 60));
+    expect(scans).toEqual([]);
+    const status = svc.bm25IndexStatus();
+    expect(status.state).toBe("disabled");
+    expect(status.size).toBe(0);
+    expect(status.summary).toBe("disabled — retrieval mode is vector-only; the index is not used");
+    expect(status.summary).not.toMatch(/text search/);
+  });
+
+  it("the kill switch does not warm the index", async () => {
+    seed(4);
+    process.env.FLAIR_BM25_INDEX = "false";
+    svc.scheduleBm25BootWarm();
+    await new Promise((r) => setTimeout(r, 60));
+    expect(scans).toEqual([]);
+    expect(svc.bm25IndexStatus().size).toBe(0);
+  });
+
+  it("bm25-only retrieval still warms the index", async () => {
+    seed(4);
+    process.env.FLAIR_RETRIEVAL_MODE = "bm25-only";
+    svc.scheduleBm25BootWarm();
+    await poll(() => svc.bm25IndexStatus().state === "ready", "ready");
+    expect(svc.bm25IndexStatus().size).toBe(4);
   });
 });

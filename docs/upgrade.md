@@ -39,9 +39,11 @@ flair doctor
 After a restart, `flair status` shows the BM25 index building in the
 background (`building 312/817 docs (38%) · started 4s ago`) and then
 `ready · 817 docs · built in 1.2s · 3m ago`. A text search issued while it
-is building waits for that build. `disabled — <reason>` means search is on
-the per-query scan; the reason says why. With `THREADS_COUNT` greater than
-1 the line names the worker it describes.
+is building waits for that build. `disabled — <reason>` means the index is
+not serving; the reason says why (after a failure, search is on the
+per-query scan). With `FLAIR_BM25_INDEX=false` or vector-only retrieval the
+index is not built at all. With `THREADS_COUNT` greater than 1 the line
+names the worker it describes.
 
 `flair upgrade` checks and upgrades the npm-global packages (`@tpsdev-ai/flair`,
 `@tpsdev-ai/flair-mcp`) and, if present, the `openclaw-flair` plugin (via

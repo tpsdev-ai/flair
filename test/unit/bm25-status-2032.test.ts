@@ -7,7 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { formatBm25IndexSummary, bm25SearchLagReason } from "../../resources/bm25-status.ts";
+import { formatBm25IndexSummary, bm25SearchLagReason, bm25DisabledWarning } from "../../resources/bm25-status.ts";
 import { formatBm25StatusLine } from "../../src/commands/status.ts";
 
 const NOW = Date.parse("2026-09-28T15:00:00.000Z");
@@ -161,5 +161,40 @@ describe("product strings this chip owns (flair#2032)", () => {
     const src = readFileSync(join(import.meta.dir, "..", "..", "resources", "embeddings-boot.ts"), "utf8");
     expect(src).toContain("scheduleBm25BootWarm");
     expect(src).toMatch(/registerEmbeddingsBackend\(\)\.finally/);
+  });
+});
+
+describe("HealthDetail warning for a disabled index (flair#2032)", () => {
+  const on = { indexEnabled: true, inRetrievalPath: true };
+
+  test("a failure-disabled index is a warning", () => {
+    expect(bm25DisabledWarning({ state: "disabled", summary: "disabled — build failed: disk gone" }, on))
+      .toBe("bm25 index: disabled — build failed: disk gone");
+  });
+
+  test("the kill switch is a setting, not a warning", () => {
+    expect(bm25DisabledWarning(
+      { state: "disabled", summary: "disabled — FLAIR_BM25_INDEX is off" },
+      { indexEnabled: false, inRetrievalPath: true },
+    )).toBeNull();
+  });
+
+  test("vector-only retrieval is a setting, not a warning", () => {
+    expect(bm25DisabledWarning(
+      { state: "disabled", summary: "disabled — retrieval mode is vector-only; the index is not used" },
+      { indexEnabled: true, inRetrievalPath: false },
+    )).toBeNull();
+  });
+
+  test("ready, building and empty are not this warning", () => {
+    for (const state of ["ready", "building", "empty"]) {
+      expect(bm25DisabledWarning({ state, summary: "x" }, on)).toBeNull();
+    }
+  });
+
+  test("HealthDetail routes its disabled warning through bm25DisabledWarning with both settings", () => {
+    const src = readFileSync(join(import.meta.dir, "..", "..", "resources", "health.ts"), "utf8");
+    expect(src).toMatch(/bm25DisabledWarning\(bm25, \{\s*indexEnabled: bm25IndexEnabled\(\),\s*inRetrievalPath: bm25IndexInRetrievalPath\(\),\s*\}\)/);
+    expect(src).not.toContain("message: `bm25 index: ${bm25.summary}`");
   });
 });

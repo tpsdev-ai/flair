@@ -14,7 +14,7 @@ flair doctor
 
 - `building 312/817 docs (38%) · started 4s ago` — the background build (started after embeddings boot) is in progress. A text search waits for that build.
 - `ready · 817 docs · built in 1.2s · 3m ago` — the index is serving.
-- `disabled — <reason>` — the index is off and search uses a per-query scan. The reason is the feed error, a failed build, or `FLAIR_BM25_INDEX is off`.
+- `disabled — <reason>` — the index is not serving. After a feed error or a failed build, search uses a per-query scan and `flair status` also lists it as a warning. `FLAIR_BM25_INDEX is off` (the kill switch) and `retrieval mode is vector-only` are settings: the index is not built and they are not warnings.
 - `not built yet — builds in the background after startup, or on the first text search` — the warm has not started. A text search builds it too.
 
 With `THREADS_COUNT` greater than 1 the line names the worker it describes (`worker 3 of 4`). Each worker has its own index; the line is not a cluster total.

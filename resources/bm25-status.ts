@@ -108,6 +108,23 @@ export function formatBm25IndexSummary(input: Bm25StatusFields, now = Date.now()
 }
 
 /**
+ * HealthDetail warning for an index that is `disabled` while search still
+ * answers. Only a failure (feed error, failed build, failed rank) warns.
+ * `FLAIR_BM25_INDEX=false` and vector-only retrieval are operator settings:
+ * the status line states them, and they are not a standing warning.
+ */
+export function bm25DisabledWarning(
+  bm25: { state?: string; summary?: string } | null | undefined,
+  opts: { indexEnabled: boolean; inRetrievalPath: boolean },
+): string | null {
+  if (!opts.indexEnabled || !opts.inRetrievalPath) return null;
+  if (bm25?.state !== "disabled") return null;
+  const summary = bm25.summary?.trim() ?? "";
+  if (summary.length === 0) return null;
+  return `bm25 index: ${summary}`;
+}
+
+/**
  * Lag text for searchReady. A caller that already has a summary (HealthDetail)
  * passes it through; a caller with only a state (public /Health) gets the
  * same facts without doc counts.

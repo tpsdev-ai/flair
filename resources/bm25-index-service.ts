@@ -85,6 +85,7 @@ import { databases } from "harper";
 import { withDetachedTxn } from "./table-helpers.js";
 import { Bm25Index, INDEX_SELECT, type IndexRecord, type RankParams } from "./bm25-index.js";
 import { formatBm25IndexSummary, readThreadsCount, type Bm25IndexState } from "./bm25-status.js";
+import { retrievalMode } from "./bm25.js";
 
 /** Kill switch. Default ON; set FLAIR_BM25_INDEX=false/0/off to force every
  *  query back onto the legacy per-query corpus scan + buildBM25(). Read
@@ -92,6 +93,22 @@ import { formatBm25IndexSummary, readThreadsCount, type Bm25IndexState } from ".
 export function bm25IndexEnabled(): boolean {
   const v = (process.env.FLAIR_BM25_INDEX ?? "true").toLowerCase();
   return v === "true" || v === "1" || v === "on";
+}
+
+/**
+ * The index is read only by the "hybrid" and "bm25-only" retrieval modes
+ * (semantic-retrieval-core.ts). A "vector-only" process has no lexical leg,
+ * so the boot warm does not build an index nothing reads, and status says
+ * so instead of claiming a text search will build it. An unrecognized
+ * FLAIR_RETRIEVAL_MODE throws on every query anyway; treat it as in the
+ * path so this check never hides that error.
+ */
+export function bm25IndexInRetrievalPath(): boolean {
+  try {
+    return retrievalMode() !== "vector-only";
+  } catch {
+    return true;
+  }
 }
 
 type PendingEvent = { kind: "upsert"; record: IndexRecord } | { kind: "delete"; id: string };
@@ -164,8 +181,13 @@ export function __setBm25BuildPauseForTests(fn: (() => Promise<void>) | null): v
 export function bm25IndexStatus(): Bm25IndexStatus {
   const threadsCount = readThreadsCount();
   const enabled = bm25IndexEnabled();
-  const viewState: Bm25IndexState = enabled ? state : "disabled";
-  const reason = enabled ? disabledReason : "FLAIR_BM25_INDEX is off";
+  const inPath = bm25IndexInRetrievalPath();
+  const viewState: Bm25IndexState = enabled && inPath ? state : "disabled";
+  const reason = !enabled
+    ? "FLAIR_BM25_INDEX is off"
+    : !inPath
+      ? "retrieval mode is vector-only; the index is not used"
+      : disabledReason;
   const view = {
     state: viewState,
     size: index.size,
@@ -399,7 +421,7 @@ async function waitForMemorySearch(maxWaitMs = 30_000, intervalMs = 50): Promise
 
 async function warmWhenReady(serial: number): Promise<void> {
   if (serial !== warmSerial) return;
-  if (!bm25IndexEnabled()) return;
+  if (!bm25IndexEnabled() || !bm25IndexInRetrievalPath()) return;
   let ready = false;
   try {
     ready = await waitForMemorySearch();
@@ -409,7 +431,7 @@ async function warmWhenReady(serial: number): Promise<void> {
     return;
   }
   if (serial !== warmSerial) return;
-  if (!bm25IndexEnabled()) return;
+  if (!bm25IndexEnabled() || !bm25IndexInRetrievalPath()) return;
   if (!ready) {
     if (state === "empty") {
       disabledReason = "background build skipped: Memory table was not ready within 30s; a text search builds it";

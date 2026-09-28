@@ -9,7 +9,8 @@ import { getMigrationStatusSnapshot } from "./migrations/status.js";
 import { resolveMigrationDataDirForRead } from "./migrations/data-dir.js";
 import { REM_DEDUP_STATS_PATH } from "./dedup-cluster.js";
 import { hybridEnabled, retrievalMode } from "./bm25.js";
-import { bm25IndexEnabled, bm25IndexStatus } from "./bm25-index-service.js";
+import { bm25IndexEnabled, bm25IndexInRetrievalPath, bm25IndexStatus } from "./bm25-index-service.js";
+import { bm25DisabledWarning } from "./bm25-status.js";
 import { normalizeStamp } from "./embedding-space-guard.js";
 import { getModelId } from "./embeddings-provider.js";
 import { describeStampOutstanding, EMBEDDING_STAMP_ID } from "./migrations/stamp-outstanding.js";
@@ -210,10 +211,15 @@ export class HealthDetail extends Resource {
     if (!readiness.searchReady && readiness.searchReadyReason) {
       stats.searchReadyReason = readiness.searchReadyReason;
       warnings.push({ level: "warn", message: readiness.searchReadyReason });
-    } else if (bm25.state === "disabled" && bm25.summary) {
-      // The index is answering via the per-query scan. searchReady stays
-      // true (recall works); the line says why the fast path is off.
-      warnings.push({ level: "warn", message: `bm25 index: ${bm25.summary}` });
+    } else {
+      // A failed index answers via the per-query scan. searchReady stays
+      // true (recall works); the line says why the fast path is off. The
+      // kill switch and vector-only retrieval are settings, not warnings.
+      const bm25Warning = bm25DisabledWarning(bm25, {
+        indexEnabled: bm25IndexEnabled(),
+        inRetrievalPath: bm25IndexInRetrievalPath(),
+      });
+      if (bm25Warning) warnings.push({ level: "warn", message: bm25Warning });
     }
 
     const ctx = (this as any).getContext?.();
