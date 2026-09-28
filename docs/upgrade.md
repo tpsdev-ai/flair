@@ -77,8 +77,16 @@ and:
 5. Restarts the systemd unit whose `WorkingDirectory` / `ExecStart` names the
    tree (`FLAIR_SYSTEMD_UNIT=flair.service` adds an explicit unit). If no unit
    is found, it falls back to `flair restart`
-6. Verifies, then removes `.upgrade-prev`. On a failed restart or verify the
-   previous tree is swapped back
+6. Verifies, then removes `.upgrade-prev` on success. A thrown restart error
+   keeps a swapped Flair package when the prior `/Health` connection was
+   refused (`keep`, successful exit). With a swap and a running or indeterminate
+   prior probe, a nonempty previous version selects rollback. No swap, or no
+   previous version after a running or indeterminate probe, selects `no-target`
+   (failure). Verification keeps an `ok` or `healthy-unverified` result;
+   other results select rollback with a
+   nonempty previous version, or `cannot-rollback` without one. A reported
+   deprecation blocks rollback, and a missing saved tree skips tree restoration.
+   See [Restart, verification and rollback](#restart-verification-and-rollback).
 
 ```bash
 flair upgrade --check --tree /opt/flair
@@ -128,8 +136,17 @@ it exists and skips restoration when it is absent. The tree restore first
 attempts to move the live path to `.upgrade-failed` when it exists.
 
 After that stage, an engine change requires a snapshot path and successful
-snapshot restoration before restart. Rollback then attempts restart and,
-if restart returns, verification; its reported outcomes exit with failure.
+snapshot restoration before restart. Before restoring, rollback stops the
+instance and requires fresh daemon evidence that it is stopped. It then moves
+the current data directory to a unique, timestamped sibling named
+`<data-dir>.pre-rollback-<timestamp>-<suffix>` and prints that retained path.
+Rollback never deletes this retained directory. If stopping, confirming the
+stop, validating the snapshot, or moving the data aside fails, restoration is
+refused without replacing the current data. To recover writes made after the
+snapshot, stop Flair, set aside the restored data directory, move the retained
+directory back, and start with the Harper engine version that wrote it.
+Rollback then attempts restart and, if restart returns, verification; its
+reported outcomes exit with failure.
 
 If that restart throws, the npm-global and restored-tree diagnostics label
 the rollback target known-broken for this attempt. The missing-tree diagnostic
@@ -448,9 +465,19 @@ flair restart
 flair restore ~/flair-backup-<date>.json
 ```
 
-`flair upgrade` does this automatically on a failed post-restart verification — see
-"Upgrade is a transaction" above. This section is for doing it by hand, e.g. after
-`--no-verify`, or after problems surface later than the automatic check catches.
+`flair upgrade` selects automatic rollback after post-restart verification only
+when the result is neither `ok` nor `healthy-unverified` and a nonempty previous
+version is available; otherwise a failed result is `cannot-rollback`. A thrown
+restart error instead keeps a swapped Flair package after a refused pre-upgrade
+`/Health` connection (`keep`, successful exit). No swap, or no previous version
+after a running or indeterminate probe, selects `no-target`; a swap with that
+probe and a nonempty previous version selects rollback. Reported deprecation
+blocks rollback; a missing saved plain-tree directory skips tree restoration.
+Engine-change data restoration requires a confirmed stop and retention of the
+current directory. See [Restart, verification and rollback](#restart-verification-and-rollback)
+for the decisions and retained-data recovery instructions. This section is for
+manual recovery, e.g. after `--no-verify`, or after problems surface later than
+the automatic check catches.
 
 ### Known issue — upgrading *from* an older version can still report a false rollback
 

@@ -13,6 +13,7 @@ import { fabricUpgrade } from "../fabric-upgrade.js";
 import { renderFleetSweepTable, sweepFleet } from "../fleet-verify.js";
 import { resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
 import { defaultKeysDir } from "../lib/auth-resolve.js";
+import { classifyDaemonState, type DaemonEvidence } from "../lib/daemon-liveness.js";
 import { renderVerifiedSummary } from "../lib/doctor-run.js";
 import { isDetached, renderDetachedWarning } from "../lib/launchd-management.js";
 import { FLAIR_MCP_PACKAGE, clearFlairCliVersionCache } from "../lib/mcp-spec.js";
@@ -22,11 +23,11 @@ import { decideAfterRestartFailure, decideDeprecatedRollback, formatKnownBrokenR
 import { ownedPinRefreshShouldReport, refreshOwnedPins } from "../lib/owned-pins.js";
 import { extractSnapshotSafely, validateSnapshotArchive } from "../lib/safe-snapshot-extract.js";
 import { collectUpgradeExecPathWarning, findFlairPackageDir, resolveNpmGlobalFlairPackage, resolveServingFlairPackage } from "../lib/upgrade-exec-path.js";
-import { PlainTreeUpgradePlan, UPGRADE_FAILED_SUFFIX, decidePlainTreeRollback, discardPlainTreePrevious, findSystemdUnitsForTree, formatPlainTreeBanner, formatPlainTreePlan, formatPlainTreeScopeFooter, planPlainTreeUpgrade, resolvePlainTreeListingTarget, resolvePlainTreeTarget, restartSystemdUnits, restorePlainTreePrevious, treeSibling } from "../lib/upgrade-plain-tree.js";
+import { PlainTreeUpgradePlan, UPGRADE_FAILED_SUFFIX, decidePlainTreeRollback, discardPlainTreePrevious, findSystemdUnitsForTree, formatPlainTreeBanner, formatPlainTreePlan, formatPlainTreeScopeFooter, planPlainTreeUpgrade, resolvePlainTreeListingTarget, resolvePlainTreeTarget, restartSystemdUnits, stopSystemdUnits, restorePlainTreePrevious, treeSibling } from "../lib/upgrade-plain-tree.js";
 import { probeInstance } from "../probe.js";
 import * as render from "../render.js";
 import { FLAIR_PKG_NAME, primeVersionCheckCache } from "../version-check.js";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
 
 import { join, resolve, sep } from "node:path";
 import { create as tarCreate } from "tar";
@@ -45,6 +46,7 @@ export type UpgradeCli = {
   doctorRunAfterUpgrade: (...args: any[]) => any;
   flairPackageDir: (...args: any[]) => any;
   fleetSweepCallerExitMessage: (...args: any[]) => any;
+  gatherDaemonEvidence: (port: number, dataDir: string) => Promise<DaemonEvidence>;
   humanBytes: (...args: any[]) => any;
   isCredentialOnlyFailure: (...args: any[]) => any;
   observeLaunchdManagement: (...args: any[]) => any;
@@ -1539,8 +1541,12 @@ program
     // while the version on disk lies about what's actually running.
     // --no-restart opts back out for the "stage now, bounce later" case.
     // --restart is kept as a deprecated no-op for old muscle memory.
-    // Upgrade = install → restart → verify → (rollback on failure), one
-    // transaction — never report success on a broken restart.
+    // Restart failure: no swap yields no-target; a swap after a refused
+    // pre-upgrade /Health connection yields keep (exit success). Otherwise a
+    // nonempty previous version selects rollback, or no-target without one.
+    // Verification has its own ok/healthy-unverified/rollback/cannot-rollback
+    // decision. Rollback refuses reported deprecation; plain-tree restoration
+    // is skipped when the saved tree is missing. See docs/upgrade.md.
     const previousFlairVersion = flairFinding?.installed ?? null;
     const expectedFlairVersion =
       flairFinding?.status === "outdated" && !flairInstallFailed
@@ -1632,9 +1638,36 @@ program
           console.log(`\nEngine version changed — restoring pre-upgrade snapshot before rollback...`);
           console.log(`  snapshot: ${snapshotPath}`);
           console.log(`  target:   ${upgradeDataDir}`);
+          let retainedDataDir: string;
           try {
+            // A failed restart/verify does not prove the daemon stopped.
+            // stopFlairProcess can return after a best-effort wait; require
+            // fresh pid AND health evidence before touching the directory.
+            if (treePlan) stopSystemdUnits(treePlan.systemdUnits);
+            await stopFlairProcess(port, upgradeDataDir);
+            const state = classifyDaemonState(
+              await cli.gatherDaemonEvidence(port, upgradeDataDir),
+              { port, dataDir: upgradeDataDir },
+            );
+            if (state.state !== "NOT_RUNNING") {
+              throw new Error(`instance is not confirmed stopped (${state.state})`);
+            }
             await validateSnapshotArchive({ file: snapshotPath, targetDir: upgradeDataDir });
-            rmSync(upgradeDataDir, { recursive: true, force: true });
+            // Reserve a unique sibling, even for two rollbacks in the same
+            // millisecond. Rename preserves post-snapshot writes; never prune
+            // this directory or put it inside the tree being restored.
+            const destination = mkdtempSync(`${resolve(upgradeDataDir)}.pre-rollback-${new Date().toISOString().replace(/[:.]/g, "-")}-`);
+            renameSync(upgradeDataDir, destination);
+            retainedDataDir = destination;
+          } catch (err: any) {
+            console.error(`❌ refusing snapshot restore: could not stop and retain the current data: ${err.message}`);
+            console.error(`   ${upgradeDataDir} was not moved or replaced; no snapshot was restored.`);
+            console.error(`   Resolve the stop or move-aside failure before retrying; snapshot: ${snapshotPath}`);
+            process.exit(1);
+          }
+          console.log(`  Current data retained at: ${retainedDataDir}`);
+          console.log(`  To recover writes made after the snapshot: stop Flair, set aside ${upgradeDataDir}, move ${retainedDataDir} back to ${upgradeDataDir}, and start with the Harper engine version that wrote it.`);
+          try {
             mkdirSync(upgradeDataDir, { recursive: true, mode: 0o700 });
             await extractSnapshotSafely({ file: snapshotPath, targetDir: upgradeDataDir });
             rollbackSnapshotRestored = true;
@@ -1642,6 +1675,7 @@ program
           } catch (err: any) {
             console.error(`❌ snapshot restore failed: ${err.message}`);
             console.error(`   @tpsdev-ai/flair@${toVersion} is installed but the data directory could not be restored.`);
+            console.error(`   Pre-restore data remains intact at ${retainedDataDir}.`);
             console.error(`   The snapshot itself is intact at ${snapshotPath} — restore it by hand:`);
             console.error(`   flair snapshot restore "${snapshotPath}"`);
             console.error(`   Then: flair start`);

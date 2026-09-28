@@ -34,6 +34,7 @@ import {
   unitTextMentionsTree,
   findSystemdUnitsForTree,
   systemdRestartArgs,
+  stopSystemdUnits,
   applyPlainTreeUpgrade,
   restorePlainTreePrevious,
   discardPlainTreePrevious,
@@ -711,6 +712,20 @@ describe("systemd unit discovery", () => {
       .toEqual(["restart", "flair.service"]);
     expect(systemdRestartArgs({ name: "flair.service", path: "/x", scope: "user" }))
       .toEqual(["--user", "restart", "flair.service"]);
+  });
+
+  test("snapshot restore stops system and user units, and propagates a failed stop", () => {
+    const units = [
+      { name: "flair.service", path: "/x", scope: "system" as const },
+      { name: "flair-user.service", path: "/y", scope: "user" as const },
+    ];
+    const calls: Array<[string, string[]]> = [];
+    stopSystemdUnits(units, (bin, args) => { calls.push([bin, args]); return ""; });
+    expect(calls).toEqual([
+      ["systemctl", ["stop", "flair.service"]],
+      ["systemctl", ["--user", "stop", "flair-user.service"]],
+    ]);
+    expect(() => stopSystemdUnits(units, () => { throw new Error("stop failed"); })).toThrow("stop failed");
   });
 });
 

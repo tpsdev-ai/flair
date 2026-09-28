@@ -685,6 +685,20 @@ export function restartSystemdUnits(
   }
 }
 
+/** Stop the unit itself so Restart= cannot respawn a writer during restore. */
+export function stopSystemdUnits(
+  units: SystemdUnitRef[],
+  exec: ExecFile = execFileSync as ExecFile,
+): void {
+  for (const unit of units) {
+    exec("systemctl", unit.scope === "user" ? ["--user", "stop", unit.name] : ["stop", unit.name], {
+      encoding: "utf-8",
+      timeout: 120_000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  }
+}
+
 function copyPreserved(fromTree: string, toTree: string, names: string[]): void {
   for (const name of names) {
     const src = join(fromTree, name);

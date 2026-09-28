@@ -4804,6 +4804,7 @@ bindUpgradeCli({
   doctorRunAfterUpgrade,
   flairPackageDir,
   fleetSweepCallerExitMessage,
+  gatherDaemonEvidence,
   humanBytes,
   isCredentialOnlyFailure,
   observeLaunchdManagement,

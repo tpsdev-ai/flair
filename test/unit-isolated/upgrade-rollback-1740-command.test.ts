@@ -15,7 +15,7 @@
  * there and cannot itself be the red-on-base proof. The behavioural red is
  * a call-site mutation: hard-coding `priorLiveness: "running"` in
  * decideAfterRestartFailure's argument makes the stopped case exit 1.
- * That failure is quoted in the PR. The pure helper tests stay in
+ * The pure helper tests stay in
  * test/unit/upgrade-rollback-1740.test.ts and do not see that hard-code.
  *
  * Isolated: mock.module is process-global, and this imports src/cli.ts.
@@ -281,7 +281,7 @@ describe("flair upgrade restart failure (flair#1740)", () => {
       "   (no previous tree to restore)",
       `❌ Restart failed. No previous tree was restored: ${START_ERROR}`,
       `   The previous tree was not restored (nothing at ${previousDir}), so @tpsdev-ai/flair@0.54.1 is not what this rollback installed.`,
-      `   The live tree is still at ${tree}. It was not moved to ${failedDir}.`,
+      `   Check the live-tree path ${tree}; this rollback did not move it to ${failedDir}.`,
       "   Do not run `flair start` expecting @tpsdev-ai/flair@0.54.1; that version was not restored.",
       `   Recovery (plain-tree): do not npm install -g. There is no previous tree to move back onto ${tree}.`,
       `   Inspect the tree at ${tree}, then run \`flair doctor\`.`,

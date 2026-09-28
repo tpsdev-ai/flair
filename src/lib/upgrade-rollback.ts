@@ -146,7 +146,7 @@ export function formatKnownBrokenRollbackRestart(input: {
     lines.push(
       `❌ Restart failed. No previous tree was restored: ${input.error}`,
       `   The previous tree was not restored (nothing at ${input.lane.previousDir}), so ${installed} is not what this rollback installed.`,
-      `   The live tree is still at ${input.lane.treeDir}. It was not moved to ${input.lane.failedDir}.`,
+      `   Check the live-tree path ${input.lane.treeDir}; this rollback did not move it to ${input.lane.failedDir}.`,
       `   Do not run \`flair start\` expecting ${installed}; that version was not restored.`,
       `   Recovery (plain-tree): do not npm install -g. There is no previous tree to move back onto ${input.lane.treeDir}.`,
       `   Inspect the tree at ${input.lane.treeDir}, then run \`flair doctor\`.`,

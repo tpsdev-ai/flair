@@ -269,7 +269,7 @@ describe("formatKnownBrokenRollbackRestart (flair#1740)", () => {
     expect(text).toBe([
       `❌ Restart failed. No previous tree was restored: ${START_ERROR}`,
       "   The previous tree was not restored (nothing at /opt/flair.upgrade-prev), so @tpsdev-ai/flair@0.54.1 is not what this rollback installed.",
-      "   The live tree is still at /opt/flair. It was not moved to /opt/flair.upgrade-failed.",
+      "   Check the live-tree path /opt/flair; this rollback did not move it to /opt/flair.upgrade-failed.",
       "   Do not run `flair start` expecting @tpsdev-ai/flair@0.54.1; that version was not restored.",
       "   Recovery (plain-tree): do not npm install -g. There is no previous tree to move back onto /opt/flair.",
       "   Inspect the tree at /opt/flair, then run `flair doctor`.",
