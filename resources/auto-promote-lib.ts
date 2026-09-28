@@ -134,10 +134,10 @@ export interface AutoPromoteCandidateInput {
 // describe it otherwise anywhere (comment, changelog, skip reason) — we amended
 // the 0.55.0 Metal entry for exactly this overclaim shape.
 //
-// The detection is ASCII-ONLY. It recognizes the ASCII backtick and the ASCII
-// pairs ( ) [ ] { }. Non-ASCII pairs — full-width （）/［］/｛｝ and CJK lenticular
-// 【】/〔〕/〖〗 — are NOT covered, so a truncated claim written in those scripts
-// is judged balanced and is NOT refused. Do not assume Unicode coverage.
+// Bracket coverage is the enumerated table in src/rem/promote-policy.ts,
+// including its full-width/CJK pairs; unlisted bracket pairs are not checked.
+// Backticks use parity, not Markdown span matching, so valid escape spans
+// can be refused. This signal does not establish semantic completeness.
 //
 // The check counts delimiters WITHOUT interpreting context, so it is deliberately
 // over-broad: a COMPLETE claim that merely discusses an unmatched delimiter (an

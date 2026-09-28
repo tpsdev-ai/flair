@@ -382,8 +382,9 @@ function projectSkillCard(r: any): Record<string, unknown> {
  *   - the HNSW leg over the stored embedding — which for a skill row IS the
  *     `trigger` embedding (#1543), so the task is ranked against "when to use";
  *   - the 'query' inputType SemanticSearch already applies to the task string;
- *   - resolveReadScope (own any-visibility + every non-private row) — NEVER
- *     another agent's private skill.
+ *   - Non-admin searches use resolveReadScope: own records at any visibility
+ *     plus other agents' non-private records. Administrator searches can
+ *     include private skills.
  * Identity is the RESOLVED agent; no body agentId is forwarded, so a caller can
  * never widen scope past its own read-scope (the SemanticSearch cross-agent
  * guard would 403 a mismatch anyway).
@@ -418,9 +419,9 @@ async function skillSearch(agent: ResolvedAgent, args: any) {
  * skill_get — the full skill by id (flair#1546 component 2).
  *
  * A thin wrapper over Memory.get() — the SAME by-id read as memory_get, under
- * the SAME read-scope gate (makeByIdReadGate → resolveReadScope): a non-owner
- * cannot read another agent's PRIVATE skill (it 404s), exactly as a private
- * memory does. skill_get is the disclosure step after skill_search's catalog:
+ * the SAME read-scope gate (makeByIdReadGate → resolveReadScope): a non-admin
+ * caller cannot read another agent's private skill; administrators retain
+ * access, exactly as a private memory does. skill_get is the disclosure step after skill_search's catalog:
  * it returns the full procedure (`content`) + trigger + metadata.
  *
  * It is a SKILL tool, not a general reader: a readable id that is NOT a skill
@@ -616,7 +617,9 @@ async function memoryGet(agent: ResolvedAgent, args: any) {
   // path the Ed25519 REST route takes: it loads the row, hands the override a
   // `RequestTarget` (never a bare string), and still dispatches through
   // Memory.get() → makeByIdReadGate → resolveReadScope, so the scope model is
-  // unchanged (own + org-non-private only). See resources/in-process.ts:223.
+  // unchanged: non-admin agents can read their own and other agents'
+  // non-private records; administrator reads are unfiltered. See
+  // resources/in-process.ts:223.
   //
   // flair#744 slice 1 — opt-in inline trust block. The instance call passed
   // `includeTrust` as a 2nd positional opts arg to get(); the static form has
@@ -1196,7 +1199,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   memory_search: {
         impl: memorySearch,
     contract: {
-      summary: "{ results: MemoryRecord[] } — semantic hits scoped to the caller's own and other agents' non-private memories; each hit carries content, never the raw embedding.",
+      summary: "{ results: MemoryRecord[] } — semantic hits subject to the caller's read scope; each hit carries content, never the raw embedding.",
       requiredFields: ["results"],
       fieldTypes: { results: "array" },
       invariants: {
@@ -1233,8 +1236,8 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
     contract: {
       summary:
         "{ results: SkillCard[] } — the skill catalog (lightweight id/name/trigger/description/tags/agentId, " +
-        "ranked by trigger match); the full procedure and the raw embedding are never on a card. Scoped to the " +
-        "caller's own + non-private skills; another agent's private skill is never returned.",
+        "ranked by trigger match); the full procedure and the raw embedding are never on a card. Non-admin callers " +
+        "can retrieve their own and other agents' non-private skills; administrators can also retrieve private skills.",
       requiredFields: ["results"],
       fieldTypes: { results: "array" },
       invariants: {
@@ -1251,13 +1254,14 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
     contract: {
       summary:
         "The full skill record { id, agentId, content, trigger, tags, durability, metadata, createdAt, ... } for a " +
-        "skill readable under the caller's read-scope — embedding + embeddingModel always stripped. A non-owner " +
-        "cannot read another agent's private skill, and a readable non-skill id is not found (both 404).",
+        "skill readable under the caller's read-scope — embedding + embeddingModel always stripped. A non-admin " +
+        "caller cannot read another agent's private skill; administrators retain access. A readable non-skill id " +
+        "is reported as not found.",
       requiredFields: ["id", "agentId", "content", "createdAt"],
       fieldTypes: { id: "string", agentId: "string", content: "string" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
       invariants: { fullyResolved: true },
-      errorShape: { trigger: "get a non-skill / unreadable / another agent's private id (404)", fields: ["error", "status"] },
+      errorShape: { trigger: "get a non-skill or unreadable id (404)", fields: ["error", "status"] },
     },
   },
   memory_update: {
@@ -1279,7 +1283,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
       fieldTypes: { id: "string", archived: "boolean" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
       invariants: { fullyResolved: true },
-      errorShape: { trigger: "basementing a non-existent or non-owned id", fields: ["error", "status"] },
+      errorShape: { trigger: "basementing a non-existent, unreadable, or unauthorized id", fields: ["error", "status"] },
     },
   },
   memory_restore: {
@@ -1290,7 +1294,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
       fieldTypes: { id: "string", archived: "boolean" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
       invariants: { fullyResolved: true },
-      errorShape: { trigger: "restoring a non-existent or non-owned id", fields: ["error", "status"] },
+      errorShape: { trigger: "restoring a non-existent, unreadable, or unauthorized id", fields: ["error", "status"] },
     },
   },
   memory_get: {
@@ -1301,13 +1305,13 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
       fieldTypes: { id: "string", agentId: "string", content: "string" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
       invariants: { fullyResolved: true },
-      errorShape: { trigger: "get a non-existent / unowned id (makeByIdReadGate 404)", fields: ["error", "status"] },
+      errorShape: { trigger: "get a non-existent or unreadable id (makeByIdReadGate 404)", fields: ["error", "status"] },
     },
   },
   memory_delete: {
         impl: memoryDelete,
     contract: {
-      summary: "Deletes the caller's own memory at any durability tier (success echo is thin). Cross-owner deletion returns { error, status:403 } for a non-admin; a deleted row round-trips as gone via memory_get.",
+      summary: "Deletes a memory by ID when authorized, at any durability tier (success echo is thin). Cross-owner deletion returns { error, status:403 } for a non-admin; a deleted row round-trips as gone via memory_get.",
       invariants: { fullyResolved: true },
       errorShape: { trigger: "a non-admin deletes another agent's memory", fields: ["error", "status"] },
     },

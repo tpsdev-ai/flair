@@ -38,6 +38,19 @@ including the leading `- ` and a 2-space indent on continuation lines:
 keeps that lede, up to three issue links, and any Heads-up lines — nothing else.
 A long lede *is* the dump; move detail into the body. The docs-freshness gate
 fails naming the fragment, its word count, and this rule.
+The fragment-reading gate uses a non-exhaustive heuristic for these imperative
+forms outside the lede, fenced examples and Heads-up blocks (including their
+contiguous `>` continuation lines):
+
+- Sentence-start `set`/`run`/`add`/`remove`, optionally preceded by `please`,
+  followed by inline code, a `FLAIR_*` name or a `--flag`.
+- `you must` or `before upgrading` followed by those verbs.
+- Sentence-start `After upgrading, run` or `To upgrade, run`.
+
+Move matched instructions into a `> **Heads-up:**` block. An unrelated Heads-up
+does not exempt the rest of the entry. Passing this gate does not prove that
+every operator instruction will survive rendering; reviewers must check the
+rendered notes.
 
 Assembly is a pure join — no reflow, no re-indent, no rewrapping — so tables and
 nested code blocks survive verbatim. The flip side is that a fragment which is

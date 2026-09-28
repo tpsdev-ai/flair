@@ -61,11 +61,16 @@ export { canonicalize, signBody, verifyBodySignature, signBodyFresh, verifyBodyS
  * Implements:
  * - Instance identity management
  * - Peer pairing (one-shot HTTP handshake)
- * - Sync frame protocol (push/pull over WebSocket)
- * - Conflict resolution (field-level LWW with Lamport clocks)
- * - Peer public key propagation (hub broadcasts PeerAnnouncement frames)
+ * - Sync record batches over HTTP push (POST /FederationSync)
+ * - Conflict resolution (record-level LWW using updatedAt)
+ * - Per-record signature verification using locally pinned originator keys
  *
- * Per FLAIR-FEDERATION spec §§ 1-7.
+ * Pairing exchanges and pins both participants' public keys. Cross-peer
+ * public-key broadcasts are not implemented; PeerAnnouncement and SyncFrame
+ * are unused protocol declarations.
+ * Per-record signature enforcement defaults to verify-if-present; requiring
+ * signatures is an operator opt-in via
+ * FLAIR_FEDERATION_REQUIRE_RECORD_SIGNATURES=true.
  */
 
 // ─── Sync frame types ────────────────────────────────────────────────────────
@@ -140,8 +145,8 @@ export function payloadIdMismatch(record: { id: string; data?: Record<string, an
 }
 
 /**
- * Field-level Last-Write-Wins merge.
- * For each field, the value with the later `updatedAt` wins.
+ * Record-level Last-Write-Wins merge.
+ * Incoming fields are applied when the remote record's updatedAt is later.
  * Records with no local counterpart are accepted directly.
  */
 export function mergeRecord(local: Record<string, any> | null, remote: SyncRecord): Record<string, any> {

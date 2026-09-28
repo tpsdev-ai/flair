@@ -116,7 +116,7 @@ resolve_flair_package_dir() {
   # Last resort: walk up from the (symlink-resolved) binary. The bin is
   # dist/cli-shim.cjs, so the package dir is two levels above it.
   local resolved=""
-  resolved="$(node -e 'try{process.stdout.write(require("node:fs").realpathSync(process.argv[1]))}catch{}' "$FLAIR_BIN" 2>/dev/null || true)"
+  resolved="$(node "$SCRIPT_DIR/boot-probe.mjs" realpath "$FLAIR_BIN" 2>/dev/null || true)"
   if [ -n "$resolved" ]; then
     printf '%s\n' "$(cd "$(dirname "$resolved")/../.." && pwd)"
     return 0
@@ -226,7 +226,7 @@ if [ ! -s "$PASS_FILE" ]; then
   # Same generator init uses (base64url over 18 random bytes), invoked through
   # node so the value never appears on a command line. Written under umask 077
   # and chmod'd, because readAdminPassFileSecure refuses any group/other bit.
-  ( umask 077; node -e 'process.stdout.write(require("node:crypto").randomBytes(18).toString("base64url"))' > "$PASS_FILE" )
+  ( umask 077; node "$SCRIPT_DIR/boot-probe.mjs" password > "$PASS_FILE" )
   printf '\n' >> "$PASS_FILE"
 fi
 chmod 600 "$PASS_FILE"
@@ -289,7 +289,7 @@ else
   # the listener, so "something answers the port" cannot pass.
   SIDECAR="$DATA_DIR/flair-daemon.json"
   [ -f "$SIDECAR" ] || fail "no daemon sidecar at ${SIDECAR} after init"
-  SUPERVISED_PID="$(node -e 'try{process.stdout.write(String(require(process.argv[1]).pid||""))}catch{}' "$SIDECAR" 2>/dev/null || true)"
+  SUPERVISED_PID="$(node "$SCRIPT_DIR/boot-probe.mjs" pid "$SIDECAR" 2>/dev/null || true)"
   [ -n "$SUPERVISED_PID" ] || fail "daemon sidecar ${SIDECAR} has no pid"
   kill -0 "$SUPERVISED_PID" 2>/dev/null || fail "supervised pid ${SUPERVISED_PID} is not alive"
   echo "daemon supervised pid: ${SUPERVISED_PID}"
@@ -340,10 +340,10 @@ MIN_DESCRIPTORS_MAJOR=0
 MIN_DESCRIPTORS_MINOR=54
 MIN_DESCRIPTORS_PATCH=2
 MIN_DESCRIPTORS_VERSION="${MIN_DESCRIPTORS_MAJOR}.${MIN_DESCRIPTORS_MINOR}.${MIN_DESCRIPTORS_PATCH}"
-FLAIR_VERSION="$(node -p "require('$FLAIR_PKG_DIR/package.json').version" 2>/dev/null || true)"
+FLAIR_VERSION="$(node "$SCRIPT_DIR/boot-probe.mjs" version "$FLAIR_PKG_DIR/package.json" 2>/dev/null || true)"
 if [ -s "$DESCRIPTORS" ]; then
   # A non-empty file is not enough — it must be the module the engine imports.
-  node -e 'import(require("node:url").pathToFileURL(process.argv[1]).href).then(m=>{if(!Array.isArray(m.TOOL_DESCRIPTORS)||m.TOOL_DESCRIPTORS.length===0){console.error("no TOOL_DESCRIPTORS export");process.exit(1)}}).catch(e=>{console.error(e.message);process.exit(1)})' "$DESCRIPTORS" \
+  node "$SCRIPT_DIR/boot-probe.mjs" descriptors "$DESCRIPTORS" \
     || fail "installed descriptors module did not export TOOL_DESCRIPTORS: $DESCRIPTORS"
   echo "descriptors present: ${DESCRIPTORS}"
 elif [ -n "$FLAIR_VERSION" ] && version_ge "$FLAIR_VERSION" "$MIN_DESCRIPTORS_VERSION"; then

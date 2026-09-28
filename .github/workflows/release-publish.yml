@@ -445,7 +445,13 @@ jobs:
             echo "::error::version v${VERSION_TOP} is burned: a release-attempt deployment already exists for it; the next patch is the only path"
             exit 1
           fi
-          MARKER_BODY="$(jq -n --arg ref "v${VERSION_TOP}" '{ref:$ref, environment:"release-attempt", task:"stage-attempt", auto_merge:false, required_contexts:[]}')"
+          # The marker carries the CERTIFIED values this job re-derived from the
+          # artifact it staged (flair#1928 slice 1): the package-set digest and the
+          # manifest sha256, plus the version. The promote job later reads the version
+          # and the certified digest from HERE as DATA (never from main's package.json,
+          # which moves on after a release). It is written BEFORE anything is staged,
+          # so a missing/invalid digest refuses the stage (nothing staged).
+          MARKER_BODY="$(jq -n --arg ref "v${VERSION_TOP}" --arg psd "$PACKAGE_SET_DIGEST" --arg ms "$MANIFEST_DIGEST" --arg ver "$VERSION_TOP" '{ref:$ref, environment:"release-attempt", task:"stage-attempt", auto_merge:false, required_contexts:[], payload:{package_set_digest:$psd, manifest_sha256:$ms, version:$ver}}')"
           if ! printf '%s' "$MARKER_BODY" | gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments" --input - > /dev/null; then
             echo "::error::could not write the release-attempt marker for v${VERSION_TOP}; nothing was staged"
             exit 1
@@ -520,12 +526,12 @@ jobs:
             echo ""
             echo "$PUBLISHED package(s) submitted to npm **staging** with provenance under the **$TAG_LINE** tag. They are **not live at latest** yet."
             echo ""
-            echo "flair tarball sha256 (the canary's expected_sha256):"
+            echo "package-set digest (the canary's package_set_digest): $PACKAGE_SET_DIGEST"; echo ""; echo "flair tarball sha256 (the canary's expected_sha256):"
             while IFS=$'\t' read -r name version basename sha; do
               if [ "$name" = "@tpsdev-ai/flair" ]; then echo "  $sha"; break; fi
             done < "$LIST"
             echo ""
-            echo "**To release:** open npmjs.com -> Settings -> Staged Packages, review each tarball, and approve with 2FA. Then dispatch the post-publish canary (Actions -> \"Post-publish canary — install + boot a published version\") with this version and the flair tarball's sha256. Only a canary PASS prints the sha256-bound promote command; run that line to move latest. On a canary FAIL, run the emitted npm deprecate line and re-cut the next patch — a staged tag is immutable, so a version is never refreshed in place."
+            echo "**To release:** open npmjs.com -> Settings -> Staged Packages, review each tarball, and approve with 2FA. Then dispatch the post-publish canary (Actions -> \"Post-publish canary — install + boot a published version\") with this version, the flair tarball's sha256, and the package-set digest printed above. Only a canary PASS prints the sha256-bound promote command; run that line to move latest. On a canary FAIL, run the emitted npm deprecate line and re-cut the next patch — a staged tag is immutable, so a version is never refreshed in place."
           } >> "$GITHUB_STEP_SUMMARY"
 
   github-release:

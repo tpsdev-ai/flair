@@ -298,7 +298,7 @@ jobs:
           printf '%s\n' "$changed"
           run=false
           # Single-file triggers (anchored) plus directory triggers (prefix).
-          if printf '%s\n' "$changed" | grep -Eq '^(src/cli\.ts|src/lib/(daemon-liveness|launchd-repair|mcp-enable)\.ts|resources/health\.ts|scripts/release[^/]*\.sh|scripts/ci/local-npm-registry\.mjs|scripts/ci/redirect-upgrade-registry\.cjs|scripts/ci/redact-launchd-plist\.mjs|scripts/ci/macos-launchd-upgrade-lane\.sh|scripts/ci/macos-launchd-passfile-missing-check\.sh|\.github/workflows/test\.yml)$' \
+          if printf '%s\n' "$changed" | grep -Eq '^(src/cli\.ts|src/lib/(daemon-liveness|launchd-repair|mcp-enable)\.ts|resources/health\.ts|scripts/release[^/]*\.sh|scripts/ci/local-npm-registry\.mjs|scripts/ci/select-migration-baseline\.mjs|scripts/ci/redirect-upgrade-registry\.cjs|scripts/ci/redact-launchd-plist\.mjs|scripts/ci/macos-launchd-upgrade-lane\.sh|scripts/ci/macos-launchd-passfile-missing-check\.sh|\.github/workflows/test\.yml)$' \
              || printf '%s\n' "$changed" | grep -Eq '^(src/commands/|templates/launchd/)'; then
             run=true
           fi
@@ -352,44 +352,16 @@ jobs:
         run: |
           set -euo pipefail
           export HEAD_VERSION="${{ steps.pack.outputs.pr_version }}"
-          PUBLISHED_VERSIONS="$(npm view @tpsdev-ai/flair versions --json)" || {
-            echo "::error::cannot query the npm registry for @tpsdev-ai/flair versions"
+          # Newest non-deprecated publish strictly below this PR's version
+          # (flair#1757). `versions` still lists a deprecated build — 0.54.1
+          # shipped broken — and installing it fails inside Harper instead of
+          # at selection. This lane used to cap the pool at dist-tags.latest when
+          # that tag was below HEAD; the helper uses deprecation instead. It
+          # prints the chosen baseline and each deprecated version newer than
+          # that baseline. An all-deprecated registry prints `no baseline`.
+          if ! BASELINE_VERSION="$(node "$GITHUB_WORKSPACE/scripts/ci/select-migration-baseline.mjs" "$HEAD_VERSION")"; then
             exit 1
-          }
-          # The registry's recommended release, which is what a normal upgrade
-          # starts from. A version is still listed in `versions` after it is
-          # rolled back (0.54.1 shipped broken and `latest` stayed at 0.53.0),
-          # and a broken baseline cannot bring its instance up at all, let
-          # alone exercise the upgrade path this lane exists to test.
-          LATEST_TAG="$(npm view @tpsdev-ai/flair dist-tags.latest 2>/dev/null || true)"
-          export LATEST_TAG
-          BASELINE_VERSION="$(printf '%s' "$PUBLISHED_VERSIONS" | node -e "
-            const headVer = process.env.HEAD_VERSION;
-            const latest = process.env.LATEST_TAG || '';
-            const validLatest = /^[0-9]+\.[0-9]+\.[0-9]+$/.test(latest);
-            const lt = (a, b) => {
-              const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
-              const len = Math.max(pa.length, pb.length);
-              for (let i = 0; i < len; i++) {
-                const ca = pa[i] || 0, cb = pb[i] || 0;
-                if (ca < cb) return true;
-                if (ca > cb) return false;
-              }
-              return false;
-            };
-            const rsort = (a, b) => lt(b, a) ? -1 : lt(a, b) ? 1 : 0;
-            let d = ''; process.stdin.on('data', c => d += c); process.stdin.on('end', () => {
-              const older = JSON.parse(d).filter(v => !v.includes('-') && lt(v, headVer));
-              if (older.length === 0) {
-                console.error('::error::no published version is strictly older than ' + headVer);
-                process.exit(1);
-              }
-              const pool = validLatest && lt(latest, headVer)
-                ? older.filter(v => v === latest || lt(v, latest))
-                : older;
-              console.log(pool.sort(rsort)[0]);
-            });
-          ")"
+          fi
           if [[ ! "$BASELINE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::derived baseline '${BASELINE_VERSION}' is not x.y.z — refusing to install"
             exit 1
@@ -399,11 +371,7 @@ jobs:
             exit 1
           fi
           echo "baseline_version=$BASELINE_VERSION" >> "$GITHUB_OUTPUT"
-          if [[ "$BASELINE_VERSION" == "$LATEST_TAG" ]]; then
-            echo "Baseline (registry latest, < ${HEAD_VERSION}): ${BASELINE_VERSION}"
-          else
-            echo "Baseline (most recent npm-published version < ${HEAD_VERSION}, latest tag ${LATEST_TAG:-none}): ${BASELINE_VERSION}"
-          fi
+          echo "Baseline (newest non-deprecated npm version < ${HEAD_VERSION}): ${BASELINE_VERSION}"
       - name: Pre-download embedding model (shared)
         shell: bash
         run: |

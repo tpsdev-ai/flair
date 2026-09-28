@@ -41,6 +41,7 @@
 import { readFileSync, writeFileSync, readdirSync, statSync, existsSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { operatorRemedyViolation } from "./changelog-release-notes.mjs";
 
 export const ROOT = resolve(fileURLToPath(import.meta.url), "../..");
 export const FRAGMENT_DIR_REL = join(".changelog", "unreleased");
@@ -247,6 +248,8 @@ export function readFragments(dir = FRAGMENT_DIR) {
     const { category, slug } = parseFragmentName(name);
     const body = readFileSync(full, "utf8");
     validateFragmentBody(`${FRAGMENT_DIR_REL}/${name}`, body);
+    const remedy = operatorRemedyViolation(body);
+    if (remedy) throw new FragmentError(`${FRAGMENT_DIR_REL}/${name}: ${remedy}`);
     out.push({ name, path: full, category, slug, body: body.replace(/\s+$/, "") });
   }
   return out;

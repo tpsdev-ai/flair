@@ -8,7 +8,7 @@
  */
 import { Command } from "commander";
 import { COMPONENT_ENV_FILENAME, PUBLIC_URL_KEY, describePublicUrlFinding, readEnvValue } from "../component-env.js";
-import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, describeAgentGateFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
+import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, continuityWriteBlockers, describeAgentGateFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
 import { FleetPresenceRow, markStale, sortOldestVersionFirst } from "../fleet-presence.js";
 import { hookSettingsPath, resolveHookAgentId } from "../hook-install.js";
 import { ALL_CLIENTS, decideCodexPinOnly, decideJsonPinOnly, detectClients, type ClientId, wireAntigravity, wireClaudeCode, wireCodex, wireCursor, wireGemini } from "../install/clients.js";
@@ -1333,8 +1333,13 @@ program
           const continuityDetail = continuity.state === "partial"
             ? (!continuity.postToolUse.present ? "the PostToolUse entry is missing" : "the Stop entry is missing")
             : "an entry is not the current form (unsilenced, hand-altered, or a drifted PostToolUse matcher)";
-          console.log(`  ${render.icons.warn} Continuity capture hooks: ${continuity.state} — ${continuityDetail}`);
-          if (autoFix) {
+          const pinDetail = [
+            continuity.postToolUse.reason && "PostToolUse " + continuity.postToolUse.reason,
+            continuity.stop.reason && "Stop " + continuity.stop.reason,
+          ].filter(Boolean).join("; ");
+          const blockers = continuityWriteBlockers(continuity);
+          console.log(`  ${render.icons.warn} Continuity capture hooks: ${continuity.state} — ${continuityDetail}${pinDetail ? "; " + pinDetail : ""}`);
+          if (autoFix && blockers.length === 0) {
             if (dryRun) {
               console.log(`     ${render.wrap(render.c.dim, "Would rewrite the continuity capture hooks in")} ${continuity.path}`);
             } else {
@@ -1354,7 +1359,14 @@ program
               }
             }
           } else {
-            console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(rewrites both entries to the current form — same agent, same instance)")}`);
+            if (blockers.length > 0) {
+              const advice = pinDetail
+                ? "Resolve the listed non-version pin(s) manually; doctor cannot rewrite them."
+                : "Continuity hook rewrite held or refused; resolve the listed reason(s) manually.";
+              console.log(`     ${advice} ${blockers.join(" ")}`);
+            } else {
+              console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(rewrites both entries to the current form — same agent, same instance)")}`);
+            }
           }
           issues++;
         }

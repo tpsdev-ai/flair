@@ -26,7 +26,7 @@ import {
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SCRIPT_REL = join("scripts", "docs-freshness-check.mjs");
-const SCRIPT_FILES = ["docs-freshness-check.mjs", "changelog-fragments.mjs", "published-paths.mjs"];
+const SCRIPT_FILES = ["docs-freshness-check.mjs", "changelog-fragments.mjs", "changelog-release-notes.mjs", "changelog-extract.mjs", "published-paths.mjs"];
 
 const created: string[] = [];
 function track(dir: string): string {

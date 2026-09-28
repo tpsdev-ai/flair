@@ -160,6 +160,65 @@ class TestDeterministicRecordId:
         rid = _deterministic_record_id("app", "user", "sess", "evt")
         assert rid == "app:user:sess:evt"
 
+    def test_separator_free_ids_match_the_historical_join(self):
+        """Tuples with no ':' in any component keep the historical join."""
+        from adk_flair.memory_service import _deterministic_record_id
+        # Pinned literals — the JS suite asserts the same strings.
+        cases = [
+            (("app", "user", "sess", "evt"), "app:user:sess:evt"),
+            (("my-app", "user-1", "sess-1", "evt-1"), "my-app:user-1:sess-1:evt-1"),
+            (("a%b", "c_d", "e", "f"), "a%b:c_d:e:f"),
+            (("a%3Ab", "c", "d", "e"), "a%3Ab:c:d:e"),
+            (("100%", "user", "sess", "evt"), "100%:user:sess:evt"),
+            (("a|b", "c", "d", "e"), "a|b:c:d:e"),
+            (("", "", "", ""), ":::"),
+        ]
+        for parts, expected in cases:
+            assert _deterministic_record_id(*parts) == expected
+
+    def test_colon_placement_produces_distinct_ids(self):
+        """Tuples that differ only in where a ':' falls must not share an id.
+
+        The old join of all four is the one stored id ``pre:post:user:sess:evt``.
+        Each new id contains no ':'. The old join always contains at least
+        three, so none of these is an id that encoder could have stored.
+        """
+        from adk_flair.memory_service import _deterministic_record_id
+        shifted = [
+            ("pre:post", "user", "sess", "evt"),
+            ("pre", "post:user", "sess", "evt"),
+            ("pre", "post", "user:sess", "evt"),
+            ("pre", "post", "user", "sess:evt"),
+        ]
+        ids = [_deterministic_record_id(*parts) for parts in shifted]
+        assert len(set(ids)) == len(shifted)
+        legacy = "pre:post:user:sess:evt"
+        assert legacy.count(":") >= 3
+        for rid in ids:
+            assert ":" not in rid
+            assert rid != legacy
+        # Pinned literals — the JS suite asserts the same strings.
+        assert ids == [
+            "pre%3Apost|user|sess|evt",
+            "pre|post%3Auser|sess|evt",
+            "pre|post|user%3Asess|evt",
+            "pre|post|user|sess%3Aevt",
+        ]
+
+    def test_encoded_colon_does_not_collide_with_a_literal_percent_sequence(self):
+        """Encoding ':' as '%3A' must not match a separator-free literal, and '|' is escaped."""
+        from adk_flair.memory_service import _deterministic_record_id
+        encoded = _deterministic_record_id("a:b", "c%d", "e:f", "g%3A")
+        literal = _deterministic_record_id("a%3Ab", "c%25d", "e%3Af", "g%253A")
+        piped = _deterministic_record_id("a|b", "c:d", "e", "f")
+        assert encoded != literal
+        assert encoded == "a%3Ab|c%25d|e%3Af|g%253A"
+        assert ":" not in encoded
+        # No raw ':' in the literal tuple, so the historical join is kept.
+        assert literal == "a%3Ab:c%25d:e%3Af:g%253A"
+        assert piped == "a%7Cb|c%3Ad|e|f"
+        assert piped != "a|b:c:d:e"
+
 
 # ─── URL protection ─────────────────────────────────────────────────────────
 
@@ -504,7 +563,8 @@ class TestAddSessionToMemory:
         first_call = service._client.request.call_args_list[0]
         body = first_call[1]["json"]
         assert body["agentId"] == "test-agent"
-        assert body["tags"] == ["adk:app:user"]
+        assert body["tags"] == ["adk:app:user", "adk-event:evt-1"]
+        assert body["sessionId"] == "sess-1"
         assert body["content"] == "hello world"
         assert body["id"] == "app:user:sess-1:evt-1"
 
@@ -544,6 +604,114 @@ class TestAddSessionToMemory:
         warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
         assert any("write failed" in w.lower() for w in warnings)
 
+    @pytest.mark.asyncio
+    async def test_colon_bearing_write_posts_disjoint_id_and_keeps_legacy_row(self, service):
+        """Session write posts an id the old join could not have stored.
+
+        ``("pre:post", "user", "sess", "evt")`` and
+        ``("pre", "post:user", "sess", "evt")`` both used to store
+        ``pre:post:user:sess:evt``. That row is occupied. The 409 fallback
+        replaces the new id only when that row has a complete stamp, never
+        the legacy row. Restoring the old join at the session call site
+        posts the legacy id; the conflict read has no matching stamp, so
+        the occupied row is kept.
+        """
+        await _assert_colon_write_preserves_legacy(
+            service,
+            lambda: service.add_session_to_memory(
+                _make_session("pre:post", "user", "sess", [_make_event("evt", "hello")])
+            ),
+            "pre%3Apost|user|sess|evt",
+            "pre:post", "user", "sess", "evt",
+        )
+        await _assert_colon_write_preserves_legacy(
+            service,
+            lambda: service.add_session_to_memory(
+                _make_session("pre", "post:user", "sess", [_make_event("evt", "hello")])
+            ),
+            "pre|post%3Auser|sess|evt",
+            "pre", "post:user", "sess", "evt",
+        )
+
+    @pytest.mark.asyncio
+    async def test_event_write_keeps_occupied_direct_id(self, service, caplog):
+        """An event write must not replace a direct-memory row that shares the id.
+
+        The row's id and compound tag match this event, and it has no event
+        stamp. Treating that as the same tuple PUTs the row.
+        """
+        record_id = "app:user:sess-1:evt-1"
+
+        def respond(method, path, **kwargs):
+            if method == "POST":
+                return _mock_response(409, "Conflict")
+            if method == "GET":
+                return _json_response({
+                    "id": record_id,
+                    "content": "direct fact",
+                    "tags": ["adk:app:user"],
+                })
+            return _mock_response(200)
+
+        service._client.request.side_effect = respond
+        with caplog.at_level(logging.WARNING):
+            await service.add_session_to_memory(
+                _make_session("app", "user", "sess-1", [_make_event("evt-1", "overwrite")])
+            )
+
+        methods = [c[0][0] for c in service._client.request.call_args_list]
+        assert methods == ["POST", "GET"]
+        assert service._client.request.call_args_list[0][1]["json"]["id"] == record_id
+        assert any(
+            "write failed" in r.getMessage() and "409" in r.getMessage()
+            for r in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_event_write_keeps_contradictory_stamp(self, service, caplog):
+        """A matching id and compound tag with a contradictory stamp is kept.
+
+        One row has this session and another event's tag; the other has this
+        event's tag and another session. Either half-match still PUTs on a
+        head that accepts an unstamped id.
+        """
+        from adk_flair.memory_service import _event_tag
+
+        record_id = "app:user:sess-1:evt-1"
+        rows = [
+            {
+                "id": record_id,
+                "sessionId": "sess-1",
+                "tags": ["adk:app:user", _event_tag("other-evt")],
+            },
+            {
+                "id": record_id,
+                "sessionId": "other-sess",
+                "tags": ["adk:app:user", _event_tag("evt-1")],
+            },
+        ]
+        for row in rows:
+            def respond(method, path, row=row, **kwargs):
+                if method == "POST":
+                    return _mock_response(409, "Conflict")
+                if method == "GET":
+                    return _json_response(row)
+                return _mock_response(200)
+
+            service._client.request.reset_mock(side_effect=True)
+            service._client.request.side_effect = respond
+            caplog.clear()
+            with caplog.at_level(logging.WARNING):
+                await service.add_session_to_memory(
+                    _make_session("app", "user", "sess-1", [_make_event("evt-1", "overwrite")])
+                )
+            methods = [c[0][0] for c in service._client.request.call_args_list]
+            assert methods == ["POST", "GET"], row
+            assert any(
+                "write failed" in r.getMessage() and "409" in r.getMessage()
+                for r in caplog.records
+            )
+
 
 # ─── add_events_to_memory ───────────────────────────────────────────────────
 
@@ -567,6 +735,34 @@ class TestAddEventsToMemory:
         )
 
         assert service._client.request.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_colon_bearing_write_posts_disjoint_id_and_keeps_legacy_row(self, service):
+        """Incremental-event write posts an id the old join could not have stored.
+
+        Same occupied legacy row as the session-write test. Restoring the old
+        join at the add_events_to_memory call site posts that id; the conflict
+        read has no matching stamp, so the occupied row is kept. The
+        session-write test does not call this entrypoint.
+        """
+        await _assert_colon_write_preserves_legacy(
+            service,
+            lambda: service.add_events_to_memory(
+                app_name="pre:post", user_id="user",
+                events=[_make_event("evt", "hello")], session_id="sess",
+            ),
+            "pre%3Apost|user|sess|evt",
+            "pre:post", "user", "sess", "evt",
+        )
+        await _assert_colon_write_preserves_legacy(
+            service,
+            lambda: service.add_events_to_memory(
+                app_name="pre", user_id="post:user",
+                events=[_make_event("evt", "hello")], session_id="sess",
+            ),
+            "pre|post%3Auser|sess|evt",
+            "pre", "post:user", "sess", "evt",
+        )
 
     @pytest.mark.asyncio
     async def test_custom_metadata_is_stored_not_warned(self, service, caplog):
@@ -633,6 +829,49 @@ class TestAddMemory:
         assert body["content"] == "direct fact"
         assert body["tags"] == ["adk:app:user"]
         assert body["author"] == "test-agent"
+
+    @pytest.mark.asyncio
+    async def test_direct_readd_replaces_occupied_id(self, service, caplog):
+        """Re-adding a caller-chosen id replaces the row. No stamp check.
+
+        The GET body would fail the event-write stamp check. add_memory must
+        not read it: POST then PUT, no warning. Routing this through the
+        event fail-closed path turns the test red.
+        """
+        from urllib.parse import quote
+
+        occupied = "pre:post:user:sess:evt"
+
+        def respond(method, path, **kwargs):
+            if method == "POST":
+                return _mock_response(409, "Conflict")
+            if method == "GET":
+                return _json_response({
+                    "id": occupied,
+                    "sessionId": "other-sess",
+                    "tags": ["adk:app:user", "adk-event:other-evt"],
+                })
+            return _mock_response(200)
+
+        service._client.request.side_effect = respond
+        with caplog.at_level(logging.WARNING):
+            await service.add_memory(
+                app_name="app",
+                user_id="user",
+                memories=[MemoryEntry(
+                    id=occupied,
+                    content=types.Content(role="user", parts=[types.Part(text="overwrite")]),
+                )],
+            )
+
+        methods = [c[0][0] for c in service._client.request.call_args_list]
+        assert methods == ["POST", "PUT"]
+        post, put = service._client.request.call_args_list
+        assert post[1]["json"]["id"] == occupied
+        assert post[1]["json"]["content"] == "overwrite"
+        assert put[1]["json"] == post[1]["json"]
+        assert put[0][1] == "/Memory/" + quote(occupied, safe="")
+        assert not any("write failed" in r.getMessage().lower() for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_skipped_textless_entry_logs_one_warning_on_success(self, service, caplog):
@@ -854,12 +1093,65 @@ def _mock_response(status_code: int, reason: str = "") -> MagicMock:
     )
 
 
+def _json_response(payload, status_code: int = 200, reason: str = "OK") -> MagicMock:
+    resp = _mock_response(status_code, reason)
+    resp.json.return_value = payload
+    resp.text = json.dumps(payload)
+    return resp
+
+
+async def _assert_colon_write_preserves_legacy(service, write, expected_id, app, user, session, event):
+    """POST expected_id, require a complete stamp, replace that id only.
+
+    ``write`` is a zero-arg callable returning the awaitable under test.
+    The legacy event-join id is occupied. A restored old join posts that id;
+    the conflict read has no complete stamp for this tuple, so the occupied
+    row is kept and the test fails.
+    """
+    from urllib.parse import quote
+    from adk_flair.memory_service import _compound_tag, _event_tag
+
+    legacy_id = "pre:post:user:sess:evt"
+    legacy_path = "/Memory/" + quote(legacy_id, safe="")
+    expected_path = "/Memory/" + quote(expected_id, safe="")
+
+    def respond(method, path, **kwargs):
+        body_id = (kwargs.get("json") or {}).get("id")
+        if body_id == legacy_id or path == legacy_path:
+            return _mock_response(409, "Conflict")
+        if method == "POST":
+            return _mock_response(409, "Conflict")
+        if method == "GET" and path == expected_path:
+            return _json_response({
+                "id": expected_id,
+                "sessionId": session,
+                "tags": [_compound_tag(app, user), _event_tag(event)],
+            })
+        return _mock_response(200)
+
+    service._client.request.reset_mock(side_effect=True)
+    service._client.request.side_effect = respond
+    await write()
+
+    assert service._client.request.call_count == 3, service._client.request.call_args_list
+    first, second, third = service._client.request.call_args_list
+    assert (first[0][0], first[0][1]) == ("POST", "/Memory/")
+    assert first[1]["json"]["id"] == expected_id
+    assert ":" not in first[1]["json"]["id"]
+    assert first[1]["json"]["id"] != legacy_id
+    assert (second[0][0], second[0][1]) == ("GET", expected_path)
+    assert third[0][0] == "PUT"
+    assert third[0][1] == expected_path
+    assert third[0][1] != legacy_path
+    assert third[1]["json"]["id"] == expected_id
+
+
 class TestCreateVerbAndConflictFallback:
     """flair#1336: creates must use POST /Memory/ (the create verb), never a
     bare PUT /Memory/{id} — PUT-shaped creates 404 on Harper deployments
     where PUT is update-only (observed on hosted Harper Fabric). A 409 from
-    POST (record already exists — deterministic-id re-ingestion) falls back
-    to PUT, preserving the old replace semantics."""
+    an event write falls back to PUT only when the occupied row has a
+    complete event stamp for the tuple being written."""
 
     @pytest.mark.asyncio
     async def test_all_write_entrypoints_create_via_post_collection(self, service):
@@ -897,27 +1189,40 @@ class TestCreateVerbAndConflictFallback:
 
     @pytest.mark.asyncio
     async def test_conflict_falls_back_to_put_replace(self, service, caplog):
-        """POST → 409 (record exists) → PUT /Memory/{id} with the SAME body.
-        Idempotent re-ingestion must neither raise nor warn.
+        """POST → 409 → PUT /Memory/{id} when the row has a complete stamp.
 
-        This is the trap a naive PUT→POST swap walks into: without the
-        fallback, every re-save of an already-ingested session event fails
-        with 409 on every deployment where the old PUT path worked."""
-        service._client.request.side_effect = [
-            _mock_response(409, "Conflict"),
-            _mock_response(200),
-        ]
+        The GET row carries this session, the compound tag, and this event's
+        tag. An unstamped pre-upgrade row is not replaced; that case is
+        ``test_event_write_keeps_occupied_direct_id``.
+        """
+        from adk_flair.memory_service import _event_tag
+
+        record_id = "app:user:sess-1:evt-1"
+
+        def respond(method, path, **kwargs):
+            if method == "POST":
+                return _mock_response(409, "Conflict")
+            if method == "GET":
+                return _json_response({
+                    "id": record_id,
+                    "sessionId": "sess-1",
+                    "tags": ["adk:app:user", _event_tag("evt-1")],
+                })
+            return _mock_response(200)
+
+        service._client.request.side_effect = respond
 
         session = _make_session("app", "user", "sess-1", [_make_event("evt-1", "hello")])
         await service.add_session_to_memory(session)
 
-        assert service._client.request.call_count == 2
-        first, second = service._client.request.call_args_list
+        assert service._client.request.call_count == 3
+        first, second, third = service._client.request.call_args_list
         assert (first[0][0], first[0][1]) == ("POST", "/Memory/")
+        assert (second[0][0], second[0][1]) == ("GET", "/Memory/app%3Auser%3Asess-1%3Aevt-1")
         # #1970: the id is one percent-encoded path segment (':' → %3A); the
         # server decodes it, so the record addressed is unchanged.
-        assert (second[0][0], second[0][1]) == ("PUT", "/Memory/app%3Auser%3Asess-1%3Aevt-1")
-        assert second[1]["json"] == first[1]["json"]
+        assert (third[0][0], third[0][1]) == ("PUT", "/Memory/app%3Auser%3Asess-1%3Aevt-1")
+        assert third[1]["json"] == first[1]["json"]
 
         warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
         assert not any("write failed" in str(w).lower() for w in warnings)
@@ -933,36 +1238,45 @@ class TestCreateVerbAndConflictFallback:
         extra segments."""
         from urllib.parse import unquote
 
+        from adk_flair.memory_service import _event_tag
+
         signed_paths = []
 
         def _record_sign(_key, _agent, _method, path):
             signed_paths.append(path)
             return "TPS-Ed25519 x:0:0:AA"
 
-        for rid in ["a#b", "x?y=1", "a/b/c", "50%", "sp ace"]:
-            service._client.request.reset_mock()
-            service._client.request.side_effect = [
-                _mock_response(409, "Conflict"),
-                _mock_response(200),
-            ]
+        for event_id in ["a#b", "x?y=1", "a/b/c", "50%", "sp ace"]:
+            record_id = f"app:user:sess:{event_id}"
+
+            def respond(method, path, **kwargs):
+                if method == "POST":
+                    return _mock_response(409, "Conflict")
+                if method == "GET":
+                    return _json_response({
+                        "id": record_id,
+                        "sessionId": "sess",
+                        "tags": ["adk:app:user", _event_tag(event_id)],
+                    })
+                return _mock_response(200)
+
+            service._client.request.reset_mock(side_effect=True)
+            service._client.request.side_effect = respond
             signed_paths.clear()
             with patch("adk_flair.memory_service._sign_request", side_effect=_record_sign):
-                await service.add_memory(
-                    app_name="app", user_id="user",
-                    memories=[MemoryEntry(
-                        id=rid,
-                        content=types.Content(role="user", parts=[types.Part(text="fact")]),
-                    )],
+                await service.add_session_to_memory(
+                    _make_session("app", "user", "sess", [_make_event(event_id, "fact")])
                 )
-            assert service._client.request.call_count == 2
-            method, sent_path = service._client.request.call_args_list[1][0][:2]
+            methods = [c[0][0] for c in service._client.request.call_args_list]
+            assert methods == ["POST", "GET", "PUT"]
+            method, sent_path = service._client.request.call_args_list[2][0][:2]
             assert method == "PUT"
             assert sent_path.startswith("/Memory/")
             segment = sent_path[len("/Memory/"):]
             assert "/" not in segment  # assertion: one segment only
             assert "?" not in segment
             assert "#" not in segment
-            assert unquote(segment) == rid
+            assert unquote(segment) == record_id
             # Where the site signs, the signed path equals the sent path.
             assert signed_paths[-1] == sent_path
 
