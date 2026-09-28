@@ -223,6 +223,9 @@ export function loadBudget(path = DEFAULT_BUDGET_PATH) {
   } catch (err) {
     return { ok: false, reason: `budget file is not JSON: ${err.message}` };
   }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, reason: `budget file is not an object: ${path}` };
+  }
   const maxBytes = Number(raw.maxBytes);
   const maxPackages = Number(raw.maxPackages);
   if (!Number.isFinite(maxBytes) || maxBytes <= 0 || !Number.isFinite(maxPackages) || maxPackages <= 0) {
