@@ -60,9 +60,9 @@ export type UpgradeCli = {
   resolveInstanceServingPid: (...args: any[]) => any;
   resolveUpgradeRestartVerify: (...args: any[]) => any;
   restartAfterUpgrade: (...args: any[]) => any;
-  /** `npm install -g <spec>`. Injected so the upgrade command can be driven without touching a real prefix. */
+  /** Package-install binding used by runPackageInstall. */
   runPackageInstall: (spec: string) => void;
-  /** Plain-tree swap. Injected so a command test can leave `.upgrade-prev` absent. */
+  /** Tree-swap binding used by applyPlainTreeUpgrade. */
   applyPlainTreeUpgrade: (plan: PlainTreeUpgradePlan) => Promise<void>;
   shouldPrintUpgradeLine: (...args: any[]) => any;
   shouldRunFleetVerify: (...args: any[]) => any;
@@ -80,7 +80,7 @@ export function bindCli(fns: UpgradeCli): void {
   cli = fns;
 }
 
-/** Replace some bindings without rebuilding the rest. Tests use this. */
+/** Shallow-merge the supplied bindings into cli. */
 export function rebindCli(partial: Partial<UpgradeCli>): void {
   cli = { ...cli, ...partial };
 }
@@ -1351,47 +1351,9 @@ program
     // never restarts Flair onto a different port.
     const baseUrl = `http://127.0.0.1:${upgradePort}`;
 
-    // ── Credential pre-flight (flair#741 fix #1) ────────────────────────────
-    // Post-restart verification (below) needs to authenticate against the
-    // running instance. If it can't do that RIGHT NOW, against the CURRENT,
-    // pre-upgrade instance, every upgrade on this machine is structurally
-    // doomed before a single package is touched: post-restart verify fails
-    // for the exact same credential reason, the rollback fires, and the
-    // rollback's own re-verify fails identically — producing "ROLLBACK ALSO
-    // FAILED VERIFICATION / state UNKNOWN" for an instance that was healthy
-    // the entire time. That is exactly the flair#741 incident report (a
-    // real 0.22.0→0.22.1 upgrade, healthy Flair, no ~/.flair/admin-pass, no
-    // FLAIR_ADMIN_PASS). Catch it here, before any mutation, with a message
-    // that says plainly: nothing was touched.
-    //
-    // Runs the SAME verification call (probeInstance + the agent-key-aware
-    // verifyAuthedGet, fix #2) that post-restart verification uses below —
-    // just against the pre-upgrade instance, with no expectVersion (there's
-    // no target version to compare against yet; the question here is purely
-    // "does an authenticated read work at all").
-    //
-    // Gated on --verify (shouldVerify): this check exists ONLY to keep
-    // post-restart verification honest. A user who already opted out of
-    // that verification with --no-verify has no use for a pre-flight that
-    // protects it, and blocking their upgrade on a check they didn't ask
-    // for would be a new, surprising failure mode of its own.
-    //
-    // Deliberately does NOT abort when the pre-flight instance is merely
-    // UNREACHABLE (down/timeout) rather than reachable-but-unauthenticated.
-    // `flair upgrade` may be the user's way of FIXING a down instance (bad
-    // code on disk that a newer version resolves) — today's behavior
-    // (pre-flair#741, no pre-flight at all) already lets that proceed, and
-    // a new hard block here would take away a legitimate recovery path for
-    // a failure mode this issue was never about. Only the specific
-    // "server responded, credentials didn't work" case is structurally
-    // doomed in a way a fresh install/restart can't fix on its own — so
-    // only that case aborts. A down instance is not aborted: `flair upgrade`
-    // may be how the operator fixes code that never started.
-    //
-    // Prior liveness is NOT this credential preflight (flair#1740). It runs
-    // whenever a restart is coming, including `--no-verify`, and it does not
-    // treat a failed or non-2xx /Health as "stopped". Only connection refused
-    // is confirmed-stopped. Indeterminate stays indeterminate.
+    // Probe prior /Health when shouldRestart is true, including --no-verify.
+    // The separate credential preflight runs when shouldVerify is true and
+    // exits only when isCredentialOnlyFailure(preflight) is true.
     let priorLiveness: PriorLiveness = { kind: "indeterminate", reason: "prior /Health was not probed" };
     if (shouldRestart) {
       priorLiveness = await classifyUpgradePriorLiveness(baseUrl, { timeoutMs: 3000 });
@@ -1604,25 +1566,7 @@ program
     const port = upgradePort;
     // baseUrl was hoisted above (pre-flight, fix #1) — same URL, no redeclaration.
 
-    /**
-     * Roll @tpsdev-ai/flair back to `toVersion`, restart on it, re-verify, and
-     * exit. Shared by the two ways an upgrade can fail after the package swap:
-     * the restart itself (flair#905) and post-restart verification (flair#635).
-     *
-     * flair#905 found the restart leg wired straight to `process.exit(1)` — so
-     * `docs/upgrade.md`'s "install → restart → verify → rollback-on-failure, in
-     * one step" was only ever true for the verify leg. An upgrade that installed
-     * new packages and then failed to start them left the operator on the new
-     * version with nothing running and no rollback.
-     *
-     * flair#1740: the restart-failure decision enters here when prior
-     * /Health was running or indeterminate and the previous version is
-     * known. A refused connection does not take that decision's rollback.
-     * Verification also reaches this function, through decideAfterVerify,
-     * and that path does not consult prior liveness. A version the registry
-     * reports as deprecated is not the rollback target. A failed lookup, or
-     * a null `deprecated` field, is not that report, so rollback still runs.
-     */
+    /** Map deprecation lookup results other than active/deprecated to unknown. */
     const readRollbackDeprecation = async (version: string): Promise<DeprecationLookup> => {
       try {
         const res = await fetchVersionDeprecation(FLAIR_PKG_NAME, version);
@@ -1734,12 +1678,8 @@ program
           await restartAfterUpgrade(port, upgradeDataDir, rolledBackCli.ok ? rolledBackCli : null);
         }
       } catch (err: any) {
-        // npm-global is the lane that reinstalled `toVersion`. A plain-tree
-        // restore moved a previous tree back; that is not an npm reinstall.
-        // When no previous tree was restored, no rollback version is on disk,
-        // so the headline stays neutral and does not call a version
-        // known-broken. Known-broken is only for a version this rollback
-        // actually put in place, and only for this attempt.
+        // Report the install lane, tree-restore results and snapshot-restore
+        // result to formatKnownBrokenRollbackRestart.
         const lane: RollbackRecoveryLane = treePlan
           ? {
               kind: "plain-tree",
@@ -1838,12 +1778,9 @@ program
         installedVersion: expectedFlairVersion,
         startError: err?.message ?? String(err),
       });
-      // Connection refused keeps the install, even when the previous version
-      // string was unreadable. Exit 0 — the upgrade completed; `flair start`
-      // is the follow-up. Running or indeterminate rolls back below when the
-      // previous version is known. no-target is the other result: Flair was
-      // not swapped, or the previous version is unknown after a running or
-      // indeterminate probe.
+      // decideAfterRestartFailure: no swap -> no-target; swapped + stopped ->
+      // keep; otherwise a nonempty previous version -> rollback, else no-target.
+      // keep exits successfully; rollbackTo and no-target exit with failure.
       if (restartDecision.kind === "keep") {
         for (const line of restartDecision.lines) console.error(line);
         process.exit(0);

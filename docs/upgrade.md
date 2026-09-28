@@ -90,73 +90,53 @@ flair upgrade --tree /opt/flair --flair-version 0.50.0
 without touching the tree. A git checkout or a path that *is* the npm-global
 install is refused rather than overwritten.
 
-### Upgrade is a transaction
+### Restart, verification and rollback
 
-As of flair#635, `flair upgrade` is install → restart → verify →
-rollback-on-failure, in one step — installing new code without restarting used
-to leave the OLD process serving while the version on disk lied about what was
-actually running:
+In the local upgrade path, `--no-restart` skips restart and post-restart
+verification. With restart enabled, the pre-install `/Health` probe also runs
+under `--no-verify`.
 
-- **Restart happens automatically** after install. Pass `--no-restart` to
-  stage the new packages without bouncing the process yet (the old
-  opt-in `--restart` flag still parses but is now a no-op — restart is the
-  default).
-- **The restart runs through the newly installed CLI** (flair#905), not the
-  process that did the installing. Only version N's own code knows how version
-  N starts — spawn arguments, required environment, config templates and the
-  Harper dependency's own package name are all things a release may change, and
-  the pre-swap process would get every one of them wrong the same silent way.
-  The output names the CLI it handed the restart to. If that CLI can't be found
-  or its version can't be confirmed, the upgrade says so and restarts in-process
-  rather than refusing to start anything.
-- **Post-restart verification** (skip with `--no-verify`) confirms the
-  restarted instance answers `/Health`, that an authenticated request
-  round-trips, and that the reported running version matches what was just
-  installed. It then runs the same enumerable doctor install-health checks
-  (`flair doctor`'s client-integration catalog, plus launchd management)
-  and prints `✅ verified: healthy` only when every check ran and none
-  failed. A missing Codex SessionStart hook — which `flair init` before
-  0.50.0 never wrote — is one of those checks. Installing the hook is
-  consent-bearing (it executes at every session start): an interactive
-  upgrade prompts; a non-interactive upgrade states the gap and withholds
-  ✅. Pass `--install-hooks` to consent without a prompt, then `flair
-  doctor` exits 0.
-- **On a failed post-upgrade restart**, keep and rollback apply only
-  when the upgrade swapped `@tpsdev-ai/flair` itself. `no-target` is
-  either case: Flair was not swapped, or Flair was swapped and the
-  previous version is unknown after a running or indeterminate
-  `/Health`. Before the swap, including with `--no-verify`, it probes
-  `/Health` once (flair#1740). A refused connection means no listener
-  accepted it. That does not show that no process was running. When
-  Flair itself was swapped and the connection was refused, the new
-  version stays installed, including when the previous version cannot
-  be read, and the command tells you to run `flair start`. A timeout or
-  a non-2xx answer is indeterminate, not stopped. Rollback needs a
-  known previous version and is refused when the registry reports that
-  version deprecated. If the lookup fails, or the `deprecated` field is
-  null, rollback still proceeds. Post-restart verification failures
-  follow the existing `decideAfterVerify` decision: an unknown previous
-  version yields `cannot-rollback`, not `no-target`. When rollback runs,
-  the previous version is restored according to the install lane
-  (npm-global reinstalls the package; plain-tree restores the saved
-  tree) and restarted, then the command exits nonzero with a clear
-  report of what failed. If a rollback put a previous version in place
-  and that version's restart fails, the command exits nonzero and
-  names that version known-broken for this attempt. When no previous tree
-  was restored, the headline is neutral: it does not call a rollback
-  version known-broken, and it does not say the rollback restart failed.
-  Recovery matches the install lane and both filesystem results: whether
-  the previous tree was restored, and whether a live tree was set aside
-  at `.upgrade-failed`. A restore can succeed when nothing was at the
-  live path, and that message does not claim a tree was moved there.
-  npm-global recovery offers `npm view @tpsdev-ai/flair version` as a
-  candidate to check, not a guaranteed non-deprecated release. The
-  message also says whether a pre-upgrade data snapshot was restored.
-  Until flair#905 the rollback was wired to the *verification* leg
-  only. If the rollback itself fails verification, it says so loudly
-  and points at the concrete pre-upgrade snapshot path (see
-  "Pre-upgrade snapshot" below) instead of retrying in a loop — see
-  [Downgrade](#downgrade) for the restore procedure.
+The probe labels a successful HTTP response `running`. A caught error with
+`ECONNREFUSED` or `ConnectionRefused` in its collected codes or top-level text
+is `stopped`; other responses and caught errors are `indeterminate`.
+The `stopped` label does not establish whether a process exists.
+
+After a thrown restart error, `decideAfterRestartFailure` selects:
+
+| Flair itself was swapped | Prior probe | Previous version | Decision |
+| --- | --- | --- | --- |
+| No | Any | Any | `no-target` |
+| Yes | `stopped` | Any | `keep` |
+| Yes | `running` or `indeterminate` | Nonempty | `rollback` |
+| Yes | `running` or `indeterminate` | Missing or empty | `no-target` |
+
+`keep` leaves the new package installed, prints the start error and
+`flair start`, and exits successfully. `no-target` exits with failure.
+`rollback` enters the shared rollback path below.
+
+When post-restart verification runs, `decideAfterVerify` returns `ok` for
+a successful probe; otherwise it returns `healthy-unverified` when the probe
+reports healthy with a credentials failure. Other results select `rollback`
+for a nonempty previous version and `cannot-rollback` otherwise; the latter exits
+with failure. Prior liveness and the swap flag are not inputs to this decision.
+
+The shared rollback path refuses a target reported deprecated by the registry
+lookup and exits with failure. Failed or unusable lookups, including a null
+`deprecated` field, allow the attempt. npm-global attempts to reinstall the
+previous package version; plain-tree attempts to restore the saved tree when
+it exists and skips restoration when it is absent. The tree restore first
+attempts to move the live path to `.upgrade-failed` when it exists.
+
+After that stage, an engine change requires a snapshot path and successful
+snapshot restoration before restart. Rollback then attempts restart and,
+if restart returns, verification; its reported outcomes exit with failure.
+
+If that restart throws, the npm-global and restored-tree diagnostics label
+the rollback target known-broken for this attempt. The missing-tree diagnostic
+uses a neutral headline. Plain-tree recovery text reports whether the previous
+tree was restored and whether a live tree was set aside. Both lanes report
+whether a data snapshot was restored. An npm version candidate printed by
+this message is not guaranteed non-deprecated.
 
 ### Pre-upgrade snapshot (opt-in for same-engine, unconditional on engine change)
 

@@ -556,11 +556,7 @@ export interface FetchRegistryDeps extends ResolveNpmRegistryDeps {
   timeoutMs?: number;
   /** Injectable fetch — tests mock `globalThis.fetch`. */
   fetchImpl?: typeof fetch;
-  /**
-   * Injectable `npm view` JSON reader. Production uses `runNpmViewJson`.
-   * Tests pass this so a malformed `deprecated` field can be classified
-   * without spawning npm.
-   */
+  /** Optional npm reader for fetchVersionDeprecation; defaults to runNpmViewJson. */
   npmViewJson?: (
     spec: string,
     field: string,
@@ -647,11 +643,7 @@ function runNpmViewJson(
   });
 }
 
-/**
- * Split npm view's stdout into empty, malformed, or JSON.
- * Empty (the field is absent — npm prints nothing and exits 0) is not
- * malformed JSON. Callers must not treat those as the same answer.
- */
+/** Parse trimmed stdout as JSON; distinguish empty output from invalid JSON. */
 export function parseNpmViewStdout(stdout: string): JsonFetchResult {
   const text = stdout.trim();
   if (text === "") return { ok: false, message: "npm view returned empty output" };
@@ -662,17 +654,12 @@ export function parseNpmViewStdout(stdout: string): JsonFetchResult {
   }
 }
 
-/** Drop C0/C1 controls and DEL before a registry string is printed. */
+/** Remove characters in U+0000-U+001F and U+007F-U+009F. */
 export function stripControlChars(value: string): string {
   return value.replace(/[\u0000-\u001F\u007F\u0080-\u009F]/g, "");
 }
 
-/**
- * A registry body is an exact-version document only when it is an object whose
- * `name` and `version` are the package and version we asked for. An HTTP 200
- * with no such document (empty object, missing name, a different version) is
- * not "this version is active".
- */
+/** Accept a non-array object whose name and version equal the requested values. */
 export function isExactVersionDocument(
   data: unknown,
   packageName: string,
@@ -686,9 +673,9 @@ export function isExactVersionDocument(
 }
 
 /**
- * Map npm view's `deprecated` field output. Empty stdout is "no deprecation".
- * Malformed stdout is not evidence either way (`unavailable` at the fetch layer).
- * A deprecation string is control-stripped before it can be printed.
+ * Empty-output errors and blank strings yield active; nonblank strings yield
+ * deprecated. Other errors and non-string values yield unavailable.
+ * Deprecation messages have control characters removed and a fallback if empty.
  */
 export function deprecationFromNpmView(parsed: JsonFetchResult):
   | { kind: "active" }
@@ -698,7 +685,7 @@ export function deprecationFromNpmView(parsed: JsonFetchResult):
     if (parsed.message === "npm view returned empty output") return { kind: "active" };
     return { kind: "unavailable", message: parsed.message };
   }
-  // A present value that is not a string is malformed, not "not deprecated".
+  // Non-string JSON values yield unavailable, including null.
   if (typeof parsed.data !== "string") {
     return { kind: "unavailable", message: "npm view deprecated field was not a string" };
   }
@@ -800,26 +787,23 @@ export async function fetchDeclaredDependencies(
 }
 
 export type VersionDeprecationResult =
-  /** npm's version document carries a non-empty `deprecated` string. */
+  /** The lookup returned a nonblank deprecation string. */
   | { kind: "deprecated"; message: string; registry: RegistryResolution }
-  /** The version document was read and is not deprecated. */
+  /** The lookup found an absent field, empty npm output, or a blank string. */
   | { kind: "active"; registry: RegistryResolution }
-  /** `version` is not strict semver, so it was not sent to the registry. */
+  /** The supplied version failed isStrictSemver before registry resolution. */
   | { kind: "invalid"; value: string }
   | { kind: "refused"; message: string }
-  /** Offline, timeout, non-2xx, or npm error. Not evidence of deprecation. */
+  /** The returned lookup result could not establish deprecation status. */
   | { kind: "unavailable"; message: string; registry: RegistryResolution };
 
 /**
- * Read the npm `deprecated` field for one exact version (flair#1740).
- *
- * A rollback must not return to a version npm has marked deprecated. Only a
- * positive string refuses the rollback. A missing field or a blank string is
- * `active`. A present null is not that absence: it is `unavailable`, same as
- * any other non-string, so the lookup does not claim the version is active.
- * A lookup failure is also `unavailable`.
- *
- * Same registry, scheme, and transport rules as `fetchDeclaredDependencies`.
+ * Query deprecation for a strict semver version using the resolved registry.
+ * HTTP responses must pass isExactVersionDocument; npm output goes through
+ * deprecationFromNpmView. Absent HTTP fields and blank strings yield active;
+ * nonblank strings yield deprecated. Non-string fields yield unavailable.
+ * Registry resolution errors return refused; invalid versions return invalid.
+ * decideDeprecatedRollback refuses only a reported deprecated result.
  */
 export async function fetchVersionDeprecation(
   packageName: string,

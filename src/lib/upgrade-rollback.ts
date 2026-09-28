@@ -1,52 +1,33 @@
-/**
- * upgrade-rollback.ts — when a post-upgrade restart failure is evidence
- * against the new version (flair#1740).
- *
- * "Restart failed" and "there was nothing running to restart" are not the
- * same condition. A refused connection keeps the new package when
- * @tpsdev-ai/flair was swapped. It does not show that no process was
- * running. Running or indeterminate rolls back only when that package was
- * swapped and the previous version is known. An indeterminate probe is
- * not a refused connection, so it does not waive rollback.
- *
- * Pure: no I/O. The command classifies prior liveness and asks the registry
- * whether the rollback target is deprecated. This module only decides.
- */
+/** Pure decisions and diagnostic formatting for upgrade rollback. */
 
 const FLAIR_PKG = "@tpsdev-ai/flair";
 
-/** Matches classifyUpgradePriorLiveness. Indeterminate is not stopped. */
+/** Liveness labels consumed by decideAfterRestartFailure. */
 export type PriorLivenessKind = "running" | "stopped" | "indeterminate";
 
 export interface RestartFailureInput {
   priorLiveness: PriorLivenessKind;
-  /** True when this upgrade actually replaced @tpsdev-ai/flair. */
+  /** False makes decideAfterRestartFailure return no-target. */
   flairWasSwapped: boolean;
-  /** Previously installed version, or null when it could not be read. */
+  /** Rollback target; a falsy value cannot select rollback. */
   previousVersion: string | null;
-  /** Version now on disk (the upgrade target), when known. */
+  /** Optional version label for the keep diagnostic. */
   installedVersion: string | null;
-  /** The restart error, without a "restart failed:" prefix. */
+  /** Error text included in the reason or keep diagnostic. */
   startError: string;
 }
 
 export type RestartFailureDecision =
   | { kind: "rollback"; toVersion: string; reason: string }
-  /** Upgrade stands. The new version stays installed; start is a follow-up. */
+  /** Selected when flairWasSwapped is true and priorLiveness is stopped. */
   | { kind: "keep"; lines: string[] }
-  /** @tpsdev-ai/flair was not swapped, or (when not confirmed-stopped) the previous version is unknown. */
+  /** No swap, or no previous version after running/indeterminate. */
   | { kind: "no-target" };
 
 /**
- * What to do when the post-upgrade restart throws.
- *
- * When @tpsdev-ai/flair was swapped, a refused connection keeps the new
- * version even when the previous version string is unreadable. A failed
- * start is not evidence against that install. Running and indeterminate
- * both roll back when a previous version is known. If Flair was not
- * swapped, or the previous version is unknown after a running or
- * indeterminate probe, the decision is no-target. Indeterminate does
- * not take the keep path.
+ * No swap yields no-target. Otherwise stopped yields keep, regardless of the
+ * previous version. Running/indeterminate yields rollback for a nonempty
+ * previous version, or no-target without one.
  */
 export function decideAfterRestartFailure(input: RestartFailureInput): RestartFailureDecision {
   if (!input.flairWasSwapped) return { kind: "no-target" };
@@ -70,7 +51,7 @@ export function decideAfterRestartFailure(input: RestartFailureInput): RestartFa
   };
 }
 
-/** Lines for a confirmed-stopped restart failure that must not undo the install. */
+/** Format the installed-version label, refused-connection note, error and start command. */
 export function formatNotRunningRestartFailure(input: {
   installedVersion: string | null;
   startError: string;
@@ -86,11 +67,7 @@ export function formatNotRunningRestartFailure(input: {
   ];
 }
 
-/**
- * Registry answer for "does npm mark this exact version deprecated?".
- * `unknown` is a failed or unusable lookup — not evidence of deprecation —
- * so rollback proceeds. Only a positive `deprecated` string refuses.
- */
+/** Lookup input to decideDeprecatedRollback; only deprecated selects refuse. */
 export type DeprecationLookup =
   | { kind: "deprecated"; message: string }
   | { kind: "active" }
@@ -100,15 +77,14 @@ export type DeprecatedRollbackDecision =
   | { kind: "proceed" }
   | { kind: "refuse"; lines: string[] };
 
-/** Drop C0/C1 controls and DEL so a registry string cannot rewrite the terminal. */
+/** Remove characters in U+0000-U+001F and U+007F-U+009F. */
 export function stripControlChars(value: string): string {
   return value.replace(/[\u0000-\u001F\u007F\u0080-\u009F]/g, "");
 }
 
 /**
- * Refuse rollback when the registry reports a deprecation. A failed lookup
- * (`unknown`) is not a deprecation and does not refuse — offline still rolls
- * back. The printed message is control-stripped.
+ * Return refuse only for lookup.kind === "deprecated"; otherwise proceed.
+ * Remove control characters from the deprecation message before formatting it.
  */
 export function decideDeprecatedRollback(input: {
   toVersion: string;
@@ -142,27 +118,23 @@ export type RollbackRecoveryLane =
       kind: "plain-tree";
       treeDir: string;
       failedDir: string;
-      /** Where the pre-swap tree would have been. */
+      /** Saved-tree path used in the missing-tree diagnostic. */
       previousDir: string;
-      /** True only when that previous tree was actually moved back onto treeDir. */
+      /** Selects the restored-tree diagnostic when true. */
       restored: boolean;
-      /** True only when a live tree was renamed onto failedDir during that restore. */
+      /** True selects the set-aside-tree diagnostic after a restore. */
       liveTreeSetAside: boolean;
     };
 
 /**
- * The rollback's own restart failed on this attempt. When a previous version
- * was actually put back, `flair start` on it is not a recovery for that
- * attempt, and the headline says known-broken. When no previous tree was
- * restored, the headline stays neutral: nothing was put back to call
- * known-broken. Plain-tree text reports two filesystem results separately:
- * whether the previous tree was restored, and whether a live tree was renamed
- * to `.upgrade-failed`. Say whether a pre-upgrade data snapshot was restored.
+ * Plain-tree with restored: false gets a neutral restart-failure headline;
+ * other lanes get KNOWN-BROKEN for this attempt. Recovery text uses the lane,
+ * liveTreeSetAside and recoveryVersion. Snapshot text uses snapshotRestored.
  */
 export function formatKnownBrokenRollbackRestart(input: {
   toVersion: string;
   error: string;
-  /** Version the upgrade had reached before this rollback, when it differs. */
+  /** Candidate recovery version; used when nonempty and different from toVersion. */
   recoveryVersion: string | null;
   lane: RollbackRecoveryLane;
   snapshotRestored: boolean;

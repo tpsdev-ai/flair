@@ -809,14 +809,9 @@ export async function applyPlainTreeUpgrade(
 }
 
 /**
- * Put `.upgrade-prev` back at the live tree path. Used by upgrade rollback
- * when restart or verify fails after a swap.
- *
- * `restored: false` means the saved tree is absent. That does not prove
- * the swap never completed.
- * `liveTreeSetAside` is true only when a directory at the live path was
- * renamed to `.upgrade-failed`. A restore can succeed with nothing to set
- * aside — the caller must not claim that move happened.
+ * Return restored: false when previousDir is absent. Otherwise attempt to
+ * move the live path to .upgrade-failed when it exists, then move previousDir
+ * to the live path. A restored: true result also reports whether the live path moved.
  */
 export function restorePlainTreePrevious(plan: Pick<PlainTreeUpgradePlan, "treeDir" | "previousDir">):
   | { restored: false }

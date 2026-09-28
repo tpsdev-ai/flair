@@ -1,21 +1,14 @@
-- **`flair upgrade` keeps the new version when `/Health` refused
-  the connection.** A failed post-upgrade restart rolls back only when
-  `@tpsdev-ai/flair` itself was swapped, the previous version is known,
-  and `/Health` was up or indeterminate. `--no-verify` is included.
-  A refused connection keeps the new version even when the previous
-  version cannot be read.
-  `no-target` is either of two cases: Flair was not swapped, or it was
-  swapped and the previous version is unknown after a running or
-  indeterminate probe. When the registry reports a deprecation, that
-  version is not the rollback target; a failed lookup still rolls back.
-  A present null `deprecated` field is not treated as active. A failed
-  rollback restart exits nonzero. It names that version known-broken
-  for this attempt only when this rollback put a previous version in
-  place. When no previous tree was restored, the headline stays
-  neutral. The message reports whether the previous tree was restored
-  and whether a live tree was set aside.
+- **Failed post-upgrade restarts keep a swapped Flair package after a refused
+  pre-upgrade `/Health` connection.** This includes `--no-verify` and an unreadable previous
+  version. With a running or indeterminate probe, a swapped Flair package and
+  a nonempty previous version select rollback. No swap, or no previous version
+  after a running or indeterminate probe, yields `no-target`.
+  A reported deprecation blocks the rollback attempt; failed lookups do not.
+  npm-global attempts to reinstall the previous package; plain-tree attempts
+  to restore the saved tree when it exists. If a rollback restart throws,
+  its diagnostics use the install lane and recorded tree and snapshot
+  restoration results.
 
-  > **Heads-up:** When `/Health` refused the connection, including with
-  > `--no-verify`, a failed post-upgrade restart keeps the new version
-  > if `@tpsdev-ai/flair` itself was swapped. An unresponsive `/Health`
-  > is not treated as a refused connection.
+  > **Heads-up:** After a refused pre-upgrade `/Health` connection, a failed
+  > restart keeps the new version only when Flair itself was swapped, exits
+  > successfully, and prints `flair start`. Timeouts remain indeterminate.

@@ -1,18 +1,4 @@
-/**
- * upgrade-prior-liveness.ts — was Flair up before `flair upgrade` swapped
- * packages? (flair#1740)
- *
- * Independent of post-upgrade verification. `--no-verify` still has to know
- * this, because a restart failure is not evidence against the new version
- * only when nothing was listening.
- *
- * Three outcomes, not two:
- *   - running        — /Health returned 2xx
- *   - stopped        — the connect was refused (nothing accepted the socket)
- *   - indeterminate  — timeout, non-2xx, reset, or any other failure
- *
- * Indeterminate is not "stopped". An unresponsive process is still a process.
- */
+/** Classify the pre-install /Health attempt for the restart-failure decision. */
 
 export type PriorLiveness =
   | { kind: "running" }
@@ -20,14 +6,14 @@ export type PriorLiveness =
   | { kind: "indeterminate"; reason: string };
 
 export interface PriorLivenessOptions {
-  /** Budget for the single /Health attempt. Default 3000ms. */
+  /** AbortSignal.timeout duration; defaults to DEFAULT_TIMEOUT_MS. */
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
 }
 
 const DEFAULT_TIMEOUT_MS = 3000;
 
-/** Walk `cause` and `AggregateError.errors` for a Node error code. */
+/** Collect string code fields through cause and array-valued errors, skipping cycles. */
 export function errorCodes(err: unknown): string[] {
   const codes: string[] = [];
   const seen = new Set<unknown>();
@@ -45,10 +31,8 @@ export function errorCodes(err: unknown): string[] {
 }
 
 /**
- * True only for "nothing accepted the TCP connection".
- * Node reports `ECONNREFUSED`. Bun's fetch reports `ConnectionRefused`.
- * A timeout, a reset, or a generic "unable to connect" without that code
- * is not this signal.
+ * Match ECONNREFUSED or ConnectionRefused in collected codes or in the
+ * top-level error text. Other text and codes do not match.
  */
 export function isConnectionRefused(err: unknown): boolean {
   const codes = errorCodes(err);
@@ -63,8 +47,9 @@ function errorText(err: unknown): string {
 }
 
 /**
- * One /Health attempt. Connection refused is the only "stopped" signal.
- * Anything else that is not 2xx is indeterminate — including a 3s timeout.
+ * Fetch /Health once with a timeout signal. An ok response yields running;
+ * a caught error matching isConnectionRefused yields stopped. Other responses
+ * and caught errors yield indeterminate.
  */
 export async function classifyUpgradePriorLiveness(
   baseUrl: string,
