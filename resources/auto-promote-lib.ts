@@ -135,7 +135,7 @@ export interface AutoPromoteCandidateInput {
 // the 0.55.0 Metal entry for exactly this overclaim shape.
 //
 // Bracket coverage is the enumerated table in src/rem/promote-policy.ts,
-// including its full-width/CJK pairs; unlisted delimiters are not checked.
+// including its full-width/CJK pairs; unlisted bracket pairs are not checked.
 // Backticks use parity, not Markdown span matching, so valid escape spans
 // can be refused. This signal does not establish semantic completeness.
 //
