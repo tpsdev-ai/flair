@@ -160,7 +160,9 @@ function runInit(
     const child = spawn("bun", [CLI_PATH, "init", ...args], {
       cwd: join(import.meta.dir, "..", ".."),
       env,
-      timeout: CHILD_DEADLINE_MS,
+      // Numeric literals: check-cli-spawn-budgets does not read CHILD_DEADLINE_MS.
+      timeout: 30_000,
+      killSignal: "SIGTERM",
     });
     let stdout = "";
     let stderr = "";
@@ -174,6 +176,7 @@ function runInit(
           stdout,
           stderr,
           elapsedMs: Date.now() - startedAt,
+          timeoutSignal: "SIGTERM",
         })));
         return;
       }
@@ -233,6 +236,11 @@ async function runInitInProcess(args: string[], home: string): Promise<{ stdout:
     setOccupiedListenerLookupForTests(null);
   }
   return { stdout, stderr };
+}
+
+/** `typeof fetch` is overloaded, so a one-status stub needs the double assertion. */
+function loginFailedFetch(): typeof fetch {
+  return (async () => new Response('{"error":"Login failed"}', { status: 401 })) as unknown as typeof fetch;
 }
 
 function expectHealthLoggedThenNoAuthorization(
@@ -436,11 +444,12 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     }
     expect(httpHolder.pid).not.toBe(opsHolder.pid);
     expect(children.every((child) => child.exitCode === null && child.killed === false)).toBe(true);
-  }, CASE_BUDGET_MS);
+    // Literal, and above the 30_000 spawn timeout: the gate does not read CASE_BUDGET_MS.
+  }, 40_000);
 
   test("self-started seed keeps today's credential 401 hint", async () => {
     const orig = globalThis.fetch;
-    globalThis.fetch = (async () => new Response('{"error":"Login failed"}', { status: 401 })) as typeof fetch;
+    globalThis.fetch = loginFailedFetch();
     try {
       await seedAgentViaOpsApi(19925, "canary", "pubkey", "admin", "this-init-password");
       throw new Error("expected seed to throw");
@@ -460,7 +469,7 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
 
   test("seed against a verified operations holder does not blame credentials", async () => {
     const orig = globalThis.fetch;
-    globalThis.fetch = (async () => new Response('{"error":"Login failed"}', { status: 401 })) as typeof fetch;
+    globalThis.fetch = loginFailedFetch();
     const listener: OccupiedHarperListener = {
       port: 19925,
       pids: [42],
@@ -493,7 +502,7 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
 
   test("a holder that changes during the request is not named", async () => {
     const orig = globalThis.fetch;
-    globalThis.fetch = (async () => new Response('{"error":"Login failed"}', { status: 401 })) as typeof fetch;
+    globalThis.fetch = loginFailedFetch();
     const before: OccupiedHarperListener = {
       port: 19925,
       pids: [42],
@@ -526,7 +535,7 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
 
   test("several operations-port holders are not a kill list", async () => {
     const orig = globalThis.fetch;
-    globalThis.fetch = (async () => new Response('{"error":"Login failed"}', { status: 401 })) as typeof fetch;
+    globalThis.fetch = loginFailedFetch();
     const many: OccupiedHarperListener = {
       port: 19925,
       pids: [42, 43],
