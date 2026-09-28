@@ -1333,7 +1333,11 @@ program
           const continuityDetail = continuity.state === "partial"
             ? (!continuity.postToolUse.present ? "the PostToolUse entry is missing" : "the Stop entry is missing")
             : "an entry is not the current form (unsilenced, hand-altered, or a drifted PostToolUse matcher)";
-          console.log(`  ${render.icons.warn} Continuity capture hooks: ${continuity.state} — ${continuityDetail}`);
+          const pinDetail = [
+            continuity.postToolUse.reason && "PostToolUse " + continuity.postToolUse.reason,
+            continuity.stop.reason && "Stop " + continuity.stop.reason,
+          ].filter(Boolean).join("; ");
+          console.log(`  ${render.icons.warn} Continuity capture hooks: ${continuity.state} — ${pinDetail || continuityDetail}`);
           if (autoFix) {
             if (dryRun) {
               console.log(`     ${render.wrap(render.c.dim, "Would rewrite the continuity capture hooks in")} ${continuity.path}`);

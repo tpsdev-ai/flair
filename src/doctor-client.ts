@@ -351,9 +351,10 @@ export interface ContinuityHookEventReport {
   command?: string;
   /** PostToolUse only — the matcher on the group carrying our entry. */
   matcher?: string;
-  /** Present AND the exact shape we write today (silenced wrapper, unpinned
-   *  npx invocation, and — for PostToolUse — the expected matcher). */
+  /** Present with a silenced invocation, a bare or resolved version spec,
+   *  and — for PostToolUse — the expected matcher. */
   currentForm: boolean;
+  reason?: string;
 }
 
 export interface ContinuityCaptureHookReport {
@@ -389,7 +390,11 @@ function continuityEventReport(config: any, event: ContinuityHookEvent): Continu
     CONTINUITY_INVOCATION_RE.test(command) &&
     hookCommandIsSilenced(command);
   const matcherOk = event !== "PostToolUse" || matcher === CONTINUITY_POST_TOOL_USE_MATCHER;
-  return { present: true, command, matcher, currentForm: shapeOk && matcherOk };
+  const spec = decodeWiringSpec(command, FLAIR_MCP_PACKAGE);
+  const pinOk = spec?.token.kind === "none" || spec?.token.kind === "version";
+  const reason = pinOk ? undefined
+    : "pin " + (spec?.token.kind ?? "malformed") + ": " + (spec?.token.value ?? "missing package");
+  return { present: true, command, matcher, currentForm: shapeOk && matcherOk && pinOk, reason };
 }
 
 /**
