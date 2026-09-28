@@ -293,9 +293,18 @@ function codexFlairSectionText(raw: string): string | null {
   return nextHeader === -1 ? after : after.slice(0, "[mcp_servers.flair]".length + nextHeader);
 }
 
+function codexWiringPin(raw: string): string {
+  const unknown = `${FLAIR_MCP_PACKAGE}@unknown`;
+  const headers = [...raw.matchAll(CODEX_FLAIR_HEADER_RE)];
+  if (headers.length !== 1 || headers[0]!.index !== raw.indexOf("[mcp_servers.flair]")) return unknown;
+  if (/"{3}|'{3}/.test(raw)) return unknown;
+  const body = raw.slice(headers[0]!.index! + headers[0]![0].length).split(/^[ \t]*\[/m)[0]!;
+  const args = body.split("\n").filter((line) => /^[ \t]*args[ \t]*=/.test(line));
+  const spec = args.length === 1 ? args[0]!.match(CODEX_ARGS_LINE_RE)?.[1] : undefined;
+  return spec !== undefined && argNamesFlairPackage(spec) ? spec : unknown;
+}
 function codexFlairSectionHasCurrentPin(raw: string): boolean {
-  const section = codexFlairSectionText(raw);
-  return section !== null && section.includes(mcpServerSpec());
+  return codexWiringPin(raw) === mcpServerSpec();
 }
 
 /**
@@ -390,7 +399,9 @@ function wireJsonMcpCore(
         const decision = decidePinWrite({
           pkg: FLAIR_MCP_PACKAGE,
           entry: `${label} config ${display}`,
-          existingText: existing ? JSON.stringify(existing) : null,
+          existingText: existing == null ? null : (() => {
+            const pin = classifyFlairEntryArgs(existing); return pin.ok ? pin.arg : `${FLAIR_MCP_PACKAGE}@unknown`;
+          })(),
           runningVersion: flairCliVersion(),
         });
         if (decision.action !== "write") {
@@ -1389,7 +1400,7 @@ function _wireCodex(env: WireEnv): { ok: boolean; message: string } {
         const decision = decidePinWrite({
           pkg: FLAIR_MCP_PACKAGE,
           entry: `Codex config ${display}`,
-          existingText: hasSection ? codexFlairSectionText(raw) : null,
+          existingText: hasSection ? codexWiringPin(raw) : null,
           runningVersion: flairCliVersion(),
         });
         if (decision.action !== "write") {

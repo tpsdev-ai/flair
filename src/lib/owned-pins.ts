@@ -39,6 +39,7 @@ import { isUnsafeAdapterPin } from "./stale-client-pin.js";
 import { type ConfigSectionOptions } from "./config-critical-section.js";
 import {
   hookInstallHint,
+  parseInstallerHookForm,
   hookSettingsPath,
   repinSessionStartHook,
   SUPPORTED_HARNESSES,
@@ -408,7 +409,8 @@ export function repinSessionStartHookGuarded(
     displayPath: hookSettingsPath(homeDir, harness),
   };
   const wouldWrite = flairCliVersion();
-  const existing = readOwnedPin(resolved, homeDir).pin;
+  const command = checkSessionStartHook(homeDir, resolved.path).command;
+  const existing = command ? wiringPinString(decodeWiringSpec(parseInstallerHookForm(command)?.pkgSpec ?? `${FLAIR_MCP_PACKAGE}@unknown`, FLAIR_MCP_PACKAGE)) : null;
   if (pinWriteWouldLowerOrIsUnknown(existing, wouldWrite)) {
     return {
       target: resolved,

@@ -446,15 +446,16 @@ export interface ContinuityHookInstall {
  *                       never repins a BEHIND entry UP; it repairs shape only.
  */
 function decideContinuityWrite(existingCommand: string | null, entryLabel: string): PinWriteDecision {
+  const pinText = existingCommand === null ? null : existingCommand.match(/^(?:sh -c ')?FLAIR_AGENT_ID=[^\s'"]+(?: FLAIR_URL=[^\s'"]+)? npx -y (?:-p )?(@tpsdev-ai\/flair-mcp(?:@[^\s"']+)?) flair-continuity-capture(?: >\/dev\/null 2>\/dev\/null \|\| true')?$/)?.[1] ?? `${FLAIR_MCP_PACKAGE}@unknown`;
   const decision = decidePinWrite({
     pkg: FLAIR_MCP_PACKAGE,
     entry: entryLabel,
-    existingText: existingCommand,
+    existingText: pinText,
     runningVersion: flairCliVersion(),
   });
   if (decision.action !== "write") return decision;
   if (existingCommand === null) return decision; // absent → provision at the running CLI
-  const spec = decodeWiringSpec(existingCommand, FLAIR_MCP_PACKAGE);
+  const spec = decodeWiringSpec(pinText ?? "", FLAIR_MCP_PACKAGE);
   if (isComparableWiringPin(spec)) return { action: "write", pin: wiringPinString(spec), line: null };
   return { action: "write", pin: null, line: null }; // unpinned → repair, stay unpinned
 }
@@ -1725,7 +1726,7 @@ export function upgradeSessionStartHookCommand(homeDir: string, settingsPath?: s
             const decision = decidePinWrite({
               pkg: FLAIR_MCP_PACKAGE,
               entry: `SessionStart hook in ${path}`,
-              existingText: hook.command,
+              existingText: FLAIR_MCP_PACKAGE, // The matched legacy form is unpinned.
               runningVersion: flairCliVersion(),
             });
             if (decision.action !== "write") {
