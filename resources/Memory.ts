@@ -1,5 +1,4 @@
 import { databases } from "harper";
-import * as harperRuntime from "harper";
 import { randomUUID } from "node:crypto";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
@@ -93,7 +92,17 @@ function unselectedReadQuery(query: any): any {
   const isConditionIterable =
     !!query && typeof query === "object" && typeof query[Symbol.iterator] === "function" && !(query instanceof URLSearchParams);
   if (isConditionIterable && !("conditions" in query)) {
-    return { conditions: Array.from(query) };
+    // A bare iterable of conditions can also carry the read options (operator,
+    // limit, offset, sort) as properties. Copy every non-selection, non-index
+    // property so the scope read runs on the SAME query the caller asked for.
+    // Dropping them would change limit/offset/sort (an unbounded or differently
+    // ordered scope read) while the caller-shaped output stayed the same.
+    const rest: any = { conditions: Array.from(query) };
+    for (const key of Object.keys(query)) {
+      if (key === "select" || key === "property" || /^\d+$/.test(key)) continue;
+      rest[key] = (query as any)[key];
+    }
+    return rest;
   }
   if (query && typeof query === "object") {
     const rest: any = { ...query };
@@ -846,28 +855,23 @@ export class Memory extends (databases as any).flair.Memory {
     // STORED row; the caller's selection shapes only the OUTPUT. So on a
     // non-admin by-id read that carries a `select`/`property`, read the FULL row
     // (never the caller-shaped one), project it through the gated join, and
-    // apply the selection LAST. The unshaped target is built the SAME way
-    // makeByIdReadGate now does (#1975) — from the target's constructor and the
-    // same id — and a target that cannot be rebuilt fails closed to the 404 an
-    // absent row gets. An unsupported selection shape is refused with 400 before
+    // apply the selection LAST. The unshaped read target is a PLAIN object
+    // carrying only the id — the SAME shape the shared by-id gate now builds
+    // itself (#1995). It is never the caller's target and never its
+    // constructor. An unsupported selection shape is refused with 400 before
     // any read.
     if (auth.kind === "agent" && !auth.isAdmin && carriesSelection(target)) {
       const selection = parseCallerSelection((target as any).select, (target as any).property, { surface: "byId" });
       if (selection instanceof Response) return selection; // 400, no read
       const targetId = typeof target === "string" ? target : (target as any)?.id;
-      // Build the unshaped read target from a FRESH `RequestTarget` carrying only
-      // the id — never from `target.constructor`. A caller-supplied constructor
-      // could install `select`/`property` that omit `visibility`/`archived`, so
-      // the scope predicate (memory-read-scope.ts) would treat another agent's
-      // private row as non-private and render an archived row's pointer. A
-      // fresh target carries no such shaping. Same construction the shared
-      // by-id gate uses (#1975). Resolved from the runtime namespace so a test
-      // mock that does not model the class cannot fail the named-export link;
-      // when the class is absent (non-Harper test env) fall back to a PLAIN
-      // id-only object — still never the read target's own constructor.
-      const RequestTargetCtor: any = (harperRuntime as any).RequestTarget;
-      const unshaped: any = typeof RequestTargetCtor === "function" ? new RequestTargetCtor() : {};
-      unshaped.id = targetId;
+      // Build the unshaped read target as a PLAIN object carrying only the id —
+      // never the caller's target and never its constructor. A caller-supplied
+      // constructor could install `select`/`property` that omit
+      // `visibility`/`archived`, so the scope predicate (memory-read-scope.ts)
+      // would treat another agent's private row as non-private and render an
+      // archived row's pointer. A plain id-only object carries no such shaping —
+      // the same construction the shared by-id gate uses (#1995).
+      const unshaped: any = targetId != null ? { id: targetId } : {};
       const record = await memoryByIdReadGate.call(this, unshaped, (t: any) => super.get(t));
       if (record instanceof Response) return record;
       // A1-iv item 2: the gated join, through the ONE reader helper — pointer |

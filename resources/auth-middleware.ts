@@ -4,7 +4,7 @@ import { getEmbedding } from "./embeddings-provider.js";
 import { isAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
 import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { resolveReadScope } from "./memory-read-scope.js";
-import { parseCallerSelection } from "./caller-selection.js";
+import { parseCallerSelection, restSelection } from "./caller-selection.js";
 import { NOT_FOUND } from "./record-type-kit.js";
 import { isForbiddenOwnerMutation, resolveGuardedRecord } from "./record-owner-guard.js";
 import { checkHttpRateLimit } from "./rate-limit.js";
@@ -660,16 +660,18 @@ server.http(async (request: any, nextLayer: any) => {
         const pathParts = url.pathname.split("/").filter(Boolean);
         const memId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
         if (memId) {
-          // flair#1940 round 13 — validate the REST selection shape BEFORE the
-          // scope read below. Harper parses the query into select/property and
-          // dispatches to Memory.get only after this middleware runs, so an
-          // unsupported selection must be refused here: otherwise this
-          // Memory.get (and the subsequent Harper dispatch) runs before the
-          // resource's own by-id selection check can answer 400. The resource
-          // check stays for direct/in-process calls.
+          // flair#1940 round 14 — validate Harper's PARSED REST selection and
+          // path-property forms BEFORE the scope read below, not only the named
+          // URL parameters. Harper turns `?select(...)` into `target.select`
+          // (a selection the handler refuses with 400) and `/Memory/<id>.<name>`
+          // into `target.property`; neither is a named `select`/`property`
+          // parameter, so the pre-read used to run before the handler's 400
+          // (ordering gap). The resource's own check stays for direct/in-process
+          // calls.
+          const rest = restSelection(url.pathname, url.search);
           const selection = parseCallerSelection(
-            url.searchParams.get("select") ?? undefined,
-            url.searchParams.get("property") ?? undefined,
+            rest?.select ?? url.searchParams.get("select") ?? undefined,
+            rest?.property ?? url.searchParams.get("property") ?? undefined,
             { surface: "byId" },
           );
           if (selection instanceof Response) return selection;

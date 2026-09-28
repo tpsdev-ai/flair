@@ -953,4 +953,36 @@ describe("round 13 — the unselected read keeps the caller's conditions; unsupp
     const g: any = await makeMemory(agentCtx("agent-b")).get({ id: "mem-b4", property: "content" });
     expect(g).toBe("hello"); // assertion: by-id property returns the value
   });
+
+  it("(b2c) an ITERABLE query that also carries a select keeps its conditions (and limit/offset/sort)", async () => {
+    // The accepted non-array iterable branch used to keep only the conditions and
+    // drop the read options, so a bounded/sorted scope read silently became an
+    // unbounded one.
+    seedMemory({ id: "mem-b2c-a", agentId: "agent-a", visibility: "shared", content: "keep" });
+    seedMemory({ id: "mem-b2c-b", agentId: "agent-b", visibility: "shared", content: "drop" });
+    const iter: any = new Set([{ attribute: "agentId", comparator: "equals", value: "agent-a" }]);
+    iter.select = ["id", "agentId"];
+    iter.limit = 5;
+    iter.offset = 0;
+    iter.sort = { attribute: "createdAt", descending: true };
+    const out: any[] = [];
+    for await (const r of await makeMemory(agentCtx("agent-b")).search(iter)) out.push(r);
+    expect(out.map((r) => r.id)).toEqual(["mem-b2c-a"]); // assertion: the caller's iterable condition survived
+    const base = harnessState.lastBaseSearchQuery as any;
+    expect(Array.isArray(base?.conditions)).toBe(true); // assertion: conditions reached the base read
+    expect(base.limit).toBe(5); // assertion: limit preserved
+    expect(base.offset).toBe(0); // assertion: offset preserved
+    expect(base.sort).toEqual({ attribute: "createdAt", descending: true }); // assertion: sort preserved
+    expect(base.select).toBeUndefined(); // assertion: the caller's select did not reach the base read
+  });
+
+  it("(b3d) a `forceNulls` array select returns `null` for a missing key (Harper's projection)", async () => {
+    seedMemory({ id: "mem-b3d", agentId: "agent-a", visibility: "shared", content: "x" });
+    const select: any = ["content", "noSuchField"];
+    select.forceNulls = true;
+    const res: any = await makeMemory(agentCtx("agent-b")).get({ id: "mem-b3d", select });
+    expect(Object.keys(res)).toEqual(["content", "noSuchField"]); // assertion: both keys present, in order
+    expect(res.content).toBe("x"); // assertion: the present key keeps its value
+    expect(res.noSuchField).toBeNull(); // assertion: the missing key is null under forceNulls
+  });
 });

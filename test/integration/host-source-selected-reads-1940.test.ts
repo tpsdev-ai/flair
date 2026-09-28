@@ -65,6 +65,8 @@ const CANON = JSON.stringify(POINTER);
 const idArchived = "hsr-archived-shared";       // t1: archived, bound pointer
 const idUnbound = "hsr-inline-unbound";         // t2a: inline hostSource, no pointer row
 const idBound = "hsr-bound-author";             // t2b: bound pointer, no inline field
+const idPrivate = "hsr-private-other";          // round 14 t5: private, owned by `author`
+const idClean = "hsr-clean-shared";             // round 14 t6/t7: clean shared row
 
 beforeAll(async () => {
   harper = await startHarper();
@@ -95,6 +97,16 @@ beforeAll(async () => {
   await insertRow(harper, "MemoryHostSource", {
     memoryId: idBound, hostSource: CANON, scopeAtWrite: "shared",
     authorId: author.id, memoryInstanceToken: tokBound, receivedAt: new Date().toISOString(),
+  });
+
+  await insertRow(harper, "Memory", {
+    id: idPrivate, agentId: author.id, content: "author private note", contentHash: "h",
+    visibility: "private", archived: false, instanceToken: randomUUID(), createdAt: new Date().toISOString(),
+  });
+
+  await insertRow(harper, "Memory", {
+    id: idClean, agentId: author.id, content: "clean body", contentHash: "h",
+    visibility: "shared", archived: false, instanceToken: randomUUID(), createdAt: new Date().toISOString(),
   });
 }, 240_000);
 
@@ -140,5 +152,47 @@ describe("flair#1940 round 12 — selected reads decide on the stored row (real 
     console.log("t2b bound body:", body, "status:", res.status);
     expect(res.status).toBe(200); // assertion: the author's scalar read succeeded
     expect(body).toContain(POINTER.id); // assertion: the gated pointer is rendered
+  }, 30_000);
+});
+
+describe("flair#1940 round 14 — REST selection validation and clean-row parity (real Harper, REST)", () => {
+  it("t5: an unsupported REST selection is refused 400 BEFORE the scope pre-read (not 404)", async () => {
+    // A PRIVATE row owned by another agent would make the middleware's scope
+    // pre-read answer 404. A 400 here proves the middleware validated Harper's
+    // parsed `?select(*)` selection and refused it BEFORE any Memory read — the
+    // ordering fix for the pre-read. (If the pre-read ran first, this would be
+    // the 404 the t5-ctrl control below shows.)
+    const res = await authFetch(harper, reader, "GET", `/Memory/${idPrivate}?select(*)`);
+    const body = await res.text();
+    console.log("t5 body:", body, "status:", res.status);
+    expect(res.status).toBe(400); // assertion: the selection refusal, NOT the pre-read's 404
+  }, 30_000);
+
+  it("t5-ctrl: a SUPPORTED selection on that private row still reaches the scope pre-read (404)", async () => {
+    const res = await authFetch(harper, reader, "GET", `/Memory/${idPrivate}?select(content)`);
+    const body = await res.text();
+    console.log("t5-ctrl body:", body, "status:", res.status);
+    expect(res.status).toBe(404); // assertion: the private row is denied by the scope pre-read
+  }, 30_000);
+
+  it("t6: a clean-row array select with a missing key matches Harper's shape", async () => {
+    const res = await authFetch(harper, reader, "GET", `/Memory/${idClean}?select(content,noSuchField)`);
+    const body = await res.text();
+    console.log("t6 body:", body, "status:", res.status);
+    expect(res.status).toBe(200); // assertion: the read succeeded
+    const row = JSON.parse(body);
+    expect(row.content).toBe("clean body"); // assertion: the present key keeps its value
+    expect("noSuchField" in row).toBe(false); // assertion: a missing key serializes away (undefined, not null)
+  }, 30_000);
+
+  it("t7: a clean-row asArray select returns a values array", async () => {
+    const res = await authFetch(harper, reader, "GET", `/Memory/${idClean}?select((content,agentId))`);
+    const body = await res.text();
+    console.log("t7 body:", body, "status:", res.status);
+    expect(res.status).toBe(200); // assertion: the read succeeded
+    const arr = JSON.parse(body);
+    expect(Array.isArray(arr)).toBe(true); // assertion: asArray → array
+    expect(arr[0]).toBe("clean body"); // assertion: values in select order
+    expect(arr[1]).toBe(author.id); // assertion: second value in select order
   }, 30_000);
 });

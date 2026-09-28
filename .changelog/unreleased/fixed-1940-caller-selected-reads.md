@@ -5,9 +5,10 @@
   `instanceToken`, `archived` and `visibility`. The caller's selection is applied afterwards. So an
   archived row renders no pointer even when the selection omits `archived`, and a caller cannot move
   the pointer decision by choosing which fields it asks for. Two selection shapes are supported: a
-  single field name (a string `select`, or `property`) returns that field's value, and an array of
-  field names returns an object with those keys. Any other shape is refused with 400 before any read,
-  and the message names the two supported shapes. Inline pointer fields (`hostSource`,
+  single field name — a string `select`, or `property` on a by-id read — returns that field's value,
+  and an array of field names returns an object with those keys (a values array when flagged
+  `asArray`). Any other shape is refused with 400 before any read, and the message names the two
+  supported shapes. Inline pointer fields (`hostSource`,
   `hostSourceScope`, `hostSourceVisibility`) are stripped from the projected row, so a single-field
   read of one of them returns no value rather than the inline string. `SemanticSearch` results are
   projected through the same gated join. Admin and internal reads are unchanged.
