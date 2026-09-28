@@ -16,7 +16,11 @@ type ScanKind = "id-count" | "index" | "legacy" | "embedding" | "other";
 let memoryStore: Map<string, Record<string, unknown>>;
 let scans: ScanKind[];
 let searchThrows: Error | null = null;
-let subscribeMode: "infinite" | "error" = "infinite";
+let subscribeMode: "infinite" | "error" | "queue" = "infinite";
+/** Resolved to let the first index scan's generator return after its last row. */
+let holdFirstIndexTail: Promise<void> | null = null;
+let indexScansSeen = 0;
+let feedPush: ((ev: Record<string, unknown>) => void) | null = null;
 
 function classify(query: any): ScanKind {
   if (query?.sort?.attribute === "embedding") return "embedding";
@@ -36,11 +40,17 @@ function project(record: Record<string, unknown>, select?: string[]): Record<str
 
 function memorySearch(query: any) {
   if (searchThrows) throw searchThrows;
-  scans.push(classify(query));
+  const kind = classify(query);
+  scans.push(kind);
   const select: string[] | undefined = Array.isArray(query?.select) ? query.select : undefined;
+  // Park only the first admitting scan after its last row, inside the
+  // consumer's final for-await next(). That is the window where an aborted
+  // build resumes and used to clear a replacement build's buffer.
+  const tail = kind === "index" && indexScansSeen++ === 0 ? holdFirstIndexTail : null;
   async function* gen() {
     const records = [...memoryStore.values()].sort((a, b) => String(a.id) < String(b.id) ? -1 : 1);
     for (const r of records) yield project(r, select);
+    if (tail) await tail;
   }
   return gen();
 }
@@ -56,6 +66,24 @@ mock.module("harper", () => ({
             return {
               async *[Symbol.asyncIterator]() {
                 throw new Error("socket closed");
+              },
+            };
+          }
+          if (subscribeMode === "queue") {
+            const queue: Record<string, unknown>[] = [];
+            let wake: (() => void) | null = null;
+            feedPush = (ev) => {
+              queue.push(ev);
+              const w = wake;
+              wake = null;
+              w?.();
+            };
+            return {
+              async *[Symbol.asyncIterator]() {
+                for (;;) {
+                  while (queue.length === 0) await new Promise<void>((r) => { wake = r; });
+                  yield queue.shift();
+                }
               },
             };
           }
@@ -105,6 +133,9 @@ describe("flair#2032 — BM25 boot warm and build status", () => {
     scans = [];
     searchThrows = null;
     subscribeMode = "infinite";
+    holdFirstIndexTail = null;
+    indexScansSeen = 0;
+    feedPush = null;
     delete process.env.FLAIR_BM25_INDEX;
     delete process.env.THREADS_COUNT;
     svc.__resetBm25IndexForTests();
@@ -233,6 +264,74 @@ describe("flair#2032 — BM25 boot warm and build status", () => {
     expect(status.workerThreadId).toBe(threadId);
     expect(status.threadsCount).toBe(4);
     expect(status.summary).toContain(`worker ${threadId} of 4`);
+  });
+
+  it("an aborted build does not clear a replacement build's event buffer", async () => {
+    seed(3);
+    subscribeMode = "queue";
+    let releaseScan!: () => void;
+    holdFirstIndexTail = new Promise<void>((r) => { releaseScan = r; });
+
+    const buildA = svc.indexedBm25Ids({ q: "uniquezebra", conditions: [], limit: 10 });
+    await poll(() => {
+      const s = svc.bm25IndexStatus();
+      return s.state === "building" && s.built === 3 && s.total === 3;
+    }, "build A admitted");
+
+    svc.markBm25IndexStale("unhandled feed event type reload");
+    expect(svc.bm25IndexStatus().state).toBe("empty");
+
+    let releaseB!: () => void;
+    svc.__setBm25BuildPauseForTests(async () => { await new Promise<void>((r) => { releaseB = r; }); });
+    let settledB = false;
+    const buildB = svc.indexedBm25Ids({ q: "apples", conditions: [], limit: 10 }).then((ids) => {
+      settledB = true;
+      return ids;
+    });
+    await poll(() => {
+      const s = svc.bm25IndexStatus();
+      return s.state === "building" && s.built === 1 && s.total === 3;
+    }, "build B paused");
+
+    const early = {
+      id: "m998",
+      content: "earlyzebra lives here",
+      agentId: "agent-a",
+      visibility: "shared",
+      archived: false,
+      createdAt: "2026-06-01T00:00:00.000Z",
+    };
+    svc.noteMemoryUpsert(early);
+
+    releaseScan();
+    expect(await buildA).toBeNull();
+
+    expect(feedPush).toBeTypeOf("function");
+    feedPush!({
+      type: "put",
+      value: {
+        id: "m999",
+        content: "heldzebra lives here",
+        agentId: "agent-a",
+        visibility: "shared",
+        archived: false,
+        createdAt: "2026-06-01T00:00:00.000Z",
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    const mid = svc.bm25IndexStatus();
+    expect(mid.state).toBe("building");
+    expect(mid.state).not.toBe("disabled");
+    expect(settledB).toBe(false);
+
+    releaseB();
+    await buildB;
+    expect(svc.bm25IndexStatus().state).toBe("ready");
+    const earlyIds = await svc.indexedBm25Ids({ q: "earlyzebra", conditions: [], limit: 10 });
+    const heldIds = await svc.indexedBm25Ids({ q: "heldzebra", conditions: [], limit: 10 });
+    expect(earlyIds).toContain("m998");
+    expect(heldIds).toContain("m999");
   });
 
   it("the kill switch is disabled with a reason", () => {

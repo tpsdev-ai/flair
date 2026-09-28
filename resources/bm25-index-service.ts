@@ -198,7 +198,17 @@ function apply(ev: PendingEvent): void {
 
 function record(ev: PendingEvent): void {
   if (state === "disabled" || state === "empty") return; // a later build will scan it
-  if (state === "building") { pending!.push(ev); return; }
+  if (state === "building") {
+    // A throw here is caught by the feed consumer, which disables the index
+    // for this worker's lifetime. A missing buffer means this build no longer
+    // owns the events; mark stale so the next query rebuilds instead.
+    if (pending == null) {
+      markBm25IndexStale("in-flight build lost its event buffer");
+      return;
+    }
+    pending.push(ev);
+    return;
+  }
   apply(ev);
 }
 
@@ -345,11 +355,15 @@ async function build(ctx: any): Promise<boolean> {
     if (serial === buildSerial) disable("build failed: " + String(err?.message ?? err));
     return false;
   }
+  // Ownership is checked before the buffer is taken. An aborted build
+  // resumes after its last for-await yield; by then a stale marker may have
+  // started a replacement whose `pending` is a new array. Clearing it here
+  // makes the next feed event throw and disables the index for this worker.
+  // Nothing awaits between this check and the clear, so the take is atomic
+  // on the single thread.
+  if (!live()) return false;
   const buffered = pending ?? [];
   pending = null;
-  // `state` may have been knocked back to "empty" by a stale marker that
-  // arrived during the scan; in that case do not claim readiness.
-  if (!live()) return false;
   const finished = Date.now();
   state = "ready";
   finishedAt = finished;

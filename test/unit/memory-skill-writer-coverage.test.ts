@@ -128,6 +128,8 @@ add("migrations/visibility-backfill", ["alias-source:(databases as unknown as { 
   "Read-only migration adapter alias.");
 add("embedding-space-guard", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1"],
   "Read-only alias — the vector-space guard scans distinct embeddingModel stamps (search only); no write through this handle.");
+add("bm25-index-service", ["alias-source:(databases as any).flair?.Memory#1"],
+  "Read-only boot probe — checks Memory.search is a function before the background index build. No write through this handle.");
 
 test("every raw Memory write site has an explicit policy (no unscanned skill-writer)", () => {
   const sites = [...new Glob("resources/**/*.ts").scanSync(".")].flatMap(file => rawTableWriteSites(file, readFileSync(file, "utf8"), "Memory"));
