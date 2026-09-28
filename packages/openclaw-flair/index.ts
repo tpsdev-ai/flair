@@ -24,7 +24,7 @@ import { accessSync, constants as fsConstants } from "node:fs";
 import { dirname } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { FlairClient, encodeRecordId, loadPrivateKey, resolveKeyPath } from "@tpsdev-ai/flair-client";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 
 /** The host tool-context fields this plugin reads. `agentId` is the identity. */
 type ToolContext = { agentId?: string };

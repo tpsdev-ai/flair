@@ -130,6 +130,17 @@ jobs:
           restore-keys: |
             bun-cache-${{ runner.os }}-
       - run: sfw bun install --frozen-lockfile
+      - name: "Check workspace peer deps resolve within their declared ranges"
+        # `bun install --frozen-lockfile` refuses only a manifest/lockfile
+        # mismatch; it does NOT check that a RESOLVED peer satisfies the range a
+        # package declares for it. So raising a peer floor without refreshing
+        # bun.lock passes every gate while the workspace keeps installing a
+        # version below the declared minimum (flair#1936: openclaw-flair declared
+        # openclaw >=2026.8.1 against a lock pinning openclaw@2026.7.1). Optional
+        # peers are skipped; a declared non-optional peer with no resolution
+        # fails closed. Runs after `bun install` (same job as the pre-install
+        # checks) because it uses the repo's own `semver` dependency.
+        run: node scripts/check-peer-deps.mjs
       # adk-flair-js integration tests boot an ephemeral Harper instance.
       # Harper's NAPI modules require real Node.js (bun 1.3.x lacks uv_ip6_addr).
       # The matrix node-version is used here; Harper is known-good on 22,
