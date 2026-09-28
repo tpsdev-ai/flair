@@ -62,7 +62,7 @@ describe("assertValidDurability — write-side rejection (flair#1238)", () => {
 // enough — a validator nobody calls is not a control (the visibility guard proved
 // this: neutering it inside Memory.post() broke nothing, 3869 tests still passed).
 //
-// This scan fails the build if either write path stops calling it. Same shape as
+// This scan checks for one textual call in each REST write method. Same shape as
 // visibility-write-validation.test.ts and claimed-zero-authority-tripwire.test.ts,
 // and same limitation, stated plainly: it detects DELETION, not misbehaviour. A
 // behavioural assertion (unknown durability → 400) needs the REST surface against
@@ -71,7 +71,7 @@ describe("assertValidDurability — write-side rejection (flair#1238)", () => {
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-describe("the durability guard stays wired into both write paths", () => {
+describe("the durability guard stays wired into all write paths", () => {
   const src = readFileSync(join(import.meta.dir, "..", "..", "resources", "Memory.ts"), "utf8");
 
   test("Memory.ts imports the validator", () => {
@@ -79,10 +79,20 @@ describe("the durability guard stays wired into both write paths", () => {
     expect(src).toContain("assertValidDurability");
   });
 
-  test("it is called once per write path — post() and put()", () => {
-    const calls = src.match(/assertValidDurability\(content\.durability\)/g) ?? [];
-    // Two write paths exist (post and put). Each needs its own guard: they are
-    // separate entry points, and REST reaches both.
-    expect(calls.length).toBe(2);
+  // Each REST write method's own body: from its signature to its closing brace,
+  // the first two-space-indented "}" line after the signature.
+  function methodBody(name: string): string {
+    const start = src.indexOf(`\n  async ${name}(`);
+    expect(start, `Memory.${name}() not found`).toBeGreaterThan(-1);
+    const end = src.indexOf("\n  }\n", start);
+    expect(end, `end of Memory.${name}() not found`).toBeGreaterThan(start);
+    return src.slice(start, end);
+  }
+
+  // Three separate REST entry points write a Memory: post(), patch() and put().
+  // Each needs its own guard, so each method body must call the validator once.
+  test.each(["post", "patch", "put"])("Memory.%s() calls the validator exactly once", (name) => {
+    const calls = methodBody(name).match(/assertValidDurability\(content\.durability\)/g) ?? [];
+    expect(calls.length).toBe(1);
   });
 });
