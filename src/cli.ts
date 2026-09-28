@@ -3267,8 +3267,8 @@ export async function seedAgentViaOpsApi(
    * Set only when `flair init` skipped starting Harper and did not already
    * stop for a foreign data directory (flair#1749). `before` is who held
    * THIS operations port immediately before the insert — not the HTTP
-   * port's listener. On a 401, `reread` runs and a process is named only
-   * when both reads are the same single pid. Several holders, or a holder
+   * port's listener. On a 401, `reread` runs and a pid is named only
+   * when both reads are the same sole PID. Several holders, or a holder
    * that changed during the request, stay unattributed. Omit this when init
    * started Harper itself — that 401 keeps the credential hint. A different
    * data directory does not prove the passwords differ, and the HTTP holder

@@ -17,14 +17,13 @@
  *
  * That pre-auth observation is a single read. It is not the operations-port
  * 401 check. A 401 names a pid only when the read before the insert and the
- * read after the 401 are the same single pid. Several holders, or a holder
+ * read after the 401 are the same sole PID. Several holders, or a holder
  * that changed during the request, stay "a Harper instance this init did
  * not start".
  *
- * These messages do not offer `flair stop`. That command only signals a
- * verified, sidecar-backed daemon, so init cannot promise it will act on
- * this listener. The remedy is `kill <pid>` when one process is named.
- * Init never signals a process it did not start.
+ * These messages do not offer `flair stop`. `flair stop` cannot be promised
+ * to act on this listener. The remedy is `kill <pid>` when one process is
+ * named. Init never signals a process it did not start.
  */
 import { canonicalLexicalPath } from "./daemon-liveness.js";
 
@@ -36,7 +35,7 @@ export interface OccupiedHarperListener {
    * PIDs from this one read. The pre-auth message names a pid only when
    * this list has exactly one entry. An operations-port 401 names a pid
    * only when the read before the insert and the read after the 401 agree
-   * on that same single pid. Empty, or more than one, is the unattributed
+   * on that same sole PID. Empty, or more than one, is the unattributed
    * fallback: do not suggest `kill` for every pid in the list.
    */
   pids: number[];
@@ -80,7 +79,7 @@ export interface OperationsPortAttribution {
 /**
  * The process a 401 can be tied to.
  *
- * One pid, the same pid on both sides of the insert: that holder. Zero
+ * One pid, the same sole PID on both sides of the insert: that holder. Zero
  * pids, several pids, or a different pid after the 401: nobody. The
  * fallback does not keep data directories from a set of processes the 401
  * was not tied to. This is not the pre-auth observation, which is one read.
@@ -182,7 +181,7 @@ export function foreignOccupiedListenerDetail(
 /**
  * The operations-API 401 after init skipped its own start. Unlike the
  * pre-auth notice, which is one read, `listener` here is the before-and-after
- * attribution for the operations port: the same single pid on both sides,
+ * attribution for the operations port: the same sole PID on both sides,
  * or the unattributed fallback. Do not pass the HTTP port's pids through.
  * The rejection is not proof the passwords differ, and it is not proof the
  * HTTP listener caused it. The message does not offer `flair stop`.
@@ -208,9 +207,8 @@ export function occupiedListenerAuthFailure(input: {
 }
 
 /**
- * `kill` only for the one pid this message named. No `flair stop`: that
- * command only signals a verified sidecar-backed daemon, and init cannot
- * promise it will act on a listener this init did not start.
+ * `kill` only for the one pid this message named. `flair stop` cannot be
+ * promised to act on this listener.
  */
 function appendRemedy(lines: string[], listener: OccupiedHarperListener): void {
   if (listener.pids.length === 1) lines.push(`  kill ${listener.pids[0]}`);

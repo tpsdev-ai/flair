@@ -158,9 +158,8 @@ export function initAdminPassRefusalMessage(
     /**
      * Foreign-instance only. Default true keeps the historical `flair stop`
      * line from before the occupied-listener detail. `flair init` passes
-     * false: those messages do not offer `flair stop`, because that command
-     * only signals a verified sidecar-backed daemon and cannot be promised
-     * for a listener this init did not start (flair#1749).
+     * false: those messages do not offer `flair stop`. `flair stop` cannot
+     * be promised to act on this listener (flair#1749).
      */
     offerFlairStop?: boolean;
   } = {},

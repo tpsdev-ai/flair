@@ -5,7 +5,7 @@
  * when that read returned one, and the stub's health request carries no
  * Authorization. The lookup in those tests is injected, so they do not call
  * the host's lsof, /proc, or ps. An operations-port 401 is a different
- * check: the same single pid before the insert and after the 401. These
+ * check: the same sole PID before the insert and after the 401. These
  * messages do not offer `flair stop`. The self-started seed keeps today's
  * credential hint. Init does not signal a process it did not start.
  */
@@ -15,6 +15,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { program, seedAgentViaOpsApi, setOccupiedListenerLookupForTests } from "../../src/cli.js";
+import { flairDataDir } from "../../src/lib/flair-paths.js";
 import { listenerRootPathOnPlatform } from "../../src/lib/init-listener-environ.js";
 import { parseNullSeparatedEnviron, extractRootPath } from "../../src/lib/daemon-liveness.js";
 import {
@@ -338,6 +339,47 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     expect(output).not.toContain("admin password will not match");
     expect(output).toContain(staleDataDir);
     expect(output).toContain(`pid ${listener.pid}`);
+    expectHealthLoggedThenNoAuthorization(requests);
+    expect(children[0]?.exitCode).toBe(null);
+  }, CASE_BUDGET_MS);
+
+  test("default-directory listener recorded by pidfile and sidecar does not offer flair stop", async () => {
+    // At 8baa0a85, defaultDataDir()'s hdb.pid and flair-daemon.json both naming
+    // a pid in the listener list set flairStopApplies, and this refusal printed
+    // `flair stop`. This assertion fails on that commit. A non-default
+    // directory never produced the offer, so the cases above would pass there.
+    scratch = mkdtempSync(join(tmpdir(), "flair-1749-"));
+    const home = join(scratch, "home");
+    const defaultDir = flairDataDir(home);
+    const dataDir = join(scratch, "other");
+    const logPath = join(scratch, "requests.log");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(dataDir, { recursive: true });
+    mkdirSync(defaultDir, { recursive: true });
+
+    const listener = await startStub(defaultDir, "both", logPath);
+    writeFileSync(join(defaultDir, "hdb.pid"), `${listener.pid}\n`);
+    writeFileSync(join(defaultDir, "flair-daemon.json"), `${JSON.stringify({ pid: listener.pid })}\n`);
+    setOccupiedListenerLookupForTests({
+      pids: () => [listener.pid],
+      rootPath: () => ({ rootPath: defaultDir, environReadable: true }),
+    });
+    const { stdout, stderr } = await runInitInProcess([
+      "--agent", "canary",
+      "--port", String(listener.httpPort),
+      "--ops-port", String(listener.opsPort),
+      "--data-dir", dataDir,
+      "--no-mcp",
+      "--skip-soul",
+    ], home);
+    const output = stdout + stderr;
+    const requests = readStubLog(logPath);
+
+    expect(output).toContain("already answering on port");
+    expect(output).toContain(defaultDir);
+    expect(output).toContain(`pid ${listener.pid}`);
+    expect(output).toContain(`kill ${listener.pid}`);
+    expect(output).not.toContain("flair stop");
     expectHealthLoggedThenNoAuthorization(requests);
     expect(children[0]?.exitCode).toBe(null);
   }, CASE_BUDGET_MS);

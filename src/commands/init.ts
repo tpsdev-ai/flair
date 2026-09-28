@@ -627,8 +627,8 @@ program
       // The unauthenticated /health probe already ran. This is one read of
       // that port's listener — not the before-and-after 401 attribution.
       // Name it and exit before any Authorization header is sent. Do not
-      // signal it, and do not offer `flair stop`: that command only signals
-      // a verified sidecar-backed daemon (flair#1749).
+      // signal it. `flair stop` cannot be promised to act on this listener
+      // (flair#1749).
       if (reason === "foreign-instance") {
         const listener = readOccupiedListener(httpPort);
         const head = initAdminPassRefusalMessage(reason, {
@@ -1077,12 +1077,12 @@ program
       }
 
       // Seed agent via operations API. Unlike the pre-auth observation,
-      // which is one read, a 401 names a process only when the same single
-      // pid held the operations port before the insert and after the
-      // rejection. The HTTP port's holder is not an input and is not
-      // assumed to have caused the rejection. Several holders, or a holder
-      // that changed during the request, stay unattributed. Init started
-      // Harper itself → no listener, and that 401 keeps the credential hint.
+      // which is one read, a 401 names a pid only when the read before the
+      // insert and the read after the rejection are the same sole PID. The
+      // HTTP port's holder is not an input and is not assumed to have caused
+      // the rejection. Several holders, or a holder that changed during the
+      // request, stay unattributed. Init started Harper itself → no listener,
+      // and that 401 keeps the credential hint.
       console.log(`Seeding agent '${agentId}' via operations API...`);
       const opsListener = skippedOwnStart ? operationsPortAttribution(opsPort) : undefined;
       await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, adminUser, adminPass, opsListener);
