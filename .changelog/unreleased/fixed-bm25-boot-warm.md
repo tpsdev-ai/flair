@@ -4,6 +4,7 @@
   duration, age), or disabled with the reason. With more than one Harper
   worker, the line names the worker it describes. With `FLAIR_BM25_INDEX=false`
   or vector-only retrieval the index is not built, and that setting is not
-  reported as a warning.
+  reported as a warning. Public `/Health` uses coarse wording when a background
+  warm was skipped or an index became stale, without exposing internal reasons.
 
   (Closes #2032)

@@ -84,7 +84,7 @@ import { threadId } from "node:worker_threads";
 import { databases } from "harper";
 import { withDetachedTxn } from "./table-helpers.js";
 import { Bm25Index, INDEX_SELECT, type IndexRecord, type RankParams } from "./bm25-index.js";
-import { formatBm25IndexSummary, readThreadsCount, type Bm25IndexState } from "./bm25-status.js";
+import { BM25_BOOT_WARM_SKIPPED_PREFIX, formatBm25IndexSummary, readThreadsCount, type Bm25IndexState } from "./bm25-status.js";
 import { retrievalMode } from "./bm25.js";
 
 /** Kill switch. Default ON; set FLAIR_BM25_INDEX=false/0/off to force every
@@ -427,14 +427,14 @@ async function warmWhenReady(serial: number): Promise<void> {
     ready = await waitForMemorySearch();
   } catch (err: any) {
     if (serial !== warmSerial || state !== "empty") return;
-    disabledReason = "background build skipped: " + String(err?.message ?? err) + "; a text search builds it";
+    disabledReason = BM25_BOOT_WARM_SKIPPED_PREFIX + " " + String(err?.message ?? err) + "; a text search builds it";
     return;
   }
   if (serial !== warmSerial) return;
   if (!bm25IndexEnabled() || !bm25IndexInRetrievalPath()) return;
   if (!ready) {
     if (state === "empty") {
-      disabledReason = "background build skipped: Memory table was not ready within 30s; a text search builds it";
+      disabledReason = BM25_BOOT_WARM_SKIPPED_PREFIX + " Memory table was not ready within 30s; a text search builds it";
     }
     return;
   }

@@ -9,6 +9,9 @@
 
 export type Bm25IndexState = "empty" | "building" | "ready" | "disabled" | "failed";
 
+/** Stable marker shared by boot-warm status and the public lag classifier. */
+export const BM25_BOOT_WARM_SKIPPED_PREFIX = "background build skipped:";
+
 export type Bm25StatusFields = {
   state: Bm25IndexState | string;
   reason?: string;
@@ -126,15 +129,11 @@ export function bm25DisabledWarning(
 
 /**
  * Lag text for searchReady. A caller that already has a summary (HealthDetail)
- * passes it through; public /Health passes `state` and `reason` only, so doc
- * counts stay off the unauthenticated body. A skipped warm or a stale marker
- * records that reason while state is `empty` — name it, the same sentence
- * `formatBm25IndexSummary` puts on the detail summary. An in-flight build
- * still says a text search waits, even if a leftover reason is present.
+ * passes it through; public /Health receives only state and reason. Classify
+ * the reason without copying it: stale feed markers and build errors can
+ * contain details that do not belong on the unauthenticated endpoint.
  */
-export function bm25SearchLagReason(
-  bm25: { state?: string; summary?: string; reason?: string } | null | undefined,
-): string {
+export function bm25SearchLagReason(bm25: { state?: string; reason?: string; summary?: string } | null | undefined): string {
   const summary = bm25?.summary?.trim() ?? "";
   if (summary.length > 0) {
     return summary.startsWith("bm25 index:") ? summary : `bm25 index: ${summary}`;
@@ -142,9 +141,12 @@ export function bm25SearchLagReason(
   if (bm25?.state === "building") {
     return "bm25 index: building — a text search waits for this build";
   }
-  const reason = (bm25?.reason ?? "").trim();
-  if (reason.length > 0) {
-    return `bm25 index: not built yet — ${reason}; a text search rebuilds it`;
+  const reason = bm25?.reason?.trim() ?? "";
+  if (bm25?.state === "empty" && reason.startsWith(BM25_BOOT_WARM_SKIPPED_PREFIX)) {
+    return "bm25 index not built yet — background build was skipped; a text search builds it";
+  }
+  if (bm25?.state === "empty" && reason.length > 0) {
+    return "bm25 index not built yet — previous index became stale; a text search rebuilds it";
   }
   return "bm25 index not built yet — builds in the background after startup, or on the first text search";
 }

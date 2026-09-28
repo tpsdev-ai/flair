@@ -101,19 +101,51 @@ describe("resolveSearchReadiness (flair#1326)", () => {
     expect(r.searchReadyReason).not.toMatch(/scans the corpus/i);
   });
 
-  test("public /Health shape (reason, no summary) names a skipped warm or stale marker", () => {
-    const skipped = "background build skipped: Memory table was not ready within 30s; a text search builds it";
-    const r = resolveSearchReadiness({
+  test("public lag names a skipped background warm without exposing its error", () => {
+    const readiness = resolveSearchReadiness({
       resources: mounted,
       memoryTable,
-      bm25: { state: "empty", reason: skipped },
-      hybridEnabled: true,
+      bm25: { state: "empty", reason: "background build skipped: private table error; a text search builds it" },
+      retrievalMode: "hybrid",
     });
-    expect(r.searchReady).toBe(false);
-    expect(r.ok).toBe(true);
-    expect(r.status).toBe(200);
-    expect(r.searchReadyReason).toBe(`bm25 index: not built yet — ${skipped}; a text search rebuilds it`);
-    expect(r.searchReadyReason).not.toMatch(/builds in the background after startup/);
+    const body = buildPublicHealthBody(readiness, { version: "dev", buildCommit: null });
+    expect(body.searchReady).toBe(false);
+    expect(body.searchReadyReason).toBe("bm25 index not built yet — background build was skipped; a text search builds it");
+    expect(JSON.stringify(body)).not.toContain("private table error");
+  });
+
+  test("public lag names a stale index without exposing feed contents", () => {
+    const readiness = resolveSearchReadiness({
+      resources: mounted,
+      memoryTable,
+      bm25: { state: "empty", reason: "unhandled feed event type private-event" },
+      retrievalMode: "bm25-only",
+    });
+    const body = buildPublicHealthBody(readiness, { version: "dev", buildCommit: null });
+    expect(body.searchReady).toBe(false);
+    expect(body.searchReadyReason).toBe("bm25 index not built yet — previous index became stale; a text search rebuilds it");
+    expect(JSON.stringify(body)).not.toContain("private-event");
+  });
+
+  test("public Health omits lag text for ready, disabled, failed, and vector-only states", () => {
+    for (const bm25 of [
+      { state: "ready", reason: "" },
+      { state: "disabled", reason: "FLAIR_BM25_INDEX is off" },
+      { state: "disabled", reason: "retrieval mode is vector-only; the index is not used" },
+      { state: "failed", reason: "build failed: private error" },
+    ]) {
+      const readiness = resolveSearchReadiness({ resources: mounted, memoryTable, bm25 });
+      const body = buildPublicHealthBody(readiness, { version: "dev", buildCommit: null });
+      expect(body.searchReady).toBe(true);
+      expect("searchReadyReason" in body).toBe(false);
+    }
+    const vectorOnly = resolveSearchReadiness({
+      resources: mounted,
+      memoryTable,
+      bm25: { state: "empty", reason: "unhandled feed event type private-event" },
+      retrievalMode: "vector-only",
+    });
+    expect("searchReadyReason" in buildPublicHealthBody(vectorOnly, { version: "dev", buildCommit: null })).toBe(false);
   });
 
   test("BM25 still building → names the in-flight build, does not claim search-ready", () => {
