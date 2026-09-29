@@ -109,6 +109,10 @@ mock.module("../../resources/search-readiness.js", () => ({
 }));
 mock.module("../../resources/embed-gpu.js", () => ({
   withEmbedGpuHealth: (body: object) => ({ ...body, embedding: {} }),
+  embedGpuStatusNotice: (embedding: unknown) => {
+    expect(embedding).toEqual({});
+    return null;
+  },
 }));
 mock.module("../../resources/federation-peer-liveness.js", () => ({
   classifyPeerLiveness: () => "disconnected",

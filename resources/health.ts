@@ -15,7 +15,7 @@ import { normalizeStamp } from "./embedding-space-guard.js";
 import { getModelId } from "./embeddings-provider.js";
 import { describeStampOutstanding, EMBEDDING_STAMP_ID } from "./migrations/stamp-outstanding.js";
 import { buildPublicHealthBody, resolveSearchReadiness, type ResourceRegistry, type SearchReadiness } from "./search-readiness.js";
-import { withEmbedGpuHealth } from "./embed-gpu.js";
+import { embedGpuStatusNotice, withEmbedGpuHealth } from "./embed-gpu.js";
 import {
   classifyPeerLiveness,
   federationPeersAllDisconnectedWarning,
@@ -200,8 +200,9 @@ export class HealthDetail extends Resource {
     stats.bm25 = bm25;
     const embeddingBody = withEmbedGpuHealth({ ok: true });
     stats.embedding = embeddingBody.embedding;
-    if (embeddingBody.embedding.fallback) {
-      warnings.push({ level: "warn", message: embeddingBody.embedding.fallback });
+    const embedNotice = embedGpuStatusNotice(embeddingBody.embedding);
+    if (embedNotice) {
+      warnings.push(embedNotice);
     }
     stats.searchReady = readiness.searchReady;
     // The active retrieval strategy (retrievalMode() in ./bm25.ts) — reported

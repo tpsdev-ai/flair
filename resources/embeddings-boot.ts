@@ -88,10 +88,10 @@ import { availableParallelism } from "node:os";
 import { resolveModelsDir } from "./embeddings-provider.js";
 import {
   applyEmbedGpuChoice,
-  captureIoDuring,
   formatEmbedGpuLogLine,
-  getEmbedGpuStatement,
+  formatEmbedGpuRequestLine,
   previewEmbedGpuStatement,
+  readGpuTypeFromWarmup,
   resolveEmbedGpuChoice,
   setEmbedGpuStatement,
 } from "./embed-gpu.js";
@@ -226,26 +226,38 @@ export async function registerEmbeddingsBackend(): Promise<void> {
       threads,
       gpuLayers: choice.gpuLayers,
     };
-    const needsMetalConfirm = choice.gpuLayers > 0 && choice.metalUsable;
-    if (!needsMetalConfirm) {
-      const statement = applyEmbedGpuChoice(choice, "");
+    // gpuLayers 0 is a CPU request — nothing was asked of the GPU.
+    // Any positive offload is read back from the engine after warmup.
+    // Captured stdio is not the signal (flair#2031).
+    if (choice.gpuLayers <= 0) {
+      const statement = applyEmbedGpuChoice(choice);
       console.log(formatEmbedGpuLogLine(statement));
       await register({ logicalName: LOGICAL_NAME, kind: "embedding", config });
     } else {
       setEmbedGpuStatement(previewEmbedGpuStatement(choice));
-      console.log(formatEmbedGpuLogLine(getEmbedGpuStatement()));
-      const { log } = await captureIoDuring(async () => {
-        const engine = await register({
-          logicalName: LOGICAL_NAME,
-          kind: "embedding",
-          config,
+      console.log(formatEmbedGpuRequestLine(choice));
+      // GPU type comes from the binding this warmup dlopens. Do not open
+      // another llama-addon afterwards — a second binary can report CPU
+      // while this one is on Metal (flair#2031).
+      try {
+        const { value: engine, gpuType } = await readGpuTypeFromWarmup(async () => {
+          const created = await register({
+            logicalName: LOGICAL_NAME,
+            kind: "embedding",
+            config,
+          });
+          if (created && typeof created.ensureReady === "function") {
+            await created.ensureReady();
+          }
+          return created;
         });
-        if (engine && typeof engine.ensureReady === "function") {
-          await engine.ensureReady();
-        }
-      });
-      const statement = applyEmbedGpuChoice(choice, log);
-      console.log(formatEmbedGpuLogLine(statement));
+        const statement = applyEmbedGpuChoice(choice, engine, () => gpuType);
+        console.log(formatEmbedGpuLogLine(statement));
+      } catch (err) {
+        // A failed warmup has ended; it must not leave Health pending forever.
+        applyEmbedGpuChoice(choice);
+        throw err;
+      }
     }
   } catch (err) {
     // Not installed, or globalThis.models isn't ready (module loaded outside

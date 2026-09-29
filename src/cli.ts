@@ -4851,6 +4851,7 @@ bindUpgradeCli({
   doctorRunAfterUpgrade,
   flairPackageDir,
   fleetSweepCallerExitMessage,
+  gatherDaemonEvidence,
   humanBytes,
   isCredentialOnlyFailure,
   observeLaunchdManagement,
@@ -4866,6 +4867,10 @@ bindUpgradeCli({
   resolveInstanceServingPid,
   resolveUpgradeRestartVerify,
   restartAfterUpgrade,
+  runPackageInstall: (spec: string) => {
+    execFileSync("npm", ["install", "-g", spec], { stdio: "pipe" });
+  },
+  applyPlainTreeUpgrade,
   shouldPrintUpgradeLine,
   shouldRunFleetVerify,
   startFlairProcess,
