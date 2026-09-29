@@ -106,7 +106,7 @@ export class Soul extends (databases as any).flair.Soul {
     // UPDATE keeps the stored value (a body value never replaces or clears it).
     // The row is resolved by the URL-BOUND target id, never a body `id` (Harper
     // writes to the URL target); a mismatch or a failed read refuses the write.
-    const resolvedOriginRow = await resolveStoredRow(this, "Soul", content);
+    const resolvedOriginRow = await resolveStoredRow(this, "Soul", content, () => super.get());
     if (resolvedOriginRow.denial) return resolvedOriginRow.denial;
     await applyOriginatorInstanceId(content, resolvedOriginRow.row);
     return super.put(content, context);

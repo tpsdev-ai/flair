@@ -138,7 +138,7 @@ export class Relationship extends (databases as any).flair.Relationship {
     // CREATE and must stamp the local id (Harper's patch path does not require
     // an existing row). The row is resolved by the URL-BOUND target id, never a
     // body `id`. See resources/originator-instance.ts.
-    const resolvedOriginRow = await resolveStoredRow(this, "Relationship", content);
+    const resolvedOriginRow = await resolveStoredRow(this, "Relationship", content, () => super.get());
     if (resolvedOriginRow.denial) return resolvedOriginRow.denial;
     await applyOriginatorInstanceId(content, resolvedOriginRow.row);
     return super.patch(content, query);
@@ -230,7 +230,7 @@ export class Relationship extends (databases as any).flair.Relationship {
     // merge is the raw table writer and never takes a request-body field).
     // The row is resolved by the URL-BOUND target id, never a body `id` (Harper
     // writes to the URL target); a mismatch or a failed read refuses the write.
-    const resolvedOriginRow = await resolveStoredRow(this, "Relationship", content);
+    const resolvedOriginRow = await resolveStoredRow(this, "Relationship", content, () => super.get());
     if (resolvedOriginRow.denial) return resolvedOriginRow.denial;
     await applyOriginatorInstanceId(content, resolvedOriginRow.row);
 

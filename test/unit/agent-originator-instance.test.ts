@@ -200,4 +200,19 @@ describe("flair#1965 r2 — Agent PUT resolves the URL-bound target; PATCH creat
     await a.patch({ displayName: "Brand New via PATCH" });
     expect(agentStore.get("agent-patch-new").originatorInstanceId).toBe("flair_local_test");
   });
+
+  it("a stored-row read FAILURE refuses the write (never read as 'create')", async () => {
+    instanceRow = { id: "flair_local_test" };
+    const original = (BaseAgent as any).get;
+    try {
+      (BaseAgent as any).get = async () => { throw new Error("reader down"); };
+      const a: any = makeAgent(agentCtx("agent-admin", true));
+      const res: any = await a.put({ id: "agent-readfail", name: "X" });
+      expect(res instanceof Response).toBe(true);
+      expect(res.status).toBe(500);
+      expect(agentStore.get("agent-readfail")).toBeUndefined(); // nothing written
+    } finally {
+      (BaseAgent as any).get = original;
+    }
+  });
 });

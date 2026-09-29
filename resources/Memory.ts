@@ -1509,7 +1509,7 @@ export class Memory extends (databases as any).flair.Memory {
     // disagrees with the target, or a lookup that FAILS, refuses the write — a
     // failed read must never look like "no record". See
     // resources/originator-instance.ts's resolveStoredRow.
-    const resolvedExisting = await resolveStoredRow(this, "Memory", content);
+    const resolvedExisting = await resolveStoredRow(this, "Memory", content, () => super.get());
     if (resolvedExisting.denial) return resolvedExisting.denial;
     const preExisting = resolvedExisting.row;
 

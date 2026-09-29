@@ -216,7 +216,9 @@ function storedRowLookupFailure(tableName: string, err: unknown): Response {
  *
  * Rules:
  *   - a body `id` that disagrees with the URL target id is REFUSED;
- *   - the stored row is read by the URL target id;
+ *   - the stored row is read by the URL target id (via the raw table reader,
+ *     falling back to the resource's own bound-record read when the table
+ *     exposes no static reader — an in-process harness);
  *   - a read FAILURE refuses the write — it is never read as "no stored row".
  *
  * An in-process call with no URL-bound id (a direct `new Resource().put(body)`)
@@ -226,6 +228,7 @@ export async function resolveStoredRow(
   resource: unknown,
   tableName: string,
   content: unknown,
+  getUrlBound: () => unknown,
 ): Promise<{ row: Record<string, any> | null; denial?: Response }> {
   const targetId = urlTargetId(resource);
   const bodyId = isPlainObject(content) && content.id != null ? content.id : undefined;
@@ -237,11 +240,17 @@ export async function resolveStoredRow(
   const id = targetId ?? bodyId;
   if (id == null) return { row: null };
 
-  let row: unknown;
   try {
-    row = await (databases as any).flair[tableName].get(id);
+    const table = (databases as any).flair?.[tableName];
+    if (table && typeof table.get === "function") {
+      const row = await table.get(id);
+      return { row: isStoredRow(row) ? row : null };
+    }
+    // No static table reader (an in-process harness): read the resource's own
+    // URL-bound record instead — the row this write lands on.
+    const bound = await getUrlBound();
+    return { row: isStoredRow(bound) ? bound : null };
   } catch (err) {
     return { row: null, denial: storedRowLookupFailure(tableName, err) };
   }
-  return { row: isStoredRow(row) ? row : null };
 }
