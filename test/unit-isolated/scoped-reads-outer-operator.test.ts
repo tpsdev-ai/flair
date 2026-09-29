@@ -50,7 +50,9 @@ mock.module("harper", () => ({
       MemoryUsage: baseFor("MemoryUsage"),
       MemoryGrant: baseFor("MemoryGrant"),
       Agent: { get: async () => null, search: async () => [] },
-      Memory: { get: async () => null, search: async () => [] },
+      // MemoryUsage reads show a row only about a memory the reader can read,
+      // so the ledger rows below name memories that exist and are readable.
+      Memory: { get: async (id: string) => stores.Memory?.get(id) ?? null, search: async () => [] },
     },
   },
   Resource: class {},
@@ -76,6 +78,10 @@ beforeEach(() => {
   stores.Integration = new Map([
     ["int-a", { id: "int-a", agentId: "agent-a", platform: "x" }],
     ["int-b", { id: "int-b", agentId: "agent-b", platform: "y" }],
+  ]);
+  stores.Memory = new Map([
+    ["m1", { id: "m1", agentId: "agent-a" }],
+    ["m2", { id: "m2", agentId: "agent-b" }],
   ]);
   stores.MemoryUsage = new Map([
     ["use-a", { id: "use-a", agentId: "agent-a", memoryId: "m1" }],

@@ -40,10 +40,23 @@
  * ledger is an audit trail, not a shared surface — there is no product need
  * to expose "which agent used which memory" cross-agent, and narrowing this
  * costs nothing.
+ *
+ * And within its own contributions, a non-admin agent sees a row only while
+ * the memory the row names exists and is in its Memory read scope
+ * (resolveReadScope — the rule Memory.get() applies). A row about a memory
+ * the reader cannot read reads exactly like a row that does not exist: 404 by
+ * id, absent from a collection read. A ledger row is therefore never evidence
+ * about a memory its reader cannot otherwise see. The rule lives in
+ * ./usage-recording.ts (isLedgerRowVisible / readableLedgerRows), next to the
+ * write-side gate. Like Memory's reads, a non-admin read here ignores the
+ * caller's `select`/`property`, so the decision always sees the stored
+ * `memoryId`. A collection read filters after the owner-scoped query, so a
+ * `limit` can return fewer rows than it names.
  */
 import { databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { makeByIdReadGate, makeReadScope, makeScopedSearch } from "./record-type-kit.js";
+import { isLedgerRowVisible, readableLedgerRows } from "./usage-recording.js";
 
 // Owner-only read scope through the shared by-id gate and scoped search.
 const usageReadScope = makeReadScope("owner-only", "agentId");
@@ -57,6 +70,18 @@ const UNAUTH = () =>
 const NOT_FOUND = () =>
   new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { "Content-Type": "application/json" } });
 
+/** The caller's query without its `select`/`property` (a key deletion, not a
+ *  selection parser — the same rule resources/Memory.ts applies to a
+ *  non-admin read, so the read decision sees the stored row). */
+function withoutCallerSelection(query: any): any {
+  if (!query || typeof query !== "object") return query;
+  if ((query as any).select === undefined && (query as any).property === undefined) return query;
+  const copy: any = Array.isArray(query) ? query.slice() : { ...query };
+  delete copy.select;
+  delete copy.property;
+  return copy;
+}
+
 export class MemoryUsage extends (databases as any).flair.MemoryUsage {
   /** Self-authorize now that the global gate is non-rejecting — same pattern
    *  as every other table resource in this codebase (Memory.ts/MemoryGrant.ts
@@ -64,14 +89,35 @@ export class MemoryUsage extends (databases as any).flair.MemoryUsage {
   allowRead() { return allowVerified((this as any).getContext?.()); }
 
   async get(target?: any) {
-    return usageByIdReadGate.call(this, target, (t: any) => super.get(t));
+    // Collection / query reads are governed by search() below.
+    if (!target || (typeof target === "object" && target.isCollection)) {
+      return this.search(target);
+    }
+    const ctx = (this as any).getContext?.();
+    const auth = await resolveAgentAuth(ctx);
+    // Anonymous (404), trusted internal and admin (unfiltered): the shared gate.
+    if (auth.kind !== "agent" || auth.isAdmin) {
+      return usageByIdReadGate.call(this, target, (t: any) => super.get(t));
+    }
+    // Non-admin agent: the owner-only gate on the stored row (read by a plain
+    // id-only target, so the caller's select/property never shapes it), then
+    // the memory that row names must be readable by this agent. Both denials
+    // are the same 404 as a missing row.
+    const targetId = typeof target === "string" ? target : (target as any)?.id;
+    const row = await usageByIdReadGate.call(this, targetId != null ? { id: targetId } : {}, (t: any) => super.get(t));
+    if (!row || row instanceof Response) return row ?? NOT_FOUND();
+    return (await isLedgerRowVisible(ctx, auth.agentId, row)) ? row : NOT_FOUND();
   }
 
   async search(query?: any) {
-    const auth = await resolveAgentAuth((this as any).getContext?.());
+    const ctx = (this as any).getContext?.();
+    const auth = await resolveAgentAuth(ctx);
     if (auth.kind === "anonymous") return UNAUTH();
     if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) return super.search(query);
-    return usageScopedSearch(auth.agentId, query, (q: any) => super.search(q));
+    // Owner-only query (outermost AND), then only the rows about memories this
+    // agent can read — see the module doc.
+    const rows = await usageScopedSearch(auth.agentId, withoutCallerSelection(query), (q: any) => super.search(q));
+    return readableLedgerRows(ctx, auth.agentId, rows);
   }
 
   // Append-only ledger: rows are created via RecordUsage's RAW table call
