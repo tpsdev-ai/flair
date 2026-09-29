@@ -353,7 +353,7 @@ class FlairMemoryProvider(MemoryProvider):
             },
             {
                 "key": "key_path",
-                 "description": "Path to the Ed25519 private key file (created by `flair agent add`): 32-byte raw seed, a base64-encoded 32-byte raw seed, PEM, or canonical standard base64 of PKCS8 DER",
+                 "description": "Path to the Ed25519 private key file. `flair agent add` creates a raw 32-byte seed file. Accepted key file formats: a 32-byte raw seed, a base64-encoded 32-byte seed, an Ed25519 PEM key, or canonical standard base64 of PKCS8 DER.",
                 "secret": True,
                 "env_var": "FLAIR_KEY_PATH",
             },

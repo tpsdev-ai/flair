@@ -603,7 +603,9 @@ def test_b64_44_char_seed_loads_and_signs(tmp_path):
 
 def test_b64_decodes_to_31_bytes_is_refused(tmp_path):
     """A base64 string that decodes to 31 bytes is refused via the named
-    format error — no key material in the message."""
+    format error — no key material in the message.
+    The 32-byte length gate in _parse_private_key rejects it after the
+    canonical decoder succeeds."""
     seed = b"\x00" * 31  # 31 zero bytes
     seed_b64 = _b64mod.b64encode(seed).decode("ascii")
     assert len(seed_b64) == 44  # padding: ceil(31/3)*4 = 44
@@ -621,7 +623,9 @@ def test_b64_decodes_to_31_bytes_is_refused(tmp_path):
 
 def test_b64_decodes_to_33_bytes_is_refused(tmp_path):
     """A base64 string that decodes to 33 bytes is refused via the named
-    format error — no key material in the message."""
+    format error — no key material in the message.
+    The 32-byte length gate in _parse_private_key rejects it after the
+    canonical decoder succeeds."""
     seed = b"\x00" * 33  # 33 zero bytes
     seed_b64 = _b64mod.b64encode(seed).decode("ascii")
     assert len(seed_b64) == 44  # ceil(33/3)*4 = 44
@@ -639,7 +643,9 @@ def test_b64_decodes_to_33_bytes_is_refused(tmp_path):
 
 def test_non_canonical_b64_of_32_bytes_is_refused(tmp_path):
     """A non-canonical base64 of 32 bytes (unpadded or with wrong padding)
-    is refused — it is NOT decoded to anything."""
+    is refused — it is NOT decoded to anything.
+    The base64 decoder's validate=True padding validation rejects it before
+    the round-trip guard or the 32-byte gate can run."""
     # Generate payload that produces a non-canonical base64
     payload = b"\x00" * 32
     canonical = _b64mod.b64encode(payload).decode("ascii")  # padded
