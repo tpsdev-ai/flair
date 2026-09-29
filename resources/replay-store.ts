@@ -11,13 +11,15 @@
  * The record of truth is the local `ReplayNonce` table (schemas/replay.graphql:
  * `replicate: false`, `expiration: 120`). Every Harper thread of this instance
  * reads and writes the same rows. Per-thread memory holds only keys this thread
- * has seen recorded: it may refuse early on a HIT, and a MISS always goes to the
- * store.
+ * has seen recorded — its own write, or a row it read back from the store: it
+ * may refuse early on a HIT, and a MISS always goes to the store.
  *
  * Check-and-record, `recordOnce()` (wrapped by each guard's `claim()`):
  *   1. `tryLock([REPLAY_LOCK_NAMESPACE, key])` on the table's primary store. The
  *      lock is per key and shared by every thread of the process. Not acquired
- *      means the same key is being recorded right now: "replay".
+ *      means another claim of the same key is in progress: "contended". The
+ *      guard refuses that request as a replay but does not remember the key,
+ *      because the other claim may still fail to write it.
  *   2. Read the key fresh (`getEntry`; on LMDB the thread's cached read snapshot
  *      is dropped first). Present: "replay".
  *   3. `put` the row in its OWN transaction and await the commit.
@@ -63,6 +65,13 @@ export type ReplayScope = "a" | "f";
 
 /** Outcome of a claim. Only "recorded" lets a request through. */
 export type ReplayClaim = "recorded" | "replay" | "unavailable";
+
+/**
+ * Outcome of `recordOnce`. "replay": the key's row is in the store.
+ * "contended": another claim of the key holds its lock, so whether the key ends
+ * up recorded is not known yet.
+ */
+export type RecordOutcome = "recorded" | "replay" | "contended";
 
 /** The store's dependencies, resolved on every claim (tests inject fakes). */
 export interface ReplayStoreDeps {
@@ -131,18 +140,19 @@ export function replayWindowGap(windowMs: number, source?: string): string | nul
 }
 
 /**
- * The atomic check-and-record. Resolves "recorded" for the first claim of `key`
- * across every thread of the instance and "replay" for every other one. THROWS
- * on a contract gap or any store error; `ReplayGuard.claim` turns that into
- * "unavailable".
+ * The atomic check-and-record. Resolves "recorded" when this call writes the
+ * key's row (one claim per key, across every thread of the instance), "replay"
+ * when the row is already in the store, and "contended" when another claim of
+ * `key` holds its lock. THROWS on a contract gap or any store error;
+ * `ReplayGuard.claim` turns that into "unavailable".
  */
-export async function recordOnce(key: string, seenAt: number, deps: ReplayStoreDeps): Promise<"recorded" | "replay"> {
+export async function recordOnce(key: string, seenAt: number, deps: ReplayStoreDeps): Promise<RecordOutcome> {
   const gap = replayStoreContractGap(deps);
   if (gap) throw new ReplayStoreUnavailable(gap);
   const { table, transaction } = deps;
   const store = table.primaryStore;
   const lockKey = [REPLAY_LOCK_NAMESPACE, key];
-  if (!store.tryLock(lockKey)) return "replay";
+  if (!store.tryLock(lockKey)) return "contended";
   try {
     store.resetReadTxn?.();
     if (store.getEntry(key) != null) return "replay";
@@ -181,7 +191,7 @@ export interface ReplayGuard {
   readonly windowMs: number;
   /** Where the window is configured, when it is configurable. */
   readonly windowSource?: string;
-  /** True only when THIS thread already saw `key` recorded. A false proves nothing. */
+  /** True only when THIS thread already saw `key` recorded in the store. A false proves nothing. */
   knownReplay(key: string, now?: number): boolean;
   /** Authoritative check-and-record. Anything but "recorded" must refuse the request. */
   claim(key: string, now?: number): Promise<ReplayClaim>;
@@ -231,10 +241,16 @@ export function createReplayGuard(opts: ReplayGuardOptions): ReplayGuard {
         const deps = resolveDeps();
         const gap = replayStoreContractGap(deps, windowMs);
         if (gap) throw new ReplayStoreUnavailable(gap);
-        const verdict = await recordOnce(full, now, deps);
+        const outcome = await recordOnce(full, now, deps);
+        // A contended key is refused for this request but not remembered: the
+        // claim holding its lock may still fail to write it, and the next
+        // presentation must be decided by the store.
+        if (outcome === "contended") return "replay";
+        // Remembered only once the store has confirmed the row: written here,
+        // or read back from it.
         prune(now);
         seen.set(full, now);
-        return verdict;
+        return outcome;
       } catch (err) {
         noteUnavailable(scope, err);
         return "unavailable";

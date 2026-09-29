@@ -4,8 +4,10 @@
  * resources/replay-store.ts is the ONE check-and-record for agent auth and for
  * federation body signatures. These tests pin, against an in-memory table with
  * the same contract (test/helpers/fake-replay-store.ts):
- *   - one claim per key is "recorded", every other is "replay", including N
+ *   - one claim per key is "recorded", every other is refused, including N
  *     concurrent claims of the same key;
+ *   - a claim that misses the key's lock is refused but not remembered, so the
+ *     key is accepted once the lock holder's failed write leaves it unrecorded;
  *   - the lock key is namespaced and always released;
  *   - a store error, or a missing store primitive, refuses (never accepts);
  *   - memory only short-circuits a HIT — a miss always consults the store;
@@ -139,6 +141,36 @@ function seedAgent(): void {
 const fedKeys = nacl.sign.keyPair();
 const FED_PUB = Buffer.from(fedKeys.publicKey).toString("base64url");
 
+/**
+ * Holds the table's next write open until `release()`, then fails it. The claim
+ * making that write holds the key's lock meanwhile, so a second claim of the
+ * key misses the lock. Later writes use the table's own `put`.
+ */
+function holdFailingWrite(): { reached(claim: Promise<unknown>): Promise<void>; release(): void } {
+  let release!: () => void;
+  let entered!: () => void;
+  const released = new Promise<void>((r) => (release = r));
+  const inside = new Promise<void>((r) => (entered = r));
+  const put = table.put;
+  table.put = async () => {
+    table.put = put;
+    entered();
+    await released;
+    throw new Error("fake store: write failure");
+  };
+  return {
+    // Resolves once `claim` is inside the held write; rejects if it ends first.
+    reached: (claim) =>
+      Promise.race([
+        inside,
+        claim.then(() => {
+          throw new Error("the claim finished before it reached the held write");
+        }),
+      ]),
+    release,
+  };
+}
+
 // ─── The check-and-record ──────────────────────────────────────────────────
 
 describe("recordOnce — atomic check-and-record", () => {
@@ -167,6 +199,15 @@ describe("recordOnce — atomic check-and-record", () => {
     };
     expect(await rs.recordOnce("a:x:n3", 1, deps())).toBe("recorded");
     expect(lockedDuringPut).toBe(true); // assertion: a second claimant is shut out until the commit
+  });
+
+  it("a lock miss is \"contended\", not \"replay\": the key's row is not in the store", async () => {
+    const lockKey = [rs.REPLAY_LOCK_NAMESPACE, "a:x:n4"];
+    expect(table.primaryStore.tryLock(lockKey)).toBe(true); // another claim of the key holds its lock
+    expect(await rs.recordOnce("a:x:n4", 1, deps())).toBe("contended"); // assertion: told apart from a stored row
+    expect(table.rows.size).toBe(0);
+    table.primaryStore.unlock(lockKey);
+    expect(await rs.recordOnce("a:x:n4", 2, deps())).toBe("recorded");
   });
 
   it("N concurrent claims of one key yield exactly one recorded", async () => {
@@ -276,6 +317,57 @@ describe("memory short-circuits a HIT only; the store decides a miss", () => {
     expect(await rs.agentReplayGuard.claim("same")).toBe("recorded");
     expect(await rs.federationReplayGuard.claim("same")).toBe("recorded");
     expect([...table.rows.keys()].sort()).toEqual(["a:same", "f:same"]);
+  });
+});
+
+// ─── A lock miss refuses the request but is not remembered ─────────────────
+
+describe("a claim that misses the key's lock is refused, and not remembered", () => {
+  it("the guard: after the lock holder's write fails, the key is recorded on the next claim", async () => {
+    const g = rs.createReplayGuard({ scope: "a", windowMs: WINDOW_MS, deps });
+    const held = holdFailingWrite();
+    const holder = g.claim("agent:lm1");
+    await held.reached(holder);
+    expect(await g.claim("agent:lm1")).toBe("replay"); // assertion: the lock miss refuses this request
+    expect(g.knownReplay("agent:lm1")).toBe(false); // assertion: ...and is not remembered
+    held.release();
+    expect(await holder).toBe("unavailable"); // the holder's write failed
+    expect(table.rows.size).toBe(0);
+    expect(g.knownReplay("agent:lm1")).toBe(false);
+    expect(await g.claim("agent:lm1")).toBe("recorded"); // assertion: the store decides the retry
+    expect(g.knownReplay("agent:lm1")).toBe(true); // a confirmed record is remembered
+  });
+
+  it("auth gate (auth-middleware.ts): the lock miss answers 401; once the holder's write fails, the same nonce is accepted", async () => {
+    seedAgent();
+    const nonce = randomUUID();
+    const held = holdFailingWrite();
+    const holder: Promise<Response> = middleware(signedRequest({ nonce }), nextLayer);
+    await held.reached(holder);
+    const contended: Response = await middleware(signedRequest({ nonce }), nextLayer);
+    expect(contended.status).toBe(401);
+    expect(await contended.json()).toEqual({ error: "nonce_replay_detected" }); // assertion: the lock miss refuses this request
+    held.release();
+    expect((await holder).status).toBe(503); // the holder's write failed
+    expect(table.rows.size).toBe(0);
+    const retry: Response = await middleware(signedRequest({ nonce }), nextLayer);
+    expect(retry.status).toBe(200); // assertion: not refused from this thread's memory
+    expect([...table.rows.keys()]).toEqual([`a:${AGENT}:${nonce}`]);
+    const replay: Response = await middleware(signedRequest({ nonce }), nextLayer);
+    expect(replay.status).toBe(401);
+  });
+
+  it("federation: the lock miss is a replay; once the holder's write fails, the same body is accepted", async () => {
+    const body = signBodyFresh({ instanceId: "spoke-1", records: [] }, fedKeys.secretKey);
+    const held = holdFailingWrite();
+    const holder = rs.verifyFederationRequestBody(body, FED_PUB);
+    await held.reached(holder);
+    expect(await rs.verifyFederationRequestBody(body, FED_PUB)).toEqual({ ok: false, reason: "replay" }); // assertion: refused
+    held.release();
+    expect(await holder).toEqual({ ok: false, reason: "replay_store_unavailable" });
+    expect(table.rows.size).toBe(0);
+    expect(await rs.verifyFederationRequestBody(body, FED_PUB)).toEqual({ ok: true }); // assertion: not refused from memory
+    expect(await rs.verifyFederationRequestBody(body, FED_PUB)).toEqual({ ok: false, reason: "replay" });
   });
 });
 

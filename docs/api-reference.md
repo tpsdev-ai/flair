@@ -56,8 +56,9 @@ by-id deny both return **404**, never 403, so ids are not an existence oracle.
 
 Every Ed25519-signed request and federation body carries a nonce, recorded
 once per instance in the `ReplayNonce` table before the request takes effect.
-A nonce already recorded is refused (`401`, `nonce_replay_detected` at the auth
-gate). When the instance cannot record the nonce, the request is refused with
+A nonce already recorded, or being recorded by a concurrent request, is refused
+as a replay (`401`, `nonce_replay_detected` at the auth gate). When the replay
+store is unavailable or the write fails, the request is refused with
 `503 replay_store_unavailable`, and the server log names the cause.
 
 ### Read-scope vocabulary

@@ -11,8 +11,7 @@
 // with a test-only probe resource (test/fixtures/replay-probe-2061/probe.js)
 // that runs on every worker and calls the SAME functions the request paths call
 // (verifyAgentRequest; verifyFederationRequestBody), with each step dispatched
-// to a chosen worker over Harper's thread mesh. The same test run against the
-// previous build (per-thread nonce maps) fails its cross-worker and race cases.
+// to a chosen worker over Harper's thread mesh.
 //
 // THREADS_COUNT is set explicitly, which Harper honours on every platform (its
 // darwin default of one worker applies only when no count is given).
@@ -125,6 +124,18 @@ describe(`replay stores are instance-shared across ${WORKERS} Harper workers (fl
     expect(result.storeError.acceptedWhileFailing).toBe(false); // assertion: fail closed
     expect(result.storeError.entryWhileFailing).toEqual({ present: false });
     expect(result.storeError.sameNonceAfterRecovery).toBe(true);
+  });
+
+  test("a request that misses the key's lock is refused but not remembered: once the holder's write fails, the nonce is accepted", () => {
+    const l = result.lockMiss;
+    expect(l.skipped).toBeNull();
+    expect(l.holderWorker).not.toBe(0); // assertion: the lock is held on the other worker
+    expect(l.reachedWrite).toBe(true); // the holder was inside its write while the other worker claimed
+    expect(l.contendedAccepted).toBe(false); // assertion: the lock miss refuses that request
+    expect(l.holderAccepted).toBe(false); // the holder's write failed, so its request is refused too
+    expect(l.entryAfterFailedWrite).toEqual({ present: false });
+    expect(l.retryAccepted).toBe(true); // assertion: the worker that missed the lock asks the store, not its memory
+    expect(l.replayAfterRetry).toBe(false);
   });
 
   test("an in-window entry survives Harper's expiration scan", () => {

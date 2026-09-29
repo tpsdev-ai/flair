@@ -11,7 +11,8 @@
 // step calls the SAME functions the server's request paths call:
 //   - agent auth: verifyAgentRequest (resources/agent-auth.ts)
 //   - federation: verifyFederationRequestBody (resources/replay-store.ts), or,
-//     on a build without it, the verify + nonce store Federation.ts used before.
+//     on a build without that module, verifyBodySignatureFresh with the nonce
+//     store that build's Federation.ts passes it.
 import { databases, server } from "harper";
 import { isMainThread, threadId } from "node:worker_threads";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -40,7 +41,7 @@ const write = (name, obj) => {
 
 // ── version-appropriate entry points ────────────────────────────────────────
 let replayStore = null; // resources/replay-store.js when this build has it
-let legacyFedStore = null; // the per-thread store Federation.ts used before it
+let legacyFedStore = null; // the nonce store of a build without replay-store.js
 async function loadApis() {
   try {
     replayStore = await import("./replay-store.js");
@@ -136,6 +137,29 @@ const ops = {
       accepted.push(results.filter(Boolean).length);
     }
     return { accepted };
+  },
+  async heldFailingWrite({ args }) {
+    // THIS worker's next write to the table waits until the driver releases it
+    // (ia[7]), then fails. Meanwhile the claim making it holds the key's lock;
+    // ia[6] tells the driver that it is inside the write.
+    const t = databases.flair.ReplayNonce;
+    if (!t) return { skipped: "no ReplayNonce table in this build" };
+    const original = t.put;
+    t.put = async () => {
+      t.put = original;
+      Atomics.store(ia, 6, 1);
+      Atomics.notify(ia, 6);
+      while (Atomics.load(ia, 7) === 0) {
+        const r = Atomics.waitAsync(ia, 7, 0, 10_000);
+        if (r.async) await r.value;
+      }
+      throw new Error("replay-probe-2061: simulated store write failure (held)");
+    };
+    try {
+      return { accepted: await agentAttempt(args) };
+    } finally {
+      t.put = original;
+    }
   },
   async failingStore({ args }) {
     // A store error on THIS worker: the table's write throws for one request.
@@ -313,6 +337,40 @@ async function scenario() {
       skipped: during.skipped ?? null,
       entryWhileFailing: await call(0, "storeEntry", { key: `a:${AGENT}:${h.nonce}` }),
       sameNonceAfterRecovery: (await call(0, "agent", agentHeader({ nonce: h.nonce }))).accepted,
+    };
+  }
+
+  // 4b. a request that misses the key's lock is refused but not remembered: the
+  //     last worker holds the lock while its write fails, then the same nonce is
+  //     accepted on worker 0, the worker that missed the lock.
+  {
+    const holderWorker = cnt - 1;
+    const h = agentHeader();
+    Atomics.store(ia, 6, 0);
+    Atomics.store(ia, 7, 0);
+    let holderSettled = false;
+    const holderDone = call(holderWorker, "heldFailingWrite", { args: h }).finally(() => {
+      holderSettled = true;
+    });
+    const deadline = Date.now() + 30_000;
+    while (Atomics.load(ia, 6) === 0 && !holderSettled) {
+      if (Date.now() > deadline) throw new Error(`worker ${holderWorker} never reached its held write`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const reachedWrite = Atomics.load(ia, 6) === 1;
+    const contendedAccepted = (await call(0, "agent", agentHeader({ nonce: h.nonce }))).accepted;
+    Atomics.store(ia, 7, 1);
+    Atomics.notify(ia, 7);
+    const holder = await holderDone;
+    res.lockMiss = {
+      holderWorker,
+      skipped: holder.skipped ?? null,
+      reachedWrite,
+      contendedAccepted,
+      holderAccepted: holder.accepted ?? null,
+      entryAfterFailedWrite: await call(0, "storeEntry", { key: `a:${AGENT}:${h.nonce}` }),
+      retryAccepted: (await call(0, "agent", agentHeader({ nonce: h.nonce }))).accepted,
+      replayAfterRetry: (await call(holderWorker, "agent", agentHeader({ nonce: h.nonce }))).accepted,
     };
   }
 
