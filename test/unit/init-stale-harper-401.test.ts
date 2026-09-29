@@ -83,12 +83,15 @@ function denied(_req, res) {
 let scratch: string | null = null;
 const children: ChildProcess[] = [];
 
-// flair#2057: init drives a darwin launchd step. Lay the shared fake
-// `launchctl` first on PATH (exactly as the command-level launchd tests do) with
-// a tripwire directly behind it, so no run in this file — in-process or spawned
-// — can reach the host's service manager. On a developer Mac that step
-// otherwise makes real read-only `launchctl list` / `launchctl print` calls
-// against the developer's own GUI domain. See test/helpers/fake-launchctl.ts.
+// flair#2057: init drives a darwin launchd step. Its one launchctl call is a
+// `launchctl unload` of the legacy (pre-flair#693) plist, made only when that
+// plist exists and its ROOTPATH is the data dir being initialised
+// (cleanupLegacyLaunchdPlist in src/cli.ts). No fixture here creates one, but
+// if a fixture or init ever reaches that call it must not land on the
+// developer's own GUI launchd domain. So lay the shared fake `launchctl` first
+// on PATH (like the command-level launchd tests do) with a tripwire directly
+// behind it: no run in this file — in-process or spawned — can reach the
+// host's service manager. See test/helpers/fake-launchctl.ts.
 let fakeLaunchctl: ReturnType<typeof installFakeLaunchctl>;
 let savedPath: string | undefined;
 
@@ -96,7 +99,6 @@ beforeEach(() => {
   fakeLaunchctl = installFakeLaunchctl("flair-1749-launchctl-");
   savedPath = process.env.PATH;
   process.env.PATH = `${fakeLaunchctl.pathEntry}:${process.env.PATH ?? ""}`;
-  Object.assign(process.env, fakeLaunchctl.env);
   // Proves the fake — not the tripwire, not the host binary — answers launchctl
   // for this PATH. This is the tripwire's own mutation check: drop the fake and
   // this throws the named tripwire message.
@@ -104,13 +106,14 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  // A non-empty tripwire log means some run reached a launchctl that was not
-  // the fake. That must never happen in a unit test.
-  expect(fakeLaunchctl.tripped()).toEqual([]);
-  if (savedPath === undefined) delete process.env.PATH;
-  else process.env.PATH = savedPath;
-  delete process.env.FAKE_LAUNCHCTL_LOG;
-  delete process.env.FAKE_LAUNCHCTL_TRIPWIRE_LOG;
+  try {
+    // Any byte in the tripwire log means some run reached a launchctl that was
+    // not the fake. That must never happen in a unit test.
+    fakeLaunchctl.assertClear();
+  } finally {
+    if (savedPath === undefined) delete process.env.PATH;
+    else process.env.PATH = savedPath;
+  }
 });
 
 afterEach(() => {
