@@ -125,11 +125,20 @@ async function main() {
     if (!time) {
       throw new Error(`no publish time for ${name}@${version}`);
     }
+    // Validate the SHAPE before parsing. The publish time must be a STRING.
+    // Date.parse coerces a number to a finite date (Date.parse(1) is not an
+    // error, so a non-string would be silently accepted) and THROWS on an
+    // object whose toString is not callable — and a thrown error here would be
+    // RETRIED. Both are registry failures, not age comparisons, so fail closed
+    // with the same non-retryable error.
+    if (typeof time !== "string") {
+      throw new Error(`unparseable publish time for ${name}@${version}: ${JSON.stringify(time)}`);
+    }
     const publishedAt = Date.parse(time);
     if (Number.isNaN(publishedAt)) {
-      // Present but not a valid date: the registry handed back a value we
-      // cannot trust. Fail closed like a fetch failure — never compare it to
-      // the cutoff (NaN comparisons are always false and would slip through).
+      // A present STRING that is not a valid date is equally untrustworthy:
+      // fail closed like a fetch failure — never compare it to the cutoff (NaN
+      // comparisons are always false and would slip through).
       throw new Error(`unparseable publish time for ${name}@${version}: ${JSON.stringify(time)}`);
     }
     return publishedAt;

@@ -241,24 +241,38 @@ describe("CLI fail-closed exit — too-fresh dep", () => {
 });
 
 describe("CLI fail-closed exit — unparseable publish time", () => {
-  it("exits 2 when a present publish time cannot be parsed (flair#2076)", async () => {
-    const root = writeFixtureRepo(join(scratch, "unparseable-time"));
-    const registry = unparseableRegistry();
+  // Runs the gate against a fixture registry serving `value` as the pinned
+  // dep's publish time, and asserts the fail-closed shape: the SPECIFIC
+  // diagnostic, EXACTLY ONE request (not retried), and exit 2. Asserting the
+  // diagnostic (not just the generic registry-failure report) keeps this from
+  // passing on an unrelated fetch failure.
+  async function assertUnparseable(label: string, value: unknown) {
+    const root = writeFixtureRepo(join(scratch, `unparseable-${label}`));
+    const registry = unparseableRegistry(value);
     try {
       const { exitCode, output } = await runGate(CLI_SCRIPT, {
         FLAIR_CHECK_DEP_AGES_ROOT: root,
         FLAIR_NPM_REGISTRY: registry.url,
       });
-      // Treated as a registry failure, never compared to the cutoff.
-      expect({
-        exitCode,
-        registryFailure: output.includes("Failed to fetch publish times"),
-      }).toEqual({ exitCode: 2, registryFailure: true });
+      expect(output).toContain("unparseable publish time");
       expect(output).toContain(`${FIXTURE_DEP}@${FIXTURE_VERSION}`);
       expect(output).not.toContain("younger than the bake-time policy");
+      expect(registry.requests).toEqual([`/${FIXTURE_DEP}`]); // exactly one
       expect(exitCode).toBe(2);
     } finally {
       registry.stop();
     }
+  }
+
+  it("a non-date STRING is a non-retryable registry failure (flair#2076)", async () => {
+    await assertUnparseable("string", "not-a-timestamp");
+  }, 30_000);
+
+  it("an OBJECT publish time fails closed without a retried throw", async () => {
+    await assertUnparseable("object", { toString: null });
+  }, 30_000);
+
+  it("a NUMBER publish time fails closed (Date.parse(1) is a finite date)", async () => {
+    await assertUnparseable("number", 1);
   }, 30_000);
 });
