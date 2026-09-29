@@ -1,87 +1,30 @@
 /**
  * ed25519-auth.test.ts — unit tests for the shared Ed25519 auth primitives
- * module (shared nonce-store consolidation).
+ * module: the replay window, the header parser and the key import.
  *
  * resources/ed25519-auth.ts has ZERO dependency on harper (it
  * only imports resources/b64.ts, which is also dependency-free), so these
  * tests import it directly — no mock.module needed.
  *
- * Covers the shared nonce store in isolation: pruning, replay rejection, and
- * the cross-path closure property (a nonce recorded via the shared API is
- * then rejected — proving there is exactly ONE store, not three). Real
- * cross-MODULE closure (agent-auth.ts <-> Presence.ts <-> auth-middleware.ts
- * all seeing the same recorded nonce) is covered in
- * ed25519-auth-cross-site.test.ts and auth-middleware-ed25519.test.ts.
+ * The replay guard (which nonces were used) is resources/replay-store.ts,
+ * covered by test/unit-isolated/replay-store.test.ts; cross-MODULE closure
+ * (agent-auth.ts <-> Presence.ts all refusing the same recorded nonce) is in
+ * ed25519-auth-cross-site.test.ts.
  */
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect } from "bun:test";
 import nacl from "tweetnacl";
 import {
   WINDOW_MS,
-  isNonceReplay,
-  recordNonce,
   importEd25519Key,
   b64ToArrayBuffer,
   parseTpsEd25519Header,
   TPS_ED25519_HEADER_RE,
   MAX_AUTH_HEADER_LEN,
-  __clearNoncesForTest,
 } from "../../resources/ed25519-auth.ts";
-
-beforeEach(() => {
-  __clearNoncesForTest();
-});
 
 describe("WINDOW_MS", () => {
   it("defaults to 30_000 (matches all 3 pre-consolidation sites)", () => {
     expect(WINDOW_MS).toBe(30_000);
-  });
-});
-
-describe("isNonceReplay / recordNonce — the single shared store", () => {
-  it("a fresh (agentId, nonce) pair is not a replay", () => {
-    expect(isNonceReplay("agent-a", "nonce-1", Date.now())).toBe(false);
-  });
-
-  it("CORE CLOSURE PROPERTY: recording a nonce via the shared API makes the SAME key rejected", () => {
-    const ts = Date.now();
-    expect(isNonceReplay("agent-a", "nonce-2", ts)).toBe(false);
-    recordNonce("agent-a", "nonce-2", ts);
-    // Any caller checking the identical (agentId, nonce) — regardless of which
-    // "site" it represents — now sees a replay, because there is exactly one
-    // module-level nonceSeen Map backing both isNonceReplay and recordNonce.
-    expect(isNonceReplay("agent-a", "nonce-2", ts + 1000)).toBe(true);
-  });
-
-  it("nonceKey format is `${agentId}:${nonce}` — different agentId does not collide", () => {
-    const ts = Date.now();
-    recordNonce("agent-a", "shared-nonce", ts);
-    expect(isNonceReplay("agent-a", "shared-nonce", ts)).toBe(true);
-    expect(isNonceReplay("agent-b", "shared-nonce", ts)).toBe(false);
-  });
-
-  it("different nonce for the same agent does not collide", () => {
-    const ts = Date.now();
-    recordNonce("agent-a", "nonce-x", ts);
-    expect(isNonceReplay("agent-a", "nonce-y", ts)).toBe(false);
-  });
-
-  it("prunes entries older than WINDOW_MS — replay guard expires", () => {
-    const ts = 1_000_000;
-    recordNonce("agent-a", "nonce-3", ts);
-    expect(isNonceReplay("agent-a", "nonce-3", ts + WINDOW_MS - 1)).toBe(true);
-    // Strictly greater than WINDOW_MS is pruned (matches all 3 sites' `now - t > WINDOW_MS`).
-    expect(isNonceReplay("agent-a", "nonce-3", ts + WINDOW_MS + 1)).toBe(false);
-  });
-
-  it("pruning one expired nonce does not evict a still-fresh nonce", () => {
-    const t0 = 1_000_000;
-    recordNonce("agent-a", "old-nonce", t0);
-    const t1 = t0 + 10_000;
-    recordNonce("agent-a", "fresh-nonce", t1);
-    // Advance past old-nonce's window but within fresh-nonce's window.
-    const now = t0 + WINDOW_MS + 1;
-    expect(isNonceReplay("agent-a", "old-nonce", now)).toBe(false); // pruned
-    expect(isNonceReplay("agent-a", "fresh-nonce", now)).toBe(true); // still recorded
   });
 });
 

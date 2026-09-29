@@ -22,7 +22,10 @@ agent's Ed25519 private key. The server verifies against the agent's
 registered public key.
 
 - **Replay window:** 30 seconds
-- **Nonce deduplication:** Prevents replay within the window
+- **Nonce deduplication:** Prevents replay within the window. Each nonce is
+  recorded once per instance, in a table every Harper worker thread shares,
+  before the request takes effect; if that record cannot be written, the
+  request is refused
 - **No shared secrets:** Each agent has its own key pair
 
 ### Admin Authentication

@@ -57,6 +57,49 @@ export interface VerifyFreshOptions {
   nonceStore?: NonceStore;
 }
 
+/** Freshness window the federation endpoints (FederationPair, FederationSync) use, in ms. */
+export const FEDERATION_WINDOW_MS = 30_000;
+
+/**
+ * An asynchronous, authoritative replay record — what the federation endpoints
+ * use (resources/replay-store.ts's `federationReplayGuard`). Unlike
+ * `NonceStore`, recording is a single check-and-record that can refuse.
+ */
+export interface ReplayRecorder {
+  /** True only when this recorder already saw `nonce` recorded. A false proves nothing. */
+  knownReplay(nonce: string, now?: number): boolean;
+  /** Check-and-record `nonce`. Anything but "recorded" must refuse the request. */
+  claim(nonce: string, now?: number): Promise<"recorded" | "replay" | "unavailable">;
+}
+
+export interface VerifyFreshOnceResult {
+  ok: boolean;
+  reason?: VerifyFreshResult["reason"] | "replay_store_unavailable";
+}
+
+type FreshPrecheck =
+  | { ok: true; nonce: string; now: number; verificationBody: Record<string, any> }
+  | { ok: false; reason: "stale" | "future" | "invalid_signature" };
+
+/** Field presence and timestamp checks shared by both verify functions. */
+function precheckFresh(body: Record<string, any>, windowMs: number): FreshPrecheck {
+  const { signature, _ts, _nonce, ...rest } = body;
+
+  // ── Field presence ───────────────────────────────────────────────────
+  if (!signature) return { ok: false, reason: "invalid_signature" };
+  if (_ts == null || !Number.isFinite(_ts)) return { ok: false, reason: "invalid_signature" };
+  if (!_nonce || typeof _nonce !== "string") return { ok: false, reason: "invalid_signature" };
+
+  // ── Timestamp check ──────────────────────────────────────────────────
+  const now = Date.now();
+  const delta = now - _ts;
+  if (delta > windowMs) return { ok: false, reason: "stale" };
+  if (delta < -windowMs) return { ok: false, reason: "future" };
+
+  // Canonical form includes _ts and _nonce.
+  return { ok: true, nonce: _nonce, now, verificationBody: { _ts, _nonce, ...rest, signature } };
+}
+
 /**
  * A simple in-memory nonce store with TTL-based eviction.
  * Replaceable — callers can provide their own Map-like implementation.
@@ -69,8 +112,10 @@ export interface NonceStore {
 }
 
 /**
- * Default in-memory nonce store backed by a Map.
- * Safe for module-level singleton use (e.g. federationNonceStore).
+ * Default in-memory nonce store backed by a Map. It is local to one process
+ * (and one Harper thread); the Flair server's federation endpoints record
+ * nonces through `verifyBodySignatureFreshOnce` and resources/replay-store.ts
+ * instead.
  */
 export function createNonceStore(): NonceStore {
   const store = new Map<string, number>();
@@ -119,6 +164,8 @@ export function signBodyFresh(
  * 4. Records the nonce on success.
  *
  * Returns `{ ok: true }` on success, or `{ ok: false, reason: "..." }`.
+ * Replay detection is only as wide as `opts.nonceStore`; the Flair server's
+ * endpoints use `verifyBodySignatureFreshOnce` below.
  */
 export function verifyBodySignatureFresh(
   body: Record<string, any>,
@@ -128,18 +175,9 @@ export function verifyBodySignatureFresh(
   const windowMs = opts.windowMs ?? 30_000;
   const nonceStore = opts.nonceStore;
 
-  const { signature, _ts, _nonce, ...rest } = body;
-
-  // ── Field presence ───────────────────────────────────────────────────
-  if (!signature) return { ok: false, reason: "invalid_signature" };
-  if (_ts == null || !Number.isFinite(_ts)) return { ok: false, reason: "invalid_signature" };
-  if (!_nonce || typeof _nonce !== "string") return { ok: false, reason: "invalid_signature" };
-
-  // ── Timestamp check ──────────────────────────────────────────────────
-  const now = Date.now();
-  const delta = now - _ts;
-  if (delta > windowMs) return { ok: false, reason: "stale" };
-  if (delta < -windowMs) return { ok: false, reason: "future" };
+  const pre = precheckFresh(body, windowMs);
+  if (!pre.ok) return pre;
+  const { nonce: _nonce, now } = pre;
 
   // ── Nonce replay check ───────────────────────────────────────────────
   if (nonceStore) {
@@ -149,8 +187,7 @@ export function verifyBodySignatureFresh(
   }
 
   // ── Signature verification — canonical form includes _ts, _nonce ─────
-  const verificationBody = { _ts, _nonce, ...rest, signature };
-  if (!verifyBodySignature(verificationBody, publicKeyB64url)) {
+  if (!verifyBodySignature(pre.verificationBody, publicKeyB64url)) {
     return { ok: false, reason: "invalid_signature" };
   }
 
@@ -160,6 +197,41 @@ export function verifyBodySignatureFresh(
   }
 
   return { ok: true };
+}
+
+/**
+ * Verify a signed request body and record its nonce ONCE (the federation
+ * endpoints' check).
+ *
+ * Same field, timestamp and signature checks as `verifyBodySignatureFresh`.
+ * The nonce is claimed through `opts.replay` only AFTER the signature has
+ * verified; a claim that is not "recorded" — a replay, an unusable store, or
+ * anything thrown — refuses. `replay.knownReplay` may refuse earlier, on a hit
+ * only.
+ */
+export async function verifyBodySignatureFreshOnce(
+  body: Record<string, any>,
+  publicKeyB64url: string,
+  opts: { windowMs?: number; replay: ReplayRecorder },
+): Promise<VerifyFreshOnceResult> {
+  const pre = precheckFresh(body, opts.windowMs ?? FEDERATION_WINDOW_MS);
+  if (!pre.ok) return pre;
+
+  if (opts.replay.knownReplay(pre.nonce, pre.now)) return { ok: false, reason: "replay" };
+
+  if (!verifyBodySignature(pre.verificationBody, publicKeyB64url)) {
+    return { ok: false, reason: "invalid_signature" };
+  }
+
+  let claimed: "recorded" | "replay" | "unavailable";
+  try {
+    claimed = await opts.replay.claim(pre.nonce);
+  } catch {
+    claimed = "unavailable";
+  }
+  if (claimed === "recorded") return { ok: true };
+  if (claimed === "replay") return { ok: false, reason: "replay" };
+  return { ok: false, reason: "replay_store_unavailable" };
 }
 
 // ─── Legacy signing (without anti-replay) ────────────────────────────────────

@@ -28,6 +28,7 @@
 import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
 import nacl from "tweetnacl";
 import { signBody, signBodyFresh } from "../../resources/federation-crypto.js";
+import { createFakeReplayNonceTable, ensureGlobalHarperTransaction } from "../helpers/fake-replay-store.ts";
 
 const PEER_ID = "inst-remote";
 const ORIGIN = "instance-origin";
@@ -55,6 +56,8 @@ function table(name: string) {
   };
 }
 
+ensureGlobalHarperTransaction();
+
 mock.module("harper", () => ({
   Resource: class {},
   server: { http: () => {}, getUser: async () => null },
@@ -79,7 +82,8 @@ mock.module("harper", () => ({
           return r;
         },
       },
-      Nonce: { search: () => emptyGen(), put: async () => {}, delete: async () => {} },
+      // Signed federation bodies record their nonce here (flair#2061).
+      ReplayNonce: createFakeReplayNonceTable(),
       Instance: { search: () => emptyGen() },
     },
   },
