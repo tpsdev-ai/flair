@@ -39,6 +39,7 @@
     "test/unit/auth-middleware.test.ts",
     "test/unit/bridges-runtime-formats.test.ts",
     "test/unit/changelog-fragments.test.ts",
+    "test/unit/check-dep-ages.test.ts",
     "test/unit/cli-target-flag.test.ts",
     "test/unit/doctor-client-network.test.ts",
     "test/unit/ed25519-auth.test.ts",
