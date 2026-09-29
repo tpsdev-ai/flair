@@ -250,18 +250,19 @@ def _parse_private_key(data: bytes):
                 pass
         return None
 
-       # 3. Canonical standard base64 of a 32-byte raw seed or a PKCS8 DER key.
-       #    Order: base64-encoded 32-byte raw seed first, then PKCS8 DER.
-       #    Rationale: PKCS8 DER of an Ed25519 key is 48 bytes; a seed is 32.
-       #    They never shadow each other by length, but checking the shorter
-       #    seed first matches the TypeScript loader's precedence in
-       #    src/lib/auth-resolve.ts/packages/adk-flair-js/src/signing.ts.
+    # 3. Canonical standard base64 of a 32-byte raw seed or a PKCS8 DER key.
+    #    Order: the 32-byte raw seed first, then PKCS8 DER, matching the
+    #    TypeScript loaders (src/lib/auth-resolve.ts and
+    #    packages/adk-flair-js/src/signing.ts). A complete Ed25519 PKCS8 DER
+    #    key is always longer than 32 bytes (48 in its bare form, more with
+    #    optional fields), so it is never taken for a seed.
     der = _canonical_base64_decode(text)
     if der is not None:
-           # 3a. base64-encoded raw 32-byte seed (44-char form, like the CLI).
+        # 3a. base64-encoded raw 32-byte seed (44-char form, like the CLI).
         if len(der) == 32:
             return ed25519.Ed25519PrivateKey.from_private_bytes(der)
-           # 3b. PKCS8 DER— the historical Hermes keyfile format remains here.
+        # 3b. PKCS8 DER: the historical Hermes keyfile format. Any other
+        #     decoded length also ends here and fails to parse.
         try:
             key = serialization.load_der_private_key(der, password=None)
             if isinstance(key, ed25519.Ed25519PrivateKey):
