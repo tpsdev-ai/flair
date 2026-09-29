@@ -29,14 +29,20 @@ Run the shared unit lane before pushing:
 bun install --frozen-lockfile
 bun run test:unit          # root, isolated and TypeScript package unit tests
 bun run test:unit --list   # show discovery and process boundaries without running
+bun run test:unit --keep-going  # run every step; report all failures at the end
 ```
 
 `bun run test` and `npm test` use this same runner. CI and the release script
 also call it. It builds `flair-client` before package consumers and runs each
-`test/unit-isolated/` file in a fresh process. The runner stops on failure and
-prints the failed step; Bun reports pass/skip counts for each test process.
-Node.js must be on PATH for builds and subprocess tests. Use the Bun version
-in `packageManager` for CI parity.
+`test/unit-isolated/` file in a fresh process. Locally the runner stops at the
+first failing step and prints it; in CI it runs every step and prints one final
+summary of every failed step, so a PR that breaks two steps surfaces both in a
+single round. Keep-going is on by default when `CI` is set, and can be forced
+anywhere with `bun run test:unit --keep-going`; a local run without the flag
+stays fail-fast. The home-isolation and temp-leak guards run once at the end in
+either mode and are listed in the same summary. Bun reports pass/skip counts for
+each test process. Node.js must be on PATH for builds and subprocess tests. Use
+the Bun version in `packageManager` for CI parity.
 
 Child processes start without ambient `FLAIR_*`, `HARPER_*`, `HDB_*` or
 `FABRIC_*` deployment settings; tests set their own fixture configuration.

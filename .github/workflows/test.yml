@@ -149,7 +149,12 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
       - name: Shared unit lane (root, isolated and workspace tests)
-        run: bun run test:unit
+        # --keep-going (flair#2030): run EVERY step and report every failure in one
+        # summary, so a PR that breaks two steps shows both in the same run
+        # instead of one per round. GitHub also sets CI=true, which enables it
+        # implicitly; the flag is passed explicitly so the behaviour does not
+        # depend on the runner's environment. Local runs stay fail-fast.
+        run: bun run test:unit --keep-going
       # Keep the platform execution/skip check visible independently of the unit lane.
       - name: "Darwin-gated unit tests: report skip count (flair#1012)"
         run: bun scripts/check-darwin-gated-tests.mjs

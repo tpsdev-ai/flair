@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runUnitSteps, unitEnvironment, unitPlan } from "../../scripts/test-unit.ts";
+import { ciRequestsKeepGoing, runUnitSteps, unitEnvironment, unitPlan } from "../../scripts/test-unit.ts";
 
 const root = join(import.meta.dir, "../..");
 const fixtures: string[] = [];
@@ -12,6 +12,18 @@ function fixture(): string {
   const dir = mkdtempSync(join(tmpdir(), "flair-unit-runner-"));
   fixtures.push(dir);
   return dir;
+}
+
+/** Run `body` with console.error captured, returning its result and the stderr text. */
+function captureErrors<T>(body: () => T): { result: T; errors: string } {
+  const errors: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
+  try {
+    return { result: body(), errors: errors.join("\n") };
+  } finally {
+    console.error = original;
+  }
 }
 
 describe("shared unit lane", () => {
@@ -110,5 +122,81 @@ describe("shared unit lane", () => {
       { name: "must not run", cwd: dir, args: ["-e", 'require("node:fs").writeFileSync("later", "ran")'], files: [] },
     ])).toBe(1);
     expect(() => readFileSync(join(dir, "later"))).toThrow();
+  });
+
+  test("keep-going runs every step and reports each failure with its exit status", () => {
+    // (a) two failing fixture steps: both run, both appear in the summary, and
+    // the lane exits non-zero.
+    const dir = fixture();
+    const { result: code, errors } = captureErrors(() => runUnitSteps([
+      { name: "first failing step", cwd: dir, args: ["-e", 'require("node:fs").writeFileSync("ran-1", "x"); process.exit(5)'], files: [] },
+      { name: "second failing step", cwd: dir, args: ["-e", 'require("node:fs").writeFileSync("ran-2", "x"); process.exit(6)'], files: [] },
+    ], process.execPath, dir, true));
+    expect(code).toBe(1);
+    expect(readFileSync(join(dir, "ran-1"), "utf8")).toBe("x");
+    expect(readFileSync(join(dir, "ran-2"), "utf8")).toBe("x");
+    expect(errors).toContain("first failing step");
+    expect(errors).toContain("second failing step");
+    expect(errors).toContain("exit 5");
+    expect(errors).toContain("exit 6");
+    expect(errors).toContain("ran 2 steps, 2 failed");
+  });
+
+  test("keep-going runs later steps after an early failure", () => {
+    // (b) one failing step early: every later step still ran.
+    const dir = fixture();
+    const code = runUnitSteps([
+      { name: "fails early", cwd: dir, args: ["-e", "process.exit(3)"], files: [] },
+      { name: "later one", cwd: dir, args: ["-e", 'require("node:fs").writeFileSync("later-1", "x")'], files: [] },
+      { name: "later two", cwd: dir, args: ["-e", 'require("node:fs").writeFileSync("later-2", "x")'], files: [] },
+    ], process.execPath, dir, true);
+    expect(code).toBe(1);
+    expect(readFileSync(join(dir, "later-1"), "utf8")).toBe("x");
+    expect(readFileSync(join(dir, "later-2"), "utf8")).toBe("x");
+  });
+
+  test("keep-going fails the lane and names a guard even when every step passed", () => {
+    // (c) all steps pass but a guard fails: the lane fails and the summary names
+    // the guard — the non-zero code cannot come from a failed step.
+    const home = fixture();
+    const config = join(home, ".codex", "config.toml");
+    const script = [
+      'const fs = require("node:fs"), path = require("node:path");',
+      `fs.mkdirSync(path.dirname(${JSON.stringify(config)}), { recursive: true });`,
+      `fs.writeFileSync(${JSON.stringify(config)}, "planted\\n");`,
+    ].join("");
+    const { result: code, errors } = captureErrors(() => runUnitSteps(
+      [{ name: "succeeds but writes a real config", cwd: home, args: ["-e", script], files: [] }],
+      process.execPath,
+      home,
+      true,
+    ));
+    expect(code).toBe(1);
+    expect(errors).toContain("ran 1 step, 0 failed");
+    expect(errors).toContain("Guard failures:");
+    expect(errors).toContain("home-isolation guard");
+    expect(errors).toContain(".codex/config.toml");
+  });
+
+  test("keep-going is opt-in: the default still stops at the first failure", () => {
+    // (d) local default without the flag: still fail-fast.
+    const dir = fixture();
+    const code = runUnitSteps([
+      { name: "fails", cwd: dir, args: ["-e", 'require("node:fs").writeFileSync("first", "x"); process.exit(9)'], files: [] },
+      { name: "must not run", cwd: dir, args: ["-e", 'require("node:fs").writeFileSync("second", "x")'], files: [] },
+    ], process.execPath, dir); // no keepGoing argument
+    expect(code).toBe(1);
+    expect(readFileSync(join(dir, "first"), "utf8")).toBe("x");
+    expect(() => readFileSync(join(dir, "second"))).toThrow();
+  });
+
+  test("keep-going is requested when CI is set", () => {
+    expect(ciRequestsKeepGoing({ CI: "true" })).toBe(true);
+    expect(ciRequestsKeepGoing({ CI: "1" })).toBe(true);
+    expect(ciRequestsKeepGoing({ CI: " TRUE " })).toBe(true);
+    expect(ciRequestsKeepGoing({})).toBe(false);
+    expect(ciRequestsKeepGoing({ CI: "" })).toBe(false);
+    expect(ciRequestsKeepGoing({ CI: "false" })).toBe(false);
+    expect(ciRequestsKeepGoing({ CI: "0" })).toBe(false);
   });
 });

@@ -68,7 +68,10 @@ function ciTestTargets(): { dirs: string[]; rootGlob: boolean } {
 }
 
 function sharedUnitFiles(text: string): Set<string> {
-  if (!/^\s*run: bun run test:unit\s*$/m.test(text)) return new Set();
+  // The shared-runner invocation may carry trailing flags (flair#2030 adds
+  // `--keep-going`); a flag must not make the coverage detector read as "CI runs
+  // nothing", which would silently zero this gate's corpus.
+  if (!/^\s*run: bun run test:unit(?:\s+--[\w-]+)*\s*$/m.test(text)) return new Set();
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
   if (pkg.scripts["test:unit"] !== "bun scripts/test-unit.ts") return new Set();
   return new Set(unitPlan(REPO_ROOT).flatMap(step => step.files.map(file => relative(REPO_ROOT, file))));
@@ -144,6 +147,13 @@ describe("every test file is reachable from a CI command", () => {
   test("removing the shared runner invocation removes its coverage", () => {
     expect(sharedUnitFiles("      run: bun run test:unit").size).toBeGreaterThan(100);
     expect(sharedUnitFiles("      run: echo unit tests").size).toBe(0);
+  });
+
+  test("a trailing flag on the shared runner invocation keeps its coverage", () => {
+    // flair#2030: the CI step is `bun run test:unit --keep-going`. If the
+    // detector only matched the bare command, every root/isolated test file
+    // would read as an orphan and this gate would fail on a correct workflow.
+    expect(sharedUnitFiles("      run: bun run test:unit --keep-going").size).toBeGreaterThan(100);
   });
 
   test("loop directory parser detects file-by-file loops from workflow + release.sh", () => {

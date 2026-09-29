@@ -154,7 +154,65 @@ export function unitPlan(root: string): UnitStep[] {
   return steps;
 }
 
-export function runUnitSteps(steps: UnitStep[], executable = process.execPath, guardHome = realHomeDir()): number {
+/** One failure the keep-going summary reports: a step or an end-of-lane guard. */
+export interface UnitLaneFailure {
+  kind: "step" | "guard";
+  name: string;
+  detail: string;
+}
+
+/**
+ * Whether the environment asks for keep-going because it is a CI run (flair#2030).
+ *
+ * GitHub Actions sets `CI=true` for every job, so this is what makes keep-going
+ * the CI default without a workflow flag. Any non-empty value except the
+ * conventional falsey spellings (`0`, `false`) counts as set.
+ */
+export function ciRequestsKeepGoing(env: NodeJS.ProcessEnv): boolean {
+  const value = env.CI?.trim().toLowerCase();
+  return !!value && value !== "0" && value !== "false";
+}
+
+/**
+ * The one summary keep-going mode prints at the end: how many steps ran and
+ * failed, then each failed step with its exit status, then each failed guard.
+ * A guard failure is listed in the SAME summary as step failures (flair#2030).
+ */
+export function summarizeUnitLane(failures: readonly UnitLaneFailure[], totalSteps: number): string {
+  const stepFailures = failures.filter(failure => failure.kind === "step");
+  const guardFailures = failures.filter(failure => failure.kind === "guard");
+  const lines = [
+    `Unit lane FAILED (keep-going): ran ${totalSteps} step${totalSteps === 1 ? "" : "s"}, ${stepFailures.length} failed.`,
+  ];
+  if (stepFailures.length) {
+    lines.push("Failed steps:");
+    for (const failure of stepFailures) lines.push(`  - ${failure.name} (${failure.detail})`);
+  }
+  if (guardFailures.length) {
+    lines.push("Guard failures:");
+    for (const failure of guardFailures) lines.push(`  - ${failure.name}: ${failure.detail}`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Run the unit plan.
+ *
+ * `keepGoing` (flair#2030) chooses the failure policy. When false — the local
+ * default — the lane stops at the first failing step, exactly as it always has.
+ * When true — the CI default — it runs EVERY step, prints one final summary
+ * naming each failed step with its exit status, and exits non-zero if any step
+ * failed. Both guards run once at the end in either mode; in keep-going mode
+ * they are evaluated after every step has run (never skipped because a step
+ * failed) and a guard failure is listed in the same summary, so it still fails
+ * the lane even when every step passed.
+ */
+export function runUnitSteps(
+  steps: UnitStep[],
+  executable = process.execPath,
+  guardHome = realHomeDir(),
+  keepGoing = false,
+): number {
   // Fingerprint the REAL client configs before the lane and compare after it.
   // `guardHome` defaults to the real home (realHomeDir() resolves the passwd
   // entry for the current uid, not HOME, so neither the sandbox this module
@@ -164,15 +222,36 @@ export function runUnitSteps(steps: UnitStep[], executable = process.execPath, g
   const before = snapshotClientConfigs(guardHome);
   // The temp-dir leak guard's `before` snapshot (flair#1889).
   const tempBefore = flairTempNames();
-  const guardPassed = (): boolean => {
+
+  // Both guards run ONCE, at the END (flair#2030). Collecting their failures in
+  // the same list as step failures is what lets keep-going report them in one
+  // summary; in fail-fast mode only a guard can reach the end, and its failure
+  // still exits non-zero.
+  const guardFailures: UnitLaneFailure[] = [];
+  const runGuards = (): void => {
     const changed = changedConfigs(before, snapshotClientConfigs(guardHome));
-    if (!changed.length) return true;
-    console.error(
-      `Home-isolation guard FAILED: a real client config changed during the lane: ${changed.join(", ")}. ` +
-        `A test reached around the sandbox — make it use the sandbox HOME (flair#1853).`,
-    );
-    return false;
+    if (changed.length) {
+      console.error(
+        `Home-isolation guard FAILED: a real client config changed during the lane: ${changed.join(", ")}. ` +
+          `A test reached around the sandbox — make it use the sandbox HOME (flair#1853).`,
+      );
+      guardFailures.push({
+        kind: "guard",
+        name: "home-isolation guard",
+        detail: `a real client config changed during the lane: ${changed.join(", ")} (flair#1853)`,
+      });
+    }
+    const leaked = newFlairTempNames(tempBefore, flairTempNames());
+    if (reportTempDirLeaks(leaked)) {
+      guardFailures.push({
+        kind: "guard",
+        name: "temp-dir leak guard",
+        detail: `the unit lane left ${leaked.length} new flair-* director${leaked.length === 1 ? "y" : "ies"} in ${tmpdir()} (flair#1889)`,
+      });
+    }
   };
+
+  const stepFailures: UnitLaneFailure[] = [];
   let completed = 0;
   for (const step of steps) {
     console.log(`\n${step.name}${step.files.length ? ` (${step.files.length} files)` : ""}`);
@@ -192,24 +271,43 @@ export function runUnitSteps(steps: UnitStep[], executable = process.execPath, g
       sandbox.cleanup();
     }
     if (result.error || result.status !== 0) {
-      guardPassed();
-      console.error(`Unit lane failed: ${step.name} (${result.error?.message ?? result.signal ?? `exit ${result.status}`}). ${completed}/${steps.length} steps completed.`);
-      reportTempDirLeaks(newFlairTempNames(tempBefore, flairTempNames()));
-      return 1;
+      const detail = result.error?.message ?? result.signal ?? `exit ${result.status}`;
+      if (!keepGoing) {
+        // Fail-fast (the local default): stop here. The end-of-lane guards still
+        // run so a config write next to a step failure is not missed.
+        runGuards();
+        console.error(`Unit lane failed: ${step.name} (${detail}). ${completed}/${steps.length} steps completed.`);
+        return 1;
+      }
+      // Keep-going (the CI default): record the failure and run every later step.
+      stepFailures.push({ kind: "step", name: step.name, detail });
+      continue;
     }
     completed++;
   }
-  const tempLeakFailed = reportTempDirLeaks(newFlairTempNames(tempBefore, flairTempNames()));
-  if (!guardPassed()) return 1;
-  if (tempLeakFailed) return 1;
-  console.log(`\nUnit lane passed: ${completed} steps, ${steps.reduce((n, step) => n + step.files.length, 0)} test files. Test pass/skip counts are reported by Bun above.`);
+
+  runGuards();
+  const summary = `${completed} steps, ${steps.reduce((n, step) => n + step.files.length, 0)} test files`;
+  if (!keepGoing) {
+    // Every step passed; only a guard failure can fail the lane now.
+    if (guardFailures.length) return 1;
+    console.log(`\nUnit lane passed: ${summary}. Test pass/skip counts are reported by Bun above.`);
+    return 0;
+  }
+  const failures = [...stepFailures, ...guardFailures];
+  if (failures.length) {
+    console.error(`\n${summarizeUnitLane(failures, steps.length)}`);
+    return 1;
+  }
+  console.log(`\nUnit lane passed: ${summary}. Test pass/skip counts are reported by Bun above.`);
   return 0;
 }
 
 if (import.meta.main) {
   try {
     const args = process.argv.slice(2);
-    if (args.some(arg => arg !== "--list")) throw new Error("Usage: bun run test:unit [--list]");
+    const allowed = new Set(["--list", "--keep-going"]);
+    if (args.some(arg => !allowed.has(arg))) throw new Error("Usage: bun run test:unit [--list] [--keep-going]");
     const root = dirname(dirname(fileURLToPath(import.meta.url)));
     const steps = unitPlan(root);
     if (args.includes("--list")) {
@@ -220,8 +318,15 @@ if (import.meta.main) {
       }
       const node = spawnSync("node", ["--version"], { encoding: "utf8" });
       if (node.error || node.status !== 0) throw new Error("Node.js is required on PATH for builds and subprocess tests (see package.json engines).");
-      console.log(`Unit lane: Bun ${Bun.version}; Node ${node.stdout.trim()}; ${steps.length} steps. Ambient FLAIR_/HARPER_/HDB_/FABRIC_ settings are removed from child environments; each step runs under a sandbox HOME. A guard fails the lane if a real client config changed. Integration, heavy, Python and Playwright suites are separate.`);
-      process.exitCode = runUnitSteps(steps);
+      // Keep-going is on by default under CI (flair#2030): GitHub Actions sets
+      // CI=true, so a PR reports every failing step in one run instead of one
+      // per round. The local default stays fail-fast; `--keep-going` opts in.
+      const keepGoing = args.includes("--keep-going") || ciRequestsKeepGoing(process.env);
+      const mode = keepGoing
+        ? "keep-going: every step runs, failures are summed at the end"
+        : "fail-fast: stops at the first failing step";
+      console.log(`Unit lane: Bun ${Bun.version}; Node ${node.stdout.trim()}; ${steps.length} steps; ${mode}. Ambient FLAIR_/HARPER_/HDB_/FABRIC_ settings are removed from child environments; each step runs under a sandbox HOME. A guard fails the lane if a real client config changed. Integration, heavy, Python and Playwright suites are separate.`);
+      process.exitCode = runUnitSteps(steps, process.execPath, realHomeDir(), keepGoing);
     }
   } catch (error) {
     console.error(`Unit lane could not run: ${error instanceof Error ? error.message : error}`);
