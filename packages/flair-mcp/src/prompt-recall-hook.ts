@@ -682,9 +682,10 @@ async function main(): Promise<void> {
   // The process-level deadline, armed before stdin or the config is read: when
   // it passes, the hook prints the one "unavailable (timeout)" line (or `{}`
   // when there is no identity to recall for) and exits 0, whatever
-  // asynchronous work is still pending. A timer cannot fire during synchronous
-  // work (flair-client parsing and mapping a response that has fully arrived);
-  // it fires as soon as that returns. It starts from the environment's budget
+  // asynchronous work is still pending. A timer cannot run during synchronous
+  // work (flair-client parsing and mapping a response that has fully arrived),
+  // and a successful result may finish before an overdue timer runs: the first
+  // answer wins. It starts from the environment's budget
   // and moves to the configured one once runRecall has read the config.
   stripInterpolationLiteralsFromEnv();
   const expired = readEnvOrUnset("FLAIR_AGENT_ID") ? hookOutput(unavailableNote("timeout")) : NOOP_OUTPUT;
