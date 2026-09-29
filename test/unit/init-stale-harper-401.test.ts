@@ -9,7 +9,7 @@
  * messages do not offer `flair stop`. The self-started seed keeps today's
  * credential hint. Init does not signal a process it did not start.
  */
-import { describe, test, expect, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -30,6 +30,7 @@ import {
   type OccupiedHarperListener,
 } from "../../src/lib/init-occupied-listener.js";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
+import { installFakeLaunchctl } from "../helpers/fake-launchctl.ts";
 
 const CLI_PATH = join(import.meta.dir, "..", "..", "src", "cli.ts");
 const CHILD_DEADLINE_MS = 30_000;
@@ -81,6 +82,36 @@ function denied(_req, res) {
 
 let scratch: string | null = null;
 const children: ChildProcess[] = [];
+
+// flair#2057: init drives a darwin launchd step. Lay the shared fake
+// `launchctl` first on PATH (exactly as the command-level launchd tests do) with
+// a tripwire directly behind it, so no run in this file — in-process or spawned
+// — can reach the host's service manager. On a developer Mac that step
+// otherwise makes real read-only `launchctl list` / `launchctl print` calls
+// against the developer's own GUI domain. See test/helpers/fake-launchctl.ts.
+let fakeLaunchctl: ReturnType<typeof installFakeLaunchctl>;
+let savedPath: string | undefined;
+
+beforeEach(() => {
+  fakeLaunchctl = installFakeLaunchctl("flair-1749-launchctl-");
+  savedPath = process.env.PATH;
+  process.env.PATH = `${fakeLaunchctl.pathEntry}:${process.env.PATH ?? ""}`;
+  Object.assign(process.env, fakeLaunchctl.env);
+  // Proves the fake — not the tripwire, not the host binary — answers launchctl
+  // for this PATH. This is the tripwire's own mutation check: drop the fake and
+  // this throws the named tripwire message.
+  fakeLaunchctl.assertShadowed();
+});
+
+afterEach(() => {
+  // A non-empty tripwire log means some run reached a launchctl that was not
+  // the fake. That must never happen in a unit test.
+  expect(fakeLaunchctl.tripped()).toEqual([]);
+  if (savedPath === undefined) delete process.env.PATH;
+  else process.env.PATH = savedPath;
+  delete process.env.FAKE_LAUNCHCTL_LOG;
+  delete process.env.FAKE_LAUNCHCTL_TRIPWIRE_LOG;
+});
 
 afterEach(() => {
   for (const child of children) {
