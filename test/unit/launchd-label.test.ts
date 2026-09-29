@@ -673,6 +673,38 @@ describe("resolveLaunchdLabel / migrateLegacyLaunchdLabel / ensureLaunchdService
     expect(isLaunchdValidationRefusal(stuck)).toBe(false);
   });
 
+  test("migrateLegacyLaunchdLabel: a lint that THROWS instead of answering is a validation refusal, before any launchctl call (flair#2040 r8)", () => {
+    // The default lint creates, writes and removes a temporary copy, and any of
+    // those can throw. A plain error would reach the start paths' failed-LOAD
+    // handling, which boots the legacy job out.
+    const legacyPath = launchdPlistPath(LEGACY_LAUNCHD_LABEL, launchAgentsDir);
+    const wellFormed = fakePlist(LEGACY_LAUNCHD_LABEL);
+    writeFileSync(legacyPath, wellFormed);
+    const noLaunchctl = () => { throw new Error("no launchctl call is expected before validation passes"); };
+    const refusal = (lint: (content: string) => string | null): Error => {
+      try {
+        migrateLegacyLaunchdLabel(dataDir, noLaunchctl, launchAgentsDir, undefined, { settleMs: 0, sleep: () => {}, lint });
+      } catch (err) {
+        return err as Error;
+      }
+      throw new Error("expected a refusal");
+    };
+
+    const thrown = refusal(() => { throw new Error("ENOENT: no such file or directory, mkdtemp '/gone/flair-plist-lint-XXXXXX'"); });
+    expect(isLaunchdValidationRefusal(thrown)).toBe(true);
+    expect(thrown.message).toContain("could not be validated (the lint failed: ENOENT: no such file or directory, mkdtemp");
+    expect(thrown.message).toContain("Nothing was unloaded");
+
+    // A throw that is not an Error is refused the same way.
+    const odd = refusal(() => { throw "lint exploded"; });
+    expect(isLaunchdValidationRefusal(odd)).toBe(true);
+    expect(odd.message).toContain("the lint failed: lint exploded");
+
+    // Nothing was written or removed.
+    expect(readFileSync(legacyPath, "utf-8")).toBe(wellFormed);
+    expect(existsSync(launchdPlistPath(launchdLabel(dataDir), launchAgentsDir))).toBe(false);
+  });
+
   // ── flair#874 / flair#872 structural guards ────────────────────────
 
   test("stopFlairProcess uses launchctl unload, not launchctl stop, on the launchd path (flair#874)", async () => {

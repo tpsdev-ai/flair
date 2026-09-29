@@ -70,8 +70,8 @@
   The launchd launcher no longer starts a second instance on a data directory
   that a live process already serves (the pid in `hdb.pid`). It exits 0 before
   Harper loads anything, and launchd's KeepAlive retry may start Flair once that
-  process has exited. Linux is unchanged: Flair's instance service is
-  launchd-only.
+  process has exited. This PID guard applies only to the macOS launchd
+  launcher.
 
   > **Heads-up:** to hand a directly running instance to launchd, run
   > `flair doctor --fix` from a console (GUI) login session on the Mac. launchd

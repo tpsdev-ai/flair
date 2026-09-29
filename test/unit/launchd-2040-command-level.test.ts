@@ -231,9 +231,11 @@ function setupFixture(port: number): Fixture {
   writeFileSync(
     join(probe, "drive.ts"),
     [
-      `import { repairLaunchdManagement, registerInitLaunchdService, startFlairProcess } from "./src/cli.ts";`,
+      `import { repairLaunchdManagement, registerInitLaunchdService, setLaunchdMigrationLintForTests, startFlairProcess } from "./src/cli.ts";`,
       `const [what, arg] = process.argv.slice(2);`,
       `const input = JSON.parse(arg);`,
+      // A migration lint that THROWS instead of answering (flair#2040 r8).
+      `if (input.lintThrows) setLaunchdMigrationLintForTests(() => { throw new Error(input.lintThrows); });`,
       `let r;`,
       `if (what === "repair") r = await repairLaunchdManagement(input.dataDir, input.port);`,
       `else if (what === "init") r = await registerInitLaunchdService(input);`,
@@ -250,6 +252,18 @@ function setupFixture(port: number): Fixture {
       `}`,
       `console.log("RESULT " + JSON.stringify(r));`,
       `process.exit(0);`,
+    ].join("\n"),
+  );
+  // `flair start` itself (the CLI's own command path), with a migration lint
+  // that THROWS instead of answering (flair#2040 r8): argv[2] is the error
+  // message, the rest is the command line.
+  writeFileSync(
+    join(probe, "start-cli.ts"),
+    [
+      `import { runCli, setLaunchdMigrationLintForTests } from "./src/cli.ts";`,
+      `const [lintThrows] = process.argv.splice(2, 1);`,
+      `setLaunchdMigrationLintForTests(() => { throw new Error(lintThrows); });`,
+      `await runCli();`,
     ].join("\n"),
   );
 
@@ -362,10 +376,14 @@ function passFilePlist(label: string): string {
   });
 }
 
-async function drive(what: "repair" | "init" | "startleg", input: unknown): Promise<{ result: any; stdout: string; stderr: string }> {
+async function drive(
+  what: "repair" | "init" | "startleg",
+  input: unknown,
+  envOverride: Record<string, string> = {},
+): Promise<{ result: any; stdout: string; stderr: string }> {
   const proc = Bun.spawn([process.execPath, join(fx.probe, "drive.ts"), what, JSON.stringify(input)], {
     cwd: fx.probe,
-    env: childEnv(),
+    env: { ...childEnv(), ...envOverride },
     timeout: 100_000,
     stdout: "pipe",
     stderr: "pipe",
@@ -378,10 +396,20 @@ async function drive(what: "repair" | "init" | "startleg", input: unknown): Prom
   return { result: JSON.parse(line.slice("RESULT ".length)), stdout, stderr };
 }
 
-async function flairStart(): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = Bun.spawn([process.execPath, join(fx.probe, "src", "cli.ts"), "start", "--port", String(fx.port)], {
+/**
+ * `flair start --port <port>` in a child. `lintThrows` runs it through the
+ * start-cli.ts entry, whose migration lint throws that message (flair#2040 r8);
+ * `envOverride` is laid over the child's environment.
+ */
+async function flairStart(
+  opts: { lintThrows?: string; envOverride?: Record<string, string> } = {},
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const entry = opts.lintThrows === undefined
+    ? [join(fx.probe, "src", "cli.ts")]
+    : [join(fx.probe, "start-cli.ts"), opts.lintThrows];
+  const proc = Bun.spawn([process.execPath, ...entry, "start", "--port", String(fx.port)], {
     cwd: fx.probe,
-    env: childEnv(),
+    env: { ...childEnv(), ...(opts.envOverride ?? {}) },
     timeout: 60_000,
     stdout: "pipe",
     stderr: "pipe",
@@ -1821,5 +1849,130 @@ describe("flair#2040 × flair#2034 — init reports the plist writer's outcome; 
       });
     },
     60_000,
+  );
+});
+
+// ─── round 8: a lint that THROWS is a validation refusal too ────────────────
+//
+// Round 7 made a lint that RETURNED a problem a validation refusal. A lint can
+// also THROW: the default one creates, writes and removes a temporary copy of
+// the plist, and any of those can fail. A thrown error reached the start paths'
+// failed-LOAD handling, which boots every job for the instance out — the loaded
+// legacy job included — for a check that had refused to touch it.
+
+describe("flair#2040 r8 — a lint that throws leaves a loaded legacy job and both plists untouched (both start paths)", () => {
+  const LINT_THROWS = "injected lint failure (flair#2040 r8)";
+
+  function legacyPlistPath(): string {
+    return launchdPlistPath(LEGACY_LAUNCHD_LABEL, fx.agentsDir);
+  }
+
+  /**
+   * A WELL-FORMED legacy plist whose paths all exist (so only the lint's own
+   * failure stops the migration), and its job loaded and idle (no pid).
+   */
+  function arrangeLoadedLegacy(): string {
+    const plist = passFilePlist(LEGACY_LAUNCHD_LABEL);
+    expect(plist).toContain(`<key>Label</key><string>${LEGACY_LAUNCHD_LABEL}</string>`);
+    writeFileSync(legacyPlistPath(), plist);
+    markLoaded(LEGACY_LAUNCHD_LABEL, null);
+    return plist;
+  }
+
+  /** A TMPDIR that does not exist: the default lint cannot create its temporary copy. */
+  function missingTmpdir(): Record<string, string> {
+    const dir = join(fx.home, "no-such-tmp");
+    expect(existsSync(dir)).toBe(false);
+    return { TMPDIR: dir };
+  }
+
+  function expectLegacyUntouched(plist: string): void {
+    // Zero launchctl calls that change launchd's state ...
+    expect(mutatingCalls()).toEqual([]);
+    // ... the legacy plist byte-for-byte, no replacement written ...
+    expect(readFileSync(legacyPlistPath(), "utf-8")).toBe(plist);
+    expect(existsSync(fx.plistPath)).toBe(false);
+    // ... and the legacy job READ (a presence probe), still loaded, nothing started.
+    expect(shimLines()).toContain(`print ${GUI}/${LEGACY_LAUNCHD_LABEL}`);
+    expect(existsSync(join(fx.state, "loaded", LEGACY_LAUNCHD_LABEL))).toBe(true);
+    expect(stubStarts()).toEqual([]);
+  }
+
+  function expectStartRefused(stderr: string, actorLine: string, lintDetail: string): void {
+    expect(stderr).toContain(actorLine);
+    expect(stderr).toContain(`could not be validated (the lint failed: ${lintDetail}`);
+    expect(stderr).toContain("Nothing was loaded or unloaded");
+    expect(stderr).toContain(`${GUI}/${LEGACY_LAUNCHD_LABEL} is loaded`);
+    expect(stderr).toContain("Flair was NOT started directly");
+    expect(stderr).toContain(`launchctl bootout ${GUI}/${LEGACY_LAUNCHD_LABEL}`);
+    expect(stderr).not.toContain("unloaded again");
+  }
+
+  test.skipIf(!isDarwin)(
+    "(e12) `flair start`: LOADED-IDLE legacy job + an injected lint that THROWS -> refused (exit 1), zero mutating calls, the legacy job still loaded, nothing started",
+    async () => {
+      const plist = arrangeLoadedLegacy();
+
+      const { stdout, stderr, exitCode } = await flairStart({ lintThrows: LINT_THROWS });
+
+      expect(exitCode).toBe(1);
+      expectStartRefused(stderr, `flair start: did not load the launchd job ${fx.label}`, LINT_THROWS);
+      expectLegacyUntouched(plist);
+      expect(await healthy()).toBe(false);
+      expect(`${stdout}\n${stderr}`).not.toContain("✓");
+      expect(stdout).not.toContain("Flair started");
+    },
+    90_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(e13) `flair start`: LOADED-IDLE legacy job + the DEFAULT lint unable to create its temporary file -> refused (exit 1), zero mutating calls, the legacy job still loaded, nothing started",
+    async () => {
+      const plist = arrangeLoadedLegacy();
+
+      const { stdout, stderr, exitCode } = await flairStart({ envOverride: missingTmpdir() });
+
+      expect(exitCode).toBe(1);
+      expectStartRefused(stderr, `flair start: did not load the launchd job ${fx.label}`, "ENOENT");
+      expect(stderr).toContain("mkdtemp");
+      expectLegacyUntouched(plist);
+      expect(await healthy()).toBe(false);
+      expect(`${stdout}\n${stderr}`).not.toContain("✓");
+      expect(stdout).not.toContain("Flair started");
+    },
+    90_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(f4) start leg (startFlairProcess): LOADED-IDLE legacy job + an injected lint that THROWS -> throws, zero mutating calls, the legacy job still loaded, nothing started",
+    async () => {
+      const plist = arrangeLoadedLegacy();
+
+      const { result, stdout } = await drive("startleg", { dataDir: fx.dataDir, port: fx.port, lintThrows: LINT_THROWS });
+
+      expect(result.started).toBe(false);
+      expectStartRefused(result.error, `flair: did not load the launchd job ${fx.label}`, LINT_THROWS);
+      expectLegacyUntouched(plist);
+      expect(await healthy()).toBe(false);
+      expect(stdout).not.toContain("✓");
+    },
+    90_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(f5) start leg (startFlairProcess): LOADED-IDLE legacy job + the DEFAULT lint unable to create its temporary file -> throws, zero mutating calls, the legacy job still loaded, nothing started",
+    async () => {
+      const plist = arrangeLoadedLegacy();
+
+      const { result, stdout } = await drive("startleg", { dataDir: fx.dataDir, port: fx.port }, missingTmpdir());
+
+      expect(result.started).toBe(false);
+      expectStartRefused(result.error, `flair: did not load the launchd job ${fx.label}`, "ENOENT");
+      expect(result.error).toContain("mkdtemp");
+      expectLegacyUntouched(plist);
+      expect(await healthy()).toBe(false);
+      expect(stdout).not.toContain("✓");
+    },
+    90_000,
   );
 });

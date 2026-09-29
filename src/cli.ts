@@ -774,6 +774,18 @@ function resolveLaunchdLabel(
 type LaunchctlRunner = (cmd: string) => void;
 
 /**
+ * Test seam (flair#2040): the lint migrateLegacyLaunchdLabel runs when its
+ * caller injects none — which is every start path. Lets a command-level test
+ * drive `flair start` and the start leg with a lint that throws. Production
+ * leaves this unset.
+ */
+let launchdMigrationLintForTests: ((content: string) => string | null) | null = null;
+
+export function setLaunchdMigrationLintForTests(lint: ((content: string) => string | null) | null): void {
+  launchdMigrationLintForTests = lint;
+}
+
+/**
  * Migrate a pre-flair#693 legacy-labeled launchd service to the new
  * instance-scoped label for `dataDir`: unload the legacy service FIRST,
  * then rewrite its plist content under the new label/path (same content,
@@ -785,7 +797,8 @@ type LaunchctlRunner = (cmd: string) => void;
  * flair#2040: before anything is unloaded, the legacy plist must be readable,
  * and the replacement content must carry the expected Label and pass
  * `opts.lint` (plutil -lint by default). Any of these failing throws a
- * LaunchdValidationRefusal with nothing unloaded, written or removed.
+ * LaunchdValidationRefusal with nothing unloaded, written or removed — and so
+ * does a lint that throws instead of answering.
  */
 function migrateLegacyLaunchdLabel(
   dataDir: string,
@@ -842,8 +855,20 @@ function migrateLegacyLaunchdLabel(
   // flair#2040: a plist that still carries the expected Label can be malformed
   // XML, which bootstrap would reject only AFTER the legacy job was unloaded.
   // Lint the replacement content now, before anything is unloaded; a lint that
-  // could not run is a failed check, not a pass.
-  const lintProblem = (opts.lint ?? lintLaunchdPlistContent)(newContent);
+  // could not run is a failed check, not a pass. So is a lint that THREW (its
+  // temporary copy could not be created, written or removed, say): every lint
+  // exception is a validation refusal here. A plain error would reach the start
+  // paths' failed-LOAD handling, which boots the legacy job out.
+  const lint = opts.lint ?? launchdMigrationLintForTests ?? lintLaunchdPlistContent;
+  let lintProblem: string | null;
+  try {
+    lintProblem = lint(newContent);
+  } catch (err: any) {
+    throw new LaunchdValidationRefusal(
+      `not migrating off the legacy launchd label: the replacement plist for ${newLabel} could not be validated ` +
+        `(the lint failed: ${err?.message ?? String(err)}). Nothing was unloaded, and the legacy plist ${resolved.plistPath} was left as it was.`,
+    );
+  }
   if (lintProblem !== null) {
     throw new LaunchdValidationRefusal(
       `not migrating off the legacy launchd label: the replacement plist for ${newLabel} failed validation ` +
@@ -5626,7 +5651,9 @@ function afterFailedLaunchdAttempt(
  * `plutil -lint` over plist CONTENT, before it is written anywhere launchd
  * reads (flair#2040). Returns a problem line, or null ONLY when plutil ran and
  * accepted it. A plutil that cannot be run, times out or dies on a signal is a
- * problem too: a lint that did not run is not a lint that passed.
+ * problem too: a lint that did not run is not a lint that passed. Creating,
+ * writing or removing its temporary copy can THROW; migrateLegacyLaunchdLabel
+ * turns any throw into a validation refusal before it unloads anything.
  */
 function lintLaunchdPlistContent(content: string): string | null {
   if (process.platform !== "darwin") return null;
