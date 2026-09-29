@@ -12,19 +12,30 @@
  * scripts/lib/check-dep-ages-collect.mjs and always runs the gate.
  * There is no "am I the main module" check: the gate ALWAYS executes.
  *
- * Override for the repo root this script scans (for test fixtures):
+ * Override for the repo root this script scans (for TEST FIXTURES only):
  *   FLAIR_CHECK_DEP_AGES_ROOT=/path/to/fixture node scripts/check-dep-ages.mjs
+ *
+ * `--ci` marks THIS invocation as the CI gate (the workflow passes it). The CI
+ * gate scans the checked-out repository whatever the environment says, so it
+ * REFUSES to run (exit 2, naming FLAIR_CHECK_DEP_AGES_ROOT) when that override
+ * is set alongside `--ci`. The flag is used rather than a sniffed `CI=true`,
+ * because under CI the test process itself runs with `CI=true` — a sniff would
+ * make the fixture-root tests refuse there, and `CI=true` is ambient rather
+ * than a deliberate statement about THIS invocation.
  *
  * Exit codes:
  *   0 — all checked deps older than the threshold (or nothing to check)
  *   1 — at least one dep too fresh
- *   2 — registry fetch failure (treated as fail, not warn — better safe)
+ *   2 — registry fetch failure (treated as fail, not warn — better safe), or a
+ *       REFUSED CI run (the fixture-root override set together with `--ci`)
  */
 
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { collectDeps } from "./lib/check-dep-ages-collect.mjs";
+
+const IS_CI_GATE = process.argv.slice(2).includes("--ci");
 
 const REPO_ROOT = process.env.FLAIR_CHECK_DEP_AGES_ROOT ??
   join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -36,6 +47,22 @@ function readPkg(path) {
 // ── Main gate logic (always runs — no main-detection guard) ──────────────────
 
 async function main() {
+  // The CI gate scans the CHECKED-OUT repository, whatever the environment
+  // says. FLAIR_CHECK_DEP_AGES_ROOT exists so tests can point the gate at a
+  // fixture repository; honouring it on a CI run would let a stray variable
+  // divert the gate away from the tree under review. The workflow declares
+  // itself with an explicit --ci flag (not a sniffed CI=true), and we refuse
+  // when the override is set alongside it — before scanning or fetching.
+  if (IS_CI_GATE && process.env.FLAIR_CHECK_DEP_AGES_ROOT) {
+    console.error(
+      "FLAIR_CHECK_DEP_AGES_ROOT is set, but the CI gate must scan the checked-out repository.",
+    );
+    console.error(
+      "Refusing to run. Unset FLAIR_CHECK_DEP_AGES_ROOT: it is for tests, which point the gate at a fixture repository and do not pass --ci.",
+    );
+    process.exit(2);
+  }
+
   const MIN_AGE_DAYS = Number(process.env.FLAIR_DEP_MIN_AGE_DAYS ?? "7");
   const REGISTRY = process.env.FLAIR_NPM_REGISTRY ?? "https://registry.npmjs.org";
 

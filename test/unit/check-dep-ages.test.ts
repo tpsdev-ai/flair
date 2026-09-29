@@ -135,14 +135,14 @@ function writeFixtureRepo(root: string): string {
  * would block that server's event loop. The env is built explicitly (no
  * ambient FLAIR_* can change the policy, the keep-current list or the root).
  */
-async function runGate(script: string, extraEnv: Record<string, string>) {
+async function runGate(script: string, extraEnv: Record<string, string>, extraArgs: string[] = []) {
   if (!existsSync(script)) setupFailure(`gate script not found at ${script}`);
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? "",
     FLAIR_DEP_MIN_AGE_DAYS: MIN_AGE_DAYS,
     ...extraEnv,
   };
-  const proc = Bun.spawn(["node", script], {
+  const proc = Bun.spawn(["node", script, ...extraArgs], {
     env,
     stdout: "pipe",
     stderr: "pipe",
@@ -219,6 +219,42 @@ describe("CLI fail-closed exit — too-fresh dep", () => {
       expect(output).toContain("Pinned production deps younger than the bake-time policy");
       expect(output).toContain(`${FIXTURE_DEP}@${FIXTURE_VERSION}`);
       expect(exitCode).toBe(1);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+});
+
+describe("CLI fail-closed exit — the CI gate refuses the fixture-root override", () => {
+  it("exits 2, naming the variable, when the CI invocation has the override set", async () => {
+    const root = writeFixtureRepo(join(scratch, "ci-override"));
+    const { exitCode, output } = await runGate(
+      CLI_SCRIPT,
+      // An unreachable registry keeps a RED run (main, which ignores --ci) off
+      // the real npm registry; the discriminating assertion is the message.
+      { FLAIR_CHECK_DEP_AGES_ROOT: root, FLAIR_NPM_REGISTRY: "http://127.0.0.1:1" },
+      ["--ci"],
+    );
+    expect(output).toContain("FLAIR_CHECK_DEP_AGES_ROOT");
+    expect(exitCode).toBe(2);
+  }, 30_000);
+
+  it("--ci without the override scans the real repository root", async () => {
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(
+        CLI_SCRIPT,
+        { FLAIR_NPM_REGISTRY: registry.url },
+        ["--ci"],
+      );
+      // It did NOT refuse ...
+      expect(output).not.toContain("FLAIR_CHECK_DEP_AGES_ROOT is set");
+      // ... and it scanned the REAL root (several deps), not the one-dep fixture.
+      expect(registry.requests.length).toBeGreaterThan(1);
+      expect(registry.requests).not.toContain(`/${FIXTURE_DEP}`);
+      // The fixture registry serves only FIXTURE_VERSION, so the real deps have
+      // no publish time there and the gate fails closed (1 or 2).
+      expect([1, 2]).toContain(exitCode);
     } finally {
       registry.stop();
     }
