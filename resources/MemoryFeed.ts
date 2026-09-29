@@ -12,6 +12,7 @@ import { extractPointerInputs } from "./memory-host-source.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { buildProvenance } from "./provenance.js";
 import { applyFederationBookkeeping, applyOriginatorInstanceId } from "./originator-instance.js";
+import { resolveReadScope } from "./memory-read-scope.js";
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -228,15 +229,77 @@ export class FeedMemories extends Resource {
     return record;
   }
 
-  async *connect(target: any, incomingMessages: any) {
-    const subscription = await (databases as any).flair.Memory.subscribe(target);
+  // Subscription admission: verified agents, admins and trusted internal
+  // calls; anonymous HTTP is refused (the same gate as FeedSouls). Admission is
+  // decided here, by the caller's resolved identity, not by which Harper user
+  // the request carries. What a subscriber then RECEIVES is decided per record
+  // in connect() below.
+  async allowRead(): Promise<boolean> {
+    return allowVerified((this as any).getContext?.());
+  }
 
-    if (!incomingMessages) {
-      return subscription;
+  /**
+   * The memory feed applies the ordinary Memory read rule to every event:
+   * a non-admin agent receives a record only when
+   * `resolveReadScope(agentId).isAllowed(record)` allows it, the same predicate
+   * Memory.get()/search() use (its own records at any visibility, plus every
+   * other agent's non-private records). Admin agents and trusted internal
+   * calls are unfiltered, as before.
+   *
+   * The decision is made on the FULL stored row, through Harper's synchronous
+   * `SubscriptionRequest.rowFilter`. Harper applies that filter to the
+   * subscribe-time replay of current rows, to every live event (an update is
+   * re-read from the primary store and delivered as a full-row `put`), and to
+   * history/reload re-deliveries. An event that carries no stored row to
+   * decide from — a delete tombstone, a published message, a raw/partial
+   * event — is not delivered to a filtered subscriber at all: fail-closed,
+   * since there is no record left to check. The request object is built here,
+   * so no caller-supplied option (rawEvents, eventFilter, a filter of its own)
+   * reaches the scoped subscription.
+   *
+   * The loop re-applies the identical predicate to what the subscription
+   * yields, so a host Harper that does not honour `rowFilter` fails closed
+   * rather than open.
+   */
+  async *connect(target: any, incomingMessages: any) {
+    const auth = await resolveAgentAuth((this as any).getContext?.());
+    if (auth.kind === "anonymous") {
+      // allowRead() refuses anonymous HTTP before connect() runs; this is the
+      // in-process backstop.
+      throw Object.assign(new Error("authentication required"), { statusCode: 401 });
     }
 
+    if (auth.kind === "internal" || auth.isAdmin) {
+      const subscription = await (databases as any).flair.Memory.subscribe(target);
+
+      if (!incomingMessages) {
+        return subscription;
+      }
+
+      for await (const event of subscription) {
+        yield event;
+      }
+      return;
+    }
+
+    const scope = await resolveReadScope(auth.agentId);
+    const subscription = await (databases as any).flair.Memory.subscribe({
+      rowFilter: (record: any) => scope.isAllowed(record),
+    });
     for await (const event of subscription) {
-      yield event;
+      if (isReadableRowEvent(event, scope.isAllowed)) yield event;
     }
   }
+}
+
+/**
+ * True for an event that carries a full stored row the reader may see. Mirrors
+ * the events Harper hands to `rowFilter` (a `put` or `invalidate` with a row);
+ * every other event type is withheld from a filtered subscriber.
+ */
+function isReadableRowEvent(event: any, isAllowed: (record: any) => boolean): boolean {
+  if (!event || (event.type !== "put" && event.type !== "invalidate")) return false;
+  const row = event.value;
+  if (row == null || typeof row !== "object") return false;
+  return isAllowed(row);
 }
