@@ -868,7 +868,13 @@ describe("flair#1022 — `flair restart` reports the launchd outcome, not just l
       // Same property test/unit/snapshot-datadir-instance-targeting.test.ts
       // pins, re-asserted here because this file adds new launchctl traffic
       // (`list`) to the same code paths.
-      expect(lines.filter((l) => !l.includes(label))).toEqual([]);
+      //
+      // flair#2040: the ONE label-less line is the read-only DOMAIN preflight
+      // (`launchctl print gui/<uid>`), which names the user's GUI domain, not
+      // an install — it reads the domain's state and touches no job. Every
+      // INSTANCE-scoped invocation still carries this fixture's label.
+      const instanceLines = lines.filter((l) => !/^print\s+gui\//.test(l));
+      expect(instanceLines.filter((l) => !l.includes(label))).toEqual([]);
       const plistArgs = lines.flatMap((l) => l.split(/\s+/).filter((a) => a.endsWith(".plist")));
       expect(plistArgs.filter((a) => a !== plistPath)).toEqual([]);
     },
