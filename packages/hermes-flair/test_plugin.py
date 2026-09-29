@@ -165,7 +165,7 @@ def test_load_private_key_raw_seed_written_by_flair_agent_add(tmp_path):
     agent_id, ts, nonce, sig_b64 = auth[len("TPS-Ed25519 "):].split(":")
     payload = f"{agent_id}:{ts}:{nonce}:GET:/Memory/abc".encode("utf-8")
     # Verifies with the matching public key (raises on failure).
-    key.public_key().verify(base64.b64decode(sig_b64), payload)
+    priv.public_key().verify(base64.b64decode(sig_b64), payload)
     assert key.public_key().public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw
     ) == priv.public_key().public_bytes(
@@ -598,7 +598,7 @@ def test_b64_44_char_seed_loads_and_signs(tmp_path):
     # Signature verifies with the matching public key
     agent_id, ts, nonce, sig_b64 = auth[len("TPS-Ed25519 "):].split(":")
     payload = f"{agent_id}:{ts}:{nonce}:POST:/Memory/xyz".encode("utf-8")
-    key.public_key().verify(_b64mod.b64decode(sig_b64), payload)
+    priv.public_key().verify(_b64mod.b64decode(sig_b64), payload)
 
 
 def test_b64_decodes_to_31_bytes_is_refused(tmp_path):
