@@ -172,11 +172,15 @@ import {
 import {
   assessTreeDivergence,
   proveServingTree,
+  systemdUnitStateFromShow,
+  type LocalPidEvidence,
   type ServingTree,
+  type SystemdUnitManagerState,
   type TreeAssessment,
 } from "./lib/tree-divergence.js";
-import { planPlistRuntimeRepoint, planSystemdUnitRuntimeRepoint, type RepointDeps, type RepointPlan } from "./lib/service-repoint.js";
-import { writeFilesAtomically } from "./lib/atomic-write.js";
+import { planPlistRuntimeRepoint, type PlistOwnership, type RepointDeps, type RepointTargets } from "./lib/service-repoint.js";
+import { applyRepointPlan, repointSystemdUserUnit, type MainServiceRepointResult } from "./lib/service-repoint-apply.js";
+import { snapshotRegularFile, type AtomicWriteHooks, type FileSnapshot } from "./lib/atomic-write.js";
 import { preferVersionManagerAlias } from "./lib/node-alias-path.js";
 import { stabilizeMqttNetworkKeyOrder } from "./lib/stabilize-mqtt-network.js";
 import { detectOpsApiAllInterfacesBind } from "./lib/ops-api-bind.js";
@@ -5370,15 +5374,37 @@ function realRepointDeps(): RepointDeps {
   };
 }
 
-/** `systemctl --user show -p MainPID --value <unit>`: the PID, or null. Bounded; never throws. */
-function systemdUserMainPid(unitName: string): number | null {
-  const res = spawnSync("systemctl", ["--user", "show", "-p", "MainPID", "--value", unitName], {
-    encoding: "utf-8",
-    timeout: LAUNCHCTL_QUERY_TIMEOUT_MS,
-  });
+/**
+ * `systemctl --user show` for a unit: MainPID, the file it loaded (FragmentPath),
+ * every drop-in it applies (DropInPaths) and its WorkingDirectory. null when it
+ * could not be read. Read-only and bounded; never throws.
+ */
+function systemdUserUnitState(unitName: string): SystemdUnitManagerState | null {
+  const res = spawnSync(
+    "systemctl",
+    ["--user", "show", "-p", "MainPID", "-p", "FragmentPath", "-p", "DropInPaths", "-p", "WorkingDirectory", "--", unitName],
+    { encoding: "utf-8", timeout: LAUNCHCTL_QUERY_TIMEOUT_MS },
+  );
   if (res.status !== 0) return null;
-  const n = Number(String(res.stdout ?? "").trim());
-  return Number.isInteger(n) && n > 0 ? n : null;
+  return systemdUnitStateFromShow(String(res.stdout ?? ""));
+}
+
+/**
+ * What this host knows about which process serves `dataDir` on `port`: the
+ * data dir's PID file (only when that process is alive) and the distinct PIDs
+ * listening on the port (null when they could not be read).
+ */
+function localPidEvidence(dataDir: string, port: number): LocalPidEvidence {
+  let listeners: number[] | null;
+  try {
+    const out = execSync(`lsof -ti :${port} -sTCP:LISTEN`, { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] });
+    listeners = [...new Set(parseListeningPids(out, process.pid))];
+  } catch (err: any) {
+    // lsof exits 1 with no output when nothing listens; anything else is "could not read".
+    listeners = err?.status === 1 && String(err?.stdout ?? "").trim() === "" ? [] : null;
+  }
+  const pidFilePid = readHarperPid(dataDir);
+  return { pidFile: pidFilePid !== null && isProcessAlive(pidFilePid) ? pidFilePid : null, listeners };
 }
 
 /** This CLI's own install tree (realpath) and version. */
@@ -5406,17 +5432,18 @@ function resolveServingTree(dataDir: string, port: number, query: ServingTreeQue
     queryUrl: query.queryUrl ?? `http://127.0.0.1:${port}`,
     dataDir,
     respondingPid: query.respondingPid ?? null,
-    localServingPid: () => resolveInstanceServingPid(dataDir, port),
+    localPids: () => localPidEvidence(dataDir, port),
     launchd: { label, plistPath },
     launchdJobPid: (l) => readLaunchctlJobState(l, realLaunchctlLister).pid,
     findUserUnitsForTree: (tree) =>
       findSystemdUnitsForTree(tree, { systemDirs: [], envUnit: "" })
         .filter((u) => u.scope === "user")
         .map((u) => ({ name: u.name, path: u.path })),
-    systemdUserMainPid,
+    systemdUserUnit: systemdUserUnitState,
     servingPackage: (pid) => resolveServingFlairPackage(pid),
     exists: existsSync,
     read: (p) => readFileSync(p, "utf-8"),
+    samePath: samePathCanonical,
   });
 }
 
@@ -5431,86 +5458,31 @@ function assessInstallTree(dataDir: string, port: number, query: ServingTreeQuer
   });
 }
 
-export type MainServiceRepointResult =
-  | { kind: "repointed" | "would-repoint" | "current" | "pinned-node"; unitPath: string; detail: string }
-  | { kind: "not-applicable"; detail: string }
-  | { kind: "refused"; unitPath?: string; detail: string };
+export type { MainServiceRepointResult };
 
 /**
- * Apply a re-point plan to `unitPath`: write atomically, then run `reload`
- * (systemd's daemon-reload). A failed reload restores the unit's previous
- * bytes, so the unit and the service manager never disagree.
+ * Re-point an adopted pass-file plist's runtime paths (see planPlistRuntimeRepoint):
+ * planned from `planned` (a regular-file snapshot), written only over those
+ * same bytes (see applyRepointPlan).
  */
-function applyRepointPlan(
-  plan: RepointPlan,
-  unitPath: string,
-  dryRun: boolean,
-  reload?: () => void,
-): MainServiceRepointResult {
-  switch (plan.kind) {
-    case "current":
-    case "pinned-node":
-      return { kind: plan.kind, unitPath, detail: plan.detail };
-    case "refuse":
-      return { kind: "refused", unitPath, detail: plan.detail };
-    case "repoint": {
-      if (dryRun) return { kind: "would-repoint", unitPath, detail: plan.detail.replace(/^re-pointed/, "would re-point") };
-      let original: string;
-      let mode = 0o644;
-      try {
-        original = readFileSync(unitPath, "utf-8");
-        mode = statSync(unitPath).mode & 0o7777;
-      } catch (err: any) {
-        return { kind: "refused", unitPath, detail: `could not read ${unitPath} (${err?.message ?? err}); nothing was changed.` };
-      }
-      try {
-        writeFilesAtomically([{ path: unitPath, content: plan.text, mode }]);
-      } catch (err: any) {
-        return { kind: "refused", unitPath, detail: `could not re-point ${unitPath}: ${err?.message ?? err}` };
-      }
-      if (reload) {
-        try {
-          reload();
-        } catch (err: any) {
-          try {
-            writeFilesAtomically([{ path: unitPath, content: original, mode }]);
-          } catch (restoreErr: any) {
-            return {
-              kind: "refused",
-              unitPath,
-              detail:
-                `re-pointed ${unitPath}, but the service manager could not reload it (${err?.message ?? err}) and restoring ` +
-                `its previous content failed too (${restoreErr?.message ?? restoreErr}). Check the unit by hand.`,
-            };
-          }
-          return {
-            kind: "refused",
-            unitPath,
-            detail: `the service manager could not reload ${unitPath} (${err?.message ?? err}); the unit was restored to its previous content.`,
-          };
-        }
-      }
-      return { kind: "repointed", unitPath, detail: plan.detail };
-    }
-  }
-}
-
-/** Re-point an adopted pass-file plist's runtime paths (see planPlistRuntimeRepoint). */
 function repointAdoptedPlistFile(
-  plistPath: string,
-  raw: string,
-  targets: Parameters<typeof planPlistRuntimeRepoint>[1],
-  dryRun = false,
+  planned: FileSnapshot,
+  targets: RepointTargets,
+  owner: PlistOwnership,
+  opts: { dryRun?: boolean; atomic?: AtomicWriteHooks } = {},
 ): MainServiceRepointResult {
-  return applyRepointPlan(planPlistRuntimeRepoint(raw, targets, realRepointDeps(), plistPath), plistPath, dryRun);
+  const plan = planPlistRuntimeRepoint(planned.content, targets, realRepointDeps(), planned.path, owner);
+  return applyRepointPlan(plan, planned, { dryRun: opts.dryRun, atomic: opts.atomic });
 }
 
 /**
  * Re-point THIS instance's own service unit at this CLI's install tree —
  * `flair init` (Linux) and `flair doctor --fix`. macOS: the data dir's own
- * pass-file plist (ROOTPATH = this data dir). Linux: the systemd USER unit
- * proven to own the serving process; a unit with drop-in overrides is refused.
- * Only runtime paths change; see src/lib/service-repoint.ts for the rules.
+ * pass-file plist (see PlistOwnership for what makes it this instance's).
+ * Linux: the systemd USER unit proven to own the answering process — the file
+ * systemd loaded for it, with no drop-ins. Only runtime paths change; see
+ * src/lib/service-repoint.ts for the shapes and src/lib/service-repoint-apply.ts
+ * for the write.
  */
 function repointMainServiceUnit(
   dataDir: string,
@@ -5521,8 +5493,8 @@ function repointMainServiceUnit(
   const cli = cliInstallTree();
   const harper = harperBin();
   if (!harper) return { kind: "refused", detail: harperBinNotFoundMessage(harperSearchRoots()) };
-  const targets = {
-    launcher: launchdLauncherPath(),
+  const targets: RepointTargets = {
+    launcher: launchdLauncherPath(cli.dir),
     nodeBin: preferVersionManagerAlias(process.execPath),
     harperBin: harper,
     workingDirectory: cli.dir,
@@ -5530,16 +5502,24 @@ function repointMainServiceUnit(
   };
 
   if (process.platform === "darwin") {
-    const { plistPath } = resolveLaunchdLabel(dataDir);
+    const { label, plistPath } = resolveLaunchdLabel(dataDir);
     if (!existsSync(plistPath)) {
       return { kind: "not-applicable", detail: `no launchd service is registered for this data directory (${plistPath})` };
     }
-    let raw: string;
+    let planned: FileSnapshot;
     try {
-      raw = readFileSync(plistPath, "utf-8");
+      planned = snapshotRegularFile(plistPath);
     } catch (err: any) {
-      return { kind: "refused", unitPath: plistPath, detail: `could not read ${plistPath} (${err?.message ?? err}).` };
+      return {
+        kind: "refused",
+        unitPath: plistPath,
+        detail:
+          `${plistPath} is not re-pointed: ${err?.message ?? err}; flair rewrites only a regular plist file in place. ` +
+          `To move it, set its launcher, node, Harper entry and WorkingDirectory to this CLI's tree (${cli.dir}) by ` +
+          "hand in the file it points to, then run: flair restart",
+      };
     }
+    const raw = planned.content;
     const disposition = classifyPlist(plistPath, dataDir, {
       exists: existsSync,
       read: () => raw,
@@ -5559,7 +5539,12 @@ function repointMainServiceUnit(
         detail: `${plistPath} still embeds the admin password inline; run flair doctor --fix first (it regenerates the plist in pass-file mode).`,
       };
     }
-    return repointAdoptedPlistFile(plistPath, raw, targets, dryRun);
+    return repointAdoptedPlistFile(
+      planned,
+      targets,
+      { label, dataDir, home: resolveHome(), adminPassFile: defaultAdminPassPath() },
+      { dryRun },
+    );
   }
 
   if (process.platform === "linux") {
@@ -5567,29 +5552,19 @@ function repointMainServiceUnit(
     if (serving.kind !== "proven") {
       return { kind: "not-applicable", detail: `no service unit is proven to serve this instance: ${serving.reason}` };
     }
-    if (existsSync(`${serving.unitPath}.d`)) {
-      return {
-        kind: "refused",
-        unitPath: serving.unitPath,
-        detail: `${serving.unitPath}.d holds drop-in overrides that can set ExecStart= or WorkingDirectory=, so flair does not re-point the unit; edit it by hand.`,
-      };
-    }
-    let text: string;
-    try {
-      text = readFileSync(serving.unitPath, "utf-8");
-    } catch (err: any) {
-      return { kind: "refused", unitPath: serving.unitPath, detail: `could not read ${serving.unitPath} (${err?.message ?? err}).` };
-    }
-    const plan = planSystemdUnitRuntimeRepoint(
-      text,
-      serving.unitTree ?? serving.dir,
-      { ...targets, launcher: undefined },
-      realRepointDeps(),
-      serving.unitPath,
+    return repointSystemdUserUnit(
+      serving,
+      targets,
+      {
+        repoint: realRepointDeps(),
+        exists: existsSync,
+        unitState: systemdUserUnitState,
+        reload: () => {
+          execFileSync("systemctl", ["--user", "daemon-reload"], { stdio: "pipe", timeout: 30_000 });
+        },
+      },
+      { dryRun },
     );
-    return applyRepointPlan(plan, serving.unitPath, dryRun, () => {
-      execFileSync("systemctl", ["--user", "daemon-reload"], { stdio: "pipe", timeout: 30_000 });
-    });
   }
 
   return { kind: "not-applicable", detail: `${process.platform} has no service manager flair re-points` };
@@ -5964,6 +5939,8 @@ export interface WriteInitLaunchdPlistOptions {
 export interface WriteInitLaunchdPlistDeps {
   /** Prove a credential against the live instance; returns an error string, or null when proven. */
   prove?: (port: number, credential: string) => Promise<string | null>;
+  /** Filesystem hooks for the adopted-plist re-point's read, re-check and write (tests). */
+  atomic?: AtomicWriteHooks;
 }
 
 /**
@@ -5971,16 +5948,20 @@ export interface WriteInitLaunchdPlistDeps {
  *
  * `unchanged`, `not-repointed` and `refused` all mean NO plist write happened:
  * `unchanged` when the instance is already adopted with the pass-file shape
- * and already serves this CLI's tree (flair#1693 — init must not downgrade it,
- * and re-writing would only churn the file); `not-repointed` when an adopted
- * plist serves another tree but may not be moved (flair#2034 — the detail says
- * why: a separately managed tree, a downgrade, an unexpected shape); `refused`
- * when the launcher's argv cannot be satisfied (flair#1685). `repointed` means
- * ONLY the adopted plist's runtime paths were replaced, atomically.
+ * and already serves this CLI's tree, or pins another node for it (flair#1693 —
+ * init must not downgrade it, and re-writing would only churn the file);
+ * `not-repointed` when an adopted plist serves another tree but may not be
+ * moved (flair#2034 — the detail names the file, what did not match and the
+ * hand edit: a separately managed tree, a possible downgrade, a plist not
+ * provably this instance's or not in the shape flair writes, a symlink, or a
+ * file that changed while it was being planned); `refused` when the launcher's
+ * argv cannot be satisfied (flair#1685). `repointed` means ONLY the adopted
+ * plist's runtime paths were replaced, atomically, over the bytes they were
+ * planned from.
  */
 export type WriteInitLaunchdPlistResult =
   | { kind: "written"; plistPath: string }
-  | { kind: "unchanged"; plistPath: string; detail: string }
+  | { kind: "unchanged"; plistPath: string; detail: string; pinnedNode?: string }
   | { kind: "repointed"; plistPath: string; detail: string }
   | { kind: "not-repointed"; plistPath: string; detail: string }
   | { kind: "refused"; detail: string };
@@ -5997,9 +5978,11 @@ export type WriteInitLaunchdPlistResult =
  * is required on `LaunchdPlistOptions`) and makes the writer own its
  * precondition:
  *
- *   1. An on-disk plist that is provably ours IN THE PASS-FILE SHAPE is left
- *      byte-for-byte unchanged. An adopted instance is never downgraded, and a
- *      re-run of init does not churn mtime / flap launchd state.
+ *   1. An on-disk plist that is provably ours IN THE PASS-FILE SHAPE is never
+ *      regenerated. An adopted instance is never downgraded, and a re-run of
+ *      init does not churn mtime / flap launchd state. Its runtime paths alone
+ *      are re-pointed when it serves another npm-global tree (flair#2034,
+ *      src/lib/service-repoint.ts); otherwise it is left byte-for-byte unchanged.
  *   2. A plist that is provably another instance's (`foreign`) or cannot be
  *      attributed (`unattributable`) is refused, naming `flair doctor --fix`.
  *   3. Otherwise, resolve the pass file BEFORE writing anything: reuse an
@@ -6050,15 +6033,43 @@ export async function writeInitLaunchdPlist(
         // flair#2034 §2: never regenerated or downgraded (#1693), but its
         // RUNTIME paths — launcher, node, Harper entry, working directory —
         // are re-pointed at this CLI's tree when it serves another
-        // npm-global tree. Every other byte stays. No credential is needed:
-        // the pass-file path it names is left as it is.
-        const r = repointAdoptedPlistFile(opts.plistPath, raw, {
-          launcher: launchdLauncherPath(),
-          nodeBin: opts.execPath,
-          harperBin: opts.harperBinPath,
-          workingDirectory: opts.workingDirectory,
-          cliVersion: readFlairPackageAt(opts.workingDirectory)?.version ?? null,
-        });
+        // npm-global tree AND it is provably this instance's plist in the
+        // shape flair writes (service-repoint.ts). Every other byte stays. No
+        // credential is needed: the pass-file path it names is left as it is.
+        // The plan is made from a regular-file snapshot and written only over
+        // those same bytes.
+        let planned: FileSnapshot;
+        try {
+          planned = snapshotRegularFile(opts.plistPath, { lstat: deps.atomic?.lstat, read: deps.atomic?.read });
+        } catch (err: any) {
+          return {
+            kind: "not-repointed",
+            plistPath: opts.plistPath,
+            detail:
+              `${opts.plistPath} is not re-pointed: ${err?.message ?? err}; flair rewrites only a regular plist file in ` +
+              "place. To move it, set its launcher, node, Harper entry and WorkingDirectory to this CLI's tree " +
+              `(${opts.workingDirectory}) by hand in the file it points to, then run: flair restart`,
+          };
+        }
+        if (planned.content !== raw) {
+          return {
+            kind: "not-repointed",
+            plistPath: opts.plistPath,
+            detail: `${opts.plistPath} changed while flair init was reading it; nothing was written. Re-run flair init.`,
+          };
+        }
+        const r = repointAdoptedPlistFile(
+          planned,
+          {
+            launcher: launchdLauncherPath(opts.workingDirectory),
+            nodeBin: opts.execPath,
+            harperBin: opts.harperBinPath,
+            workingDirectory: opts.workingDirectory,
+            cliVersion: readFlairPackageAt(opts.workingDirectory)?.version ?? null,
+          },
+          { label: opts.label, dataDir: opts.dataDir, home: resolveHome(), adminPassFile: adminPassPath },
+          { atomic: deps.atomic },
+        );
         switch (r.kind) {
           case "repointed":
             return { kind: "repointed", plistPath: opts.plistPath, detail: r.detail };
@@ -6071,6 +6082,7 @@ export async function writeInitLaunchdPlist(
               detail:
                 `the launchd service is already adopted with the pass-file launcher; leaving ${opts.plistPath} unchanged` +
                 (r.kind === "pinned-node" ? ` (${r.detail})` : ""),
+              ...(r.kind === "pinned-node" ? { pinnedNode: r.detail } : {}),
             };
         }
       }

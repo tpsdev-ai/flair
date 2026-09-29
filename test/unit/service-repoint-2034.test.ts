@@ -8,7 +8,13 @@
  * Pure: the planners take text and injected path facts. No filesystem.
  */
 import { describe, test, expect } from "bun:test";
-import { planPlistRuntimeRepoint, planSystemdUnitRuntimeRepoint, type RepointDeps, type RepointTargets } from "../../src/lib/service-repoint.ts";
+import {
+  planPlistRuntimeRepoint,
+  planSystemdUnitRuntimeRepoint,
+  type PlistOwnership,
+  type RepointDeps,
+  type RepointTargets,
+} from "../../src/lib/service-repoint.ts";
 import { buildLaunchdPlist } from "../../src/cli.ts";
 
 const OLD = "/Users/u/.local/share/mise/installs/node/24.18.0";
@@ -18,6 +24,14 @@ const NEW_TREE = `${NEW}/lib/node_modules/@tpsdev-ai/flair`;
 const NEW_ALIAS_NODE = "/Users/u/.local/share/mise/installs/node/24/bin/node";
 const LAUNCHER = "templates/launchd/start-flair-with-admin-pass.sh";
 const HARPER = "node_modules/harper/dist/bin/harper.js";
+
+/** This instance, as the adopted plist below declares it. */
+const OWNER: PlistOwnership = {
+  label: "ai.tpsdev.flair.abcd1234",
+  dataDir: "/Users/u/.flair/data",
+  home: "/Users/u",
+  adminPassFile: "/Users/u/.flair/admin-pass",
+};
 
 const targets: RepointTargets = {
   launcher: `${NEW_TREE}/${LAUNCHER}`,
@@ -69,7 +83,7 @@ function adoptedPlist(over: { tree?: string; node?: string; args?: string } = {}
 describe("planPlistRuntimeRepoint", () => {
   test("re-points exactly the four runtime values of an adopted pass-file plist", () => {
     const before = adoptedPlist();
-    const plan = planPlistRuntimeRepoint(before, targets, deps(), "/p.plist");
+    const plan = planPlistRuntimeRepoint(before, targets, deps(), "/p.plist", OWNER);
     expect(plan.kind).toBe("repoint");
     if (plan.kind !== "repoint") return;
     expect(plan.changes.map((c) => c.field)).toEqual(["launcher", "node", "Harper entry", "WorkingDirectory"]);
@@ -106,8 +120,11 @@ describe("planPlistRuntimeRepoint", () => {
     const oldAmpTree = "/Users/u/A&B/lib/node_modules/@tpsdev-ai/flair";
     const before = adoptedPlist({ tree: oldAmpTree });
     expect(before).toContain("A&amp;B");
-    const d = deps({ present: [`${NEW_TREE}/${LAUNCHER}`, `${NEW_TREE}/${HARPER}`, NEW_TREE, NEW_ALIAS_NODE, `${oldAmpTree}/${LAUNCHER}`] });
-    const plan = planPlistRuntimeRepoint(before, amp, d, "/p.plist");
+    const d = deps({
+      present: [`${NEW_TREE}/${LAUNCHER}`, `${NEW_TREE}/${HARPER}`, NEW_TREE, NEW_ALIAS_NODE, `${oldAmpTree}/${LAUNCHER}`],
+      versions: { [oldAmpTree]: "0.57.0" },
+    });
+    const plan = planPlistRuntimeRepoint(before, amp, d, "/p.plist", OWNER);
     expect(plan.kind).toBe("repoint");
     if (plan.kind === "repoint") {
       expect(plan.changes.find((c) => c.field === "WorkingDirectory")?.from).toBe(oldAmpTree);
@@ -116,7 +133,7 @@ describe("planPlistRuntimeRepoint", () => {
   });
 
   test("already this CLI's tree: current, nothing to write", () => {
-    const plan = planPlistRuntimeRepoint(adoptedPlist({ tree: NEW_TREE, node: NEW_ALIAS_NODE }), targets, deps(), "/p.plist");
+    const plan = planPlistRuntimeRepoint(adoptedPlist({ tree: NEW_TREE, node: NEW_ALIAS_NODE }), targets, deps(), "/p.plist", OWNER);
     expect(plan.kind).toBe("current");
   });
 
@@ -127,25 +144,26 @@ describe("planPlistRuntimeRepoint", () => {
       targets,
       deps({ present: [pinned, NEW_ALIAS_NODE, `${NEW_TREE}/${LAUNCHER}`, `${NEW_TREE}/${HARPER}`, NEW_TREE] }),
       "/p.plist",
+      OWNER,
     );
     expect(plan.kind).toBe("pinned-node");
   });
 
   test("this CLI's tree with a node that no longer exists: only the node is replaced", () => {
     const gone = "/opt/gone/node/bin/node";
-    const plan = planPlistRuntimeRepoint(adoptedPlist({ tree: NEW_TREE, node: gone }), targets, deps(), "/p.plist");
+    const plan = planPlistRuntimeRepoint(adoptedPlist({ tree: NEW_TREE, node: gone }), targets, deps(), "/p.plist", OWNER);
     expect(plan.kind).toBe("repoint");
     if (plan.kind === "repoint") expect(plan.changes.map((c) => c.field)).toEqual(["node"]);
   });
 
   test("a plain tree or checkout is separately managed: refused", () => {
-    const plan = planPlistRuntimeRepoint(adoptedPlist({ tree: "/Users/u/work/flair" }), targets, deps(), "/p.plist");
+    const plan = planPlistRuntimeRepoint(adoptedPlist({ tree: "/Users/u/work/flair" }), targets, deps(), "/p.plist", OWNER);
     expect(plan.kind).toBe("refuse");
     if (plan.kind === "refuse") expect(plan.detail).toContain("separately managed");
   });
 
   test("an old tree with a NEWER flair than this CLI's: refused (no downgrade)", () => {
-    const plan = planPlistRuntimeRepoint(adoptedPlist(), targets, deps({ versions: { [OLD_TREE]: "0.58.0" } }), "/p.plist");
+    const plan = planPlistRuntimeRepoint(adoptedPlist(), targets, deps({ versions: { [OLD_TREE]: "0.58.0" } }), "/p.plist", OWNER);
     expect(plan.kind).toBe("refuse");
     if (plan.kind === "refuse") expect(plan.detail).toContain("downgrade");
   });
@@ -158,11 +176,11 @@ describe("planPlistRuntimeRepoint", () => {
     <string>${OLD_TREE}/${HARPER}</string>
     <string>--extra</string>
   </array>`;
-    expect(planPlistRuntimeRepoint(adoptedPlist({ args: five }), targets, deps(), "/p.plist").kind).toBe("refuse");
+    expect(planPlistRuntimeRepoint(adoptedPlist({ args: five }), targets, deps(), "/p.plist", OWNER).kind).toBe("refuse");
   });
 
   test("this CLI's tree is missing a file the unit would exec: refused", () => {
-    const plan = planPlistRuntimeRepoint(adoptedPlist(), targets, deps({ present: [NEW_TREE, NEW_ALIAS_NODE] }), "/p.plist");
+    const plan = planPlistRuntimeRepoint(adoptedPlist(), targets, deps({ present: [NEW_TREE, NEW_ALIAS_NODE] }), "/p.plist", OWNER);
     expect(plan.kind).toBe("refuse");
   });
 });
@@ -172,7 +190,13 @@ describe("planSystemdUnitRuntimeRepoint (Linux)", () => {
   const LNX_NEW = "/home/u/.nvm/versions/node/v24.19.0";
   const LOLD = `${LNX_OLD}/lib/node_modules/@tpsdev-ai/flair`;
   const LNEW = `${LNX_NEW}/lib/node_modules/@tpsdev-ai/flair`;
-  const t: RepointTargets = { nodeBin: `${LNX_NEW}/bin/node`, harperBin: `${LNEW}/${HARPER}`, workingDirectory: LNEW, cliVersion: "0.57.0" };
+  const t: RepointTargets = {
+    launcher: `${LNEW}/${LAUNCHER}`,
+    nodeBin: `${LNX_NEW}/bin/node`,
+    harperBin: `${LNEW}/${HARPER}`,
+    workingDirectory: LNEW,
+    cliVersion: "0.57.0",
+  };
   const d = deps({
     present: [`${LNX_NEW}/bin/node`, `${LNEW}/${HARPER}`, LNEW, `${LNEW}/${LAUNCHER}`],
     versions: { [LOLD]: "0.57.0" },
@@ -238,6 +262,7 @@ describe("planSystemdUnitRuntimeRepoint (Linux)", () => {
   });
 
   test("already this CLI's tree: current", () => {
-    expect(planSystemdUnitRuntimeRepoint(unit, LNEW, t, d, "/u.service").kind).toBe("current");
+    const current = unit.split(LOLD).join(LNEW).split(`${LNX_OLD}/bin/node`).join(`${LNX_NEW}/bin/node`);
+    expect(planSystemdUnitRuntimeRepoint(current, LNEW, t, d, "/u.service").kind).toBe("current");
   });
 });

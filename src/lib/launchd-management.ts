@@ -277,10 +277,13 @@ export function classifyServiceNodePin(
       kind: "pinned",
       unitNodeBin,
       currentNodeBin,
+      // `flair init` never rewrites a pin (it reports `pinned-node` and writes
+      // nothing), so the only way to move it is by hand — said as such.
       message:
         `${unitDescription} pins node ${unitNodeBin} while this CLI runs ${currentNodeBin}, and it serves this ` +
-        `CLI's own install tree (${unitTree}). That is treated as a deliberate runtime pin and left as it is. ` +
-        "To move the service to this CLI's runtime anyway: flair init && flair restart",
+        `CLI's own install tree (${unitTree}). That is treated as a deliberate runtime pin and left as it is; ` +
+        "`flair init` does not change it. To move the service to this CLI's runtime, change that node path to " +
+        `${currentNodeBin} in the unit by hand, then run: flair restart`,
       remedy: [],
     };
   }

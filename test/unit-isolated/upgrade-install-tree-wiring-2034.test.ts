@@ -58,6 +58,7 @@ mock.module("../../src/lib/tree-divergence.js", () => ({
       unitPath: "/u/Library/LaunchAgents/ai.tpsdev.flair.abcd1234.plist",
       unitNodeBin: null,
       unitTree: OLD_TREE,
+      dropInPaths: [],
     };
   },
 }));

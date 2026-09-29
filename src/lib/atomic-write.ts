@@ -15,6 +15,18 @@
  * it had before the call, and the remaining temp files are removed. The caller
  * sees either the complete new set or the complete old set.
  *
+ * PLANNED FROM THESE BYTES (flair#2034 §2, round 3). A caller that computed
+ * the new content FROM the file's current content passes the snapshot it
+ * planned from as `expect` (see snapshotRegularFile). Immediately before the
+ * rename, the target is lstat'ed and read again: it must still be a regular
+ * file (never a symlink — rename would replace the link itself, not the file
+ * it points to), the SAME file (device + inode), and hold exactly the planned
+ * bytes. Anything else — an operator's edit saved while flair was planning, a
+ * file swapped for a symlink — refuses the write and changes nothing. This is a
+ * re-check, not a lock: the window between the re-check and the rename is the
+ * one syscall apart, and a second flair writer planning from the same bytes
+ * computes the same content.
+ *
  * The filesystem primitives are injectable so a test can fail any step (a
  * write, an fsync, the Nth rename) and prove the recovery, without a real
  * failing disk.
@@ -24,6 +36,7 @@ import {
   existsSync,
   fchmodSync,
   fsyncSync,
+  lstatSync,
   openSync,
   readFileSync,
   renameSync,
@@ -34,10 +47,40 @@ import {
 import { randomBytes } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 
+/** The identity and bytes a caller planned from (see snapshotRegularFile). */
+export interface PlannedFrom {
+  content: string;
+  dev: number;
+  ino: number;
+}
+
 export interface AtomicWriteEntry {
   path: string;
   content: string;
   /** File mode for the new file (e.g. 0o600). */
+  mode: number;
+  /**
+   * The file the new content was planned from. When set, the target is
+   * re-checked immediately before its rename and the write is refused unless
+   * it is still that regular file (same device + inode) holding exactly those
+   * bytes.
+   */
+  expect?: PlannedFrom;
+}
+
+/** The subset of fs.Stats the re-checks read. */
+export interface LstatResult {
+  isFile(): boolean;
+  isSymbolicLink(): boolean;
+  dev: number;
+  ino: number;
+  mode: number;
+}
+
+/** A regular file as read for planning: its bytes, mode and identity. */
+export interface FileSnapshot extends PlannedFrom {
+  path: string;
+  /** Permission bits (mode & 0o7777). */
   mode: number;
 }
 
@@ -53,6 +96,7 @@ export interface AtomicWriteHooks {
   exists?: (path: string) => boolean;
   read?: (path: string) => string;
   modeOf?: (path: string) => number;
+  lstat?: (path: string) => LstatResult;
 }
 
 interface Resolved {
@@ -66,6 +110,7 @@ interface Resolved {
   exists: (path: string) => boolean;
   read: (path: string) => string;
   modeOf: (path: string) => number;
+  lstat: (path: string) => LstatResult;
 }
 
 function resolveHooks(h: AtomicWriteHooks): Resolved {
@@ -84,7 +129,58 @@ function resolveHooks(h: AtomicWriteHooks): Resolved {
     exists: h.exists ?? ((p) => existsSync(p)),
     read: h.read ?? ((p) => readFileSync(p, "utf-8")),
     modeOf: h.modeOf ?? ((p) => statSync(p).mode & 0o7777),
+    lstat: h.lstat ?? ((p) => lstatSync(p)),
   };
+}
+
+/** Why `st` is not a plain regular file, or null. */
+function notRegular(path: string, st: LstatResult): string | null {
+  if (st.isSymbolicLink()) return `${path} is a symbolic link`;
+  if (!st.isFile()) return `${path} is not a regular file`;
+  return null;
+}
+
+/**
+ * Read `path` for planning: it must be a regular file (lstat — a symlink is
+ * refused, never followed), and it must be the same file before and after the
+ * read. Throws an Error naming the path and what did not hold.
+ */
+export function snapshotRegularFile(
+  path: string,
+  hooks: Pick<AtomicWriteHooks, "lstat" | "read"> = {},
+): FileSnapshot {
+  const lstat = hooks.lstat ?? ((p: string) => lstatSync(p));
+  const read = hooks.read ?? ((p: string) => readFileSync(p, "utf-8"));
+  const before = lstat(path);
+  const bad = notRegular(path, before);
+  if (bad) throw new Error(bad);
+  const content = read(path);
+  const after = lstat(path);
+  if (notRegular(path, after) || after.dev !== before.dev || after.ino !== before.ino) {
+    throw new Error(`${path} was replaced while it was being read`);
+  }
+  return { path, content, dev: before.dev, ino: before.ino, mode: before.mode & 0o7777 };
+}
+
+/** The re-check before a rename: null when `path` is still the planned file with the planned bytes. */
+function plannedFileProblem(fs: Resolved, path: string, expect: PlannedFrom): string | null {
+  let st: LstatResult;
+  try {
+    st = fs.lstat(path);
+  } catch (err) {
+    return `${path} could not be checked again before replacing it (${(err as Error)?.message ?? err})`;
+  }
+  const bad = notRegular(path, st);
+  if (bad) return bad;
+  if (st.dev !== expect.dev || st.ino !== expect.ino) return `${path} was replaced by another file since flair read it`;
+  let now: string;
+  try {
+    now = fs.read(path);
+  } catch (err) {
+    return `${path} could not be read again before replacing it (${(err as Error)?.message ?? err})`;
+  }
+  if (now !== expect.content) return `${path} was changed since flair read it`;
+  return null;
 }
 
 function tempPathFor(target: string): string {
@@ -129,6 +225,12 @@ export function writeFilesAtomically(entries: AtomicWriteEntry[], hooks: AtomicW
   const fs = resolveHooks(hooks);
 
   // 1. Remember what each target held, so a failed commit can put it back.
+  //    A planned-from target must already be exactly what was planned from.
+  for (const e of entries) {
+    if (!e.expect) continue;
+    const problem = plannedFileProblem(fs, e.path, e.expect);
+    if (problem) throw new Error(`refusing to replace ${e.path}: ${problem}; nothing was changed`);
+  }
   const originals = entries.map((e) => {
     if (!fs.exists(e.path)) return { path: e.path, existed: false as const };
     return { path: e.path, existed: true as const, content: fs.read(e.path), mode: fs.modeOf(e.path) };
@@ -150,6 +252,10 @@ export function writeFilesAtomically(entries: AtomicWriteEntry[], hooks: AtomicW
   const committed: number[] = [];
   for (let i = 0; i < entries.length; i++) {
     try {
+      // Re-check the planned-from target immediately before replacing it.
+      const expect = entries[i]!.expect;
+      const problem = expect ? plannedFileProblem(fs, entries[i]!.path, expect) : null;
+      if (problem) throw new Error(`refusing to replace it: ${problem}`);
       fs.rename(staged[i]!, entries[i]!.path);
       committed.push(i);
     } catch (err) {
@@ -175,6 +281,9 @@ export function writeFilesAtomically(entries: AtomicWriteEntry[], hooks: AtomicW
           `could not replace ${entries[i]!.path} (${cause}), and restoring the files already replaced failed for: ` +
             `${unrestored.join(", ")} — those now hold the NEW content while the rest hold the old.`,
         );
+      }
+      if (committed.length === 0) {
+        throw new Error(`could not replace ${entries[i]!.path} (${cause}); nothing was changed`);
       }
       throw new Error(
         `could not replace ${entries[i]!.path} (${cause}); every file was restored to its previous content: ` +

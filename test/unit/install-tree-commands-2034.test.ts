@@ -33,6 +33,7 @@ function assessment(state: "same" | "diverged" | "separate" | "unknown", over: {
           unitPath: "/u/Library/LaunchAgents/ai.tpsdev.flair.abcd1234.plist",
           unitNodeBin: null,
           unitTree: dir,
+          dropInPaths: [],
         };
   return withRunningVersion(
     assessTreeDivergence({ cli, serving, currentNodeBin: "/n", samePath: (a, b) => a === b }),

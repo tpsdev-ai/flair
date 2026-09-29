@@ -38,11 +38,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildLaunchdPlist,
-  launchdLauncherPath,
   writeInitLaunchdPlist,
   type LaunchdPlistOptions,
   type WriteInitLaunchdPlistOptions,
 } from "../../src/cli.ts";
+import { resolveHome } from "../../src/lib/home.ts";
 
 let tmp: string;
 let savedFlairPass: string | undefined;
@@ -67,23 +67,28 @@ afterEach(() => {
 });
 
 const DATA_DIR = "/Users/example/.flair/data";
+/** A tree that does not exist on disk: the adopted-plist fixtures below serve it. */
+const TREE = "/opt/flair";
+const TREE_HARPER = `${TREE}/node_modules/harper/dist/bin/harper.js`;
+const TREE_LAUNCHER = `${TREE}/templates/launchd/start-flair-with-admin-pass.sh`;
 
 function plistFor(dataDir: string, over: Partial<LaunchdPlistOptions> = {}): string {
   return buildLaunchdPlist({
     label: "ai.tpsdev.flair.deadbeef",
     execPath: "/usr/local/bin/node",
-    harperBinPath: "/opt/flair/harper.js",
-    workingDirectory: "/opt/flair",
+    harperBinPath: TREE_HARPER,
+    workingDirectory: TREE,
     dataDir,
     modelsDir: `${dataDir}/models`,
     setConfig: JSON.stringify({ rootPath: dataDir, http: { port: 9926 } }),
     adminUser: "admin",
     httpPort: 9926,
     opsNetworkPort: "9925",
+    // This instance's own plist: this user's HOME and this instance's pass file.
     passFile: {
-      launcher: launchdLauncherPath(),
-      adminPassFile: "/Users/example/.flair/admin-pass",
-      home: "/Users/example",
+      launcher: TREE_LAUNCHER,
+      adminPassFile: join(tmp, "admin-pass"),
+      home: resolveHome(),
       path: "/usr/bin:/bin",
     },
     ...over,
@@ -99,8 +104,8 @@ function baseOptions(over: Partial<WriteInitLaunchdPlistOptions> = {}): WriteIni
     adminUser: "admin",
     modelsDir: `${DATA_DIR}/models`,
     execPath: "/usr/local/bin/node",
-    harperBinPath: "/opt/flair/harper.js",
-    workingDirectory: "/opt/flair",
+    harperBinPath: TREE_HARPER,
+    workingDirectory: TREE,
     httpPort: 9926,
     opsNetworkPort: "9925",
     setConfig: JSON.stringify({ rootPath: DATA_DIR, http: { port: 9926 } }),
@@ -235,6 +240,8 @@ describe("writeInitLaunchdPlist — re-points an adopted plist at this CLI's tre
     mkdirSync(join(prefix, "bin"), { recursive: true });
     writeFileSync(join(tree, "package.json"), JSON.stringify({ name: "@tpsdev-ai/flair", version }));
     writeFileSync(harper, "// harper\n");
+    mkdirSync(join(tree, "templates", "launchd"), { recursive: true });
+    writeFileSync(join(tree, "templates", "launchd", "start-flair-with-admin-pass.sh"), "#!/bin/sh\n", { mode: 0o755 });
     writeFileSync(join(prefix, "bin", "node"), "#!/bin/sh\n", { mode: 0o755 });
     return { tree, node: join(prefix, "bin", "node"), harper };
   }
@@ -249,8 +256,8 @@ describe("writeInitLaunchdPlist — re-points an adopted plist at this CLI's tre
       workingDirectory: old.tree,
       passFile: {
         launcher: join(old.tree, "templates", "launchd", "start-flair-with-admin-pass.sh"),
-        adminPassFile: "/Users/example/.flair/admin-pass",
-        home: "/Users/example",
+        adminPassFile: opts.adminPassPath!,
+        home: resolveHome(),
         path: "/custom/R&D/bin:/usr/bin:/bin",
       },
     });
@@ -267,9 +274,9 @@ describe("writeInitLaunchdPlist — re-points an adopted plist at this CLI's tre
       harperBinPath: cur.harper,
       workingDirectory: cur.tree,
       passFile: {
-        launcher: launchdLauncherPath(),
-        adminPassFile: "/Users/example/.flair/admin-pass",
-        home: "/Users/example",
+        launcher: join(cur.tree, "templates", "launchd", "start-flair-with-admin-pass.sh"),
+        adminPassFile: opts.adminPassPath!,
+        home: resolveHome(),
         path: "/custom/R&D/bin:/usr/bin:/bin",
       },
     });

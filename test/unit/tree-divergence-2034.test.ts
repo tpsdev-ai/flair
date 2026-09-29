@@ -51,7 +51,7 @@ function darwinProbe(over: Partial<ServingTreeProbe> = {}): ServingTreeProbe & {
     queryUrl: "http://127.0.0.1:9926",
     dataDir: DATA,
     respondingPid: 4242,
-    localServingPid: () => { calls.push("localServingPid"); return 4242; },
+    localPids: () => { calls.push("localPids"); return { pidFile: 4242, listeners: [4242] }; },
     launchd: { label: LABEL, plistPath: PLIST_PATH },
     launchdJobPid: () => { calls.push("launchdJobPid"); return 4242; },
     servingPackage: (pid) => { calls.push(`servingPackage:${pid}`); return { dir: OLD_TREE, version: "0.57.0" }; },
@@ -105,13 +105,12 @@ describe("proveServingTree — macOS", () => {
     }
   });
 
-  test("without a reported pid the local serving pid is used — and only then", () => {
-    const withPid = darwinProbe();
-    proveServingTree(withPid);
-    expect(withPid.calls).not.toContain("localServingPid");
+  test("without a reported pid, the one process listening on the port is the answer", () => {
     const without = darwinProbe({ respondingPid: null });
-    expect(proveServingTree(without).kind).toBe("proven");
-    expect(without.calls).toContain("localServingPid");
+    const s = proveServingTree(without);
+    expect(s.kind).toBe("proven");
+    if (s.kind === "proven") expect(s.pid).toBe(4242);
+    expect(without.calls).toContain("localPids");
   });
 
   test("the process's tree cannot be read: unknown (never falls back to the unit's WorkingDirectory)", () => {
@@ -138,9 +137,10 @@ describe("proveServingTree — Linux", () => {
       queryUrl: "http://127.0.0.1:9926",
       dataDir: DATA,
       respondingPid: 77,
-      localServingPid: () => 77,
+      localPids: () => ({ pidFile: 77, listeners: [77] }),
       findUserUnitsForTree: (tree) => (tree === OLD_TREE ? [{ name: "my-flair.service", path: UNIT }] : []),
-      systemdUserMainPid: (name) => (name === "my-flair.service" ? 77 : null),
+      systemdUserUnit: (name) =>
+        name === "my-flair.service" ? { mainPid: 77, fragmentPath: UNIT, dropInPaths: [], workingDirectory: OLD_TREE } : null,
       servingPackage: () => ({ dir: OLD_TREE, version: "0.57.0" }),
       exists: (p) => p === UNIT,
       read: () => unitText,
@@ -165,7 +165,11 @@ describe("proveServingTree — Linux", () => {
   });
 
   test("a user unit whose MainPID is another process (direct start): unknown", () => {
-    expect(proveServingTree(linuxProbe({ systemdUserMainPid: () => 12 })).kind).toBe("unknown");
+    expect(
+      proveServingTree(
+        linuxProbe({ systemdUserUnit: () => ({ mainPid: 12, fragmentPath: UNIT, dropInPaths: [], workingDirectory: OLD_TREE }) }),
+      ).kind,
+    ).toBe("unknown");
   });
 
   test("an unsupported platform is unknown", () => {
@@ -185,6 +189,7 @@ function proven(over: Record<string, unknown> = {}) {
     unitPath: PLIST_PATH,
     unitNodeBin: OLD_NODE,
     unitTree: OLD_TREE,
+    dropInPaths: [] as string[],
     ...over,
   };
 }

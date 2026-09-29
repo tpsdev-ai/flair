@@ -16,11 +16,15 @@
  *   - macOS: the launchd plist for THIS data directory (its ROOTPATH is this
  *     data dir) has a running job whose PID is the serving PID;
  *   - Linux: a systemd USER unit that names the serving tree has that PID as
- *     its MainPID.
+ *     its MainPID, and systemd reports that very file as the unit's
+ *     FragmentPath (the file it loaded, not another file of the same name).
  *
- * The serving PID is the one the answering process reported about itself
- * (`/HealthDetail`'s `pid`) when available, else the process this data dir
- * records (Harper's `hdb.pid`, then the port's listener). The tree is read from
+ * The serving PID is the process that ANSWERED: the PID it reported about
+ * itself (`/HealthDetail`'s `pid`) when available, else the one process
+ * listening on the instance's port. Harper's `hdb.pid` is never the answer on
+ * its own — it is a cross-check: when a live `hdb.pid`, the listener and the
+ * reported PID do not all agree, the answer is UNKNOWN (a stale or reused PID
+ * file, a second instance on the port), never a guess. The tree is read from
  * that process (its working directory / command line), never from the unit.
  *
  * Without that proof — a remote target, a directly started server, a
@@ -52,10 +56,31 @@ export interface ProvenServingTree {
   manager: ServiceManagerKind;
   unitName: string;
   unitPath: string;
-  /** The node binary the unit names now. */
+  /** The node binary the unit names now (null when drop-ins make the unit file alone not authoritative). */
   unitNodeBin: string | null;
   /** The install tree the unit names now (may differ from `dir` after a re-point that is not yet restarted). */
   unitTree: string | null;
+  /** systemd: the drop-in files the manager applies to the unit (never re-pointed while any exist). [] for launchd. */
+  dropInPaths: string[];
+}
+
+/** What this host knows locally about which process serves the data dir. */
+export interface LocalPidEvidence {
+  /** The PID in the data dir's Harper PID file, when that process is alive; null otherwise. */
+  pidFile: number | null;
+  /** The distinct PIDs listening on the instance's port; null when they could not be read. */
+  listeners: number[] | null;
+}
+
+/** A systemd user unit as its manager reports it (`systemctl --user show`). */
+export interface SystemdUnitManagerState {
+  mainPid: number | null;
+  /** The unit file systemd loaded. */
+  fragmentPath: string | null;
+  /** Every drop-in systemd applies to the unit, from any location. */
+  dropInPaths: string[];
+  /** The WorkingDirectory systemd holds for the unit (a leading `!` removed), or null. */
+  workingDirectory: string | null;
 }
 
 export interface UnknownServingTree {
@@ -74,24 +99,105 @@ export interface ServingTreeProbe {
   dataDir: string;
   /** The PID the answering process reported about itself, when known. */
   respondingPid?: number | null;
-  /** The PID serving `dataDir` locally (hdb.pid, then the port listener). Called only when needed. */
-  localServingPid: () => number | null;
+  /** This data dir's live PID-file PID and the port's listeners (see identifyAnsweringPid). */
+  localPids: () => LocalPidEvidence;
   /** macOS: this data dir's launchd label and plist path. */
   launchd?: { label: string; plistPath: string };
   /** macOS: the running PID of a launchd job, or null when it is not loaded / not running. */
   launchdJobPid?: (label: string) => number | null;
   /** Linux: systemd USER units that name `tree` in WorkingDirectory/ExecStart. */
   findUserUnitsForTree?: (tree: string) => Array<{ name: string; path: string }>;
-  /** Linux: a user unit's MainPID, or null when it has none. */
-  systemdUserMainPid?: (unitName: string) => number | null;
+  /** Linux: a user unit as the manager reports it, or null when it could not be read. */
+  systemdUserUnit?: (unitName: string) => SystemdUnitManagerState | null;
   /** The @tpsdev-ai/flair package a live PID runs from, or null. */
   servingPackage: (pid: number) => PackageLocation | null;
   exists: (p: string) => boolean;
   read: (p: string) => string;
+  /** Path equality for the FragmentPath check — callers pass a realpath-based comparison. */
+  samePath?: (a: string, b: string) => boolean;
 }
 
 function unknown(reason: string): UnknownServingTree {
   return { kind: "unknown", reason };
+}
+
+/**
+ * The process that answered for this instance — or why it cannot be named.
+ *
+ * `respondingPid` (what the answering process said about itself) is taken
+ * only when no local evidence contradicts it; without it, the ONE process
+ * listening on the port is the answer. A live PID-file PID that is not that
+ * process — a stale file whose PID was reused, a second instance — makes the
+ * answer unknown: a conflict is never resolved by picking a side.
+ */
+export function identifyAnsweringPid(
+  respondingPid: number | null | undefined,
+  evidence: LocalPidEvidence,
+): { pid: number } | { reason: string } {
+  const listeners = evidence.listeners === null ? null : [...new Set(evidence.listeners)];
+  const pidFile = evidence.pidFile;
+  if (typeof respondingPid === "number" && Number.isInteger(respondingPid) && respondingPid > 0) {
+    if (listeners !== null && listeners.length > 0 && !listeners.includes(respondingPid)) {
+      return {
+        reason:
+          `the process that answered (pid ${respondingPid}) is not the one listening on the instance's port ` +
+          `(pid ${listeners.join(", ")})`,
+      };
+    }
+    if (pidFile !== null && pidFile !== respondingPid) {
+      return {
+        reason:
+          `the process that answered (pid ${respondingPid}) is not the one this data directory's PID file names ` +
+          `(pid ${pidFile})`,
+      };
+    }
+    return { pid: respondingPid };
+  }
+  if (listeners === null) return { reason: "the process listening on the instance's port could not be read" };
+  if (listeners.length === 0) return { reason: "no process is listening on the instance's port" };
+  if (listeners.length > 1) {
+    return { reason: `more than one process listens on the instance's port (pids ${listeners.join(", ")})` };
+  }
+  const listener = listeners[0]!;
+  if (pidFile !== null && pidFile !== listener) {
+    return {
+      reason:
+        `the process listening on the instance's port (pid ${listener}) is not the one this data directory's PID ` +
+        `file names (pid ${pidFile}), so which one serves this data directory is not proven`,
+    };
+  }
+  return { pid: listener };
+}
+
+/** Parse `systemctl show -p A -p B …` output (`Key=value` lines) into a map. */
+export function parseSystemctlShow(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of text.split(/\r?\n/)) {
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    out[line.slice(0, eq)] = line.slice(eq + 1);
+  }
+  return out;
+}
+
+/**
+ * A user unit's manager state from `systemctl --user show <unit> -p MainPID
+ * -p FragmentPath -p DropInPaths -p WorkingDirectory`. null when a property is
+ * missing — an unreadable answer is not an empty one.
+ */
+export function systemdUnitStateFromShow(text: string): SystemdUnitManagerState | null {
+  const kv = parseSystemctlShow(text);
+  for (const key of ["MainPID", "FragmentPath", "DropInPaths", "WorkingDirectory"]) {
+    if (!(key in kv)) return null;
+  }
+  const pid = Number(kv.MainPID);
+  const wd = kv.WorkingDirectory!.trim().replace(/^!/, "");
+  return {
+    mainPid: Number.isInteger(pid) && pid > 0 ? pid : null,
+    fragmentPath: kv.FragmentPath!.trim() === "" ? null : kv.FragmentPath!.trim(),
+    dropInPaths: kv.DropInPaths!.trim() === "" ? [] : kv.DropInPaths!.trim().split(/\s+/),
+    workingDirectory: wd === "" ? null : wd,
+  };
 }
 
 /** The node binary and working directory an active systemd `[Service]` section names. */
@@ -140,13 +246,15 @@ export function proveServingTree(p: ServingTreeProbe): ServingTree {
     );
   }
 
-  const pickPid = (): number | null => {
-    if (typeof p.respondingPid === "number" && p.respondingPid > 0) return p.respondingPid;
+  const samePath = p.samePath ?? ((a: string, b: string) => resolve(a) === resolve(b));
+  const answering = (): { pid: number } | { reason: string } => {
+    let evidence: LocalPidEvidence;
     try {
-      return p.localServingPid();
+      evidence = p.localPids();
     } catch {
-      return null;
+      evidence = { pidFile: null, listeners: null };
     }
+    return identifyAnsweringPid(p.respondingPid, evidence);
   };
 
   if (p.platform === "darwin") {
@@ -171,8 +279,9 @@ export function proveServingTree(p: ServingTreeProbe): ServingTree {
     if (jobPid === null) {
       return unknown(`launchd is not running the job ${ld.label}, so the instance answering was not started by it`);
     }
-    const pid = pickPid();
-    if (pid === null) return unknown("the process serving this instance could not be identified");
+    const who = answering();
+    if ("reason" in who) return unknown(`the process serving this instance could not be identified: ${who.reason}`);
+    const pid = who.pid;
     if (pid !== jobPid) {
       return unknown(
         `the process serving this instance (pid ${pid}) is not launchd's job ${ld.label} (pid ${jobPid}) — it was started ` +
@@ -193,22 +302,34 @@ export function proveServingTree(p: ServingTreeProbe): ServingTree {
       unitPath: ld.plistPath,
       unitNodeBin,
       unitTree: refs?.workingDirectory ?? null,
+      dropInPaths: [],
     };
   }
 
   if (p.platform === "linux") {
-    const pid = pickPid();
-    if (pid === null) return unknown("the process serving this instance could not be identified");
+    const who = answering();
+    if ("reason" in who) return unknown(`the process serving this instance could not be identified: ${who.reason}`);
+    const pid = who.pid;
     const pkg = p.servingPackage(pid);
     if (!pkg) return unknown(`the install tree of the serving process (pid ${pid}) could not be read`);
     const units = p.findUserUnitsForTree?.(pkg.dir) ?? [];
+    const notLoaded: string[] = [];
     for (const u of units) {
-      const mainPid = p.systemdUserMainPid?.(u.name) ?? null;
-      if (mainPid !== pid) continue;
+      const state = p.systemdUserUnit?.(u.name) ?? null;
+      if (!state || state.mainPid !== pid) continue;
+      // The PID belongs to the unit NAME; only the file systemd actually loaded
+      // for that name is proof about this file.
+      if (state.fragmentPath === null || !samePath(state.fragmentPath, u.path)) {
+        notLoaded.push(`systemd loads ${u.name} from ${state.fragmentPath ?? "no file"}, not ${u.path}`);
+        continue;
+      }
       let refs: { nodeBin: string | null; workingDirectory: string | null } = { nodeBin: null, workingDirectory: null };
-      try {
-        refs = readSystemdServiceRefs(p.read(u.path));
-      } catch { /* the proof is the MainPID; the refs are detail */ }
+      // With drop-ins, the unit file alone does not say what systemd runs.
+      if (state.dropInPaths.length === 0) {
+        try {
+          refs = readSystemdServiceRefs(p.read(u.path));
+        } catch { /* the proof is the MainPID + FragmentPath; the refs are detail */ }
+      }
       return {
         kind: "proven",
         dir: pkg.dir,
@@ -219,7 +340,11 @@ export function proveServingTree(p: ServingTreeProbe): ServingTree {
         unitPath: u.path,
         unitNodeBin: refs.nodeBin,
         unitTree: refs.workingDirectory,
+        dropInPaths: state.dropInPaths,
       };
+    }
+    if (notLoaded.length > 0) {
+      return unknown(`the serving process (pid ${pid}) belongs to a systemd user unit, but ${notLoaded.join("; ")}`);
     }
     return unknown(
       `no systemd user unit that names ${pkg.dir} owns the serving process (pid ${pid}) — it was started directly, ` +
@@ -344,6 +469,17 @@ export function describeUnit(s: ProvenServingTree): string {
     : `the systemd user unit ${s.unitName} (${s.unitPath})`;
 }
 
+/**
+ * Diverged, but `flair init` will not re-point this unit: systemd applies
+ * drop-ins to it, and a drop-in can set ExecStart= / WorkingDirectory= that the
+ * unit file does not show. The remedy is then a hand edit, never `flair init`.
+ */
+export function manualRepointReason(a: TreeAssessment): string | null {
+  const s = a.serving;
+  if (a.state !== "diverged" || s.kind !== "proven" || s.manager !== "systemd-user" || s.dropInPaths.length === 0) return null;
+  return `systemd applies drop-ins to ${s.unitName} (${s.dropInPaths.join(", ")}), so flair does not re-point it`;
+}
+
 function v(version: string | null): string {
   return version ? `flair ${version}` : "flair version unknown";
 }
@@ -397,12 +533,15 @@ export function formatTreeAssessmentLines(a: TreeAssessment, opts: TreeLinesOpti
       `   \`flair upgrade\` changes this CLI's tree only; the instance keeps serving ${s.dir} until its service is re-pointed.`,
     );
   }
+  const manual = manualRepointReason(a);
   if (a.cliOlder) {
     lines.push(
       `   This CLI's tree has an OLDER flair than the instance runs, so re-pointing the service at it now would downgrade the`,
       "   instance — `flair init` will not do that. First update this CLI's tree from this same shell:",
       "     npm i -g @tpsdev-ai/flair",
-      "   Then: flair init && flair restart",
+      manual
+        ? `   Then (${manual}) point the unit at ${a.cli.dir} by hand, then: flair restart`
+        : "   Then: flair init && flair restart",
     );
     return lines;
   }
@@ -413,10 +552,21 @@ export function formatTreeAssessmentLines(a: TreeAssessment, opts: TreeLinesOpti
     );
     return lines;
   }
+  if (manual) {
+    lines.push(
+      `   ${manual}.`,
+      `   Remedy: point the unit's node, Harper entry and WorkingDirectory at ${a.cli.dir} by hand (where the drop-ins`,
+      "   set them, edit the drop-ins), then: flair restart",
+    );
+    return lines;
+  }
   lines.push(
     "   Remedy: flair init && flair restart",
-    `   \`flair init\` re-points ${unit} at this CLI's tree — its node, Harper entry${s.manager === "launchd" ? ", launcher" : ""} and working directory — and`,
-    "   leaves the unit's other settings as they are (it also re-points the federation-sync shim when that runs another tree).",
+    `   \`flair init\` re-points ${unit} at this CLI's tree.`,
+    `   It changes only the unit's node, Harper entry, ${s.manager === "launchd" ? "launcher" : "launcher (if it runs one)"} and working directory,`,
+    "   and leaves the unit's other settings as they are. It writes only a unit it can prove is this instance's and in a shape",
+    "   it supports; otherwise it changes nothing and names the file, what did not match, and the remedy. It also",
+    "   re-points the federation-sync shim when that runs another tree.",
     "   init is Flair's full setup command, so it also re-runs its idempotent setup for this data directory: it reuses the existing",
     "   Harper install and admin password, saves the instance's recorded configuration again, and in an interactive shell can",
     "   offer agent and MCP-client setup. `flair restart` then restarts the instance under the re-pointed unit and reports which",
@@ -456,12 +606,14 @@ export function treeAssessmentJson(a: TreeAssessment): Record<string, unknown> {
     cliOlder: a.cliOlder,
     nodePin: a.nodePin ? { kind: a.nodePin.kind, unitNodeBin: a.nodePin.unitNodeBin, currentNodeBin: a.nodePin.currentNodeBin } : null,
     remedy:
-      a.state !== "diverged"
+      a.state !== "diverged" || manualRepointReason(a) !== null
         ? null
         : a.cliOlder
           ? ["npm i -g @tpsdev-ai/flair", "flair init", "flair restart"]
           : a.restartPending
             ? ["flair restart"]
             : ["flair init", "flair restart"],
+    // Set when flair init will not re-point the unit: the remedy is a hand edit, then `flair restart`.
+    manualRemedy: manualRepointReason(a),
   };
 }

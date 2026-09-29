@@ -57,12 +57,12 @@
  * `flair federation sync --admin-pass-file`, which reads it through
  * readAdminPassFileSecure() and refuses a file that is not owner-only.
  */
-import { existsSync, chmodSync, rmSync, readFileSync, mkdirSync, realpathSync, statSync } from "node:fs";
+import { existsSync, chmodSync, rmSync, readFileSync, mkdirSync, realpathSync } from "node:fs";
 import { resolve, dirname, isAbsolute } from "node:path";
 
 import { fileURLToPath } from "node:url";
 import { escapeXml, unescapeXml } from "../lib/xml-escape.js";
-import { writeFilesAtomically, type AtomicWriteHooks } from "../lib/atomic-write.js";
+import { snapshotRegularFile, writeFilesAtomically, type AtomicWriteHooks, type FileSnapshot } from "../lib/atomic-write.js";
 import { preferVersionManagerAlias, type AliasHooks } from "../lib/node-alias-path.js";
 import { compareVersions, isNpmGlobalFlairTree } from "../lib/tree-divergence.js";
 import { findFlairPackageDir } from "../lib/upgrade-exec-path.js";
@@ -922,10 +922,14 @@ export function formatStatusReport(s: SchedulerStatus, a: DriverAssessment): For
 // to establish that the scheduler is enabled and that it execs this shim.
 //
 // Refused, never guessed: an unreadable unit or shim, a unit that does not exec
-// the shim, a shim not in the generated shape. A shim with no unit (the leftover
-// of `federation sync disable`) is not an enabled scheduler and is left alone.
-// The write is atomic (temp file + fsync + rename): the shim is either the old
-// one or the new one, never a partial file.
+// the shim, a shim that is a symlink or not a regular file, and a shim whose
+// COMMANDS differ from what `flair federation sync enable` writes — compared
+// line by line with the template, where the only difference allowed is the two
+// paths on the exec line (comment lines are not compared). A shim with no unit
+// (the leftover of `federation sync disable`) is not an enabled scheduler and is
+// left alone. The write is atomic (temp file + fsync + rename) and lands only
+// over the bytes it was planned from: the shim is re-checked immediately before
+// the rename, and an edit made in between refuses the write.
 
 export type FederationRuntimeStatus =
   | "not-enabled"
@@ -958,8 +962,10 @@ export interface RewriteFederationRuntimeOpts {
   /** The @tpsdev-ai/flair package a file belongs to ({dir, version}), or null. */
   packageOf?: (p: string) => { dir: string; version: string | null } | null;
   modeOf?: (p: string) => number;
-  /** Filesystem hooks for the atomic write (tests inject failures here). */
+  /** Filesystem hooks for the shim's snapshot, re-check and atomic write (tests inject failures here). */
   atomic?: AtomicWriteHooks;
+  /** Where the shim template is read from, for the shape check (testing). */
+  templateRootOverride?: string;
 }
 
 export interface RewriteFederationRuntimeResult {
@@ -975,6 +981,38 @@ export interface RewriteFederationRuntimeResult {
 const SHIM_MARKER = "# Deployed by `flair federation sync enable`";
 const SHIM_EXEC_LINE_RE = /^exec "([^"\n]*)" "([^"\n]*)" federation sync "\$@"$/gm;
 const UNSAFE_SHIM_VALUE = /["$`\\\n]/;
+
+/** A shell command line of the shim (not blank, not a `#` comment at column 0). */
+function shimCommandLines(text: string): Array<{ n: number; line: string }> {
+  return text
+    .split("\n")
+    .map((line, i) => ({ n: i + 1, line }))
+    .filter(({ line, n }) => n === 1 || (line !== "" && !line.startsWith("#")));
+}
+
+/**
+ * Does `shimText` run exactly the commands the enable template writes? The
+ * first line (the interpreter) and every non-comment line are compared, in
+ * order, with the template's; the exec line may differ only in its two quoted
+ * paths. Returns the reason it does not match (naming a line number, never the
+ * line's content — a hand edit may hold a secret), or null.
+ */
+export function federationShimShapeProblem(shimText: string, templateText: string): string | null {
+  const want = shimCommandLines(templateText);
+  const have = shimCommandLines(shimText);
+  const execTemplate = /^exec "\{\{NODE_BIN\}\}" "\{\{FLAIR_BIN\}\}" federation sync "\$@"$/;
+  for (let i = 0; i < Math.max(want.length, have.length); i++) {
+    const w = want[i];
+    const h = have[i];
+    if (!h) return `it ends after line ${have.length ? have[have.length - 1]!.n : 0}, before the generated commands do`;
+    if (!w) return `line ${h.n} is a command the generated shim does not have`;
+    const matches = execTemplate.test(w.line)
+      ? new RegExp(SHIM_EXEC_LINE_RE.source).test(h.line)
+      : h.line === w.line;
+    if (!matches) return `line ${h.n} is not the generated command at that position`;
+  }
+  return null;
+}
 
 /** Does the federation-sync unit exec `shimPath`? Returns the reason it does not, or null. */
 function federationUnitExecsShim(plat: SchedulerPlatform, text: string, shimPath: string): string | null {
@@ -1057,15 +1095,31 @@ export function rewriteFederationSchedulerRuntime(
   const notOurs = federationUnitExecsShim(plat, unitText, shimPath);
   if (notOurs) return refused(`${unitPath} does not exec the flair-generated shim: ${notOurs}.`);
   if (!exists(shimPath)) return refused(`${unitPath} execs ${shimPath}, which does not exist.`);
-  let shimText: string;
+  // A regular file (never followed through a symlink), read once: the plan and
+  // the pre-rename re-check both use these bytes.
+  let planned: FileSnapshot;
   try {
-    shimText = read(shimPath);
+    planned = snapshotRegularFile(shimPath, { lstat: opts.atomic?.lstat, read });
   } catch (err: any) {
-    return refused(`could not read ${shimPath} (${err?.message ?? err}).`);
+    return refused(`could not read ${shimPath} as a regular file (${err?.message ?? err}).`);
   }
+  const shimText = planned.content;
   const execLines = [...shimText.matchAll(SHIM_EXEC_LINE_RE)];
   if (!shimText.includes(SHIM_MARKER) || execLines.length !== 1) {
     return refused(`${shimPath} is not in the shape \`flair federation sync enable\` writes (one \`exec "<node>" "<flair>" federation sync\` line).`);
+  }
+  let templateText: string;
+  try {
+    templateText = readTemplate(opts.templateRootOverride ?? defaultTemplateRoot(), "bin/flair-federation-sync.sh.tmpl");
+  } catch (err: any) {
+    return refused(`could not read the shim template to compare ${shimPath} with (${err?.message ?? err}).`);
+  }
+  const shapeProblem = federationShimShapeProblem(shimText, templateText);
+  if (shapeProblem) {
+    return refused(
+      `${shimPath} does not run exactly the commands \`flair federation sync enable\` writes (${shapeProblem}), so it ` +
+        "was hand-changed and flair does not rewrite it.",
+    );
   }
   const oldNode = execLines[0]![1]!;
   const oldFlair = execLines[0]![2]!;
@@ -1135,12 +1189,14 @@ export function rewriteFederationSchedulerRuntime(
   const nextLine = `exec "${nextNode}" "${nextFlair}" federation sync "$@"`;
   const execMatch = execLines[0]!;
   const nextText = shimText.slice(0, execMatch.index!) + nextLine + shimText.slice(execMatch.index! + execMatch[0].length);
-  let mode = 0o700;
+  let mode = planned.mode;
+  if (opts.modeOf) {
+    try {
+      mode = opts.modeOf(shimPath);
+    } catch { /* keep the snapshot's mode */ }
+  }
   try {
-    mode = (opts.modeOf ?? ((p: string) => statSync(p).mode & 0o7777))(shimPath);
-  } catch { /* keep the enable default */ }
-  try {
-    writeFilesAtomically([{ path: shimPath, content: nextText, mode }], opts.atomic);
+    writeFilesAtomically([{ path: shimPath, content: nextText, mode, expect: planned }], opts.atomic);
   } catch (err: any) {
     return refused(`could not write ${shimPath}: ${err?.message ?? err}.`);
   }

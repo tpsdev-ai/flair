@@ -95,6 +95,53 @@ flair upgrade --tree /opt/flair --flair-version 0.50.0
 without touching the tree. A git checkout or a path that *is* the npm-global
 install is refused rather than overwritten.
 
+### After a Node bump: the CLI and the instance in different install trees
+
+A service unit bakes the node binary and install tree of the runtime it was
+written under. After a Node version bump, `flair` on your PATH can come from the
+new runtime's global tree while the instance keeps serving the old one.
+`flair status`, `flair upgrade`, `flair doctor` and `flair restart` name this —
+both trees, both versions, the unit — but only when it is **proven**: the
+service manager must own the process that answered (the PID the instance
+reported, or the one process listening on its port; a PID file that disagrees
+with the listener makes the answer unknown). On Linux, systemd must also report
+the unit file flair selected as the one it loaded (`FragmentPath`). Otherwise
+the serving tree is reported as unknown and nothing is advised from it.
+
+The remedy is `flair init && flair restart`. `flair init` re-points the
+instance's own unit — **only** its launcher, node, Harper entry and working
+directory — and writes nothing unless the unit is provably this instance's and
+exactly a shape flair supports:
+
+| | Written only when | Refused (nothing written) |
+|---|---|---|
+| macOS plist (`~/Library/LaunchAgents/ai.tpsdev.flair.<hash>.plist`) | one Label (this data directory's), one ROOTPATH (this data directory), one HOME (yours), no `Program` key, ProgramArguments = the launcher in its WorkingDirectory tree, this instance's admin-pass file, a `node`, a Harper entry in that tree | anything else — another HOME, label or pass file, an extra argument |
+| Linux systemd user unit (the one proven above) | one `WorkingDirectory=` (the served tree) and one `ExecStart=` of `<node> <harper.js> run .` or `<launcher> <admin-pass file> <node> <harper.js>`, optional `-` prefix | drop-ins (any location systemd reports, or `<unit>.d` beside the file), any other argument (operator arguments are never rewritten), quoting, `%` specifiers, `$` variables, line continuations, other `ExecStart=` prefixes, and a new path that would need quoting |
+| Both | the old tree is an npm-global install whose flair version can be read and is not newer than this CLI's | a plain tree or checkout (separately managed), an unreadable or newer version (a downgrade cannot be ruled out) |
+
+A unit that serves this CLI's tree with a different, existing node is treated
+as a deliberate pin: `flair init` leaves it, and init and `flair doctor` report it
+with the hand edit that would move it. The write is atomic and
+lands only over the bytes it was planned from — the file is read as a regular
+file (a symlink is refused, not followed) and re-checked immediately before the
+rename, so an edit saved in between refuses the write. On Linux, `flair init`
+then runs `systemctl --user daemon-reload` (which also loads any other pending
+edits to your user units) and checks what systemd loaded; if the reload fails or
+systemd does not hold the re-pointed unit, the previous bytes are restored and
+systemd is reloaded again, and a failure of that recovery is reported with the
+state it leaves. Every refusal names the file, what did not match, and the
+remedy — the paths to set by hand, an update of this CLI's tree, or a
+reinstall; after a hand edit, `flair restart` brings the instance up under
+the edited unit (macOS reloads the plist; on Linux, when the unit is proven to
+run the instance, it reloads systemd and restarts through the unit).
+
+The federation-sync shim (`~/.flair/bin/flair-federation-sync`) is re-pointed
+the same way: only its exec line changes, the scheduler unit is never
+rewritten, and the shim is refused when it is a symlink, changes between the
+read and the rename, or runs any command other than what
+`flair federation sync enable` writes (comment lines are not compared).
+`flair federation sync enable` regenerates it.
+
 ### Upgrade is a transaction
 
 As of flair#635, `flair upgrade` is install → restart → verify →

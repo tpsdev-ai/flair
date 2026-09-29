@@ -36,6 +36,7 @@ const diverged = assessTreeDivergence({
     unitPath: "/u/Library/LaunchAgents/ai.tpsdev.flair.abcd1234.plist",
     unitNodeBin: null,
     unitTree: OLD_TREE,
+    dropInPaths: [],
   },
   runningVersion: "0.57.0",
   currentNodeBin: "/n",

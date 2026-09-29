@@ -983,8 +983,10 @@ program
           // emits the pass-file launcher and never HDB_ADMIN_PASSWORD. It reuses
           // an existing valid ~/.flair/admin-pass, or proves the credential in
           // hand against this (now-healthy) instance and writes it 0600, or
-          // refuses without writing a plist. An already-adopted instance is left
-          // byte-for-byte unchanged rather than downgraded to the inline shape.
+          // refuses without writing a plist. An already-adopted instance is never
+          // regenerated or downgraded to the inline shape; only its runtime paths
+          // are re-pointed, when it is provably this instance's plist serving
+          // another npm-global tree (flair#2034 — see src/lib/service-repoint.ts).
           const outcome = await writeInitLaunchdPlist({
             dataDir,
             plistPath,
@@ -1006,6 +1008,8 @@ program
           }
           if (outcome.kind === "unchanged") {
             console.log("Launchd service already managed — plist unchanged ✓");
+            // A deliberate node pin is never changed by init; say so, with the hand edit.
+            if (outcome.pinnedNode) console.log(`  ${outcome.pinnedNode}`);
           } else if (outcome.kind === "repointed") {
             // flair#2034 §2: only the runtime paths changed; the running
             // process keeps its old tree until it is restarted.
@@ -1030,6 +1034,8 @@ program
           console.log("  It takes effect when systemd next starts the unit: flair restart");
         } else if (r.kind === "refused") {
           console.warn(`Systemd user unit left unchanged — ${r.detail}`);
+        } else if (r.kind === "pinned-node") {
+          console.log(`Systemd user unit left as it is — ${r.detail}`);
         }
       }
 
