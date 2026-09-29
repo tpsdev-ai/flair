@@ -220,7 +220,6 @@ import {
   type InstanceMatch,
 } from "./lib/daemon-liveness.js";
 import { readProcessStartTimeMs } from "./lib/process-start-time.js";
-import { acquireDataDirLock, dataDirLockPath, type DataDirLockDeps } from "./lib/data-dir-lock.js";
 import { readInitListenerRootPath } from "./lib/init-listener-environ.js";
 import {
   listenerFromLookup,
@@ -5125,7 +5124,7 @@ function inspectServingFlairPackage(pid: number): boolean | null {
 }
 
 /** Gather every piece of evidence the classifier needs, in one place. */
-async function gatherDaemonEvidence(port: number, dataDir: string): Promise<DaemonEvidence> {
+export async function gatherDaemonEvidence(port: number, dataDir: string): Promise<DaemonEvidence> {
   const dataDirUnsafe = checkDataDirSafe(dataDir);
   const pidfile = readPidfile(dataDir);
   const pidLiveness = pidfile.kind === "present" ? probePidLiveness(pidfile.pid) : null;
@@ -5232,7 +5231,7 @@ async function gatherDaemonEvidence(port: number, dataDir: string): Promise<Daem
  * this point. The start time is recorded faithfully for forward
  * compatibility and audit, not as a security gate here.
  */
-function writeDaemonSidecarFile(dataDir: string, pid: number, port: number, startTimeMs: number): void {
+function writeDaemonSidecar(dataDir: string, pid: number, port: number, startTimeMs = Date.now()): void {
   const sidecar = { pid, startTimeMs, port, flairVersion: __pkgVersion };
   const tmpPath = join(dataDir, `.flair-daemon.json.${process.pid}.${randomBytes(4).toString("hex")}.tmp`);
   // Write with mode 0600 so the tmp file is never world-readable (flair#1454
@@ -5247,35 +5246,6 @@ function writeDaemonSidecarFile(dataDir: string, pid: number, port: number, star
 }
 
 /**
- * Write the identity sidecar, serialised with the stop-time cleanup on the
- * data-directory lock (flair#2055). Throws when the lock cannot be taken: a
- * writer must not publish an identity record it could not serialise against a
- * concurrent cleanup (fail closed — an unheld lock is never permission to
- * write). The self-heal caller already treats a failed write as best-effort.
- *
- * `lockOverrides` is a test seam (a shorter deadline, say); production passes
- * none and uses the shared defaults.
- */
-export function writeDaemonSidecar(
-  dataDir: string,
-  pid: number,
-  port: number,
-  startTimeMs = Date.now(),
-  lockOverrides: Partial<DataDirLockDeps> = {},
-): void {
-  const lock = acquireDataDirLock(dataDir, lockOverrides);
-  if (lock.status === "acquired") {
-    try {
-      writeDaemonSidecarFile(dataDir, pid, port, startTimeMs);
-    } finally {
-      lock.release();
-    }
-    return;
-  }
-  throw new Error(`could not lock ${dataDirLockPath(dataDir)} to write the daemon sidecar: ${lock.reason}`);
-}
-
-/**
  * Remove the identity sidecar left behind by a stop (flair#2055).
  *
  * A sidecar that still names a pid which is CONFIRMED gone is a leftover, and
@@ -5287,35 +5257,28 @@ export function writeDaemonSidecar(
  *   2. a FRESH O_NOFOLLOW read taken just before the unlink must still name
  *      that pid. A sidecar another supervisor rewrote in between names a
  *      different pid and is left alone; a symlinked or malformed one reads as
- *      `unreadable` and is not removed either.
+ *      `unreadable` and is not removed either, because the re-read never
+ *      followed the link.
  *
- * The whole section runs under the data-directory lock (flair#2055 blocker 2),
- * so a concurrent writer can neither slip a fresh sidecar between the read and
- * the unlink nor have its sidecar removed: it either finishes before the read
- * (and is left alone) or waits and writes after the lock is released. When the
- * lock cannot be taken, NOTHING is removed — an unheld lock is never permission
- * to delete. Best-effort: a failure to unlink is reported, never fatal.
+ * There is no lock: the re-read narrows the window to the gap between the read
+ * and the unlink, and the only loser of that race is a start that rewrote the
+ * sidecar in the gap — a live daemon left with no sidecar, which the next
+ * status/stop/restart RECOVERS by self-heal (shouldAdoptMissingSidecar adopts
+ * the identity from the live process; see the recovery test). A lock would buy
+ * nothing here and add a crash-recovery hazard, so the design relies on the
+ * self-heal instead. A writer OUTSIDE flair could substitute a symlink after
+ * the final read; that is out of scope (same as any other path flair re-reads
+ * by name). Best-effort: a failure to unlink is reported, never fatal.
  */
-
-/** TEST-ONLY: fires inside the cleanup's locked section, after it decides to remove and before the unlink. */
-let sidecarCleanupBeforeUnlinkHook: (() => void) | null = null;
-
-export function setSidecarCleanupBeforeUnlinkHookForTests(fn: (() => void) | null): void {
-  sidecarCleanupBeforeUnlinkHook = fn;
-}
-
-/** The cleanup's critical section. MUST be called with the data-directory lock held. */
-function removeSidecarIfConfirmedDeadLocked(dataDir: string): void {
+export function removeStaleSidecarIfConfirmedDead(dataDir: string): void {
   const observed = readSidecar(dataDir);
   if (observed.kind !== "present") return;
   const observedPid = observed.pid;
   const observedPidLiveness = probePidLiveness(observedPid);
-  // Re-read under the lock: only the sidecar that still names the
-  // confirmed-dead pid is ours to remove.
+  // Re-read: only the sidecar that still names the confirmed-dead pid is ours
+  // to remove (a sidecar rewritten in the gap is left alone).
   const fresh = readSidecar(dataDir);
   if (!shouldRemoveSidecarAfterStop({ observedPid, observedPidLiveness, sidecar: fresh })) return;
-  // TEST-ONLY interpose point: a concurrent writer runs here in tests.
-  sidecarCleanupBeforeUnlinkHook?.();
   const sidecarPath = join(dataDir, "flair-daemon.json");
   try {
     unlinkSync(sidecarPath);
@@ -5323,24 +5286,6 @@ function removeSidecarIfConfirmedDeadLocked(dataDir: string): void {
     if (err?.code === "ENOENT") return; // raced with another remover
     console.error(`could not remove the stale daemon sidecar ${sidecarPath}: ${err?.code ?? err?.message}`);
   }
-}
-
-export function removeStaleSidecarIfConfirmedDead(
-  dataDir: string,
-  lockOverrides: Partial<DataDirLockDeps> = {},
-): void {
-  const lock = acquireDataDirLock(dataDir, lockOverrides);
-  if (lock.status === "acquired") {
-    try {
-      removeSidecarIfConfirmedDeadLocked(dataDir);
-    } finally {
-      lock.release();
-    }
-    return;
-  }
-  // Never delete on an unheld lock: the lock IS the serialisation against a
-  // concurrent writer (flair#2055 blocker 2).
-  console.error(`could not remove a stale daemon sidecar: ${lock.reason}`);
 }
 
 /**

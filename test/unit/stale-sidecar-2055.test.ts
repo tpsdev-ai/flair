@@ -22,6 +22,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gatherDaemonEvidence, readSidecar } from "../../src/cli.ts";
 
 const cliPath = join(import.meta.dirname, "..", "..", "src", "cli.ts");
 const repoRoot = join(import.meta.dirname, "..", "..");
@@ -280,6 +281,31 @@ describe("flair#2055 — a stale identity sidecar never refuses and never surviv
       expect(existsSync(sidecarPath())).toBe(false);
       expect(stdout + stderr).not.toMatch(/could not be verified/i);
       expect(stdout + stderr).toMatch(/was last written by Harper 99\.0\.0/i);
+    },
+    30_000,
+  );
+
+  test(
+    "a live daemon whose sidecar was removed is re-adopted and stop acts on it (the race outcome is recoverable)",
+    async () => {
+      const { pid, port } = await spawnHarperDecoy();
+      writeFileSync(join(dataDir, "hdb.pid"), `${pid}\n`);
+      // Simulate the outcome of a start racing the cleanup's re-read/unlink:
+      // the daemon is live and hdb.pid names it, but there is NO sidecar.
+      expect(existsSync(sidecarPath())).toBe(false);
+
+      // The next evidence read re-adopts the identity from the live process and
+      // rewrites the sidecar naming the live pid.
+      const evidence = await gatherDaemonEvidence(port, dataDir);
+      expect(evidence.identity).toEqual({ kind: "verified", pid });
+      expect(readSidecar(dataDir)).toMatchObject({ kind: "present", pid });
+
+      // And stop acts on it without refusing.
+      const { stdout, stderr, exitCode } = await runFlair(["stop", "--port", String(port)]);
+      expect(exitCode).toBe(0);
+      expect(stdout + stderr).toMatch(/Flair stopped/i);
+      expect(stdout + stderr).not.toMatch(/could not be verified/i);
+      expect(pidAlive(pid)).toBe(false);
     },
     30_000,
   );
