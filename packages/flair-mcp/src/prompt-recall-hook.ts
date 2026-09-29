@@ -206,12 +206,18 @@ function parseTimeoutMs(raw: string | undefined): number | undefined {
  * value may be bare or quoted, and a trailing `# comment` is ignored. Keys are
  * this module's own constants, never input.
  */
+// The value after `<key>` on its line: optional blanks, a colon, then a bare or quoted scalar. A fixed
+// pattern: no expression is ever built from the key.
+const CONFIG_VALUE_RE = /^[ \t]*:[ \t]*(?:"([^"\n]*)"|'([^'\n]*)'|([^\s#]+))/;
+
 export function readConfigValue(text: string | null | undefined, key: string): string | undefined {
   if (!text) return undefined;
-  const re = new RegExp(`^${key}[ \\t]*:[ \\t]*(?:"([^"\\n]*)"|'([^'\\n]*)'|([^\\s#]+))`, "m");
-  const m = text.match(re);
-  if (!m) return undefined;
-  return m[1] ?? m[2] ?? m[3];
+  for (const line of text.split("\n")) {
+    if (!line.startsWith(key)) continue;
+    const m = CONFIG_VALUE_RE.exec(line.slice(key.length));
+    if (m) return m[1] ?? m[2] ?? m[3];
+  }
+  return undefined;
 }
 
 /** `~/.flair/config.yaml`, or `config.yml` when only that exists. The home is

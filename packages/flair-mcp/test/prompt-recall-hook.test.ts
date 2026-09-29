@@ -380,6 +380,11 @@ describe("configuration: environment, then ~/.flair/config.yaml, then defaults",
     expect(readConfigValue("promptRecallMinScore : '0.75'\n", "promptRecallMinScore")).toBe("0.75");
   });
 
+  test("a longer key that shares the prefix is not read as the key", () => {
+    expect(readConfigValue("promptRecallMinScoreX: 0.9\n", "promptRecallMinScore")).toBeUndefined();
+    expect(readConfigValue("promptRecallMinScoreX: 0.9\npromptRecallMinScore: 0.4 # note\n", "promptRecallMinScore")).toBe("0.4");
+  });
+
   test("runRecall reads ~/.flair/config.yaml under the resolved HOME, and the environment still wins", async () => {
     writeConfig("promptRecallMinScore: 0.9\n");
     const suppressed = new FixtureStore();
