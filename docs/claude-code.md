@@ -84,6 +84,57 @@ Copy this into your project's `CLAUDE.md` (or `.claude/settings.md`, `AGENTS.md`
 
 This is a prompt-driven CLI setup: Claude must choose to run these commands. For MCP tools and automatic startup recall, run `flair init --agent my-project --client claude-code`, restart Claude Code, and verify the hook with `flair hook status --harness claude-code`; these prompt instructions do not guarantee automatic capture.
 
+## Hooks
+
+`@tpsdev-ai/flair-mcp` ships three Claude Code hooks. Each is a separate binary, each is optional, and each exits 0 on every failure, so none of them can block a session or a prompt.
+
+| Hook | Claude Code event | What it does | Install |
+|---|---|---|---|
+| `flair-session-start` | `SessionStart` | Loads bootstrap context (soul plus relevant memories) when a session opens. | `flair hook install` ([details](mcp-clients.md#auto-recall-on-session-start-optional-hook)) |
+| `flair-continuity-capture` | `PostToolUse` and `Stop` | Journals the agent's working state into the ephemeral memory tier, so the next session start can point at it with a one-line resume hint. | `flair hook install --continuity` |
+| `flair-prompt-recall` | `UserPromptSubmit` | Searches memory with each prompt and adds the relevant memories as context before the model answers. | By hand, below |
+
+### Per-prompt recall (`flair-prompt-recall`)
+
+Session-start recall runs once. Later in the session a prompt can bring up something the agent's memory already covers, such as a user's direction on a named technique or an earlier decision, and unless something searches at that moment the agent answers without it. `flair-prompt-recall` searches on every prompt:
+
+1. It builds a search query from the prompt, with markup, URLs and noise such as long ids stripped, bounded to 500 characters.
+2. It runs the same hybrid search as the MCP `memory_search` tool, signed with the agent's own Ed25519 key, so the results are limited to what that agent may read.
+3. It adds the hits whose score meets a relevance threshold (at most 4 by default), each with its id, date, score and a snippet, under a header that frames them as a signal, not an instruction, and tells the model to read the full memory before acting on it. The whole block is at most 2,000 characters.
+
+It never holds up a prompt. It skips prompts that are not questions: background task notifications, and acknowledgements too short to search ("ok, thanks"). It exits 0 on every path. When Flair is unreachable, slow or refuses the request, it adds no memories, only one line saying recall was unavailable for that prompt.
+
+`flair hook install` does not write this hook. Add it to `~/.claude/settings.json` by hand:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'out=$(FLAIR_AGENT_ID=my-project npx -y -p @tpsdev-ai/flair-mcp@<version> flair-prompt-recall 2>/dev/null) && printf %s \"$out\" || true'"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Swap `my-project` for your agent ID and `<version>` for `flair --version`. The `sh -c ... || true` wrapper is the same one the SessionStart hook uses: if the command cannot resolve at all, the prompt goes through with no output. Nothing in the CLI rewrites this entry, so update its `<version>` by hand after an upgrade.
+
+The hook runs on every prompt, so its latency is added to each turn. The recall is bounded by its time budget; npx's own start-up is not.
+
+| Setting | Environment variable | `~/.flair/config.yaml` key | Default |
+|---|---|---|---|
+| Relevance threshold, 0 to 1, on the search's absolute score | `FLAIR_PROMPT_RECALL_MIN_SCORE` | `promptRecallMinScore` | `0.62` |
+| Most memories added per prompt, 1 to 10 | `FLAIR_PROMPT_RECALL_MAX_HITS` | `promptRecallMaxHits` | `4` |
+| Time budget in milliseconds, 250 to 15000 | `FLAIR_PROMPT_RECALL_TIMEOUT_MS` | `promptRecallTimeoutMs` | `3000` |
+
+The environment wins over the config file, where the keys are top-level entries; a value that is missing or out of range falls through to the next source. The hook reads `FLAIR_AGENT_ID`, `FLAIR_URL` and `FLAIR_KEY_PATH` like the other hooks. It never uses `FLAIR_ADMIN_USER` or `FLAIR_ADMIN_PASSWORD`: without an agent key the request goes out unsigned, Flair refuses it, and the prompt gets the one "unavailable" line.
+
 ## Multiple Projects
 
 Create a separate agent per project:
