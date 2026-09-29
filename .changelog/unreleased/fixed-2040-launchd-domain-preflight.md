@@ -47,7 +47,10 @@
   `init`, `start` and `doctor` print a launchd check mark (including the
   legacy-migration lines) or "repaired" only when launchd's pid equals an
   identified serving pid. When the serving process cannot be identified, the
-  result says so and claims nothing. `flair start`'s fallback names the reason
+  result says so and claims nothing. After loading the job, `doctor --fix`
+  first waits, up to the startup budget, while launchd runs it and its port
+  does not answer yet: a job that is still starting is not judged early. Any
+  other observation is judged at once. `flair start`'s fallback names the reason
   instead of a raw `launchd start failed`. It starts directly only after the job
   is shown unloaded; otherwise it reports the uncertainty and exits non-zero.
   `flair restart` still stops first: its start leg decides only whether Flair

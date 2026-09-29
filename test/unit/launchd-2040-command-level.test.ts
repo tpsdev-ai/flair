@@ -62,12 +62,16 @@ const http = createServer((_q, r) => {
   r.writeHead(200, { "content-type": "application/json" });
   r.end('{"ok":true,"version":"0.57.0","buildCommit":null,"searchReady":true}');
 });
-http.listen(port, "127.0.0.1", () => {
+// A real Harper takes seconds to boot: STUB_START_DELAY_MS holds the bind and
+// the hdb.pid write back while the process itself is already running.
+const serve = () => http.listen(port, "127.0.0.1", () => {
   if (!process.env.STUB_NO_PIDFILE) writeFileSync(join(root, "hdb.pid"), String(process.pid));
   writeFileSync(join(root, "stub-port"), String(http.address().port));
   try { rmSync(join(root, "operations-server"), { force: true }); } catch {}
   createNetServer((s) => s.end()).listen(join(root, "operations-server"));
 });
+const startDelayMs = Number(process.env.STUB_START_DELAY_MS ?? 0);
+if (startDelayMs > 0) setTimeout(serve, startDelayMs); else serve();
 process.on("SIGTERM", () => {
   appendFileSync(join(root, "signals.log"), "SIGTERM " + process.pid + "\\n");
   try { if (readFileSync(join(root, "hdb.pid"), "utf-8").trim() === String(process.pid)) rmSync(join(root, "hdb.pid")); } catch {}
@@ -86,6 +90,8 @@ process.on("SIGTERM", () => {
 //   kickstart-fail/<l>    `kickstart` of <l> fails (5)
 //   bootstrap-no-spawn/<l> `bootstrap` loads <l> but starts no process
 //   stub-no-pidfile       the process a `bootstrap` starts writes no hdb.pid
+//   stub-start-delay      the process a `bootstrap` starts runs at once, but binds its
+//                         port and writes hdb.pid only after this many ms (a real boot)
 //   print-fail/<l>        `print gui/<uid>/<l>` fails (5): presence UNKNOWN
 const SHIM = `#!/bin/sh
 printf '%s\\n' "$*" >> "$SHIM_LOG"
@@ -135,6 +141,7 @@ case "$verb" in
     : > "$S/loaded/$l"
     [ -f "$S/bootstrap-no-spawn/$l" ] && exit 0
     if [ -f "$S/stub-no-pidfile" ]; then export STUB_NO_PIDFILE=1; fi
+    if [ -f "$S/stub-start-delay" ]; then export STUB_START_DELAY_MS="$(cat "$S/stub-start-delay")"; fi
     ROOTPATH="$STUB_ROOT" HTTP_PORT="$STUB_PORT" "$STUB_RUNTIME" "$STUB_HARPER" run . >/dev/null 2>&1 </dev/null &
     echo $! > "$S/pid/$l"
     exit 0 ;;
@@ -1378,6 +1385,59 @@ describe("flair#2040 r5 — doctor --fix: a failed repair puts a corrupt plist b
       const after = readFileSync(fx.plistPath);
       expect(after.length).toBe(corrupt.length);
       expect(Buffer.compare(after, corrupt)).toBe(0);
+    },
+    90_000,
+  );
+});
+
+describe("flair#2040 r6 — doctor --fix waits for the job it loaded to START before judging it", () => {
+  // A real launchd job has not bound its port or written hdb.pid when
+  // `kickstart` returns (flair#1827). Judging that first observation strictly
+  // reported every real hand-off as a failure and unloaded the job again —
+  // leaving nothing serving (the macOS runner's real-launchd lane, round 4+).
+  const SLOW_START_MS = 1_500;
+
+  test.skipIf(!isDarwin)(
+    "(r6a) regenerate: the job binds and writes hdb.pid 1.5 s after kickstart -> repaired and serving; not unloaded",
+    async () => {
+      writeFileSync(join(fx.state, "stub-start-delay"), String(SLOW_START_MS));
+
+      const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
+
+      expect(result).toMatchObject({ kind: "repaired" }); // whole result printed on failure
+      const managedPid = Number(readFileSync(join(fx.state, "pid", fx.label), "utf-8"));
+      expect(result.detail).toContain(`is running as process ${managedPid}`);
+      expect(hdbPid()).toBe(managedPid);
+      expect(alive(managedPid)).toBe(true);
+      expect(await healthy()).toBe(true);
+      expect(existsSync(fx.plistPath)).toBe(true);
+      expect(existsSync(join(fx.state, "loaded", fx.label))).toBe(true);
+      // Loaded once, never booted out after the load.
+      const verbs = mutatingCalls();
+      expect(verbs.filter((l) => l.startsWith("bootstrap"))).toEqual([`bootstrap ${GUI} ${fx.plistPath}`]);
+      expect(verbs.slice(verbs.indexOf(`kickstart ${GUI}/${fx.label}`)).filter((l) => l.startsWith("bootout"))).toEqual([]);
+    },
+    90_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(r6b) adopt: the job binds and writes hdb.pid 1.5 s after kickstart -> adopted, and the direct process is not restarted",
+    async () => {
+      writeFileSync(fx.plistPath, passFilePlist(fx.label));
+      const directPid = await startDirectStub();
+      writeFileSync(join(fx.state, "stub-start-delay"), String(SLOW_START_MS));
+
+      const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
+
+      expect(result).toMatchObject({ kind: "repaired" }); // whole result printed on failure
+      expect(result.detail).toContain("adopted the direct-spawned instance into launchd");
+      expect(signals()).toContain(`SIGTERM ${directPid}`);
+      const managedPid = Number(readFileSync(join(fx.state, "pid", fx.label), "utf-8"));
+      expect(managedPid).not.toBe(directPid);
+      expect(hdbPid()).toBe(managedPid);
+      expect(await healthy()).toBe(true);
+      // The direct stub and launchd's job only: no direct restart by a restore.
+      expect(stubStarts()).toEqual([directPid, managedPid]);
     },
     90_000,
   );

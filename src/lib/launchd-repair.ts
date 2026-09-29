@@ -45,7 +45,7 @@
 
 import { resolve } from "node:path";
 import type { LaunchdManagement } from "./launchd-management.js";
-import type { DaemonState, HealthResult } from "./daemon-liveness.js";
+import { healthIndicatesListener, type DaemonState, type HealthResult } from "./daemon-liveness.js";
 import { preserveHttpPortValue, preserveSecurePort } from "./http-bind.js";
 import {
   type LaunchdLoadability,
@@ -699,4 +699,69 @@ export async function decideAdoptStopWithWait(
     };
   }
   return { health: poll.value, decision, timedOut: poll.timedOut, waitedMs: poll.waitedMs, observations: poll.observations };
+}
+
+// ─── wait for the job just loaded to START, then judge it strictly (flair#2040) ─
+//
+// `doctor --fix` claims "repaired" only through the STRICT verifier: launchd's
+// pid must equal the IDENTIFIED serving pid. When `kickstart` returns, the job
+// launchd just started has not bound its port or written hdb.pid yet
+// (flair#1827), so its first observation is "unverified" — a job that is still
+// STARTING, not evidence against it. Judging that single observation reported
+// every real hand-off as a failure and unloaded the job again, leaving nothing
+// serving (flair#2040, round 6).
+
+/** One observation of the job just loaded: the port's health, then launchd management. */
+export interface LaunchdServingObservation {
+  /** The instance's /Health probe — taken FIRST, so a port that answers is visible to the management read's lsof. */
+  health: HealthResult;
+  management: LaunchdManagement;
+}
+
+/**
+ * Still starting: launchd runs the job (it reported a pid), nothing identifies
+ * the serving process yet, and nothing answers HTTP on the port. Every other
+ * observation is final: verified, detached (launchd reports no pid, or another
+ * process serves), or a port that answers while the serving process still
+ * cannot be identified.
+ */
+export function launchdJobStillStarting(o: LaunchdServingObservation): boolean {
+  return o.management.state === "unverified" && !healthIndicatesListener(o.health);
+}
+
+export interface LaunchdServingWaitResult {
+  /** The FINAL observation — the caller judges it with verifyLaunchdManagement. */
+  observation: LaunchdServingObservation;
+  /** The management detail, naming the wait when it timed out. */
+  detail: string;
+  timedOut: boolean;
+  waitedMs: number;
+  observations: number;
+}
+
+/**
+ * Poll `observe` while the job is still starting (launchdJobStillStarting), up
+ * to `deadlineMs`, and return the final observation. It decides nothing: the
+ * caller applies the strict verifier UNCHANGED to what this returns, so a job
+ * that never serves still fails — at the deadline, with the wait named.
+ */
+export async function awaitLaunchdJobServing(opts: {
+  observe: () => LaunchdServingObservation | Promise<LaunchdServingObservation>;
+  deadlineMs: number;
+  intervalMs?: number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}): Promise<LaunchdServingWaitResult> {
+  const poll = await pollUntil<LaunchdServingObservation>({
+    observe: opts.observe,
+    until: (o) => !launchdJobStillStarting(o),
+    deadlineMs: opts.deadlineMs,
+    intervalMs: opts.intervalMs,
+    now: opts.now,
+    sleep: opts.sleep,
+  });
+  const detail = poll.timedOut
+    ? `${poll.value.management.detail} (waited ${poll.waitedMs}ms for the launchd job to start serving; its port still did not answer: ${poll.value.health.kind})`
+    : poll.value.management.detail;
+  return { observation: poll.value, detail, timedOut: poll.timedOut, waitedMs: poll.waitedMs, observations: poll.observations };
 }

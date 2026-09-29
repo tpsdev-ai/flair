@@ -167,6 +167,7 @@ import {
   mapRepairThrow,
   decideAdoptStopWithWait,
   verifyAdoptServingWithWait,
+  awaitLaunchdJobServing,
   domainPreflightRefusal,
   type AdminPassAvailability,
   type LaunchdRepairResult,
@@ -6515,8 +6516,9 @@ function planLaunchdRepairFor(dataDir: string, port: number): {
  *      if it cannot be shown gone, stop here, before the direct process is
  *      touched), clean-stop the direct process (adopt), write the plist, load
  *      it with commands that NAME the probed domain (bootstrap/kickstart
- *      gui/<uid>), and verify STRICTLY: launchd's pid is the IDENTIFIED
- *      serving pid (verifyLaunchdManagement), and on adopt the serving pid
+ *      gui/<uid>), wait (bounded) while the job is still starting, and verify
+ *      STRICTLY: launchd's pid is the IDENTIFIED serving pid
+ *      (verifyLaunchdManagement), and on adopt the serving pid
  *      changed and the old one is dead (flair#1684/#1685). ANY failure here
  *      goes through restoreAfterFailedRepair.
  *
@@ -6890,10 +6892,22 @@ async function commitLaunchdRepair(p: PreparedLaunchdRepair): Promise<LaunchdRep
     done.loaded = true;
     loadLaunchdJob({ run: realLaunchctlCommand, domain: p.domain, label: p.label, plistPath: p.plistPath, strict: true });
     // 5. Verify (fail-loud, STRICT: launchd's pid must be the IDENTIFIED
-    //    serving pid — an unidentified one is not proof, flair#2040).
-    const after = observeLaunchdManagement(p.dataDir, p.port);
+    //    serving pid — an unidentified one is not proof, flair#2040). When
+    //    kickstart returns, the job has not bound its port or written hdb.pid
+    //    yet (flair#1827): wait, bounded, while it is still STARTING (launchd
+    //    runs it and nothing answers its port), then judge the final
+    //    observation. Any other observation is judged at once.
+    const settled = await awaitLaunchdJobServing({
+      observe: async () => {
+        // Health first: a port that answers is then visible to the lsof read.
+        const health = await probeHealth(p.port);
+        return { health, management: observeLaunchdManagement(p.dataDir, p.port) };
+      },
+      deadlineMs: STARTUP_TIMEOUT_MS,
+    });
+    const after = settled.observation.management;
     const verdict = verifyLaunchdManagement(after);
-    if (!verdict.verified) throw new Error(after.detail);
+    if (!verdict.verified) throw new Error(settled.detail);
     // On the adopt arm, port health alone is the green light that lied in
     // #1684: the pre-adopt direct process answered the port the whole time
     // the launchd job was failing to start. Prove the launchd job itself
