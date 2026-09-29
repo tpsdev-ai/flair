@@ -2,7 +2,7 @@ import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
-import { localInstanceId } from "./instance-identity.js";
+import { applyOriginatorInstanceId, resolveStoredRow } from "./originator-instance.js";
 import {
   buildProvenance,
   makeAuthGate,
@@ -14,6 +14,8 @@ import {
   FORBIDDEN,
   UNAUTH,
 } from "./record-type-kit.js";
+import { stripServerStampedFields } from "./memory-declared-attributes.js";
+import { isSemanticPatch, RELATIONSHIP_SEMANTIC_FIELDS } from "./provenance.js";
 import { RECORD_TYPES } from "./record-types.js";
 
 // Parameterized from RECORD_TYPES.Relationship (record-types slice 2,
@@ -133,6 +135,51 @@ export class Relationship extends (databases as any).flair.Relationship {
   async patch(content: any, query?: any) {
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
+    // flair#1960 r2: PATCH was the one Relationship writer that never touched
+    // `provenance`. The schema declares the field writable, so a caller could
+    // PATCH a forged `verified.agentId`/`verified.timestamp` straight onto the
+    // row, and stripping alone would let a stored value ride through. Mirror the
+    // Memory/put() contract: strip any body-supplied server-stamped field (so a
+    // body can never SET a `verified.*` field) and, when the patch changes the
+    // relationship's semantic identity (subject/predicate/object), re-stamp
+    // provenance from the resolved auth and ONE server clock read. A
+    // metadata-only patch (confidence/source/validTo) keeps the stored,
+    // previously-stamped blob. Claim inputs are captured before the guard so a
+    // `claimed.model`/`claimed.client` on the body is folded in like put().
+    const claimInputs = { model: (content as any)?.model, claimedClient: (content as any)?.claimedClient };
+    // flair#718 authorship-provenance — `claimedClient` is a WRITE-BODY-ONLY
+    // passthrough, already folded into `provenance.claimed.client` by
+    // buildProvenance (below, on a semantic PATCH). Delete it before delegating
+    // so it is NEVER persisted as a top-level row field — the SAME contract as
+    // put(), which deletes it before the table write. Without this the PATCH
+    // body's `claimedClient` rode through `super.patch()` onto the row.
+    delete content.claimedClient;
+    stripServerStampedFields(content);
+    // flair#1960 r3 + flair#1965 r2/r3: resolve the stored row ONCE (the shared
+    // resolveStoredRow), by the URL-BOUND target id — refusing a body `id` that
+    // disagrees with the address and refusing a lookup that FAILS (never read as
+    // "no stored row"). This ONE resolved row drives BOTH rule sets: the
+    // semantic-PATCH provenance decision below AND the originatorInstanceId
+    // create/update rule. The previous `.catch(() => null)` turned a read ERROR
+    // into "no stored row"; isSemanticPatch returns false for `null`, so the
+    // patch fell through to `super.patch()` as a METADATA-ONLY write and kept a
+    // legacy stored blob — including a caller-chosen `verified.timestamp` — in
+    // place. A read error is not a missing row: without the stored record we
+    // cannot tell a semantic PATCH from a metadata-only one, so fail closed and
+    // refuse rather than degrade to a blob-preserving decision.
+    const resolvedStored = await resolveStoredRow(this, "Relationship", content, () => super.get());
+    if (resolvedStored.denial) return resolvedStored.denial;
+    const existing = resolvedStored.row;
+    if (isSemanticPatch(content, existing, RELATIONSHIP_SEMANTIC_FIELDS)) {
+      const auth = await resolveAgentAuth((this as any).getContext?.());
+      content.provenance = buildProvenance(auth, content.createdAt ?? existing?.createdAt, claimInputs);
+    }
+    // flair#1965 r2: an EXISTING row keeps its stored originatorInstanceId (a
+    // body value is dropped); a PATCH whose URL target has no stored row is a
+    // CREATE and must stamp the local id (Harper's patch path does not require
+    // an existing row). The row is resolved by the URL-BOUND target id, never a
+    // body `id`. See resources/originator-instance.ts.
+    await applyOriginatorInstanceId(content, existing);
     return super.patch(content, query);
   }
 
@@ -214,14 +261,17 @@ export class Relationship extends (databases as any).flair.Relationship {
     // persisted as a row field.
     delete content.claimedClient;
 
-    // Write-time originatorInstanceId stamp (federation-edge-hardening slice
-    // 1) — see resources/Memory.ts's stampOriginatorInstanceId doc for the
-    // full contract. No-op if already set (never fires for a genuine local
-    // write; a federation-synced record never reaches this method — the
-    // merge path writes via the raw table object, bypassing this class).
-    if (content.originatorInstanceId == null) {
-      content.originatorInstanceId = await localInstanceId();
-    }
+    // Write-time originatorInstanceId (federation-edge-hardening slice 1): a
+    // CREATE (no stored row) stamps this instance's own id, ignoring any body
+    // value; an UPDATE keeps the STORED value — a body value neither replaces
+    // nor clears it. Relationship has no post(), so put() carries both. See
+    // resources/originator-instance.ts for the full contract (the federation
+    // merge is the raw table writer and never takes a request-body field).
+    // The row is resolved by the URL-BOUND target id, never a body `id` (Harper
+    // writes to the URL target); a mismatch or a failed read refuses the write.
+    const resolvedOriginRow = await resolveStoredRow(this, "Relationship", content, () => super.get());
+    if (resolvedOriginRow.denial) return resolvedOriginRow.denial;
+    await applyOriginatorInstanceId(content, resolvedOriginRow.row);
 
     return super.put(content);
   }

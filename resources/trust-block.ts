@@ -32,8 +32,8 @@
  *
  * ─── `claimed.*` is surfaced as a BOOLEAN only ──────────────────────────────
  * `hasClaimedProvenance` reports only WHETHER the record carries a self-
- * reported `claimed` sub-object — never its content. Raw `claimed.model` /
- * `claimed.client` values are self-reported and unverified (resources/
+ * reported `claimed.model` / `claimed.client` — never its content. Raw
+ * `claimed.*` values are self-reported and unverified (resources/
  * provenance.ts); exposing them as authoritative trust evidence would defeat
  * the verified-vs-claimed distinction the block exists to draw. The advisory
  * "there is a self-report here" bit is enough for the reader to weight it.
@@ -131,9 +131,15 @@ export interface TrustBlock {
   /** `provenance.verified.timestamp` — server-clock write time, or null. */
   verifiedAt: string | null;
   /**
-   * Whether the record carries a self-reported `provenance.claimed` sub-object
-   * (model/client). ADVISORY ONLY, zero authority — the content is never
-   * surfaced here (see module doc).
+   * Whether the record carries a self-reported authorship claim —
+   * `provenance.claimed.model` or `claimed.client` (model/client). ADVISORY
+   * ONLY, zero authority — the content is never surfaced here (see module
+   * doc). `claimed.createdAt` (flair#1960) does NOT set this: it is present on
+   * essentially every new row (the builder omits the `claimed` object only when
+   * `createdAt`, `model` and `client` are ALL absent after sanitization, e.g. a
+   * body with no/control-only `createdAt` and no model/client claim), so
+   * counting it would make the bit almost always true and meaningless. It flags
+   * the OPTIONAL authorship claims (model/client) only.
    */
   hasClaimedProvenance: boolean;
 
@@ -257,7 +263,14 @@ export function buildTrustBlock(record: TrustableRecord, now: number = Date.now(
           verifiedAt = typeof p.verified.timestamp === "string" ? p.verified.timestamp : null;
         }
         // Boolean only — the self-reported content is deliberately NOT surfaced.
-        hasClaimedProvenance = p.claimed != null && typeof p.claimed === "object";
+        // flair#1960: `claimed.createdAt` is on every new row, so it must not
+        // count here or the bit would always read true; it flags the optional
+        // model/client authorship claims only.
+        const claimed = p.claimed;
+        hasClaimedProvenance =
+          claimed != null &&
+          typeof claimed === "object" &&
+          (typeof claimed.model === "string" || typeof claimed.client === "string");
       }
     } catch {
       // Malformed provenance → treated as unattributed, never throws.

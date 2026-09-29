@@ -29,6 +29,7 @@ import { randomBytes } from "node:crypto";
 import { TOOLS, listToolDefs, type ResolvedAgent } from "./mcp-tools.js";
 import { checkToolArguments, withoutNullArguments } from "./mcp-tool-arguments.js";
 import { agentRecordIsAdmin } from "./agent-admin.js";
+import { stampOriginatorOnCreate } from "./originator-instance.js";
 import { resolveVersion } from "./version.js";
 
 // The MCP protocol revision we implement (initialize handshake).
@@ -243,7 +244,9 @@ async function jitProvisionPrincipal(sub: string): Promise<string> {
   const now = new Date().toISOString();
   const principalId = `agt_mcp_${sub.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 24)}_${randomBytes(4).toString("hex")}`;
 
-  await (databases as any).flair.Agent.put({
+  // flair#1965 r2: this is a raw Agent create (it bypasses the Agent resource's
+  // post()), so stamp the local instance id here — every create path carries it.
+  const principalRow: any = {
     id: principalId,
     name: principalId,
     displayName: principalId,
@@ -257,8 +260,9 @@ async function jitProvisionPrincipal(sub: string): Promise<string> {
     admin: false,
     createdAt: now,
     updatedAt: now,
-  });
-
+  };
+  await stampOriginatorOnCreate(principalRow);
+  await (databases as any).flair.Agent.put(principalRow);
   await (databases as any).flair.Credential.put({
     id: `cred_mcp_${randomBytes(8).toString("hex")}`,
     principalId,

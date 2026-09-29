@@ -4,8 +4,9 @@ import { readAllInstanceRows } from "./instance-identity-rows.js";
 /**
  * ─── Local instance identity (federation-edge-hardening slice 1) ────────────
  *
- * The write-time `originatorInstanceId` stamp (Memory.ts/Soul.ts/Agent.ts/
- * Relationship.ts post()/put()) needs to know THIS instance's own federation
+ * The write-time `originatorInstanceId` stamp (resources/originator-instance.ts,
+ * called by Memory.ts/Soul.ts/Agent.ts/Relationship.ts post()/put()/patch())
+ * needs to know THIS instance's own federation
  * identity — the same `id` FederationInstance.get() (resources/Federation.ts)
  * finds-or-creates on first boot and persists in the `Instance` table
  * (schemas/federation.graphql). Exactly one row is expected in a given

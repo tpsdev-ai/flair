@@ -685,6 +685,20 @@ export function restartSystemdUnits(
   }
 }
 
+/** Stop the unit itself so Restart= cannot respawn a writer during restore. */
+export function stopSystemdUnits(
+  units: SystemdUnitRef[],
+  exec: ExecFile = execFileSync as ExecFile,
+): void {
+  for (const unit of units) {
+    exec("systemctl", unit.scope === "user" ? ["--user", "stop", unit.name] : ["stop", unit.name], {
+      encoding: "utf-8",
+      timeout: 120_000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  }
+}
+
 function copyPreserved(fromTree: string, toTree: string, names: string[]): void {
   for (const name of names) {
     const src = join(fromTree, name);
@@ -809,24 +823,26 @@ export async function applyPlainTreeUpgrade(
 }
 
 /**
- * Put `.upgrade-prev` back at the live tree path. Used by upgrade rollback
- * when restart or verify fails after a swap.
- *
- * Returns whether a previous tree was restored. `false` means there was
- * nothing to restore (swap never completed) — the caller must say so.
+ * Return restored: false when previousDir is absent. Otherwise attempt to
+ * move the live path to .upgrade-failed when it exists, then move previousDir
+ * to the live path. A restored: true result also reports whether the live path moved.
  */
-export function restorePlainTreePrevious(plan: Pick<PlainTreeUpgradePlan, "treeDir" | "previousDir">): boolean {
+export function restorePlainTreePrevious(plan: Pick<PlainTreeUpgradePlan, "treeDir" | "previousDir">):
+  | { restored: false }
+  | { restored: true; liveTreeSetAside: boolean } {
   const treeDir = canonicalPath(plan.treeDir);
   const previousDir = plan.previousDir;
-  if (!existsSync(previousDir)) return false;
+  if (!existsSync(previousDir)) return { restored: false };
 
   const failedDir = treeSibling(treeDir, UPGRADE_FAILED_SUFFIX);
+  let liveTreeSetAside = false;
   if (existsSync(treeDir)) {
     if (existsSync(failedDir)) rmSync(failedDir, { recursive: true, force: true });
     renameSync(treeDir, failedDir);
+    liveTreeSetAside = true;
   }
   renameSync(previousDir, treeDir);
-  return true;
+  return { restored: true, liveTreeSetAside };
 }
 
 /** Drop the displaced previous tree after a successful verify (saves a second copy). */
@@ -898,6 +914,6 @@ export function decidePlainTreeRollback(previousDirExists: boolean): PlainTreeRo
   if (previousDirExists) return { kind: "restore" };
   return {
     kind: "skip",
-    reason: "no previous tree to restore (the live tree was not swapped)",
+    reason: "no previous tree to restore",
   };
 }

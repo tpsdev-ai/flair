@@ -15,7 +15,7 @@
  * doc comment for why that matters — bun runs test/unit/ in one process and
  * dynamic imports are cached by resolved path).
  */
-import { describe, it, expect, beforeEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, mock, spyOn } from "bun:test";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 
@@ -37,13 +37,33 @@ function matchesCondition(record: any, cond: any): boolean {
 
 class BaseRelationship {
   async get(target?: any) {
-    const id = typeof target === "string" ? target : target?.id;
+    const id = typeof target === "string" ? target : (target?.id ?? (this as any)._targetId);
     return relationshipStore.get(id) ?? null;
   }
-  async put(content: any) {
-    relationshipStore.set(content.id, { ...content });
-    return { ...content };
+  // Real Harper PATCH merges the body into the stored row; the id comes from the
+  // URL, which the double models as an explicit `_targetId` on the instance.
+  async patch(content: any) {
+    const id = content?.id ?? (this as any)._targetId;
+    const merged = { ...(relationshipStore.get(id) ?? {}), ...content };
+    relationshipStore.set(id, merged);
+    return { ...merged };
   }
+  // Real Harper's table is statically callable
+  // (`databases.flair.Relationship.get(id)`), which is how
+  // resources/originator-instance.ts's resolveStoredRow reads the pre-existing
+  // row for the create/update decision.
+  static async get(id: any) {
+    return relationshipStore.get(id) ?? null;
+  }
+  getId() { return (this as any)._targetId; }
+  async put(content: any) {
+    const id = this.getId() ?? content.id;
+    const rec = { ...content, id };
+    relationshipStore.set(id, rec);
+    return rec;
+  }
+  // By-id PATCH merge (Harper binds the resource instance to the URL id;
+  // Relationship.patch() delegates via `super.patch(content, query)`).
   async delete(id: any) {
     relationshipStore.delete(id);
     return { ok: true };
@@ -178,26 +198,19 @@ describe("Relationship.get() — anonymous denied, owner-scoped for non-admin, u
   });
 });
 
-// ─── federation-edge-hardening slice 1: write-time originatorInstanceId stamp ──
-// See resources/Memory.ts's stampOriginatorInstanceId doc for the full
-// contract. Relationship.ts only exposes put() as a write path (no post()
-// override — same idiom as Memory.ts's HTTP-reachable-only-via-PUT note).
-describe("federation-edge-hardening slice 1 — Relationship.put() write-time originatorInstanceId stamp", () => {
-  it("stamps the local instance id on a fresh local write", async () => {
+// ─── federation-edge-hardening slice 1 / flair#1965: originatorInstanceId stamp ──
+// See resources/originator-instance.ts for the full contract. Relationship has no
+// post(), so put() carries both create and update: a body value on create is
+// replaced by the local id; on update the stored value stands.
+describe("federation-edge-hardening slice 1 / flair#1965 — Relationship originatorInstanceId is server-stamped", () => {
+  it("CREATE (put, no stored row) stamps the local instance id", async () => {
     instanceRow = { id: "flair_local_test" };
     const r = makeRelationship(agentCtx("agent-1"));
     const res: any = await r.put({ id: "rel-fresh", subject: "nathan", predicate: "manages", object: "flint" });
     expect(res.originatorInstanceId).toBe("flair_local_test");
   });
 
-  it("stamps null when this instance has no Instance row yet — never invents one", async () => {
-    instanceRow = null;
-    const r = makeRelationship(agentCtx("agent-1"));
-    const res: any = await r.put({ id: "rel-no-instance", subject: "nathan", predicate: "manages", object: "flint" });
-    expect(res.originatorInstanceId).toBeNull();
-  });
-
-  it("THE KEY TEST — a relationship already carrying another instance's originatorInstanceId is NEVER clobbered with the local id", async () => {
+  it("CREATE (put) IGNORES a request-body originatorInstanceId and stamps the local id", async () => {
     instanceRow = { id: "flair_local_test" };
     const r = makeRelationship(agentCtx("agent-1"));
     const res: any = await r.put({
@@ -207,8 +220,53 @@ describe("federation-edge-hardening slice 1 — Relationship.put() write-time or
       object: "flint",
       originatorInstanceId: "instance-B",
     });
+    expect(res.originatorInstanceId).toBe("flair_local_test");
+    expect(res.originatorInstanceId).not.toBe("instance-B");
+  });
+
+  it("stamps null when this instance has no Instance row yet — never invents one", async () => {
+    instanceRow = null;
+    const r = makeRelationship(agentCtx("agent-1"));
+    const res: any = await r.put({ id: "rel-no-instance", subject: "nathan", predicate: "manages", object: "flint" });
+    expect(res.originatorInstanceId).toBeNull();
+  });
+
+  it("UPDATE (put) with a body value LEAVES the stored value — a client cannot change it", async () => {
+    instanceRow = { id: "flair_local_test" };
+    relationshipStore.set("rel-upd", {
+      id: "rel-upd", agentId: "agent-1", subject: "nathan", predicate: "manages", object: "flint",
+      originatorInstanceId: "instance-B",
+    });
+    const r = makeRelationship(agentCtx("agent-1"));
+    const res: any = await r.put({
+      id: "rel-upd", subject: "nathan", predicate: "manages", object: "flint",
+      originatorInstanceId: "instance-attacker",
+    });
     expect(res.originatorInstanceId).toBe("instance-B");
-    expect(res.originatorInstanceId).not.toBe("flair_local_test");
+    expect(res.originatorInstanceId).not.toBe("instance-attacker");
+  });
+
+  it("UPDATE (put) that OMITS the field leaves the stored value", async () => {
+    instanceRow = { id: "flair_local_test" };
+    relationshipStore.set("rel-upd2", {
+      id: "rel-upd2", agentId: "agent-1", subject: "nathan", predicate: "manages", object: "flint",
+      originatorInstanceId: "instance-B",
+    });
+    const r = makeRelationship(agentCtx("agent-1"));
+    const res: any = await r.put({ id: "rel-upd2", subject: "nathan", predicate: "manages", object: "flint" });
+    expect(res.originatorInstanceId).toBe("instance-B");
+  });
+
+  it("PATCH cannot set or clear originatorInstanceId — the stored value stands", async () => {
+    instanceRow = { id: "flair_local_test" };
+    relationshipStore.set("rel-patch", {
+      id: "rel-patch", agentId: "agent-1", subject: "nathan", predicate: "manages", object: "flint",
+      originatorInstanceId: "instance-B",
+    });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r._targetId = "rel-patch";
+    await r.patch({ originatorInstanceId: "instance-attacker" });
+    expect(relationshipStore.get("rel-patch").originatorInstanceId).toBe("instance-B");
   });
 });
 
@@ -334,14 +392,28 @@ describe("relationship-write-path — Relationship.put() write-time provenance s
     expect(prov.verified.agentId).toBeNull();
   });
 
-  it("uses the SAME shape as Memory's provenance — {v, verified:{agentId,timestamp,receivedAt}} — no Relationship-specific format", async () => {
+  it("uses the SAME shape as Memory's provenance — {v, verified:{agentId,timestamp,receivedAt}, claimed?} — no Relationship-specific format", async () => {
     const r = makeRelationship(agentCtx("agent-1"));
     const res: any = await r.put({ id: "rel-prov-3", subject: "nathan", predicate: "manages", object: "flint" });
     const prov = JSON.parse(res.provenance);
-    expect(Object.keys(prov).sort()).toEqual(["v", "verified"]);
-    // flair#1940 A4: the shared buildProvenance() now also stamps the server's
-    // receipt time; Relationship reuses it as-is, so the shape stays identical.
+    // flair#1960: every write carries claimed.createdAt, so `claimed` is present
+    // — still the identical shape Memory writes, no Relationship-specific format.
+    expect(Object.keys(prov).sort()).toEqual(["claimed", "v", "verified"]);
     expect(Object.keys(prov.verified).sort()).toEqual(["agentId", "receivedAt", "timestamp"]);
+  });
+
+  it("flair#1960: a caller-supplied past createdAt is recorded as claimed.createdAt while verified.timestamp is the server clock", async () => {
+    const before = Date.now();
+    const past = "2001-01-01T00:00:00.000Z";
+    const r = makeRelationship(agentCtx("agent-1"));
+    const res: any = await r.put({ id: "rel-prov-backdated", subject: "nathan", predicate: "manages", object: "flint", createdAt: past });
+    const prov = JSON.parse(res.provenance);
+    expect(res.createdAt).toBe(past);
+    expect(prov.claimed.createdAt).toBe(past);
+    expect(prov.verified.timestamp).not.toBe(past);
+    const stamped = Date.parse(prov.verified.timestamp);
+    expect(stamped).toBeGreaterThanOrEqual(before - 5000);
+    expect(stamped).toBeLessThanOrEqual(Date.now() + 5000);
   });
 
   // ─── migration-equivalence (same discipline as flair#684's usageCount) ──────
@@ -382,6 +454,177 @@ describe("relationship-write-path — Relationship.put() write-time provenance s
   });
 });
 
+// ─── flair#1960 r2 — Relationship.patch() forge-proof provenance ───────────
+describe("flair#1960 r2 — Relationship.patch() derives provenance from the server, never the body", () => {
+  it("a semantic PATCH on a backdated-legacy row re-stamps verified.* and a FORGED verified.agentId/timestamp never lands", async () => {
+    const before = Date.now();
+    relationshipStore.set("rel-prov-patch", {
+      id: "rel-prov-patch", agentId: "agent-1", subject: "nathan", predicate: "manages", object: "flint",
+      createdAt: "2001-01-01T00:00:00.000Z",
+      provenance: JSON.stringify({ v: 1, verified: { agentId: "agent-1", timestamp: "2001-01-01T00:00:00.000Z" } }),
+    });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r._targetId = "rel-prov-patch";
+    await r.patch({
+      subject: "nathan-renamed", // semantic change
+      provenance: JSON.stringify({ v: 1, verified: { agentId: "attacker", timestamp: "1999-01-01T00:00:00.000Z" } }),
+    });
+    const stored = relationshipStore.get("rel-prov-patch");
+    expect(stored.subject).toBe("nathan-renamed"); // control: the patch landed
+    const prov = JSON.parse(stored.provenance);
+    expect(prov.verified.agentId).toBe("agent-1"); // forged agentId did not land
+    expect(prov.verified.timestamp).not.toBe("1999-01-01T00:00:00.000Z"); // forged timestamp did not land
+    expect(prov.verified.timestamp).not.toBe("2001-01-01T00:00:00.000Z"); // legacy stored value not carried forward
+    const stamped = Date.parse(prov.verified.timestamp);
+    expect(stamped).toBeGreaterThanOrEqual(before - 5000);
+    expect(stamped).toBeLessThanOrEqual(Date.now() + 5000);
+    expect(prov.verified.timestamp).toBe(prov.verified.receivedAt);
+  });
+
+  it("a metadata-only PATCH strips a forged provenance but keeps the stored blob", async () => {
+    const legacy = JSON.stringify({ v: 1, verified: { agentId: "agent-1", timestamp: "2001-01-01T00:00:00.000Z" } });
+    relationshipStore.set("rel-prov-patch-meta", {
+      id: "rel-prov-patch-meta", agentId: "agent-1", subject: "a", predicate: "b", object: "c", confidence: 1.0, provenance: legacy,
+    });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r._targetId = "rel-prov-patch-meta";
+    await r.patch({ confidence: 0.4, provenance: JSON.stringify({ v: 1, verified: { agentId: "attacker", timestamp: "1999-01-01T00:00:00.000Z" } }) });
+    const stored = relationshipStore.get("rel-prov-patch-meta");
+    expect(stored.confidence).toBe(0.4); // control: the patch landed
+    expect(stored.provenance).toBe(legacy); // no semantic change ⇒ stored blob preserved, forged value never landed
+  });
+});
+
+// ─── flair#1960 r3 — Relationship.patch() fail-closed read + claimedClient strip ──
+describe("flair#1960 r3 — Relationship.patch() controls", () => {
+  it("a stored-row read ERROR refuses the PATCH (500) and never delegates to the by-id store write (super.patch)", async () => {
+    const legacy = JSON.stringify({ v: 1, verified: { agentId: "agent-1", timestamp: "2001-01-01T00:00:00.000Z" } });
+    relationshipStore.set("rel-readfail", {
+      id: "rel-readfail", agentId: "agent-1", subject: "nathan", predicate: "manages", object: "flint", provenance: legacy,
+    });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r._targetId = "rel-readfail";
+    // r4/merge: the semantic-PATCH decision and the originatorInstanceId
+    // create/update decision share ONE stored-row read — the #1965
+    // resolveStoredRow, which reads through the URL-bound target id via the
+    // table reader (BaseRelationship.get). Make THAT read fail: the write must
+    // be refused, never degraded to a metadata-only, blob-preserving decision.
+    const getSpy = spyOn(BaseRelationship, "get").mockImplementation(async () => {
+      throw new Error("simulated stored-row read failure");
+    });
+    let superPatchCalls = 0;
+    const realPatch = BaseRelationship.prototype.patch;
+    const patchSpy = spyOn(BaseRelationship.prototype, "patch").mockImplementation(function (this: any, content: any) {
+      superPatchCalls += 1;
+      return realPatch.call(this, content);
+    });
+    try {
+      const res = await r.patch({ subject: "nathan-renamed" });
+      expect(superPatchCalls).toBe(0); // never delegated to the blob-preserving by-id store write
+      expect(res instanceof Response).toBe(true);
+      expect((res as Response).status).toBe(500);
+      await expect((res as Response).json()).resolves.toMatchObject({ error: "stored_row_lookup_failed" });
+      expect(relationshipStore.get("rel-readfail").subject).toBe("nathan"); // nothing landed
+      expect(relationshipStore.get("rel-readfail").provenance).toBe(legacy);
+    } finally {
+      getSpy.mockRestore();
+      patchSpy.mockRestore();
+    }
+  });
+
+  it("a semantic PATCH body's claimedClient is folded into claimed.client and NEVER persisted as a row field", async () => {
+    relationshipStore.set("rel-cc-sem", {
+      id: "rel-cc-sem", agentId: "agent-1", subject: "a", predicate: "b", object: "c", createdAt: "2001-01-01T00:00:00.000Z",
+    });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r._targetId = "rel-cc-sem";
+    await r.patch({ subject: "a-renamed", claimedClient: "codex" }); // semantic change
+    const stored = relationshipStore.get("rel-cc-sem");
+    expect(stored.subject).toBe("a-renamed"); // control: the patch landed
+    expect("claimedClient" in stored).toBe(false); // never a top-level row field
+    const prov = JSON.parse(stored.provenance);
+    expect(prov.claimed.client).toBe("codex"); // folded into provenance only
+  });
+
+  it("a metadata-only PATCH body's claimedClient is never persisted as a row field either", async () => {
+    const legacy = JSON.stringify({ v: 1, verified: { agentId: "agent-1", timestamp: "2001-01-01T00:00:00.000Z" } });
+    relationshipStore.set("rel-cc-meta", {
+      id: "rel-cc-meta", agentId: "agent-1", subject: "a", predicate: "b", object: "c", confidence: 1.0, provenance: legacy,
+    });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r._targetId = "rel-cc-meta";
+    await r.patch({ confidence: 0.4, claimedClient: "codex" }); // metadata-only
+    const stored = relationshipStore.get("rel-cc-meta");
+    expect(stored.confidence).toBe(0.4); // control: the patch landed
+    expect("claimedClient" in stored).toBe(false); // never a top-level row field
+    expect(stored.provenance).toBe(legacy); // no semantic change ⇒ stored blob preserved
+  });
+});
+
+// ─── flair#1960 r4 — createdAt is SEMANTIC for Relationship.patch() ────────
+describe("flair#1960 r4 — a createdAt-only Relationship PATCH re-stamps provenance", () => {
+  it("re-stamps provenance and claimed.createdAt follows the new row createdAt", async () => {
+    const before = Date.now();
+    relationshipStore.set("rel-createdat", {
+      id: "rel-createdat", agentId: "agent-1", subject: "a", predicate: "b", object: "c",
+      createdAt: "2001-01-01T00:00:00.000Z",
+      provenance: JSON.stringify({
+        v: 1,
+        verified: { agentId: "agent-1", timestamp: "2001-01-01T00:00:00.000Z", receivedAt: "2001-01-01T00:00:00.000Z" },
+        claimed: { createdAt: "2001-01-01T00:00:00.000Z" },
+      }),
+    });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r._targetId = "rel-createdat";
+    // createdAt-ONLY (no identity change) — must still re-stamp.
+    await r.patch({ createdAt: "2002-02-02T03:04:05.678Z" });
+    const stored = relationshipStore.get("rel-createdat");
+    expect(stored.createdAt).toBe("2002-02-02T03:04:05.678Z"); // control: the patch landed
+    const prov = JSON.parse(stored.provenance);
+    const stamped = Date.parse(prov.verified.timestamp);
+    expect(stamped).toBeGreaterThanOrEqual(before - 5000);
+    expect(stamped).toBeLessThanOrEqual(Date.now() + 5000);
+    expect(prov.verified.timestamp).toBe(prov.verified.receivedAt);
+    expect(prov.verified.timestamp).not.toBe("2001-01-01T00:00:00.000Z"); // stale stored stamp not carried forward
+    expect(prov.claimed.createdAt).toBe("2002-02-02T03:04:05.678Z"); // the claim follows the row
+    expect(prov.claimed.createdAt).toBe(stored.createdAt);
+  });
+
+  it("a createdAt-only PATCH whose value needs sanitizing records the sanitized claim", async () => {
+    relationshipStore.set("rel-createdat-san", {
+      id: "rel-createdat-san", agentId: "agent-1", subject: "a", predicate: "b", object: "c",
+      createdAt: "2001-01-01T00:00:00.000Z",
+    });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r._targetId = "rel-createdat-san";
+    const RAW = "  2002-02-02T03:04:05.678Z\n";
+    await r.patch({ createdAt: RAW });
+    const stored = relationshipStore.get("rel-createdat-san");
+    expect(stored.createdAt).toBe(RAW); // the row keeps the caller's value unchanged
+    const prov = JSON.parse(stored.provenance);
+    expect(prov.claimed.createdAt).toBe("2002-02-02T03:04:05.678Z"); // sanitized: control chars stripped, trimmed
+    expect(prov.claimed.createdAt).toBe(stored.createdAt.trim()); // = sanitizeClaim(row.createdAt)
+  });
+
+  it("a metadata-only PATCH still preserves the stored provenance (and its claimed.createdAt)", async () => {
+    const legacy = JSON.stringify({
+      v: 1,
+      verified: { agentId: "agent-1", timestamp: "2001-01-01T00:00:00.000Z", receivedAt: "2001-01-01T00:00:00.000Z" },
+      claimed: { createdAt: "2001-01-01T00:00:00.000Z" },
+    });
+    relationshipStore.set("rel-createdat-meta", {
+      id: "rel-createdat-meta", agentId: "agent-1", subject: "a", predicate: "b", object: "c", confidence: 1.0, provenance: legacy,
+    });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r._targetId = "rel-createdat-meta";
+    await r.patch({ confidence: 0.4 });
+    const stored = relationshipStore.get("rel-createdat-meta");
+    expect(stored.confidence).toBe(0.4); // control: the patch landed
+    expect(stored.provenance).toBe(legacy); // no semantic change ⇒ stored blob preserved
+    expect(JSON.parse(stored.provenance).claimed.createdAt).toBe("2001-01-01T00:00:00.000Z");
+  });
+});
+
 // ─── flair#718 authorship-provenance — Relationship.put() claimedClient ────
 describe("flair#718 authorship-provenance — Relationship.put() claimedClient handling", () => {
   it("a claimedClient on the write body is folded into provenance.claimed.client, and NEVER persisted as a top-level row field", async () => {
@@ -401,10 +644,34 @@ describe("flair#718 authorship-provenance — Relationship.put() claimedClient h
     expect("claimedClient" in stored).toBe(false);
   });
 
-  it("absent claimedClient → provenance has no `claimed` key at all", async () => {
+  it("absent claimedClient → provenance carries no claimed.client (only the claimed.createdAt time)", async () => {
     const r = makeRelationship(agentCtx("agent-1"));
     const res: any = await r.put({ id: "rel-claimed-client-2", subject: "a", predicate: "b", object: "c" });
     const prov = JSON.parse(res.provenance);
-    expect("claimed" in prov).toBe(false);
+    expect(prov.claimed.client).toBeUndefined();
+    expect(typeof prov.claimed.createdAt).toBe("string");
+  });
+});
+
+// ─── flair#1965 round 2 — URL-target resolution + PATCH-create stamping ──────
+describe("flair#1965 r2 — Relationship PUT resolves the URL-bound target; PATCH creates are stamped", () => {
+  it("REFUSES a PUT whose body id differs from the URL target id", async () => {
+    instanceRow = { id: "flair_local_test" };
+    relationshipStore.set("rel-real", { id: "rel-real", agentId: "agent-1", subject: "a", predicate: "b", object: "c", originatorInstanceId: "instance-B" });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r._targetId = "rel-real";
+    const res: any = await r.put({ id: "rel-decoy", subject: "a", predicate: "b", object: "c", originatorInstanceId: "instance-attacker" });
+    expect(res instanceof Response).toBe(true);
+    expect(res.status).toBe(400);
+    expect(relationshipStore.get("rel-decoy")).toBeUndefined();
+    expect(relationshipStore.get("rel-real").originatorInstanceId).toBe("instance-B");
+  });
+
+  it("PATCH that CREATES a row (URL target has no stored row) stamps the local instance id", async () => {
+    instanceRow = { id: "flair_local_test" };
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r._targetId = "rel-patch-new";
+    await r.patch({ subject: "nathan", predicate: "manages", object: "flint" });
+    expect(relationshipStore.get("rel-patch-new").originatorInstanceId).toBe("flair_local_test");
   });
 });

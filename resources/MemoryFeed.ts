@@ -11,6 +11,7 @@ import { noteMemoryUpsert } from "./bm25-index-service.js";
 import { extractPointerInputs } from "./memory-host-source.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { buildProvenance } from "./provenance.js";
+import { applyFederationBookkeeping, applyOriginatorInstanceId } from "./originator-instance.js";
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -200,12 +201,27 @@ export class FeedMemories extends Resource {
     // rule #1956 applies to put()). No `.catch`: the rejection propagates.
     const priorById = await (databases as any).flair.Memory.get(record.id);
     record.instanceToken = priorById?.instanceToken ?? randomUUID();
-    // Feed re-ingestion keeps the same incarnation and its original provenance.
-    // Restore only the stored stamp, never the submitted copy. New/unstamped
-    // rows get trusted caller identity and server time, not body timestamps.
-    record.provenance = typeof priorById?.provenance === "string"
-      ? priorById.provenance
-      : buildProvenance(auth, now, content);
+    // Feed ingest is a full-row write: it REPLACES the stored row, so a
+    // re-ingest with new content is a semantic re-authoring. Re-stamp
+    // provenance from the resolved (trusted) identity and ONE server clock read
+    // (inside buildProvenance) rather than carrying the stored blob forward — a
+    // legacy row whose `verified.timestamp` came from a client `createdAt` must
+    // not keep presenting that value after a new write (flair#1960 r2). The feed
+    // body's own `createdAt` is recorded only as the CLAIM
+    // `provenance.claimed.createdAt`, never as a verified timestamp. The
+    // incarnation token is still preserved above (a re-ingest is not a
+    // reincarnation), so only `provenance` is re-derived.
+    record.provenance = buildProvenance(auth, record.createdAt, content);
+    // flair#1965 r2: this raw table put REPLACES the row, bypassing the Memory
+    // resource's write methods, so the create/update rule is applied here
+    // explicitly: a CREATE (no stored row) stamps this instance's own id and
+    // ignores any body value; an UPDATE keeps the STORED value (a body value
+    // neither replaces nor clears it). The receiver-side federation bookkeeping
+    // (`_originatorInstanceId` et al.) is likewise unsettable from a body — it
+    // stands as stored, or is dropped on a create. See
+    // resources/originator-instance.ts.
+    await applyOriginatorInstanceId(record, priorById);
+    applyFederationBookkeeping(record, priorById);
     await (databases as any).flair.Memory.put(record);
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).
     noteMemoryUpsert(record);

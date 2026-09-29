@@ -80,7 +80,10 @@ export interface Relationship {
   createdAt: string;
   updatedAt?: string;
   /** JSON blob, same shape as Memory.provenance — { v, verified: { agentId,
-   *  timestamp }, claimed?: { model, client } }. Absent on rows written before this
+   *  timestamp, receivedAt }, claimed?: { createdAt, model, client } }.
+   *  `verified.*` is server-derived (timestamp and receivedAt are the server
+   *  write instant); `claimed.*` is the caller's unverified claim (the record's
+   *  own `createdAt` is the claimed creation time). Absent on rows written before this
    *  field existed (migration-equivalence: additive/nullable). */
   provenance?: string;
   /** Always true after a successful write() — the server never suppresses a

@@ -102,6 +102,11 @@ function stageOrRun(ctx: any, apply: () => void): void {
 }
 
 export class BaseMemory {
+  /** Real Harper binds the resource to the URL target (`getId()`); a PUT writes
+   *  to THAT id. `_targetId` models the URL-bound target; unset for a direct
+   *  in-process call, where the body id IS the write key. See
+   *  resources/originator-instance.ts. */
+  getId() { return (this as any)._targetId; }
   async get(target?: any) {
     harnessState.lastBaseGetTarget = target;
     const id = typeof target === "string" ? target : target?.id;
@@ -127,7 +132,8 @@ export class BaseMemory {
     return row;
   }
   async put(content: any, ctx?: any) {
-    stageOrRun(ctx, () => harnessState.memoryStore.set(content.id, { ...content }));
+    const id = this.getId?.() ?? content.id;
+    stageOrRun(ctx, () => harnessState.memoryStore.set(id, { ...content, id }));
     return { ...content };
   }
   async post(content: any, ctx?: any) {
@@ -193,8 +199,7 @@ export class BaseMemory {
   }
   static put(c: any, ctx?: any) {
     return new BaseMemory().put(c, ctx);
-  }
-  static post(c: any, ctx?: any) {
+  }  static post(c: any, ctx?: any) {
     return new BaseMemory().post(c, ctx);
   }
   static patch(c: any) {

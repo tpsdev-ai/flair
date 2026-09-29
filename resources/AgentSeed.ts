@@ -27,6 +27,7 @@ import { reconcileAdminFields } from "./agent-admin.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { rejectSkillWritePath } from "./skill-write.js";
+import { stampOriginatorOnCreate } from "./originator-instance.js";
 
 const DEFAULT_SOUL_KEYS = (agentId: string, displayName: string, role: string, now: string) => ({
   name: displayName,
@@ -79,7 +80,27 @@ export class AgentSeed extends Resource {
     }
 
     // ── Agent record ──────────────────────────────────────────────────────────
-    const existingAgent = await (databases as any).flair.Agent.get(agentId).catch(() => null);
+    // flair#1965 r3: a FAILED existing-Agent lookup must refuse the whole seed.
+    // The previous `.catch(() => null)` turned a read ERROR into "no agent", so
+    // the raw Agent.put below would take the CREATE branch and overwrite an
+    // existing row (with a fresh local originator stamp). A read error is never
+    // "no row". See resources/originator-instance.ts for the same rule on the
+    // resource write paths.
+    let existingAgent: any;
+    try {
+      existingAgent = await (databases as any).flair.Agent.get(agentId);
+    } catch (err) {
+      // Constant format string + a structured data object (semgrep
+      // javascript.lang.security.audit.unsafe-formatstring).
+      console.error(
+        "AgentSeed: the existing-agent lookup failed, so the seed was refused rather than overwriting the row as a create",
+        { agentId, err },
+      );
+      return new Response(JSON.stringify({
+        error: "agent_lookup_failed",
+        message: "the existing agent record could not be read, so the seed was refused",
+      }), { status: 500, headers: { "content-type": "application/json" } });
+    }
     let agent = existingAgent;
     if (!existingAgent) {
       // flair#941 — this writes the RAW table, so resources/Agent.ts's post()
@@ -89,6 +110,11 @@ export class AgentSeed extends Resource {
       // ordinary agent. Admin-only path (allowCreate + the isAdmin re-check
       // above), so this normalises an authorized intent.
       agent = reconcileAdminFields({ id: agentId, name, role, publicKey: "pending", createdAt: now, updatedAt: now });
+      // flair#1965 r2: this creates an Agent row through the RAW table, so the
+      // Agent resource's post() stamp never runs. Stamp the local instance id
+      // here (every create path carries it). See
+      // resources/originator-instance.ts.
+      await stampOriginatorOnCreate(agent);
       await (databases as any).flair.Agent.put(agent);
       invalidateAdminCache();
     }
@@ -104,6 +130,8 @@ export class AgentSeed extends Resource {
         continue;
       }
       const entry = { id, agentId, key, value: String(value), provenance: soulProvenance(auth, source!, now), durability: "permanent", createdAt: now, updatedAt: now };
+      // flair#1965 r2: raw Soul create — stamp the local instance id.
+      await stampOriginatorOnCreate(entry);
       await (databases as any).flair.Soul.put(entry);
       soulEntries.push(entry);
     }
@@ -155,6 +183,8 @@ export class AgentSeed extends Resource {
         // fields and stamp a fresh incarnation token.
         stripServerStampedFields(record);
         record.instanceToken = randomUUID();
+        // flair#1965 r2: raw Memory create — stamp the local instance id.
+        await stampOriginatorOnCreate(record);
         await (databases as any).flair.Memory.put(record);
         noteMemoryUpsert(record);
         memories.push(record);

@@ -7,9 +7,9 @@
  *   1. Boot window — jsResources register incrementally. /Health can be up
  *      while /Memory and /SemanticSearch still 404 from Harper's catch-all
  *      (documented in packages/adk-flair-js/test/helpers/boot-harper.mjs).
- *   2. Cold BM25 index — hybrid retrieval's persistent index is lazy-built
- *      on the first search, not at component start (bm25-index-service.ts).
- *      That first-query corpus scan grows with store size. /Health answering
+ *   2. BM25 index still empty or building — the persistent index warms in
+ *      the background after embeddings boot (bm25-index-service.ts). Until
+ *      that build finishes, a text search waits for it. /Health answering
  *      is not "recall is warm."
  *
  * This module is Harper-free so the decision is unit-testable against the
@@ -20,16 +20,16 @@
  *   - Routes/table not mounted → not healthy (ok:false, HTTP 503). A
  *     traffic-gating probe that only looks at status must not get a green
  *     light for a node whose search routes are not serving.
- *   - Routes up but index still cold → process is live (ok:true, HTTP 200)
- *     and searchReady:false names the lag. We do NOT 503 on a cold index:
- *     the index builds on the first search, and a health check must not
- *     trigger that scan (bm25-index-service.ts: "Eager building would add a
- *     full corpus scan to every boot including … health checks"). 503-until-
- *     warm would deadlock — health waits for the index, the index waits for
- *     a search that never comes.
+ *   - Routes up but the BM25 index is still empty or building → process is
+ *     live (ok:true, HTTP 200) and searchReady:false names the lag. We do
+ *     NOT 503 on an unready index: a health check must not be what builds
+ *     it, and 503-until-warm would make a traffic gate wait on a scan the
+ *     gate itself is not supposed to run. The background warm (or a text
+ *     search) is what clears `empty`.
  */
 
 import type { RetrievalMode } from "./bm25.js";
+import { bm25SearchLagReason } from "./bm25-status.js";
 
 /**
  * How a ready result was verified. Constant strings — no interpolation
@@ -81,6 +81,8 @@ export type MemoryTable = {
 export type Bm25Status = {
   state: string;
   reason?: string;
+  /** Operator line from bm25IndexStatus(), when the caller has it. */
+  summary?: string;
 } | null | undefined;
 
 function routeMounted(resources: ResourceRegistry, name: string): boolean {
@@ -139,15 +141,16 @@ export function resolveSearchReadiness(opts: {
     return notServing("memory table not queryable");
   }
 
-  // Hybrid + the persistent index are default-on. A cold or in-flight BM25
-  // index means the first search will pay a full corpus scan — the #1326
-  // lag. Name it; do not fail liveness.
+  // Hybrid + the persistent index are default-on. An empty or in-flight BM25
+  // index means a text search waits for the build — the #1326 lag. Name it;
+  // do not fail liveness.
   //
   // `disabled` (feed/build failure) and `FLAIR_BM25_INDEX=false` both fall
   // back to the per-query scan. The kill switch never calls ensureReady, so
-  // status stays `empty` for the life of the process — that is serving, not
-  // cold. Treating it as lag would make searchReady false forever and refuse
-  // a node that is already answering recall.
+  // the underlying state stays `empty` while status() reports `disabled` —
+  // that is serving, not an unready index. Treating the kill switch as lag
+  // would make searchReady false forever and refuse a node that is already
+  // answering recall. Callers pass `bm25IndexEnabled: false` for that case.
   // The persistent BM25 index is in the retrieval path for "hybrid" and
   // "bm25-only"; a "vector-only" process has no lexical leg to keep warm.
   // `retrievalMode` is the current selector; `hybridEnabled` is the legacy
@@ -157,11 +160,8 @@ export function resolveSearchReadiness(opts: {
     opts.retrievalMode ?? (opts.hybridEnabled === false ? "vector-only" : "hybrid");
   const indexInPath = effectiveMode !== "vector-only" && opts.bm25IndexEnabled !== false;
   if (indexInPath && opts.bm25) {
-    if (opts.bm25.state === "building") {
-      return namesLag("bm25 index building — first search is still scanning the corpus");
-    }
-    if (opts.bm25.state === "empty") {
-      return namesLag("bm25 index not built (cold boot; first search scans the corpus)");
+    if (opts.bm25.state === "building" || opts.bm25.state === "empty") {
+      return namesLag(bm25SearchLagReason(opts.bm25));
     }
   }
 

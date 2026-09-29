@@ -1,0 +1,1 @@
+- **Rollback recovery now warns when the proposed version failed earlier in the upgrade.** The CLI also explains how to choose and check a different, non-deprecated release.

@@ -93,7 +93,9 @@ mock.module("../../resources/bm25.js", () => ({
   hybridEnabled: () => false, retrievalMode: () => "vector",
 }));
 mock.module("../../resources/bm25-index-service.js", () => ({
-  bm25IndexEnabled: () => false, bm25IndexStatus: () => ({}),
+  bm25IndexEnabled: () => false,
+  bm25IndexInRetrievalPath: () => false,
+  bm25IndexStatus: () => ({}),
   noteMemoryUpsert: () => {}, noteMemoryDelete: () => {},
 }));
 mock.module("../../resources/embedding-space-guard.js", () => ({ normalizeStamp: (s: string) => s }));
@@ -107,6 +109,10 @@ mock.module("../../resources/search-readiness.js", () => ({
 }));
 mock.module("../../resources/embed-gpu.js", () => ({
   withEmbedGpuHealth: (body: object) => ({ ...body, embedding: {} }),
+  embedGpuStatusNotice: (embedding: unknown) => {
+    expect(embedding).toEqual({});
+    return null;
+  },
 }));
 mock.module("../../resources/federation-peer-liveness.js", () => ({
   classifyPeerLiveness: () => "disconnected",

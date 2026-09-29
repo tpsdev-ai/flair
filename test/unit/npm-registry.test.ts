@@ -20,7 +20,11 @@ import {
   INSECURE_REGISTRY_ENV,
   RegistryRefusalError,
   createRegistryNoticePrinter,
+  deprecationFromNpmView,
   fetchLatestVersion,
+  fetchVersionDeprecation,
+  isExactVersionDocument,
+  parseNpmViewStdout,
   formatRegistryLine,
   isStrictSemver,
   packageScope,
@@ -487,6 +491,232 @@ describe("fetchLatestVersion", () => {
       timeoutMs: 1000,
     });
     expect(res.kind).toBe("unavailable");
+  });
+});
+
+describe("fetchVersionDeprecation", () => {
+  test("a deprecated version document returns the npm message", async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({
+        version: "0.54.1",
+        name: "@tpsdev-ai/flair",
+        deprecated: "broken publish — missing Harper transitive deps",
+      }), { status: 200 })) as unknown as typeof fetch;
+    const res = await fetchVersionDeprecation("@tpsdev-ai/flair", "0.54.1", {
+      env: {},
+      readConfig: reader({}),
+      readConfigMap: noEntries,
+      fetchImpl,
+      timeoutMs: 1000,
+    });
+    expect(res.kind).toBe("deprecated");
+    if (res.kind === "deprecated") {
+      expect(res.message).toBe("broken publish — missing Harper transitive deps");
+    }
+  });
+
+  test("a version document with no deprecated field is active", async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ name: "@tpsdev-ai/flair", version: "0.54.2", dependencies: {} }), { status: 200 })) as unknown as typeof fetch;
+    const res = await fetchVersionDeprecation("@tpsdev-ai/flair", "0.54.2", {
+      env: {},
+      readConfig: reader({}),
+      readConfigMap: noEntries,
+      fetchImpl,
+      timeoutMs: 1000,
+    });
+    expect(res.kind).toBe("active");
+  });
+
+  test("a present null deprecated field is unavailable, not active", async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({
+        name: "@tpsdev-ai/flair",
+        version: "0.54.2",
+        deprecated: null,
+      }), { status: 200 })) as unknown as typeof fetch;
+    const res = await fetchVersionDeprecation("@tpsdev-ai/flair", "0.54.2", {
+      env: {},
+      readConfig: reader({}),
+      readConfigMap: noEntries,
+      fetchImpl,
+      timeoutMs: 1000,
+    });
+    expect(res.kind).toBe("unavailable");
+    if (res.kind === "unavailable") {
+      expect(res.message).toContain("was null");
+    }
+  });
+
+  test("a blank deprecated string is not a deprecation", async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ name: "@tpsdev-ai/flair", version: "0.54.2", deprecated: "  " }), { status: 200 })) as unknown as typeof fetch;
+    const res = await fetchVersionDeprecation("@tpsdev-ai/flair", "0.54.2", {
+      env: {},
+      readConfig: reader({}),
+      readConfigMap: noEntries,
+      fetchImpl,
+      timeoutMs: 1000,
+    });
+    expect(res.kind).toBe("active");
+  });
+
+  test("a non-2xx answer is unavailable, not deprecated", async () => {
+    const fetchImpl = (async () => new Response("nope", { status: 503 })) as unknown as typeof fetch;
+    const res = await fetchVersionDeprecation("@tpsdev-ai/flair", "0.54.1", {
+      env: {},
+      readConfig: reader({}),
+      readConfigMap: noEntries,
+      fetchImpl,
+      timeoutMs: 1000,
+    });
+    expect(res.kind).toBe("unavailable");
+  });
+
+  test("HTTP 200 with no version document is unavailable, not active", async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ ok: true }), { status: 200 })) as unknown as typeof fetch;
+    const res = await fetchVersionDeprecation("@tpsdev-ai/flair", "0.54.1", {
+      env: {},
+      readConfig: reader({}),
+      readConfigMap: noEntries,
+      fetchImpl,
+      timeoutMs: 1000,
+    });
+    expect(res.kind).toBe("unavailable");
+  });
+
+  test("HTTP 200 for a different version is not this version's document", async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ name: "@tpsdev-ai/flair", version: "9.9.9" }), { status: 200 })) as unknown as typeof fetch;
+    const res = await fetchVersionDeprecation("@tpsdev-ai/flair", "0.54.1", {
+      env: {},
+      readConfig: reader({}),
+      readConfigMap: noEntries,
+      fetchImpl,
+      timeoutMs: 1000,
+    });
+    expect(res.kind).toBe("unavailable");
+    expect(isExactVersionDocument({ version: "9.9.9" }, "@tpsdev-ai/flair", "0.54.1")).toBe(false);
+  });
+
+  test("HTTP 200 with the right version but no package name is unavailable, not active", async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ version: "0.54.1" }), { status: 200 })) as unknown as typeof fetch;
+    const res = await fetchVersionDeprecation("@tpsdev-ai/flair", "0.54.1", {
+      env: {},
+      readConfig: reader({}),
+      readConfigMap: noEntries,
+      fetchImpl,
+      timeoutMs: 1000,
+    });
+    expect(res.kind).toBe("unavailable");
+    expect(isExactVersionDocument({ version: "0.54.1" }, "@tpsdev-ai/flair", "0.54.1")).toBe(false);
+  });
+
+  test("a non-string deprecated field is unavailable, not active", async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({
+        name: "@tpsdev-ai/flair",
+        version: "0.54.1",
+        deprecated: { note: "broken" },
+      }), { status: 200 })) as unknown as typeof fetch;
+    const res = await fetchVersionDeprecation("@tpsdev-ai/flair", "0.54.1", {
+      env: {},
+      readConfig: reader({}),
+      readConfigMap: noEntries,
+      fetchImpl,
+      timeoutMs: 1000,
+    });
+    expect(res.kind).toBe("unavailable");
+  });
+
+  test("npm view of a non-string deprecated field is unavailable, not active", async () => {
+    let viewed = false;
+    const res = await fetchVersionDeprecation("@tpsdev-ai/flair", "0.54.1", {
+      env: { npm_config_registry: "https://registry.example" },
+      readConfig: reader({ "strict-ssl": "false" }),
+      readConfigMap: noEntries,
+      timeoutMs: 1000,
+      npmViewJson: async () => {
+        viewed = true;
+        return { ok: true, data: { note: "broken" }, message: "" };
+      },
+    });
+    expect(viewed).toBe(true);
+    expect(res.kind).toBe("unavailable");
+    if (res.kind === "unavailable") {
+      expect(res.message).toContain("was not a string");
+    }
+  });
+
+  test("control characters are stripped from a deprecated version document", async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({
+        name: "@tpsdev-ai/flair",
+        version: "0.54.1",
+        deprecated: "broken\u0001publish\u001b[31m now",
+      }), { status: 200 })) as unknown as typeof fetch;
+    const res = await fetchVersionDeprecation("@tpsdev-ai/flair", "0.54.1", {
+      env: {},
+      readConfig: reader({}),
+      readConfigMap: noEntries,
+      fetchImpl,
+      timeoutMs: 1000,
+    });
+    expect(res.kind).toBe("deprecated");
+    if (res.kind === "deprecated") {
+      expect(res.message).toBe("brokenpublish[31m now");
+      expect(res.message).not.toContain("\u0001");
+      expect(res.message).not.toContain("\u001b");
+    }
+  });
+
+  test("a non-semver version is invalid and never fetched", async () => {
+    let called = false;
+    const fetchImpl = (async () => {
+      called = true;
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    const res = await fetchVersionDeprecation("@tpsdev-ai/flair", "https://attacker.example/x.tgz", {
+      env: {},
+      readConfig: reader({}),
+      readConfigMap: noEntries,
+      fetchImpl,
+      timeoutMs: 1000,
+    });
+    expect(res.kind).toBe("invalid");
+    expect(called).toBe(false);
+  });
+});
+
+describe("parseNpmViewStdout / deprecationFromNpmView", () => {
+  test("empty stdout is not malformed JSON and means no deprecation", () => {
+    const parsed = parseNpmViewStdout("  \n");
+    expect(parsed.ok).toBe(false);
+    expect(parsed.message).toBe("npm view returned empty output");
+    expect(deprecationFromNpmView(parsed).kind).toBe("active");
+  });
+
+  test("malformed stdout is not treated as active", () => {
+    const parsed = parseNpmViewStdout("{not json");
+    expect(parsed.ok).toBe(false);
+    expect(parsed.message).toBe("npm view returned malformed JSON");
+    const field = deprecationFromNpmView(parsed);
+    expect(field.kind).toBe("unavailable");
+  });
+
+  test("a JSON value that is not a string is unavailable, not active", () => {
+    const parsed = parseNpmViewStdout(JSON.stringify({ note: "broken" }));
+    expect(parsed.ok).toBe(true);
+    expect(deprecationFromNpmView(parsed).kind).toBe("unavailable");
+  });
+
+  test("a JSON deprecation string is control-stripped", () => {
+    const parsed = parseNpmViewStdout(JSON.stringify("bad\u0007build"));
+    const field = deprecationFromNpmView(parsed);
+    expect(field.kind).toBe("deprecated");
+    if (field.kind === "deprecated") expect(field.message).toBe("badbuild");
   });
 });
 

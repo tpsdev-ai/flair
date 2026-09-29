@@ -20,6 +20,7 @@ import { withHome } from "./home.js";
 import {
   ALL_CLIENTS,
   clientConfigPath,
+  codexWiringPin,
   repinCodexPin,
   repinJsonMcpPin,
   type ClientId,
@@ -27,6 +28,7 @@ import {
 import {
   checkSessionStartHook,
   isFlairHookCommand,
+  SESSION_START_HOOK_INVOCATION_RE,
   readClientMcpBlock,
 } from "../doctor-client.js";
 import {
@@ -39,6 +41,7 @@ import { isUnsafeAdapterPin } from "./stale-client-pin.js";
 import { type ConfigSectionOptions } from "./config-critical-section.js";
 import {
   hookInstallHint,
+  parseInstallerHookForm,
   hookSettingsPath,
   repinSessionStartHook,
   SUPPORTED_HARNESSES,
@@ -161,7 +164,9 @@ export function readOwnedPin(target: OwnedPinTarget, homeDir: string): OwnedPinR
     entryExists: block.entryExists,
     // Read the pin whenever the ENTRY exists — an entry without an identity is
     // still a pin we own and may refresh (flair#1834 A1 item 1).
-    pin: block.entryExists ? wiringPinString(decodeWiringSpec(text, FLAIR_MCP_PACKAGE)) : null,
+    pin: block.entryExists
+      ? wiringPinString(decodeWiringSpec(target.id === "codex" ? codexWiringPin(text) : text, FLAIR_MCP_PACKAGE))
+      : null,
   };
 }
 
@@ -408,8 +413,22 @@ export function repinSessionStartHookGuarded(
     displayPath: hookSettingsPath(homeDir, harness),
   };
   const wouldWrite = flairCliVersion();
-  const existing = readOwnedPin(resolved, homeDir).pin;
-  if (pinWriteWouldLowerOrIsUnknown(existing, wouldWrite)) {
+  const command = checkSessionStartHook(homeDir, resolved.path).command;
+  const form = command ? parseInstallerHookForm(command) : null;
+  // A form supplies the exact span the writer replaces. For a rejected form,
+  // the status-only match may recover an unreadable pin for a HOLD; it cannot
+  // authorize a write. The writer still validates the full command in-lock.
+  const invocation = form ? undefined : command?.match(SESSION_START_HOOK_INVOCATION_RE)?.[0];
+  const spec = form?.pkgSpec
+    ?? invocation?.slice("npx -y -p ".length, -" flair-session-start".length);
+  const existing = spec ? wiringPinString(decodeWiringSpec(spec, FLAIR_MCP_PACKAGE)) : null;
+  // A comparable pin in a non-installer command is a shape refusal, not an
+  // unknown pin. Let the writer retain its "not one of the installer forms"
+  // classification. Unreadable pins retain their raw-value hold diagnostic.
+  if (
+    pinWriteWouldLowerOrIsUnknown(existing, wouldWrite)
+    && (form !== null || comparePinVersions(existing, wouldWrite) === null)
+  ) {
     return {
       target: resolved,
       action: "hold",
