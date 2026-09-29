@@ -459,3 +459,68 @@ export function shouldAdoptMissingSidecar(input: {
   if (input.instanceMatch.kind === "mismatch") return false;
   return true;
 }
+
+// ─── the stale identity sidecar (flair#2055) ────────────────────────────────
+//
+// After `flair stop` ended a directly started Harper, the sidecar flair wrote
+// at spawn still names the stopped pid. A later instance under a DIFFERENT
+// supervisor (a systemd user unit's Harper) writes its own pid to `hdb.pid`,
+// so `hdb.pid` and the sidecar disagree — and reading that as an identity
+// conflict made every stop/restart refuse ("its identity could not be
+// verified"). A sidecar whose named pid is CONFIRMED gone is a leftover, not a
+// conflict; dropping it lets the live process be identified on the evidence it
+// serves. The two pure gates below are the whole decision, so the adapter's fs
+// and liveness reads stay seams.
+
+/**
+ * Whether the identity sidecar is stale — does it name a pid that is CONFIRMED
+ * gone?
+ *
+ * Stale is a POSITIVE finding, never a default. Only `kill(pid, 0)` returning
+ * ESRCH (`gone`) is stale; `eperm` (a live process owned by another user) and
+ * every indeterminate answer (`null`) are NOT stale. Unknown evidence never
+ * licenses an action, so a non-stale sidecar stays evidence and the machine
+ * keeps refusing exactly as it did before the fix.
+ */
+export type SidecarStaleness =
+  | { kind: "stale" }   // names a pid CONFIRMED gone — drop it, treat as absent
+  | { kind: "live" }    // names a pid that is alive (or EPERM) — real evidence
+  | { kind: "unknown" }; // liveness of the named pid could not be determined
+
+export function classifySidecarStaleness(
+  sidecar: SidecarRead,
+  liveness: PidLiveness | null,
+): SidecarStaleness {
+  // Absent / unreadable is not a stale sidecar to drop; callers only ask about
+  // a sidecar they could read.
+  if (sidecar.kind !== "present") return { kind: "live" };
+  if (liveness === null) return { kind: "unknown" };
+  if (liveness.kind === "gone") return { kind: "stale" };
+  if (liveness.kind === "alive" || liveness.kind === "eperm") return { kind: "live" };
+  return { kind: "unknown" };
+}
+
+/**
+ * The #2055 stop-time gate: remove the sidecar ONLY when the pid it names is
+ * CONFIRMED gone AND a fresh O_NOFOLLOW read still names that same pid.
+ *
+ * `observedPid` is the pid the sidecar named when the stop was observed;
+ * `observedPidLiveness` is that pid read AFTER the stop's wait — `gone` (ESRCH)
+ * is the confirmation. A process that survived, one owned by another user
+ * (EPERM), or one whose liveness could not be read removes nothing.
+ *
+ * `sidecar` is a fresh O_NOFOLLOW read taken after the stop. A sidecar another
+ * supervisor rewrote in between names a DIFFERENT pid and is left alone (the
+ * "still names that pid" check). A symlinked or malformed sidecar arrives here
+ * as `unreadable` (the read never followed the link) and is likewise not
+ * removed — removing on unknown evidence is the defect this gate exists to
+ * prevent.
+ */
+export function shouldRemoveSidecarAfterStop(input: {
+  observedPid: number;
+  observedPidLiveness: PidLiveness;
+  sidecar: SidecarRead;
+}): boolean {
+  if (input.observedPidLiveness.kind !== "gone") return false;
+  return input.sidecar.kind === "present" && input.sidecar.pid === input.observedPid;
+}

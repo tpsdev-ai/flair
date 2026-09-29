@@ -37,6 +37,8 @@ import {
   classifyPortOwner,
   classifyInstanceMatch,
   shouldAdoptMissingSidecar,
+  classifySidecarStaleness,
+  shouldRemoveSidecarAfterStop,
   parseNullSeparatedEnviron,
   extractRootPath,
   canonicalLexicalPath,
@@ -618,5 +620,128 @@ describe("flair#1478 — environ helpers", () => {
   test("canonicalLexicalPath drops a trailing slash", () => {
     expect(canonicalLexicalPath("/home/u/.flair/data/")).toBe("/home/u/.flair/data");
     expect(canonicalLexicalPath("/")).toBe("/");
+  });
+});
+
+// ─── flair#2055 — the stale identity sidecar ────────────────────────────────
+//
+// After `flair stop` ended a directly started Harper the sidecar it wrote
+// still names the stopped pid. A later instance under a DIFFERENT supervisor
+// (a systemd user unit's Harper) writes its own pid to hdb.pid, so the two
+// disagree — and the old code read that as an identity conflict and refused
+// stop/restart with "its identity could not be verified". The two gates here
+// are the whole decision; the adapters supply the fs/liveness reads.
+
+describe("flair#2055 — classifySidecarStaleness", () => {
+  test("a sidecar naming a pid CONFIRMED gone is stale", () => {
+    expect(classifySidecarStaleness(sidecar(9999, 1_000_000), { kind: "gone" }))
+      .toEqual({ kind: "stale" });
+  });
+
+  test("a sidecar naming a live pid is real evidence, not stale", () => {
+    expect(classifySidecarStaleness(sidecar(4242, 1_000_000), { kind: "alive" }))
+      .toEqual({ kind: "live" });
+  });
+
+  test("EPERM (another user's live process) is NOT stale", () => {
+    expect(classifySidecarStaleness(sidecar(4242, 1_000_000), { kind: "eperm" }))
+      .toEqual({ kind: "live" });
+  });
+
+  test("indeterminate liveness is unknown, never stale", () => {
+    expect(classifySidecarStaleness(sidecar(4242, 1_000_000), null))
+      .toEqual({ kind: "unknown" });
+  });
+
+  test("an absent / unreadable sidecar is not a stale sidecar to drop", () => {
+    expect(classifySidecarStaleness({ kind: "absent" }, { kind: "gone" })).toEqual({ kind: "live" });
+    expect(classifySidecarStaleness({ kind: "unreadable", reason: "flair-daemon.json is a symbolic link" }, { kind: "gone" }))
+      .toEqual({ kind: "live" });
+  });
+});
+
+describe("flair#2055 — shouldRemoveSidecarAfterStop", () => {
+  const gone = { kind: "gone" } as const;
+  const alive = { kind: "alive" } as const;
+  const eperm = { kind: "eperm" } as const;
+
+  test("removes the sidecar only after the pid is CONFIRMED gone and still named", () => {
+    expect(shouldRemoveSidecarAfterStop({ observedPid: 4242, observedPidLiveness: gone, sidecar: sidecar(4242, 1) }))
+      .toBe(true);
+  });
+
+  test("a sidecar naming a DIFFERENT pid than the one stopped is kept", () => {
+    expect(shouldRemoveSidecarAfterStop({ observedPid: 4242, observedPidLiveness: gone, sidecar: sidecar(9999, 1) }))
+      .toBe(false);
+  });
+
+  test("a survived process (alive) or another user's (EPERM) removes nothing", () => {
+    expect(shouldRemoveSidecarAfterStop({ observedPid: 4242, observedPidLiveness: alive, sidecar: sidecar(4242, 1) }))
+      .toBe(false);
+    expect(shouldRemoveSidecarAfterStop({ observedPid: 4242, observedPidLiveness: eperm, sidecar: sidecar(4242, 1) }))
+      .toBe(false);
+  });
+
+  test("a symlinked or malformed sidecar (unreadable) is not followed or removed", () => {
+    expect(shouldRemoveSidecarAfterStop({
+      observedPid: 4242,
+      observedPidLiveness: gone,
+      sidecar: { kind: "unreadable", reason: "flair-daemon.json is a symbolic link" },
+    })).toBe(false);
+    expect(shouldRemoveSidecarAfterStop({
+      observedPid: 4242,
+      observedPidLiveness: gone,
+      sidecar: { kind: "unreadable", reason: "flair-daemon.json is malformed" },
+    })).toBe(false);
+  });
+
+  test("an absent sidecar is a no-op", () => {
+    expect(shouldRemoveSidecarAfterStop({ observedPid: 4242, observedPidLiveness: gone, sidecar: { kind: "absent" } }))
+      .toBe(false);
+  });
+});
+
+describe("flair#2055 — a dead-pid sidecar is not a disagreement with hdb.pid", () => {
+  const readStartTime = (_pid: number) => 1_000_000;
+  // The adapter's drop, reduced to the pure part it uses.
+  const dropIfStale = (s: SidecarRead, l: { kind: "gone" } | { kind: "alive" } | { kind: "eperm" } | null): SidecarRead =>
+    classifySidecarStaleness(s, l).kind === "stale" ? { kind: "absent" } : s;
+
+  test("dead-pid sidecar beside a live hdb.pid: WITHOUT the drop it refuses, WITH it the live process wins", () => {
+    const stale = sidecar(1111, 1); // names a pid that is CONFIRMED gone
+
+    // Before the fix: the sidecar stays and names a different pid than hdb.pid.
+    const refused = classifyDaemonState(ev({
+      pidfile: { kind: "present", pid: 4242 },
+      pidLiveness: { kind: "alive" },
+      identity: verifyIdentity({ pidfilePid: 4242, sidecar: stale, readStartTime }),
+      health: { kind: "ok" },
+    }), ctx);
+    expect(refused.state).toBe("DISAGREEMENT");
+
+    // After the fix: the stale sidecar is dropped (treated as absent), so the
+    // self-heal adopts the identity from the LIVE process — its own sidecar,
+    // verified against its own start time — and the machine classifies RUNNING.
+    expect(dropIfStale(stale, { kind: "gone" })).toEqual({ kind: "absent" });
+    const running = classifyDaemonState(ev({
+      pidfile: { kind: "present", pid: 4242 },
+      pidLiveness: { kind: "alive" },
+      identity: verifyIdentity({ pidfilePid: 4242, sidecar: sidecar(4242, 1_000_000), readStartTime }),
+      health: { kind: "ok" },
+    }), ctx);
+    expect(running).toEqual({ state: "RUNNING", pid: 4242 });
+  });
+
+  test("unknown liveness keeps today's refusal (the sidecar is not dropped)", () => {
+    const undetermined = sidecar(1111, 1);
+    expect(classifySidecarStaleness(undetermined, null).kind).toBe("unknown");
+    expect(dropIfStale(undetermined, null)).toEqual(undetermined);
+    const s = classifyDaemonState(ev({
+      pidfile: { kind: "present", pid: 4242 },
+      pidLiveness: { kind: "alive" },
+      identity: verifyIdentity({ pidfilePid: 4242, sidecar: undetermined, readStartTime }),
+      health: { kind: "ok" },
+    }), ctx);
+    expect(s.state).toBe("DISAGREEMENT");
   });
 });

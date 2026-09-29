@@ -37,6 +37,7 @@ export type ServiceCli = {
   resolveOpsBindHost: (...args: any[]) => any;
   resolveOpsPort: (...args: any[]) => any;
   restartFlair: (...args: any[]) => any;
+  removeStaleSidecarIfConfirmedDead: (...args: any[]) => any;
   stampEngineVersionIfRunning: (...args: any[]) => any;
   waitForHealth: (...args: any[]) => any;
   waitForProcessExit: (...args: any[]) => any;
@@ -96,6 +97,10 @@ function flairPackageDir(...args: any[]): any {
 
 function gatherDaemonEvidence(...args: any[]): any {
   return cli.gatherDaemonEvidence(...args);
+}
+
+function removeStaleSidecarIfConfirmedDead(...args: any[]): any {
+  return cli.removeStaleSidecarIfConfirmedDead(...args);
 }
 
 function guardEngineNotBackwards(...args: any[]): any {
@@ -224,6 +229,12 @@ program
           }
         }
         await waitForProcessExit(pid, STARTUP_TIMEOUT_MS);
+        // flair#2055: once the process is CONFIRMED gone, drop the identity
+        // sidecar — a leftover naming the stopped pid is what makes a later
+        // instance under another supervisor refuse. Gated on a fresh
+        // O_NOFOLLOW read that still names the pid it named before; unknown
+        // liveness removes nothing.
+        removeStaleSidecarIfConfirmedDead(dataDir);
         const after = await probeHealth(port);
         if (after.kind === "refused") {
           console.log(`✅ Flair stopped (${label}, pid ${pid})`);
@@ -233,6 +244,10 @@ program
         return;
       }
       case "NOT_RUNNING":
+        // A sidecar left naming a pid that is CONFIRMED gone is a leftover too
+        // (flair#2055); clearing it here keeps a repeat stop from carrying the
+        // refusal forward.
+        removeStaleSidecarIfConfirmedDead(dataDir);
         console.log("Flair is not running.");
         return;
       case "DISAGREEMENT":
