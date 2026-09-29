@@ -483,17 +483,44 @@ describe("resolveLaunchdLabel / migrateLegacyLaunchdLabel / ensureLaunchdService
     ]);
 
     // The result must report the unload.
-    expect(result).toEqual({ action: "unloaded", unloadFailed: undefined, deleteFailed: undefined });
+    expect(result).toEqual({ action: "unloaded", deleteFailed: undefined });
   });
 
-  test("cleanupLegacyLaunchdPlist: a boot-out that does not take is REPORTED as a failed unload — never a check mark (flair#2040)", () => {
+  test("cleanupLegacyLaunchdPlist: a boot-out that does not take is REPORTED as unconfirmed, the plist is KEPT, and there is no check mark (flair#2040)", () => {
+    const myDataDir = "/Users/alice/.flair/data";
+    const legacyPath = launchdPlistPath(LEGACY_LAUNCHD_LABEL, launchAgentsDir);
+    const legacyBytes =
+      `<plist><dict><key>Label</key><string>${LEGACY_LAUNCHD_LABEL}</string><key>EnvironmentVariables</key><dict><key>ROOTPATH</key><string>${myDataDir}</string></dict></dict></plist>`;
+    writeFileSync(legacyPath, legacyBytes);
+    const { run } = launchdStandIn({ bootoutSticks: false });
+    const logged: string[] = [];
+    const origLog = console.log;
+    const origErr = console.error;
+    console.log = (...a: unknown[]) => { logged.push(a.join(" ")); };
+    console.error = (...a: unknown[]) => { logged.push(a.join(" ")); };
+    let result;
+    try {
+      result = cleanupLegacyLaunchdPlist(myDataDir, launchAgentsDir, run, undefined, { settleMs: 0, sleep: () => {} });
+    } finally {
+      console.log = origLog;
+      console.error = origErr;
+    }
+    expect(result!.action).toBe("unload-unconfirmed");
+    if (result!.action === "unload-unconfirmed") expect(result!.unloadFailed).toContain("the job is still loaded");
+    // A job that may still be loaded keeps its plist: removing it would orphan the job.
+    expect(readFileSync(legacyPath, "utf-8")).toBe(legacyBytes);
+    expect(logged.join("\n")).toContain("was left in place");
+    expect(logged.join("\n")).not.toContain("✓");
+  });
+
+  test("cleanupLegacyLaunchdPlist: retiring a legacy plist whose job is gone prints NO check mark — only the strict verifier licenses one (flair#2040)", () => {
     const myDataDir = "/Users/alice/.flair/data";
     const legacyPath = launchdPlistPath(LEGACY_LAUNCHD_LABEL, launchAgentsDir);
     writeFileSync(
       legacyPath,
       `<plist><dict><key>Label</key><string>${LEGACY_LAUNCHD_LABEL}</string><key>EnvironmentVariables</key><dict><key>ROOTPATH</key><string>${myDataDir}</string></dict></dict></plist>`,
     );
-    const { run } = launchdStandIn({ bootoutSticks: false });
+    const { run } = launchdStandIn();
     const logged: string[] = [];
     const origLog = console.log;
     console.log = (...a: unknown[]) => { logged.push(a.join(" ")); };
@@ -504,7 +531,8 @@ describe("resolveLaunchdLabel / migrateLegacyLaunchdLabel / ensureLaunchdService
       console.log = origLog;
     }
     expect(result!.action).toBe("unloaded");
-    if (result!.action === "unloaded") expect(result!.unloadFailed).toContain("the job is still loaded");
+    expect(existsSync(legacyPath)).toBe(false);
+    expect(logged.join("\n")).toContain("Retired the legacy launchd plist");
     expect(logged.join("\n")).not.toContain("✓");
   });
 
@@ -522,7 +550,7 @@ describe("resolveLaunchdLabel / migrateLegacyLaunchdLabel / ensureLaunchdService
     });
     expect(launchctlCalls).toEqual([`launchctl print ${GUI}/${LEGACY_LAUNCHD_LABEL}`]);
     expect(existsSync(legacyPath)).toBe(false);
-    expect(result).toEqual({ action: "unloaded", unloadFailed: undefined, deleteFailed: undefined });
+    expect(result).toEqual({ action: "unloaded", deleteFailed: undefined });
   });
 
   test("cleanupLegacyLaunchdPlist: no legacy plist present is a clean no-op", () => {
@@ -556,6 +584,51 @@ describe("resolveLaunchdLabel / migrateLegacyLaunchdLabel / ensureLaunchdService
     // No new plist was written.
     const newLabel = launchdLabel(dataDir);
     expect(existsSync(launchdPlistPath(newLabel, launchAgentsDir))).toBe(false);
+  });
+
+  test("migrateLegacyLaunchdLabel: malformed XML that still carries the expected Label is REFUSED before anything is unloaded (flair#2040)", () => {
+    // The Label replace matches, but the document is not a valid plist (the
+    // <array> is never closed). Bootstrap would reject it only AFTER the legacy
+    // job was booted out; the lint must refuse it first.
+    const legacyPath = launchdPlistPath(LEGACY_LAUNCHD_LABEL, launchAgentsDir);
+    const malformed = fakePlist(LEGACY_LAUNCHD_LABEL).replace("  </array>\n", "");
+    expect(malformed).toContain(`<key>Label</key><string>${LEGACY_LAUNCHD_LABEL}</string>`);
+    expect(malformed).not.toContain("</array>");
+    writeFileSync(legacyPath, malformed);
+
+    // A host-independent stand-in for plutil -lint: rejects an unclosed <array>.
+    const linted: string[] = [];
+    const lint = (content: string) => {
+      linted.push(content);
+      const opened = (content.match(/<array>/g) ?? []).length;
+      const closed = (content.match(/<\/array>/g) ?? []).length;
+      return opened === closed ? null : "plutil -lint rejected the plist (<plist>: Encountered unexpected element)";
+    };
+    const { calls, run } = launchdStandIn();
+    expect(() => migrateLegacyLaunchdLabel(dataDir, run, launchAgentsDir, undefined, { settleMs: 0, sleep: () => {}, lint }))
+      .toThrow(/failed validation \(plutil -lint rejected the plist.*Nothing was unloaded/);
+
+    // The REPLACEMENT content was linted (new label in, legacy label out) ...
+    const newLabel = launchdLabel(dataDir);
+    expect(linted.length).toBe(1);
+    expect(linted[0]).toContain(`<key>Label</key><string>${newLabel}</string>`);
+    // ... and NO launchctl call happened: no bootout, not even a presence probe.
+    expect(calls).toEqual([]);
+    expect(calls.some((c) => c.includes("bootout"))).toBe(false);
+    // Nothing was written or removed.
+    expect(readFileSync(legacyPath, "utf-8")).toBe(malformed);
+    expect(existsSync(launchdPlistPath(newLabel, launchAgentsDir))).toBe(false);
+  });
+
+  test("migrateLegacyLaunchdLabel: the same plist, well-formed, passes the same lint and migrates (positive control for the refusal above)", () => {
+    const legacyPath = launchdPlistPath(LEGACY_LAUNCHD_LABEL, launchAgentsDir);
+    writeFileSync(legacyPath, fakePlist(LEGACY_LAUNCHD_LABEL));
+    const lint = (content: string) =>
+      (content.match(/<array>/g) ?? []).length === (content.match(/<\/array>/g) ?? []).length ? null : "rejected";
+    const { calls, run } = launchdStandIn();
+    const result = migrateLegacyLaunchdLabel(dataDir, run, launchAgentsDir, undefined, { settleMs: 0, sleep: () => {}, lint });
+    expect(result.migrated).toBe(true);
+    expect(calls).toContain(`launchctl bootout ${GUI}/${LEGACY_LAUNCHD_LABEL}`);
   });
 
   // ── flair#874 / flair#872 structural guards ────────────────────────

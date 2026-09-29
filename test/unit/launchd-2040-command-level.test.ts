@@ -1160,3 +1160,191 @@ describe("flair#2040 r4 — init: a legacy job not PROVEN idle is never booted o
     60_000,
   );
 });
+
+// ─── round 5: no check mark before the verifier, no plist lost to a failure ─
+
+describe("flair#2040 r5 — init: an idle legacy job that cannot be shown unloaded keeps its plist", () => {
+  function legacyPlistPath(): string {
+    return launchdPlistPath(LEGACY_LAUNCHD_LABEL, fx.agentsDir);
+  }
+
+  /** An owned legacy registration whose job is loaded but runs no process (idle), and whose bootout fails. */
+  async function arrangeIdleLegacyWhoseBootoutFails(): Promise<{ pid: number; legacyBytes: string }> {
+    const legacyBytes = passFilePlist(LEGACY_LAUNCHD_LABEL);
+    writeFileSync(legacyPlistPath(), legacyBytes);
+    const pid = await startDirectStub();
+    markLoaded(LEGACY_LAUNCHD_LABEL, null);
+    writeFileSync(join(fx.state, "bootout-fail", LEGACY_LAUNCHD_LABEL), "");
+    return { pid, legacyBytes };
+  }
+
+  test.skipIf(!isDarwin)(
+    "(d9) loaded-idle legacy job + bootout fails -> 'uncertain' (init exits 1); legacy plist kept byte-for-byte; the new plist removed again; no check mark",
+    async () => {
+      const { pid, legacyBytes } = await arrangeIdleLegacyWhoseBootoutFails();
+
+      const { result, stdout, stderr } = await drive("init", initInput());
+
+      expect(result.kind).toBe("uncertain"); // init exits 1 on uncertain
+      const text = result.lines.map((l: any) => l.text).join("\n");
+      expect(text).toContain(`the legacy job ${LEGACY_LAUNCHD_LABEL} could not be shown unloaded`);
+      expect(text).toContain(`Its plist at ${legacyPlistPath()} was left in place`);
+      expect(text).toContain(`the new plist ${fx.plistPath} was removed again`);
+      expect(text).toContain(`launchctl bootout ${GUI}/${LEGACY_LAUNCHD_LABEL}`);
+      expect(text).not.toContain("Launchd service registered");
+      expect(`${text}\n${stdout}\n${stderr}`).not.toContain("✓");
+      // Both plist states: the legacy plist as it was, the new one as it was (absent).
+      expect(readFileSync(legacyPlistPath(), "utf-8")).toBe(legacyBytes);
+      expect(existsSync(fx.plistPath)).toBe(false);
+      // The one mutating call was the failed bootout; nothing was loaded.
+      expect(mutatingCalls()).toEqual([`bootout ${GUI}/${LEGACY_LAUNCHD_LABEL}`]);
+      expect(existsSync(join(fx.state, "loaded", LEGACY_LAUNCHD_LABEL))).toBe(true);
+      // The idle job was not the serving process: the direct instance still serves.
+      expect(alive(pid)).toBe(true);
+      expect(signals()).toBe("");
+      expect(await healthy()).toBe(true);
+    },
+    60_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(d9b) same, with a prior plist at the new path that init rewrote -> that plist is put back byte-for-byte",
+    async () => {
+      const { legacyBytes } = await arrangeIdleLegacyWhoseBootoutFails();
+      // Ours (ROOTPATH is this data dir), but not the pass-file launcher shape,
+      // so init rewrites it.
+      const launcher = join(fx.probe, "templates", "launchd", "start-flair-with-admin-pass.sh");
+      const priorBytes = passFilePlist(fx.label).replace(`<string>${launcher}</string>`, "<string>/usr/bin/true</string>");
+      expect(priorBytes).not.toBe(passFilePlist(fx.label));
+      writeFileSync(fx.plistPath, priorBytes);
+
+      const { result } = await drive("init", initInput());
+
+      expect(result.kind).toBe("uncertain");
+      const text = result.lines.map((l: any) => l.text).join("\n");
+      expect(text).toContain(`the plist at ${fx.plistPath} was put back as it was`);
+      expect(readFileSync(fx.plistPath, "utf-8")).toBe(priorBytes);
+      expect(readFileSync(legacyPlistPath(), "utf-8")).toBe(legacyBytes);
+      expect(mutatingCalls().filter((l) => l.startsWith("bootstrap"))).toEqual([]);
+    },
+    60_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(d10) an owned legacy plist whose job is not loaded, Flair running directly -> retired with NO check mark; reported as running directly",
+    async () => {
+      const legacyBytes = passFilePlist(LEGACY_LAUNCHD_LABEL);
+      writeFileSync(legacyPlistPath(), legacyBytes);
+      const pid = await startDirectStub();
+
+      const { result, stdout, stderr } = await drive("init", initInput());
+
+      expect(result.kind).toBe("direct");
+      const text = result.lines.map((l: any) => l.text).join("\n");
+      expect(text).toContain("Flair is running directly, NOT launchd-managed");
+      expect(stdout).toContain("Retired the legacy launchd plist");
+      expect(`${text}\n${stdout}\n${stderr}`).not.toContain("✓");
+      expect(existsSync(legacyPlistPath())).toBe(false);
+      expect(existsSync(fx.plistPath)).toBe(true);
+      expect(mutatingCalls()).toEqual([]);
+      expect(alive(pid)).toBe(true);
+    },
+    60_000,
+  );
+});
+
+describe("flair#2040 r5 — `flair start`: the legacy migration's check mark only after the strict verifier", () => {
+  function writeLegacyPlist(): void {
+    writeFileSync(launchdPlistPath(LEGACY_LAUNCHD_LABEL, fx.agentsDir), passFilePlist(LEGACY_LAUNCHD_LABEL));
+  }
+
+  test.skipIf(!isDarwin)(
+    "(e7) legacy plist migrated and loaded, but launchd does not report the serving pid -> NO check mark anywhere; 'NOT verified'",
+    async () => {
+      writeLegacyPlist();
+      writeFileSync(join(fx.state, `list-no-pid-${fx.label}`), "");
+      const { stdout, stderr, exitCode } = await flairStart();
+      expect(exitCode).toBe(0);
+      expect(stderr).toContain("NOT verified as launchd-managed");
+      expect(stderr).toContain(`moved off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${fx.label}`);
+      expect(`${stdout}\n${stderr}`).not.toContain("✓");
+      expect(stdout).not.toContain("✅ Flair started (launchd");
+      // The migration itself did happen.
+      expect(existsSync(launchdPlistPath(LEGACY_LAUNCHD_LABEL, fx.agentsDir))).toBe(false);
+      expect(existsSync(fx.plistPath)).toBe(true);
+    },
+    90_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(e8) POSITIVE CONTROL: legacy plist migrated and launchd's pid is the serving pid -> the migration check mark and ✅ launchd-managed",
+    async () => {
+      writeLegacyPlist();
+      const { stdout, exitCode } = await flairStart();
+      expect(exitCode).toBe(0);
+      const managedPid = Number(readFileSync(join(fx.state, "pid", fx.label), "utf-8"));
+      expect(stdout).toContain(`Migrated launchd service off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${fx.label} ✓`);
+      expect(stdout).toContain(`✅ Flair started (launchd-managed: launchd job ${fx.label} is running as process ${managedPid})`);
+    },
+    90_000,
+  );
+});
+
+describe("flair#2040 r5 — `flair start`: a malformed legacy plist is refused before anything is unloaded", () => {
+  test.skipIf(!isDarwin)(
+    "(e9) the legacy plist keeps its Label but is not a valid plist -> the default plutil -lint refuses the migration; nothing unloaded, written or removed; Flair started directly",
+    async () => {
+      const legacyPath = launchdPlistPath(LEGACY_LAUNCHD_LABEL, fx.agentsDir);
+      const malformed = passFilePlist(LEGACY_LAUNCHD_LABEL).replace("</array>", "");
+      expect(malformed).toContain(`<key>Label</key><string>${LEGACY_LAUNCHD_LABEL}</string>`);
+      expect(malformed).not.toContain("</array>");
+      writeFileSync(legacyPath, malformed);
+
+      const { stdout, stderr, exitCode } = await flairStart();
+
+      expect(exitCode).toBe(0);
+      expect(stderr).toContain("not migrating off the legacy launchd label: the replacement plist");
+      expect(stderr).toContain("plutil -lint rejected the plist");
+      // Nothing was unloaded or loaded: only read-only presence probes reached launchctl.
+      expect(mutatingCalls()).toEqual([]);
+      // The legacy plist is as it was, and no replacement was written.
+      expect(readFileSync(legacyPath, "utf-8")).toBe(malformed);
+      expect(existsSync(fx.plistPath)).toBe(false);
+      expect(`${stdout}\n${stderr}`).not.toContain("✓");
+      expect(stdout).toContain("NOT launchd-managed");
+      expect(await healthy()).toBe(true);
+    },
+    90_000,
+  );
+});
+
+describe("flair#2040 r5 — doctor --fix: a failed repair puts a corrupt plist back byte-for-byte", () => {
+  test.skipIf(!isDarwin)(
+    "(c2) a plist with invalid UTF-8 bytes + a bootstrap that fails after the write -> failed; the file's bytes are identical to before",
+    async () => {
+      // Invalid UTF-8 (0xff 0xfe, a lone continuation byte, a truncated
+      // sequence): a corrupt plist is repairable (regenerate), and decoding it
+      // as UTF-8 would replace these bytes.
+      const corrupt = Buffer.concat([
+        Buffer.from([0xff, 0xfe, 0x3c, 0x70, 0x6c, 0x80, 0xc3, 0x28, 0x0a]),
+        Buffer.from("not a plist\n", "utf-8"),
+        Buffer.from([0xe2, 0x82]),
+      ]);
+      writeFileSync(fx.plistPath, corrupt);
+      writeFileSync(join(fx.state, "bootstrap-fail", fx.label), "");
+
+      const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
+
+      expect(result.kind).toBe("failed");
+      expect(result.detail).toContain("Bootstrap failed: 5: Input/output error");
+      expect(result.detail).toContain("the plist and config files were put back as they were");
+      // The repair did write its plist (the failure is after the write) ...
+      expect(mutatingCalls()).toContain(`bootstrap ${GUI} ${fx.plistPath}`);
+      // ... and the restore put the ORIGINAL bytes back, not a decoded copy.
+      const after = readFileSync(fx.plistPath);
+      expect(after.length).toBe(corrupt.length);
+      expect(Buffer.compare(after, corrupt)).toBe(0);
+    },
+    90_000,
+  );
+});

@@ -349,7 +349,6 @@ program
             const { execSync } = await import("node:child_process");
             // Targeted at gui/<uid> — the domain the preflight probed (flair#2040).
             const { label, migrated } = ensureLaunchdServiceLoaded(dataDir, (cmd: string) => execSync(cmd, { stdio: "pipe" }));
-            if (migrated) console.log(`Migrated launchd service off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${label} ✓`);
             await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
             readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture on the freshly-created socket
             stampEngineVersionIfRunning(dataDir); // flair#1047: stamp the store with the engine version
@@ -360,12 +359,16 @@ program
             const managed = observeLaunchdManagement(dataDir, port);
             const verdict = verifyLaunchdManagement(managed);
             if (verdict.verified) {
+              // The migration's check mark too only after the strict verifier
+              // passed: moving a plist is not launchd running this instance.
+              if (migrated) console.log(`Migrated launchd service off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${label} ✓`);
               console.log(`✅ Flair started (launchd-managed: ${verdict.detail})`);
               return;
             }
             // Healthy, but not proven to be launchd's process: no launchd check
             // mark, and no claim about what happens at the next reboot either.
             console.error(`⚠️  Flair is running on port ${port}, but it is NOT verified as launchd-managed: ${managed.detail}`);
+            if (migrated) console.error(`   The launchd service was moved off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${label}.`);
             if (managed.remedy?.length) console.error(`   Fix: ${managed.remedy.join(" && ")}`);
             return;
           } catch (err: any) {

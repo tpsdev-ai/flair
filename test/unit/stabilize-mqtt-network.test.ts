@@ -102,8 +102,9 @@ describe("doctor --fix adopt keeps MQTT_* and restabilizes mqtt.network", () => 
     const cliSrc = readFileSync(join(import.meta.dir, "..", "..", "src", "cli.ts"), "utf8");
     expect(cliSrc).toMatch(/stabilizeMqttNetworkKeyOrder/);
     // flair#2040: the write lives in the repair's commit phase, from the
-    // config bytes the prepare phase recorded (so the restore can put them back).
-    expect(cliSrc).toMatch(/stabilizeMqttNetworkKeyOrder\(p\.prior\.config\.snapshot\.bytes\)/);
+    // config bytes the prepare phase recorded (so the restore can put them back;
+    // the snapshot is the raw buffer, decoded only for this reorder).
+    expect(cliSrc).toMatch(/stabilizeMqttNetworkKeyOrder\(p\.prior\.config\.snapshot\.bytes\.toString\("utf-8"\)\)/);
     expect(cliSrc).toMatch(/if \(changed\) \{\s*done\.wroteConfig = true;\s*writeFileAtomic\(p\.prior\.config\.path, text/);
   });
 

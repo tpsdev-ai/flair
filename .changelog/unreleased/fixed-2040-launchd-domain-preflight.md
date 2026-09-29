@@ -26,25 +26,32 @@
   `bootout` and `kickstart` against `gui/<uid>`), not `load`, `unload` and
   `start`. Those act on whatever domain launchctl infers for the calling
   process. If a step fails after the stop, doctor tries to unload the new job
-  and checks that it is gone, puts the plist and config back, and tries to
-  restart the instance directly. The result reports each attempt's outcome. It
-  also says when the state could not be established, for example a job that
-  could not be shown unloaded, in which case nothing is started.
+  and checks that it is gone, puts the plist and config files back
+  byte-for-byte, and tries to restart the instance directly. The result reports
+  each attempt's outcome. It also says when the state could not be established,
+  for example a job that could not be shown unloaded, in which case nothing is
+  started.
 
   `flair init` retires a legacy `ai.tpsdev.flair` job only behind the same
   checks. It boots the job out only when it is proven not to serve the
-  instance. When the job does serve the instance, init tries the guarded
-  replacement and a restore. When that cannot be established, it refuses.
-  Otherwise init writes the plist and says Flair is running directly, not
-  launchd-managed.
+  instance, and removes the job's plist only once the job is shown gone. If it
+  cannot be shown gone, init keeps that plist, puts back the plist it had just
+  written, reports the uncertainty and exits non-zero. When the job does serve
+  the instance, init tries the guarded replacement and a restore. When that
+  cannot be established, it refuses. Otherwise init writes the plist and says
+  Flair is running directly, not launchd-managed. The move off a legacy label
+  made by `flair start` (and the start legs of `restart`, `upgrade` and
+  `snapshot`) runs `plutil -lint` on the replacement plist before it unloads
+  anything, and refuses the move when the lint rejects it or cannot run.
 
-  `init`, `start` and `doctor` print their launchd check mark or "repaired" only
-  when launchd's pid equals an identified serving pid. When the serving process
-  cannot be identified, the result says so and claims nothing. `flair start`'s
-  fallback names the reason instead of a raw `launchd start failed`. It starts
-  directly only after the job is shown unloaded; otherwise it reports the
-  uncertainty and exits non-zero. `flair restart` still stops first: its start
-  leg decides only whether Flair comes back under launchd or directly.
+  `init`, `start` and `doctor` print a launchd check mark (including the
+  legacy-migration lines) or "repaired" only when launchd's pid equals an
+  identified serving pid. When the serving process cannot be identified, the
+  result says so and claims nothing. `flair start`'s fallback names the reason
+  instead of a raw `launchd start failed`. It starts directly only after the job
+  is shown unloaded; otherwise it reports the uncertainty and exits non-zero.
+  `flair restart` still stops first: its start leg decides only whether Flair
+  comes back under launchd or directly.
 
   The launchd launcher no longer starts a second instance on a data directory
   that a live process already serves (the pid in `hdb.pid`). It exits 0 before

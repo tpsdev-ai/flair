@@ -693,7 +693,7 @@ export function launchdLauncherPath(packageRoot: string = flairPackageDir()): st
  * temp file from creation — pass 0o600 when `content` holds a secret, so the
  * secret is never briefly world-readable on disk (flair#1573 slice a).
  */
-export function writeFileAtomic(path: string, content: string, mode: number): void {
+export function writeFileAtomic(path: string, content: string | Uint8Array, mode: number): void {
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true });
   const tmpPath = join(dir, `.${basename(path)}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`);
@@ -751,13 +751,26 @@ type LaunchctlRunner = (cmd: string) => void;
  * file. There is never a moment where both the legacy and new labels are
  * registered for the same data dir. No-op (migrated: false) if there's
  * nothing legacy to migrate, or the new label is already registered.
+ *
+ * flair#2040: before anything is unloaded, the replacement content must carry
+ * the expected Label and pass `opts.lint` (plutil -lint by default); either
+ * failing throws with nothing unloaded, written or removed.
  */
 function migrateLegacyLaunchdLabel(
   dataDir: string,
   runLaunchctl: LaunchctlRunner,
   launchAgentsDir: string = defaultLaunchAgentsDir(),
   uid: number = currentUid(),
-  opts: { settleMs?: number; sleep?: (ms: number) => void } = {},
+  opts: {
+    settleMs?: number;
+    sleep?: (ms: number) => void;
+    /**
+     * Syntax check of the replacement plist content: a problem line, or null
+     * when it passed. Defaults to `plutil -lint` over a temp copy
+     * (lintLaunchdPlistContent); injected so tests never depend on the host.
+     */
+    lint?: (content: string) => string | null;
+  } = {},
 ): { migrated: boolean; label: string; plistPath: string } {
   const resolved = resolveLaunchdLabel(dataDir, launchAgentsDir);
   if (!resolved.isLegacy) {
@@ -782,6 +795,17 @@ function migrateLegacyLaunchdLabel(
       `Legacy plist at ${resolved.plistPath} does not contain the expected ` +
       `Label key — it may be malformed or from an unknown Flair version. ` +
       `Remove it manually and re-run 'flair init'.`,
+    );
+  }
+  // flair#2040: a plist that still carries the expected Label can be malformed
+  // XML, which bootstrap would reject only AFTER the legacy job was unloaded.
+  // Lint the replacement content now, before anything is unloaded; a lint that
+  // could not run is a failed check, not a pass.
+  const lintProblem = (opts.lint ?? lintLaunchdPlistContent)(newContent);
+  if (lintProblem !== null) {
+    throw new Error(
+      `not migrating off the legacy launchd label: the replacement plist for ${newLabel} failed validation ` +
+        `(${lintProblem}). Nothing was unloaded, and the legacy plist ${resolved.plistPath} was left as it was.`,
     );
   }
 
@@ -820,7 +844,10 @@ function migrateLegacyLaunchdLabel(
  */
 type LegacyCleanupResult =
   | { action: "none" }
-  | { action: "unloaded"; unloadFailed?: string; deleteFailed?: string }
+  | { action: "unloaded"; deleteFailed?: string }
+  // flair#2040: the job could not be shown unloaded, so its plist was KEPT —
+  // the caller must not report the retirement, nor leave a second plist beside it.
+  | { action: "unload-unconfirmed"; unloadFailed: string }
   | { action: "skipped-foreign"; foreignDataDir: string }
   | { action: "skipped-unknown" };
 
@@ -849,7 +876,6 @@ function cleanupLegacyLaunchdPlist(
   const legacyOwnedByUs = legacyRootPath !== null && resolve(legacyRootPath) === resolve(dataDir);
 
   if (legacyOwnedByUs) {
-    let unloadFailed: string | undefined;
     let deleteFailed: string | undefined;
     // flair#2040: targeted at the GUI domain, only when the job is loaded
     // there, and VERIFIED gone afterwards (ensureLaunchdJobAbsent) — a bootout
@@ -860,17 +886,22 @@ function cleanupLegacyLaunchdPlist(
     const domain = launchdGuiDomain(uid);
     const gone = ensureLaunchdJobAbsent({ run: runLaunchctl, domain, label: LEGACY_LAUNCHD_LABEL, settleMs: opts.settleMs, sleep: opts.sleep });
     if (gone !== null) {
-      unloadFailed = gone;
+      // The job may still be loaded: its plist is KEPT (removing it would
+      // orphan a loaded job), and the caller reports the uncertainty.
       console.error(
-        `Failed to unload legacy launchd service (${LEGACY_LAUNCHD_LABEL}): ` +
-          `${unloadFailed}. ` +
-          `It may still be loaded — unload it manually with: launchctl bootout ${domain}/${LEGACY_LAUNCHD_LABEL}`,
+        `Failed to unload legacy launchd service (${LEGACY_LAUNCHD_LABEL}): ${gone}. ` +
+          `It may still be loaded, so its plist at ${legacyPlistPath} was left in place — unload it with: ` +
+          `launchctl bootout ${domain}/${LEGACY_LAUNCHD_LABEL}`,
       );
+      return { action: "unload-unconfirmed", unloadFailed: gone };
     }
     try {
       unlinkSync(legacyPlistPath);
-      // A check mark only when the job was also shown to be gone.
-      if (!unloadFailed) console.log(`Migrated off legacy launchd label (${LEGACY_LAUNCHD_LABEL}) ✓`);
+      // No check mark (flair#2040): retiring the legacy plist is not launchd
+      // managing this instance — only the strict verifier licenses a ✓.
+      console.log(
+        `Retired the legacy launchd plist (${LEGACY_LAUNCHD_LABEL}) at ${legacyPlistPath}; its job is not loaded (verified).`,
+      );
     } catch (err: any) {
       deleteFailed = err?.message ?? String(err);
       console.error(
@@ -878,7 +909,7 @@ function cleanupLegacyLaunchdPlist(
           `${deleteFailed}. Remove it manually.`,
       );
     }
-    return { action: "unloaded", unloadFailed, deleteFailed };
+    return { action: "unloaded", deleteFailed };
   }
 
   if (legacyRootPath !== null) {
@@ -6026,9 +6057,10 @@ export interface InitLaunchdLine {
  *               identified — no claim either way;
  *   - refused:  the plist writer refused (credential/ownership) — init exits 1;
  *   - down:     replacing failed AND every restore failed — init exits 1;
- *   - uncertain: a job could not be shown unloaded during the restore, so
- *               nothing further was started; the state is reported as unknown
- *               — init exits 1.
+ *   - uncertain: a job could not be shown unloaded — during the restore (so
+ *               nothing further was started), or when retiring an idle legacy
+ *               job (its plist is kept and the new plist put back); the state
+ *               is reported as unknown — init exits 1.
  */
 export type InitLaunchdOutcome = {
   kind: "managed" | "direct" | "unverified" | "skipped" | "restored" | "refused" | "down" | "uncertain";
@@ -6178,7 +6210,28 @@ async function registerInitLaunchdService(input: {
 
   if (role !== "serving") {
     // PROVEN not serving (absent, or idle): retiring it stops nothing.
-    cleanupLegacyLaunchdPlist(dataDir, plistDir, realLaunchctlCommand, uid);
+    const cleanup = cleanupLegacyLaunchdPlist(dataDir, plistDir, realLaunchctlCommand, uid);
+    if (cleanup.action === "unload-unconfirmed") {
+      // flair#2040: the legacy job could not be shown unloaded, and the helper
+      // KEPT its plist. The replacement written above must not stay beside it
+      // (two plists for one data directory would give launchd two jobs), so it
+      // is put back as it was, and nothing is reported as registered.
+      let putBack: string;
+      try {
+        restoreFile(write.plistPath, priorNew);
+        putBack = priorNew.kind === "absent"
+          ? `the new plist ${write.plistPath} was removed again`
+          : `the plist at ${write.plistPath} was put back as it was`;
+      } catch (e: any) {
+        putBack = `putting ${write.plistPath} back FAILED (${e?.message ?? e})`;
+      }
+      err(
+        `⚠️  Launchd: not re-registered — the legacy job ${LEGACY_LAUNCHD_LABEL} could not be shown unloaded ` +
+          `(${cleanup.unloadFailed}), so it may still be loaded. Its plist at ${legacyPath} was left in place, and ${putBack}.`,
+      );
+      err(`   Fix: launchctl bootout ${domain}/${LEGACY_LAUNCHD_LABEL}, then re-run 'flair init'.`);
+      return { kind: "uncertain", lines };
+    }
     return reportInitLaunchd(dataDir, port, write, outcome.kind, lines);
   }
 
@@ -6509,15 +6562,19 @@ async function repairLaunchdManagement(dataDir: string, port: number): Promise<L
  * which the callers refuse on BEFORE they stop anything — a snapshot that
  * could not be taken cannot be put back, and must never be mistaken for
  * "there was no file".
+ *
+ * `bytes` is the RAW buffer, never a decoded string: a corrupt plist is a
+ * repairable case, and decoding invalid UTF-8 replaces those bytes, so a
+ * string snapshot would not put the file back as it was.
  */
 type FileSnapshot =
   | { kind: "absent" }
-  | { kind: "present"; bytes: string; mode: number }
+  | { kind: "present"; bytes: Buffer; mode: number }
   | { kind: "unreadable"; error: string };
 
 function snapshotFile(path: string): FileSnapshot {
   try {
-    const bytes = readFileSync(path, "utf-8");
+    const bytes = readFileSync(path);
     return { kind: "present", bytes, mode: statSync(path).mode & 0o777 };
   } catch (err: any) {
     if (err?.code === "ENOENT") return { kind: "absent" };
@@ -6534,9 +6591,10 @@ function unreadableSnapshot(entries: Array<[string, FileSnapshot | null]>): stri
 }
 
 /**
- * Put a file back as `snapshot` recorded it: rewritten when it was present,
- * removed ONLY when it was proven absent. An unreadable snapshot is never
- * "restored" — that would delete or clobber a file whose bytes were never known.
+ * Put a file back as `snapshot` recorded it: rewritten byte-for-byte (the raw
+ * buffer) when it was present, removed ONLY when it was proven absent. An
+ * unreadable snapshot is never "restored" — that would delete or clobber a
+ * file whose bytes were never known.
  */
 function restoreFile(path: string, snapshot: FileSnapshot): void {
   if (snapshot.kind === "unreadable") {
@@ -6805,7 +6863,7 @@ async function commitLaunchdRepair(p: PreparedLaunchdRepair): Promise<LaunchdRep
     // file (port, securePort, mtls). Reorder only those scalar lines
     // before launchd loads so the next persist matches the settled file.
     if (p.prior.config && p.prior.config.snapshot.kind === "present") {
-      const { text, changed } = stabilizeMqttNetworkKeyOrder(p.prior.config.snapshot.bytes);
+      const { text, changed } = stabilizeMqttNetworkKeyOrder(p.prior.config.snapshot.bytes.toString("utf-8"));
       if (changed) {
         done.wroteConfig = true;
         writeFileAtomic(p.prior.config.path, text, 0o644);
