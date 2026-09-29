@@ -225,7 +225,7 @@ describe("Flair unavailable: no memories, one note line", () => {
     expect(elapsed).toBeLessThan(DEFAULT_TIMEOUT_MS);
   });
 
-  test("a malformed search answer injects nothing and never throws", async () => {
+  test("a non-list value returned by the search client injects nothing and never throws", async () => {
     const out = await runRecall(payload(REPLAY_PROMPT), {
       env,
       makeClient: clientThat(async () => ({ not: "an array" }) as unknown as RecallHit[]),
@@ -364,7 +364,7 @@ describe("the config read is bounded and never blocks", () => {
   });
 });
 
-describe("result processing is bounded, whatever the search returns", () => {
+describe("the hook's own result processing is bounded, whatever the search client returns", () => {
   test("an answer far longer than requested is read only up to the requested number of hits", async () => {
     let reads = 0;
     const answer = Array.from({ length: 100_000 }, (_, i) => ({ id: `mem-${i}`, content: "unrelated note", score: 0.3 }));
@@ -380,7 +380,7 @@ describe("result processing is bounded, whatever the search returns", () => {
     expect(reads).toBeLessThanOrEqual(candidateLimit(DEFAULT_MAX_HITS));
   });
 
-  test("only the first CONTENT_SCAN_CHARS of a memory are examined, so huge memories cost nothing extra", async () => {
+  test("only the first CONTENT_SCAN_CHARS of a memory are examined, so huge memories cost the hook nothing extra", async () => {
     env.FLAIR_PROMPT_RECALL_MAX_HITS = "10";
     // Text that only a whole-content pass would reach: past the scan window.
     const late = `${" ".repeat(CONTENT_SCAN_CHARS + 10)}LATE-MARKER about Jev`;

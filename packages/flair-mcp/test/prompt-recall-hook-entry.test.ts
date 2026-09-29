@@ -4,9 +4,9 @@
  * a loopback HTTP stand-in for Flair.
  *
  * What only a spawned process can show: the exit code (always 0), that the
- * whole process ends within its time budget whatever is still pending (stdin
- * held open, a config path that is a FIFO, a result set too large to arrive in
- * time), and what actually goes on the wire.
+ * process ends within its time budget whatever asynchronous work is still
+ * pending (stdin held open, a config path that is a FIFO, a result set too
+ * large to arrive in time), and what actually goes on the wire.
  *
  * The stand-in authenticates the way Flair does: it parses the Authorization
  * header and verifies the Ed25519 signature over the canonical payload with
@@ -65,7 +65,7 @@ interface SeenRequest {
   body: Record<string, unknown>;
 }
 
-type Mode = "fixture" | "hang" | "flood";
+type Mode = "fixture" | "hang" | "flood" | "malformed";
 
 let server: Server;
 let serverUrl: string;
@@ -135,10 +135,18 @@ beforeAll(async () => {
       verified,
       body,
     });
-    if (mode === "hang") return; // accept, never answer
+    // Authentication comes first, in every mode: a request that does not
+    // verify is refused before any mode decides how to answer.
     if (!verified) {
       res.writeHead(401, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "authentication required" }));
+      return;
+    }
+    if (mode === "hang") return; // accept, never answer
+    if (mode === "malformed") {
+      // A 200 whose `results` is not a list.
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ results: { not: "a list" } }));
       return;
     }
     if (mode === "flood") {
@@ -291,6 +299,21 @@ describe("flair-prompt-recall entry point (spawned, real client)", () => {
   );
 
   test(
+    "control: the refusal comes before the mode, so a wrong-key request is refused even in hang mode",
+    async () => {
+      mode = "hang";
+      const other = generateKeyPairSync("ed25519").privateKey;
+      // A short client timeout, so a stand-in that hung instead of refusing
+      // fails this case in seconds rather than at the client's 10 s default.
+      const client = new FlairClient({ agentId: AGENT, url: serverUrl, privateKey: other, adminUser: "", adminPassword: "", timeoutMs: 3000 });
+      await expect(client.memory.search("Jev", { limit: 1 })).rejects.toMatchObject({ status: 401 });
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.verified).toBe(false);
+    },
+    CASE_BUDGET_MS,
+  );
+
+  test(
     "replay: the direction reaches stdout; the request verifies against the agent's own public key, never admin Basic",
     async () => {
       const run = await runEntry(
@@ -429,6 +452,21 @@ describe("flair-prompt-recall entry point (spawned, real client)", () => {
       // Sending all of it takes about FLOOD_CHUNKS × FLOOD_INTERVAL_MS (~10 s):
       // the hook ended on its budget instead of waiting for, or processing, the rest.
       expect(run.elapsedMs).toBeLessThan(ENDS_ON_DEADLINE_MS);
+    },
+    CASE_BUDGET_MS,
+  );
+
+  test(
+    "a 200 whose `results` is not a list makes flair-client throw: one unavailable note, exit 0",
+    async () => {
+      mode = "malformed";
+      const run = await runEntry(childEnv({}), payload(REPLAY_PROMPT), "malformed-results");
+      expect(run.status).toBe(0);
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.verified).toBe(true);
+      const ctx = contextOf(run.stdout);
+      expect(ctx.split("\n")).toHaveLength(1);
+      expect(ctx).toContain("Flair recall was unavailable for this prompt (unreachable)");
     },
     CASE_BUDGET_MS,
   );

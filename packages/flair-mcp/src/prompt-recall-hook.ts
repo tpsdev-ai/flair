@@ -36,26 +36,33 @@
  *
  * NEVER BLOCKS
  * ------------
- * Every path exits 0. The time budget (default 3 s) covers the WHOLE hook: the
- * entry point arms a process-level deadline before it reads stdin or the
- * config, measured from the moment it starts, and when the deadline passes it
- * prints the one "unavailable (timeout)" line and exits 0, whatever is still
- * pending (stdin held open, a stalled read, a slow search or a result still
- * arriving). The deadline starts from the environment's budget and moves to
- * the configured one once the config has been read. Inside that:
+ * Every path exits 0. The time budget (default 3 s) runs from the moment the
+ * process starts: the entry point arms a process-level deadline before it
+ * reads stdin or the config, and when the deadline passes during asynchronous
+ * work (stdin held open, a stalled read, a slow search, a response still
+ * arriving) it prints the one "unavailable (timeout)" line and exits 0. The
+ * deadline starts from the environment's budget and moves to the configured
+ * one once the config has been read. Inside that:
  *   - stdin is read up to STDIN_MAX_BYTES; a larger payload is not searched;
  *   - the config file is refused unless it is a regular file of at most
  *     CONFIG_MAX_BYTES, checked before it is opened (a FIFO would block the
  *     open) and again on the opened descriptor, and read asynchronously;
- *   - the search runs under the budget that remains, and result processing is
- *     bounded: at most candidateLimit(maxHits) hits and CONTENT_SCAN_CHARS of
- *     each memory's text are ever examined.
+ *   - the search runs under the budget that remains;
+ *   - after the client returns, the hook's own processing is bounded: at most
+ *     candidateLimit(maxHits) hits and CONTENT_SCAN_CHARS of each memory's
+ *     text are ever examined.
+ * NOT bounded: a response that arrives in full within the budget is parsed,
+ * and every result in it mapped, synchronously inside flair-client before it
+ * returns. A timer cannot interrupt that work, and the response size is not
+ * capped; the deadline takes effect once it finishes.
  * When Flair is unreachable, slow or refuses the request, or the client cannot
  * be built, the output carries NO memories, only one line saying recall was
  * unavailable for this prompt (with the failure kind — never a message text, a
- * URL or a credential). Missing identity, malformed or oversized stdin, a
- * skipped prompt, a search answer that is not a list of hits and "nothing
- * above the threshold" all print the inert `{}`. The entry point prints and
+ * URL or a credential); that includes a 200 whose `results` is not a list,
+ * which makes flair-client throw. Missing identity, malformed or oversized
+ * stdin, a skipped prompt, a non-list value returned to runRecall by an
+ * injected search client, and "nothing above the threshold" all print the
+ * inert `{}`. The entry point prints and
  * then ends the process explicitly, so an abandoned in-flight request cannot
  * keep it alive past the budget. What runs before this process starts (the
  * launcher, node's own start-up) is outside the budget.
@@ -125,7 +132,8 @@ export const CONTEXT_MAX_CHARS = 2000;
 /** A hit line whose snippet would be shorter than this is dropped, not shown mangled. */
 const MIN_SNIPPET_CHARS = 40;
 /** How much of one memory's content the hook ever examines (flattening,
- *  unwrapping, cutting). Bounds result processing whatever the server sends. */
+ *  unwrapping, cutting). Bounds the hook's own processing of a result once the
+ *  client has returned it. */
 export const CONTENT_SCAN_CHARS = 4096;
 /** Upper bound on the hook's stdin, the UserPromptSubmit payload. A larger
  *  payload is not read further and not searched. */
@@ -370,7 +378,8 @@ export function buildRecallQuery(prompt: string): string {
  * de-duplication, only those whose score meets the threshold, at most
  * `maxHits`. A hit with no content or a non-numeric score is dropped. Only the
  * first candidateLimit(maxHits) entries are examined, the number the search
- * was asked for, so an answer with more than that costs nothing extra.
+ * was asked for, so an answer with more than that costs the hook nothing
+ * extra (flair-client has already parsed and mapped all of them by then).
  */
 export function selectHits(hits: unknown, cfg: Pick<RecallConfig, "minScore" | "maxHits">): RecallHit[] {
   if (!Array.isArray(hits)) return [];
@@ -672,9 +681,11 @@ async function main(): Promise<void> {
   }
   // The process-level deadline, armed before stdin or the config is read: when
   // it passes, the hook prints the one "unavailable (timeout)" line (or `{}`
-  // when there is no identity to recall for) and exits 0, whatever is still
-  // pending. It starts from the environment's budget and moves to the
-  // configured one once runRecall has read the config.
+  // when there is no identity to recall for) and exits 0, whatever
+  // asynchronous work is still pending. A timer cannot fire during synchronous
+  // work (flair-client parsing and mapping a response that has fully arrived);
+  // it fires as soon as that returns. It starts from the environment's budget
+  // and moves to the configured one once runRecall has read the config.
   stripInterpolationLiteralsFromEnv();
   const expired = readEnvOrUnset("FLAIR_AGENT_ID") ? hookOutput(unavailableNote("timeout")) : NOOP_OUTPUT;
   let deadline = setTimeout(() => finish(expired), envBudgetMs(process.env));
