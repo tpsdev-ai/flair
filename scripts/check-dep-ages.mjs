@@ -103,6 +103,8 @@ async function main() {
   function isRetryablePublishTimeError(err) {
     const msg = String(err?.message ?? err);
     if (msg.startsWith("no publish time")) return false;
+    // A malformed value is not transient; retrying fetches the same bad body.
+    if (msg.startsWith("unparseable publish time")) return false;
     if (/^HTTP 4\d\d/.test(msg) && !/^HTTP 408/.test(msg) && !/^HTTP 429/.test(msg)) {
       return false;
     }
@@ -123,7 +125,14 @@ async function main() {
     if (!time) {
       throw new Error(`no publish time for ${name}@${version}`);
     }
-    return Date.parse(time);
+    const publishedAt = Date.parse(time);
+    if (Number.isNaN(publishedAt)) {
+      // Present but not a valid date: the registry handed back a value we
+      // cannot trust. Fail closed like a fetch failure — never compare it to
+      // the cutoff (NaN comparisons are always false and would slip through).
+      throw new Error(`unparseable publish time for ${name}@${version}: ${JSON.stringify(time)}`);
+    }
+    return publishedAt;
   }
 
   async function getPublishTime(name, version) {

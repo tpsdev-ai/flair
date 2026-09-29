@@ -170,6 +170,21 @@ function freshRegistry() {
   return { url: `http://127.0.0.1:${server.port}`, requests, stop: () => server.stop(true) };
 }
 
+/** A registry that reports FIXTURE_VERSION with a PRESENT but unparseable time. */
+function unparseableRegistry(value = "not-a-timestamp") {
+  const requests: string[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(req) {
+      requests.push(new URL(req.url).pathname);
+      return Response.json({ time: { [FIXTURE_VERSION]: value } });
+    },
+  });
+  if (!server.port) setupFailure("fixture registry did not bind a port");
+  return { url: `http://127.0.0.1:${server.port}`, requests, stop: () => server.stop(true) };
+}
+
 describe("CLI fail-closed exit — dead registry", () => {
   it("exits 2 when FLAIR_NPM_REGISTRY is unreachable", async () => {
     const root = writeFixtureRepo(join(scratch, "dead-registry"));
@@ -219,6 +234,29 @@ describe("CLI fail-closed exit — too-fresh dep", () => {
       expect(output).toContain("Pinned production deps younger than the bake-time policy");
       expect(output).toContain(`${FIXTURE_DEP}@${FIXTURE_VERSION}`);
       expect(exitCode).toBe(1);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+});
+
+describe("CLI fail-closed exit — unparseable publish time", () => {
+  it("exits 2 when a present publish time cannot be parsed (flair#2076)", async () => {
+    const root = writeFixtureRepo(join(scratch, "unparseable-time"));
+    const registry = unparseableRegistry();
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      // Treated as a registry failure, never compared to the cutoff.
+      expect({
+        exitCode,
+        registryFailure: output.includes("Failed to fetch publish times"),
+      }).toEqual({ exitCode: 2, registryFailure: true });
+      expect(output).toContain(`${FIXTURE_DEP}@${FIXTURE_VERSION}`);
+      expect(output).not.toContain("younger than the bake-time policy");
+      expect(exitCode).toBe(2);
     } finally {
       registry.stop();
     }
