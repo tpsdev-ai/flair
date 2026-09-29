@@ -47,6 +47,7 @@ import {
   UNAUTH,
   NOT_FOUND,
 } from "./record-type-kit.js";
+import { isSemanticPatch, MEMORY_SEMANTIC_FIELDS } from "./provenance.js";
 import { RECORD_TYPES } from "./record-types.js";
 import { attachTrust } from "./trust-block.js";
 import { recordCitations } from "./usage-recording.js";
@@ -1302,6 +1303,11 @@ export class Memory extends (databases as any).flair.Memory {
       if (stale) return stale;
     }
     stripClientVersionPassthrough(content);
+    // flair#1960 r2: capture the (undeclared) authorship-claim inputs BEFORE the
+    // undeclared-attribute strip removes them, so a semantic PATCH re-stamps
+    // provenance with the SAME claims a post()/put() would record from this body
+    // (a PATCH body's `model`/`claimedClient` are folded into `claimed` only).
+    const claimInputs = { model: (content as any)?.model, claimedClient: (content as any)?.claimedClient };
     // A1' item 1: patch() is a Memory writer too. Drop any pointer inputs and
     // every undeclared attribute here, so a PATCH can never carry a pointer
     // onto the row (the pointer is written ONLY by post()/put() and the table
@@ -1364,6 +1370,26 @@ export class Memory extends (databases as any).flair.Memory {
     const existingForSkill = (await Promise.resolve(super.get()).catch(() => null)) as any;
     const skillDenial = rejectSkillWritePath(content) ?? rejectSkillWritePath(existingForSkill);
     if (skillDenial) return skillDenial;
+    // ── flair#1960 r2: a SEMANTIC patch re-stamps provenance ────────────────
+    // patch() strips a caller-supplied `provenance` (above) so a body can never
+    // SET a `verified.*` field, but stripping alone would leave the STORED blob
+    // in place — including a legacy row whose `verified.timestamp` came from a
+    // client `createdAt` before this release. A patch that changes the record's
+    // content is a fresh authored write, so it re-stamps from the resolved auth
+    // and ONE server clock read (never the caller's `createdAt`, never a carried-
+    // forward stored value). A metadata-only patch (no semantic field changes)
+    // keeps the stored, previously-stamped blob: no new content was authored, so
+    // there is no new write to attribute. See resources/provenance.ts
+    // (isSemanticPatch / MEMORY_SEMANTIC_FIELDS) for the field set.
+    if (isSemanticPatch(content, existingForSkill, MEMORY_SEMANTIC_FIELDS)) {
+      const ctx = (this as any).getContext?.();
+      const auth = await resolveAgentAuth(ctx);
+      content.provenance = buildProvenance(
+        auth,
+        content.createdAt ?? existingForSkill?.createdAt,
+        claimInputs,
+      );
+    }
     return super.patch(content, query);
   }
 

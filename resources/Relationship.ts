@@ -14,6 +14,8 @@ import {
   FORBIDDEN,
   UNAUTH,
 } from "./record-type-kit.js";
+import { stripServerStampedFields } from "./memory-declared-attributes.js";
+import { isSemanticPatch, RELATIONSHIP_SEMANTIC_FIELDS } from "./provenance.js";
 import { RECORD_TYPES } from "./record-types.js";
 
 // Parameterized from RECORD_TYPES.Relationship (record-types slice 2,
@@ -133,6 +135,24 @@ export class Relationship extends (databases as any).flair.Relationship {
   async patch(content: any, query?: any) {
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
+    // flair#1960 r2: PATCH was the one Relationship writer that never touched
+    // `provenance`. The schema declares the field writable, so a caller could
+    // PATCH a forged `verified.agentId`/`verified.timestamp` straight onto the
+    // row, and stripping alone would let a stored value ride through. Mirror the
+    // Memory/put() contract: strip any body-supplied server-stamped field (so a
+    // body can never SET a `verified.*` field) and, when the patch changes the
+    // relationship's semantic identity (subject/predicate/object), re-stamp
+    // provenance from the resolved auth and ONE server clock read. A
+    // metadata-only patch (confidence/source/validTo) keeps the stored,
+    // previously-stamped blob. Claim inputs are captured before the guard so a
+    // `claimed.model`/`claimed.client` on the body is folded in like put().
+    const claimInputs = { model: (content as any)?.model, claimedClient: (content as any)?.claimedClient };
+    stripServerStampedFields(content);
+    const existing = (await Promise.resolve(super.get()).catch(() => null)) as any;
+    if (isSemanticPatch(content, existing, RELATIONSHIP_SEMANTIC_FIELDS)) {
+      const auth = await resolveAgentAuth((this as any).getContext?.());
+      content.provenance = buildProvenance(auth, content.createdAt ?? existing?.createdAt, claimInputs);
+    }
     return super.patch(content, query);
   }
 

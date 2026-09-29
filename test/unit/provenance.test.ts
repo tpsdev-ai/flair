@@ -68,10 +68,21 @@ describe("flair#1960 — verified.timestamp is the SERVER write instant, never t
     expect(stamped).toBeLessThanOrEqual(Date.now() + 5000);
   });
 
-  it("shares ONE clock read between verified.timestamp and verified.receivedAt", () => {
-    // Both assert the same server write instant, so one `new Date()` keeps them
-    // identical instead of letting a second read drift them apart.
-    const prov = parse(buildProvenance(AGENT, PAST, {}));
+  it("shares exactly ONE clock read between verified.timestamp and verified.receivedAt", () => {
+    // flair#1960 r2: use an INJECTED, counting-and-ADVANCING fake clock. The
+    // second read returns a DIFFERENT value, so `timestamp === receivedAt` can
+    // only hold if buildProvenance read the clock exactly once. Two wall-clock
+    // reads almost always agree (a double-read matched on 9,993/10,000 pairs),
+    // so the old string-equality-only assertion did NOT prove a single read —
+    // this one fails deterministically (calls === 2, values differ) if a second
+    // read is ever added.
+    let calls = 0;
+    const base = Date.parse("2026-07-18T00:00:00.000Z");
+    const clock = () => new Date(base + calls++ * 1000);
+    const prov = parse(buildProvenance(AGENT, PAST, {}, clock));
+    expect(calls).toBe(1);
+    expect(prov.verified.timestamp).toBe(new Date(base).toISOString());
+    expect(prov.verified.receivedAt).toBe(new Date(base).toISOString());
     expect(prov.verified.timestamp).toBe(prov.verified.receivedAt);
   });
 

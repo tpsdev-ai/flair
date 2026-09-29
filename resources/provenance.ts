@@ -56,6 +56,11 @@ function sanitizeClaim(value: unknown): string | undefined {
  *   the caller's `createdAt` is a CLAIM and is recorded separately under
  *   `claimed.createdAt` (below), never here. Every field under `verified` is
  *   server-derived.
+ *   The clock is an injectable `() => Date` (defaulting to the wall clock) so
+ *   the "one read" contract is TESTABLE: a counting/advancing fake clock fails
+ *   the test deterministically if a second read is ever added (flair#1960 r2 —
+ *   comparing two wall-clock reads only catches a drift of >0 ms, which the
+ *   test used to miss ~7 times in 10,000). Production callers never pass one.
  * - The host pointer (`hostSource`) is NOT provenance (flair#1940 A5): it lives
  *   in its own `MemoryHostSource` table, is never part of this `{ v, verified,
  *   claimed }` blob, and is written on the Memory write path in the same
@@ -97,12 +102,17 @@ function sanitizeClaim(value: unknown): string | undefined {
  * buildProvenance as-is," which this module makes literal (one function, one
  * shape, imported by every writer) instead of a copy that could drift.
  */
-export function buildProvenance(auth: AgentAuthVerdict, createdAt: string, content: any): string {
+export function buildProvenance(
+  auth: AgentAuthVerdict,
+  createdAt: string,
+  content: any,
+  clock: () => Date = () => new Date(),
+): string {
   // ONE clock read per write, shared by BOTH server-derived timestamps
   // (flair#1960): `verified.timestamp` and `verified.receivedAt` assert the
-  // same server write instant, so a single `new Date()` keeps them identical
+  // same server write instant, so a single `clock()` call keeps them identical
   // instead of letting a second read drift them apart by milliseconds.
-  const serverNow = new Date().toISOString();
+  const serverNow = clock().toISOString();
   const provenance: {
     v: 1;
     verified: { agentId: string | null; timestamp: string; receivedAt: string };
@@ -131,4 +141,39 @@ export function buildProvenance(auth: AgentAuthVerdict, createdAt: string, conte
     if (client !== undefined) provenance.claimed.client = client;
   }
   return JSON.stringify(provenance);
+}
+
+/**
+ * The fields whose change makes a memory write SEMANTIC — the text the record
+ * actually says. A PATCH that changes one of these is re-authoring content, so
+ * it MUST re-stamp provenance from the resolved auth and the server clock rather
+ * than carry a previously stored `verified.*` value forward (flair#1960 r2).
+ */
+export const MEMORY_SEMANTIC_FIELDS = Object.freeze(["content", "subject", "summary"] as const);
+
+/**
+ * The fields whose change makes a relationship write SEMANTIC — its identity
+ * (what it links). Same rule as MEMORY_SEMANTIC_FIELDS: a semantic PATCH
+ * re-stamps provenance; a metadata-only PATCH (confidence/source/etc.) leaves
+ * the stored, previously-stamped blob in place.
+ */
+export const RELATIONSHIP_SEMANTIC_FIELDS = Object.freeze(["subject", "predicate", "object"] as const);
+
+/**
+ * True when `content` changes at least one of `fields` relative to the STORED
+ * record — the trigger for a provenance re-stamp on the update (PATCH) path.
+ *
+ * A value that is ABSENT from the write body is never a change (Harper PATCH
+ * merges; a missing key means "leave the stored value"), so this only looks at
+ * keys actually present in `content`. A non-object body, or a body whose target
+ * is not a string/primitive change, is not semantic.
+ */
+export function isSemanticPatch(content: any, existing: any, fields: readonly string[]): boolean {
+  if (!content || typeof content !== "object" || Array.isArray(content)) return false;
+  if (!existing || typeof existing !== "object") return false;
+  for (const field of fields) {
+    if (!Object.prototype.hasOwnProperty.call(content, field)) continue;
+    if (content[field] !== existing[field]) return true;
+  }
+  return false;
 }

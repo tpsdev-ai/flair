@@ -161,13 +161,18 @@ type Relationship @table(database: "flair") {
   originatorInstanceId: String @indexed  # federation-edge-hardening slice 1 — see Memory.originatorInstanceId's doc above
                                     # for the full contract (write-time stamp, nullable, preserved across sync merges).
                                     # Stamped server-side in resources/Relationship.ts's put().
-  provenance: String                # JSON blob (relationship-write-path, folded K&S refinement): SAME shape as
-                                    # Memory.provenance above — { v, verified: { agentId, timestamp }, claimed?: { model, client } }
-                                    # — via the shared resources/provenance.ts buildProvenance(), never a
-                                    # Relationship-specific format. Nullable by design — pre-existing rows read back
+  provenance: String                # JSON blob (relationship-write-path, folded K&S refinement; re-stamped on
+                                    # the semantic PATCH path by flair#1960 r2): SAME shape as
+                                    # Memory.provenance above — { v, verified: { agentId, timestamp, receivedAt },
+                                    # claimed?: { createdAt, model, client } } — via the shared
+                                    # resources/provenance.ts buildProvenance(), never a
+                                    # Relationship-specific format. Every field under `verified` is
+                                    # server-derived (the resolved auth verdict + one server clock read),
+                                    # never client-writable. Nullable by design — pre-existing rows read back
                                     # provenance = null, unchanged behavior (migration-equivalence gate, same
                                     # discipline as Memory.usageCount/flair#684). Stamped server-side in
-                                    # resources/Relationship.ts's put(); never client-writable.
+                                    # resources/Relationship.ts's put() (and re-stamped on a semantic patch());
+                                    # never client-writable.
 }
 
 type Soul @table(database: "flair") {

@@ -134,9 +134,12 @@ export interface TrustBlock {
    * Whether the record carries a self-reported authorship claim —
    * `provenance.claimed.model` or `claimed.client` (model/client). ADVISORY
    * ONLY, zero authority — the content is never surfaced here (see module
-   * doc). `claimed.createdAt` (flair#1960) does NOT set this: every new row
-   * carries a claimed createdAt, so counting it would make the bit always
-   * true and meaningless.
+   * doc). `claimed.createdAt` (flair#1960) does NOT set this: it is present on
+   * essentially every new row (the builder omits the `claimed` object only when
+   * `createdAt`, `model` and `client` are ALL absent after sanitization, e.g. a
+   * body with no/control-only `createdAt` and no model/client claim), so
+   * counting it would make the bit almost always true and meaningless. It flags
+   * the OPTIONAL authorship claims (model/client) only.
    */
   hasClaimedProvenance: boolean;
 

@@ -349,7 +349,7 @@ A peer can therefore show `presenceStatus: "offline"`, `activity: "idle"`, `last
 | `subject` / `summary` | String | Compression: subject → summary → content |
 | `validFrom` / `validTo` | String | Temporal validity; expired rows drop out of search |
 | `_safetyFlags` | [String] | Content-safety scan |
-| `provenance` | String | Server JSON `{ v, verified: { agentId, timestamp, receivedAt }, claimed? }`. `verified.*` is server-derived: `timestamp` and `receivedAt` (A4 of #1940) are the server write instant, never client-writable. `claimed?` holds unverified caller claims — `createdAt` (the record's claimed creation time, #1960), `model`, `client`. |
+| `provenance` | String | Server JSON `{ v, verified: { agentId, timestamp, receivedAt }, claimed? }`. On a freshly-stamped LOCAL write, every field under `verified` is server-derived: `timestamp` and `receivedAt` (A4 of #1940) are the server write instant, never client-writable. `claimed?` holds unverified caller claims — `createdAt` (the record's claimed creation time, #1960), `model`, `client`. Stored blobs are never rewritten: legacy rows, the `_reindex` maintenance re-PUT, a metadata-only PATCH (no content change), and federation-synced rows all keep their originator's stored `provenance` unchanged. |
 | `originatorInstanceId` | String | Write-time instance id; preserved across sync |
 | `metadata` | String | Client JSON blob; opaque to the server |
 | `entities` | [String] | Attention-plane `type:value` strings |

@@ -200,15 +200,17 @@ export class FeedMemories extends Resource {
     // rule #1956 applies to put()). No `.catch`: the rejection propagates.
     const priorById = await (databases as any).flair.Memory.get(record.id);
     record.instanceToken = priorById?.instanceToken ?? randomUUID();
-    // Feed re-ingestion keeps the same incarnation and its original provenance.
-    // Restore only the stored stamp, never the submitted copy. New/unstamped
-    // rows get trusted caller identity and the SERVER write instant (stamped
-    // inside buildProvenance, flair#1960) — the feed's own `createdAt` is
-    // recorded only as the CLAIM `provenance.claimed.createdAt`, never as a
-    // verified timestamp.
-    record.provenance = typeof priorById?.provenance === "string"
-      ? priorById.provenance
-      : buildProvenance(auth, record.createdAt, content);
+    // Feed ingest is a full-row write: it REPLACES the stored row, so a
+    // re-ingest with new content is a semantic re-authoring. Re-stamp
+    // provenance from the resolved (trusted) identity and ONE server clock read
+    // (inside buildProvenance) rather than carrying the stored blob forward — a
+    // legacy row whose `verified.timestamp` came from a client `createdAt` must
+    // not keep presenting that value after a new write (flair#1960 r2). The feed
+    // body's own `createdAt` is recorded only as the CLAIM
+    // `provenance.claimed.createdAt`, never as a verified timestamp. The
+    // incarnation token is still preserved above (a re-ingest is not a
+    // reincarnation), so only `provenance` is re-derived.
+    record.provenance = buildProvenance(auth, record.createdAt, content);
     await (databases as any).flair.Memory.put(record);
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).
     noteMemoryUpsert(record);

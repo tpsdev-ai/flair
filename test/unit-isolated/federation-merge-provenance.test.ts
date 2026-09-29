@@ -143,6 +143,23 @@ describe("flair#1940 round 22 — the federated merge preserves provenance", () 
     expect(memoryStore.get("m-new")?.provenance).toBe(provenance); // assertion: the inbound provenance survives the strip
   });
 
+  it("(f1-in-new-legacy) a NEW synced row carrying a LEGACY provenance (caller-chosen verified.timestamp, no claimed/receivedAt) keeps it byte-for-byte", async () => {
+    // flair#1960 r2 documented preservation case: a federated receive is not a
+    // local write, so it does NOT re-stamp — the originator's stored blob is
+    // preserved verbatim, legacy timestamp and all. Record signatures
+    // authenticate those bytes; there is no bulk rewrite.
+    const { secretKey, publicKey } = keypair();
+    peerStore.set(PEER_ID, { id: PEER_ID, publicKey, role: "hub", status: "connected" });
+    const legacy = JSON.stringify({ v: 1, verified: { agentId: "agent-a", timestamp: "2001-01-01T00:00:00.000Z" } });
+    const record = memoryRecord(
+      { id: "m-legacy", data: { id: "m-legacy", agentId: "agent-a", content: "legacy synced note", visibility: "shared", provenance: legacy }, updatedAt: NEW, originatorInstanceId: PEER_ID },
+      secretKey,
+    );
+    const res: any = await postSync({ instanceId: PEER_ID, records: [record], lamportClock: 9 }, secretKey);
+    expect(res.merged).toBe(1); // control: the record merged
+    expect(memoryStore.get("m-legacy")?.provenance).toBe(legacy); // assertion: the legacy originator stamp is preserved verbatim
+  });
+
   it("(f1-in-update) a NEWER remote UPDATE keeps the provenance the merge SELECTED (the remote one)", async () => {
     const { secretKey, publicKey } = keypair();
     peerStore.set(PEER_ID, { id: PEER_ID, publicKey, role: "hub", status: "connected" });

@@ -37,12 +37,20 @@ function matchesCondition(record: any, cond: any): boolean {
 
 class BaseRelationship {
   async get(target?: any) {
-    const id = typeof target === "string" ? target : target?.id;
+    const id = typeof target === "string" ? target : (target?.id ?? (this as any).id);
     return relationshipStore.get(id) ?? null;
   }
   async put(content: any) {
     relationshipStore.set(content.id, { ...content });
     return { ...content };
+  }
+  // By-id PATCH merge (Harper binds the resource instance to the URL id;
+  // Relationship.patch() delegates via `super.patch(content, query)`).
+  async patch(content: any) {
+    const id = (this as any).id ?? content?.id;
+    const prev = relationshipStore.get(id) ?? {};
+    relationshipStore.set(id, { ...prev, ...content });
+    return relationshipStore.get(id);
   }
   async delete(id: any) {
     relationshipStore.delete(id);
@@ -393,6 +401,47 @@ describe("relationship-write-path — Relationship.put() write-time provenance s
     for await (const rec of await r.search()) results.push(rec);
     const ids = results.map((rec) => rec.id).sort();
     expect(ids).toEqual(["legacy-no-prov-2", "new-with-prov"].sort());
+  });
+});
+
+// ─── flair#1960 r2 — Relationship.patch() forge-proof provenance ───────────
+describe("flair#1960 r2 — Relationship.patch() derives provenance from the server, never the body", () => {
+  it("a semantic PATCH on a backdated-legacy row re-stamps verified.* and a FORGED verified.agentId/timestamp never lands", async () => {
+    const before = Date.now();
+    relationshipStore.set("rel-prov-patch", {
+      id: "rel-prov-patch", agentId: "agent-1", subject: "nathan", predicate: "manages", object: "flint",
+      createdAt: "2001-01-01T00:00:00.000Z",
+      provenance: JSON.stringify({ v: 1, verified: { agentId: "agent-1", timestamp: "2001-01-01T00:00:00.000Z" } }),
+    });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r.id = "rel-prov-patch";
+    await r.patch({
+      subject: "nathan-renamed", // semantic change
+      provenance: JSON.stringify({ v: 1, verified: { agentId: "attacker", timestamp: "1999-01-01T00:00:00.000Z" } }),
+    });
+    const stored = relationshipStore.get("rel-prov-patch");
+    expect(stored.subject).toBe("nathan-renamed"); // control: the patch landed
+    const prov = JSON.parse(stored.provenance);
+    expect(prov.verified.agentId).toBe("agent-1"); // forged agentId did not land
+    expect(prov.verified.timestamp).not.toBe("1999-01-01T00:00:00.000Z"); // forged timestamp did not land
+    expect(prov.verified.timestamp).not.toBe("2001-01-01T00:00:00.000Z"); // legacy stored value not carried forward
+    const stamped = Date.parse(prov.verified.timestamp);
+    expect(stamped).toBeGreaterThanOrEqual(before - 5000);
+    expect(stamped).toBeLessThanOrEqual(Date.now() + 5000);
+    expect(prov.verified.timestamp).toBe(prov.verified.receivedAt);
+  });
+
+  it("a metadata-only PATCH strips a forged provenance but keeps the stored blob", async () => {
+    const legacy = JSON.stringify({ v: 1, verified: { agentId: "agent-1", timestamp: "2001-01-01T00:00:00.000Z" } });
+    relationshipStore.set("rel-prov-patch-meta", {
+      id: "rel-prov-patch-meta", agentId: "agent-1", subject: "a", predicate: "b", object: "c", confidence: 1.0, provenance: legacy,
+    });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r.id = "rel-prov-patch-meta";
+    await r.patch({ confidence: 0.4, provenance: JSON.stringify({ v: 1, verified: { agentId: "attacker", timestamp: "1999-01-01T00:00:00.000Z" } }) });
+    const stored = relationshipStore.get("rel-prov-patch-meta");
+    expect(stored.confidence).toBe(0.4); // control: the patch landed
+    expect(stored.provenance).toBe(legacy); // no semantic change ⇒ stored blob preserved, forged value never landed
   });
 });
 

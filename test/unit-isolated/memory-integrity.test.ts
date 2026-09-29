@@ -169,13 +169,24 @@ class BaseMemory {
     // direct in-process calls (e.g. this file's other post()/put() helpers)
     // pass a bare id. Support both so get() unit tests can exercise the real
     // RequestTarget shape without breaking the existing string-id
-    // call sites in this file.
-    const id = typeof target === "string" ? target : target?.id;
+    // call sites in this file. A NO-ARGUMENT call resolves the resource
+    // instance's own bound id (`this.id`), matching Harper's by-id invariant
+    // that Memory.patch() relies on when it calls `super.get()` for the stored
+    // row.
+    const id = typeof target === "string" ? target : (target?.id ?? (this as any).id);
     return memoryStore.get(id) ?? null;
   }
   async delete(id: any) {
     memoryStore.delete(id);
     return { ok: true };
+  }
+  // By-id PATCH merge (real Harper binds the resource instance to the URL id;
+  // Memory.patch() delegates via `super.patch(content, query)`).
+  async patch(content: any) {
+    const id = (this as any).id ?? content?.id;
+    const prev = memoryStore.get(id) ?? {};
+    memoryStore.set(id, { ...prev, ...content });
+    return memoryStore.get(id);
   }
   search(query: any) {
     return memorySearchGen(query);
@@ -1555,6 +1566,54 @@ describe("memory-provenance slice 1 — Memory.put() stamps the identical shape 
     expect(result.written).toBe(true);
     const prov = JSON.parse((await BaseMemory.get(result.id)).provenance);
     expect(prov.verified.agentId).toBeNull();
+  });
+});
+
+describe("flair#1960 r2 — Memory.patch() re-stamps provenance on a semantic write", () => {
+  it("a semantic PATCH on a backdated-legacy row re-stamps verified.* from the server clock (never carries the stored caller-chosen timestamp forward)", async () => {
+    const before = Date.now();
+    // A LEGACY row: provenance written before this release, whose
+    // verified.timestamp came from the caller's createdAt at the time.
+    memoryStore.set("prov-patch-legacy", {
+      id: "prov-patch-legacy",
+      agentId: "agent-1",
+      content: "original body",
+      durability: "standard",
+      createdAt: "2001-01-01T00:00:00.000Z",
+      provenance: JSON.stringify({ v: 1, verified: { agentId: "agent-1", timestamp: "2001-01-01T00:00:00.000Z" } }),
+    });
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m.id = "prov-patch-legacy";
+    await m.patch({
+      content: "a genuinely new body",
+      // Forged verified fields in the body — must never land.
+      provenance: JSON.stringify({ v: 1, verified: { agentId: "attacker", timestamp: "1999-01-01T00:00:00.000Z" } }),
+    });
+    const stored = memoryStore.get("prov-patch-legacy");
+    expect(stored.content).toBe("a genuinely new body"); // control: the patch landed
+    const prov = JSON.parse(stored.provenance);
+    expect(prov.verified.agentId).toBe("agent-1"); // forged agentId did not land
+    expect(prov.verified.timestamp).not.toBe("2001-01-01T00:00:00.000Z"); // not the legacy stored value
+    expect(prov.verified.timestamp).not.toBe("1999-01-01T00:00:00.000Z"); // not the forged body value
+    const stamped = Date.parse(prov.verified.timestamp);
+    expect(stamped).toBeGreaterThanOrEqual(before - 5000);
+    expect(stamped).toBeLessThanOrEqual(Date.now() + 5000);
+    expect(prov.verified.timestamp).toBe(prov.verified.receivedAt);
+    expect(prov.claimed.createdAt).toBe("2001-01-01T00:00:00.000Z"); // the record's own creation claim, recorded under claimed
+  });
+
+  it("a metadata-only PATCH (no semantic field change) strips a forged provenance but keeps the stored blob", async () => {
+    const legacy = JSON.stringify({ v: 1, verified: { agentId: "agent-1", timestamp: "2001-01-01T00:00:00.000Z" } });
+    memoryStore.set("prov-patch-meta", {
+      id: "prov-patch-meta", agentId: "agent-1", content: "unchanged body", durability: "standard", provenance: legacy,
+    });
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m.id = "prov-patch-meta";
+    await m.patch({ tags: ["tagged"], provenance: JSON.stringify({ v: 1, verified: { agentId: "attacker", timestamp: "1999-01-01T00:00:00.000Z" } }) });
+    const stored = memoryStore.get("prov-patch-meta");
+    expect(stored.tags).toEqual(["tagged"]); // control: the patch landed
+    expect(stored.content).toBe("unchanged body");
+    expect(stored.provenance).toBe(legacy); // no new content authored ⇒ stored blob preserved, forged value never landed
   });
 });
 
