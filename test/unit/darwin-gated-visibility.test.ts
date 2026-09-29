@@ -18,11 +18,35 @@
 //      and on Linux requires bun to report a skip per inventoried title.
 //      An empty inventory, an omit-form gate, or a skip count of 0 is a
 //      failure — "nothing at all" is what let #1012 sit.
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { installFakeServiceManager } from "../helpers/fake-launchctl.ts";
+
+// flair#2062: runGate spawns the darwin-gate script, whose own child `bun test`
+// re-runs inventoried files; on a systemd host their product code asks
+// `systemctl --user show` about the caller's cgroup unit. Lay a recording fake
+// first on PATH for the whole file (the child inherits it) with a fail-closed
+// tripwire behind it, so no part of this file reaches the host systemctl.
+let svc: ReturnType<typeof installFakeServiceManager> | undefined;
+let savedPath: string | undefined;
+beforeEach(() => {
+  savedPath = process.env.PATH;
+  svc = installFakeServiceManager("flair1012-svc-");
+  process.env.PATH = `${svc.pathEntry}:${savedPath ?? ""}`;
+});
+afterEach(() => {
+  try {
+    svc?.assertClear();
+  } finally {
+    svc?.cleanup();
+    svc = undefined;
+    if (savedPath === undefined) delete process.env.PATH;
+    else process.env.PATH = savedPath;
+  }
+});
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "check-darwin-gated-tests.mjs");

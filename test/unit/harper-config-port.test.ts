@@ -44,6 +44,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createDataSnapshot, launchdLabel, launchdPlistPath } from "../../src/cli";
+import { installFakeServiceManager } from "../helpers/fake-launchctl.ts";
 
 const cliPath = join(import.meta.dirname, "..", "..", "src", "cli.ts");
 
@@ -58,6 +59,8 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
   let shimBin: string;
   let defaultDataDir: string;
   let launchctlLog: string;
+  let svc: ReturnType<typeof installFakeServiceManager> | undefined;
+  let savedPath: string | undefined;
   const scratchDirs: string[] = [];
   const spawned: Array<{ kill: (s?: number) => void }> = [];
 
@@ -77,6 +80,13 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
       `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\nexit 0\n`,
       { mode: 0o755 },
     );
+    // flair#2062: on a systemd host, the doctor/snapshot paths here ask
+    // `systemctl --user show` about the caller's cgroup unit. Lay a recording
+    // fake first on PATH (this file's own launchctl shim stays ahead of it) with
+    // a fail-closed tripwire behind it, so no run can reach the host systemctl.
+    savedPath = process.env.PATH;
+    svc = installFakeServiceManager("flair914-svc-");
+    process.env.PATH = `${svc.pathEntry}:${savedPath ?? ""}`;
   });
 
   afterEach(() => {
@@ -84,6 +94,14 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
       // SIGKILL: one stub deliberately ignores SIGTERM, and a survivor would
       // hold its port into the next test.
       try { proc.kill(9); } catch { /* already gone */ }
+    }
+    try {
+      svc?.assertClear();
+    } finally {
+      svc?.cleanup();
+      svc = undefined;
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
     }
     for (const dir of [tmpHome, shimBin, ...scratchDirs.splice(0)]) {
       rmSync(dir, { recursive: true, force: true });

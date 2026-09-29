@@ -211,6 +211,34 @@ function serviceManagerTripwireScript(name: string, logPath: string): string {
   ].join("\n");
 }
 
+/**
+ * A recording fake for one service manager: logs `<binary> <args>` and exits 0.
+ * The `systemctl` fake answers a `show` query the way a host WITHOUT the unit
+ * would — `MainPID=0` and empty `FragmentPath`/`DropInPaths`/`WorkingDirectory`
+ * — so a product path that asks about the caller's own cgroup unit reads
+ * "no such unit", exactly as on a host with no such unit. If the log write
+ * fails, it says so on stderr and exits 1: a fake that cannot record must not
+ * look like a fake that answered.
+ */
+function serviceManagerFakeScript(name: string, logPath: string): string {
+  const lines = [
+    "#!/bin/sh",
+    `printf '%s %s\\n' ${shellQuote(name)} "$*" >> ${shellQuote(logPath)} || {`,
+    `  printf '%s\\n' ${shellQuote(`flair-test-fake-${name}: could not record this call in ${logPath}`)} >&2`,
+    "  exit 1",
+    "}",
+  ];
+  if (name === "systemctl") {
+    lines.push(
+      `case " $* " in`,
+      `  *" show "*) printf 'MainPID=0\\nFragmentPath=\\nDropInPaths=\\nWorkingDirectory=\\n';;`,
+      "esac",
+    );
+  }
+  lines.push("exit 0", "");
+  return lines.join("\n");
+}
+
 export interface ServiceManagerTripwire {
   /** Directory holding the tripwire shims. Put this FIRST on each step's PATH. */
   dir: string;
@@ -271,10 +299,107 @@ export function installServiceManagerTripwire(prefix = "flair-service-manager-tr
   };
 }
 
+export interface FakeServiceManager {
+  /** Directory holding the fake `launchctl` and `systemctl`. Put this FIRST on PATH. */
+  fakeDir: string;
+  /** Directory holding the tripwire shims, directly behind the fakes. */
+  tripwireDir: string;
+  /** `${fakeDir}:${tripwireDir}` — prepend this to a child's PATH. */
+  pathEntry: string;
+  /** The fakes' shared log: each line is `<binary> <space-joined args>`. Created empty. */
+  logPath: string;
+  /** Every recorded call across both binaries, oldest first. */
+  invocations(): string[];
+  /** Lines that reached the tripwire. A test asserts this stays empty. */
+  tripped(): string[];
+  /** Throw the tripwire message if the tripwire log holds anything at all. */
+  assertClear(): void;
+  /**
+   * Prove the fake (not the tripwire, not the host binary) answers `binary`
+   * for the process's own PATH. Throws the tripwire message when the tripwire
+   * answered instead.
+   */
+  assertShadowed(binary?: ServiceManagerBinary): void;
+  /** Best-effort removal of the scratch directories (tempDir also sweeps). */
+  cleanup(): void;
+}
+
+/**
+ * A recording fake for BOTH host service managers (flair#2062): a directory
+ * holding `launchctl` and `systemctl` that log every call and exit 0 — the
+ * `systemctl` fake answers the `show` query the way a host WITHOUT the unit
+ * would (`MainPID=0` and empty fields) — plus the fail-closed tripwire behind
+ * them, so a call that somehow misses the fake fails loudly instead of reaching
+ * the host.
+ *
+ * Unit tests that reach a service manager through their product code lay this
+ * first on PATH. The launchctl half reuses the #2057 fake's contract; the
+ * systemctl half answers the query `flair`'s Linux tree assessment and restart
+ * plan actually run.
+ */
+export function installFakeServiceManager(prefix = "flair-fake-service-manager-"): FakeServiceManager {
+  const root = tempDir(prefix);
+  const fakeDir = join(root, "fake");
+  mkdirSync(fakeDir, { recursive: true });
+  const logPath = join(root, "fake.log");
+  writeFileSync(logPath, "");
+  const binPaths = {} as Record<ServiceManagerBinary, string>;
+  for (const name of SERVICE_MANAGER_BINARIES) {
+    const binPath = join(fakeDir, name);
+    writeFileSync(binPath, serviceManagerFakeScript(name, logPath));
+    chmodSync(binPath, 0o755);
+    binPaths[name] = binPath;
+  }
+  const tripwire = installServiceManagerTripwire(prefix + "tripwire-");
+  const invocations = () => logLines(readLog(logPath));
+  return {
+    fakeDir,
+    tripwireDir: tripwire.dir,
+    pathEntry: `${fakeDir}:${tripwire.dir}`,
+    logPath,
+    invocations,
+    tripped: () => tripwire.tripped(),
+    assertClear: () => tripwire.assertClear(),
+    assertShadowed(binary: ServiceManagerBinary = "launchctl") {
+      const probe = `__flair_fake_${binary}_probe_${randomUUID()}__`;
+      const probePath = process.env.PATH ?? "";
+      // Preflight: the first `binary` on this PATH must be one of THIS helper's
+      // own shims (the fake or the tripwire, which never touches the host).
+      const first = firstOnPath(binary, probePath);
+      if (first !== binPaths[binary] && first !== tripwire.binPaths[binary]) {
+        throw new Error(
+          `fake-service-manager: the assertShadowed probe did not reach the fake — refusing to spawn it: ` +
+            `the first ${binary} on this PATH is ${first ?? "none"}, not this helper's fake (${binPaths[binary]}) or tripwire`,
+        );
+      }
+      const res = spawnSync(binary, [probe], {
+        encoding: "utf-8",
+        env: { ...process.env, PATH: probePath },
+        timeout: 10_000,
+      });
+      const detail =
+        `${binary} ${probe} exited ${res.status ?? "null"}` +
+        `${res.error ? `, ${res.error.message}` : ""}; stderr: ${(res.stderr ?? "").trim()}`;
+      if (readLog(tripwire.logPath).length > 0) {
+        throw new Error(`${SERVICE_MANAGER_TRIPWIRE_EVENT} (${detail})`);
+      }
+      if (res.status !== 0 || !invocations().includes(`${binary} ${probe}`)) {
+        throw new Error(
+          `fake-service-manager: the assertShadowed probe did not reach the fake — something else answers ` +
+            `${binary} on this PATH (${detail})`,
+        );
+      }
+    },
+    cleanup() {
+      rmSync(root, { recursive: true, force: true });
+      tripwire.cleanup();
+    },
+  };
+}
+
 export interface FakeLaunchctl {
   /** Directory holding the fake shim. Put this FIRST on PATH. */
-  fakeDir: string;
-  /** Directory holding the tripwire shim. Put this directly AFTER the fake. */
+  fakeDir: string;  /** Directory holding the tripwire shim. Put this directly AFTER the fake. */
   tripwireDir: string;
   /** `${fakeDir}:${tripwireDir}` — prepend this to a child's PATH. */
   pathEntry: string;
