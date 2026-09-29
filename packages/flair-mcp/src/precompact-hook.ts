@@ -76,6 +76,8 @@
  *   FLAIR_HOOK_PROBE (probe mode: exit 0 before stdin, files or network)
  */
 
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { isProbeMode, readEnvOrUnset, stripInterpolationLiteralsFromEnv } from "./env-guard.js";
 import { memoryPutPath } from "./record-id-path.js";
 import { bumpSeqBounded, isSafeFileId, resolveSessionDir, statePath, type ContinuityClient } from "./continuity.js";
@@ -437,12 +439,31 @@ async function main(): Promise<void> {
 }
 
 // Only run when executed as a script, not when imported by tests.
+/**
+ * Whether this module is the process entry point. Where the runtime provides
+ * `import.meta.main` (Bun; Node 22.18+), its answer decides, true or false.
+ * Otherwise compare FILESYSTEM paths resolved through symlinks: the module URL
+ * is percent-encoded and an npm bin shim is a symlink, so comparing the URL
+ * string with `argv[1]` misses both.
+ */
+export function isDirectRun(
+  moduleUrl: string,
+  argv1: string | undefined,
+  metaMain: boolean | undefined,
+  realpath: (p: string) => string = realpathSync,
+): boolean {
+  if (metaMain !== undefined) return metaMain;
+  if (argv1 == null || argv1 === "") return false;
+  try {
+    return realpath(fileURLToPath(moduleUrl)) === realpath(argv1);
+  } catch {
+    return false;
+  }
+}
+
 const importMeta = import.meta as ImportMeta & { main?: boolean };
 const isMain =
-  importMeta.main === true ||
-  (typeof process !== "undefined" &&
-    process.argv[1] != null &&
-    import.meta.url === `file://${process.argv[1]}`);
+  typeof process !== "undefined" && isDirectRun(import.meta.url, process.argv[1], importMeta.main);
 
 if (isMain) {
   void main().catch(() => finish(""));
