@@ -16,9 +16,10 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { wrapUntrusted } from "../../../resources/content-safety.ts";
 import {
@@ -37,6 +38,7 @@ import {
   classifyRecallFailure,
   FLAGGED_NOTE,
   formatRecallContext,
+  isDirectRun,
   isNotificationPrompt,
   readConfigValue,
   readFlairConfigText,
@@ -596,5 +598,46 @@ describe("classifyRecallFailure", () => {
     expect(classifyRecallFailure(Object.assign(new Error("x"), { name: "TimeoutError" }))).toBe("timeout");
     expect(classifyRecallFailure(new Error("timeout while connecting"))).toBe("unreachable");
     expect(classifyRecallFailure(null)).toBe("unreachable");
+  });
+});
+
+describe("isDirectRun — the entry-point check without import.meta.main", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "flair recall entry "));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a path containing a space still matches (the module URL is percent-encoded)", () => {
+    const file = join(dir, "prompt-recall-hook.js");
+    writeFileSync(file, "");
+    const url = pathToFileURL(file).href;
+    expect(url).toContain("%20");
+    expect(isDirectRun(url, file, undefined)).toBe(true);
+  });
+
+  test("an npm-style bin symlink to the module matches", () => {
+    const file = join(dir, "prompt-recall-hook.js");
+    writeFileSync(file, "");
+    const shim = join(dir, "flair-prompt-recall");
+    symlinkSync(file, shim);
+    expect(isDirectRun(pathToFileURL(file).href, shim, undefined)).toBe(true);
+  });
+
+  test("another script, a missing argv[1] and an unresolvable path do not match", () => {
+    const file = join(dir, "prompt-recall-hook.js");
+    const other = join(dir, "other.js");
+    writeFileSync(file, "");
+    writeFileSync(other, "");
+    const url = pathToFileURL(file).href;
+    expect(isDirectRun(url, other, undefined)).toBe(false);
+    expect(isDirectRun(url, undefined, undefined)).toBe(false);
+    expect(isDirectRun(url, join(dir, "missing.js"), undefined)).toBe(false);
+  });
+
+  test("import.meta.main, where the runtime provides it, decides first", () => {
+    expect(isDirectRun("file:///nowhere/x.js", undefined, true)).toBe(true);
   });
 });

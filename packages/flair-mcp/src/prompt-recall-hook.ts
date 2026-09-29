@@ -103,10 +103,11 @@
  *   }
  */
 
-import { constants as fsConstants, existsSync } from "node:fs";
+import { constants as fsConstants, existsSync, realpathSync } from "node:fs";
 import { open, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { isProbeMode, readEnvOrUnset, stripInterpolationLiteralsFromEnv } from "./env-guard.js";
 
 // ── defaults and bounds ─────────────────────────────────────────────────────
@@ -707,13 +708,32 @@ async function main(): Promise<void> {
   finish(output);
 }
 
+/**
+ * Whether this module is the process entry point. `import.meta.main` answers
+ * directly where the runtime provides it (Bun; Node 22.18+). Otherwise compare
+ * FILESYSTEM paths, both resolved through symlinks: the module URL is
+ * percent-encoded (a space is `%20`) and an npm bin shim is a symlink, so a
+ * string comparison of the URL with `argv[1]` misses both.
+ */
+export function isDirectRun(
+  moduleUrl: string,
+  argv1: string | undefined,
+  metaMain: boolean | undefined,
+  realpath: (p: string) => string = realpathSync,
+): boolean {
+  if (metaMain === true) return true;
+  if (argv1 == null || argv1 === "") return false;
+  try {
+    return realpath(fileURLToPath(moduleUrl)) === realpath(argv1);
+  } catch {
+    return false;
+  }
+}
+
 // Only run when executed as a script, not when imported by tests.
 const importMeta = import.meta as ImportMeta & { main?: boolean };
 const isMain =
-  importMeta.main === true ||
-  (typeof process !== "undefined" &&
-    process.argv[1] != null &&
-    import.meta.url === `file://${process.argv[1]}`);
+  typeof process !== "undefined" && isDirectRun(import.meta.url, process.argv[1], importMeta.main);
 
 if (isMain) {
   void main().catch(() => finish(NOOP_OUTPUT));
