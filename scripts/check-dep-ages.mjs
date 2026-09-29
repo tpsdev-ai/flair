@@ -49,7 +49,7 @@
 
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -116,7 +116,7 @@ export function collectDeps(pkgs, keepCurrent) {
 }
 
 // ── Main gate logic (runs only when executed directly) ──────────────────────
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   void (async () => {
     const MIN_AGE_DAYS = Number(process.env.FLAIR_DEP_MIN_AGE_DAYS ?? "7");
     const REGISTRY = process.env.FLAIR_NPM_REGISTRY ?? "https://registry.npmjs.org";
@@ -185,14 +185,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const toCheck = collectDeps(allPkgs, KEEP_CURRENT);
 
     if (toCheck.size === 0) {
-      console.log("✓ No external pinned deps to check.");
+      console.log("✓ No external pinned production deps to check.");
       if (KEEP_CURRENT.size > 0) {
         console.log(`(${KEEP_CURRENT.size} packages on the keep-current allow-list: ${[...KEEP_CURRENT].sort().join(", ")})`);
        }
       process.exit(0);
     }
 
-    console.log(`Checking ${toCheck.size} pinned deps against ${MIN_AGE_DAYS}-day bake-time policy...`);
+    console.log(`Checking ${toCheck.size} pinned production deps against ${MIN_AGE_DAYS}-day bake-time policy...`);
     if (KEEP_CURRENT.size > 0) {
       console.log(`Keep-current allow-list (${KEEP_CURRENT.size} packages, exempt from bake-time): ${[...KEEP_CURRENT].sort().join(", ")}`);
     }
@@ -279,7 +279,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 
     // ── Report ────────────────────────────────────────────────────────
     if (tooFresh.length > 0) {
-      console.error("❌ Pinned deps younger than the bake-time policy:");
+      console.error("❌ Pinned production deps younger than the bake-time policy:");
       console.error("");
       for (const f of tooFresh.sort((a, b) => b.publishedAt - a.publishedAt)) {
         const days = f.ageDays.toFixed(1);
@@ -303,6 +303,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       process.exit(2);
     }
 
-    console.log(`✓ All ${toCheck.size} external pinned deps are at least ${MIN_AGE_DAYS} days old.`);
+    console.log(`✓ All ${toCheck.size} external pinned production deps are at least ${MIN_AGE_DAYS} days old.`);
   })();
 }

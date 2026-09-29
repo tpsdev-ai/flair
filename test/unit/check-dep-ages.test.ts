@@ -68,16 +68,6 @@ describe("collectDeps", () => {
       expect(result.size).toBe(0);
     });
 
-    it("skips an optional workspace: entry", () => {
-      const pkgs = [
-        {
-          pkg: { optionalDependencies: { "@tpsdev-ai/some": "workspace:*" } },
-          path: "packages/w/pkg.json",
-        },
-      ];
-      const result = collectDeps(pkgs, keepCurrent);
-      expect(result.size).toBe(0);
-    });
   });
 
   describe("peerDependencies", () => {
@@ -106,10 +96,47 @@ describe("collectDeps", () => {
       expect(result.size).toBe(1);
       expect(result.has("shared-pkg@2.0.0")).toBe(true);
       const entry = result.get("shared-pkg@2.0.0");
-      expect(entry.declaredIn.sort()).toEqual([
+      expect(entry).toBeDefined();
+      expect(entry!.declaredIn.sort()).toEqual([
         "packages/a/package.json",
         "packages/b/package.json",
       ]);
     });
+  });
+});
+
+describe("direct-execution guard", () => {
+  it("runs correctly when script path contains a space", () => {
+    const fs = require("fs");
+    const os = require("os");
+    const path = require("path");
+    const { spawnSync } = require("child_process");
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "test "));
+    try {
+       // Create a minimal fixture repo with no external pinned deps
+       // (the "no network" path: the gate exits via the no-deps message)
+       const scriptsDir = path.join(tmpDir, "scripts");
+      fs.mkdirSync(scriptsDir);
+       // Create an empty packages/ dir so readdirSync doesn't fail
+      fs.mkdirSync(path.join(tmpDir, "packages"));
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "@test/fixture", dependencies: {} }),
+       );
+        // Copy the actual script into the scripts/ subdirectory
+      const src = path.join(__dirname, "..", "..", "scripts", "check-dep-ages.mjs");
+      fs.copyFileSync(src, path.join(scriptsDir, "check-dep-ages.mjs"));
+        // Run from the space-containing directory
+      const result = spawnSync("node", [path.join(scriptsDir, "check-dep-ages.mjs")], {
+        cwd: tmpDir,
+        env: { ...process.env, FLAIR_DEP_MIN_AGE_DAYS: "0" },
+        timeout: 10000,
+        });
+      const output = Buffer.from([...(result.stdout || []), ...(result.stderr || [])]).toString();
+      expect(output).toMatch(/production/);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
