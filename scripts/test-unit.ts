@@ -453,7 +453,10 @@ export function runUnitSteps(
     } catch (error) {
       if (tripwireUnreadable) return undefined;
       tripwireUnreadable = true;
-      return `the service-manager tripwire log could not be read (${errorMessage(error)})`;
+      // Covers both an unreadable log and one that cannot record calls (a
+      // replaced/symlinked log, or one that discards the canary): either way the
+      // lane must fail, never read the empty log as clear (flair#2064).
+      return `the service-manager tripwire log cannot be read or cannot record calls (${errorMessage(error)})`;
     }
     if (!calls.length) return undefined;
     return `reached the host service manager without its own fake (${calls.join("; ")})`;

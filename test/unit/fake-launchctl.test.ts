@@ -11,7 +11,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   installFakeLaunchctl,
@@ -123,5 +123,44 @@ describe("fake launchctl + tripwire (flair#2057)", () => {
     expect(tripped).toHaveLength(1);
     expect(tripped[0]).toStartWith(`${LAUNCHCTL_TRIPWIRE_EVENT} argc=1 argv=__flair_fake_launchctl_probe_`);
     expect(() => fake.assertClear()).toThrow(LAUNCHCTL_TRIPWIRE_MESSAGE);
+  });
+});
+
+// ─── flair#2062/#2064 — a tripwire log that cannot record calls ───────────────
+//
+// A readable EMPTY log must not be read as clear: a symlink to /dev/null (a
+// readable log that discards every append) or an unwritable log must FAIL the
+// check with a named message, so a test that swallows the tripwire's non-zero
+// exit cannot leave the lane green.
+
+describe("flair#2062/#2064 — the tripwire log must prove it can record calls", () => {
+  test("a log replaced by a symlink to /dev/null is refused, not read as empty", () => {
+    const tripwire = installLaunchctlTripwire();
+    rmSync(tripwire.logPath);
+    symlinkSync("/dev/null", tripwire.logPath);
+    expect(() => tripwire.assertClear()).toThrow(/replaced or symlinked/);
+    expect(() => tripwire.assertClear()).toThrow("tripwire log cannot record calls");
+    expect(() => tripwire.tripped()).toThrow("tripwire log cannot record calls");
+    tripwire.cleanup();
+  });
+
+  test.skipIf(process.getuid?.() === 0)(
+    "an unwritable log (still the original file) is refused by the canary round-trip, not read as empty",
+    () => {
+      const tripwire = installLaunchctlTripwire();
+      // Same inode (not replaced); the append fails, so the canary cannot round-trip.
+      chmodSync(tripwire.logPath, 0o444);
+      expect(() => tripwire.assertClear()).toThrow(/discards writes/);
+      expect(() => tripwire.assertClear()).toThrow("tripwire log cannot record calls");
+      tripwire.cleanup();
+    },
+  );
+
+  test("a clear log still passes the canary round-trip and stays empty", () => {
+    const tripwire = installLaunchctlTripwire();
+    expect(() => tripwire.assertClear()).not.toThrow();
+    // The canary was truncated back to empty; a following read is still clear.
+    expect(tripwire.tripped()).toEqual([]);
+    tripwire.cleanup();
   });
 });

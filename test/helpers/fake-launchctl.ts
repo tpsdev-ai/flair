@@ -44,7 +44,7 @@
 
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { accessSync, chmodSync, constants, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, appendFileSync, chmodSync, constants, lstatSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./temp-dir.ts";
 
@@ -90,7 +90,12 @@ function fakeScript(logPath: string): string {
 function tripwireScript(logPath: string): string {
   return [
     "#!/bin/sh",
-    `printf '%s argc=%s argv=%s\\n' ${shellQuote(LAUNCHCTL_TRIPWIRE_EVENT)} "$#" "$*" >> ${shellQuote(logPath)}`,
+    // Fail closed on the append itself: a tripwire that cannot record must say so
+    // and exit non-zero, never look like one that recorded (flair#2064).
+    `printf '%s argc=%s argv=%s\\n' ${shellQuote(LAUNCHCTL_TRIPWIRE_EVENT)} "$#" "$*" >> ${shellQuote(logPath)} || {`,
+    `  printf '%s: could not record this call in %s\\n' ${shellQuote(LAUNCHCTL_TRIPWIRE_MESSAGE)} ${shellQuote(logPath)} >&2`,
+    "  exit 1",
+    "}",
     `printf '%s: %s\\n' ${shellQuote(LAUNCHCTL_TRIPWIRE_MESSAGE)} "$*" >&2`,
     "exit 1",
     "",
@@ -111,6 +116,87 @@ function readLog(path: string): string {
         `so a missing or unreadable log is a broken harness, not "no launchctl calls"`,
     );
   }
+}
+
+/** Named message for a tripwire log that cannot record calls. */
+export const TRIPWIRE_LOG_CANNOT_RECORD = "tripwire log cannot record calls";
+
+/** The log file's identity at setup: the ORIGINAL regular file the handle owns. */
+interface LogIdentity {
+  dev: number;
+  ino: number;
+}
+
+function logIdentity(logPath: string): LogIdentity {
+  const st = statSync(logPath);
+  return { dev: st.dev, ino: st.ino };
+}
+
+/**
+ * Read a tripwire log, refusing one that cannot record calls (flair#2062/#2064).
+ *
+ * A readable EMPTY log is NOT taken as "clear". Before accepting it:
+ *
+ *   (a) `lstat` it and require the ORIGINAL regular file created at setup — the
+ *       same dev/inode (a symlink, e.g. to `/dev/null`, has another inode), so a
+ *       replaced log is refused rather than read as empty; and
+ *   (b) append a unique canary line, read it back, require it, then truncate the
+ *       file to empty again — so a log that discards writes (unwritable, or a
+ *       symlink that swallows the append) is refused rather than read as empty.
+ *
+ * Any failure throws {@link TRIPWIRE_LOG_CANNOT_RECORD}; a missing/unreadable log
+ * throws the read error. Neither is ever read as "no calls".
+ */
+function readTripwireLog(logPath: string, identity: LogIdentity): string {
+  let st;
+  try {
+    st = lstatSync(logPath);
+  } catch (err) {
+    throw new Error(
+      `fake-launchctl: cannot read ${logPath} (${(err as Error).message}). The log is created at install, ` +
+        `so a missing or unreadable log is a broken harness, not "no calls"`,
+    );
+  }
+  // (a) require the original regular file (not a symlink; same dev/inode).
+  if (!st.isFile() || st.isSymbolicLink() || st.dev !== identity.dev || st.ino !== identity.ino) {
+    throw new Error(
+      `${TRIPWIRE_LOG_CANNOT_RECORD}: cannot read ${logPath} as the original regular file (replaced or symlinked); ` +
+        `a call it discarded would read as clear`,
+    );
+  }
+  let content: string;
+  try {
+    content = readFileSync(logPath, "utf-8");
+  } catch (err) {
+    throw new Error(
+      `fake-launchctl: cannot read ${logPath} (${(err as Error).message}). The log is created at install, ` +
+        `so a missing or unreadable log is a broken harness, not "no calls"`,
+    );
+  }
+  if (content.length > 0) return content;
+  // (b) canary: append, read back, require, truncate.
+  const canary = `__flair_tripwire_canary_${randomUUID()}__`;
+  try {
+    appendFileSync(logPath, canary + "\n");
+  } catch (err) {
+    throw new Error(
+      `${TRIPWIRE_LOG_CANNOT_RECORD}: ${logPath} discards writes (could not append a canary: ${(err as Error).message})`,
+    );
+  }
+  let back: string;
+  try {
+    back = readFileSync(logPath, "utf-8");
+  } catch (err) {
+    throw new Error(
+      `fake-launchctl: cannot read ${logPath} (${(err as Error).message}). The log is created at install, ` +
+        `so a missing or unreadable log is a broken harness, not "no calls"`,
+    );
+  }
+  if (!back.includes(canary)) {
+    throw new Error(`${TRIPWIRE_LOG_CANNOT_RECORD}: ${logPath} discards writes (the canary did not read back)`);
+  }
+  writeFileSync(logPath, "");
+  return "";
 }
 
 /** One entry per log line, oldest first. Blank lines are kept, never dropped. */
@@ -143,15 +229,16 @@ export function installLaunchctlTripwire(prefix = "flair-launchctl-tripwire-"): 
   const binPath = join(dir, "launchctl");
   const logPath = join(dir, "tripwire.log");
   writeFileSync(logPath, "");
+  const identity = logIdentity(logPath);
   writeFileSync(binPath, tripwireScript(logPath));
   chmodSync(binPath, 0o755);
   return {
     dir,
     binPath,
     logPath,
-    tripped: () => logLines(readLog(logPath)),
+    tripped: () => logLines(readTripwireLog(logPath, identity)),
     assertClear() {
-      const raw = readLog(logPath);
+      const raw = readTripwireLog(logPath, identity);
       if (raw.length > 0) {
         throw new Error(`${LAUNCHCTL_TRIPWIRE_MESSAGE} (reached by: ${JSON.stringify(logLines(raw))})`);
       }
@@ -173,6 +260,17 @@ export function installLaunchctlTripwire(prefix = "flair-launchctl-tripwire-"): 
 // launchctl tripwire above: a nonempty log line for every call (a no-argument
 // call included), the log path written INTO the script, the log created empty,
 // and a read that throws rather than reporting "no calls".
+//
+// SCOPE (flair#2062): the guard catches a manager command resolved through the
+// INHERITED PATH. It does not contain a child that rebuilds PATH (`/usr/bin:/bin`),
+// runs under an empty environment (`env -i`), or calls the manager by an
+// absolute path — those bypass PATH lookup entirely and are a named follow-up,
+// not covered here.
+//
+// RECORDING IS CHECKED (flair#2062/#2064): before a readable EMPTY log is
+// accepted as clear, it must still be the ORIGINAL regular file (same
+// dev/inode, not a symlink) and must pass a canary round-trip; a log that
+// discards writes or was replaced fails with `tripwire log cannot record calls`.
 
 /** The service-manager binaries the unit-lane tripwire covers. */
 export const SERVICE_MANAGER_BINARIES = ["launchctl", "systemctl"] as const;
@@ -204,7 +302,12 @@ export function serviceManagerTripwireMessage(name: string): string {
 function serviceManagerTripwireScript(name: string, logPath: string): string {
   return [
     "#!/bin/sh",
-    `printf '%s %s argc=%s argv=%s\\n' ${shellQuote(SERVICE_MANAGER_TRIPWIRE_EVENT)} ${shellQuote(name)} "$#" "$*" >> ${shellQuote(logPath)}`,
+    // Fail closed on the append itself (flair#2064): a tripwire that cannot
+    // record must say so and exit non-zero, never look like one that recorded.
+    `printf '%s %s argc=%s argv=%s\\n' ${shellQuote(SERVICE_MANAGER_TRIPWIRE_EVENT)} ${shellQuote(name)} "$#" "$*" >> ${shellQuote(logPath)} || {`,
+    `  printf '%s: could not record this call in %s\\n' ${shellQuote(serviceManagerTripwireMessage(name))} ${shellQuote(logPath)} >&2`,
+    "  exit 1",
+    "}",
     `printf '%s: %s\\n' ${shellQuote(serviceManagerTripwireMessage(name))} "$*" >&2`,
     "exit 1",
     "",
@@ -213,12 +316,13 @@ function serviceManagerTripwireScript(name: string, logPath: string): string {
 
 /**
  * A recording fake for one service manager: logs `<binary> <args>` and exits 0.
- * The `systemctl` fake answers a `show` query the way a host WITHOUT the unit
- * would — `MainPID=0` and empty `FragmentPath`/`DropInPaths`/`WorkingDirectory`
- * — so a product path that asks about the caller's own cgroup unit reads
- * "no such unit", exactly as on a host with no such unit. If the log write
- * fails, it says so on stderr and exits 1: a fake that cannot record must not
- * look like a fake that answered.
+ * The `systemctl` fake answers a `show` query with `MainPID=0` and empty
+ * `FragmentPath`/`DropInPaths`/`WorkingDirectory` — what a host reports when
+ * systemd says the unit has NO MAIN PROCESS. That leaves the serving tree
+ * unproven (the same verdict the real host gives when it names a DIFFERENT
+ * MainPID), which is all the unit tests rely on. If the log write fails, it
+ * says so on stderr and exits 1: a fake that cannot record must not look like a
+ * fake that answered.
  */
 function serviceManagerFakeScript(name: string, logPath: string): string {
   const lines = [
@@ -270,6 +374,7 @@ export function installServiceManagerTripwire(prefix = "flair-service-manager-tr
   const dir = tempDir(prefix);
   const logPath = join(dir, "tripwire.log");
   writeFileSync(logPath, "");
+  const identity = logIdentity(logPath);
   const binPaths = {} as Record<ServiceManagerBinary, string>;
   for (const name of SERVICE_MANAGER_BINARIES) {
     const binPath = join(dir, name);
@@ -281,14 +386,14 @@ export function installServiceManagerTripwire(prefix = "flair-service-manager-tr
     dir,
     logPath,
     binPaths,
-    tripped: () => logLines(readLog(logPath)),
+    tripped: () => logLines(readTripwireLog(logPath, identity)),
     takeTrips() {
-      const lines = logLines(readLog(logPath));
+      const lines = logLines(readTripwireLog(logPath, identity));
       if (lines.length) writeFileSync(logPath, "");
       return lines;
     },
     assertClear() {
-      const raw = readLog(logPath);
+      const raw = readTripwireLog(logPath, identity);
       if (raw.length > 0) {
         throw new Error(`${SERVICE_MANAGER_TRIPWIRE_EVENT} (reached by: ${JSON.stringify(logLines(raw))})`);
       }
@@ -327,10 +432,11 @@ export interface FakeServiceManager {
 /**
  * A recording fake for BOTH host service managers (flair#2062): a directory
  * holding `launchctl` and `systemctl` that log every call and exit 0 — the
- * `systemctl` fake answers the `show` query the way a host WITHOUT the unit
- * would (`MainPID=0` and empty fields) — plus the fail-closed tripwire behind
- * them, so a call that somehow misses the fake fails loudly instead of reaching
- * the host.
+ * `systemctl` fake answers the `show` query with `MainPID=0` and empty fields,
+ * i.e. "systemd says this unit has no main process" (which leaves the serving
+ * tree unproven, the same verdict the host gives when it names a DIFFERENT
+ * MainPID) — plus the fail-closed tripwire behind them, so a call that somehow
+ * misses the fake fails loudly instead of reaching the host.
  *
  * Unit tests that reach a service manager through their product code lay this
  * first on PATH. The launchctl half reuses the #2057 fake's contract; the

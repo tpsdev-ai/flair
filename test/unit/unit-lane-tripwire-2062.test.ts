@@ -14,7 +14,7 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -135,7 +135,7 @@ describe("flair#2062 — the unit lane fails a step that reaches a host service 
         { tripwire },
       ));
       expect(code).toBe(1);
-      expect(errors).toContain("the service-manager tripwire log could not be read");
+      expect(errors).toContain("the service-manager tripwire log cannot be read or cannot record calls");
     } finally {
       tripwire.cleanup();
     }
@@ -158,4 +158,30 @@ describe("flair#2062 — the unit lane fails a step that reaches a host service 
       tripwire.cleanup();
     }
   });
+
+  test(
+    "a tripwire log that discards writes fails the lane even when the step swallows the exit (flair#2064)",
+    () => {
+      const dir = fixture();
+      const tripwire = installServiceManagerTripwire();
+      // Replace the tripwire log with a symlink to /dev/null: readable, but it
+      // discards every append, so a swallowed call would otherwise read as clear.
+      rmSync(tripwire.logPath);
+      symlinkSync("/dev/null", tripwire.logPath);
+      try {
+        const { result: code, errors } = captureErrors(() => runUnitSteps(
+          [{ name: "swallows the tripwire", cwd: dir, args: ["-e", swallowLaunchctl(["list"])], files: [] }],
+          process.execPath,
+          dir,
+          { tripwire },
+        ));
+        // The step exits 0 (it swallowed the non-zero exit); only the log check fails it.
+        expect(code).toBe(1);
+        expect(errors).toContain("swallows the tripwire");
+        expect(errors).toContain("tripwire log cannot record calls");
+      } finally {
+        tripwire.cleanup();
+      }
+    },
+  );
 });
