@@ -86,7 +86,7 @@ This is a prompt-driven CLI setup: Claude must choose to run these commands. For
 
 ## Hooks
 
-`@tpsdev-ai/flair-mcp` ships three Claude Code hooks. Each is a separate binary, each is optional, and each exits 0 on every failure, so none of them can block a session or a prompt.
+`@tpsdev-ai/flair-mcp` ships three Claude Code hooks. Each is a separate binary and each is optional. Each exits 0 on every failure it handles, but a hook can still delay the session start or the prompt it runs for; prompt recall's time budget and its limits are described below.
 
 | Hook | Claude Code event | What it does | Install |
 |---|---|---|---|
@@ -102,7 +102,7 @@ Session-start recall runs once. Later in the session a prompt can bring up somet
 2. It runs the same hybrid search as the MCP `memory_search` tool, signed with the agent's own Ed25519 key, so the results are limited to what that agent may read.
 3. It adds the hits whose score meets a relevance threshold (at most 4 by default), each with its id, date, score and a snippet, under a header that frames them as a signal, not an instruction, and tells the model to read the full memory before acting on it. The whole block is at most 2,000 characters. A memory that Flair's content scan flagged as possible prompt injection is shown with a fixed warning line ahead of its quoted text; cutting the text to fit never cuts the warning, so such a memory appears with its whole warning or not at all.
 
-It can delay a prompt until its time budget runs out, and a response that has fully arrived within the budget can take longer to process (see below). It skips prompts that are not questions: background task notifications, and acknowledgements too short to search ("ok, thanks"). It exits 0 on every failure it handles. When Flair is unreachable, slow or refuses the request, it adds no memories, only one line saying recall was unavailable for that prompt.
+It can delay a prompt until its time budget runs out, and a response that has fully arrived within the budget can take longer to process (see below). It skips two kinds of prompt: background task notifications, and prompts too short to search once cleaned ("ok, thanks"). Every other prompt is searched, question or not. It exits 0 on every failure it handles. When Flair is unreachable, slow or refuses the request, it adds no memories, only one line saying recall was unavailable for that prompt.
 
 The time budget (3 seconds by default) runs from the moment the hook process starts: reading the prompt, reading the config file and the search all count against it. When it runs out during asynchronous work (waiting for the prompt on stdin, reading the config file, connecting to Flair or downloading its response), the hook prints the one "unavailable" line and exits 0 at once. The prompt payload is read up to 1 MiB (a larger one is not searched), and the config file is read only if it is a regular file of at most 256 KiB. Once a response has arrived in full, the Flair client parses it and converts every result in it before returning, synchronously; the deadline cannot interrupt that work, and there is no cap on the size of a response that arrives within the budget. After the client returns, the hook's own processing looks at no more than the requested number of results and the first 4,096 characters of each memory. What happens before the process starts is outside the budget: the launcher and node's own start-up.
 

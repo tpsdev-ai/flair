@@ -13,10 +13,11 @@
  * WHAT IT DOES, per prompt
  * ------------------------
  *   1. Reads Claude Code's UserPromptSubmit payload on stdin (`prompt`).
- *   2. Skips prompts that are not questions from the user: background task
- *      notifications (text carrying `<task-notification>`) and prompts whose
- *      cleaned text is too short to search (`ok`, `go ahead`). A skipped prompt
- *      never builds a client and never searches.
+ *   2. Skips two kinds of prompt: background task notifications (text
+ *      carrying `<task-notification>`) and prompts whose cleaned text is
+ *      shorter than MIN_QUERY_CHARS (`ok`, `go ahead`). Every other prompt is
+ *      searched, question or not. A skipped prompt never builds a client and
+ *      never searches.
  *   3. Builds the query from the prompt with markup, URLs and noise (long ids,
  *      hashes, markdown syntax) stripped, bounded to QUERY_MAX_CHARS.
  *   4. Runs the SAME hybrid search the MCP `memory_search` tool uses
@@ -34,15 +35,16 @@
  *      quoted text, so cutting the text to fit can never cut the flag: a
  *      flagged memory is shown with its whole flag or not at all.
  *
- * NEVER BLOCKS
- * ------------
- * Every path exits 0. The time budget (default 3 s) runs from the moment the
- * process starts: the entry point arms a process-level deadline before it
+ * FAILS OPEN
+ * ----------
+ * Every failure it handles exits 0, though the hook can still delay the prompt
+ * (see "NOT bounded" below). The time budget (default 3 s) runs from the moment
+ * the process starts: the entry point arms a process-level deadline before it
  * reads stdin or the config, and when the deadline passes during asynchronous
  * work (stdin held open, a stalled read, a slow search, a response still
  * arriving) it prints the one "unavailable (timeout)" line and exits 0. The
- * deadline starts from the environment's budget and moves to the configured
- * one once the config has been read. Inside that:
+ * deadline starts from the environment's budget and moves to the configured one
+ * once the config has been read. Inside that:
  *   - stdin is read up to STDIN_MAX_BYTES; a larger payload is not searched;
  *   - the config file is refused unless it is a regular file of at most
  *     CONFIG_MAX_BYTES, checked before it is opened (a FIFO would block the
@@ -124,7 +126,7 @@ export const TIMEOUT_CEILING_MS = 15_000;
 export const PROMPT_SCAN_CHARS = 8000;
 /** Upper bound on the query sent to the search. */
 export const QUERY_MAX_CHARS = 500;
-/** A cleaned prompt shorter than this is an acknowledgement, not a question. */
+/** A cleaned prompt shorter than this is treated as an acknowledgement and not searched. */
 export const MIN_QUERY_CHARS = 12;
 /** Upper bound on one memory's snippet. */
 export const SNIPPET_MAX_CHARS = 280;
@@ -573,7 +575,7 @@ export async function runRecall(rawInput: string, deps: RecallDeps = {}): Promis
     return { output: NOOP_OUTPUT, reason: "no-prompt", hits: 0 };
   }
 
-  // Not a question from the user: never search.
+  // A background notification, or a prompt too short to search: never search.
   if (isNotificationPrompt(prompt)) return { output: NOOP_OUTPUT, reason: "skipped-notification", hits: 0 };
   const query = buildRecallQuery(prompt);
   if (query.length < MIN_QUERY_CHARS) return { output: NOOP_OUTPUT, reason: "skipped-short", hits: 0 };
