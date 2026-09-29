@@ -398,6 +398,34 @@ function markLoaded(label: string, pid: number | null): void {
   if (pid !== null) writeFileSync(join(fx.state, "pid", label), String(pid));
 }
 
+/**
+ * flair#2040 CI diagnostics: run a case's assertions; when one fails, print
+ * what the driver saw (the whole result, its output tails, the shim's calls,
+ * signals, stub starts), then fail as before.
+ */
+async function explainOnFailure(
+  run: { result: unknown; stdout: string; stderr: string },
+  check: () => Promise<void>,
+): Promise<void> {
+  try {
+    await check();
+  } catch (err) {
+    console.error(
+      [
+        "----- flair#2040 command-level diagnostics -----",
+        `result: ${JSON.stringify(run.result, null, 2)}`,
+        `driver stdout (tail):\n${run.stdout.slice(-4_000)}`,
+        `driver stderr (tail):\n${run.stderr.slice(-4_000)}`,
+        `launchctl shim calls:\n${shimLines().join("\n")}`,
+        `signals:\n${signals()}`,
+        `stub starts: ${stubStarts().join(", ")}`,
+        `hdb.pid: ${hdbPid()}`,
+      ].join("\n"),
+    );
+    throw err;
+  }
+}
+
 beforeEach(async () => {
   fx = setupFixture(await freePort());
 });
@@ -496,22 +524,25 @@ describe("flair#2040 — doctor --fix never stops an instance it cannot hand to 
     async () => {
       const { pid } = await arrangeDirectInstance();
 
-      const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
+      const run = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
+      const { result } = run;
 
-      expect(result).toMatchObject({ kind: "repaired" }); // whole result printed on failure
-      expect(result.detail).toContain("adopted the direct-spawned instance into launchd");
-      // The direct process was clean-stopped (SIGTERM), and launchd's job now serves.
-      expect(signals()).toContain(`SIGTERM ${pid}`);
-      expect(alive(pid)).toBe(false);
-      const managedPid = Number(readFileSync(join(fx.state, "pid", fx.label), "utf-8"));
-      expect(managedPid).not.toBe(pid);
-      expect(hdbPid()).toBe(managedPid);
-      expect(await healthy()).toBe(true);
-      // The load names the probed domain; the legacy, domain-inferring verbs are gone.
-      const verbs = mutatingCalls();
-      expect(verbs).toContain(`bootstrap ${GUI} ${fx.plistPath}`);
-      expect(verbs).toContain(`kickstart ${GUI}/${fx.label}`);
-      expect(verbs.filter((l) => /^(load|unload|start)\b/.test(l))).toEqual([]);
+      await explainOnFailure(run, async () => {
+        expect(result).toMatchObject({ kind: "repaired" }); // whole result printed on failure
+        expect(result.detail).toContain("adopted the direct-spawned instance into launchd");
+        // The direct process was clean-stopped (SIGTERM), and launchd's job now serves.
+        expect(signals()).toContain(`SIGTERM ${pid}`);
+        expect(alive(pid)).toBe(false);
+        const managedPid = Number(readFileSync(join(fx.state, "pid", fx.label), "utf-8"));
+        expect(managedPid).not.toBe(pid);
+        expect(hdbPid()).toBe(managedPid);
+        expect(await healthy()).toBe(true);
+        // The load names the probed domain; the legacy, domain-inferring verbs are gone.
+        const verbs = mutatingCalls();
+        expect(verbs).toContain(`bootstrap ${GUI} ${fx.plistPath}`);
+        expect(verbs).toContain(`kickstart ${GUI}/${fx.label}`);
+        expect(verbs.filter((l) => /^(load|unload|start)\b/.test(l))).toEqual([]);
+      });
     },
     90_000,
   );
@@ -522,13 +553,16 @@ describe("flair#2040 — doctor --fix never stops an instance it cannot hand to 
       const { pid } = await arrangeDirectInstance();
       markLoaded(fx.label, null); // loaded, not running: e.g. the launcher refusing while the direct process serves
 
-      const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
+      const run = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
+      const { result } = run;
 
-      expect(result).toMatchObject({ kind: "repaired" }); // whole result printed on failure
-      expect(signals()).toContain(`SIGTERM ${pid}`);
-      const order = readFileSync(join(fx.state, "bootout-order"), "utf-8").split("\n").filter(Boolean);
-      // The FIRST bootout of this job happened while the direct process still served.
-      expect(order[0]).toBe(`${fx.label} serving-alive`);
+      await explainOnFailure(run, async () => {
+        expect(result).toMatchObject({ kind: "repaired" }); // whole result printed on failure
+        expect(signals()).toContain(`SIGTERM ${pid}`);
+        const order = readFileSync(join(fx.state, "bootout-order"), "utf-8").split("\n").filter(Boolean);
+        // The FIRST bootout of this job happened while the direct process still served.
+        expect(order[0]).toBe(`${fx.label} serving-alive`);
+      });
     },
     90_000,
   );
