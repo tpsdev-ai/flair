@@ -185,6 +185,22 @@ export function isForbiddenOwnerMutation(
 }
 
 /**
+ * The refusal for a write that names a stored record owned by another
+ * principal: 403 with a body that names only the table.
+ *
+ * One constructor for every place the rule is enforced — the auth middleware
+ * for `/<Table>/<id>` routes, and resources/relay-ops.ts for a Message POST to
+ * the collection that reuses an existing message id — so a refused caller gets
+ * the same response on either route, and it carries nothing from the stored
+ * row.
+ */
+export function ownerMutationRefusal(table: string): Response {
+  return new Response(JSON.stringify({
+    error: `forbidden: cannot modify ${table} owned by another principal`,
+  }), { status: 403, headers: { "Content-Type": "application/json" } });
+}
+
+/**
  * Decide whether a caller may CHANGE the owner field of an already-stored record.
  *
  * The ownership rule above answers "may you write this row"; it does not answer

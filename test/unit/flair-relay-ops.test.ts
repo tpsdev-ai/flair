@@ -6,7 +6,8 @@
  * over-cap 4xx + per-sender sub-cap; absorbing-consumed under a deadline sweep;
  * signature verify + tampered-field reject; contentHash retry-dedup; seq
  * read-ordering; server-resolved orgScope (not settable from the body); no-forge
- * `from`; and the no-existence-oracle response.
+ * `from`; the no-existence-oracle response; and the same-id retry answered only
+ * for the original sender.
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import nacl from "tweetnacl";
@@ -278,6 +279,96 @@ describe("contentHash retry-dedup", () => {
     const resend = send("alice", "bob", 1, { id: "alice-bob-1-retry", createdAt: "2026-09-04T12:00:00.000Z" });
     await relaySend(d, agentAuth("alice"), resend);
     expect(d.msgs.store.size).toBe(1);
+  });
+});
+
+// ─── same-id retry: answered only for the original sender ──────────────────
+
+/** The owner-guard refusal body, as the auth middleware returns it for a write
+ *  to `/Message/<id>` the caller does not own. */
+const OWNER_REFUSAL_BODY = JSON.stringify({ error: "forbidden: cannot modify Message owned by another principal" });
+
+/** Every stored field of `row` that must not appear in a refusal body. */
+function storedValues(row: any): string[] {
+  return [row.from, row.to, row.threadId, row.contentHash, row.deliveredAt, row.createdAt, row.body, row.state]
+    .filter((v) => typeof v === "string" && v.length > 0);
+}
+
+describe("same-id retry: the idempotent answer is for the original sender only", () => {
+  it("the same sender's retry with the same id gets the stored message's accepted view, and no second row", async () => {
+    const d = deps();
+    const msg = send("alice", "bob", 1, { id: "shared-id" });
+    const first = (await relaySend(d, agentAuth("alice"), { ...msg })) as MessageEnvelope;
+    // A retry that reuses the id with a later createdAt/body is still answered
+    // idempotently with the STORED message, not the resend.
+    const retry = send("alice", "bob", 2, { id: "shared-id", body: "resend" });
+    const second = (await relaySend(d, agentAuth("alice"), retry)) as MessageEnvelope;
+    expect(isResponse(second)).toBe(false);
+    expect(second).toEqual(first);
+    expect(d.msgs.store.size).toBe(1);
+    expect(d.msgs.store.get("shared-id").body).toBe("msg-1");
+  });
+
+  it("a different sender reusing the id is refused with the owner-guard 403 and gets none of the stored message's fields", async () => {
+    const d = deps();
+    await relaySend(d, agentAuth("carol"), send("carol", "alice", 0, { id: "taken", threadId: "carol:alice:private" }));
+    const stored = { ...d.msgs.store.get("taken") };
+
+    const res = await relaySend(d, agentAuth("bob"), send("bob", "bob", 0, { id: "taken", threadId: "bob:own" }));
+    expect(isResponse(res)).toBe(true);
+    const r = res as Response;
+    expect(r.status).toBe(403);
+    const text = await r.text();
+    expect(text).toBe(OWNER_REFUSAL_BODY);
+    for (const v of storedValues(stored)) expect(text.includes(v), `refusal leaked a stored value: ${v}`).toBe(false);
+
+    // Nothing written: the stored message is unchanged and no second row exists.
+    expect(d.msgs.store.size).toBe(1);
+    expect(d.msgs.store.get("taken")).toEqual(stored);
+  });
+
+  it("the refusal is the same whatever the stored message holds (no field of it shapes the response)", async () => {
+    const bodies: string[] = [];
+    for (const [to, thread, body] of [["alice", "carol:alice:t1", "one"], ["bob", "carol:bob:t2", "two"]]) {
+      const d = deps();
+      await relaySend(d, agentAuth("carol"), send("carol", to, 3, { id: "taken", threadId: thread, body }));
+      const res = (await relaySend(d, agentAuth("bob"), send("bob", "alice", 0, { id: "taken" }))) as Response;
+      expect(res.status).toBe(403);
+      bodies.push(await res.text());
+    }
+    expect(bodies[0]).toBe(bodies[1]);
+  });
+
+  it("an admin sending as another principal is refused the same way for an id held by a third sender", async () => {
+    const d = deps();
+    await relaySend(d, agentAuth("carol"), send("carol", "alice", 0, { id: "taken" }));
+    const res = (await relaySend(d, agentAuth("admin-agent", true), send("bob", "alice", 0, { id: "taken" }))) as Response;
+    expect(res.status).toBe(403);
+    expect(await res.text()).toBe(OWNER_REFUSAL_BODY);
+    expect(d.msgs.store.get("taken").from).toBe("carol");
+  });
+
+  it("a failed ownership lookup refuses: nothing is written and nothing is returned from the store", async () => {
+    const d = deps();
+    await relaySend(d, agentAuth("alice"), send("alice", "bob", 0, { id: "taken" }));
+    const stored = { ...d.msgs.store.get("taken") };
+    const failingGet = { ...d.msgs, get: async () => { throw new Error("simulated Message read failure"); } };
+    const dFail: RelayDeps = { ...d, messages: failingGet };
+
+    // Both a different sender and the original sender are refused while the
+    // stored row cannot be read — the lookup failing is never evidence of
+    // ownership, and never a licence to write.
+    for (const [who, msg] of [
+      ["bob", send("bob", "alice", 0, { id: "taken" })],
+      ["alice", send("alice", "bob", 1, { id: "taken", body: "overwrite?" })],
+    ] as const) {
+      const res = (await relaySend(dFail, agentAuth(who), msg)) as Response;
+      expect(isResponse(res), `${who}: expected a refusal`).toBe(true);
+      expect(res.status).toBe(403);
+      expect(await res.text()).toBe(OWNER_REFUSAL_BODY);
+    }
+    expect(d.msgs.store.size).toBe(1);
+    expect(d.msgs.store.get("taken")).toEqual(stored);
   });
 });
 
