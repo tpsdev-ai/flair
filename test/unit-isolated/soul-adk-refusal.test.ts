@@ -14,6 +14,11 @@ let lookupFails = false;
 let getBehavior: "ok" | "throw" | "empty" = "ok";
 
 class BaseSoul {
+  // Real Harper binds the resource to the URL target (`getId()`); this double
+  // models the bound id on the instance as `.id` (the same shape the other
+  // Soul/Memory/Agent doubles use). resources/originator-instance.ts's
+  // resolveStoredRow reads the stored row by this id.
+  getId() { return (this as any).id; }
   async delete(id: string) { soulStore.delete(id); }
   async post(content: any) {
     soulStore.set(content.id ?? "soul", { ...content });
@@ -148,7 +153,7 @@ describe("Soul.patch refuses ADK-sourced claims", () => {
     expect(soulStore.get("shared-app-role").value).toBe("Be the team's memory.");
   });
 
-  test("a failed stored-state read cannot authorize a PATCH", async () => {
+  test("a failed stored-state read cannot authorize a PATCH — refused (500), never read as 'no stored state'", async () => {
     soulStore.set("shared-app-pref", {
       id: "shared-app-pref",
       agentId: "shared-app",
@@ -157,7 +162,10 @@ describe("Soul.patch refuses ADK-sourced claims", () => {
     });
     getBehavior = "throw";
     const soul = makeSoul("shared-app-pref");
-    await expect(soul.patch({ value: "alice likes tea" })).rejects.toThrow("unavailable");
+    const res: any = await soul.patch({ value: "alice likes tea" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(500);
+    expect((await (res as Response).json()).error).toBe("stored_row_lookup_failed");
     expect(soulStore.get("shared-app-pref").value).toBe("Be concise.");
   });
 
