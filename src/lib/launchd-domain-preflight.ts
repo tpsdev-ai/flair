@@ -128,10 +128,17 @@ export function assessLaunchdDomain(opts: {
  * label that is not listed is enabled — launchd lists only overrides.
  */
 export function parsePrintDisabled(output: string, label: string): boolean {
-  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const m = output.match(new RegExp(`"${escaped}"\\s*=>\\s*(\\w+)`));
-  if (!m) return false;
-  return m[1] === "disabled" || m[1] === "true";
+  // Match the quoted label as plain text and read its value with a fixed
+  // pattern: no expression is built from the label.
+  const quoted = `"${label}"`;
+  for (const line of output.split("\n")) {
+    const at = line.indexOf(quoted);
+    if (at < 0) continue;
+    const m = /^\s*=>\s*(\w+)/.exec(line.slice(at + quoted.length));
+    if (!m) continue;
+    return m[1] === "disabled" || m[1] === "true";
+  }
+  return false;
 }
 
 /**
