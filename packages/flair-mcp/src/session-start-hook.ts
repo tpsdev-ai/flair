@@ -146,10 +146,12 @@ interface SessionStartInput {
 // (./precompact-hook.ts) saved a record, this hook shows it FIRST: after a
 // compaction, the record this harness session saved; after a restart, the
 // one the previous session saved. Which record is decided from the local
-// marker file alone (./precompact.ts resolvePreCompactLookup), then fetched
-// with one `GET /Memory/<id>` that runs concurrently with bootstrap under the
-// same continuity timeout as the resume hint. No marker ⇒ no request; any
-// failure ⇒ nothing shown, boot proceeds.
+// marker file alone (./precompact.ts resolvePreCompactLookup: a bounded,
+// asynchronous read), then fetched with one `GET /Memory/<id>`; both run
+// concurrently with bootstrap under the same continuity timeout as the resume
+// hint. No marker ⇒ no request; any failure ⇒ nothing shown, boot proceeds.
+// The record is shown as quoted data between fixed BEGIN/END lines with every
+// line prefixed (./precompact.ts formatPreCompactContext).
 
 /** Minimal surface of FlairClient this hook depends on (eases testing).
  *  `request` is optional and structurally matches PresencePoster (presence.ts)
@@ -369,17 +371,20 @@ export async function runHook(
       : Promise.resolve(null);
 
   // Pre-compaction record (flair#2069): decided locally, fetched concurrently,
-  // bounded by the same continuity timeout; null (nothing shown) on any failure.
-  const precompactLookup =
-    typeof client.request === "function" ? resolvePreCompactLookup(input, agentId, continuity) : null;
-  const precompactDone: Promise<string | null> = precompactLookup
-    ? withTimeout(
-        fetchPreCompactRecord(client as unknown as ContinuityClient, agentId, precompactLookup).then((record) =>
-          record ? formatPreCompactContext(record) : null,
-        ),
-        resolveContinuityTimeoutMs(),
-      ).catch(() => null)
-    : Promise.resolve(null);
+  // the marker read and the fetch both bounded by the same continuity timeout;
+  // null (nothing shown) on any failure.
+  const precompactDone: Promise<string | null> =
+    typeof client.request === "function"
+      ? withTimeout(
+          (async () => {
+            const lookup = await resolvePreCompactLookup(input, agentId, continuity);
+            if (!lookup) return null;
+            const record = await fetchPreCompactRecord(client as unknown as ContinuityClient, agentId, lookup);
+            return record ? formatPreCompactContext(record) : null;
+          })(),
+          resolveContinuityTimeoutMs(),
+        ).catch(() => null)
+      : Promise.resolve(null);
 
   let context = "";
   try {

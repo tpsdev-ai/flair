@@ -60,7 +60,10 @@
  * with meta.hook "PreCompact". It quotes user turns, so unlike the journal
  * lines it is redacted, and it is the one continuity row whose CONTENT
  * flair-session-start shows (first, after a compaction or a restart). Its
- * rules live in ./precompact.ts; nothing above changes for journal rows.
+ * rules live in ./precompact.ts; nothing above changes for journal rows. That
+ * hook has a whole-process deadline, so it reads the state file through
+ * bumpSeqBounded (asynchronous, size-capped with fstat before any byte is
+ * read) instead of the synchronous bumpSeq the capture hook uses.
  *
  * FAIL-OPEN THROUGHOUT: continuity is a recovery aid, not a correctness gate.
  * Flair unreachable, a #1261 guard 400, a malformed payload, a missing state
@@ -68,7 +71,8 @@
  * blocks the agent's turn or boot.
  */
 
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, constants as fsConstants, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmod, open, rename, writeFile, type FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -201,30 +205,105 @@ export function readPointer(sessionDir: string, agentId: string): SessionPointer
   }
 }
 
-/** Read + parse a state file. null on ANY problem — capture then journals
- *  nothing (continuity wasn't seeded for this harness session). */
-export function readState(sessionDir: string, agentId: string, harnessSessionId: string): SessionState | null {
+/** Parse a state file's text: the state, or why it is not one. */
+function parseState(
+  raw: string,
+  agentId: string,
+  harnessSessionId: string,
+): { ok: true; state: SessionState } | { ok: false; detail: "malformed JSON" | "unexpected shape" } {
+  let parsed: Partial<SessionState> | null;
   try {
-    const raw = readFileSync(statePath(sessionDir, agentId, harnessSessionId), "utf-8");
-    const parsed = JSON.parse(raw) as Partial<SessionState> | null;
-    if (
-      parsed &&
-      typeof parsed.sessionId === "string" && parsed.sessionId !== "" &&
-      typeof parsed.processUUID === "string" && parsed.processUUID !== "" &&
-      typeof parsed.seq === "number" && Number.isFinite(parsed.seq)
-    ) {
-      return {
+    parsed = JSON.parse(raw) as Partial<SessionState> | null;
+  } catch {
+    return { ok: false, detail: "malformed JSON" };
+  }
+  if (
+    parsed &&
+    typeof parsed.sessionId === "string" && parsed.sessionId !== "" &&
+    typeof parsed.processUUID === "string" && parsed.processUUID !== "" &&
+    typeof parsed.seq === "number" && Number.isFinite(parsed.seq)
+  ) {
+    return {
+      ok: true,
+      state: {
         sessionId: parsed.sessionId,
         processUUID: parsed.processUUID,
         seq: parsed.seq,
         agentId: typeof parsed.agentId === "string" ? parsed.agentId : agentId,
         harnessSessionId: typeof parsed.harnessSessionId === "string" ? parsed.harnessSessionId : harnessSessionId,
         updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : "",
-      };
-    }
-    return null;
+      },
+    };
+  }
+  return { ok: false, detail: "unexpected shape" };
+}
+
+/** Read + parse a state file. null on ANY problem — capture then journals
+ *  nothing (continuity wasn't seeded for this harness session). */
+export function readState(sessionDir: string, agentId: string, harnessSessionId: string): SessionState | null {
+  try {
+    const parsed = parseState(readFileSync(statePath(sessionDir, agentId, harnessSessionId), "utf-8"), agentId, harnessSessionId);
+    return parsed.ok ? parsed.state : null;
   } catch {
     return null;
+  }
+}
+
+// ── bounded asynchronous reads (the PreCompact hook's deadline) ─────────────
+
+/**
+ * Upper bound on a session file read through readSmallFile: the state file and
+ * the pre-compaction marker (./precompact.ts). Each is a few hundred bytes when
+ * Flair wrote it, so anything larger is refused unread.
+ */
+export const SESSION_FILE_MAX_BYTES = 16 * 1024;
+
+/** A bounded read's outcome. Only a missing file is "absent"; every other
+ *  failure is "refused" with a short reason, never an empty read. */
+export type SmallFileRead =
+  | { kind: "absent" }
+  | { kind: "ok"; text: string }
+  | { kind: "refused"; detail: string };
+
+/**
+ * Read a small regular file without ever holding the event loop:
+ *   - the open is non-blocking, so a FIFO at the path cannot stall it;
+ *   - the opened descriptor is checked with fstat BEFORE any byte is read, and
+ *     anything that is not a regular file of at most `maxBytes` is refused;
+ *   - at most `maxBytes + 1` bytes are ever read, so a file that grew after
+ *     the check is refused too;
+ *   - every step is asynchronous, so a process-level deadline can fire
+ *     between them.
+ */
+export async function readSmallFile(path: string, maxBytes: number = SESSION_FILE_MAX_BYTES): Promise<SmallFileRead> {
+  let handle: FileHandle;
+  try {
+    handle = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0));
+  } catch (err) {
+    const code = (err as { code?: unknown } | null)?.code;
+    if (code === "ENOENT") return { kind: "absent" };
+    return { kind: "refused", detail: typeof code === "string" ? code : "unreadable" };
+  }
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile()) return { kind: "refused", detail: "not a regular file" };
+    if (opened.size > maxBytes) return { kind: "refused", detail: `larger than ${maxBytes} bytes` };
+    // Read to EOF, not to the size fstat reported, into a buffer one byte
+    // larger than the cap: a file that grew past the cap is refused, never cut.
+    const buf = Buffer.alloc(maxBytes + 1);
+    let got = 0;
+    while (got < buf.length) {
+      const { bytesRead } = await handle.read(buf, got, buf.length - got, got);
+      if (bytesRead === 0) break;
+      got += bytesRead;
+    }
+    if (got > maxBytes) return { kind: "refused", detail: `larger than ${maxBytes} bytes` };
+    return { kind: "ok", text: buf.subarray(0, got).toString("utf8") };
+  } catch (err) {
+    const code = (err as { code?: unknown } | null)?.code;
+    return { kind: "refused", detail: typeof code === "string" ? code : "unreadable" };
+  } finally {
+    await handle.close().catch(() => undefined);
   }
 }
 
@@ -276,6 +355,46 @@ export function bumpSeq(sessionDir: string, agentId: string, harnessSessionId: s
     return next;
   } catch {
     return null;
+  }
+}
+
+/** bumpSeqBounded's outcome. "absent" (never seeded) is kept apart from
+ *  "unreadable" (a state file that exists but was refused or did not parse),
+ *  so a caller that reports it never words the second as the first. */
+export type SeqBump =
+  | { kind: "bumped"; state: SessionState }
+  | { kind: "absent" }
+  | { kind: "unreadable"; detail: string }
+  | { kind: "unwritable" };
+
+/**
+ * bumpSeq for a caller with a process-level deadline (the PreCompact hook):
+ * the same increment and the same temp-file + rename, with every step
+ * asynchronous and the read bounded by readSmallFile (size-capped with fstat
+ * before any byte is read; a FIFO or other non-regular file refused). Never
+ * throws.
+ */
+export async function bumpSeqBounded(
+  sessionDir: string,
+  agentId: string,
+  harnessSessionId: string,
+  now: Date = new Date(),
+): Promise<SeqBump> {
+  const finalPath = statePath(sessionDir, agentId, harnessSessionId);
+  const read = await readSmallFile(finalPath);
+  if (read.kind === "absent") return { kind: "absent" };
+  if (read.kind === "refused") return { kind: "unreadable", detail: read.detail };
+  const parsed = parseState(read.text, agentId, harnessSessionId);
+  if (!parsed.ok) return { kind: "unreadable", detail: parsed.detail };
+  const next: SessionState = { ...parsed.state, seq: parsed.state.seq + 1, updatedAt: now.toISOString() };
+  const tmpPath = `${finalPath}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  try {
+    await writeFile(tmpPath, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
+    await chmod(tmpPath, 0o600);
+    await rename(tmpPath, finalPath);
+    return { kind: "bumped", state: next };
+  } catch {
+    return { kind: "unwritable" };
   }
 }
 

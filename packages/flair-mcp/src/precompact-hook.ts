@@ -12,8 +12,9 @@
  *      ("PreCompact"), `session_id`, `transcript_path` and `trigger`
  *      ("manual" for /compact, "auto" for automatic compaction).
  *   2. Finds this harness session's continuity state (seeded by
- *      flair-session-start) and consumes a journal seq, exactly as
- *      flair-continuity-capture does.
+ *      flair-session-start) and consumes a journal seq, as
+ *      flair-continuity-capture does, through the bounded asynchronous
+ *      bumpSeqBounded.
  *   3. Reads the transcript TAIL (bounded in bytes and lines) and builds the
  *      record: standing instructions, open tasks, in-flight work and the last
  *      assistant message, redacted and cut to the record bound. Nothing to
@@ -32,15 +33,23 @@
  * process-level deadline before reading stdin, and when it passes the hook
  * prints the one timeout note and exits 0, whatever is still
  * pending (stdin held open, a slow read, a write in flight). stdin is read up
- * to STDIN_MAX_BYTES; a larger payload is ignored. What runs before this
- * process starts (the launcher, node's start-up) is outside the budget.
+ * to STDIN_MAX_BYTES; a larger payload is ignored. Every local file the hook
+ * reads is read asynchronously with a size cap checked (fstat) before any byte
+ * is read: the transcript by its tail caps, the continuity state file and the
+ * marker by SESSION_FILE_MAX_BYTES; a larger file, or one that is not a
+ * regular file, is refused with a note. Its local writes are asynchronous too,
+ * so none of this can hold the process past the deadline. What runs before
+ * this process starts (the launcher, node's start-up) is outside the budget.
+ * One local read is not this hook's own: flair-client reads the agent's key
+ * file synchronously, and the deadline cannot interrupt that read.
  *
  * NOTES (the only output)
  * -----------------------
  * Silent: a probe, a malformed or non-PreCompact payload, no FLAIR_AGENT_ID,
  * a tail with nothing to record, and success. One note, naming the reason: no
- * continuity state for the session, an unreadable transcript, a marker that
- * could not be read or written, and a write that failed (with its kind:
+ * continuity state for the session, a state file that could not be read (too
+ * large, not a regular file, malformed) or updated, an unreadable transcript,
+ * a marker that could not be read or written, and a write that failed (with its kind:
  * auth, timeout, unreachable or http-<status>, never a message text, URL or
  * credential).
  *
@@ -63,7 +72,7 @@
 
 import { isProbeMode, readEnvOrUnset, stripInterpolationLiteralsFromEnv } from "./env-guard.js";
 import { memoryPutPath } from "./record-id-path.js";
-import { bumpSeq, isSafeFileId, resolveSessionDir, type ContinuityClient } from "./continuity.js";
+import { bumpSeqBounded, isSafeFileId, resolveSessionDir, statePath, type ContinuityClient } from "./continuity.js";
 import {
   PRECOMPACT_HOOK,
   buildPreCompactContent,
@@ -163,6 +172,8 @@ export type PreCompactReason =
   | "no-agent-id"
   | "bad-session-id"
   | "no-state"
+  | "state-unreadable"
+  | "state-unwritable"
   | "no-transcript"
   | "nothing-to-record"
   | "marker-unreadable"
@@ -250,10 +261,13 @@ export async function runPreCompact(rawInput: string, deps: PreCompactDeps = {})
   const trigger = normalizeTrigger(input.trigger);
 
   // The session's continuity state, seeded by flair-session-start. Consuming a
-  // seq orders the record inside the session's journal.
+  // seq orders the record inside the session's journal. The read is
+  // asynchronous and size-capped before any byte is read, so a large or odd
+  // file at the state path cannot hold the process past its deadline; a state
+  // file that exists but cannot be used is reported as such, never as absent.
   const sessionDir = deps.sessionDir ?? resolveSessionDir(env);
-  const state = bumpSeq(sessionDir, agentId, harnessSessionId, now());
-  if (!state) {
+  const bumped = await bumpSeqBounded(sessionDir, agentId, harnessSessionId, now());
+  if (bumped.kind === "absent") {
     return {
       output: preCompactNote(
         "Flair: no continuity state for this session, so no pre-compaction record was saved. flair-session-start creates it when a session starts.",
@@ -261,6 +275,18 @@ export async function runPreCompact(rawInput: string, deps: PreCompactDeps = {})
       reason: "no-state",
     };
   }
+  if (bumped.kind === "unreadable" || bumped.kind === "unwritable") {
+    const path = statePath(sessionDir, agentId, harnessSessionId);
+    return {
+      output: preCompactNote(
+        bumped.kind === "unreadable"
+          ? `Flair: the continuity state file ${path} could not be read (${bumped.detail}), so no pre-compaction record was saved. Remove that file to reset it; flair-session-start recreates it when a session starts.`
+          : `Flair: the continuity state file ${path} could not be updated, so no pre-compaction record was saved.`,
+      ),
+      reason: bumped.kind === "unreadable" ? "state-unreadable" : "state-unwritable",
+    };
+  }
+  const state = bumped.state;
 
   const tail = await readTranscriptTail(input.transcript_path);
   if (!tail.ok) {
@@ -275,7 +301,7 @@ export async function runPreCompact(rawInput: string, deps: PreCompactDeps = {})
   // Dedup: an unreadable marker is NOT "no marker". Treating it as absent would
   // license a second record for a compaction that already has one.
   const markerPath = precompactMarkerPath(sessionDir, agentId);
-  const read = readPreCompactMarker(sessionDir, agentId);
+  const read = await readPreCompactMarker(sessionDir, agentId);
   if (read.kind === "unknown") {
     return {
       output: preCompactNote(
@@ -287,7 +313,7 @@ export async function runPreCompact(rawInput: string, deps: PreCompactDeps = {})
   const at = now();
   const resolved = resolvePreCompactRecordId(read.kind === "present" ? read.marker : null, harnessSessionId, trigger, agentId, at);
   try {
-    writePreCompactMarker(sessionDir, agentId, {
+    await writePreCompactMarker(sessionDir, agentId, {
       harnessSessionId,
       sessionId: state.sessionId,
       trigger,

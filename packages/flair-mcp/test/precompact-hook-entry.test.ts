@@ -9,7 +9,9 @@
  * its budget whatever is still pending (stdin held open, a write never
  * answered), what goes on the wire, and the full loop the issue asks for:
  * a compaction writes ONE record, a rerun keeps it one, and the next session
- * start shows it at the top, after a compaction and after a restart.
+ * start shows it at the top, after a compaction and after a restart. And that
+ * the hook's own local files cannot hold it past its budget: an oversize or
+ * non-regular state file or marker is refused before any byte is read.
  *
  * The stand-in authenticates the way Flair does: it parses the Authorization
  * header and verifies the Ed25519 signature over the canonical payload with
@@ -28,7 +30,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { closeSync, existsSync, mkdtempSync, openSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, rmSync, statSync, truncateSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,8 +38,14 @@ import { join } from "node:path";
 import { b64ToArrayBuffer } from "../../../resources/b64.ts";
 import { importEd25519Key, parseTpsEd25519Header, WINDOW_MS } from "../../../resources/ed25519-auth.ts";
 import { childOverranDeadline } from "../../../test/helpers/child-deadline.js";
-import { seedSession } from "../src/continuity.ts";
-import { PRECOMPACT_RECORD_MAX_CHARS, REDACTED, precompactMarkerPath } from "../src/precompact.ts";
+import { SESSION_FILE_MAX_BYTES, seedSession, statePath } from "../src/continuity.ts";
+import {
+  PRECOMPACT_DATA_BEGIN,
+  PRECOMPACT_DATA_PREFIX,
+  PRECOMPACT_RECORD_MAX_CHARS,
+  REDACTED,
+  precompactMarkerPath,
+} from "../src/precompact.ts";
 import { writeFailedNote } from "../src/precompact-hook.ts";
 
 const PRECOMPACT_ENTRY = join(import.meta.dir, "..", "src", "precompact-hook.ts");
@@ -294,6 +302,8 @@ describe("flair-precompact entry point (spawned, real client)", () => {
       expect(afterCompact.status).toBe(0);
       const ctx = contextOf(afterCompact.stdout);
       expect(ctx.startsWith(HEADER_START)).toBe(true);
+      expect(ctx.split("\n")[1]).toBe(PRECOMPACT_DATA_BEGIN); // the record is quoted data…
+      expect(ctx).toContain(`\n${PRECOMPACT_DATA_PREFIX}${STORED_INSTRUCTION}\n`); // …every line of it prefixed
       expect(ctx.indexOf(STORED_INSTRUCTION)).toBeGreaterThan(0);
       expect(ctx.indexOf("## Bootstrap context")).toBeGreaterThan(ctx.indexOf(STORED_INSTRUCTION));
       expect(ctx).not.toContain(GH_TOKEN);
@@ -407,6 +417,98 @@ describe("flair-precompact entry point (spawned, real client)", () => {
       expect(noteOf(run.stdout)).toContain("the transcript could not be read (not-a-file)");
       expect(seen).toHaveLength(0);
       expect(run.elapsedMs).toBeLessThan(ENDS_ON_DEADLINE_MS);
+    },
+    CASE_BUDGET_MS,
+  );
+
+  /** A SPARSE file far over the session-file cap: large to any reader, no disk used. */
+  function sparseFile(path: string, bytes = 64 * 1024 * 1024): void {
+    writeFileSync(path, "");
+    truncateSync(path, bytes);
+    expect(statSync(path).size).toBe(bytes);
+  }
+
+  test(
+    "an oversize continuity state file: refused before any byte is read; one note, no request, no record, exit 0 within the budget",
+    async () => {
+      mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+      const path = statePath(sessionDir, AGENT, HARNESS);
+      sparseFile(path);
+      const run = await runEntry(
+        PRECOMPACT_ENTRY,
+        childEnv({ FLAIR_PRECOMPACT_TIMEOUT_MS: String(SHORT_BUDGET_MS) }),
+        precompactInput(writeTranscript(transcriptLines())),
+        "oversize-state",
+      );
+      expect(run.status).toBe(0);
+      expect(noteOf(run.stdout)).toBe(
+        `Flair: the continuity state file ${path} could not be read (larger than ${SESSION_FILE_MAX_BYTES} bytes), so no pre-compaction record was saved. Remove that file to reset it; flair-session-start recreates it when a session starts.`,
+      );
+      expect(seen).toHaveLength(0);
+      expect(rows.size).toBe(0);
+      expect(existsSync(precompactMarkerPath(sessionDir, AGENT))).toBe(false);
+      expect(run.elapsedMs).toBeLessThan(ENDS_ON_DEADLINE_MS);
+    },
+    CASE_BUDGET_MS,
+  );
+
+  test(
+    "an oversize marker: refused before any byte is read; one note, no request, no record, exit 0 within the budget",
+    async () => {
+      seedSession(sessionDir, AGENT, HARNESS);
+      const markerPath = precompactMarkerPath(sessionDir, AGENT);
+      sparseFile(markerPath);
+      const run = await runEntry(
+        PRECOMPACT_ENTRY,
+        childEnv({ FLAIR_PRECOMPACT_TIMEOUT_MS: String(SHORT_BUDGET_MS) }),
+        precompactInput(writeTranscript(transcriptLines())),
+        "oversize-marker",
+      );
+      expect(run.status).toBe(0);
+      expect(noteOf(run.stdout)).toBe(
+        `Flair: the pre-compaction marker ${markerPath} could not be read (larger than ${SESSION_FILE_MAX_BYTES} bytes), so no record was saved. Remove that file to reset it.`,
+      );
+      expect(seen).toHaveLength(0);
+      expect(rows.size).toBe(0);
+      expect(statSync(markerPath).size).toBe(64 * 1024 * 1024); // left as it was
+      expect(run.elapsedMs).toBeLessThan(ENDS_ON_DEADLINE_MS);
+    },
+    CASE_BUDGET_MS,
+  );
+
+  test(
+    "a FIFO at the state path or the marker path is refused, never read (a synchronous read would block for good): one note each, exit 0",
+    async () => {
+      mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+      const statePipe = statePath(sessionDir, AGENT, HARNESS);
+      expect(spawnSync("mkfifo", [statePipe], { encoding: "utf-8" }).status).toBe(0); // a missing mkfifo must FAIL, not skip
+      const stateRun = await runEntry(
+        PRECOMPACT_ENTRY,
+        childEnv({ FLAIR_PRECOMPACT_TIMEOUT_MS: String(SHORT_BUDGET_MS) }),
+        precompactInput(writeTranscript(transcriptLines())),
+        "state-fifo",
+        { deadlineMs: 8_000 },
+      );
+      expect(stateRun.status).toBe(0);
+      expect(noteOf(stateRun.stdout)).toContain(`the continuity state file ${statePipe} could not be read (not a regular file)`);
+      expect(stateRun.elapsedMs).toBeLessThan(ENDS_ON_DEADLINE_MS);
+
+      rmSync(statePipe);
+      seedSession(sessionDir, AGENT, HARNESS);
+      const markerPipe = precompactMarkerPath(sessionDir, AGENT);
+      expect(spawnSync("mkfifo", [markerPipe], { encoding: "utf-8" }).status).toBe(0);
+      const markerRun = await runEntry(
+        PRECOMPACT_ENTRY,
+        childEnv({ FLAIR_PRECOMPACT_TIMEOUT_MS: String(SHORT_BUDGET_MS) }),
+        precompactInput(writeTranscript(transcriptLines())),
+        "marker-fifo",
+        { deadlineMs: 8_000 },
+      );
+      expect(markerRun.status).toBe(0);
+      expect(noteOf(markerRun.stdout)).toContain(`the pre-compaction marker ${markerPipe} could not be read (not a regular file)`);
+      expect(markerRun.elapsedMs).toBeLessThan(ENDS_ON_DEADLINE_MS);
+      expect(seen).toHaveLength(0);
+      expect(rows.size).toBe(0);
     },
     CASE_BUDGET_MS,
   );
