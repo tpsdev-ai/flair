@@ -8,6 +8,13 @@ import { fileURLToPath } from "node:url";
 // installs its sandbox in THIS process — harmless: the guard resolves the real
 // home from the passwd entry for the current uid, never from HOME.
 import { createSandboxHome, type SandboxHome } from "../test/helpers/sandbox-home.ts";
+// The unit-lane service-manager tripwire (flair#2062): every step runs with a
+// `launchctl`/`systemctl` shim FIRST on PATH, so a unit test that reaches a host
+// service manager without its own fake fails the lane instead of touching it.
+import {
+  installServiceManagerTripwire,
+  type ServiceManagerTripwire,
+} from "../test/helpers/fake-launchctl.ts";
 import { changedConfigs, realHomeDir, snapshotClientConfigs } from "./home-isolation-guard.ts";
 
 export interface UnitStep {
@@ -138,6 +145,26 @@ export function unitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(source).filter(([key]) =>
     !/^(FLAIR_|HARPER_|HDB_|FABRIC_)/.test(key),
   ));
+}
+
+/**
+ * The environment one step runs under (flair#2062): the deployment-scrubbed
+ * environment, the step's sandbox HOME, and the service-manager tripwire FIRST
+ * on PATH.
+ *
+ * The tripwire goes first so a unit test that invokes `launchctl` or `systemctl`
+ * without its own fake lands on the tripwire and fails the lane. A test that
+ * supplies its own fake prepends it to `process.env.PATH`, which puts the fake
+ * ahead of the tripwire — the test's fake answers and the tripwire stays clear.
+ */
+export function stepEnvironment(
+  source: NodeJS.ProcessEnv,
+  sandbox: SandboxHome,
+  tripwireDir: string,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...unitEnvironment(source), ...sandbox.env };
+  env.PATH = `${tripwireDir}:${env.PATH ?? ""}`;
+  return env;
 }
 
 function testFiles(dir: string, recursive = true): string[] {
@@ -309,6 +336,12 @@ export interface UnitLaneOptions {
   limits?: Readonly<UnitLaneLimits>;
   /** Creates each step's sandbox HOME. A seam for tests; defaults to createSandboxHome. */
   createSandbox?: () => SandboxHome;
+  /**
+   * The service-manager tripwire every step runs behind (flair#2062). A seam
+   * for tests; defaults to a fresh installServiceManagerTripwire. When unset,
+   * the runner owns it and removes it at the end of the lane.
+   */
+  tripwire?: ServiceManagerTripwire;
 }
 
 const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -327,6 +360,7 @@ function runStep(
   executable: string,
   timeout: { ms: number; reason: string } | undefined,
   createSandbox: () => SandboxHome,
+  tripwireDir: string,
 ): string | undefined {
   // A fresh sandbox HOME per step: even if one step's child wrote a config,
   // the next step cannot read it back, and the real home is never the target.
@@ -344,7 +378,7 @@ function runStep(
     result = spawnSync(executable, step.args, {
       cwd: step.cwd,
       stdio: "inherit",
-      env: { ...unitEnvironment(process.env), ...sandbox.env },
+      env: stepEnvironment(process.env, sandbox, tripwireDir),
       timeout: timeout?.ms,
       // SIGKILL, not the default SIGTERM: spawnSync waits for the child to
       // exit, so a child that ignores SIGTERM would still hang the lane.
@@ -396,6 +430,34 @@ export function runUnitSteps(
   const laneBudgetMs = limits?.laneBudgetMs;
   const deadline = laneBudgetMs === undefined ? Infinity : Date.now() + laneBudgetMs;
   const budgetRanOut = `the lane's ${seconds(laneBudgetMs ?? 0)} time budget ran out`;
+  // The service-manager tripwire (flair#2062). Created BEFORE the temp-dir
+  // snapshot below, so its own scratch directory is never mistaken for a leak
+  // this lane caused. Every step runs with `tripwire.dir` FIRST on PATH; after
+  // every step a nonempty tripwire log fails the lane naming the step and the
+  // calls. `options.tripwire` is a test seam — a caller that supplies one owns
+  // its cleanup.
+  const tripwire = options.tripwire ?? installServiceManagerTripwire();
+  const ownsTripwire = options.tripwire === undefined;
+  const finish = (code: number): number => {
+    if (ownsTripwire) tripwire.cleanup();
+    return code;
+  };
+  // Read the tripwire log after a step. A nonempty log is a step failure naming
+  // the calls; an unreadable log is a broken harness and fails the lane too
+  // (reported once — never read as "no calls").
+  let tripwireUnreadable = false;
+  const inspectTripwire = (): string | undefined => {
+    let calls: string[];
+    try {
+      calls = tripwire.takeTrips();
+    } catch (error) {
+      if (tripwireUnreadable) return undefined;
+      tripwireUnreadable = true;
+      return `the service-manager tripwire log could not be read (${errorMessage(error)})`;
+    }
+    if (!calls.length) return undefined;
+    return `reached the host service manager without its own fake (${calls.join("; ")})`;
+  };
   // Fingerprint the REAL client configs before the lane and compare after it.
   // `guardHome` defaults to the real home (realHomeDir() resolves the passwd
   // entry for the current uid, not HOME, so neither the sandbox this module
@@ -446,7 +508,7 @@ export function runUnitSteps(
       if (!keepGoing) {
         runGuards();
         console.error(`Unit lane failed: ${budgetRanOut} before ${step.name}. ${completed}/${steps.length} steps completed.`);
-        return 1;
+        return finish(1);
       }
       for (const skipped of notRun) stepFailures.push({ kind: "not-run", name: skipped.name, detail: budgetRanOut });
       break;
@@ -458,17 +520,21 @@ export function runUnitSteps(
       : remaining < limit
         ? { ms: remaining, reason: `timed out: ${budgetRanOut}` }
         : { ms: limit, reason: `timed out after ${seconds(limit)}` };
-    const detail = runStep(step, executable, timeout, createSandbox);
-    if (detail !== undefined) {
+    const detail = runStep(step, executable, timeout, createSandbox, tripwire.dir);
+    // The tripwire is checked after EVERY step, whatever the step's own
+    // outcome, so a call that reached it is named with the step that made it.
+    const tripwireDetail = inspectTripwire();
+    const reason = [detail, tripwireDetail].filter(Boolean).join("; ") || undefined;
+    if (reason !== undefined) {
       if (!keepGoing) {
         // Fail-fast (the local default): stop here. The end-of-lane guards still
         // run so a config write next to a step failure is not missed.
         runGuards();
-        console.error(`Unit lane failed: ${step.name} (${detail}). ${completed}/${steps.length} steps completed.`);
-        return 1;
+        console.error(`Unit lane failed: ${step.name} (${reason}). ${completed}/${steps.length} steps completed.`);
+        return finish(1);
       }
       // Keep-going (the CI default): record the failure and run every later step.
-      stepFailures.push({ kind: "step", name: step.name, detail });
+      stepFailures.push({ kind: "step", name: step.name, detail: reason });
       continue;
     }
     completed++;
@@ -478,17 +544,17 @@ export function runUnitSteps(
   const summary = `${completed} steps, ${steps.reduce((n, step) => n + step.files.length, 0)} test files`;
   if (!keepGoing) {
     // Every step passed; only a guard failure can fail the lane now.
-    if (guardFailures.length) return 1;
+    if (guardFailures.length) return finish(1);
     console.log(`\nUnit lane passed: ${summary}. Test pass/skip counts are reported by Bun above.`);
-    return 0;
+    return finish(0);
   }
   const failures = [...stepFailures, ...guardFailures];
   if (failures.length) {
     console.error(`\n${summarizeUnitLane(failures, steps.length)}`);
-    return 1;
+    return finish(1);
   }
   console.log(`\nUnit lane passed: ${summary}. Test pass/skip counts are reported by Bun above.`);
-  return 0;
+  return finish(0);
 }
 
 if (import.meta.main) {
@@ -507,7 +573,7 @@ if (import.meta.main) {
       const mode = invocation.keepGoing
         ? `keep-going: every step runs and failures are summed at the end; a step is killed after ${seconds(STEP_TIMEOUT_MS)} (root unit tests: ${seconds(ROOT_STEP_TIMEOUT_MS)}) and the lane after ${seconds(KEEP_GOING_LANE_BUDGET_MS)}`
         : "fail-fast: stops at the first failing step; steps are not time-limited";
-      console.log(`Unit lane: Bun ${Bun.version}; Node ${node.stdout.trim()}; ${steps.length} steps; ${mode}. Ambient FLAIR_/HARPER_/HDB_/FABRIC_ settings are removed from child environments; each step runs under a sandbox HOME. A guard fails the lane if a real client config changed. Integration, heavy, Python and Playwright suites are separate.`);
+      console.log(`Unit lane: Bun ${Bun.version}; Node ${node.stdout.trim()}; ${steps.length} steps; ${mode}. Ambient FLAIR_/HARPER_/HDB_/FABRIC_ settings are removed from child environments; each step runs under a sandbox HOME and behind a launchctl/systemctl tripwire (a unit test that reaches a host service manager without its own fake fails the lane). A guard fails the lane if a real client config changed. Integration, heavy, Python and Playwright suites are separate.`);
       process.exitCode = runUnitSteps(steps, process.execPath, realHomeDir(), {
         keepGoing: invocation.keepGoing,
         limits: invocation.limits,

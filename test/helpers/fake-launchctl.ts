@@ -162,6 +162,115 @@ export function installLaunchctlTripwire(prefix = "flair-launchctl-tripwire-"): 
   };
 }
 
+// ─── the unit-lane service-manager tripwire (flair#2062) ────────────────────
+//
+// The per-test fake above guards ONE test file. The unit lane itself needs the
+// same guard on EVERY step it runs: `launchctl` (darwin) and `systemctl`
+// (linux) act on HOST state, and a unit test must not reach a host service
+// manager at all. `scripts/test-unit.ts` puts one directory holding both
+// shims FIRST on each step's PATH; a test that supplies its own fake prepends
+// it, which puts the fake ahead of the tripwire. Same fail-closed shape as the
+// launchctl tripwire above: a nonempty log line for every call (a no-argument
+// call included), the log path written INTO the script, the log created empty,
+// and a read that throws rather than reporting "no calls".
+
+/** The service-manager binaries the unit-lane tripwire covers. */
+export const SERVICE_MANAGER_BINARIES = ["launchctl", "systemctl"] as const;
+export type ServiceManagerBinary = (typeof SERVICE_MANAGER_BINARIES)[number];
+
+/**
+ * The marker every service-manager tripwire log line starts with. The full line
+ * is `${SERVICE_MANAGER_TRIPWIRE_EVENT} <name> argc=<n> argv=<args>`, so a call
+ * with no arguments still leaves a nonempty line.
+ */
+export const SERVICE_MANAGER_TRIPWIRE_EVENT = "service-manager-tripwire-fired";
+
+/**
+ * The message the unit-lane tripwire prints, naming the binary invoked. Named so
+ * a unit test that reaches a host service manager fails with something an
+ * operator can act on, rather than an unexplained non-zero exit.
+ */
+export function serviceManagerTripwireMessage(name: string): string {
+  return (
+    `unit lane tripwire: ${name} was invoked by a unit test; ` +
+    `a unit test must never reach the host service manager — give the test its own fake`
+  );
+}
+
+/**
+ * The unit-lane tripwire script: records a nonempty event naming itself plus
+ * argc/argv, shouts the named message, exits non-zero. Never answers.
+ */
+function serviceManagerTripwireScript(name: string, logPath: string): string {
+  return [
+    "#!/bin/sh",
+    `printf '%s %s argc=%s argv=%s\\n' ${shellQuote(SERVICE_MANAGER_TRIPWIRE_EVENT)} ${shellQuote(name)} "$#" "$*" >> ${shellQuote(logPath)}`,
+    `printf '%s: %s\\n' ${shellQuote(serviceManagerTripwireMessage(name))} "$*" >&2`,
+    "exit 1",
+    "",
+  ].join("\n");
+}
+
+export interface ServiceManagerTripwire {
+  /** Directory holding the tripwire shims. Put this FIRST on each step's PATH. */
+  dir: string;
+  /** Log of invocations that reached the tripwire. Created empty; must stay empty. */
+  logPath: string;
+  /** The tripwire executables, by binary name. */
+  binPaths: Record<ServiceManagerBinary, string>;
+  /** Lines the tripwire logged, oldest first. Throws if the log cannot be read. */
+  tripped(): string[];
+  /**
+   * Read the log, then truncate it, so each caller attributes only the calls
+   * that happened since its last read. Throws if the log cannot be read — a
+   * missing or unreadable log is a broken harness, never "no calls".
+   */
+  takeTrips(): string[];
+  /** Throw if the log holds anything at all (or cannot be read). */
+  assertClear(): void;
+  /** Best-effort removal of the scratch directory (tempDir also sweeps). */
+  cleanup(): void;
+}
+
+/**
+ * Install the unit-lane service-manager tripwire: one directory with a
+ * `launchctl` and a `systemctl` shim sharing a single log. Put `dir` FIRST on
+ * every step's PATH; a test that supplies its own fake prepends it, which puts
+ * the fake ahead of this tripwire.
+ */
+export function installServiceManagerTripwire(prefix = "flair-service-manager-tripwire-"): ServiceManagerTripwire {
+  const dir = tempDir(prefix);
+  const logPath = join(dir, "tripwire.log");
+  writeFileSync(logPath, "");
+  const binPaths = {} as Record<ServiceManagerBinary, string>;
+  for (const name of SERVICE_MANAGER_BINARIES) {
+    const binPath = join(dir, name);
+    writeFileSync(binPath, serviceManagerTripwireScript(name, logPath));
+    chmodSync(binPath, 0o755);
+    binPaths[name] = binPath;
+  }
+  return {
+    dir,
+    logPath,
+    binPaths,
+    tripped: () => logLines(readLog(logPath)),
+    takeTrips() {
+      const lines = logLines(readLog(logPath));
+      if (lines.length) writeFileSync(logPath, "");
+      return lines;
+    },
+    assertClear() {
+      const raw = readLog(logPath);
+      if (raw.length > 0) {
+        throw new Error(`${SERVICE_MANAGER_TRIPWIRE_EVENT} (reached by: ${JSON.stringify(logLines(raw))})`);
+      }
+    },
+    cleanup() {
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
 export interface FakeLaunchctl {
   /** Directory holding the fake shim. Put this FIRST on PATH. */
   fakeDir: string;
