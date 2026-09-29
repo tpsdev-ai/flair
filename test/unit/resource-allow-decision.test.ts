@@ -287,9 +287,11 @@ describe("auth-middleware's public early-return allowlist doesn't read raw conte
     expect(/allowRead\s*\(\s*\)\s*:\s*boolean\s*\{\s*return true/.test(body) || /allowRead\s*\(\s*\)\s*\{\s*return true/.test(body)).toBe(true);
   });
 
-  it("FederationSync + FederationPair self-verify via verifyBodySignatureFresh", () => {
+  it("FederationSync + FederationPair self-verify via verifyFederationRequestBody", () => {
     const body = stripComments(SRC("Federation.ts"));
-    expect(body.includes("verifyBodySignatureFresh(")).toBe(true);
+    // One call per endpoint: the signature, freshness and instance-wide nonce
+    // check (resources/replay-store.ts, flair#2061).
+    expect(body.split("await verifyFederationRequestBody(").length - 1).toBe(2);
   });
 
   it("OAuthAuthorize requires a real Authorization header before trusting resolveAgentAuth (#609 regression guard)", () => {

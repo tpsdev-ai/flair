@@ -54,6 +54,13 @@ the schema section so the catalog is complete.
 Anonymous HTTP is denied on every agent-facing table (and on `GET /Presence`, which needs a verified reader unless the instance enables the public-roster opt-in). A by-id miss and a
 by-id deny both return **404**, never 403, so ids are not an existence oracle.
 
+Every Ed25519-signed request and federation body carries a nonce, recorded
+once per instance in the `ReplayNonce` table before the request takes effect.
+A nonce already recorded, or being recorded by a concurrent request, is refused
+as a replay (`401`, `nonce_replay_detected` at the auth gate). When the replay
+store is unavailable or the write fails, the request is refused with
+`503 replay_store_unavailable`, and the server log names the cause.
+
 ### Read-scope vocabulary
 
 From `RECORD_TYPES` in `resources/record-types.ts`:
@@ -204,8 +211,9 @@ The remedy is `flair upgrade` (the adapter), not a server upgrade alone.
 | GET / write | `/Peer` | Admin Basic | Pinned peer keys and sync cursors. |
 | GET / write | `/PairingToken` | Admin Basic | One-time tokens; default TTL 1 hour. |
 
-`Nonce` and `SyncLog` are **not** `@export` — no agent REST. Nonce is the
-anti-replay store; SyncLog is the operator audit trail.
+`ReplayNonce` and `SyncLog` are **not** `@export` — no agent REST.
+ReplayNonce is the anti-replay store (shared with agent auth); SyncLog is the
+operator audit trail.
 
 ### Messaging (Flair Relay)
 
@@ -433,7 +441,7 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **Instance** | yes | One row per Flair instance (`id`, `publicKey`, `role` hub/spoke, `fabricEndpoint`, `status`) |
 | **PairingToken** | yes | One-time token (`expiresAt`, `consumedBy`) |
 | **Peer** | yes | Pinned peer (`publicKey`, `endpoint`, `status`, `lastSyncAt` / `lastMergeAt`, `lastSyncCursor`, `relayOnly`) |
-| **Nonce** | no | Body-sig anti-replay; PK is the nonce string |
+| **ReplayNonce** | no | `schemas/replay.graphql`. Anti-replay record shared by agent auth (`a:<agentId>:<nonce>`) and federation body signatures (`f:<nonce>`). Local to the instance (`replicate: false`); rows expire after 120 s |
 | **SyncLog** | no | Per-sync audit (`peerId`, `direction`, counts, `skippedReasons`, `status`) |
 
 ### Other tables

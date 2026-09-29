@@ -38,9 +38,9 @@ Override per-run via `FLAIR_DEP_KEEP_CURRENT="pkg1,pkg2,@scope/pkg3"` env (addit
 
 ### 2. Exact-version pinning for production deps
 
-Some `dependencies` entries are exact-pinned (`harper@5.2.8`, `commander@14.0.3`, `jose@6.2.2`, `tweetnacl@1.0.3`), but others are range-spec'd (`harper-fabric-embeddings@^0.5.0`, `js-yaml@^4.3.2`, `semver@^7.8.5`, `tar@^7.5.22`). Most overrides use ranges (`^`/`~`), with one exact alias (`npm:empty-npm-package@1.0.0` for `react-native-fs`). The age gate (`scripts/check-dep-ages.mjs`, line 130) checks npm publish age for external entries in the `dependencies` field whose declared version starts with a digit (`/^\d/.test(version)`), excluding workspace-internal dependencies and the keep-current list (`harper`, `harper-fabric-embeddings`, `@harperfast/oauth`); its default threshold is seven days.
+Some `dependencies` entries are exact-pinned (`harper@5.2.8`, `commander@14.0.3`, `jose@6.2.2`, `tweetnacl@1.0.3`), but others are range-spec'd (`harper-fabric-embeddings@^0.5.0`, `js-yaml@^4.3.2`, `semver@^7.8.5`, `tar@^7.5.22`). Most overrides use ranges (`^`/`~`), with one exact alias (`npm:empty-npm-package@1.0.0` for `react-native-fs`). The age gate (`scripts/check-dep-ages.mjs`, with the collection rule in `collectDeps` in `scripts/lib/check-dep-ages-collect.mjs`) checks npm publish age for external entries in both `dependencies` and `optionalDependencies` whose declared version starts with a digit (`/^\d/.test(version)`), excluding workspace-internal dependencies and the keep-current list (`harper`, `harper-fabric-embeddings`, `@harperfast/oauth`); its default threshold is seven days.
 
-- `peerDependencies` may use ranges: they state what the host project must provide, and they are never bundled into our published tarballs. They are still installed, because npm and Bun install non-optional peers by default: a consumer's install resolves them, and our own workspace install records the required peers of `langgraph-flair`, `n8n-nodes-flair` and `openclaw-flair` in `bun.lock` like any other dependency (the frozen-lockfile install does not check a recorded peer against its declared range; flair#1936). Most `devDependencies` are exact-pinned for build reproducibility; a few are ranged (`@types/semver@^7.8.0`). They don't ship in our published tarballs.
+- `peerDependencies` may use ranges: they state what the host project must provide. They are still installed, but an exact-pin check of our declaration does not describe what actually gets installed — the consumer resolves them from a range. This is the reason we do not include peers in the bake-time gate (not "never bundled into tarballs"): the gate checks versions we actually pull, and we don't pull a peer declaration at face value. Our workspace install records the required peers of `langgraph-flair`, `n8n-nodes-flair` and `openclaw-flair` in `bun.lock` like any other dependency (the frozen-lockfile install does not check a recorded peer against its declared range; flair#1936). Most `devDependencies` are exact-pinned for build reproducibility; a few are ranged (`@types/semver@^7.8.0`). They don't ship in our published tarballs.
 - **Flair declares no optional peers today**, and no `optionalDependencies` at the root; `packages/flair-bench/package.json` (line 38) declares some. If either is ever proposed as an install-weight fix, the mechanism has now been measured twice (`@harperfast/oauth` flair#750, `node-llama-cpp` flair#887) and the result is counter-intuitive enough to be worth stating: **only `peerDependencies` + `peerDependenciesMeta.optional` is skipped by a default install** (npm and bun alike). A plain `optionalDependencies` entry *is* still installed by default — "optional" there means "a failed install is non-fatal", not "skipped" — so it buys no install-weight reduction whatsoever. Exact-pinning an optional peer (rather than ranging it) is also legitimate where the consuming code path is version-sensitive, so that an operator who installs a different version gets told the version they have is not the version that was tested.
 
   Note the corollary, measured during flair#893: an optional peer that is simply *absent* installs silently — npm prints no warning at all — so it cannot be relied on to prompt anyone to install it. Anything a user must install for a feature to work needs to be documented, or detected and reported at runtime.
@@ -121,7 +121,7 @@ Fails any PR where a workspace package declares an internal `@tpsdev-ai/*` dep a
 
 ### `scripts/check-dep-ages.mjs` (this PR)
 
-Fails any PR with an external pinned production dep version published less than `FLAIR_DEP_MIN_AGE_DAYS` ago (default 7). Queries the npm registry's `time` map. Workspace-internal deps exempt. Wired into the `test-unit` job. Its limits, stated: it covers npm production dependencies only (not the Python, Docker or GitHub Actions updates the Renovate preset proposes), and it reads the same registry publish timestamp Renovate does, so it is a second line against the cooldown being removed from the config — not against a release whose publish date lies.
+Fails any PR with an external pinned production dep version published less than `FLAIR_DEP_MIN_AGE_DAYS` ago (default 7). Queries the npm registry's `time` map. Checks both `dependencies` and `optionalDependencies` — npm and bun install optionalDependencies by default. Workspace-internal deps exempt. Wired into the `test-unit` job. Its limits, stated: it does not check `peerDependencies` (resolved from a range by the consumer's install) nor `devDependencies` (don't ship in our tarballs) — it reads the same registry publish timestamp Renovate does, so it is a second line against the cooldown being removed from the config — not against a release whose publish date lies.
 
 Configurable:
 
@@ -163,17 +163,22 @@ Each check matches a CI gate exactly so the local and remote outcomes can't drif
 
 If you're building on top of `@tpsdev-ai/flair-client` and want the same posture:
 
+The guard is two files: `scripts/check-dep-ages.mjs` imports `./lib/check-dep-ages-collect.mjs` relative to itself, so copy both and keep `lib/` beside the script.
+
 ```bash
-# Copy the dep-age guard into your repo
+# Copy the dep-age guard into your repo (both files, same relative layout)
+mkdir -p scripts/lib
 curl -fsSL https://raw.githubusercontent.com/tpsdev-ai/flair/main/scripts/check-dep-ages.mjs \
   -o scripts/check-dep-ages.mjs
+curl -fsSL https://raw.githubusercontent.com/tpsdev-ai/flair/main/scripts/lib/check-dep-ages-collect.mjs \
+  -o scripts/lib/check-dep-ages-collect.mjs
 chmod +x scripts/check-dep-ages.mjs
 
 # Wire it into your CI as a fast pre-test step
 - run: node scripts/check-dep-ages.mjs
 ```
 
-The script has no external dependencies — node 18+ is enough.
+The two files have no external dependencies — node 18+ is enough.
 
 To adopt the same Renovate preset in your repo, make your `.github/renovate.json`:
 

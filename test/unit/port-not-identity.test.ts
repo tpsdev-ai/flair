@@ -22,8 +22,32 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir, homedir } from "node:os";
+import { installFakeServiceManager } from "../helpers/fake-launchctl.ts";
 
 const cliPath = join(import.meta.dirname, "..", "..", "src", "cli.ts");
+
+// flair#2062: on a systemd host, the uninstall/attribution paths here ask
+// `systemctl --user show` about the caller's cgroup unit. Lay a recording fake
+// first on PATH for EVERY test in this file (each describe's own launchctl shim
+// stays ahead of it) with a fail-closed tripwire behind it, so nothing reaches
+// the host systemctl.
+let svc: ReturnType<typeof installFakeServiceManager> | undefined;
+let savedPath: string | undefined;
+beforeEach(() => {
+  savedPath = process.env.PATH;
+  svc = installFakeServiceManager("flair1749-svc-");
+  process.env.PATH = `${svc.pathEntry}:${savedPath ?? ""}`;
+});
+afterEach(() => {
+  try {
+    svc?.assertClear();
+  } finally {
+    svc?.cleanup();
+    svc = undefined;
+    if (savedPath === undefined) delete process.env.PATH;
+    else process.env.PATH = savedPath;
+  }
+});
 
 describe("flair#917 — uninstall refuses to kill a PID that is not this instance's Harper", () => {
   let tmpHome: string;
@@ -44,7 +68,7 @@ describe("flair#917 — uninstall refuses to kill a PID that is not this instanc
     // launchctl shim — records invocations, does nothing
     writeFileSync(
       join(shimBin, "launchctl"),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\nexit 0\n`,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\n[ "$1" = print-disabled ] && printf 'disabled services = {\\n}\\n'\nexit 0\n`,
       { mode: 0o755 },
     );
   });
@@ -171,7 +195,7 @@ describe("flair#862 — probePort rejects non-200 responses; discoverPortFromPid
 
     writeFileSync(
       join(shimBin, "launchctl"),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\nexit 0\n`,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\n[ "$1" = print-disabled ] && printf 'disabled services = {\\n}\\n'\nexit 0\n`,
       { mode: 0o755 },
     );
   });
@@ -279,7 +303,7 @@ describe("flair#915 — the default install attribution gap is closed", () => {
 
     writeFileSync(
       join(shimBin, "launchctl"),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\nexit 0\n`,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\n[ "$1" = print-disabled ] && printf 'disabled services = {\\n}\\n'\nexit 0\n`,
       { mode: 0o755 },
     );
   });
@@ -396,7 +420,7 @@ describe("flair#819 — uninstall reads Harper's config instead of defaulting to
 
     writeFileSync(
       join(shimBin, "launchctl"),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\nexit 0\n`,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\n[ "$1" = print-disabled ] && printf 'disabled services = {\\n}\\n'\nexit 0\n`,
       { mode: 0o755 },
     );
   });

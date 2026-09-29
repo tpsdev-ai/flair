@@ -6,28 +6,20 @@
  *   - resources/agent-auth.ts       (resolveAgentAuth's per-resource fallback)
  *   - resources/Presence.ts         (POST /Presence heartbeat auth)
  *
- * Before this module existed, each of the 3 files carried its OWN
- * module-level `nonceSeen` Map (replay guard) plus its own copy of
- * `importEd25519Key`. Three independent replay windows meant a nonce
- * recorded as "seen" via one path was invisible to the other two — a
- * defense-in-depth gap, and a drift hazard (any future fix to one copy
- * silently didn't apply to the other two). Consolidating all three into
- * this one module means there is exactly ONE replay guard and ONE
- * key-import implementation, imported by all 3 sites.
+ * It holds the replay window, the header parser and the key import, so the
+ * three sites cannot drift. The replay guard itself — which nonces have been
+ * used — lives in resources/replay-store.ts: one check-and-record against the
+ * instance-wide `ReplayNonce` table, shared by all three sites and by every
+ * Harper worker thread (flair#2061).
  *
  * `b64ToArrayBuffer` was already unified into resources/b64.ts in a prior
  * pass (see that file's header) — re-exported here so callers can import
  * everything Ed25519-auth-related from one place.
  *
- * NOT included here: resources/Federation.ts's replay guard. Federation
- * uses its own purpose-built NonceStore (federation-crypto.ts) for a
- * different signing scheme (federation peer-to-peer body signatures, not
- * agent TPS-Ed25519 auth) — deliberately left alone.
- *
  * Signed payload format (must match the TPS CLI signer exactly — changing
  * it breaks every agent's auth): `${agentId}:${ts}:${nonce}:${METHOD}:${pathname}${search}`.
  * Auth header format: `TPS-Ed25519 <agentId>:<ts>:<nonce>:<signatureB64>`.
- * nonceKey format (replay-guard map key): `${agentId}:${nonce}`.
+ * Replay key: `${agentId}:${nonce}` (stored as `a:${agentId}:${nonce}`).
  */
 import { b64ToArrayBuffer } from "./b64.js";
 
@@ -42,6 +34,11 @@ export { b64ToArrayBuffer };
  * docs, or test in this repo currently sets that var, so preserving it is
  * additive/no-op for today's deployments while keeping agent-auth.ts's
  * stated "plugin-shaped, config via env" design intent.
+ *
+ * The replay store keeps a nonce for REPLAY_RETENTION_MS (resources/
+ * replay-store.ts); a window that is not shorter than half of that makes the
+ * agent-auth replay guard unavailable, and every signed request is refused
+ * with a named error.
  */
 export const WINDOW_MS = Number(process.env.FLAIR_AGENT_AUTH_WINDOW_MS) || 30_000;
 
@@ -90,50 +87,6 @@ export function parseTpsEd25519Header(header: string): ParsedAuthHeader | null {
   const m = TPS_ED25519_HEADER_RE.exec(header);
   if (!m) return null;
   return { agentId: m[1], tsRaw: m[2], nonce: m[3], signatureB64: m[4] };
-}
-
-// ─── Replay guard (single shared instance) ─────────────────────────────────
-//
-// nonceSeen is the ONE module-level singleton — the whole point of this
-// consolidation. A nonce recorded via any one of the 3 call sites is
-// immediately visible to the other two, because they all import this same
-// module (Node/bun module cache = one instance per process).
-const nonceSeen = new Map<string, number>();
-
-/** Remove nonce records older than WINDOW_MS relative to `now`. */
-export function pruneNonces(now: number = Date.now()): void {
-  for (const [k, ts] of nonceSeen) {
-    if (now - ts > WINDOW_MS) nonceSeen.delete(k);
-  }
-}
-
-/**
- * Prune expired entries, then report whether (agentId, nonce) has already
- * been recorded within the current window. Returns true = REPLAY (reject).
- *
- * Deliberately does NOT record as a side effect — callers check this BEFORE
- * verifying the signature and call `recordNonce` only AFTER the signature is
- * confirmed valid (matches the pre-consolidation per-site behavior at all 3
- * sites exactly: an invalid-signature attempt never burns the nonce, so a
- * client that retries with a corrected signature isn't locked out).
- */
-export function isNonceReplay(agentId: string, nonce: string, now: number = Date.now()): boolean {
-  pruneNonces(now);
-  return nonceSeen.has(`${agentId}:${nonce}`);
-}
-
-/** Record (agentId, nonce) as seen at `ts`. Call only after successful verification. */
-export function recordNonce(agentId: string, nonce: string, ts: number): void {
-  nonceSeen.set(`${agentId}:${nonce}`, ts);
-}
-
-/**
- * Test-only escape hatch: clear all recorded nonces. Never called by any
- * production call site — exists so unit tests can isolate the shared
- * singleton between cases instead of relying on WINDOW_MS-based expiry.
- */
-export function __clearNoncesForTest(): void {
-  nonceSeen.clear();
 }
 
 // ─── Ed25519 public key import (cached) ────────────────────────────────────

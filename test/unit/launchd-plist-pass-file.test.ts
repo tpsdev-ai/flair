@@ -26,10 +26,12 @@ import {
   readdirSync,
   statSync,
   chmodSync,
+  existsSync,
+  mkdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   buildLaunchdPlist,
   writeFileAtomic,
@@ -293,5 +295,72 @@ describe("launcher script — non-interactive start", () => {
     expect(() =>
       execFileSync("sh", [LAUNCHER, unreadable, fakeNode, "/opt/flair/harper.js"], { stdio: "pipe" }),
     ).toThrow();
+  });
+});
+
+// flair#2040: when launchd starts the job (RunAtLoad at a console login, or a
+// KeepAlive retry) while a DIRECT process already serves the same data
+// directory, the launcher must not start a second Harper on it. Harper's own
+// hdb.pid check would refuse too, but only after loading its config and
+// applying HARPER_SET_CONFIG to the data directory; the launcher refuses before
+// Harper runs at all. Platform-independent: plain sh + `kill -0`.
+describe("launcher script — never a second instance on a served data directory (flair#2040)", () => {
+  const LAUNCHER = join(import.meta.dir, "../../templates/launchd/start-flair-with-admin-pass.sh");
+
+  function fixture(): { fakeNode: string; adminPassFile: string; rootPath: string; marker: string } {
+    const marker = join(tmp, "node-was-execd");
+    const fakeNode = join(tmp, "fake-node");
+    writeFileSync(fakeNode, `#!/bin/sh\necho "$$" > "${marker}"\n`);
+    chmodSync(fakeNode, 0o755);
+    const adminPassFile = join(tmp, "admin-pass");
+    writeFileSync(adminPassFile, "PLACEHOLDER-password\n");
+    chmodSync(adminPassFile, 0o600);
+    const rootPath = join(tmp, "data");
+    mkdirSync(rootPath, { recursive: true });
+    return { fakeNode, adminPassFile, rootPath, marker };
+  }
+
+  function launch(f: ReturnType<typeof fixture>) {
+    return spawnSync("sh", [LAUNCHER, f.adminPassFile, f.fakeNode, "/opt/flair/harper.js"], {
+      encoding: "utf-8",
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ROOTPATH: f.rootPath },
+    });
+  }
+
+  test("hdb.pid names a LIVE process -> exit 0, says why, and node is never exec'd", () => {
+    const f = fixture();
+    // A live pid this test owns: its own process.
+    writeFileSync(join(f.rootPath, "hdb.pid"), String(process.pid));
+    const r = launch(f);
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain(`${f.rootPath} is already served by pid ${process.pid}`);
+    expect(r.stderr).toContain("not starting a second instance");
+    expect(existsSync(f.marker)).toBe(false);
+    // The pid file is left as it was.
+    expect(readFileSync(join(f.rootPath, "hdb.pid"), "utf-8")).toBe(String(process.pid));
+  });
+
+  test("CONTROL: hdb.pid names a DEAD process -> the launcher starts Harper as before", () => {
+    const f = fixture();
+    const dead = spawnSync("sh", ["-c", "echo $$"], { encoding: "utf-8" }).stdout.trim();
+    writeFileSync(join(f.rootPath, "hdb.pid"), dead);
+    const r = launch(f);
+    expect(r.status).toBe(0);
+    expect(existsSync(f.marker)).toBe(true);
+  });
+
+  test("CONTROL: no hdb.pid -> the launcher starts Harper", () => {
+    const f = fixture();
+    const r = launch(f);
+    expect(r.status).toBe(0);
+    expect(existsSync(f.marker)).toBe(true);
+  });
+
+  test("CONTROL: hdb.pid naming pid 1 is no evidence (mirrors Harper's getHdbPid) -> starts", () => {
+    const f = fixture();
+    writeFileSync(join(f.rootPath, "hdb.pid"), "1");
+    const r = launch(f);
+    expect(r.status).toBe(0);
+    expect(existsSync(f.marker)).toBe(true);
   });
 });

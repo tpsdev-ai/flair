@@ -9,6 +9,7 @@
 import { describe, it, expect, mock, beforeEach, spyOn } from "bun:test";
 import nacl from "tweetnacl";
 import { signBodyFresh } from "../../resources/federation-crypto.ts";
+import { createFakeReplayNonceTable, ensureGlobalHarperTransaction } from "../helpers/fake-replay-store.ts";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 
@@ -53,13 +54,12 @@ const databasesMock = {
         return row;
       },
     },
-    Nonce: {
-      search: () => asyncRows([]),
-      put: async () => undefined,
-      get: async () => null,
-    },
+    // Signed federation bodies record their nonce here (flair#2061).
+    ReplayNonce: createFakeReplayNonceTable(),
   },
 };
+
+ensureGlobalHarperTransaction();
 
 mock.module("harper", () => ({
   databases: databasesMock,
