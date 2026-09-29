@@ -5,7 +5,7 @@ import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.j
 import { guardAuthorityFields } from "./authority-field-guard.js";
 import { isForbiddenOwnerMutation } from "./record-owner-guard.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
-import { localInstanceId } from "./instance-identity.js";
+import { applyOriginatorInstanceId, dropClientOriginator, keepStoredOriginator, stampOriginatorOnCreate } from "./originator-instance.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { isEmbeddingSpaceUniform, noteWriteStamp } from "./embedding-space-guard.js";
 import { scanFields, isStrictMode } from "./content-safety.js";
@@ -734,36 +734,19 @@ function defaultVisibilityForDurability(durability: unknown): "private" | "share
  */
 
 /**
- * ─── Write-time originatorInstanceId stamp (federation-edge-hardening slice 1) ──
+ * ─── Write-time originatorInstanceId (federation-edge-hardening slice 1) ─────
  *
- * Stamps this instance's own federation identity (resources/instance-
- * identity.ts's localInstanceId(), cached — never a DB read per write) onto
- * every LOCAL write. Deliberately a no-op when `content.originatorInstanceId`
- * already carries a non-null value: this is the anti-clobber rule that keeps
- * a federation-synced record's true origin intact.
- *
- * Why this can never clobber a synced record: FederationSync.post()
- * (resources/Federation.ts) merges incoming records via the RAW table object
- * (`(databases as any).flair.Memory.put(mergedData)`) — Harper's static
- * table-level put, not this Resource subclass's instance put() below. The
- * merge path never runs this function at all, so a record arriving from
- * instance B keeps whatever `originatorInstanceId` it already carried in
- * `mergedData` (that instance's own write-time stamp, carried through in the
- * synced row) with no risk of this instance overwriting it with its own id.
- * The `content.originatorInstanceId == null` guard below is still applied —
- * defense-in-depth for any future path that might route a synced payload
- * through this class's post()/put() — so the invariant holds even if that
- * assumption ever changes.
- *
- * `localInstanceId()` resolves to null on an instance that has never been
- * federation-bootstrapped (no Instance row yet) — the field is nullable by
- * design, so this stamps null rather than inventing an id.
+ * The server-stamped `originatorInstanceId` contract and the create/update rule
+ * live in resources/originator-instance.ts — the single delegate Memory, Soul,
+ * Agent and Relationship share, so the four writers cannot drift. In short:
+ * a CREATE stamps this instance's own id (any body value is ignored); an UPDATE
+ * keeps the stored value (a body value neither replaces nor clears it); and a
+ * federation merge — resources/Federation.ts's FederationSync.post(), which
+ * applies inbound rows through the RAW table handle, never a resource method —
+ * preserves the originating instance's value. See that module for the full
+ * rationale. `content.originatorInstanceId == null` is no longer read here: a
+ * body value is not trusted at any point.
  */
-async function stampOriginatorInstanceId(content: any): Promise<void> {
-  if (content.originatorInstanceId == null) {
-    content.originatorInstanceId = await localInstanceId();
-  }
-}
 
 export class Memory extends (databases as any).flair.Memory {
   /**
@@ -1223,10 +1206,10 @@ export class Memory extends (databases as any).flair.Memory {
     // top-level field — authorship lives in the provenance JSON only.
     delete content.claimedClient;
 
-    // Write-time originatorInstanceId stamp (federation-edge-hardening slice
-    // 1) — see stampOriginatorInstanceId's doc above. No-op if already set
-    // (never fires for a genuine local write — no client sets this field).
-    await stampOriginatorInstanceId(content);
+    // Write-time originatorInstanceId (federation-edge-hardening slice 1): a
+    // post() is always a CREATE, so this instance's own id is stamped and any
+    // request-body value is ignored — see resources/originator-instance.ts.
+    await stampOriginatorOnCreate(content);
 
     // ── Write the new record FIRST ──────────────────────────────────────────
     // A1' item 1: the guard keeps declared Memory attributes and the explicit
@@ -1313,6 +1296,10 @@ export class Memory extends (databases as any).flair.Memory {
     // A1-iv item 3: strip server-stamped fields on patch too (a PATCH body may
     // not set instanceToken or provenance; the stored values stand).
     stripServerStampedFields(content);
+    // flair#1965: originatorInstanceId is server-stamped too — a PATCH body
+    // value is dropped so the stored value stands (a patch merges; see
+    // resources/originator-instance.ts).
+    dropClientOriginator(content);
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
     // Preserve stored visibility on updates before applying write policy: a
@@ -1411,6 +1398,11 @@ export class Memory extends (databases as any).flair.Memory {
       if (reindexExisting && typeof reindexExisting.provenance === "string") {
         content.provenance = reindexExisting.provenance;
       }
+      // flair#1965: a reindex is a re-PUT of an EXISTING row (an UPDATE), so the
+      // row's stored originatorInstanceId stands; a body value is dropped, and a
+      // legacy row with no value is left un-stamped. See
+      // resources/originator-instance.ts.
+      keepStoredOriginator(content, reindexExisting);
       // Preserve stored visibility on updates before applying write policy:
       // a reindex payload that omits it keeps the record's stored value.
       if (content.visibility === undefined || content.visibility === null) {
@@ -1721,14 +1713,13 @@ export class Memory extends (databases as any).flair.Memory {
     // folded into `provenance.claimed.client`. Never persisted as a row field.
     delete content.claimedClient;
 
-    // Write-time originatorInstanceId stamp (federation-edge-hardening slice
-    // 1) — see stampOriginatorInstanceId's doc above post(). No-op if
-    // already set: an update/patch of an existing local record carries its
-    // own already-stamped originatorInstanceId forward unchanged (the
-    // `{...existing, ...patch}` merge pattern every put() caller uses), and a
-    // federation-synced record never reaches this method at all (see that
-    // function's doc for why the merge path can't clobber it here either).
-    await stampOriginatorInstanceId(content);
+    // Write-time originatorInstanceId (federation-edge-hardening slice 1):
+    // a CREATE (no pre-existing row) stamps this instance's own id, ignoring
+    // any body value; an UPDATE keeps the STORED value — a body value neither
+    // replaces nor clears it. A federation-synced record never reaches this
+    // method at all (the merge path writes via the raw table handle). See
+    // resources/originator-instance.ts.
+    await applyOriginatorInstanceId(content, preExisting);
 
     // ── Write the new/updated record FIRST ──────────────────────────────────
     // A1' item 1: persist ONLY declared Memory attributes (see post()).

@@ -1,7 +1,7 @@
 import { databases } from "harper";
 import { isAdmin, resolveAgentAuth, allowVerified, allowAdmin, invalidateAdminCache } from "./agent-auth.js";
 import { agentRecordIsAdmin, reconcileAdminFields } from "./agent-admin.js";
-import { localInstanceId } from "./instance-identity.js";
+import { applyOriginatorInstanceId, dropClientOriginator, resolveStoredRow, stampOriginatorOnCreate } from "./originator-instance.js";
 
 /**
  * Agent resource — serves as the Principal table in 1.0.
@@ -58,14 +58,12 @@ export class Agent extends (databases as any).flair.Agent {
     content.createdAt = now;
     content.updatedAt = now;
 
-    // Write-time originatorInstanceId stamp (federation-edge-hardening slice
-    // 1) — see resources/Memory.ts's stampOriginatorInstanceId doc for the
-    // full contract. No-op if already set (never fires for a genuine local
-    // write; a federation-synced record never reaches this method — the
-    // merge path writes via the raw table object, bypassing this class).
-    if (content.originatorInstanceId == null) {
-      content.originatorInstanceId = await localInstanceId();
-    }
+    // Write-time originatorInstanceId (federation-edge-hardening slice 1): a
+    // post() is a CREATE — stamp this instance's own id, ignoring any
+    // request-body value. See resources/originator-instance.ts for the full
+    // contract (create/update rule; the federation merge path is the raw
+    // table writer and never consults a body).
+    await stampOriginatorOnCreate(content);
 
     return super.post(content, context);
   }
@@ -144,11 +142,10 @@ export class Agent extends (databases as any).flair.Agent {
     // never manufactures one.
     reconcileAdminFields(content);
 
-    // Write-time originatorInstanceId stamp — see post() above / Memory.ts's
-    // stampOriginatorInstanceId doc. No-op if already set.
-    if (content.originatorInstanceId == null) {
-      content.originatorInstanceId = await localInstanceId();
-    }
+    // Write-time originatorInstanceId — see post() above /
+    // resources/originator-instance.ts. A CREATE stamps the local id; an
+    // UPDATE keeps the stored value (a body value never replaces or clears it).
+    await applyOriginatorInstanceId(content, await resolveStoredRow("Agent", () => super.get(), content));
 
     const result = await super.put(content);
     invalidateAdminCache();
@@ -188,6 +185,10 @@ export class Agent extends (databases as any).flair.Agent {
       // Immutable fields, matching put().
       delete content.createdAt;
       delete content.publicKey;
+      // flair#1965: originatorInstanceId is server-stamped — a PATCH body value
+      // is dropped so the stored value stands (a patch merges; see
+      // resources/originator-instance.ts).
+      dropClientOriginator(content);
       content.updatedAt = new Date().toISOString();
     }
 

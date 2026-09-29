@@ -1,6 +1,6 @@
 import { databases } from "harper";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
-import { localInstanceId } from "./instance-identity.js";
+import { applyOriginatorInstanceId, dropClientOriginator, resolveStoredRow, stampOriginatorOnCreate } from "./originator-instance.js";
 import { makeAuthGate, stampAttribution } from "./record-type-kit.js";
 import { RECORD_TYPES } from "./record-types.js";
 import { authorizeSoulWrite, refuseSoulWriteContent, soulProvenance } from "./soul-write-policy.js";
@@ -50,14 +50,12 @@ export class Soul extends (databases as any).flair.Soul {
     content.durability ||= "permanent";
     content.createdAt = new Date().toISOString();
     content.updatedAt = content.createdAt;
-    // Write-time originatorInstanceId stamp (federation-edge-hardening slice
-    // 1) — see resources/Memory.ts's stampOriginatorInstanceId doc for the
-    // full contract. No-op if already set (never fires for a genuine local
-    // write; a federation-synced record never reaches this method — the
-    // merge path writes via the raw table object, bypassing this class).
-    if (content.originatorInstanceId == null) {
-      content.originatorInstanceId = await localInstanceId();
-    }
+    // Write-time originatorInstanceId (federation-edge-hardening slice 1): a
+    // post() is a CREATE — stamp this instance's own id, ignoring any
+    // request-body value. See resources/originator-instance.ts for the full
+    // contract (create/update rule; the federation merge path is the raw
+    // table writer and never consults a body).
+    await stampOriginatorOnCreate(content);
     return super.post(content, context);
   }
 
@@ -80,6 +78,10 @@ export class Soul extends (databases as any).flair.Soul {
     }
     const learnedDenied = await refuseSoulWriteContent({ ...existing, ...content });
     if (learnedDenied) return learnedDenied;
+    // flair#1965: originatorInstanceId is server-stamped — a PATCH body value is
+    // dropped so the stored value stands (a patch merges; see
+    // resources/originator-instance.ts).
+    dropClientOriginator(content);
     const skillSourceDenied = refuseSkillAssignmentWrite(content, existing);
     if (skillSourceDenied) return skillSourceDenied;
     return super.patch(content, query);
@@ -99,11 +101,10 @@ export class Soul extends (databases as any).flair.Soul {
     const ownerDenial = await guardOwnerFieldImmutable(this, () => existing, content, "agentId");
     if (ownerDenial) return ownerDenial;
     content.updatedAt = new Date().toISOString();
-    // Write-time originatorInstanceId stamp — see post() above / Memory.ts's
-    // stampOriginatorInstanceId doc. No-op if already set.
-    if (content.originatorInstanceId == null) {
-      content.originatorInstanceId = await localInstanceId();
-    }
+    // Write-time originatorInstanceId — see post() above /
+    // resources/originator-instance.ts. A CREATE stamps the local id; an
+    // UPDATE keeps the stored value (a body value never replaces or clears it).
+    await applyOriginatorInstanceId(content, await resolveStoredRow("Soul", () => super.get(), content));
     return super.put(content, context);
   }
 

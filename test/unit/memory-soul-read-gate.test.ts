@@ -50,7 +50,21 @@ class BaseSoul {
     return rec;
   }
   async get(target?: any) {
-    const id = typeof target === "string" ? target : target?.id;
+    const id = typeof target === "string" ? target : (target?.id ?? (this as any)._targetId);
+    return soulStore.get(id) ?? null;
+  }
+  // Real Harper PATCH merges the body into the stored row; the id comes from the
+  // URL, which the double models as an explicit `_targetId` on the instance.
+  async patch(content: any) {
+    const id = content?.id ?? (this as any)._targetId;
+    const merged = { ...(soulStore.get(id) ?? {}), ...content };
+    soulStore.set(id, merged);
+    return { ...merged };
+  }
+  // Real Harper's table is statically callable (`databases.flair.Soul.get(id)`),
+  // which is how resources/originator-instance.ts's resolveStoredRow reads the
+  // pre-existing row for the create/update decision.
+  static async get(id: any) {
     return soulStore.get(id) ?? null;
   }
   search() {
@@ -152,46 +166,69 @@ describe("Soul write gates — unaffected by the read-gate fix", () => {
   });
 });
 
-// ─── federation-edge-hardening slice 1: write-time originatorInstanceId stamp ──
-// See resources/Memory.ts's stampOriginatorInstanceId doc for the full
-// contract (write-time, cached local instance id, anti-clobber for
-// federation-synced records). Soul.ts stamps in both post() and put().
-describe("federation-edge-hardening slice 1 — Soul.post()/put() write-time originatorInstanceId stamp", () => {
-  it("post() stamps the local instance id on a fresh local write", async () => {
+// ─── federation-edge-hardening slice 1 / flair#1965: originatorInstanceId stamp ──
+// See resources/originator-instance.ts for the full contract. originatorInstanceId
+// is server-stamped and NEVER client-writable: a body value on create is replaced
+// by the local id; on update the stored value stands. Soul.ts stamps on post()
+// (create) and put() (create or update).
+describe("federation-edge-hardening slice 1 / flair#1965 — Soul originatorInstanceId is server-stamped", () => {
+  const owner = () => ({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
+
+  it("CREATE (post) stamps the local instance id on a fresh local write", async () => {
     instanceRow = { id: "flair_local_test" };
-    const s = makeSoul({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
-    const res: any = await s.post({ agentId: "agent-1", key: "identity", value: "my soul" });
+    const res: any = await makeSoul(owner()).post({ agentId: "agent-1", key: "identity", value: "my soul" });
     expect(res.originatorInstanceId).toBe("flair_local_test");
+  });
+
+  it("CREATE (post) IGNORES a request-body originatorInstanceId and stamps the local id", async () => {
+    instanceRow = { id: "flair_local_test" };
+    const res: any = await makeSoul(owner()).post({
+      agentId: "agent-1",
+      key: "identity",
+      value: "body claims instance B",
+      originatorInstanceId: "instance-B",
+    });
+    expect(res.originatorInstanceId).toBe("flair_local_test");
+    expect(res.originatorInstanceId).not.toBe("instance-B");
   });
 
   it("stamps null when this instance has no Instance row yet — never invents one", async () => {
     instanceRow = null;
-    const s = makeSoul({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
-    const res: any = await s.post({ agentId: "agent-1", key: "identity", value: "my soul" });
+    const res: any = await makeSoul(owner()).post({ agentId: "agent-1", key: "identity", value: "my soul" });
     expect(res.originatorInstanceId).toBeNull();
   });
 
-  it("THE KEY TEST — a soul record already carrying another instance's originatorInstanceId is NEVER clobbered with the local id", async () => {
+  it("CREATE (put, no stored row) stamps the local id and ignores a body value", async () => {
     instanceRow = { id: "flair_local_test" };
-    const s = makeSoul({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
-    const res: any = await s.post({
-      agentId: "agent-1",
-      key: "identity",
-      value: "authored on instance B",
-      originatorInstanceId: "instance-B",
+    const res: any = await makeSoul(owner()).put({
+      id: "soul-1", agentId: "agent-1", key: "identity", value: "fresh put", originatorInstanceId: "instance-B",
     });
-    expect(res.originatorInstanceId).toBe("instance-B");
-    expect(res.originatorInstanceId).not.toBe("flair_local_test");
+    expect(res.originatorInstanceId).toBe("flair_local_test");
   });
 
-  it("put() also stamps the local instance id, and also never clobbers an already-set origin", async () => {
+  it("UPDATE (put) with a body value LEAVES the stored value — a client cannot change it", async () => {
     instanceRow = { id: "flair_local_test" };
-    const s1 = makeSoul({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
-    const fresh: any = await s1.put({ id: "soul-1", agentId: "agent-1", key: "identity", value: "fresh put" });
-    expect(fresh.originatorInstanceId).toBe("flair_local_test");
+    soulStore.set("soul-2", { id: "soul-2", agentId: "agent-1", key: "identity", value: "authored on B", originatorInstanceId: "instance-B" });
+    const res: any = await makeSoul(owner()).put({
+      id: "soul-2", agentId: "agent-1", key: "identity", value: "edit", originatorInstanceId: "instance-attacker",
+    });
+    expect(res.originatorInstanceId).toBe("instance-B");
+    expect(res.originatorInstanceId).not.toBe("instance-attacker");
+  });
 
-    const s2 = makeSoul({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
-    const synced: any = await s2.put({ id: "soul-2", agentId: "agent-1", key: "identity", value: "synced put", originatorInstanceId: "instance-B" });
-    expect(synced.originatorInstanceId).toBe("instance-B");
+  it("UPDATE (put) that OMITS the field leaves the stored value", async () => {
+    instanceRow = { id: "flair_local_test" };
+    soulStore.set("soul-3", { id: "soul-3", agentId: "agent-1", key: "identity", value: "authored on B", originatorInstanceId: "instance-B" });
+    const res: any = await makeSoul(owner()).put({ id: "soul-3", agentId: "agent-1", key: "identity", value: "edit" });
+    expect(res.originatorInstanceId).toBe("instance-B");
+  });
+
+  it("PATCH cannot set or clear originatorInstanceId — the stored value stands", async () => {
+    instanceRow = { id: "flair_local_test" };
+    soulStore.set("soul-patch", { id: "soul-patch", agentId: "agent-1", key: "identity", value: "authored on B", originatorInstanceId: "instance-B" });
+    const s: any = makeSoul(owner());
+    s._targetId = "soul-patch";
+    await s.patch({ originatorInstanceId: "instance-attacker" });
+    expect(soulStore.get("soul-patch").originatorInstanceId).toBe("instance-B");
   });
 });
