@@ -155,11 +155,11 @@ describe("flair#902 — snapshot commands target the instance named by --data-di
   ): void {
     const lines = launchctlLines();
     expect(lines.length).toBeGreaterThan(0);
-    // flair#2040: the read-only DOMAIN preflight (`launchctl print gui/<uid>`)
-    // names the user's GUI domain, not an install, so it is the one invocation
-    // that does not carry the target label. Every INSTANCE-scoped invocation
-    // still must.
-    const instanceLines = lines.filter((line) => !/^print\s+gui\//.test(line));
+    // flair#2040: the read-only DOMAIN preflight (`launchctl print gui/<uid>`,
+    // `print-disabled gui/<uid>`) names the user's GUI domain, not an install,
+    // so those are the invocations that do not carry the target label. Every
+    // INSTANCE-scoped invocation still must.
+    const instanceLines = lines.filter((line) => !/^print(-disabled)?\s+gui\/\d+$/.test(line));
     expect(instanceLines.filter((line) => !line.includes(target.label))).toEqual([]);
     expect(lines.filter((line) => line.includes(forbiddenLabel))).toEqual([]);
     const plistArgs = lines.flatMap((line) => line.split(/\s+/).filter((arg) => arg.endsWith(".plist")));

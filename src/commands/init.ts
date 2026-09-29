@@ -21,7 +21,7 @@ import {
 import { mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
 import { opsSocketPathRefusal } from "../lib/socket-path-limit.js";
 import * as render from "../render.js";
-import { execSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
@@ -35,13 +35,11 @@ import {
   type OccupiedHarperListener,
   type OperationsPortAttribution,
 } from "../lib/init-occupied-listener.js";
-import { initLaunchdStatusLine } from "../lib/launchd-domain-preflight.js";
 
 export type InitCli = {
   api: (...args: any[]) => any;
   b64url: (...args: any[]) => any;
   buildOperationsApiConfig: (...args: any[]) => any;
-  cleanupLegacyLaunchdPlist: (...args: any[]) => any;
   defaultDataDir: (...args: any[]) => any;
   defaultLaunchAgentsDir: (...args: any[]) => any;
   ensureFlairAgentRole: (...args: any[]) => any;
@@ -53,7 +51,6 @@ export type InitCli = {
   launchdLabel: (...args: any[]) => any;
   launchdPlistPath: (...args: any[]) => any;
   opsNetworkPortValue: (...args: any[]) => any;
-  observeLaunchdJobLoaded: (...args: any[]) => any;
   persistDefaultInstallCoordinates: (...args: any[]) => any;
   privKeyPath: (...args: any[]) => any;
   provisionFabric: (...args: any[]) => any;
@@ -77,7 +74,7 @@ export type InitCli = {
   verifySemanticSearch: (...args: any[]) => any;
   waitForHealth: (...args: any[]) => any;
   writeDaemonSidecar: (...args: any[]) => any;
-  writeInitLaunchdPlist: (...args: any[]) => any;
+  registerInitLaunchdService: (...args: any[]) => any;
   MQTT_DISABLED_CONFIG: any;
   STARTUP_TIMEOUT_MS: any;
 };
@@ -99,10 +96,6 @@ function b64url(...args: any[]): any {
 
 function buildOperationsApiConfig(...args: any[]): any {
   return cli.buildOperationsApiConfig(...args);
-}
-
-function cleanupLegacyLaunchdPlist(...args: any[]): any {
-  return cli.cleanupLegacyLaunchdPlist(...args);
 }
 
 function defaultDataDir(...args: any[]): any {
@@ -143,10 +136,6 @@ function launchdLabel(...args: any[]): any {
 
 function launchdPlistPath(...args: any[]): any {
   return cli.launchdPlistPath(...args);
-}
-
-function observeLaunchdJobLoaded(...args: any[]): any {
-  return cli.observeLaunchdJobLoaded(...args);
 }
 
 function opsNetworkPortValue(...args: any[]): any {
@@ -257,8 +246,8 @@ function writeDaemonSidecar(...args: any[]): any {
   return cli.writeDaemonSidecar(...args);
 }
 
-function writeInitLaunchdPlist(...args: any[]): any {
-  return cli.writeInitLaunchdPlist(...args);
+function registerInitLaunchdService(...args: any[]): any {
+  return cli.registerInitLaunchdService(...args);
 }
 
 export function register(program: Command): void {
@@ -934,8 +923,9 @@ program
         console.log(`Admin password saved to: ${adminPassPath}`);
       }
 
-      // Register launchd service on macOS so Harper survives reboots
-      // and `flair restart` / `flair stop` work via launchctl.
+      // Write this instance's launchd plist on macOS so launchd can own it
+      // (survive reboots; `flair restart` / `flair stop` via launchctl) — and
+      // report whether launchd ACTUALLY manages it (flair#2040).
       if (process.platform === "darwin") {
         const harperBinPath = harperBin();
         if (harperBinPath) {
@@ -943,20 +933,6 @@ program
           const plistDir = defaultLaunchAgentsDir();
           mkdirSync(plistDir, { recursive: true });
           const plistPath = launchdPlistPath(label, plistDir);
-
-          // flair#693 + flair#966: a pre-flair#693 install registered under
-          // the bare LEGACY_LAUNCHD_LABEL. init always writes fresh plist
-          // content below (it has the current ports/creds in hand), so
-          // migration here is just "clean up the old registration" —
-          // unload + remove it BEFORE writing the new one, so re-running
-          // init never leaves two services behind for this data dir.
-          //
-          // flair#966: the legacy plist is NOT scoped to this data dir —
-          // it is a single global label. cleanupLegacyLaunchdPlist reads
-          // ROOTPATH to establish ownership before touching it.
-          cleanupLegacyLaunchdPlist(dataDir, plistDir, (cmd: string) => {
-            execSync(cmd, { stdio: "pipe" });
-          });
 
           const opsSocket = join(dataDir, "operations-server");
           // authorizeLocal: false (flair#654) — same posture as the initial spawn
@@ -984,39 +960,45 @@ program
           // hand against this (now-healthy) instance and writes it 0600, or
           // refuses without writing a plist. An already-adopted instance is left
           // byte-for-byte unchanged rather than downgraded to the inline shape.
-          const outcome = await writeInitLaunchdPlist({
+          //
+          // flair#693 + flair#966 + flair#2040: a pre-flair#693 install
+          // registered under the bare LEGACY_LAUNCHD_LABEL is retired here, but
+          // only when ROOTPATH proves it is this data dir's — and when its job
+          // is the process SERVING this instance, retiring it stops Flair, so
+          // registerInitLaunchdService preflights the launchd domain and
+          // validates the replacement BEFORE unloading anything, loads and
+          // verifies the replacement, and restores the legacy job on failure.
+          //
+          // flair#2040: NEVER a check mark for a load that did not happen. The
+          // step reports "launchd-managed ✓" only when launchd is verified to
+          // run the process serving this instance; otherwise it says the plist
+          // is on disk and Flair runs directly, with the reason.
+          const launchdStep = await registerInitLaunchdService({
             dataDir,
-            plistPath,
-            label,
-            adminPass,
-            adminUser,
-            modelsDir,
-            execPath: process.execPath,
-            harperBinPath,
-            workingDirectory: flairPackageDir(),
-            httpPort: httpBind.bindValue,
-            opsNetworkPort: opsNetworkPortValue(opsBindHost, opsPort),
-            setConfig,
             port: httpPort,
+            plistDir,
+            write: {
+              dataDir,
+              plistPath,
+              label,
+              adminPass,
+              adminUser,
+              modelsDir,
+              execPath: process.execPath,
+              harperBinPath,
+              workingDirectory: flairPackageDir(),
+              httpPort: httpBind.bindValue,
+              opsNetworkPort: opsNetworkPortValue(opsBindHost, opsPort),
+              setConfig,
+              port: httpPort,
+            },
           });
-          if (outcome.kind === "refused") {
-            console.error(`Error: ${outcome.detail}`);
+          for (const line of launchdStep.lines as Array<{ stream: "out" | "err"; text: string }>) {
+            (line.stream === "err" ? console.error : console.log)(line.text);
+          }
+          if (launchdStep.kind === "refused" || launchdStep.kind === "down") {
             process.exit(1);
           }
-          // flair#2040: NEVER print a check mark for a load that did not
-          // happen. Verify the job is actually loaded (read-only `launchctl
-          // print <domain>/<label>`); over ssh the GUI domain is unreachable,
-          // so the plist is written but the job loads only at the next console
-          // login — say so, with the reason, instead of "registered ✓".
-          const loadState = observeLaunchdJobLoaded(dataDir);
-          const loaded = loadState.state === "not-applicable" || loadState.loaded === true;
-          console.log(
-            initLaunchdStatusLine({
-              outcome: outcome.kind === "unchanged" ? "unchanged" : "written",
-              loaded,
-              reason: "reason" in loadState ? loadState.reason : undefined,
-            }),
-          );
         }
       }
     }

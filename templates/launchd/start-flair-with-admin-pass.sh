@@ -25,6 +25,28 @@ ADMIN_PASS_FILE="$1"
 NODE="$2"
 HARPER_BIN="$3"
 
+# flair#2040: never start a SECOND instance on a data directory that a live
+# process already serves. `flair init`, and a `flair start`/`doctor --fix` that
+# fell back to a direct start, leave the instance running outside launchd with
+# this plist on disk (RunAtLoad + KeepAlive). When launchd later starts the job
+# — at the next console login, say — Harper's own "already running" check
+# (hdb.pid) would refuse, but only AFTER it has loaded its config and applied
+# HARPER_SET_CONFIG to the data directory's config state. Refuse here, before
+# Harper runs at all: no config load, no hdb.pid write, no port bind, no store
+# open, and the admin password is never read. Exit 0 — a deliberate no-op, not a
+# crash. KeepAlive makes launchd retry after its throttle interval (10 s by
+# default); once the direct process has exited, the next attempt starts Harper
+# and launchd owns the instance.
+# Mirrors Harper's getHdbPid(): a pid that is ours, 1, or not alive is no
+# evidence. ROOTPATH comes from the plist's EnvironmentVariables.
+if [ -n "${ROOTPATH:-}" ] && [ -f "$ROOTPATH/hdb.pid" ]; then
+  LIVE_PID="$(tr -cd '0-9' < "$ROOTPATH/hdb.pid" 2>/dev/null || true)"
+  if [ -n "$LIVE_PID" ] && [ "$LIVE_PID" != "$$" ] && [ "$LIVE_PID" -gt 1 ] 2>/dev/null && kill -0 "$LIVE_PID" 2>/dev/null; then
+    echo "start-flair-with-admin-pass: $ROOTPATH is already served by pid $LIVE_PID (not started by this launchd job); not starting a second instance. launchd retries after its throttle interval and starts Flair once that process has exited." >&2
+    exit 0
+  fi
+fi
+
 if [ ! -f "$ADMIN_PASS_FILE" ]; then
   echo "start-flair-with-admin-pass: admin-pass file not found: $ADMIN_PASS_FILE" >&2
   exit 1

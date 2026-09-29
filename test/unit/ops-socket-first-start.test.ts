@@ -260,9 +260,11 @@ describe("the adopt / first-start wire (flair#1701)", () => {
     // Without this call after ensureLaunchdServiceLoaded, first start stays
     // red and a second `flair start` is what finally chmods — the 0.54.2
     // canary defect.
-    const body = functionBody(src, "repairLaunchdManagement");
+    // flair#2040: the bounce lives in the repair's commit phase, and the load
+    // is loadLaunchdJob (targeted bootstrap/kickstart gui/<uid>).
+    const body = functionBody(src, "commitLaunchdRepair");
     const unlinkAt = body.indexOf("unlinkStaleOpsSocket(");
-    const loadAt = body.indexOf("ensureLaunchdServiceLoaded(");
+    const loadAt = body.indexOf("loadLaunchdJob(");
     expect(unlinkAt).toBeGreaterThan(-1);
     expect(loadAt).toBeGreaterThan(-1);
     expect(unlinkAt).toBeLessThan(loadAt);

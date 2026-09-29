@@ -48,35 +48,37 @@ import type { LaunchdManagement } from "./launchd-management.js";
 import type { DaemonState, HealthResult } from "./daemon-liveness.js";
 import { preserveHttpPortValue, preserveSecurePort } from "./http-bind.js";
 import {
-  type DomainAvailability,
+  type LaunchdLoadability,
   renderDomainUnavailableMessage,
 } from "./launchd-domain-preflight.js";
 
-// ─── domain preflight (flair#2040) ────────────────────────────────────────
+// ─── launchd preflight gate (flair#2040) ──────────────────────────────────
 
 /**
- * The `doctor --fix` refusal when the target launchd domain cannot be loaded
- * into from this session — a PURE gate the executor runs BEFORE it stops
- * anything (flair#2040).
+ * The `doctor --fix` refusal when this instance's launchd job cannot be loaded
+ * from this session — a PURE gate the executor runs BEFORE it stops, unloads or
+ * writes anything (flair#2040).
  *
- * Returns null when the domain is available (or not applicable, i.e. not
- * macOS), so the executor proceeds unchanged. Returns a `refused` result — so
- * doctor reports an ISSUE, never "fixed", and exits non-zero — when the domain
- * is `unavailable` OR `unknown`. `unknown` fails CLOSED: a probe we could not
- * interpret must not license stopping a healthy instance.
+ * Returns null when the preflight allows an attempt (`available`, or
+ * `not-applicable` off macOS), so the executor proceeds. Returns a `refused`
+ * result — doctor reports an ISSUE, never "fixed", and exits non-zero — when
+ * the GUI domain is `unavailable` or `unknown` (fail closed: a probe we could
+ * not interpret must not license stopping a healthy instance), or when the
+ * job's label is `disabled` in that domain (launchd would refuse the load).
  *
- * The refusal carries the actor + state + remedy in its `detail` (there is no
- * structured remedy on a refusal — it is a verdict, not a failure), and states
- * plainly that the running instance was left untouched.
+ * The refusal carries actor + state + remedy in its `detail` (a refusal is a
+ * verdict, not a failure, so there is no structured remedy), and says that
+ * nothing was touched.
  */
 export function domainPreflightRefusal(
-  availability: DomainAvailability,
+  loadability: LaunchdLoadability,
+  uid: number,
 ): Extract<LaunchdRepairResult, { kind: "refused" }> | null {
-  if (availability.state === "available" || availability.state === "not-applicable") return null;
+  if (loadability.state === "available" || loadability.state === "not-applicable") return null;
   return {
     kind: "refused",
-    reason: "launchd-domain-unavailable",
-    detail: renderDomainUnavailableMessage(availability),
+    reason: loadability.state === "disabled" ? "launchd-job-disabled" : "launchd-domain-unavailable",
+    detail: renderDomainUnavailableMessage(loadability, uid),
   };
 }
 
@@ -440,7 +442,7 @@ export function verifyAdoptServing(input: AdoptServingEvidence): AdoptServingPro
 
 export type LaunchdRepairResult =
   | { kind: "no-op"; reason: "already-managed" | "not-applicable"; detail: string }
-  | { kind: "refused"; reason: "foreign" | "unattributable" | "config-unreadable" | "unsupported-config" | "engine-backwards" | "missing-credential" | "launchd-domain-unavailable"; detail: string; plistPath?: string }
+  | { kind: "refused"; reason: "foreign" | "unattributable" | "config-unreadable" | "unsupported-config" | "engine-backwards" | "missing-credential" | "launchd-domain-unavailable" | "launchd-job-disabled"; detail: string; plistPath?: string }
   | { kind: "repaired"; detail: string }
   | { kind: "failed"; detail: string; remedy?: string[] };
 

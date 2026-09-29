@@ -101,7 +101,10 @@ describe("doctor --fix adopt keeps MQTT_* and restabilizes mqtt.network", () => 
   test("repairLaunchdManagement calls stabilizeMqttNetworkKeyOrder", () => {
     const cliSrc = readFileSync(join(import.meta.dir, "..", "..", "src", "cli.ts"), "utf8");
     expect(cliSrc).toMatch(/stabilizeMqttNetworkKeyOrder/);
-    expect(cliSrc).toMatch(/if \(changed\) writeFileAtomic\(cfgPath/);
+    // flair#2040: the write lives in the repair's commit phase, from the
+    // config bytes the prepare phase recorded (so the restore can put them back).
+    expect(cliSrc).toMatch(/stabilizeMqttNetworkKeyOrder\(p\.prior\.config\.snapshot\.bytes\)/);
+    expect(cliSrc).toMatch(/if \(changed\) \{\s*done\.wroteConfig = true;\s*writeFileAtomic\(p\.prior\.config\.path, text/);
   });
 
   test("the Darwin adopt detach keeps MQTT_* from buildDirectSpawnEnv", () => {

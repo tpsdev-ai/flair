@@ -45,7 +45,7 @@
  * extracted program/working-directory paths ever reach a message, and the
  * extractor below reads exactly those keys rather than returning the document.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
 import { unescapeXml } from "./xml-escape.js";
 
 /**
@@ -207,6 +207,62 @@ export function diagnoseLaunchdPlistPaths(
     };
   }
 
+  return null;
+}
+
+/**
+ * Validate a plist's CONTENT before it is written or loaded (flair#2040) —
+ * the check that must pass before any command stops the running instance to
+ * put this plist in its place.
+ *
+ * `diagnoseLaunchdPlistPaths` reads a plist that is already on disk and words
+ * its finding as drift ("no longer exists"). This reads the document the caller
+ * is ABOUT to install and answers a stricter question: can launchd run it?
+ *
+ *   - every absolute ProgramArguments entry exists;
+ *   - ProgramArguments[0] — what launchd execs — is executable;
+ *   - for the pass-file shape (`<launcher> <admin-pass-file> <node> <harper>`),
+ *     the node binary the launcher execs is executable;
+ *   - WorkingDirectory is an existing directory;
+ *   - ROOTPATH (the data directory) is an existing directory.
+ *
+ * Returns one line naming the offending key and path, or null. Never returns
+ * plist content — only the extracted paths (the plist may name the pass file).
+ */
+export function checkLaunchdPlistBeforeLoad(
+  content: string,
+  deps: {
+    exists?: (p: string) => boolean;
+    isExecutable?: (p: string) => boolean;
+    isDirectory?: (p: string) => boolean;
+  } = {},
+): string | null {
+  const exists = deps.exists ?? existsSync;
+  const isExecutable = deps.isExecutable ?? ((p: string) => {
+    try { accessSync(p, constants.X_OK); return true; } catch { return false; }
+  });
+  const isDirectory = deps.isDirectory ?? ((p: string) => {
+    try { return statSync(p).isDirectory(); } catch { return false; }
+  });
+  const refs = readPlistProgramRefs("<content>", () => content);
+  if (!refs || refs.programArguments.length === 0) return "the plist has no ProgramArguments";
+  for (const arg of refs.programArguments) {
+    if (arg.startsWith("/") && !exists(arg)) return `ProgramArguments names ${arg}, which does not exist`;
+  }
+  const program = refs.programArguments[0];
+  if (!program.startsWith("/")) return `ProgramArguments[0] (${program}) is not an absolute path`;
+  if (!isExecutable(program)) return `ProgramArguments[0] (${program}) is not executable, so launchd cannot exec it`;
+  if (refs.programArguments.length >= 4 && refs.programArguments[0].endsWith(".sh")) {
+    const node = refs.programArguments[2];
+    if (node.startsWith("/") && !isExecutable(node)) return `the node binary the launcher execs (${node}) is not executable`;
+  }
+  const wd = refs.workingDirectory;
+  if (wd === null) return "the plist has no WorkingDirectory";
+  if (!isDirectory(wd)) return `WorkingDirectory ${wd} is not an existing directory`;
+  const root = content.match(/<key>ROOTPATH<\/key>\s*<string>([^<]*)<\/string>/);
+  if (!root) return "the plist has no ROOTPATH";
+  const rootPath = unescapeXml(root[1]);
+  if (!isDirectory(rootPath)) return `ROOTPATH ${rootPath} (the data directory) is not an existing directory`;
   return null;
 }
 

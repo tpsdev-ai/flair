@@ -826,7 +826,8 @@ describe("flair#1022 — `flair restart` reports the launchd outcome, not just l
 
       expect(exitCode).toBe(1);
       // Named cause, named fix — the whole difference from a bare timeout.
-      expect(stderr).toContain("launchd start failed");
+      // flair#2040: the fallback line names the actor, the job and the error.
+      expect(stderr).toContain("launchd could not start the job");
       expect(stderr).toContain(gone);
       expect(stderr).toContain("Fix it with: flair init && flair restart");
 
@@ -835,11 +836,15 @@ describe("flair#1022 — `flair restart` reports the launchd outcome, not just l
       // Matched per line on the VERB, not as a substring: `unload <plist>`
       // contains `load <plist>`, so a substring check here passes for the
       // wrong reason and would keep passing if the pre-flight were removed.
+      // flair#2040: the load is now `bootstrap`/`kickstart gui/<uid>…`; the
+      // legacy verbs are asserted absent too, so neither form slips through.
       const verbs = readFileSync(launchctlLog, "utf-8")
         .split("\n").map((l) => l.trim()).filter(Boolean)
         .map((l) => l.split(/\s+/)[0]);
       expect(verbs).not.toContain("load");
       expect(verbs).not.toContain("start");
+      expect(verbs).not.toContain("bootstrap");
+      expect(verbs).not.toContain("kickstart");
       // Positive control on that parse: the stop leg's unload DID happen, so
       // an empty or mis-parsed log cannot make the two assertions above pass
       // vacuously.
@@ -869,11 +874,12 @@ describe("flair#1022 — `flair restart` reports the launchd outcome, not just l
       // pins, re-asserted here because this file adds new launchctl traffic
       // (`list`) to the same code paths.
       //
-      // flair#2040: the ONE label-less line is the read-only DOMAIN preflight
-      // (`launchctl print gui/<uid>`), which names the user's GUI domain, not
-      // an install — it reads the domain's state and touches no job. Every
-      // INSTANCE-scoped invocation still carries this fixture's label.
-      const instanceLines = lines.filter((l) => !/^print\s+gui\//.test(l));
+      // flair#2040: the label-less lines are the read-only DOMAIN preflight
+      // (`launchctl print gui/<uid>` and `print-disabled gui/<uid>`), which
+      // name the user's GUI domain, not an install — they read the domain's
+      // state and touch no job. Every INSTANCE-scoped invocation still carries
+      // this fixture's label.
+      const instanceLines = lines.filter((l) => !/^print(-disabled)?\s+gui\/\d+$/.test(l));
       expect(instanceLines.filter((l) => !l.includes(label))).toEqual([]);
       const plistArgs = lines.flatMap((l) => l.split(/\s+/).filter((a) => a.endsWith(".plist")));
       expect(plistArgs.filter((a) => a !== plistPath)).toEqual([]);
