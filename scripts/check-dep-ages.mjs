@@ -116,7 +116,7 @@ export function collectDeps(pkgs, keepCurrent) {
 }
 
 // ── Main gate logic (runs only when executed directly) ──────────────────────
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (typeof process.argv[1] === "string" && import.meta.url === pathToFileURL(process.argv[1]).href) {
   void (async () => {
     const MIN_AGE_DAYS = Number(process.env.FLAIR_DEP_MIN_AGE_DAYS ?? "7");
     const REGISTRY = process.env.FLAIR_NPM_REGISTRY ?? "https://registry.npmjs.org";

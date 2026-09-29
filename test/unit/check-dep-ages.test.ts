@@ -16,7 +16,7 @@ describe("collectDeps", () => {
     it("collects an exact dependencies pin", () => {
       const pkgs = [
         { pkg: { dependencies: { "some-pkg": "1.2.3" } }, path: "packages/foo/package.json" },
-      ];
+       ];
       const result = collectDeps(pkgs, keepCurrent);
       expect(result.size).toBe(1);
       expect(result.has("some-pkg@1.2.3")).toBe(true);
@@ -24,9 +24,9 @@ describe("collectDeps", () => {
         name: "some-pkg",
         version: "1.2.3",
         declaredIn: ["packages/foo/package.json"],
-      });
-    });
-  });
+       });
+     });
+   });
 
   describe("optionalDependencies", () => {
     it("collects an exact optionalDependencies pin with correct declaredIn", () => {
@@ -34,8 +34,8 @@ describe("collectDeps", () => {
         {
           pkg: { optionalDependencies: { "some-opt": "4.5.6" } },
           path: "packages/bar/package.json",
-        },
-      ];
+         },
+       ];
       const result = collectDeps(pkgs, keepCurrent);
       expect(result.size).toBe(1);
       expect(result.has("some-opt@4.5.6")).toBe(true);
@@ -43,32 +43,32 @@ describe("collectDeps", () => {
         name: "some-opt",
         version: "4.5.6",
         declaredIn: ["packages/bar/package.json"],
-      });
-    });
+       });
+     });
 
     it("skips an optional range like ^1.2.3", () => {
       const pkgs = [
         {
           pkg: { optionalDependencies: { "some-opt": "^1.2.3" } },
           path: "packages/bar/package.json",
-        },
-      ];
+         },
+       ];
       const result = collectDeps(pkgs, keepCurrent);
       expect(result.size).toBe(0);
-    });
+     });
 
     it("skips an optional @tpsdev-ai/* pin", () => {
       const pkgs = [
         {
           pkg: { optionalDependencies: { "@tpsdev-ai/internal": "1.0.0" } },
           path: "packages/internal/package.json",
-        },
-      ];
+         },
+       ];
       const result = collectDeps(pkgs, keepCurrent);
       expect(result.size).toBe(0);
-    });
+     });
 
-  });
+   });
 
   describe("peerDependencies", () => {
     it("does NOT collect an exact peerDependencies pin", () => {
@@ -76,12 +76,12 @@ describe("collectDeps", () => {
         {
           pkg: { peerDependencies: { "some-peer": "7.8.9" } },
           path: "packages/peer/package.json",
-        },
-      ];
+         },
+       ];
       const result = collectDeps(pkgs, keepCurrent);
       expect(result.size).toBe(0);
-    });
-  });
+     });
+   });
 
   describe("cross-package dedup", () => {
     it("one entry for same name@version declared in two packages", () => {
@@ -90,8 +90,8 @@ describe("collectDeps", () => {
         {
           pkg: { optionalDependencies: { "shared-pkg": "2.0.0" } },
           path: "packages/b/package.json",
-        },
-      ];
+         },
+       ];
       const result = collectDeps(pkgs, keepCurrent);
       expect(result.size).toBe(1);
       expect(result.has("shared-pkg@2.0.0")).toBe(true);
@@ -100,9 +100,9 @@ describe("collectDeps", () => {
       expect(entry!.declaredIn.sort()).toEqual([
         "packages/a/package.json",
         "packages/b/package.json",
-      ]);
-    });
-  });
+       ]);
+     });
+   });
 });
 
 describe("direct-execution guard", () => {
@@ -114,29 +114,33 @@ describe("direct-execution guard", () => {
 
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "test "));
     try {
-       // Create a minimal fixture repo with no external pinned deps
-       // (the "no network" path: the gate exits via the no-deps message)
+        // Create a minimal fixture repo with no external pinned deps
+        // (the "no network" path: the gate exits via the no-deps message)
        const scriptsDir = path.join(tmpDir, "scripts");
       fs.mkdirSync(scriptsDir);
-       // Create an empty packages/ dir so readdirSync doesn't fail
+        // Create an empty packages/ dir so readdirSync doesn't fail
       fs.mkdirSync(path.join(tmpDir, "packages"));
       fs.writeFileSync(
         path.join(tmpDir, "package.json"),
         JSON.stringify({ name: "@test/fixture", dependencies: {} }),
-       );
-        // Copy the actual script into the scripts/ subdirectory
+        );
+         // Copy the actual script into the scripts/ subdirectory
       const src = path.join(__dirname, "..", "..", "scripts", "check-dep-ages.mjs");
       fs.copyFileSync(src, path.join(scriptsDir, "check-dep-ages.mjs"));
-        // Run from the space-containing directory
+         // Run from the space-containing directory
       const result = spawnSync("node", [path.join(scriptsDir, "check-dep-ages.mjs")], {
         cwd: tmpDir,
         env: { ...process.env, FLAIR_DEP_MIN_AGE_DAYS: "0" },
         timeout: 10000,
-        });
-      const output = Buffer.from([...(result.stdout || []), ...(result.stderr || [])]).toString();
-      expect(output).toMatch(/production/);
-    } finally {
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      const stdout = Buffer.from(result.stdout ?? []).toString();
+      const stderr = Buffer.from(result.stderr ?? []).toString();
+      expect(stdout).toContain("✓ No external pinned production deps to check");
+      expect(stderr).toBe("");
+     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
+     }
+   });
 });
