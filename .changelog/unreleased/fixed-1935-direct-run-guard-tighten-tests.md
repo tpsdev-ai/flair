@@ -1,0 +1,1 @@
+- **`scripts/check-dep-ages.mjs` import guard never throws on `import()`**: the `process.argv[1]` type check on the direct-run gate is a string check, so `import.meta.url === pathToFileURL(process.argv[1]).href` never throws when imported as a module.
