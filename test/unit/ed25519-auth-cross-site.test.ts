@@ -5,7 +5,8 @@
  * sites that used to carry their OWN nonceSeen Map. This test imports BOTH
  * real modules under one harper mock (bun's module cache is
  * process-global, so both modules resolve the SAME `../../resources/
- * ed25519-auth.ts` singleton) and proves a nonce recorded via one site is
+ * replay-store.ts` guard over the same ReplayNonce table — flair#2061) and
+ * proves a nonce recorded via one site is
  * rejected as a replay via the OTHER — in both directions — using a real
  * Ed25519 keypair and a real signature, not a simulated header.
  *
@@ -25,8 +26,9 @@
  * memory-soul-read-gate.test.ts's header comment for the same footgun on
  * Memory.ts). Safer to extend this file than add a competing one.
  */
-import { mock, describe, it, expect, beforeEach } from "bun:test";
+import { mock, describe, it, expect, beforeEach, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
+import { createFakeReplayNonceTable, ensureGlobalHarperTransaction } from "../helpers/fake-replay-store.ts";
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -53,7 +55,7 @@ class BasePresence {
   }
 }
 
-const databasesMock = {
+const databasesMock: { flair: Record<string, any> } = {
   flair: {
     Agent: {
       get: async (id: string) => agentsById[id] ?? null,
@@ -62,8 +64,19 @@ const databasesMock = {
       },
     },
     Presence: BasePresence,
+    // The ONE replay store both sites record into (resources/replay-store.ts,
+    // flair#2061) — reset per test below.
+    ReplayNonce: createFakeReplayNonceTable(),
   },
 };
+
+// replay-store.ts reads Harper's transaction() from the global, as Harper
+// assigns it; install a stand-in for this file only.
+let restoreTransaction: () => void = () => {};
+beforeAll(() => {
+  restoreTransaction = ensureGlobalHarperTransaction();
+});
+afterAll(() => restoreTransaction());
 
 // Minimal stand-in for Harper's runtime-injected `Resource` base class —
 // required alongside `databases` any time harper is mocked, or a
@@ -129,6 +142,7 @@ function makePresenceInstance(request: any): any {
 beforeEach(() => {
   agentsById = {};
   presenceRecords = {};
+  databasesMock.flair.ReplayNonce = createFakeReplayNonceTable();
 });
 
 // ─── Cross-path closure ─────────────────────────────────────────────────────

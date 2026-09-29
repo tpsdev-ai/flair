@@ -39,12 +39,14 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
   writeFileSync,
   chmodSync,
 } from "node:fs";
+import type { Dirent } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -114,6 +116,17 @@ const INIT_UNCHANGED_CASE_BUDGET_MS = 420_000;
 
 /** Jobs this file loaded. Unloaded on afterEach and on process exit. */
 const LOADED_JOBS = new Set<{ label: string; plistPath: string }>();
+
+/** The last CLI run (doctor --fix / init) — printed by dumpDiagnostics when a case fails. */
+interface CliRun {
+  what: string;
+  exitCode: number | null;
+  signal: string | null;
+  elapsedMs: number;
+  stdout: string;
+  stderr: string;
+}
+let lastCliRun: CliRun | undefined;
 
 function nodeBin(): string {
   if (process.env.NODE_BIN) return process.env.NODE_BIN;
@@ -235,6 +248,7 @@ async function runDoctorFix(
   const exitCode: number = await new Promise((resolveExit, reject) => {
     proc.on("error", reject);
     proc.on("exit", (code, signal) => {
+      lastCliRun = { what: "doctor --fix", exitCode: code, signal, elapsedMs: Date.now() - startedAt, stdout, stderr };
       if (signal !== null) {
         reject(new Error(childOverranDeadline("flair CLI", cliLeg(["doctor", "--fix"]), CHILD_DEADLINE_MS, { status: code, signal, stdout, stderr, elapsedMs: Date.now() - startedAt, timeoutSignal: "SIGTERM" })));
         return;
@@ -275,6 +289,7 @@ async function runInit(
   const exitCode: number = await new Promise((resolveExit, reject) => {
     proc.on("error", reject);
     proc.on("exit", (code, signal) => {
+      lastCliRun = { what: "init", exitCode: code, signal, elapsedMs: Date.now() - startedAt, stdout, stderr };
       if (signal !== null) {
         reject(new Error(childOverranDeadline("flair CLI", cliLeg(["init"]), CHILD_DEADLINE_MS, { status: code, signal, stdout, stderr, elapsedMs: Date.now() - startedAt, timeoutSignal: "SIGTERM" })));
         return;
@@ -387,6 +402,137 @@ function clearLaunchdLogs(dataDir: string): void {
   for (const which of ["stderr", "stdout"] as const) {
     writeFileSync(join(dataDir, "log", `launchd-${which}.log`), "");
   }
+}
+
+// ─── flair#2040 CI diagnostics ───────────────────────────────────────────────
+// This file runs only on the macOS CI runner, so when a case fails there the
+// log is all there is. Print — bounded, with the fixture password redacted —
+// what the CLI said, what launchd holds for the fixture's label, the plist, the
+// instance's logs and its processes. Read-only; the fixture label only.
+const DIAG_MAX_CHARS = 4_000;
+const DIAG_MAX_LOG_FILES = 8;
+
+function redactDiag(text: string): string {
+  // The fixture password is a test value, but it never belongs in a CI log.
+  return text.split(ADMIN_PASS).join("<redacted>");
+}
+
+function boundDiag(text: string): string {
+  const t = redactDiag(text);
+  return t.length > DIAG_MAX_CHARS ? `[... ${t.length - DIAG_MAX_CHARS} earlier chars omitted ...]\n${t.slice(-DIAG_MAX_CHARS)}` : t;
+}
+
+function runDiag(cmd: string, args: string[]): string {
+  const res = spawnSync(cmd, args, { encoding: "utf-8", timeout: 5_000 });
+  const how = res.error ? `error: ${res.error.message}` : res.signal ? `signal ${res.signal}` : `exit ${res.status}`;
+  return `$ ${cmd} ${args.join(" ")} -> ${how}\n${res.stdout ?? ""}${res.stderr ? `[stderr]\n${res.stderr}` : ""}`;
+}
+
+/** Plist text with any value under a credential-looking key replaced (paths stay). */
+function redactPlistText(raw: string): string {
+  return raw.replace(/(<key>[^<]*(?:PASS|SECRET|TOKEN|CREDENTIAL)[^<]*<\/key>\s*<string>)[^<]*(<\/string>)/gi, "$1<redacted>$2");
+}
+
+function logFilesUnder(dir: string, depth: number): string[] {
+  const found: string[] = [];
+  let entries: Dirent[] = [];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return found;
+  }
+  for (const e of entries) {
+    const p = join(dir, e.name);
+    if (e.isDirectory() && depth > 0) found.push(...logFilesUnder(p, depth - 1));
+    else if (e.isFile() && e.name.endsWith(".log")) found.push(p);
+  }
+  return found;
+}
+
+function dumpDiagnostics(sb: Sandbox, why: string): void {
+  const out: string[] = [];
+  const section = (title: string, body: string): void => {
+    out.push(`----- ${title} -----\n${boundDiag(body)}`);
+  };
+  out.push(`===== flair#2040 diagnostics: ${redactDiag(why).slice(0, 600)} =====`);
+  out.push(`label=${sb.label} plist=${sb.plistPath} dataDir=${sb.dataDir} http=${sb.httpPort} ops=${sb.opsPort}`);
+  if (lastCliRun) {
+    const r = lastCliRun;
+    out.push(`last CLI run: flair ${r.what} -> exit ${r.exitCode}${r.signal ? ` signal ${r.signal}` : ""} after ${r.elapsedMs}ms`);
+    section(`flair ${r.what} stdout`, r.stdout);
+    section(`flair ${r.what} stderr`, r.stderr);
+  } else {
+    out.push("last CLI run: none recorded");
+  }
+  const uid = process.getuid?.();
+  if (uid !== undefined) {
+    section(`launchctl print gui/${uid}/${sb.label}`, runDiag("launchctl", ["print", `gui/${uid}/${sb.label}`]));
+    // The preflight's two domain reads: the domain probe's exit code, and the
+    // head of print-disabled (its "disabled services" block is what it parses).
+    const domain = spawnSync("launchctl", ["print", `gui/${uid}`], { encoding: "utf-8", timeout: 5_000 });
+    out.push(`launchctl print gui/${uid} -> exit ${domain.status}${domain.signal ? ` signal ${domain.signal}` : ""}`);
+    section(`launchctl print-disabled gui/${uid} (head)`, runDiag("launchctl", ["print-disabled", `gui/${uid}`]).slice(0, 1_500));
+  }
+  const listed = launchctlList(sb.label);
+  section(`launchctl list ${sb.label} (exit ${listed.code})`, listed.stdout);
+  let plistText = "(absent)";
+  try {
+    if (existsSync(sb.plistPath)) plistText = redactPlistText(readFileSync(sb.plistPath, "utf-8"));
+  } catch (err) {
+    plistText = `(unreadable: ${err instanceof Error ? err.message : String(err)})`;
+  }
+  section(`plist ${sb.plistPath}`, plistText);
+  const passFile = join(sb.tmpHome, ".flair", "admin-pass");
+  let passState = "absent";
+  try {
+    if (existsSync(passFile)) passState = `present, mode ${(statSync(passFile).mode & 0o777).toString(8)}`;
+  } catch (err) {
+    passState = `unstat-able: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  out.push(`admin-pass file ${passFile}: ${passState} (content never printed)`);
+  const pidFile = readPidFile(sb.dataDir);
+  out.push(`hdb.pid: ${pidFile ?? "none"}${pidFile ? (isAlive(pidFile) ? " (alive)" : " (dead)") : ""}`);
+  const logs = logFilesUnder(sb.tmpHome, 5);
+  out.push(`log files under the fixture HOME (${logs.length}): ${logs.join(", ") || "none"}`);
+  for (const f of logs.slice(0, DIAG_MAX_LOG_FILES)) {
+    let text = "";
+    try {
+      text = readFileSync(f, "utf-8");
+    } catch (err) {
+      text = `(unreadable: ${err instanceof Error ? err.message : String(err)})`;
+    }
+    section(`log ${f} (${text.length} chars)`, text);
+  }
+  const pids = new Set<number>();
+  if (pidFile) pids.add(pidFile);
+  const launchdPid = parseLaunchctlList(listed.stdout).pid;
+  if (launchdPid) pids.add(launchdPid);
+  for (const p of [...listeningPids(sb.httpPort), ...listeningPids(sb.opsPort)]) pids.add(p);
+  if (sb.direct?.pid) pids.add(sb.direct.pid);
+  out.push(`fixture pids: hdb.pid=${pidFile ?? "none"} launchd=${launchdPid ?? "none"} http-listeners=[${listeningPids(sb.httpPort).join(",")}] direct=${sb.direct?.pid ?? "none"}`);
+  section("ps (fixture pids)", pids.size ? runDiag("ps", ["-o", "pid,ppid,stat,lstart,etime,command", "-p", [...pids].join(",")]) : "(no fixture pid known)");
+  const all = spawnSync("ps", ["-axo", "pid,ppid,stat,etime,command"], { encoding: "utf-8", timeout: 5_000 }).stdout ?? "";
+  section("ps (processes naming the fixture HOME)", all.split("\n").filter((l) => l.includes(sb.tmpHome)).join("\n") || "(none)");
+  console.error(out.join("\n"));
+}
+
+/** Run a case body; on failure, print diagnostics for the newest sandbox, then fail as before. */
+function diagnosed(body: () => Promise<void>): () => Promise<void> {
+  return async () => {
+    try {
+      await body();
+    } catch (err) {
+      const sb = live[live.length - 1];
+      if (sb) {
+        try {
+          dumpDiagnostics(sb, err instanceof Error ? err.message : String(err));
+        } catch (diagErr) {
+          console.error(`flair#2040 diagnostics themselves failed: ${diagErr instanceof Error ? diagErr.message : String(diagErr)}`);
+        }
+      }
+      throw err;
+    }
+  };
 }
 
 function unloadJob(label: string, plistPath: string): void {
@@ -578,6 +724,7 @@ afterEach(async () => {
     const sb = live.pop();
     if (sb) await teardown(sb);
   }
+  lastCliRun = undefined;
 });
 
 function assertNoPrompt(log: string, cliOut: string): void {
@@ -691,7 +838,7 @@ async function directSpawnDetached(sb: Sandbox): Promise<number> {
 
 test.skipIf(!isDarwin)(
   "corrupt or missing launchd plist: doctor --fix regenerates and comes up managed",
-  async () => {
+  diagnosed(async () => {
     requireCliBuild();
     const sb = await newSandbox();
     const before = await snapshotBeforeFix(sb);
@@ -710,13 +857,13 @@ test.skipIf(!isDarwin)(
     await assertNoRebootstrap(sb, before);
     expect(result.stdout + result.stderr).toMatch(/launchd|regenerat|managed/i);
     expect(managed.pid).toBeGreaterThan(0);
-  },
+  }),
   CORRUPT_PLIST_CASE_BUDGET_MS,
 );
 
 test.skipIf(!isDarwin)(
   "detached direct-spawned instance: doctor --fix adopts into launchd, bouncing once",
-  async () => {
+  diagnosed(async () => {
     requireCliBuild();
     const sb = await newSandbox();
     const before = await snapshotBeforeFix(sb);
@@ -761,13 +908,13 @@ test.skipIf(!isDarwin)(
     expect(instancePid(sb.dataDir, sb.httpPort), "PID must stay stable after adopt (no KeepAlive restart loop)").toBe(
       managed.pid,
     );
-  },
+  }),
   ADOPT_DETACHED_CASE_BUDGET_MS,
 );
 
 test.skipIf(!isDarwin)(
   "adopt with NO pass file and a proven env credential: doctor writes the 0600 file and adopts (flair#1685)",
-  async () => {
+  diagnosed(async () => {
     requireCliBuild();
     const sb = await newSandbox();
     const before = await snapshotBeforeFix(sb);
@@ -794,13 +941,13 @@ test.skipIf(!isDarwin)(
     assertSecretFreePlist(sb.plistPath);
     expect(result.stdout + result.stderr).toMatch(/adopt|bounc/i);
     await assertNoRebootstrap(sb, before);
-  },
+  }),
   ADOPT_NO_PASS_CASE_BUDGET_MS,
 );
 
 test.skipIf(!isDarwin)(
   "regenerate with NO pass file, no live process, and no env credential: refuse and write no plist (flair#1685)",
-  async () => {
+  diagnosed(async () => {
     requireCliBuild();
     const sb = await newSandbox();
     // Instance DOWN: unload the job and remove the pass file, then move the
@@ -824,13 +971,13 @@ test.skipIf(!isDarwin)(
       "a refusal must not leave a launchd plist whose launcher needs the missing pass file",
     ).toBe(false);
     expect(result.stdout + result.stderr).toMatch(/admin-pass|flair init/i);
-  },
+  }),
   REFUSE_NO_PASS_CASE_BUDGET_MS,
 );
 
 test.skipIf(!isDarwin)(
   "flair init on an already-adopted instance leaves the plist byte-identical (flair#1693)",
-  async () => {
+  diagnosed(async () => {
     requireCliBuild();
     const sb = await newSandbox();
     // newSandbox() has already adopted via doctor --fix, so the on-disk plist
@@ -848,6 +995,6 @@ test.skipIf(!isDarwin)(
     expect(result.stdout + result.stderr).toMatch(/unchanged|already managed/i);
     const managed = assessManaged(sb.dataDir, sb.httpPort, sb.launchAgentsDir);
     expect(managed.state, managed.detail).toBe("managed");
-  },
+  }),
   INIT_UNCHANGED_CASE_BUDGET_MS,
 );

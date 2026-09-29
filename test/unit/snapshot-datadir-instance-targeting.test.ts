@@ -90,7 +90,7 @@ describe("flair#902 — snapshot commands target the instance named by --data-di
     // nothing reaches real launchd.
     writeFileSync(
       join(shimBin, "launchctl"),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\nexit 0\n`,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\n[ "$1" = print-disabled ] && printf 'disabled services = {\\n}\\n'\nexit 0\n`,
       { mode: 0o755 },
     );
   });
@@ -155,7 +155,12 @@ describe("flair#902 — snapshot commands target the instance named by --data-di
   ): void {
     const lines = launchctlLines();
     expect(lines.length).toBeGreaterThan(0);
-    expect(lines.filter((line) => !line.includes(target.label))).toEqual([]);
+    // flair#2040: the read-only DOMAIN preflight (`launchctl print gui/<uid>`,
+    // `print-disabled gui/<uid>`) names the user's GUI domain, not an install,
+    // so those are the invocations that do not carry the target label. Every
+    // INSTANCE-scoped invocation still must.
+    const instanceLines = lines.filter((line) => !/^print(-disabled)?\s+gui\/\d+$/.test(line));
+    expect(instanceLines.filter((line) => !line.includes(target.label))).toEqual([]);
     expect(lines.filter((line) => line.includes(forbiddenLabel))).toEqual([]);
     const plistArgs = lines.flatMap((line) => line.split(/\s+/).filter((arg) => arg.endsWith(".plist")));
     expect(plistArgs.filter((arg) => arg !== target.plistPath)).toEqual([]);

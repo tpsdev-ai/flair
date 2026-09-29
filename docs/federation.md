@@ -316,7 +316,7 @@ flair federation unpin <instanceId>
 ```
 
 HTTP paths (`/FederationPair`, `/FederationSync`, `/FederationInstance`,
-`/FederationPeers`) and the Instance / Peer / PairingToken / Nonce / SyncLog
+`/FederationPeers`) and the Instance / Peer / PairingToken / SyncLog / ReplayNonce
 schemas: **[docs/api-reference.md](api-reference.md#federation)**.
 
 ## Limitations (1.0)
