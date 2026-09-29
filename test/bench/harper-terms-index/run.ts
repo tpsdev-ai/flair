@@ -297,6 +297,8 @@ function markdown(report: any): string {
   lines.push("");
   lines.push(`Recommendation: **${report.decision.recommendation}**.`);
   lines.push("");
+  lines.push("Query p95 misses the 2× bar on every cell at 100k. That includes head queries, where the in-memory index is already walking a large posting list (about 6–14×), not only mid queries whose memory p95 is sub-millisecond and whose ratio is mostly fixed search overhead. Ingest here is the lexical row only — content, scope columns, and the terms index — with no embedding. The absolute add at 100k is about a quarter of a millisecond per put. That delta would be a small fraction of an embedding-bound `Memory.put`, but the query gate fails on its own, so the recommendation does not depend on reading the ingest percentage as an end-to-end Memory.put regression.");
+  lines.push("");
   lines.push("Decision rule: adopt unless ingest regresses by more than ~20% OR query p95 exceeds ~2× today's warm in-memory index at 100k.");
   lines.push("");
   lines.push("### Environment");
@@ -352,7 +354,7 @@ function markdown(report: any): string {
   lines.push("");
   lines.push("1. **Hybrid (decision query).** N and sum(dl) are point reads of a per-scope aggregate written in the same transaction as the row. df is the length of the term's posting list, which the scorer reads anyway. Scoped df is therefore not a second pass.");
   lines.push("2. **Scope scan.** N and avgdl come from walking every row in the scope (`docLen` only) on each query. df still comes from postings. See `harperScopeScan` in the JSON.");
-  lines.push("3. **Global index count.** `terms` index `getValuesCount(term)` is an O(1) count of index entries. It is global df, not scoped df, so it is the wrong idf for a single-agent query. Cost is `globalDfCount`.");
+  lines.push("3. **Global index count.** `terms` index `getValuesCount(term)` counts index entries for one token. It is global df, not scoped df, so it is the wrong idf for a single-agent query. At n=50 it was ~0.01ms; at 100k, df(t1)=24906, it was ~3.8ms p50. Cost is `globalDfCount`.");
   lines.push("4. **Maintained per-(scope, term) df.** Extra counter rows, one per unique term per scope plus a global counter. Ingest cost is the `terms-df` arm (1k and 10k). Query cost is two point reads (`dfProbe`).");
   lines.push("");
   lines.push("### Ranking equivalence");
