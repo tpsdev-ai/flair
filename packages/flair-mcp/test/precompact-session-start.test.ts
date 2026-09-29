@@ -1,0 +1,191 @@
+/**
+ * precompact-session-start.test.ts — flair#2069: `flair-session-start` shows
+ * the newest pre-compaction record FIRST, after a compaction and after a
+ * restart, then its normal content (bootstrap, then the resume hint).
+ *
+ * Lives in THIS package's lane because runHook's module statically imports
+ * @tpsdev-ai/flair-client by its built dist (see continuity-resume.test.ts).
+ * The record is written by the real runPreCompact against an in-memory store
+ * that the session-start client then reads, so the two halves meet on the
+ * same row. The spawned, signature-checked end-to-end run is
+ * ./precompact-hook-entry.test.ts.
+ *
+ * Hermetic: injected clients, a per-test temp FLAIR_SESSION_DIR and
+ * transcript. No network, never the real ~/.flair.
+ */
+
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { runHook } from "../src/session-start-hook.ts";
+import { continuityTag, readPointer, readState, seedSession } from "../src/continuity.ts";
+import { PRECOMPACT_RECORD_MAX_CHARS } from "../src/precompact.ts";
+import { runPreCompact } from "../src/precompact-hook.ts";
+
+const AGENT = "agent-a";
+const HARNESS = "claude-sess-1";
+const HEADER_START = "Flair continuity record, saved by the PreCompact hook before a context compaction (trigger: auto";
+const INSTRUCTION = "Never force-push a shared branch.";
+
+const ORIGINAL_ENV = {
+  FLAIR_AGENT_ID: process.env.FLAIR_AGENT_ID,
+  FLAIR_SESSION_DIR: process.env.FLAIR_SESSION_DIR,
+  FLAIR_CONTINUITY_TIMEOUT_MS: process.env.FLAIR_CONTINUITY_TIMEOUT_MS,
+};
+
+let dir: string;
+let sessionDir: string;
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), "flair-precompact-start-test-"));
+  sessionDir = join(dir, "session");
+  process.env.FLAIR_SESSION_DIR = sessionDir;
+  process.env.FLAIR_AGENT_ID = AGENT;
+  delete process.env.FLAIR_CONTINUITY_TIMEOUT_MS;
+});
+
+afterEach(() => {
+  for (const [key, value] of Object.entries(ORIGINAL_ENV)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  rmSync(dir, { recursive: true, force: true });
+});
+
+/** Rows keyed by id (PUT upserts), GET by id, the list read, and bootstrap. */
+class Store {
+  readonly rows = new Map<string, Record<string, unknown>>();
+  readonly paths: string[] = [];
+  bootstrapContext = "## Bootstrap context";
+  failGet = false;
+
+  client() {
+    return {
+      bootstrap: async () => ({ context: this.bootstrapContext }),
+      request: async (method: string, path: string, body?: unknown): Promise<any> => {
+        this.paths.push(`${method} ${path}`);
+        if (method === "PUT" && path.startsWith("/Memory/")) {
+          this.rows.set(decodeURIComponent(path.slice("/Memory/".length)), { ...(body as Record<string, unknown>) });
+          return {};
+        }
+        if (method === "GET" && path.startsWith("/Memory?agentId=")) return [...this.rows.values()];
+        if (method === "GET" && path.startsWith("/Memory/")) {
+          if (this.failGet) throw new TypeError("fetch failed");
+          const row = this.rows.get(decodeURIComponent(path.slice("/Memory/".length)));
+          if (!row) throw Object.assign(new Error("not found"), { status: 404 });
+          return { ...row, expiresAt: "2999-01-01T00:00:00.000Z" };
+        }
+        return {};
+      },
+    };
+  }
+}
+
+function transcript(): string {
+  const path = join(dir, "transcript.jsonl");
+  const lines = [
+    { type: "user", message: { role: "user", content: `${INSTRUCTION} Keep going.` } },
+    { type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Edit", input: { file_path: "/repo/a.ts" } }] } },
+  ];
+  writeFileSync(path, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  return path;
+}
+
+async function compact(store: Store): Promise<string> {
+  const out = await runPreCompact(
+    JSON.stringify({ session_id: HARNESS, transcript_path: transcript(), hook_event_name: "PreCompact", trigger: "auto" }),
+    { env: process.env, sessionDir, makeClient: () => store.client() },
+  );
+  expect(out.reason).toBe("written");
+  return out.recordId!;
+}
+
+function contextOf(out: string): string {
+  const parsed = JSON.parse(out) as { hookSpecificOutput?: { hookEventName?: string; additionalContext?: string } };
+  expect(parsed.hookSpecificOutput?.hookEventName).toBe("SessionStart");
+  return parsed.hookSpecificOutput?.additionalContext ?? "";
+}
+
+describe("session start shows the pre-compaction record first (flair#2069)", () => {
+  test("after a compaction: the record this session saved is at the TOP, then bootstrap; one GET by id, no list search, no rotation", async () => {
+    const state = seedSession(sessionDir, AGENT, HARNESS);
+    const store = new Store();
+    const recordId = await compact(store);
+    store.paths.length = 0;
+
+    const ctx = contextOf(await runHook(JSON.stringify({ cwd: "/repo", source: "compact", session_id: HARNESS }), () => store.client()));
+    expect(ctx.startsWith(HEADER_START)).toBe(true);
+    const recordAt = ctx.indexOf(`- ${INSTRUCTION}`);
+    const bootstrapAt = ctx.indexOf("## Bootstrap context");
+    expect(recordAt).toBeGreaterThan(0);
+    expect(bootstrapAt).toBeGreaterThan(recordAt); // record first, then the normal content
+    expect(ctx).not.toContain("Continuity:"); // compaction is not a restart: no resume hint
+
+    expect(store.paths.filter((p) => p.startsWith("GET /Memory/"))).toEqual([`GET /Memory/${encodeURIComponent(recordId)}`]);
+    expect(store.paths.filter((p) => p.startsWith("GET /Memory?agentId="))).toHaveLength(0);
+    expect(readPointer(sessionDir, AGENT)?.sessionId).toBe(state.sessionId); // never rotated
+  });
+
+  test("after a restart: the previous session's record first, then bootstrap, then the resume hint", async () => {
+    const prior = seedSession(sessionDir, AGENT, HARNESS);
+    const store = new Store();
+    await compact(store);
+
+    const ctx = contextOf(await runHook(JSON.stringify({ cwd: "/repo", source: "startup", session_id: "claude-new" }), () => store.client()));
+    expect(ctx.startsWith(HEADER_START)).toBe(true);
+    const recordAt = ctx.indexOf(`- ${INSTRUCTION}`);
+    const bootstrapAt = ctx.indexOf("## Bootstrap context");
+    const hintAt = ctx.indexOf("Continuity:");
+    expect(recordAt).toBeGreaterThan(0);
+    expect(bootstrapAt).toBeGreaterThan(recordAt);
+    expect(hintAt).toBeGreaterThan(bootstrapAt);
+    expect(ctx).toContain(continuityTag(prior.sessionId)); // the hint names the prior session
+    expect(readState(sessionDir, AGENT, "claude-new")).not.toBeNull(); // boot seeded the new session as before
+  });
+
+  test("the record stays at the top when bootstrap context overflows the 10,000-character output", async () => {
+    seedSession(sessionDir, AGENT, HARNESS);
+    const store = new Store();
+    await compact(store);
+    store.bootstrapContext = "B".repeat(12_000);
+
+    const ctx = contextOf(await runHook(JSON.stringify({ cwd: "/repo", source: "compact", session_id: HARNESS }), () => store.client()));
+    expect(ctx.length).toBe(10_000);
+    expect(ctx.startsWith(HEADER_START)).toBe(true);
+    expect(ctx).toContain(`- ${INSTRUCTION}`);
+    const block = ctx.slice(0, ctx.indexOf("\n\nB"));
+    expect(block.length).toBeLessThan(PRECOMPACT_RECORD_MAX_CHARS + 500); // header + bounded record
+  });
+
+  test("nothing is shown for another session's record, a failed read, or no record at all; boot proceeds", async () => {
+    seedSession(sessionDir, AGENT, HARNESS);
+    const store = new Store();
+    await compact(store);
+
+    // A compaction of a DIFFERENT harness session.
+    const other = contextOf(await runHook(JSON.stringify({ cwd: "/repo", source: "compact", session_id: "claude-other" }), () => store.client()));
+    expect(other).toBe("## Bootstrap context");
+
+    // The read fails.
+    store.failGet = true;
+    const failed = contextOf(await runHook(JSON.stringify({ cwd: "/repo", source: "compact", session_id: HARNESS }), () => store.client()));
+    expect(failed).toBe("## Bootstrap context");
+  });
+
+  test("a hanging read is bounded by the continuity timeout and degrades to the normal output", async () => {
+    process.env.FLAIR_CONTINUITY_TIMEOUT_MS = "250";
+    seedSession(sessionDir, AGENT, HARNESS);
+    const store = new Store();
+    await compact(store);
+    const started = Date.now();
+    const out = await runHook(JSON.stringify({ cwd: "/repo", source: "compact", session_id: HARNESS }), () => ({
+      bootstrap: async () => ({ context: "ctx" }),
+      request: (method: string, path: string): Promise<any> =>
+        method === "GET" && path.startsWith("/Memory/") ? new Promise(() => {}) : Promise.resolve({}),
+    }));
+    expect(contextOf(out)).toBe("ctx");
+    expect(Date.now() - started).toBeLessThan(3000);
+  });
+});

@@ -131,6 +131,56 @@ Then the CLAUDE.md simplifies to:
 
     Use `flair bootstrap` when MCP is not wired.
 
+## Continuity across compaction (`flair-precompact`, optional)
+
+When Claude Code compacts a conversation, it replaces the history with a summary, and whatever the summary leaves out is gone from the agent's context: a rule the user gave an hour ago, the open task list, the work in flight. `flair-precompact` is a `PreCompact` hook that saves one bounded record just before that happens, and `flair-session-start` shows the record first when the session continues after the compaction, or when the next session starts after a restart.
+
+It needs `flair-session-start` installed (`flair hook install`): that hook creates the per-session continuity state the record belongs to, and it is the one that shows the record. `flair hook install` does not write the PreCompact entry, so add it to `~/.claude/settings.json` by hand:
+
+```json
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'out=$(FLAIR_AGENT_ID=my-project npx -y -p @tpsdev-ai/flair-mcp@<version> flair-precompact 2>/dev/null) && printf %s \"$out\" || true'",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Swap `my-project` for your agent ID and `<version>` for `flair --version`. With no `matcher`, the hook runs for both `/compact` (`manual`) and automatic (`auto`) compaction. A PreCompact hook that exits 2 blocks compaction; this command always exits 0 (the `|| true` covers a launcher that fails before the hook runs), and `timeout` bounds the launcher, whose start-up happens before the hook's own budget begins.
+
+What the record holds, all of it copied from the end of the transcript (no model call, no summary):
+
+- **Standing instructions**: sentences from your own turns that start with a rule-giving phrase (don't, do not, never, always, stop, avoid, make sure, remember to, from now on, going forward) or contain always, never, from now on, going forward or in (the) future. Questions are skipped. At most 6, the newest, 200 characters each.
+- **Open tasks**: the task tools' list (`TaskCreate`/`TaskUpdate`, and `TodoWrite` when a session has it enabled), minus completed and deleted tasks. At most 8.
+- **In-flight work**: the last 5 file edits and shell commands, recorded the way `flair-continuity-capture` records them: a file's path, a shell command's description, never the command itself.
+- **The last assistant message**, cut to 300 characters.
+
+A section with nothing in it is left out, and when nothing at all was found no record is written. The whole record is at most 2,000 characters. The hook reads at most the last 1 MiB and the last 2,000 lines of the transcript, and never reads tool results, thinking, subagent turns or messages the harness wrote (task notifications, slash commands and their output, system reminders, compaction summaries).
+
+Before anything is stored, credential-shaped strings are replaced with `[redacted]`: private key blocks, `user:password@` in URLs, `Bearer` and `Basic` values, `name=value` and `name: value` pairs whose name contains password, secret, token, credential, or api, access or private key, and tokens with a known prefix (for example `sk-`, `ghp_`, `github_pat_`, `xox…-`, `AKIA`, `AIza`, `npm_`, JWTs). This is pattern matching and best effort: a secret with no recognizable shape, such as a bare password in a sentence, is stored as written. The record lives in the ephemeral tier (expires after 24 hours), is private to the agent, and is written with the agent's own key through the same signed request as the continuity journal; the hook never uses `FLAIR_ADMIN_USER` or `FLAIR_ADMIN_PASSWORD`.
+
+One compaction gives one record. When the hook runs again for the same session and trigger within 5 minutes of the record's first write, it updates that record instead of adding a second one; the record's id is kept in `~/.flair/session/<agent>.precompact.json`, which holds ids and a timestamp, never record content. Two genuine compactions of the same kind within those 5 minutes therefore share one record, holding the newer state.
+
+The hook never blocks compaction. Its time budget (`FLAIR_PRECOMPACT_TIMEOUT_MS`, default 5000 ms, 250 to 15000) covers the whole process from its start. When Flair is unreachable, slow or refuses the write, or the transcript or the hook's own files cannot be read, Claude Code shows one short warning naming the reason, and compaction goes ahead either way. After a timeout the warning says the record may be missing: Flair can still finish a write the hook stopped waiting for.
+
+Limits worth knowing:
+
+- The instruction heuristic is simple. It misses a rule phrased any other way ("I'd rather you ask first", other languages), and it can pick up a sentence that only mentions the words ("I never said that").
+- Claude Code writes the transcript asynchronously, so the newest messages may not be in it yet when the hook runs.
+- Only the end of the transcript is read: a task created before that part has no name there and is left out, and an instruction given before it is not seen.
+- The transcript's format is Claude Code's own, not a documented interface; a field the hook does not recognize is skipped, never guessed.
+- After a restart, the record shown is the one the previous session saved at its last compaction, which can be older than that session's final state. The block says when it was written; treat it as a signal to check, not an instruction.
+- The marker file remembers only the newest record per agent ID. When two sessions share one agent ID and both compact, the session that compacted first no longer finds its record through the marker.
+
 ## Soul (Personality / Context)
 
 Want Claude Code to have consistent personality or project context? Set soul entries:

@@ -85,6 +85,7 @@
       "version": "0.57.0",
       "bin": {
         "flair-mcp": "dist/mcp-shim.cjs",
+        "flair-precompact": "dist/precompact-hook.js",
         "flair-session-start": "dist/session-start-hook.js",
         "flair-continuity-capture": "dist/continuity-capture-hook.js",
       },

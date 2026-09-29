@@ -22,9 +22,9 @@
  * (missing FLAIR_AGENT_ID, malformed stdin, Flair unreachable, auth error, a
  * hung daemon, an unexpected throw) exits 0. Malformed stdin is treated as
  * empty input and can still yield bootstrap context. A failed bootstrap yields
- * a continuity resume hint only when the separate lookup finds eligible prior
- * entries; otherwise stdout is `{}`. The hook attempts one stderr diagnostic
- * when bootstrap fails (flair#1943). The Codex command retains stderr and the
+ * a pre-compaction record and/or a continuity resume hint only when their
+ * separate lookups find one; otherwise stdout is `{}`. The hook attempts one
+ * stderr diagnostic when bootstrap fails (flair#1943). The Codex command retains stderr and the
  * Claude Code command discards it; delivery depends on stderr being writable.
  *
  * A hard timeout (FLAIR_HOOK_TIMEOUT_MS, default 8s) wraps the bootstrap call
@@ -89,6 +89,7 @@ import {
   resolveContinuityTimeoutMs,
   type ContinuityClient,
 } from "./continuity.js";
+import { fetchPreCompactRecord, formatPreCompactContext, resolvePreCompactLookup } from "./precompact.js";
 
 /** Claude Code SessionStart additionalContext hard limit (chars). */
 const MAX_CHARS = 10_000;
@@ -140,6 +141,15 @@ interface SessionStartInput {
 // Compaction is NOT a restart: prepareContinuityBoot stays fully inert on a
 // compaction-sourced SessionStart — no rotation, no state-file touch, no
 // hint (scenario S7 holds by construction).
+//
+// Pre-compaction record (flair#2069): when the PreCompact hook
+// (./precompact-hook.ts) saved a record, this hook shows it FIRST: after a
+// compaction, the record this harness session saved; after a restart, the
+// one the previous session saved. Which record is decided from the local
+// marker file alone (./precompact.ts resolvePreCompactLookup), then fetched
+// with one `GET /Memory/<id>` that runs concurrently with bootstrap under the
+// same continuity timeout as the resume hint. No marker ⇒ no request; any
+// failure ⇒ nothing shown, boot proceeds.
 
 /** Minimal surface of FlairClient this hook depends on (eases testing).
  *  `request` is optional and structurally matches PresencePoster (presence.ts)
@@ -283,8 +293,9 @@ function hookOutput(context: string): string {
 /**
  * Core hook logic, with injectable dependencies so it can be unit-tested
  * without a live Flair daemon. Returns the exact string to print to stdout.
- * A failed bootstrap can still return a continuity resume hint. Without
- * bootstrap context or a resume hint, this returns NOOP_OUTPUT. The entry
+ * A failed bootstrap can still return a pre-compaction record and a
+ * continuity resume hint. Without bootstrap context, a pre-compaction record
+ * or a resume hint, this returns NOOP_OUTPUT. The entry
  * point catches unexpected exceptions.
  *
  * @param rawInput   the raw stdin string (may be empty / malformed)
@@ -357,6 +368,19 @@ export async function runHook(
         ).catch(() => null)
       : Promise.resolve(null);
 
+  // Pre-compaction record (flair#2069): decided locally, fetched concurrently,
+  // bounded by the same continuity timeout; null (nothing shown) on any failure.
+  const precompactLookup =
+    typeof client.request === "function" ? resolvePreCompactLookup(input, agentId, continuity) : null;
+  const precompactDone: Promise<string | null> = precompactLookup
+    ? withTimeout(
+        fetchPreCompactRecord(client as unknown as ContinuityClient, agentId, precompactLookup).then((record) =>
+          record ? formatPreCompactContext(record) : null,
+        ),
+        resolveContinuityTimeoutMs(),
+      ).catch(() => null)
+    : Promise.resolve(null);
+
   let context = "";
   try {
     const res = await withTimeout(
@@ -381,11 +405,15 @@ export async function runHook(
   }
 
   const resumeHint = await resumeHintDone;
+  const precompactBlock = await precompactDone;
   await presenceDone;
 
-  // Combine: bootstrap context first, then AT MOST one continuity hint line.
-  // Either piece may be absent; both absent ⇒ the inert no-op output.
+  // Combine: the pre-compaction record FIRST (bounded, so the MAX_CHARS cut
+  // below can only shorten what follows it), then the bootstrap context, then
+  // AT MOST one continuity hint line. Any piece may be absent; all absent ⇒
+  // the inert no-op output.
   const pieces: string[] = [];
+  if (precompactBlock) pieces.push(precompactBlock);
   if (context.trim()) pieces.push(context);
   if (resumeHint) pieces.push(resumeHint);
   if (pieces.length === 0) return NOOP_OUTPUT;
