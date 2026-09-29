@@ -54,11 +54,28 @@ export type IdentityResult =
   | { kind: "unverified"; reason: string }
   | { kind: "none" };
 
-/** `kill(pid, 0)` is a three-way, not a boolean. */
+/** `kill(pid, 0)` is a FOUR-way, not a boolean. */
 export type PidLiveness =
   | { kind: "alive" }
-  | { kind: "gone" }   // ESRCH
-  | { kind: "eperm" }; // exists, but another user's
+  | { kind: "gone" }                     // ESRCH — the pid does not exist
+  | { kind: "eperm" }                    // exists, but another user's
+  | { kind: "unknown"; reason: string };  // the probe failed for another reason — NOT gone
+
+/**
+ * Map the errno from a failed `kill(pid, 0)` to a `PidLiveness`. Pure so the
+ * adapter's errno handling is unit-testable.
+ *
+ * `gone` is returned ONLY for ESRCH — the one errno that says the pid does not
+ * exist. EPERM means it exists but is another user's. EVERY other errno
+ * (EINVAL, EACCES, ...) is `unknown`: the liveness was not determined, and
+ * unknown must never be read as "gone". A caller with the successful case (no
+ * error) passes through `alive` itself.
+ */
+export function livenessFromKillError(code: string | undefined): PidLiveness {
+  if (code === "ESRCH") return { kind: "gone" };
+  if (code === "EPERM") return { kind: "eperm" };
+  return { kind: "unknown", reason: code ?? "the liveness probe failed" };
+}
 
 /**
  * The health probe. `ok` is flair-identified 2xx — not "any HTTP answered"
@@ -189,6 +206,17 @@ export function classifyDaemonState(ev: DaemonEvidence, ctx: DaemonContext): Dae
     return {
       state: "DISAGREEMENT",
       detail: `the recorded pid ${pid} is alive, but its identity could not be verified (${reason}) — refusing to act on it`,
+    };
+  }
+
+  // Liveness could not be determined (an errno other than ESRCH/EPERM). This is
+  // NOT "gone": refusing is the only safe verdict (unknown never licenses an
+  // action — neither a stop nor a sidecar removal).
+  if (liveness?.kind === "unknown") {
+    return {
+      state: "UNKNOWN",
+      detail:
+        `could not determine whether the recorded pid ${pid} is alive (${liveness.reason}) — refusing to act on it`,
     };
   }
 
@@ -478,9 +506,9 @@ export function shouldAdoptMissingSidecar(input: {
  *
  * Stale is a POSITIVE finding, never a default. Only `kill(pid, 0)` returning
  * ESRCH (`gone`) is stale; `eperm` (a live process owned by another user) and
- * every indeterminate answer (`null`) are NOT stale. Unknown evidence never
- * licenses an action, so a non-stale sidecar stays evidence and the machine
- * keeps refusing exactly as it did before the fix.
+ * every indeterminate answer — `null`, or a probe that failed with any other
+ * errno (`unknown`) — are NOT stale. Unknown evidence never licenses an action,
+ * so a non-stale sidecar stays evidence and the machine keeps refusing.
  */
 export type SidecarStaleness =
   | { kind: "stale" }   // names a pid CONFIRMED gone — drop it, treat as absent
@@ -497,6 +525,7 @@ export function classifySidecarStaleness(
   if (liveness === null) return { kind: "unknown" };
   if (liveness.kind === "gone") return { kind: "stale" };
   if (liveness.kind === "alive" || liveness.kind === "eperm") return { kind: "live" };
+  // liveness.kind === "unknown" — not stale.
   return { kind: "unknown" };
 }
 

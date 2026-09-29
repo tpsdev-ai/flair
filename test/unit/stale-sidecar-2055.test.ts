@@ -37,6 +37,7 @@ const FLAIR_HEALTH_JSON = JSON.stringify({
 describe("flair#2055 — a stale identity sidecar never refuses and never survives a stop", () => {
   let tmpHome: string;
   let dataDir: string;
+  let shimBin: string;
   const spawned: Array<{ kill: (sig?: NodeJS.Signals | number) => void }> = [];
 
   beforeEach(() => {
@@ -45,6 +46,18 @@ describe("flair#2055 — a stale identity sidecar never refuses and never surviv
     // cases use --data-dir. Both name this same directory.
     dataDir = join(tmpHome, ".flair", "data");
     mkdirSync(dataDir, { recursive: true });
+    // A service-manager STAND-IN first on the CLI's PATH: `flair restart`'s
+    // Linux leg reads the serving process's cgroup unit and asks `systemctl`
+    // about it. This keeps that probe off the host's real systemctl — the
+    // stand-in reports a MainPID that is not the decoy, so the restart takes
+    // the direct path (which is the code under test). Nothing real is touched.
+    shimBin = mkdtempSync(join(tmpdir(), "flair2055-shim-"));
+    writeFileSync(
+      join(shimBin, "systemctl"),
+      "#!/bin/sh\nfor a in \"$@\"; do if [ \"$a\" = \"show\" ]; then printf 'MainPID=1\\n'; exit 0; fi; done\nexit 0\n",
+      { mode: 0o755 },
+    );
+    writeFileSync(join(shimBin, "launchctl"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   });
 
   afterEach(() => {
@@ -52,6 +65,7 @@ describe("flair#2055 — a stale identity sidecar never refuses and never surviv
       try { proc.kill(9); } catch { /* already gone */ }
     }
     rmSync(tmpHome, { recursive: true, force: true });
+    rmSync(shimBin, { recursive: true, force: true });
   });
 
   function pidAlive(pid: number): boolean {
@@ -63,16 +77,20 @@ describe("flair#2055 — a stale identity sidecar never refuses and never surviv
     }
   }
 
-  /** A pid that is CONFIRMED gone: spawn, record it, and wait for it to exit. */
+  /** A pid that is CONFIRMED gone: spawn, record it, and wait until `kill(pid, 0)` says ESRCH. */
   async function confirmedDeadPid(): Promise<number> {
     const p = Bun.spawn(["bun", "-e", "process.exit(0)"], { stdout: "ignore", stderr: "ignore" });
     const pid = (p as unknown as { pid: number }).pid;
     await p.exited;
     for (let i = 0; i < 100; i++) {
-      try { process.kill(pid, 0); } catch { return pid; }
+      // ESRCH ONLY: this oracle must not read EPERM (or any other errno) as
+      // "dead" — the point of the fixture is a pid that is CONFIRMED gone.
+      try { process.kill(pid, 0); } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code === "ESRCH") return pid;
+      }
       await new Promise((r) => setTimeout(r, 20));
     }
-    throw new Error(`pid ${pid} was still alive after exit`);
+    throw new Error(`pid ${pid} never reported ESRCH after exit`);
   }
 
   /**
@@ -137,6 +155,8 @@ describe("flair#2055 — a stale identity sidecar never refuses and never surviv
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
       HOME: tmpHome,
+      // The service-manager stand-in goes FIRST so no probe reaches the host.
+      PATH: `${shimBin}:${process.env.PATH ?? ""}`,
     };
     // FLAIR_URL outranks the resolved port; an ambient one would mask what this
     // measures.

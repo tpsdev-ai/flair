@@ -39,6 +39,7 @@ import {
   shouldAdoptMissingSidecar,
   classifySidecarStaleness,
   shouldRemoveSidecarAfterStop,
+  livenessFromKillError,
   parseNullSeparatedEnviron,
   extractRootPath,
   canonicalLexicalPath,
@@ -743,5 +744,55 @@ describe("flair#2055 — a dead-pid sidecar is not a disagreement with hdb.pid",
       health: { kind: "ok" },
     }), ctx);
     expect(s.state).toBe("DISAGREEMENT");
+  });
+});
+
+// ─── flair#2055 blocker 1 — an unexpected errno is never "gone" ──────────────
+//
+// `probePidLiveness` used to return `gone` for every error except EPERM, so an
+// EINVAL (or any other errno) read as "the pid is dead" — turning an
+// undetermined liveness into a licence to remove a sidecar and to classify a
+// recorded pid as not running. The mapping is now pure and ESRCH-only.
+
+describe("flair#2055 — livenessFromKillError", () => {
+  test("ESRCH is gone; EPERM is eperm", () => {
+    expect(livenessFromKillError("ESRCH")).toEqual({ kind: "gone" });
+    expect(livenessFromKillError("EPERM")).toEqual({ kind: "eperm" });
+  });
+
+  test("every other errno — EINVAL included — is unknown, never gone", () => {
+    for (const code of ["EINVAL", "EACCES", "ENOSYS", undefined]) {
+      const result = livenessFromKillError(code);
+      expect(result.kind).toBe("unknown");
+      expect(result.kind).not.toBe("gone");
+    }
+  });
+});
+
+describe("flair#2055 — an unknown liveness never licenses removal or staleness", () => {
+  // The adapter's errno decision, fed through both gates.
+  const unknown = livenessFromKillError("EINVAL");
+
+  test("unknown is NOT stale: the sidecar is kept", () => {
+    const stale = sidecar(9999, 1); // names a different pid than the live hdb.pid
+    expect(classifySidecarStaleness(stale, unknown)).toEqual({ kind: "unknown" });
+  });
+
+  test("unknown is NOT removable: the stop-time gate refuses", () => {
+    expect(shouldRemoveSidecarAfterStop({
+      observedPid: 4242,
+      observedPidLiveness: unknown,
+      sidecar: sidecar(4242, 1), // even a sidecar that still names the pid
+    })).toBe(false);
+  });
+
+  test("an unknown recorded-pid liveness classifies UNKNOWN, not NOT_RUNNING", () => {
+    const s = classifyDaemonState(ev({
+      pidfile: { kind: "present", pid: 4242 },
+      pidLiveness: unknown,
+      identity: none,
+      health: { kind: "refused" },
+    }), ctx);
+    expect(s.state).toBe("UNKNOWN");
   });
 });
