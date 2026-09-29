@@ -33,6 +33,9 @@ mock.module("harper", () => {
 });
 
 const { HealthDetail } = await import("../../resources/health.ts");
+const { previewEmbedGpuStatement, setEmbedGpuStatement, applyEmbedGpuChoice, _resetEmbedGpuStatementForTests } = await import(
+  "../../resources/embed-gpu.ts"
+);
 const { noteStateWriteAttempt, noteStateWriteFailure, _resetProgressForTests } = await import(
   "../../resources/migrations/progress.ts"
 );
@@ -95,4 +98,25 @@ describe("flair#1800 C2 — /HealthDetail stateFile is redacted for non-admin ca
     const admin: any = await makeDetail({ agent: "admin-agent", isAdmin: true }).get();
     expect(admin.migrations.stateFile.path).toBeNull();
   });
+});
+
+test("HealthDetail labels GPU warmup pending, then restores finished no-readback warning", async () => {
+  const choice = { gpuLayers: 99, source: "env" as const, metalUsable: true };
+  try {
+    setEmbedGpuStatement(previewEmbedGpuStatement(choice));
+    const pending: any = await makeDetail({ agent: "agent-x" }).get();
+    expect(pending.embedding.pending).toBe(true);
+    expect(pending.warnings).toContainEqual({
+      level: "info", message: "requested GPU offload; Metal engagement pending (warmup in progress)",
+    });
+
+    applyEmbedGpuChoice(choice, {});
+    const finished: any = await makeDetail({ agent: "agent-x" }).get();
+    expect(finished.embedding.pending).toBeUndefined();
+    expect(finished.warnings).toContainEqual({
+      level: "warn", message: "requested GPU offload; Metal engagement unconfirmed",
+    });
+  } finally {
+    _resetEmbedGpuStatementForTests();
+  }
 });
