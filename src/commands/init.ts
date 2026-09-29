@@ -35,6 +35,7 @@ import {
   type OccupiedHarperListener,
   type OperationsPortAttribution,
 } from "../lib/init-occupied-listener.js";
+import { initLaunchdStatusLine } from "../lib/launchd-domain-preflight.js";
 
 export type InitCli = {
   api: (...args: any[]) => any;
@@ -52,6 +53,7 @@ export type InitCli = {
   launchdLabel: (...args: any[]) => any;
   launchdPlistPath: (...args: any[]) => any;
   opsNetworkPortValue: (...args: any[]) => any;
+  observeLaunchdJobLoaded: (...args: any[]) => any;
   persistDefaultInstallCoordinates: (...args: any[]) => any;
   privKeyPath: (...args: any[]) => any;
   provisionFabric: (...args: any[]) => any;
@@ -141,6 +143,10 @@ function launchdLabel(...args: any[]): any {
 
 function launchdPlistPath(...args: any[]): any {
   return cli.launchdPlistPath(...args);
+}
+
+function observeLaunchdJobLoaded(...args: any[]): any {
+  return cli.observeLaunchdJobLoaded(...args);
 }
 
 function opsNetworkPortValue(...args: any[]): any {
@@ -997,10 +1003,19 @@ program
             console.error(`Error: ${outcome.detail}`);
             process.exit(1);
           }
+          // flair#2040: NEVER print a check mark for a load that did not
+          // happen. Verify the job is actually loaded (read-only `launchctl
+          // print <domain>/<label>`); over ssh the GUI domain is unreachable,
+          // so the plist is written but the job loads only at the next console
+          // login — say so, with the reason, instead of "registered ✓".
+          const loadState = observeLaunchdJobLoaded(dataDir);
+          const loaded = loadState.state === "not-applicable" || loadState.loaded === true;
           console.log(
-            outcome.kind === "unchanged"
-              ? "Launchd service already managed — plist unchanged ✓"
-              : "Launchd service registered ✓",
+            initLaunchdStatusLine({
+              outcome: outcome.kind === "unchanged" ? "unchanged" : "written",
+              loaded,
+              reason: "reason" in loadState ? loadState.reason : undefined,
+            }),
           );
         }
       }

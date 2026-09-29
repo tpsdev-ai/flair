@@ -165,10 +165,20 @@ import {
   mapRepairThrow,
   decideAdoptStopWithWait,
   verifyAdoptServingWithWait,
+  domainPreflightRefusal,
   type AdminPassAvailability,
   type LaunchdRepairResult,
   type RepairPlan,
 } from "./lib/launchd-repair.js";
+import {
+  assessLaunchdDomain,
+  launchdGuiDomain,
+  verifyLaunchdJobLoaded,
+  renderInitJobNotLoadedMessage,
+  renderStartFallbackMessage,
+  DOMAIN_PROBE_TIMEOUT_MS,
+  type DomainProbeRunner,
+} from "./lib/launchd-domain-preflight.js";
 import { stabilizeMqttNetworkKeyOrder } from "./lib/stabilize-mqtt-network.js";
 import { detectOpsApiAllInterfacesBind } from "./lib/ops-api-bind.js";
 import {
@@ -4521,6 +4531,7 @@ bindInitCli({
   waitForHealth,
   writeDaemonSidecar,
   writeInitLaunchdPlist,
+  observeLaunchdJobLoaded,
   MQTT_DISABLED_CONFIG,
   STARTUP_TIMEOUT_MS,
 });
@@ -5303,6 +5314,52 @@ const realLaunchctlLister: LaunchctlLister = (label) => {
   return { code: res.status, stdout: res.stdout ?? "" };
 };
 
+/** The current uid. `getuid` is always present on macOS; 0 is a harmless fallback. */
+function currentUid(): number {
+  return typeof process.getuid === "function" ? process.getuid() : 0;
+}
+
+/**
+ * `launchctl print <target>` — READ-ONLY (it prints, it does not load/start/
+ * bootstrap), capped so an unreachable launchd cannot hang the CLI. This is the
+ * domain-preflight runner (flair#2040).
+ */
+function launchctlPrintRunner(target: string): DomainProbeRunner {
+  return () => {
+    const res = spawnSync("launchctl", ["print", target], {
+      encoding: "utf-8",
+      timeout: DOMAIN_PROBE_TIMEOUT_MS,
+    });
+    return { code: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+  };
+}
+
+/** Can this process load a job in the target launchd GUI domain right now? (flair#2040) */
+function observeLaunchdDomain() {
+  const uid = currentUid();
+  return assessLaunchdDomain({
+    platform: process.platform,
+    uid,
+    run: launchctlPrintRunner(launchdGuiDomain(uid)),
+  });
+}
+
+/**
+ * Is THIS instance's launchd job actually loaded? (flair#2040) — a read-only
+ * `launchctl print <domain>/<label>`, so `flair init` / `flair start` report a
+ * LOADED job rather than a check mark for one that was written but never loaded.
+ */
+function observeLaunchdJobLoaded(dataDir: string) {
+  const uid = currentUid();
+  const { label } = resolveLaunchdLabel(dataDir);
+  return verifyLaunchdJobLoaded({
+    platform: process.platform,
+    uid,
+    label,
+    run: launchctlPrintRunner(`${launchdGuiDomain(uid)}/${label}`),
+  });
+}
+
 /**
  * Which process is actually serving `dataDir` — Harper's own `hdb.pid` first,
  * then the listener on `port`.
@@ -5955,6 +6012,16 @@ async function repairLaunchdManagement(dataDir: string, port: number): Promise<L
     case "adopt":
     case "regenerate": {
       try {
+        // flair#2040: PREFLIGHT the launchd domain BEFORE anything is stopped,
+        // regenerated or written. From an ssh session the GUI domain is not
+        // reachable, so the load would fail only AFTER the live instance was
+        // clean-stopped — leaving Flair down. `unavailable` OR `unknown`
+        // REFUSES here (fail closed): doctor reports an issue, never "fixed",
+        // and the live instance is left untouched. Runs before
+        // guardEngineNotBackwards purely so the domain verdict is decided first;
+        // both are pure reads.
+        const domainRefusal = domainPreflightRefusal(observeLaunchdDomain());
+        if (domainRefusal) return domainRefusal;
         // Guard FIRST (flair#1093): the repair is a boot path, and an older
         // engine opening a newer store fails at the storage layer minutes
         // later — same refusal as startFlairProcess. On the adopt arm this
@@ -6338,30 +6405,40 @@ async function startFlairProcess(port: number, dataDir: string): Promise<void> {
       // for health on `port`, see the OTHER instance answer, and report
       // success.
       assertLaunchdServiceOwnedBy(dataDir, label, plistPath, "start");
-      try {
-        // flair#1022: launchd will not tell us it cannot exec the job.
-        // `launchctl load` and `launchctl start` BOTH exit 0 for a plist whose
-        // ProgramArguments[0] does not exist (measured, see the module header),
-        // so the only way this loop learns anything is by waiting the full
-        // startup budget for a port that will never open — the reported
-        // incident's second 60-second hang, ending in "did not respond within
-        // 60000ms (120 attempts)", an error about a port that says nothing
-        // about the cause. The paths in the plist are absolute and checkable
-        // with an existsSync, so check them first and turn a two-minute silence
-        // into an immediate, named diagnosis. Still falls back — a running
-        // instance beats a down one — just without the wait or the mystery.
-        const stalePlist = diagnoseLaunchdPlistPaths(plistPath);
-        if (stalePlist) {
-          throw new Error(`${stalePlist.message} Fix it with: ${stalePlist.remedy.join(" && ")}`);
+      // flair#2040: preflight the launchd domain BEFORE attempting the load.
+      // From an ssh session the GUI domain is unreachable, so `launchctl
+      // load/start` fails; the CLI used to print a raw "launchctl start …
+      // failed". Say WHY instead, then fall back to a direct start (a running
+      // instance beats a down one) — the job loads at the next console login.
+      const startDomain = observeLaunchdDomain();
+      if (startDomain.state === "unavailable" || startDomain.state === "unknown") {
+        console.error(renderStartFallbackMessage(startDomain.reason));
+      } else {
+        try {
+          // flair#1022: launchd will not tell us it cannot exec the job.
+          // `launchctl load` and `launchctl start` BOTH exit 0 for a plist whose
+          // ProgramArguments[0] does not exist (measured, see the module header),
+          // so the only way this loop learns anything is by waiting the full
+          // startup budget for a port that will never open — the reported
+          // incident's second 60-second hang, ending in "did not respond within
+          // 60000ms (120 attempts)", an error about a port that says nothing
+          // about the cause. The paths in the plist are absolute and checkable
+          // with an existsSync, so check them first and turn a two-minute silence
+          // into an immediate, named diagnosis. Still falls back — a running
+          // instance beats a down one — just without the wait or the mystery.
+          const stalePlist = diagnoseLaunchdPlistPaths(plistPath);
+          if (stalePlist) {
+            throw new Error(`${stalePlist.message} Fix it with: ${stalePlist.remedy.join(" && ")}`);
+          }
+          const { execSync } = await import("node:child_process");
+          ensureLaunchdServiceLoaded(dataDir, (cmd) => execSync(cmd, { stdio: "pipe" }));
+          await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
+          readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture across restart/upgrade
+          stampEngineVersionIfRunning(dataDir); // flair#1047: stamp the store with the engine version
+          return;
+        } catch (err: any) {
+          console.error(`launchd start failed, falling back to direct start: ${err.message}`);
         }
-        const { execSync } = await import("node:child_process");
-        ensureLaunchdServiceLoaded(dataDir, (cmd) => execSync(cmd, { stdio: "pipe" }));
-        await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
-        readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture across restart/upgrade
-        stampEngineVersionIfRunning(dataDir); // flair#1047: stamp the store with the engine version
-        return;
-      } catch (err: any) {
-        console.error(`launchd start failed, falling back to direct start: ${err.message}`);
       }
     }
   }
@@ -7016,6 +7093,10 @@ export {
   // launchd management observation (flair#1022)
   observeLaunchdManagement,
   resolveInstanceServingPid,
+
+  // launchd domain preflight (flair#2040)
+  observeLaunchdDomain,
+  observeLaunchdJobLoaded,
 };
 
 // Shared with `flair status` via src/lib/ops-api-bind.ts (flair#852).
