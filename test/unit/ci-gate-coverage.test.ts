@@ -23,7 +23,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, relative } from "node:path";
-import { unitPlan } from "../../scripts/test-unit.ts";
+import { parseUnitLaneArgs, unitPlan } from "../../scripts/test-unit.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const WORKFLOW_DIR = join(REPO_ROOT, ".github", "workflows");
@@ -67,11 +67,24 @@ function ciTestTargets(): { dirs: string[]; rootGlob: boolean } {
   return ciTestTargetsFromText(workflowText());
 }
 
+/**
+ * Whether one `run: bun run test:unit ...` line EXECUTES the lane (flair#2030).
+ * The runner's own argument parser decides: `--list` only prints the plan, and
+ * an unknown or contradictory flag makes the runner exit with a usage error, so
+ * neither runs a single test and neither may count as coverage. A flag that
+ * runs the lane (`--keep-going`, `--fail-fast`) keeps it.
+ */
+function executesSharedLane(flags: string): boolean {
+  try {
+    return !parseUnitLaneArgs(flags.trim().split(/\s+/).filter(Boolean), {}).list;
+  } catch {
+    return false;
+  }
+}
+
 function sharedUnitFiles(text: string): Set<string> {
-  // The shared-runner invocation may carry trailing flags (flair#2030 adds
-  // `--keep-going`); a flag must not make the coverage detector read as "CI runs
-  // nothing", which would silently zero this gate's corpus.
-  if (!/^\s*run: bun run test:unit(?:\s+--[\w-]+)*\s*$/m.test(text)) return new Set();
+  const invocations = [...text.matchAll(/^[ \t]*run: bun run test:unit((?:[ \t]+\S+)*)[ \t]*$/gm)];
+  if (!invocations.some(([, flags]) => executesSharedLane(flags))) return new Set();
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
   if (pkg.scripts["test:unit"] !== "bun scripts/test-unit.ts") return new Set();
   return new Set(unitPlan(REPO_ROOT).flatMap(step => step.files.map(file => relative(REPO_ROOT, file))));
@@ -154,6 +167,17 @@ describe("every test file is reachable from a CI command", () => {
     // detector only matched the bare command, every root/isolated test file
     // would read as an orphan and this gate would fail on a correct workflow.
     expect(sharedUnitFiles("      run: bun run test:unit --keep-going").size).toBeGreaterThan(100);
+    expect(sharedUnitFiles("      run: bun run test:unit --fail-fast").size).toBeGreaterThan(100);
+  });
+
+  test("an invocation that runs no tests covers nothing (flair#2030)", () => {
+    // `--list` prints the plan and exits: crediting it would let a workflow that
+    // runs zero unit tests pass this gate. Same for a flag the runner refuses.
+    for (const flags of ["--list", "--list --keep-going", "--keep-going --list", "--keep-going --fail-fast", "--no-such-flag"]) {
+      expect(sharedUnitFiles(`      run: bun run test:unit ${flags}`).size).toBe(0);
+    }
+    // One executing line is enough, wherever it sits among listing ones.
+    expect(sharedUnitFiles("      run: bun run test:unit --list\n      run: bun run test:unit --keep-going").size).toBeGreaterThan(100);
   });
 
   test("loop directory parser detects file-by-file loops from workflow + release.sh", () => {

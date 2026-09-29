@@ -488,7 +488,10 @@ if ! (cd "$ROOT" && node scripts/check-darwin-gated-tests.mjs); then
   fi
   exit 1
 fi
-if ! (cd "$ROOT" && bun run test:unit); then
+# --fail-fast (flair#2030): a release stops at the first failing step. The
+# runner turns keep-going on for a truthy CI value, and a release shell can
+# inherit CI=true; the explicit flag wins over it.
+if ! (cd "$ROOT" && bun run test:unit --fail-fast); then
   echo "❌ Tests failed (unit)"
   if [[ "$(uname -s)" == Darwin ]]; then
     echo "   This host is macOS. The unit suite includes darwin-gated launchd tests that Linux CI skips (flair#1012)."
