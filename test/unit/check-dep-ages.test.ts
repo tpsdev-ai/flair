@@ -171,7 +171,7 @@ function freshRegistry() {
 }
 
 /** A registry that reports FIXTURE_VERSION with a PRESENT but unparseable time. */
-function unparseableRegistry(value = "not-a-timestamp") {
+function unparseableRegistry(value: unknown = "not-a-timestamp") {
   const requests: string[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
