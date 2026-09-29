@@ -118,13 +118,15 @@ exactly a shape flair supports:
 
 | | Written only when | Refused (nothing written) |
 |---|---|---|
-| macOS plist (`~/Library/LaunchAgents/ai.tpsdev.flair.<hash>.plist`), read as XML structure | one Label (this data directory's) at the top level, ROOTPATH (this data directory) and HOME (yours) in `EnvironmentVariables`, no `Program` key, ProgramArguments = the launcher in its WorkingDirectory tree, this instance's admin-pass file, a `node`, a Harper entry in that tree | anything else — another HOME, label or pass file, an extra argument, a key in the wrong dict, an XML comment, CDATA, a character reference, a duplicate key |
+| macOS plist (`~/Library/LaunchAgents/ai.tpsdev.flair.<hash>.plist`), read as XML structure | one Label (this data directory's) at the top level, ROOTPATH (this data directory) and HOME (yours) in `EnvironmentVariables`, no `Program` key, ProgramArguments = the launcher in its WorkingDirectory tree, this instance's admin-pass file, a `node`, a Harper entry in that tree | a plist that is not this instance's or not in that shape — another HOME, label or pass file, an extra argument, a key in the wrong dict — and an XML declaration naming an encoding other than UTF-8, an XML comment, CDATA, a character reference, a duplicate key, or an unsupported XML element |
 | Linux systemd user unit (the one proven above) | one `WorkingDirectory=` (the served tree) and one `ExecStart=` of `<node> <harper.js> run .` or `<launcher> <admin-pass file> <node> <harper.js>`, optional `-` prefix | drop-ins (any location systemd reports, or `<unit>.d` beside the file), any other argument (operator arguments are never rewritten), quoting, `%` specifiers, `$` variables, line continuations, other `ExecStart=` prefixes, and a new path that would need quoting |
-| Both | the old tree is an npm-global install; its flair version and this CLI's are strict semver and this CLI's is not older (prereleases count: `0.57.0-beta.1` is older than `0.57.0`) | a plain tree or checkout (separately managed), an unreadable, non-semver or newer version (a downgrade cannot be ruled out) |
+| Both, when moving to a different installed tree | the old tree is an npm-global install; its flair version and this CLI's are strict semver and this CLI's is not older (prereleases count: `0.57.0-beta.1` is older than `0.57.0`) | a plain tree or checkout (separately managed), an unreadable, non-semver or newer version (a downgrade cannot be ruled out) |
 
 A unit that serves this CLI's tree with a different, existing node is treated
 as a deliberate pin: `flair init` leaves it, and init and `flair doctor` report it
-with the hand edit that would move it. The write is atomic and
+with the hand edit that would move it. A plist that already serves this CLI's
+tree has a missing runtime path replaced without the version check in the table,
+which applies only to a move between trees. The write is atomic and
 lands only over the bytes it was planned from — the file is read as a regular
 file (a symlink is refused, not followed) whose bytes are valid UTF-8 (anything
 else is refused before planning), and its bytes are re-checked immediately
@@ -133,9 +135,11 @@ before the rename, so an edit saved in between refuses the write. On Linux,
 if it cannot), then runs `systemctl --user daemon-reload` (which also loads any
 other pending edits to your user units) and checks what systemd loaded. If the
 reload fails or systemd does not hold the re-pointed unit, the previous bytes
-are restored, systemd is reloaded and asked again; flair says the file and
-systemd agree only when systemd reports what it held before the write, and
-otherwise reports systemd's state as unverified. Every refusal names the file, what did not match, and the
+are restored, systemd is reloaded and asked again. That check covers three
+fields: when systemd's FragmentPath, drop-ins and WorkingDirectory are back at
+the values recorded before the write, flair says exactly that and still calls
+full agreement between the restored file and systemd unverified; otherwise it
+reports systemd's state as unverified. Every refusal names the file, what did not match, and the
 remedy — the paths to set by hand, an update of this CLI's tree, or a
 reinstall; after a hand edit, `flair restart` brings the instance up under
 the edited unit (macOS reloads the plist; on Linux, when the unit is proven to
@@ -145,9 +149,9 @@ The federation-sync shim (`~/.flair/bin/flair-federation-sync`) is re-pointed
 the same way: only its exec line changes, the scheduler unit is never
 rewritten, and the shim is refused when it is a symlink or not valid UTF-8,
 changes between the read and the rename, runs any command other than what
-`flair federation sync enable` writes (comment lines are not compared), or
-when its installed old tree's version (or this CLI's) is not strict semver or
-is newer.
+`flair federation sync enable` writes (comment lines are not compared), or —
+when it is moved to a different installed tree — when that tree's version (or
+this CLI's) is not strict semver or is newer.
 `flair federation sync enable` regenerates it.
 
 ### Upgrade is a transaction

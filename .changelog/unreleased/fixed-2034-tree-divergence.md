@@ -34,9 +34,10 @@
   did not match, and the remedy: the paths to set by hand, an update of this
   CLI's tree, or a reinstall.
 
-  - macOS, the adopted pass-file plist, read as XML structure: a plist with an
-    XML comment, CDATA, a character reference, a duplicate key or any element
-    flair does not write is refused. It must declare exactly one Label (this
+  - macOS, the adopted pass-file plist, read as XML structure: a plist whose
+    XML declaration names an encoding other than UTF-8, or that has an XML
+    comment, CDATA, a character reference, a duplicate key or an unsupported
+    XML element, is refused. It must declare exactly one Label (this
     data directory's) in the top-level dict, ROOTPATH (this data directory) and
     HOME (this user's) in its EnvironmentVariables dict, no `Program` key, and
     ProgramArguments of exactly the launcher in its WorkingDirectory tree, this
@@ -51,10 +52,12 @@
     a path of this CLI's that would need quoting in a unit is refused rather
     than written. Drop-ins refuse the re-point, whether systemd reports them
     from any location or a `<unit>.d` directory sits beside the file.
-  - Both: the old tree's flair version and this CLI's must be strict semver,
-    and the CLI's must not be older by semver ordering, prereleases included
-    (`0.57.0-beta.1` is older than `0.57.0`); otherwise a downgrade cannot be
-    ruled out and nothing is written. A unit serving this CLI's tree
+  - Both, when moving the unit to a different installed tree: the old tree's
+    flair version and this CLI's must be strict semver, and the CLI's must not
+    be older by semver ordering, prereleases included (`0.57.0-beta.1` is older
+    than `0.57.0`); otherwise a downgrade cannot be ruled out and nothing is
+    written. (A plist already serving this CLI's tree has a missing runtime
+    path replaced without that version check.) A unit serving this CLI's tree
     with a different, existing node is a deliberate pin that init leaves as it
     is (init and doctor report it, with the hand edit that moves it).
   - The write is atomic and lands only over the bytes it was planned from: the
@@ -67,10 +70,12 @@
     edits to that user's units) and asks systemd whether it loaded the same
     file, with no drop-ins and the new working directory. If the reload fails or
     systemd does not hold that, init restores the previous bytes, reloads again
-    and asks again: it says the file and systemd agree only when systemd
-    reports what it held before the write; otherwise, or when the restore or
-    the second reload fails, the message states what the file holds and that
-    systemd's state is unverified.
+    and asks again. That check covers three fields: when systemd's
+    FragmentPath, drop-ins and WorkingDirectory are back at the values
+    recorded before the write, the message says exactly that and still calls
+    full agreement between the restored file and systemd unverified; when they
+    are not, or when the restore or the second reload fails, the message
+    states what the file holds and that systemd's state is unverified.
 
   `flair init` is still the full setup command and also re-runs its other
   idempotent setup for the data directory, which creates or saves instance
@@ -83,8 +88,10 @@
   shim is refused when its commands differ from what `flair federation sync
   enable` writes in anything but the two paths on the exec line (comment lines
   are not compared), when it is a symlink or not valid UTF-8, when it changes
-  between the read and the rename, or when its installed old tree's version
-  (or this CLI's) is not strict semver or is newer; an unreadable unit or shim
+  between the read and the rename, or, when moving it to a different
+  installed tree, when that tree's version (or this CLI's) is not strict
+  semver or is newer (a shim already running this CLI's tree has a missing
+  node replaced without that check); an unreadable unit or shim
   is refused, and a leftover shim without an enabled scheduler is left alone.
 
   `flair doctor` runs an install-tree check on every run. A different node

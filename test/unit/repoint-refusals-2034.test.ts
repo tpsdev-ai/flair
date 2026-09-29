@@ -574,7 +574,10 @@ describe("5 — the write lands only over the bytes it was planned from", () => 
     expect(readFileSync(f.path, "utf-8")).toContain(`WorkingDirectory=${NEW_TREE}`);
   });
 
-  test("systemd: a failed reload restores the bytes, reloads, and RE-QUERIES before saying they agree", () => {
+  const FIELDS_BACK = "FragmentPath, drop-ins and WorkingDirectory are back at the values captured before the write";
+  const FULL_UNVERIFIED = "full agreement between the restored file and what the manager loaded is unverified";
+
+  test("systemd: a failed reload restores the bytes, reloads, RE-QUERIES, and says only that the captured fields are back", () => {
     const f = systemdFixture();
     const d = fakes(f.path, { reloads: [() => { throw new Error("Failed to reload daemon"); }] });
     const r = repointSystemdUserUnit(f.serving, targets, d);
@@ -583,8 +586,24 @@ describe("5 — the write lands only over the bytes it was planned from", () => 
     // capture, reload (fails), restore, reload, re-query against the capture.
     expect(d.calls).toEqual(["show", "reload", "reload", "show"]);
     if (r.kind === "refused") {
-      expect(r.detail).toContain("the manager reports the unit it held before the write again");
-      expect(r.detail).not.toContain("UNVERIFIED");
+      expect(r.detail).toContain(FIELDS_BACK);
+      expect(r.detail).toContain(FULL_UNVERIFIED);
+      expect(r.detail).not.toContain("which unit the manager holds is UNVERIFIED");
+    }
+  });
+
+  test("systemd: a manager that already differed from the file when captured is reported by its fields only — never as agreement", () => {
+    const f = systemdFixture();
+    // systemd holds a WorkingDirectory the unit file does not name (an edit not yet reloaded).
+    const held: SystemdUnitManagerState = { mainPid: 77, fragmentPath: f.path, dropInPaths: [], workingDirectory: "/srv/elsewhere" };
+    const d = fakes(f.path, { reloads: [() => { throw new Error("Failed to reload daemon"); }], unitState: () => held });
+    const r = repointSystemdUserUnit(f.serving, targets, d);
+    expect(r.kind).toBe("refused");
+    expect(readFileSync(f.path, "utf-8")).toBe(f.before);
+    if (r.kind === "refused") {
+      expect(r.detail).toContain(FIELDS_BACK);
+      expect(r.detail).toContain(FULL_UNVERIFIED);
+      expect(r.detail).not.toMatch(/\bagree\b|reports the unit it held before/);
     }
   });
 
@@ -607,7 +626,7 @@ describe("5 — the write lands only over the bytes it was planned from", () => 
     if (r.kind === "refused") {
       expect(r.detail).toContain("UNVERIFIED");
       expect(r.detail).toContain("x.conf");
-      expect(r.detail).not.toContain("reports the unit it held before the write again");
+      expect(r.detail).not.toContain(FIELDS_BACK);
     }
   });
 
@@ -1104,6 +1123,44 @@ describe("round 4 / 2 — the plist is read as XML structure; comments and mispl
     refused(adoptedPlist().replace("<string>/usr/bin:/bin</string>", "<string>&#47;usr/bin:/bin</string>"), "reference");
     refused(adoptedPlist().replace("<key>RunAtLoad</key><true/>", "<key>RunAtLoad</key><true/>\n  <key>RunAtLoad</key><false/>"), "twice");
     refused(`${adoptedPlist()}\n<plist version="1.0"><dict/></plist>`, "after");
+  });
+
+  test("round 5: an XML declaration of UTF-16 over UTF-8 bytes, or of an unknown encoding, is refused, naming the file", () => {
+    expect(adoptedPlist()).toContain('encoding="UTF-8"');
+    refused(adoptedPlist().replace('encoding="UTF-8"', 'encoding="UTF-16"'), "only UTF-8 is read");
+    refused(adoptedPlist().replace('encoding="UTF-8"', "encoding='x-flair-unknown'"), "x-flair-unknown");
+    const plan = planPlistRuntimeRepoint(adoptedPlist().replace('encoding="UTF-8"', 'encoding="UTF-16"'), plistTargets(), plistDeps(), "/p.plist", OWNER);
+    if (plan.kind === "refuse") expect(plan.detail).toContain("the launchd plist /p.plist");
+  });
+
+  test("round 5 control: a UTF-8 declaration in any case, or no encoding at all, is read", () => {
+    for (const raw of [
+      adoptedPlist().replace('encoding="UTF-8"', 'encoding="utf-8"'),
+      adoptedPlist().replace(' encoding="UTF-8"', ""),
+      adoptedPlist().replace(/^<\?xml[^>]*>\n/, ""),
+    ]) {
+      expect(planPlistRuntimeRepoint(raw, plistTargets(), plistDeps(), "/p.plist", OWNER).kind).toBe("repoint");
+    }
+  });
+
+  test("round 5: plist value elements are supported (real, date, data); an unsupported XML element is refused", () => {
+    const at = "<key>RunAtLoad</key>";
+    for (const v of ["<real>1.5</real>", "<date>2026-09-28T00:00:00Z</date>", "<data>AAAA</data>"]) {
+      const raw = adoptedPlist().replace(at, `<key>OperatorValue</key>${v}\n  ${at}`);
+      expect(planPlistRuntimeRepoint(raw, plistTargets(), plistDeps(), "/p.plist", OWNER).kind).toBe("repoint");
+    }
+    refused(adoptedPlist().replace(at, `<key>OperatorValue</key><set/>\n  ${at}`), "an unsupported XML element <set>");
+  });
+
+  test("round 5: the version gate applies to a move between trees — a same-tree missing node is replaced without it", () => {
+    const t = plistTargets();
+    const raw = adoptedPlist({ workingDirectory: MAC_NEW_TREE, harperBinPath: t.harperBin, launcher: t.launcher, execPath: "/opt/gone/bin/node" });
+    const d = repointDeps({ present: [t.launcher!, t.nodeBin, t.harperBin, t.workingDirectory], versions: {} });
+    const plan = planPlistRuntimeRepoint(raw, t, d, "/p.plist", OWNER);
+    expect(plan.kind).toBe("repoint");
+    if (plan.kind === "repoint") expect(plan.changes.map((c) => c.field)).toEqual(["node"]);
+    // The same unreadable version refuses a move from another tree.
+    expect(planPlistRuntimeRepoint(adoptedPlist(), t, d, "/p.plist", OWNER).kind).toBe("refuse");
   });
 
   test("control: a plain plist with operator-changed values is still re-pointed", () => {

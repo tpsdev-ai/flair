@@ -13,10 +13,13 @@
  *      holds for the unit (the file it loaded, its drop-ins, its working
  *      directory). When the reload fails or the manager does not hold what was
  *      written, the previous bytes are put back, the manager is reloaded again
- *      and ASKED AGAIN: only when it reports the state captured before the write
- *      does the result say the file and the manager agree. Anything short of
- *      that query's confirmation — a failed restore, a failed second reload, a
- *      different answer — is reported with the manager's state as UNVERIFIED.
+ *      and ASKED AGAIN. That query compares three fields — FragmentPath,
+ *      drop-ins, WorkingDirectory — with the values captured before the write;
+ *      when they are back, the result says exactly that, and still calls full
+ *      agreement between the restored file and the manager unverified (three
+ *      fields are not the whole unit). Anything short of that — a failed
+ *      restore, a failed second reload, a different or missing answer — is
+ *      reported with the manager's state as UNVERIFIED.
  *   3. Linux: a unit with drop-ins — any the manager reports, from any
  *      location, or a `<unit>.d` directory beside the file — is refused.
  *
@@ -127,16 +130,18 @@ export function applyRepointPlan(plan: RepointPlan, planned: FileSnapshot, opts:
       unitPath,
       detail:
         `${unitPath} was not re-pointed: ${failure}. flair restored the file's previous content and reloaded the ` +
-        `service manager, but the manager does not report the unit it held before (${back}): the file holds the ` +
-        `previous unit; which unit the manager holds is UNVERIFIED. ${unverified}`,
+        "service manager, but the manager does not report the FragmentPath, drop-ins and WorkingDirectory captured " +
+        `before the write (${back}): the file holds the previous unit; which unit the manager holds is UNVERIFIED. ${unverified}`,
     };
   }
   return {
     kind: "refused",
     unitPath,
     detail:
-      `${unitPath} was not re-pointed: ${failure}. flair restored the file's previous content, reloaded the service ` +
-      `manager, and the manager reports the unit it held before the write again.${handEdit}`,
+      `${unitPath} was not re-pointed: ${failure}. flair restored the file's previous content and reloaded the service ` +
+      "manager; the manager's FragmentPath, drop-ins and WorkingDirectory are back at the values captured before the " +
+      "write. Only those three fields were checked, so full agreement between the restored file and what the manager " +
+      `loaded is unverified.${handEdit}`,
   };
 }
 

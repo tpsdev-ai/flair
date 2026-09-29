@@ -16,8 +16,8 @@
  * hand. No other shape is interpreted, and no operator argument is rewritten.
  *
  *   - launchd — the pass-file plist `flair init` / `doctor --fix` write, for
- *     THIS instance, read as XML structure (readPlistStructure — a comment,
- *     CDATA or any structure beyond a plain plist is refused): one Label (this
+ *     THIS instance, read as XML structure (readPlistStructure — a non-UTF-8
+ *     declaration, a comment, CDATA or an unsupported XML element is refused): one Label (this
  *     data dir's label) at the top level, one ROOTPATH (this data dir) and one
  *     HOME (this user's home) in EnvironmentVariables, no `Program` key, one WorkingDirectory
  *     and a ProgramArguments array of exactly
@@ -236,11 +236,14 @@ type PlistValue =
 
 /**
  * Read a plist the way launchd would — as XML structure — or say why it is not
- * the plain shape flair writes. REFUSED rather than interpreted: XML comments,
- * CDATA, processing instructions after the declaration, a DOCTYPE with an
- * internal subset, entity references beyond the five predefined ones, unknown
- * elements, text outside a value, duplicate keys in one dict, and anything
- * after `</plist>`. Refusing comments (instead of skipping them) is what keeps
+ * the plain shape flair writes. REFUSED rather than interpreted: an XML
+ * declaration naming any encoding but UTF-8 (the bytes are read as UTF-8, so
+ * another declared encoding would be read wrongly), XML comments, CDATA,
+ * processing instructions after the declaration, a DOCTYPE with an internal
+ * subset, entity references beyond the five predefined ones, unsupported XML
+ * elements (the plist value elements are supported, including `real`, `date`
+ * and `data`, which flair does not write), text outside a value, duplicate keys
+ * in one dict, and anything after `</plist>`. Refusing comments (instead of skipping them) is what keeps
  * the text rewrite below exact: with none, every literal `<key>…</key>` in the
  * file is a real element, so the unique-key counts and the value splices
  * address the same elements this reader placed.
@@ -327,7 +330,7 @@ export function readPlistStructure(raw: string): { top: Map<string, PlistValue> 
         }
       }
       default:
-        return fail(`an element <${o.name}> flair does not write`);
+        return fail(`an unsupported XML element <${o.name}>`);
     }
   };
   try {
@@ -336,6 +339,11 @@ export function readPlistStructure(raw: string): { top: Map<string, PlistValue> 
     if (raw.startsWith("<?xml", i)) {
       const e = raw.indexOf("?>", i);
       if (e < 0) fail("an unterminated XML declaration");
+      // Absent, or UTF-8: the file's bytes are read as UTF-8.
+      const enc = /\sencoding\s*=\s*(["'])([^"']*)\1/.exec(raw.slice(i, e));
+      if (enc && enc[2]!.toLowerCase() !== "utf-8") {
+        fail(`an XML declaration of the encoding ${JSON.stringify(enc[2])} (only UTF-8 is read)`);
+      }
       i = e + 2;
     }
     ws();
