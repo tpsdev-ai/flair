@@ -434,7 +434,7 @@ describe("flair#2040 — doctor --fix never stops an instance it cannot hand to 
 
       const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
 
-      expect(result.kind).toBe("refused"); // doctor counts an issue and exits non-zero; never "repaired"
+      expect(result).toMatchObject({ kind: "refused" }); // whole result printed on failure // doctor counts an issue and exits non-zero; never "repaired"
       expect(result.reason).toBe("launchd-domain-unavailable");
       expect(result.detail).toContain(`launchctl print ${GUI} exited 125`);
       expect(result.detail).toContain("Nothing was stopped, unloaded or rewritten");
@@ -460,7 +460,7 @@ describe("flair#2040 — doctor --fix never stops an instance it cannot hand to 
 
       const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
 
-      expect(result.kind).toBe("refused");
+      expect(result).toMatchObject({ kind: "refused" }); // whole result printed on failure
       expect(result.reason).toBe("launchd-job-disabled");
       expect(result.detail).toContain(`launchctl enable ${GUI}/${fx.label}`);
       expect(alive(pid)).toBe(true);
@@ -479,7 +479,7 @@ describe("flair#2040 — doctor --fix never stops an instance it cannot hand to 
 
       const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
 
-      expect(result.kind).toBe("failed");
+      expect(result).toMatchObject({ kind: "failed" }); // whole result printed on failure
       expect(result.detail).toContain("start-flair-with-admin-pass.sh, which does not exist");
       expect(result.detail).toContain("Nothing was stopped or unloaded, and no plist was written");
       expect(alive(pid)).toBe(true);
@@ -498,7 +498,7 @@ describe("flair#2040 — doctor --fix never stops an instance it cannot hand to 
 
       const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
 
-      expect(result.kind).toBe("repaired");
+      expect(result).toMatchObject({ kind: "repaired" }); // whole result printed on failure
       expect(result.detail).toContain("adopted the direct-spawned instance into launchd");
       // The direct process was clean-stopped (SIGTERM), and launchd's job now serves.
       expect(signals()).toContain(`SIGTERM ${pid}`);
@@ -524,7 +524,7 @@ describe("flair#2040 — doctor --fix never stops an instance it cannot hand to 
 
       const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
 
-      expect(result.kind).toBe("repaired");
+      expect(result).toMatchObject({ kind: "repaired" }); // whole result printed on failure
       expect(signals()).toContain(`SIGTERM ${pid}`);
       const order = readFileSync(join(fx.state, "bootout-order"), "utf-8").split("\n").filter(Boolean);
       // The FIRST bootout of this job happened while the direct process still served.
@@ -541,7 +541,7 @@ describe("flair#2040 — doctor --fix never stops an instance it cannot hand to 
 
       const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
 
-      expect(result.kind).toBe("failed");
+      expect(result).toMatchObject({ kind: "failed" }); // whole result printed on failure
       expect(result.detail).toContain("is loaded but not running");
       expect(result.detail).toContain("Flair was restarted directly");
       expect(signals()).toContain(`SIGTERM ${pid}`);
@@ -561,7 +561,7 @@ describe("flair#2040 — doctor --fix never stops an instance it cannot hand to 
 
       const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
 
-      expect(result.kind).toBe("failed"); // never "repaired"
+      expect(result).toMatchObject({ kind: "failed" }); // whole result printed on failure // never "repaired"
       expect(result.detail).toContain("Bootstrap failed: 5: Input/output error");
       expect(result.detail).toContain("Restored:");
       expect(result.detail).toContain("Flair was restarted directly");
@@ -607,7 +607,7 @@ describe("flair#2040 — init never unloads a serving legacy job it cannot repla
 
       const { result } = await drive("init", initInput());
 
-      expect(result.kind).toBe("skipped");
+      expect(result).toMatchObject({ kind: "skipped" }); // whole result printed on failure
       const text = result.lines.map((l: any) => l.text).join("\n");
       expect(text).toContain("the launchd GUI domain is unavailable from this session");
       expect(text).toContain("Nothing was unloaded or removed");
@@ -629,7 +629,7 @@ describe("flair#2040 — init never unloads a serving legacy job it cannot repla
 
       const { result } = await drive("init", initInput());
 
-      expect(result.kind).toBe("managed");
+      expect(result).toMatchObject({ kind: "managed" }); // whole result printed on failure
       const text = result.lines.map((l: any) => l.text).join("\n");
       expect(text).toContain(`Migrated launchd service off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${fx.label}`);
       expect(text).toContain("✓");
@@ -653,7 +653,7 @@ describe("flair#2040 — init never unloads a serving legacy job it cannot repla
 
       const { result } = await drive("init", initInput());
 
-      expect(result.kind).toBe("restored");
+      expect(result).toMatchObject({ kind: "restored" }); // whole result printed on failure
       const text = result.lines.map((l: any) => l.text).join("\n");
       expect(text).toContain("failed after the legacy job was unloaded");
       expect(text).toContain(`Restored: the legacy job ${LEGACY_LAUNCHD_LABEL} is loaded again and serving`);
@@ -676,7 +676,7 @@ describe("flair#2040 — init never unloads a serving legacy job it cannot repla
 
       const { result } = await drive("init", initInput());
 
-      expect(result.kind).toBe("restored");
+      expect(result).toMatchObject({ kind: "restored" }); // whole result printed on failure
       const text = result.lines.map((l: any) => l.text).join("\n");
       expect(text).not.toContain("✓");
       expect(text).toContain("is loaded but not running");
@@ -695,7 +695,7 @@ describe("flair#2040 — init never unloads a serving legacy job it cannot repla
 
       const { result } = await drive("init", initInput());
 
-      expect(result.kind).toBe("direct");
+      expect(result).toMatchObject({ kind: "direct" }); // whole result printed on failure
       const text = result.lines.map((l: any) => l.text).join("\n");
       expect(text).toContain(`Launchd plist written (${fx.plistPath})`);
       expect(text).toContain("Flair is running directly, NOT launchd-managed");
@@ -736,7 +736,7 @@ describe("flair#2040 — a launchd start of the job while a DIRECT process serve
       const pid = await startDirectStub();
       writeFileSync(join(fx.state, "domain-code"), "125");
       const { result } = await drive("init", initInput());
-      expect(result.kind).toBe("direct");
+      expect(result).toMatchObject({ kind: "direct" }); // whole result printed on failure
 
       const startsBefore = stubStarts().length;
       const refused = runAsLaunchd(fx.plistPath);
@@ -939,7 +939,7 @@ describe("flair#2040 r4 — doctor --fix: an unknown answer refuses before any s
 
       const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
 
-      expect(result.kind).toBe("failed");
+      expect(result).toMatchObject({ kind: "failed" }); // whole result printed on failure
       expect(result.detail).toContain("plutil -lint could not check the plist");
       expect(result.detail).toContain("Nothing was stopped or unloaded");
       expect(alive(pid)).toBe(true);
@@ -959,7 +959,7 @@ describe("flair#2040 r4 — doctor --fix: an unknown answer refuses before any s
 
       const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
 
-      expect(result.kind).toBe("refused");
+      expect(result).toMatchObject({ kind: "refused" }); // whole result printed on failure
       expect(result.reason).toBe("unreadable-prior-state");
       expect(result.detail).toContain(`${fx.plistPath} (EACCES`);
       expect(existsSync(fx.plistPath)).toBe(true);
@@ -981,7 +981,7 @@ describe("flair#2040 r4 — doctor --fix: an unknown answer refuses before any s
 
       const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
 
-      expect(result.kind).toBe("refused");
+      expect(result).toMatchObject({ kind: "refused" }); // whole result printed on failure
       expect(result.reason).toBe("unverifiable");
       expect(result.detail).toContain("could not be identified");
       expect(alive(pid)).toBe(true);
@@ -1000,7 +1000,7 @@ describe("flair#2040 r4 — doctor --fix: an unknown answer refuses before any s
 
       const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
 
-      expect(result.kind).toBe("failed");
+      expect(result).toMatchObject({ kind: "failed" }); // whole result printed on failure
       expect(result.detail).toContain("could not be identified");
       expect(result.detail).toContain("Restored:");
       expect(result.detail).toContain("unloaded again (verified absent)");
@@ -1021,7 +1021,7 @@ describe("flair#2040 r4 — doctor --fix: an unknown answer refuses before any s
 
       const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
 
-      expect(result.kind).toBe("failed");
+      expect(result).toMatchObject({ kind: "failed" }); // whole result printed on failure
       expect(result.detail).toContain("could not unload the loaded job before stopping anything");
       expect(result.detail).toContain("the job is still loaded");
       expect(result.detail).toContain("this repair did not stop the running instance");
@@ -1042,7 +1042,7 @@ describe("flair#2040 r4 — doctor --fix: an unknown answer refuses before any s
 
       const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
 
-      expect(result.kind).toBe("refused");
+      expect(result).toMatchObject({ kind: "refused" }); // whole result printed on failure
       expect(result.reason).toBe("unverifiable");
       expect(result.detail).toContain("could not say whether the job is loaded");
       expect(alive(pid)).toBe(true);
@@ -1062,7 +1062,7 @@ describe("flair#2040 r4 — doctor --fix: an unknown answer refuses before any s
 
       const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
 
-      expect(result.kind).toBe("failed");
+      expect(result).toMatchObject({ kind: "failed" }); // whole result printed on failure
       expect(result.detail).toContain("the job this repair loaded could not be shown unloaded");
       expect(result.detail).toContain("Flair was NOT restarted directly");
       expect(result.remedy).toContain(`launchctl bootout ${GUI}/${fx.label}`);
@@ -1081,7 +1081,7 @@ describe("flair#2040 r4 — doctor --fix: an unknown answer refuses before any s
 
       const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
 
-      expect(result.kind).toBe("refused");
+      expect(result).toMatchObject({ kind: "refused" }); // whole result printed on failure
       expect(result.reason).toBe("unverifiable");
       expect(result.detail).toContain(`port ${fx.port} is not free`);
       expect(alive(pid)).toBe(true);
@@ -1105,7 +1105,7 @@ describe("flair#2040 r4 — init: a legacy job not PROVEN idle is never booted o
 
       const { result } = await drive("init", initInput());
 
-      expect(result.kind).toBe("skipped");
+      expect(result).toMatchObject({ kind: "skipped" }); // whole result printed on failure
       const text = result.lines.map((l: any) => l.text).join("\n");
       expect(text).toContain("may be the process serving this instance");
       expect(text).toContain("could not be identified");
@@ -1130,7 +1130,7 @@ describe("flair#2040 r4 — init: a legacy job not PROVEN idle is never booted o
 
       const { result } = await drive("init", initInput());
 
-      expect(result.kind).toBe("skipped");
+      expect(result).toMatchObject({ kind: "skipped" }); // whole result printed on failure
       const text = result.lines.map((l: any) => l.text).join("\n");
       expect(text).toContain("could not say whether it is loaded");
       expect(mutatingCalls()).toEqual([]);
@@ -1150,7 +1150,7 @@ describe("flair#2040 r4 — init: a legacy job not PROVEN idle is never booted o
 
       const { result } = await drive("init", initInput());
 
-      expect(result.kind).toBe("unverified");
+      expect(result).toMatchObject({ kind: "unverified" }); // whole result printed on failure
       const text = result.lines.map((l: any) => l.text).join("\n");
       expect(text).toContain("launchd management is NOT verified");
       expect(text).not.toContain("✓");
@@ -1185,7 +1185,7 @@ describe("flair#2040 r5 — init: an idle legacy job that cannot be shown unload
 
       const { result, stdout, stderr } = await drive("init", initInput());
 
-      expect(result.kind).toBe("uncertain"); // init exits 1 on uncertain
+      expect(result).toMatchObject({ kind: "uncertain" }); // whole result printed on failure // init exits 1 on uncertain
       const text = result.lines.map((l: any) => l.text).join("\n");
       expect(text).toContain(`the legacy job ${LEGACY_LAUNCHD_LABEL} could not be shown unloaded`);
       expect(text).toContain(`Its plist at ${legacyPlistPath()} was left in place`);
@@ -1220,7 +1220,7 @@ describe("flair#2040 r5 — init: an idle legacy job that cannot be shown unload
 
       const { result } = await drive("init", initInput());
 
-      expect(result.kind).toBe("uncertain");
+      expect(result).toMatchObject({ kind: "uncertain" }); // whole result printed on failure
       const text = result.lines.map((l: any) => l.text).join("\n");
       expect(text).toContain(`the plist at ${fx.plistPath} was put back as it was`);
       expect(readFileSync(fx.plistPath, "utf-8")).toBe(priorBytes);
@@ -1239,7 +1239,7 @@ describe("flair#2040 r5 — init: an idle legacy job that cannot be shown unload
 
       const { result, stdout, stderr } = await drive("init", initInput());
 
-      expect(result.kind).toBe("direct");
+      expect(result).toMatchObject({ kind: "direct" }); // whole result printed on failure
       const text = result.lines.map((l: any) => l.text).join("\n");
       expect(text).toContain("Flair is running directly, NOT launchd-managed");
       expect(stdout).toContain("Retired the legacy launchd plist");
@@ -1335,7 +1335,7 @@ describe("flair#2040 r5 — doctor --fix: a failed repair puts a corrupt plist b
 
       const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
 
-      expect(result.kind).toBe("failed");
+      expect(result).toMatchObject({ kind: "failed" }); // whole result printed on failure
       expect(result.detail).toContain("Bootstrap failed: 5: Input/output error");
       expect(result.detail).toContain("the plist and config files were put back as they were");
       // The repair did write its plist (the failure is after the write) ...
