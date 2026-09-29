@@ -144,8 +144,11 @@ function logIdentity(logPath: string): LogIdentity {
  *       file to empty again — so a log that discards writes (unwritable, or a
  *       symlink that swallows the append) is refused rather than read as empty.
  *
- * Any failure throws {@link TRIPWIRE_LOG_CANNOT_RECORD}; a missing/unreadable log
- * throws the read error. Neither is ever read as "no calls".
+ * Every failure throws and fails the lane; none is ever read as "no calls". An
+ * identity mismatch, a failed canary append and a canary mismatch throw
+ * {@link TRIPWIRE_LOG_CANNOT_RECORD}; a missing or unreadable log throws the read
+ * error, a failed canary readback throws a "cannot read" error, and a failed
+ * truncate propagates the filesystem error.
  */
 function readTripwireLog(logPath: string, identity: LogIdentity): string {
   let st;
