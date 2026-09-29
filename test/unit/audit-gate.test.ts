@@ -155,7 +155,12 @@ describe("the committed allowlist", () => {
     // sources ["npm-install"] so the gate knows they are fixed for bun only.
     // joi joined this class when the root override moved bun.lock off 17.13.4.
     const npmOnly = ALLOWLIST.entries.filter((e) => ["fastify", "joi"].includes(e.package));
-    expect(npmOnly.length).toBeGreaterThan(0);
+    // Name the joi entries: a non-empty check alone could be satisfied by the
+    // fastify entries while the joi entries had gone missing.
+    expect(npmOnly.filter((e) => e.package === "joi").map((e) => e.ghsa).sort()).toEqual([
+      "GHSA-6w3j-5fw6-r9vr",
+      "GHSA-gg4h-3hg2-grpc",
+    ]);
     for (const e of npmOnly) {
       expect(e.sources).toEqual(["npm-install"]);
       expect(e.introducedBy).toMatch(/^harper -> /);

@@ -1,4 +1,4 @@
-- **Root dependency overrides raised for new undici, ip-address, lodash, joi and fast-uri advisories in the repo lockfile.**
+- **Root dependency overrides raised for undici, ip-address, lodash, joi and fast-uri advisories in the repo lockfile.**
   `undici` ~8.10.2 (GHSA-3wwx-pv8p-q78v), `ip-address` ^10.5.1 (GHSA-rpw4-54j3-4h4q,
   GHSA-2vr4-cq9g-pvrc) and `lodash` ^4.18.0 (GHSA-r5fr-rjxr-66jc, GHSA-xxjr-mmjv-4gpg,
   GHSA-f23m-r3pf-42rh) move `bun.lock` out of the affected ranges, and the three lodash
