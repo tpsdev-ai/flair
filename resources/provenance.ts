@@ -147,19 +147,28 @@ export function buildProvenance(
 
 /**
  * The fields whose change makes a memory write SEMANTIC — the text the record
- * actually says. A PATCH that changes one of these is re-authoring content, so
- * it MUST re-stamp provenance from the resolved auth and the server clock rather
- * than carry a previously stored `verified.*` value forward (flair#1960 r2).
+ * actually says, plus its creation claim. A PATCH that changes one of these is
+ * re-authoring content (and, for `createdAt`, re-authoring the creation claim),
+ * so it MUST re-stamp provenance from the resolved auth and the server clock
+ * rather than carry a previously stored `verified.*` value forward (flair#1960
+ * r2). `createdAt` is included (flair#1960 r4): a createdAt-only PATCH is
+ * allowed and reaches `super.patch`, so if it were NOT semantic the row's
+ * `createdAt` could change while `provenance.claimed.createdAt` kept the old
+ * value. Making it semantic means a changed creation claim re-stamps, and
+ * `claimed.createdAt` follows the row.
  */
-export const MEMORY_SEMANTIC_FIELDS = Object.freeze(["content", "subject", "summary"] as const);
+export const MEMORY_SEMANTIC_FIELDS = Object.freeze(["content", "subject", "summary", "createdAt"] as const);
 
 /**
  * The fields whose change makes a relationship write SEMANTIC — its identity
- * (what it links). Same rule as MEMORY_SEMANTIC_FIELDS: a semantic PATCH
- * re-stamps provenance; a metadata-only PATCH (confidence/source/etc.) leaves
- * the stored, previously-stamped blob in place.
+ * (what it links), plus its creation claim. Same rule as MEMORY_SEMANTIC_FIELDS:
+ * a semantic PATCH re-stamps provenance; a metadata-only PATCH
+ * (confidence/source/etc.) leaves the stored, previously-stamped blob in place.
+ * `createdAt` is included (flair#1960 r4) for the same reason: a changed
+ * creation claim is a re-authored claim, so the PATCH re-stamps and
+ * `claimed.createdAt` follows the row.
  */
-export const RELATIONSHIP_SEMANTIC_FIELDS = Object.freeze(["subject", "predicate", "object"] as const);
+export const RELATIONSHIP_SEMANTIC_FIELDS = Object.freeze(["subject", "predicate", "object", "createdAt"] as const);
 
 /**
  * True when `content` changes at least one of `fields` relative to the STORED

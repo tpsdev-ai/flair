@@ -1668,6 +1668,80 @@ describe("flair#1960 r3 — Memory.patch() refuses a PATCH when the stored-row R
   });
 });
 
+describe("flair#1960 r4 — createdAt is SEMANTIC (a changed creation claim re-stamps provenance)", () => {
+  it("a createdAt-only PATCH re-stamps provenance and claimed.createdAt follows the new row createdAt", async () => {
+    const before = Date.now();
+    memoryStore.set("prov-patch-createdat", {
+      id: "prov-patch-createdat",
+      agentId: "agent-1",
+      content: "body",
+      durability: "standard",
+      createdAt: "2001-01-01T00:00:00.000Z",
+      provenance: JSON.stringify({
+        v: 1,
+        verified: { agentId: "agent-1", timestamp: "2001-01-01T00:00:00.000Z", receivedAt: "2001-01-01T00:00:00.000Z" },
+        claimed: { createdAt: "2001-01-01T00:00:00.000Z" },
+      }),
+    });
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m.id = "prov-patch-createdat";
+    // A createdAt-ONLY patch: no content change. Before r4 this returned false
+    // from isSemanticPatch, so the row's createdAt moved while the stored
+    // claimed.createdAt kept the old value.
+    await m.patch({ createdAt: "2002-02-02T03:04:05.678Z" });
+    const stored = memoryStore.get("prov-patch-createdat");
+    expect(stored.createdAt).toBe("2002-02-02T03:04:05.678Z"); // control: the patch landed
+    const prov = JSON.parse(stored.provenance);
+    // Provenance is RE-STAMPED from the server clock, not carried forward...
+    const stamped = Date.parse(prov.verified.timestamp);
+    expect(stamped).toBeGreaterThanOrEqual(before - 5000);
+    expect(stamped).toBeLessThanOrEqual(Date.now() + 5000);
+    expect(prov.verified.timestamp).toBe(prov.verified.receivedAt);
+    expect(prov.verified.timestamp).not.toBe("2001-01-01T00:00:00.000Z"); // stale stored stamp not carried forward
+    // ...and the claim follows the row: claimed.createdAt is the new row createdAt (sanitized).
+    expect(prov.claimed.createdAt).toBe("2002-02-02T03:04:05.678Z");
+    expect(prov.claimed.createdAt).toBe(stored.createdAt);
+  });
+
+  it("a createdAt-only PATCH whose value needs sanitizing records the sanitized claim, matching the new row createdAt sanitized", async () => {
+    memoryStore.set("prov-patch-createdat-san", {
+      id: "prov-patch-createdat-san",
+      agentId: "agent-1",
+      content: "body",
+      durability: "standard",
+      createdAt: "2001-01-01T00:00:00.000Z",
+    });
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m.id = "prov-patch-createdat-san";
+    const RAW = "  2002-02-02T03:04:05.678Z\n";
+    await m.patch({ createdAt: RAW });
+    const stored = memoryStore.get("prov-patch-createdat-san");
+    expect(stored.createdAt).toBe(RAW); // the row keeps the caller's value unchanged
+    const prov = JSON.parse(stored.provenance);
+    expect(prov.claimed.createdAt).toBe("2002-02-02T03:04:05.678Z"); // sanitized: control chars stripped, trimmed
+    expect(prov.claimed.createdAt).toBe(stored.createdAt.trim()); // = sanitizeClaim(row.createdAt)
+  });
+
+  it("a metadata-only PATCH still preserves the stored provenance (and its claimed.createdAt)", async () => {
+    const legacy = JSON.stringify({
+      v: 1,
+      verified: { agentId: "agent-1", timestamp: "2001-01-01T00:00:00.000Z", receivedAt: "2001-01-01T00:00:00.000Z" },
+      claimed: { createdAt: "2001-01-01T00:00:00.000Z" },
+    });
+    memoryStore.set("prov-patch-meta-r4", {
+      id: "prov-patch-meta-r4", agentId: "agent-1", content: "unchanged body", durability: "standard",
+      createdAt: "2001-01-01T00:00:00.000Z", provenance: legacy,
+    });
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m.id = "prov-patch-meta-r4";
+    await m.patch({ tags: ["tagged"] });
+    const stored = memoryStore.get("prov-patch-meta-r4");
+    expect(stored.tags).toEqual(["tagged"]); // control: the patch landed
+    expect(stored.provenance).toBe(legacy); // no semantic change ⇒ stored blob preserved
+    expect(JSON.parse(stored.provenance).claimed.createdAt).toBe("2001-01-01T00:00:00.000Z");
+  });
+});
+
 describe("memory-provenance slice 1 — migration-equivalence (no-provenance-field memories)", () => {
   it("an existing/old row with no provenance field reads back fine — provenance is purely additive, not required for reads", async () => {
     memoryStore.set("legacy-no-prov", { id: "legacy-no-prov", agentId: "agent-owner", content: "pre-migration content, no provenance field at all." });

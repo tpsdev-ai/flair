@@ -511,6 +511,70 @@ describe("flair#1960 r3 — Relationship.patch() controls", () => {
   });
 });
 
+// ─── flair#1960 r4 — createdAt is SEMANTIC for Relationship.patch() ────────
+describe("flair#1960 r4 — a createdAt-only Relationship PATCH re-stamps provenance", () => {
+  it("re-stamps provenance and claimed.createdAt follows the new row createdAt", async () => {
+    const before = Date.now();
+    relationshipStore.set("rel-createdat", {
+      id: "rel-createdat", agentId: "agent-1", subject: "a", predicate: "b", object: "c",
+      createdAt: "2001-01-01T00:00:00.000Z",
+      provenance: JSON.stringify({
+        v: 1,
+        verified: { agentId: "agent-1", timestamp: "2001-01-01T00:00:00.000Z", receivedAt: "2001-01-01T00:00:00.000Z" },
+        claimed: { createdAt: "2001-01-01T00:00:00.000Z" },
+      }),
+    });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r.id = "rel-createdat";
+    // createdAt-ONLY (no identity change) — must still re-stamp.
+    await r.patch({ createdAt: "2002-02-02T03:04:05.678Z" });
+    const stored = relationshipStore.get("rel-createdat");
+    expect(stored.createdAt).toBe("2002-02-02T03:04:05.678Z"); // control: the patch landed
+    const prov = JSON.parse(stored.provenance);
+    const stamped = Date.parse(prov.verified.timestamp);
+    expect(stamped).toBeGreaterThanOrEqual(before - 5000);
+    expect(stamped).toBeLessThanOrEqual(Date.now() + 5000);
+    expect(prov.verified.timestamp).toBe(prov.verified.receivedAt);
+    expect(prov.verified.timestamp).not.toBe("2001-01-01T00:00:00.000Z"); // stale stored stamp not carried forward
+    expect(prov.claimed.createdAt).toBe("2002-02-02T03:04:05.678Z"); // the claim follows the row
+    expect(prov.claimed.createdAt).toBe(stored.createdAt);
+  });
+
+  it("a createdAt-only PATCH whose value needs sanitizing records the sanitized claim", async () => {
+    relationshipStore.set("rel-createdat-san", {
+      id: "rel-createdat-san", agentId: "agent-1", subject: "a", predicate: "b", object: "c",
+      createdAt: "2001-01-01T00:00:00.000Z",
+    });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r.id = "rel-createdat-san";
+    const RAW = "  2002-02-02T03:04:05.678Z\n";
+    await r.patch({ createdAt: RAW });
+    const stored = relationshipStore.get("rel-createdat-san");
+    expect(stored.createdAt).toBe(RAW); // the row keeps the caller's value unchanged
+    const prov = JSON.parse(stored.provenance);
+    expect(prov.claimed.createdAt).toBe("2002-02-02T03:04:05.678Z"); // sanitized: control chars stripped, trimmed
+    expect(prov.claimed.createdAt).toBe(stored.createdAt.trim()); // = sanitizeClaim(row.createdAt)
+  });
+
+  it("a metadata-only PATCH still preserves the stored provenance (and its claimed.createdAt)", async () => {
+    const legacy = JSON.stringify({
+      v: 1,
+      verified: { agentId: "agent-1", timestamp: "2001-01-01T00:00:00.000Z", receivedAt: "2001-01-01T00:00:00.000Z" },
+      claimed: { createdAt: "2001-01-01T00:00:00.000Z" },
+    });
+    relationshipStore.set("rel-createdat-meta", {
+      id: "rel-createdat-meta", agentId: "agent-1", subject: "a", predicate: "b", object: "c", confidence: 1.0, provenance: legacy,
+    });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r.id = "rel-createdat-meta";
+    await r.patch({ confidence: 0.4 });
+    const stored = relationshipStore.get("rel-createdat-meta");
+    expect(stored.confidence).toBe(0.4); // control: the patch landed
+    expect(stored.provenance).toBe(legacy); // no semantic change ⇒ stored blob preserved
+    expect(JSON.parse(stored.provenance).claimed.createdAt).toBe("2001-01-01T00:00:00.000Z");
+  });
+});
+
 // ─── flair#718 authorship-provenance — Relationship.put() claimedClient ────
 describe("flair#718 authorship-provenance — Relationship.put() claimedClient handling", () => {
   it("a claimedClient on the write body is folded into provenance.claimed.client, and NEVER persisted as a top-level row field", async () => {

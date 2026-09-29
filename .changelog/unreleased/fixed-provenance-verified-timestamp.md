@@ -13,10 +13,11 @@
   under `verified`: the writers strip a body-supplied `provenance` and re-derive
   it from the resolved auth and one server clock read. A semantic update (one
   that changes the record's content — `content`/`subject`/`summary` for Memory,
-  `subject`/`predicate`/`object` for Relationships) re-stamps provenance; a
-  metadata-only PATCH leaves the stored blob in place, because no new content
-  was authored. A PATCH whose stored-row read fails is refused (500), never
-  silently degraded to a metadata-only decision.
+  `subject`/`predicate`/`object` for Relationships — or its creation claim,
+  `createdAt` on both resources; a changed creation claim is re-authoring the
+  claim) re-stamps provenance; a metadata-only PATCH leaves the stored blob in
+  place, because no new content was authored. A PATCH whose stored-row read
+  fails is refused (500), never silently degraded to a metadata-only decision.
 
   There is no bulk rewrite of stored provenance: an untouched row retains its
   blob until a later semantic local write re-stamps it. A row written before
@@ -24,7 +25,7 @@
   whatever the caller's `createdAt` was at the time (it may equal, precede, or
   follow the true write time) and there is no `claimed.createdAt`; rows written
   before that field existed also lack `receivedAt`. Rows deliberately NOT
-  re-stamped: a metadata-only PATCH (no content change), the `_reindex`
+  re-stamped: a metadata-only PATCH (no content or creation-claim change), the `_reindex`
   maintenance re-PUT (which keeps the stored bytes so a corpus-wide reindex
   stays byte-identical), federation-synced rows (which keep the ORIGINATOR's
   stamped blob), and any row that is never written again. The server-stamped
