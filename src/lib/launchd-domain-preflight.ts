@@ -11,10 +11,16 @@
  * init` had printed "Launchd service registered ✓" for a plist it wrote but
  * never loaded.
  *
- * THE RULE this module serves: no flair command stops, unloads or replaces a
- * running instance before it has checked everything it can check about the
- * replacement from this session, and every failure after a stop tries to bring
- * back what was running and says what state it left.
+ * THE RULE this module serves, for the guarded launchd handoffs — `doctor
+ * --fix`'s adopt/regenerate, `flair init`'s replacement of a legacy job, and
+ * the launchd attempt in `flair start` and in the start leg of restart /
+ * upgrade / snapshot: nothing running is stopped or unloaded before every
+ * check that can be made from this session has passed, an UNKNOWN answer is a
+ * failed check, and every failure after a stop is followed by an attempt to
+ * bring back what was running, reporting the state it left (or that the state
+ * could not be established). `flair restart` itself stops the instance first
+ * — that is what it was asked to do — so its start leg's preflight decides
+ * only HOW it comes back (under launchd, or directly), not whether it stopped.
  *
  * WHAT IS CHECKED, AND HOW. Everything here is READ-ONLY:
  *
@@ -166,6 +172,15 @@ export function assessLaunchdLoadability(opts: {
   if (res.code !== 0) {
     return { state: "unknown", reason: probeSummary(`print-disabled ${target}`, res.code, `${res.stderr}\n${res.stdout}`) };
   }
+  // flair#2040: "not listed" means enabled only in output we RECOGNISE. An
+  // unrecognised listing (no `disabled services` block) is unknown, not a
+  // silent "enabled".
+  if (!/disabled services/i.test(res.stdout)) {
+    return {
+      state: "unknown",
+      reason: `launchctl print-disabled ${target} printed no "disabled services" listing, so whether ${opts.label} is disabled is unknown`,
+    };
+  }
   if (parsePrintDisabled(res.stdout, opts.label)) {
     return {
       state: "disabled",
@@ -252,9 +267,26 @@ export function renderStartLaunchdUnavailable(
   return `${actor}: launchd cannot start this instance's job from this session — ${describeLoadabilityProblem(l)}. Starting Flair directly instead.`;
 }
 
-/** The launchd attempt itself failed (load/start/health); the caller falls back to a direct start. */
+/**
+ * The launchd attempt itself failed (load/start/health) AND the job was then
+ * verified absent from the domain (ensureLaunchdJobAbsent) — only then does the
+ * caller fall back to a direct start, and only then may it say so.
+ */
 export function renderStartLaunchdFailed(actor: string, label: string, error: string): string {
-  return `${actor}: launchd could not start the job ${label} (${error}). The job was unloaded again; starting Flair directly instead.`;
+  return `${actor}: launchd could not start the job ${label} (${error}). The job was unloaded again (verified absent); starting Flair directly instead.`;
+}
+
+/**
+ * The launchd attempt failed and the job could NOT be shown to be unloaded:
+ * launchd may still start it, and a direct start could run a second Harper on
+ * the same data directory. The caller does not start directly.
+ */
+export function renderStartLaunchdUnloadUncertain(actor: string, target: string, error: string, uncertainty: string): string[] {
+  return [
+    `${actor}: launchd could not start the job ${target} (${error}), and unloading it again could not be confirmed (${uncertainty}).`,
+    "   Flair was NOT started directly: launchd may still start this job, and a direct start could run a second instance on the same data directory.",
+    `   Fix: unload it ('launchctl bootout ${target}'), confirm 'launchctl print ${target}' no longer finds it, then re-run the command.`,
+  ];
 }
 
 /**
@@ -290,14 +322,69 @@ export function printJobCommand(domain: string, label: string): string {
   return `launchctl print ${domain}/${label}`;
 }
 
-/** Is `label` loaded in `domain`, per the read-only `launchctl print <domain>/<label>`? */
-export function isLaunchdJobLoaded(run: LaunchctlCommandRunner, domain: string, label: string): boolean {
+/** Where a job stands in a domain: loaded, proven absent, or UNKNOWN. */
+export type LaunchdJobPresence = "loaded" | "absent" | "unknown";
+
+/**
+ * Is `label` loaded in `domain`, per the read-only `launchctl print
+ * <domain>/<label>`? (flair#2040) Tri-state on purpose: "absent" only when
+ * launchctl SAYS so (exit 113 / "Could not find service"); any other failure is
+ * "unknown" — a probe that did not answer is not proof the job is gone.
+ */
+export function launchdJobPresence(run: LaunchctlCommandRunner, domain: string, label: string): LaunchdJobPresence {
   try {
     run(printJobCommand(domain, label));
-    return true;
-  } catch {
-    return false;
+    return "loaded";
+  } catch (err) {
+    const e = err as { status?: unknown; stderr?: unknown; message?: unknown } | null;
+    const text = `${e && e.stderr != null ? String(e.stderr) : ""}\n${String(e?.message ?? err)}`;
+    if (e?.status === 113 || /could not find service/i.test(text)) return "absent";
+    return "unknown";
   }
+}
+
+/**
+ * Boot `label` out of `domain` and VERIFY it is gone (flair#2040): `bootout`
+ * errors are not swallowed into "fine" — absence is re-read with the
+ * read-only presence probe — polled for up to `settleMs` after a bootout that
+ * launchctl accepted (or reports in progress), because `bootout` can return
+ * while launchd is still tearing the job down. Returns null when the job
+ * is PROVEN absent, or the reason absence could not be established. (A nullable
+ * result rather than a boolean-keyed union: src/cli.ts compiles without
+ * strictNullChecks, where such a union does not narrow.)
+ */
+export function ensureLaunchdJobAbsent(opts: {
+  run: LaunchctlCommandRunner;
+  domain: string;
+  label: string;
+  settleMs?: number;
+  sleep?: (ms: number) => void;
+}): string | null {
+  const { run, domain, label } = opts;
+  const settleMs = opts.settleMs ?? 5_000;
+  const sleep = opts.sleep ?? sleepSync;
+  let bootoutError: string | null = null;
+  if (launchdJobPresence(run, domain, label) === "absent") return null;
+  try {
+    run(bootoutCommand(domain, label));
+  } catch (err) {
+    bootoutError = errorText(err);
+  }
+  // Wait out launchd's asynchronous teardown only when there is one to wait
+  // for: a bootout launchctl accepted, or one it reports as still in
+  // progress. A bootout it REFUSED leaves the job where it was — re-read once.
+  const settling = bootoutError === null || /in progress|\b36\b/i.test(bootoutError);
+  const deadline = Date.now() + (settling ? settleMs : 0);
+  let presence = launchdJobPresence(run, domain, label);
+  while (presence !== "absent" && Date.now() < deadline) {
+    sleep(250);
+    presence = launchdJobPresence(run, domain, label);
+  }
+  if (presence === "absent") return null;
+  return (
+    `after launchctl bootout ${domain}/${label}${bootoutError ? ` (which failed: ${bootoutError})` : ""}, ` +
+    (presence === "loaded" ? "the job is still loaded" : "launchctl print could not say whether the job is loaded")
+  );
 }
 
 function errorText(err: unknown): string {
@@ -317,11 +404,11 @@ function sleepSync(ms: number): void {
  * the domain: bootout (so a rewritten plist is re-read, flair#872) → bootstrap
  * → kickstart.
  *
- * `bootout` of a job that is not loaded fails harmlessly and is ignored.
- * `bootout` is also asynchronous: launchd can still hold the job for a moment,
- * and a `bootstrap` issued in that window fails. So a failed bootstrap waits
- * (up to `settleMs`) for the job to leave the domain and retries ONCE. If the
- * job never leaves:
+ * `bootout` of a job that is not loaded fails harmlessly and is ignored here:
+ * nothing below trusts it — a failed bootstrap is retried ONLY after the job is
+ * proven absent (launchdJobPresence). `bootout` is asynchronous, so a failed
+ * bootstrap waits (up to `settleMs`) for the job to leave the domain and
+ * retries ONCE. If the job is not proven gone:
  *   - `strict` (doctor, init): throw — the loaded definition is the old one,
  *     and a repair must not report the new one as loaded;
  *   - otherwise (start/restart): fall through to `kickstart`, which starts the
@@ -346,13 +433,14 @@ export function loadLaunchdJob(opts: {
     run(bootstrapCommand(domain, plistPath));
   } catch (first) {
     bootstrapError = errorText(first);
+    // Retry only once the job is PROVEN absent; "unknown" counts as still there.
     const deadline = Date.now() + settleMs;
-    let loaded = isLaunchdJobLoaded(run, domain, label);
-    while (loaded && Date.now() < deadline) {
+    let presence = launchdJobPresence(run, domain, label);
+    while (presence !== "absent" && Date.now() < deadline) {
       sleep(250);
-      loaded = isLaunchdJobLoaded(run, domain, label);
+      presence = launchdJobPresence(run, domain, label);
     }
-    if (!loaded) {
+    if (presence === "absent") {
       try {
         run(bootstrapCommand(domain, plistPath));
         bootstrapError = null;

@@ -996,7 +996,7 @@ program
           for (const line of launchdStep.lines as Array<{ stream: "out" | "err"; text: string }>) {
             (line.stream === "err" ? console.error : console.log)(line.text);
           }
-          if (launchdStep.kind === "refused" || launchdStep.kind === "down") {
+          if (launchdStep.kind === "refused" || launchdStep.kind === "down" || launchdStep.kind === "uncertain") {
             process.exit(1);
           }
         }

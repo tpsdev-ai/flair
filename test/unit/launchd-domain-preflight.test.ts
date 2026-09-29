@@ -18,7 +18,10 @@ import {
   renderStartLaunchdUnavailable,
   renderStartLaunchdFailed,
   renderDirectRunNotice,
+  renderStartLaunchdUnloadUncertain,
   launchdGuiDomain,
+  launchdJobPresence,
+  ensureLaunchdJobAbsent,
   type DomainProbeRunner,
 } from "../../src/lib/launchd-domain-preflight.ts";
 import { domainPreflightRefusal } from "../../src/lib/launchd-repair.ts";
@@ -131,7 +134,7 @@ describe("assessLaunchdLoadability — domain first, then the job's enabled stat
     const l = assessLaunchdLoadability({
       platform: "darwin", uid: UID, label: LABEL,
       printDomain: runner({ code: 0 }),
-      printDisabled: runner({ code: 0, stdout: `"${LABEL}" => disabled` }),
+      printDisabled: runner({ code: 0, stdout: `disabled services = {\n\t\t"${LABEL}" => disabled\n\t}\n` }),
     });
     expect(l.state).toBe("disabled");
     if (l.state === "disabled") expect(l.reason).toContain(`${LABEL} is disabled in gui/501`);
@@ -142,6 +145,15 @@ describe("assessLaunchdLoadability — domain first, then the job's enabled stat
       platform: "darwin", uid: UID, label: LABEL,
       printDomain: runner({ code: 0 }),
       printDisabled: runner({ code: 64, stderr: "Usage: launchctl print-disabled <domain-target>" }),
+    });
+    expect(l.state).toBe("unknown");
+  });
+
+  test("domain available + an UNRECOGNISED print-disabled listing -> unknown, never a silent 'enabled' (flair#2040)", () => {
+    const l = assessLaunchdLoadability({
+      platform: "darwin", uid: UID, label: LABEL,
+      printDomain: runner({ code: 0 }),
+      printDisabled: runner({ code: 0, stdout: "" }),
     });
     expect(l.state).toBe("unknown");
   });
@@ -267,5 +279,72 @@ describe("loadLaunchdJob — every command names the domain", () => {
 describe("launchdGuiDomain", () => {
   test("the domain the LaunchAgent must load into", () => {
     expect(launchdGuiDomain(501)).toBe("gui/501");
+  });
+});
+
+describe("launchdJobPresence — absent ONLY when launchctl says so (flair#2040)", () => {
+  const D = "gui/501";
+  test("print succeeds -> loaded", () => {
+    expect(launchdJobPresence(() => {}, D, LABEL)).toBe("loaded");
+  });
+  test("exit 113 -> absent", () => {
+    expect(launchdJobPresence(() => { throw Object.assign(new Error("Command failed"), { status: 113 }); }, D, LABEL)).toBe("absent");
+  });
+  test("'Could not find service' -> absent", () => {
+    expect(launchdJobPresence(() => { throw Object.assign(new Error("Command failed"), { status: 1, stderr: `Could not find service "${LABEL}" in domain` }); }, D, LABEL)).toBe("absent");
+  });
+  test("any other failure (125, timeout, spawn error) -> UNKNOWN, never absent", () => {
+    expect(launchdJobPresence(() => { throw Object.assign(new Error("Command failed"), { status: 125, stderr: "125: Domain does not support specified action" }); }, D, LABEL)).toBe("unknown");
+    expect(launchdJobPresence(() => { throw Object.assign(new Error("spawnSync /bin/sh ETIMEDOUT"), { status: null }); }, D, LABEL)).toBe("unknown");
+  });
+});
+
+describe("ensureLaunchdJobAbsent — a bootout is VERIFIED, never assumed (flair#2040)", () => {
+  const D = "gui/501";
+  const notFound = () => Object.assign(new Error("Command failed"), { status: 113 });
+
+  test("already absent -> null, and no bootout is issued", () => {
+    const calls: string[] = [];
+    expect(ensureLaunchdJobAbsent({ run: (c) => { calls.push(c); if (c.includes("print")) throw notFound(); }, domain: D, label: LABEL })).toBeNull();
+    expect(calls).toEqual([`launchctl print ${D}/${LABEL}`]);
+  });
+
+  test("loaded, bootout takes -> null", () => {
+    let gone = false;
+    const run = (c: string) => { if (c.includes("bootout")) gone = true; if (c.includes("print") && gone) throw notFound(); };
+    expect(ensureLaunchdJobAbsent({ run, domain: D, label: LABEL, settleMs: 0, sleep: () => {} })).toBeNull();
+  });
+
+  test("loaded, bootout FAILS and the job stays -> the reason, naming the bootout error", () => {
+    const run = (c: string) => { if (c.includes("bootout")) throw Object.assign(new Error("Command failed"), { status: 5, stderr: "Boot-out failed: 5: Input/output error" }); };
+    const r = ensureLaunchdJobAbsent({ run, domain: D, label: LABEL, settleMs: 0, sleep: () => {} });
+    expect(r).toContain("which failed: Boot-out failed: 5: Input/output error");
+    expect(r).toContain("the job is still loaded");
+  });
+
+  test("bootout 'succeeds' but presence cannot be read afterwards -> the reason (unknown is not absent)", () => {
+    let booted = false;
+    const run = (c: string) => {
+      if (c.includes("bootout")) { booted = true; return; }
+      if (c.includes("print") && booted) throw Object.assign(new Error("Command failed"), { status: 125 });
+    };
+    const r = ensureLaunchdJobAbsent({ run, domain: D, label: LABEL, settleMs: 0, sleep: () => {} });
+    expect(r).toContain("could not say whether the job is loaded");
+  });
+
+  test("bootout is asynchronous: absence is polled until the settle deadline", () => {
+    let prints = 0;
+    const run = (c: string) => { if (c.includes("print") && ++prints > 3) throw notFound(); };
+    expect(ensureLaunchdJobAbsent({ run, domain: D, label: LABEL, settleMs: 60_000, sleep: () => {} })).toBeNull();
+    expect(prints).toBe(4);
+  });
+
+  test("the uncertainty message does not claim an unload and says Flair was NOT started directly", () => {
+    const lines = renderStartLaunchdUnloadUncertain("flair start", `${D}/${LABEL}`, "kickstart failed", "the job is still loaded");
+    const text = lines.join("\n");
+    expect(text).toContain("unloading it again could not be confirmed");
+    expect(text).toContain("Flair was NOT started directly");
+    expect(text).not.toContain("was unloaded again");
+    expect(text).toContain(`launchctl bootout ${D}/${LABEL}`);
   });
 });

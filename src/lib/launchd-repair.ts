@@ -134,7 +134,7 @@ export type RepairPlan =
   | { kind: "no-op"; reason: "already-managed" | "not-applicable"; detail: string }
   | {
       kind: "refuse";
-      reason: "foreign" | "unattributable" | "config-unreadable" | "unsupported-config" | "missing-credential";
+      reason: "foreign" | "unattributable" | "config-unreadable" | "unsupported-config" | "missing-credential" | "unverifiable";
       detail: string;
       plistPath?: string;
     }
@@ -242,6 +242,20 @@ export function planLaunchdRepair(input: PlanLaunchdRepairInput): RepairPlan {
   }
   if (observation.state === "managed") {
     return { kind: "no-op", reason: "already-managed", detail: observation.detail };
+  }
+  // flair#2040: launchd runs the job, but the process serving this instance
+  // could not be identified. Regenerating would boot out a job that may be the
+  // one serving; adopting has no direct process to stop. Unknown evidence
+  // licenses neither: refuse, touching nothing.
+  if (observation.state === "unverified") {
+    return {
+      kind: "refuse",
+      reason: "unverifiable",
+      detail:
+        `cannot repair launchd management: ${observation.detail}. Nothing was touched. ` +
+        "Restart Flair ('flair restart') so it rewrites its hdb.pid, or make lsof available, then re-run 'flair doctor'.",
+      plistPath,
+    };
   }
 
   // Config authority (flair#914): no readable harper-config.yaml means no safe
@@ -442,7 +456,7 @@ export function verifyAdoptServing(input: AdoptServingEvidence): AdoptServingPro
 
 export type LaunchdRepairResult =
   | { kind: "no-op"; reason: "already-managed" | "not-applicable"; detail: string }
-  | { kind: "refused"; reason: "foreign" | "unattributable" | "config-unreadable" | "unsupported-config" | "engine-backwards" | "missing-credential" | "launchd-domain-unavailable" | "launchd-job-disabled"; detail: string; plistPath?: string }
+  | { kind: "refused"; reason: "foreign" | "unattributable" | "config-unreadable" | "unsupported-config" | "engine-backwards" | "missing-credential" | "launchd-domain-unavailable" | "launchd-job-disabled" | "unverifiable" | "unreadable-prior-state"; detail: string; plistPath?: string }
   | { kind: "repaired"; detail: string }
   | { kind: "failed"; detail: string; remedy?: string[] };
 

@@ -63,7 +63,7 @@ const http = createServer((_q, r) => {
   r.end('{"ok":true,"version":"0.57.0","buildCommit":null,"searchReady":true}');
 });
 http.listen(port, "127.0.0.1", () => {
-  writeFileSync(join(root, "hdb.pid"), String(process.pid));
+  if (!process.env.STUB_NO_PIDFILE) writeFileSync(join(root, "hdb.pid"), String(process.pid));
   writeFileSync(join(root, "stub-port"), String(http.address().port));
   try { rmSync(join(root, "operations-server"), { force: true }); } catch {}
   createNetServer((s) => s.end()).listen(join(root, "operations-server"));
@@ -82,6 +82,11 @@ process.on("SIGTERM", () => {
 //   list-no-pid[-<l>]     `list` reports loaded jobs (or just <l>) WITHOUT a PID
 //   loaded/<l>, pid/<l>   what is "loaded" and the pid "launchd" runs for it
 //   bootout-order         (written) each bootout's label + whether the serving pid was alive
+//   bootout-fail/<l>      `bootout` of <l> fails (5) and the job STAYS loaded
+//   kickstart-fail/<l>    `kickstart` of <l> fails (5)
+//   bootstrap-no-spawn/<l> `bootstrap` loads <l> but starts no process
+//   stub-no-pidfile       the process a `bootstrap` starts writes no hdb.pid
+//   print-fail/<l>        `print gui/<uid>/<l>` fails (5): presence UNKNOWN
 const SHIM = `#!/bin/sh
 printf '%s\\n' "$*" >> "$SHIM_LOG"
 S="$SHIM_STATE"
@@ -92,6 +97,7 @@ case "$verb" in
     case "$t" in
       gui/*/*)
         l="\${t#gui/*/}"
+        if [ -f "$S/print-fail/$l" ]; then echo "Could not print service: 5: Input/output error" >&2; exit 5; fi
         if [ -f "$S/loaded/$l" ]; then printf '%s = {\\n}\\n' "$t"; exit 0; fi
         printf 'Could not find service "%s" in domain for user gui: %s\\n' "$l" "${UID}" >&2; exit 113 ;;
       gui/*)
@@ -117,6 +123,7 @@ case "$verb" in
     # Record whether the instance's serving process was alive at this bootout.
     sp=$(cat "$STUB_ROOT/hdb.pid" 2>/dev/null)
     if [ -n "$sp" ] && kill -0 "$sp" 2>/dev/null; then echo "$l serving-alive" >> "$S/bootout-order"; else echo "$l serving-gone" >> "$S/bootout-order"; fi
+    if [ -f "$S/bootout-fail/$l" ]; then echo "Boot-out failed: 5: Input/output error" >&2; exit 5; fi
     if [ -f "$S/loaded/$l" ]; then
       if [ -f "$S/pid/$l" ]; then kill -TERM "$(cat "$S/pid/$l")" 2>/dev/null; rm -f "$S/pid/$l"; fi
       rm -f "$S/loaded/$l"; exit 0
@@ -126,11 +133,14 @@ case "$verb" in
     l=$(basename "$2" .plist)
     if [ -f "$S/bootstrap-fail/$l" ]; then echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi
     : > "$S/loaded/$l"
+    [ -f "$S/bootstrap-no-spawn/$l" ] && exit 0
+    if [ -f "$S/stub-no-pidfile" ]; then export STUB_NO_PIDFILE=1; fi
     ROOTPATH="$STUB_ROOT" HTTP_PORT="$STUB_PORT" "$STUB_RUNTIME" "$STUB_HARPER" run . >/dev/null 2>&1 </dev/null &
     echo $! > "$S/pid/$l"
     exit 0 ;;
   kickstart)
     l="\${1#gui/*/}"
+    if [ -f "$S/kickstart-fail/$l" ]; then echo "Could not kickstart service: 5: Input/output error" >&2; exit 5; fi
     [ -f "$S/loaded/$l" ] && exit 0
     echo "Could not find service" >&2; exit 113 ;;
 esac
@@ -185,7 +195,7 @@ function setupFixture(port: number): Fixture {
   mkdirSync(shimBin);
   writeFileSync(join(shimBin, "launchctl"), SHIM, { mode: 0o755 });
   const state = join(home, "shim-state");
-  for (const d of ["loaded", "pid", "bootstrap-fail"]) mkdirSync(join(state, d), { recursive: true });
+  for (const d of ["loaded", "pid", "bootstrap-fail", "bootout-fail", "kickstart-fail", "bootstrap-no-spawn", "print-fail"]) mkdirSync(join(state, d), { recursive: true });
 
   // A package tree whose Harper is the stub (see the file header).
   const probe = mkdtempSync(join(repoRoot, ".flair2040-probe-"));
@@ -372,6 +382,16 @@ function initInput(adminPass = ADMIN_PASS) {
   };
 }
 
+/**
+ * Take away every way to identify the serving process: no hdb.pid, and an
+ * `lsof` that cannot run (a shim first on PATH that fails). The serving
+ * process keeps serving — it just cannot be attributed.
+ */
+function makeServingUnattributable(): void {
+  rmSync(join(fx.dataDir, "hdb.pid"), { force: true });
+  writeFileSync(join(fx.shimBin, "lsof"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+}
+
 /** Mark `label` as loaded in the shim, running `pid` (what launchd would report). */
 function markLoaded(label: string, pid: number | null): void {
   writeFileSync(join(fx.state, "loaded", label), "");
@@ -461,7 +481,7 @@ describe("flair#2040 — doctor --fix never stops an instance it cannot hand to 
 
       expect(result.kind).toBe("failed");
       expect(result.detail).toContain("start-flair-with-admin-pass.sh, which does not exist");
-      expect(result.detail).toContain("Nothing was stopped, unloaded or rewritten");
+      expect(result.detail).toContain("Nothing was stopped or unloaded, and no plist was written");
       expect(alive(pid)).toBe(true);
       expect(hdbPid()).toBe(pid);
       expect(signals()).toBe("");
@@ -815,9 +835,46 @@ describe("flair#2040 — `flair start` claims launchd only after verifying it", 
       expect(stderr).toContain("Bootstrap failed: 5: Input/output error");
       expect(stderr).not.toContain("launchd start failed");
       expect(stdout).toContain("NOT launchd-managed");
-      const calls = mutatingCalls();
-      expect(calls[calls.length - 1]).toBe(`bootout ${GUI}/${fx.label}`);
+      // The fallback VERIFIED the job absent (a read-only print after the
+      // failed load) before starting directly, and says so (flair#2040 r4).
+      expect(stderr).toContain("The job was unloaded again (verified absent)");
+      const lines = shimLines();
+      expect(lines[lines.length - 1]).toBe(`print ${GUI}/${fx.label}`);
       expect(await healthy()).toBe(true);
+    },
+    90_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(e5) a running launchd job whose serving process cannot be attributed -> NO launchd check mark (strict verifier)",
+    async () => {
+      writeRegisteredPlist();
+      writeFileSync(join(fx.state, "stub-no-pidfile"), "");
+      writeFileSync(join(fx.shimBin, "lsof"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+      const { stdout, stderr, exitCode } = await flairStart();
+      expect(exitCode).toBe(0);
+      expect(await healthy()).toBe(true);
+      expect(stdout).not.toContain("✅ Flair started (launchd");
+      expect(stderr).toContain("NOT verified as launchd-managed");
+      expect(stderr).toContain("could not be identified");
+    },
+    90_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(e6) the load fails and the loaded job's bootout FAILS -> the uncertainty is reported, no 'unloaded again', and NO direct start",
+    async () => {
+      writeRegisteredPlist();
+      for (const flag of ["bootstrap-no-spawn", "kickstart-fail", "bootout-fail"]) writeFileSync(join(fx.state, flag, fx.label), "");
+      const { stdout, stderr, exitCode } = await flairStart();
+      expect(exitCode).toBe(1);
+      expect(stderr).toContain(`flair start: launchd could not start the job ${GUI}/${fx.label}`);
+      expect(stderr).toContain("unloading it again could not be confirmed");
+      expect(stderr).toContain("Flair was NOT started directly");
+      expect(stderr).not.toContain("unloaded again (verified absent)");
+      expect(stdout).not.toContain("Flair started");
+      expect(stubStarts()).toEqual([]);
+      expect(await healthy()).toBe(false);
     },
     90_000,
   );
@@ -856,5 +913,250 @@ describe("flair#2040 — `flair restart` preflights launchd before its start leg
       expect(hdbPid()).not.toBe(pid);
     },
     120_000,
+  );
+});
+
+// ─── round 4: unknown evidence never licenses a stop or a success claim ────
+//
+// Every case below removes one piece of evidence — the serving pid, a
+// readable prior plist, a lint run, a confirmed unload, a free port — and
+// asserts the executor refuses (touching nothing) or reports the uncertainty,
+// instead of reading the missing answer as "fine".
+
+describe("flair#2040 r4 — doctor --fix: an unknown answer refuses before any stop", () => {
+  async function arrangeDirectInstance(): Promise<{ pid: number; plistBytes: string }> {
+    const plistBytes = passFilePlist(fx.label);
+    writeFileSync(fx.plistPath, plistBytes);
+    const pid = await startDirectStub();
+    return { pid, plistBytes };
+  }
+
+  test.skipIf(!isDarwin)(
+    "(a5) plutil cannot run (dies on a signal) -> preparation FAILS; nothing stopped",
+    async () => {
+      const { pid, plistBytes } = await arrangeDirectInstance();
+      writeFileSync(join(fx.shimBin, "plutil"), "#!/bin/sh\nkill -KILL $$\n", { mode: 0o755 });
+
+      const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
+
+      expect(result.kind).toBe("failed");
+      expect(result.detail).toContain("plutil -lint could not check the plist");
+      expect(result.detail).toContain("Nothing was stopped or unloaded");
+      expect(alive(pid)).toBe(true);
+      expect(signals()).toBe("");
+      expect(readFileSync(fx.plistPath, "utf-8")).toBe(plistBytes);
+      expect(mutatingCalls()).toEqual([]);
+    },
+    60_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(a6) an existing plist that cannot be read + a commit that would fail -> refused BEFORE the stop; the plist is never deleted",
+    async () => {
+      const { pid, plistBytes } = await arrangeDirectInstance();
+      writeFileSync(join(fx.state, "bootstrap-fail", fx.label), "");
+      chmodSync(fx.plistPath, 0o000);
+
+      const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
+
+      expect(result.kind).toBe("refused");
+      expect(result.reason).toBe("unreadable-prior-state");
+      expect(result.detail).toContain(`${fx.plistPath} (EACCES`);
+      expect(existsSync(fx.plistPath)).toBe(true);
+      chmodSync(fx.plistPath, 0o644);
+      expect(readFileSync(fx.plistPath, "utf-8")).toBe(plistBytes);
+      expect(alive(pid)).toBe(true);
+      expect(signals()).toBe("");
+      expect(mutatingCalls()).toEqual([]);
+    },
+    60_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(b4) launchd runs the job but the serving process cannot be attributed -> refused (unverifiable), never 'already managed', nothing touched",
+    async () => {
+      const { pid, plistBytes } = await arrangeDirectInstance();
+      markLoaded(fx.label, pid);
+      makeServingUnattributable();
+
+      const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
+
+      expect(result.kind).toBe("refused");
+      expect(result.reason).toBe("unverifiable");
+      expect(result.detail).toContain("could not be identified");
+      expect(alive(pid)).toBe(true);
+      expect(signals()).toBe("");
+      expect(readFileSync(fx.plistPath, "utf-8")).toBe(plistBytes);
+      expect(mutatingCalls()).toEqual([]);
+    },
+    60_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(b5) regenerate: the new job serves but cannot be attributed -> NOT 'repaired'; the job is unloaded again and the plist removed",
+    async () => {
+      writeFileSync(join(fx.state, "stub-no-pidfile"), "");
+      writeFileSync(join(fx.shimBin, "lsof"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+
+      const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
+
+      expect(result.kind).toBe("failed");
+      expect(result.detail).toContain("could not be identified");
+      expect(result.detail).toContain("Restored:");
+      expect(result.detail).toContain("unloaded again (verified absent)");
+      expect(result.detail).toContain("Flair was not running before this repair (its port was free)");
+      expect(mutatingCalls()).toContain(`bootstrap ${GUI} ${fx.plistPath}`);
+      expect(existsSync(join(fx.state, "loaded", fx.label))).toBe(false);
+      expect(existsSync(fx.plistPath)).toBe(false);
+    },
+    90_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(b6) a loaded job whose bootout FAILS -> stop here, BEFORE the direct process is touched; the result says so",
+    async () => {
+      const { pid, plistBytes } = await arrangeDirectInstance();
+      markLoaded(fx.label, null);
+      writeFileSync(join(fx.state, "bootout-fail", fx.label), "");
+
+      const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
+
+      expect(result.kind).toBe("failed");
+      expect(result.detail).toContain("could not unload the loaded job before stopping anything");
+      expect(result.detail).toContain("the job is still loaded");
+      expect(result.detail).toContain("this repair did not stop the running instance");
+      expect(result.detail).not.toContain("is not loaded in this session now");
+      expect(alive(pid)).toBe(true);
+      expect(signals()).toBe("");
+      expect(readFileSync(fx.plistPath, "utf-8")).toBe(plistBytes);
+      expect(mutatingCalls().filter((l) => l.startsWith("bootstrap"))).toEqual([]);
+    },
+    60_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(b8) whether the job is loaded cannot be read -> refused before anything is unloaded or stopped",
+    async () => {
+      const { pid, plistBytes } = await arrangeDirectInstance();
+      writeFileSync(join(fx.state, "print-fail", fx.label), "");
+
+      const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
+
+      expect(result.kind).toBe("refused");
+      expect(result.reason).toBe("unverifiable");
+      expect(result.detail).toContain("could not say whether the job is loaded");
+      expect(alive(pid)).toBe(true);
+      expect(signals()).toBe("");
+      expect(readFileSync(fx.plistPath, "utf-8")).toBe(plistBytes);
+      expect(mutatingCalls()).toEqual([]);
+    },
+    60_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(b9) after the stop, the new job is not verified AND cannot be unloaded -> NOT restarted directly (it could race the job); the result says so",
+    async () => {
+      const { pid } = await arrangeDirectInstance();
+      writeFileSync(join(fx.state, `list-no-pid-${fx.label}`), "");
+      writeFileSync(join(fx.state, "bootout-fail", fx.label), "");
+
+      const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
+
+      expect(result.kind).toBe("failed");
+      expect(result.detail).toContain("the job this repair loaded could not be shown unloaded");
+      expect(result.detail).toContain("Flair was NOT restarted directly");
+      expect(result.remedy).toContain(`launchctl bootout ${GUI}/${fx.label}`);
+      expect(signals()).toContain(`SIGTERM ${pid}`);
+      // Two stub starts only: the direct instance and launchd's job — no third, direct restart.
+      expect(stubStarts().length).toBe(2);
+    },
+    120_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(b7) regenerate: no serving process identified, but the port answers -> refused; 'none identified' is not 'none'",
+    async () => {
+      const pid = await startDirectStub();
+      makeServingUnattributable();
+
+      const { result } = await drive("repair", { dataDir: fx.dataDir, port: fx.port });
+
+      expect(result.kind).toBe("refused");
+      expect(result.reason).toBe("unverifiable");
+      expect(result.detail).toContain(`port ${fx.port} is not free`);
+      expect(alive(pid)).toBe(true);
+      expect(existsSync(fx.plistPath)).toBe(false);
+      expect(mutatingCalls()).toEqual([]);
+    },
+    60_000,
+  );
+});
+
+describe("flair#2040 r4 — init: a legacy job not PROVEN idle is never booted out", () => {
+  test.skipIf(!isDarwin)(
+    "(d7) a loaded, running legacy job + no attributable serving process (no hdb.pid, no lsof) -> skipped; nothing unloaded, removed or written",
+    async () => {
+      const legacyPath = launchdPlistPath(LEGACY_LAUNCHD_LABEL, fx.agentsDir);
+      const legacyBytes = passFilePlist(LEGACY_LAUNCHD_LABEL);
+      writeFileSync(legacyPath, legacyBytes);
+      const pid = await startDirectStub();
+      markLoaded(LEGACY_LAUNCHD_LABEL, pid);
+      makeServingUnattributable();
+
+      const { result } = await drive("init", initInput());
+
+      expect(result.kind).toBe("skipped");
+      const text = result.lines.map((l: any) => l.text).join("\n");
+      expect(text).toContain("may be the process serving this instance");
+      expect(text).toContain("could not be identified");
+      expect(text).not.toContain("✓");
+      expect(mutatingCalls()).toEqual([]);
+      expect(readFileSync(legacyPath, "utf-8")).toBe(legacyBytes);
+      expect(existsSync(fx.plistPath)).toBe(false);
+      expect(alive(pid)).toBe(true);
+      expect(signals()).toBe("");
+    },
+    60_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(d8) whether the legacy job is loaded cannot be read -> skipped; nothing unloaded, removed or written",
+    async () => {
+      const legacyPath = launchdPlistPath(LEGACY_LAUNCHD_LABEL, fx.agentsDir);
+      const legacyBytes = passFilePlist(LEGACY_LAUNCHD_LABEL);
+      writeFileSync(legacyPath, legacyBytes);
+      const pid = await startDirectStub();
+      writeFileSync(join(fx.state, "print-fail", LEGACY_LAUNCHD_LABEL), "");
+
+      const { result } = await drive("init", initInput());
+
+      expect(result.kind).toBe("skipped");
+      const text = result.lines.map((l: any) => l.text).join("\n");
+      expect(text).toContain("could not say whether it is loaded");
+      expect(mutatingCalls()).toEqual([]);
+      expect(readFileSync(legacyPath, "utf-8")).toBe(legacyBytes);
+      expect(existsSync(fx.plistPath)).toBe(false);
+      expect(alive(pid)).toBe(true);
+    },
+    60_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(d6) no legacy job; launchd runs the new job but the serving process cannot be attributed -> 'NOT verified', no check mark",
+    async () => {
+      const pid = await startDirectStub();
+      markLoaded(fx.label, pid);
+      makeServingUnattributable();
+
+      const { result } = await drive("init", initInput());
+
+      expect(result.kind).toBe("unverified");
+      const text = result.lines.map((l: any) => l.text).join("\n");
+      expect(text).toContain("launchd management is NOT verified");
+      expect(text).not.toContain("✓");
+      expect(mutatingCalls()).toEqual([]);
+      expect(alive(pid)).toBe(true);
+    },
+    60_000,
   );
 });

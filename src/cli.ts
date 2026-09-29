@@ -148,6 +148,7 @@ import { entityFormatHint, parseEntitiesCsv } from "./lib/entity-vocab-cli.js";
 import { escapeXml, unescapeXml } from "./lib/xml-escape.js";
 import {
   assessLaunchdManagement,
+  verifyLaunchdManagement,
   checkLaunchdPlistBeforeLoad,
   diagnoseLaunchdPlistPaths,
   isDetached,
@@ -175,13 +176,15 @@ import {
   assessLaunchdLoadability,
   bootoutCommand,
   describeLoadabilityProblem,
-  isLaunchdJobLoaded,
+  ensureLaunchdJobAbsent,
+  launchdJobPresence,
   launchdGuiDomain,
   loadabilityAllowsAttempt,
   loadabilityRemedy,
   loadLaunchdJob,
   renderStartLaunchdFailed,
   renderStartLaunchdUnavailable,
+  renderStartLaunchdUnloadUncertain,
   DIRECT_PROCESS_GUARD_NOTE,
   DOMAIN_PROBE_TIMEOUT_MS,
   RUN_AT_LOAD_NOTE,
@@ -754,6 +757,7 @@ function migrateLegacyLaunchdLabel(
   runLaunchctl: LaunchctlRunner,
   launchAgentsDir: string = defaultLaunchAgentsDir(),
   uid: number = currentUid(),
+  opts: { settleMs?: number; sleep?: (ms: number) => void } = {},
 ): { migrated: boolean; label: string; plistPath: string } {
   const resolved = resolveLaunchdLabel(dataDir, launchAgentsDir);
   if (!resolved.isLegacy) {
@@ -763,10 +767,7 @@ function migrateLegacyLaunchdLabel(
   const newLabel = launchdLabel(dataDir);
   const newPlistPath = launchdPlistPath(newLabel, launchAgentsDir);
 
-  // Targeted at the GUI domain the preflight probed (flair#2040), not the
-  // domain launchctl would infer for this process.
-  try { runLaunchctl(bootoutCommand(launchdGuiDomain(uid), LEGACY_LAUNCHD_LABEL)); } catch { /* not loaded — best effort */ }
-
+  // flair#2040: read and validate the plist BEFORE unloading anything.
   const legacyContent = readFileSync(resolved.plistPath, "utf-8");
   // Use a function replacer to avoid $-sensitivity in the replacement
   // string (flair#919). String.prototype.replace interprets $&, $', $`
@@ -783,8 +784,32 @@ function migrateLegacyLaunchdLabel(
       `Remove it manually and re-run 'flair init'.`,
     );
   }
+
+  // Targeted at the GUI domain the preflight probed (flair#2040), not the
+  // domain launchctl would infer for this process — and VERIFIED: migrating
+  // while the legacy job may still be loaded would leave launchd two jobs for
+  // one data directory.
+  const legacyGone = ensureLaunchdJobAbsent({ run: runLaunchctl, domain: launchdGuiDomain(uid), label: LEGACY_LAUNCHD_LABEL, settleMs: opts.settleMs, sleep: opts.sleep });
+  if (legacyGone !== null) {
+    throw new Error(
+      `not migrating off the legacy launchd label: ${legacyGone}. The legacy plist ${resolved.plistPath} was left as it was.`,
+    );
+  }
+
   writeFileSync(newPlistPath, newContent);
-  try { unlinkSync(resolved.plistPath); } catch { /* best effort */ }
+  // Two plists for one data directory would give launchd two jobs at the next
+  // login: a legacy plist that cannot be removed undoes the migration.
+  try {
+    unlinkSync(resolved.plistPath);
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") {
+      try { unlinkSync(newPlistPath); } catch { /* reported below */ }
+      throw new Error(
+        `not migrating off the legacy launchd label: could not remove ${resolved.plistPath} (${err?.code ?? err}); ` +
+          `${newPlistPath} was removed again.`,
+      );
+    }
+  }
 
   return { migrated: true, label: newLabel, plistPath: newPlistPath };
 }
@@ -815,6 +840,7 @@ function cleanupLegacyLaunchdPlist(
   plistDir: string,
   runLaunchctl: LaunchctlRunner,
   uid: number = currentUid(),
+  opts: { settleMs?: number; sleep?: (ms: number) => void } = {},
 ): LegacyCleanupResult {
   const legacyPlistPath = launchdPlistPath(LEGACY_LAUNCHD_LABEL, plistDir);
   if (!existsSync(legacyPlistPath)) return { action: "none" };
@@ -825,27 +851,26 @@ function cleanupLegacyLaunchdPlist(
   if (legacyOwnedByUs) {
     let unloadFailed: string | undefined;
     let deleteFailed: string | undefined;
-    // flair#2040: targeted at the GUI domain, and only when the job is
-    // actually loaded there — `bootout` of a job that is not loaded fails, and
-    // that failure is not something to report. Callers that may be booting out
-    // the job SERVING the instance must preflight + restore
-    // (registerInitLaunchdService); this helper is the not-serving cleanup.
+    // flair#2040: targeted at the GUI domain, only when the job is loaded
+    // there, and VERIFIED gone afterwards (ensureLaunchdJobAbsent) — a bootout
+    // error is reported, never read as success. Callers that may be booting
+    // out the job SERVING the instance must preflight + restore
+    // (registerInitLaunchdService); this helper is the PROVEN-not-serving
+    // cleanup.
     const domain = launchdGuiDomain(uid);
-    if (isLaunchdJobLoaded(runLaunchctl, domain, LEGACY_LAUNCHD_LABEL)) {
-      try {
-        runLaunchctl(bootoutCommand(domain, LEGACY_LAUNCHD_LABEL));
-      } catch (err: any) {
-        unloadFailed = err?.message ?? String(err);
-        console.error(
-          `Failed to unload legacy launchd service (${LEGACY_LAUNCHD_LABEL}): ` +
-            `${unloadFailed}. ` +
-            `It may still be loaded — unload it manually with: launchctl bootout ${domain}/${LEGACY_LAUNCHD_LABEL}`,
-        );
-      }
+    const gone = ensureLaunchdJobAbsent({ run: runLaunchctl, domain, label: LEGACY_LAUNCHD_LABEL, settleMs: opts.settleMs, sleep: opts.sleep });
+    if (gone !== null) {
+      unloadFailed = gone;
+      console.error(
+        `Failed to unload legacy launchd service (${LEGACY_LAUNCHD_LABEL}): ` +
+          `${unloadFailed}. ` +
+          `It may still be loaded — unload it manually with: launchctl bootout ${domain}/${LEGACY_LAUNCHD_LABEL}`,
+      );
     }
     try {
       unlinkSync(legacyPlistPath);
-      console.log(`Migrated off legacy launchd label (${LEGACY_LAUNCHD_LABEL}) ✓`);
+      // A check mark only when the job was also shown to be gone.
+      if (!unloadFailed) console.log(`Migrated off legacy launchd label (${LEGACY_LAUNCHD_LABEL}) ✓`);
     } catch (err: any) {
       deleteFailed = err?.message ?? String(err);
       console.error(
@@ -899,7 +924,7 @@ function ensureLaunchdServiceLoaded(
   opts: { uid?: number; strict?: boolean; settleMs?: number; sleep?: (ms: number) => void } = {},
 ): { label: string; plistPath: string; migrated: boolean } {
   const uid = opts.uid ?? currentUid();
-  const migration = migrateLegacyLaunchdLabel(dataDir, runLaunchctl, launchAgentsDir, uid);
+  const migration = migrateLegacyLaunchdLabel(dataDir, runLaunchctl, launchAgentsDir, uid, { settleMs: opts.settleMs, sleep: opts.sleep });
   loadLaunchdJob({
     run: runLaunchctl,
     domain: launchdGuiDomain(uid),
@@ -5396,19 +5421,26 @@ const realLaunchctlCommand: LaunchctlRunner = (cmd) => {
 };
 
 /**
- * Unload `label` from the GUI domain, best effort (flair#2040). Used before a
- * direct-start fallback so a job whose load half-worked cannot be started by
- * KeepAlive underneath the direct process.
+ * Unload `labels` from the GUI domain and VERIFY each is gone (flair#2040).
+ * Used before a direct-start fallback so a job whose load half-worked cannot be
+ * started by KeepAlive underneath the direct process. Returns null when every
+ * label is PROVEN absent; otherwise which job could not be shown gone, and why
+ * — and then the caller must NOT start directly (nor say the job was unloaded).
  */
-function bootoutLaunchdJob(label: string): void {
-  try { realLaunchctlCommand(bootoutCommand(launchdGuiDomain(currentUid()), label)); } catch { /* not loaded */ }
+function bootoutLaunchdJob(labels: string[]): { target: string; detail: string } | null {
+  const domain = launchdGuiDomain(currentUid());
+  for (const label of labels) {
+    const notGone = ensureLaunchdJobAbsent({ run: realLaunchctlCommand, domain, label });
+    if (notGone !== null) return { target: `${domain}/${label}`, detail: notGone };
+  }
+  return null;
 }
 
 /**
  * `plutil -lint` over plist CONTENT, before it is written anywhere launchd
- * reads (flair#2040). Returns a problem line, or null when plutil accepts it —
- * or cannot be run (it ships with macOS; its absence is not evidence against
- * the plist, and the path checks still apply).
+ * reads (flair#2040). Returns a problem line, or null ONLY when plutil ran and
+ * accepted it. A plutil that cannot be run, times out or dies on a signal is a
+ * problem too: a lint that did not run is not a lint that passed.
  */
 function lintLaunchdPlistContent(content: string): string | null {
   if (process.platform !== "darwin") return null;
@@ -5417,7 +5449,10 @@ function lintLaunchdPlistContent(content: string): string | null {
     const file = join(dir, "candidate.plist");
     writeFileSync(file, content, { mode: 0o600 });
     const res = spawnSync("plutil", ["-lint", file], { encoding: "utf-8", timeout: DOMAIN_PROBE_TIMEOUT_MS });
-    if (res.error || res.status === null) return null;
+    if (res.error || res.status === null) {
+      const why = res.error ? res.error.message : `it ended on ${res.signal ?? "a signal"}`;
+      return `plutil -lint could not check the plist (${why}), so its syntax is unverified`;
+    }
     if (res.status === 0) return null;
     return `plutil -lint rejected the plist (${(res.stdout || res.stderr || "").trim().split("\n")[0].replace(file, "<plist>")})`;
   } finally {
@@ -5987,11 +6022,16 @@ export interface InitLaunchdLine {
  *               removed or written;
  *   - restored: replacing a serving legacy job failed after it was unloaded;
  *               the prior service was brought back (details in the lines);
+ *   - unverified: launchd runs the job but the serving process could not be
+ *               identified — no claim either way;
  *   - refused:  the plist writer refused (credential/ownership) — init exits 1;
- *   - down:     replacing failed AND every restore failed — init exits 1.
+ *   - down:     replacing failed AND every restore failed — init exits 1;
+ *   - uncertain: a job could not be shown unloaded during the restore, so
+ *               nothing further was started; the state is reported as unknown
+ *               — init exits 1.
  */
 export type InitLaunchdOutcome = {
-  kind: "managed" | "direct" | "skipped" | "restored" | "refused" | "down";
+  kind: "managed" | "direct" | "unverified" | "skipped" | "restored" | "refused" | "down" | "uncertain";
   lines: InitLaunchdLine[];
 };
 
@@ -6041,24 +6081,59 @@ async function registerInitLaunchdService(input: {
     return reportInitLaunchd(dataDir, port, write, outcome.kind, lines);
   }
 
+  const keptLegacy = `Nothing was unloaded or removed: the legacy job ${LEGACY_LAUNCHD_LABEL} and its plist at ${legacyPath} were left as they were`;
+
   // An owned legacy registration. Retiring it may stop the instance (when its
   // job is what serves), so the preflight gates EVERYTHING below.
   const loadability = observeLaunchdLoadability(write.label);
   if (!loadabilityAllowsAttempt(loadability)) {
     const problem = loadability as Exclude<LaunchdLoadability, { state: "available" } | { state: "not-applicable" }>;
     err(
-      `⚠️  Launchd: not re-registered — ${describeLoadabilityProblem(problem)}. Nothing was unloaded or removed: ` +
-        `the legacy job ${LEGACY_LAUNCHD_LABEL} and its plist at ${legacyPath} were left as they were, and no new ` +
+      `⚠️  Launchd: not re-registered — ${describeLoadabilityProblem(problem)}. ${keptLegacy}, and no new ` +
         "plist was written (two plists for one data directory would give launchd two jobs for it).",
     );
     err(`   Fix: ${loadabilityRemedy(problem, uid, "flair init")}.`);
     return { kind: "skipped", lines };
   }
 
+  // flair#2040: what is the legacy job doing? Only PROVEN answers license a
+  // boot-out. The role is:
+  //   absent  - launchctl says the job is not loaded: nothing to boot out;
+  //   idle    - launchd lists the job with no process, or runs a process that
+  //             is identified as NOT the one serving this instance;
+  //   serving - launchd's pid IS the identified serving pid;
+  //   unknown - anything else (the job's state cannot be read, launchd's pid is
+  //             not visible from here, or the serving process cannot be
+  //             identified). Unknown is treated as possibly serving — and since
+  //             neither a boot-out nor a verified replacement is possible on
+  //             unknown evidence, init refuses.
+  const presence = launchdJobPresence(realLaunchctlCommand, domain, LEGACY_LAUNCHD_LABEL);
   const servingPid = resolveInstanceServingPid(dataDir, port);
-  const legacyJob = readLaunchctlJobState(LEGACY_LAUNCHD_LABEL, realLaunchctlLister);
-  const legacyServes = legacyJob.pid !== null && servingPid !== null && legacyJob.pid === servingPid;
-  if (legacyServes) {
+  const legacyJob = presence === "loaded"
+    ? readLaunchctlJobState(LEGACY_LAUNCHD_LABEL, realLaunchctlLister)
+    : { registered: false, pid: null, lastExitStatus: null };
+  const role: "absent" | "idle" | "serving" | "unknown" =
+    presence === "absent" ? "absent"
+      : presence === "unknown" ? "unknown"
+        : legacyJob.registered && legacyJob.pid === null ? "idle"
+          : legacyJob.pid !== null && servingPid !== null
+            ? (legacyJob.pid === servingPid ? "serving" : "idle")
+            : "unknown";
+  if (role === "unknown") {
+    const why = presence === "unknown"
+      ? `'launchctl print ${domain}/${LEGACY_LAUNCHD_LABEL}' could not say whether it is loaded`
+      : !legacyJob.registered
+        ? `it is loaded in ${domain}, but launchd's process for it is not visible from this session`
+        : `launchd runs it as process ${legacyJob.pid}, but the process serving this instance could not be identified ` +
+          `(no live hdb.pid, and no listener found on port ${port})`;
+    err(
+      `⚠️  Launchd: not re-registered — the legacy job ${LEGACY_LAUNCHD_LABEL} may be the process serving this instance: ` +
+        `${why}. ${keptLegacy}, and no new plist was written.`,
+    );
+    err("   Fix: restart Flair so it rewrites its hdb.pid ('flair restart'), or make lsof available, then re-run 'flair init'.");
+    return { kind: "skipped", lines };
+  }
+  if (role === "serving") {
     // Replacing a serving job is a boot path: the replacement runs THIS
     // package's Harper, which may be older than the store (flair#1093). Refuse
     // here, before anything is unloaded or written.
@@ -6066,78 +6141,78 @@ async function registerInitLaunchdService(input: {
       guardEngineNotBackwards(dataDir);
     } catch (e: any) {
       if (!e?.engineBackwards) throw e;
-      err(
-        `⚠️  Launchd: not re-registered — ${e.message} Nothing was unloaded or removed: the legacy job ` +
-          `${LEGACY_LAUNCHD_LABEL} and its plist were left as they were.`,
-      );
+      err(`⚠️  Launchd: not re-registered — ${e.message} ${keptLegacy}.`);
       return { kind: "skipped", lines };
     }
   }
 
-  // The replacement is written and validated while the instance is still up
-  // (the writer proves the credential against it).
+  // The prior bytes a failed hand-off would put back. A plist that exists but
+  // cannot be read cannot be put back: refuse before anything is written.
   const priorNew = snapshotFile(write.plistPath);
   const priorLegacy = snapshotFile(legacyPath);
+  const unreadable = unreadableSnapshot([[write.plistPath, priorNew], [legacyPath, priorLegacy]]);
+  if (unreadable) {
+    err(`⚠️  Launchd: not re-registered — ${unreadable} exists but could not be read, so it could not be put back. ${keptLegacy}.`);
+    return { kind: "skipped", lines };
+  }
+
+  // The replacement is written and validated while the instance is still up
+  // (the writer proves the credential against it).
   const outcome = await writeInitLaunchdPlist(write);
   if (outcome.kind === "refused") {
     return {
       kind: "refused",
       lines: [
         { stream: "err", text: `Error: ${outcome.detail}` },
-        { stream: "err", text: `Nothing was unloaded: the legacy job ${LEGACY_LAUNCHD_LABEL} and its plist were left as they were.` },
+        { stream: "err", text: `${keptLegacy}.` },
       ],
     };
   }
   const problem = validateLaunchdPlistContent(readFileSync(write.plistPath, "utf-8"));
   if (problem) {
     restoreFile(write.plistPath, priorNew);
-    err(
-      `⚠️  Launchd: not re-registered — the plist init would install for ${write.label} cannot be loaded (${problem}). ` +
-        `Nothing was unloaded or removed: the legacy job ${LEGACY_LAUNCHD_LABEL} and its plist were left as they were.`,
-    );
+    err(`⚠️  Launchd: not re-registered — the plist init would install for ${write.label} cannot be loaded (${problem}). ${keptLegacy}.`);
     err("   Fix: npm install -g @tpsdev-ai/flair && flair init");
     return { kind: "skipped", lines };
   }
 
-  if (!legacyServes) {
-    // The legacy job is not the process serving this instance, so retiring it
-    // stops nothing.
+  if (role !== "serving") {
+    // PROVEN not serving (absent, or idle): retiring it stops nothing.
     cleanupLegacyLaunchdPlist(dataDir, plistDir, realLaunchctlCommand, uid);
     return reportInitLaunchd(dataDir, port, write, outcome.kind, lines);
   }
 
   // The legacy job IS the serving instance: replace it and verify, or restore.
-  let bootedOut = false;
+  const legacyPid = legacyJob.pid!;
   try {
-    realLaunchctlCommand(bootoutCommand(domain, LEGACY_LAUNCHD_LABEL));
-    bootedOut = true;
-    await waitForProcessExit(legacyJob.pid!, STARTUP_TIMEOUT_MS);
+    const gone = ensureLaunchdJobAbsent({ run: realLaunchctlCommand, domain, label: LEGACY_LAUNCHD_LABEL });
+    if (gone !== null) throw new Error(`could not unload the legacy job: ${gone}`);
+    await waitForProcessExit(legacyPid, STARTUP_TIMEOUT_MS);
     unlinkSync(legacyPath);
     const bounceAt = Date.now();
     unlinkStaleOpsSocket(dataDir);
     loadLaunchdJob({ run: realLaunchctlCommand, domain, label: write.label, plistPath: write.plistPath, strict: true });
     await waitForHealth(port, write.adminUser, write.adminPass, STARTUP_TIMEOUT_MS);
+    // STRICT: launchd's pid must be the IDENTIFIED serving pid (flair#2040).
     const after = observeLaunchdManagement(dataDir, port);
-    if (after.state !== "managed") throw new Error(after.detail);
+    const verdict = verifyLaunchdManagement(after);
+    if (!verdict.verified) throw new Error(after.detail);
     await readyOpsSocketPostureAfterStart(dataDir, { notBeforeMs: bounceAt });
-    out(`Migrated launchd service off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${write.label}; ${after.detail} ✓`);
+    out(`Migrated launchd service off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${write.label}; ${verdict.detail} ✓`);
     return { kind: "managed", lines };
   } catch (e: any) {
     const cause = e?.message ?? String(e);
-    if (!bootedOut) {
-      // Nothing was stopped: the legacy job is still loaded and serving.
+    if (isProcessAlive(legacyPid) && existsSync(legacyPath) && (await probeHealth(port)).kind === "ok") {
+      // Nothing was stopped: the legacy job's process still serves.
       restoreFile(write.plistPath, priorNew);
-      err(
-        `⚠️  Launchd: not re-registered — could not unload the legacy job ${LEGACY_LAUNCHD_LABEL} (${cause}). ` +
-          "Nothing was stopped; the legacy job and its plist were left as they were.",
-      );
+      err(`⚠️  Launchd: not re-registered — ${cause}. The legacy job's process is still serving; its plist was left as it was.`);
       return { kind: "skipped", lines };
     }
     return restoreLegacyAfterFailedMigration({ dataDir, port, write, domain, legacyPath, priorNew, priorLegacy, cause, lines });
   }
 }
 
-/** The status lines for a written/unchanged plist: managed only when verified. */
+/** The status lines for a written/unchanged plist: managed only when VERIFIED. */
 function reportInitLaunchd(
   dataDir: string,
   port: number,
@@ -6146,14 +6221,23 @@ function reportInitLaunchd(
   lines: InitLaunchdLine[],
 ): InitLaunchdOutcome {
   const managed = observeLaunchdManagement(dataDir, port);
-  if (managed.state === "managed") {
+  const verdict = verifyLaunchdManagement(managed);
+  if (verdict.verified) {
     lines.push({
       stream: "out",
       text: outcome === "unchanged"
-        ? `Launchd service already managed — plist unchanged; ${managed.detail} ✓`
-        : `Launchd service registered; ${managed.detail} ✓`,
+        ? `Launchd service already managed — plist unchanged; ${verdict.detail} ✓`
+        : `Launchd service registered; ${verdict.detail} ✓`,
     });
     return { kind: "managed", lines };
+  }
+  const plistLine = `Launchd plist ${outcome === "unchanged" ? "unchanged" : "written"} (${write.plistPath})`;
+  if (managed.state === "unverified") {
+    // launchd runs the job, but nothing identifies the serving process: no
+    // claim either way (flair#2040).
+    lines.push({ stream: "out", text: `${plistLine} — launchd management is NOT verified: ${managed.detail}.` });
+    lines.push({ stream: "out", text: "   Fix: restart Flair so it rewrites its hdb.pid ('flair restart'), or make lsof available, then run 'flair doctor'." });
+    return { kind: "unverified", lines };
   }
   // No pid in this line: init names only a process it started (flair#1749) —
   // the serving process may be one it merely found answering the port.
@@ -6164,8 +6248,8 @@ function reportInitLaunchd(
   lines.push({
     stream: "out",
     text:
-      `Launchd plist ${outcome === "unchanged" ? "unchanged" : "written"} (${write.plistPath}) — Flair is running ` +
-      `directly, NOT launchd-managed: init starts Flair directly and does not hand a running instance to launchd.${fromHere}`,
+      `${plistLine} — Flair is running directly, NOT launchd-managed: init starts Flair directly and does not hand a ` +
+      `running instance to launchd.${fromHere}`,
   });
   lines.push({
     stream: "out",
@@ -6178,8 +6262,11 @@ function reportInitLaunchd(
 
 /**
  * Bring back the legacy service after replacing it failed (flair#2040): unload
- * the new job, put both plists back, bootstrap the legacy job and verify it
- * serves — or, if that fails, start Flair directly. Says which.
+ * the new job and VERIFY it is gone, put both plists back, bootstrap the
+ * legacy job and verify it serves — or, if that fails and the legacy job is
+ * verified gone, start Flair directly. Each step is an attempt whose outcome is
+ * reported; when a job cannot be shown unloaded, nothing further is started
+ * (two processes on one data directory is not a restore).
  */
 async function restoreLegacyAfterFailedMigration(r: {
   dataDir: string;
@@ -6193,10 +6280,25 @@ async function restoreLegacyAfterFailedMigration(r: {
   lines: InitLaunchdLine[];
 }): Promise<InitLaunchdOutcome> {
   const { dataDir, port, write, domain, lines } = r;
+  const headline = `⚠️  Launchd: moving the service to ${write.label} failed after the legacy job was unloaded (${r.cause}).`;
   const newPid = readLaunchctlJobState(write.label, realLaunchctlLister).pid;
-  try { realLaunchctlCommand(bootoutCommand(domain, write.label)); } catch { /* not loaded */ }
-  if (newPid !== null) {
-    try { await waitForProcessExit(newPid, STARTUP_TIMEOUT_MS); } catch { /* the health checks below report it */ }
+  const servingNow = resolveInstanceServingPid(dataDir, port);
+  const newGone = ensureLaunchdJobAbsent({ run: realLaunchctlCommand, domain, label: write.label });
+  if (newGone !== null) {
+    lines.push({ stream: "err", text: headline });
+    lines.push({
+      stream: "err",
+      text:
+        `   The new job could not be shown unloaded (${newGone}), so the legacy job was NOT reloaded and Flair was ` +
+        "NOT started directly — either could run a second instance on this data directory. Flair may be down, or run by the new job.",
+    });
+    lines.push({ stream: "err", text: `   Fix: launchctl bootout ${domain}/${write.label}, then 'flair init' from a console (GUI) login session.` });
+    return { kind: "uncertain", lines };
+  }
+  for (const pid of new Set([newPid, servingNow])) {
+    if (pid !== null) {
+      try { await waitForProcessExit(pid, STARTUP_TIMEOUT_MS); } catch { /* the health checks below report it */ }
+    }
   }
   try {
     restoreFile(write.plistPath, r.priorNew);
@@ -6204,9 +6306,8 @@ async function restoreLegacyAfterFailedMigration(r: {
   } catch (e: any) {
     lines.push({ stream: "err", text: `   putting the plists back FAILED: ${e?.message ?? e}` });
   }
-  const headline = `⚠️  Launchd: moving the service to ${write.label} failed after the legacy job was unloaded (${r.cause}).`;
   try {
-    loadLaunchdJob({ run: realLaunchctlCommand, domain, label: LEGACY_LAUNCHD_LABEL, plistPath: r.legacyPath });
+    loadLaunchdJob({ run: realLaunchctlCommand, domain, label: LEGACY_LAUNCHD_LABEL, plistPath: r.legacyPath, strict: true });
     await waitForHealth(port, write.adminUser, write.adminPass, STARTUP_TIMEOUT_MS);
     const legacy = assessLaunchdManagement({
       platform: process.platform,
@@ -6216,17 +6317,29 @@ async function restoreLegacyAfterFailedMigration(r: {
       plistExists: existsSync,
       list: realLaunchctlLister,
     });
+    const verdict = verifyLaunchdManagement(legacy);
     lines.push({ stream: "err", text: headline });
     lines.push({
       stream: "err",
-      text: legacy.state === "managed"
-        ? `   Restored: the legacy job ${LEGACY_LAUNCHD_LABEL} is loaded again and serving (${legacy.detail}); both plists are as they were.`
-        : `   Restored: Flair answers on port ${port} again after reloading the legacy job, but launchd does not confirm it serves (${legacy.detail}).`,
+      text: verdict.verified
+        ? `   Restored: the legacy job ${LEGACY_LAUNCHD_LABEL} is loaded again and serving (${verdict.detail}); both plists are as they were.`
+        : `   Partly restored: Flair answers on port ${port} again after reloading the legacy job, but launchd serving it is NOT verified (${legacy.detail}).`,
     });
     lines.push({ stream: "err", text: "   Fix: re-run 'flair init' (or 'flair doctor --fix') from a console (GUI) login session." });
     return { kind: "restored", lines };
   } catch (legacyErr: any) {
-    try { realLaunchctlCommand(bootoutCommand(domain, LEGACY_LAUNCHD_LABEL)); } catch { /* not loaded */ }
+    const legacyGone = ensureLaunchdJobAbsent({ run: realLaunchctlCommand, domain, label: LEGACY_LAUNCHD_LABEL });
+    if (legacyGone !== null) {
+      lines.push({ stream: "err", text: headline });
+      lines.push({
+        stream: "err",
+        text:
+          `   Reloading the legacy job failed (${legacyErr?.message ?? legacyErr}), and it could not be shown unloaded ` +
+          `(${legacyGone}), so Flair was NOT started directly. Flair may be down, or run by the legacy job.`,
+      });
+      lines.push({ stream: "err", text: `   Fix: launchctl bootout ${domain}/${LEGACY_LAUNCHD_LABEL}, then 'flair start'.` });
+      return { kind: "uncertain", lines };
+    }
     try {
       const pid = await startFlairDirect(port, dataDir);
       lines.push({ stream: "err", text: headline });
@@ -6317,41 +6430,48 @@ function planLaunchdRepairFor(dataDir: string, port: number): {
  * Repair launchd management for `dataDir` (flair#1573 slice b) — the
  * `doctor --fix` launchd repair for a MISSING, CORRUPT, or DETACHED plist.
  *
- * TWO PHASES (flair#2040). The rule: nothing that is running is stopped,
- * unloaded or replaced until everything checkable about the replacement has
- * been checked from THIS session, and every failure after that point tries to
- * bring back what was running and reports the state it left.
+ * TWO PHASES (flair#2040). The rule for this handoff: the running instance
+ * is not stopped, and no launchd job is unloaded, until every check that can
+ * be made about the replacement from THIS session has passed; an UNKNOWN
+ * answer is a failed check, never a pass. Every failure after that point is
+ * followed by an attempt to bring back what was running, and the result
+ * reports the state the instance was left in — including when that state
+ * could not be established.
  *
- *   1. PREPARE (prepareLaunchdRepair) — reads and validation only; the running
+ *   1. PREPARE (prepareLaunchdRepair) — reads and validation; the running
  *      instance and launchd are untouched:
  *        - the launchd preflight: is the GUI domain reachable from this
  *          session, and is the job enabled there (read-only `launchctl print`
  *          / `print-disabled`, domainPreflightRefusal — `unknown` refuses);
- *        - the engine guard (flair#1093) and the credential (flair#1685 —
- *          proven against the live instance before anything is stopped);
+ *        - the engine guard (flair#1093);
+ *        - the prior plist/config bytes (an existing file that cannot be read
+ *          refuses — it could not be put back) and which jobs are loaded
+ *          (an unanswerable `launchctl print` refuses);
+ *        - adopt: the direct process is attributed by the liveness machine
+ *          (DISAGREEMENT/UNKNOWN refuses); regenerate: the port must be
+ *          provably free (nothing identified as serving is not proof that
+ *          nothing serves);
+ *        - the credential (flair#1685 — proven against the live instance; the
+ *          one write this phase can make is that 0600 admin-pass file, and it
+ *          stays if a later check refuses);
  *        - the NEW plist is built in memory and validated: every path it names
  *          exists, the launcher and node are executable, the working and data
- *          directories exist, and `plutil -lint` accepts it;
- *        - on the adopt arm, the direct process is attributed by the liveness
- *          machine (a DISAGREEMENT/UNKNOWN verdict refuses here, not after an
- *          unload);
- *        - the prior plist/config bytes and launchd state are recorded for
- *          the restore.
+ *          directories exist, and `plutil -lint` ran and accepted it.
  *   2. COMMIT (commitLaunchdRepair) — boot out any loaded job for this
- *      instance (so KeepAlive cannot race what follows), clean-stop the direct
- *      process (adopt), write the plist, load it with commands that NAME the
- *      probed domain (bootstrap/kickstart gui/<uid>), and verify: launchd's
- *      pid is the serving pid, and on adopt the serving pid changed and the old
- *      one is dead (flair#1684/#1685). ANY failure here goes through
- *      restoreAfterFailedRepair: unload the new job, put the files back, and —
- *      when an instance was serving before — restart it directly and say so.
+ *      instance and VERIFY it is gone (so KeepAlive cannot race what follows;
+ *      if it cannot be shown gone, stop here, before the direct process is
+ *      touched), clean-stop the direct process (adopt), write the plist, load
+ *      it with commands that NAME the probed domain (bootstrap/kickstart
+ *      gui/<uid>), and verify STRICTLY: launchd's pid is the IDENTIFIED
+ *      serving pid (verifyLaunchdManagement), and on adopt the serving pid
+ *      changed and the old one is dead (flair#1684/#1685). ANY failure here
+ *      goes through restoreAfterFailedRepair.
  *
  * The preflight cannot PROVE a bootstrap will succeed — only loading something
  * proves that — which is why phase 2 restores rather than assumes.
  *
- * Never reports success on a direct-start: the verify is
- * assessLaunchdManagement (launchctl PID AND that PID is the serving process).
- * Every throw becomes a named result, never a crash mid-report.
+ * Never reports success on a direct start or an unattributed process. Every
+ * throw becomes a named result, never a crash mid-report.
  */
 async function repairLaunchdManagement(dataDir: string, port: number): Promise<LaunchdRepairResult> {
   const { plan, plistPath, isLegacy, config } = planLaunchdRepairFor(dataDir, port);
@@ -6369,11 +6489,12 @@ async function repairLaunchdManagement(dataDir: string, port: number): Promise<L
         if ("kind" in outcome) return outcome;
         prepared = outcome;
       } catch (err) {
-        // Phase 1 touches nothing that is running, so a throw here is reported
-        // as such.
+        // Phase 1 stops and unloads nothing and writes no plist, so a throw
+        // here is reported as such (it may already have written the admin-pass
+        // file — see prepareLaunchdRepair).
         const mapped = mapRepairThrow(err);
         if (mapped.kind === "failed") {
-          return { ...mapped, detail: `${mapped.detail} (nothing was stopped, unloaded or rewritten)` };
+          return { ...mapped, detail: `${mapped.detail} (nothing was stopped or unloaded, and no plist was written)` };
         }
         return mapped;
       }
@@ -6382,20 +6503,46 @@ async function repairLaunchdManagement(dataDir: string, port: number): Promise<L
   }
 }
 
-/** A file's bytes and mode, taken before a repair rewrites it (null: it did not exist). */
-type FileSnapshot = { bytes: string; mode: number } | null;
+/**
+ * A file's state, taken before a repair rewrites it (flair#2040). "absent"
+ * ONLY when the read failed with ENOENT; any other failure is "unreadable",
+ * which the callers refuse on BEFORE they stop anything — a snapshot that
+ * could not be taken cannot be put back, and must never be mistaken for
+ * "there was no file".
+ */
+type FileSnapshot =
+  | { kind: "absent" }
+  | { kind: "present"; bytes: string; mode: number }
+  | { kind: "unreadable"; error: string };
 
 function snapshotFile(path: string): FileSnapshot {
   try {
-    return { bytes: readFileSync(path, "utf-8"), mode: statSync(path).mode & 0o777 };
-  } catch {
-    return null;
+    const bytes = readFileSync(path, "utf-8");
+    return { kind: "present", bytes, mode: statSync(path).mode & 0o777 };
+  } catch (err: any) {
+    if (err?.code === "ENOENT") return { kind: "absent" };
+    return { kind: "unreadable", error: `${err?.code ?? "error"}: ${err?.message ?? err}` };
   }
 }
 
-/** Put a file back as `snapshot` recorded it — removed when it did not exist. */
+/** The first snapshot that could not be taken, as "<path> (<error>)", or null. */
+function unreadableSnapshot(entries: Array<[string, FileSnapshot | null]>): string | null {
+  for (const [path, snap] of entries) {
+    if (snap && snap.kind === "unreadable") return `${path} (${snap.error})`;
+  }
+  return null;
+}
+
+/**
+ * Put a file back as `snapshot` recorded it: rewritten when it was present,
+ * removed ONLY when it was proven absent. An unreadable snapshot is never
+ * "restored" — that would delete or clobber a file whose bytes were never known.
+ */
 function restoreFile(path: string, snapshot: FileSnapshot): void {
-  if (snapshot === null) {
+  if (snapshot.kind === "unreadable") {
+    throw new Error(`not restoring ${path}: its prior contents could not be read (${snapshot.error})`);
+  }
+  if (snapshot.kind === "absent") {
     try { unlinkSync(path); } catch (err: any) { if (err?.code !== "ENOENT") throw err; }
     return;
   }
@@ -6415,7 +6562,7 @@ interface PreparedLaunchdRepair {
   legacyPlistPath: string | null;
   prior: {
     plist: FileSnapshot;
-    legacyPlist: FileSnapshot;
+    legacyPlist: FileSnapshot | null;
     config: { path: string; snapshot: FileSnapshot } | null;
     jobLoaded: boolean;
     legacyJobLoaded: boolean;
@@ -6424,9 +6571,15 @@ interface PreparedLaunchdRepair {
 }
 
 /**
- * Phase 1 of the repair: every check that can be made without touching the
- * running instance or launchd. Returns a refusal/failure (nothing touched) or
- * the prepared repair.
+ * Phase 1 of the repair: every check that can be made without stopping the
+ * running instance or changing launchd. Returns a refusal/failure or the
+ * prepared repair. Every UNKNOWN answer here refuses (flair#2040): a check
+ * that could not be made is not a check that passed.
+ *
+ * The only write this phase can make is the admin-pass file, and only when the
+ * plan must materialize it from an environment credential that authenticated
+ * against the running instance; that 0600 file stays if a later check refuses.
+ * It is written after every check that does not need it.
  */
 async function prepareLaunchdRepair(
   dataDir: string,
@@ -6440,6 +6593,7 @@ async function prepareLaunchdRepair(
   const domain = launchdGuiDomain(uid);
   const label = launchdLabel(dataDir);
   const plistPath = launchdPlistPath(label);
+  const untouched = "Nothing was stopped, unloaded or rewritten.";
 
   // flair#2040: the launchd preflight comes FIRST. From an ssh session the GUI
   // domain is not reachable, and the load would fail only AFTER the live
@@ -6452,6 +6606,75 @@ async function prepareLaunchdRepair(
   // a newer store fails at the storage layer minutes later — same refusal as
   // startFlairProcess. A pure read, so it refuses WITHOUT bouncing anything.
   guardEngineNotBackwards(dataDir);
+
+  // The prior state the restore would need. A file that exists but cannot be
+  // read cannot be put back: refuse now, before anything is stopped.
+  const legacyPlistPath = isLegacy && resolvedPlistPath !== plistPath ? resolvedPlistPath : null;
+  const cfgPath = harperConfigPath(dataDir);
+  const priorPlist = snapshotFile(plistPath);
+  const priorLegacy = legacyPlistPath ? snapshotFile(legacyPlistPath) : null;
+  const priorConfig = cfgPath ? { path: cfgPath, snapshot: snapshotFile(cfgPath) } : null;
+  const unreadable = unreadableSnapshot([
+    [plistPath, priorPlist],
+    [legacyPlistPath ?? "", priorLegacy],
+    [cfgPath ?? "", priorConfig?.snapshot ?? null],
+  ]);
+  if (unreadable) {
+    return {
+      kind: "refused",
+      reason: "unreadable-prior-state",
+      detail:
+        `refusing to repair launchd management: ${unreadable} exists but could not be read, so a failed hand-off ` +
+        `could not put it back. ${untouched}`,
+      plistPath: resolvedPlistPath,
+    };
+  }
+
+  // Which jobs are loaded — asked, not assumed. "unknown" refuses: the commit
+  // must boot out any loaded job BEFORE the stop, and cannot plan that blind.
+  const jobPresence = launchdJobPresence(realLaunchctlCommand, domain, label);
+  const legacyPresence = legacyPlistPath ? launchdJobPresence(realLaunchctlCommand, domain, LEGACY_LAUNCHD_LABEL) : "absent";
+  if (jobPresence === "unknown" || legacyPresence === "unknown") {
+    const which = jobPresence === "unknown" ? label : LEGACY_LAUNCHD_LABEL;
+    return {
+      kind: "refused",
+      reason: "unverifiable",
+      detail:
+        `refusing to repair launchd management: 'launchctl print ${domain}/${which}' could not say whether the job is ` +
+        `loaded. ${untouched}`,
+      plistPath: resolvedPlistPath,
+    };
+  }
+
+  let servingPid: number | null = null;
+  if (plan.kind === "adopt") {
+    // Adopt: attribute the direct process NOW. A foreign or unattributable
+    // process refuses here, before any job is unloaded (flair#1454 machine).
+    servingPid = resolveInstanceServingPid(dataDir, port);
+    const state = classifyDaemonState(await gatherDaemonEvidence(port, dataDir), { port, dataDir });
+    if (state.state === "DISAGREEMENT" || state.state === "UNKNOWN") {
+      return {
+        kind: "failed",
+        detail: `refusing to adopt: ${state.detail} ${untouched}`,
+        remedy: ["flair stop", "flair doctor --fix"],
+      };
+    }
+  } else {
+    // Regenerate: the planner saw no serving process — but "none identified"
+    // is not "none". Require positive evidence that nothing serves the port
+    // (ECONNREFUSED) before loading a job that would bind it.
+    const health = await probeHealth(port);
+    if (health.kind !== "refused") {
+      return {
+        kind: "refused",
+        reason: "unverifiable",
+        detail:
+          `refusing to repair launchd management: no process was identified as serving this instance, but port ${port} ` +
+          `is not free (health probe: ${health.kind}), so something this repair cannot attribute may be serving it. ${untouched}`,
+        plistPath: resolvedPlistPath,
+      };
+    }
+  }
 
   // Credential before plist (flair#1685). When the plan says the pass file must
   // be materialized (an env candidate), PROVE the credential against the live
@@ -6501,7 +6724,8 @@ async function prepareLaunchdRepair(
   // Build the replacement in memory and validate it BEFORE anything is stopped
   // (flair#2040, flair#1685 hardening): launchctl exits 0 for a job whose
   // program is missing, so a stale launcher or node path would produce a job
-  // that never starts — after the live instance was already down.
+  // that never starts — after the live instance was already down. A lint that
+  // could not run fails here too.
   const plistContent = buildRepairPlist(dataDir, config);
   const contentProblem = validateLaunchdPlistContent(plistContent);
   if (contentProblem) {
@@ -6509,28 +6733,11 @@ async function prepareLaunchdRepair(
       kind: "failed",
       detail:
         `refusing to repair launchd management: the plist this repair would install for ${label} cannot be ` +
-        `loaded — ${contentProblem}. Nothing was stopped, unloaded or rewritten.`,
+        `loaded — ${contentProblem}. Nothing was stopped or unloaded, and no plist was written.`,
       remedy: ["npm install -g @tpsdev-ai/flair", "flair doctor --fix"],
     };
   }
 
-  // Adopt: attribute the direct process NOW. A foreign or unattributable
-  // process refuses here, before any job is unloaded (flair#1454 machine).
-  let servingPid: number | null = null;
-  if (plan.kind === "adopt") {
-    servingPid = resolveInstanceServingPid(dataDir, port);
-    const state = classifyDaemonState(await gatherDaemonEvidence(port, dataDir), { port, dataDir });
-    if (state.state === "DISAGREEMENT" || state.state === "UNKNOWN") {
-      return {
-        kind: "failed",
-        detail: `refusing to adopt: ${state.detail} Nothing was stopped, unloaded or rewritten.`,
-        remedy: ["flair stop", "flair doctor --fix"],
-      };
-    }
-  }
-
-  const legacyPlistPath = isLegacy && resolvedPlistPath !== plistPath ? resolvedPlistPath : null;
-  const cfgPath = harperConfigPath(dataDir);
   return {
     dataDir,
     port,
@@ -6542,11 +6749,11 @@ async function prepareLaunchdRepair(
     plistContent,
     legacyPlistPath,
     prior: {
-      plist: snapshotFile(plistPath),
-      legacyPlist: legacyPlistPath ? snapshotFile(legacyPlistPath) : null,
-      config: cfgPath ? { path: cfgPath, snapshot: snapshotFile(cfgPath) } : null,
-      jobLoaded: isLaunchdJobLoaded(realLaunchctlCommand, domain, label),
-      legacyJobLoaded: legacyPlistPath ? isLaunchdJobLoaded(realLaunchctlCommand, domain, LEGACY_LAUNCHD_LABEL) : false,
+      plist: priorPlist,
+      legacyPlist: priorLegacy,
+      config: priorConfig,
+      jobLoaded: jobPresence === "loaded",
+      legacyJobLoaded: legacyPresence === "loaded",
       servingPid,
     },
   };
@@ -6554,6 +6761,8 @@ async function prepareLaunchdRepair(
 
 /** What phase 2 has changed so far — the restore undoes exactly this. */
 interface RepairProgress {
+  /** The jobs that were loaded before the repair were booted out and verified gone. */
+  unloadedPrior: boolean;
   stopped: boolean;
   wrotePlist: boolean;
   removedLegacy: boolean;
@@ -6563,18 +6772,20 @@ interface RepairProgress {
 
 /** Phase 2: the bounce, with restore on any failure. */
 async function commitLaunchdRepair(p: PreparedLaunchdRepair): Promise<LaunchdRepairResult> {
-  const done: RepairProgress = { stopped: false, wrotePlist: false, removedLegacy: false, wroteConfig: false, loaded: false };
+  const done: RepairProgress = { unloadedPrior: false, stopped: false, wrotePlist: false, removedLegacy: false, wroteConfig: false, loaded: false };
   try {
     // 1. Unload whatever launchd holds for this instance FIRST, so KeepAlive
     //    cannot start the job while the direct process is stopping or while the
-    //    new plist is loading. Such a job is not serving this instance (the
-    //    planner only reaches adopt/regenerate when launchd is not managing it).
-    if (p.prior.jobLoaded) {
-      try { realLaunchctlCommand(bootoutCommand(p.domain, p.label)); } catch { /* the strict load below re-checks */ }
+    //    new plist is loading, and VERIFY it is gone (flair#2040). Such a job is
+    //    not serving this instance (the planner only reaches adopt/regenerate
+    //    when launchd is not managing it). If it cannot be shown gone, stop here
+    //    — before the direct process is touched.
+    for (const [loaded, label] of [[p.prior.jobLoaded, p.label], [p.prior.legacyJobLoaded, LEGACY_LAUNCHD_LABEL]] as const) {
+      if (!loaded) continue;
+      const gone = ensureLaunchdJobAbsent({ run: realLaunchctlCommand, domain: p.domain, label });
+      if (gone !== null) throw new Error(`could not unload the loaded job before stopping anything: ${gone}`);
     }
-    if (p.prior.legacyJobLoaded) {
-      try { realLaunchctlCommand(bootoutCommand(p.domain, LEGACY_LAUNCHD_LABEL)); } catch { /* best effort */ }
-    }
+    done.unloadedPrior = p.prior.jobLoaded || p.prior.legacyJobLoaded;
     // 2. Adopt (flair#1573 slice b2): clean-stop the direct process so the new
     //    job does not collide on the port. The captured pid is the evidence the
     //    verify uses to prove the serving pid CHANGED.
@@ -6593,7 +6804,7 @@ async function commitLaunchdRepair(p: PreparedLaunchdRepair): Promise<LaunchdRep
     // leave harper-config.yaml not byte-identical to the first-repair
     // file (port, securePort, mtls). Reorder only those scalar lines
     // before launchd loads so the next persist matches the settled file.
-    if (p.prior.config && p.prior.config.snapshot) {
+    if (p.prior.config && p.prior.config.snapshot.kind === "present") {
       const { text, changed } = stabilizeMqttNetworkKeyOrder(p.prior.config.snapshot.bytes);
       if (changed) {
         done.wroteConfig = true;
@@ -6601,10 +6812,16 @@ async function commitLaunchdRepair(p: PreparedLaunchdRepair): Promise<LaunchdRep
       }
     }
     // A pre-flair#693 legacy plist is retired so it is not orphaned beside the
-    // regenerated one (its job was booted out in step 1).
+    // regenerated one (its job was booted out and verified gone in step 1).
     if (p.legacyPlistPath) {
       done.removedLegacy = true;
-      try { unlinkSync(p.legacyPlistPath); } catch { /* best effort */ }
+      // Not best-effort (flair#2040): a legacy plist left beside the new one
+      // would give launchd two jobs for this instance at the next login.
+      try {
+        unlinkSync(p.legacyPlistPath);
+      } catch (err: any) {
+        if (err?.code !== "ENOENT") throw new Error(`could not remove the legacy plist ${p.legacyPlistPath}: ${err?.code ?? err}`);
+      }
     }
     // 4. Load, with commands that name the probed domain (flair#2040). Drop
     //    the pre-bounce leftover socket first so exists() cannot be true on
@@ -6614,9 +6831,11 @@ async function commitLaunchdRepair(p: PreparedLaunchdRepair): Promise<LaunchdRep
     unlinkStaleOpsSocket(p.dataDir);
     done.loaded = true;
     loadLaunchdJob({ run: realLaunchctlCommand, domain: p.domain, label: p.label, plistPath: p.plistPath, strict: true });
-    // 5. Verify (fail-loud).
+    // 5. Verify (fail-loud, STRICT: launchd's pid must be the IDENTIFIED
+    //    serving pid — an unidentified one is not proof, flair#2040).
     const after = observeLaunchdManagement(p.dataDir, p.port);
-    if (after.state !== "managed") throw new Error(after.detail);
+    const verdict = verifyLaunchdManagement(after);
+    if (!verdict.verified) throw new Error(after.detail);
     // On the adopt arm, port health alone is the green light that lied in
     // #1684: the pre-adopt direct process answered the port the whole time
     // the launchd job was failing to start. Prove the launchd job itself
@@ -6648,8 +6867,8 @@ async function commitLaunchdRepair(p: PreparedLaunchdRepair): Promise<LaunchdRep
     // older than bounceAt.
     await readyOpsSocketPostureAfterStart(p.dataDir, { notBeforeMs: bounceAt });
     const detail = p.arm === "adopt"
-      ? `adopted the direct-spawned instance into launchd (bounced the live instance): ${after.detail}`
-      : after.detail;
+      ? `adopted the direct-spawned instance into launchd (bounced the live instance): ${verdict.detail}`
+      : verdict.detail;
     return { kind: "repaired", detail };
   } catch (err: any) {
     return restoreAfterFailedRepair(p, done, err?.message ?? String(err));
@@ -6657,11 +6876,12 @@ async function commitLaunchdRepair(p: PreparedLaunchdRepair): Promise<LaunchdRep
 }
 
 /**
- * Undo a failed phase 2 (flair#2040): unload the job this repair loaded, put
- * the plist/config files back, and — when an instance was serving before the
- * repair — make sure one is serving again, restarting it DIRECTLY if the repair
- * had stopped it. Always a `failed` result whose detail says exactly what state
- * the instance was left in; never "fixed".
+ * Undo a failed phase 2 (flair#2040): unload the job this repair loaded and
+ * verify it is gone, put the plist/config files back, and — when an instance
+ * was serving before the repair and this repair stopped it — restart it
+ * DIRECTLY. Every step is an attempt whose outcome is reported: the result is
+ * always `failed` (never "fixed"), and its detail says the state the instance
+ * was left in, including when that state could not be established.
  */
 async function restoreAfterFailedRepair(
   p: PreparedLaunchdRepair,
@@ -6670,37 +6890,62 @@ async function restoreAfterFailedRepair(
 ): Promise<LaunchdRepairResult> {
   const notes: string[] = [];
   // a. Unload the job this repair loaded (or tried to), so KeepAlive cannot
-  //    fight the restart — and wait for its process, if it had one, to exit.
+  //    fight the restart, VERIFY it is gone, and wait for its process to exit.
   if (done.loaded) {
     const launchdPid = readLaunchctlJobState(p.label, realLaunchctlLister).pid;
-    try { realLaunchctlCommand(bootoutCommand(p.domain, p.label)); } catch { /* not loaded */ }
-    if (launchdPid !== null && launchdPid !== p.prior.servingPid) {
-      try { await waitForProcessExit(launchdPid, STARTUP_TIMEOUT_MS); } catch { /* reported by the health probe below */ }
+    const servingNow = resolveInstanceServingPid(p.dataDir, p.port);
+    const gone = ensureLaunchdJobAbsent({ run: realLaunchctlCommand, domain: p.domain, label: p.label });
+    if (gone !== null) {
+      // A direct restart now could race the job on the same data directory.
+      return {
+        kind: "failed",
+        detail:
+          `${cause}. Undoing it could not be completed: the job this repair loaded could not be shown unloaded (${gone}), ` +
+          "so Flair was NOT restarted directly — launchd may still run the new job, or Flair may be down. " +
+          "The plist and config files were left as the repair wrote them.",
+        remedy: [`launchctl bootout ${p.domain}/${p.label}`, "flair start"],
+      };
     }
-    notes.push(`the launchd job ${p.label} was unloaded again`);
+    for (const pid of new Set([launchdPid, servingNow])) {
+      if (pid !== null && pid !== p.prior.servingPid) {
+        try { await waitForProcessExit(pid, STARTUP_TIMEOUT_MS); } catch { /* reported by the health probe below */ }
+      }
+    }
+    notes.push(`the launchd job ${p.label} was unloaded again (verified absent)`);
   }
-  // b. Put the files back.
+  // b. Put the files back (every snapshot was proven readable in phase 1).
   try {
     if (done.wrotePlist) restoreFile(p.plistPath, p.prior.plist);
-    if (done.removedLegacy && p.legacyPlistPath) restoreFile(p.legacyPlistPath, p.prior.legacyPlist);
+    if (done.removedLegacy && p.legacyPlistPath && p.prior.legacyPlist) restoreFile(p.legacyPlistPath, p.prior.legacyPlist);
     if (done.wroteConfig && p.prior.config) restoreFile(p.prior.config.path, p.prior.config.snapshot);
     if (done.wrotePlist || done.removedLegacy || done.wroteConfig) notes.push("the plist and config files were put back as they were");
   } catch (err: any) {
     notes.push(`putting the plist/config files back FAILED (${err?.message ?? err})`);
   }
-  if (p.prior.jobLoaded || p.prior.legacyJobLoaded) {
+  if (done.unloadedPrior) {
     notes.push("the launchd job that was loaded before the repair (it was not serving this instance) is not loaded in this session now");
   }
   // c. Bring back the instance that was serving.
   if (p.arm === "adopt") {
     const health = await probeHealth(p.port);
-    if (health.kind === "ok") {
-      const pid = resolveInstanceServingPid(p.dataDir, p.port);
+    if (!done.stopped) {
       notes.push(
-        `Flair is serving on port ${p.port}${pid ? ` (pid ${pid})` : ""} — the running instance did not go down, ` +
-          "so nothing was restarted; it runs directly, NOT under launchd",
+        health.kind === "ok"
+          ? `this repair did not stop the running instance, and Flair is serving on port ${p.port} — directly, NOT under launchd`
+          : `this repair did not stop the running instance, but Flair is not answering on port ${p.port} (${health.kind})`,
       );
-    } else if (done.stopped) {
+    } else if (health.kind !== "refused") {
+      // The repair stopped the instance, yet the port is not free: something
+      // this repair cannot attribute answers or holds it. Starting a second
+      // instance on top of it is not a restore.
+      return {
+        kind: "failed",
+        detail:
+          `${cause}. The repair had stopped the running instance, and port ${p.port} is not free (${health.kind}) — ` +
+          `what holds it could not be attributed, so Flair was NOT restarted directly. ${notes.length ? `Also: ${notes.join("; ")}.` : ""}`.trim(),
+        remedy: ["flair status", "flair start"],
+      };
+    } else {
       try {
         const pid = await startFlairDirect(p.port, p.dataDir);
         notes.push(`Flair was restarted directly${pid ? ` (pid ${pid})` : ""} and is serving on port ${p.port} — running directly, NOT under launchd`);
@@ -6713,11 +6958,9 @@ async function restoreAfterFailedRepair(
           remedy: ["flair start"],
         };
       }
-    } else {
-      notes.push(`Flair is not answering on port ${p.port} (${health.kind}); this repair had not stopped it`);
     }
   } else {
-    notes.push("Flair was not running before this repair and was not started");
+    notes.push("Flair was not running before this repair (its port was free) and was not started");
   }
   return {
     kind: "failed",
@@ -6990,9 +7233,16 @@ async function startFlairProcess(port: number, dataDir: string): Promise<void> {
           return;
         } catch (err: any) {
           // Unload whatever the attempt loaded before starting directly, so
-          // KeepAlive cannot start the job underneath the direct process.
-          bootoutLaunchdJob(launchdLabel(dataDir));
-          console.error(renderStartLaunchdFailed("flair", launchdLabel(dataDir), err?.message ?? String(err)));
+          // KeepAlive cannot start the job underneath the direct process — and
+          // only start directly once every job for this instance is VERIFIED
+          // gone (flair#2040). If that cannot be shown, do not start directly.
+          const cause = err?.message ?? String(err);
+          const labels = label === LEGACY_LAUNCHD_LABEL ? [launchdLabel(dataDir), LEGACY_LAUNCHD_LABEL] : [launchdLabel(dataDir)];
+          const notGone = bootoutLaunchdJob(labels);
+          if (notGone !== null) {
+            throw new Error(renderStartLaunchdUnloadUncertain("flair", notGone.target, cause, notGone.detail).join("\n"));
+          }
+          console.error(renderStartLaunchdFailed("flair", launchdLabel(dataDir), cause));
         }
       }
     }

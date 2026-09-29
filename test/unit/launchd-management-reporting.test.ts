@@ -66,6 +66,7 @@ import {
   readLaunchctlJobState,
   readPlistProgramRefs,
   renderDetachedWarning,
+  verifyLaunchdManagement,
   type LaunchctlLister,
 } from "../../src/lib/launchd-management.ts";
 import {
@@ -198,18 +199,32 @@ describe("flair#1022 — assessLaunchdManagement distinguishes healthy from mana
 
   // ─── the false-positive guards. An over-eager check is its own defect. ───
 
-  test("POSITIVE CONTROL: a running job with an unreadable instance PID is managed, not detached", () => {
+  test("a running job with an UNIDENTIFIED instance PID is unverified: no alarm, and no success claim (flair#2040)", () => {
     // hdb.pid missing and lsof unavailable is a real condition on a working
-    // install. A live job under THIS instance's label is positive evidence;
-    // demanding a second, less reliable source before believing it would warn
-    // on healthy installs every time.
+    // install, so this must not WARN (not detached) — but a live job under the
+    // label does not prove it serves this instance, so it is not "managed"
+    // either, and the strict verifier every success claim uses refuses it.
     const m = assessLaunchdManagement({
       ...base,
       platform: "darwin",
       instancePid: null,
       list: listerFor(listRunning(base.label, 4242)),
     });
-    expect(m.state).toBe("managed");
+    expect(m.state).toBe("unverified");
+    expect(isDetached(m)).toBe(false);
+    expect(m.detail).toContain("could not be identified");
+    expect(verifyLaunchdManagement(m).verified).toBe(false);
+  });
+
+  test("verifyLaunchdManagement: verified ONLY when launchd's pid equals an IDENTIFIED serving pid", () => {
+    const managed = assessLaunchdManagement({ ...base, platform: "darwin", instancePid: 4242, list: listerFor(listRunning(base.label, 4242)) });
+    expect(verifyLaunchdManagement(managed)).toMatchObject({ verified: true, pid: 4242 });
+    const detached = assessLaunchdManagement({ ...base, platform: "darwin", instancePid: 4242, list: listerFor(listRunning(base.label, 9999)) });
+    expect(verifyLaunchdManagement(detached).verified).toBe(false);
+    // A hand-built "managed" with no identified serving pid is not trusted either.
+    expect(verifyLaunchdManagement({ state: "managed", detail: "x", launchdPid: 4242 }).verified).toBe(false);
+    expect(verifyLaunchdManagement({ state: "managed", detail: "x", launchdPid: 4242, servingPid: null }).verified).toBe(false);
+    expect(verifyLaunchdManagement({ state: "managed", detail: "x", launchdPid: 1, servingPid: 2 }).verified).toBe(false);
   });
 
   test("POSITIVE CONTROL: off darwin nothing is claimed, and launchctl is never consulted", () => {
@@ -564,6 +579,12 @@ describe("flair#1022 — `flair restart` reports the launchd outcome, not just l
         `  printf 'Could not find service "%s"\\n' "$2" >&2`,
         `  exit 113`,
         `fi`,
+        // flair#2040: the preflight reads the job's enabled state from a
+        // RECOGNISED print-disabled listing (an unrecognised one is unknown),
+        // and a fallback VERIFIES the job is gone with `print <domain>/<label>`
+        // — which, in this file's world, finds no loaded job.
+        `if [ "$1" = "print-disabled" ]; then printf 'disabled services = {\\n}\\n'; fi`,
+        `case "$1 $2" in "print gui/"*/*) printf 'Could not find service "%s"\\n' "$2" >&2; exit 113 ;; esac`,
         "exit 0",
       ].join("\n"),
       { mode: 0o755 },

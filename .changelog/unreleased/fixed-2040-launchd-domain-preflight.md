@@ -1,35 +1,54 @@
-- **`doctor --fix` and `init` check launchd before stopping anything and restore on failure; `start` claims launchd only after verifying it (flair#2040).**
+- **Launchd handoffs check before stopping anything, report what they could not verify, and claim launchd only when proven (flair#2040).**
   Over an ssh session the per-user GUI launchd domain can be unreachable
   (`launchctl print gui/<uid>` → `125: Domain does not support specified
   action`). `flair doctor --fix` used to clean-stop a healthy direct-spawned
-  instance and only then fail to load the job, leaving Flair down, and `flair
-  init` printed "Launchd service registered ✓" for a plist it never loaded.
+  instance and only then fail to load the job, leaving Flair down. `flair init`
+  printed "Launchd service registered ✓" for a plist it never loaded.
 
-  `doctor --fix` now checks everything it can before it stops anything: that the
-  GUI domain answers and the job is not disabled there (read-only `launchctl
-  print` and `print-disabled`), the engine and the credential, and the plist it
-  would install (every path exists, the launcher and node are executable,
-  `plutil -lint` accepts it). If a check fails it refuses — non-zero, never
-  "fixed" — and the running instance is untouched. The load uses commands that
-  name the probed domain (`launchctl bootstrap`, `bootout` and `kickstart`
-  against `gui/<uid>`) instead of `load`, `unload` and `start`, which act on the
-  domain launchctl infers for the calling process. If anything fails after the
-  stop, doctor unloads the new job, puts the plist and config back, restarts the
-  instance directly and says so ("running directly, NOT under launchd").
+  Before `doctor --fix` stops the instance or unloads a job, it checks:
+  - that the GUI domain answers and the job is not disabled there (read-only
+    `launchctl print` and `print-disabled`);
+  - the engine;
+  - that existing plist and config files are readable;
+  - which jobs are loaded;
+  - which process serves the instance (or, when nothing is identified, that the
+    port is free);
+  - the credential;
+  - the plist it would install: every path exists, the launcher and node are
+    executable, and `plutil -lint` ran and accepted it.
+
+  An answer it cannot get counts as a failed check. It then refuses — non-zero,
+  never "fixed" — without stopping or unloading anything. The one file it can
+  write before refusing is the 0600 admin-pass file, when it must provision that
+  file from a credential proven against the running instance.
+
+  The load uses commands that name the probed domain (`launchctl bootstrap`,
+  `bootout` and `kickstart` against `gui/<uid>`), not `load`, `unload` and
+  `start`. Those act on whatever domain launchctl infers for the calling
+  process. If a step fails after the stop, doctor tries to unload the new job
+  and checks that it is gone, puts the plist and config back, and tries to
+  restart the instance directly. The result reports each attempt's outcome. It
+  also says when the state could not be established, for example a job that
+  could not be shown unloaded, in which case nothing is started.
 
   `flair init` retires a legacy `ai.tpsdev.flair` job only behind the same
-  checks; when that job is the process serving the instance, init loads and
-  verifies the replacement and restores the legacy job if that fails. Otherwise
-  init writes the plist and says Flair is running directly, not launchd-managed;
-  the check mark appears only when launchd is verified to run the serving
-  process. `flair start` checks the same way, prints `✅ Flair started
-  (launchd-managed …)` only after verifying that launchd's pid is the serving
-  pid, and a direct-start fallback names the reason and says "running directly,
-  NOT launchd-managed" instead of a raw `launchd start failed`.
+  checks. It boots the job out only when it is proven not to serve the
+  instance. When the job does serve the instance, init tries the guarded
+  replacement and a restore. When that cannot be established, it refuses.
+  Otherwise init writes the plist and says Flair is running directly, not
+  launchd-managed.
+
+  `init`, `start` and `doctor` print their launchd check mark or "repaired" only
+  when launchd's pid equals an identified serving pid. When the serving process
+  cannot be identified, the result says so and claims nothing. `flair start`'s
+  fallback names the reason instead of a raw `launchd start failed`. It starts
+  directly only after the job is shown unloaded; otherwise it reports the
+  uncertainty and exits non-zero. `flair restart` still stops first: its start
+  leg decides only whether Flair comes back under launchd or directly.
 
   The launchd launcher no longer starts a second instance on a data directory
-  that a live process already serves (the pid in `hdb.pid`): it exits 0 before
-  Harper loads anything, and launchd's KeepAlive retry starts Flair once that
+  that a live process already serves (the pid in `hdb.pid`). It exits 0 before
+  Harper loads anything, and launchd's KeepAlive retry may start Flair once that
   process has exited. Linux is unchanged: Flair's instance service is
   launchd-only.
 

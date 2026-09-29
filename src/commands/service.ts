@@ -9,12 +9,13 @@
 import { Command } from "commander";
 import { DEFAULT_ADMIN_USER } from "../lib/auth-resolve.js";
 import { classifyDaemonState } from "../lib/daemon-liveness.js";
-import { diagnoseLaunchdPlistPaths, isDetached, renderDetachedWarning } from "../lib/launchd-management.js";
+import { diagnoseLaunchdPlistPaths, isDetached, renderDetachedWarning, verifyLaunchdManagement } from "../lib/launchd-management.js";
 import {
   loadabilityAllowsAttempt,
   renderDirectRunNotice,
   renderStartLaunchdFailed,
   renderStartLaunchdUnavailable,
+  renderStartLaunchdUnloadUncertain,
 } from "../lib/launchd-domain-preflight.js";
 import { opsSocketPathRefusal } from "../lib/socket-path-limit.js";
 import { execSync, spawn } from "node:child_process";
@@ -326,7 +327,7 @@ program
       // dir is currently registered under (new instance-scoped, or a
       // pre-flair#693 legacy install) so the existsSync gate below is
       // accurate before we attempt anything.
-      const { plistPath } = resolveLaunchdLabel(dataDir);
+      const { plistPath, isLegacy } = resolveLaunchdLabel(dataDir);
       if (existsSync(plistPath)) {
         // flair#2040: preflight BEFORE the load — is the GUI domain reachable
         // from this session, and is the job enabled there? Read-only. When it
@@ -353,11 +354,13 @@ program
             readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture on the freshly-created socket
             stampEngineVersionIfRunning(dataDir); // flair#1047: stamp the store with the engine version
             // flair#2040: the launchd check mark only after VERIFYING that
-            // launchd runs the process serving this instance — a healthy port
-            // is not proof that launchd started what answers it.
+            // launchd's pid IS the identified serving pid — a healthy port is
+            // not proof that launchd started what answers it, and an
+            // unidentified serving process is not proof either.
             const managed = observeLaunchdManagement(dataDir, port);
-            if (managed.state === "managed") {
-              console.log(`✅ Flair started (launchd-managed: ${managed.detail})`);
+            const verdict = verifyLaunchdManagement(managed);
+            if (verdict.verified) {
+              console.log(`✅ Flair started (launchd-managed: ${verdict.detail})`);
               return;
             }
             // Healthy, but not proven to be launchd's process: no launchd check
@@ -367,9 +370,16 @@ program
             return;
           } catch (err: any) {
             // Unload whatever the attempt loaded, so KeepAlive cannot start the
-            // job underneath the direct process started below.
-            bootoutLaunchdJob(jobLabel);
-            console.error(renderStartLaunchdFailed("flair start", jobLabel, err?.message ?? String(err)));
+            // job underneath the direct process started below — and start
+            // directly only once every job for this instance is VERIFIED gone
+            // (flair#2040). Otherwise say so and do not start directly.
+            const cause = err?.message ?? String(err);
+            const notGone = bootoutLaunchdJob(isLegacy ? [jobLabel, LEGACY_LAUNCHD_LABEL] : [jobLabel]);
+            if (notGone !== null) {
+              for (const line of renderStartLaunchdUnloadUncertain("flair start", notGone.target, cause, notGone.detail)) console.error(line);
+              process.exit(1);
+            }
+            console.error(renderStartLaunchdFailed("flair start", jobLabel, cause));
             launchdFellBack = true;
           }
         }

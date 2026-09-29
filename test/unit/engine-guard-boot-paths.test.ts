@@ -156,7 +156,8 @@ describe("every boot path runs the guard", () => {
     const body = functionBody(src, "registerInitLaunchdService");
     const guardAt = body.indexOf("guardEngineNotBackwards(");
     expect(guardAt).toBeGreaterThan(-1);
-    const bootoutAt = body.indexOf("realLaunchctlCommand(bootoutCommand(");
+    // The serving job's boot-out is the verified one (flair#2040 round 4).
+    const bootoutAt = body.indexOf("ensureLaunchdJobAbsent(");
     expect(bootoutAt).toBeGreaterThan(guardAt);
   });
 

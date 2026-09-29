@@ -343,8 +343,18 @@ export type LaunchdManagementState =
   | "not-applicable"
   /** macOS, but no service is registered for this instance. Never was managed; not a degradation. */
   | "no-service"
-  /** A service is registered AND launchd is running this instance's process. */
+  /**
+   * A service is registered AND launchd is running this instance's process:
+   * launchd's pid and the IDENTIFIED serving pid are the same number.
+   */
   | "managed"
+  /**
+   * launchd is running the job, but the process serving this instance could
+   * not be identified (no live hdb.pid, no port listener found), so whether
+   * launchd serves it is UNKNOWN (flair#2040). Not an alarm — nothing shows it
+   * is detached — and never a success: see verifyLaunchdManagement.
+   */
+  | "unverified"
   /** A service is registered and launchd is NOT running this instance's process. */
   | "detached";
 
@@ -354,13 +364,41 @@ export interface LaunchdManagement {
   label?: string;
   /** One line of evidence for the verdict. Present for every state. */
   detail: string;
-  /** Commands that restore management. Present iff state === "detached". */
+  /** Commands that restore management. Present for "detached" (and "unverified"). */
   remedy?: string[];
+  /** launchd's pid for the job, when it reported one. */
+  launchdPid?: number | null;
+  /** The pid identified as serving this instance, or null when it could not be identified. */
+  servingPid?: number | null;
 }
 
 /** True when the instance is running outside the service manager that is registered to own it. */
 export function isDetached(m: LaunchdManagement): boolean {
   return m.state === "detached";
+}
+
+/**
+ * The STRICT verifier every success claim goes through (flair#2040): a
+ * launchd check mark from `flair start` or `flair init`, and `doctor --fix`'s
+ * "repaired". Verified ONLY when launchd reported a pid, a serving pid was
+ * IDENTIFIED, and they are the same number. An unknown serving pid is never
+ * verified — unknown evidence must not license a success claim.
+ *
+ * `assessLaunchdManagement` is the observer (status, warnings); this decides
+ * what may be claimed.
+ */
+export function verifyLaunchdManagement(
+  m: LaunchdManagement,
+): { verified: true; pid: number; detail: string } | { verified: false; detail: string; remedy?: string[] } {
+  if (
+    m.state === "managed" &&
+    typeof m.launchdPid === "number" &&
+    typeof m.servingPid === "number" &&
+    m.launchdPid === m.servingPid
+  ) {
+    return { verified: true, pid: m.launchdPid, detail: m.detail };
+  }
+  return { verified: false, detail: m.detail, remedy: m.remedy };
 }
 
 export interface AssessLaunchdManagementInput {
@@ -399,10 +437,11 @@ export interface AssessLaunchdManagementInput {
  *   - launchd reports a PID that is not the instance's PID ⇒ **detached**, and
  *     this is the exact shape the incident produced: launchd holds a job that
  *     is failing, while a directly-spawned process answers on the port.
- *   - launchd reports a PID and we cannot read the instance's own ⇒ **managed**.
- *     A live job under this instance's label is positive evidence; refusing to
- *     believe it because `hdb.pid` was unreadable would warn on healthy
- *     installs, which is its own defect.
+ *   - launchd reports a PID and we cannot identify the instance's own ⇒
+ *     **unverified** (flair#2040). Warning on it would alarm healthy installs,
+ *     which is its own defect; calling it managed would be a claim without
+ *     proof. It is neither: no warning, and no success claim
+ *     (verifyLaunchdManagement refuses it).
  *
  * A parent-process check is NOT used, and that is worth stating because it is
  * the obvious first idea: the direct-start fallback spawns `detached: true` and
@@ -464,10 +503,35 @@ export function assessLaunchdManagement(input: AssessLaunchdManagementInput): La
         `this instance is served by process ${instancePid}, but launchd's job ${label} is process ${job.pid} — ` +
         `the running instance is not the one launchd manages.${because}`,
       remedy,
+      launchdPid: job.pid,
+      servingPid: instancePid,
     };
   }
 
-  return { state: "managed", label, detail: `launchd job ${label} is running as process ${job.pid}` };
+  if (instancePid === null) {
+    // flair#2040: launchd runs SOMETHING, but nothing identifies the process
+    // serving this instance. Not detached (no evidence of that, and a warning
+    // on a healthy install trains operators to skip warnings) — and not
+    // managed either: an unknown serving pid is not proof.
+    return {
+      state: "unverified",
+      label,
+      detail:
+        `launchd job ${label} is running as process ${job.pid}, but the process serving this instance could not be ` +
+        "identified (no live hdb.pid, and no listener found on its port), so launchd management is NOT verified",
+      remedy: ["flair restart"],
+      launchdPid: job.pid,
+      servingPid: null,
+    };
+  }
+
+  return {
+    state: "managed",
+    label,
+    detail: `launchd job ${label} is running as process ${job.pid}`,
+    launchdPid: job.pid,
+    servingPid: instancePid,
+  };
 }
 
 /**
