@@ -23,10 +23,11 @@
 
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { collectDeps } from "./lib/check-dep-ages-collect.mjs";
 
 const REPO_ROOT = process.env.FLAIR_CHECK_DEP_AGES_ROOT ??
-  join(dirname(new URL(import.meta.url).pathname), "..");
+  join(dirname(fileURLToPath(import.meta.url)), "..");
 
 function readPkg(path) {
   return JSON.parse(readFileSync(path, "utf8"));
