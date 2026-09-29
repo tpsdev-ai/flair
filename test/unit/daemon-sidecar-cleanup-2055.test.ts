@@ -10,8 +10,10 @@
  * Everything is HOME-isolated (a scratch data dir under the OS temp dir). The
  * lock that briefly serialised this with the writers was removed: the only
  * loser of the read/unlink window is a start that rewrote the sidecar in it,
- * and a live daemon left with no sidecar is re-adopted by the next
- * status/stop/restart (see the recovery test in stale-sidecar-2055.test.ts).
+ * and a live daemon left with no sidecar can be re-adopted by a later
+ * port-based stop or restart once the live process supplies the required
+ * pidfile and health evidence (see the recovery test in
+ * stale-sidecar-2055.test.ts). `flair status` does not re-adopt.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";

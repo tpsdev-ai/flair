@@ -5262,9 +5262,11 @@ function writeDaemonSidecar(dataDir: string, pid: number, port: number, startTim
  *
  * There is no lock: the re-read narrows the window to the gap between the read
  * and the unlink, and the only loser of that race is a start that rewrote the
- * sidecar in the gap — a live daemon left with no sidecar, which the next
- * status/stop/restart RECOVERS by self-heal (shouldAdoptMissingSidecar adopts
- * the identity from the live process; see the recovery test). A lock would buy
+ * sidecar in the gap — a live daemon left with no sidecar, which a later
+ * port-based stop or restart can RECOVER by self-heal once the live process
+ * supplies the required pidfile and health evidence (shouldAdoptMissingSidecar
+ * adopts the identity from the live process; see the recovery test). `flair
+ * status` does not re-adopt. A lock would buy
  * nothing here and add a crash-recovery hazard, so the design relies on the
  * self-heal instead. A writer OUTSIDE flair could substitute a symlink after
  * the final read; that is out of scope (same as any other path flair re-reads

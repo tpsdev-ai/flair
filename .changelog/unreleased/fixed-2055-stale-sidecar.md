@@ -12,6 +12,7 @@
   as gone. The port-based stop removes the sidecar once the pid it names is
   confirmed gone — opened with `O_NOFOLLOW` and removed only while a re-read
   still names that pid. A start racing that re-read/unlink can lose its fresh
-  sidecar, leaving a live daemon with none; the next status/stop/restart
-  re-adopts it (`test/unit/stale-sidecar-2055.test.ts`).
+  sidecar, leaving a live daemon with none; a later port-based stop or
+  restart can re-adopt it once the live process supplies the required pidfile
+  and health evidence (`test/unit/stale-sidecar-2055.test.ts`).
   (`test/unit/daemon-liveness.test.ts`, `test/unit/daemon-sidecar-cleanup-2055.test.ts`)
