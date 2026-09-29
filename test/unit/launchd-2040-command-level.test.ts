@@ -35,7 +35,7 @@
 // "darwin"`. Linux CI reports these as skipped (flair#1012); the darwin
 // unit lane executes them.
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -231,11 +231,17 @@ function setupFixture(port: number): Fixture {
   writeFileSync(
     join(probe, "drive.ts"),
     [
+      `import { chmodSync } from "node:fs";`,
       `import { repairLaunchdManagement, registerInitLaunchdService, setLaunchdMigrationLintForTests, startFlairProcess } from "./src/cli.ts";`,
       `const [what, arg] = process.argv.slice(2);`,
       `const input = JSON.parse(arg);`,
       // A migration lint that THROWS instead of answering (flair#2040 r8).
-      `if (input.lintThrows) setLaunchdMigrationLintForTests(() => { throw new Error(input.lintThrows); });`,
+      // `lockDirBeforeThrow` makes that directory read-only first, so putting a
+      // plist in it back afterwards fails (flair#2078).
+      `if (input.lintThrows) setLaunchdMigrationLintForTests(() => {`,
+      `  if (input.lockDirBeforeThrow) chmodSync(input.lockDirBeforeThrow, 0o555);`,
+      `  throw new Error(input.lintThrows);`,
+      `});`,
       `let r;`,
       `if (what === "repair") r = await repairLaunchdManagement(input.dataDir, input.port);`,
       `else if (what === "init") r = await registerInitLaunchdService(input);`,
@@ -1974,5 +1980,157 @@ describe("flair#2040 r8 — a lint that throws leaves a loaded legacy job and bo
       expect(stdout).not.toContain("✓");
     },
     90_000,
+  );
+});
+
+describe("flair#2078 — init: a lint that throws puts back the plist init wrote beside the legacy one", () => {
+  const LINT_THROWS = "injected lint failure (flair#2078)";
+
+  function legacyPlistPath(): string {
+    return launchdPlistPath(LEGACY_LAUNCHD_LABEL, fx.agentsDir);
+  }
+
+  /**
+   * A WELL-FORMED legacy plist for THIS data dir whose paths all exist (so only
+   * the lint's own failure stops init), and its job loaded and idle (no pid).
+   */
+  function arrangeLoadedLegacy(): string {
+    const plist = passFilePlist(LEGACY_LAUNCHD_LABEL);
+    expect(plist).toContain(`<key>Label</key><string>${LEGACY_LAUNCHD_LABEL}</string>`);
+    writeFileSync(legacyPlistPath(), plist);
+    markLoaded(LEGACY_LAUNCHD_LABEL, null);
+    return plist;
+  }
+
+  /**
+   * A prior plist at the new path that init REWRITES: ours (ROOTPATH is this
+   * data dir), but not the pass-file launcher shape.
+   */
+  function arrangePriorNewPlist(): string {
+    const launcher = join(fx.probe, "templates", "launchd", "start-flair-with-admin-pass.sh");
+    const prior = passFilePlist(fx.label).replace(`<string>${launcher}</string>`, "<string>/usr/bin/true</string>");
+    expect(prior).not.toBe(passFilePlist(fx.label));
+    writeFileSync(fx.plistPath, prior);
+    return prior;
+  }
+
+  /** Every file in the LaunchAgents directory: name -> mode and bytes. */
+  function agentsDirState(): Record<string, string> {
+    const state: Record<string, string> = {};
+    for (const name of readdirSync(fx.agentsDir).sort()) {
+      const path = join(fx.agentsDir, name);
+      state[name] = `${(statSync(path).mode & 0o777).toString(8)} ${readFileSync(path).toString("base64")}`;
+    }
+    return state;
+  }
+
+  /** A TMPDIR that does not exist: the default lint cannot create its temporary copy. */
+  function missingTmpdir(): Record<string, string> {
+    const dir = join(fx.home, "no-such-tmp");
+    expect(existsSync(dir)).toBe(false);
+    return { TMPDIR: dir };
+  }
+
+  function expectRefusedUntouched(result: any, before: Record<string, string>, lintDetail: string): string {
+    expect(result).toMatchObject({ kind: "skipped" }); // whole result printed on failure
+    const text = result.lines.map((l: any) => l.text).join("\n");
+    // The refusal names the plist, the error, and what was left as it was.
+    expect(text).toContain(`the plist init would install for ${fx.label} could not be validated (the lint failed: ${lintDetail}`);
+    expect(text).toContain(`the legacy job ${LEGACY_LAUNCHD_LABEL} and its plist at ${legacyPlistPath()} were left as they were`);
+    expect(text).not.toContain("✓");
+    expect(text).not.toContain("Launchd service registered");
+    // The LaunchAgents directory is exactly as it was: same files, same bytes.
+    expect(agentsDirState()).toEqual(before);
+    // Zero launchctl calls that change launchd's state; the legacy job was only
+    // READ, is still loaded, and nothing was started.
+    expect(mutatingCalls()).toEqual([]);
+    expect(shimLines()).toContain(`print ${GUI}/${LEGACY_LAUNCHD_LABEL}`);
+    expect(existsSync(join(fx.state, "loaded", LEGACY_LAUNCHD_LABEL))).toBe(true);
+    expect(stubStarts()).toEqual([]);
+    return text;
+  }
+
+  test.skipIf(!isDarwin)(
+    "(g1) a prior plist at the new path + an injected lint that THROWS -> refused; the LaunchAgents directory byte-for-byte as before; zero mutating calls",
+    async () => {
+      arrangeLoadedLegacy();
+      arrangePriorNewPlist();
+      const before = agentsDirState();
+      expect(Object.keys(before).length).toBe(2);
+
+      const run = await drive("init", { ...initInput(), lintThrows: LINT_THROWS });
+
+      await explainOnFailure(run, async () => {
+        const text = expectRefusedUntouched(run.result, before, LINT_THROWS);
+        expect(text).toContain(`the plist at ${fx.plistPath} was put back as it was`);
+      });
+    },
+    60_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(g2) NO prior plist at the new path + an injected lint that THROWS -> refused; the new plist does not remain; zero mutating calls",
+    async () => {
+      const legacy = arrangeLoadedLegacy();
+      const before = agentsDirState();
+      expect(Object.keys(before)).toEqual([`${LEGACY_LAUNCHD_LABEL}.plist`]);
+
+      const run = await drive("init", { ...initInput(), lintThrows: LINT_THROWS });
+
+      await explainOnFailure(run, async () => {
+        const text = expectRefusedUntouched(run.result, before, LINT_THROWS);
+        expect(text).toContain(`the new plist ${fx.plistPath} was removed again`);
+        expect(existsSync(fx.plistPath)).toBe(false);
+        expect(readFileSync(legacyPlistPath(), "utf-8")).toBe(legacy);
+      });
+    },
+    60_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(g3) the DEFAULT lint unable to create its temporary file (TMPDIR missing) -> the same refusal; the LaunchAgents directory byte-for-byte as before",
+    async () => {
+      arrangeLoadedLegacy();
+      arrangePriorNewPlist();
+      const before = agentsDirState();
+
+      const run = await drive("init", initInput(), missingTmpdir());
+
+      await explainOnFailure(run, async () => {
+        const text = expectRefusedUntouched(run.result, before, "ENOENT");
+        expect(text).toContain("mkdtemp");
+        expect(text).toContain(`the plist at ${fx.plistPath} was put back as it was`);
+      });
+    },
+    60_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(g4) the lint throws AND the plist cannot be put back -> 'uncertain' (init exits 1), the failed put-back named; nothing loaded or unloaded",
+    async () => {
+      const legacy = arrangeLoadedLegacy();
+
+      let run: Awaited<ReturnType<typeof drive>>;
+      try {
+        run = await drive("init", { ...initInput(), lintThrows: LINT_THROWS, lockDirBeforeThrow: fx.agentsDir });
+      } finally {
+        chmodSync(fx.agentsDir, 0o755);
+      }
+
+      await explainOnFailure(run, async () => {
+        expect(run.result).toMatchObject({ kind: "uncertain" }); // whole result printed on failure
+        const text = run.result.lines.map((l: any) => l.text).join("\n");
+        expect(text).toContain(`could not be validated (the lint failed: ${LINT_THROWS})`);
+        expect(text).toContain(`putting ${fx.plistPath} back FAILED`);
+        expect(text).toContain("EACCES");
+        expect(text).not.toContain("✓");
+        // Reported honestly: the new plist IS still there, beside the legacy one.
+        expect(existsSync(fx.plistPath)).toBe(true);
+        expect(readFileSync(legacyPlistPath(), "utf-8")).toBe(legacy);
+        expect(mutatingCalls()).toEqual([]);
+        expect(existsSync(join(fx.state, "loaded", LEGACY_LAUNCHD_LABEL))).toBe(true);
+      });
+    },
+    60_000,
   );
 });

@@ -775,14 +775,36 @@ type LaunchctlRunner = (cmd: string) => void;
 
 /**
  * Test seam (flair#2040): the lint migrateLegacyLaunchdLabel runs when its
- * caller injects none — which is every start path. Lets a command-level test
- * drive `flair start` and the start leg with a lint that throws. Production
- * leaves this unset.
+ * caller injects none — which is every start path — and the lint `flair init`
+ * runs over the plist it writes when it retires a legacy registration
+ * (flair#2078). Lets a command-level test drive `flair start`, the start leg
+ * and init's launchd step with a lint that throws. Production leaves this
+ * unset.
  */
 let launchdMigrationLintForTests: ((content: string) => string | null) | null = null;
 
 export function setLaunchdMigrationLintForTests(lint: ((content: string) => string | null) | null): void {
   launchdMigrationLintForTests = lint;
+}
+
+/**
+ * Run `lint` over a replacement plist before anything is unloaded (flair#2040,
+ * flair#2078): the problem line it reports, or null when it passed. A lint that
+ * THROWS instead of answering (its temporary copy could not be created, written
+ * or removed, say) checked nothing. That is a LaunchdValidationRefusal whose
+ * message is `refusal("the lint failed: <error>")`: never a pass, and never a
+ * plain error that escapes the caller's refusal handling.
+ */
+function lintReplacementPlist(
+  content: string,
+  lint: (content: string) => string | null,
+  refusal: (failure: string) => string,
+): string | null {
+  try {
+    return lint(content);
+  } catch (err: any) {
+    throw new LaunchdValidationRefusal(refusal(`the lint failed: ${err?.message ?? String(err)}`));
+  }
 }
 
 /**
@@ -860,15 +882,10 @@ function migrateLegacyLaunchdLabel(
   // exception is a validation refusal here. A plain error would reach the start
   // paths' failed-LOAD handling, which boots the legacy job out.
   const lint = opts.lint ?? launchdMigrationLintForTests ?? lintLaunchdPlistContent;
-  let lintProblem: string | null;
-  try {
-    lintProblem = lint(newContent);
-  } catch (err: any) {
-    throw new LaunchdValidationRefusal(
-      `not migrating off the legacy launchd label: the replacement plist for ${newLabel} could not be validated ` +
-        `(the lint failed: ${err?.message ?? String(err)}). Nothing was unloaded, and the legacy plist ${resolved.plistPath} was left as it was.`,
-    );
-  }
+  const lintProblem = lintReplacementPlist(newContent, lint, (failure) =>
+    `not migrating off the legacy launchd label: the replacement plist for ${newLabel} could not be validated ` +
+      `(${failure}). Nothing was unloaded, and the legacy plist ${resolved.plistPath} was left as it was.`,
+  );
   if (lintProblem !== null) {
     throw new LaunchdValidationRefusal(
       `not migrating off the legacy launchd label: the replacement plist for ${newLabel} failed validation ` +
@@ -5653,7 +5670,8 @@ function afterFailedLaunchdAttempt(
  * accepted it. A plutil that cannot be run, times out or dies on a signal is a
  * problem too: a lint that did not run is not a lint that passed. Creating,
  * writing or removing its temporary copy can THROW; migrateLegacyLaunchdLabel
- * turns any throw into a validation refusal before it unloads anything.
+ * and init's launchd step (lintReplacementPlist) turn any throw into a
+ * validation refusal before they unload anything.
  */
 function lintLaunchdPlistContent(content: string): string | null {
   if (process.platform !== "darwin") return null;
@@ -5678,8 +5696,11 @@ function lintLaunchdPlistContent(content: string): string | null {
  * unload or replace anything for it (flair#2040): its paths (launcher, node,
  * Harper, working directory, data directory) and, on macOS, its syntax.
  */
-function validateLaunchdPlistContent(content: string): string | null {
-  return checkLaunchdPlistBeforeLoad(content) ?? lintLaunchdPlistContent(content);
+function validateLaunchdPlistContent(
+  content: string,
+  lint: (content: string) => string | null = lintLaunchdPlistContent,
+): string | null {
+  return checkLaunchdPlistBeforeLoad(content) ?? lint(content);
 }
 
 /**
@@ -6540,8 +6561,8 @@ export interface InitLaunchdLine {
  *   - managed:  launchd runs this instance's job, verified (pid = serving pid);
  *   - direct:   the plist is on disk and Flair runs directly, NOT under launchd;
  *   - skipped:  a legacy job would have had to be replaced and the preflight or
- *               the replacement's validation failed — nothing was unloaded,
- *               removed or written;
+ *               the replacement's validation failed — nothing was unloaded or
+ *               removed, and a plist init wrote was put back as it was;
  *   - restored: replacing a serving legacy job failed after it was unloaded;
  *               the prior service was brought back (details in the lines);
  *   - unverified: launchd runs the job but the serving process could not be
@@ -6550,13 +6571,32 @@ export interface InitLaunchdLine {
  *   - down:     replacing failed AND every restore failed — init exits 1;
  *   - uncertain: a job could not be shown unloaded — during the restore (so
  *               nothing further was started), or when retiring an idle legacy
- *               job (its plist is kept and the new plist put back); the state
- *               is reported as unknown — init exits 1.
+ *               job (its plist is kept and the new plist put back) — or the
+ *               replacement failed validation and the plist init wrote could
+ *               not be put back (flair#2078); the state is reported as unknown
+ *               — init exits 1.
  */
 export type InitLaunchdOutcome = {
   kind: "managed" | "direct" | "unverified" | "skipped" | "restored" | "refused" | "down" | "uncertain";
   lines: InitLaunchdLine[];
 };
+
+/**
+ * Put the plist `flair init` wrote back as `prior` recorded it (flair#2040,
+ * flair#2078): its prior bytes, or removed when there was none. Never throws:
+ * `ok` false means the put-back FAILED, and `text` says so with the error.
+ */
+function putInitPlistBack(path: string, prior: FileSnapshot): { ok: boolean; text: string } {
+  try {
+    restoreFile(path, prior);
+  } catch (e: any) {
+    return { ok: false, text: `putting ${path} back FAILED (${e?.message ?? e})` };
+  }
+  return {
+    ok: true,
+    text: prior.kind === "absent" ? `the new plist ${path} was removed again` : `the plist at ${path} was put back as it was`,
+  };
+}
 
 /**
  * `flair init`'s launchd step (flair#2040): write this instance's plist, retire
@@ -6575,8 +6615,9 @@ export type InitLaunchdOutcome = {
  * up, and only then boot the legacy job out, load the replacement with
  * targeted commands and verify it; any failure after the boot-out restores the
  * legacy plist and job (or, failing that, starts Flair directly) and says so.
- * If the preflight or the validation fails, NOTHING is unloaded, removed or
- * written.
+ * If the preflight fails, NOTHING is unloaded, removed or written; if the
+ * validation fails — a lint that throws included (flair#2078) — nothing is
+ * unloaded or removed, and the plist init wrote is put back as it was.
  */
 async function registerInitLaunchdService(input: {
   dataDir: string;
@@ -6691,11 +6732,41 @@ async function registerInitLaunchdService(input: {
       ],
     };
   }
-  const problem = validateLaunchdPlistContent(readFileSync(write.plistPath, "utf-8"));
-  if (problem) {
-    restoreFile(write.plistPath, priorNew);
-    err(`⚠️  Launchd: not re-registered — the plist init would install for ${write.label} cannot be loaded (${problem}). ${keptLegacy}.`);
-    err("   Fix: npm install -g @tpsdev-ai/flair && flair init");
+  // Every failed validation is a refusal made before anything is unloaded: a
+  // problem the checks REPORT, and — as in the start paths' migration — a lint
+  // that THROWS (lintReplacementPlist) or a written plist that cannot be read
+  // back (flair#2078). Each puts the plist just written back as it was, or
+  // removes it when there was none: left beside the legacy plist, it would give
+  // launchd two jobs for one data directory at the next login.
+  const installing = `the plist init would install for ${write.label}`;
+  let refusal: { why: string; fix: string } | null = null;
+  try {
+    const problem = validateLaunchdPlistContent(readFileSync(write.plistPath, "utf-8"), (content) =>
+      lintReplacementPlist(content, launchdMigrationLintForTests ?? lintLaunchdPlistContent, (failure) =>
+        `${installing} could not be validated (${failure})`),
+    );
+    if (problem !== null) {
+      refusal = { why: `${installing} cannot be loaded (${problem})`, fix: "npm install -g @tpsdev-ai/flair && flair init" };
+    }
+  } catch (e: any) {
+    refusal = isLaunchdValidationRefusal(e)
+      ? { why: e.message, fix: `make sure the temporary directory (${tmpdir()}) exists and is writable, and re-run 'flair init'.` }
+      : { why: `${installing} could not be validated (${e?.message ?? String(e)})`, fix: "resolve the error above, and re-run 'flair init'." };
+  }
+  if (refusal !== null) {
+    const putBack = putInitPlistBack(write.plistPath, priorNew);
+    err(
+      `⚠️  Launchd: not re-registered — ${refusal.why}. Nothing was unloaded: the legacy job ${LEGACY_LAUNCHD_LABEL} ` +
+        `and its plist at ${legacyPath} were left as they were, and ${putBack.text}.`,
+    );
+    if (!putBack.ok) {
+      err(
+        `   Fix: remove ${write.plistPath} (beside the legacy plist, launchd would load two jobs for this data ` +
+          `directory at the next login); then ${refusal.fix}`,
+      );
+      return { kind: "uncertain", lines };
+    }
+    err(`   Fix: ${refusal.fix}`);
     return { kind: "skipped", lines };
   }
 
@@ -6707,18 +6778,10 @@ async function registerInitLaunchdService(input: {
       // KEPT its plist. The replacement written above must not stay beside it
       // (two plists for one data directory would give launchd two jobs), so it
       // is put back as it was, and nothing is reported as registered.
-      let putBack: string;
-      try {
-        restoreFile(write.plistPath, priorNew);
-        putBack = priorNew.kind === "absent"
-          ? `the new plist ${write.plistPath} was removed again`
-          : `the plist at ${write.plistPath} was put back as it was`;
-      } catch (e: any) {
-        putBack = `putting ${write.plistPath} back FAILED (${e?.message ?? e})`;
-      }
+      const putBack = putInitPlistBack(write.plistPath, priorNew);
       err(
         `⚠️  Launchd: not re-registered — the legacy job ${LEGACY_LAUNCHD_LABEL} could not be shown unloaded ` +
-          `(${cleanup.unloadFailed}), so it may still be loaded. Its plist at ${legacyPath} was left in place, and ${putBack}.`,
+          `(${cleanup.unloadFailed}), so it may still be loaded. Its plist at ${legacyPath} was left in place, and ${putBack.text}.`,
       );
       err(`   Fix: launchctl bootout ${domain}/${LEGACY_LAUNCHD_LABEL}, then re-run 'flair init'.`);
       return { kind: "uncertain", lines };
