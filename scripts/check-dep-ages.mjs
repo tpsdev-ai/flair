@@ -18,16 +18,22 @@
  * `--ci` marks THIS invocation as the CI gate (the workflow passes it). The CI
  * gate scans the checked-out repository whatever the environment says, so it
  * REFUSES to run (exit 2, naming FLAIR_CHECK_DEP_AGES_ROOT) when that override
- * is set alongside `--ci`. The flag is used rather than a sniffed `CI=true`,
- * because under CI the test process itself runs with `CI=true` — a sniff would
- * make the fixture-root tests refuse there, and `CI=true` is ambient rather
- * than a deliberate statement about THIS invocation.
+ * is PRESENT (even empty) alongside `--ci`.
+ *
+ * The gate accepts ONLY no arguments or exactly `--ci`; any other argument
+ * exits 2, so a typo cannot silently run WITHOUT the CI guard.
+ *
+ * An explicit flag is used rather than a sniffed `CI=true`: the flag is the
+ * invocation's OWN statement of intent, it cannot be set by accident in a
+ * developer shell, and it is visible in the workflow file — unlike an ambient
+ * variable any environment can set.
  *
  * Exit codes:
  *   0 — all checked deps older than the threshold (or nothing to check)
  *   1 — at least one dep too fresh
- *   2 — registry fetch failure (treated as fail, not warn — better safe), or a
- *       REFUSED CI run (the fixture-root override set together with `--ci`)
+ *   2 — registry fetch failure (treated as fail, not warn — better safe), a
+ *       REFUSED CI run (the fixture-root override present together with `--ci`),
+ *       or an unexpected argument
  */
 
 import { readFileSync } from "node:fs";
@@ -35,7 +41,17 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { collectDeps } from "./lib/check-dep-ages-collect.mjs";
 
-const IS_CI_GATE = process.argv.slice(2).includes("--ci");
+const ARGS = process.argv.slice(2);
+
+// Accept ONLY no arguments (tests, local use) or exactly `--ci` (the CI gate).
+// Anything else exits 2 BEFORE scanning: a typo must not silently run without
+// the CI guard.
+const IS_CI_GATE = ARGS.length === 1 && ARGS[0] === "--ci";
+if (ARGS.length > 0 && !IS_CI_GATE) {
+  console.error(`check-dep-ages: unexpected argument(s): ${ARGS.join(" ")}`);
+  console.error("Accepted: no arguments, or exactly --ci (the CI gate's own flag).");
+  process.exit(2);
+}
 
 const REPO_ROOT = process.env.FLAIR_CHECK_DEP_AGES_ROOT ??
   join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -51,11 +67,13 @@ async function main() {
   // says. FLAIR_CHECK_DEP_AGES_ROOT exists so tests can point the gate at a
   // fixture repository; honouring it on a CI run would let a stray variable
   // divert the gate away from the tree under review. The workflow declares
-  // itself with an explicit --ci flag (not a sniffed CI=true), and we refuse
-  // when the override is set alongside it — before scanning or fetching.
-  if (IS_CI_GATE && process.env.FLAIR_CHECK_DEP_AGES_ROOT) {
+  // itself with an explicit --ci flag, and we refuse when the override is
+  // PRESENT (even empty) before scanning or fetching. A PRESENCE test, not a
+  // truthiness test: an empty value would otherwise slip through and resolve
+  // the root to "".
+  if (IS_CI_GATE && process.env.FLAIR_CHECK_DEP_AGES_ROOT !== undefined) {
     console.error(
-      "FLAIR_CHECK_DEP_AGES_ROOT is set, but the CI gate must scan the checked-out repository.",
+      "FLAIR_CHECK_DEP_AGES_ROOT is present, but the CI gate must scan the checked-out repository.",
     );
     console.error(
       "Refusing to run. Unset FLAIR_CHECK_DEP_AGES_ROOT: it is for tests, which point the gate at a fixture repository and do not pass --ci.",

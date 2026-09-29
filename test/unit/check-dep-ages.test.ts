@@ -248,13 +248,49 @@ describe("CLI fail-closed exit — the CI gate refuses the fixture-root override
         ["--ci"],
       );
       // It did NOT refuse ...
-      expect(output).not.toContain("FLAIR_CHECK_DEP_AGES_ROOT is set");
+      expect(output).not.toContain("Refusing to run");
       // ... and it scanned the REAL root (several deps), not the one-dep fixture.
       expect(registry.requests.length).toBeGreaterThan(1);
       expect(registry.requests).not.toContain(`/${FIXTURE_DEP}`);
       // The fixture registry serves only FIXTURE_VERSION, so the real deps have
       // no publish time there and the gate fails closed (1 or 2).
       expect([1, 2]).toContain(exitCode);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+
+  it("refuses an EMPTY override on the CI invocation, before reading or fetching", async () => {
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(
+        CLI_SCRIPT,
+        { FLAIR_CHECK_DEP_AGES_ROOT: "", FLAIR_NPM_REGISTRY: registry.url },
+        ["--ci"],
+      );
+      // A PRESENT-but-empty override is refused like any other.
+      expect(output).toContain("FLAIR_CHECK_DEP_AGES_ROOT");
+      expect(output).not.toContain("Checking"); // never started scanning
+      expect(registry.requests).toEqual([]); // no registry request
+      expect(exitCode).toBe(2);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+
+  it("refuses an unknown argument, before scanning", async () => {
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(
+        CLI_SCRIPT,
+        { FLAIR_NPM_REGISTRY: registry.url },
+        ["--c1"], // a typo of --ci
+      );
+      expect(output).toContain("--c1"); // names the offending argument
+      expect(output).toContain("--ci"); // ... and the accepted form
+      expect(output).not.toContain("Checking");
+      expect(registry.requests).toEqual([]);
+      expect(exitCode).toBe(2);
     } finally {
       registry.stop();
     }
