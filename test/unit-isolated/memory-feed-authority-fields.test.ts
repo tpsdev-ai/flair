@@ -92,7 +92,11 @@ describe("FeedMemories.post authority fields", () => {
       expect(Date.parse(provenance.verified[field])).toBeGreaterThanOrEqual(before);
       expect(Date.parse(provenance.verified[field])).toBeLessThanOrEqual(Date.now());
     }
-    expect(provenance.claimed).toEqual({ model: "claimed-model", client: "claimed-client" });
+    // flair#1960: the feed's own createdAt is a CLAIM — recorded under
+    // claimed.createdAt (the row keeps it too), never as a verified timestamp.
+    expect(provenance.claimed).toEqual({ createdAt: "1900-01-01T00:00:00.000Z", model: "claimed-model", client: "claimed-client" });
+    expect(provenance.verified.timestamp).not.toBe("1900-01-01T00:00:00.000Z");
+    expect(stored.createdAt).toBe("1900-01-01T00:00:00.000Z");
     expect(stored.model).toBeUndefined();
     expect(stored.claimedClient).toBeUndefined();
     expect(stored.instanceToken).not.toBe("FORGED-TOKEN");

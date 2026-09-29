@@ -1411,7 +1411,7 @@ describe("Memory.delete() — ownership check uses the raw record (super.get), n
 //
 // Foundational capture for an emergent-trust model (see resources/Memory.ts's
 // buildProvenance() doc). Deliberately minimal — verified fields only:
-//   { v: 1, verified: { agentId, timestamp }, claimed?: { model } }
+//   { v: 1, verified: { agentId, timestamp, receivedAt }, claimed?: { createdAt, model, client } }
 //
 // These tests live in THIS file (rather than a new one) for the same reason
 // the within-org-read-open migration-equivalence block above does: bun runs every
@@ -1431,22 +1431,41 @@ describe("memory-provenance slice 1 — Memory.post() write-time stamp", () => {
     expect(prov.v).toBe(1);
     expect(prov.verified.agentId).toBe("agent-1");
     expect(typeof prov.verified.timestamp).toBe("string");
-    // Reuses the same server-clock createdAt the method computed for this write.
-    expect(prov.verified.timestamp).toBe(stored.createdAt);
+    // flair#1960: the SERVER write instant, shared with receivedAt — never the
+    // caller's createdAt. That createdAt is the writer's claim: it stays on the
+    // row AND is recorded under claimed.createdAt.
+    expect(prov.verified.timestamp).toBe(prov.verified.receivedAt);
+    expect(prov.claimed.createdAt).toBe(stored.createdAt);
   });
 
   it("omits claimed.model when the write payload has no model field", async () => {
     const m = makeMemory(agentCtx("agent-1"));
     const r = await m.post({ agentId: "agent-1", content: "No model field on this write at all." });
     const prov = JSON.parse((await BaseMemory.get(r.id)).provenance);
-    expect(prov.claimed).toBeUndefined();
+    expect(prov.claimed.model).toBeUndefined();
+  });
+
+  it("flair#1960: a caller-supplied past createdAt gets a SERVER-time verified.timestamp, keeps the claim on the row, and records it under claimed.createdAt", async () => {
+    const before = Date.now();
+    const past = "2001-01-01T00:00:00.000Z";
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.post({ agentId: "agent-1", content: "Backdated note, long enough for the dedup gate to inspect.", createdAt: past });
+    const stored = await BaseMemory.get(r.id);
+    const prov = JSON.parse(stored.provenance);
+    expect(stored.createdAt).toBe(past); // the record keeps the caller's claim
+    expect(prov.claimed.createdAt).toBe(past); // the claim is recorded, labelled claimed
+    expect(prov.verified.timestamp).not.toBe(past); // verified is the server clock
+    const stamped = Date.parse(prov.verified.timestamp);
+    expect(Number.isFinite(stamped)).toBe(true);
+    expect(stamped).toBeGreaterThanOrEqual(before - 5000);
+    expect(stamped).toBeLessThanOrEqual(Date.now() + 5000);
   });
 
   it("includes claimed.model ONLY when the payload carries one — never invented", async () => {
     const m = makeMemory(agentCtx("agent-1"));
     const r = await m.post({ agentId: "agent-1", content: "This write claims a model, unverified.", model: "claude-opus-4-7" });
     const prov = JSON.parse((await BaseMemory.get(r.id)).provenance);
-    expect(prov.claimed).toEqual({ model: "claude-opus-4-7" });
+    expect(prov.claimed.model).toBe("claude-opus-4-7");
     // claimed.model is UNVERIFIED passthrough — verified.agentId is still the
     // authenticated identity, entirely independent of the claimed model.
     expect(prov.verified.agentId).toBe("agent-1");
@@ -1456,7 +1475,7 @@ describe("memory-provenance slice 1 — Memory.post() write-time stamp", () => {
     const m = makeMemory(agentCtx("agent-1"));
     const r = await m.post({ agentId: "agent-1", content: "Empty-string model field on this write.", model: "" });
     const prov = JSON.parse((await BaseMemory.get(r.id)).provenance);
-    expect(prov.claimed).toBeUndefined();
+    expect(prov.claimed.model).toBeUndefined();
   });
 
   it("no authenticated agent (internal call) stamps verified.agentId: null — never throws", async () => {
@@ -1506,12 +1525,27 @@ describe("memory-provenance slice 1 — Memory.put() stamps the identical shape 
     const m = makeMemory(agentCtx("agent-1"));
     const r = await m.put({ id: "agent-1-put-model", agentId: "agent-1", content: "PUT with a claimed model field.", model: "gpt-5" });
     const prov = JSON.parse((await BaseMemory.get(r.id)).provenance);
-    expect(prov.claimed).toEqual({ model: "gpt-5" });
+    expect(prov.claimed.model).toBe("gpt-5");
 
     const m2 = makeMemory(agentCtx("agent-1"));
     const r2 = await m2.put({ id: "agent-1-put-no-model", agentId: "agent-1", content: "PUT with no claimed model field." });
     const prov2 = JSON.parse((await BaseMemory.get(r2.id)).provenance);
-    expect(prov2.claimed).toBeUndefined();
+    expect(prov2.claimed.model).toBeUndefined();
+  });
+
+  it("flair#1960: put() with a caller-supplied past createdAt stamps a server-time verified.timestamp and records the claim", async () => {
+    const before = Date.now();
+    const past = "2001-01-01T00:00:00.000Z";
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.put({ id: "agent-1-backdated-put", agentId: "agent-1", content: "Backdated PUT, long enough for the gate.", createdAt: past });
+    const stored = await BaseMemory.get(r.id);
+    const prov = JSON.parse(stored.provenance);
+    expect(stored.createdAt).toBe(past);
+    expect(prov.claimed.createdAt).toBe(past);
+    expect(prov.verified.timestamp).not.toBe(past);
+    const stamped = Date.parse(prov.verified.timestamp);
+    expect(stamped).toBeGreaterThanOrEqual(before - 5000);
+    expect(stamped).toBeLessThanOrEqual(Date.now() + 5000);
   });
 
   it("no authenticated agent (internal call) via put() also stamps verified.agentId: null — never throws", async () => {
@@ -1774,12 +1808,13 @@ describe("flair#718 authorship-provenance — Memory.post()/put() claimedClient 
     expect(prov.claimed.client).toBe("gemini"); // reflects the CURRENT write, not the original post()
   });
 
-  it("absent claimedClient → provenance has no `claimed` key at all (never invented, never stamped as empty)", async () => {
+  it("absent claimedClient → provenance carries no claimed.client (claimed.createdAt is still stamped)", async () => {
     const m = makeMemory(agentCtx("agent-1"));
     const r: any = await m.post({ agentId: "agent-1", content: "A plain memory with no client label, long enough for the gate." });
     const stored = await BaseMemory.get(r.id);
     const prov = JSON.parse(stored.provenance);
-    expect("claimed" in prov).toBe(false);
+    expect(prov.claimed.client).toBeUndefined();
+    expect(prov.claimed.createdAt).toBe(stored.createdAt);
   });
 
   it("claimedClient is dropped from the row EVEN when the write is otherwise denied's opposite case — a successful cross-write scenario (supersede) also strips it", async () => {

@@ -39,8 +39,8 @@ function sanitizeClaim(value: unknown): string | undefined {
  * CLAIMS. Deliberately minimal — verified fields only:
  *
  *   { v: 1,
- *     verified: { agentId: <string|null>, timestamp: <ISO string> },
- *     claimed?: { model?: <string>, client?: <string> } }
+ *     verified: { agentId: <string|null>, timestamp: <ISO string>, receivedAt: <ISO string> },
+ *     claimed?: { createdAt?: <string>, model?: <string>, client?: <string> } }
  *
  * - `verified.agentId` comes from the ALREADY-RESOLVED auth verdict
  *   (resolveAgentAuth) — never from anything the caller can forge on the
@@ -49,15 +49,24 @@ function sanitizeClaim(value: unknown): string | undefined {
  *   with no per-agent identity to attribute) stamps `null` rather than
  *   throwing; `kind: "anonymous"` never reaches here — every write path
  *   already 401s it before this point.
- * - `verified.timestamp` reuses the server-clock `createdAt` the caller has
- *   already computed by this point (never client-suppliable) — the same
- *   "stamp a dynamic attribute the server controls" mechanism as e.g. the
- *   `embeddingModel = getModelId()` stamp in resources/Memory.ts.
+ * - `verified.timestamp` is stamped from the SERVER clock at write time
+ *   (flair#1960) — the SAME single clock read as `verified.receivedAt`, because
+ *   both assert the server's write instant (a second read could differ by
+ *   milliseconds and make the two fields disagree). Never client-suppliable:
+ *   the caller's `createdAt` is a CLAIM and is recorded separately under
+ *   `claimed.createdAt` (below), never here. Every field under `verified` is
+ *   server-derived.
  * - The host pointer (`hostSource`) is NOT provenance (flair#1940 A5): it lives
  *   in its own `MemoryHostSource` table, is never part of this `{ v, verified,
  *   claimed }` blob, and is written on the Memory write path in the same
  *   transaction as the Memory row (t1/t2). `provenance` therefore stays a field
  *   the server controls and is never client-writable.
+ * - `claimed.createdAt` (flair#1960) is the caller's claim on the record's
+ *   creation time — the `createdAt` the write carries, sanitized like the
+ *   other claims (string-only, control-char strip, trim, 200-char cap,
+ *   drop-if-empty). It is a CLAIM, never verified: the server's own write
+ *   instant lives in `verified.timestamp`. The record's own `createdAt` field
+ *   still carries the caller's value unchanged.
  * - `claimed.model` is an OPTIONAL, UNVERIFIED passthrough: included only
  *   when the incoming write payload itself already carries a non-empty
  *   string `model` field (sanitized via sanitizeClaim above). Never
@@ -77,8 +86,9 @@ function sanitizeClaim(value: unknown): string | undefined {
  *   OAuth path, the caller is required to source this from the verified
  *   `client_id` token claim, never the user-controlled `client_name` — see
  *   resources/mcp-handler.ts's handleToolCall for that stamp site.
- * - The `claimed` key is omitted entirely (not stamped as `{}`) when both
- *   `model` and `client` are absent.
+ * - The `claimed` key is omitted entirely (not stamped as `{}`) when
+ *   `createdAt`, `model` and `client` are ALL absent after sanitization (e.g.
+ *   an empty or all-control-chars `createdAt` with no model/client claims).
  *
  * Originally introduced in resources/Memory.ts (Memory.post()/Memory.put());
  * extracted here so Relationship.ts (and any future write path) can reuse the
@@ -88,24 +98,35 @@ function sanitizeClaim(value: unknown): string | undefined {
  * shape, imported by every writer) instead of a copy that could drift.
  */
 export function buildProvenance(auth: AgentAuthVerdict, createdAt: string, content: any): string {
+  // ONE clock read per write, shared by BOTH server-derived timestamps
+  // (flair#1960): `verified.timestamp` and `verified.receivedAt` assert the
+  // same server write instant, so a single `new Date()` keeps them identical
+  // instead of letting a second read drift them apart by milliseconds.
+  const serverNow = new Date().toISOString();
   const provenance: {
     v: 1;
     verified: { agentId: string | null; timestamp: string; receivedAt: string };
-    claimed?: { model?: string; client?: string };
+    claimed?: { createdAt?: string; model?: string; client?: string };
   } = {
     v: 1,
     verified: {
       agentId: auth.kind === "agent" ? auth.agentId : null,
-      timestamp: createdAt,
-      // flair#1940 A4: the server's RECEIPT time, stamped from the server clock —
-      // never client-writable (content is consulted only for `claimed.*`).
-      receivedAt: new Date().toISOString(),
+      // flair#1960: the server's write instant — NEVER the caller's `createdAt`.
+      timestamp: serverNow,
+      // flair#1940 A4: the server's RECEIPT time — same clock read as above.
+      receivedAt: serverNow,
     },
   };
+  // The caller's `createdAt` is their CLAIM on the record's creation time; it is
+  // recorded under `claimed` (sanitized like the other claims) so a reader can
+  // compare the claim against the server's `verified.timestamp`. The record's
+  // own `createdAt` field keeps the claim unchanged (flair#1960).
+  const claimedCreatedAt = sanitizeClaim(createdAt);
   const model = sanitizeClaim(content?.model);
   const client = sanitizeClaim(content?.claimedClient);
-  if (model !== undefined || client !== undefined) {
+  if (claimedCreatedAt !== undefined || model !== undefined || client !== undefined) {
     provenance.claimed = {};
+    if (claimedCreatedAt !== undefined) provenance.claimed.createdAt = claimedCreatedAt;
     if (model !== undefined) provenance.claimed.model = model;
     if (client !== undefined) provenance.claimed.client = client;
   }

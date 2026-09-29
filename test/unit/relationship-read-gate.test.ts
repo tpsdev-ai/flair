@@ -334,14 +334,28 @@ describe("relationship-write-path — Relationship.put() write-time provenance s
     expect(prov.verified.agentId).toBeNull();
   });
 
-  it("uses the SAME shape as Memory's provenance — {v, verified:{agentId,timestamp,receivedAt}} — no Relationship-specific format", async () => {
+  it("uses the SAME shape as Memory's provenance — {v, verified:{agentId,timestamp,receivedAt}, claimed?} — no Relationship-specific format", async () => {
     const r = makeRelationship(agentCtx("agent-1"));
     const res: any = await r.put({ id: "rel-prov-3", subject: "nathan", predicate: "manages", object: "flint" });
     const prov = JSON.parse(res.provenance);
-    expect(Object.keys(prov).sort()).toEqual(["v", "verified"]);
-    // flair#1940 A4: the shared buildProvenance() now also stamps the server's
-    // receipt time; Relationship reuses it as-is, so the shape stays identical.
+    // flair#1960: every write carries claimed.createdAt, so `claimed` is present
+    // — still the identical shape Memory writes, no Relationship-specific format.
+    expect(Object.keys(prov).sort()).toEqual(["claimed", "v", "verified"]);
     expect(Object.keys(prov.verified).sort()).toEqual(["agentId", "receivedAt", "timestamp"]);
+  });
+
+  it("flair#1960: a caller-supplied past createdAt is recorded as claimed.createdAt while verified.timestamp is the server clock", async () => {
+    const before = Date.now();
+    const past = "2001-01-01T00:00:00.000Z";
+    const r = makeRelationship(agentCtx("agent-1"));
+    const res: any = await r.put({ id: "rel-prov-backdated", subject: "nathan", predicate: "manages", object: "flint", createdAt: past });
+    const prov = JSON.parse(res.provenance);
+    expect(res.createdAt).toBe(past);
+    expect(prov.claimed.createdAt).toBe(past);
+    expect(prov.verified.timestamp).not.toBe(past);
+    const stamped = Date.parse(prov.verified.timestamp);
+    expect(stamped).toBeGreaterThanOrEqual(before - 5000);
+    expect(stamped).toBeLessThanOrEqual(Date.now() + 5000);
   });
 
   // ─── migration-equivalence (same discipline as flair#684's usageCount) ──────
@@ -401,10 +415,11 @@ describe("flair#718 authorship-provenance — Relationship.put() claimedClient h
     expect("claimedClient" in stored).toBe(false);
   });
 
-  it("absent claimedClient → provenance has no `claimed` key at all", async () => {
+  it("absent claimedClient → provenance carries no claimed.client (only the claimed.createdAt time)", async () => {
     const r = makeRelationship(agentCtx("agent-1"));
     const res: any = await r.put({ id: "rel-claimed-client-2", subject: "a", predicate: "b", object: "c" });
     const prov = JSON.parse(res.provenance);
-    expect("claimed" in prov).toBe(false);
+    expect(prov.claimed.client).toBeUndefined();
+    expect(typeof prov.claimed.createdAt).toBe("string");
   });
 });

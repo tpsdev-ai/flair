@@ -202,10 +202,13 @@ export class FeedMemories extends Resource {
     record.instanceToken = priorById?.instanceToken ?? randomUUID();
     // Feed re-ingestion keeps the same incarnation and its original provenance.
     // Restore only the stored stamp, never the submitted copy. New/unstamped
-    // rows get trusted caller identity and server time, not body timestamps.
+    // rows get trusted caller identity and the SERVER write instant (stamped
+    // inside buildProvenance, flair#1960) — the feed's own `createdAt` is
+    // recorded only as the CLAIM `provenance.claimed.createdAt`, never as a
+    // verified timestamp.
     record.provenance = typeof priorById?.provenance === "string"
       ? priorById.provenance
-      : buildProvenance(auth, now, content);
+      : buildProvenance(auth, record.createdAt, content);
     await (databases as any).flair.Memory.put(record);
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).
     noteMemoryUpsert(record);

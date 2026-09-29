@@ -726,9 +726,10 @@ function defaultVisibilityForDurability(durability: unknown): "private" | "share
  * "reuse buildProvenance as-is" contract) instead of a hand-copied format
  * that could drift. See that module for the full field-by-field rationale
  * (verified.agentId from the auth verdict never the body, verified.timestamp
- * = the server-computed createdAt, optional unverified claimed.model /
- * claimed.client passthroughs — the latter added by flair#718 authorship-
- * provenance). Deliberately NOT implemented in this slice: a
+ * = the SERVER write instant (flair#1960), optional unverified
+ * claimed.createdAt / claimed.model / claimed.client passthroughs — the last
+ * two added by flair#718 authorship-provenance). Deliberately NOT implemented
+ * in this slice: a
  * context-fingerprint field — bootstrap doesn't return the IDs a fingerprint
  * would need, so it requires client cooperation that's out of scope here.
  */
