@@ -350,7 +350,7 @@ A peer can therefore show `presenceStatus: "offline"`, `activity: "idle"`, `last
 | `validFrom` / `validTo` | String | Temporal validity; expired rows drop out of search |
 | `_safetyFlags` | [String] | Content-safety scan |
 | `provenance` | String | Server JSON `{ v, verified: { agentId, timestamp, receivedAt }, claimed? }`. `receivedAt` (A4 of #1940) is the server's receipt time, never client-writable. |
-| `originatorInstanceId` | String | Server-stamped write-time instance id. On create the local id is stamped and any request-body value is ignored; on update the stored value stands (a body value neither replaces nor clears it). Preserved across sync. Never client-writable. |
+| `originatorInstanceId` | String | Server-stamped write-time instance id, applied on every application write (Memory/Soul/Agent/Relationship `post()`/`put()`/`patch()`, Memory's `_reindex` re-PUT, the `POST /FeedMemories` ingest, `POST /AgentSeed` and the MCP/IdP principal provisioning). On create the local id is stamped and any request-body value is ignored; on update the stored value stands (a body value neither replaces nor clears it). Preserved across sync. Not client-writable through a resource write; the only raw-table paths below the resource layer are the signed federation merge (a verified, non-revoked paired peer) and the administrator ops API. |
 | `metadata` | String | Client JSON blob; opaque to the server |
 | `entities` | [String] | Attention-plane `type:value` strings |
 
@@ -373,7 +373,7 @@ The pointer is a host-object pointer — versioned JSON `{ v: 1, host, kind, id,
 
 The **binding** (A1-iv item 1): The named application create paths stamp a local `instanceToken`; existing legacy rows may have none. Memory's REST write paths remove client-supplied `instanceToken` and `provenance`. The named update paths retain a stored token when their existing-row read succeeds. The join returns a pointer (or `"withheld"`) only when `memoryId`, `authorId === memory.agentId`, `memoryInstanceToken === memory.instanceToken`, and “not archived” all hold (`b1`–`b5`), so a deleted-and-recreated id, a re-owned row and an archived row all show no pointer.
 
-**Write (`POST /Memory`, `PUT /Memory/<id>`)** — the three pointer inputs (`hostSource`, `hostSourceScope`, `hostSourceVisibility`) are write-body-only and are stripped from the Memory row before persist; only `post()`/`put()` accept them. The Memory row and its pointer row commit together or not at all because they share ONE transaction: a request's open transaction when there is one, and a created one when an internal caller has no request context (`transaction(ctx, cb)`). A pointer that cannot be persisted aborts that transaction, so neither row commits (real-Harper rollback assertions `t1`/`t2`; the transaction helper throws rather than running unwrapped). A partial PUT that omits `visibility` carries the visibility read from the existing row into the written row, so it is preserved sequentially (`p2`); concurrent updates need a conflict check to guarantee preservation. The guard keeps declared Memory attributes and the explicit `UNDECLARED_ALLOWED` fields. Memory's REST write paths remove `instanceToken` and `provenance` from the request body. `originatorInstanceId` is server-stamped too (#1965): a create stamps the local instance id and ignores any body value, an update keeps the stored value — it is never client-writable (see `resources/originator-instance.ts`).
+**Write (`POST /Memory`, `PUT /Memory/<id>`)** — the three pointer inputs (`hostSource`, `hostSourceScope`, `hostSourceVisibility`) are write-body-only and are stripped from the Memory row before persist; only `post()`/`put()` accept them. The Memory row and its pointer row commit together or not at all because they share ONE transaction: a request's open transaction when there is one, and a created one when an internal caller has no request context (`transaction(ctx, cb)`). A pointer that cannot be persisted aborts that transaction, so neither row commits (real-Harper rollback assertions `t1`/`t2`; the transaction helper throws rather than running unwrapped). A partial PUT that omits `visibility` carries the visibility read from the existing row into the written row, so it is preserved sequentially (`p2`); concurrent updates need a conflict check to guarantee preservation. The guard keeps declared Memory attributes and the explicit `UNDECLARED_ALLOWED` fields. Memory's REST write paths remove `instanceToken` and `provenance` from the request body. `originatorInstanceId` is server-stamped too (#1965): a create stamps the local instance id and ignores any body value, an update keeps the stored value, and a `PATCH` that creates a row is stamped as well. The pre-existing row is resolved by the URL-bound target id (never a body `id`); a body id that disagrees with the address, or a stored-row read that fails, refuses the write. It is not client-writable through a resource write — the only raw-table paths below the resource layer are the signed federation merge (a verified paired peer) and the administrator ops API (see `resources/originator-instance.ts`).
 
 - **A1'** — the pointer is its own table; the Memory schema declares no `hostSource`. Additive with no data migration.
 - **A2** — the server validates and REJECTS (never truncates): `host`/`kind` come from a closed set (`openclaw/run`, `cursor/launch`, `codex/turn`); `id` matches `^[A-Za-z0-9._:/@#-]{1,256}$`; `url` is https only, with NO userinfo (an empty userinfo `https://@host/` is refused), capped at 2048 characters; C0/DEL/C1 controls (U+0000-U+001F, U+007F-U+009F, including U+0085) and the FULL bidi set (U+200E, U+200F, U+202A-U+202E, U+2066-U+2069) are refused anywhere; values are NFC-normalised; unknown keys or any `v` other than 1 are refused. `hostSourceScope: "record"` opts the pointer into the record's own read scope (A3); any wider scope is refused.
@@ -400,7 +400,7 @@ A `hostSource`, like a client-supplied `createdAt`, is a writer claim attributed
 | `provenance` | String | Operator/internal author + `sourceClass` |
 | `durability` | String | Default `permanent` |
 | `createdAt` / `updatedAt` | String | |
-| `originatorInstanceId` | String | Server-stamped write-time instance id; never client-writable |
+| `originatorInstanceId` | String | Server-stamped write-time instance id; not client-writable through a resource write |
 
 ### Agent (Principal)
 
@@ -421,7 +421,7 @@ agents.
 | `runtime` / `runtimeEndpoint` | String | How to reach the principal |
 | `subjects` | [String] | Soul-level interests |
 | `createdAt` / `updatedAt` | String | |
-| `originatorInstanceId` | String | Server-stamped write-time instance id; never client-writable |
+| `originatorInstanceId` | String | Server-stamped write-time instance id; not client-writable through a resource write |
 
 Related: **Credential** (`principalId`, `kind` webauthn / bearer-token /
 ed25519 / idp) and **Integration** (legacy platform connection).

@@ -55,9 +55,12 @@ class BaseRelationship {
   static async get(id: any) {
     return relationshipStore.get(id) ?? null;
   }
+  getId() { return (this as any)._targetId; }
   async put(content: any) {
-    relationshipStore.set(content.id, { ...content });
-    return { ...content };
+    const id = this.getId() ?? content.id;
+    const rec = { ...content, id };
+    relationshipStore.set(id, rec);
+    return rec;
   }
   async delete(id: any) {
     relationshipStore.delete(id);
@@ -459,5 +462,28 @@ describe("flair#718 authorship-provenance — Relationship.put() claimedClient h
     const res: any = await r.put({ id: "rel-claimed-client-2", subject: "a", predicate: "b", object: "c" });
     const prov = JSON.parse(res.provenance);
     expect("claimed" in prov).toBe(false);
+  });
+});
+
+// ─── flair#1965 round 2 — URL-target resolution + PATCH-create stamping ──────
+describe("flair#1965 r2 — Relationship PUT resolves the URL-bound target; PATCH creates are stamped", () => {
+  it("REFUSES a PUT whose body id differs from the URL target id", async () => {
+    instanceRow = { id: "flair_local_test" };
+    relationshipStore.set("rel-real", { id: "rel-real", agentId: "agent-1", subject: "a", predicate: "b", object: "c", originatorInstanceId: "instance-B" });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r._targetId = "rel-real";
+    const res: any = await r.put({ id: "rel-decoy", subject: "a", predicate: "b", object: "c", originatorInstanceId: "instance-attacker" });
+    expect(res instanceof Response).toBe(true);
+    expect(res.status).toBe(400);
+    expect(relationshipStore.get("rel-decoy")).toBeUndefined();
+    expect(relationshipStore.get("rel-real").originatorInstanceId).toBe("instance-B");
+  });
+
+  it("PATCH that CREATES a row (URL target has no stored row) stamps the local instance id", async () => {
+    instanceRow = { id: "flair_local_test" };
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r._targetId = "rel-patch-new";
+    await r.patch({ subject: "nathan", predicate: "manages", object: "flint" });
+    expect(relationshipStore.get("rel-patch-new").originatorInstanceId).toBe("flair_local_test");
   });
 });

@@ -104,7 +104,11 @@ export class Soul extends (databases as any).flair.Soul {
     // Write-time originatorInstanceId — see post() above /
     // resources/originator-instance.ts. A CREATE stamps the local id; an
     // UPDATE keeps the stored value (a body value never replaces or clears it).
-    await applyOriginatorInstanceId(content, await resolveStoredRow("Soul", () => super.get(), content));
+    // The row is resolved by the URL-BOUND target id, never a body `id` (Harper
+    // writes to the URL target); a mismatch or a failed read refuses the write.
+    const resolvedOriginRow = await resolveStoredRow(this, "Soul", content);
+    if (resolvedOriginRow.denial) return resolvedOriginRow.denial;
+    await applyOriginatorInstanceId(content, resolvedOriginRow.row);
     return super.put(content, context);
   }
 

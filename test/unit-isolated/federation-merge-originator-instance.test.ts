@@ -3,18 +3,24 @@
  *
  * Drives the REAL `FederationSync.post` apply (Peer lookup → batch signature →
  * per-record merge → `table.put`) for EACH synced table and pins that the
- * inbound merge KEEPS THE ORIGINATING INSTANCE'S `originatorInstanceId`:
- *   - the value written comes from the pushed ROW (`record.data`), so it is the
- *     author's stamp — never re-stamped by the RECEIVING instance and never
- *     replaced by the relaying sender's id;
+ * inbound merge KEEPS THE PUSHED ROW'S `originatorInstanceId` verbatim:
+ *   - the value written comes from `record.data` — the merge never re-stamps it
+ *     with the RECEIVING instance's id and never replaces it with the relaying
+ *     sender's id;
  *   - on an update the merge's LWW choice is the remote value, same as today;
  *   - the receiver's own bookkeeping stamp is the separate `_originatorInstanceId`.
  *
- * This is the "federation merges keep the originating instance's value" leg of
+ * Scope note (no authorship claim): this pins PRESERVATION of an authenticated
+ * peer's row value. The fixture signs the `instance-origin` row with the
+ * RELAYING peer's key, so it does NOT prove the named instance authored the
+ * value; proving authorship would need a per-originator signature check, which
+ * this test deliberately does not assert.
+ *
+ * This is the "federation merges keep the pushed row's originating value" leg of
  * #1965. The path applies rows through the RAW table handle (`table.put`), never
- * through a resource's post()/put()/patch(), so it never consults a request body
- * — which is exactly why it keeps the remote value without reopening client
- * writability.
+ * through a resource's post()/put()/patch(), so it never takes a field from a
+ * resource request body — which is why it keeps the remote value without
+ * reopening client writability.
  *
  * Runs in test/unit-isolated (own process) so its harper mock never races
  * another file.
@@ -98,8 +104,11 @@ function keypair() {
  * A pushed record as src/commands/federation.ts builds it today: the ENVELOPE
  * `originatorInstanceId` is the SENDER's own instance id (used for the
  * per-record signature), while the ROW (`data`) carries whatever
- * `originatorInstanceId` the stored record held — here the true author,
- * `ORIGIN`. A hub relaying a spoke's row looks exactly like this.
+ * `originatorInstanceId` the stored record held — here `ORIGIN`, the value the
+ * row CLAIMS. A hub relaying a spoke's row looks exactly like this. NOTE: the
+ * signature below is made with the relaying peer's key, so `ORIGIN` is not
+ * cryptographically proven here — the test pins PRESERVATION of the pushed row's
+ * value, not authorship.
  */
 function pushedRecord(
   tableName: string,
@@ -147,9 +156,9 @@ beforeEach(() => {
   stores = { Memory: new Map(), Soul: new Map(), Agent: new Map(), Relationship: new Map(), Message: new Map() };
 });
 
-describe("flair#1965 — the federated merge keeps the ORIGINATING instance's originatorInstanceId", () => {
+describe("flair#1965 — the federated merge preserves an authenticated peer's row value", () => {
   for (const tableName of ["Memory", "Soul", "Agent", "Relationship"]) {
-    it(`${tableName}: a NEW inbound row is stored with the pushed ROW's originatorInstanceId (the author's), not the receiver's or sender's`, async () => {
+    it(`${tableName}: a NEW inbound row is stored with the pushed ROW's originatorInstanceId (preserved verbatim), not the receiver's or sender's`, async () => {
       const { secretKey, publicKey } = keypair();
       peerStore.set(PEER_ID, { id: PEER_ID, publicKey, role: "hub", status: "connected" });
       const data = ROWS[tableName].data(ORIGIN);
@@ -165,7 +174,7 @@ describe("flair#1965 — the federated merge keeps the ORIGINATING instance's or
       expect(stored._originatorInstanceId).toBe(PEER_ID);
     });
 
-    it(`${tableName}: a NEWER inbound update keeps the REMOTE (originating) value over the local row's`, async () => {
+    it(`${tableName}: a NEWER inbound update keeps the REMOTE (pushed-row) value over the local row's`, async () => {
       const { secretKey, publicKey } = keypair();
       peerStore.set(PEER_ID, { id: PEER_ID, publicKey, role: "hub", status: "connected" });
       const local = ROWS[tableName].data(LOCAL_ORIGIN);

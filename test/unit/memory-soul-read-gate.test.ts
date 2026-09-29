@@ -44,9 +44,14 @@ class BaseSoul {
     soulStore.set(id, rec);
     return rec;
   }
+  // Real Harper binds the resource to the URL target (`getId()`); a PUT writes
+  // to THAT id and rewrites the record's primary key to it. `_targetId` models
+  // the URL-bound target. See resources/originator-instance.ts.
+  getId() { return (this as any)._targetId; }
   async put(content: any) {
-    const rec = { ...content };
-    soulStore.set(content.id, rec);
+    const id = this.getId() ?? content.id;
+    const rec = { ...content, id };
+    soulStore.set(id, rec);
     return rec;
   }
   async get(target?: any) {
@@ -230,5 +235,31 @@ describe("federation-edge-hardening slice 1 / flair#1965 — Soul originatorInst
     s._targetId = "soul-patch";
     await s.patch({ originatorInstanceId: "instance-attacker" });
     expect(soulStore.get("soul-patch").originatorInstanceId).toBe("instance-B");
+  });
+});
+
+// ─── flair#1965 round 2 — URL-target resolution + PATCH-create handling ─────
+describe("flair#1965 r2 — Soul PUT resolves the URL-bound target; a PATCH create is refused", () => {
+  const owner = () => ({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
+  it("REFUSES a PUT whose body id differs from the URL target id", async () => {
+    instanceRow = { id: "flair_local_test" };
+    soulStore.set("soul-real", { id: "soul-real", agentId: "agent-1", key: "identity", value: "real", originatorInstanceId: "instance-B" });
+    const s: any = makeSoul(owner());
+    s._targetId = "soul-real";
+    const res: any = await s.put({ id: "soul-decoy", agentId: "agent-1", key: "identity", value: "decoy", originatorInstanceId: "instance-attacker" });
+    expect(res instanceof Response).toBe(true);
+    expect(res.status).toBe(400);
+    expect(soulStore.get("soul-decoy")).toBeUndefined();
+    expect(soulStore.get("soul-real").originatorInstanceId).toBe("instance-B");
+  });
+
+  it("a PATCH that would CREATE a row is REFUSED (fail-closed on missing stored state) — never an un-stamped create", async () => {
+    instanceRow = { id: "flair_local_test" };
+    const s: any = makeSoul(owner());
+    s._targetId = "soul-patch-new";
+    const res: any = await s.patch({ agentId: "agent-1", key: "identity", value: "brand new via patch" });
+    expect(res instanceof Response).toBe(true);
+    expect(res.status).toBe(403);
+    expect(soulStore.get("soul-patch-new")).toBeUndefined();
   });
 });

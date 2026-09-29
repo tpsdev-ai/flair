@@ -1,7 +1,7 @@
 import { databases } from "harper";
 import { isAdmin, resolveAgentAuth, allowVerified, allowAdmin, invalidateAdminCache } from "./agent-auth.js";
 import { agentRecordIsAdmin, reconcileAdminFields } from "./agent-admin.js";
-import { applyOriginatorInstanceId, dropClientOriginator, resolveStoredRow, stampOriginatorOnCreate } from "./originator-instance.js";
+import { applyOriginatorInstanceId, resolveStoredRow, stampOriginatorOnCreate } from "./originator-instance.js";
 
 /**
  * Agent resource — serves as the Principal table in 1.0.
@@ -145,7 +145,11 @@ export class Agent extends (databases as any).flair.Agent {
     // Write-time originatorInstanceId — see post() above /
     // resources/originator-instance.ts. A CREATE stamps the local id; an
     // UPDATE keeps the stored value (a body value never replaces or clears it).
-    await applyOriginatorInstanceId(content, await resolveStoredRow("Agent", () => super.get(), content));
+    // The row is resolved by the URL-BOUND target id, never a body `id` (Harper
+    // writes to the URL target); a mismatch or a failed read refuses the write.
+    const resolvedOriginRow = await resolveStoredRow(this, "Agent", content);
+    if (resolvedOriginRow.denial) return resolvedOriginRow.denial;
+    await applyOriginatorInstanceId(content, resolvedOriginRow.row);
 
     const result = await super.put(content);
     invalidateAdminCache();
@@ -185,10 +189,14 @@ export class Agent extends (databases as any).flair.Agent {
       // Immutable fields, matching put().
       delete content.createdAt;
       delete content.publicKey;
-      // flair#1965: originatorInstanceId is server-stamped — a PATCH body value
-      // is dropped so the stored value stands (a patch merges; see
-      // resources/originator-instance.ts).
-      dropClientOriginator(content);
+      // flair#1965 r2: an EXISTING row keeps its stored originatorInstanceId
+      // (a body value is dropped); a PATCH whose URL target has no stored row is
+      // a CREATE and must stamp the local id (Harper's patch path does not
+      // require an existing row). The row is resolved by the URL-BOUND target
+      // id, never a body `id`. See resources/originator-instance.ts.
+      const resolvedOriginRow = await resolveStoredRow(this, "Agent", content);
+      if (resolvedOriginRow.denial) return resolvedOriginRow.denial;
+      await applyOriginatorInstanceId(content, resolvedOriginRow.row);
       content.updatedAt = new Date().toISOString();
     }
 

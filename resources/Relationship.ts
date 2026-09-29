@@ -2,7 +2,7 @@ import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
-import { applyOriginatorInstanceId, dropClientOriginator, resolveStoredRow } from "./originator-instance.js";
+import { applyOriginatorInstanceId, resolveStoredRow } from "./originator-instance.js";
 import {
   buildProvenance,
   makeAuthGate,
@@ -133,10 +133,14 @@ export class Relationship extends (databases as any).flair.Relationship {
   async patch(content: any, query?: any) {
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
-    // flair#1965: originatorInstanceId is server-stamped — a PATCH body value is
-    // dropped so the stored value stands (a patch merges; see
-    // resources/originator-instance.ts).
-    dropClientOriginator(content);
+    // flair#1965 r2: an EXISTING row keeps its stored originatorInstanceId (a
+    // body value is dropped); a PATCH whose URL target has no stored row is a
+    // CREATE and must stamp the local id (Harper's patch path does not require
+    // an existing row). The row is resolved by the URL-BOUND target id, never a
+    // body `id`. See resources/originator-instance.ts.
+    const resolvedOriginRow = await resolveStoredRow(this, "Relationship", content);
+    if (resolvedOriginRow.denial) return resolvedOriginRow.denial;
+    await applyOriginatorInstanceId(content, resolvedOriginRow.row);
     return super.patch(content, query);
   }
 
@@ -223,8 +227,12 @@ export class Relationship extends (databases as any).flair.Relationship {
     // value; an UPDATE keeps the STORED value — a body value neither replaces
     // nor clears it. Relationship has no post(), so put() carries both. See
     // resources/originator-instance.ts for the full contract (the federation
-    // merge path is the raw table writer and never consults a body).
-    await applyOriginatorInstanceId(content, await resolveStoredRow("Relationship", () => super.get(), content));
+    // merge is the raw table writer and never takes a request-body field).
+    // The row is resolved by the URL-BOUND target id, never a body `id` (Harper
+    // writes to the URL target); a mismatch or a failed read refuses the write.
+    const resolvedOriginRow = await resolveStoredRow(this, "Relationship", content);
+    if (resolvedOriginRow.denial) return resolvedOriginRow.denial;
+    await applyOriginatorInstanceId(content, resolvedOriginRow.row);
 
     return super.put(content);
   }

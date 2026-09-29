@@ -30,9 +30,15 @@ class BaseAgent {
     agentStore.set(id, rec);
     return rec;
   }
+  // Real Harper binds the resource to the URL target (`getId()`); a PUT writes
+  // to THAT id and rewrites the record's primary key to it. `_targetId` models
+  // the URL-bound target on the instance (unset for a direct in-process call,
+  // where the body id IS the write key). See resources/originator-instance.ts.
+  getId() { return (this as any)._targetId; }
   async put(content: any) {
-    const rec = { ...content };
-    agentStore.set(content.id, rec);
+    const id = this.getId() ?? content.id;
+    const rec = { ...content, id };
+    agentStore.set(id, rec);
     return rec;
   }
   async get(target?: any) {
@@ -154,5 +160,44 @@ describe("federation-edge-hardening slice 1 — migration-equivalence (no-origin
     const res: any = await a.get("legacy-agent");
     expect(res.name).toBe("Legacy Principal");
     expect(res.originatorInstanceId).toBeUndefined();
+  });
+});
+
+// ─── flair#1965 round 2 — URL-target resolution + PATCH-create stamping ──────
+// Blocker 2: the stored-row lookup must use the URL-BOUND target id, never a
+// body `id` (Harper writes to the URL target and rewrites the row's primary key
+// to it), and a mismatch or a failed read must REFUSE the write — never fall
+// back to "create". Blocker 3: Harper's patch path has no existing-row
+// requirement, so a PATCH that creates a row must stamp the local id.
+describe("flair#1965 r2 — Agent PUT resolves the URL-bound target; PATCH creates are stamped", () => {
+  it("REFUSES a PUT whose body id differs from the URL target id (a body id is not the row this write lands on)", async () => {
+    instanceRow = { id: "flair_local_test" };
+    agentStore.set("agent-real", { id: "agent-real", name: "Real", originatorInstanceId: "instance-B" });
+    const a: any = makeAgent(agentCtx("agent-admin", true));
+    a._targetId = "agent-real";
+    const res: any = await a.put({ id: "agent-decoy", name: "Decoy", originatorInstanceId: "instance-attacker" });
+    expect(res instanceof Response).toBe(true);
+    expect(res.status).toBe(400);
+    expect(agentStore.get("agent-decoy")).toBeUndefined(); // nothing landed on the body id
+    expect(agentStore.get("agent-real").originatorInstanceId).toBe("instance-B"); // the target row is untouched
+  });
+
+  it("a PUT whose body OMITS `id` updates the URL-bound target row, keeping its stored value (never keyed on a body id)", async () => {
+    instanceRow = { id: "flair_local_test" };
+    agentStore.set("agent-target", { id: "agent-target", name: "Target", originatorInstanceId: "instance-B" });
+    const a: any = makeAgent(agentCtx("agent-admin", true));
+    a._targetId = "agent-target";
+    const res: any = await a.put({ name: "Target Updated" });
+    expect(res instanceof Response).toBe(false);
+    expect(agentStore.get("agent-target").name).toBe("Target Updated");
+    expect(agentStore.get("agent-target").originatorInstanceId).toBe("instance-B");
+  });
+
+  it("PATCH that CREATES a row (URL target has no stored row) stamps the local instance id", async () => {
+    instanceRow = { id: "flair_local_test" };
+    const a: any = makeAgent(agentCtx("agent-admin", true));
+    a._targetId = "agent-patch-new";
+    await a.patch({ displayName: "Brand New via PATCH" });
+    expect(agentStore.get("agent-patch-new").originatorInstanceId).toBe("flair_local_test");
   });
 });

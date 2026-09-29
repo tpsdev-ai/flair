@@ -5,7 +5,7 @@ import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.j
 import { guardAuthorityFields } from "./authority-field-guard.js";
 import { isForbiddenOwnerMutation } from "./record-owner-guard.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
-import { applyOriginatorInstanceId, dropClientOriginator, keepStoredOriginator, stampOriginatorOnCreate } from "./originator-instance.js";
+import { applyFederationBookkeeping, applyOriginatorInstanceId, dropClientFederationBookkeeping, keepStoredOriginator, resolveStoredRow, stampOriginatorOnCreate } from "./originator-instance.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { isEmbeddingSpaceUniform, noteWriteStamp } from "./embedding-space-guard.js";
 import { scanFields, isStrictMode } from "./content-safety.js";
@@ -1210,6 +1210,10 @@ export class Memory extends (databases as any).flair.Memory {
     // post() is always a CREATE, so this instance's own id is stamped and any
     // request-body value is ignored — see resources/originator-instance.ts.
     await stampOriginatorOnCreate(content);
+    // flair#1965 r2: the receiver-side federation bookkeeping (`_originatorInstanceId`
+    // et al.) is a client-unsettable stamp; a CREATE must not carry one from the
+    // body. See resources/originator-instance.ts.
+    dropClientFederationBookkeeping(content);
 
     // ── Write the new record FIRST ──────────────────────────────────────────
     // A1' item 1: the guard keeps declared Memory attributes and the explicit
@@ -1296,10 +1300,6 @@ export class Memory extends (databases as any).flair.Memory {
     // A1-iv item 3: strip server-stamped fields on patch too (a PATCH body may
     // not set instanceToken or provenance; the stored values stand).
     stripServerStampedFields(content);
-    // flair#1965: originatorInstanceId is server-stamped too — a PATCH body
-    // value is dropped so the stored value stands (a patch merges; see
-    // resources/originator-instance.ts).
-    dropClientOriginator(content);
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
     // Preserve stored visibility on updates before applying write policy: a
@@ -1350,6 +1350,17 @@ export class Memory extends (databases as any).flair.Memory {
     const existingForSkill = (await Promise.resolve(super.get()).catch(() => null)) as any;
     const skillDenial = rejectSkillWritePath(content) ?? rejectSkillWritePath(existingForSkill);
     if (skillDenial) return skillDenial;
+    // flair#1965 r2: a PATCH over an EXISTING row keeps the stored
+    // originatorInstanceId (a body value is dropped); a PATCH whose URL target
+    // has NO stored row is a CREATE — Harper's patch path has no existing-row
+    // requirement — so it must stamp the local id rather than leave the new row
+    // un-stamped. `existingForSkill` is the URL-bound row (super.get() with no
+    // target), exactly the row this patch is over. See
+    // resources/originator-instance.ts.
+    await applyOriginatorInstanceId(content, existingForSkill);
+    // The receiver-side federation bookkeeping keeps its stored value (a patch
+    // merges); a client body value is dropped.
+    dropClientFederationBookkeeping(content);
     return super.patch(content, query);
   }
 
@@ -1403,6 +1414,8 @@ export class Memory extends (databases as any).flair.Memory {
       // legacy row with no value is left un-stamped. See
       // resources/originator-instance.ts.
       keepStoredOriginator(content, reindexExisting);
+      // The receiver-side federation bookkeeping likewise stands as stored.
+      applyFederationBookkeeping(content, reindexExisting);
       // Preserve stored visibility on updates before applying write policy:
       // a reindex payload that omits it keeps the record's stored value.
       if (content.visibility === undefined || content.visibility === null) {
@@ -1490,10 +1503,15 @@ export class Memory extends (databases as any).flair.Memory {
     // `{...existing, ...patch}` payload, and must never have their stored
     // visibility overwritten by a default recomputed from that merged content
     // — only a genuinely NEW id gets the default stamped.
-    // A lookup failure fails the write (it is not the same as "no record").
-    const preExisting = content.id
-      ? await (databases as any).flair.Memory.get(content.id)
-      : null;
+    // The row is resolved by the URL-BOUND target id, never the request body's
+    // `id`: Harper writes to the URL target and rewrites the row's primary key
+    // to it, so a body id names a row this PUT does NOT land on. A body id that
+    // disagrees with the target, or a lookup that FAILS, refuses the write — a
+    // failed read must never look like "no record". See
+    // resources/originator-instance.ts's resolveStoredRow.
+    const resolvedExisting = await resolveStoredRow(this, "Memory", content);
+    if (resolvedExisting.denial) return resolvedExisting.denial;
+    const preExisting = resolvedExisting.row;
 
     // Preserve stored visibility on updates before applying write policy
     // (only the two writable values; the guards below see the result).
@@ -1720,6 +1738,10 @@ export class Memory extends (databases as any).flair.Memory {
     // method at all (the merge path writes via the raw table handle). See
     // resources/originator-instance.ts.
     await applyOriginatorInstanceId(content, preExisting);
+    // The receiver-side federation bookkeeping stands as stored on an update,
+    // and a client body may not set it on a create. See
+    // resources/originator-instance.ts.
+    applyFederationBookkeeping(content, preExisting);
 
     // ── Write the new/updated record FIRST ──────────────────────────────────
     // A1' item 1: persist ONLY declared Memory attributes (see post()).

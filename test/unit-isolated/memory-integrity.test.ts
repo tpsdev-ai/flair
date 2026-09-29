@@ -159,10 +159,16 @@ class BaseMemory {
     return id;
   }
   async put(content: any) {
-    callOrder.push(`put:${content.id}`);
-    memoryStore.set(content.id, { ...content });
+    // Real Harper binds the resource to the URL target (`getId()`); a PUT writes
+    // to THAT id. `_targetId` models the URL-bound target; unset for a direct
+    // in-process call, where the body id IS the write key. See
+    // resources/originator-instance.ts.
+    const id = (this as any).getId?.() ?? content.id;
+    callOrder.push(`put:${id}`);
+    memoryStore.set(id, { ...content, id });
     return undefined;
   }
+  getId() { return (this as any)._targetId; }
   async get(target: any) {
     // Real Harper's get() receives a RequestTarget object (pathname, search,
     // id, isCollection, sort) for HTTP-routed reads, NOT a plain string — only
@@ -1937,5 +1943,44 @@ describe("flair#1383 — Memory write path refuses an identified pre-0.18.0 clie
     });
     expect(r.written).toBe(true);
     expect(memoryStore.size).toBe(1);
+  });
+});
+
+// ─── flair#1965 r2 — URL-target resolution + PATCH-create stamping ──────────
+// Blocker 2: the stored-row lookup must use the URL-BOUND target id, never a
+// body `id`; a mismatch (or a failed read) REFUSES the write. Blocker 3: a
+// PATCH whose URL target has no stored row is a CREATE and must stamp the local
+// id (Harper's patch path does not require an existing row).
+describe("flair#1965 r2 — Memory PUT resolves the URL-bound target; PATCH creates are stamped", () => {
+  it("REFUSES a PUT whose body id differs from the URL target id (a body id is not the row this write lands on)", async () => {
+    instanceRow = { id: "flair_local_test" };
+    memoryStore.set("mem-real", { id: "mem-real", agentId: "agent-1", content: "real row", originatorInstanceId: "instance-B" });
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m._targetId = "mem-real";
+    const res: any = await m.put({ id: "mem-decoy", agentId: "agent-1", content: "decoy content, long enough for the gate.", originatorInstanceId: "instance-attacker" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(400);
+    expect(memoryStore.get("mem-decoy")).toBeUndefined(); // nothing landed on the body id
+    expect(memoryStore.get("mem-real").originatorInstanceId).toBe("instance-B"); // the target row is untouched
+  });
+
+  it("a PUT whose body id MATCHES the URL target updates that row, keeping its stored value", async () => {
+    instanceRow = { id: "flair_local_test" };
+    memoryStore.set("mem-target", { id: "mem-target", agentId: "agent-1", content: "target row", visibility: "shared", originatorInstanceId: "instance-B" });
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m._targetId = "mem-target";
+    const res: any = await m.put({ id: "mem-target", agentId: "agent-1", content: "target row updated here, long enough for the gate.", visibility: "shared" });
+    expect(res instanceof Response).toBe(false);
+    expect(memoryStore.get("mem-target").content).toBe("target row updated here, long enough for the gate.");
+    expect(memoryStore.get("mem-target").originatorInstanceId).toBe("instance-B");
+  });
+
+  it("PATCH that CREATES a row (URL target has no stored row) stamps the local instance id", async () => {
+    instanceRow = { id: "flair_local_test" };
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m._targetId = "mem-patch-create";
+    const res: any = await m.patch({ agentId: "agent-1", content: "brand new via patch, long enough for the gate." });
+    expect(res instanceof Response).toBe(false);
+    expect(memoryStore.get("mem-patch-create").originatorInstanceId).toBe("flair_local_test");
   });
 });

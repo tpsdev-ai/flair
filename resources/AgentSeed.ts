@@ -27,6 +27,7 @@ import { reconcileAdminFields } from "./agent-admin.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { rejectSkillWritePath } from "./skill-write.js";
+import { stampOriginatorOnCreate } from "./originator-instance.js";
 
 const DEFAULT_SOUL_KEYS = (agentId: string, displayName: string, role: string, now: string) => ({
   name: displayName,
@@ -89,6 +90,11 @@ export class AgentSeed extends Resource {
       // ordinary agent. Admin-only path (allowCreate + the isAdmin re-check
       // above), so this normalises an authorized intent.
       agent = reconcileAdminFields({ id: agentId, name, role, publicKey: "pending", createdAt: now, updatedAt: now });
+      // flair#1965 r2: this creates an Agent row through the RAW table, so the
+      // Agent resource's post() stamp never runs. Stamp the local instance id
+      // here (every create path carries it). See
+      // resources/originator-instance.ts.
+      await stampOriginatorOnCreate(agent);
       await (databases as any).flair.Agent.put(agent);
       invalidateAdminCache();
     }
@@ -104,6 +110,8 @@ export class AgentSeed extends Resource {
         continue;
       }
       const entry = { id, agentId, key, value: String(value), provenance: soulProvenance(auth, source!, now), durability: "permanent", createdAt: now, updatedAt: now };
+      // flair#1965 r2: raw Soul create — stamp the local instance id.
+      await stampOriginatorOnCreate(entry);
       await (databases as any).flair.Soul.put(entry);
       soulEntries.push(entry);
     }
@@ -155,6 +163,8 @@ export class AgentSeed extends Resource {
         // fields and stamp a fresh incarnation token.
         stripServerStampedFields(record);
         record.instanceToken = randomUUID();
+        // flair#1965 r2: raw Memory create — stamp the local instance id.
+        await stampOriginatorOnCreate(record);
         await (databases as any).flair.Memory.put(record);
         noteMemoryUpsert(record);
         memories.push(record);
