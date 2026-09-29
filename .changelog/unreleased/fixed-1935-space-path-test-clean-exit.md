@@ -1,1 +1,0 @@
-- **`test/unit/check-dep-ages.test.ts` space-path test now requires a clean exit**: assertions enforce no spawn error, exit status 0, the "no external pinned" message on stdout, and empty stderr — not just a regex match on combined output.
