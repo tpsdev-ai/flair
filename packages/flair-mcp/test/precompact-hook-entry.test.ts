@@ -5,9 +5,9 @@
  * same way, reading back what it wrote.
  *
  * What only a spawned process can show: the exit code (always 0, so a
- * PreCompact hook never blocks compaction), that the whole process ends within
- * its budget whatever is still pending (stdin held open, a write never
- * answered), what goes on the wire, and the full loop the issue asks for:
+ * PreCompact hook never blocks compaction), that the process ends within
+ * its budget whatever asynchronous work is still pending (stdin held open, a
+ * write never answered), what goes on the wire, and the full loop the issue asks for:
  * a compaction writes ONE record, a rerun keeps it one, and the next session
  * start shows it at the top, after a compaction and after a restart. And that
  * the hook's own local files cannot hold it past its budget: an oversize or

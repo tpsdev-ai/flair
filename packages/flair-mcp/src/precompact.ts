@@ -59,12 +59,15 @@
  * can end the block early or stand at the start of a line as a role turn
  * ("System:", "Human:"). See formatPreCompactContext.
  *
- * BOUNDED LOCAL WORK: the hook has a whole-process deadline, so every local
- * file it reads is read asynchronously with a size cap checked before any byte
- * is read: the transcript by its tail caps, and the continuity state file and
- * the marker by SESSION_FILE_MAX_BYTES (./continuity.ts readSmallFile), with
- * anything that is not a regular file refused. Its local writes are
- * asynchronous too.
+ * BOUNDED LOCAL WORK: the hook arms a process-level deadline before it reads
+ * stdin. A timer can fire only between asynchronous steps, so every local
+ * file the hook reads is read asynchronously with a size cap checked before
+ * any byte is read: the transcript by its tail caps, and the continuity state
+ * file and the marker by SESSION_FILE_MAX_BYTES (./continuity.ts
+ * readSmallFile), with anything that is not a regular file refused. Its local
+ * writes are asynchronous too. The deadline cannot preempt synchronous work:
+ * flair-client reads the agent's key file synchronously, and the hook entry's
+ * Claude Code `timeout` is the outer bound (see ./precompact-hook.ts).
  */
 
 import { randomUUID } from "node:crypto";
@@ -138,8 +141,39 @@ export function cutTo(text: string, max: number): string {
   return `${text.slice(0, end)}…`;
 }
 
+// ── line breaks ─────────────────────────────────────────────────────────────
+
+/*
+ * THE LINE-BREAK SET: every character a reader might take as a line break
+ * ("\r\n" counts as one break): line feed, carriage return, vertical tab,
+ * form feed, NEL (U+0085), LINE SEPARATOR (U+2028) and PARAGRAPH SEPARATOR
+ * (U+2029), written `\n\r\v\f\u0085\u2028\u2029` in a character class.
+ *
+ * Three places must agree on where a line ends:
+ *   - an Authorization-style value is redacted up to the first of them, and
+ *     no further (the three AUTHORIZATION_PATTERNS);
+ *   - a text the record keeps is collapsed onto one line across them
+ *     (ONE_LINE_RE, in oneLine);
+ *   - the quoted display splits the surfaced record on each of them
+ *     (LINE_BREAK_RE, in quoteRecordLines).
+ * Were the redactor to stop at fewer breaks than the display splits on, it
+ * would consume a line the display shows as a line of its own.
+ *
+ * Each of those five patterns is a regex LITERAL with the whole set written
+ * out; none is built from a shared variable. What keeps them from drifting is
+ * a test (test/unit/continuity-precompact.test.ts, "redaction and the quoted
+ * display share ONE line-break class"): for every BMP code unit, each
+ * Authorization pattern stops at the character exactly when the display
+ * splits on it, and oneLine never leaves a character the display splits on.
+ * Change the set in all five literals together.
+ */
+
+/** C0 controls, DEL and the whole line-break set (see THE LINE-BREAK SET):
+ *  collapsed to one space by oneLine. */
+const ONE_LINE_RE = /[\n\r\v\f\u0085\u2028\u2029\u0000-\u0009\u000e-\u001f\u007f]+/g;
+
 function oneLine(text: string): string {
-  return text.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim();
+  return text.replace(ONE_LINE_RE, " ").replace(/\s+/g, " ").trim();
 }
 
 // ── redaction ───────────────────────────────────────────────────────────────
@@ -148,7 +182,9 @@ function oneLine(text: string): string {
  * Authorization-style values, redacted WHOLE: everything after the label or
  * scheme word through the end of its line, whatever its characters (a
  * credential can be any length and alphabet, and a scheme like Digest carries
- * quoted parameters). The label or scheme word and one space stay; a value
+ * quoted parameters). The line ends at the first character of THE LINE-BREAK
+ * SET (above), the same breaks the quoted display splits on, so the line after
+ * a value is never consumed with it. The label or scheme word and one space stay; a value
  * that is already exactly the placeholder is left alone, so redacting twice
  * changes nothing. Applied in this order, before SECRET_PATTERNS:
  *   - an `Authorization` / `Proxy-Authorization` label (any case, then an
@@ -163,9 +199,9 @@ function oneLine(text: string): string {
  * then the rest of one line, so it stays linear on long input.
  */
 const AUTHORIZATION_PATTERNS: readonly RegExp[] = [
-  /\b((?:proxy-)?authorization["']?[ \t]*[:=])([^\r\n\u2028\u2029]*)/gi,
-  /\b(bearer)[ \t]+([^\r\n\u2028\u2029]*)/gi,
-  /\b(Basic|BASIC)[ \t]+([^\r\n\u2028\u2029]*)/g,
+  /\b((?:proxy-)?authorization["']?[ \t]*[:=])([^\n\r\v\f\u0085\u2028\u2029]*)/gi,
+  /\b(bearer)[ \t]+([^\n\r\v\f\u0085\u2028\u2029]*)/gi,
+  /\b(Basic|BASIC)[ \t]+([^\n\r\v\f\u0085\u2028\u2029]*)/g,
 ];
 
 /**
@@ -783,14 +819,17 @@ export const PRECOMPACT_DATA_END = "<<<END flair-precompact-record>>>";
 /** The prefix on EVERY line between them. */
 export const PRECOMPACT_DATA_PREFIX = "| ";
 
-/** Every sequence a reader might take as a line break. */
+/** Every sequence a reader might take as a line break: "\r\n" as one, then
+ *  each character of THE LINE-BREAK SET (the set the redactor stops at). */
 const LINE_BREAK_RE = /\r\n|[\n\r\v\f\u0085\u2028\u2029]/;
-/** Other control characters, shown as a space. */
-const CONTROL_CHAR_RE = /[\u0000-\u0008\u000e-\u001f\u007f-\u009f]/g;
+/** Every other control character, the tab included: C0, DEL and C1. Applied
+ *  after the split, so no line break is left for it; each is shown as a space. */
+const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f-\u009f]/g;
 
 /**
  * The record as quoted data lines: split on every line break a reader might
- * honor, control characters shown as spaces, and EVERY line prefixed with
+ * honor (THE LINE-BREAK SET), every other control character, the tab included,
+ * shown as a space, and EVERY line prefixed with
  * PRECOMPACT_DATA_PREFIX. No line of the result can equal PRECOMPACT_DATA_END
  * or start with a role marker ("System:", "Human:", "Assistant:"), whatever
  * the record text holds, because every line starts with the prefix.
@@ -807,9 +846,15 @@ export function quoteRecordLines(content: string): string[] {
  * instruction or a conversation turn, and the prefix on every line keeps any
  * text there from closing the block early or posing as one.
  *
- * Size: the content is at most PRECOMPACT_RECORD_MAX_CHARS, and the prefix
- * adds 2 characters per line, so the block is at most about 3 times that plus
- * the fixed lines, well inside session start's 10,000-character output.
+ * Size: the content is at most PRECOMPACT_RECORD_MAX_CHARS (C = 2,000)
+ * characters, so at most C + 1 lines. Each line break becomes one "\n" and
+ * each line gains the 2-character prefix, so the quoted lines total at most
+ * C + 2(C + 1) = 6,002 characters. The fixed lines (the header with the
+ * longest trigger, "unknown", and the longest timestamp toISOString() renders,
+ * 27 characters for an expanded year; the flagged note; BEGIN; END; the joins)
+ * add under 700, so the block is under 6,700 characters, inside session
+ * start's 10,000-character output. A record this hook writes has at most 24
+ * lines (every text in it went through oneLine), so its block is under 2,750.
  */
 export function formatPreCompactContext(record: SurfacedPreCompact): string {
   const header =

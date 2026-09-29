@@ -29,19 +29,22 @@
  * `decision: "block"` object. This binary does neither on any path: it exits 0
  * and prints either nothing or ONE `{"systemMessage": …}` object (a warning
  * Claude Code shows the user). The time budget (FLAIR_PRECOMPACT_TIMEOUT_MS,
- * default 5 s) covers the whole process from its start: the entry point arms a
+ * default 5 s) starts when the process does: the entry point arms a
  * process-level deadline before reading stdin, and when it passes the hook
- * prints the one timeout note and exits 0, whatever is still
+ * prints the one timeout note and exits 0, whatever asynchronous work is still
  * pending (stdin held open, a slow read, a write in flight). stdin is read up
  * to STDIN_MAX_BYTES; a larger payload is ignored. Every local file the hook
  * reads is read asynchronously with a size cap checked (fstat) before any byte
  * is read: the transcript by its tail caps, the continuity state file and the
  * marker by SESSION_FILE_MAX_BYTES; a larger file, or one that is not a
  * regular file, is refused with a note. Its local writes are asynchronous too,
- * so none of this can hold the process past the deadline. What runs before
- * this process starts (the launcher, node's start-up) is outside the budget.
- * One local read is not this hook's own: flair-client reads the agent's key
- * file synchronously, and the deadline cannot interrupt that read.
+ * so none of the hook's own file work can hold the process past the deadline.
+ * The deadline bounds asynchronous work only: a timer cannot preempt
+ * synchronous code, and one local read is synchronous and not this hook's
+ * own: flair-client reads the agent's key file synchronously while the client
+ * is built. The outer bound on the whole process is Claude Code's own hook
+ * `timeout` in the settings entry. What runs before this process starts (the
+ * launcher, node's start-up) is outside the budget too.
  *
  * NOTES (the only output)
  * -----------------------
@@ -95,7 +98,8 @@ export const PRECOMPACT_TIMEOUT_CEILING_MS = 15_000;
 /** Upper bound on the hook's stdin (the PreCompact payload is a few hundred bytes). */
 export const STDIN_MAX_BYTES = 256 * 1024;
 
-/** The whole-process budget: FLAIR_PRECOMPACT_TIMEOUT_MS when in range, else the default. */
+/** The process-level budget (armed at start, bounds the hook's asynchronous work):
+ *  FLAIR_PRECOMPACT_TIMEOUT_MS when in range, else the default. */
 export function resolvePreCompactBudgetMs(env: Env = process.env): number {
   const raw = readEnvOrUnset(ENV_PRECOMPACT_TIMEOUT_MS, env as NodeJS.ProcessEnv);
   const n = raw != null && raw.trim() !== "" ? Number(raw) : NaN;
@@ -230,7 +234,7 @@ export interface PreCompactDeps {
   now?: () => Date;
   /** When the budget started (epoch ms). The entry point passes its own start. */
   startedAt?: number;
-  /** The whole-process budget in ms (default: resolvePreCompactBudgetMs(env)). */
+  /** The process-level budget in ms (default: resolvePreCompactBudgetMs(env)). */
   budgetMs?: number;
 }
 

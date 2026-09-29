@@ -12,9 +12,11 @@
   bootstrap context, as quoted data: between fixed begin and end lines, with every line prefixed, so
   text from the transcript cannot pose as an instruction or a conversation turn. The hook always
   exits 0, so it never blocks compaction; when Flair is unreachable or slow, or one of its own files
-  is refused, it shows one short warning. Its time budget covers the whole process
-  (`FLAIR_PRECOMPACT_TIMEOUT_MS`, default 5000 ms), and it checks the size of every local file it
-  reads before reading it. It is opt-in and wired by hand: `flair hook install` does not write the
-  entry, and `docs/claude-code.md` gives the `settings.json` snippet and the heuristic's limits.
+  is refused, it shows one short warning. Its time budget (`FLAIR_PRECOMPACT_TIMEOUT_MS`, default
+  5000 ms) starts before it reads its input and bounds its asynchronous work, though not the Flair
+  client's synchronous read of the agent's key file (the hook entry's Claude Code `timeout` is the
+  outer bound), and it checks the size of every local file it reads before reading it. It is opt-in
+  and wired by hand: `flair hook install` does not write the entry, and `docs/claude-code.md` gives
+  the `settings.json` snippet and the heuristic's limits.
 
   (Closes #2069)

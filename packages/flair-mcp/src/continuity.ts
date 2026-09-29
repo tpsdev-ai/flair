@@ -61,7 +61,8 @@
  * lines it is redacted, and it is the one continuity row whose CONTENT
  * flair-session-start shows (first, after a compaction or a restart). Its
  * rules live in ./precompact.ts; nothing above changes for journal rows. That
- * hook has a whole-process deadline, so it reads the state file through
+ * hook arms a process-level deadline, which can fire only between
+ * asynchronous steps, so it reads the state file through
  * bumpSeqBounded (asynchronous, size-capped with fstat before any byte is
  * read) instead of the synchronous bumpSeq the capture hook uses.
  *
