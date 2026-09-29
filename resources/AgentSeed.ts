@@ -80,7 +80,27 @@ export class AgentSeed extends Resource {
     }
 
     // ── Agent record ──────────────────────────────────────────────────────────
-    const existingAgent = await (databases as any).flair.Agent.get(agentId).catch(() => null);
+    // flair#1965 r3: a FAILED existing-Agent lookup must refuse the whole seed.
+    // The previous `.catch(() => null)` turned a read ERROR into "no agent", so
+    // the raw Agent.put below would take the CREATE branch and overwrite an
+    // existing row (with a fresh local originator stamp). A read error is never
+    // "no row". See resources/originator-instance.ts for the same rule on the
+    // resource write paths.
+    let existingAgent: any;
+    try {
+      existingAgent = await (databases as any).flair.Agent.get(agentId);
+    } catch (err) {
+      // Constant format string + a structured data object (semgrep
+      // javascript.lang.security.audit.unsafe-formatstring).
+      console.error(
+        "AgentSeed: the existing-agent lookup failed, so the seed was refused rather than overwriting the row as a create",
+        { agentId, err },
+      );
+      return new Response(JSON.stringify({
+        error: "agent_lookup_failed",
+        message: "the existing agent record could not be read, so the seed was refused",
+      }), { status: 500, headers: { "content-type": "application/json" } });
+    }
     let agent = existingAgent;
     if (!existingAgent) {
       // flair#941 — this writes the RAW table, so resources/Agent.ts's post()

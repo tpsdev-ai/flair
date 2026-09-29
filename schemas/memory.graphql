@@ -114,9 +114,11 @@ type Memory @table(database: "flair") {
                                # omits the field leaves it). Nullable (existing rows read null = clean upgrade).
                                # NOT client-writable through a resource write. Distinct from the legacy _originatorInstanceId (Federation.ts's
                                # mergeRecord — stamped by the RECEIVER at merge time, forgeable/lossy); this field is stamped by the ORIGINATING
-                               # instance itself and preserved (never re-stamped) as the record flows through sync merges. Two trusted raw-table
-                               # paths sit below the resource layer and are outside the rule: the SIGNED federation merge (FederationSync.post,
-                               # a verified, non-revoked paired peer) and Harper's administrator ops API (:9925, admin auth). @indexed for the
+                               # instance itself and preserved (never re-stamped) as the record flows through sync merges. Federation and Harper's
+                               # administrator ops API are EXCEPTIONS to the rule, not the field's only raw writers: the SIGNED federation merge
+                               # (FederationSync.post, which accepts a signed HTTP body from a known, non-revoked peer; a record's own signature,
+                               # when present, is verified against the pinned key of the record's envelope originator) and the administrator ops
+                               # API (:9925, admin auth). @indexed for the
                                # later sync push-query filter (per-record signature verification and the classifier org-gate are separate slices).
   metadata: String             # JSON blob (flair#1332/#1202): ADK custom_metadata, store-and-return. CLIENT-WRITABLE
                                # (unlike provenance above, which is server-stamped) and OPAQUE TO THE SERVER by

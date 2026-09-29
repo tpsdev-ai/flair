@@ -1722,6 +1722,61 @@ describe("federation-edge-hardening slice 1 / flair#1965 — Memory.put() create
   });
 });
 
+describe("flair#1965 r3 — Memory stored-row resolution is fail-closed and URL-bound", () => {
+  it("a FAILED stored-row read refuses a PATCH (500) — never read as 'no row' and stamped as a create", async () => {
+    instanceRow = { id: "flair_local_test" };
+    memoryStore.set("mem-r3-readfail", { id: "mem-r3-readfail", agentId: "agent-1", content: "authored on B", durability: "standard", originatorInstanceId: "instance-B" });
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m._targetId = "mem-r3-readfail";
+    const spy = spyOn(BaseMemory, "get").mockImplementation(async () => { throw new Error("simulated stored-row read failure"); });
+    try {
+      const res: any = await m.patch({ content: "an edit, long enough for the gate" });
+      expect(res instanceof Response).toBe(true);
+      expect((res as Response).status).toBe(500);
+      expect((await (res as Response).json()).error).toBe("stored_row_lookup_failed");
+      const stored = memoryStore.get("mem-r3-readfail");
+      expect(stored.content).toBe("authored on B"); // nothing written
+      expect(stored.originatorInstanceId).toBe("instance-B"); // never re-stamped
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a PATCH whose body id disagrees with the URL target is refused (400)", async () => {
+    instanceRow = { id: "flair_local_test" };
+    memoryStore.set("mem-r3-real", { id: "mem-r3-real", agentId: "agent-1", content: "real", durability: "standard", originatorInstanceId: "instance-B" });
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m._targetId = "mem-r3-real";
+    const res: any = await m.patch({ id: "mem-r3-decoy", content: "decoy, long enough for the gate" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(400);
+    expect((await (res as Response).json()).error).toBe("id_target_mismatch");
+    expect(memoryStore.get("mem-r3-decoy")).toBeUndefined();
+    expect(memoryStore.get("mem-r3-real").content).toBe("real");
+  });
+
+  it("the _reindex re-PUT refuses a FAILED stored-row read (500) and a missing row (404)", async () => {
+    instanceRow = { id: "flair_local_test" };
+    memoryStore.set("mem-r3-reindex", { id: "mem-r3-reindex", agentId: "agent-1", content: "x", type: "session", originatorInstanceId: "instance-B" });
+    const m1: any = makeMemory({});
+    const spy = spyOn(BaseMemory, "get").mockImplementation(async () => { throw new Error("simulated stored-row read failure"); });
+    try {
+      const res: any = await m1.put({ _reindex: true, id: "mem-r3-reindex", agentId: "agent-1", content: "x", type: "session" });
+      expect(res instanceof Response).toBe(true);
+      expect((res as Response).status).toBe(500);
+      expect((await (res as Response).json()).error).toBe("stored_row_lookup_failed");
+    } finally {
+      spy.mockRestore();
+    }
+    // A reindex names an EXISTING row; a missing row is refused, never created.
+    const m2: any = makeMemory({});
+    const res2: any = await m2.put({ _reindex: true, id: "mem-r3-missing", agentId: "agent-1", content: "x", type: "session" });
+    expect(res2 instanceof Response).toBe(true);
+    expect((res2 as Response).status).toBe(404);
+    expect(memoryStore.get("mem-r3-missing")).toBeUndefined();
+  });
+});
+
 describe("federation-edge-hardening slice 1 — migration-equivalence (no-originatorInstanceId-field memories)", () => {
   it("an existing/old row with no originatorInstanceId field reads back fine — the field is purely additive, not required for reads", async () => {
     memoryStore.set("legacy-no-origin", { id: "legacy-no-origin", agentId: "agent-owner", content: "pre-migration content, no originatorInstanceId field at all." });

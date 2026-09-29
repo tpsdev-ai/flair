@@ -1347,16 +1347,22 @@ export class Memory extends (databases as any).flair.Memory {
     // Skills are written via skill_store (→ Memory.post) or Memory.put; no
     // memory_patch tool exists and no internal path patches a skill row (hit-
     // tracking goes through table.put, not this override), so rejecting is safe.
-    const existingForSkill = (await Promise.resolve(super.get()).catch(() => null)) as any;
+    // flair#1965 r3: resolve the stored row by the URL-BOUND target id, refusing
+    // a body id that disagrees with the address, and refusing a lookup that
+    // FAILS. The previous `.catch(() => null)` turned a read ERROR into "no
+    // stored row", so the patch (a) skipped the skill-row check and (b) stamped
+    // a CREATE over a row that actually exists. A failed read is never "no row".
+    // See resources/originator-instance.ts's resolveStoredRow.
+    const resolvedStored = await resolveStoredRow(this, "Memory", content, () => super.get());
+    if (resolvedStored.denial) return resolvedStored.denial;
+    const existingForSkill = resolvedStored.row;
     const skillDenial = rejectSkillWritePath(content) ?? rejectSkillWritePath(existingForSkill);
     if (skillDenial) return skillDenial;
     // flair#1965 r2: a PATCH over an EXISTING row keeps the stored
     // originatorInstanceId (a body value is dropped); a PATCH whose URL target
     // has NO stored row is a CREATE — Harper's patch path has no existing-row
     // requirement — so it must stamp the local id rather than leave the new row
-    // un-stamped. `existingForSkill` is the URL-bound row (super.get() with no
-    // target), exactly the row this patch is over. See
-    // resources/originator-instance.ts.
+    // un-stamped. See resources/originator-instance.ts.
     await applyOriginatorInstanceId(content, existingForSkill);
     // The receiver-side federation bookkeeping keeps its stored value (a patch
     // merges); a client body value is dropped.
@@ -1395,9 +1401,24 @@ export class Memory extends (databases as any).flair.Memory {
       // PRESERVE the existing row's incarnation token (reindex is a re-PUT of
       // an existing row, never a reincarnation).
       stripServerStampedFields(content);
-      const reindexExisting = content.id
-        ? await (databases as any).flair.Memory.get(content.id)
-        : null;
+      // flair#1965 r3: resolve the stored row by the URL-BOUND target id (never a
+      // body id alone); a body id that disagrees with the address, or a lookup
+      // that FAILS, refuses the reindex. A reindex is a re-PUT of an EXISTING
+      // row, so an absent stored row is refused too — a failed read must never
+      // be read as "no row" and re-created/re-stamped. See
+      // resources/originator-instance.ts's resolveStoredRow.
+      const resolvedReindex = await resolveStoredRow(this, "Memory", content, () => super.get());
+      if (resolvedReindex.denial) return resolvedReindex.denial;
+      const reindexExisting = resolvedReindex.row;
+      if (!reindexExisting) {
+        return new Response(
+          JSON.stringify({
+            error: "reindex_row_not_found",
+            message: "the _reindex re-PUT requires an existing stored row",
+          }),
+          { status: 404, headers: { "content-type": "application/json" } },
+        );
+      }
       stampInstanceToken(content, reindexExisting);
       // Keep the EXISTING row's STORED provenance byte-for-byte. The rest of
       // the row is filtered above and may gain an absent incarnation token.

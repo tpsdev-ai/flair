@@ -66,11 +66,16 @@ export class Soul extends (databases as any).flair.Soul {
     if (denied) return denied;
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
-    // Fail-closed, same as Memory's stored-state read: a throw aborts the
-    // write; missing/unreadable stored state cannot authorize a PATCH that
-    // typically omits agentId (that used to skip the content-provenance match).
-    const existing = await super.get();
-    if (!existing || typeof existing !== "object" || existing instanceof Response) {
+    // Fail-closed, same class as Memory's stored-state read: the stored row is
+    // resolved by the URL-BOUND target id, refusing a body id that disagrees
+    // with the address and refusing a lookup that FAILS (a failed read is never
+    // "no stored row"). A PATCH that typically omits agentId cannot be
+    // authorized without the stored state, so an absent row is refused too. See
+    // resources/originator-instance.ts's resolveStoredRow.
+    const resolvedStored = await resolveStoredRow(this, "Soul", content, () => super.get());
+    if (resolvedStored.denial) return resolvedStored.denial;
+    const existing = resolvedStored.row;
+    if (!existing) {
       return new Response(JSON.stringify({ error: "soul_stored_state_unavailable" }), {
         status: 403,
         headers: { "Content-Type": "application/json" },

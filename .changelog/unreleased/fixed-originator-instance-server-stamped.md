@@ -24,16 +24,24 @@
 
   The federation merge path keeps the value carried in the pushed row: it applies
   rows through the raw table handle, never through a resource's write method, and
-  takes the originator from the record's own already-authenticated data. That
-  body is not body-less — `POST /FederationSync` IS reachable over REST — but it
-  is trusted only after the handler verifies a batch signature against the
-  sending paired peer's pinned key (and each record's signature against its
-  claimed originator's key) and the peer is a known, non-revoked pair.
+  takes the originator from the record's own authenticated data. That path is an
+  EXCEPTION to the stamping rule, not a client-writable field.
+  `POST /FederationSync` DOES accept a signed HTTP body: a batch is applied only
+  after the handler verifies the batch signature against the sending peer's
+  pinned key — the peer must be a known, non-revoked peer — and, when a record
+  carries one, the record's own signature against the pinned key of the record's
+  ENVELOPE originator (`record.originatorInstanceId`, which defaults to the
+  receiver and need not equal the stored `data.originatorInstanceId`). Record
+  signatures are verified when present; an operator can require them.
 
   > **Scope:** the stamp is enforced at the resource layer for every REST /
-  > application write. Two trusted raw-table paths sit outside it by design — the
-  > signed federation merge above, and Harper's administrator ops API (`:9925`),
-  > which can set any column under admin auth. Neither is a client request body.
+  > application write. Federation and the administrator ops API are EXCEPTIONS to
+  > the stamping rule, not the field's only raw writers: the signed federation
+  > merge above applies a verified peer's rows through the raw table handle, and
+  > Harper's administrator ops API (`:9925`) can set any column under admin auth.
+  > The other raw-table writers (the feed ingest, `POST /AgentSeed` and the MCP /
+  > IdP provisioning paths) apply the rule themselves, as the list above says.
+  > Neither exception is a client request body.
   >
   > **Heads-up:** if a client or script relied on setting `originatorInstanceId`
   > through `POST`/`PUT`/`PATCH`, that value is now ignored — the server stamps

@@ -24,7 +24,7 @@
  * importing resources/Memory.ts — only resources/Soul.ts, which has no other
  * importer in test/unit/.
  */
-import { describe, it, expect, beforeEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, mock, spyOn } from "bun:test";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete (process.env as any).FLAIR_PUBLIC;
@@ -261,5 +261,40 @@ describe("flair#1965 r2 — Soul PUT resolves the URL-bound target; a PATCH crea
     expect(res instanceof Response).toBe(true);
     expect(res.status).toBe(403);
     expect(soulStore.get("soul-patch-new")).toBeUndefined();
+  });
+});
+
+// ─── flair#1965 round 3 — fail-closed, URL-bound stored-row resolution ───────
+describe("flair#1965 r3 — Soul PATCH is fail-closed and URL-bound", () => {
+  const owner = () => ({ tpsAgent: "operator", tpsAgentIsAdmin: true, headers: new Headers({ authorization: "Basic verified" }) });
+
+  it("a FAILED stored-row read refuses the PATCH (500) — never read as 'no stored state'", async () => {
+    instanceRow = { id: "flair_local_test" };
+    soulStore.set("soul-r3-readfail", { id: "soul-r3-readfail", agentId: "agent-1", key: "identity", value: "authored on B", originatorInstanceId: "instance-B" });
+    const s: any = makeSoul(owner());
+    s._targetId = "soul-r3-readfail";
+    const spy = spyOn(BaseSoul, "get").mockImplementation(async () => { throw new Error("simulated stored-row read failure"); });
+    try {
+      const res: any = await s.patch({ value: "an edit" });
+      expect(res instanceof Response).toBe(true);
+      expect((res as Response).status).toBe(500);
+      expect((await (res as Response).json()).error).toBe("stored_row_lookup_failed");
+      expect(soulStore.get("soul-r3-readfail").value).toBe("authored on B"); // nothing written
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a PATCH whose body id disagrees with the URL target is refused (400)", async () => {
+    instanceRow = { id: "flair_local_test" };
+    soulStore.set("soul-r3-real", { id: "soul-r3-real", agentId: "agent-1", key: "identity", value: "real", originatorInstanceId: "instance-B" });
+    const s: any = makeSoul(owner());
+    s._targetId = "soul-r3-real";
+    const res: any = await s.patch({ id: "soul-r3-decoy", value: "decoy" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(400);
+    expect((await (res as Response).json()).error).toBe("id_target_mismatch");
+    expect(soulStore.get("soul-r3-decoy")).toBeUndefined();
+    expect(soulStore.get("soul-r3-real").value).toBe("real");
   });
 });

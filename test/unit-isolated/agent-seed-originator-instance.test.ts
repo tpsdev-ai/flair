@@ -17,6 +17,10 @@ let agentStore: Map<string, any>;
 let soulStore: Map<string, any>;
 let memStore: Map<string, any>;
 let instanceRow: any = null;
+// flair#1965 r3: simulate a FAILED existing-Agent lookup (the read throws) so a
+// test can prove the seed is refused rather than overwriting the row as a
+// create. Reset in beforeEach.
+let agentGetThrows = false;
 
 function gen(values: () => Iterable<any>) {
   return async function* () {
@@ -30,7 +34,10 @@ mock.module("harper", () => ({
   databases: {
     flair: {
       Agent: {
-        get: async (id: string) => agentStore.get(id) ?? null,
+        get: async (id: string) => {
+          if (agentGetThrows) throw new Error("simulated agent read failure");
+          return agentStore.get(id) ?? null;
+        },
         put: async (r: any) => { agentStore.set(r.id, { ...r }); return r; },
       },
       Soul: {
@@ -75,6 +82,7 @@ beforeEach(() => {
   soulStore = new Map();
   memStore = new Map();
   instanceRow = null;
+  agentGetThrows = false;
   _resetLocalInstanceIdCacheForTests();
 });
 
@@ -101,5 +109,27 @@ describe("flair#1965 r2 — AgentSeed stamps originatorInstanceId on every raw c
     expect(agentStore.get("newbie2").originatorInstanceId).toBeNull();
     for (const s of soulStore.values()) expect(s.originatorInstanceId).toBeNull();
     for (const m of memStore.values()) expect(m.originatorInstanceId).toBeNull();
+  });
+});
+
+describe("flair#1965 r3 — AgentSeed fails closed on a failed existing-Agent lookup", () => {
+  test("a FAILED existing-Agent read refuses the seed (500) and never overwrites the existing row as a create", async () => {
+    instanceRow = { id: LOCAL_ID };
+    // An existing Agent row that a failed read must NOT be allowed to clobber.
+    agentStore.set("existing", { id: "existing", name: "Existing", role: "agent", publicKey: "stable-key", originatorInstanceId: "instance-B" });
+    agentGetThrows = true;
+
+    const res: any = await seed().post({ agentId: "existing", displayName: "Existing" });
+    expect(res instanceof Response).toBe(true);
+    expect(res.status).toBe(500);
+    expect((await (res as Response).json()).error).toBe("agent_lookup_failed");
+
+    // The existing row is untouched — no re-stamp, no overwrite.
+    const stored = agentStore.get("existing");
+    expect(stored.publicKey).toBe("stable-key");
+    expect(stored.originatorInstanceId).toBe("instance-B");
+    // No Soul/Memory rows were created either (the seed refused before them).
+    expect(soulStore.size).toBe(0);
+    expect(memStore.size).toBe(0);
   });
 });
