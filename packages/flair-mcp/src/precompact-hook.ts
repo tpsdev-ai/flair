@@ -30,9 +30,12 @@
  * and prints either nothing or ONE `{"systemMessage": …}` object (a warning
  * Claude Code shows the user). The time budget (FLAIR_PRECOMPACT_TIMEOUT_MS,
  * default 5 s) starts when the process does: the entry point arms a
- * process-level deadline before reading stdin, and when it passes the hook
- * prints the one timeout note and exits 0, whatever asynchronous work is still
- * pending (stdin held open, a slow read, a write in flight). stdin is read up
+ * process-level deadline before reading stdin. When it passes, the timer starts
+ * finishing whatever asynchronous work is still pending (stdin held open, a
+ * slow read, a write in flight): the hook prints the one timeout note and exits
+ * 0 once stdout drains, waiting at most a further STDOUT_DRAIN_GRACE_MS (1 s).
+ * Synchronous work can delay the timer itself; Claude Code's hook timeout is
+ * the outer bound. stdin is read up
  * to STDIN_MAX_BYTES; a larger payload is ignored. Every local file the hook
  * reads is read asynchronously with a size cap checked (fstat) before any byte
  * is read: the transcript by its tail caps, the continuity state file and the
@@ -98,7 +101,7 @@ export const PRECOMPACT_TIMEOUT_CEILING_MS = 15_000;
 /** Upper bound on the hook's stdin (the PreCompact payload is a few hundred bytes). */
 export const STDIN_MAX_BYTES = 256 * 1024;
 
-/** The process-level budget (armed at start, bounds the hook's asynchronous work):
+/** The process-level budget (armed at start; when it passes, finishing starts and the process exits once stdout drains, at most STDOUT_DRAIN_GRACE_MS later):
  *  FLAIR_PRECOMPACT_TIMEOUT_MS when in range, else the default. */
 export function resolvePreCompactBudgetMs(env: Env = process.env): number {
   const raw = readEnvOrUnset(ENV_PRECOMPACT_TIMEOUT_MS, env as NodeJS.ProcessEnv);
