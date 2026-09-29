@@ -39,7 +39,7 @@ Provide via environment variables, or `$HERMES_HOME/flair.json`:
 |------------------|------------------|-------------------------------------|-------------------------------------------------|
 | Server URL       | `FLAIR_URL`      | `http://127.0.0.1:19926`             | Override for remote Flair deployments           |
 | Agent ID         | `FLAIR_AGENT_ID` | `hermes`                            | Must match `flair agent add <id>`               |
-| Private key path | `FLAIR_KEY_PATH` | `~/.flair/keys/<agent>.key`         | When creating a new key, `flair agent add` writes a raw 32-byte Ed25519 seed. The plugin also accepts Ed25519 PEM and canonically base64-encoded PKCS8 DER after text normalization. `agent add` does not write the alternative formats, and it reuses an existing key file. |
+| Private key path | `FLAIR_KEY_PATH` | `~/.flair/keys/<agent>.key`         | When creating a new key, `flair agent add` writes a raw 32-byte Ed25519 seed. The plugin also accepts a base64-encoded 32-byte raw seed, Ed25519 PEM, or canonically base64-encoded PKCS8 DER after text normalization. `agent add` does not write the alternative formats, and it reuses an existing key file. |
 
 Example `flair.json`:
 

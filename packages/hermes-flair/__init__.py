@@ -20,7 +20,9 @@ Config (env vars or $HERMES_HOME/flair.json):
   FLAIR_KEY_PATH     — Ed25519 private key file
                        (default: ~/.flair/keys/<agent>.key)
                        Accepts a 32-byte raw seed (what `flair agent add`
-                       writes), a PEM key, or strict base64 of PKCS8 DER.
+                       writes), a base64-encoded 32-byte raw seed (44
+                        characters), an Ed25519 PEM key, or canonical
+                        standard base64 of PKCS8 DER.
 
 Bootstrap a Flair-side identity for this agent:
   1. Install Flair: npm i -g @tpsdev-ai/flair
@@ -154,8 +156,8 @@ def _format_error(key_path: str) -> ValueError:
     """The named format error: the path and the accepted formats, never the bytes."""
     return ValueError(
         f"flair: could not load an Ed25519 private key from {key_path}: "
-        "expected an exact 32-byte raw seed, an Ed25519 PEM key, or canonical "
-        "standard base64 of PKCS8 DER"
+          "expected an exact 32-byte raw seed, a base64-encoded 32-byte raw seed, "
+          "an Ed25519 PEM key, or canonical standard base64 of PKCS8 DER"
     )
 
 
@@ -189,7 +191,7 @@ def _load_private_key(key_path: str):
       2. Ed25519 PEM: after outer whitespace is stripped, the WHOLE file must be
          one PEM block (a BEGIN line, a base64 body, an END line). Junk before
          or after the block is refused.
-      3. Canonical standard base64 of a PKCS8 DER key, after outer whitespace is
+       3. Canonical standard base64 of a 32-byte raw seed or PKCS8 DER key,
          stripped. The encoding must round-trip (standard alphabet, correctly
          padded).
 
@@ -248,9 +250,18 @@ def _parse_private_key(data: bytes):
                 pass
         return None
 
-    # 3. Canonical standard base64 of PKCS8 DER.
+       # 3. Canonical standard base64 of a 32-byte raw seed or a PKCS8 DER key.
+       #    Order: base64-encoded 32-byte raw seed first, then PKCS8 DER.
+       #    Rationale: PKCS8 DER of an Ed25519 key is 48 bytes; a seed is 32.
+       #    They never shadow each other by length, but checking the shorter
+       #    seed first matches the TypeScript loader's precedence in
+       #    src/lib/auth-resolve.ts/packages/adk-flair-js/src/signing.ts.
     der = _canonical_base64_decode(text)
     if der is not None:
+           # 3a. base64-encoded raw 32-byte seed (44-char form, like the CLI).
+        if len(der) == 32:
+            return ed25519.Ed25519PrivateKey.from_private_bytes(der)
+           # 3b. PKCS8 DER— the historical Hermes keyfile format remains here.
         try:
             key = serialization.load_der_private_key(der, password=None)
             if isinstance(key, ed25519.Ed25519PrivateKey):
@@ -259,7 +270,6 @@ def _parse_private_key(data: bytes):
             pass
 
     return None
-
 
 def _sign_request(priv_key, agent_id: str, method: str, path: str) -> str:
     """Build the TPS-Ed25519 Authorization header value."""
@@ -343,7 +353,7 @@ class FlairMemoryProvider(MemoryProvider):
             },
             {
                 "key": "key_path",
-                "description": "Path to the Ed25519 private key file (created by `flair agent add`): 32-byte raw seed, PEM, or strict base64 of PKCS8 DER",
+                 "description": "Path to the Ed25519 private key file (created by `flair agent add`): 32-byte raw seed, PEM, or canonical standard base64 of PKCS8 DER",
                 "secret": True,
                 "env_var": "FLAIR_KEY_PATH",
             },
