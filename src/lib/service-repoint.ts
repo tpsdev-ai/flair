@@ -16,8 +16,10 @@
  * hand. No other shape is interpreted, and no operator argument is rewritten.
  *
  *   - launchd — the pass-file plist `flair init` / `doctor --fix` write, for
- *     THIS instance: one Label (this data dir's label), one ROOTPATH (this data
- *     dir), one HOME (this user's home), no `Program` key, one WorkingDirectory
+ *     THIS instance, read as XML structure (readPlistStructure — a comment,
+ *     CDATA or any structure beyond a plain plist is refused): one Label (this
+ *     data dir's label) at the top level, one ROOTPATH (this data dir) and one
+ *     HOME (this user's home) in EnvironmentVariables, no `Program` key, one WorkingDirectory
  *     and a ProgramArguments array of exactly
  *       [<tree>/templates/launchd/start-flair-with-admin-pass.sh,
  *        <this instance's admin-pass file>, <…/node>,
@@ -40,7 +42,8 @@
  *     that is NOT this CLI's tree, whose flair version can be read and is not
  *     newer than this CLI's → node, Harper entry, launcher and tree move together;
  *   - it serves a plain tree or a checkout → never (`refuse`): separately managed;
- *   - the old tree's flair version (or this CLI's) cannot be read, or is newer
+ *   - the old tree's flair version (or this CLI's) cannot be read, is not strict
+ *     semver, or is newer by semver ordering (0.57.0-beta.1 is older than 0.57.0)
  *     → refused: a downgrade cannot be ruled out;
  *   - it serves THIS CLI's tree with an existing, different node → a deliberate
  *     runtime pin, left as it is (`pinned-node`);
@@ -55,7 +58,7 @@
  */
 import { basename, isAbsolute, relative, sep } from "node:path";
 import { escapeXml, unescapeXml } from "./xml-escape.js";
-import { compareVersions, isNpmGlobalFlairTree } from "./tree-divergence.js";
+import { compareVersions, isExactSemver, isNpmGlobalFlairTree } from "./tree-divergence.js";
 
 export const LAUNCHER_BASENAME = "start-flair-with-admin-pass.sh";
 /** The launcher's path relative to an install tree. */
@@ -182,20 +185,26 @@ function treeGate(oldTree: string, t: RepointTargets, deps: RepointDeps, unit: s
       `as a separately managed deployment and does not re-point it.${byHand(t, launcher)}`
     );
   }
+  // Semver ordering (prereleases included); a version that cannot be read or
+  // is not strict semver cannot rule a downgrade out, so it is refused.
+  const unusable = (v: string | null): string | null =>
+    v === null ? "cannot be read" : isExactSemver(v) ? null : `(${JSON.stringify(v)}) is not a semver version`;
   const oldVersion = deps.treeVersion(oldTree);
-  if (!oldVersion) {
+  const oldBad = unusable(oldVersion);
+  if (oldBad) {
     return (
-      `${unit} serves ${oldTree}, whose flair version cannot be read, so flair cannot rule out that re-pointing would ` +
+      `${unit} serves ${oldTree}, whose flair version ${oldBad}, so flair cannot rule out that re-pointing would ` +
       `downgrade the instance, and does not re-point it.${byHand(t, launcher)}`
     );
   }
-  if (!t.cliVersion) {
+  const cliBad = unusable(t.cliVersion);
+  if (cliBad) {
     return (
-      `this CLI's own flair version cannot be read, so flair cannot rule out that re-pointing ${unit} would downgrade ` +
+      `this CLI's own flair version ${cliBad}, so flair cannot rule out that re-pointing ${unit} would downgrade ` +
       `the instance, and does not re-point it.${byHand(t, launcher)}`
     );
   }
-  if (compareVersions(t.cliVersion, oldVersion) < 0) {
+  if ((compareVersions(t.cliVersion!, oldVersion!) ?? -1) < 0) {
     return (
       `${unit} serves flair ${oldVersion} from ${oldTree}; this CLI's tree has the older ${t.cliVersion}, so re-pointing ` +
       "would downgrade the instance. Update this CLI's tree first (npm i -g @tpsdev-ai/flair), then re-run flair init."
@@ -218,9 +227,140 @@ function keyCount(raw: string, key: string): number {
   return raw.split(`<key>${key}</key>`).length - 1;
 }
 
-function stringValue(raw: string, key: string): string | null {
-  const m = new RegExp(`<key>${key}</key>\\s*<string>([^<]*)</string>`).exec(raw);
-  return m ? unescapeXml(m[1]!) : null;
+/** A plist value as the structural reader sees it. */
+type PlistValue =
+  | { t: "dict"; entries: Map<string, PlistValue> }
+  | { t: "array"; items: PlistValue[] }
+  | { t: "string"; v: string }
+  | { t: "scalar" };
+
+/**
+ * Read a plist the way launchd would — as XML structure — or say why it is not
+ * the plain shape flair writes. REFUSED rather than interpreted: XML comments,
+ * CDATA, processing instructions after the declaration, a DOCTYPE with an
+ * internal subset, entity references beyond the five predefined ones, unknown
+ * elements, text outside a value, duplicate keys in one dict, and anything
+ * after `</plist>`. Refusing comments (instead of skipping them) is what keeps
+ * the text rewrite below exact: with none, every literal `<key>…</key>` in the
+ * file is a real element, so the unique-key counts and the value splices
+ * address the same elements this reader placed.
+ */
+export function readPlistStructure(raw: string): { top: Map<string, PlistValue> } | { problem: string } {
+  const TAG = /<(\/?)([A-Za-z]+)((?:\s+[A-Za-z]+="[^"<>&]*")*)\s*(\/?)>/y;
+  const TEXT = /[^<]*/y;
+  let i = raw.charCodeAt(0) === 0xfeff ? 1 : 0;
+  const fail = (why: string): never => {
+    throw new Error(why);
+  };
+  const ws = (): void => {
+    while (i < raw.length && /\s/.test(raw[i]!)) i++;
+  };
+  const tag = (): { close: boolean; name: string; attrs: string; empty: boolean } => {
+    TAG.lastIndex = i;
+    const m = TAG.exec(raw);
+    if (!m) fail(`unexpected content at offset ${i}`);
+    i = TAG.lastIndex;
+    return { close: m![1] === "/", name: m![2]!, attrs: m![3]!, empty: m![4] === "/" };
+  };
+  const text = (): string => {
+    TEXT.lastIndex = i;
+    const t = TEXT.exec(raw)![0];
+    i = TEXT.lastIndex;
+    if (/&(?!(?:amp|lt|gt|quot|apos);)/.test(t)) fail("an entity or character reference flair does not write");
+    return unescapeXml(t);
+  };
+  const end = (name: string): void => {
+    const c = tag();
+    if (!c.close || c.name !== name || c.attrs !== "" || c.empty) fail(`an unclosed <${name}>`);
+  };
+  const value = (): PlistValue => {
+    ws();
+    const o = tag();
+    if (o.close || o.attrs !== "") fail(`an unexpected <${o.close ? "/" : ""}${o.name}>`);
+    switch (o.name) {
+      case "true":
+      case "false":
+        if (!o.empty) end(o.name);
+        return { t: "scalar" };
+      case "string": {
+        if (o.empty) return { t: "string", v: "" };
+        const v = text();
+        end("string");
+        return { t: "string", v };
+      }
+      case "integer":
+      case "real":
+      case "date":
+      case "data":
+        if (!o.empty) {
+          text();
+          end(o.name);
+        }
+        return { t: "scalar" };
+      case "array": {
+        const items: PlistValue[] = [];
+        if (o.empty) return { t: "array", items };
+        for (;;) {
+          ws();
+          if (raw.startsWith("</array>", i)) {
+            i += "</array>".length;
+            return { t: "array", items };
+          }
+          items.push(value());
+        }
+      }
+      case "dict": {
+        const entries = new Map<string, PlistValue>();
+        if (o.empty) return { t: "dict", entries };
+        for (;;) {
+          ws();
+          if (raw.startsWith("</dict>", i)) {
+            i += "</dict>".length;
+            return { t: "dict", entries };
+          }
+          const k = tag();
+          if (k.close || k.name !== "key" || k.attrs !== "" || k.empty) fail("a dict entry that does not start with <key>");
+          const key = text();
+          end("key");
+          if (entries.has(key)) fail(`the key ${JSON.stringify(key)} twice in one dict`);
+          entries.set(key, value());
+        }
+      }
+      default:
+        return fail(`an element <${o.name}> flair does not write`);
+    }
+  };
+  try {
+    if (/<!--|<!\[CDATA\[/.test(raw)) fail("an XML comment or CDATA section");
+    ws();
+    if (raw.startsWith("<?xml", i)) {
+      const e = raw.indexOf("?>", i);
+      if (e < 0) fail("an unterminated XML declaration");
+      i = e + 2;
+    }
+    ws();
+    if (raw.startsWith("<!DOCTYPE", i)) {
+      const e = raw.indexOf(">", i);
+      if (e < 0 || raw.slice(i, e).includes("[")) fail("a DOCTYPE with an internal subset");
+      i = e + 1;
+    }
+    ws();
+    const root = tag();
+    if (root.close || root.name !== "plist" || root.empty) fail("no <plist> root element");
+    const top = value();
+    if (top.t !== "dict") fail("a <plist> whose value is not a dict");
+    ws();
+    end("plist");
+    ws();
+    if (i !== raw.length) fail("content after </plist>");
+    return { top: (top as { t: "dict"; entries: Map<string, PlistValue> }).entries };
+  } catch (err) {
+    return { problem: (err as Error).message };
+  }
+}
+
+function plistString(v: PlistValue | undefined): string | null {
+  return v?.t === "string" ? v.v : null;
 }
 
 /**
@@ -242,21 +382,32 @@ export function planPlistRuntimeRepoint(
   });
   if (!t.launcher) return { kind: "refuse", detail: "internal: no launcher path to write" };
 
+  // Read as structure: Label and the runtime keys in the top-level dict,
+  // ROOTPATH and HOME in its EnvironmentVariables dict.
+  const doc = readPlistStructure(raw);
+  if ("problem" in doc) return refuse(`is not in the plain plist shape flair writes (it has ${doc.problem})`);
+  const top = doc.top;
+  const env = top.get("EnvironmentVariables");
+  if (env?.t !== "dict") return refuse("has no EnvironmentVariables dict");
   // One unambiguous declaration of each key this decision reads.
   for (const key of ["Label", "ProgramArguments", "WorkingDirectory", "ROOTPATH", "HOME"]) {
     if (keyCount(raw, key) !== 1) return refuse(`does not declare exactly one ${key}`);
   }
-  if (keyCount(raw, "Program") !== 0) return refuse("declares a Program key, which launchd runs instead of ProgramArguments[0]");
-  const label = stringValue(raw, "Label");
+  if (keyCount(raw, "Program") !== 0 || top.has("Program")) {
+    return refuse("declares a Program key, which launchd runs instead of ProgramArguments[0]");
+  }
+  const label = plistString(top.get("Label"));
   if (label !== owner.label) return refuse(`has the Label ${JSON.stringify(label)}, not this data directory's ${owner.label}`);
-  const rootPath = stringValue(raw, "ROOTPATH");
+  const rootPath = plistString(env.entries.get("ROOTPATH"));
   if (rootPath === null || !deps.samePath(rootPath, owner.dataDir)) {
-    return refuse(`declares ROOTPATH ${JSON.stringify(rootPath)}, not this data directory ${owner.dataDir}`);
+    return refuse(`declares ROOTPATH ${JSON.stringify(rootPath)} in EnvironmentVariables, not this data directory ${owner.dataDir}`);
   }
-  const home = stringValue(raw, "HOME");
+  const home = plistString(env.entries.get("HOME"));
   if (home === null || !deps.samePath(home, owner.home)) {
-    return refuse(`declares HOME ${JSON.stringify(home)}, not this user's home ${owner.home}`);
+    return refuse(`declares HOME ${JSON.stringify(home)} in EnvironmentVariables, not this user's home ${owner.home}`);
   }
+  const parsedArgs = top.get("ProgramArguments");
+  const parsedWd = plistString(top.get("WorkingDirectory"));
 
   const argsBlock = /(<key>ProgramArguments<\/key>\s*<array>)([\s\S]*?)(<\/array>)/.exec(raw);
   const wd = /(<key>WorkingDirectory<\/key>\s*<string>)([^<]*)(<\/string>)/.exec(raw);
@@ -268,6 +419,14 @@ export function planPlistRuntimeRepoint(
   }
   const args = strings.map((m) => unescapeXml(m[1]!));
   const oldTree = unescapeXml(wd[2]!);
+  // The splice targets must be the very values the structure holds.
+  if (
+    parsedArgs?.t !== "array" ||
+    parsedArgs.items.map((x) => plistString(x)).join("\u0000") !== args.join("\u0000") ||
+    parsedWd !== oldTree
+  ) {
+    return refuse("has a ProgramArguments or WorkingDirectory that is not a top-level value in the shape flair writes");
+  }
   if (!isAbsolute(oldTree)) return refuse(`has a WorkingDirectory that is not an absolute path (${JSON.stringify(oldTree)})`);
   if (relInTree(oldTree, args[0]!, deps) !== LAUNCHER_REL) {
     return refuse(`runs ${args[0]} as its program, not ${LAUNCHER_REL} inside its WorkingDirectory ${oldTree}`);

@@ -21,6 +21,11 @@
  *   6. the federation shim must run exactly the generated commands, and the
  *      pin message offers only a remedy that exists.
  *
+ * Round 4 adds the exactness cases at the end: a listener result that is not
+ * exactly the reported pid, a plist identity hidden in a comment or misplaced,
+ * semver prereleases and unparseable versions, bytes that are not valid UTF-8,
+ * and a recovery that is confirmed by querying the manager again.
+ *
  * Every service manager is a fake; every file lives in a scratch directory.
  */
 import { describe, test, expect } from "bun:test";
@@ -40,6 +45,7 @@ import { fileURLToPath } from "node:url";
 import { tempDir } from "../helpers/temp-dir.ts";
 import {
   assessTreeDivergence,
+  compareVersions,
   formatTreeAssessmentLines,
   identifyAnsweringPid,
   proveServingTree,
@@ -563,29 +569,96 @@ describe("5 — the write lands only over the bytes it was planned from", () => 
     const d = fakes(f.path);
     const r = repointSystemdUserUnit(f.serving, targets, d);
     expect(r.kind).toBe("repointed");
-    expect(d.calls).toEqual(["reload", "show"]);
+    // Captured before the write, then confirmed after the reload.
+    expect(d.calls).toEqual(["show", "reload", "show"]);
     expect(readFileSync(f.path, "utf-8")).toContain(`WorkingDirectory=${NEW_TREE}`);
   });
 
-  test("systemd: a failed reload restores the bytes AND reloads again, so disk and manager agree", () => {
+  test("systemd: a failed reload restores the bytes, reloads, and RE-QUERIES before saying they agree", () => {
     const f = systemdFixture();
     const d = fakes(f.path, { reloads: [() => { throw new Error("Failed to reload daemon"); }] });
     const r = repointSystemdUserUnit(f.serving, targets, d);
     expect(r.kind).toBe("refused");
     expect(readFileSync(f.path, "utf-8")).toBe(f.before);
-    expect(d.calls).toEqual(["reload", "reload"]);
-    if (r.kind === "refused") expect(r.detail).toContain("both hold the previous unit");
+    // capture, reload (fails), restore, reload, re-query against the capture.
+    expect(d.calls).toEqual(["show", "reload", "reload", "show"]);
+    if (r.kind === "refused") {
+      expect(r.detail).toContain("the manager reports the unit it held before the write again");
+      expect(r.detail).not.toContain("UNVERIFIED");
+    }
   });
 
-  test("systemd: the manager not holding what was written (a drop-in appeared) is restored the same way", () => {
+  test("systemd: a drop-in that appears and PERSISTS after the restore is reported as UNVERIFIED, never as agreement", () => {
     const f = systemdFixture();
+    let shows = 0;
     const d = fakes(f.path, {
-      unitState: () => ({ mainPid: 77, fragmentPath: f.path, dropInPaths: ["/run/user/1/systemd/transient/x.conf"], workingDirectory: NEW_TREE }),
+      unitState: (): SystemdUnitManagerState => {
+        shows++;
+        const wd = /^WorkingDirectory=(.*)$/m.exec(readFileSync(f.path, "utf-8"))?.[1] ?? null;
+        // The capture sees no drop-in; every query after the first reload does.
+        return { mainPid: 77, fragmentPath: f.path, dropInPaths: shows === 1 ? [] : ["/run/user/1/systemd/transient/x.conf"], workingDirectory: wd };
+      },
     });
     const r = repointSystemdUserUnit(f.serving, targets, d);
     expect(r.kind).toBe("refused");
     expect(readFileSync(f.path, "utf-8")).toBe(f.before);
     expect(d.calls.filter((c) => c === "reload")).toHaveLength(2);
+    expect(shows).toBe(3);
+    if (r.kind === "refused") {
+      expect(r.detail).toContain("UNVERIFIED");
+      expect(r.detail).toContain("x.conf");
+      expect(r.detail).not.toContain("reports the unit it held before the write again");
+    }
+  });
+
+  test("systemd: a second reload that leaves the manager on the re-pointed unit is UNVERIFIED", () => {
+    const f = systemdFixture();
+    // The manager: the first reload loads the new unit with a transient drop-in
+    // (so the re-point is not confirmed); the second reload drops the drop-in but
+    // does NOT load the restored file — it still holds the new working directory.
+    let held: SystemdUnitManagerState = { mainPid: 77, fragmentPath: f.path, dropInPaths: [], workingDirectory: OLD_TREE };
+    let reloads = 0;
+    const d = fakes(f.path, {
+      reload: () => {
+        reloads++;
+        if (reloads === 1) held = { ...held, dropInPaths: ["/run/user/1/systemd/transient/x.conf"], workingDirectory: NEW_TREE };
+        if (reloads === 2) held = { ...held, dropInPaths: [] };
+      },
+      unitState: () => held,
+    });
+    const r = repointSystemdUserUnit(f.serving, targets, d);
+    expect(r.kind).toBe("refused");
+    expect(readFileSync(f.path, "utf-8")).toBe(f.before);
+    expect(reloads).toBe(2);
+    if (r.kind === "refused") {
+      expect(r.detail).toContain("UNVERIFIED");
+      expect(r.detail).toContain(`WorkingDirectory ${NEW_TREE}`);
+    }
+  });
+
+  test("systemd: a manager that cannot be queried after the restore is UNVERIFIED", () => {
+    const f = systemdFixture();
+    let shows = 0;
+    const d = fakes(f.path, {
+      reloads: [() => { throw new Error("Failed to reload daemon"); }],
+      unitState: (): SystemdUnitManagerState | null => {
+        shows++;
+        return shows === 1 ? { mainPid: 77, fragmentPath: f.path, dropInPaths: [], workingDirectory: OLD_TREE } : null;
+      },
+    });
+    const r = repointSystemdUserUnit(f.serving, targets, d);
+    expect(r.kind).toBe("refused");
+    expect(readFileSync(f.path, "utf-8")).toBe(f.before);
+    if (r.kind === "refused") expect(r.detail).toContain("UNVERIFIED");
+  });
+
+  test("systemd: when the manager's state before the write cannot be captured, nothing is written", () => {
+    const f = systemdFixture();
+    const d = fakes(f.path, { unitState: () => null });
+    const r = repointSystemdUserUnit(f.serving, targets, d);
+    expect(r.kind).toBe("refused");
+    expect(readFileSync(f.path, "utf-8")).toBe(f.before);
+    expect(d.calls).toEqual([]);
   });
 
   test("systemd: when the second reload fails too, the result names the state left behind", () => {
@@ -596,6 +669,7 @@ describe("5 — the write lands only over the bytes it was planned from", () => 
     expect(readFileSync(f.path, "utf-8")).toBe(f.before);
     if (r.kind === "refused") {
       expect(r.detail).toContain("the file holds the previous unit");
+      expect(r.detail).toContain("UNVERIFIED");
       expect(r.detail).toContain("systemctl --user daemon-reload");
     }
   });
@@ -619,7 +693,40 @@ describe("5 — the write lands only over the bytes it was planned from", () => 
     );
     expect(r.kind).toBe("refused");
     expect(readFileSync(f.path, "utf-8")).toContain(`WorkingDirectory=${NEW_TREE}`);
-    if (r.kind === "refused") expect(r.detail).toContain("RE-POINTED");
+    if (r.kind === "refused") {
+      expect(r.detail).toContain("RE-POINTED");
+      expect(r.detail).toContain("UNVERIFIED");
+      expect(r.detail).not.toContain("has loaded");
+    }
+  });
+
+  test("systemd: a restore that fails AFTER a successful first reload still never says the manager loaded anything", () => {
+    const f = systemdFixture();
+    let renames = 0;
+    let shows = 0;
+    const r = repointSystemdUserUnit(
+      f.serving,
+      targets,
+      fakes(f.path, {
+        // The reload succeeds, but the manager does not report the new unit.
+        unitState: (): SystemdUnitManagerState => {
+          shows++;
+          return { mainPid: 77, fragmentPath: f.path, dropInPaths: [], workingDirectory: OLD_TREE };
+        },
+        atomic: {
+          rename: (from, to) => {
+            renames++;
+            if (renames === 2) throw new Error("EIO: simulated");
+            renameSync(from, to);
+          },
+        },
+      }),
+    );
+    expect(r.kind).toBe("refused");
+    if (r.kind === "refused") {
+      expect(r.detail).toContain("UNVERIFIED");
+      expect(r.detail).not.toContain("has loaded");
+    }
   });
 
   test("systemd: drop-ins the manager reports, or a <unit>.d beside the file, refuse before any write", () => {
@@ -756,7 +863,7 @@ describe("6 — the federation shim must run exactly the generated commands", ()
         templateRootOverride: templateRoot,
         ...over,
       });
-    return { root, shim, rewrite };
+    return { root, shim, rewrite, oldTree: dirname(dirname(old.cli)) };
   }
 
   test("a marked shim with an extra hand-written command is refused and left as it is", () => {
@@ -806,6 +913,77 @@ describe("6 — the federation shim must run exactly the generated commands", ()
   });
 });
 
+describe("round 4 — the shim's version gate and bytes", () => {
+  const templateRoot = join(resolve(dirname(fileURLToPath(import.meta.url)), "..", ".."), "templates");
+  function shim(oldVersion = "0.57.0") {
+    const root = tempDir("flair-2034-shim4-");
+    const home = join(root, "home");
+    mkdirSync(join(home, ".flair", "bin"), { recursive: true });
+    const rt = (v: string, version: string) => {
+      const prefix = join(root, "rt", v);
+      const t = join(prefix, "lib", "node_modules", "@tpsdev-ai", "flair");
+      mkdirSync(join(t, "dist"), { recursive: true });
+      mkdirSync(join(prefix, "bin"), { recursive: true });
+      writeFileSync(join(t, "package.json"), JSON.stringify({ name: "@tpsdev-ai/flair", version }));
+      writeFileSync(join(t, "dist", "cli.js"), "// flair\n");
+      writeFileSync(join(prefix, "bin", "node"), "#!/bin/sh\n", { mode: 0o755 });
+      return { node: join(prefix, "bin", "node"), cli: join(t, "dist", "cli.js") };
+    };
+    const old = rt("24.18.0", oldVersion);
+    const cur = rt("24.19.0", "0.57.0");
+    const path = join(home, ".flair", "bin", "flair-federation-sync");
+    const plist = join(home, "Library", "LaunchAgents", "dev.flair.federation.sync.plist");
+    enableScheduler({
+      intervalSeconds: 600,
+      flairBin: old.cli,
+      nodeBin: old.node,
+      platformOverride: "darwin",
+      shimPathOverride: path,
+      launchdPlistOverride: plist,
+      homeOverride: home,
+      templateRootOverride: templateRoot,
+      skipLoad: true,
+    });
+    const rewrite = (over: Parameters<typeof rewriteFederationSchedulerRuntime>[0] = {}) =>
+      rewriteFederationSchedulerRuntime({
+        platformOverride: "darwin",
+        shimPathOverride: path,
+        launchdPlistOverride: plist,
+        nodeBin: cur.node,
+        flairBin: cur.cli,
+        templateRootOverride: templateRoot,
+        ...over,
+      });
+    return { path, rewrite };
+  }
+
+  test("a prerelease CLI (0.57.0-beta.1) is older than a 0.57.0 shim tree: refused as a downgrade", () => {
+    const f = shim("0.57.0");
+    const before = readFileSync(f.path);
+    const r = f.rewrite({ cliVersion: "0.57.0-beta.1" });
+    expect(r.status).toBe("refused");
+    expect(r.detail).toContain("downgrade");
+    expect(readFileSync(f.path).equals(before)).toBe(true);
+  });
+
+  test("an old tree whose version is not semver is refused, never re-pointed", () => {
+    const f = shim("0.57");
+    const r = f.rewrite();
+    expect(r.status).toBe("refused");
+    expect(r.detail).toContain("downgrade cannot be ruled out");
+  });
+
+  test("a shim holding bytes that are not valid UTF-8 is refused and keeps its bytes", () => {
+    const f = shim();
+    const bytes = Buffer.concat([readFileSync(f.path), Buffer.from([0x23, 0x20, 0xff, 0x0a])]);
+    writeFileSync(f.path, bytes);
+    const r = f.rewrite();
+    expect(r.status).toBe("refused");
+    expect(r.detail).toContain("not valid UTF-8");
+    expect(readFileSync(f.path).equals(bytes)).toBe(true);
+  });
+});
+
 describe("6 — a deliberate pin's message offers only a remedy that exists", () => {
   test("init leaves a same-tree plist that pins another node, and reports the pin with its hand edit", async () => {
     const f = macFixture();
@@ -849,5 +1027,170 @@ describe("6 — a deliberate pin's message offers only a remedy that exists", ()
     expect(pin!.message).not.toContain("flair init && flair restart");
     expect(pin!.message).toContain("does not change it");
     expect(pin!.message).toContain(`to ${NEW_NODE} in the unit by hand`);
+  });
+});
+
+// ─── round 4: the five exactness defects ─────────────────────────────────────
+
+describe("round 4 / 1 — a non-empty listener result must be exactly the one reported pid", () => {
+  const probe = (evidence: LocalPidEvidence, respondingPid: number | null): ServingTreeProbe => ({
+    platform: "linux",
+    local: true,
+    queryUrl: "http://127.0.0.1:9926",
+    dataDir: DATA,
+    respondingPid,
+    localPids: () => evidence,
+    findUserUnitsForTree: () => [{ name: "flair.service", path: UNIT }],
+    systemdUserUnit: () => ({ mainPid: 77, fragmentPath: UNIT, dropInPaths: [], workingDirectory: OLD_TREE }),
+    servingPackage: () => ({ dir: OLD_TREE, version: "0.57.0" }),
+    exists: () => true,
+    read: () => unitText(DIRECT),
+  });
+
+  test("two listeners [77, 88] with a reported 77 (and MainPID 77) is UNKNOWN", () => {
+    expect("reason" in identifyAnsweringPid(77, { pidFile: null, listeners: [77, 88] })).toBe(true);
+    expect("reason" in identifyAnsweringPid(77, { pidFile: 77, listeners: [77, 88] })).toBe(true);
+    expect(proveServingTree(probe({ pidFile: 77, listeners: [77, 88] }, 77)).kind).toBe("unknown");
+  });
+
+  test("an EMPTY listener result means nobody is listening: UNKNOWN even with a reported pid", () => {
+    const r = identifyAnsweringPid(77, { pidFile: null, listeners: [] });
+    expect("reason" in r && r.reason).toContain("no process is listening");
+    expect(proveServingTree(probe({ pidFile: null, listeners: [] }, 77)).kind).toBe("unknown");
+  });
+
+  test("an UNREADABLE listener (lsof missing or failing) leaves the reported pid standing — still cross-checked", () => {
+    expect(identifyAnsweringPid(77, { pidFile: null, listeners: null })).toEqual({ pid: 77 });
+    expect(identifyAnsweringPid(77, { pidFile: 77, listeners: null })).toEqual({ pid: 77 });
+    expect("reason" in identifyAnsweringPid(77, { pidFile: 88, listeners: null })).toBe(true);
+    expect("reason" in identifyAnsweringPid(null, { pidFile: 77, listeners: null })).toBe(true);
+    expect(proveServingTree(probe({ pidFile: null, listeners: null }, 77)).kind).toBe("proven");
+  });
+});
+
+describe("round 4 / 2 — the plist is read as XML structure; comments and misplaced keys are refused", () => {
+  const home = `<key>HOME</key><string>${OWNER.home}</string>`;
+  const root = `<key>ROOTPATH</key><string>${OWNER.dataDir}</string>`;
+  const refused = (raw: string, why?: string) => {
+    expect(adoptedPlist()).toContain(home);
+    expect(adoptedPlist()).toContain(root);
+    const plan = planPlistRuntimeRepoint(raw, plistTargets(), plistDeps(), "/p.plist", OWNER);
+    expect(plan.kind).toBe("refuse");
+    if (why && plan.kind === "refuse") expect(plan.detail).toContain(why);
+  };
+
+  test("HOME declared only inside an XML comment is refused", () => {
+    refused(adoptedPlist().replace(home, `<!-- ${home} -->`));
+  });
+
+  test("ROOTPATH declared only inside an XML comment is refused", () => {
+    refused(adoptedPlist().replace(root, `<!-- ${root} -->`));
+  });
+
+  test("any comment is refused, not skipped — even one beside the real keys", () => {
+    refused(adoptedPlist().replace("<key>RunAtLoad</key>", "<!-- operator note -->\n  <key>RunAtLoad</key>"), "comment");
+  });
+
+  test("HOME at the top level instead of in EnvironmentVariables is refused", () => {
+    refused(adoptedPlist().replace(home, "").replace("<key>RunAtLoad</key>", `${home}\n  <key>RunAtLoad</key>`), "EnvironmentVariables");
+  });
+
+  test("ROOTPATH at the top level instead of in EnvironmentVariables is refused", () => {
+    refused(adoptedPlist().replace(root, "").replace("<key>RunAtLoad</key>", `${root}\n  <key>RunAtLoad</key>`), "EnvironmentVariables");
+  });
+
+  test("CDATA, a character reference, a duplicate key elsewhere, or content after </plist> is refused", () => {
+    refused(adoptedPlist().replace("<string>/usr/bin:/bin</string>", "<string><![CDATA[/usr/bin:/bin]]></string>"));
+    refused(adoptedPlist().replace("<string>/usr/bin:/bin</string>", "<string>&#47;usr/bin:/bin</string>"), "reference");
+    refused(adoptedPlist().replace("<key>RunAtLoad</key><true/>", "<key>RunAtLoad</key><true/>\n  <key>RunAtLoad</key><false/>"), "twice");
+    refused(`${adoptedPlist()}\n<plist version="1.0"><dict/></plist>`, "after");
+  });
+
+  test("control: a plain plist with operator-changed values is still re-pointed", () => {
+    const raw = adoptedPlist().replace("<key>RunAtLoad</key><true/>", "<key>RunAtLoad</key><false/>");
+    expect(planPlistRuntimeRepoint(raw, plistTargets(), plistDeps(), "/p.plist", OWNER).kind).toBe("repoint");
+  });
+});
+
+describe("round 4 / 3 — semver ordering, prereleases included; an unparseable version is refused", () => {
+  test("compareVersions is semver ordering and null for anything that is not strict semver", () => {
+    expect(compareVersions("0.57.0-beta.1", "0.57.0")).toBeLessThan(0);
+    expect(compareVersions("0.57.0-beta.2", "0.57.0-beta.10")).toBeLessThan(0);
+    expect(compareVersions("0.58.0", "0.57.9")).toBeGreaterThan(0);
+    expect(compareVersions("0.57.0", "0.57.0")).toBe(0);
+    for (const bad of ["0.57", "latest", "v0.57.0", ""]) expect(compareVersions(bad, "0.57.0")).toBeNull();
+  });
+
+  test("a prerelease CLI is older than a released service: both planners refuse it as a downgrade", () => {
+    const beta = { ...targets, cliVersion: "0.57.0-beta.1" };
+    const unit = planSystemdUnitRuntimeRepoint(unitText(DIRECT), OLD_TREE, beta, repointDeps(), UNIT);
+    expect(unit.kind).toBe("refuse");
+    if (unit.kind === "refuse") expect(unit.detail).toContain("downgrade");
+    const plist = planPlistRuntimeRepoint(adoptedPlist(), { ...plistTargets(), cliVersion: "0.57.0-beta.1" }, plistDeps(), "/p.plist", OWNER);
+    expect(plist.kind).toBe("refuse");
+  });
+
+  test("an old tree or CLI version that is not semver is refused, naming which", () => {
+    const oldBad = planSystemdUnitRuntimeRepoint(unitText(DIRECT), OLD_TREE, targets, repointDeps({ versions: { [OLD_TREE]: "0.57" } }), UNIT);
+    expect(oldBad.kind).toBe("refuse");
+    if (oldBad.kind === "refuse") expect(oldBad.detail).toContain("is not a semver version");
+    const cliBad = planSystemdUnitRuntimeRepoint(unitText(DIRECT), OLD_TREE, { ...targets, cliVersion: "dev" }, repointDeps(), UNIT);
+    expect(cliBad.kind).toBe("refuse");
+    if (cliBad.kind === "refuse") expect(cliBad.detail).toContain("this CLI's own flair version");
+  });
+
+  test("the divergence message treats a prerelease CLI as older than the instance", () => {
+    const serving: ProvenServingTree = {
+      kind: "proven", dir: OLD_TREE, version: "0.57.0", pid: 77, manager: "systemd-user", unitName: "flair.service",
+      unitPath: UNIT, unitNodeBin: OLD_NODE, unitTree: OLD_TREE, dropInPaths: [],
+    };
+    const a = assessTreeDivergence({ cli: { dir: NEW_TREE, version: "0.57.0-beta.1" }, serving, runningVersion: "0.57.0", currentNodeBin: NEW_NODE });
+    expect(a.cliOlder).toBe(true);
+  });
+});
+
+describe("round 4 / 4 — bytes, not decoded text, at the write boundary", () => {
+  function file(bytes: Buffer): { dir: string; path: string } {
+    const dir = tempDir("flair-2034-bytes-");
+    const path = join(dir, "unit.service");
+    writeFileSync(path, bytes, { mode: 0o644 });
+    return { dir, path };
+  }
+
+  test("two different invalid byte sequences (ff, fe) are both refused before anything is planned", () => {
+    for (const b of [0xff, 0xfe]) {
+      const f = file(Buffer.from([0x41, b, 0x42, 0x0a]));
+      expect(() => snapshotRegularFile(f.path)).toThrow(/not valid UTF-8/);
+    }
+    // A genuine U+FFFD (ef bf bd) is valid UTF-8 and is read.
+    expect(snapshotRegularFile(file(Buffer.from("A\uFFFDB\n", "utf-8")).path).content).toBe("A\uFFFDB\n");
+  });
+
+  test("a genuine U+FFFD swapped for an invalid byte between plan and rename is refused (same text, different bytes)", () => {
+    const f = file(Buffer.from("A\uFFFDB\n", "utf-8"));
+    const planned = snapshotRegularFile(f.path);
+    const swapped = Buffer.from([0x41, 0xff, 0x42, 0x0a]);
+    expect(swapped.toString("utf-8")).toBe(planned.content);
+    expect(() =>
+      writeFilesAtomically([{ path: f.path, content: "NEW\n", mode: 0o644, expect: planned }], {
+        fsync: (fd) => {
+          fsyncSync(fd);
+          writeFileSync(f.path, swapped);
+        },
+      }),
+    ).toThrow(/changed since flair read it/);
+    expect(readFileSync(f.path).equals(swapped)).toBe(true);
+  });
+
+  test("init: an adopted plist with an invalid byte in an operator value is not re-pointed and keeps its bytes", async () => {
+    const f = macFixture();
+    const text = readFileSync(f.opts.plistPath, "utf-8");
+    const at = text.indexOf("/usr/bin:/bin");
+    const bytes = Buffer.concat([Buffer.from(text.slice(0, at), "utf-8"), Buffer.from([0xfe]), Buffer.from(text.slice(at), "utf-8")]);
+    writeFileSync(f.opts.plistPath, bytes);
+    const r = await writeInitLaunchdPlist(f.opts);
+    expect(r.kind).toBe("not-repointed");
+    if (r.kind === "not-repointed") expect(r.detail).toContain("not valid UTF-8");
+    expect(readFileSync(f.opts.plistPath).equals(bytes)).toBe(true);
   });
 });

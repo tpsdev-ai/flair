@@ -12,9 +12,11 @@
  *   2. systemd: after the write, the manager is reloaded and asked what it now
  *      holds for the unit (the file it loaded, its drop-ins, its working
  *      directory). When the reload fails or the manager does not hold what was
- *      written, the previous bytes are put back AND the manager is reloaded
- *      again, so the file and the manager agree on the previous unit. When that
- *      recovery itself fails, the result says exactly which state is left.
+ *      written, the previous bytes are put back, the manager is reloaded again
+ *      and ASKED AGAIN: only when it reports the state captured before the write
+ *      does the result say the file and the manager agree. Anything short of
+ *      that query's confirmation — a failed restore, a failed second reload, a
+ *      different answer — is reported with the manager's state as UNVERIFIED.
  *   3. Linux: a unit with drop-ins — any the manager reports, from any
  *      location, or a `<unit>.d` directory beside the file — is refused.
  *
@@ -36,8 +38,12 @@ export interface ApplyRepointOptions {
   atomic?: AtomicWriteHooks;
   /** systemd: reload the manager (`systemctl --user daemon-reload`). Throws on failure. */
   reload?: () => void;
-  /** After a successful reload: why the manager does not hold what was written, or null when it does. */
-  verifyLoaded?: () => string | null;
+  /**
+   * After a reload, ask the manager: why it does not hold the `planned` unit
+   * (after the write) or the `previous` one (after a restore, compared with the
+   * state captured before the write) — or null when it does.
+   */
+  verifyLoaded?: (want: "planned" | "previous") => string | null;
   /** The hand-edit remedy appended to a refusal that leaves the previous unit in place. */
   handEdit?: string;
 }
@@ -73,19 +79,18 @@ export function applyRepointPlan(plan: RepointPlan, planned: FileSnapshot, opts:
   if (!opts.reload) return { kind: "repointed", unitPath, detail: plan.detail };
 
   let failure: string | null = null;
-  let firstReloadRan = false;
   try {
     opts.reload();
-    firstReloadRan = true;
-    failure = opts.verifyLoaded?.() ?? null;
+    failure = opts.verifyLoaded?.("planned") ?? null;
   } catch (err) {
     failure = `the service manager could not reload it (${msg(err)})`;
   }
   if (failure === null) return { kind: "repointed", unitPath, detail: plan.detail };
+  const unverified = "Run: systemctl --user daemon-reload, then check the unit with systemctl --user show.";
 
   // Put the planned-from bytes back — only over the bytes flair itself wrote.
   try {
-    const written = snapshotRegularFile(unitPath, { lstat: opts.atomic?.lstat, read: opts.atomic?.read });
+    const written = snapshotRegularFile(unitPath, { lstat: opts.atomic?.lstat, readBytes: opts.atomic?.readBytes });
     if (written.content !== plan.text) throw new Error(`${unitPath} was changed after flair wrote it`);
     writeFilesAtomically([{ path: unitPath, content: planned.content, mode: planned.mode, expect: written }], opts.atomic);
   } catch (err) {
@@ -94,8 +99,8 @@ export function applyRepointPlan(plan: RepointPlan, planned: FileSnapshot, opts:
       unitPath,
       detail:
         `${unitPath} was re-pointed on disk, but ${failure}, and restoring its previous content failed (${msg(err)}). ` +
-        `The file now holds the RE-POINTED unit; the service manager ${firstReloadRan ? "has loaded it" : "may still hold the previous definition"}. ` +
-        "Check the file by hand, then run: systemctl --user daemon-reload",
+        "The file holds the RE-POINTED unit flair wrote (or, if it was changed after that write, the change); which " +
+        `unit the service manager holds is UNVERIFIED. Check the file by hand. ${unverified}`,
     };
   }
   try {
@@ -106,16 +111,32 @@ export function applyRepointPlan(plan: RepointPlan, planned: FileSnapshot, opts:
       unitPath,
       detail:
         `${unitPath} was not re-pointed: ${failure}. flair restored the file's previous content, but reloading the ` +
-        `service manager again failed (${msg(err)}): the file holds the previous unit, and the manager may still hold ` +
-        "the re-pointed one. Run: systemctl --user daemon-reload",
+        `service manager again failed (${msg(err)}): the file holds the previous unit; which unit the manager holds is ` +
+        `UNVERIFIED. ${unverified}`,
+    };
+  }
+  let back: string | null;
+  try {
+    back = opts.verifyLoaded ? opts.verifyLoaded("previous") : "flair cannot query this service manager";
+  } catch (err) {
+    back = `the service manager could not be queried (${msg(err)})`;
+  }
+  if (back !== null) {
+    return {
+      kind: "refused",
+      unitPath,
+      detail:
+        `${unitPath} was not re-pointed: ${failure}. flair restored the file's previous content and reloaded the ` +
+        `service manager, but the manager does not report the unit it held before (${back}): the file holds the ` +
+        `previous unit; which unit the manager holds is UNVERIFIED. ${unverified}`,
     };
   }
   return {
     kind: "refused",
     unitPath,
     detail:
-      `${unitPath} was not re-pointed: ${failure}. flair restored the file's previous content and reloaded the service ` +
-      `manager, so both hold the previous unit again.${handEdit}`,
+      `${unitPath} was not re-pointed: ${failure}. flair restored the file's previous content, reloaded the service ` +
+      `manager, and the manager reports the unit it held before the write again.${handEdit}`,
   };
 }
 
@@ -166,7 +187,7 @@ export function repointSystemdUserUnit(
   }
   let planned: FileSnapshot;
   try {
-    planned = snapshotRegularFile(unitPath, { lstat: deps.atomic?.lstat, read: deps.atomic?.read });
+    planned = snapshotRegularFile(unitPath, { lstat: deps.atomic?.lstat, readBytes: deps.atomic?.readBytes });
   } catch (err) {
     return {
       kind: "refused",
@@ -175,14 +196,46 @@ export function repointSystemdUserUnit(
     };
   }
   const plan = planSystemdUnitRuntimeRepoint(planned.content, serving.unitTree ?? serving.dir, targets, deps.repoint, unitPath);
+  // Capture what the manager holds BEFORE writing: a restore is confirmed
+  // against it. When it cannot be read, a failed reload could never be
+  // verified, so nothing is written.
+  let before: SystemdUnitManagerState | null = null;
+  if (plan.kind === "repoint" && !opts.dryRun) {
+    before = deps.unitState(serving.unitName);
+    if (!before || before.fragmentPath === null || !deps.repoint.samePath(before.fragmentPath, unitPath) || before.dropInPaths.length > 0) {
+      return {
+        kind: "refused",
+        unitPath,
+        detail:
+          `${unitPath} is not re-pointed: systemd ${before ? `reports ${serving.unitName} from ${before.fragmentPath ?? "no file"} with drop-ins [${before.dropInPaths.join(", ")}]` : `did not report ${serving.unitName}`}, ` +
+          `so the state to restore to cannot be captured. To move it, ${handEdit}`,
+      };
+    }
+  }
+  const same = (a: string | null, b: string | null): boolean => (a === null || b === null ? a === b : deps.repoint.samePath(a, b));
   return applyRepointPlan(plan, planned, {
     dryRun: opts.dryRun,
     atomic: deps.atomic,
     reload: deps.reload,
     handEdit: `To move it, ${handEdit}`,
-    verifyLoaded: () => {
+    verifyLoaded: (want) => {
       const st = deps.unitState(serving.unitName);
       if (!st) return `systemd did not report ${serving.unitName} after the reload`;
+      if (want === "previous") {
+        const was = before!;
+        if (
+          !same(st.fragmentPath, was.fragmentPath) ||
+          st.dropInPaths.join("\n") !== was.dropInPaths.join("\n") ||
+          !same(st.workingDirectory, was.workingDirectory)
+        ) {
+          return (
+            `systemd reports ${serving.unitName} from ${st.fragmentPath ?? "no file"}, drop-ins [${st.dropInPaths.join(", ")}], ` +
+            `WorkingDirectory ${st.workingDirectory ?? "(none)"}; before the write it was ${was.fragmentPath}, drop-ins [], ` +
+            `WorkingDirectory ${was.workingDirectory ?? "(none)"}`
+          );
+        }
+        return null;
+      }
       if (st.fragmentPath === null || !deps.repoint.samePath(st.fragmentPath, unitPath)) {
         return `after the reload systemd loads ${serving.unitName} from ${st.fragmentPath ?? "no file"}, not ${unitPath}`;
       }

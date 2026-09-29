@@ -27,6 +27,15 @@
  * one syscall apart, and a second flair writer planning from the same bytes
  * computes the same content.
  *
+ * BYTES, NOT DECODED TEXT (round 4). A snapshot is taken only of a file whose
+ * bytes survive a UTF-8 decode and re-encode unchanged; any other file is
+ * refused before anything is planned from it (two different invalid byte
+ * sequences decode to the same U+FFFD, so a rewrite would change bytes flair
+ * does not own). The re-check compares the file's BYTES with the encoding of
+ * the planned content, which is exact for such a file, and the new content is
+ * written as its UTF-8 encoding, so every byte outside the replaced values is
+ * the byte that was read.
+ *
  * The filesystem primitives are injectable so a test can fail any step (a
  * write, an fsync, the Nth rename) and prove the recovery, without a real
  * failing disk.
@@ -49,6 +58,7 @@ import { basename, dirname, join } from "node:path";
 
 /** The identity and bytes a caller planned from (see snapshotRegularFile). */
 export interface PlannedFrom {
+  /** The file's bytes, decoded — losslessly: they re-encode to exactly the bytes read. */
   content: string;
   dev: number;
   ino: number;
@@ -95,6 +105,8 @@ export interface AtomicWriteHooks {
   unlink?: (path: string) => void;
   exists?: (path: string) => boolean;
   read?: (path: string) => string;
+  /** The file's raw bytes (snapshots and the pre-rename re-check compare bytes). */
+  readBytes?: (path: string) => Buffer;
   modeOf?: (path: string) => number;
   lstat?: (path: string) => LstatResult;
 }
@@ -109,6 +121,7 @@ interface Resolved {
   unlink: (path: string) => void;
   exists: (path: string) => boolean;
   read: (path: string) => string;
+  readBytes: (path: string) => Buffer;
   modeOf: (path: string) => number;
   lstat: (path: string) => LstatResult;
 }
@@ -128,6 +141,7 @@ function resolveHooks(h: AtomicWriteHooks): Resolved {
     unlink: h.unlink ?? ((p) => unlinkSync(p)),
     exists: h.exists ?? ((p) => existsSync(p)),
     read: h.read ?? ((p) => readFileSync(p, "utf-8")),
+    readBytes: h.readBytes ?? ((p) => readFileSync(p)),
     modeOf: h.modeOf ?? ((p) => statSync(p).mode & 0o7777),
     lstat: h.lstat ?? ((p) => lstatSync(p)),
   };
@@ -142,19 +156,24 @@ function notRegular(path: string, st: LstatResult): string | null {
 
 /**
  * Read `path` for planning: it must be a regular file (lstat — a symlink is
- * refused, never followed), and it must be the same file before and after the
- * read. Throws an Error naming the path and what did not hold.
+ * refused, never followed), it must be the same file before and after the
+ * read, and its bytes must be valid UTF-8 that re-encodes to exactly those
+ * bytes. Throws an Error naming the path and what did not hold.
  */
 export function snapshotRegularFile(
   path: string,
-  hooks: Pick<AtomicWriteHooks, "lstat" | "read"> = {},
+  hooks: Pick<AtomicWriteHooks, "lstat" | "readBytes"> = {},
 ): FileSnapshot {
   const lstat = hooks.lstat ?? ((p: string) => lstatSync(p));
-  const read = hooks.read ?? ((p: string) => readFileSync(p, "utf-8"));
+  const readBytes = hooks.readBytes ?? ((p: string) => readFileSync(p));
   const before = lstat(path);
   const bad = notRegular(path, before);
   if (bad) throw new Error(bad);
-  const content = read(path);
+  const bytes = readBytes(path);
+  const content = bytes.toString("utf-8");
+  if (!Buffer.from(content, "utf-8").equals(bytes)) {
+    throw new Error(`${path} is not valid UTF-8, so flair cannot rewrite it without changing bytes it does not own`);
+  }
   const after = lstat(path);
   if (notRegular(path, after) || after.dev !== before.dev || after.ino !== before.ino) {
     throw new Error(`${path} was replaced while it was being read`);
@@ -173,13 +192,13 @@ function plannedFileProblem(fs: Resolved, path: string, expect: PlannedFrom): st
   const bad = notRegular(path, st);
   if (bad) return bad;
   if (st.dev !== expect.dev || st.ino !== expect.ino) return `${path} was replaced by another file since flair read it`;
-  let now: string;
+  let now: Buffer;
   try {
-    now = fs.read(path);
+    now = fs.readBytes(path);
   } catch (err) {
     return `${path} could not be read again before replacing it (${(err as Error)?.message ?? err})`;
   }
-  if (now !== expect.content) return `${path} was changed since flair read it`;
+  if (!now.equals(Buffer.from(expect.content, "utf-8"))) return `${path} was changed since flair read it`;
   return null;
 }
 
@@ -233,7 +252,9 @@ export function writeFilesAtomically(entries: AtomicWriteEntry[], hooks: AtomicW
   }
   const originals = entries.map((e) => {
     if (!fs.exists(e.path)) return { path: e.path, existed: false as const };
-    return { path: e.path, existed: true as const, content: fs.read(e.path), mode: fs.modeOf(e.path) };
+    // A planned-from target is restored from the bytes it was re-checked to hold.
+    const content = e.expect ? e.expect.content : fs.read(e.path);
+    return { path: e.path, existed: true as const, content, mode: fs.modeOf(e.path) };
   });
 
   // 2. Stage every new file. Nothing visible has changed yet.

@@ -1099,7 +1099,7 @@ export function rewriteFederationSchedulerRuntime(
   // the pre-rename re-check both use these bytes.
   let planned: FileSnapshot;
   try {
-    planned = snapshotRegularFile(shimPath, { lstat: opts.atomic?.lstat, read });
+    planned = snapshotRegularFile(shimPath, { lstat: opts.atomic?.lstat, readBytes: opts.atomic?.readBytes });
   } catch (err: any) {
     return refused(`could not read ${shimPath} as a regular file (${err?.message ?? err}).`);
   }
@@ -1166,7 +1166,17 @@ export function rewriteFederationSchedulerRuntime(
           "flair treats it as separately managed and does not re-point it.",
       };
     }
-    if (oldPkg?.version && cliVersion && compareVersions(cliVersion, oldPkg.version) < 0) {
+    // Semver ordering (prereleases included). While the old tree is still
+    // installed, a version that cannot be read or is not strict semver cannot
+    // rule a downgrade out, so it is refused.
+    const order = oldPkg && oldPkg.version && cliVersion ? compareVersions(cliVersion, oldPkg.version) : null;
+    if (oldPkg && order === null) {
+      return refused(
+        `${shimPath} runs flair from ${oldPkg.dir}; its version (${JSON.stringify(oldPkg.version)}) or this CLI's ` +
+          `(${JSON.stringify(cliVersion)}) is not a readable semver version, so a downgrade cannot be ruled out.`,
+      );
+    }
+    if (oldPkg && order !== null && order < 0) {
       return refused(
         `${shimPath} runs flair ${oldPkg.version} from ${oldPkg.dir}; this CLI's tree has the older ${cliVersion}, so ` +
           "re-pointing would downgrade it. Update this CLI's tree first (npm i -g @tpsdev-ai/flair).",

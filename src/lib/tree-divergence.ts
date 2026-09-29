@@ -19,12 +19,13 @@
  *     its MainPID, and systemd reports that very file as the unit's
  *     FragmentPath (the file it loaded, not another file of the same name).
  *
- * The serving PID is the process that ANSWERED: the PID it reported about
- * itself (`/HealthDetail`'s `pid`) when available, else the one process
- * listening on the instance's port. Harper's `hdb.pid` is never the answer on
- * its own — it is a cross-check: when a live `hdb.pid`, the listener and the
- * reported PID do not all agree, the answer is UNKNOWN (a stale or reused PID
- * file, a second instance on the port), never a guess. The tree is read from
+ * The serving PID is the process that ANSWERED (see identifyAnsweringPid): the
+ * one process listening on the instance's port, which must also be the PID the
+ * answering process reported about itself (`/HealthDetail`'s `pid`) when there
+ * is one. Harper's `hdb.pid` is never the answer on its own — it is a
+ * cross-check. Any disagreement, more than one listener, or nobody listening is
+ * UNKNOWN (a stale or reused PID file, a second instance on the port), never a
+ * guess. The tree is read from
  * that process (its working directory / command line), never from the unit.
  *
  * Without that proof — a remote target, a directly started server, a
@@ -36,6 +37,7 @@
  * launchd, systemd or running instance.
  */
 import { resolve } from "node:path";
+import semver from "semver";
 import { classifyServiceNodePin, readPlistProgramRefs, type NodePinDeps, type ServiceNodePin } from "./launchd-management.js";
 import { unescapeXml } from "./xml-escape.js";
 
@@ -124,11 +126,19 @@ function unknown(reason: string): UnknownServingTree {
 /**
  * The process that answered for this instance — or why it cannot be named.
  *
- * `respondingPid` (what the answering process said about itself) is taken
- * only when no local evidence contradicts it; without it, the ONE process
- * listening on the port is the answer. A live PID-file PID that is not that
- * process — a stale file whose PID was reused, a second instance — makes the
- * answer unknown: a conflict is never resolved by picking a side.
+ * The listener result decides first, and the reported PID (what the answering
+ * process said about itself) must agree with it:
+ *
+ *   - exactly one listening PID: the answer — and a reported PID must equal it;
+ *   - more than one listening PID, or NONE (an empty result means nobody is
+ *     listening, never "could not read"): unknown, whatever was reported;
+ *   - the listeners could not be read at all (lsof missing or failing): the
+ *     reported PID stands on its own — it is the answering process's own
+ *     report — and without one the answer is unknown.
+ *
+ * A live PID-file PID that is not the answer — a stale file whose PID was
+ * reused, a second instance — makes it unknown too: a conflict is never
+ * resolved by picking a side.
  */
 export function identifyAnsweringPid(
   respondingPid: number | null | undefined,
@@ -136,37 +146,31 @@ export function identifyAnsweringPid(
 ): { pid: number } | { reason: string } {
   const listeners = evidence.listeners === null ? null : [...new Set(evidence.listeners)];
   const pidFile = evidence.pidFile;
-  if (typeof respondingPid === "number" && Number.isInteger(respondingPid) && respondingPid > 0) {
-    if (listeners !== null && listeners.length > 0 && !listeners.includes(respondingPid)) {
-      return {
-        reason:
-          `the process that answered (pid ${respondingPid}) is not the one listening on the instance's port ` +
-          `(pid ${listeners.join(", ")})`,
-      };
-    }
-    if (pidFile !== null && pidFile !== respondingPid) {
-      return {
-        reason:
-          `the process that answered (pid ${respondingPid}) is not the one this data directory's PID file names ` +
-          `(pid ${pidFile})`,
-      };
-    }
-    return { pid: respondingPid };
-  }
-  if (listeners === null) return { reason: "the process listening on the instance's port could not be read" };
-  if (listeners.length === 0) return { reason: "no process is listening on the instance's port" };
-  if (listeners.length > 1) {
+  const reported =
+    typeof respondingPid === "number" && Number.isInteger(respondingPid) && respondingPid > 0 ? respondingPid : null;
+  if (listeners !== null && listeners.length === 0) return { reason: "no process is listening on the instance's port" };
+  if (listeners !== null && listeners.length > 1) {
     return { reason: `more than one process listens on the instance's port (pids ${listeners.join(", ")})` };
   }
-  const listener = listeners[0]!;
-  if (pidFile !== null && pidFile !== listener) {
+  const listener = listeners === null ? null : listeners[0]!;
+  if (reported !== null && listener !== null && reported !== listener) {
     return {
       reason:
-        `the process listening on the instance's port (pid ${listener}) is not the one this data directory's PID ` +
-        `file names (pid ${pidFile}), so which one serves this data directory is not proven`,
+        `the process that answered (pid ${reported}) is not the one listening on the instance's port (pid ${listener})`,
     };
   }
-  return { pid: listener };
+  const pid = listener ?? reported;
+  if (pid === null) {
+    return { reason: "the process listening on the instance's port could not be read, and the instance reported no pid" };
+  }
+  if (pidFile !== null && pidFile !== pid) {
+    return {
+      reason:
+        `the process ${listener !== null ? "listening on the instance's port" : "that answered"} (pid ${pid}) is not ` +
+        `the one this data directory's PID file names (pid ${pidFile}), so which one serves this data directory is not proven`,
+    };
+  }
+  return { pid };
 }
 
 /** Parse `systemctl show -p A -p B …` output (`Key=value` lines) into a map. */
@@ -365,16 +369,19 @@ export function isNpmGlobalFlairTree(dir: string): boolean {
   return /[/\\]lib[/\\]node_modules[/\\]@tpsdev-ai[/\\]flair[/\\]?$/.test(dir);
 }
 
-/** Compare dotted versions numerically; <0, 0, >0 (missing parts are 0; a pre-release tag is ignored). */
-export function compareVersions(a: string, b: string): number {
-  const parts = (v: string) => v.replace(/^v/, "").split("-")[0]!.split(".").map((n) => Number.parseInt(n, 10) || 0);
-  const pa = parts(a);
-  const pb = parts(b);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
-    if (d !== 0) return d < 0 ? -1 : 1;
-  }
-  return 0;
+/** True for a strict semver version exactly as written (no leading "v", no spaces, no build metadata). */
+export function isExactSemver(v: string | null): v is string {
+  return typeof v === "string" && semver.valid(v) === v;
+}
+
+/**
+ * Semver ordering (prereleases included: 0.57.0-beta.1 < 0.57.0): <0, 0, >0 —
+ * or null when either side is not an exact semver version. Callers that guard
+ * a downgrade treat null as "cannot rule it out" and refuse.
+ */
+export function compareVersions(a: string, b: string): number | null {
+  if (!isExactSemver(a) || !isExactSemver(b)) return null;
+  return semver.compare(a, b);
 }
 
 /**
@@ -459,7 +466,7 @@ export function withRunningVersion(a: TreeAssessment, runningVersion: string | n
       a.state === "diverged" &&
       a.cli.version !== null &&
       servingCodeVersion !== null &&
-      compareVersions(a.cli.version, servingCodeVersion) < 0,
+      (compareVersions(a.cli.version, servingCodeVersion) ?? 0) < 0,
   };
 }
 
@@ -487,7 +494,7 @@ function v(version: string | null): string {
 function relation(version: string | null, latest: string): string {
   if (!version) return "unknown";
   const c = compareVersions(version, latest);
-  return c === 0 ? "current" : c < 0 ? "behind" : "ahead";
+  return c === null ? "unknown" : c === 0 ? "current" : c < 0 ? "behind" : "ahead";
 }
 
 export interface TreeLinesOptions {

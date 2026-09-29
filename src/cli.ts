@@ -6040,7 +6040,7 @@ export async function writeInitLaunchdPlist(
         // those same bytes.
         let planned: FileSnapshot;
         try {
-          planned = snapshotRegularFile(opts.plistPath, { lstat: deps.atomic?.lstat, read: deps.atomic?.read });
+          planned = snapshotRegularFile(opts.plistPath, { lstat: deps.atomic?.lstat, readBytes: deps.atomic?.readBytes });
         } catch (err: any) {
           return {
             kind: "not-repointed",
