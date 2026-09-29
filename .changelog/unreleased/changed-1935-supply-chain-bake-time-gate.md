@@ -11,8 +11,8 @@
   imports relative to itself. An unexpected error, such as a missing
   `packages/` directory, now exits `2` (the registry-failure code); in the
   last release it was an uncaught exception that exited `1`, the too-fresh
-  code. `FLAIR_CHECK_DEP_AGES_ROOT` overrides the repository root the gate
-  scans. Unit tests now run the gate against a fixture repository and a local
+  code. Outside `--ci` runs, `FLAIR_CHECK_DEP_AGES_ROOT` overrides the scanned
+  repository root; CI refuses the variable. Unit tests now run the gate against a fixture repository and a local
   registry, and assert both fail-closed exits: `1` with the too-fresh
   diagnostic under a 7-day policy, and `2` when the registry is unreachable.
 

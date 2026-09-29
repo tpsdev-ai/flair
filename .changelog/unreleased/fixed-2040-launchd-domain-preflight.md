@@ -33,8 +33,9 @@
   started.
 
   `flair init` retires a legacy `ai.tpsdev.flair` job only behind the same
-  checks. It boots the job out only when it is proven not to serve the
-  instance, and removes the job's plist only once the job is shown gone. If it
+  checks. Init retires a non-serving legacy job directly and replaces a serving
+  legacy job through the guarded handoff; it removes the legacy plist only after
+  confirming the job is unloaded. If it
   cannot be shown gone, init keeps that plist, puts back the plist it had just
   written, reports the uncertainty and exits non-zero. When the job does serve
   the instance, init tries the guarded replacement and a restore. When that
