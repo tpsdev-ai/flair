@@ -5,6 +5,7 @@ import { isAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME } from "./agent-a
 import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { isForbiddenOwnerMutation, resolveGuardedRecord } from "./record-owner-guard.js";
 import { checkHttpRateLimit } from "./rate-limit.js";
+import { multiWorkerCondition, multiWorkerRefusalResponse } from "./multi-worker-guard.js";
 import { stripUndeclaredMemoryAttributes, DECLARED_MEMORY_ATTRIBUTES } from "./memory-declared-attributes.js";
 
 // --- Non-admin Memory read: ignore the caller's selection --------------------
@@ -198,6 +199,15 @@ server.http(async (request: any, nextLayer: any) => {
   }
 
   const url = new URL(request.url, "http://" + (request.headers.get("host") || "localhost"));
+
+  // ── Multi-worker refusal, before the rate limiter and before any auth ──────
+  // flair#2059: with more than one Harper worker the per-worker replay guards
+  // no longer bound replay, so the instance does not serve. Every requested
+  // path except /Health gets one named 503 here — before the rate limiter,
+  // before any credential is read, and before any table is touched. /Health
+  // steps through and renders the same refusal itself (resources/health.ts).
+  const multiWorkerRefusal = multiWorkerRefusalResponse(multiWorkerCondition(), url.pathname);
+  if (multiWorkerRefusal) return multiWorkerRefusal;
 
   // ── Rate limiting, right after the method check ────────────────────────────
   // Before the public-path passthrough below (the OAuth endpoints all sit on it,

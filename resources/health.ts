@@ -4,6 +4,7 @@ import { homedir, platform } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
+import { multiWorkerCondition, multiWorkerHealthField } from "./multi-worker-guard.js";
 import { resolveBuildInfo } from "./build-info.js";
 import { getMigrationStatusSnapshot } from "./migrations/status.js";
 import { resolveMigrationDataDirForRead } from "./migrations/data-dir.js";
@@ -121,9 +122,21 @@ export class Health extends Resource {
       version: build?.version ?? resolveVersion(),
       buildCommit: build?.commit ?? null,
     }));
-    if (readiness.status !== 200) {
+    // flair#2059: on more than one Harper worker the instance refuses to serve.
+    // /Health stays reachable and reports the refusal (or the explicit opt-in)
+    // as the reason, with `ok` false and HTTP 503, so a traffic gate reads the
+    // refused state rather than a green light. On one worker the field is
+    // omitted and this endpoint is byte-identical to before the guard.
+    const multiWorker = multiWorkerHealthField(multiWorkerCondition());
+    let status = readiness.status;
+    if (multiWorker) {
+      body.ok = false;
+      body.multiWorker = multiWorker;
+      status = 503;
+    }
+    if (status !== 200) {
       return new Response(JSON.stringify(body), {
-        status: readiness.status,
+        status,
         headers: { "content-type": "application/json" },
       });
     }

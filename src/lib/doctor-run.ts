@@ -77,6 +77,8 @@ export interface DoctorRunContext {
   detectedClientIds: readonly string[];
   /** Observed launchd state. Omit to skip the check as N/A. */
   launchd?: LaunchdManagement;
+  /** Observed worker-thread state. Omit to skip the check as N/A. */
+  workerThreads?: WorkerThreadsObservation;
   keysDir?: string;
   keyAgentIds?: string[];
   agentFlag?: string;
@@ -108,6 +110,7 @@ export const DOCTOR_CHECK_IDS = [
   "verified-read",
   "keys-prune",
   "launchd-management",
+  "worker-threads",
 ] as const;
 
 export type DoctorCheckId = (typeof DOCTOR_CHECK_IDS)[number];
@@ -421,6 +424,58 @@ function runKeysPrune(ctx: DoctorRunContext): DoctorCheckResult {
   });
 }
 
+/**
+ * What doctor observed about the instance's worker threads, derived from the
+ * public /Health `multiWorker` field. `serving` covers a single worker (the
+ * field is omitted) and any instance that is not in the refusal; `refused`
+ * names the refusal or the explicit opt-in with the observed worker count.
+ */
+export type WorkerThreadsObservation =
+  | { kind: "serving" }
+  | { kind: "refused"; state: "refused" | "unsafe-opt-in"; workerCount: number };
+
+/**
+ * Read the doctor observation from a /Health `multiWorker` value. The field is
+ * present exactly when the instance is refusing (or serving under the opt-in);
+ * an absent or unrecognized value is therefore a serving instance, which is what
+ * a one-worker instance reports. Only a value that NAMES the refusal is treated
+ * as one — an unknown shape is never promoted to "refused".
+ */
+export function readWorkerThreadsObservation(raw: unknown): WorkerThreadsObservation {
+  if (raw && typeof raw === "object") {
+    const rec = raw as { state?: unknown; workerCount?: unknown };
+    const state = rec.state;
+    const workerCount = rec.workerCount;
+    if (
+      (state === "refused" || state === "unsafe-opt-in") &&
+      typeof workerCount === "number" && Number.isFinite(workerCount)
+    ) {
+      return { kind: "refused", state, workerCount };
+    }
+  }
+  return { kind: "serving" };
+}
+
+function runWorkerThreads(ctx: DoctorRunContext): DoctorCheckResult {
+  const id = "worker-threads";
+  const label = "worker threads";
+  const observed = ctx.workerThreads;
+  if (!observed) {
+    return result(id, label, "skip", { detail: "instance not observed" });
+  }
+  if (observed.kind === "serving") {
+    return result(id, label, "pass", { detail: "the instance reports no multi-worker refusal" });
+  }
+  const detail =
+    observed.state === "refused"
+      ? `the instance runs ${observed.workerCount} Harper worker threads and refuses to serve; multi-worker is unsupported until the multi-worker readiness work lands`
+      : `the instance runs ${observed.workerCount} Harper worker threads under the FLAIR_MULTI_WORKER_UNSAFE=1 opt-in, so its replay guards are per worker`;
+  return result(id, label, "fail", {
+    detail,
+    remedy: "Set THREADS_COUNT=1 and restart flair",
+  });
+}
+
 function runLaunchdManagement(ctx: DoctorRunContext): DoctorCheckResult {
   const id = "launchd-management";
   const label = "launchd management";
@@ -474,6 +529,7 @@ export const DOCTOR_CHECKS: readonly DoctorCheckDef[] = [
   { id: "verified-read", label: "per-agent verified-read", run: runVerifiedRead },
   { id: "keys-prune", label: "keys prune classification", run: runKeysPrune },
   { id: "launchd-management", label: "launchd management", run: runLaunchdManagement },
+  { id: "worker-threads", label: "worker threads", run: runWorkerThreads },
 ];
 
 export interface DoctorRun {

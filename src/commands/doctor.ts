@@ -17,7 +17,7 @@ import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, resolveAdminUse
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
 import { plistCarriesInlineAdminPassword } from "../lib/launchd-management.js";
-import { DOCTOR_CHECK_IDS, catalogIssueDelta, mcpRepinIcon, renderCatalogDoctorLines, runDoctorChecks } from "../lib/doctor-run.js";
+import { DOCTOR_CHECK_IDS, catalogIssueDelta, mcpRepinIcon, readWorkerThreadsObservation, renderCatalogDoctorLines, runDoctorChecks, type WorkerThreadsObservation } from "../lib/doctor-run.js";
 import { describeEmbedGpuDoctorFinding } from "../lib/embed-gpu-doctor.js";
 import { adminPassDesyncFinding, detectPersistedAdminUser } from "../lib/init-admin-pass.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
@@ -467,13 +467,27 @@ program
     // picture here instead of a one-liner and `--fix` offers the restart.
     let runningVersion: string | null = null;
     let embedGpuFromHealth: unknown;
+    let workerThreads: WorkerThreadsObservation | undefined;
     if (harperResponding) {
       try {
         const healthRes = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(3000) });
-        if (healthRes.ok) {
-          const body = (await healthRes.json()) as { version?: unknown; embedding?: unknown };
-          runningVersion = typeof body?.version === "string" ? body.version : null;
-          embedGpuFromHealth = body.embedding;
+        // flair#2059: the refused multi-worker state is reported by /Health as a
+        // 503 WITH a body, so the body is read whether or not the status is OK.
+        // A body that NAMES the refusal becomes the worker-threads observation;
+        // an absent field is a serving instance (a one-worker /Health omits it).
+        let healthBody: { version?: unknown; embedding?: unknown; multiWorker?: unknown } | null = null;
+        try {
+          healthBody = (await healthRes.json()) as { version?: unknown; embedding?: unknown; multiWorker?: unknown };
+        } catch {
+          // A non-JSON /Health body is not an observation: the worker-threads
+          // check stays unobserved and reports skip, never a pass.
+        }
+        if (healthBody) {
+          if (healthRes.ok) {
+            runningVersion = typeof healthBody.version === "string" ? healthBody.version : null;
+            embedGpuFromHealth = healthBody.embedding;
+          }
+          workerThreads = readWorkerThreadsObservation(healthBody.multiWorker);
         }
       } catch { /* leave runningVersion null — reported below as "unknown" */ }
 
@@ -929,6 +943,7 @@ program
       keysDir,
       keyAgentIds,
       agentFlag: typeof opts.agent === "string" ? opts.agent : undefined,
+      workerThreads,
     };
     const catalogBefore = runDoctorChecks(doctorCtx, { catalogIds: doctorCatalogIds });
     // flair#1834 PR-H: a hook file on disk IS the wiring — the same rule the
