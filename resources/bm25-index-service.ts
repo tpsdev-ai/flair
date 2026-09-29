@@ -25,13 +25,18 @@
 // Maps plus the whole projected corpus INCLUDING content, transiently, on
 // every single query.
 //
-// ── COLD BOOT: LAZY ─────────────────────────────────────────────────────────
-// Built on the first hybrid query that carries query text, not at component
-// start. Eager building would add a full corpus scan to every boot including
-// the many processes that never search (CLI verbs, migration boots, health
-// checks), and it would race the embedding engine's own model load. The first
-// query after boot pays what every query used to pay; every one after it pays
-// nothing. Concurrent first queries share a single build promise.
+// ── BOOT WARM ───────────────────────────────────────────────────────────────
+// After the embeddings backend registration settles, embeddings-boot.ts calls
+// scheduleBm25BootWarm(). That schedules ensureReady on a later turn, at low
+// priority (setImmediate, then a yield every few dozen documents). Module
+// load, boot, and the first non-search request do not wait on the scan.
+// A text query that arrives while the build is in flight awaits the SAME
+// buildPromise — it does not fall back to the per-query corpus scan.
+//
+// The warm is not started from this module's top level. Importing the service
+// (unit tests, CLI helpers) must not scan. Processes that never load
+// embeddings-boot still build on the first text search, which is what the
+// `empty` status line says.
 //
 // ── STAYING CURRENT ─────────────────────────────────────────────────────────
 // Two mechanisms, deliberately overlapping:
@@ -67,14 +72,20 @@
 // Both of flair's shipped launch paths pin `THREADS_COUNT=1` (src/cli.ts's
 // launchd plist and its direct-spawn env), as does the integration harness, so
 // the shipped configuration has exactly one worker and "per worker" is "per
-// process". Cross-worker write visibility rides on mechanism (1): the feed is
-// audit-log-backed and the audit store is shared, so a write committed by
+// process". Status is still per worker: bm25IndexStatus() names the worker
+// thread when THREADS_COUNT is greater than 1, and never claims to aggregate
+// the other workers' indexes. Cross-worker write visibility rides on
+// mechanism (1): the feed is audit-log-backed and the audit store is shared,
+// so a write committed by
 // another worker still arrives. Mechanism (2) is local to the writing worker,
 // which is why it is an immediacy optimisation and never the correctness
 // argument.
+import { threadId } from "node:worker_threads";
 import { databases } from "harper";
 import { withDetachedTxn } from "./table-helpers.js";
 import { Bm25Index, INDEX_SELECT, type IndexRecord, type RankParams } from "./bm25-index.js";
+import { BM25_BOOT_WARM_SKIPPED_PREFIX, formatBm25IndexSummary, readThreadsCount, type Bm25IndexState } from "./bm25-status.js";
+import { retrievalMode } from "./bm25.js";
 
 /** Kill switch. Default ON; set FLAIR_BM25_INDEX=false/0/off to force every
  *  query back onto the legacy per-query corpus scan + buildBM25(). Read
@@ -82,6 +93,22 @@ import { Bm25Index, INDEX_SELECT, type IndexRecord, type RankParams } from "./bm
 export function bm25IndexEnabled(): boolean {
   const v = (process.env.FLAIR_BM25_INDEX ?? "true").toLowerCase();
   return v === "true" || v === "1" || v === "on";
+}
+
+/**
+ * The index is read only by the "hybrid" and "bm25-only" retrieval modes
+ * (semantic-retrieval-core.ts). A "vector-only" process has no lexical leg,
+ * so the boot warm does not build an index nothing reads, and status says
+ * so instead of claiming a text search will build it. An unrecognized
+ * FLAIR_RETRIEVAL_MODE throws on every query anyway; treat it as in the
+ * path so this check never hides that error.
+ */
+export function bm25IndexInRetrievalPath(): boolean {
+  try {
+    return retrievalMode() !== "vector-only";
+  } catch {
+    return true;
+  }
 }
 
 type PendingEvent = { kind: "upsert"; record: IndexRecord } | { kind: "delete"; id: string };
@@ -92,20 +119,91 @@ let buildPromise: Promise<boolean> | null = null;
 let pending: PendingEvent[] | null = null;
 let feedStarted = false;
 let disabledReason = "";
+let builtCount = 0;
+let totalCount = 0;
+let startedAt: number | null = null;
+let finishedAt: number | null = null;
+let buildDurationMs: number | null = null;
+/** Invalidates an in-flight build when a stale marker or a test reset lands. */
+let buildSerial = 0;
+/** Test seam: awaited once the first document of a multi-doc build is in. */
+let buildPause: (() => Promise<void>) | null = null;
+let warmScheduled = false;
+let warmSerial = 0;
+
+const YIELD_EVERY = 32;
+
+export type Bm25IndexStatus = {
+  state: Bm25IndexState;
+  size: number;
+  postings: number;
+  terms: number;
+  reason: string;
+  built: number;
+  total: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  buildDurationMs: number | null;
+  /** `node:worker_threads` id of the worker answering this call. */
+  workerThreadId: number;
+  /** THREADS_COUNT as seen by this process, or null when it is not a count. */
+  threadsCount: number | null;
+  /** This object describes one worker's index. It is not a cluster aggregate. */
+  scope: "this-worker";
+  summary: string;
+};
 
 /** Test seam — resets everything this module owns. */
 export function __resetBm25IndexForTests(): void {
+  buildSerial++;
+  warmSerial++;
+  warmScheduled = false;
+  buildPause = null;
   index.clear();
   state = "empty";
   buildPromise = null;
   pending = null;
   feedStarted = false;
   disabledReason = "";
+  builtCount = 0;
+  totalCount = 0;
+  startedAt = null;
+  finishedAt = null;
+  buildDurationMs = null;
 }
 
-/** Diagnostics, for tests and `flair doctor`-shaped callers. */
-export function bm25IndexStatus(): { state: string; size: number; postings: number; terms: number; reason: string } {
-  return { state, size: index.size, postings: index.postingCount, terms: index.termCount, reason: disabledReason };
+/** Test seam — hold the build after the first admitted document. */
+export function __setBm25BuildPauseForTests(fn: (() => Promise<void>) | null): void {
+  buildPause = fn;
+}
+
+/** Diagnostics, for tests, /HealthDetail, and `flair status`. */
+export function bm25IndexStatus(): Bm25IndexStatus {
+  const threadsCount = readThreadsCount();
+  const enabled = bm25IndexEnabled();
+  const inPath = bm25IndexInRetrievalPath();
+  const viewState: Bm25IndexState = enabled && inPath ? state : "disabled";
+  const reason = !enabled
+    ? "FLAIR_BM25_INDEX is off"
+    : !inPath
+      ? "retrieval mode is vector-only; the index is not used"
+      : disabledReason;
+  const view = {
+    state: viewState,
+    size: index.size,
+    postings: index.postingCount,
+    terms: index.termCount,
+    reason,
+    built: builtCount,
+    total: totalCount,
+    startedAt,
+    finishedAt,
+    buildDurationMs,
+    workerThreadId: threadId,
+    threadsCount,
+    scope: "this-worker" as const,
+  };
+  return { ...view, summary: formatBm25IndexSummary(view) };
 }
 
 function project(record: any): IndexRecord | null {
@@ -122,7 +220,17 @@ function apply(ev: PendingEvent): void {
 
 function record(ev: PendingEvent): void {
   if (state === "disabled" || state === "empty") return; // a later build will scan it
-  if (state === "building") { pending!.push(ev); return; }
+  if (state === "building") {
+    // A throw here is caught by the feed consumer, which disables the index
+    // for this worker's lifetime. A missing buffer means this build no longer
+    // owns the events; mark stale so the next query rebuilds instead.
+    if (pending == null) {
+      markBm25IndexStale("in-flight build lost its event buffer");
+      return;
+    }
+    pending.push(ev);
+    return;
+  }
   apply(ev);
 }
 
@@ -143,9 +251,21 @@ export function noteMemoryDelete(id: string): void {
  *  cannot express incrementally (a resync/base-copy `reload` marker). */
 export function markBm25IndexStale(reason: string): void {
   if (state === "disabled") return;
+  buildSerial++;
   disabledReason = reason;
   state = "empty";
   buildPromise = null;
+  builtCount = 0;
+  totalCount = 0;
+  startedAt = null;
+  finishedAt = null;
+  buildDurationMs = null;
+}
+
+function stampFinished(): void {
+  if (finishedAt != null) return;
+  finishedAt = Date.now();
+  buildDurationMs = startedAt == null ? null : finishedAt - startedAt;
 }
 
 function disable(reason: string): void {
@@ -154,6 +274,12 @@ function disable(reason: string): void {
   buildPromise = null;
   pending = null;
   index.clear();
+  builtCount = 0;
+  stampFinished();
+}
+
+function yieldBackground(): Promise<void> {
+  return new Promise((resolve) => { setImmediate(resolve); });
 }
 
 async function startFeed(ctx: any): Promise<void> {
@@ -187,38 +313,83 @@ async function startFeed(ctx: any): Promise<void> {
 }
 
 /**
- * Build (or rebuild) the index from one full corpus scan.
+ * Build (or rebuild) the index from the corpus.
  *
- * ORDER IS LOAD-BEARING: the change feed is started BEFORE the scan, and the
- * events it delivers during the scan are buffered and replayed AFTER it. A
- * delete that lands mid-scan for a row the cursor has not reached yet would
- * otherwise be applied first and then undone by the cursor re-adding the row.
- * Replaying after the scan lets the newer event win, whichever order they
- * physically occurred in.
+ * ORDER IS LOAD-BEARING: the change feed is started BEFORE either pass, and
+ * the events it delivers during the passes are buffered and replayed AFTER
+ * the admitting pass. A delete that lands mid-scan for a row the cursor has
+ * not reached yet would otherwise be applied first and then undone by the
+ * cursor re-adding the row. Replaying after the admitting pass lets the
+ * newer event win, whichever order they physically occurred in.
+ *
+ * Pass 1 counts ids so status can report built/total. Pass 2 admits the
+ * projected rows and yields every few dozen documents so a request already
+ * on the event loop is not stuck behind the tokenize.
  */
 async function build(ctx: any): Promise<boolean> {
+  const serial = ++buildSerial;
+  const live = () => state === "building" && serial === buildSerial;
   state = "building";
   pending = [];
   index.clear();
+  builtCount = 0;
+  totalCount = 0;
+  startedAt = Date.now();
+  finishedAt = null;
+  buildDurationMs = null;
   try {
     await startFeed(ctx);
+    if (!live()) return false;
+    // Count first so status can report built/total while the bodies are
+    // admitted. Buffering every projected row would hold the corpus in JS
+    // for the length of the tokenize; a second id-only pass does not.
+    const idScan = withDetachedTxn(ctx, () =>
+      (databases as any).flair.Memory.search({ select: ["id"] }),
+    );
+    let total = 0;
+    for await (const row of idScan as any) {
+      if (!live()) return false;
+      if (row && typeof row.id === "string") total++;
+    }
+    if (!live()) return false;
+    totalCount = total;
+    // Let a status read observe 0/total before tokenize starts, and let
+    // already-queued requests run before this worker spends the scan.
+    await yieldBackground();
+    if (!live()) return false;
+
     const results = withDetachedTxn(ctx, () =>
       (databases as any).flair.Memory.search({ select: INDEX_SELECT }),
     );
+    let admitted = 0;
     for await (const row of results as any) {
+      if (!live()) return false;
       const r = project(row);
-      if (r) index.upsert(r);
+      if (!r) continue;
+      index.upsert(r);
+      admitted++;
+      builtCount = admitted;
+      if (buildPause && admitted === 1 && total > 1) await buildPause();
+      if (!live()) return false;
+      if (admitted % YIELD_EVERY === 0) await yieldBackground();
     }
   } catch (err: any) {
-    disable("build failed: " + String(err?.message ?? err));
+    if (serial === buildSerial) disable("build failed: " + String(err?.message ?? err));
     return false;
   }
+  // Ownership is checked before the buffer is taken. An aborted build
+  // resumes after its last for-await yield; by then a stale marker may have
+  // started a replacement whose `pending` is a new array. Clearing it here
+  // makes the next feed event throw and disables the index for this worker.
+  // Nothing awaits between this check and the clear, so the take is atomic
+  // on the single thread.
+  if (!live()) return false;
   const buffered = pending ?? [];
   pending = null;
-  // `state` may have been knocked back to "empty" by a stale marker that
-  // arrived during the scan; in that case do not claim readiness.
-  if (state !== "building") return false;
+  const finished = Date.now();
   state = "ready";
+  finishedAt = finished;
+  buildDurationMs = finished - (startedAt ?? finished);
   for (const ev of buffered) apply(ev);
   return true;
 }
@@ -227,8 +398,62 @@ async function ensureReady(ctx: any): Promise<boolean> {
   if (!bm25IndexEnabled()) return false;
   if (state === "disabled") return false;
   if (state === "ready") return true;
-  if (!buildPromise) buildPromise = build(ctx).finally(() => { buildPromise = null; });
+  if (!buildPromise) {
+    const run = build(ctx).finally(() => {
+      if (buildPromise === run) buildPromise = null;
+    });
+    buildPromise = run;
+  }
   return buildPromise;
+}
+
+async function waitForMemorySearch(maxWaitMs = 30_000, intervalMs = 50): Promise<boolean> {
+  const deadline = Date.now() + maxWaitMs;
+  for (;;) {
+    try {
+      const mem = (databases as any).flair?.Memory;
+      if (mem && typeof mem.search === "function") return true;
+    } catch { /* tables are not bound yet */ }
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
+async function warmWhenReady(serial: number): Promise<void> {
+  if (serial !== warmSerial) return;
+  if (!bm25IndexEnabled() || !bm25IndexInRetrievalPath()) return;
+  let ready = false;
+  try {
+    ready = await waitForMemorySearch();
+  } catch (err: any) {
+    if (serial !== warmSerial || state !== "empty") return;
+    disabledReason = `${BM25_BOOT_WARM_SKIPPED_PREFIX} ${String(err?.message ?? err)}`;
+    return;
+  }
+  if (serial !== warmSerial) return;
+  if (!bm25IndexEnabled() || !bm25IndexInRetrievalPath()) return;
+  if (!ready) {
+    if (state === "empty") {
+      disabledReason = `${BM25_BOOT_WARM_SKIPPED_PREFIX} Memory table was not ready within 30s`;
+    }
+    return;
+  }
+  if (state !== "empty") return;
+  await ensureReady(undefined);
+}
+
+/**
+ * Start the index build on a later turn. Boot and the caller do not wait.
+ * A text query that arrives mid-build shares `buildPromise`.
+ * Idempotent per process until a test reset.
+ */
+export function scheduleBm25BootWarm(): void {
+  if (warmScheduled) return;
+  warmScheduled = true;
+  const serial = warmSerial;
+  setImmediate(() => {
+    void warmWhenReady(serial);
+  });
 }
 
 /**

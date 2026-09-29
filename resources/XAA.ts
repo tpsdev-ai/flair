@@ -4,6 +4,7 @@ import { harperPortValue } from "../src/lib/harper-port-value.js";
 import { DEFAULT_HTTP_PORT } from "./a2a-url.js";
 import { createHash, randomBytes } from "node:crypto";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
+import { stampOriginatorOnCreate } from "./originator-instance.js";
 
 /**
  * XAA (Enterprise-Managed Authorization) — ID-JAG validation for Flair.
@@ -170,8 +171,9 @@ async function resolveOrCreatePrincipal(
   const principalId = `usr_${idpSubject.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 20)}_${randomBytes(4).toString("hex")}`;
   const now = nowISO();
 
-  // Create principal (via Agent table)
-  await (databases as any).flair.Agent.put({
+  // Create principal (via Agent table). flair#1965 r2: a raw Agent create —
+  // stamp the local instance id (the Agent resource's post() does not run here).
+  const principalRow: any = {
     id: principalId,
     name: displayName,
     displayName,
@@ -183,7 +185,9 @@ async function resolveOrCreatePrincipal(
     admin: false,
     createdAt: now,
     updatedAt: now,
-  });
+  };
+  await stampOriginatorOnCreate(principalRow);
+  await (databases as any).flair.Agent.put(principalRow);
 
   // Create IdP credential
   await (databases as any).flair.Credential.put({

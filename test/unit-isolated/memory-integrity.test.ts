@@ -159,34 +159,38 @@ class BaseMemory {
     return id;
   }
   async put(content: any) {
-    callOrder.push(`put:${content.id}`);
-    memoryStore.set(content.id, { ...content });
+    // Real Harper binds the resource to the URL target (`getId()`); a PUT writes
+    // to THAT id. `_targetId` models the URL-bound target; unset for a direct
+    // in-process call, where the body id IS the write key. See
+    // resources/originator-instance.ts.
+    const id = (this as any).getId?.() ?? content.id;
+    callOrder.push(`put:${id}`);
+    memoryStore.set(id, { ...content, id });
     return undefined;
   }
+  getId() { return (this as any)._targetId; }
   async get(target: any) {
     // Real Harper's get() receives a RequestTarget object (pathname, search,
     // id, isCollection, sort) for HTTP-routed reads, NOT a plain string — only
     // direct in-process calls (e.g. this file's other post()/put() helpers)
     // pass a bare id. Support both so get() unit tests can exercise the real
     // RequestTarget shape without breaking the existing string-id
-    // call sites in this file. A NO-ARGUMENT call resolves the resource
-    // instance's own bound id (`this.id`), matching Harper's by-id invariant
-    // that Memory.patch() relies on when it calls `super.get()` for the stored
-    // row.
-    const id = typeof target === "string" ? target : (target?.id ?? (this as any).id);
+    // call sites in this file. A no-argument call models the URL-bound target
+    // via an explicit `_targetId` the test sets.
+    const id = typeof target === "string" ? target : (target?.id ?? (this as any)._targetId);
     return memoryStore.get(id) ?? null;
+  }
+  // Real Harper PATCH merges the body into the stored row; the id comes from the
+  // URL, which the double models as an explicit `_targetId` on the instance.
+  async patch(content: any) {
+    const id = content?.id ?? (this as any)._targetId;
+    const merged = { ...(memoryStore.get(id) ?? {}), ...content };
+    memoryStore.set(id, merged);
+    return { ...merged };
   }
   async delete(id: any) {
     memoryStore.delete(id);
     return { ok: true };
-  }
-  // By-id PATCH merge (real Harper binds the resource instance to the URL id;
-  // Memory.patch() delegates via `super.patch(content, query)`).
-  async patch(content: any) {
-    const id = (this as any).id ?? content?.id;
-    const prev = memoryStore.get(id) ?? {};
-    memoryStore.set(id, { ...prev, ...content });
-    return memoryStore.get(id);
   }
   search(query: any) {
     return memorySearchGen(query);
@@ -1583,7 +1587,7 @@ describe("flair#1960 r2 — Memory.patch() re-stamps provenance on a semantic wr
       provenance: JSON.stringify({ v: 1, verified: { agentId: "agent-1", timestamp: "2001-01-01T00:00:00.000Z" } }),
     });
     const m: any = makeMemory(agentCtx("agent-1"));
-    m.id = "prov-patch-legacy";
+    m._targetId = "prov-patch-legacy";
     await m.patch({
       content: "a genuinely new body",
       // Forged verified fields in the body — must never land.
@@ -1608,7 +1612,7 @@ describe("flair#1960 r2 — Memory.patch() re-stamps provenance on a semantic wr
       id: "prov-patch-meta", agentId: "agent-1", content: "unchanged body", durability: "standard", provenance: legacy,
     });
     const m: any = makeMemory(agentCtx("agent-1"));
-    m.id = "prov-patch-meta";
+    m._targetId = "prov-patch-meta";
     await m.patch({ tags: ["tagged"], provenance: JSON.stringify({ v: 1, verified: { agentId: "attacker", timestamp: "1999-01-01T00:00:00.000Z" } }) });
     const stored = memoryStore.get("prov-patch-meta");
     expect(stored.tags).toEqual(["tagged"]); // control: the patch landed
@@ -1633,18 +1637,14 @@ describe("flair#1960 r3 — Memory.patch() refuses a PATCH when the stored-row R
       provenance: legacy,
     });
     const m: any = makeMemory(agentCtx("agent-1"));
-    m.id = "prov-patch-readfail";
-    // The read that drives the semantic-PATCH decision is the THIRD super.get()
-    // in patch(): (1) guardAuthorityFields, (2) guardOwnerFieldImmutable,
-    // (3) the semantic read (no visibility/durability branch for this body).
-    // The guards' reads succeed; only the semantic read fails — the intermittent
-    // case the old `.catch(() => null)` swallowed.
-    const realGet = BaseMemory.prototype.get;
-    let getCalls = 0;
-    const getSpy = spyOn(BaseMemory.prototype, "get").mockImplementation(async function (this: any, target: any) {
-      getCalls += 1;
-      if (getCalls === 3) throw new Error("simulated stored-row read failure");
-      return realGet.call(this, target);
+    m._targetId = "prov-patch-readfail";
+    // r4/merge: the semantic-PATCH decision and the originatorInstanceId
+    // create/update decision share ONE stored-row read — the #1965
+    // resolveStoredRow, which reads through the URL-bound target id via the
+    // table reader (BaseMemory.get). Make THAT read fail: the write must be
+    // refused, never degraded to a metadata-only blob-preserving decision.
+    const getSpy = spyOn(BaseMemory, "get").mockImplementation(async () => {
+      throw new Error("simulated stored-row read failure");
     });
     let superPatchCalls = 0;
     const realPatch = BaseMemory.prototype.patch;
@@ -1654,11 +1654,10 @@ describe("flair#1960 r3 — Memory.patch() refuses a PATCH when the stored-row R
     });
     try {
       const res = await m.patch({ content: "a genuinely new body" });
-      expect(getCalls).toBe(3); // the stored-row read really was attempted
       expect(superPatchCalls).toBe(0); // never delegated to the blob-preserving by-id store write
       expect(res instanceof Response).toBe(true);
       expect((res as Response).status).toBe(500);
-      await expect((res as Response).json()).resolves.toMatchObject({ error: "stored_row_read_failed" });
+      await expect((res as Response).json()).resolves.toMatchObject({ error: "stored_row_lookup_failed" });
       expect(memoryStore.get("prov-patch-readfail").content).toBe("original body"); // nothing landed
       expect(memoryStore.get("prov-patch-readfail").provenance).toBe(legacy);
     } finally {
@@ -1684,7 +1683,7 @@ describe("flair#1960 r4 — createdAt is SEMANTIC (a changed creation claim re-s
       }),
     });
     const m: any = makeMemory(agentCtx("agent-1"));
-    m.id = "prov-patch-createdat";
+    m._targetId = "prov-patch-createdat";
     // A createdAt-ONLY patch: no content change. Before r4 this returned false
     // from isSemanticPatch, so the row's createdAt moved while the stored
     // claimed.createdAt kept the old value.
@@ -1712,7 +1711,7 @@ describe("flair#1960 r4 — createdAt is SEMANTIC (a changed creation claim re-s
       createdAt: "2001-01-01T00:00:00.000Z",
     });
     const m: any = makeMemory(agentCtx("agent-1"));
-    m.id = "prov-patch-createdat-san";
+    m._targetId = "prov-patch-createdat-san";
     const RAW = "  2002-02-02T03:04:05.678Z\n";
     await m.patch({ createdAt: RAW });
     const stored = memoryStore.get("prov-patch-createdat-san");
@@ -1733,7 +1732,7 @@ describe("flair#1960 r4 — createdAt is SEMANTIC (a changed creation claim re-s
       createdAt: "2001-01-01T00:00:00.000Z", provenance: legacy,
     });
     const m: any = makeMemory(agentCtx("agent-1"));
-    m.id = "prov-patch-meta-r4";
+    m._targetId = "prov-patch-meta-r4";
     await m.patch({ tags: ["tagged"] });
     const stored = memoryStore.get("prov-patch-meta-r4");
     expect(stored.tags).toEqual(["tagged"]); // control: the patch landed
@@ -1781,17 +1780,19 @@ describe("memory-provenance slice 1 — migration-equivalence (no-provenance-fie
   });
 });
 
-// ─── federation-edge-hardening slice 1: write-time originatorInstanceId stamp ──
+// ─── federation-edge-hardening slice 1 / flair#1965: originatorInstanceId stamp ──
 //
-// New nullable field on the 4 synced tables (Memory/Soul/Agent/Relationship),
-// stamped server-side from resources/instance-identity.ts's localInstanceId()
-// on every LOCAL write. Distinct from the legacy `_originatorInstanceId`
-// (Federation.ts's mergeRecord — receiver-stamped at merge time, forgeable);
-// this field is stamped by the ORIGINATING instance and must survive a
-// federation sync unchanged. These tests live in THIS file for the same
-// mock+import-collision reason as the memory-provenance slice 1 block above
-// (this file already owns the Memory mock+import).
-describe("federation-edge-hardening slice 1 — Memory.post() write-time originatorInstanceId stamp", () => {
+// originatorInstanceId names the federation instance that AUTHORED a record and
+// is server-stamped — never client-writable (schemas/memory.graphql). The rule
+// (resources/originator-instance.ts): a CREATE stamps the local instance id and
+// IGNORES any request-body value; an UPDATE keeps the STORED value — a body value
+// neither replaces nor clears it, and an update that omits the field leaves it.
+// Distinct from the legacy `_originatorInstanceId` (Federation.ts's mergeRecord —
+// receiver-stamped at merge time), which the federation merge writes. These tests
+// live in THIS file for the same mock+import-collision reason as the
+// memory-provenance slice 1 block above (this file already owns the Memory
+// mock+import).
+describe("federation-edge-hardening slice 1 / flair#1965 — Memory.post() stamps a server-set originatorInstanceId", () => {
   it("stamps the local instance id on a fresh local write", async () => {
     instanceRow = { id: "flair_local_test" };
     const m = makeMemory(agentCtx("agent-1"));
@@ -1808,23 +1809,19 @@ describe("federation-edge-hardening slice 1 — Memory.post() write-time origina
     expect(stored.originatorInstanceId).toBeNull();
   });
 
-  it("THE KEY TEST — a record already carrying another instance's originatorInstanceId is NEVER clobbered with the local id", async () => {
-    // Simulates the shape a federation-synced record would carry (this
-    // instance's own local id is "flair_local_test", but the write itself
-    // already carries instance B's origin — e.g. a caller re-writing synced
-    // data through this class rather than the raw table object). The stamp
-    // must be a no-op here: the record's TRUE author (instance B) must never
-    // be overwritten by whichever instance happens to run this write.
+  it("IGNORES a request-body originatorInstanceId and stamps the local id — a client can never set it on create", async () => {
+    // The body claims instance B as its origin; the server-stamped contract
+    // means the claim is discarded and THIS instance's id is stamped.
     instanceRow = { id: "flair_local_test" };
     const m = makeMemory(agentCtx("agent-1"));
     const r = await m.post({
       agentId: "agent-1",
-      content: "This record was authored on instance B, long enough for the gate.",
+      content: "This body claims instance B as its origin, long enough for the gate.",
       originatorInstanceId: "instance-B",
     });
     const stored = await BaseMemory.get(r.id);
-    expect(stored.originatorInstanceId).toBe("instance-B");
-    expect(stored.originatorInstanceId).not.toBe("flair_local_test");
+    expect(stored.originatorInstanceId).toBe("flair_local_test");
+    expect(stored.originatorInstanceId).not.toBe("instance-B");
   });
 
   it("flair#1896 — with SEVERAL Instance rows the write SUCCEEDS and stamps NOTHING (never an arbitrary identity)", async () => {
@@ -1847,41 +1844,76 @@ describe("federation-edge-hardening slice 1 — Memory.post() write-time origina
   });
 });
 
-describe("federation-edge-hardening slice 1 — Memory.put() stamps the identical shape (shared helper)", () => {
-  it("a fresh PUT (not-yet-existing id) stamps the local instance id the same as post()", async () => {
-    instanceRow = { id: "flair_local_test" };
-    const m = makeMemory(agentCtx("agent-1"));
-    const r = await m.put({ id: "agent-1-fresh-origin", agentId: "agent-1", content: "Fresh PUT create, long enough for the gate." });
-    const stored = await BaseMemory.get(r.id);
-    expect(stored.originatorInstanceId).toBe("flair_local_test");
-  });
-
-  it("THE KEY TEST via put() — an update carrying instance B's originatorInstanceId retains it, never re-stamped to the local id", async () => {
+describe("federation-edge-hardening slice 1 / flair#1965 — Memory.put() create vs update", () => {
+  it("CREATE (PUT, not-yet-existing id) stamps the local instance id and ignores a body value", async () => {
     instanceRow = { id: "flair_local_test" };
     const m = makeMemory(agentCtx("agent-1"));
     const r = await m.put({
-      id: "agent-1-synced-origin",
+      id: "agent-1-fresh-origin",
       agentId: "agent-1",
-      content: "Synced-shaped record authored on instance B, long enough for the gate.",
+      content: "Fresh PUT create claiming instance B, long enough for the gate.",
       originatorInstanceId: "instance-B",
     });
     const stored = await BaseMemory.get(r.id);
-    expect(stored.originatorInstanceId).toBe("instance-B");
+    expect(stored.originatorInstanceId).toBe("flair_local_test");
+    expect(stored.originatorInstanceId).not.toBe("instance-B");
+  });
 
-    // A SUBSEQUENT update (e.g. memory_update's read-merge-PUT pattern) that
-    // carries the existing record forward must ALSO preserve instance B's
-    // origin — this is the realistic shape of an update to an already-synced
-    // record (the merged payload spreads the existing stored fields).
-    const existing = await BaseMemory.get(r.id);
-    const merged = { ...existing, content: "Edited locally after sync, long enough for the gate.", updatedAt: new Date().toISOString() };
-    const mUpdate = makeMemory(agentCtx("agent-1"));
-    await mUpdate.put(merged);
-    const after = await BaseMemory.get(r.id);
+  it("UPDATE (PUT) with a body value LEAVES the stored value — a client cannot change or clear it", async () => {
+    instanceRow = { id: "flair_local_test" };
+    memoryStore.set("agent-1-synced-origin", {
+      id: "agent-1-synced-origin",
+      agentId: "agent-1",
+      content: "authored on instance B",
+      originatorInstanceId: "instance-B",
+    });
+    const m = makeMemory(agentCtx("agent-1"));
+    await m.put({
+      id: "agent-1-synced-origin",
+      agentId: "agent-1",
+      content: "Edited locally after sync, long enough for the gate.",
+      originatorInstanceId: "instance-attacker",
+    });
+    const after = await BaseMemory.get("agent-1-synced-origin");
     expect(after.originatorInstanceId).toBe("instance-B");
+    expect(after.originatorInstanceId).not.toBe("instance-attacker");
     expect(after.content).toBe("Edited locally after sync, long enough for the gate.");
   });
 
-  it("no authenticated agent (internal call) via put() still stamps the local instance id — never throws", async () => {
+  it("UPDATE (PUT) that OMITS the field leaves the stored value", async () => {
+    instanceRow = { id: "flair_local_test" };
+    memoryStore.set("agent-1-synced-origin2", {
+      id: "agent-1-synced-origin2",
+      agentId: "agent-1",
+      content: "authored on instance B",
+      originatorInstanceId: "instance-B",
+    });
+    const m = makeMemory(agentCtx("agent-1"));
+    await m.put({
+      id: "agent-1-synced-origin2",
+      agentId: "agent-1",
+      content: "Edited locally after sync, long enough for the gate.",
+    });
+    const after = await BaseMemory.get("agent-1-synced-origin2");
+    expect(after.originatorInstanceId).toBe("instance-B");
+  });
+
+  it("PATCH cannot set or clear originatorInstanceId — the stored value stands", async () => {
+    instanceRow = { id: "flair_local_test" };
+    memoryStore.set("memory-patch", {
+      id: "memory-patch",
+      agentId: "agent-1",
+      content: "authored on instance B",
+      durability: "standard",
+      originatorInstanceId: "instance-B",
+    });
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m._targetId = "memory-patch";
+    await m.patch({ originatorInstanceId: "instance-attacker" });
+    expect(memoryStore.get("memory-patch").originatorInstanceId).toBe("instance-B");
+  });
+
+  it("no authenticated agent (internal call) via put() still stamps the local instance id on a CREATE — never throws", async () => {
     instanceRow = { id: "flair_local_test" };
     const r: any = new (Memory as any)();
     r.getContext = () => undefined;
@@ -1889,6 +1921,61 @@ describe("federation-edge-hardening slice 1 — Memory.put() stamps the identica
     expect(result.written).toBe(true);
     const stored = await BaseMemory.get(result.id);
     expect(stored.originatorInstanceId).toBe("flair_local_test");
+  });
+});
+
+describe("flair#1965 r3 — Memory stored-row resolution is fail-closed and URL-bound", () => {
+  it("a FAILED stored-row read refuses a PATCH (500) — never read as 'no row' and stamped as a create", async () => {
+    instanceRow = { id: "flair_local_test" };
+    memoryStore.set("mem-r3-readfail", { id: "mem-r3-readfail", agentId: "agent-1", content: "authored on B", durability: "standard", originatorInstanceId: "instance-B" });
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m._targetId = "mem-r3-readfail";
+    const spy = spyOn(BaseMemory, "get").mockImplementation(async () => { throw new Error("simulated stored-row read failure"); });
+    try {
+      const res: any = await m.patch({ content: "an edit, long enough for the gate" });
+      expect(res instanceof Response).toBe(true);
+      expect((res as Response).status).toBe(500);
+      expect((await (res as Response).json()).error).toBe("stored_row_lookup_failed");
+      const stored = memoryStore.get("mem-r3-readfail");
+      expect(stored.content).toBe("authored on B"); // nothing written
+      expect(stored.originatorInstanceId).toBe("instance-B"); // never re-stamped
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a PATCH whose body id disagrees with the URL target is refused (400)", async () => {
+    instanceRow = { id: "flair_local_test" };
+    memoryStore.set("mem-r3-real", { id: "mem-r3-real", agentId: "agent-1", content: "real", durability: "standard", originatorInstanceId: "instance-B" });
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m._targetId = "mem-r3-real";
+    const res: any = await m.patch({ id: "mem-r3-decoy", content: "decoy, long enough for the gate" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(400);
+    expect((await (res as Response).json()).error).toBe("id_target_mismatch");
+    expect(memoryStore.get("mem-r3-decoy")).toBeUndefined();
+    expect(memoryStore.get("mem-r3-real").content).toBe("real");
+  });
+
+  it("the _reindex re-PUT refuses a FAILED stored-row read (500) and a missing row (404)", async () => {
+    instanceRow = { id: "flair_local_test" };
+    memoryStore.set("mem-r3-reindex", { id: "mem-r3-reindex", agentId: "agent-1", content: "x", type: "session", originatorInstanceId: "instance-B" });
+    const m1: any = makeMemory({});
+    const spy = spyOn(BaseMemory, "get").mockImplementation(async () => { throw new Error("simulated stored-row read failure"); });
+    try {
+      const res: any = await m1.put({ _reindex: true, id: "mem-r3-reindex", agentId: "agent-1", content: "x", type: "session" });
+      expect(res instanceof Response).toBe(true);
+      expect((res as Response).status).toBe(500);
+      expect((await (res as Response).json()).error).toBe("stored_row_lookup_failed");
+    } finally {
+      spy.mockRestore();
+    }
+    // A reindex names an EXISTING row; a missing row is refused, never created.
+    const m2: any = makeMemory({});
+    const res2: any = await m2.put({ _reindex: true, id: "mem-r3-missing", agentId: "agent-1", content: "x", type: "session" });
+    expect(res2 instanceof Response).toBe(true);
+    expect((res2 as Response).status).toBe(404);
+    expect(memoryStore.get("mem-r3-missing")).toBeUndefined();
   });
 });
 
@@ -1915,7 +2002,7 @@ describe("federation-edge-hardening slice 1 — migration-equivalence (no-origin
     expect(results.length).toBe(2);
   });
 
-  it("updating a legacy (no-originatorInstanceId) record via put() adds the field additively without disturbing any other field", async () => {
+  it("updating a legacy (no-originatorInstanceId) record via put() keeps it un-stamped — the field is set on CREATE, never invented on UPDATE", async () => {
     instanceRow = { id: "flair_local_test" };
     memoryStore.set("legacy-origin-2", { id: "legacy-origin-2", agentId: "agent-1", content: "legacy content", durability: "standard", archived: false });
     const existing = await BaseMemory.get("legacy-origin-2");
@@ -1927,7 +2014,7 @@ describe("federation-edge-hardening slice 1 — migration-equivalence (no-origin
 
     const after = await BaseMemory.get("legacy-origin-2");
     expect(after.content).toBe("patched legacy content"); // untouched aside from the intended patch
-    expect(after.originatorInstanceId).toBe("flair_local_test"); // additively gains the stamp on this write
+    expect(after.originatorInstanceId).toBeUndefined(); // an UPDATE keeps the STORED value; a legacy row stays un-stamped
   });
 });
 
@@ -2114,5 +2201,44 @@ describe("flair#1383 — Memory write path refuses an identified pre-0.18.0 clie
     });
     expect(r.written).toBe(true);
     expect(memoryStore.size).toBe(1);
+  });
+});
+
+// ─── flair#1965 r2 — URL-target resolution + PATCH-create stamping ──────────
+// Blocker 2: the stored-row lookup must use the URL-BOUND target id, never a
+// body `id`; a mismatch (or a failed read) REFUSES the write. Blocker 3: a
+// PATCH whose URL target has no stored row is a CREATE and must stamp the local
+// id (Harper's patch path does not require an existing row).
+describe("flair#1965 r2 — Memory PUT resolves the URL-bound target; PATCH creates are stamped", () => {
+  it("REFUSES a PUT whose body id differs from the URL target id (a body id is not the row this write lands on)", async () => {
+    instanceRow = { id: "flair_local_test" };
+    memoryStore.set("mem-real", { id: "mem-real", agentId: "agent-1", content: "real row", originatorInstanceId: "instance-B" });
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m._targetId = "mem-real";
+    const res: any = await m.put({ id: "mem-decoy", agentId: "agent-1", content: "decoy content, long enough for the gate.", originatorInstanceId: "instance-attacker" });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(400);
+    expect(memoryStore.get("mem-decoy")).toBeUndefined(); // nothing landed on the body id
+    expect(memoryStore.get("mem-real").originatorInstanceId).toBe("instance-B"); // the target row is untouched
+  });
+
+  it("a PUT whose body id MATCHES the URL target updates that row, keeping its stored value", async () => {
+    instanceRow = { id: "flair_local_test" };
+    memoryStore.set("mem-target", { id: "mem-target", agentId: "agent-1", content: "target row", visibility: "shared", originatorInstanceId: "instance-B" });
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m._targetId = "mem-target";
+    const res: any = await m.put({ id: "mem-target", agentId: "agent-1", content: "target row updated here, long enough for the gate.", visibility: "shared" });
+    expect(res instanceof Response).toBe(false);
+    expect(memoryStore.get("mem-target").content).toBe("target row updated here, long enough for the gate.");
+    expect(memoryStore.get("mem-target").originatorInstanceId).toBe("instance-B");
+  });
+
+  it("PATCH that CREATES a row (URL target has no stored row) stamps the local instance id", async () => {
+    instanceRow = { id: "flair_local_test" };
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m._targetId = "mem-patch-create";
+    const res: any = await m.patch({ agentId: "agent-1", content: "brand new via patch, long enough for the gate." });
+    expect(res instanceof Response).toBe(false);
+    expect(memoryStore.get("mem-patch-create").originatorInstanceId).toBe("flair_local_test");
   });
 });

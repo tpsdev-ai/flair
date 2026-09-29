@@ -106,13 +106,20 @@ type Memory @table(database: "flair") {
   # transport is outside this slice. The three write-body inputs (hostSource,
   # hostSourceScope, hostSourceVisibility) are consumed by Memory.post()/put()
   # and are never persisted here.
-  originatorInstanceId: String @indexed  # federation-edge-hardening slice 1: WRITE-TIME instance identity, stamped server-side in
-                               # resources/Memory.ts from resources/instance-identity.ts's localInstanceId() — never client-writable.
-                               # Nullable (existing rows read null = clean upgrade). Distinct from the legacy _originatorInstanceId
-                               # (Federation.ts's mergeRecord — stamped by the RECEIVER at merge time, forgeable/lossy); this field is
-                               # stamped by the ORIGINATING instance itself and preserved (never re-stamped) as the record flows through
-                               # sync merges. @indexed for the later sync push-query filter (per-record signature verification and the
-                               # classifier org-gate are separate, later slices — not built here).
+  originatorInstanceId: String @indexed  # federation-edge-hardening slice 1: WRITE-TIME instance identity, stamped server-side on every
+                               # application write via resources/originator-instance.ts from resources/instance-identity.ts's localInstanceId()
+                               # (Memory/Soul/Agent/Relationship post()/put()/patch(), Memory's _reindex re-PUT, the FeedMemories ingest, AgentSeed
+                               # and the MCP/IdP principal provisioning). On CREATE the local id is stamped and any request-body value is
+                               # ignored; on UPDATE the STORED value stands (a body value neither replaces nor clears it, and an update that
+                               # omits the field leaves it). Nullable (existing rows read null = clean upgrade).
+                               # NOT client-writable through a resource write. Distinct from the legacy _originatorInstanceId (Federation.ts's
+                               # mergeRecord — stamped by the RECEIVER at merge time, forgeable/lossy); this field is stamped by the ORIGINATING
+                               # instance itself and preserved (never re-stamped) as the record flows through sync merges. Federation and Harper's
+                               # administrator ops API are EXCEPTIONS to the rule, not the field's only raw writers: the SIGNED federation merge
+                               # (FederationSync.post, which accepts a signed HTTP body from a known, non-revoked peer; a record's own signature,
+                               # when present, is verified against the pinned key of the record's envelope originator) and the administrator ops
+                               # API (:9925, admin auth). @indexed for the
+                               # later sync push-query filter (per-record signature verification and the classifier org-gate are separate slices).
   metadata: String             # JSON blob (flair#1332/#1202): ADK custom_metadata, store-and-return. CLIENT-WRITABLE
                                # (unlike provenance above, which is server-stamped) and OPAQUE TO THE SERVER by
                                # contract: stored verbatim, returned verbatim, never parsed server-side, never
@@ -160,7 +167,8 @@ type Relationship @table(database: "flair") {
   updatedAt: String
   originatorInstanceId: String @indexed  # federation-edge-hardening slice 1 — see Memory.originatorInstanceId's doc above
                                     # for the full contract (write-time stamp, nullable, preserved across sync merges).
-                                    # Stamped server-side in resources/Relationship.ts's put().
+                                    # Stamped server-side in resources/Relationship.ts's put() via resources/originator-instance.ts
+                                    # (create stamps the local id; update keeps the stored value; never client-writable).
   provenance: String                # JSON blob (relationship-write-path, folded K&S refinement; re-stamped on
                                     # the semantic PATCH path by flair#1960 r2): SAME shape as
                                     # Memory.provenance above — { v, verified: { agentId, timestamp, receivedAt },
@@ -188,7 +196,8 @@ type Soul @table(database: "flair") {
   updatedAt: String
   originatorInstanceId: String @indexed  # federation-edge-hardening slice 1 — see Memory.originatorInstanceId's doc above
                                     # for the full contract (write-time stamp, nullable, preserved across sync merges).
-                                    # Stamped server-side in resources/Soul.ts's post()/put().
+                                    # Stamped server-side in resources/Soul.ts's post()/put() via resources/originator-instance.ts
+                                    # (create stamps the local id; update keeps the stored value; never client-writable).
 }
 
 type MemoryGrant @table(database: "flair") @export {

@@ -37,21 +37,33 @@ function matchesCondition(record: any, cond: any): boolean {
 
 class BaseRelationship {
   async get(target?: any) {
-    const id = typeof target === "string" ? target : (target?.id ?? (this as any).id);
+    const id = typeof target === "string" ? target : (target?.id ?? (this as any)._targetId);
     return relationshipStore.get(id) ?? null;
   }
+  // Real Harper PATCH merges the body into the stored row; the id comes from the
+  // URL, which the double models as an explicit `_targetId` on the instance.
+  async patch(content: any) {
+    const id = content?.id ?? (this as any)._targetId;
+    const merged = { ...(relationshipStore.get(id) ?? {}), ...content };
+    relationshipStore.set(id, merged);
+    return { ...merged };
+  }
+  // Real Harper's table is statically callable
+  // (`databases.flair.Relationship.get(id)`), which is how
+  // resources/originator-instance.ts's resolveStoredRow reads the pre-existing
+  // row for the create/update decision.
+  static async get(id: any) {
+    return relationshipStore.get(id) ?? null;
+  }
+  getId() { return (this as any)._targetId; }
   async put(content: any) {
-    relationshipStore.set(content.id, { ...content });
-    return { ...content };
+    const id = this.getId() ?? content.id;
+    const rec = { ...content, id };
+    relationshipStore.set(id, rec);
+    return rec;
   }
   // By-id PATCH merge (Harper binds the resource instance to the URL id;
   // Relationship.patch() delegates via `super.patch(content, query)`).
-  async patch(content: any) {
-    const id = (this as any).id ?? content?.id;
-    const prev = relationshipStore.get(id) ?? {};
-    relationshipStore.set(id, { ...prev, ...content });
-    return relationshipStore.get(id);
-  }
   async delete(id: any) {
     relationshipStore.delete(id);
     return { ok: true };
@@ -186,26 +198,19 @@ describe("Relationship.get() — anonymous denied, owner-scoped for non-admin, u
   });
 });
 
-// ─── federation-edge-hardening slice 1: write-time originatorInstanceId stamp ──
-// See resources/Memory.ts's stampOriginatorInstanceId doc for the full
-// contract. Relationship.ts only exposes put() as a write path (no post()
-// override — same idiom as Memory.ts's HTTP-reachable-only-via-PUT note).
-describe("federation-edge-hardening slice 1 — Relationship.put() write-time originatorInstanceId stamp", () => {
-  it("stamps the local instance id on a fresh local write", async () => {
+// ─── federation-edge-hardening slice 1 / flair#1965: originatorInstanceId stamp ──
+// See resources/originator-instance.ts for the full contract. Relationship has no
+// post(), so put() carries both create and update: a body value on create is
+// replaced by the local id; on update the stored value stands.
+describe("federation-edge-hardening slice 1 / flair#1965 — Relationship originatorInstanceId is server-stamped", () => {
+  it("CREATE (put, no stored row) stamps the local instance id", async () => {
     instanceRow = { id: "flair_local_test" };
     const r = makeRelationship(agentCtx("agent-1"));
     const res: any = await r.put({ id: "rel-fresh", subject: "nathan", predicate: "manages", object: "flint" });
     expect(res.originatorInstanceId).toBe("flair_local_test");
   });
 
-  it("stamps null when this instance has no Instance row yet — never invents one", async () => {
-    instanceRow = null;
-    const r = makeRelationship(agentCtx("agent-1"));
-    const res: any = await r.put({ id: "rel-no-instance", subject: "nathan", predicate: "manages", object: "flint" });
-    expect(res.originatorInstanceId).toBeNull();
-  });
-
-  it("THE KEY TEST — a relationship already carrying another instance's originatorInstanceId is NEVER clobbered with the local id", async () => {
+  it("CREATE (put) IGNORES a request-body originatorInstanceId and stamps the local id", async () => {
     instanceRow = { id: "flair_local_test" };
     const r = makeRelationship(agentCtx("agent-1"));
     const res: any = await r.put({
@@ -215,8 +220,53 @@ describe("federation-edge-hardening slice 1 — Relationship.put() write-time or
       object: "flint",
       originatorInstanceId: "instance-B",
     });
+    expect(res.originatorInstanceId).toBe("flair_local_test");
+    expect(res.originatorInstanceId).not.toBe("instance-B");
+  });
+
+  it("stamps null when this instance has no Instance row yet — never invents one", async () => {
+    instanceRow = null;
+    const r = makeRelationship(agentCtx("agent-1"));
+    const res: any = await r.put({ id: "rel-no-instance", subject: "nathan", predicate: "manages", object: "flint" });
+    expect(res.originatorInstanceId).toBeNull();
+  });
+
+  it("UPDATE (put) with a body value LEAVES the stored value — a client cannot change it", async () => {
+    instanceRow = { id: "flair_local_test" };
+    relationshipStore.set("rel-upd", {
+      id: "rel-upd", agentId: "agent-1", subject: "nathan", predicate: "manages", object: "flint",
+      originatorInstanceId: "instance-B",
+    });
+    const r = makeRelationship(agentCtx("agent-1"));
+    const res: any = await r.put({
+      id: "rel-upd", subject: "nathan", predicate: "manages", object: "flint",
+      originatorInstanceId: "instance-attacker",
+    });
     expect(res.originatorInstanceId).toBe("instance-B");
-    expect(res.originatorInstanceId).not.toBe("flair_local_test");
+    expect(res.originatorInstanceId).not.toBe("instance-attacker");
+  });
+
+  it("UPDATE (put) that OMITS the field leaves the stored value", async () => {
+    instanceRow = { id: "flair_local_test" };
+    relationshipStore.set("rel-upd2", {
+      id: "rel-upd2", agentId: "agent-1", subject: "nathan", predicate: "manages", object: "flint",
+      originatorInstanceId: "instance-B",
+    });
+    const r = makeRelationship(agentCtx("agent-1"));
+    const res: any = await r.put({ id: "rel-upd2", subject: "nathan", predicate: "manages", object: "flint" });
+    expect(res.originatorInstanceId).toBe("instance-B");
+  });
+
+  it("PATCH cannot set or clear originatorInstanceId — the stored value stands", async () => {
+    instanceRow = { id: "flair_local_test" };
+    relationshipStore.set("rel-patch", {
+      id: "rel-patch", agentId: "agent-1", subject: "nathan", predicate: "manages", object: "flint",
+      originatorInstanceId: "instance-B",
+    });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r._targetId = "rel-patch";
+    await r.patch({ originatorInstanceId: "instance-attacker" });
+    expect(relationshipStore.get("rel-patch").originatorInstanceId).toBe("instance-B");
   });
 });
 
@@ -414,7 +464,7 @@ describe("flair#1960 r2 — Relationship.patch() derives provenance from the ser
       provenance: JSON.stringify({ v: 1, verified: { agentId: "agent-1", timestamp: "2001-01-01T00:00:00.000Z" } }),
     });
     const r: any = makeRelationship(agentCtx("agent-1"));
-    r.id = "rel-prov-patch";
+    r._targetId = "rel-prov-patch";
     await r.patch({
       subject: "nathan-renamed", // semantic change
       provenance: JSON.stringify({ v: 1, verified: { agentId: "attacker", timestamp: "1999-01-01T00:00:00.000Z" } }),
@@ -437,7 +487,7 @@ describe("flair#1960 r2 — Relationship.patch() derives provenance from the ser
       id: "rel-prov-patch-meta", agentId: "agent-1", subject: "a", predicate: "b", object: "c", confidence: 1.0, provenance: legacy,
     });
     const r: any = makeRelationship(agentCtx("agent-1"));
-    r.id = "rel-prov-patch-meta";
+    r._targetId = "rel-prov-patch-meta";
     await r.patch({ confidence: 0.4, provenance: JSON.stringify({ v: 1, verified: { agentId: "attacker", timestamp: "1999-01-01T00:00:00.000Z" } }) });
     const stored = relationshipStore.get("rel-prov-patch-meta");
     expect(stored.confidence).toBe(0.4); // control: the patch landed
@@ -453,13 +503,13 @@ describe("flair#1960 r3 — Relationship.patch() controls", () => {
       id: "rel-readfail", agentId: "agent-1", subject: "nathan", predicate: "manages", object: "flint", provenance: legacy,
     });
     const r: any = makeRelationship(agentCtx("agent-1"));
-    r.id = "rel-readfail";
-    // guardOwnerFieldImmutable swallows a read error (it catches internally);
-    // the stored-row read that drives the semantic-PATCH decision is the SECOND
-    // super.get(). Making every read fail therefore hits exactly that read —
-    // the one the old `.catch(() => null)` coerced to `null` (a metadata-only
-    // decision that kept the legacy stamp).
-    const getSpy = spyOn(BaseRelationship.prototype, "get").mockImplementation(async () => {
+    r._targetId = "rel-readfail";
+    // r4/merge: the semantic-PATCH decision and the originatorInstanceId
+    // create/update decision share ONE stored-row read — the #1965
+    // resolveStoredRow, which reads through the URL-bound target id via the
+    // table reader (BaseRelationship.get). Make THAT read fail: the write must
+    // be refused, never degraded to a metadata-only, blob-preserving decision.
+    const getSpy = spyOn(BaseRelationship, "get").mockImplementation(async () => {
       throw new Error("simulated stored-row read failure");
     });
     let superPatchCalls = 0;
@@ -473,7 +523,7 @@ describe("flair#1960 r3 — Relationship.patch() controls", () => {
       expect(superPatchCalls).toBe(0); // never delegated to the blob-preserving by-id store write
       expect(res instanceof Response).toBe(true);
       expect((res as Response).status).toBe(500);
-      await expect((res as Response).json()).resolves.toMatchObject({ error: "stored_row_read_failed" });
+      await expect((res as Response).json()).resolves.toMatchObject({ error: "stored_row_lookup_failed" });
       expect(relationshipStore.get("rel-readfail").subject).toBe("nathan"); // nothing landed
       expect(relationshipStore.get("rel-readfail").provenance).toBe(legacy);
     } finally {
@@ -487,7 +537,7 @@ describe("flair#1960 r3 — Relationship.patch() controls", () => {
       id: "rel-cc-sem", agentId: "agent-1", subject: "a", predicate: "b", object: "c", createdAt: "2001-01-01T00:00:00.000Z",
     });
     const r: any = makeRelationship(agentCtx("agent-1"));
-    r.id = "rel-cc-sem";
+    r._targetId = "rel-cc-sem";
     await r.patch({ subject: "a-renamed", claimedClient: "codex" }); // semantic change
     const stored = relationshipStore.get("rel-cc-sem");
     expect(stored.subject).toBe("a-renamed"); // control: the patch landed
@@ -502,7 +552,7 @@ describe("flair#1960 r3 — Relationship.patch() controls", () => {
       id: "rel-cc-meta", agentId: "agent-1", subject: "a", predicate: "b", object: "c", confidence: 1.0, provenance: legacy,
     });
     const r: any = makeRelationship(agentCtx("agent-1"));
-    r.id = "rel-cc-meta";
+    r._targetId = "rel-cc-meta";
     await r.patch({ confidence: 0.4, claimedClient: "codex" }); // metadata-only
     const stored = relationshipStore.get("rel-cc-meta");
     expect(stored.confidence).toBe(0.4); // control: the patch landed
@@ -525,7 +575,7 @@ describe("flair#1960 r4 — a createdAt-only Relationship PATCH re-stamps proven
       }),
     });
     const r: any = makeRelationship(agentCtx("agent-1"));
-    r.id = "rel-createdat";
+    r._targetId = "rel-createdat";
     // createdAt-ONLY (no identity change) — must still re-stamp.
     await r.patch({ createdAt: "2002-02-02T03:04:05.678Z" });
     const stored = relationshipStore.get("rel-createdat");
@@ -546,7 +596,7 @@ describe("flair#1960 r4 — a createdAt-only Relationship PATCH re-stamps proven
       createdAt: "2001-01-01T00:00:00.000Z",
     });
     const r: any = makeRelationship(agentCtx("agent-1"));
-    r.id = "rel-createdat-san";
+    r._targetId = "rel-createdat-san";
     const RAW = "  2002-02-02T03:04:05.678Z\n";
     await r.patch({ createdAt: RAW });
     const stored = relationshipStore.get("rel-createdat-san");
@@ -566,7 +616,7 @@ describe("flair#1960 r4 — a createdAt-only Relationship PATCH re-stamps proven
       id: "rel-createdat-meta", agentId: "agent-1", subject: "a", predicate: "b", object: "c", confidence: 1.0, provenance: legacy,
     });
     const r: any = makeRelationship(agentCtx("agent-1"));
-    r.id = "rel-createdat-meta";
+    r._targetId = "rel-createdat-meta";
     await r.patch({ confidence: 0.4 });
     const stored = relationshipStore.get("rel-createdat-meta");
     expect(stored.confidence).toBe(0.4); // control: the patch landed
@@ -600,5 +650,28 @@ describe("flair#718 authorship-provenance — Relationship.put() claimedClient h
     const prov = JSON.parse(res.provenance);
     expect(prov.claimed.client).toBeUndefined();
     expect(typeof prov.claimed.createdAt).toBe("string");
+  });
+});
+
+// ─── flair#1965 round 2 — URL-target resolution + PATCH-create stamping ──────
+describe("flair#1965 r2 — Relationship PUT resolves the URL-bound target; PATCH creates are stamped", () => {
+  it("REFUSES a PUT whose body id differs from the URL target id", async () => {
+    instanceRow = { id: "flair_local_test" };
+    relationshipStore.set("rel-real", { id: "rel-real", agentId: "agent-1", subject: "a", predicate: "b", object: "c", originatorInstanceId: "instance-B" });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r._targetId = "rel-real";
+    const res: any = await r.put({ id: "rel-decoy", subject: "a", predicate: "b", object: "c", originatorInstanceId: "instance-attacker" });
+    expect(res instanceof Response).toBe(true);
+    expect(res.status).toBe(400);
+    expect(relationshipStore.get("rel-decoy")).toBeUndefined();
+    expect(relationshipStore.get("rel-real").originatorInstanceId).toBe("instance-B");
+  });
+
+  it("PATCH that CREATES a row (URL target has no stored row) stamps the local instance id", async () => {
+    instanceRow = { id: "flair_local_test" };
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r._targetId = "rel-patch-new";
+    await r.patch({ subject: "nathan", predicate: "manages", object: "flint" });
+    expect(relationshipStore.get("rel-patch-new").originatorInstanceId).toBe("flair_local_test");
   });
 });

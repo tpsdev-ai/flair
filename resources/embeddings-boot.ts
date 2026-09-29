@@ -275,4 +275,26 @@ export function _resetEmbeddingsBackendRegistrationForTests(): void {
   registered = false;
 }
 
-void registerEmbeddingsBackend();
+/**
+ * Kick the BM25 build after embeddings registration settles.
+ *
+ * Not a static import: this module is loaded by unit tests that only want
+ * `resolveEmbedThreads`, and `bm25-index-service` imports `harper`, which
+ * throws outside a real Harper boot. `globalThis.models` is the same "are
+ * we inside Harper?" signal the registration path already uses. Boot does
+ * not wait on the scan — `scheduleBm25BootWarm` returns on this turn.
+ */
+function kickBm25BootWarm(): void {
+  const g = globalThis as { models?: unknown };
+  if (g.models == null) return;
+  void import("./bm25-index-service.js").then((mod) => {
+    mod.scheduleBm25BootWarm();
+  }).catch((err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[bm25] boot warm skipped: ${message}`);
+  });
+}
+
+void registerEmbeddingsBackend().finally(() => {
+  kickBm25BootWarm();
+});

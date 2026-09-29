@@ -11,6 +11,7 @@ import { noteMemoryUpsert } from "./bm25-index-service.js";
 import { extractPointerInputs } from "./memory-host-source.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { buildProvenance } from "./provenance.js";
+import { applyFederationBookkeeping, applyOriginatorInstanceId } from "./originator-instance.js";
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -211,6 +212,16 @@ export class FeedMemories extends Resource {
     // incarnation token is still preserved above (a re-ingest is not a
     // reincarnation), so only `provenance` is re-derived.
     record.provenance = buildProvenance(auth, record.createdAt, content);
+    // flair#1965 r2: this raw table put REPLACES the row, bypassing the Memory
+    // resource's write methods, so the create/update rule is applied here
+    // explicitly: a CREATE (no stored row) stamps this instance's own id and
+    // ignores any body value; an UPDATE keeps the STORED value (a body value
+    // neither replaces nor clears it). The receiver-side federation bookkeeping
+    // (`_originatorInstanceId` et al.) is likewise unsettable from a body — it
+    // stands as stored, or is dropped on a create. See
+    // resources/originator-instance.ts.
+    await applyOriginatorInstanceId(record, priorById);
+    applyFederationBookkeeping(record, priorById);
     await (databases as any).flair.Memory.put(record);
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).
     noteMemoryUpsert(record);

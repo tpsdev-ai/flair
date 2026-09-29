@@ -62,9 +62,18 @@ export function stripUndeclaredMemoryAttributes(content: unknown): string[] {
  * so a whitelist alone does not stop forgery: a client could PUT a
  * `provenance` or an `instanceToken` that then reads as if the server stamped
  * it. Memory's REST write paths remove `instanceToken` and `provenance` from the
- * request body. `originatorInstanceId` is handled in #1965. `post()`/`put()` re-stamp `provenance` (via `buildProvenance`) and
- * `instanceToken` after the strip; the other writers strip and preserve the
+ * request body. `post()`/`put()` re-stamp `provenance` (via `buildProvenance`)
+ * and `instanceToken` after the strip; the other writers strip and preserve the
  * stored value.
+ *
+ * `originatorInstanceId` is NOT in this set (flair#1965): its write rule is
+ * create-vs-update — a CREATE stamps the local id, an UPDATE keeps the stored
+ * value — so it cannot simply be stripped and re-stamped here. It is handled by
+ * resources/originator-instance.ts, called from every Memory writer
+ * (post/put/patch/reindex). Leaving it out of this set also keeps the
+ * federation merge (resources/Federation.ts), which calls
+ * stripServerStampedFields on the merged Memory row, from deleting the
+ * originator's value.
  */
 export const SERVER_STAMPED_MEMORY_FIELDS = Object.freeze([
   "instanceToken",

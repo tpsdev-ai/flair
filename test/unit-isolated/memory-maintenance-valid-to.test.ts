@@ -81,7 +81,10 @@ mock.module("harper", () => ({
   } } },
 }));
 mock.module("../../resources/agent-auth.js", () => ({ isAdmin: async () => false }));
-mock.module("../../resources/bm25-index-service.js", () => ({ noteMemoryUpsert, noteMemoryDelete }));
+mock.module("../../resources/bm25-index-service.js", () => ({
+  noteMemoryUpsert, noteMemoryDelete,
+  bm25IndexInRetrievalPath: () => false,
+}));
 const { MemoryMaintenance } = await import("../../resources/MemoryMaintenance.ts");
 
 function seed(id: string, fields: Record<string, unknown> = {}): Row {

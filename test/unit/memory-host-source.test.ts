@@ -248,8 +248,15 @@ describe("A1' — cascade: delete leaves no pointer row", () => {
 // ─── A1'' item 1: the whitelist is MEASURED, so shipped attributes survive ────
 
 describe("A1'' item 1 — shipped attributes survive the guarded write", () => {
-  it("(w1) a full-row put keeps `type` and the three federation bookkeeping fields", async () => {
-    seedMemory({ id: "mem-w1", agentId: "agent-a" });
+  it("(w1) a full-row put keeps `type` and the STORED federation bookkeeping, and a client body cannot forge it", async () => {
+    seedMemory({
+      id: "mem-w1",
+      agentId: "agent-a",
+      type: "session",
+      _originatorInstanceId: "inst-orig",
+      _syncedFrom: "inst-peer",
+      _syncedAt: "2026-01-01T00:00:00.000Z",
+    });
     const m = makeMemory(agentCtx("agent-a"));
     await m.put({
       id: "mem-w1",
@@ -257,13 +264,15 @@ describe("A1'' item 1 — shipped attributes survive the guarded write", () => {
       content: "a short note",
       visibility: "shared",
       type: "session",
-      _originatorInstanceId: "inst-orig",
-      _syncedFrom: "inst-peer",
-      _syncedAt: "2026-01-01T00:00:00.000Z",
+      // A client body that tries to forge the receiver bookkeeping: it is
+      // dropped, and the STORED values stand (flair#1965 r2).
+      _originatorInstanceId: "FORGED",
+      _syncedFrom: "FORGED",
+      _syncedAt: "FORGED",
     });
     const stored: any = memoryStore.get("mem-w1");
     expect(stored.type).toBe("session"); // assertion: declared `type` kept
-    expect(stored._originatorInstanceId).toBe("inst-orig"); // assertion: federation bookkeeping kept
+    expect(stored._originatorInstanceId).toBe("inst-orig"); // assertion: stored bookkeeping kept, forged value ignored
     expect(stored._syncedFrom).toBe("inst-peer"); // assertion
     expect(stored._syncedAt).toBe("2026-01-01T00:00:00.000Z"); // assertion
   });
