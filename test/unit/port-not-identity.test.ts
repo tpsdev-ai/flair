@@ -68,7 +68,7 @@ describe("flair#917 — uninstall refuses to kill a PID that is not this instanc
     // launchctl shim — records invocations, does nothing
     writeFileSync(
       join(shimBin, "launchctl"),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\nexit 0\n`,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\n[ "$1" = print-disabled ] && printf 'disabled services = {\\n}\\n'\nexit 0\n`,
       { mode: 0o755 },
     );
   });
@@ -195,7 +195,7 @@ describe("flair#862 — probePort rejects non-200 responses; discoverPortFromPid
 
     writeFileSync(
       join(shimBin, "launchctl"),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\nexit 0\n`,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\n[ "$1" = print-disabled ] && printf 'disabled services = {\\n}\\n'\nexit 0\n`,
       { mode: 0o755 },
     );
   });
@@ -303,7 +303,7 @@ describe("flair#915 — the default install attribution gap is closed", () => {
 
     writeFileSync(
       join(shimBin, "launchctl"),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\nexit 0\n`,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\n[ "$1" = print-disabled ] && printf 'disabled services = {\\n}\\n'\nexit 0\n`,
       { mode: 0o755 },
     );
   });
@@ -420,7 +420,7 @@ describe("flair#819 — uninstall reads Harper's config instead of defaulting to
 
     writeFileSync(
       join(shimBin, "launchctl"),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\nexit 0\n`,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\n[ "$1" = print-disabled ] && printf 'disabled services = {\\n}\\n'\nexit 0\n`,
       { mode: 0o755 },
     );
   });

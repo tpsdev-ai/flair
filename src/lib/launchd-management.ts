@@ -45,7 +45,7 @@
  * extracted program/working-directory paths ever reach a message, and the
  * extractor below reads exactly those keys rather than returning the document.
  */
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { unescapeXml } from "./xml-escape.js";
 
 /**
@@ -207,6 +207,62 @@ export function diagnoseLaunchdPlistPaths(
     };
   }
 
+  return null;
+}
+
+/**
+ * Validate a plist's CONTENT before it is written or loaded (flair#2040) —
+ * the check that must pass before any command stops the running instance to
+ * put this plist in its place.
+ *
+ * `diagnoseLaunchdPlistPaths` reads a plist that is already on disk and words
+ * its finding as drift ("no longer exists"). This reads the document the caller
+ * is ABOUT to install and answers a stricter question: can launchd run it?
+ *
+ *   - every absolute ProgramArguments entry exists;
+ *   - ProgramArguments[0] — what launchd execs — is executable;
+ *   - for the pass-file shape (`<launcher> <admin-pass-file> <node> <harper>`),
+ *     the node binary the launcher execs is executable;
+ *   - WorkingDirectory is an existing directory;
+ *   - ROOTPATH (the data directory) is an existing directory.
+ *
+ * Returns one line naming the offending key and path, or null. Never returns
+ * plist content — only the extracted paths (the plist may name the pass file).
+ */
+export function checkLaunchdPlistBeforeLoad(
+  content: string,
+  deps: {
+    exists?: (p: string) => boolean;
+    isExecutable?: (p: string) => boolean;
+    isDirectory?: (p: string) => boolean;
+  } = {},
+): string | null {
+  const exists = deps.exists ?? existsSync;
+  const isExecutable = deps.isExecutable ?? ((p: string) => {
+    try { accessSync(p, constants.X_OK); return true; } catch { return false; }
+  });
+  const isDirectory = deps.isDirectory ?? ((p: string) => {
+    try { return statSync(p).isDirectory(); } catch { return false; }
+  });
+  const refs = readPlistProgramRefs("<content>", () => content);
+  if (!refs || refs.programArguments.length === 0) return "the plist has no ProgramArguments";
+  for (const arg of refs.programArguments) {
+    if (arg.startsWith("/") && !exists(arg)) return `ProgramArguments names ${arg}, which does not exist`;
+  }
+  const program = refs.programArguments[0];
+  if (!program.startsWith("/")) return `ProgramArguments[0] (${program}) is not an absolute path`;
+  if (!isExecutable(program)) return `ProgramArguments[0] (${program}) is not executable, so launchd cannot exec it`;
+  if (refs.programArguments.length >= 4 && refs.programArguments[0].endsWith(".sh")) {
+    const node = refs.programArguments[2];
+    if (node.startsWith("/") && !isExecutable(node)) return `the node binary the launcher execs (${node}) is not executable`;
+  }
+  const wd = refs.workingDirectory;
+  if (wd === null) return "the plist has no WorkingDirectory";
+  if (!isDirectory(wd)) return `WorkingDirectory ${wd} is not an existing directory`;
+  const root = content.match(/<key>ROOTPATH<\/key>\s*<string>([^<]*)<\/string>/);
+  if (!root) return "the plist has no ROOTPATH";
+  const rootPath = unescapeXml(root[1]);
+  if (!isDirectory(rootPath)) return `ROOTPATH ${rootPath} (the data directory) is not an existing directory`;
   return null;
 }
 
@@ -401,8 +457,18 @@ export type LaunchdManagementState =
   | "not-applicable"
   /** macOS, but no service is registered for this instance. Never was managed; not a degradation. */
   | "no-service"
-  /** A service is registered AND launchd is running this instance's process. */
+  /**
+   * A service is registered AND launchd is running this instance's process:
+   * launchd's pid and the IDENTIFIED serving pid are the same number.
+   */
   | "managed"
+  /**
+   * launchd is running the job, but the process serving this instance could
+   * not be identified (no live hdb.pid, no port listener found), so whether
+   * launchd serves it is UNKNOWN (flair#2040). Not an alarm — nothing shows it
+   * is detached — and never a success: see verifyLaunchdManagement.
+   */
+  | "unverified"
   /** A service is registered and launchd is NOT running this instance's process. */
   | "detached";
 
@@ -412,13 +478,41 @@ export interface LaunchdManagement {
   label?: string;
   /** One line of evidence for the verdict. Present for every state. */
   detail: string;
-  /** Commands that restore management. Present iff state === "detached". */
+  /** Commands that restore management. Present for "detached" (and "unverified"). */
   remedy?: string[];
+  /** launchd's pid for the job, when it reported one. */
+  launchdPid?: number | null;
+  /** The pid identified as serving this instance, or null when it could not be identified. */
+  servingPid?: number | null;
 }
 
 /** True when the instance is running outside the service manager that is registered to own it. */
 export function isDetached(m: LaunchdManagement): boolean {
   return m.state === "detached";
+}
+
+/**
+ * The STRICT verifier every success claim goes through (flair#2040): a
+ * launchd check mark from `flair start` or `flair init`, and `doctor --fix`'s
+ * "repaired". Verified ONLY when launchd reported a pid, a serving pid was
+ * IDENTIFIED, and they are the same number. An unknown serving pid is never
+ * verified — unknown evidence must not license a success claim.
+ *
+ * `assessLaunchdManagement` is the observer (status, warnings); this decides
+ * what may be claimed.
+ */
+export function verifyLaunchdManagement(
+  m: LaunchdManagement,
+): { verified: true; pid: number; detail: string } | { verified: false; detail: string; remedy?: string[] } {
+  if (
+    m.state === "managed" &&
+    typeof m.launchdPid === "number" &&
+    typeof m.servingPid === "number" &&
+    m.launchdPid === m.servingPid
+  ) {
+    return { verified: true, pid: m.launchdPid, detail: m.detail };
+  }
+  return { verified: false, detail: m.detail, remedy: m.remedy };
 }
 
 export interface AssessLaunchdManagementInput {
@@ -457,10 +551,11 @@ export interface AssessLaunchdManagementInput {
  *   - launchd reports a PID that is not the instance's PID ⇒ **detached**, and
  *     this is the exact shape the incident produced: launchd holds a job that
  *     is failing, while a directly-spawned process answers on the port.
- *   - launchd reports a PID and we cannot read the instance's own ⇒ **managed**.
- *     A live job under this instance's label is positive evidence; refusing to
- *     believe it because `hdb.pid` was unreadable would warn on healthy
- *     installs, which is its own defect.
+ *   - launchd reports a PID and we cannot identify the instance's own ⇒
+ *     **unverified** (flair#2040). Warning on it would alarm healthy installs,
+ *     which is its own defect; calling it managed would be a claim without
+ *     proof. It is neither: no warning, and no success claim
+ *     (verifyLaunchdManagement refuses it).
  *
  * A parent-process check is NOT used, and that is worth stating because it is
  * the obvious first idea: the direct-start fallback spawns `detached: true` and
@@ -522,10 +617,35 @@ export function assessLaunchdManagement(input: AssessLaunchdManagementInput): La
         `this instance is served by process ${instancePid}, but launchd's job ${label} is process ${job.pid} — ` +
         `the running instance is not the one launchd manages.${because}`,
       remedy,
+      launchdPid: job.pid,
+      servingPid: instancePid,
     };
   }
 
-  return { state: "managed", label, detail: `launchd job ${label} is running as process ${job.pid}` };
+  if (instancePid === null) {
+    // flair#2040: launchd runs SOMETHING, but nothing identifies the process
+    // serving this instance. Not detached (no evidence of that, and a warning
+    // on a healthy install trains operators to skip warnings) — and not
+    // managed either: an unknown serving pid is not proof.
+    return {
+      state: "unverified",
+      label,
+      detail:
+        `launchd job ${label} is running as process ${job.pid}, but the process serving this instance could not be ` +
+        "identified (no live hdb.pid, and no listener found on its port), so launchd management is NOT verified",
+      remedy: ["flair restart"],
+      launchdPid: job.pid,
+      servingPid: null,
+    };
+  }
+
+  return {
+    state: "managed",
+    label,
+    detail: `launchd job ${label} is running as process ${job.pid}`,
+    launchdPid: job.pid,
+    servingPid: instancePid,
+  };
 }
 
 /**

@@ -9,7 +9,13 @@
 import { Command } from "commander";
 import { DEFAULT_ADMIN_USER } from "../lib/auth-resolve.js";
 import { classifyDaemonState } from "../lib/daemon-liveness.js";
-import { diagnoseLaunchdPlistPaths, isDetached, renderDetachedWarning } from "../lib/launchd-management.js";
+import { diagnoseLaunchdPlistPaths, isDetached, renderDetachedWarning, verifyLaunchdManagement } from "../lib/launchd-management.js";
+import {
+  LaunchdValidationRefusal,
+  loadabilityAllowsAttempt,
+  renderDirectRunNotice,
+  renderStartLaunchdUnavailable,
+} from "../lib/launchd-domain-preflight.js";
 import { opsSocketPathRefusal } from "../lib/socket-path-limit.js";
 import { formatServingTreeLine, formatTreeAssessmentLines, type TreeAssessment } from "../lib/tree-divergence.js";
 import { execSync, spawn } from "node:child_process";
@@ -17,6 +23,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 export type ServiceCli = {
+  afterFailedLaunchdAttempt: (...args: any[]) => any;
   assessInstallTree: (...args: any[]) => any;
   buildDirectSpawnEnv: (...args: any[]) => any;
   closedDirectSpawnEnv: (...args: any[]) => any;
@@ -27,6 +34,8 @@ export type ServiceCli = {
   guardEngineNotBackwards: (...args: any[]) => any;
   harperBinNotFoundMessage: (...args: any[]) => any;
   harperSearchRoots: (...args: any[]) => any;
+  launchdLabel: (...args: any[]) => any;
+  observeLaunchdLoadability: (...args: any[]) => any;
   observeLaunchdManagement: (...args: any[]) => any;
   probeHealth: (...args: any[]) => any;
   readyOpsSocketPosture: (...args: any[]) => any;
@@ -51,6 +60,10 @@ let cli: ServiceCli;
 /** Bind the cli-locals this module depends on. */
 export function bindCli(fns: ServiceCli): void {
   cli = fns;
+}
+
+function afterFailedLaunchdAttempt(...args: any[]): any {
+  return cli.afterFailedLaunchdAttempt(...args);
 }
 
 function buildDirectSpawnEnv(...args: any[]): any {
@@ -113,6 +126,14 @@ function harperBinNotFoundMessage(...args: any[]): any {
 
 function harperSearchRoots(...args: any[]): any {
   return cli.harperSearchRoots(...args);
+}
+
+function launchdLabel(...args: any[]): any {
+  return cli.launchdLabel(...args);
+}
+
+function observeLaunchdLoadability(...args: any[]): any {
+  return cli.observeLaunchdLoadability(...args);
 }
 
 function observeLaunchdManagement(...args: any[]): any {
@@ -335,31 +356,71 @@ program
     }
 
     const platform = process.platform;
+    // Set when a launchd service is registered for this instance but this run
+    // could not start it under launchd — the direct start below then reports
+    // "running directly, NOT launchd-managed" instead of a plain success.
+    let launchdFellBack = false;
     if (platform === "darwin") {
       // resolveLaunchdLabel (flair#693) finds whichever label this data
       // dir is currently registered under (new instance-scoped, or a
       // pre-flair#693 legacy install) so the existsSync gate below is
       // accurate before we attempt anything.
-      const { plistPath } = resolveLaunchdLabel(dataDir);
+      const { plistPath, isLegacy } = resolveLaunchdLabel(dataDir);
       if (existsSync(plistPath)) {
-        try {
-          // flair#1022, same pre-flight as startFlairProcess: launchctl exits 0
-          // for a job it cannot exec, so a stale plist is only ever observable
-          // as a startup timeout unless the paths are checked first.
-          const stalePlist = diagnoseLaunchdPlistPaths(plistPath);
-          if (stalePlist) {
-            throw new Error(`${stalePlist.message} Fix it with: ${stalePlist.remedy.join(" && ")}`);
+        // flair#2040: preflight BEFORE the load — is the GUI domain reachable
+        // from this session, and is the job enabled there? Read-only. When it
+        // is not, say why (actor, state) and start directly.
+        const jobLabel = launchdLabel(dataDir);
+        const loadability = observeLaunchdLoadability(jobLabel);
+        if (!loadabilityAllowsAttempt(loadability)) {
+          console.error(renderStartLaunchdUnavailable("flair start", loadability));
+          launchdFellBack = true;
+        } else {
+          try {
+            // flair#1022, same pre-flight as startFlairProcess: launchctl exits 0
+            // for a job it cannot exec, so a stale plist is only ever observable
+            // as a startup timeout unless the paths are checked first.
+            // flair#2040: a validation refusal — nothing loaded or unloaded.
+            const stalePlist = diagnoseLaunchdPlistPaths(plistPath);
+            if (stalePlist) {
+              throw new LaunchdValidationRefusal(`${stalePlist.message} Fix it with: ${stalePlist.remedy.join(" && ")}`);
+            }
+            const { execSync } = await import("node:child_process");
+            // Targeted at gui/<uid> — the domain the preflight probed (flair#2040).
+            const { label, migrated } = ensureLaunchdServiceLoaded(dataDir, (cmd: string) => execSync(cmd, { stdio: "pipe" }));
+            await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
+            readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture on the freshly-created socket
+            stampEngineVersionIfRunning(dataDir); // flair#1047: stamp the store with the engine version
+            // flair#2040: the launchd check mark only after VERIFYING that
+            // launchd's pid IS the identified serving pid — a healthy port is
+            // not proof that launchd started what answers it, and an
+            // unidentified serving process is not proof either.
+            const managed = observeLaunchdManagement(dataDir, port);
+            const verdict = verifyLaunchdManagement(managed);
+            if (verdict.verified) {
+              // The migration's check mark too only after the strict verifier
+              // passed: moving a plist is not launchd running this instance.
+              if (migrated) console.log(`Migrated launchd service off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${label} ✓`);
+              console.log(`✅ Flair started (launchd-managed: ${verdict.detail})`);
+              return;
+            }
+            // Healthy, but not proven to be launchd's process: no launchd check
+            // mark, and no claim about what happens at the next reboot either.
+            console.error(`⚠️  Flair is running on port ${port}, but it is NOT verified as launchd-managed: ${managed.detail}`);
+            if (migrated) console.error(`   The launchd service was moved off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${label}.`);
+            if (managed.remedy?.length) console.error(`   Fix: ${managed.remedy.join(" && ")}`);
+            return;
+          } catch (err: any) {
+            // flair#2040: start directly below only when no job for this
+            // instance could start underneath the direct process. A failed LOAD
+            // is unloaded again and verified gone; a VALIDATION refusal loaded
+            // and unloaded nothing, so nothing is booted out — a loaded job (a
+            // legacy one, say) refuses the direct start instead.
+            const after = afterFailedLaunchdAttempt("flair start", jobLabel, isLegacy ? [jobLabel, LEGACY_LAUNCHD_LABEL] : [jobLabel], err);
+            for (const line of after.lines) console.error(line);
+            if (!after.directStart) process.exit(1);
+            launchdFellBack = true;
           }
-          const { execSync } = await import("node:child_process");
-          const { label, migrated } = ensureLaunchdServiceLoaded(dataDir, (cmd: string) => execSync(cmd, { stdio: "pipe" }));
-          if (migrated) console.log(`Migrated launchd service off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${label} ✓`);
-          await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
-          readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture on the freshly-created socket
-          stampEngineVersionIfRunning(dataDir); // flair#1047: stamp the store with the engine version
-          console.log("✅ Flair started (launchd)");
-          return;
-        } catch (err: any) {
-          console.error(`launchd start failed, falling back to direct start: ${err.message}`);
         }
       }
     }
@@ -404,7 +465,14 @@ program
       await waitForHealth(port, DEFAULT_ADMIN_USER, adminPass, STARTUP_TIMEOUT_MS);
       readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture on the freshly-created socket
       stampEngineVersionIfRunning(dataDir); // flair#1047: stamp the store with the engine version
-      console.log(`✅ Flair started on port ${port}`);
+      if (launchdFellBack) {
+        // flair#2040: a direct start that took launchd's place says so.
+        const [headline, ...rest] = renderDirectRunNotice(port, proc.pid ?? null);
+        console.log(headline);
+        for (const line of rest) console.error(line);
+      } else {
+        console.log(`✅ Flair started on port ${port}`);
+      }
     } catch {
       console.error("❌ Flair failed to start within timeout. Check logs in " + join(dataDir, "harper.log"));
       process.exit(1);

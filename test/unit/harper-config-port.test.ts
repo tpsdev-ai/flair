@@ -77,7 +77,7 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
     launchctlLog = join(tmpHome, "launchctl-invocations.log");
     writeFileSync(
       join(shimBin, "launchctl"),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\nexit 0\n`,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "$LAUNCHCTL_LOG"\n[ "$1" = print-disabled ] && printf 'disabled services = {\\n}\\n'\nexit 0\n`,
       { mode: 0o755 },
     );
     // flair#2062: on a systemd host, the doctor/snapshot paths here ask

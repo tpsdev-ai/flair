@@ -272,7 +272,11 @@ describe("check-darwin-gated-tests.mjs reads JUnit, not bun stdout (flair#1418)"
     expect(cleanVerdict.tests.length).toBeGreaterThanOrEqual(9);
     const expected = process.platform === "darwin" ? "pass" : "skip";
     expect(cleanVerdict.tests.every((t) => t.status === expected)).toBe(true);
-  }, 60_000);
+    // Budget: this case runs the WHOLE darwin inventory twice, so it scales
+    // with that inventory. At 6be6b907 it took ~50-55 s of a 60 s budget on
+    // macOS; flair#2040's command-level launchd suite (31 darwin-gated cases,
+    // ~24 s per run) pushes it past 60 s. The assertions are unchanged.
+  }, 180_000);
 
   test("a title bun never registers is absent under both environments", () => {
     // Inventory finds statement-level skipIf; bun does not register a test

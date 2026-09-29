@@ -78,8 +78,8 @@ function walkTestFiles(dir, out = []) {
     if (ent.name === "node_modules" || ent.name === "dist") continue;
     // flair#1581: real-Harper darwin integration (test/integration*) is a
     // dedicated macOS step. The #1012 inventory re-runs every inventoried
-    // file — including from darwin-gated-visibility's 60s runGate — so a
-    // multi-minute launchd boot must not live here.
+    // file — including twice from one darwin-gated-visibility case (180 s
+    // budget) — so a multi-minute launchd boot must not live here.
     if (
       ent.isDirectory() &&
       /^(integration|integration-isolated|integration-heavy|e2e|bench|compat|helpers|fixtures)/.test(ent.name)

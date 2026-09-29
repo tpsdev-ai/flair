@@ -216,7 +216,7 @@ extract_symptom() {
     return 0
   fi
   echo "::group::flair#1683 symptom excerpt (flair-upgrade.log)"
-  grep -nE "Restarting Flair|did not respond within|launchd start failed|Harper at port|Rolling back|rolled back|restart failed|post-restart verification failed" "$logfile" || echo "(no known symptom line found)"
+  grep -nE "Restarting Flair|did not respond within|launchd start failed|launchd could not start the job|launchd cannot start this instance|Harper at port|Rolling back|rolled back|restart failed|post-restart verification failed" "$logfile" || echo "(no known symptom line found)"
   echo "::endgroup::"
 }
 

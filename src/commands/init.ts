@@ -23,7 +23,7 @@ import { opsSocketPathRefusal } from "../lib/socket-path-limit.js";
 import * as render from "../render.js";
 import { rewriteFederationSchedulerRuntime } from "../federation/scheduler.js";
 import { preferVersionManagerAlias } from "../lib/node-alias-path.js";
-import { execSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
@@ -42,7 +42,6 @@ export type InitCli = {
   api: (...args: any[]) => any;
   b64url: (...args: any[]) => any;
   buildOperationsApiConfig: (...args: any[]) => any;
-  cleanupLegacyLaunchdPlist: (...args: any[]) => any;
   defaultDataDir: (...args: any[]) => any;
   defaultLaunchAgentsDir: (...args: any[]) => any;
   ensureFlairAgentRole: (...args: any[]) => any;
@@ -78,7 +77,7 @@ export type InitCli = {
   verifySemanticSearch: (...args: any[]) => any;
   waitForHealth: (...args: any[]) => any;
   writeDaemonSidecar: (...args: any[]) => any;
-  writeInitLaunchdPlist: (...args: any[]) => any;
+  registerInitLaunchdService: (...args: any[]) => any;
   MQTT_DISABLED_CONFIG: any;
   STARTUP_TIMEOUT_MS: any;
 };
@@ -100,10 +99,6 @@ function b64url(...args: any[]): any {
 
 function buildOperationsApiConfig(...args: any[]): any {
   return cli.buildOperationsApiConfig(...args);
-}
-
-function cleanupLegacyLaunchdPlist(...args: any[]): any {
-  return cli.cleanupLegacyLaunchdPlist(...args);
 }
 
 function defaultDataDir(...args: any[]): any {
@@ -254,12 +249,12 @@ function writeDaemonSidecar(...args: any[]): any {
   return cli.writeDaemonSidecar(...args);
 }
 
-function repointMainServiceUnit(...args: any[]): any {
-  return cli.repointMainServiceUnit(...args);
+function registerInitLaunchdService(...args: any[]): any {
+  return cli.registerInitLaunchdService(...args);
 }
 
-function writeInitLaunchdPlist(...args: any[]): any {
-  return cli.writeInitLaunchdPlist(...args);
+function repointMainServiceUnit(...args: any[]): any {
+  return cli.repointMainServiceUnit(...args);
 }
 
 export function register(program: Command): void {
@@ -935,8 +930,9 @@ program
         console.log(`Admin password saved to: ${adminPassPath}`);
       }
 
-      // Register launchd service on macOS so Harper survives reboots
-      // and `flair restart` / `flair stop` work via launchctl.
+      // Write this instance's launchd plist on macOS so launchd can own it
+      // (survive reboots; `flair restart` / `flair stop` via launchctl) — and
+      // report whether launchd ACTUALLY manages it (flair#2040).
       if (process.platform === "darwin") {
         const harperBinPath = harperBin();
         if (harperBinPath) {
@@ -944,20 +940,6 @@ program
           const plistDir = defaultLaunchAgentsDir();
           mkdirSync(plistDir, { recursive: true });
           const plistPath = launchdPlistPath(label, plistDir);
-
-          // flair#693 + flair#966: a pre-flair#693 install registered under
-          // the bare LEGACY_LAUNCHD_LABEL. init always writes fresh plist
-          // content below (it has the current ports/creds in hand), so
-          // migration here is just "clean up the old registration" —
-          // unload + remove it BEFORE writing the new one, so re-running
-          // init never leaves two services behind for this data dir.
-          //
-          // flair#966: the legacy plist is NOT scoped to this data dir —
-          // it is a single global label. cleanupLegacyLaunchdPlist reads
-          // ROOTPATH to establish ownership before touching it.
-          cleanupLegacyLaunchdPlist(dataDir, plistDir, (cmd: string) => {
-            execSync(cmd, { stdio: "pipe" });
-          });
 
           const opsSocket = join(dataDir, "operations-server");
           // authorizeLocal: false (flair#654) — same posture as the initial spawn
@@ -987,38 +969,46 @@ program
           // regenerated or downgraded to the inline shape; only its runtime paths
           // are re-pointed, when it is provably this instance's plist serving
           // another npm-global tree (flair#2034 — see src/lib/service-repoint.ts).
-          const outcome = await writeInitLaunchdPlist({
+          //
+          // flair#693 + flair#966 + flair#2040: a pre-flair#693 install
+          // registered under the bare LEGACY_LAUNCHD_LABEL is retired here, but
+          // only when ROOTPATH proves it is this data dir's — and when its job
+          // is the process SERVING this instance, retiring it stops Flair, so
+          // registerInitLaunchdService preflights the launchd domain and
+          // validates the replacement BEFORE unloading anything, loads and
+          // verifies the replacement, and restores the legacy job on failure.
+          //
+          // flair#2040: NEVER a check mark for a load that did not happen. The
+          // step reports "launchd-managed ✓" only when launchd is verified to
+          // run the process serving this instance; otherwise it says the plist
+          // is on disk and Flair runs directly, with the reason. The plist
+          // writer's own outcome (written / unchanged / re-pointed / not
+          // re-pointed, flair#2034) is reported in the same lines.
+          const launchdStep = await registerInitLaunchdService({
             dataDir,
-            plistPath,
-            label,
-            adminPass,
-            adminUser,
-            modelsDir,
-            execPath: preferVersionManagerAlias(process.execPath),
-            harperBinPath,
-            workingDirectory: flairPackageDir(),
-            httpPort: httpBind.bindValue,
-            opsNetworkPort: opsNetworkPortValue(opsBindHost, opsPort),
-            setConfig,
             port: httpPort,
+            plistDir,
+            write: {
+              dataDir,
+              plistPath,
+              label,
+              adminPass,
+              adminUser,
+              modelsDir,
+              execPath: preferVersionManagerAlias(process.execPath),
+              harperBinPath,
+              workingDirectory: flairPackageDir(),
+              httpPort: httpBind.bindValue,
+              opsNetworkPort: opsNetworkPortValue(opsBindHost, opsPort),
+              setConfig,
+              port: httpPort,
+            },
           });
-          if (outcome.kind === "refused") {
-            console.error(`Error: ${outcome.detail}`);
-            process.exit(1);
+          for (const line of launchdStep.lines as Array<{ stream: "out" | "err"; text: string }>) {
+            (line.stream === "err" ? console.error : console.log)(line.text);
           }
-          if (outcome.kind === "unchanged") {
-            console.log("Launchd service already managed — plist unchanged ✓");
-            // A deliberate node pin is never changed by init; say so, with the hand edit.
-            if (outcome.pinnedNode) console.log(`  ${outcome.pinnedNode}`);
-          } else if (outcome.kind === "repointed") {
-            // flair#2034 §2: only the runtime paths changed; the running
-            // process keeps its old tree until it is restarted.
-            console.log(`Launchd service re-pointed at this CLI's install tree ✓ — ${outcome.detail}`);
-            console.log("  It takes effect when launchd next starts the service: flair restart");
-          } else if (outcome.kind === "not-repointed") {
-            console.warn(`Launchd service left unchanged — ${outcome.detail}`);
-          } else {
-            console.log("Launchd service registered ✓");
+          if (launchdStep.kind === "refused" || launchdStep.kind === "down" || launchdStep.kind === "uncertain") {
+            process.exit(1);
           }
         }
       }

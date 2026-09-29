@@ -24,6 +24,22 @@ import { collectDeps } from "../../scripts/lib/check-dep-ages-collect.mjs";
 
 /* ─────────────────────────── Unit tests ───────────────────────────── */
 
+
+/** A registry that reports FIXTURE_VERSION with a PRESENT but unparseable time. */
+function unparseableRegistry(value: unknown = "not-a-timestamp") {
+  const requests: string[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(req) {
+      requests.push(new URL(req.url).pathname);
+      return Response.json({ time: { [FIXTURE_VERSION]: value } });
+    },
+  });
+  if (!server.port) setupFailure("fixture registry did not bind a port");
+  return { url: `http://127.0.0.1:${server.port}`, requests, stop: () => server.stop(true) };
+}
+
 describe("collectDeps", () => {
   const keepCurrent = new Set(["harper", "some-skip"]);
 
@@ -135,14 +151,14 @@ function writeFixtureRepo(root: string): string {
  * would block that server's event loop. The env is built explicitly (no
  * ambient FLAIR_* can change the policy, the keep-current list or the root).
  */
-async function runGate(script: string, extraEnv: Record<string, string>) {
+async function runGate(script: string, extraEnv: Record<string, string>, extraArgs: string[] = []) {
   if (!existsSync(script)) setupFailure(`gate script not found at ${script}`);
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? "",
     FLAIR_DEP_MIN_AGE_DAYS: MIN_AGE_DAYS,
     ...extraEnv,
   };
-  const proc = Bun.spawn(["node", script], {
+  const proc = Bun.spawn(["node", script, ...extraArgs], {
     env,
     stdout: "pipe",
     stderr: "pipe",
@@ -164,21 +180,6 @@ function freshRegistry() {
     fetch(req) {
       requests.push(new URL(req.url).pathname);
       return Response.json({ time: { [FIXTURE_VERSION]: new Date().toISOString() } });
-    },
-  });
-  if (!server.port) setupFailure("fixture registry did not bind a port");
-  return { url: `http://127.0.0.1:${server.port}`, requests, stop: () => server.stop(true) };
-}
-
-/** A registry that reports FIXTURE_VERSION with a PRESENT but unparseable time. */
-function unparseableRegistry(value: unknown = "not-a-timestamp") {
-  const requests: string[] = [];
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch(req) {
-      requests.push(new URL(req.url).pathname);
-      return Response.json({ time: { [FIXTURE_VERSION]: value } });
     },
   });
   if (!server.port) setupFailure("fixture registry did not bind a port");
@@ -234,6 +235,78 @@ describe("CLI fail-closed exit — too-fresh dep", () => {
       expect(output).toContain("Pinned production deps younger than the bake-time policy");
       expect(output).toContain(`${FIXTURE_DEP}@${FIXTURE_VERSION}`);
       expect(exitCode).toBe(1);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+});
+
+describe("CLI fail-closed exit — the CI gate refuses the fixture-root override", () => {
+  it("exits 2, naming the variable, when the CI invocation has the override set", async () => {
+    const root = writeFixtureRepo(join(scratch, "ci-override"));
+    const { exitCode, output } = await runGate(
+      CLI_SCRIPT,
+      // An unreachable registry keeps a RED run (main, which ignores --ci) off
+      // the real npm registry; the discriminating assertion is the message.
+      { FLAIR_CHECK_DEP_AGES_ROOT: root, FLAIR_NPM_REGISTRY: "http://127.0.0.1:1" },
+      ["--ci"],
+    );
+    expect(output).toContain("FLAIR_CHECK_DEP_AGES_ROOT");
+    expect(exitCode).toBe(2);
+  }, 30_000);
+
+  it("--ci without the override scans the real repository root", async () => {
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(
+        CLI_SCRIPT,
+        { FLAIR_NPM_REGISTRY: registry.url },
+        ["--ci"],
+      );
+      // It did NOT refuse ...
+      expect(output).not.toContain("Refusing to run");
+      // ... and it scanned the REAL root (several deps), not the one-dep fixture.
+      expect(registry.requests.length).toBeGreaterThan(1);
+      expect(registry.requests).not.toContain(`/${FIXTURE_DEP}`);
+      // The fixture registry serves only FIXTURE_VERSION, so the real deps have
+      // no publish time there and the gate fails closed (1 or 2).
+      expect([1, 2]).toContain(exitCode);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+
+  it("refuses an EMPTY override on the CI invocation, before reading or fetching", async () => {
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(
+        CLI_SCRIPT,
+        { FLAIR_CHECK_DEP_AGES_ROOT: "", FLAIR_NPM_REGISTRY: registry.url },
+        ["--ci"],
+      );
+      // A PRESENT-but-empty override is refused like any other.
+      expect(output).toContain("FLAIR_CHECK_DEP_AGES_ROOT");
+      expect(output).not.toContain("Checking"); // never started scanning
+      expect(registry.requests).toEqual([]); // no registry request
+      expect(exitCode).toBe(2);
+    } finally {
+      registry.stop();
+    }
+  }, 30_000);
+
+  it("refuses an unknown argument, before scanning", async () => {
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(
+        CLI_SCRIPT,
+        { FLAIR_NPM_REGISTRY: registry.url },
+        ["--c1"], // a typo of --ci
+      );
+      expect(output).toContain("--c1"); // names the offending argument
+      expect(output).toContain("--ci"); // ... and the accepted form
+      expect(output).not.toContain("Checking");
+      expect(registry.requests).toEqual([]);
+      expect(exitCode).toBe(2);
     } finally {
       registry.stop();
     }
