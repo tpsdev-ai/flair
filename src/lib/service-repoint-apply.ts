@@ -24,7 +24,8 @@
  *      location, or a `<unit>.d` directory beside the file — is refused.
  *   4. `flair restart` on Linux (restartOnLinux): a proven user unit is
  *      restarted through systemd and its new main process verified; a process
- *      any other systemd service owns is never stopped and respawned outside it.
+ *      that is the main process of any other systemd unit is never stopped and
+ *      respawned outside it.
  *
  * Every filesystem and service-manager call is injectable, so each branch is
  * driven by a test with no real launchd, systemd or operator file.
@@ -36,6 +37,7 @@ import {
   restartedUnitProblem,
   type ProvenServingTree,
   type ServingTree,
+  type SystemdManager,
   type SystemdUnitManagerState,
 } from "./tree-divergence.js";
 
@@ -270,6 +272,8 @@ export interface LinuxRestartDeps {
   pids: number[];
   procCgroup: (pid: number) => string;
   uid: number;
+  /** The MainPID a manager reports for a unit (0: no main process), or null when it could not be asked. */
+  unitMainPid: (unitName: string, manager: SystemdManager) => number | null;
   /** Run `systemctl <args>`; throws on failure. */
   systemctl: (args: string[]) => void;
   /** Wait until the instance answers again. */
@@ -288,12 +292,20 @@ export interface LinuxRestartDeps {
 /**
  * `flair restart` on Linux (see planLinuxRestart). A proven user unit is
  * restarted THROUGH systemd and its new main process must run from the unit's
- * WorkingDirectory; a process in any systemd service that is not that proven
- * unit is refused, never stopped and respawned outside its manager; only a
- * process no manager owns takes the direct path.
+ * WorkingDirectory; a process that is the main process (MainPID) of any other
+ * systemd unit is refused, never stopped and respawned outside its manager, and
+ * so is one whose cgroup or unit MainPID cannot be read. A process no unit
+ * supervises — none in its cgroup, or one whose MainPID is another process —
+ * takes the direct path.
  */
 export async function restartOnLinux(d: LinuxRestartDeps): Promise<"systemd" | "direct"> {
-  const plan = planLinuxRestart({ serving: d.serving, pids: d.pids, procCgroup: d.procCgroup, uid: d.uid });
+  const plan = planLinuxRestart({
+    serving: d.serving,
+    pids: d.pids,
+    procCgroup: d.procCgroup,
+    uid: d.uid,
+    unitMainPid: d.unitMainPid,
+  });
   if (plan.kind === "refuse") throw new Error(plan.detail);
   if (plan.kind === "direct") {
     await d.direct();

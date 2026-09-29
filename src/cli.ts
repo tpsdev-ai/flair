@@ -172,10 +172,12 @@ import {
 import {
   assessTreeDivergence,
   linuxUnitProbe,
+  mainPidFromShow,
   proveServingTree,
   systemdUnitStateFromShow,
   type LocalPidEvidence,
   type ServingTree,
+  type SystemdManager,
   type SystemdUnitManagerState,
   type TreeAssessment,
 } from "./lib/tree-divergence.js";
@@ -5382,22 +5384,32 @@ function realRepointDeps(): RepointDeps {
 }
 
 /**
- * `systemctl --user show` for a unit: MainPID, the file it loaded (FragmentPath),
- * every drop-in it applies (DropInPaths) and its WorkingDirectory. null when it
- * could not be read. Read-only and bounded; never throws.
+ * `systemctl show` for a unit — of this user's manager (`--user`) or the
+ * system's: MainPID, the file it loaded (FragmentPath), every drop-in it
+ * applies (DropInPaths) and its WorkingDirectory. null when it could not be
+ * read. Read-only and bounded; never throws.
  */
-function systemctlUserShow(unitName: string): string | null {
+function systemctlShow(unitName: string, manager: SystemdManager): string | null {
   const res = spawnSync(
     "systemctl",
-    ["--user", "show", "-p", "MainPID", "-p", "FragmentPath", "-p", "DropInPaths", "-p", "WorkingDirectory", "--", unitName],
+    [
+      ...(manager === "user" ? ["--user"] : []),
+      "show", "-p", "MainPID", "-p", "FragmentPath", "-p", "DropInPaths", "-p", "WorkingDirectory", "--", unitName,
+    ],
     { encoding: "utf-8", timeout: LAUNCHCTL_QUERY_TIMEOUT_MS },
   );
   return res.status === 0 ? String(res.stdout ?? "") : null;
 }
 
 function systemdUserUnitState(unitName: string): SystemdUnitManagerState | null {
-  const out = systemctlUserShow(unitName);
+  const out = systemctlShow(unitName, "user");
   return out === null ? null : systemdUnitStateFromShow(out);
+}
+
+/** The MainPID a manager reports for a unit (0: no main process), or null when it could not be asked. */
+function systemdUnitMainPid(unitName: string, manager: SystemdManager): number | null {
+  const out = systemctlShow(unitName, manager);
+  return out === null ? null : mainPidFromShow(out);
 }
 
 /** /proc/<pid>/cgroup, read directly. */
@@ -5455,7 +5467,7 @@ function resolveServingTree(dataDir: string, port: number, query: ServingTreeQue
     // against what systemd reports for it (MainPID, FragmentPath, drop-ins).
     ...linuxUnitProbe({
       readFile: (p) => readFileSync(p, "utf-8"),
-      systemctlShow: systemctlUserShow,
+      systemctlShow,
       uid: typeof process.getuid === "function" ? process.getuid() : -1,
       userUnitDir: userSystemdDir(),
     }),
@@ -6760,9 +6772,12 @@ async function restartFlair(port: number, dataDir: string): Promise<void> {
   // unit (found from the serving process's cgroup; its MainPID is that
   // process) is restarted THROUGH that unit, and the unit's new main process
   // must run from the unit's WorkingDirectory. The signal-and-respawn path
-  // below would leave the instance running outside the unit — so it is used
-  // only when no process it could stop runs in any systemd service; a process
-  // a service manager owns is refused with the systemctl command instead.
+  // below would leave a supervised instance running outside its unit — so it
+  // is refused, with the systemctl command, when a process it could stop is
+  // the MainPID of any other unit, or when its cgroup or that unit's MainPID
+  // cannot be read. A process that merely sits in some service's cgroup (a CI
+  // runner agent's child: the unit's MainPID is another process) was started
+  // directly and is restarted directly.
   if (process.platform === "linux") {
     const ev = localPidEvidence(dataDir, port);
     const how = await restartOnLinux({
@@ -6770,6 +6785,7 @@ async function restartFlair(port: number, dataDir: string): Promise<void> {
       pids: [...(ev.pidFile !== null ? [ev.pidFile] : []), ...(ev.listeners ?? [])],
       procCgroup: readProcCgroup,
       uid: typeof process.getuid === "function" ? process.getuid() : -1,
+      unitMainPid: systemdUnitMainPid,
       systemctl: (args) => {
         execFileSync("systemctl", args, { stdio: "pipe", timeout: args[1] === "restart" ? STARTUP_TIMEOUT_MS * 2 : 30_000 });
       },

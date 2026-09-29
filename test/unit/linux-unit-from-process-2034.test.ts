@@ -12,7 +12,15 @@
  * code path src/cli.ts uses — for the states before the re-point, after it
  * (restart pending) and after the restart. `restartOnLinux` is driven with a
  * fake systemctl: a proven unit is restarted through systemd and verified; a
- * process any other systemd service owns is refused, never respawned directly.
+ * process that is the main process of any other systemd unit is refused, never
+ * respawned directly.
+ *
+ * Round 7: a unit supervises a process only as its MainPID. A process that
+ * merely sits in some service's cgroup — a CI runner agent's child, the case
+ * that turned CI red — was started directly: restarted directly, and reported
+ * as started directly by status/doctor. A MainPID that cannot be read is
+ * refused with the command. The cgroup pattern is a fixed expression; the uids
+ * it captures are compared in code.
  */
 import { describe, test, expect } from "bun:test";
 import { resolve } from "node:path";
@@ -21,11 +29,15 @@ import {
   cgroupOwner,
   formatTreeAssessmentLines,
   linuxUnitProbe,
+  mainPidFromShow,
   planLinuxRestart,
   proveServingTree,
   treeAssessmentJson,
+  unitSupervision,
+  type CgroupOwner,
   type ServingTree,
   type ServingTreeProbe,
+  type SystemdManager,
   type SystemdUnitManagerState,
 } from "../../src/lib/tree-divergence.ts";
 import { restartOnLinux, type LinuxRestartDeps } from "../../src/lib/service-repoint-apply.ts";
@@ -42,6 +54,10 @@ const PID = 897724;
 const NEW_PID = 903400;
 const IN_UNIT = `0::/user.slice/user-${UID}.slice/user@${UID}.service/app.slice/${UNIT}\n`;
 const IN_SESSION = `0::/user.slice/user-${UID}.slice/session-c7.scope\n`;
+/** A directly started Harper on a hosted CI runner: inside the runner agent's service, not its main process. */
+const RUNNER_UNIT = "hosted-compute-agent.service";
+const IN_RUNNER = `0::/system.slice/${RUNNER_UNIT}\n`;
+const RUNNER_PID = 812;
 
 const unitFile = (tree: string) =>
   [
@@ -60,8 +76,18 @@ const unitFile = (tree: string) =>
 const show = (mainPid: number, wd: string, over: { fragment?: string; dropIns?: string } = {}) =>
   `MainPID=${mainPid}\nWorkingDirectory=${wd}\nActiveState=active\nFragmentPath=${over.fragment ?? FRAG}\nDropInPaths=${over.dropIns ?? ""}\n`;
 
-/** A host: which process serves, from which tree, in which cgroup, and what systemd says. */
-function host(o: { pid: number; runs: string; fileNames: string; showText: string | null; cgroup?: string }) {
+/**
+ * A host: which process serves, from which tree, in which cgroup, and what systemd says. `showText` is the user
+ * manager's answer for UNIT; `shows` answers any other unit, keyed `<manager>:<unit>` (absent: no answer).
+ */
+function host(o: {
+  pid: number;
+  runs: string;
+  fileNames: string;
+  showText: string | null;
+  cgroup?: string;
+  shows?: Record<string, string | null>;
+}) {
   const files: Record<string, string> = { [`/proc/${o.pid}/cgroup`]: o.cgroup ?? IN_UNIT, [FRAG]: unitFile(o.fileNames) };
   const calls: string[] = [];
   const probe: ServingTreeProbe = {
@@ -84,9 +110,10 @@ function host(o: { pid: number; runs: string; fileNames: string; showText: strin
         if (!(p in files)) throw new Error(`ENOENT ${p}`);
         return files[p]!;
       },
-      systemctlShow: (unit) => {
-        calls.push(`show ${unit}`);
-        return unit === UNIT ? o.showText : null;
+      systemctlShow: (unit, manager) => {
+        calls.push(manager === "user" ? `show ${unit}` : `show --${manager} ${unit}`);
+        if (manager === "user" && unit === UNIT) return o.showText;
+        return o.shows?.[`${manager}:${unit}`] ?? null;
       },
       uid: UID,
       userUnitDir: UNIT_DIR,
@@ -173,16 +200,81 @@ describe("the Linux unit is found from the running process, before and after the
     expect(cgroupOwner("0::/system.slice/flair.service", UID)).toMatchObject({ kind: "service", unit: "flair.service", user: false });
     expect(cgroupOwner("", UID).kind).toBe("unreadable");
   });
+
+  // The fixed pattern captures both uids and compares them with this user's in code. The table is literal, and its
+  // "user-service" column is what the round-6 expression (built from the uid) accepted for uid 1001: the same set.
+  const CGROUP_TABLE: ReadonlyArray<readonly [string, "user-service" | "service" | "none", string | null]> = [
+    ["/user.slice/user-1001.slice/user@1001.service/app.slice/flair-smoke.service", "user-service", "flair-smoke.service"],
+    ["/user.slice/user-1001.slice/user@1001.service/flair-smoke.service", "user-service", "flair-smoke.service"],
+    ["/user.slice/user-1001.slice/user@1001.service/app.slice/app-x.slice/flair-smoke.service", "user-service", "flair-smoke.service"],
+    ["/user.slice/user-1001.slice/user@1001.service/app.slice/flair@inst.service", "user-service", "flair@inst.service"],
+    ["/user.slice/user-1001.slice/user@1001.service/app.slice/app-flair\\x2dsmoke.service", "user-service", "app-flair\\x2dsmoke.service"],
+    ["/user.slice/user-1001.slice/user@1001.service/a:b_c.slice/x-1.service", "user-service", "x-1.service"],
+    // uid mismatch: another user's manager, or the two uids disagreeing
+    ["/user.slice/user-1002.slice/user@1002.service/app.slice/flair-smoke.service", "service", "flair-smoke.service"],
+    ["/user.slice/user-1001.slice/user@1002.service/app.slice/flair-smoke.service", "service", "flair-smoke.service"],
+    ["/user.slice/user-1002.slice/user@1001.service/app.slice/flair-smoke.service", "service", "flair-smoke.service"],
+    ["/user.slice/user-10011.slice/user@10011.service/app.slice/flair-smoke.service", "service", "flair-smoke.service"],
+    ["/user.slice/user-01001.slice/user@01001.service/app.slice/flair-smoke.service", "service", "flair-smoke.service"],
+    ["/user.slice/user-100.slice/user@100.service/app.slice/flair-smoke.service", "service", "flair-smoke.service"],
+    // not exactly a unit of this user's manager
+    ["/user.slice/user-1001.slice/user@1001.service/app.slice/flair-smoke.service/payload", "service", "flair-smoke.service"],
+    ["/user.slice/user-1001.slice/user@1001.service/app slice.slice/flair-smoke.service", "service", "flair-smoke.service"],
+    ["/user.slice/user-1001.slice/user@1001.service/app.slice/flair smoke.service", "service", "flair smoke.service"],
+    ["/user.slice/user-1001.slice/user@1001.service/app.scope/flair-smoke.service", "service", "flair-smoke.service"],
+    ["/user.slice/user-1001.slice/user@1001.service/app.slice/flair-smoke.service/", "service", "flair-smoke.service"],
+    ["user.slice/user-1001.slice/user@1001.service/app.slice/flair-smoke.service", "service", "flair-smoke.service"],
+    ["/system.slice/hosted-compute-agent.service", "service", "hosted-compute-agent.service"],
+    ["/system.slice/flair.service", "service", "flair.service"],
+    // no service
+    ["/user.slice/user-1001.slice/user@1001.service/app.slice/app-foo.scope", "none", null],
+    ["/user.slice/user-1001.slice/user@1001.service/init.scope", "none", null],
+    ["/user.slice/user-1001.slice/user@1001.service", "none", null],
+    ["/user.slice/user-1001.slice/session-c7.scope", "none", null],
+    ["/", "none", null],
+  ];
+  test("the fixed cgroup pattern accepts exactly the round-6 set (literal table, uid mismatches included)", () => {
+    for (const [path, kind, unit] of CGROUP_TABLE) {
+      const got = cgroupOwner(`0::${path}\n`, UID);
+      expect({ path, kind: got.kind, unit: "unit" in got ? got.unit : null }).toEqual({ path, kind, unit });
+    }
+    // The uids are compared, not merely present: the same path is another user's for another uid.
+    expect(cgroupOwner(`0::/user.slice/user-1002.slice/user@1002.service/app.slice/${UNIT}`, 1002).kind).toBe("user-service");
+    expect(cgroupOwner(IN_UNIT, 1002).kind).toBe("service");
+  });
+
+  test("status/doctor report a process that merely sits in a service's cgroup as started directly — the rule restart uses", () => {
+    const at = (show: string | null) =>
+      proveServingTree(
+        host({ pid: PID, runs: OLD, fileNames: OLD, showText: null, cgroup: IN_RUNNER, shows: { [`system:${RUNNER_UNIT}`]: show } }).probe,
+      );
+    const other = at(`MainPID=${RUNNER_PID}\nFragmentPath=/usr/lib/systemd/system/${RUNNER_UNIT}\nDropInPaths=\nWorkingDirectory=/\n`);
+    expect(other.kind).toBe("unknown");
+    if (other.kind === "unknown") {
+      expect(other.reason).toContain("started directly");
+      expect(other.reason).toContain(`main process is pid ${RUNNER_PID}`);
+    }
+    const main = at(`MainPID=${PID}\nFragmentPath=/usr/lib/systemd/system/${RUNNER_UNIT}\nDropInPaths=\nWorkingDirectory=/\n`);
+    expect(main.kind === "unknown" && main.reason).toContain(`is the main process of the systemd unit ${RUNNER_UNIT}`);
+    const unreadable = at(null);
+    expect(unreadable.kind === "unknown" && unreadable.reason).toContain("is not known");
+    // A user unit whose MainPID is another process: started directly too (not "owned").
+    const userOther = proveServingTree(host({ pid: PID, runs: OLD, fileNames: OLD, showText: show(12, OLD) }).probe);
+    expect(userOther.kind === "unknown" && userOther.reason).toContain("started directly");
+  });
 });
 
 describe("flair restart on Linux: through systemd for a proven unit, never around a manager", () => {
   function deps(o: {
     serving: ServingTree;
     cgroups?: Record<number, string>;
+    /** The MainPID each manager reports, keyed `<manager>:<unit>`; absent or null: it could not be asked. */
+    mainPids?: Record<string, number | null>;
     after?: SystemdUnitManagerState | null;
     cwd?: string | null;
-  }): LinuxRestartDeps & { calls: string[] } {
+  }): LinuxRestartDeps & { calls: string[]; asked: string[] } {
     const calls: string[] = [];
+    const asked: string[] = [];
     const d: LinuxRestartDeps = {
       serving: o.serving,
       pids: [PID],
@@ -192,6 +284,10 @@ describe("flair restart on Linux: through systemd for a proven unit, never aroun
         return t;
       },
       uid: UID,
+      unitMainPid: (unit: string, manager: SystemdManager) => {
+        asked.push(`${manager}:${unit}`);
+        return o.mainPids?.[`${manager}:${unit}`] ?? null;
+      },
       systemctl: (args) => {
         calls.push(`systemctl ${args.join(" ")}`);
       },
@@ -205,7 +301,7 @@ describe("flair restart on Linux: through systemd for a proven unit, never aroun
         calls.push("DIRECT stop+spawn");
       },
     };
-    return Object.assign(d, { calls });
+    return Object.assign(d, { calls, asked });
   }
   const afterRepoint = () => proveServingTree(host({ pid: PID, runs: OLD, fileNames: NEW, showText: show(PID, NEW) }).probe);
 
@@ -223,17 +319,89 @@ describe("flair restart on Linux: through systemd for a proven unit, never aroun
     await expect(restartOnLinux(deps({ serving: afterRepoint(), after: null }))).rejects.toThrow(/did not report/);
   });
 
-  test("a process in a user unit that could not be proven is REFUSED with the systemctl command — never stopped and respawned", async () => {
+  test("the MAIN process of a user unit that could not be proven is REFUSED with the systemctl command — never stopped and respawned", async () => {
     const serving: ServingTree = { kind: "unknown", reason: `systemd loads ${UNIT} from /etc/systemd/user/${UNIT}` };
-    const d = deps({ serving, cgroups: { [PID]: IN_UNIT } });
+    const d = deps({ serving, cgroups: { [PID]: IN_UNIT }, mainPids: { [`user:${UNIT}`]: PID } });
     await expect(restartOnLinux(d)).rejects.toThrow(`systemctl --user restart ${UNIT}`);
+    await expect(restartOnLinux(d)).rejects.toThrow(`pid ${PID} is the main process of the systemd unit ${UNIT}`);
     expect(d.calls).toEqual([]);
   });
 
-  test("a process in a system-level service is refused with the root systemctl command", async () => {
-    const d = deps({ serving: { kind: "unknown", reason: "system-level" }, cgroups: { [PID]: "0::/system.slice/flair.service\n" } });
+  test("the main process of a system-level service is refused with the root systemctl command", async () => {
+    const d = deps({
+      serving: { kind: "unknown", reason: "system-level" },
+      cgroups: { [PID]: "0::/system.slice/flair.service\n" },
+      mainPids: { "system:flair.service": PID },
+    });
     await expect(restartOnLinux(d)).rejects.toThrow("systemctl restart flair.service (as root)");
     expect(d.calls).toEqual([]);
+    expect(d.asked).toContain("system:flair.service");
+  });
+
+  test("a process INSIDE an unrelated service whose MainPID is another process (a CI runner agent's child) is restarted directly", async () => {
+    const h = host({
+      pid: PID,
+      runs: OLD,
+      fileNames: OLD,
+      showText: null,
+      cgroup: IN_RUNNER,
+      shows: { [`system:${RUNNER_UNIT}`]: `MainPID=${RUNNER_PID}\nFragmentPath=/usr/lib/systemd/system/${RUNNER_UNIT}\nDropInPaths=\nWorkingDirectory=/\n` },
+    });
+    const serving = proveServingTree(h.probe);
+    const d = deps({ serving, cgroups: { [PID]: IN_RUNNER }, mainPids: { [`system:${RUNNER_UNIT}`]: RUNNER_PID } });
+    expect(await restartOnLinux(d)).toBe("direct");
+    expect(d.calls).toEqual(["DIRECT stop+spawn"]);
+    expect(d.asked).toEqual([`system:${RUNNER_UNIT}`]);
+    // The same answer through the probe's own reader (the composition src/cli.ts uses).
+    expect(
+      planLinuxRestart({ serving, pids: [PID], procCgroup: () => IN_RUNNER, uid: UID, unitMainPid: h.probe.unitMainPid! }).kind,
+    ).toBe("direct");
+    // In this user's manager too: inside a user service (a multiplexer, a terminal) that is not its main process.
+    for (const cgroup of [
+      `0::/user.slice/user-${UID}.slice/user@${UID}.service/app.slice/tmux.service\n`,
+      `0::/user.slice/user-${UID}.slice/user@${UID}.service/app.slice/${UNIT}/payload\n`,
+    ]) {
+      const unit = cgroup.includes("tmux") ? "tmux.service" : UNIT;
+      const u = deps({ serving: { kind: "unknown", reason: "r" }, cgroups: { [PID]: cgroup }, mainPids: { [`user:${unit}`]: 4242 } });
+      expect(await restartOnLinux(u)).toBe("direct");
+      expect(u.asked).toEqual([`user:${unit}`]);
+    }
+  });
+
+  test("a unit whose MainPID cannot be learned is REFUSED with the named command — never guessed either way", async () => {
+    // systemd could not be asked
+    const sys = deps({ serving: { kind: "unknown", reason: "r" }, cgroups: { [PID]: IN_RUNNER } });
+    await expect(restartOnLinux(sys)).rejects.toThrow(`systemd did not report the MainPID of ${RUNNER_UNIT}`);
+    await expect(restartOnLinux(sys)).rejects.toThrow(`systemctl restart ${RUNNER_UNIT} (as root)`);
+    expect(sys.calls).toEqual([]);
+    // systemd reports no main process
+    const none = deps({ serving: { kind: "unknown", reason: "r" }, cgroups: { [PID]: IN_RUNNER }, mainPids: { [`system:${RUNNER_UNIT}`]: 0 } });
+    await expect(restartOnLinux(none)).rejects.toThrow(`systemd reports no main process for ${RUNNER_UNIT}`);
+    expect(none.calls).toEqual([]);
+    // a user unit whose MainPID could not be read
+    const user = deps({ serving: { kind: "unknown", reason: "r" }, cgroups: { [PID]: IN_UNIT } });
+    await expect(restartOnLinux(user)).rejects.toThrow(`systemctl --user restart ${UNIT}`);
+    expect(user.calls).toEqual([]);
+    // another user's manager is never asked
+    const other = deps({
+      serving: { kind: "unknown", reason: "r" },
+      cgroups: { [PID]: `0::/user.slice/user-1002.slice/user@1002.service/app.slice/${UNIT}\n` },
+      mainPids: { [`user:${UNIT}`]: 4242 },
+    });
+    await expect(restartOnLinux(other)).rejects.toThrow("another user's systemd manager");
+    expect(other.asked).toEqual([]);
+    expect(other.calls).toEqual([]);
+  });
+
+  test("unitSupervision and the MainPID parser", () => {
+    const sysOwner = cgroupOwner(IN_RUNNER, UID) as Extract<CgroupOwner, { kind: "service" }>;
+    expect(unitSupervision(PID, sysOwner, UID, () => PID)).toEqual({ kind: "main", unit: RUNNER_UNIT, manager: "system" });
+    expect(unitSupervision(PID, sysOwner, UID, () => RUNNER_PID)).toEqual({ kind: "other", unit: RUNNER_UNIT, mainPid: RUNNER_PID });
+    expect(unitSupervision(PID, sysOwner, UID, () => { throw new Error("no bus"); }).kind).toBe("unknown");
+    expect(unitSupervision(PID, sysOwner, UID, undefined).kind).toBe("unknown");
+    expect(mainPidFromShow("MainPID=812\nFragmentPath=/x\n")).toBe(812);
+    expect(mainPidFromShow("MainPID=0\n")).toBe(0);
+    for (const bad of ["", "FragmentPath=/x\n", "MainPID=\n", "MainPID=-1\n", "MainPID=12abc\n"]) expect(mainPidFromShow(bad)).toBeNull();
   });
 
   test("a process whose cgroup cannot be read is refused, not stopped", async () => {
@@ -249,6 +417,8 @@ describe("flair restart on Linux: through systemd for a proven unit, never aroun
   });
 
   test("planLinuxRestart: nothing running is the direct path (there is no process to stop)", () => {
-    expect(planLinuxRestart({ serving: { kind: "unknown", reason: "r" }, pids: [], procCgroup: () => IN_UNIT, uid: UID }).kind).toBe("direct");
+    expect(
+      planLinuxRestart({ serving: { kind: "unknown", reason: "r" }, pids: [], procCgroup: () => IN_UNIT, uid: UID, unitMainPid: () => null }).kind,
+    ).toBe("direct");
   });
 });

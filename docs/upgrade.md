@@ -161,9 +161,15 @@ reinstall; after a hand edit, `flair restart` brings the instance up under
 the edited unit (macOS reloads the plist; on Linux, when the unit is proven to
 run the instance, it reloads systemd, restarts through the unit and checks that
 the unit's new main process runs from its WorkingDirectory). On Linux,
-`flair restart` never stops a process that runs in a systemd service and starts
-it again outside that service: if the process is not the proven unit's, it
-refuses and names the `systemctl` command to use.
+`flair restart` never stops a process that a systemd unit supervises — one
+systemd reports as that unit's MainPID — and starts it again outside the unit:
+when it is not the proven unit, it refuses and names the `systemctl` command to
+use. It also refuses when flair cannot learn the MainPID of the unit the
+process's cgroup names (systemd cannot be asked, or reports no main process),
+naming the same command, and when the process's cgroup cannot be read at all.
+A process that only runs inside some service's cgroup without being its main
+process (a child of a CI runner agent, a terminal multiplexer or an ssh session
+service) was started directly, and `flair restart` restarts it directly.
 
 The federation-sync shim (`~/.flair/bin/flair-federation-sync`) is re-pointed
 the same way: only its exec line changes, the scheduler unit is never

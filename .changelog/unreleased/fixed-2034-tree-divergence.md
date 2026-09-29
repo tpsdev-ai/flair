@@ -86,9 +86,15 @@
   state. `flair restart` restarts through the proven systemd user unit on
   Linux (`systemctl --user restart`), checks that the unit's new main process
   runs from the unit's WorkingDirectory, and afterwards reports which tree
-  serves the instance. It never stops a process that runs in a systemd service
-  and starts it again outside that service: when such a process is not the
-  proven unit's, it refuses and names the `systemctl` command to use.
+  serves the instance. It never stops a process that a systemd unit
+  supervises (systemd reports it as the unit's MainPID) and starts it again
+  outside that unit: when that unit is not the proven one, or when flair
+  cannot learn the unit's MainPID (systemd cannot be asked, or reports no main
+  process), it refuses and names the `systemctl` command to use; it also
+  refuses when the process's cgroup cannot be read. A process that only runs
+  inside some service's cgroup without being its main process (a child of a
+  CI runner agent, for example) was started directly and is restarted
+  directly.
 
   `flair init` and `flair doctor --fix` also re-point the federation-sync shim
   when it runs another npm-global tree. Only the shim's exec line changes; the

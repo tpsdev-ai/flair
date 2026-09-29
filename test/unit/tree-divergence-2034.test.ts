@@ -160,8 +160,13 @@ describe("proveServingTree — Linux", () => {
     expect(s.unitTree).toBe(OLD_TREE);
   });
 
-  test("a system-level unit owns the serving process: unknown", () => {
-    const s = proveServingTree(linuxProbe({ procCgroup: () => "0::/system.slice/flair.service\n" }));
+  test("a system-level unit owns the serving process (it is the unit's MainPID): unknown", () => {
+    const s = proveServingTree(
+      linuxProbe({
+        procCgroup: () => "0::/system.slice/flair.service\n",
+        unitMainPid: (unit, manager) => (unit === "flair.service" && manager === "system" ? 77 : null),
+      }),
+    );
     expect(s.kind).toBe("unknown");
     if (s.kind === "unknown") expect(s.reason).toContain("system-level");
   });
