@@ -47,7 +47,7 @@ import {
   UNAUTH,
   NOT_FOUND,
 } from "./record-type-kit.js";
-import { isSemanticPatch, MEMORY_SEMANTIC_FIELDS } from "./provenance.js";
+import { isSemanticPatch, MEMORY_SEMANTIC_FIELDS, storedRowReadFailedResponse } from "./provenance.js";
 import { RECORD_TYPES } from "./record-types.js";
 import { attachTrust } from "./trust-block.js";
 import { recordCitations } from "./usage-recording.js";
@@ -1367,7 +1367,21 @@ export class Memory extends (databases as any).flair.Memory {
     // Skills are written via skill_store (→ Memory.post) or Memory.put; no
     // memory_patch tool exists and no internal path patches a skill row (hit-
     // tracking goes through table.put, not this override), so rejecting is safe.
-    const existingForSkill = (await Promise.resolve(super.get()).catch(() => null)) as any;
+    // flair#1960 r3: read the stored row STRICTLY. This read drives BOTH the
+    // skill-row check and the semantic-PATCH decision below. The previous
+    // `.catch(() => null)` turned a stored-row READ ERROR into "no stored row";
+    // isSemanticPatch returns false for `null`, so the patch fell through to
+    // `super.patch()` as a METADATA-ONLY write and kept a legacy stored blob —
+    // including a caller-chosen `verified.timestamp` — in place. A read error is
+    // not a missing row: without the stored record we cannot tell a semantic
+    // PATCH from a metadata-only one (nor whether the stored row is a skill), so
+    // fail closed and refuse rather than degrade to a blob-preserving decision.
+    let existingForSkill: any;
+    try {
+      existingForSkill = await super.get();
+    } catch {
+      return storedRowReadFailedResponse("Memory");
+    }
     const skillDenial = rejectSkillWritePath(content) ?? rejectSkillWritePath(existingForSkill);
     if (skillDenial) return skillDenial;
     // ── flair#1960 r2: a SEMANTIC patch re-stamps provenance ────────────────

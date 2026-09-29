@@ -59,8 +59,10 @@ function sanitizeClaim(value: unknown): string | undefined {
  *   The clock is an injectable `() => Date` (defaulting to the wall clock) so
  *   the "one read" contract is TESTABLE: a counting/advancing fake clock fails
  *   the test deterministically if a second read is ever added (flair#1960 r2 —
- *   comparing two wall-clock reads only catches a drift of >0 ms, which the
- *   test used to miss ~7 times in 10,000). Production callers never pass one.
+ *   comparing two wall-clock reads only catches a drift of >0 ms, and two reads
+ *   almost always land in the SAME millisecond, so the old equality-only test
+ *   CAUGHT a second read only ~7 times in 10,000 — it MISSED it the other
+ *   ~9,993). Production callers never pass one.
  * - The host pointer (`hostSource`) is NOT provenance (flair#1940 A5): it lives
  *   in its own `MemoryHostSource` table, is never part of this `{ v, verified,
  *   claimed }` blob, and is written on the Memory write path in the same
@@ -176,4 +178,26 @@ export function isSemanticPatch(content: any, existing: any, fields: readonly st
     if (content[field] !== existing[field]) return true;
   }
   return false;
+}
+
+/**
+ * The response a PATCH returns when its stored-row READ FAILS (flair#1960 r3).
+ *
+ * A read ERROR is not the same as "no stored row" (a `null`/`undefined`
+ * result). Both PATCH paths used to coalesce a thrown read into `null`; the
+ * semantic predicate then returns `false` for `null`, and the patch falls
+ * through to `super.patch()` as if it were a METADATA-ONLY write — which keeps
+ * a legacy stored blob (including a caller-chosen `verified.timestamp`) in
+ * place. Without the stored record there is no way to tell a semantic PATCH
+ * from a metadata-only one, so the only safe outcome is to REFUSE the write
+ * rather than fail open. 500: a server-side read fault, fail-closed.
+ */
+export function storedRowReadFailedResponse(table: "Memory" | "Relationship"): Response {
+  return new Response(
+    JSON.stringify({
+      error: "stored_row_read_failed",
+      message: `cannot read the stored ${table} row; refusing the write`,
+    }),
+    { status: 500, headers: { "content-type": "application/json" } },
+  );
 }

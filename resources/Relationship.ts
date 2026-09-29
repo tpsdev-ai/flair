@@ -15,7 +15,7 @@ import {
   UNAUTH,
 } from "./record-type-kit.js";
 import { stripServerStampedFields } from "./memory-declared-attributes.js";
-import { isSemanticPatch, RELATIONSHIP_SEMANTIC_FIELDS } from "./provenance.js";
+import { isSemanticPatch, RELATIONSHIP_SEMANTIC_FIELDS, storedRowReadFailedResponse } from "./provenance.js";
 import { RECORD_TYPES } from "./record-types.js";
 
 // Parameterized from RECORD_TYPES.Relationship (record-types slice 2,
@@ -147,8 +147,28 @@ export class Relationship extends (databases as any).flair.Relationship {
     // previously-stamped blob. Claim inputs are captured before the guard so a
     // `claimed.model`/`claimed.client` on the body is folded in like put().
     const claimInputs = { model: (content as any)?.model, claimedClient: (content as any)?.claimedClient };
+    // flair#718 authorship-provenance — `claimedClient` is a WRITE-BODY-ONLY
+    // passthrough, already folded into `provenance.claimed.client` by
+    // buildProvenance (below, on a semantic PATCH). Delete it before delegating
+    // so it is NEVER persisted as a top-level row field — the SAME contract as
+    // put(), which deletes it before the table write. Without this the PATCH
+    // body's `claimedClient` rode through `super.patch()` onto the row.
+    delete content.claimedClient;
     stripServerStampedFields(content);
-    const existing = (await Promise.resolve(super.get()).catch(() => null)) as any;
+    // flair#1960 r3: read the stored row STRICTLY. The previous
+    // `.catch(() => null)` turned a stored-row READ ERROR into "no stored row";
+    // isSemanticPatch returns false for `null`, so the patch fell through to
+    // `super.patch()` as a METADATA-ONLY write and kept a legacy stored blob —
+    // including a caller-chosen `verified.timestamp` — in place. A read error is
+    // not a missing row: without the stored record we cannot tell a semantic
+    // PATCH from a metadata-only one, so fail closed and refuse rather than
+    // degrade to a blob-preserving decision.
+    let existing: any;
+    try {
+      existing = await super.get();
+    } catch {
+      return storedRowReadFailedResponse("Relationship");
+    }
     if (isSemanticPatch(content, existing, RELATIONSHIP_SEMANTIC_FIELDS)) {
       const auth = await resolveAgentAuth((this as any).getContext?.());
       content.provenance = buildProvenance(auth, content.createdAt ?? existing?.createdAt, claimInputs);

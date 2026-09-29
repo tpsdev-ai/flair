@@ -15,7 +15,7 @@
  * doc comment for why that matters — bun runs test/unit/ in one process and
  * dynamic imports are cached by resolved path).
  */
-import { describe, it, expect, beforeEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, mock, spyOn } from "bun:test";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 
@@ -442,6 +442,72 @@ describe("flair#1960 r2 — Relationship.patch() derives provenance from the ser
     const stored = relationshipStore.get("rel-prov-patch-meta");
     expect(stored.confidence).toBe(0.4); // control: the patch landed
     expect(stored.provenance).toBe(legacy); // no semantic change ⇒ stored blob preserved, forged value never landed
+  });
+});
+
+// ─── flair#1960 r3 — Relationship.patch() fail-closed read + claimedClient strip ──
+describe("flair#1960 r3 — Relationship.patch() controls", () => {
+  it("a stored-row read ERROR refuses the PATCH (500) and never delegates to the by-id store write (super.patch)", async () => {
+    const legacy = JSON.stringify({ v: 1, verified: { agentId: "agent-1", timestamp: "2001-01-01T00:00:00.000Z" } });
+    relationshipStore.set("rel-readfail", {
+      id: "rel-readfail", agentId: "agent-1", subject: "nathan", predicate: "manages", object: "flint", provenance: legacy,
+    });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r.id = "rel-readfail";
+    // guardOwnerFieldImmutable swallows a read error (it catches internally);
+    // the stored-row read that drives the semantic-PATCH decision is the SECOND
+    // super.get(). Making every read fail therefore hits exactly that read —
+    // the one the old `.catch(() => null)` coerced to `null` (a metadata-only
+    // decision that kept the legacy stamp).
+    const getSpy = spyOn(BaseRelationship.prototype, "get").mockImplementation(async () => {
+      throw new Error("simulated stored-row read failure");
+    });
+    let superPatchCalls = 0;
+    const realPatch = BaseRelationship.prototype.patch;
+    const patchSpy = spyOn(BaseRelationship.prototype, "patch").mockImplementation(function (this: any, content: any) {
+      superPatchCalls += 1;
+      return realPatch.call(this, content);
+    });
+    try {
+      const res = await r.patch({ subject: "nathan-renamed" });
+      expect(superPatchCalls).toBe(0); // never delegated to the blob-preserving by-id store write
+      expect(res instanceof Response).toBe(true);
+      expect((res as Response).status).toBe(500);
+      await expect((res as Response).json()).resolves.toMatchObject({ error: "stored_row_read_failed" });
+      expect(relationshipStore.get("rel-readfail").subject).toBe("nathan"); // nothing landed
+      expect(relationshipStore.get("rel-readfail").provenance).toBe(legacy);
+    } finally {
+      getSpy.mockRestore();
+      patchSpy.mockRestore();
+    }
+  });
+
+  it("a semantic PATCH body's claimedClient is folded into claimed.client and NEVER persisted as a row field", async () => {
+    relationshipStore.set("rel-cc-sem", {
+      id: "rel-cc-sem", agentId: "agent-1", subject: "a", predicate: "b", object: "c", createdAt: "2001-01-01T00:00:00.000Z",
+    });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r.id = "rel-cc-sem";
+    await r.patch({ subject: "a-renamed", claimedClient: "codex" }); // semantic change
+    const stored = relationshipStore.get("rel-cc-sem");
+    expect(stored.subject).toBe("a-renamed"); // control: the patch landed
+    expect("claimedClient" in stored).toBe(false); // never a top-level row field
+    const prov = JSON.parse(stored.provenance);
+    expect(prov.claimed.client).toBe("codex"); // folded into provenance only
+  });
+
+  it("a metadata-only PATCH body's claimedClient is never persisted as a row field either", async () => {
+    const legacy = JSON.stringify({ v: 1, verified: { agentId: "agent-1", timestamp: "2001-01-01T00:00:00.000Z" } });
+    relationshipStore.set("rel-cc-meta", {
+      id: "rel-cc-meta", agentId: "agent-1", subject: "a", predicate: "b", object: "c", confidence: 1.0, provenance: legacy,
+    });
+    const r: any = makeRelationship(agentCtx("agent-1"));
+    r.id = "rel-cc-meta";
+    await r.patch({ confidence: 0.4, claimedClient: "codex" }); // metadata-only
+    const stored = relationshipStore.get("rel-cc-meta");
+    expect(stored.confidence).toBe(0.4); // control: the patch landed
+    expect("claimedClient" in stored).toBe(false); // never a top-level row field
+    expect(stored.provenance).toBe(legacy); // no semantic change ⇒ stored blob preserved
   });
 });
 

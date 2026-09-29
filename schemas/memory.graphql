@@ -166,9 +166,9 @@ type Relationship @table(database: "flair") {
                                     # Memory.provenance above — { v, verified: { agentId, timestamp, receivedAt },
                                     # claimed?: { createdAt, model, client } } — via the shared
                                     # resources/provenance.ts buildProvenance(), never a
-                                    # Relationship-specific format. Every field under `verified` is
-                                    # server-derived (the resolved auth verdict + one server clock read),
-                                    # never client-writable. Nullable by design — pre-existing rows read back
+                                    # Relationship-specific format. On a newly stamped local write, every
+                                    # field under `verified` is server-derived (the resolved auth verdict
+                                    # + one server clock read), never client-writable. Nullable by design — pre-existing rows read back
                                     # provenance = null, unchanged behavior (migration-equivalence gate, same
                                     # discipline as Memory.usageCount/flair#684). Stamped server-side in
                                     # resources/Relationship.ts's put() (and re-stamped on a semantic patch());

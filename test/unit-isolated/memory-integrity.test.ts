@@ -1617,6 +1617,57 @@ describe("flair#1960 r2 — Memory.patch() re-stamps provenance on a semantic wr
   });
 });
 
+describe("flair#1960 r3 — Memory.patch() refuses a PATCH when the stored-row READ fails", () => {
+  // The pre-fix control coalesced a thrown stored-row read into `null`
+  // (`.catch(() => null)`); `isSemanticPatch` returns false for `null`, so the
+  // patch fell through to `super.patch()` as a METADATA-ONLY write and kept the
+  // legacy stored blob. A read ERROR is not "no stored row" — the PATCH must be
+  // refused, never degraded to a blob-preserving decision.
+  it("a stored-row read ERROR refuses the PATCH (500) and never delegates to the by-id store write (super.patch)", async () => {
+    const legacy = JSON.stringify({ v: 1, verified: { agentId: "agent-1", timestamp: "2001-01-01T00:00:00.000Z" } });
+    memoryStore.set("prov-patch-readfail", {
+      id: "prov-patch-readfail",
+      agentId: "agent-1",
+      content: "original body",
+      durability: "standard",
+      provenance: legacy,
+    });
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m.id = "prov-patch-readfail";
+    // The read that drives the semantic-PATCH decision is the THIRD super.get()
+    // in patch(): (1) guardAuthorityFields, (2) guardOwnerFieldImmutable,
+    // (3) the semantic read (no visibility/durability branch for this body).
+    // The guards' reads succeed; only the semantic read fails — the intermittent
+    // case the old `.catch(() => null)` swallowed.
+    const realGet = BaseMemory.prototype.get;
+    let getCalls = 0;
+    const getSpy = spyOn(BaseMemory.prototype, "get").mockImplementation(async function (this: any, target: any) {
+      getCalls += 1;
+      if (getCalls === 3) throw new Error("simulated stored-row read failure");
+      return realGet.call(this, target);
+    });
+    let superPatchCalls = 0;
+    const realPatch = BaseMemory.prototype.patch;
+    const patchSpy = spyOn(BaseMemory.prototype, "patch").mockImplementation(function (this: any, content: any) {
+      superPatchCalls += 1;
+      return realPatch.call(this, content);
+    });
+    try {
+      const res = await m.patch({ content: "a genuinely new body" });
+      expect(getCalls).toBe(3); // the stored-row read really was attempted
+      expect(superPatchCalls).toBe(0); // never delegated to the blob-preserving by-id store write
+      expect(res instanceof Response).toBe(true);
+      expect((res as Response).status).toBe(500);
+      await expect((res as Response).json()).resolves.toMatchObject({ error: "stored_row_read_failed" });
+      expect(memoryStore.get("prov-patch-readfail").content).toBe("original body"); // nothing landed
+      expect(memoryStore.get("prov-patch-readfail").provenance).toBe(legacy);
+    } finally {
+      getSpy.mockRestore();
+      patchSpy.mockRestore();
+    }
+  });
+});
+
 describe("memory-provenance slice 1 — migration-equivalence (no-provenance-field memories)", () => {
   it("an existing/old row with no provenance field reads back fine — provenance is purely additive, not required for reads", async () => {
     memoryStore.set("legacy-no-prov", { id: "legacy-no-prov", agentId: "agent-owner", content: "pre-migration content, no provenance field at all." });
