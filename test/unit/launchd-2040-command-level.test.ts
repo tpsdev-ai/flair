@@ -64,11 +64,23 @@ const http = createServer((_q, r) => {
 });
 // A real Harper takes seconds to boot: STUB_START_DELAY_MS holds the bind and
 // the hdb.pid write back while the process itself is already running.
-const serve = () => http.listen(port, "127.0.0.1", () => {
-  if (!process.env.STUB_NO_PIDFILE) writeFileSync(join(root, "hdb.pid"), String(process.pid));
-  writeFileSync(join(root, "stub-port"), String(http.address().port));
+// STUB_PIDFILE_FIRST writes hdb.pid AND opens the operations socket at once,
+// BEFORE the (delayed) HTTP bind: a process whose pid file names it, and whose
+// ops socket is up, while its HTTP port still refuses.
+const openOpsSocket = () => {
   try { rmSync(join(root, "operations-server"), { force: true }); } catch {}
   createNetServer((s) => s.end()).listen(join(root, "operations-server"));
+};
+if (process.env.STUB_PIDFILE_FIRST) {
+  writeFileSync(join(root, "hdb.pid"), String(process.pid));
+  openOpsSocket();
+  appendFileSync(join(root, "stub-events.log"), "pidfile\\n");
+}
+const serve = () => http.listen(port, "127.0.0.1", () => {
+  if (process.env.STUB_PIDFILE_FIRST) appendFileSync(join(root, "stub-events.log"), "bound\\n");
+  if (!process.env.STUB_NO_PIDFILE) writeFileSync(join(root, "hdb.pid"), String(process.pid));
+  writeFileSync(join(root, "stub-port"), String(http.address().port));
+  if (!process.env.STUB_PIDFILE_FIRST) openOpsSocket();
 });
 const startDelayMs = Number(process.env.STUB_START_DELAY_MS ?? 0);
 if (startDelayMs > 0) setTimeout(serve, startDelayMs); else serve();
@@ -92,6 +104,8 @@ process.on("SIGTERM", () => {
 //   stub-no-pidfile       the process a `bootstrap` starts writes no hdb.pid
 //   stub-start-delay      the process a `bootstrap` starts runs at once, but binds its
 //                         port and writes hdb.pid only after this many ms (a real boot)
+//   stub-pidfile-first    ... and writes hdb.pid and opens its ops socket at once, BEFORE
+//                         that delayed HTTP bind
 //   print-fail/<l>        `print gui/<uid>/<l>` fails (5): presence UNKNOWN
 const SHIM = `#!/bin/sh
 printf '%s\\n' "$*" >> "$SHIM_LOG"
@@ -142,6 +156,7 @@ case "$verb" in
     [ -f "$S/bootstrap-no-spawn/$l" ] && exit 0
     if [ -f "$S/stub-no-pidfile" ]; then export STUB_NO_PIDFILE=1; fi
     if [ -f "$S/stub-start-delay" ]; then export STUB_START_DELAY_MS="$(cat "$S/stub-start-delay")"; fi
+    if [ -f "$S/stub-pidfile-first" ]; then export STUB_PIDFILE_FIRST=1; fi
     ROOTPATH="$STUB_ROOT" HTTP_PORT="$STUB_PORT" "$STUB_RUNTIME" "$STUB_HARPER" run . >/dev/null 2>&1 </dev/null &
     echo $! > "$S/pid/$l"
     exit 0 ;;
@@ -216,12 +231,23 @@ function setupFixture(port: number): Fixture {
   writeFileSync(
     join(probe, "drive.ts"),
     [
-      `import { repairLaunchdManagement, registerInitLaunchdService } from "./src/cli.ts";`,
+      `import { repairLaunchdManagement, registerInitLaunchdService, startFlairProcess } from "./src/cli.ts";`,
       `const [what, arg] = process.argv.slice(2);`,
       `const input = JSON.parse(arg);`,
-      `const r = what === "repair"`,
-      `  ? await repairLaunchdManagement(input.dataDir, input.port)`,
-      `  : await registerInitLaunchdService(input);`,
+      `let r;`,
+      `if (what === "repair") r = await repairLaunchdManagement(input.dataDir, input.port);`,
+      `else if (what === "init") r = await registerInitLaunchdService(input);`,
+      // The start leg of restart / upgrade / snapshot, without their stop leg.
+      `else {`,
+      `  try { await startFlairProcess(input.port, input.dataDir); r = { started: true }; }`,
+      `  catch (err) { r = { started: false, error: String(err?.message ?? err) }; }`,
+      `}`,
+      // Did the port serve at the moment the executor returned?
+      `if (input.probeServingAtReturn) {`,
+      `  let ok = false;`,
+      `  try { ok = (await fetch("http://127.0.0.1:" + input.port + "/Health", { signal: AbortSignal.timeout(1000) })).ok; } catch {}`,
+      `  console.log("SERVING_AT_RETURN " + ok);`,
+      `}`,
       `console.log("RESULT " + JSON.stringify(r));`,
       `process.exit(0);`,
     ].join("\n"),
@@ -336,7 +362,7 @@ function passFilePlist(label: string): string {
   });
 }
 
-async function drive(what: "repair" | "init", input: unknown): Promise<{ result: any; stdout: string; stderr: string }> {
+async function drive(what: "repair" | "init" | "startleg", input: unknown): Promise<{ result: any; stdout: string; stderr: string }> {
   const proc = Bun.spawn([process.execPath, join(fx.probe, "drive.ts"), what, JSON.stringify(input)], {
     cwd: fx.probe,
     env: childEnv(),
@@ -1438,6 +1464,164 @@ describe("flair#2040 r6 — doctor --fix waits for the job it loaded to START be
       expect(await healthy()).toBe(true);
       // The direct stub and launchd's job only: no direct restart by a restore.
       expect(stubStarts()).toEqual([directPid, managedPid]);
+    },
+    90_000,
+  );
+});
+
+// ─── round 7: a validation refusal never unloads a loaded legacy job ───────
+//
+// Both start paths — `flair start`, and startFlairProcess (the start leg of
+// restart / upgrade / snapshot, driven here without their stop leg) — used to
+// answer ANY failed launchd attempt by booting out every job for the instance,
+// the legacy one included. A plist that fails validation loaded nothing and
+// unloaded nothing, so a loaded (idle) legacy job was then booted out by the
+// failure handler of a check that had refused to touch it.
+
+describe("flair#2040 r7 — a failed validation leaves a loaded legacy job and both plists untouched (both start paths)", () => {
+  function legacyPlistPath(): string {
+    return launchdPlistPath(LEGACY_LAUNCHD_LABEL, fx.agentsDir);
+  }
+
+  /** A malformed legacy plist that still carries its Label; `loaded` marks its job loaded and idle (no pid). */
+  function arrangeMalformedLegacy(loaded: boolean): string {
+    const malformed = passFilePlist(LEGACY_LAUNCHD_LABEL).replace("</array>", "");
+    expect(malformed).toContain(`<key>Label</key><string>${LEGACY_LAUNCHD_LABEL}</string>`);
+    expect(malformed).not.toContain("</array>");
+    writeFileSync(legacyPlistPath(), malformed);
+    if (loaded) markLoaded(LEGACY_LAUNCHD_LABEL, null);
+    return malformed;
+  }
+
+  function expectUntouched(malformed: string): void {
+    // Zero launchctl calls that change launchd's state ...
+    expect(mutatingCalls()).toEqual([]);
+    // ... the legacy plist byte-for-byte, no replacement written ...
+    expect(readFileSync(legacyPlistPath(), "utf-8")).toBe(malformed);
+    expect(existsSync(fx.plistPath)).toBe(false);
+  }
+
+  test.skipIf(!isDarwin)(
+    "(e10) `flair start`: LOADED-IDLE legacy job + malformed replacement -> refused (exit 1), zero mutating calls, the legacy job still loaded, nothing started, the bootout remedy named",
+    async () => {
+      const malformed = arrangeMalformedLegacy(true);
+
+      const { stdout, stderr, exitCode } = await flairStart();
+
+      expect(exitCode).toBe(1);
+      expect(stderr).toContain(`flair start: did not load the launchd job ${fx.label}`);
+      expect(stderr).toContain("plutil -lint rejected the plist");
+      expect(stderr).toContain(`${GUI}/${LEGACY_LAUNCHD_LABEL} is loaded`);
+      expect(stderr).toContain("Flair was NOT started directly");
+      expect(stderr).toContain(`launchctl bootout ${GUI}/${LEGACY_LAUNCHD_LABEL}`);
+      expect(stderr).not.toContain("unloaded again");
+      expectUntouched(malformed);
+      // The job was READ (a presence probe), never booted out.
+      expect(shimLines()).toContain(`print ${GUI}/${LEGACY_LAUNCHD_LABEL}`);
+      expect(existsSync(join(fx.state, "loaded", LEGACY_LAUNCHD_LABEL))).toBe(true);
+      expect(stubStarts()).toEqual([]);
+      expect(await healthy()).toBe(false);
+      expect(`${stdout}\n${stderr}`).not.toContain("✓");
+      expect(stdout).not.toContain("Flair started");
+    },
+    90_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(f2) start leg (startFlairProcess): LOADED-IDLE legacy job + malformed replacement -> throws, zero mutating calls, the legacy job still loaded, nothing started",
+    async () => {
+      const malformed = arrangeMalformedLegacy(true);
+
+      const { result, stdout } = await drive("startleg", { dataDir: fx.dataDir, port: fx.port });
+
+      expect(result.started).toBe(false); // whole result printed on failure
+      expect(result.error).toContain(`flair: did not load the launchd job ${fx.label}`);
+      expect(result.error).toContain("plutil -lint rejected the plist");
+      expect(result.error).toContain(`${GUI}/${LEGACY_LAUNCHD_LABEL} is loaded`);
+      expect(result.error).toContain("Flair was NOT started directly");
+      expect(result.error).toContain(`launchctl bootout ${GUI}/${LEGACY_LAUNCHD_LABEL}`);
+      expectUntouched(malformed);
+      expect(shimLines()).toContain(`print ${GUI}/${LEGACY_LAUNCHD_LABEL}`);
+      expect(existsSync(join(fx.state, "loaded", LEGACY_LAUNCHD_LABEL))).toBe(true);
+      expect(stubStarts()).toEqual([]);
+      expect(await healthy()).toBe(false);
+      expect(stdout).not.toContain("✓");
+    },
+    90_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(f3) POSITIVE CONTROL, start leg: the same malformed replacement with NO job loaded -> jobs verified absent by read-only probes, zero mutating calls, Flair started directly",
+    async () => {
+      const malformed = arrangeMalformedLegacy(false);
+
+      const { result, stderr } = await drive("startleg", { dataDir: fx.dataDir, port: fx.port });
+
+      expect(result.started).toBe(true); // whole result printed on failure
+      expect(stderr).toContain(`flair: did not load the launchd job ${fx.label}`);
+      expect(stderr).toContain("plutil -lint rejected the plist");
+      expect(stderr).toContain("(verified absent); starting Flair directly instead");
+      expectUntouched(malformed);
+      // The absence was READ for both labels before the direct start.
+      expect(shimLines()).toContain(`print ${GUI}/${fx.label}`);
+      expect(shimLines()).toContain(`print ${GUI}/${LEGACY_LAUNCHD_LABEL}`);
+      expect(await healthy()).toBe(true);
+    },
+    90_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(e11) `flair start`: a stale plist (missing launcher) whose job is LOADED and idle -> refused (exit 1), zero mutating calls, the plist unchanged, nothing started",
+    async () => {
+      const stale = passFilePlist(fx.label).replace(
+        join(fx.probe, "templates", "launchd", "start-flair-with-admin-pass.sh"),
+        join(fx.home, "gone", "start-flair-with-admin-pass.sh"),
+      );
+      expect(stale).toContain(join(fx.home, "gone"));
+      writeFileSync(fx.plistPath, stale);
+      markLoaded(fx.label, null);
+
+      const { stdout, stderr, exitCode } = await flairStart();
+
+      expect(exitCode).toBe(1);
+      expect(stderr).toContain(`flair start: did not load the launchd job ${fx.label}`);
+      expect(stderr).toContain("which no longer exists");
+      expect(stderr).toContain(`${GUI}/${fx.label} is loaded`);
+      expect(stderr).toContain("Flair was NOT started directly");
+      expect(mutatingCalls()).toEqual([]);
+      expect(readFileSync(fx.plistPath, "utf-8")).toBe(stale);
+      expect(existsSync(join(fx.state, "loaded", fx.label))).toBe(true);
+      expect(stubStarts()).toEqual([]);
+      expect(stdout).not.toContain("Flair started");
+    },
+    90_000,
+  );
+});
+
+describe("flair#2040 r7 — doctor --fix: a pid file is not a serving port", () => {
+  test.skipIf(!isDarwin)(
+    "(r7a) regenerate: the job writes hdb.pid AT ONCE and binds 1.5 s later -> 'repaired' only once the port serves",
+    async () => {
+      writeFileSync(join(fx.state, "stub-start-delay"), "1500");
+      writeFileSync(join(fx.state, "stub-pidfile-first"), "");
+
+      const run = await drive("repair", { dataDir: fx.dataDir, port: fx.port, probeServingAtReturn: true });
+
+      await explainOnFailure(run, async () => {
+        expect(run.result).toMatchObject({ kind: "repaired" });
+        // The fixture really was pid-file-before-bind ...
+        expect(readFileSync(join(fx.dataDir, "stub-events.log"), "utf-8").split("\n").filter(Boolean)).toEqual(["pidfile", "bound"]);
+        // ... and doctor returned 'repaired' only when the port was serving
+        // (the ops socket was up from the start, so nothing else held it back).
+        expect(run.stdout).toContain("SERVING_AT_RETURN true");
+        const managedPid = Number(readFileSync(join(fx.state, "pid", fx.label), "utf-8"));
+        expect(run.result.detail).toContain(`is running as process ${managedPid}`);
+        expect(hdbPid()).toBe(managedPid);
+        // Loaded once, never booted out after the load.
+        const verbs = mutatingCalls();
+        expect(verbs.filter((l) => l.startsWith("bootstrap"))).toEqual([`bootstrap ${GUI} ${fx.plistPath}`]);
+        expect(verbs.slice(verbs.indexOf(`kickstart ${GUI}/${fx.label}`)).filter((l) => l.startsWith("bootout"))).toEqual([]);
+      });
     },
     90_000,
   );

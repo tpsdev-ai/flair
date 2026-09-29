@@ -44,7 +44,7 @@
  */
 
 import { resolve } from "node:path";
-import type { LaunchdManagement } from "./launchd-management.js";
+import { verifyLaunchdManagement, type LaunchdManagement } from "./launchd-management.js";
 import { healthIndicatesListener, type DaemonState, type HealthResult } from "./daemon-liveness.js";
 import { preserveHttpPortValue, preserveSecurePort } from "./http-bind.js";
 import {
@@ -710,6 +710,12 @@ export async function decideAdoptStopWithWait(
 // STARTING, not evidence against it. Judging that single observation reported
 // every real hand-off as a failure and unloaded the job again, leaving nothing
 // serving (flair#2040, round 6).
+//
+// A matching pid is not serving either: Harper can write hdb.pid BEFORE it
+// binds its port, so launchd's pid can equal the identified serving pid while
+// the port still refuses. The wait therefore runs on the PORT, not on the
+// management state (round 7), and "repaired" needs both: Flair's /Health
+// answers `ok`, and the strict verifier passes (judgeLaunchdJobServing).
 
 /** One observation of the job just loaded: the port's health, then launchd management. */
 export interface LaunchdServingObservation {
@@ -719,18 +725,19 @@ export interface LaunchdServingObservation {
 }
 
 /**
- * Still starting: launchd runs the job (it reported a pid), nothing identifies
- * the serving process yet, and nothing answers HTTP on the port. Every other
- * observation is final: verified, detached (launchd reports no pid, or another
- * process serves), or a port that answers while the serving process still
- * cannot be identified.
+ * Still starting: launchd runs the job (it reported a pid) and nothing answers
+ * HTTP on the port yet (`refused`, or a probe that could not tell:
+ * `unreachable`) — whatever the management state says, because a pid file can
+ * name launchd's pid before the port is bound. Every other observation is
+ * final: launchd reports no pid (detached), or something answers the port
+ * (then the strict verifier and the health result decide, at once).
  */
 export function launchdJobStillStarting(o: LaunchdServingObservation): boolean {
-  return o.management.state === "unverified" && !healthIndicatesListener(o.health);
+  return typeof o.management.launchdPid === "number" && !healthIndicatesListener(o.health);
 }
 
 export interface LaunchdServingWaitResult {
-  /** The FINAL observation — the caller judges it with verifyLaunchdManagement. */
+  /** The FINAL observation — the caller judges it with judgeLaunchdJobServing. */
   observation: LaunchdServingObservation;
   /** The management detail, naming the wait when it timed out. */
   detail: string;
@@ -742,8 +749,9 @@ export interface LaunchdServingWaitResult {
 /**
  * Poll `observe` while the job is still starting (launchdJobStillStarting), up
  * to `deadlineMs`, and return the final observation. It decides nothing: the
- * caller applies the strict verifier UNCHANGED to what this returns, so a job
- * that never serves still fails — at the deadline, with the wait named.
+ * caller judges what this returns with judgeLaunchdJobServing (health `ok` and
+ * the strict verifier UNCHANGED), so a job that never serves still fails — at
+ * the deadline, with the wait named.
  */
 export async function awaitLaunchdJobServing(opts: {
   observe: () => LaunchdServingObservation | Promise<LaunchdServingObservation>;
@@ -764,4 +772,28 @@ export async function awaitLaunchdJobServing(opts: {
     ? `${poll.value.management.detail} (waited ${poll.waitedMs}ms for the launchd job to start serving; its port still did not answer: ${poll.value.health.kind})`
     : poll.value.management.detail;
   return { observation: poll.value, detail, timedOut: poll.timedOut, waitedMs: poll.waitedMs, observations: poll.observations };
+}
+
+/**
+ * The success test for the job just loaded (flair#2040): Flair's /Health
+ * answers `ok` on the instance's port AND the strict verifier passes on the
+ * same observation (launchd's pid is the identified serving pid). A matching
+ * pid with a port that does not serve Flair is NOT repaired — a pid file can be
+ * written before the port is bound, and one that never binds is not serving.
+ */
+export function judgeLaunchdJobServing(
+  w: LaunchdServingWaitResult,
+): { verified: true; pid: number; detail: string } | { verified: false; detail: string } {
+  const verdict = verifyLaunchdManagement(w.observation.management);
+  if (!verdict.verified) return { verified: false, detail: w.detail };
+  if (w.observation.health.kind !== "ok") {
+    const waited = w.timedOut ? ` after waiting ${w.waitedMs}ms for it to start serving` : "";
+    return {
+      verified: false,
+      detail:
+        `${verdict.detail}, but Flair's /Health on its port did not answer ok${waited} ` +
+        `(last health probe: ${w.observation.health.kind}), so the job is NOT serving this instance`,
+    };
+  }
+  return verdict;
 }

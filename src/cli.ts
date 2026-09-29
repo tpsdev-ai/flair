@@ -168,6 +168,7 @@ import {
   decideAdoptStopWithWait,
   verifyAdoptServingWithWait,
   awaitLaunchdJobServing,
+  judgeLaunchdJobServing,
   domainPreflightRefusal,
   type AdminPassAvailability,
   type LaunchdRepairResult,
@@ -178,14 +179,19 @@ import {
   bootoutCommand,
   describeLoadabilityProblem,
   ensureLaunchdJobAbsent,
+  firstLaunchdJobNotProvenAbsent,
+  isLaunchdValidationRefusal,
   launchdJobPresence,
   launchdGuiDomain,
   loadabilityAllowsAttempt,
   loadabilityRemedy,
   loadLaunchdJob,
+  LaunchdValidationRefusal,
   renderStartLaunchdFailed,
   renderStartLaunchdUnavailable,
   renderStartLaunchdUnloadUncertain,
+  renderStartLaunchdValidationBlocked,
+  renderStartLaunchdValidationRefused,
   DIRECT_PROCESS_GUARD_NOTE,
   DOMAIN_PROBE_TIMEOUT_MS,
   RUN_AT_LOAD_NOTE,
@@ -753,9 +759,10 @@ type LaunchctlRunner = (cmd: string) => void;
  * registered for the same data dir. No-op (migrated: false) if there's
  * nothing legacy to migrate, or the new label is already registered.
  *
- * flair#2040: before anything is unloaded, the replacement content must carry
- * the expected Label and pass `opts.lint` (plutil -lint by default); either
- * failing throws with nothing unloaded, written or removed.
+ * flair#2040: before anything is unloaded, the legacy plist must be readable,
+ * and the replacement content must carry the expected Label and pass
+ * `opts.lint` (plutil -lint by default). Any of these failing throws a
+ * LaunchdValidationRefusal with nothing unloaded, written or removed.
  */
 function migrateLegacyLaunchdLabel(
   dataDir: string,
@@ -781,8 +788,19 @@ function migrateLegacyLaunchdLabel(
   const newLabel = launchdLabel(dataDir);
   const newPlistPath = launchdPlistPath(newLabel, launchAgentsDir);
 
-  // flair#2040: read and validate the plist BEFORE unloading anything.
-  const legacyContent = readFileSync(resolved.plistPath, "utf-8");
+  // flair#2040: read and validate the plist BEFORE unloading anything. Every
+  // refusal up to the legacy bootout below is a LaunchdValidationRefusal:
+  // nothing has been loaded or unloaded, and the callers must not boot out the
+  // legacy job in response to it.
+  let legacyContent: string;
+  try {
+    legacyContent = readFileSync(resolved.plistPath, "utf-8");
+  } catch (err: any) {
+    throw new LaunchdValidationRefusal(
+      `not migrating off the legacy launchd label: could not read the legacy plist ${resolved.plistPath} (${err?.code ?? err}). ` +
+        "Nothing was unloaded, and the legacy plist was left as it was.",
+    );
+  }
   // Use a function replacer to avoid $-sensitivity in the replacement
   // string (flair#919). String.prototype.replace interprets $&, $', $`
   // etc. in the replacement even when the search value is a plain string.
@@ -792,7 +810,7 @@ function migrateLegacyLaunchdLabel(
   // Refuse to propagate a malformed plist: if the Label wasn't found,
   // the plist is not what we expect and migration must not write it.
   if (newContent === legacyContent) {
-    throw new Error(
+    throw new LaunchdValidationRefusal(
       `Legacy plist at ${resolved.plistPath} does not contain the expected ` +
       `Label key — it may be malformed or from an unknown Flair version. ` +
       `Remove it manually and re-run 'flair init'.`,
@@ -804,7 +822,7 @@ function migrateLegacyLaunchdLabel(
   // could not run is a failed check, not a pass.
   const lintProblem = (opts.lint ?? lintLaunchdPlistContent)(newContent);
   if (lintProblem !== null) {
-    throw new Error(
+    throw new LaunchdValidationRefusal(
       `not migrating off the legacy launchd label: the replacement plist for ${newLabel} failed validation ` +
         `(${lintProblem}). Nothing was unloaded, and the legacy plist ${resolved.plistPath} was left as it was.`,
     );
@@ -5359,7 +5377,7 @@ export function assertLaunchdServiceOwnedBy(
 // Command registration lives in src/commands/service.ts (flair#1636).
 // Bind shared cli-locals first so the extracted module never imports this file.
 bindServiceCli({
-  bootoutLaunchdJob,
+  afterFailedLaunchdAttempt,
   buildDirectSpawnEnv,
   closedDirectSpawnEnv,
   defaultDataDir,
@@ -5466,6 +5484,46 @@ function bootoutLaunchdJob(labels: string[]): { target: string; detail: string }
     if (notGone !== null) return { target: `${domain}/${label}`, detail: notGone };
   }
   return null;
+}
+
+/**
+ * After the launchd attempt of `flair start`, or of the start leg of restart /
+ * upgrade / snapshot, failed: may the caller start Flair directly? (flair#2040)
+ * One decision for both start paths.
+ *
+ *   - A VALIDATION refusal (isLaunchdValidationRefusal: the plist failed a check
+ *     made before any launchctl call that changes state) loaded and unloaded
+ *     nothing, so nothing is booted out here either — a loaded legacy job is
+ *     left exactly as it was, and so are both plists. The jobs are only READ:
+ *     a direct start is allowed only when every one of `labels` is PROVEN
+ *     absent. A loaded job, or one whose presence cannot be read, could be
+ *     started by launchd underneath the direct process, so the caller must not
+ *     start directly.
+ *   - A failed LOAD may have left a job loaded: unload `labels` and VERIFY
+ *     each is gone (bootoutLaunchdJob) before a direct start.
+ *
+ * `lines` are what the caller reports (stderr), whether or not it starts
+ * directly. `directStart` false means: start nothing and fail.
+ */
+function afterFailedLaunchdAttempt(
+  actor: string,
+  jobLabel: string,
+  labels: string[],
+  err: any,
+): { directStart: boolean; lines: string[] } {
+  const cause = err?.message ?? String(err);
+  if (isLaunchdValidationRefusal(err)) {
+    const blocking = firstLaunchdJobNotProvenAbsent(realLaunchctlCommand, launchdGuiDomain(currentUid()), labels);
+    if (blocking !== null) {
+      return { directStart: false, lines: renderStartLaunchdValidationBlocked(actor, jobLabel, cause, blocking.target, blocking.presence) };
+    }
+    return { directStart: true, lines: [renderStartLaunchdValidationRefused(actor, jobLabel, cause)] };
+  }
+  const notGone = bootoutLaunchdJob(labels);
+  if (notGone !== null) {
+    return { directStart: false, lines: renderStartLaunchdUnloadUncertain(actor, notGone.target, cause, notGone.detail) };
+  }
+  return { directStart: true, lines: [renderStartLaunchdFailed(actor, jobLabel, cause)] };
 }
 
 /**
@@ -6516,9 +6574,10 @@ function planLaunchdRepairFor(dataDir: string, port: number): {
  *      if it cannot be shown gone, stop here, before the direct process is
  *      touched), clean-stop the direct process (adopt), write the plist, load
  *      it with commands that NAME the probed domain (bootstrap/kickstart
- *      gui/<uid>), wait (bounded) while the job is still starting, and verify
- *      STRICTLY: launchd's pid is the IDENTIFIED serving pid
- *      (verifyLaunchdManagement), and on adopt the serving pid
+ *      gui/<uid>), wait (bounded) while launchd reports a pid for the job and
+ *      its port does not answer, and verify STRICTLY: Flair's /Health answers
+ *      ok and launchd's pid is the IDENTIFIED serving pid
+ *      (judgeLaunchdJobServing), and on adopt the serving pid
  *      changed and the old one is dead (flair#1684/#1685). ANY failure here
  *      goes through restoreAfterFailedRepair.
  *
@@ -6892,11 +6951,12 @@ async function commitLaunchdRepair(p: PreparedLaunchdRepair): Promise<LaunchdRep
     done.loaded = true;
     loadLaunchdJob({ run: realLaunchctlCommand, domain: p.domain, label: p.label, plistPath: p.plistPath, strict: true });
     // 5. Verify (fail-loud, STRICT: launchd's pid must be the IDENTIFIED
-    //    serving pid — an unidentified one is not proof, flair#2040). When
-    //    kickstart returns, the job has not bound its port or written hdb.pid
-    //    yet (flair#1827): wait, bounded, while it is still STARTING (launchd
-    //    runs it and nothing answers its port), then judge the final
-    //    observation. Any other observation is judged at once.
+    //    serving pid — an unidentified one is not proof, flair#2040 — AND
+    //    Flair's /Health must answer ok). When kickstart returns, the job has
+    //    not bound its port yet (flair#1827), and hdb.pid may already name it:
+    //    wait, bounded, while launchd reports a pid and nothing answers its
+    //    port, then judge the final observation. Any other observation is
+    //    judged at once.
     const settled = await awaitLaunchdJobServing({
       observe: async () => {
         // Health first: a port that answers is then visible to the lsof read.
@@ -6905,9 +6965,8 @@ async function commitLaunchdRepair(p: PreparedLaunchdRepair): Promise<LaunchdRep
       },
       deadlineMs: STARTUP_TIMEOUT_MS,
     });
-    const after = settled.observation.management;
-    const verdict = verifyLaunchdManagement(after);
-    if (!verdict.verified) throw new Error(settled.detail);
+    const verdict = judgeLaunchdJobServing(settled);
+    if (!verdict.verified) throw new Error(verdict.detail);
     // On the adopt arm, port health alone is the green light that lied in
     // #1684: the pre-adopt direct process answered the port the whole time
     // the launchd job was failing to start. Prove the launchd job itself
@@ -7294,9 +7353,10 @@ async function startFlairProcess(port: number, dataDir: string): Promise<void> {
           // with an existsSync, so check them first and turn a two-minute silence
           // into an immediate, named diagnosis. Still falls back — a running
           // instance beats a down one — just without the wait or the mystery.
+          // flair#2040: a validation refusal — nothing loaded or unloaded.
           const stalePlist = diagnoseLaunchdPlistPaths(plistPath);
           if (stalePlist) {
-            throw new Error(`${stalePlist.message} Fix it with: ${stalePlist.remedy.join(" && ")}`);
+            throw new LaunchdValidationRefusal(`${stalePlist.message} Fix it with: ${stalePlist.remedy.join(" && ")}`);
           }
           ensureLaunchdServiceLoaded(dataDir, realLaunchctlCommand);
           await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
@@ -7304,17 +7364,15 @@ async function startFlairProcess(port: number, dataDir: string): Promise<void> {
           stampEngineVersionIfRunning(dataDir); // flair#1047: stamp the store with the engine version
           return;
         } catch (err: any) {
-          // Unload whatever the attempt loaded before starting directly, so
-          // KeepAlive cannot start the job underneath the direct process — and
-          // only start directly once every job for this instance is VERIFIED
-          // gone (flair#2040). If that cannot be shown, do not start directly.
-          const cause = err?.message ?? String(err);
+          // flair#2040: start directly only when no job for this instance could
+          // start underneath the direct process. A failed LOAD is unloaded again
+          // and verified gone; a VALIDATION refusal loaded and unloaded nothing,
+          // so nothing is booted out — a loaded job refuses the direct start
+          // instead (afterFailedLaunchdAttempt).
           const labels = label === LEGACY_LAUNCHD_LABEL ? [launchdLabel(dataDir), LEGACY_LAUNCHD_LABEL] : [launchdLabel(dataDir)];
-          const notGone = bootoutLaunchdJob(labels);
-          if (notGone !== null) {
-            throw new Error(renderStartLaunchdUnloadUncertain("flair", notGone.target, cause, notGone.detail).join("\n"));
-          }
-          console.error(renderStartLaunchdFailed("flair", launchdLabel(dataDir), cause));
+          const after = afterFailedLaunchdAttempt("flair", launchdLabel(dataDir), labels, err);
+          if (!after.directStart) throw new Error(after.lines.join("\n"));
+          for (const line of after.lines) console.error(line);
         }
       }
     }
@@ -7988,6 +8046,7 @@ export {
   observeLaunchdLoadability,
   repairLaunchdManagement,
   registerInitLaunchdService,
+  startFlairProcess,
 };
 
 // Shared with `flair status` via src/lib/ops-api-bind.ts (flair#852).

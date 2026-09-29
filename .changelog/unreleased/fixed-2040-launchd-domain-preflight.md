@@ -44,15 +44,26 @@
   `snapshot`) runs `plutil -lint` on the replacement plist before it unloads
   anything, and refuses the move when the lint rejects it or cannot run.
 
+  A refusal like that, or a plist whose paths no longer exist, has loaded and
+  unloaded nothing, and the start paths then boot nothing out either: the
+  legacy job and both plists are left as they are. Flair starts directly only
+  when read-only `launchctl print` queries show no job for the instance loaded.
+  When one is loaded, or its state cannot be read, the command starts nothing,
+  names the job and the `launchctl bootout` remedy, and exits non-zero.
+
   `init`, `start` and `doctor` print a launchd check mark (including the
   legacy-migration lines) or "repaired" only when launchd's pid equals an
   identified serving pid. When the serving process cannot be identified, the
   result says so and claims nothing. After loading the job, `doctor --fix`
-  first waits, up to the startup budget, while launchd runs it and its port
-  does not answer yet: a job that is still starting is not judged early. Any
-  other observation is judged at once. `flair start`'s fallback names the reason
-  instead of a raw `launchd start failed`. It starts directly only after the job
-  is shown unloaded; otherwise it reports the uncertainty and exits non-zero.
+  waits, up to the 60-second startup budget, while launchd reports a pid for
+  the job and its port does not answer (the connection is refused, or the
+  probe cannot tell), even when `hdb.pid` already names that pid: Harper can
+  write `hdb.pid` before it binds its port. "Repaired" also requires Flair's `/Health` to answer `ok`. A
+  port that answers ends the wait and is judged at once; a job that never
+  serves fails at the deadline, and the restore runs. After a failed load,
+  `flair start`'s fallback names the reason instead of a raw
+  `launchd start failed`, and starts directly only once the job is shown
+  unloaded again; otherwise it reports the uncertainty and exits non-zero.
   `flair restart` still stops first: its start leg decides only whether Flair
   comes back under launchd or directly.
 

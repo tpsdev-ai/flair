@@ -32,6 +32,7 @@ import {
   migrateLegacyLaunchdLabel,
   ensureLaunchdServiceLoaded,
 } from "../../src/cli.ts";
+import { isLaunchdValidationRefusal } from "../../src/lib/launchd-domain-preflight.ts";
 
 /** The GUI domain the targeted launchctl commands name (flair#2040). */
 const GUI = `gui/${typeof process.getuid === "function" ? process.getuid() : 0}`;
@@ -629,6 +630,47 @@ describe("resolveLaunchdLabel / migrateLegacyLaunchdLabel / ensureLaunchdService
     const result = migrateLegacyLaunchdLabel(dataDir, run, launchAgentsDir, undefined, { settleMs: 0, sleep: () => {}, lint });
     expect(result.migrated).toBe(true);
     expect(calls).toContain(`launchctl bootout ${GUI}/${LEGACY_LAUNCHD_LABEL}`);
+  });
+
+  test("migrateLegacyLaunchdLabel: every refusal BEFORE the legacy bootout is a validation refusal; a legacy job that cannot be unloaded is not (flair#2040 r7)", () => {
+    // The start paths boot nothing out after a validation refusal (nothing was
+    // loaded or unloaded), and unload-and-verify after anything else — so the
+    // two must be told apart by the error itself.
+    const legacyPath = launchdPlistPath(LEGACY_LAUNCHD_LABEL, launchAgentsDir);
+    const refusal = (fn: () => unknown): unknown => {
+      try { fn(); } catch (err) { return err; }
+      throw new Error("expected a refusal");
+    };
+    const noLaunchctl = () => { throw new Error("no launchctl call is expected before validation passes"); };
+
+    writeFileSync(legacyPath, fakePlist("com.example.something-else"));
+    const wrongLabel = refusal(() => migrateLegacyLaunchdLabel(dataDir, noLaunchctl, launchAgentsDir));
+    expect(isLaunchdValidationRefusal(wrongLabel)).toBe(true);
+
+    writeFileSync(legacyPath, fakePlist(LEGACY_LAUNCHD_LABEL));
+    const linted = refusal(() => migrateLegacyLaunchdLabel(dataDir, noLaunchctl, launchAgentsDir, undefined, { lint: () => "plutil -lint rejected the plist" }));
+    expect(isLaunchdValidationRefusal(linted)).toBe(true);
+    expect(String((linted as Error).message)).toContain("Nothing was unloaded");
+
+    const unrunnable = refusal(() => migrateLegacyLaunchdLabel(dataDir, noLaunchctl, launchAgentsDir, undefined, { lint: () => "plutil -lint could not check the plist" }));
+    expect(isLaunchdValidationRefusal(unrunnable)).toBe(true);
+
+    // A plist that cannot be read (a directory in its place: EISDIR) is refused
+    // the same way — nothing has been unloaded yet.
+    rmSync(legacyPath);
+    mkdirSync(legacyPath);
+    const unreadable = refusal(() => migrateLegacyLaunchdLabel(dataDir, noLaunchctl, launchAgentsDir));
+    expect(isLaunchdValidationRefusal(unreadable)).toBe(true);
+    expect(String((unreadable as Error).message)).toContain("could not read the legacy plist");
+    rmSync(legacyPath, { recursive: true });
+
+    // Positive control: a legacy job that stays loaded after its bootout is a
+    // failure AFTER an unload was attempted — not a validation refusal.
+    writeFileSync(legacyPath, fakePlist(LEGACY_LAUNCHD_LABEL));
+    const { run } = launchdStandIn({ bootoutSticks: false });
+    const stuck = refusal(() => migrateLegacyLaunchdLabel(dataDir, run, launchAgentsDir, undefined, { settleMs: 0, sleep: () => {}, lint: () => null }));
+    expect(String((stuck as Error).message)).toContain("the job is still loaded");
+    expect(isLaunchdValidationRefusal(stuck)).toBe(false);
   });
 
   // ── flair#874 / flair#872 structural guards ────────────────────────

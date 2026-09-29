@@ -11,11 +11,10 @@ import { DEFAULT_ADMIN_USER } from "../lib/auth-resolve.js";
 import { classifyDaemonState } from "../lib/daemon-liveness.js";
 import { diagnoseLaunchdPlistPaths, isDetached, renderDetachedWarning, verifyLaunchdManagement } from "../lib/launchd-management.js";
 import {
+  LaunchdValidationRefusal,
   loadabilityAllowsAttempt,
   renderDirectRunNotice,
-  renderStartLaunchdFailed,
   renderStartLaunchdUnavailable,
-  renderStartLaunchdUnloadUncertain,
 } from "../lib/launchd-domain-preflight.js";
 import { opsSocketPathRefusal } from "../lib/socket-path-limit.js";
 import { execSync, spawn } from "node:child_process";
@@ -23,7 +22,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 export type ServiceCli = {
-  bootoutLaunchdJob: (...args: any[]) => any;
+  afterFailedLaunchdAttempt: (...args: any[]) => any;
   buildDirectSpawnEnv: (...args: any[]) => any;
   closedDirectSpawnEnv: (...args: any[]) => any;
   defaultDataDir: (...args: any[]) => any;
@@ -60,8 +59,8 @@ export function bindCli(fns: ServiceCli): void {
   cli = fns;
 }
 
-function bootoutLaunchdJob(...args: any[]): any {
-  return cli.bootoutLaunchdJob(...args);
+function afterFailedLaunchdAttempt(...args: any[]): any {
+  return cli.afterFailedLaunchdAttempt(...args);
 }
 
 function buildDirectSpawnEnv(...args: any[]): any {
@@ -342,9 +341,10 @@ program
             // flair#1022, same pre-flight as startFlairProcess: launchctl exits 0
             // for a job it cannot exec, so a stale plist is only ever observable
             // as a startup timeout unless the paths are checked first.
+            // flair#2040: a validation refusal — nothing loaded or unloaded.
             const stalePlist = diagnoseLaunchdPlistPaths(plistPath);
             if (stalePlist) {
-              throw new Error(`${stalePlist.message} Fix it with: ${stalePlist.remedy.join(" && ")}`);
+              throw new LaunchdValidationRefusal(`${stalePlist.message} Fix it with: ${stalePlist.remedy.join(" && ")}`);
             }
             const { execSync } = await import("node:child_process");
             // Targeted at gui/<uid> — the domain the preflight probed (flair#2040).
@@ -372,17 +372,14 @@ program
             if (managed.remedy?.length) console.error(`   Fix: ${managed.remedy.join(" && ")}`);
             return;
           } catch (err: any) {
-            // Unload whatever the attempt loaded, so KeepAlive cannot start the
-            // job underneath the direct process started below — and start
-            // directly only once every job for this instance is VERIFIED gone
-            // (flair#2040). Otherwise say so and do not start directly.
-            const cause = err?.message ?? String(err);
-            const notGone = bootoutLaunchdJob(isLegacy ? [jobLabel, LEGACY_LAUNCHD_LABEL] : [jobLabel]);
-            if (notGone !== null) {
-              for (const line of renderStartLaunchdUnloadUncertain("flair start", notGone.target, cause, notGone.detail)) console.error(line);
-              process.exit(1);
-            }
-            console.error(renderStartLaunchdFailed("flair start", jobLabel, cause));
+            // flair#2040: start directly below only when no job for this
+            // instance could start underneath the direct process. A failed LOAD
+            // is unloaded again and verified gone; a VALIDATION refusal loaded
+            // and unloaded nothing, so nothing is booted out — a loaded job (a
+            // legacy one, say) refuses the direct start instead.
+            const after = afterFailedLaunchdAttempt("flair start", jobLabel, isLegacy ? [jobLabel, LEGACY_LAUNCHD_LABEL] : [jobLabel], err);
+            for (const line of after.lines) console.error(line);
+            if (!after.directStart) process.exit(1);
             launchdFellBack = true;
           }
         }

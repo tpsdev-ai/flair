@@ -22,6 +22,11 @@ import {
   launchdGuiDomain,
   launchdJobPresence,
   ensureLaunchdJobAbsent,
+  firstLaunchdJobNotProvenAbsent,
+  isLaunchdValidationRefusal,
+  LaunchdValidationRefusal,
+  renderStartLaunchdValidationBlocked,
+  renderStartLaunchdValidationRefused,
   type DomainProbeRunner,
 } from "../../src/lib/launchd-domain-preflight.ts";
 import { domainPreflightRefusal } from "../../src/lib/launchd-repair.ts";
@@ -346,5 +351,57 @@ describe("ensureLaunchdJobAbsent — a bootout is VERIFIED, never assumed (flair
     expect(text).toContain("Flair was NOT started directly");
     expect(text).not.toContain("was unloaded again");
     expect(text).toContain(`launchctl bootout ${D}/${LABEL}`);
+  });
+});
+
+// ─── round 7: a validation refusal is not a failed load ──────────────────
+
+describe("validation refusals (flair#2040 r7) — nothing loaded, so nothing is booted out", () => {
+  const D = "gui/501";
+  const LEGACY = "ai.tpsdev.flair";
+  const notFound = () => Object.assign(new Error("Command failed"), { status: 113 });
+
+  test("isLaunchdValidationRefusal: the class and its marker match; a plain Error (a failed load) does not", () => {
+    expect(isLaunchdValidationRefusal(new LaunchdValidationRefusal("lint refused"))).toBe(true);
+    expect(isLaunchdValidationRefusal(Object.assign(new Error("copied module"), { launchdValidationRefusal: true }))).toBe(true);
+    expect(isLaunchdValidationRefusal(new Error("launchctl bootstrap gui/501 x failed: 5: Input/output error"))).toBe(false);
+    expect(isLaunchdValidationRefusal("lint refused")).toBe(false);
+    expect(isLaunchdValidationRefusal(null)).toBe(false);
+  });
+
+  test("firstLaunchdJobNotProvenAbsent is READ-ONLY: it issues only `launchctl print`, never a bootout", () => {
+    const calls: string[] = [];
+    const run = (c: string) => { calls.push(c); if (c.endsWith(`/${LABEL}`)) throw notFound(); };
+    expect(firstLaunchdJobNotProvenAbsent(run, D, [LABEL, LEGACY])).toEqual({ target: `${D}/${LEGACY}`, presence: "loaded" });
+    expect(calls).toEqual([`launchctl print ${D}/${LABEL}`, `launchctl print ${D}/${LEGACY}`]);
+  });
+
+  test("firstLaunchdJobNotProvenAbsent: null only when EVERY label is proven absent; an unreadable presence blocks", () => {
+    expect(firstLaunchdJobNotProvenAbsent(() => { throw notFound(); }, D, [LABEL, LEGACY])).toBeNull();
+    const unreadable = (c: string) => {
+      if (c.endsWith(`/${LABEL}`)) throw notFound();
+      throw Object.assign(new Error("Command failed"), { status: 5, stderr: "5: Input/output error" });
+    };
+    expect(firstLaunchdJobNotProvenAbsent(unreadable, D, [LABEL, LEGACY])).toEqual({ target: `${D}/${LEGACY}`, presence: "unknown" });
+  });
+
+  test("the direct-start line says nothing was loaded or unloaded, and that the jobs were verified absent", () => {
+    const line = renderStartLaunchdValidationRefused("flair start", LABEL, "plutil -lint rejected the plist");
+    expect(line).toContain(`did not load the launchd job ${LABEL}`);
+    expect(line).toContain("plutil -lint rejected the plist");
+    expect(line).toContain("Nothing was loaded or unloaded");
+    expect(line).toContain("(verified absent); starting Flair directly instead");
+    expect(line).not.toContain("unloaded again");
+  });
+
+  test("the refusal names the loaded job, says Flair was NOT started directly, and names the bootout remedy", () => {
+    const text = renderStartLaunchdValidationBlocked("flair start", LABEL, "plutil -lint rejected the plist", `${D}/${LEGACY}`, "loaded").join("\n");
+    expect(text).toContain(`${D}/${LEGACY} is loaded`);
+    expect(text).toContain("Flair was NOT started directly");
+    expect(text).toContain(`launchctl bootout ${D}/${LEGACY}`);
+    expect(text).toContain("Nothing was loaded or unloaded");
+    expect(text).not.toContain("starting Flair directly instead");
+    const unknown = renderStartLaunchdValidationBlocked("flair", LABEL, "x", `${D}/${LEGACY}`, "unknown").join("\n");
+    expect(unknown).toContain(`whether ${D}/${LEGACY} is loaded could not be read`);
   });
 });

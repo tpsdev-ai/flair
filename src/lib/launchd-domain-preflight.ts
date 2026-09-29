@@ -289,6 +289,88 @@ export function renderStartLaunchdUnloadUncertain(actor: string, target: string,
   ];
 }
 
+// ─── validation refusals (flair#2040) ─────────────────────────────────────
+
+/**
+ * A launchd attempt refused by VALIDATION: a check made before any launchctl
+ * call that changes launchd's state failed (the plist's paths, its Label, its
+ * syntax, a legacy plist that could not be read). Nothing was loaded or
+ * unloaded, and no plist was written or removed.
+ *
+ * The start paths must tell this apart from a failed LOAD. After a failed load
+ * they unload what the attempt may have loaded. After a validation refusal the
+ * attempt loaded nothing, so there is nothing of its own to unload — and a job
+ * that IS loaded (a legacy job, say) is not the attempt's to boot out.
+ */
+export class LaunchdValidationRefusal extends Error {
+  readonly launchdValidationRefusal = true;
+  constructor(message: string) {
+    super(message);
+    this.name = "LaunchdValidationRefusal";
+  }
+}
+
+/** True when `err` is a LaunchdValidationRefusal (by marker, so a copied module still matches). */
+export function isLaunchdValidationRefusal(err: unknown): boolean {
+  return (
+    err instanceof LaunchdValidationRefusal ||
+    (typeof err === "object" && err !== null && (err as { launchdValidationRefusal?: unknown }).launchdValidationRefusal === true)
+  );
+}
+
+/**
+ * READ-ONLY (flair#2040): the first of `labels` that is loaded in `domain`, or
+ * whose presence cannot be read — a job launchd could start underneath a direct
+ * process. null only when every label is PROVEN absent. Issues nothing but
+ * `launchctl print <domain>/<label>`.
+ */
+export function firstLaunchdJobNotProvenAbsent(
+  run: LaunchctlCommandRunner,
+  domain: string,
+  labels: string[],
+): { target: string; presence: "loaded" | "unknown" } | null {
+  for (const label of labels) {
+    const presence = launchdJobPresence(run, domain, label);
+    if (presence !== "absent") return { target: `${domain}/${label}`, presence };
+  }
+  return null;
+}
+
+/**
+ * The launchd attempt was refused by validation, nothing was loaded or
+ * unloaded, and every job for the instance is PROVEN absent — so the caller
+ * starts directly, and says so.
+ */
+export function renderStartLaunchdValidationRefused(actor: string, label: string, cause: string): string {
+  return (
+    `${actor}: did not load the launchd job ${label}: its plist failed a check made before anything was loaded (${cause}). ` +
+    "Nothing was loaded or unloaded, and no plist was written or removed. " +
+    "No launchd job for this instance is loaded (verified absent); starting Flair directly instead."
+  );
+}
+
+/**
+ * The launchd attempt was refused by validation (nothing was loaded or
+ * unloaded), and a job for the instance is loaded — or its presence cannot be
+ * read. launchd could start it underneath a direct process, so the caller
+ * starts nothing, and leaves the job and the plists as they are.
+ */
+export function renderStartLaunchdValidationBlocked(
+  actor: string,
+  label: string,
+  cause: string,
+  target: string,
+  presence: "loaded" | "unknown",
+): string[] {
+  const state = presence === "loaded" ? `${target} is loaded` : `whether ${target} is loaded could not be read`;
+  return [
+    `${actor}: did not load the launchd job ${label}: its plist failed a check made before anything was loaded (${cause}). ` +
+      "Nothing was loaded or unloaded, and no plist was written or removed.",
+    `   Flair was NOT started directly: ${state}, and launchd could start that job underneath a direct process — a second instance on the same data directory.`,
+    `   Fix: unload that job ('launchctl bootout ${target}'), confirm 'launchctl print ${target}' no longer finds it, and re-run the command; or correct the plist so the check passes, and re-run the command.`,
+  ];
+}
+
 /**
  * The lines after a direct start that took the place of launchd: running
  * directly, NOT launchd-managed — with what that costs and what to do.

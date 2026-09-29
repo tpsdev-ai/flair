@@ -847,8 +847,11 @@ describe("flair#1022 — `flair restart` reports the launchd outcome, not just l
 
       expect(exitCode).toBe(1);
       // Named cause, named fix — the whole difference from a bare timeout.
-      // flair#2040: the fallback line names the actor, the job and the error.
-      expect(stderr).toContain("launchd could not start the job");
+      // flair#2040: the fallback line names the actor, the job and the error —
+      // and a stale plist is a VALIDATION refusal: nothing was loaded or
+      // unloaded, and the start leg boots nothing out after it (round 7).
+      expect(stderr).toContain("did not load the launchd job");
+      expect(stderr).toContain("Nothing was loaded or unloaded");
       expect(stderr).toContain(gone);
       expect(stderr).toContain("Fix it with: flair init && flair restart");
 
