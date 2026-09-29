@@ -1,135 +1,250 @@
 /**
- * tree-divergence.ts — "the CLI you ran and the instance you are talking to
- * do not live in the same install tree" (flair#2034 §2).
+ * tree-divergence.ts — "the CLI you ran and the instance you are talking to do
+ * not live in the same install tree" (flair#2034 §2).
  *
- * An instance that is served by a unit whose node path was baked at an earlier
- * runtime keeps serving from that tree; the CLI on PATH comes from the tree the
- * current runtime's global prefix owns. `flair status` then prints two
- * contradictory hints (restart vs upgrade) that point at each other, and
- * `flair upgrade` — which targets the RUNNING tree — reports "Everything is up
- * to date" about a tree that is not the one the operator is running. Neither
- * names the real problem.
+ * After a Node bump a service unit can keep serving the install tree of the
+ * runtime it was baked at, while the CLI on PATH comes from the tree of the
+ * runtime in use now. `flair status` then printed two hints that pointed at
+ * each other, and `flair upgrade` reported about a tree that was not the one
+ * serving. This module is the one shared answer to "which tree serves this
+ * instance, and does it match this CLI".
  *
- * This module is the one shared detector. It compares the CLI's package dir
- * (realpath) with the running instance's install tree, taken from the launchd
- * plist / systemd unit the instance runs from, and renders ONE message that
- * names the actor, the state (both paths and both versions) and the remedy.
+ * PROOF, NOT INFERENCE. A unit file on disk says what a service manager WOULD
+ * run; it does not say what is serving. The serving tree is only reported when
+ * a service manager is shown to own the very process that answers:
  *
- * Pure / dependency-injected so it is unit-testable without a real
- * ~/Library/LaunchAgents, a real systemd, or a running instance.
+ *   - macOS: the launchd plist for THIS data directory (its ROOTPATH is this
+ *     data dir) has a running job whose PID is the serving PID;
+ *   - Linux: a systemd USER unit that names the serving tree has that PID as
+ *     its MainPID.
+ *
+ * The serving PID is the one the answering process reported about itself
+ * (`/HealthDetail`'s `pid`) when available, else the process this data dir
+ * records (Harper's `hdb.pid`, then the port's listener). The tree is read from
+ * that process (its working directory / command line), never from the unit.
+ *
+ * Without that proof — a remote target, a directly started server, a
+ * system-level or unrelated supervisor, a server run under a different HOME —
+ * the tree is UNKNOWN, and no remedy is derived from it.
+ *
+ * Everything here is pure: the probe hands in every filesystem, process and
+ * service-manager read, so the whole decision is unit-testable without a real
+ * launchd, systemd or running instance.
  */
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { createHash } from "node:crypto";
-import { join, resolve } from "node:path";
-import { readPlistProgramRefs } from "./launchd-management.js";
-import { resolveHome } from "./home.js";
+import { resolve } from "node:path";
+import { classifyServiceNodePin, readPlistProgramRefs, type NodePinDeps, type ServiceNodePin } from "./launchd-management.js";
+import { unescapeXml } from "./xml-escape.js";
 
-export interface InstanceRuntimeRefs {
-  /** The node binary the unit execs, when the unit names one. */
-  nodeBin: string | null;
-  /** The install tree (WorkingDirectory) the unit runs the service from. */
-  workingDirectory: string | null;
+export interface PackageLocation {
+  dir: string;
+  version: string | null;
 }
 
-export interface RuntimeReadDeps {
-  read?: (p: string) => string;
+export type ServiceManagerKind = "launchd" | "systemd-user";
+
+export interface ProvenServingTree {
+  kind: "proven";
+  /** The install tree the serving process runs from (read from the process). */
+  dir: string;
+  /** The version declared by that tree's package.json (what is on disk there). */
+  version: string | null;
+  pid: number;
+  manager: ServiceManagerKind;
+  unitName: string;
+  unitPath: string;
+  /** The node binary the unit names now. */
+  unitNodeBin: string | null;
+  /** The install tree the unit names now (may differ from `dir` after a re-point that is not yet restarted). */
+  unitTree: string | null;
 }
 
-/**
- * Read the exec-related runtime refs a launchd plist names. ProgramArguments
- * for a pass-file Flair service are `[launcher, adminPassFile, <node>, <harper
- * entry>]`, so the node binary is index 2; the install tree is
- * WorkingDirectory. Returns all-null when the plist cannot be read.
- */
-export function readPlistInstanceRuntime(plistPath: string, deps: RuntimeReadDeps = {}): InstanceRuntimeRefs {
-  const refs = readPlistProgramRefs(plistPath, deps.read);
-  if (!refs) return { nodeBin: null, workingDirectory: null };
-  const nodeBin = refs.programArguments.find((a) => /(^|[/\\])node$/.test(a)) ?? null;
-  return { nodeBin, workingDirectory: refs.workingDirectory };
+export interface UnknownServingTree {
+  kind: "unknown";
+  reason: string;
 }
 
-/**
- * Read the exec-related runtime refs from a systemd user unit. `ExecStart=` is
- * a single command line; the node binary is the first token that looks like a
- * node binary, and `WorkingDirectory=` is the tree.
- */
-export function readSystemdInstanceRuntime(unitPath: string, deps: RuntimeReadDeps = {}): InstanceRuntimeRefs {
-  let raw: string;
-  try {
-    raw = (deps.read ?? ((p: string) => readFileSync(p, "utf-8")))(unitPath);
-  } catch {
-    return { nodeBin: null, workingDirectory: null };
-  }
-  const exec = /^ExecStart=(.*)$/m.exec(raw);
+export type ServingTree = ProvenServingTree | UnknownServingTree;
+
+export interface ServingTreeProbe {
+  platform: NodeJS.Platform;
+  /** False when the queried instance is not this host's local instance for `dataDir`. */
+  local: boolean;
+  /** What was queried, for messages. */
+  queryUrl: string;
+  dataDir: string;
+  /** The PID the answering process reported about itself, when known. */
+  respondingPid?: number | null;
+  /** The PID serving `dataDir` locally (hdb.pid, then the port listener). Called only when needed. */
+  localServingPid: () => number | null;
+  /** macOS: this data dir's launchd label and plist path. */
+  launchd?: { label: string; plistPath: string };
+  /** macOS: the running PID of a launchd job, or null when it is not loaded / not running. */
+  launchdJobPid?: (label: string) => number | null;
+  /** Linux: systemd USER units that name `tree` in WorkingDirectory/ExecStart. */
+  findUserUnitsForTree?: (tree: string) => Array<{ name: string; path: string }>;
+  /** Linux: a user unit's MainPID, or null when it has none. */
+  systemdUserMainPid?: (unitName: string) => number | null;
+  /** The @tpsdev-ai/flair package a live PID runs from, or null. */
+  servingPackage: (pid: number) => PackageLocation | null;
+  exists: (p: string) => boolean;
+  read: (p: string) => string;
+}
+
+function unknown(reason: string): UnknownServingTree {
+  return { kind: "unknown", reason };
+}
+
+/** The node binary and working directory an active systemd `[Service]` section names. */
+export function readSystemdServiceRefs(text: string): { nodeBin: string | null; workingDirectory: string | null } {
+  let section = "";
+  let workingDirectory: string | null = null;
   let nodeBin: string | null = null;
-  if (exec) {
-    for (const token of exec[1].split(/\s+/)) {
-      const unquoted = token.replace(/^["']|["']$/g, "");
-      if (unquoted.startsWith("/") && /(^|[/\\])node$/.test(unquoted)) {
-        nodeBin = unquoted;
-        break;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#") || line.startsWith(";")) continue;
+    if (line.startsWith("[")) {
+      section = line.slice(1).replace(/\].*$/, "").trim().toLowerCase();
+      continue;
+    }
+    if (section !== "service") continue;
+    const eq = line.indexOf("=");
+    if (eq < 0) continue;
+    const key = line.slice(0, eq).trim();
+    const value = line.slice(eq + 1).trim();
+    if (key === "WorkingDirectory") {
+      workingDirectory = value === "" ? null : value.replace(/^-/, "");
+    } else if (key === "ExecStart") {
+      if (value === "") { nodeBin = null; continue; }
+      for (const word of value.replace(/^[-@:+!]+/, "").split(/\s+/)) {
+        if (word.startsWith("/") && /(^|\/)node$/.test(word)) { nodeBin = word; break; }
       }
     }
   }
-  const wd = /^WorkingDirectory=(.*)$/m.exec(raw);
-  return { nodeBin, workingDirectory: wd ? wd[1].trim() : null };
+  return { nodeBin, workingDirectory };
 }
 
-export interface InstanceRuntimeQuery {
-  platform?: NodeJS.Platform;
-  plistPath?: string | null;
-  systemdUnitPath?: string | null;
-  deps?: RuntimeReadDeps;
+function plistRootPath(raw: string): string | null {
+  const m = /<key>ROOTPATH<\/key>\s*<string>([^<]*)<\/string>/.exec(raw);
+  return m ? unescapeXml(m[1]!) : null;
 }
 
-/** Read the running instance's runtime refs from whichever unit applies. */
-export function readInstanceRuntime(q: InstanceRuntimeQuery): InstanceRuntimeRefs {
-  const platform = q.platform ?? process.platform;
-  if (platform === "darwin") {
-    return q.plistPath ? readPlistInstanceRuntime(q.plistPath, q.deps) : { nodeBin: null, workingDirectory: null };
+/**
+ * Which install tree serves the queried instance — or UNKNOWN, with the reason,
+ * when no service manager is shown to own the answering process.
+ */
+export function proveServingTree(p: ServingTreeProbe): ServingTree {
+  if (!p.local) {
+    return unknown(
+      `${p.queryUrl} is not this data directory's local instance (a remote target, or another port), so its install ` +
+        "tree cannot be proven from here",
+    );
   }
-  return q.systemdUnitPath
-    ? readSystemdInstanceRuntime(q.systemdUnitPath, q.deps)
-    : { nodeBin: null, workingDirectory: null };
-}
 
-export interface TreeDivergenceInput {
-  /** The CLI's own package dir (as resolved by the running CLI). */
-  cliDir: string;
-  cliVersion: string;
-  /** The running instance's install tree, or null when it cannot be resolved. */
-  runningDir: string | null;
-  /** The running server's reported version, when known. */
-  runningVersion?: string | null;
-  /** Path-equality hook (defaults to realpath comparison). */
-  samePath?: (a: string, b: string) => boolean;
-}
-
-export interface TreeDivergence {
-  diverged: boolean;
-  cliDir: string;
-  cliVersion: string;
-  runningDir: string | null;
-  runningVersion: string | null;
-  /** True when the CLI's tree carries an OLDER flair than the running tree. */
-  cliTreeOlder: boolean;
-}
-
-function defaultSamePath(a: string, b: string): boolean {
-  const norm = (p: string) => {
+  const pickPid = (): number | null => {
+    if (typeof p.respondingPid === "number" && p.respondingPid > 0) return p.respondingPid;
     try {
-      return realpathSync(p);
+      return p.localServingPid();
     } catch {
-      return p;
+      return null;
     }
   };
-  return norm(a) === norm(b);
+
+  if (p.platform === "darwin") {
+    const ld = p.launchd;
+    if (!ld || !p.exists(ld.plistPath)) {
+      return unknown(
+        `no launchd service is registered for this data directory${ld ? ` (${ld.plistPath})` : ""}, so nothing proves ` +
+          "which install tree serves this instance (it was started directly, by another supervisor, or is not running)",
+      );
+    }
+    let raw: string;
+    try {
+      raw = p.read(ld.plistPath);
+    } catch (err) {
+      return unknown(`the launchd plist ${ld.plistPath} could not be read (${(err as Error)?.message ?? err})`);
+    }
+    const root = plistRootPath(raw);
+    if (root === null || resolve(root) !== resolve(p.dataDir)) {
+      return unknown(`the launchd plist ${ld.plistPath} is not registered to this data directory (${resolve(p.dataDir)})`);
+    }
+    const jobPid = p.launchdJobPid?.(ld.label) ?? null;
+    if (jobPid === null) {
+      return unknown(`launchd is not running the job ${ld.label}, so the instance answering was not started by it`);
+    }
+    const pid = pickPid();
+    if (pid === null) return unknown("the process serving this instance could not be identified");
+    if (pid !== jobPid) {
+      return unknown(
+        `the process serving this instance (pid ${pid}) is not launchd's job ${ld.label} (pid ${jobPid}) — it was started ` +
+          "directly, by another supervisor, or under a different HOME",
+      );
+    }
+    const pkg = p.servingPackage(pid);
+    if (!pkg) return unknown(`the install tree of the serving process (pid ${pid}) could not be read`);
+    const refs = readPlistProgramRefs(ld.plistPath, () => raw);
+    const unitNodeBin = refs?.programArguments.find((a) => a.startsWith("/") && /(^|[/\\])node$/.test(a)) ?? null;
+    return {
+      kind: "proven",
+      dir: pkg.dir,
+      version: pkg.version,
+      pid,
+      manager: "launchd",
+      unitName: ld.label,
+      unitPath: ld.plistPath,
+      unitNodeBin,
+      unitTree: refs?.workingDirectory ?? null,
+    };
+  }
+
+  if (p.platform === "linux") {
+    const pid = pickPid();
+    if (pid === null) return unknown("the process serving this instance could not be identified");
+    const pkg = p.servingPackage(pid);
+    if (!pkg) return unknown(`the install tree of the serving process (pid ${pid}) could not be read`);
+    const units = p.findUserUnitsForTree?.(pkg.dir) ?? [];
+    for (const u of units) {
+      const mainPid = p.systemdUserMainPid?.(u.name) ?? null;
+      if (mainPid !== pid) continue;
+      let refs: { nodeBin: string | null; workingDirectory: string | null } = { nodeBin: null, workingDirectory: null };
+      try {
+        refs = readSystemdServiceRefs(p.read(u.path));
+      } catch { /* the proof is the MainPID; the refs are detail */ }
+      return {
+        kind: "proven",
+        dir: pkg.dir,
+        version: pkg.version,
+        pid,
+        manager: "systemd-user",
+        unitName: u.name,
+        unitPath: u.path,
+        unitNodeBin: refs.nodeBin,
+        unitTree: refs.workingDirectory,
+      };
+    }
+    return unknown(
+      `no systemd user unit that names ${pkg.dir} owns the serving process (pid ${pid}) — it was started directly, ` +
+        "by a system-level unit, or by another supervisor",
+    );
+  }
+
+  return unknown(`${p.platform} has no service manager flair can check`);
 }
 
-/** Compare a parsed version; returns <0, 0, >0 (missing parts treated as 0). */
-function compareVersions(a: string, b: string): number {
-  const pa = a.split(".").map((n) => Number.parseInt(n, 10) || 0);
-  const pb = b.split(".").map((n) => Number.parseInt(n, 10) || 0);
+/**
+ * True for a tree `npm i -g` installed under some Node runtime's global prefix
+ * (`<prefix>/lib/node_modules/@tpsdev-ai/flair`) — the tree a Node bump leaves
+ * behind. A plain extracted tree or a checkout is a deliberate deployment and
+ * is never re-pointed.
+ */
+export function isNpmGlobalFlairTree(dir: string): boolean {
+  return /[/\\]lib[/\\]node_modules[/\\]@tpsdev-ai[/\\]flair[/\\]?$/.test(dir);
+}
+
+/** Compare dotted versions numerically; <0, 0, >0 (missing parts are 0; a pre-release tag is ignored). */
+export function compareVersions(a: string, b: string): number {
+  const parts = (v: string) => v.replace(/^v/, "").split("-")[0]!.split(".").map((n) => Number.parseInt(n, 10) || 0);
+  const pa = parts(a);
+  const pb = parts(b);
   for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
     const d = (pa[i] ?? 0) - (pb[i] ?? 0);
     if (d !== 0) return d < 0 ? -1 : 1;
@@ -137,97 +252,216 @@ function compareVersions(a: string, b: string): number {
   return 0;
 }
 
-export function computeTreeDivergence(input: TreeDivergenceInput): TreeDivergence {
+/**
+ * - `same`      — proven, and the serving tree IS this CLI's tree.
+ * - `diverged`  — proven, a different npm-global tree serves: the Node-bump
+ *                 case. `flair init && flair restart` re-points it.
+ * - `separate`  — proven, a different tree serves that is NOT an npm-global
+ *                 install (a plain tree, a checkout): deliberate, never re-pointed.
+ * - `unknown`   — no proof; nothing is advised from it.
+ */
+export type TreeState = "same" | "diverged" | "separate" | "unknown";
+
+export interface TreeAssessment {
+  state: TreeState;
+  cli: PackageLocation;
+  serving: ServingTree;
+  /** The version the running process reports, when it could be read. */
+  runningVersion: string | null;
+  /** Diverged only: the unit already names this CLI's tree (re-pointed, not yet restarted). */
+  restartPending: boolean;
+  /** Diverged only: this CLI's tree carries an OLDER flair than the instance runs. */
+  cliOlder: boolean;
+  /** The unit's node pin, when it names a different runtime than this CLI's. */
+  nodePin: ServiceNodePin | null;
+}
+
+function defaultSamePath(a: string, b: string): boolean {
+  return resolve(a) === resolve(b);
+}
+
+export function assessTreeDivergence(input: {
+  cli: PackageLocation;
+  serving: ServingTree;
+  runningVersion?: string | null;
+  currentNodeBin: string;
+  /** Path equality; callers pass a realpath-based comparison. */
+  samePath?: (a: string, b: string) => boolean;
+  nodePinDeps?: NodePinDeps;
+}): TreeAssessment {
   const samePath = input.samePath ?? defaultSamePath;
-  const runningDir = input.runningDir;
-  const diverged = runningDir !== null && !samePath(input.cliDir, runningDir);
-  const cliTreeOlder =
-    diverged &&
-    typeof input.runningVersion === "string" &&
-    compareVersions(input.cliVersion, input.runningVersion) < 0;
-  return {
-    diverged,
-    cliDir: input.cliDir,
-    cliVersion: input.cliVersion,
-    runningDir,
-    runningVersion: input.runningVersion ?? null,
-    cliTreeOlder,
-  };
+  const runningVersion = input.runningVersion ?? null;
+  const base = { cli: input.cli, serving: input.serving, runningVersion, restartPending: false, cliOlder: false, nodePin: null };
+  const s = input.serving;
+  if (s.kind === "unknown") return { ...base, state: "unknown" };
+
+  const nodePin = classifyServiceNodePin(
+    {
+      unitDescription: describeUnit(s),
+      unitNodeBin: s.unitNodeBin,
+      unitTree: s.unitTree,
+      currentNodeBin: input.currentNodeBin,
+      cliTree: input.cli.dir,
+    },
+    input.nodePinDeps,
+  );
+  if (samePath(input.cli.dir, s.dir)) return { ...base, state: "same", nodePin };
+  if (!isNpmGlobalFlairTree(s.dir)) return { ...base, state: "separate", nodePin };
+
+  return withRunningVersion(
+    {
+      ...base,
+      state: "diverged",
+      nodePin,
+      restartPending: s.unitTree !== null && samePath(s.unitTree, input.cli.dir),
+    },
+    runningVersion,
+  );
 }
 
 /**
- * The operator-facing lines for a diverged tree. Names the ACTOR (the CLI vs
- * the running instance), the STATE (both paths, both versions) and the REMEDY
- * (`flair init && flair restart`, plus `npm i -g @tpsdev-ai/flair` when the
- * CLI's own tree is the stale one). Returns [] when the trees agree.
+ * The assessment with the running process's version filled in (read after the
+ * proof, so a version probe is only spent when a tree was proven). `cliOlder`
+ * compares this CLI with the code the instance RUNS, falling back to the
+ * version on disk in the serving tree when the running one is unknown.
  */
-export function formatTreeDivergenceLines(d: TreeDivergence): string[] {
-  if (!d.diverged || d.runningDir === null) return [];
-  const runningVersion = d.runningVersion ? `  (v${d.runningVersion})` : "";
+export function withRunningVersion(a: TreeAssessment, runningVersion: string | null): TreeAssessment {
+  const servingCodeVersion = runningVersion ?? (a.serving.kind === "proven" ? a.serving.version : null);
+  return {
+    ...a,
+    runningVersion,
+    cliOlder:
+      a.state === "diverged" &&
+      a.cli.version !== null &&
+      servingCodeVersion !== null &&
+      compareVersions(a.cli.version, servingCodeVersion) < 0,
+  };
+}
+
+export function describeUnit(s: ProvenServingTree): string {
+  return s.manager === "launchd"
+    ? `the launchd service ${s.unitName} (${s.unitPath})`
+    : `the systemd user unit ${s.unitName} (${s.unitPath})`;
+}
+
+function v(version: string | null): string {
+  return version ? `flair ${version}` : "flair version unknown";
+}
+
+function relation(version: string | null, latest: string): string {
+  if (!version) return "unknown";
+  const c = compareVersions(version, latest);
+  return c === 0 ? "current" : c < 0 ? "behind" : "ahead";
+}
+
+export interface TreeLinesOptions {
+  /** Latest published version, when known — adds the currency line. */
+  latest?: string | null;
+  /** `upgrade` adds what `flair upgrade` does and does not change. */
+  context?: "status" | "doctor" | "upgrade" | "restart";
+}
+
+/**
+ * The operator-facing block for a `diverged` or `separate` assessment. Names the
+ * ACTOR (the CLI, the instance and the unit that owns it), the STATE (both
+ * trees, both versions, "unknown" where a version could not be read) and the
+ * REMEDY. Returns [] for `same` and `unknown` — see formatServingTreeLine.
+ */
+export function formatTreeAssessmentLines(a: TreeAssessment, opts: TreeLinesOptions = {}): string[] {
+  if (a.serving.kind !== "proven") return [];
+  const s = a.serving;
+  if (a.state === "separate") {
+    return [
+      `ℹ  The instance serves from ${s.dir} (running ${v(a.runningVersion)}; pid ${s.pid}, ${describeUnit(s)}),`,
+      `   not from this CLI's tree ${a.cli.dir} (${v(a.cli.version)}). It is not an npm-global install, so flair treats it`,
+      "   as a separately managed deployment and never re-points it. If it is a packed tree, `flair upgrade --tree " + `${s.dir}\` upgrades it.`,
+    ];
+  }
+  if (a.state !== "diverged") return [];
+
+  const unit = describeUnit(s);
   const lines = [
-    "⚠️  The CLI and the running instance are in DIFFERENT install trees.",
-    `   CLI:      ${d.cliDir}  (v${d.cliVersion})`,
-    `   instance: ${d.runningDir}${runningVersion}`,
-    "   The instance was started by a unit whose node path was baked at an earlier runtime, so it keeps serving from the old tree while this CLI runs from the current one.",
+    "⚠️  This CLI and the running instance are in DIFFERENT install trees.",
+    `   CLI:      ${a.cli.dir}  (${v(a.cli.version)})`,
+    `   instance: ${s.dir}  (running ${v(a.runningVersion)}; pid ${s.pid}, ${unit})`,
   ];
-  if (d.cliTreeOlder) {
+  if (a.nodePin?.kind === "erroneous") lines.push(`   Cause: ${a.nodePin.message}`);
+  if (opts.latest) {
     lines.push(
-      `   The CLI's tree is the stale one: run \`npm i -g ${"@tpsdev-ai/flair"}\` to make it current, then:`,
+      `   Versions: latest published is ${opts.latest}; this CLI is ${relation(a.cli.version, opts.latest)}, ` +
+        `the instance is ${relation(a.runningVersion, opts.latest)}.`,
     );
   }
-  lines.push("   Remedy: flair init && flair restart");
+  if (opts.context === "upgrade") {
+    lines.push(
+      `   \`flair upgrade\` changes this CLI's tree only; the instance keeps serving ${s.dir} until its service is re-pointed.`,
+    );
+  }
+  if (a.cliOlder) {
+    lines.push(
+      `   This CLI's tree has an OLDER flair than the instance runs, so re-pointing the service at it now would downgrade the`,
+      "   instance — `flair init` will not do that. First update this CLI's tree from this same shell:",
+      "     npm i -g @tpsdev-ai/flair",
+      "   Then: flair init && flair restart",
+    );
+    return lines;
+  }
+  if (a.restartPending) {
+    lines.push(
+      `   ${unit} already names this CLI's tree; the running process started before it was re-pointed.`,
+      "   Remedy: flair restart  (restarts the instance under the unit and reports which tree then serves)",
+    );
+    return lines;
+  }
   lines.push(
-    "   `flair init` rewrites the unit against the runtime in use now; `flair restart` brings the instance up under it. Your data is not touched.",
+    "   Remedy: flair init && flair restart",
+    `   \`flair init\` re-points ${unit} at this CLI's tree — its node, Harper entry${s.manager === "launchd" ? ", launcher" : ""} and working directory — and`,
+    "   leaves the unit's other settings as they are (it also re-points the federation-sync shim when that runs another tree).",
+    "   init is Flair's full setup command, so it also re-runs its idempotent setup for this data directory: it reuses the existing",
+    "   Harper install and admin password, saves the instance's recorded configuration again, and in an interactive shell can",
+    "   offer agent and MCP-client setup. `flair restart` then restarts the instance under the re-pointed unit and reports which",
+    "   tree serves it.",
   );
   return lines;
 }
 
-/** The one-line form for compact output. */
-export function formatTreeDivergenceOneLine(d: TreeDivergence): string | null {
-  if (!d.diverged || d.runningDir === null) return null;
-  const rv = d.runningVersion ? ` v${d.runningVersion}` : "";
-  return `CLI tree ${d.cliDir} (v${d.cliVersion}) ≠ instance tree ${d.runningDir}${rv} — run: flair init && flair restart`;
+/** One line naming the serving tree — or why it is unknown. */
+export function formatServingTreeLine(a: TreeAssessment): string {
+  if (a.serving.kind === "unknown") return `serving install tree: unknown — ${a.serving.reason}`;
+  const s = a.serving;
+  const where = a.state === "same" ? "this CLI's tree" : `this CLI is ${a.cli.dir}`;
+  return `serving install tree: ${s.dir} (running ${v(a.runningVersion)}; pid ${s.pid}, ${describeUnit(s)}) — ${where}`;
 }
 
-/** The instance-scoped launchd label for a data dir (mirrors cli.ts's
- *  launchdLabel: `ai.tpsdev.flair.<8 hex of sha256 of the realpath>`). */
-export function instanceLaunchdLabel(dataDir: string): string {
-  const hash = createHash("sha256").update(resolve(dataDir), "utf8").digest("hex").slice(0, 8);
-  return `ai.tpsdev.flair.${hash}`;
-}
-
-/**
- * Read the running instance's runtime refs for a data dir, from the launchd
- * plist (macOS) or the systemd user unit (Linux) that instance runs from. The
- * instance-scoped label is tried first; the pre-#693 bare label is a fallback so
- * an un-migrated install is still read.
- */
-export function resolveInstanceRuntimeForDataDir(
-  dataDir: string,
-  opts: {
-    platform?: NodeJS.Platform;
-    homeDir?: string;
-    read?: (p: string) => string;
-    exists?: (p: string) => boolean;
-    launchAgentsDir?: string;
-    systemdUserDir?: string;
-  } = {},
-): InstanceRuntimeRefs {
-  const platform = opts.platform ?? process.platform;
-  const home = opts.homeDir ?? resolveHome();
-  const exists = opts.exists ?? existsSync;
-  if (platform === "darwin") {
-    const dir = opts.launchAgentsDir ?? join(home, "Library", "LaunchAgents");
-    const candidates = [join(dir, `${instanceLaunchdLabel(dataDir)}.plist`), join(dir, "ai.tpsdev.flair.plist")];
-    for (const p of candidates) {
-      if (exists(p)) return readPlistInstanceRuntime(p, { read: opts.read });
-    }
-    return { nodeBin: null, workingDirectory: null };
-  }
-  const dir = opts.systemdUserDir ?? join(home, ".config", "systemd", "user");
-  const candidates = [join(dir, "flair.service"), join(dir, "dev.flair.service")];
-  for (const p of candidates) {
-    if (exists(p)) return readSystemdInstanceRuntime(p, { read: opts.read });
-  }
-  return { nodeBin: null, workingDirectory: null };
+/** The assessment as plain JSON for `flair status --json`. */
+export function treeAssessmentJson(a: TreeAssessment): Record<string, unknown> {
+  const s = a.serving;
+  return {
+    state: a.state,
+    cli: { dir: a.cli.dir, version: a.cli.version },
+    serving:
+      s.kind === "proven"
+        ? {
+            dir: s.dir,
+            treeVersion: s.version,
+            runningVersion: a.runningVersion,
+            pid: s.pid,
+            manager: s.manager,
+            unit: s.unitName,
+            unitPath: s.unitPath,
+          }
+        : null,
+    unknownReason: s.kind === "unknown" ? s.reason : null,
+    restartPending: a.restartPending,
+    cliOlder: a.cliOlder,
+    nodePin: a.nodePin ? { kind: a.nodePin.kind, unitNodeBin: a.nodePin.unitNodeBin, currentNodeBin: a.nodePin.currentNodeBin } : null,
+    remedy:
+      a.state !== "diverged"
+        ? null
+        : a.cliOlder
+          ? ["npm i -g @tpsdev-ai/flair", "flair init", "flair restart"]
+          : a.restartPending
+            ? ["flair restart"]
+            : ["flair init", "flair restart"],
+  };
 }

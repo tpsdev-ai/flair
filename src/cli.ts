@@ -169,6 +169,15 @@ import {
   type LaunchdRepairResult,
   type RepairPlan,
 } from "./lib/launchd-repair.js";
+import {
+  assessTreeDivergence,
+  proveServingTree,
+  type ServingTree,
+  type TreeAssessment,
+} from "./lib/tree-divergence.js";
+import { planPlistRuntimeRepoint, planSystemdUnitRuntimeRepoint, type RepointDeps, type RepointPlan } from "./lib/service-repoint.js";
+import { writeFilesAtomically } from "./lib/atomic-write.js";
+import { preferVersionManagerAlias } from "./lib/node-alias-path.js";
 import { stabilizeMqttNetworkKeyOrder } from "./lib/stabilize-mqtt-network.js";
 import { detectOpsApiAllInterfacesBind } from "./lib/ops-api-bind.js";
 import {
@@ -320,6 +329,7 @@ import {
   defaultReadProcessCmdline,
   defaultReadProcessCwd,
   findFlairPackageDir,
+  readFlairPackageAt,
   resolveNpmGlobalFlairPackage,
   resolveServingFlairPackage,
 } from "./lib/upgrade-exec-path.js";
@@ -4450,6 +4460,11 @@ program.configureHelp({ showGlobalOptions: true });
 // redundant noise on the one command whose whole job is this exact report.
 program.hook("preAction", async (_thisCommand, actionCommand) => {
   if (actionCommand.name() === "doctor") return;
+  // flair#2034 §2: `status` reports the server's version itself, next to this
+  // CLI's and the install tree that serves it, and decides the advice from
+  // that one comparison — a second, tree-blind "run: flair restart" line here
+  // is the hint that used to contradict it.
+  if (actionCommand.name() === "status" && actionCommand.parent === program) return;
   // Interactive-only: this is a pure stderr UX nudge for a human at a
   // terminal ("bare-npm users must not get stuck"), not a machine-consumed
   // signal — it never changes exit codes or stdout. Gating on TTY means a
@@ -4503,6 +4518,7 @@ bindInitCli({
   pubKeyPath,
   readyOpsSocketPosture,
   reconcileFederationInstanceViaOpsApi,
+  repointMainServiceUnit,
   resolveHttpPort,
   writeAdminPassFile,
   resolveOpsBindHost,
@@ -4755,6 +4771,8 @@ bindStatusCli({
   defaultDataDir,
   readHarperConfig,
   readPortFromConfig,
+  resolveHttpPort,
+  assessInstallTree,
   __pkgVersion,
 });
 registerStatus(program);
@@ -4845,6 +4863,7 @@ function stampEngineVersionIfRunning(dataDir: string): void {
 // Command registration lives in src/commands/upgrade.ts (flair#1636).
 // Bind shared cli-locals first so the extracted module never imports this file.
 bindUpgradeCli({
+  assessInstallTree,
   decideAfterRollbackVerify,
   decideAfterVerify,
   defaultDataDir,
@@ -5255,6 +5274,7 @@ export function assertLaunchdServiceOwnedBy(
 // Command registration lives in src/commands/service.ts (flair#1636).
 // Bind shared cli-locals first so the extracted module never imports this file.
 bindServiceCli({
+  assessInstallTree,
   buildDirectSpawnEnv,
   closedDirectSpawnEnv,
   defaultDataDir,
@@ -5320,6 +5340,259 @@ function resolveInstanceServingPid(dataDir: string, port: number): number | null
     isAlive: isProcessAlive,
     listeningPids,
   });
+}
+
+// ─── which install tree serves this instance (flair#2034 §2) ────────────────
+//
+// The pure decision lives in src/lib/tree-divergence.ts (proof) and
+// src/lib/service-repoint.ts (re-point planning). These adapters are the only
+// places that read the real launchd / systemd / process state or write a unit.
+
+/** realpath, or the lexically resolved path when it cannot be resolved. */
+function canonicalOr(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return resolve(p);
+  }
+}
+
+function samePathCanonical(a: string, b: string): boolean {
+  return canonicalOr(a) === canonicalOr(b);
+}
+
+function realRepointDeps(): RepointDeps {
+  return {
+    exists: existsSync,
+    samePath: samePathCanonical,
+    canonical: canonicalOr,
+    treeVersion: (dir) => readFlairPackageAt(dir)?.version ?? null,
+  };
+}
+
+/** `systemctl --user show -p MainPID --value <unit>`: the PID, or null. Bounded; never throws. */
+function systemdUserMainPid(unitName: string): number | null {
+  const res = spawnSync("systemctl", ["--user", "show", "-p", "MainPID", "--value", unitName], {
+    encoding: "utf-8",
+    timeout: LAUNCHCTL_QUERY_TIMEOUT_MS,
+  });
+  if (res.status !== 0) return null;
+  const n = Number(String(res.stdout ?? "").trim());
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/** This CLI's own install tree (realpath) and version. */
+function cliInstallTree(): { dir: string; version: string | null } {
+  const loc = findFlairPackageDir(flairPackageDir());
+  return { dir: loc?.dir ?? canonicalOr(flairPackageDir()), version: __pkgVersion || loc?.version || null };
+}
+
+export interface ServingTreeQuery {
+  /** False when the queried instance is not this host's local instance for the data dir (--target, a remote URL). */
+  local: boolean;
+  queryUrl?: string;
+  /** The PID the answering process reported about itself (/HealthDetail `pid`). */
+  respondingPid?: number | null;
+  /** The version the answering process reported (/Health `version`). */
+  runningVersion?: string | null;
+}
+
+/** Which install tree serves `dataDir`'s instance — proven from the service manager, or unknown. */
+function resolveServingTree(dataDir: string, port: number, query: ServingTreeQuery): ServingTree {
+  const { label, plistPath } = resolveLaunchdLabel(dataDir);
+  return proveServingTree({
+    platform: process.platform,
+    local: query.local,
+    queryUrl: query.queryUrl ?? `http://127.0.0.1:${port}`,
+    dataDir,
+    respondingPid: query.respondingPid ?? null,
+    localServingPid: () => resolveInstanceServingPid(dataDir, port),
+    launchd: { label, plistPath },
+    launchdJobPid: (l) => readLaunchctlJobState(l, realLaunchctlLister).pid,
+    findUserUnitsForTree: (tree) =>
+      findSystemdUnitsForTree(tree, { systemDirs: [], envUnit: "" })
+        .filter((u) => u.scope === "user")
+        .map((u) => ({ name: u.name, path: u.path })),
+    systemdUserMainPid,
+    servingPackage: (pid) => resolveServingFlairPackage(pid),
+    exists: existsSync,
+    read: (p) => readFileSync(p, "utf-8"),
+  });
+}
+
+/** This CLI's tree vs the tree proven to serve `dataDir`'s instance. */
+function assessInstallTree(dataDir: string, port: number, query: ServingTreeQuery): TreeAssessment {
+  return assessTreeDivergence({
+    cli: cliInstallTree(),
+    serving: resolveServingTree(dataDir, port, query),
+    runningVersion: query.runningVersion ?? null,
+    currentNodeBin: process.execPath,
+    samePath: samePathCanonical,
+  });
+}
+
+export type MainServiceRepointResult =
+  | { kind: "repointed" | "would-repoint" | "current" | "pinned-node"; unitPath: string; detail: string }
+  | { kind: "not-applicable"; detail: string }
+  | { kind: "refused"; unitPath?: string; detail: string };
+
+/**
+ * Apply a re-point plan to `unitPath`: write atomically, then run `reload`
+ * (systemd's daemon-reload). A failed reload restores the unit's previous
+ * bytes, so the unit and the service manager never disagree.
+ */
+function applyRepointPlan(
+  plan: RepointPlan,
+  unitPath: string,
+  dryRun: boolean,
+  reload?: () => void,
+): MainServiceRepointResult {
+  switch (plan.kind) {
+    case "current":
+    case "pinned-node":
+      return { kind: plan.kind, unitPath, detail: plan.detail };
+    case "refuse":
+      return { kind: "refused", unitPath, detail: plan.detail };
+    case "repoint": {
+      if (dryRun) return { kind: "would-repoint", unitPath, detail: plan.detail.replace(/^re-pointed/, "would re-point") };
+      let original: string;
+      let mode = 0o644;
+      try {
+        original = readFileSync(unitPath, "utf-8");
+        mode = statSync(unitPath).mode & 0o7777;
+      } catch (err: any) {
+        return { kind: "refused", unitPath, detail: `could not read ${unitPath} (${err?.message ?? err}); nothing was changed.` };
+      }
+      try {
+        writeFilesAtomically([{ path: unitPath, content: plan.text, mode }]);
+      } catch (err: any) {
+        return { kind: "refused", unitPath, detail: `could not re-point ${unitPath}: ${err?.message ?? err}` };
+      }
+      if (reload) {
+        try {
+          reload();
+        } catch (err: any) {
+          try {
+            writeFilesAtomically([{ path: unitPath, content: original, mode }]);
+          } catch (restoreErr: any) {
+            return {
+              kind: "refused",
+              unitPath,
+              detail:
+                `re-pointed ${unitPath}, but the service manager could not reload it (${err?.message ?? err}) and restoring ` +
+                `its previous content failed too (${restoreErr?.message ?? restoreErr}). Check the unit by hand.`,
+            };
+          }
+          return {
+            kind: "refused",
+            unitPath,
+            detail: `the service manager could not reload ${unitPath} (${err?.message ?? err}); the unit was restored to its previous content.`,
+          };
+        }
+      }
+      return { kind: "repointed", unitPath, detail: plan.detail };
+    }
+  }
+}
+
+/** Re-point an adopted pass-file plist's runtime paths (see planPlistRuntimeRepoint). */
+function repointAdoptedPlistFile(
+  plistPath: string,
+  raw: string,
+  targets: Parameters<typeof planPlistRuntimeRepoint>[1],
+  dryRun = false,
+): MainServiceRepointResult {
+  return applyRepointPlan(planPlistRuntimeRepoint(raw, targets, realRepointDeps(), plistPath), plistPath, dryRun);
+}
+
+/**
+ * Re-point THIS instance's own service unit at this CLI's install tree —
+ * `flair init` (Linux) and `flair doctor --fix`. macOS: the data dir's own
+ * pass-file plist (ROOTPATH = this data dir). Linux: the systemd USER unit
+ * proven to own the serving process; a unit with drop-in overrides is refused.
+ * Only runtime paths change; see src/lib/service-repoint.ts for the rules.
+ */
+function repointMainServiceUnit(
+  dataDir: string,
+  port: number,
+  opts: { dryRun?: boolean } = {},
+): MainServiceRepointResult {
+  const dryRun = opts.dryRun === true;
+  const cli = cliInstallTree();
+  const harper = harperBin();
+  if (!harper) return { kind: "refused", detail: harperBinNotFoundMessage(harperSearchRoots()) };
+  const targets = {
+    launcher: launchdLauncherPath(),
+    nodeBin: preferVersionManagerAlias(process.execPath),
+    harperBin: harper,
+    workingDirectory: cli.dir,
+    cliVersion: cli.version,
+  };
+
+  if (process.platform === "darwin") {
+    const { plistPath } = resolveLaunchdLabel(dataDir);
+    if (!existsSync(plistPath)) {
+      return { kind: "not-applicable", detail: `no launchd service is registered for this data directory (${plistPath})` };
+    }
+    let raw: string;
+    try {
+      raw = readFileSync(plistPath, "utf-8");
+    } catch (err: any) {
+      return { kind: "refused", unitPath: plistPath, detail: `could not read ${plistPath} (${err?.message ?? err}).` };
+    }
+    const disposition = classifyPlist(plistPath, dataDir, {
+      exists: existsSync,
+      read: () => raw,
+      readRootPath: () => readPlistRootPath(plistPath),
+    });
+    if (disposition !== "ours") {
+      return {
+        kind: "refused",
+        unitPath: plistPath,
+        detail: `${plistPath} cannot be attributed to this data directory (${disposition}); run flair doctor --fix to repair launchd management first.`,
+      };
+    }
+    if (plistCarriesInlineAdminPassword(raw)) {
+      return {
+        kind: "refused",
+        unitPath: plistPath,
+        detail: `${plistPath} still embeds the admin password inline; run flair doctor --fix first (it regenerates the plist in pass-file mode).`,
+      };
+    }
+    return repointAdoptedPlistFile(plistPath, raw, targets, dryRun);
+  }
+
+  if (process.platform === "linux") {
+    const serving = resolveServingTree(dataDir, port, { local: true });
+    if (serving.kind !== "proven") {
+      return { kind: "not-applicable", detail: `no service unit is proven to serve this instance: ${serving.reason}` };
+    }
+    if (existsSync(`${serving.unitPath}.d`)) {
+      return {
+        kind: "refused",
+        unitPath: serving.unitPath,
+        detail: `${serving.unitPath}.d holds drop-in overrides that can set ExecStart= or WorkingDirectory=, so flair does not re-point the unit; edit it by hand.`,
+      };
+    }
+    let text: string;
+    try {
+      text = readFileSync(serving.unitPath, "utf-8");
+    } catch (err: any) {
+      return { kind: "refused", unitPath: serving.unitPath, detail: `could not read ${serving.unitPath} (${err?.message ?? err}).` };
+    }
+    const plan = planSystemdUnitRuntimeRepoint(
+      text,
+      serving.unitTree ?? serving.dir,
+      { ...targets, launcher: undefined },
+      realRepointDeps(),
+      serving.unitPath,
+    );
+    return applyRepointPlan(plan, serving.unitPath, dryRun, () => {
+      execFileSync("systemctl", ["--user", "daemon-reload"], { stdio: "pipe", timeout: 30_000 });
+    });
+  }
+
+  return { kind: "not-applicable", detail: `${process.platform} has no service manager flair re-points` };
 }
 
 /** Agent signing-key ids under `keysDir` — node-scoped federation keys excluded. */
@@ -5696,14 +5969,20 @@ export interface WriteInitLaunchdPlistDeps {
 /**
  * The outcome of init's launchd-plist step.
  *
- * `unchanged` and `refused` both mean NO plist write happened: the first when
- * the instance is already adopted with the pass-file shape (flair#1693 — init
- * must not downgrade it, and re-writing would only churn the file), the second
- * when the launcher's argv cannot be satisfied (flair#1685).
+ * `unchanged`, `not-repointed` and `refused` all mean NO plist write happened:
+ * `unchanged` when the instance is already adopted with the pass-file shape
+ * and already serves this CLI's tree (flair#1693 — init must not downgrade it,
+ * and re-writing would only churn the file); `not-repointed` when an adopted
+ * plist serves another tree but may not be moved (flair#2034 — the detail says
+ * why: a separately managed tree, a downgrade, an unexpected shape); `refused`
+ * when the launcher's argv cannot be satisfied (flair#1685). `repointed` means
+ * ONLY the adopted plist's runtime paths were replaced, atomically.
  */
 export type WriteInitLaunchdPlistResult =
   | { kind: "written"; plistPath: string }
   | { kind: "unchanged"; plistPath: string; detail: string }
+  | { kind: "repointed"; plistPath: string; detail: string }
+  | { kind: "not-repointed"; plistPath: string; detail: string }
   | { kind: "refused"; detail: string };
 
 /**
@@ -5768,12 +6047,32 @@ export async function writeInitLaunchdPlist(
         !plistCarriesInlineAdminPassword(raw) &&
         basename(launcherArg) === basename(launchdLauncherPath());
       if (disposition === "ours" && passFileShape) {
-        return {
-          kind: "unchanged",
-          plistPath: opts.plistPath,
-          detail:
-            `the launchd service is already adopted with the pass-file launcher; leaving ${opts.plistPath} unchanged`,
-        };
+        // flair#2034 §2: never regenerated or downgraded (#1693), but its
+        // RUNTIME paths — launcher, node, Harper entry, working directory —
+        // are re-pointed at this CLI's tree when it serves another
+        // npm-global tree. Every other byte stays. No credential is needed:
+        // the pass-file path it names is left as it is.
+        const r = repointAdoptedPlistFile(opts.plistPath, raw, {
+          launcher: launchdLauncherPath(),
+          nodeBin: opts.execPath,
+          harperBin: opts.harperBinPath,
+          workingDirectory: opts.workingDirectory,
+          cliVersion: readFlairPackageAt(opts.workingDirectory)?.version ?? null,
+        });
+        switch (r.kind) {
+          case "repointed":
+            return { kind: "repointed", plistPath: opts.plistPath, detail: r.detail };
+          case "refused":
+            return { kind: "not-repointed", plistPath: opts.plistPath, detail: r.detail };
+          default:
+            return {
+              kind: "unchanged",
+              plistPath: opts.plistPath,
+              detail:
+                `the launchd service is already adopted with the pass-file launcher; leaving ${opts.plistPath} unchanged` +
+                (r.kind === "pinned-node" ? ` (${r.detail})` : ""),
+            };
+        }
       }
     }
   }
@@ -6426,8 +6725,26 @@ async function startFlairProcess(port: number, dataDir: string): Promise<void> {
  * frames down.
  */
 async function restartFlair(port: number, dataDir: string): Promise<void> {
-  await stopFlairProcess(port, dataDir);
-  await startFlairProcess(port, dataDir);
+  // flair#2034 §2: on Linux, an instance proven to run under a systemd USER
+  // unit (the unit's MainPID is the serving process) is restarted THROUGH that
+  // unit. The signal-and-respawn path below would either race the unit's own
+  // Restart= policy or leave the instance running outside the unit — and a
+  // unit that `flair init` just re-pointed would never be used.
+  const unitOwner = process.platform === "linux" ? resolveServingTree(dataDir, port, { local: true }) : null;
+  if (unitOwner?.kind === "proven" && unitOwner.manager === "systemd-user") {
+    if (unitOwner.unitTree !== null && samePathCanonical(unitOwner.unitTree, flairPackageDir())) {
+      guardEngineNotBackwards(dataDir);
+    }
+    console.log(`  (restarting through the systemd user unit that runs this instance: ${unitOwner.unitName})`);
+    execFileSync("systemctl", ["--user", "daemon-reload"], { stdio: "pipe", timeout: 30_000 });
+    execFileSync("systemctl", ["--user", "restart", unitOwner.unitName], { stdio: "pipe", timeout: STARTUP_TIMEOUT_MS * 2 });
+    await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
+    readyOpsSocketPosture(dataDir);
+    stampEngineVersionIfRunning(dataDir);
+  } else {
+    await stopFlairProcess(port, dataDir);
+    await startFlairProcess(port, dataDir);
+  }
   // Bust the version-handshake cache so the next preAction nudge re-fetches
   // the LIVE version instead of the pre-restart cached one (the false
   // "server is running <old>" users hit for up to 60s post-upgrade+restart).
@@ -6608,6 +6925,7 @@ registerFleet(program);
 // Bind shared cli-locals first so the extracted module never imports this file.
 bindDoctorCli({
   api,
+  assessInstallTree,
   checkAgentRegistered,
   classifyOpsSocketPosture,
   configPath,
@@ -6621,7 +6939,9 @@ bindDoctorCli({
   readPortFromConfig,
   relativeTime,
   repairLaunchdManagement,
+  repointMainServiceUnit,
   resolveHttpPort,
+  restartFlair,
   resolveOpsPort,
   verifyAuditLog,
   verifySemanticSearch,

@@ -57,11 +57,15 @@
  * `flair federation sync --admin-pass-file`, which reads it through
  * readAdminPassFileSecure() and refuses a file that is not owner-only.
  */
-import { existsSync, chmodSync, rmSync, readFileSync, mkdirSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { existsSync, chmodSync, rmSync, readFileSync, mkdirSync, realpathSync, statSync } from "node:fs";
+import { resolve, dirname, isAbsolute } from "node:path";
 
 import { fileURLToPath } from "node:url";
-import { escapeXml } from "../lib/xml-escape.js";
+import { escapeXml, unescapeXml } from "../lib/xml-escape.js";
+import { writeFilesAtomically, type AtomicWriteHooks } from "../lib/atomic-write.js";
+import { preferVersionManagerAlias, type AliasHooks } from "../lib/node-alias-path.js";
+import { compareVersions, isNpmGlobalFlairTree } from "../lib/tree-divergence.js";
+import { findFlairPackageDir } from "../lib/upgrade-exec-path.js";
 import {
   type SchedulerPlatform,
   type FirstRunVerification,
@@ -149,11 +153,18 @@ export interface EnableOpts {
    */
   flairBin?: string;
   /**
-   * Absolute path to the node binary baked into the shim. Defaults to
-   * resolveNodeBin() — the enabling runtime's own binary, or `command -v
-   * node` resolved once at enable time (#1231).
+   * Absolute path to the node binary baked into the shim, used verbatim.
+   * Defaults to resolveNodeBin() — the enabling runtime's own binary, or
+   * `command -v node` resolved once at enable time (#1231) — written through
+   * the same version-manager alias policy `flair init` uses when it re-points
+   * the shim (preferVersionManagerAlias, flair#2034), so enable and init agree
+   * on the path.
    */
   nodeBin?: string;
+  /** The runtime to resolve when nodeBin is not given (testing). Defaults to resolveNodeBin(). */
+  defaultNodeBin?: string;
+  /** Filesystem hooks for the alias policy (testing). */
+  aliasHooks?: AliasHooks;
   /** Override platform for testing. */
   platformOverride?: SchedulerPlatform;
   /** Override target paths for testing. */
@@ -319,7 +330,9 @@ export function enableScheduler(opts: EnableOpts): EnableResult {
   const plat = detectPlatform(opts.platformOverride);
   const resolvedFlair = resolveFlairBin(opts.flairBin);
   const flairBin = resolvedFlair.path;
-  const nodeBin = resolveNodeBin(opts.nodeBin);
+  const nodeBin = opts.nodeBin
+    ? resolveNodeBin(opts.nodeBin)
+    : preferVersionManagerAlias(opts.defaultNodeBin ?? resolveNodeBin(), opts.aliasHooks);
   const shimPath = opts.shimPathOverride ?? SHIM_PATH_DEFAULT;
   const templateRoot = opts.templateRootOverride ?? defaultTemplateRoot();
   const subs = buildSubstitutions(opts, shimPath, flairBin, nodeBin);
@@ -893,132 +906,248 @@ export function formatStatusReport(s: SchedulerStatus, a: DriverAssessment): For
   return { lines, ok: a.verdict !== "driver-stalled" && a.verdict !== "driver-inactive" && a.verdict !== "no-driver" };
 }
 
-// ─── runtime rewrite (flair#2034 §2) ────────────────────────────────────────
+// ─── runtime re-point (flair#2034 §2) ───────────────────────────────────────
 //
-// After a Node minor bump the shim's baked NODE_BIN/FLAIR_BIN point at the old
-// runtime tree, and `flair init` never rewrote them. This regenerates the shim
-// and the platform unit against the runtime in use NOW, idempotently, and only
-// when they already exist (a machine that never enabled federation sync is left
-// alone). Operator-set values the generator does not own — the installed
-// interval, FLAIR_TARGET and FLAIR_ADMIN_PASS_FILE — are read back from the
-// existing unit and preserved. Nothing here touches instance data.
+// After a Node bump the shim's baked NODE_BIN/FLAIR_BIN keep running the flair
+// of the OLD runtime's install tree. `flair init` and `flair doctor --fix`
+// re-point them at this CLI's tree.
+//
+// ONLY THE SHIM'S EXEC LINE CHANGES. The runtime lives in exactly one place:
+// the shim's `exec "<NODE_BIN>" "<FLAIR_BIN>" federation sync "$@"` line. The
+// launchd plist / systemd unit exec the SHIM by path and carry no runtime path
+// at all (templates/launchd/dev.flair.federation.sync.plist.tmpl and
+// templates/systemd/flair-federation-sync.service.tmpl), so the unit is never
+// rewritten: the operator's interval, target, pass-file, PATH, RunAtLoad and
+// anything else they set stay byte-for-byte as they are. The unit is only READ,
+// to establish that the scheduler is enabled and that it execs this shim.
+//
+// Refused, never guessed: an unreadable unit or shim, a unit that does not exec
+// the shim, a shim not in the generated shape. A shim with no unit (the leftover
+// of `federation sync disable`) is not an enabled scheduler and is left alone.
+// The write is atomic (temp file + fsync + rename): the shim is either the old
+// one or the new one, never a partial file.
+
+export type FederationRuntimeStatus =
+  | "not-enabled"
+  | "current"
+  | "pinned-node"
+  | "separate"
+  | "would-rewrite"
+  | "rewritten"
+  | "refused";
 
 export interface RewriteFederationRuntimeOpts {
-  /** The node binary to bake. Defaults to resolveNodeBin(). */
+  /** The node binary to bake. Defaults to the enable policy: preferVersionManagerAlias(resolveNodeBin()). */
   nodeBin?: string;
   /** The flair CLI script to bake. Defaults to resolveFlairBin(). */
   flairBin?: string;
-  homeOverride?: string;
-  templateRootOverride?: string;
+  /** This CLI's install tree. Defaults to the tree the baked flair script belongs to. */
+  cliTree?: string;
+  /** This CLI's flair version, for the no-downgrade rule. */
+  cliVersion?: string | null;
+  /** Classify and report what would change, without writing. */
+  dryRun?: boolean;
+  platformOverride?: SchedulerPlatform;
   shimPathOverride?: string;
   launchdPlistOverride?: string;
   /** The systemd SERVICE unit path (the one that execs the shim). */
   systemdServiceOverride?: string;
-  /** Overrides the installed interval; otherwise the installed value is preserved. */
-  intervalSeconds?: number;
-  platformOverride?: SchedulerPlatform;
   read?: (p: string) => string;
   exists?: (p: string) => boolean;
-  writeFile?: (p: string, contents: string, mode: number) => void;
+  realpath?: (p: string) => string;
+  /** The @tpsdev-ai/flair package a file belongs to ({dir, version}), or null. */
+  packageOf?: (p: string) => { dir: string; version: string | null } | null;
+  modeOf?: (p: string) => number;
+  /** Filesystem hooks for the atomic write (tests inject failures here). */
+  atomic?: AtomicWriteHooks;
 }
 
 export interface RewriteFederationRuntimeResult {
+  status: FederationRuntimeStatus;
   platform: SchedulerPlatform;
   shimPath: string;
-  shimRewritten: boolean;
   unitPath: string;
-  unitRewritten: boolean;
-  intervalSeconds: number;
-  /** True when nothing existed to rewrite. */
-  skipped: boolean;
+  detail: string;
+  from?: { nodeBin: string; flairBin: string };
+  to?: { nodeBin: string; flairBin: string };
 }
 
-// Literal patterns only: the env keys are a fixed set, so there is no reason to
-// build a RegExp from a variable (and doing so trips the ReDoS audit).
-const PLIST_ENV_RE: Record<string, RegExp> = {
-  FLAIR_TARGET: /<key>FLAIR_TARGET<\/key>\s*<string>([^<]*)<\/string>/,
-  FLAIR_ADMIN_PASS_FILE: /<key>FLAIR_ADMIN_PASS_FILE<\/key>\s*<string>([^<]*)<\/string>/,
-};
-const SYSTEMD_ENV_RE: Record<string, RegExp> = {
-  FLAIR_TARGET: /^Environment=FLAIR_TARGET=(.*)$/m,
-  FLAIR_ADMIN_PASS_FILE: /^Environment=FLAIR_ADMIN_PASS_FILE=(.*)$/m,
-};
+const SHIM_MARKER = "# Deployed by `flair federation sync enable`";
+const SHIM_EXEC_LINE_RE = /^exec "([^"\n]*)" "([^"\n]*)" federation sync "\$@"$/gm;
+const UNSAFE_SHIM_VALUE = /["$`\\\n]/;
 
-function installedEnvValue(plat: SchedulerPlatform, text: string, key: string): string {
-  const re = plat === "darwin" ? PLIST_ENV_RE[key] : SYSTEMD_ENV_RE[key];
-  if (!re) return "";
-  const m = re.exec(text);
-  if (!m) return "";
-  return plat === "darwin" ? m[1] : m[1].trim();
+/** Does the federation-sync unit exec `shimPath`? Returns the reason it does not, or null. */
+function federationUnitExecsShim(plat: SchedulerPlatform, text: string, shimPath: string): string | null {
+  if (plat === "darwin") {
+    const label = /<key>Label<\/key>\s*<string>([^<]*)<\/string>/.exec(text);
+    if (!label || unescapeXml(label[1]!) !== LAUNCHD_LABEL) return `its Label is not ${LAUNCHD_LABEL}`;
+    const block = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text);
+    const args = block ? [...block[1]!.matchAll(/<string>([^<]*)<\/string>/g)].map((m) => unescapeXml(m[1]!)) : [];
+    if (args.length !== 1 || resolve(args[0]!) !== resolve(shimPath)) {
+      return `its ProgramArguments are ${JSON.stringify(args)}, not [${JSON.stringify(shimPath)}]`;
+    }
+    return null;
+  }
+  let section = "";
+  const execs: string[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#") || line.startsWith(";")) continue;
+    if (line.startsWith("[")) {
+      section = line.slice(1).replace(/\].*$/, "").trim().toLowerCase();
+      continue;
+    }
+    if (section === "service" && /^ExecStart\s*=/.test(line)) execs.push(line.replace(/^ExecStart\s*=\s*/, "").replace(/^[-@:+!]+/, ""));
+  }
+  if (execs.length !== 1 || resolve(execs[0]!) !== resolve(shimPath)) {
+    return `its ExecStart is ${JSON.stringify(execs)}, not ${JSON.stringify(shimPath)}`;
+  }
+  return null;
 }
 
+/**
+ * Re-point the federation-sync shim at this CLI's install tree. See the block
+ * comment above for what is — and is never — changed.
+ */
 export function rewriteFederationSchedulerRuntime(
   opts: RewriteFederationRuntimeOpts = {},
 ): RewriteFederationRuntimeResult {
   const read = opts.read ?? ((p: string) => readFileSync(p, "utf-8"));
   const exists = opts.exists ?? existsSync;
-  const write = opts.writeFile ?? writeFileWithDir;
+  const realpath = opts.realpath ?? ((p: string) => realpathSync(p));
+  const canonical = (p: string): string => {
+    try {
+      return realpath(p);
+    } catch {
+      return resolve(p);
+    }
+  };
+  const packageOf = opts.packageOf ?? ((p: string) => {
+    try {
+      return findFlairPackageDir(realpath(p));
+    } catch {
+      return null;
+    }
+  });
   const plat = detectPlatform(opts.platformOverride);
   const shimPath = opts.shimPathOverride ?? SHIM_PATH_DEFAULT;
   const unitPath = plat === "darwin"
     ? (opts.launchdPlistOverride ?? LAUNCHD_PLIST_PATH)
     : (opts.systemdServiceOverride ?? SYSTEMD_SERVICE_PATH);
+  const base = { platform: plat, shimPath, unitPath };
+  const refused = (detail: string): RewriteFederationRuntimeResult => ({
+    ...base,
+    status: "refused",
+    detail: `${detail} The federation-sync shim was not changed; to regenerate the pair: flair federation sync enable`,
+  });
 
-  const haveShim = exists(shimPath);
-  const haveUnit = exists(unitPath);
-  if (!haveShim && !haveUnit) {
-    return { platform: plat, shimPath, shimRewritten: false, unitPath, unitRewritten: false, intervalSeconds: DEFAULT_INTERVAL_SECONDS, skipped: true };
+  if (!exists(unitPath)) {
+    return {
+      ...base,
+      status: "not-enabled",
+      detail: `federation sync is not enabled (no ${unitPath})${exists(shimPath) ? `; the leftover shim ${shimPath} is left as it is` : ""}.`,
+    };
+  }
+  let unitText: string;
+  try {
+    unitText = read(unitPath);
+  } catch (err: any) {
+    return refused(`could not read ${unitPath} (${err?.message ?? err}).`);
+  }
+  const notOurs = federationUnitExecsShim(plat, unitText, shimPath);
+  if (notOurs) return refused(`${unitPath} does not exec the flair-generated shim: ${notOurs}.`);
+  if (!exists(shimPath)) return refused(`${unitPath} execs ${shimPath}, which does not exist.`);
+  let shimText: string;
+  try {
+    shimText = read(shimPath);
+  } catch (err: any) {
+    return refused(`could not read ${shimPath} (${err?.message ?? err}).`);
+  }
+  const execLines = [...shimText.matchAll(SHIM_EXEC_LINE_RE)];
+  if (!shimText.includes(SHIM_MARKER) || execLines.length !== 1) {
+    return refused(`${shimPath} is not in the shape \`flair federation sync enable\` writes (one \`exec "<node>" "<flair>" federation sync\` line).`);
+  }
+  const oldNode = execLines[0]![1]!;
+  const oldFlair = execLines[0]![2]!;
+  if (!isAbsolute(oldNode) || !isAbsolute(oldFlair)) {
+    return refused(`${shimPath} names a relative node or flair path (${oldNode}, ${oldFlair}).`);
   }
 
-  const nodeBin = resolveNodeBin(opts.nodeBin);
-  const flairBin = resolveFlairBin(opts.flairBin).path;
-  const home = opts.homeOverride ?? resolveHome();
+  const newFlair = resolveFlairBin(opts.flairBin).path;
+  const newNode = opts.nodeBin ?? preferVersionManagerAlias(resolveNodeBin());
+  const newPkg = packageOf(newFlair);
+  const cliTree = opts.cliTree ?? newPkg?.dir ?? null;
+  const cliVersion = opts.cliVersion !== undefined ? opts.cliVersion : (newPkg?.version ?? null);
+  if (!cliTree) return refused(`cannot tell which install tree this CLI's script ${newFlair} belongs to.`);
 
-  // Preserve the installed interval and the operator-set target / pass-file.
-  let unitText = "";
-  if (haveUnit) {
-    try { unitText = read(unitPath); } catch { unitText = ""; }
-  }
-  const installedInterval = unitText ? parseInstalledInterval(plat, unitText) : null;
-  const intervalSeconds = opts.intervalSeconds ?? installedInterval ?? DEFAULT_INTERVAL_SECONDS;
-  const target = unitText ? installedEnvValue(plat, unitText, "FLAIR_TARGET") : "";
-  const adminPassFile = unitText ? installedEnvValue(plat, unitText, "FLAIR_ADMIN_PASS_FILE") : "";
-
-  const subs: FederationSchedulerSubstitutions = {
-    FLAIR_BIN: flairBin,
-    NODE_BIN: nodeBin,
-    SHIM_PATH: shimPath,
-    HOME: home,
-    INTERVAL_SECONDS: String(intervalSeconds),
-    ADMIN_PASS_FILE: adminPassFile,
-    FLAIR_TARGET: target,
-  };
-  const templateRoot = opts.templateRootOverride ?? defaultTemplateRoot();
-
-  let shimRewritten = false;
-  if (haveShim) {
-    const next = renderTemplate(readTemplate(templateRoot, "bin/flair-federation-sync.sh.tmpl"), subs);
-    let prev = "";
-    try { prev = read(shimPath); } catch { prev = ""; }
-    if (prev !== next) {
-      write(shimPath, next, 0o700);
-      try { chmodSync(shimPath, 0o700); } catch { /* best effort on non-POSIX */ }
-      shimRewritten = true;
+  const oldPkg = exists(oldFlair) ? packageOf(oldFlair) : null;
+  const oldNodeMissing = !exists(oldNode);
+  let nextNode = oldNode;
+  let nextFlair = oldFlair;
+  if (oldPkg && canonical(oldPkg.dir) === canonical(cliTree)) {
+    // Same install tree as this CLI.
+    if (oldNodeMissing) {
+      nextNode = newNode;
+    } else if (canonical(oldNode) === canonical(newNode)) {
+      return { ...base, status: "current", detail: `${shimPath} already runs this CLI's tree (${cliTree}).` };
+    } else {
+      return {
+        ...base,
+        status: "pinned-node",
+        detail:
+          `${shimPath} runs this CLI's tree with node ${oldNode} (this CLI runs ${newNode}); a deliberate runtime ` +
+          "pin is left as it is.",
+      };
     }
-  }
-
-  let unitRewritten = false;
-  if (haveUnit) {
-    const tmpl = plat === "darwin"
-      ? `launchd/${LAUNCHD_LABEL}.plist.tmpl`
-      : `systemd/${SYSTEMD_SERVICE_UNIT}.tmpl`;
-    const raw = readTemplate(templateRoot, tmpl);
-    const next = plat === "darwin" ? renderPlistTemplate(raw, subs) : renderTemplate(raw, subs);
-    if (unitText !== next) {
-      write(unitPath, next, 0o600);
-      unitRewritten = true;
+  } else {
+    if (exists(oldFlair) && !oldPkg) {
+      return refused(`${shimPath} runs ${oldFlair}, which is not inside a @tpsdev-ai/flair install, so its tree cannot be judged.`);
     }
+    if (oldPkg && !isNpmGlobalFlairTree(oldPkg.dir)) {
+      return {
+        ...base,
+        status: "separate",
+        detail:
+          `${shimPath} runs flair from ${oldPkg.dir}, which is not an npm-global install (a plain tree or a checkout); ` +
+          "flair treats it as separately managed and does not re-point it.",
+      };
+    }
+    if (oldPkg?.version && cliVersion && compareVersions(cliVersion, oldPkg.version) < 0) {
+      return refused(
+        `${shimPath} runs flair ${oldPkg.version} from ${oldPkg.dir}; this CLI's tree has the older ${cliVersion}, so ` +
+          "re-pointing would downgrade it. Update this CLI's tree first (npm i -g @tpsdev-ai/flair).",
+      );
+    }
+    nextNode = newNode;
+    nextFlair = newFlair;
   }
 
-  return { platform: plat, shimPath, shimRewritten, unitPath, unitRewritten, intervalSeconds, skipped: false };
+  for (const [what, p] of [["node", nextNode], ["flair", nextFlair]] as const) {
+    if (!isAbsolute(p) || UNSAFE_SHIM_VALUE.test(p)) return refused(`the ${what} path ${JSON.stringify(p)} cannot be written into a shell shim safely.`);
+    if (!exists(p)) return refused(`the ${what} path ${p} does not exist.`);
+  }
+  const from = { nodeBin: oldNode, flairBin: oldFlair };
+  const to = { nodeBin: nextNode, flairBin: nextFlair };
+  const detail =
+    `re-point ${shimPath}: node ${oldNode} → ${nextNode}` + (nextFlair !== oldFlair ? `, flair ${oldFlair} → ${nextFlair}` : "");
+  if (opts.dryRun) return { ...base, status: "would-rewrite", detail, from, to };
+
+  const nextLine = `exec "${nextNode}" "${nextFlair}" federation sync "$@"`;
+  const execMatch = execLines[0]!;
+  const nextText = shimText.slice(0, execMatch.index!) + nextLine + shimText.slice(execMatch.index! + execMatch[0].length);
+  let mode = 0o700;
+  try {
+    mode = (opts.modeOf ?? ((p: string) => statSync(p).mode & 0o7777))(shimPath);
+  } catch { /* keep the enable default */ }
+  try {
+    writeFilesAtomically([{ path: shimPath, content: nextText, mode }], opts.atomic);
+  } catch (err: any) {
+    return refused(`could not write ${shimPath}: ${err?.message ?? err}.`);
+  }
+  let after = "";
+  try {
+    after = read(shimPath);
+  } catch { /* verified below */ }
+  if (after !== nextText) return refused(`${shimPath} did not read back as written.`);
+  return { ...base, status: "rewritten", detail: detail.replace(/^re-point/, "re-pointed"), from, to };
 }

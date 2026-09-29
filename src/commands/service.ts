@@ -11,11 +11,13 @@ import { DEFAULT_ADMIN_USER } from "../lib/auth-resolve.js";
 import { classifyDaemonState } from "../lib/daemon-liveness.js";
 import { diagnoseLaunchdPlistPaths, isDetached, renderDetachedWarning } from "../lib/launchd-management.js";
 import { opsSocketPathRefusal } from "../lib/socket-path-limit.js";
+import { formatServingTreeLine, formatTreeAssessmentLines, type TreeAssessment } from "../lib/tree-divergence.js";
 import { execSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 export type ServiceCli = {
+  assessInstallTree: (...args: any[]) => any;
   buildDirectSpawnEnv: (...args: any[]) => any;
   closedDirectSpawnEnv: (...args: any[]) => any;
   defaultDataDir: (...args: any[]) => any;
@@ -52,6 +54,28 @@ export function bindCli(fns: ServiceCli): void {
 
 function buildDirectSpawnEnv(...args: any[]): any {
   return cli.buildDirectSpawnEnv(...args);
+}
+
+/**
+ * flair#2034 §2: after a restart, say which install tree now serves the
+ * instance — proven from the service manager that owns the serving process —
+ * and whether it is this CLI's. This is the verification step of the
+ * `flair init && flair restart` remedy. Report-only: the restart itself
+ * succeeded, so the exit code is not changed; `ok` is false only when a
+ * divergence is PROVEN to remain.
+ */
+export function restartTreeReport(a: TreeAssessment | null): { ok: boolean; lines: string[] } {
+  if (!a) return { ok: true, lines: [] };
+  if (a.state === "diverged") {
+    return {
+      ok: false,
+      lines: [
+        "⚠️  Flair restarted, but the instance still serves a DIFFERENT install tree than this CLI.",
+        ...formatTreeAssessmentLines(a, { context: "restart" }),
+      ],
+    };
+  }
+  return { ok: true, lines: [`   ${formatServingTreeLine(a)}`] };
 }
 
 function closedDirectSpawnEnv(...args: any[]): any {
@@ -412,7 +436,19 @@ program
         }
         return;
       }
+      let tree: TreeAssessment | null = null;
+      try {
+        tree = cli.assessInstallTree(dataDir, port, { local: true }) as TreeAssessment;
+      } catch {
+        tree = null;
+      }
+      const report = restartTreeReport(tree);
+      if (!report.ok) {
+        for (const line of report.lines) console.error(line);
+        return;
+      }
       console.log("✅ Flair restarted");
+      for (const line of report.lines) console.log(line);
     } catch (err: any) {
       console.error(`❌ Flair failed to restart: ${err?.message ?? err}`);
       process.exit(1);

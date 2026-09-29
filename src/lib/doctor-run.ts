@@ -44,7 +44,6 @@ import { findUnsafeWiredPins, mcpClientPinFindings, sessionStartHookPinFindings,
 import { flairCliVersion, isResolvedVersion } from "./mcp-spec.js";
 import { unsafeAdapterPinDetail } from "./stale-client-pin.js";
 import {
-  diagnoseLaunchdNodePath,
   isDetached,
   plistCarriesInlineAdminPassword,
   renderDetachedWarning,
@@ -460,22 +459,6 @@ function runLaunchdManagement(ctx: DoctorRunContext): DoctorCheckResult {
     } catch {
       // Plist unreadable — the management verdict above already covers a
       // plist that should exist; this check adds no failure of its own.
-    }
-    // flair#2034 §2 item 3: a plist whose node path is not the runtime in use
-    // now, EVEN WHEN the old tree still exists. `diagnoseLaunchdPlistPaths`
-    // only fires once the old tree is deleted; a surviving old tree is the
-    // common Node-minor-bump divergence and must be named here.
-    try {
-      const mismatch = diagnoseLaunchdNodePath(plistPath, process.execPath);
-      if (mismatch) {
-        return result(id, label, "fail", {
-          detail: mismatch.message,
-          remedy: mismatch.remedy.join(" && "),
-          launchd: m,
-        });
-      }
-    } catch {
-      // A best-effort comparison — never fail the command on an fs error.
     }
   }
   return result(id, label, "pass", { detail: m.detail, launchd: m });

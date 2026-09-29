@@ -30,10 +30,8 @@ import { mcpClientPinFindings, refreshOwnedPins, repinSessionStartHookGuarded, s
 import * as render from "../render.js";
 import { checkVersion, formatVersionNudge, probeInstanceVersion, FLAIR_PKG_NAME } from "../version-check.js";
 import { resolveRegistryNotice } from "../lib/npm-registry.js";
-import { cliPackageDir } from "../lib/package-dir.js";
-import { computeTreeDivergence, formatTreeDivergenceLines, resolveInstanceRuntimeForDataDir } from "../lib/tree-divergence.js";
-import { rewriteFederationSchedulerRuntime } from "../federation/scheduler.js";
-import { preferVersionManagerAlias } from "../lib/node-alias-path.js";
+import { formatServingTreeLine, formatTreeAssessmentLines, type TreeAssessment } from "../lib/tree-divergence.js";
+import { rewriteFederationSchedulerRuntime, type RewriteFederationRuntimeResult } from "../federation/scheduler.js";
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 
@@ -42,6 +40,7 @@ import { resolveHome } from "../lib/home.js";
 
 export type DoctorCli = {
   api: (...args: any[]) => any;
+  assessInstallTree: (...args: any[]) => any;
   checkAgentRegistered: (...args: any[]) => any;
   classifyOpsSocketPosture: (...args: any[]) => any;
   configPath: (...args: any[]) => any;
@@ -55,7 +54,9 @@ export type DoctorCli = {
   readPortFromConfig: (...args: any[]) => any;
   relativeTime: (...args: any[]) => any;
   repairLaunchdManagement: (...args: any[]) => any;
+  repointMainServiceUnit: (...args: any[]) => any;
   resolveHttpPort: (...args: any[]) => any;
+  restartFlair: (...args: any[]) => any;
   resolveOpsPort: (...args: any[]) => any;
   verifyAuditLog: (...args: any[]) => any;
   verifySemanticSearch: (...args: any[]) => any;
@@ -198,6 +199,134 @@ export function renderEmbedGpuDoctorFinding(
   return { lines, issueDelta: finding.isIssue ? 1 : 0 };
 }
 
+export interface InstallTreeDoctorDeps {
+  /** This CLI's tree vs the tree proven to serve the instance. */
+  assess: () => TreeAssessment;
+  /** Re-point the instance's own service unit (see repointMainServiceUnit in src/cli.ts). */
+  repoint: (dryRun: boolean) => { kind: string; detail: string };
+  /** Restart the instance (the same restart `flair restart` runs). */
+  restart: () => Promise<void>;
+  /** Classify (dryRun) or re-point the federation-sync shim. */
+  rewriteFederation: (dryRun: boolean) => Pick<RewriteFederationRuntimeResult, "status" | "detail">;
+}
+
+/**
+ * flair#2034 §2 — the "Install tree" doctor section: is the instance served
+ * from this CLI's install tree, and does the federation-sync shim run it?
+ *
+ * Runs in every `flair doctor` (it is not a catalog member, so it cannot be
+ * filtered out the way the catalog's launchd check is). Counting rules:
+ *
+ *   - a PROVEN divergence is one issue; a deliberate runtime pin (a different
+ *     node serving this CLI's own tree), a separately managed tree (a plain
+ *     tree or checkout) and an unknown serving tree are reported, never counted;
+ *   - `--fix` counts the divergence FIXED only after the unit was re-pointed,
+ *     the instance restarted, and the serving tree re-proven to be this CLI's —
+ *     "nothing to rewrite" or a failed restart is never a fix;
+ *   - a federation-sync shim running another npm-global tree is one issue,
+ *     fixed only when re-pointed AND re-read as current.
+ *
+ * Extracted from the action (like renderEmbedGpuDoctorFinding) so the counting
+ * is exercised directly; the action passes the real adapters.
+ */
+export async function runInstallTreeDoctorSection(
+  mode: { autoFix: boolean; dryRun: boolean },
+  deps: InstallTreeDoctorDeps,
+  write: (line: string) => void = (line) => console.log(line),
+): Promise<{ issues: number; fixed: number }> {
+  let issues = 0;
+  let fixed = 0;
+  const ok = render.icons.ok;
+  const bad = render.icons.error;
+  const info = render.icons.info;
+  const warn = render.icons.warn;
+
+  let a: TreeAssessment | null = null;
+  try {
+    a = deps.assess();
+  } catch (err: any) {
+    write(`  ${warn} install tree: could not check ${render.wrap(render.c.dim, `(${err?.message ?? err})`)}`);
+  }
+  if (a?.state === "same") {
+    write(`  ${ok} ${formatServingTreeLine(a)}`);
+    if (a.nodePin?.kind === "pinned") write(`  ${info} ${a.nodePin.message}`);
+  } else if (a?.state === "unknown") {
+    write(`  ${info} ${render.wrap(render.c.dim, formatServingTreeLine(a))}`);
+  } else if (a?.state === "separate") {
+    for (const line of formatTreeAssessmentLines(a, { context: "doctor" })) write(`  ${line}`);
+  } else if (a?.state === "diverged") {
+    issues++;
+    write(`  ${bad} ${render.wrap(render.c.red, "the instance is served from a different install tree than this CLI")}`);
+    for (const line of formatTreeAssessmentLines(a, { context: "doctor" })) write(`  ${render.wrap(render.c.yellow, line)}`);
+    if (mode.autoFix && a.cliOlder) {
+      write(`  ${bad} not re-pointed: this CLI's tree is older than what the instance runs — update it first (npm i -g @tpsdev-ai/flair), then re-run.`);
+    } else if (mode.autoFix && mode.dryRun) {
+      const r = deps.repoint(true);
+      write(`  ${info} ${render.wrap(render.c.dim, `[dry-run] ${r.detail}; then restart the instance and re-prove which tree serves it`)}`);
+    } else if (mode.autoFix) {
+      const r = deps.repoint(false);
+      if (r.kind === "repointed" || r.kind === "current") {
+        if (r.kind === "repointed") write(`  ${ok} ${r.detail}`);
+        try {
+          await deps.restart();
+          const after = deps.assess();
+          if (after.state === "same") {
+            fixed++;
+            write(`  ${ok} ${render.wrap(render.c.green, "restarted; verified")} — ${formatServingTreeLine(after)}`);
+          } else {
+            write(`  ${bad} restarted, but NOT fixed — ${formatServingTreeLine(after)}`);
+          }
+        } catch (err: any) {
+          write(`  ${bad} the restart failed (${err?.message ?? err}); the unit is re-pointed — run: flair restart`);
+        }
+      } else {
+        write(`  ${bad} not re-pointed — ${r.detail}`);
+      }
+    }
+  }
+
+  let f: Pick<RewriteFederationRuntimeResult, "status" | "detail"> | null = null;
+  try {
+    f = deps.rewriteFederation(true);
+  } catch (err: any) {
+    write(`  ${warn} federation-sync shim: could not check ${render.wrap(render.c.dim, `(${err?.message ?? err})`)}`);
+  }
+  switch (f?.status) {
+    case "current":
+      write(`  ${ok} federation-sync shim runs this CLI's tree`);
+      break;
+    case "pinned-node":
+    case "separate":
+      write(`  ${info} federation-sync shim: ${f.detail}`);
+      break;
+    case "refused":
+      write(`  ${warn} federation-sync shim: ${f.detail}`);
+      break;
+    case "would-rewrite": {
+      issues++;
+      write(`  ${bad} the federation-sync shim runs another install tree — ${f.detail}`);
+      if (mode.autoFix && mode.dryRun) {
+        write(`  ${info} ${render.wrap(render.c.dim, "[dry-run] would re-point the shim's exec line (the scheduler unit is not rewritten)")}`);
+      } else if (mode.autoFix) {
+        const r = deps.rewriteFederation(false);
+        const verify = r.status === "rewritten" ? deps.rewriteFederation(true) : null;
+        if (verify?.status === "current") {
+          fixed++;
+          write(`  ${ok} ${r.detail}`);
+        } else {
+          write(`  ${bad} federation-sync shim not re-pointed — ${verify ? verify.detail : r.detail}`);
+        }
+      } else {
+        write(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix  ${render.wrap(render.c.dim, "(or flair init)")}`);
+      }
+      break;
+    }
+    default:
+      break; // not enabled: nothing to say
+  }
+  return { issues, fixed };
+}
+
 // ─── flair doctor ─────────────────────────────────────────────────────────────
 
 
@@ -293,41 +422,6 @@ program
           `  ${render.icons.warn} ${render.wrap(render.c.yellow, `local CLI is ${__pkgVersion}, instance is ${versionSubject} — they differ. ` +
             `Commands run through the CLI; the instance serves the data.`)}`,
         );
-      }
-    }
-
-    // flair#2034 §2: CLI-vs-instance install-TREE divergence. Two different
-    // trees, not just two versions — the instance is served from a tree the
-    // current runtime does not own. Name both trees and the remedy.
-    let treeDivergenceLines: string[] = [];
-    try {
-      const refs = resolveInstanceRuntimeForDataDir(defaultDataDir());
-      treeDivergenceLines = formatTreeDivergenceLines(
-        computeTreeDivergence({
-          cliDir: cliPackageDir(),
-          cliVersion: __pkgVersion,
-          runningDir: refs.workingDirectory,
-          runningVersion: typeof versionSubject === "string" ? versionSubject : null,
-        }),
-      );
-    } catch {
-      treeDivergenceLines = [];
-    }
-    for (const line of treeDivergenceLines) console.log(`  ${render.wrap(render.c.yellow, line)}`);
-    if (treeDivergenceLines.length > 0) {
-      issues++;
-      if (autoFix) {
-        if (dryRun) {
-          console.log(`  ${render.icons.info} ${render.wrap(render.c.dim, "[dry-run] would rewrite the launchd/systemd unit against the current runtime and re-point the federation-sync shim")}`);
-        } else {
-          try {
-            const r = rewriteFederationSchedulerRuntime({ nodeBin: preferVersionManagerAlias(process.execPath) });
-            console.log(`  ${render.icons.ok} ${render.wrap(render.c.green, r.skipped ? "nothing to rewrite (no unit/shim)" : `rewrote the federation-sync scheduler (shim ${r.shimRewritten ? "updated" : "current"}, unit ${r.unitRewritten ? "updated" : "current"}); run \`flair init && flair restart\` to re-point the instance`)}`);
-            fixed++;
-          } catch (err: any) {
-            console.log(`  ${render.icons.error} ${render.wrap(render.c.red, `could not rewrite the federation-sync scheduler: ${err?.message ?? err}`)}`);
-          }
-        }
       }
     }
 
@@ -1616,6 +1710,27 @@ program
       } catch {
         // Plist unreadable — the launchd plan above already reports presence.
       }
+    }
+
+    // 7c. Install tree (flair#2034 §2) — after launchd management, so a repair
+    //     above has settled which service owns the instance before this asks.
+    console.log(`\n  ${render.wrap(render.c.bold, "Install tree")}`);
+    {
+      const treeSection = await runInstallTreeDoctorSection(
+        { autoFix, dryRun },
+        {
+          assess: () =>
+            cli.assessInstallTree(defaultDataDir(), effectivePort, {
+              local: true,
+              runningVersion: effectivePort === port ? instanceVersion : null,
+            }) as TreeAssessment,
+          repoint: (dry) => cli.repointMainServiceUnit(defaultDataDir(), effectivePort, { dryRun: dry }),
+          restart: () => cli.restartFlair(effectivePort, defaultDataDir()),
+          rewriteFederation: (dry) => rewriteFederationSchedulerRuntime({ dryRun: dry }),
+        },
+      );
+      issues += treeSection.issues;
+      fixed += treeSection.fixed;
     }
 
     // 7a. Resolve which agent identities the two verified-read sections below

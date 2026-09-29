@@ -210,65 +210,115 @@ export function diagnoseLaunchdPlistPaths(
   return null;
 }
 
-export interface PlistNodePathMismatch {
-  /** The node binary the plist pins. */
-  plistNodeBin: string;
-  /** What `node` resolves to now (the runtime this CLI runs under). */
+/**
+ * A service unit (launchd plist, systemd unit) whose node binary is not the
+ * runtime this CLI runs under, classified as DELIBERATE or ERRONEOUS
+ * (flair#2034 §2).
+ *
+ * A different node path is not by itself a defect: an operator can pin a
+ * service to a runtime on purpose. What makes the pin a problem is what it
+ * serves. The rule:
+ *
+ *   - `pinned` — the pinned node exists and the unit serves THIS CLI's own
+ *     install tree. The service runs the same flair code under a runtime the
+ *     operator chose; that is reported, never rewritten.
+ *   - `erroneous` — the unit serves a DIFFERENT install tree than this CLI
+ *     (the node-bump divergence: the unit's node and tree were both baked at an
+ *     earlier runtime). Both are re-pointed together by `flair init`.
+ *
+ * Same runtime by realpath (a version-manager alias that resolves to the
+ * current binary) is no pin at all → null. A MISSING pinned path is left to
+ * `diagnoseLaunchdPlistPaths`, which names the missing file more precisely →
+ * null. A unit with no node argument or no working directory is not ours to
+ * judge → null.
+ */
+export interface ServiceNodePin {
+  kind: "pinned" | "erroneous";
+  unitNodeBin: string;
   currentNodeBin: string;
   message: string;
+  /** Commands that re-point the unit. Empty for a deliberate pin. */
   remedy: string[];
 }
 
+export interface NodePinDeps {
+  exists?: (p: string) => boolean;
+  realpath?: (p: string) => string;
+}
+
+function realpathOr(p: string, realpath: (p: string) => string): string {
+  try {
+    return realpath(p);
+  } catch {
+    return p;
+  }
+}
+
+export function classifyServiceNodePin(
+  input: {
+    /** How to name the unit in a message, e.g. "the launchd plist at /x.plist". */
+    unitDescription: string;
+    unitNodeBin: string | null;
+    unitTree: string | null;
+    currentNodeBin: string;
+    cliTree: string;
+  },
+  deps: NodePinDeps = {},
+): ServiceNodePin | null {
+  const exists = deps.exists ?? existsSync;
+  const realpath = deps.realpath ?? ((p: string) => realpathSync(p));
+  const { unitNodeBin, unitTree, currentNodeBin, cliTree, unitDescription } = input;
+  if (!unitNodeBin || !unitTree) return null;
+  if (!exists(unitNodeBin)) return null; // the missing path is diagnoseLaunchdPlistPaths's
+  if (realpathOr(unitNodeBin, realpath) === realpathOr(currentNodeBin, realpath)) return null;
+
+  if (realpathOr(unitTree, realpath) === realpathOr(cliTree, realpath)) {
+    return {
+      kind: "pinned",
+      unitNodeBin,
+      currentNodeBin,
+      message:
+        `${unitDescription} pins node ${unitNodeBin} while this CLI runs ${currentNodeBin}, and it serves this ` +
+        `CLI's own install tree (${unitTree}). That is treated as a deliberate runtime pin and left as it is. ` +
+        "To move the service to this CLI's runtime anyway: flair init && flair restart",
+      remedy: [],
+    };
+  }
+  return {
+    kind: "erroneous",
+    unitNodeBin,
+    currentNodeBin,
+    message:
+      `${unitDescription} runs node ${unitNodeBin} from the install tree ${unitTree}, but this CLI runs node ` +
+      `${currentNodeBin} from ${cliTree}. Both were baked at an earlier runtime, so the service keeps serving ` +
+      "the old tree while the CLI runs from the current one.",
+    remedy: ["flair init", "flair restart"],
+  };
+}
+
 /**
- * Does this plist pin a node binary that is NOT the runtime in use now, even
- * though the pinned one still exists on disk?
- *
- * `diagnoseLaunchdPlistPaths` only fires once the old tree is DELETED. A node
- * minor bump that leaves the old tree in place is the common case, and it is
- * exactly the one that produces the silent two-tree divergence of flair#2034
- * §2: launchd keeps running the service from the old tree while the CLI on
- * PATH comes from the new one. This compares the two node paths by realpath,
- * so a version-manager symlink that resolves to the SAME runtime is a match
- * (nothing to do), and only a genuinely different runtime is flagged.
- *
- * A MISSING pinned path is left to `diagnoseLaunchdPlistPaths` (it names the
- * missing file more precisely); this returns null in that case.
+ * `classifyServiceNodePin` for a launchd plist: reads the node argument and the
+ * WorkingDirectory out of the plist and classifies them against this CLI.
  */
 export function diagnoseLaunchdNodePath(
   plistPath: string,
   currentNodeBin: string,
-  deps: {
-    read?: (p: string) => string;
-    exists?: (p: string) => boolean;
-    realpath?: (p: string) => string;
-  } = {},
-): PlistNodePathMismatch | null {
-  const exists = deps.exists ?? existsSync;
-  const realpath = deps.realpath ?? ((p: string) => realpathSync(p));
+  cliTree: string,
+  deps: NodePinDeps & { read?: (p: string) => string } = {},
+): ServiceNodePin | null {
   const refs = readPlistProgramRefs(plistPath, deps.read);
   if (!refs) return null;
-  const plistNodeBin = refs.programArguments.find((a) => a.startsWith("/") && /(^|[/\\])node$/.test(a)) ?? null;
-  if (!plistNodeBin) return null; // a hand-written plist with no node arg is not ours to judge
-  if (!exists(plistNodeBin)) return null; // the missing path is the other diagnosis
-
-  const norm = (p: string) => {
-    try {
-      return realpath(p);
-    } catch {
-      return p;
-    }
-  };
-  if (norm(plistNodeBin) === norm(currentNodeBin)) return null;
-
-  return {
-    plistNodeBin,
-    currentNodeBin,
-    message:
-      `the launchd plist at ${plistPath} pins node ${plistNodeBin}, but node resolves to ` +
-      `${currentNodeBin} now. Both exist and they are DIFFERENT runtimes, so launchd keeps ` +
-      `running the service from the old install tree while the CLI runs from the current one.`,
-    remedy: ["flair init", "flair restart"],
-  };
+  const unitNodeBin = refs.programArguments.find((a) => a.startsWith("/") && /(^|[/\\])node$/.test(a)) ?? null;
+  return classifyServiceNodePin(
+    {
+      unitDescription: `the launchd plist at ${plistPath}`,
+      unitNodeBin,
+      unitTree: refs.workingDirectory,
+      currentNodeBin,
+      cliTree,
+    },
+    deps,
+  );
 }
 
 // ─── launchctl job state ──────────────────────────────────────────────────
