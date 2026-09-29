@@ -26,6 +26,9 @@
  * semver prereleases and unparseable versions, bytes that are not valid UTF-8,
  * and a recovery that is confirmed by querying the manager again.
  *
+ * Round 8: the systemd writer's pre-write query must still name the serving
+ * process as the unit's MainPID, or nothing is written.
+ *
  * Every service manager is a fake; every file lives in a scratch directory.
  */
 import { describe, test, expect } from "bun:test";
@@ -684,6 +687,65 @@ describe("5 — the write lands only over the bytes it was planned from", () => 
     expect(r.kind).toBe("refused");
     expect(readFileSync(f.path, "utf-8")).toBe(f.before);
     expect(d.calls).toEqual([]);
+  });
+
+  test("systemd: a MainPID that changes between discovery and the pre-write query refuses — the unit file byte-identical (round 8)", () => {
+    // The last case is the control: the same manager, still naming pid 77, lets the write through.
+    for (const [name, now] of [["another process", 4242], ["no main process", 0], ["unchanged (control)", 77]] as const) {
+      const f = systemdFixture();
+      const bytes = readFileSync(f.path);
+      // One manager answers both queries, through the parser the CLI uses; it holds what the file names (so a write
+      // that went through would be confirmed, not restored).
+      let mainPid = 77;
+      const calls: string[] = [];
+      const manager = (): SystemdUnitManagerState | null => {
+        const wd = /^WorkingDirectory=(.*)$/m.exec(readFileSync(f.path, "utf-8"))?.[1] ?? "";
+        return systemdUnitStateFromShow(`MainPID=${mainPid}\nFragmentPath=${f.path}\nDropInPaths=\nWorkingDirectory=${wd}\n`);
+      };
+      // Discovery: the manager names the serving process (pid 77) as the unit's MainPID.
+      const serving = proveServingTree({
+        platform: "linux",
+        local: true,
+        queryUrl: "http://127.0.0.1:9926",
+        dataDir: DATA,
+        respondingPid: 77,
+        localPids: () => ({ pidFile: 77, listeners: [77] }),
+        ...USER_UNIT_CGROUP,
+        userUnitDir: dirname(f.path),
+        systemdUserUnit: manager,
+        servingPackage: () => ({ dir: OLD_TREE, version: "0.57.0" }),
+        exists: existsSync,
+        read: (p) => readFileSync(p, "utf-8"),
+      });
+      expect(serving.kind).toBe("proven");
+      if (serving.kind !== "proven") return;
+      expect(serving.pid).toBe(77);
+      // Then the unit's main process changes before the writer asks again.
+      mainPid = now;
+      const d = fakes(f.path, {
+        unitState: () => {
+          calls.push("show");
+          return manager();
+        },
+        reload: () => {
+          calls.push("reload");
+        },
+      });
+      const r = repointSystemdUserUnit(serving, targets, d);
+      if (now === 77) {
+        expect(r.kind).toBe("repointed");
+        expect(readFileSync(f.path, "utf-8")).toContain(`WorkingDirectory=${NEW_TREE}`);
+        expect(calls).toEqual(["show", "reload", "show"]);
+        continue;
+      }
+      expect({ name, kind: r.kind }).toEqual({ name, kind: "refused" });
+      expect(readFileSync(f.path).equals(bytes)).toBe(true);
+      expect(calls).toEqual(["show"]);
+      if (r.kind === "refused") {
+        expect(r.detail).toContain(now === 0 ? "no main process" : `pid ${now} as the main process`);
+        expect(r.detail).toContain("not the serving process (pid 77)");
+      }
+    }
   });
 
   test("systemd: when the second reload fails too, the result names the state left behind", () => {

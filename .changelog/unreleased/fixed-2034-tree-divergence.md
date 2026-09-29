@@ -69,7 +69,8 @@
     bytes are valid UTF-8 (anything else is refused before planning), and its
     bytes are re-checked, with its identity, immediately before the rename, so
     an edit saved in between refuses the write. On Linux init first records
-    what systemd holds for the unit (nothing is written if it cannot), then
+    what systemd holds for the unit (nothing is written if it cannot, or if
+    systemd no longer reports the serving process as the unit's MainPID), then
     runs `systemctl --user daemon-reload` (which also loads any other pending
     edits to that user's units) and asks systemd whether it loaded the same
     file, with no drop-ins and the new working directory. If the reload fails or
@@ -91,7 +92,9 @@
   outside that unit: when that unit is not the proven one, or when flair
   cannot learn the unit's MainPID (systemd cannot be asked, or reports no main
   process), it refuses and names the `systemctl` command to use; it also
-  refuses when the process's cgroup cannot be read. A process that only runs
+  refuses, without asking any manager, when the process's cgroup cannot be read
+  or contradicts itself (for example, a user slice and a user manager that name
+  different users, or one unit's cgroup nested in another's). A process that only runs
   inside some service's cgroup without being its main process (a child of a
   CI runner agent, for example) was started directly and is restarted
   directly.

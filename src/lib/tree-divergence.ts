@@ -36,7 +36,9 @@
  * the tree is UNKNOWN, and no remedy is derived from it. A systemd unit runs a
  * process only as its MainPID: a process that merely sits in a unit's cgroup
  * (a descendant of a CI runner agent, a terminal multiplexer, an ssh session
- * service) was started directly (see unitSupervision).
+ * service) was started directly (see unitSupervision). A cgroup path that names
+ * its users or units inconsistently is contradictory evidence: no manager is
+ * asked about it, and it never leads to a restart (see cgroupOwner).
  *
  * Everything here is pure: the probe hands in every filesystem, process and
  * service-manager read, so the whole decision is unit-testable without a real
@@ -191,11 +193,19 @@ export type CgroupOwner =
   | { kind: "user-service"; unit: string; path: string }
   /**
    * Any other `.service` in the path: a system unit, another user's, a sub-cgroup of a unit.
-   * `managerUid` is the uid of the user manager (`user@<uid>.service`) the path is under; null for the system manager.
+   * `managerUid` is the uid of the user manager (`user@<uid>.service`) the path is under, exactly as the path spells
+   * it; null for the system manager.
    */
-  | { kind: "service"; unit: string; path: string; user: boolean; managerUid: number | null }
+  | { kind: "service"; unit: string; path: string; user: boolean; managerUid: string | null }
   /** No service in the path (a login-session scope, for example): no manager owns it. */
   | { kind: "none"; path: string }
+  /**
+   * The path names its users or units inconsistently — a user slice and a user manager of different uids, a user
+   * manager not directly under `user.slice/user-<uid>.slice` at the top of the hierarchy, more than one user manager,
+   * or one service's cgroup nested in another's. It does not say which manager supervises the process, so no manager
+   * is asked about it and nothing is restarted from it.
+   */
+  | { kind: "contradictory"; path: string; reason: string }
   /** No cgroup v2 (`0::`) entry to read. */
   | { kind: "unreadable"; reason: string };
 
@@ -206,20 +216,67 @@ const USER_UNIT_CGROUP =
 const USER_MANAGER_UNIT = /^user@(\d+)\.service$/;
 
 /**
+ * Why a cgroup path's components contradict each other, or null. systemd runs
+ * a user's manager as `user@<uid>.service` at `/user.slice/user-<uid>.slice/`
+ * (the same uid, nothing above `user.slice`), and it nests no service inside
+ * another service's cgroup: a path that says otherwise does not establish which
+ * manager supervises the process, whichever manager is asked.
+ */
+function cgroupContradiction(components: string[]): string | null {
+  const services = components.filter((c) => c.endsWith(".service") && !USER_MANAGER_UNIT.test(c));
+  if (services.length > 1) {
+    return (
+      `it nests one service's cgroup in another's (${services.join(", ")}), so which unit supervises the process ` +
+      "is ambiguous"
+    );
+  }
+  const managers = components.flatMap((c, at) => {
+    const m = USER_MANAGER_UNIT.exec(c);
+    return m ? [{ at, name: c, uid: m[1]! }] : [];
+  });
+  if (managers.length > 1) {
+    return (
+      `it names more than one user manager (${managers.map((m) => m.name).join(", ")}), so which manager ` +
+      "supervises the process is ambiguous"
+    );
+  }
+  const m = managers[0];
+  if (m === undefined) return null;
+  const slice = components[m.at - 1] ?? "";
+  const sliceUid = /^user-(\d+)\.slice$/.exec(slice)?.[1];
+  if (sliceUid !== undefined && sliceUid !== m.uid) {
+    return `its user slice ${slice} and its user manager ${m.name} name different users`;
+  }
+  // Nothing but the root above user.slice: a user manager inside another unit's
+  // cgroup (a service's, a container's) is not where systemd runs it.
+  if (sliceUid === undefined || components[m.at - 2] !== "user.slice" || components.slice(0, m.at - 2).some((c) => c !== "")) {
+    return (
+      `its user manager ${m.name} is not directly under user.slice/user-${m.uid}.slice at the top of the ` +
+      "hierarchy, where systemd runs it"
+    );
+  }
+  return null;
+}
+
+/**
  * Read /proc/<pid>/cgroup text: the unified (`0::`) entry names the cgroup,
  * and a systemd unit's processes live in a cgroup named after the unit. This
  * is the service manager's own placement of the process, so it identifies the
- * unit without reading any unit file.
+ * unit without reading any unit file. A path whose components contradict each
+ * other is `contradictory` — decided here, before any manager is asked about a
+ * unit in it (see cgroupContradiction).
  */
 export function cgroupOwner(text: string, uid: number): CgroupOwner {
   const line = text.split(/\r?\n/).find((l) => l.startsWith("0::"));
   if (line === undefined) return { kind: "unreadable", reason: "it has no cgroup v2 (0::) entry" };
   const path = line.slice(3);
+  const components = path.split("/");
+  const contradiction = cgroupContradiction(components);
+  if (contradiction !== null) return { kind: "contradictory", path, reason: contradiction };
   // A fixed pattern: both uids in the path are captured and compared with this
   // user's uid here, never built into the expression.
   const exact = USER_UNIT_CGROUP.exec(path);
   if (exact && exact[1] === String(uid) && exact[2] === String(uid)) return { kind: "user-service", unit: exact[3]!, path };
-  const components = path.split("/");
   const services = components.filter((c) => c.endsWith(".service") && !USER_MANAGER_UNIT.test(c));
   if (services.length > 0) {
     // A user manager component with a `/` on both sides: the path is under that user's manager.
@@ -229,7 +286,7 @@ export function cgroupOwner(text: string, uid: number): CgroupOwner {
       unit: services[services.length - 1]!,
       path,
       user: manager !== null,
-      managerUid: manager === null ? null : Number(manager[1]),
+      managerUid: manager === null ? null : manager[1]!,
     };
   }
   return { kind: "none", path };
@@ -262,7 +319,7 @@ export function unitSupervision(
 ): UnitSupervision {
   const unit = owner.unit;
   const manager: SystemdManager | null =
-    owner.kind === "user-service" ? "user" : !owner.user ? "system" : owner.managerUid === uid ? "user" : null;
+    owner.kind === "user-service" ? "user" : !owner.user ? "system" : owner.managerUid === String(uid) ? "user" : null;
   if (manager === null) {
     return { kind: "unknown", unit, reason: `${unit} is under another user's systemd manager, which flair does not ask` };
   }
@@ -481,6 +538,12 @@ export function proveServingTree(p: ServingTreeProbe): ServingTree {
       return unknown(`the cgroup of the serving process (pid ${pid}) could not be read (${(err as Error)?.message ?? err})`);
     }
     if (owner.kind === "unreadable") return unknown(`the cgroup of the serving process (pid ${pid}) cannot be read: ${owner.reason}`);
+    if (owner.kind === "contradictory") {
+      return unknown(
+        `the cgroup of the serving process (pid ${pid}) is contradictory (${owner.path}): ${owner.reason}, so which ` +
+          "service manager supervises it is not known",
+      );
+    }
     if (owner.kind === "none") {
       return unknown(`no systemd unit owns the serving process (pid ${pid}, cgroup ${owner.path}) — it was started directly`);
     }
@@ -555,6 +618,7 @@ export type LinuxRestartPlan = { kind: "systemd"; unit: string } | { kind: "dire
  * service's cgroup (that unit's MainPID is another process) was started
  * directly and takes the direct path. When the cgroup cannot be read, or the
  * unit's MainPID cannot be learned, it is refused: unknown never licenses a stop.
+ * A contradictory cgroup is refused before any manager is asked about it.
  */
 export function planLinuxRestart(input: {
   serving: ServingTree;
@@ -582,6 +646,17 @@ export function planLinuxRestart(input: {
         detail:
           `refusing to restart: the cgroup of pid ${pid} cannot be read (${owner.reason}), so flair cannot tell whether a ` +
           "service manager supervises it, and it does not stop a process it cannot place. Restart it through whatever runs it.",
+      };
+    }
+    // Contradictory evidence is refused BEFORE any manager is asked: no MainPID
+    // answer about a unit in such a path shows who supervises the process.
+    if (owner.kind === "contradictory") {
+      return {
+        kind: "refuse",
+        detail:
+          `refusing to restart: the cgroup of pid ${pid} is contradictory (${owner.path}): ${owner.reason}. flair cannot ` +
+          "tell which service manager supervises it, and it does not stop a process it cannot place. Restart it through " +
+          "whatever runs it.",
       };
     }
     const sup = unitSupervision(pid, owner, input.uid, input.unitMainPid);

@@ -21,7 +21,9 @@
  *      restore, a failed second reload, a different or missing answer — is
  *      reported with the manager's state as UNVERIFIED.
  *   3. Linux: a unit with drop-ins — any the manager reports, from any
- *      location, or a `<unit>.d` directory beside the file — is refused.
+ *      location, or a `<unit>.d` directory beside the file — is refused, and
+ *      so is one whose MainPID, asked again immediately before the write, is
+ *      not the serving process the unit was proven to run.
  *   4. `flair restart` on Linux (restartOnLinux): a proven user unit is
  *      restarted through systemd and its new main process verified; a process
  *      that is the main process of any other systemd unit is never stopped and
@@ -214,7 +216,8 @@ export function repointSystemdUserUnit(
   const plan = planSystemdUnitRuntimeRepoint(planned.content, serving.unitTree ?? serving.dir, targets, deps.repoint, unitPath);
   // Capture what the manager holds BEFORE writing: a restore is confirmed
   // against it. When it cannot be read, a failed reload could never be
-  // verified, so nothing is written.
+  // verified, so nothing is written. The same answer must still name the
+  // serving process as the unit's MainPID.
   let before: SystemdUnitManagerState | null = null;
   if (plan.kind === "repoint" && !opts.dryRun) {
     before = deps.unitState(serving.unitName);
@@ -225,6 +228,21 @@ export function repointSystemdUserUnit(
         detail:
           `${unitPath} is not re-pointed: systemd ${before ? `reports ${serving.unitName} from ${before.fragmentPath ?? "no file"} with drop-ins [${before.dropInPaths.join(", ")}]` : `did not report ${serving.unitName}`}, ` +
           `so the state to restore to cannot be captured. To move it, ${handEdit}`,
+      };
+    }
+    // The write rests on the proof that this unit runs the serving process (its
+    // MainPID). A fresh answer naming another main process, or none, contradicts
+    // that proof, so nothing is written.
+    if (before.mainPid !== serving.pid) {
+      return {
+        kind: "refused",
+        unitPath,
+        detail:
+          `${unitPath} is not re-pointed: systemd now reports ` +
+          `${before.mainPid === null ? "no main process" : `pid ${before.mainPid} as the main process`} ` +
+          `of ${serving.unitName}, ` +
+          `not the serving process (pid ${serving.pid}) it was proven to run, so the unit is not shown to run this ` +
+          `instance. Run \`flair status\` to see which process serves it, then re-run the command. To move it, ${handEdit}`,
       };
     }
   }

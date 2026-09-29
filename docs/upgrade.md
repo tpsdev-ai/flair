@@ -27,8 +27,12 @@ flair backup \
 # 2. Check what's outdated (doesn't install anything)
 flair upgrade --check
 
-# 3. Upgrade — installs, restarts, and verifies the new version is actually
-#    serving, all in one step (see "Upgrade is a transaction" below)
+# 3. Upgrade — installs, then restarts and verifies that the new version is
+#    serving (--no-restart skips both, --no-verify skips the verification).
+#    A failure does not always roll back: when a new flair package was
+#    installed and the pre-install /Health check was refused, a failed restart
+#    keeps the new package and exits successfully, printing the start error
+#    and `flair start`. See "Restart, verification and rollback" below
 flair upgrade
 
 # 4. Verify
@@ -148,7 +152,8 @@ file (a symlink is refused, not followed) whose bytes are valid UTF-8 (anything
 else is refused before planning), and its bytes are re-checked immediately
 before the rename, so an edit saved in between refuses the write. On Linux,
 `flair init` first records what systemd holds for the unit (it writes nothing
-if it cannot), then runs `systemctl --user daemon-reload` (which also loads any
+if it cannot, or if systemd no longer reports the serving process as the
+unit's MainPID), then runs `systemctl --user daemon-reload` (which also loads any
 other pending edits to your user units) and checks what systemd loaded. If the
 reload fails or systemd does not hold the re-pointed unit, the previous bytes
 are restored, systemd is reloaded and asked again. That check covers three
@@ -166,7 +171,10 @@ systemd reports as that unit's MainPID — and starts it again outside the unit:
 when it is not the proven unit, it refuses and names the `systemctl` command to
 use. It also refuses when flair cannot learn the MainPID of the unit the
 process's cgroup names (systemd cannot be asked, or reports no main process),
-naming the same command, and when the process's cgroup cannot be read at all.
+naming the same command, and when the process's cgroup cannot be read at all
+or contradicts itself (for example, a user slice and a user manager that name
+different users, or one unit's cgroup nested in another's) — then no manager is
+asked.
 A process that only runs inside some service's cgroup without being its main
 process (a child of a CI runner agent, a terminal multiplexer or an ssh session
 service) was started directly, and `flair restart` restarts it directly.

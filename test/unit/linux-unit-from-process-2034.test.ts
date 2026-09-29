@@ -21,6 +21,11 @@
  * as started directly by status/doctor. A MainPID that cannot be read is
  * refused with the command. The cgroup pattern is a fixed expression; the uids
  * it captures are compared in code.
+ *
+ * Round 8: a cgroup path that contradicts itself — a user slice and a user
+ * manager naming different uids, a user manager outside its own slice, or one
+ * unit's cgroup nested in another's — is refused before any manager is asked,
+ * so no MainPID answer about it can license a direct restart.
  */
 import { describe, test, expect } from "bun:test";
 import { resolve } from "node:path";
@@ -58,6 +63,32 @@ const IN_SESSION = `0::/user.slice/user-${UID}.slice/session-c7.scope\n`;
 const RUNNER_UNIT = "hosted-compute-agent.service";
 const IN_RUNNER = `0::/system.slice/${RUNNER_UNIT}\n`;
 const RUNNER_PID = 812;
+/** Another process: what a manager answers as a unit's MainPID when the serving process is not it. */
+const OTHER_PID = 4242;
+/**
+ * Round 8: cgroups that contradict themselves. Without the check each reaches a manager's MainPID answer, and an
+ * answer naming another process would license the direct stop-and-spawn path.
+ */
+const CONTRADICTORY_CGROUPS: Record<string, string> = {
+  // the user slice names uid 1002, the user manager this user's uid
+  "slice and manager uids disagree": `0::/user.slice/user-1002.slice/user@${UID}.service/app.slice/${UNIT}\n`,
+  // one service's cgroup nested in another's
+  "a service nested in a service": `0::/system.slice/${RUNNER_UNIT}/flair.service\n`,
+  "a user service nested in a user service": `0::/user.slice/user-${UID}.slice/user@${UID}.service/app.slice/tmux.service/${UNIT}\n`,
+  // this user's manager nested in a service's cgroup — with a service below it, and without one
+  "a user manager nested in a service": `0::/system.slice/container.service/user.slice/user-${UID}.slice/user@${UID}.service/app.slice/${UNIT}\n`,
+  "a user manager nested in a service, no service below it": `0::/system.slice/container.service/user.slice/user-${UID}.slice/user@${UID}.service/init.scope\n`,
+};
+/** Every manager a check could ask, answering OTHER_PID as the MainPID. */
+const OTHER_MAIN_PIDS: Record<string, number> = {
+  [`user:${UNIT}`]: OTHER_PID,
+  "user:tmux.service": OTHER_PID,
+  "system:flair.service": OTHER_PID,
+  [`system:${RUNNER_UNIT}`]: OTHER_PID,
+  "system:container.service": OTHER_PID,
+  "user:container.service": OTHER_PID,
+  [`system:${UNIT}`]: OTHER_PID,
+};
 
 const unitFile = (tree: string) =>
   [
@@ -203,17 +234,18 @@ describe("the Linux unit is found from the running process, before and after the
 
   // The fixed pattern captures both uids and compares them with this user's in code. The table is literal, and its
   // "user-service" column is what the round-6 expression (built from the uid) accepted for uid 1001: the same set.
-  const CGROUP_TABLE: ReadonlyArray<readonly [string, "user-service" | "service" | "none", string | null]> = [
+  // Round 8: a path whose user slice and user manager disagree, or that nests one unit in another, is "contradictory".
+  const CGROUP_TABLE: ReadonlyArray<readonly [string, "user-service" | "service" | "none" | "contradictory", string | null]> = [
     ["/user.slice/user-1001.slice/user@1001.service/app.slice/flair-smoke.service", "user-service", "flair-smoke.service"],
     ["/user.slice/user-1001.slice/user@1001.service/flair-smoke.service", "user-service", "flair-smoke.service"],
     ["/user.slice/user-1001.slice/user@1001.service/app.slice/app-x.slice/flair-smoke.service", "user-service", "flair-smoke.service"],
     ["/user.slice/user-1001.slice/user@1001.service/app.slice/flair@inst.service", "user-service", "flair@inst.service"],
     ["/user.slice/user-1001.slice/user@1001.service/app.slice/app-flair\\x2dsmoke.service", "user-service", "app-flair\\x2dsmoke.service"],
     ["/user.slice/user-1001.slice/user@1001.service/a:b_c.slice/x-1.service", "user-service", "x-1.service"],
-    // uid mismatch: another user's manager, or the two uids disagreeing
+    // uid mismatch: another user's manager, or the two uids disagreeing (contradictory, round 8)
     ["/user.slice/user-1002.slice/user@1002.service/app.slice/flair-smoke.service", "service", "flair-smoke.service"],
-    ["/user.slice/user-1001.slice/user@1002.service/app.slice/flair-smoke.service", "service", "flair-smoke.service"],
-    ["/user.slice/user-1002.slice/user@1001.service/app.slice/flair-smoke.service", "service", "flair-smoke.service"],
+    ["/user.slice/user-1001.slice/user@1002.service/app.slice/flair-smoke.service", "contradictory", null],
+    ["/user.slice/user-1002.slice/user@1001.service/app.slice/flair-smoke.service", "contradictory", null],
     ["/user.slice/user-10011.slice/user@10011.service/app.slice/flair-smoke.service", "service", "flair-smoke.service"],
     ["/user.slice/user-01001.slice/user@01001.service/app.slice/flair-smoke.service", "service", "flair-smoke.service"],
     ["/user.slice/user-100.slice/user@100.service/app.slice/flair-smoke.service", "service", "flair-smoke.service"],
@@ -232,6 +264,18 @@ describe("the Linux unit is found from the running process, before and after the
     ["/user.slice/user-1001.slice/user@1001.service", "none", null],
     ["/user.slice/user-1001.slice/session-c7.scope", "none", null],
     ["/", "none", null],
+    // contradictory (round 8): the user slice and the user manager disagree, the manager is outside its own slice,
+    // or one unit's cgroup is nested in another's
+    ["/user.slice/user-1002.slice/user@1001.service/flair-smoke.service", "contradictory", null],
+    ["/user.slice/user-1002.slice/user@1001.service/app.slice/flair-smoke.service/payload", "contradictory", null],
+    ["/user.slice/user-1002.slice/user@1001.service", "contradictory", null],
+    ["/system.slice/user@1001.service/app.slice/flair-smoke.service", "contradictory", null],
+    ["/user.slice/user-1002.slice/user.slice/user-1001.slice/user@1001.service/app.slice/flair-smoke.service", "contradictory", null],
+    ["/user.slice/user-1001.slice/user@1001.service/app.slice/user@1001.service/flair-smoke.service", "contradictory", null],
+    ["/system.slice/hosted-compute-agent.service/flair.service", "contradictory", null],
+    ["/user.slice/user-1001.slice/user@1001.service/app.slice/tmux.service/flair-smoke.service", "contradictory", null],
+    ["/system.slice/container.service/user.slice/user-1001.slice/user@1001.service/app.slice/flair-smoke.service", "contradictory", null],
+    ["/system.slice/container.service/user.slice/user-1001.slice/user@1001.service/init.scope", "contradictory", null],
   ];
   test("the fixed cgroup pattern accepts exactly the round-6 set (literal table, uid mismatches included)", () => {
     for (const [path, kind, unit] of CGROUP_TABLE) {
@@ -261,6 +305,20 @@ describe("the Linux unit is found from the running process, before and after the
     // A user unit whose MainPID is another process: started directly too (not "owned").
     const userOther = proveServingTree(host({ pid: PID, runs: OLD, fileNames: OLD, showText: show(12, OLD) }).probe);
     expect(userOther.kind === "unknown" && userOther.reason).toContain("started directly");
+  });
+
+  test("status/doctor: a CONTRADICTORY cgroup is unknown, and no manager is asked about it (round 8)", () => {
+    for (const [name, cgroup] of Object.entries(CONTRADICTORY_CGROUPS)) {
+      const shows = Object.fromEntries(Object.keys(OTHER_MAIN_PIDS).map((k) => [k, show(PID, OLD)]));
+      const h = host({ pid: PID, runs: OLD, fileNames: OLD, showText: show(PID, OLD), cgroup, shows });
+      const s = proveServingTree(h.probe);
+      expect({ name, kind: s.kind, contradictory: s.kind === "unknown" && s.reason.includes("is contradictory") }).toEqual({
+        name,
+        kind: "unknown",
+        contradictory: true,
+      });
+      expect({ name, asked: h.calls.filter((c) => c.startsWith("show")) }).toEqual({ name, asked: [] });
+    }
   });
 });
 
@@ -391,6 +449,48 @@ describe("flair restart on Linux: through systemd for a proven unit, never aroun
     await expect(restartOnLinux(other)).rejects.toThrow("another user's systemd manager");
     expect(other.asked).toEqual([]);
     expect(other.calls).toEqual([]);
+  });
+
+  test("a CONTRADICTORY cgroup is REFUSED before any manager is asked — the direct path is never called (round 8)", async () => {
+    for (const [name, cgroup] of Object.entries(CONTRADICTORY_CGROUPS)) {
+      // Every manager answers another MainPID: for a consistent cgroup, the answer that licenses the direct path.
+      const d = deps({ serving: { kind: "unknown", reason: "r" }, cgroups: { [PID]: cgroup }, mainPids: OTHER_MAIN_PIDS });
+      let how: string | null = null;
+      let message = "";
+      try {
+        how = await restartOnLinux(d);
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect({ name, how, refused: message.includes("is contradictory"), calls: d.calls, asked: d.asked }).toEqual({
+        name,
+        how: null,
+        refused: true,
+        calls: [],
+        asked: [],
+      });
+      // The same through the probe's own reader (the composition src/cli.ts uses).
+      const shows = Object.fromEntries(Object.keys(OTHER_MAIN_PIDS).map((k) => [k, show(OTHER_PID, OLD)]));
+      const h = host({ pid: PID, runs: OLD, fileNames: OLD, showText: show(OTHER_PID, OLD), cgroup, shows });
+      const plan = planLinuxRestart({ serving: { kind: "unknown", reason: "r" }, pids: [PID], procCgroup: () => cgroup, uid: UID, unitMainPid: h.probe.unitMainPid! });
+      expect({ name, plan: plan.kind, asked: h.calls.filter((c) => c.startsWith("show")) }).toEqual({ name, plan: "refuse", asked: [] });
+    }
+    // Control: the consistent path of the first case, with the same answer, is started directly — the contradiction
+    // alone decides the refusal.
+    const consistent = deps({ serving: { kind: "unknown", reason: "r" }, cgroups: { [PID]: IN_UNIT }, mainPids: OTHER_MAIN_PIDS });
+    expect(await restartOnLinux(consistent)).toBe("direct");
+    expect(consistent.calls).toEqual(["DIRECT stop+spawn"]);
+  });
+
+  test("a user manager whose uid is spelled differently from this user's (a leading zero) is another user's — never asked", async () => {
+    const d = deps({
+      serving: { kind: "unknown", reason: "r" },
+      cgroups: { [PID]: `0::/user.slice/user-0${UID}.slice/user@0${UID}.service/app.slice/${UNIT}\n` },
+      mainPids: OTHER_MAIN_PIDS,
+    });
+    await expect(restartOnLinux(d)).rejects.toThrow("another user's systemd manager");
+    expect(d.asked).toEqual([]);
+    expect(d.calls).toEqual([]);
   });
 
   test("unitSupervision and the MainPID parser", () => {
