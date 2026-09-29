@@ -96,6 +96,36 @@ describe("buildTrustBlock — provenance status (verified vs claimed)", () => {
     expect((b as any).client).toBeUndefined();
     expect((b as any).claimed).toBeUndefined();
   });
+
+  it("flair#1960: claimed.createdAt alone does NOT set hasClaimedProvenance — only model/client do", () => {
+    // Every new row carries claimed.createdAt, so counting it would make the bit
+    // always true. It must flag the optional model/client authorship claims only.
+    const timeOnly = buildTrustBlock(
+      {
+        agentId: "agt_alice",
+        provenance: prov({
+          v: 1,
+          verified: { agentId: "agt_alice", timestamp: "2026-07-01T00:00:00.000Z" },
+          claimed: { createdAt: "2026-07-01T00:00:00.000Z" },
+        }),
+      },
+      NOW,
+    );
+    expect(timeOnly.hasClaimedProvenance).toBe(false);
+
+    const withModel = buildTrustBlock(
+      {
+        agentId: "agt_alice",
+        provenance: prov({
+          v: 1,
+          verified: { agentId: "agt_alice", timestamp: "2026-07-01T00:00:00.000Z" },
+          claimed: { createdAt: "2026-07-01T00:00:00.000Z", model: "gpt-5" },
+        }),
+      },
+      NOW,
+    );
+    expect(withModel.hasClaimedProvenance).toBe(true);
+  });
 });
 
 describe("buildTrustBlock — usage signal (flair#744 slice A: absent-vs-0 fix)", () => {

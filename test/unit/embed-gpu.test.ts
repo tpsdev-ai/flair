@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   METAL_PREBUILT,
   EMBED_GPU_FALLBACK_MSG,
+  EMBED_GPU_UNCONFIRMED_MSG,
   detectUsableMetalBackend,
   resolveEmbedGpuChoice,
   resolveEmbedGpuLayers,
@@ -12,7 +13,10 @@ import {
   confirmMetalEngagement,
   applyEmbedGpuChoice,
   previewEmbedGpuStatement,
+  setEmbedGpuStatement,
   getEmbedGpuStatement,
+  embedGpuStatusWarning,
+  embedGpuStatusNotice,
   formatEmbedGpuLogLine,
   withEmbedGpuHealth,
   captureIoDuring,
@@ -22,8 +26,8 @@ import {
 /**
  * flair#1437 — stated gpuLayers default. These cases are the product
  * contract: detect a *usable* Metal backend (not merely the platform),
- * derive 99/0, honor FLAIR_EMBED_GPU_LAYERS, and fail loud when offload
- * was requested but Metal did not engage.
+ * derive 99/0, honor FLAIR_EMBED_GPU_LAYERS, and state Metal, CPU, or
+ * unconfirmed from the engine — never from an empty log capture.
  */
 describe("detectUsableMetalBackend (flair#1437)", () => {
   it("rejects non-darwin platforms even when the prebuilt would resolve", () => {
@@ -192,12 +196,13 @@ describe("confirmMetalEngagement / fail-loud (flair#1437)", () => {
     expect(r.statement.fallback).toBeUndefined();
   });
 
-  it("forced GPU on a no-GPU box STATE fallback — never a silent CPU-under-GPU-claim", () => {
+  it("forced GPU on a no-GPU box STATE fallback when the engine says CPU", () => {
     const r = confirmMetalEngagement({
       requestedGpuLayers: 99,
       metalUsable: false,
       warmupLog: "",
       source: "env",
+      engine: { getGpuType: () => false },
     });
     expect(r.engaged).toBe(false);
     expect(r.statement.backend).toBe("cpu");
@@ -206,23 +211,38 @@ describe("confirmMetalEngagement / fail-loud (flair#1437)", () => {
     expect(r.statement.fallback).toBe(EMBED_GPU_FALLBACK_MSG);
   });
 
-  it("usable Metal + both log markers → backend=metal, gpuLayers=99, no fallback", () => {
+  it("engine readback Metal + 99 layers → backend=metal, no fallback", () => {
+    const r = confirmMetalEngagement({
+      requestedGpuLayers: 99,
+      metalUsable: true,
+      warmupLog: "",
+      source: "detected",
+      engine: { gpu: "metal", gpuLayers: 99 },
+    });
+    expect(r.engaged).toBe(true);
+    expect(r.statement).toEqual({ backend: "metal", gpuLayers: 99, source: "detected" });
+  });
+
+  it("log markers alone do not engage Metal", () => {
     const r = confirmMetalEngagement({
       requestedGpuLayers: 99,
       metalUsable: true,
       warmupLog: metalLog,
       source: "detected",
     });
-    expect(r.engaged).toBe(true);
-    expect(r.statement).toEqual({ backend: "metal", gpuLayers: 99, source: "detected" });
+    expect(r.engaged).toBe(false);
+    expect(r.statement.backend).toBe("unconfirmed");
+    expect(r.statement.gpuLayers).toBeNull();
+    expect(r.statement.fallback).toBeUndefined();
   });
 
-  it("usable Metal + missing ggml_metal_init confirmation → STATE fallback", () => {
+  it("engine readback CPU → not engaged, fallback sentence", () => {
     const r = confirmMetalEngagement({
       requestedGpuLayers: 99,
       metalUsable: true,
-      warmupLog: "harper started\nno metal here",
-      source: "detected",
+      warmupLog: metalLog,
+      source: "env",
+      engine: { gpu: false, gpuLayers: 0 },
     });
     expect(r.engaged).toBe(false);
     expect(r.statement.backend).toBe("cpu");
@@ -240,24 +260,49 @@ describe("stated snapshot + Health field (flair#1437)", () => {
     _resetEmbedGpuStatementForTests();
   });
 
-  it("preview of a Metal-derived choice does not claim metal before confirmation", () => {
+  it("preview of a Metal-derived choice does not claim metal or CPU before readback", () => {
     const preview = previewEmbedGpuStatement({
       gpuLayers: 99,
       source: "detected",
       metalUsable: true,
     });
-    expect(preview.backend).toBe("cpu");
-    expect(preview.gpuLayers).toBe(99);
+    expect(preview.backend).toBe("unconfirmed");
+    expect(preview.gpuLayers).toBeNull();
     expect(preview.fallback).toBeUndefined();
+    expect(preview.pending).toBe(true);
   });
 
-  it("applyEmbedGpuChoice stores the confirmed statement for /Health", () => {
+  it("/Health distinguishes warmup from finished no-readback, and apply clears pending", () => {
+    const choice = { gpuLayers: 99, source: "env" as const, metalUsable: true };
+    setEmbedGpuStatement(previewEmbedGpuStatement(choice));
+    const duringWarmup = withEmbedGpuHealth({ ok: true });
+    expect(duringWarmup.embedding).toEqual({
+      backend: "unconfirmed", gpuLayers: null, source: "env", pending: true,
+    });
+    expect(embedGpuStatusWarning(duringWarmup.embedding)).toContain("pending (warmup in progress)");
+    expect(embedGpuStatusNotice(duringWarmup.embedding)).toEqual({
+      level: "info", message: "requested GPU offload; Metal engagement pending (warmup in progress)",
+    });
+
+    applyEmbedGpuChoice(choice, {});
+    const afterWarmup = withEmbedGpuHealth({ ok: true });
+    expect(afterWarmup.embedding).toEqual({
+      backend: "unconfirmed", gpuLayers: null, source: "env",
+    });
+    expect(embedGpuStatusWarning(afterWarmup.embedding)).toBe(EMBED_GPU_UNCONFIRMED_MSG);
+    expect(embedGpuStatusNotice(afterWarmup.embedding)).toEqual({
+      level: "warn", message: EMBED_GPU_UNCONFIRMED_MSG,
+    });
+  });
+
+  it("applyEmbedGpuChoice stores the engine readback for /Health", () => {
     const statement = applyEmbedGpuChoice(
       { gpuLayers: 99, source: "detected", metalUsable: true },
-      "ggml_metal_init: ok\ncompute buffer size = 1",
+      { llama: { gpu: "metal" }, gpuLayers: 99 },
     );
     expect(getEmbedGpuStatement()).toEqual(statement);
     expect(statement.backend).toBe("metal");
+    expect(statement.gpuLayers).toBe(99);
   });
 
   it("withEmbedGpuHealth always attaches embedding {backend,gpuLayers,source}", () => {
@@ -267,8 +312,11 @@ describe("stated snapshot + Health field (flair#1437)", () => {
     expect(body.ok).toBe(true);
   });
 
-  it("Health field carries fallback when forced-GPU did not engage", () => {
-    applyEmbedGpuChoice({ gpuLayers: 99, source: "env", metalUsable: false }, "");
+  it("Health field carries fallback when the engine says CPU", () => {
+    applyEmbedGpuChoice(
+      { gpuLayers: 99, source: "env", metalUsable: false },
+      { gpu: false },
+    );
     const body = withEmbedGpuHealth({ ok: true });
     expect(body.embedding.backend).toBe("cpu");
     expect(body.embedding.gpuLayers).toBe(0);
@@ -281,6 +329,19 @@ describe("stated snapshot + Health field (flair#1437)", () => {
     expect(statement.backend).toBe("cpu");
     expect(statement.gpuLayers).toBe(0);
     expect(statement.source).toBe("default");
+  });
+
+  it("reading /Health before boot publishes a preview does not invent warmup", () => {
+    const saved = process.env.FLAIR_EMBED_GPU_LAYERS;
+    try {
+      process.env.FLAIR_EMBED_GPU_LAYERS = "99";
+      expect(getEmbedGpuStatement({ usable: true })).toEqual({
+        backend: "unconfirmed", gpuLayers: null, source: "env",
+      });
+    } finally {
+      if (saved === undefined) delete process.env.FLAIR_EMBED_GPU_LAYERS;
+      else process.env.FLAIR_EMBED_GPU_LAYERS = saved;
+    }
   });
 });
 

@@ -1,9 +1,10 @@
 import { describe, it, expect } from "bun:test";
 
-import { EMBED_GPU_FALLBACK_MSG } from "../../resources/embed-gpu.ts";
+import { EMBED_GPU_FALLBACK_MSG, previewEmbedGpuStatement, applyEmbedGpuChoice } from "../../resources/embed-gpu.ts";
 import {
   EMBED_GPU_DOCTOR_MARKER,
   EMBED_GPU_DETECTED_MESSAGE,
+  EMBED_GPU_UNCONFIRMED_DOCTOR_MESSAGE,
   describeEmbedGpuDoctorFinding,
 } from "../../src/lib/embed-gpu-doctor.ts";
 import {
@@ -91,6 +92,20 @@ describe("describeEmbedGpuDoctorFinding (flair#1437 — doctor line)", () => {
     })).toBeNull();
   });
 
+  it("unconfirmed readback is not the CPU fallback sentence", () => {
+    const finding = describeEmbedGpuDoctorFinding({
+      backend: "unconfirmed",
+      gpuLayers: null,
+      source: "detected",
+    });
+    expect(finding).not.toBeNull();
+    expect(finding!.isIssue).toBe(false);
+    expect(finding!.message).toBe(EMBED_GPU_DETECTED_MESSAGE);
+    expect(finding!.message).not.toContain("did not engage");
+    expect(EMBED_GPU_UNCONFIRMED_DOCTOR_MESSAGE).not.toContain("did not engage");
+    expect(EMBED_GPU_UNCONFIRMED_DOCTOR_MESSAGE).not.toContain("running CPU");
+  });
+
   it("Metal engaged (no fallback) is silent", () => {
     expect(describeEmbedGpuDoctorFinding({
       backend: "metal",
@@ -117,6 +132,28 @@ describe("describeEmbedGpuDoctorFinding (flair#1437 — doctor line)", () => {
 });
 
 describe("doctor render/count/exit path with controlled Health (flair#1761)", () => {
+  it("pending env offload is advisory while warmup runs", () => {
+    const preview = previewEmbedGpuStatement({ gpuLayers: 99, source: "env", metalUsable: true });
+    const { lines, issueDelta } = doctorLines(preview);
+    expect(lines[0]).toContain("⚠");
+    expect(lines[0]).toContain("warmup");
+    expect(lines.join("\n")).toContain("after warmup completes");
+    expect(lines.join("\n")).not.toContain("restart");
+    expect(issueDelta).toBe(0);
+    expect(doctorExit(issueDelta)).toBe(0);
+  });
+
+  it("finished env offload without readback retains the blocking error", () => {
+    const finished = applyEmbedGpuChoice({ gpuLayers: 99, source: "env", metalUsable: true }, {});
+    expect(finished.pending).toBeUndefined();
+    const { lines, issueDelta } = doctorLines(finished);
+    expect(lines[0]).toContain("✗");
+    expect(lines[0]).toContain(EMBED_GPU_UNCONFIRMED_DOCTOR_MESSAGE);
+    expect(lines.join("\n")).toContain("restart Flair");
+    expect(issueDelta).toBe(1);
+    expect(doctorExit(issueDelta)).toBe(1);
+  });
+
   it("derived default (source=detected) → warning, no issue, doctor exits 0", () => {
     const { lines, issueDelta } = doctorLines(healthEmbedding("detected"));
     const rendered = lines.join("\n");

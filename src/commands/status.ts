@@ -11,6 +11,12 @@ import { resolveAdminUser } from "../lib/auth-resolve.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
 import * as render from "../render.js";
 import { checkVersion, formatVersionNudge, FLAIR_PKG_NAME } from "../version-check.js";
+import {
+  formatServingTreeLine,
+  formatTreeAssessmentLines,
+  treeAssessmentJson,
+  type TreeAssessment,
+} from "../lib/tree-divergence.js";
 import { resolveRegistryNotice } from "../lib/npm-registry.js";
 import { hostname } from "node:os";
 import { join } from "node:path";
@@ -24,6 +30,8 @@ export type StatusCli = {
   defaultDataDir: (...args: any[]) => any;
   readHarperConfig: (...args: any[]) => any;
   readPortFromConfig: (...args: any[]) => any;
+  resolveHttpPort: (...args: any[]) => any;
+  assessInstallTree: (...args: any[]) => any;
   __pkgVersion: any;
 };
 
@@ -64,6 +72,68 @@ function readHarperConfig(...args: any[]): any {
 
 function readPortFromConfig(): number | null {
   return cli.readPortFromConfig();
+}
+
+function resolveHttpPort(...args: any[]): any {
+  return cli.resolveHttpPort(...args);
+}
+
+/**
+ * flair#2034 §2: the version-and-tree advice `flair status` prints, decided in
+ * ONE place from one comparison, each hint at most once:
+ *
+ *   - a PROVEN tree divergence prints the divergence block (both trees, both
+ *     versions — "unknown" where one cannot be read — and the remedy) INSTEAD
+ *     of the CLI's "is behind — run: flair upgrade" hint, which would upgrade
+ *     the wrong tree;
+ *   - otherwise the CLI-currency hint (this CLI vs the latest published) prints
+ *     once, and — separately — the server-currency line when the running
+ *     server's version differs from this CLI's. Its advice depends on what is
+ *     proven: `flair restart` only when the instance serves this CLI's own
+ *     tree; no local remedy when the serving tree is unknown.
+ *
+ * Pure: returns the lines; the caller prints them.
+ */
+export function statusVersionAdvice(input: {
+  cliVersion: string;
+  runningVersion: string | null;
+  versionNudge: { severity: string; message: string } | null;
+  latest: string | null;
+  tree: TreeAssessment | null;
+}): Array<{ tone: "red" | "yellow" | "dim" | "plain"; text: string }> {
+  const out: Array<{ tone: "red" | "yellow" | "dim" | "plain"; text: string }> = [];
+  const t = input.tree;
+  // A separately managed tree (a plain tree, a checkout) is the steady state of
+  // such a deployment; it is named only when its version differs from this CLI's.
+  const nameSeparate = t?.state === "separate" && input.runningVersion !== input.cliVersion;
+  if (t && (t.state === "diverged" || nameSeparate)) {
+    const tone = t.state === "diverged" ? "yellow" : "plain";
+    for (const line of formatTreeAssessmentLines(t, { latest: input.latest, context: "status" })) out.push({ tone, text: line });
+    if (t.state === "diverged") return out;
+  }
+  if (input.versionNudge) {
+    out.push({ tone: input.versionNudge.severity === "red" ? "red" : "yellow", text: `⚠ ${input.versionNudge.message}` });
+  }
+  const rv = input.runningVersion;
+  if (rv === null) {
+    out.push({ tone: "dim", text: `server version: unknown (this CLI is flair ${input.cliVersion})` });
+  } else if (rv !== input.cliVersion) {
+    if (t?.state === "same") {
+      out.push({
+        tone: "yellow",
+        text: `⚠ the server is running flair ${rv}; this CLI (the same install tree) is ${input.cliVersion} — run: flair restart`,
+      });
+    } else if (!nameSeparate) {
+      out.push({
+        tone: "yellow",
+        text:
+          `⚠ the server is running flair ${rv}; this CLI is ${input.cliVersion}. ` +
+          (t ? formatServingTreeLine(t) : "serving install tree: unknown") +
+          ", so this CLI cannot say which tree to update.",
+      });
+    }
+  }
+  return out;
 }
 
 /**
@@ -160,6 +230,12 @@ function oauthDetailLines(o: any): string[] {
 
 const LOCAL_FLAIR_PROBE_PORTS = [9926, 19926, 19925];
 
+/** The BM25 line /HealthDetail already formatted. Null on an older server. */
+export function formatBm25StatusLine(bm25: { summary?: unknown } | null | undefined): string | null {
+  if (!bm25 || typeof bm25.summary !== "string") return null;
+  const summary = bm25.summary.trim();
+  return summary.length > 0 ? summary : null;
+}
 
 /**
  * The unreachable-path guidance for a localhost target, as printable lines.
@@ -303,6 +379,29 @@ const statusCmd = program
     // version answer came from cache and no network request was made.
     const registryNotice = await resolveRegistryNotice(FLAIR_PKG_NAME);
 
+    // flair#2034 §2: which install tree serves the instance that answered —
+    // proven from the service manager that owns the answering process, or
+    // unknown. Only a local query of this data dir's instance can be proven.
+    const runningVersion: string | null =
+      typeof healthData?.version === "string" && healthData.version !== "" ? healthData.version : null;
+    let treeAssessment: TreeAssessment | null = null;
+    if (healthy) {
+      try {
+        const port = resolveHttpPort(opts);
+        let urlPort: number | null = null;
+        try { urlPort = Number(new URL(baseUrl).port) || null; } catch { urlPort = null; }
+        const local = isLocalhostUrl(baseUrl) && urlPort === port && !opts.target && !process.env.FLAIR_TARGET;
+        treeAssessment = cli.assessInstallTree(defaultDataDir(), port, {
+          local,
+          queryUrl: baseUrl,
+          respondingPid: typeof healthData?.pid === "number" ? healthData.pid : null,
+          runningVersion,
+        }) as TreeAssessment;
+      } catch {
+        treeAssessment = null;
+      }
+    }
+
     if (opts.json) {
       const out: any = { healthy, url: baseUrl, flairVersion: __pkgVersion, ...healthData };
       if (localWarnings.length > 0) {
@@ -313,6 +412,9 @@ const statusCmd = program
       }
       if (discoveredPort != null) out.discoveredPort = discoveredPort;
       if (versionCheckResult.latest) out.latestVersion = versionCheckResult.latest;
+      // flair#2034 §2: the same install-tree comparison the human output uses.
+      out.serverVersion = runningVersion;
+      out.installTree = treeAssessment ? treeAssessmentJson(treeAssessment) : null;
       if (registryNotice.line) out.registry = registryNotice.line;
       if (registryNotice.error) out.registryError = registryNotice.error;
       console.log(JSON.stringify(out, null, 2));
@@ -408,9 +510,18 @@ const statusCmd = program
     if (registryNotice.line) console.log(render.kv("Registry", registryNotice.line.replace(/^registry:\s*/, "")));
     if (registryNotice.error) console.log(`  ${render.icons.warn} ${render.wrap(render.c.yellow, registryNotice.error)}`);
 
-    if (versionNudge) {
-      const color = versionNudge.severity === "red" ? render.c.red : render.c.yellow;
-      console.log(`\n  ${render.wrap(color, "⚠")} ${render.wrap(color, versionNudge.message)}`);
+    // flair#2034 §2: every version / install-tree hint, decided once.
+    const advice = statusVersionAdvice({
+      cliVersion: __pkgVersion,
+      runningVersion,
+      versionNudge,
+      latest: versionCheckResult.latest ?? null,
+      tree: treeAssessment,
+    });
+    if (advice.length > 0) console.log("");
+    for (const a of advice) {
+      const color = a.tone === "red" ? render.c.red : a.tone === "yellow" ? render.c.yellow : a.tone === "dim" ? render.c.dim : null;
+      console.log(`  ${color ? render.wrap(color, a.text) : a.text}`);
     }
 
     if (scopedWarnings.length > 0) {
@@ -452,6 +563,9 @@ const statusCmd = program
       }
       if (healthData?.lastWrite) console.log(render.kv("Last write", render.relativeTime(healthData.lastWrite)));
     }
+
+    const bm25Line = formatBm25StatusLine(healthData?.bm25);
+    if (bm25Line) console.log(render.kv("BM25 index", bm25Line));
 
     if (agents && agents.count > 0) {
       console.log(`\n${render.wrap(render.c.bold, "Agents")}`);
@@ -895,6 +1009,9 @@ statusCmd
       console.log(`Expired:      ${memories.expired ?? 0}`);
       if (healthData?.lastWrite) console.log(`Last write:   ${relativeTime(healthData.lastWrite)} (${healthData.lastWrite})`);
     }
+
+    const bm25DeepLine = formatBm25StatusLine(healthData?.bm25);
+    if (bm25DeepLine) console.log(`BM25 index:   ${bm25DeepLine}`);
 
     const agents = healthData?.agents;
     if (agents && agents.count > 0) {

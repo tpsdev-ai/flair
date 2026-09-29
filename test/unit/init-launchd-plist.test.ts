@@ -38,11 +38,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildLaunchdPlist,
-  launchdLauncherPath,
   writeInitLaunchdPlist,
   type LaunchdPlistOptions,
   type WriteInitLaunchdPlistOptions,
 } from "../../src/cli.ts";
+import { resolveHome } from "../../src/lib/home.ts";
 
 let tmp: string;
 let savedFlairPass: string | undefined;
@@ -67,23 +67,28 @@ afterEach(() => {
 });
 
 const DATA_DIR = "/Users/example/.flair/data";
+/** A tree that does not exist on disk: the adopted-plist fixtures below serve it. */
+const TREE = "/opt/flair";
+const TREE_HARPER = `${TREE}/node_modules/harper/dist/bin/harper.js`;
+const TREE_LAUNCHER = `${TREE}/templates/launchd/start-flair-with-admin-pass.sh`;
 
 function plistFor(dataDir: string, over: Partial<LaunchdPlistOptions> = {}): string {
   return buildLaunchdPlist({
     label: "ai.tpsdev.flair.deadbeef",
     execPath: "/usr/local/bin/node",
-    harperBinPath: "/opt/flair/harper.js",
-    workingDirectory: "/opt/flair",
+    harperBinPath: TREE_HARPER,
+    workingDirectory: TREE,
     dataDir,
     modelsDir: `${dataDir}/models`,
     setConfig: JSON.stringify({ rootPath: dataDir, http: { port: 9926 } }),
     adminUser: "admin",
     httpPort: 9926,
     opsNetworkPort: "9925",
+    // This instance's own plist: this user's HOME and this instance's pass file.
     passFile: {
-      launcher: launchdLauncherPath(),
-      adminPassFile: "/Users/example/.flair/admin-pass",
-      home: "/Users/example",
+      launcher: TREE_LAUNCHER,
+      adminPassFile: join(tmp, "admin-pass"),
+      home: resolveHome(),
       path: "/usr/bin:/bin",
     },
     ...over,
@@ -99,8 +104,8 @@ function baseOptions(over: Partial<WriteInitLaunchdPlistOptions> = {}): WriteIni
     adminUser: "admin",
     modelsDir: `${DATA_DIR}/models`,
     execPath: "/usr/local/bin/node",
-    harperBinPath: "/opt/flair/harper.js",
-    workingDirectory: "/opt/flair",
+    harperBinPath: TREE_HARPER,
+    workingDirectory: TREE,
     httpPort: 9926,
     opsNetworkPort: "9925",
     setConfig: JSON.stringify({ rootPath: DATA_DIR, http: { port: 9926 } }),
@@ -223,5 +228,80 @@ describe("writeInitLaunchdPlist — ownership guard", () => {
 
     expect(result.kind).toBe("refused");
     if (result.kind === "refused") expect(result.detail).toMatch(/flair doctor --fix/);
+  });
+});
+
+describe("writeInitLaunchdPlist — re-points an adopted plist at this CLI's tree (#2034)", () => {
+  /** An npm-global runtime prefix with a flair tree (+ Harper entry) and a node binary. */
+  function runtimeTree(prefix: string, version: string): { tree: string; node: string; harper: string } {
+    const tree = join(prefix, "lib", "node_modules", "@tpsdev-ai", "flair");
+    const harper = join(tree, "node_modules", "harper", "dist", "bin", "harper.js");
+    mkdirSync(join(harper, ".."), { recursive: true });
+    mkdirSync(join(prefix, "bin"), { recursive: true });
+    writeFileSync(join(tree, "package.json"), JSON.stringify({ name: "@tpsdev-ai/flair", version }));
+    writeFileSync(harper, "// harper\n");
+    mkdirSync(join(tree, "templates", "launchd"), { recursive: true });
+    writeFileSync(join(tree, "templates", "launchd", "start-flair-with-admin-pass.sh"), "#!/bin/sh\n", { mode: 0o755 });
+    writeFileSync(join(prefix, "bin", "node"), "#!/bin/sh\n", { mode: 0o755 });
+    return { tree, node: join(prefix, "bin", "node"), harper };
+  }
+
+  test("an adopted pass-file plist serving an OLD npm-global tree is re-pointed — runtime paths only", async () => {
+    const old = runtimeTree(join(tmp, "node", "24.18.0"), "0.57.0");
+    const cur = runtimeTree(join(tmp, "node", "24.19.0"), "0.57.0");
+    const opts = baseOptions({ execPath: cur.node, harperBinPath: cur.harper, workingDirectory: cur.tree });
+    const before = plistFor(DATA_DIR, {
+      execPath: old.node,
+      harperBinPath: old.harper,
+      workingDirectory: old.tree,
+      passFile: {
+        launcher: join(old.tree, "templates", "launchd", "start-flair-with-admin-pass.sh"),
+        adminPassFile: opts.adminPassPath!,
+        home: resolveHome(),
+        path: "/custom/R&D/bin:/usr/bin:/bin",
+      },
+    });
+    writeFileSync(opts.plistPath, before, { mode: 0o644 });
+    // No pass file and no credential: re-pointing must not need one (#1693's rule).
+    expect(existsSync(opts.adminPassPath!)).toBe(false);
+
+    const result = await writeInitLaunchdPlist(opts);
+
+    expect(result.kind).toBe("repointed");
+    const after = readFileSync(opts.plistPath, "utf-8");
+    const expected = plistFor(DATA_DIR, {
+      execPath: cur.node,
+      harperBinPath: cur.harper,
+      workingDirectory: cur.tree,
+      passFile: {
+        launcher: join(cur.tree, "templates", "launchd", "start-flair-with-admin-pass.sh"),
+        adminPassFile: opts.adminPassPath!,
+        home: resolveHome(),
+        path: "/custom/R&D/bin:/usr/bin:/bin",
+      },
+    });
+    expect(after).toBe(expected);
+    expect(after).toContain("/custom/R&amp;D/bin");
+    expect(after).not.toContain("HDB_ADMIN_PASSWORD");
+    expect(statSync(opts.plistPath).mode & 0o777).toBe(0o644);
+    expect(existsSync(opts.adminPassPath!)).toBe(false);
+
+    // Idempotent: the next init leaves it byte-identical.
+    const again = await writeInitLaunchdPlist(opts);
+    expect(again.kind).toBe("unchanged");
+    expect(readFileSync(opts.plistPath, "utf-8")).toBe(after);
+  });
+
+  test("an adopted plist serving a plain tree is left byte-identical, with the reason", async () => {
+    const cur = runtimeTree(join(tmp, "node", "24.19.0"), "0.57.0");
+    const opts = baseOptions({ execPath: cur.node, harperBinPath: cur.harper, workingDirectory: cur.tree });
+    const before = plistFor(DATA_DIR);
+    writeFileSync(opts.plistPath, before);
+
+    const result = await writeInitLaunchdPlist(opts);
+
+    expect(result.kind).toBe("not-repointed");
+    if (result.kind === "not-repointed") expect(result.detail).toContain("separately managed");
+    expect(readFileSync(opts.plistPath, "utf-8")).toBe(before);
   });
 });

@@ -21,6 +21,8 @@ import {
 import { mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
 import { opsSocketPathRefusal } from "../lib/socket-path-limit.js";
 import * as render from "../render.js";
+import { rewriteFederationSchedulerRuntime } from "../federation/scheduler.js";
+import { preferVersionManagerAlias } from "../lib/node-alias-path.js";
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -57,6 +59,7 @@ export type InitCli = {
   pubKeyPath: (...args: any[]) => any;
   readyOpsSocketPosture: (...args: any[]) => any;
   reconcileFederationInstanceViaOpsApi: (...args: any[]) => any;
+  repointMainServiceUnit: (...args: any[]) => any;
   resolveHttpPort: (...args: any[]) => any;
   writeAdminPassFile: (...args: any[]) => any;
   resolveOpsBindHost: (...args: any[]) => any;
@@ -248,6 +251,10 @@ function writeDaemonSidecar(...args: any[]): any {
 
 function registerInitLaunchdService(...args: any[]): any {
   return cli.registerInitLaunchdService(...args);
+}
+
+function repointMainServiceUnit(...args: any[]): any {
+  return cli.repointMainServiceUnit(...args);
 }
 
 export function register(program: Command): void {
@@ -958,8 +965,10 @@ program
           // emits the pass-file launcher and never HDB_ADMIN_PASSWORD. It reuses
           // an existing valid ~/.flair/admin-pass, or proves the credential in
           // hand against this (now-healthy) instance and writes it 0600, or
-          // refuses without writing a plist. An already-adopted instance is left
-          // byte-for-byte unchanged rather than downgraded to the inline shape.
+          // refuses without writing a plist. An already-adopted instance is never
+          // regenerated or downgraded to the inline shape; only its runtime paths
+          // are re-pointed, when it is provably this instance's plist serving
+          // another npm-global tree (flair#2034 — see src/lib/service-repoint.ts).
           //
           // flair#693 + flair#966 + flair#2040: a pre-flair#693 install
           // registered under the bare LEGACY_LAUNCHD_LABEL is retired here, but
@@ -972,7 +981,9 @@ program
           // flair#2040: NEVER a check mark for a load that did not happen. The
           // step reports "launchd-managed ✓" only when launchd is verified to
           // run the process serving this instance; otherwise it says the plist
-          // is on disk and Flair runs directly, with the reason.
+          // is on disk and Flair runs directly, with the reason. The plist
+          // writer's own outcome (written / unchanged / re-pointed / not
+          // re-pointed, flair#2034) is reported in the same lines.
           const launchdStep = await registerInitLaunchdService({
             dataDir,
             port: httpPort,
@@ -984,7 +995,7 @@ program
               adminPass,
               adminUser,
               modelsDir,
-              execPath: process.execPath,
+              execPath: preferVersionManagerAlias(process.execPath),
               harperBinPath,
               workingDirectory: flairPackageDir(),
               httpPort: httpBind.bindValue,
@@ -1000,6 +1011,37 @@ program
             process.exit(1);
           }
         }
+      }
+
+      // flair#2034 §2: on Linux the instance's own service is the systemd
+      // USER unit proven to own the serving process (flair writes none). A
+      // unit that serves another npm-global tree is re-pointed — runtime paths
+      // only — and systemd is reloaded; anything else is left alone.
+      if (process.platform === "linux") {
+        const r = repointMainServiceUnit(dataDir, httpPort);
+        if (r.kind === "repointed") {
+          console.log(`Systemd user unit re-pointed at this CLI's install tree ✓ — ${r.detail}`);
+          console.log("  It takes effect when systemd next starts the unit: flair restart");
+        } else if (r.kind === "refused") {
+          console.warn(`Systemd user unit left unchanged — ${r.detail}`);
+        } else if (r.kind === "pinned-node") {
+          console.log(`Systemd user unit left as it is — ${r.detail}`);
+        }
+      }
+
+      // flair#2034 §2: the federation-sync shim bakes the node + flair paths
+      // of the runtime that enabled it. When it runs another npm-global tree,
+      // re-point its exec line (only that line; the scheduler unit is never
+      // rewritten). A machine that never enabled federation sync is left alone.
+      try {
+        const fed = rewriteFederationSchedulerRuntime();
+        if (fed.status === "rewritten") {
+          console.log(`Federation sync shim re-pointed at this CLI's install tree ✓ — ${fed.detail}`);
+        } else if (fed.status === "refused") {
+          console.warn(`Federation sync shim left unchanged — ${fed.detail}`);
+        }
+      } catch (err: any) {
+        console.warn(`Could not check the federation sync shim: ${err?.message ?? err}`);
       }
     }
 

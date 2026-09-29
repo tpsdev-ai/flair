@@ -951,7 +951,12 @@ describe("flair#1478 — self-heal requires flair /Health identity and pid→por
 
       expect(exitCode).toBe(0);
       expect(stdout + stderr).toMatch(/Flair stopped/i);
-      expect(existsSync(join(dataDir, "flair-daemon.json"))).toBe(true);
+      // flair#2055: the self-heal wrote the sidecar to verify this identity, and
+      // the stop that followed CONFIRMED the pid gone — so the sidecar is
+      // removed on the way out. "Flair stopped" (which requires a VERIFIED
+      // identity, i.e. the self-heal fired) plus the dead pid is the heal proof;
+      // a leftover sidecar naming a dead pid is exactly what #2055 removes.
+      expect(existsSync(join(dataDir, "flair-daemon.json"))).toBe(false);
       expect(pidAlive(pid)).toBe(false);
     },
     30_000,

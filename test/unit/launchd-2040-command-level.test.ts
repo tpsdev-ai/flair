@@ -1626,3 +1626,200 @@ describe("flair#2040 r7 — doctor --fix: a pid file is not a serving port", () 
     90_000,
   );
 });
+
+// ─── init: the plist writer's flair#2034 outcomes under flair#2040's verifier ─
+//
+// flair#2044 (merged into main) gave init's plist writer two new outcomes — a
+// re-point of an adopted plist's runtime paths, and a refusal to re-point
+// ("not re-pointed") — plus a deliberate-node-pin note on "unchanged". The
+// flair#2040 step reports every one of them, and a check mark only when launchd
+// is verified to run the serving process.
+
+describe("flair#2040 × flair#2034 — init reports the plist writer's outcome; a check mark only when verified", () => {
+  /** An executable file named `node`. Never run: only its path and identity matter to the planner. */
+  function nodeBinary(dir: string): string {
+    mkdirSync(dir, { recursive: true });
+    const p = join(dir, "node");
+    writeFileSync(p, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    return p;
+  }
+
+  /** An adopted pass-file plist for THIS instance, running `harperBin` from `tree` under `nodeBin`. */
+  function adoptedPlist(tree: string, nodeBin: string, harperBin: string): string {
+    return buildLaunchdPlist({
+      label: fx.label,
+      execPath: nodeBin,
+      harperBinPath: harperBin,
+      workingDirectory: tree,
+      dataDir: fx.dataDir,
+      modelsDir: join(fx.dataDir, "models"),
+      setConfig: "{}",
+      adminUser: "admin",
+      httpPort: fx.port,
+      opsNetworkPort: `127.0.0.1:${fx.port + 1}`,
+      passFile: {
+        launcher: join(tree, "templates", "launchd", "start-flair-with-admin-pass.sh"),
+        adminPassFile: join(fx.home, ".flair", "admin-pass"),
+        home: fx.home,
+        path: process.env.PATH ?? "/usr/bin:/bin",
+      },
+    });
+  }
+
+  /** A flair install tree (launcher + Harper entry) at `tree`; `version` adds its package.json. */
+  function installTree(tree: string, version?: string): { tree: string; harper: string } {
+    const harper = join(tree, "node_modules", "harper", "dist", "bin", "harper.js");
+    mkdirSync(join(tree, "templates", "launchd"), { recursive: true });
+    mkdirSync(join(tree, "node_modules", "harper", "dist", "bin"), { recursive: true });
+    writeFileSync(join(tree, "templates", "launchd", "start-flair-with-admin-pass.sh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    writeFileSync(harper, "");
+    if (version) writeFileSync(join(tree, "package.json"), JSON.stringify({ name: "@tpsdev-ai/flair", version }));
+    return { tree, harper };
+  }
+
+  /** init's input with this CLI's runtime a `node` binary (the re-point planner accepts only one). */
+  function initInputWithNode(cliNode: string) {
+    const input = initInput();
+    input.write.execPath = cliNode;
+    return input;
+  }
+
+  function texts(result: any, stream?: "out" | "err"): string[] {
+    return (result.lines as Array<{ stream: string; text: string }>)
+      .filter((l) => stream === undefined || l.stream === stream)
+      .map((l) => l.text);
+  }
+
+  /** A plist serving an npm-global tree of flair 0.56.0, with this CLI's probe tree at 0.57.0. */
+  function arrangeRepointable(): { oldTree: string; cliNode: string } {
+    writeFileSync(join(fx.probe, "package.json"), JSON.stringify({ name: "@tpsdev-ai/flair", version: "0.57.0" }));
+    const old = installTree(join(fx.home, "oldprefix", "lib", "node_modules", "@tpsdev-ai", "flair"), "0.56.0");
+    const oldNode = nodeBinary(join(fx.home, "oldnode", "bin"));
+    const cliNode = nodeBinary(join(fx.home, "clinode", "bin"));
+    writeFileSync(fx.plistPath, adoptedPlist(old.tree, oldNode, old.harper));
+    return { oldTree: old.tree, cliNode };
+  }
+
+  test.skipIf(!isDarwin)(
+    "(m1) a deliberate node pin while Flair runs directly -> 'NOT launchd-managed', the pin's hand edit, no check mark",
+    async () => {
+      const pinned = nodeBinary(join(fx.home, "pinned", "bin"));
+      const cliNode = nodeBinary(join(fx.home, "clinode", "bin"));
+      const bytes = adoptedPlist(fx.probe, pinned, fx.stubHarper);
+      writeFileSync(fx.plistPath, bytes);
+      await startDirectStub();
+
+      const run = await drive("init", initInputWithNode(cliNode));
+
+      await explainOnFailure(run, async () => {
+        expect(run.result).toMatchObject({ kind: "direct" });
+        const text = texts(run.result).join("\n");
+        expect(text).toContain(`Launchd plist unchanged (${fx.plistPath}) — Flair is running directly, NOT launchd-managed`);
+        expect(text).toContain(`serves this CLI's tree with node ${pinned}`);
+        expect(text).toContain(`change that node path to ${cliNode} by hand`);
+        expect(text).not.toContain("✓");
+        expect(readFileSync(fx.plistPath, "utf-8")).toBe(bytes);
+        expect(mutatingCalls()).toEqual([]);
+      });
+    },
+    60_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(m2) POSITIVE CONTROL: the same pin, launchd's pid = the serving pid -> 'already managed' ✓, then the pin",
+    async () => {
+      const pinned = nodeBinary(join(fx.home, "pinned", "bin"));
+      const cliNode = nodeBinary(join(fx.home, "clinode", "bin"));
+      writeFileSync(fx.plistPath, adoptedPlist(fx.probe, pinned, fx.stubHarper));
+      const pid = await startDirectStub();
+      markLoaded(fx.label, pid);
+
+      const run = await drive("init", initInputWithNode(cliNode));
+
+      await explainOnFailure(run, async () => {
+        expect(run.result).toMatchObject({ kind: "managed" });
+        const out = texts(run.result, "out");
+        expect(out[0]).toBe(
+          `Launchd service already managed — plist unchanged; launchd job ${fx.label} is running as process ${pid} ✓`,
+        );
+        expect(out[1]).toContain(`serves this CLI's tree with node ${pinned}`);
+        expect(mutatingCalls()).toEqual([]);
+      });
+    },
+    60_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(m3) a plist serving a plain (not npm-global) tree is not re-pointed -> the refusal on stderr, no write, no check mark",
+    async () => {
+      const plain = installTree(join(fx.home, "plain-tree"));
+      const oldNode = nodeBinary(join(fx.home, "oldnode", "bin"));
+      const cliNode = nodeBinary(join(fx.home, "clinode", "bin"));
+      const bytes = adoptedPlist(plain.tree, oldNode, plain.harper);
+      writeFileSync(fx.plistPath, bytes);
+      await startDirectStub();
+
+      const run = await drive("init", initInputWithNode(cliNode));
+
+      await explainOnFailure(run, async () => {
+        expect(run.result).toMatchObject({ kind: "direct" });
+        const err = texts(run.result, "err").join("\n");
+        expect(err).toContain(
+          `Launchd service left unchanged — the launchd plist ${fx.plistPath} serves ${plain.tree}, which is not an npm-global install`,
+        );
+        const text = texts(run.result).join("\n");
+        expect(text).toContain(`Launchd plist unchanged (${fx.plistPath}) — Flair is running directly, NOT launchd-managed`);
+        expect(text).not.toContain("✓");
+        expect(readFileSync(fx.plistPath, "utf-8")).toBe(bytes);
+        expect(mutatingCalls()).toEqual([]);
+      });
+    },
+    60_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(m4) a plist serving another npm-global tree is re-pointed while Flair runs directly -> what changed, 'flair restart', no check mark",
+    async () => {
+      const { oldTree, cliNode } = arrangeRepointable();
+      await startDirectStub();
+
+      const run = await drive("init", initInputWithNode(cliNode));
+
+      await explainOnFailure(run, async () => {
+        expect(run.result).toMatchObject({ kind: "direct" });
+        const text = texts(run.result).join("\n");
+        expect(text).toContain(`Launchd plist re-pointed at this CLI's install tree (re-pointed the launchd plist ${fx.plistPath} (`);
+        expect(text).toContain("Flair is running directly, NOT launchd-managed");
+        expect(text).toContain("It takes effect when launchd next starts the service: flair restart");
+        expect(text).not.toContain("✓");
+        const after = readFileSync(fx.plistPath, "utf-8");
+        expect(after).toContain(`<string>${fx.probe}</string>`);
+        expect(after).toContain(`<string>${cliNode}</string>`);
+        expect(after).not.toContain(oldTree);
+        expect(mutatingCalls()).toEqual([]);
+      });
+    },
+    60_000,
+  );
+
+  test.skipIf(!isDarwin)(
+    "(m5) POSITIVE CONTROL: the same re-point, launchd's pid = the serving pid -> 're-pointed' ✓ with the verifier's detail, then 'flair restart'",
+    async () => {
+      const { cliNode } = arrangeRepointable();
+      const pid = await startDirectStub();
+      markLoaded(fx.label, pid);
+
+      const run = await drive("init", initInputWithNode(cliNode));
+
+      await explainOnFailure(run, async () => {
+        expect(run.result).toMatchObject({ kind: "managed" });
+        const out = texts(run.result, "out");
+        expect(out[0]).toStartWith(`Launchd service re-pointed at this CLI's install tree — re-pointed the launchd plist ${fx.plistPath} (`);
+        expect(out[0]).toEndWith(`; launchd job ${fx.label} is running as process ${pid} ✓`);
+        expect(out[1]).toBe("  It takes effect when launchd next starts the service: flair restart");
+        expect(mutatingCalls()).toEqual([]);
+      });
+    },
+    60_000,
+  );
+});
