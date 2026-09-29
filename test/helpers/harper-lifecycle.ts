@@ -866,6 +866,11 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
     HDB_ADMIN_USERNAME: "admin",
     HDB_ADMIN_PASSWORD: "test123",
     THREADS_COUNT: String(opts.threads ?? 1),
+    // flair#2059: an instance with more than one worker refuses to serve until
+    // the multi-worker readiness work lands, so a test that deliberately runs
+    // >1 worker takes the documented opt-in. FLAIR_MULTI_WORKER_UNSAFE is the
+    // only escape hatch, and it is never set by a production launch path.
+    ...((opts.threads ?? 1) > 1 ? { FLAIR_MULTI_WORKER_UNSAFE: "1" } : {}),
     NODE_HOSTNAME: "127.0.0.1",     // IPv4 only — avoids bun uv_ip6_addr panic
     // Port audit (flair#1586): every listener a test-Harper can bind.
     //
