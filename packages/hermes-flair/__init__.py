@@ -261,8 +261,9 @@ def _parse_private_key(data: bytes):
         # 3a. base64-encoded raw 32-byte seed (44-char form, like the CLI).
         if len(der) == 32:
             return ed25519.Ed25519PrivateKey.from_private_bytes(der)
-        # 3b. PKCS8 DER: the historical Hermes keyfile format. Any other
-        #     decoded length also ends here and fails to parse.
+        # 3b. PKCS8 DER: the historical Hermes keyfile format. Other decoded
+        #     lengths are tried as PKCS8 DER; valid Ed25519 keys load, and
+        #     invalid material is refused.
         try:
             key = serialization.load_der_private_key(der, password=None)
             if isinstance(key, ed25519.Ed25519PrivateKey):
