@@ -193,9 +193,12 @@ function idTargetMismatchDenial(bodyId: unknown, targetId: unknown): Response {
  *  "no stored row": treating it as a create would let an existing row be
  *  re-stamped when the read fails but the write succeeds. */
 function storedRowLookupFailure(tableName: string, err: unknown): Response {
+  // Constant format string + a structured data object: a template literal here
+  // would let anything interpolated into the format position forge the log
+  // (semgrep javascript.lang.security.audit.unsafe-formatstring).
   console.error(
-    `originator-instance: the stored ${tableName} row could not be read, so the write was refused`,
-    err,
+    "originator-instance: the stored row could not be read, so the write was refused",
+    { table: tableName, err },
   );
   return new Response(JSON.stringify({
     error: "stored_row_lookup_failed",
