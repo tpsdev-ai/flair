@@ -48,7 +48,9 @@ export const CI_OUTSIDE_LANE_MS = 90_000;
 /**
  * Keep-going's whole-lane budget: 600 − 90 = 510 s. A step still running when
  * it runs out is killed and every later step is reported as not run, so the
- * summary and both guards print before the job limit however many steps hang.
+ * summary and both guards are expected to print before the job limit however
+ * many steps hang, provided the job's steps outside the lane stay within the
+ * reserve above (an observed margin, not a bound on workflow setup).
  */
 export const KEEP_GOING_LANE_BUDGET_MS = CI_JOB_LIMIT_MS - CI_OUTSIDE_LANE_MS;
 /**
@@ -232,8 +234,8 @@ export interface UnitLaneFailure {
  * Whether the environment asks for keep-going because it is a CI run (flair#2030).
  *
  * GitHub Actions sets `CI=true` for every job, so this is what makes keep-going
- * the CI default without a workflow flag. Only a truthy value counts: any
- * non-empty value except the conventional falsey spellings (`0`, `false`).
+ * the CI default without a workflow flag. Only a truthy value counts: a value
+ * that is nonblank after trimming, excluding `0` and `false` case-insensitively.
  */
 export function ciRequestsKeepGoing(env: NodeJS.ProcessEnv): boolean {
   const value = env.CI?.trim().toLowerCase();
@@ -369,7 +371,8 @@ function runStep(
  *
  * `options.keepGoing` (flair#2030) chooses the failure policy. When false — the
  * local default — the lane stops at the first failing step, as it always has.
- * When true — the CI default — it runs EVERY step, prints one final summary
+ * When true — the CI default — it attempts every later step (until any lane
+ * budget runs out, reporting unrun steps), prints one final summary
  * naming each failed step with its reason, and exits non-zero if any step
  * failed. Both guards run once at the end in either mode, never skipped because
  * a step failed. In keep-going mode a guard failure is listed in the same

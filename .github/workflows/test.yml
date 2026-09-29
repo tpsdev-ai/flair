@@ -50,9 +50,11 @@ jobs:
     # No job timeout here either (ops-fumh): this job's `sfw bun install` below
     # hung 16+ min on 2026-07-04, blocking merge on a required check. 10 min
     # bounds a hung install/runner. The unit lane takes 279-401 s of it
-    # (measured 2026-09-29), and scripts/test-unit.ts derives its per-step time
-    # limits and keep-going lane budget from this value (CI_JOB_LIMIT_MS,
-    # flair#2030), so the summary and guards print before the job is cancelled.
+    # (measured 2026-09-29). scripts/test-unit.ts derives its keep-going lane
+    # budget from this value (CI_JOB_LIMIT_MS minus a measured 90 s reserve for
+    # the job's other steps, flair#2030); its per-step limits are fixed values
+    # chosen from measured step times. The summary and guards are expected to
+    # print before the job is cancelled while the other steps stay in the reserve.
     # Change the two together; unit-runner.test.ts fails if they disagree.
     timeout-minutes: 10
     strategy:
@@ -153,7 +155,8 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
       - name: Shared unit lane (root, isolated and workspace tests)
-        # --keep-going (flair#2030): run EVERY step and report every failure in one
+        # --keep-going (flair#2030): keep attempting later steps until the lane budget
+        # runs out and report every failure (and any unrun step) in one
         # summary, so a PR that breaks two steps shows both in the same run
         # instead of one per round. GitHub also sets CI=true, which enables it
         # implicitly; the flag is passed explicitly so the behaviour does not

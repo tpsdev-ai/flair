@@ -36,16 +36,17 @@ bun run test:unit --fail-fast   # stop at the first failure, even when CI is set
 `bun run test` and `npm test` use this same runner. CI and the release script
 also call it. It builds `flair-client` before package consumers and runs each
 `test/unit-isolated/` file in a fresh process. Locally the runner stops at the
-first failing step and prints it. In keep-going mode it runs every step and
-prints one final summary of every failed step, so a PR that breaks two steps
+first failing step and prints it. In keep-going mode it attempts every later step until its time budget runs
+out, reports any step left unrun, and prints one final summary of every failed step, so a PR that breaks two steps
 surfaces both in a single round. Keep-going is on by default when `CI` holds a
-truthy value (anything but empty, `0` or `false`; GitHub Actions sets
+truthy value (nonblank after trimming, excluding `0` and `false` case-insensitively; GitHub Actions sets
 `CI=true`), and CI also passes `--keep-going` explicitly. `--keep-going` forces
 it anywhere; `--fail-fast` forces the first-failure stop even when `CI` is set,
 which is what the release script passes. In keep-going mode a step that runs
 past its time limit (90 s; 360 s for the root unit tests step) is killed and
-counts as a failed step, and the whole lane has a 510 s budget, so the summary
-prints inside the CI job's 10-minute limit even if steps hang; a step the budget
+counts as a failed step, and the whole lane has a 510 s budget, so the summary is
+expected to print inside the CI job's 10-minute limit even if steps hang, as long
+as the job's work outside the lane stays within the 90 s reserved for it; a step the budget
 leaves unrun is listed as not run. The limits are measured on CI runners, so a
 fail-fast run is not time-limited. The home-isolation and temp-leak guards run
 once at the end in either mode. In keep-going mode a guard failure is listed in
