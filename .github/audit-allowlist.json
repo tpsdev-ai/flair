@@ -421,6 +421,21 @@
       "added": "2026-09-09",
       "expires": "2027-02-06",
       "removeWhen": "harper ships a build resolving joi >=17.13.6 (out of the vulnerable range), or flair stops depending on harper. Re-evaluate on ANY harper version bump; if harper ships a release note touching joi validation, re-check before the next merge."
+    },
+    {
+      "ghsa": "GHSA-6h2x-m376-mqjq",
+      "package": "joi",
+      "severity": "high",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> joi",
+      "reason": "Resolved inside harper's pinned npm-shrinkwrap (joi 17.13.4; harper 5.2.8 through 5.2.14, the latest, all depend on joi 17.13.4 exactly), which npm honours over root overrides. The bun override (joi ^17.13.7) fixes it in bun.lock (17.13.8), but npm installs carry harper's pin. Retired when harper ships a shrinkwrap resolving joi >=17.13.7.",
+      "added": "2026-09-29",
+      "expires": "2026-11-28",
+      "removeWhen": "harper ships a shrinkwrap resolving joi >=17.13.7"
     }
   ]
 }
