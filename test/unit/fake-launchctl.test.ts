@@ -11,7 +11,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   installFakeLaunchctl,
@@ -83,10 +83,25 @@ describe("fake launchctl + tripwire (flair#2057)", () => {
     const path = `${impostor}:${fake.pathEntry}`;
     expect(launchctl(path, ["list"]).status).toBe(0);
     expect(() => fake.assertShadowed(path)).toThrow("did not reach the fake");
-    // Neither the exit status nor the tripwire can see this case; only the
-    // probe's absence from the fake's log does.
+    // Neither the exit status nor the tripwire can see this case. The PATH
+    // preflight refuses it before the probe is spawned: the first launchctl on
+    // this PATH is not the fake.
     fake.assertClear();
     fake.assertShadowed(fake.pathEntry);
+  });
+
+  test("assertShadowed refuses a PATH whose first launchctl is not the fake WITHOUT running it", () => {
+    const fake = installFakeLaunchctl();
+    const hostLike = tempDir("flair-launchctl-hostlike-");
+    const marker = join(hostLike, "ran");
+    writeFileSync(join(hostLike, "launchctl"), `#!/bin/sh\n: > '${marker}'\nexit 0\n`);
+    chmodSync(join(hostLike, "launchctl"), 0o755);
+    expect(() => fake.assertShadowed(`${hostLike}:${fake.pathEntry}`)).toThrow("refusing to spawn it");
+    // Independent oracle: the stand-in for a host binary leaves a file when it runs. It never ran.
+    expect(existsSync(marker)).toBe(false);
+    // A PATH with no launchctl at all is refused the same way.
+    expect(() => fake.assertShadowed(hostLike + "-absent")).toThrow("the first launchctl on this PATH is none");
+    fake.assertClear();
   });
 
   test("the fake exits non-zero when it cannot record a call, and assertShadowed fails", () => {

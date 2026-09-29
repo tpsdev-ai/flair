@@ -44,7 +44,7 @@
 
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, constants, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./temp-dir.ts";
 
@@ -201,6 +201,21 @@ export interface FakeLaunchctl {
  * in-process, then call `assertShadowed()`. No environment variables are
  * needed: both log paths are written into the scripts.
  */
+/** The first executable file named `name` on a PATH string ("" entries mean the current directory), or null. */
+function firstOnPath(name: string, pathValue: string): string | null {
+  for (const entry of pathValue.split(":")) {
+    const candidate = join(entry === "" ? "." : entry, name);
+    try {
+      if (!statSync(candidate).isFile()) continue;
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 export function installFakeLaunchctl(prefix = "flair-fake-launchctl-"): FakeLaunchctl {
   const root = tempDir(prefix);
   const fakeDir = join(root, "fake");
@@ -224,6 +239,17 @@ export function installFakeLaunchctl(prefix = "flair-fake-launchctl-"): FakeLaun
     assertShadowed(path?: string) {
       const probe = `__flair_fake_launchctl_probe_${randomUUID()}__`;
       const probePath = path ?? process.env.PATH ?? "";
+      // Preflight: resolve the first `launchctl` on this PATH before spawning anything. The
+      // probe runs only one of this helper's own shims: the fake, or the tripwire (which reports
+      // the missing fake with its named message and never touches the host). Anything else could
+      // be the host's own launchctl, so it is refused without running it.
+      const first = firstOnPath("launchctl", probePath);
+      if (first !== fakeBin && first !== join(tripwire.dir, "launchctl")) {
+        throw new Error(
+          `fake-launchctl: the assertShadowed probe did not reach the fake — refusing to spawn it: ` +
+            `the first launchctl on this PATH is ${first ?? "none"}, not this helper's fake (${fakeBin}) or tripwire`,
+        );
+      }
       const res = spawnSync("launchctl", [probe], {
         encoding: "utf-8",
         env: { ...process.env, PATH: probePath },

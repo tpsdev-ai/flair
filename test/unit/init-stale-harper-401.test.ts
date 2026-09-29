@@ -92,13 +92,16 @@ const children: ChildProcess[] = [];
 // on PATH (like the command-level launchd tests do) with a tripwire directly
 // behind it: no run in this file — in-process or spawned — can reach the
 // host's service manager. See test/helpers/fake-launchctl.ts.
-let fakeLaunchctl: ReturnType<typeof installFakeLaunchctl>;
+let fakeLaunchctl: ReturnType<typeof installFakeLaunchctl> | undefined;
 let savedPath: string | undefined;
 
 beforeEach(() => {
-  fakeLaunchctl = installFakeLaunchctl("flair-1749-launchctl-");
+  // Capture PATH before installing, so a failed install cannot leave teardown
+  // restoring an unset value (which would delete PATH for later tests).
   savedPath = process.env.PATH;
-  process.env.PATH = `${fakeLaunchctl.pathEntry}:${process.env.PATH ?? ""}`;
+  fakeLaunchctl = undefined;
+  fakeLaunchctl = installFakeLaunchctl("flair-1749-launchctl-");
+  process.env.PATH = `${fakeLaunchctl.pathEntry}:${savedPath ?? ""}`;
   // Proves the fake — not the tripwire, not the host binary — answers launchctl
   // for this PATH. This is the tripwire's own mutation check: drop the fake and
   // this throws the named tripwire message.
@@ -109,7 +112,7 @@ afterEach(() => {
   try {
     // Any byte in the tripwire log means some run reached a launchctl that was
     // not the fake. That must never happen in a unit test.
-    fakeLaunchctl.assertClear();
+    fakeLaunchctl?.assertClear();
   } finally {
     if (savedPath === undefined) delete process.env.PATH;
     else process.env.PATH = savedPath;
