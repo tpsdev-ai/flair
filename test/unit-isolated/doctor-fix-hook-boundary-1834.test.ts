@@ -8,15 +8,14 @@
  */
 
 import { describe, test, expect, afterAll, setDefaultTimeout } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { FLAIR_MCP_PACKAGE, flairCliVersion } from "../../src/lib/mcp-spec.ts";
 import { parseSemverCore } from "../../src/fabric-upgrade.ts";
 import { staleVersion } from "../helpers/stale-version.ts";
+import { offlineDoctor } from "../helpers/offline-doctor.ts";
 
-const REPO = join(import.meta.dirname, "..", "..");
 setDefaultTimeout(120_000);
 
 const INSTALLED = flairCliVersion();
@@ -26,33 +25,18 @@ const OLD = staleVersion(core);
 const homes: string[] = [];
 afterAll(() => { for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true }); });
 
-function freePort(): Promise<number> {
-  return new Promise((resolve) => {
-    const srv = createServer();
-    srv.listen(0, "127.0.0.1", () => { const p = (srv.address() as { port: number }).port; srv.close(() => resolve(p)); });
-  });
-}
-
 function stripAnsi(s: string): string { return s.replace(/\x1b\[[0-9;]*m/g, ""); }
 
 /**
- * A PATH with every directory that holds a `claude` or `codex` executable
- * removed, so both hook callers run in a CI-like environment where NEITHER
+ * The offline CLI helper supplies a PATH with no `claude` or `codex`, so both
+ * hook callers run in a CI-like environment where NEITHER
  * harness is detectable on PATH. This keeps the file host-independent: on a
  * developer box with the CLIs installed, the binaries on PATH made doctor
  * DETECT (and, with --fix, first WIRE) the client, so the hook arm ran and the
  * test went green for the WRONG reason — hiding the gate each case exists to
- * pin. Stripping them pins the behaviour that matters: a hook file on disk is
+ * pin. Excluding them pins the behaviour that matters: a hook file on disk is
  * honoured even when its harness is not detected (flair#1834 PR-H).
  */
-function pathWithoutHookHarnesses(): string {
-  const BINS = ["claude", "codex"];
-  return (process.env.PATH ?? "")
-    .split(":")
-    .filter((dir) => dir.length > 0 && !BINS.some((bin) => existsSync(join(dir, bin))))
-    .join(":");
-}
-
 function makeHome(harness: "claude-code" | "codex", command: string, opts: { mcp?: boolean } = {}): string {
   const home = mkdtempSync(join(tmpdir(), "flair-1834-hookdoc-"));
   homes.push(home);
@@ -70,12 +54,10 @@ function makeHome(harness: "claude-code" | "codex", command: string, opts: { mcp
   return home;
 }
 
-async function runDoctor(home: string, deadPort: number, args: string[]): Promise<{ out: string; status: number | null }> {
-  const env = { ...process.env, HOME: home, FLAIR_URL: `http://127.0.0.1:${deadPort}`, PATH: pathWithoutHookHarnesses() };
-  const proc = Bun.spawn(["bun", join(REPO, "src", "cli.ts"), "doctor", "--port", String(deadPort), ...args], { cwd: home, env, stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-  const status = await proc.exited;
-  return { out: stripAnsi(stdout + "\n" + stderr), status };
+async function runDoctor(home: string, args: string[]): Promise<{ out: string }> {
+  // Fetch is rejected in the child, so no loopback listener or port reservation
+  // is needed to simulate an unreachable server. The helper checks CLI exits.
+  return { out: stripAnsi(offlineDoctor(home, null)(args)) };
 }
 
 describe("flair#1834 PR-H — doctor --fix prints a hook HOLD (not a quiet skip)", () => {
@@ -83,8 +65,7 @@ describe("flair#1834 PR-H — doctor --fix prints a hook HOLD (not a quiet skip)
     const dup = `FLAIR_AGENT_ID=a FLAIR_AGENT_ID=b npx -y -p ${FLAIR_MCP_PACKAGE}@${OLD} flair-session-start`;
     const home = makeHome("claude-code", dup);
     const before = readFileSync(join(home, ".claude", "settings.json"), "utf-8");
-    const deadPort = await freePort();
-    const fix = await runDoctor(home, deadPort, ["--fix"]);
+    const fix = await runDoctor(home, ["--fix"]);
     expect(fix.out).toContain("not one of the installer forms");
     expect(fix.out).not.toContain("re-pinned the SessionStart hook");
     expect(readFileSync(join(home, ".claude", "settings.json"), "utf-8")).toBe(before);
@@ -94,8 +75,7 @@ describe("flair#1834 PR-H — doctor --fix prints a hook HOLD (not a quiet skip)
     const dup = `FLAIR_AGENT_ID=a FLAIR_AGENT_ID=b npx -y -p ${FLAIR_MCP_PACKAGE}@${OLD} flair-session-start`;
     const home = makeHome("codex", dup);
     const before = readFileSync(join(home, ".codex", "hooks.json"), "utf-8");
-    const deadPort = await freePort();
-    const fix = await runDoctor(home, deadPort, ["--fix"]);
+    const fix = await runDoctor(home, ["--fix"]);
     expect(fix.out).toContain("not one of the installer forms");
     expect(fix.out).not.toContain("re-pinned the SessionStart hook");
     expect(readFileSync(join(home, ".codex", "hooks.json"), "utf-8")).toBe(before);
@@ -109,8 +89,7 @@ describe("flair#1834 PR-H — doctor --fix prints a hook HOLD (not a quiet skip)
     const dup = `FLAIR_AGENT_ID=a FLAIR_AGENT_ID=b npx -y -p ${FLAIR_MCP_PACKAGE}@${OLD} flair-session-start`;
     const home = makeHome("claude-code", dup, { mcp: false });
     const before = readFileSync(join(home, ".claude", "settings.json"), "utf-8");
-    const deadPort = await freePort();
-    const fix = await runDoctor(home, deadPort, ["--fix"]);
+    const fix = await runDoctor(home, ["--fix"]);
     expect(fix.out).toContain("not one of the installer forms");
     expect(fix.out).not.toContain("re-pinned the SessionStart hook");
     expect(readFileSync(join(home, ".claude", "settings.json"), "utf-8")).toBe(before);

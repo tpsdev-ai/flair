@@ -23,7 +23,7 @@ import {
 } from "./memory-host-source.js";
 import { putPointerRow, deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
-import { withSharedWriteTransaction } from "./request-transaction.js";
+import { isJoinableTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { assertValidDurability } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
 import {
@@ -1787,14 +1787,11 @@ export class Memory extends (databases as any).flair.Memory {
     // delete share ONE transaction; with no request context
     // withSharedWriteTransaction creates one. A failing pointer delete aborts
     // it, so nothing is deleted; failures are NOT swallowed.
-    // The lexical-index delete hook runs after the shared write succeeds.
-    // An owned transaction has committed then; for a request-owned transaction
-    // the hook still runs BEFORE that request's commit. Firing it inside the
-    // callback marked the row deleted in the warmed BM25 index even when a
-    // later pointer-delete abort left the
-    // Memory row in place, so the surviving row vanished from lexical recall.
-    // Pinned by test/unit-isolated/memory-delete-bm25.test.ts (r22-delete-bm25) — RED if
-    // the call is moved back inside the transaction callback.
+    // A request-owned transaction may still abort after this method returns.
+    // Its committed change feed updates BM25 after commit; only a transaction
+    // owned here can use the synchronous hook after the shared write returns.
+    // Capture ownership before the helper changes the context's transaction.
+    const requestOwnsTransaction = isJoinableTransaction(ctx);
     const deleteResult = await withSharedWriteTransaction(ctx, async (c) => {
       const d = await (databases as any).flair.Memory.delete(id, c);
       const deletedId = typeof id === "string" ? id : record?.id;
@@ -1806,9 +1803,10 @@ export class Memory extends (databases as any).flair.Memory {
     });
     if (deleteResult instanceof Response) return deleteResult;
     // Use the RESOLVED deleted id (a by-record delete carries only `id`, so the
-    // stored row's id is the fallback). Only after the shared write succeeded.
+    // stored row's id is the fallback). An owned transaction has committed;
+    // a request-owned write waits for the committed change feed instead.
     const resolvedDeletedId = typeof id === "string" ? id : record?.id;
-    if (typeof resolvedDeletedId === "string" && resolvedDeletedId.length > 0) {
+    if (!requestOwnsTransaction && typeof resolvedDeletedId === "string" && resolvedDeletedId.length > 0) {
       noteMemoryDelete(resolvedDeletedId);
     }
     if (typeof id === "string") await clearHitStats(id, ctx).catch(() => {});

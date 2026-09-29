@@ -153,22 +153,28 @@ describe("the committed allowlist", () => {
     // These are the advisories the npm-install observation surfaces that `bun
     // audit` never sees — harper's npm-shrinkwrap pins them. They must declare
     // sources ["npm-install"] so the gate knows they are fixed for bun only.
-    const npmOnly = ALLOWLIST.entries.filter((e) => e.package === "fastify");
-    expect(npmOnly.length).toBeGreaterThan(0);
+    // joi joined this class when the root override moved bun.lock off 17.13.4.
+    const npmOnly = ALLOWLIST.entries.filter((e) => ["fastify", "joi"].includes(e.package));
+    // Name the joi entries: a non-empty check alone could be satisfied by the
+    // fastify entries while the joi entries had gone missing.
+    expect(npmOnly.filter((e) => e.package === "joi").map((e) => e.ghsa).sort()).toEqual([
+      "GHSA-6w3j-5fw6-r9vr",
+      "GHSA-gg4h-3hg2-grpc",
+    ]);
     for (const e of npmOnly) {
       expect(e.sources).toEqual(["npm-install"]);
       expect(e.introducedBy).toMatch(/^harper -> /);
     }
   });
 
-  it("keeps bun-only advisories (lodash) out of the npm-install source", () => {
-    // lodash is reported by `bun audit` only; declaring it npm-install would
-    // make the gate expect an npm observation that never arrives.
-    const lodash = ALLOWLIST.entries.filter((e) => e.package === "lodash");
-    expect(lodash.length).toBeGreaterThan(0);
-    for (const e of lodash) {
-      expect(e.sources).toEqual(["bun"]);
-    }
+  it("keeps lodash fixed by the root override instead of allowlisted", () => {
+    // lodash was reported by `bun audit` only (harper's shrinkwrap already pins
+    // 4.18.1 for npm installs). The last vulnerable bun copy was n8n-workflow's
+    // nested 4.17.21; the root override moved it to 4.18.x, so the three lodash
+    // entries were retired. If the override goes, they come back unlisted.
+    expect(ALLOWLIST.entries.filter((e) => e.package === "lodash")).toEqual([]);
+    const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
+    expect(pkg.overrides.lodash).toBe("^4.18.0");
   });
 });
 

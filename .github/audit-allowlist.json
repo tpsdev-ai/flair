@@ -68,51 +68,6 @@
       "removeWhen": "harper ships a v5 build resolving @fastify/static >=10.1.2 \u2014 the same move that retires GHSA-83w8-p2f5-377r."
     },
     {
-      "ghsa": "GHSA-r5fr-rjxr-66jc",
-      "package": "lodash",
-      "severity": "high",
-      "class": "vendor-pinned",
-      "sources": [
-        "bun"
-      ],
-      "approvedBy": "tps-flint",
-      "introducedBy": "harper -> lodash, and workspace @tpsdev-ai/n8n-nodes-flair -> n8n-workflow -> lodash",
-      "reason": "Renewed 2026-09-25 after re-reading (first added 2026-07-27). The harper edge is now fixed in bun.lock (harper -> lodash 4.18.1). The one remaining vulnerable copy is n8n-workflow's nested lodash 4.17.21, inside the @tpsdev-ai/n8n-nodes-flair workspace package, where n8n-workflow is a peer dependency supplied by the host n8n at runtime (the pinned copy is a dev dependency). The vulnerable API (_.template with attacker-controlled imports keys) is called nowhere in flair or in the n8n package's source, and flair's server never loads that package.",
-      "added": "2026-09-25",
-      "expires": "2026-10-09",
-      "removeWhen": "harper ships a v5 build resolving lodash >=4.18.1 AND n8n-workflow does the same, or the n8n-nodes-flair workspace package is dropped. Both edges must clear."
-    },
-    {
-      "ghsa": "GHSA-xxjr-mmjv-4gpg",
-      "package": "lodash",
-      "severity": "moderate",
-      "class": "vendor-pinned",
-      "sources": [
-        "bun"
-      ],
-      "approvedBy": "tps-flint",
-      "introducedBy": "harper -> lodash, and workspace @tpsdev-ai/n8n-nodes-flair -> n8n-workflow -> lodash",
-      "reason": "Same two vendored edges as GHSA-r5fr-rjxr-66jc; prototype pollution in _.unset/_.omit, neither of which flair calls with attacker-controlled paths.",
-      "added": "2026-07-27",
-      "expires": "2026-10-25",
-      "removeWhen": "Both lodash edges (harper and n8n-workflow) resolve >=4.18.1 \u2014 the same move that retires GHSA-r5fr-rjxr-66jc."
-    },
-    {
-      "ghsa": "GHSA-f23m-r3pf-42rh",
-      "package": "lodash",
-      "severity": "moderate",
-      "class": "vendor-pinned",
-      "sources": [
-        "bun"
-      ],
-      "approvedBy": "tps-flint",
-      "introducedBy": "harper -> lodash, and workspace @tpsdev-ai/n8n-nodes-flair -> n8n-workflow -> lodash",
-      "reason": "Same two vendored edges as GHSA-r5fr-rjxr-66jc; array-path bypass variant of the _.unset/_.omit prototype pollution.",
-      "added": "2026-07-27",
-      "expires": "2026-10-25",
-      "removeWhen": "Both lodash edges (harper and n8n-workflow) resolve >=4.18.1 \u2014 the same move that retires GHSA-r5fr-rjxr-66jc."
-    },
-    {
       "ghsa": "GHSA-rv73-9c8w-jp4c",
       "package": "validate.js",
       "severity": "moderate",
@@ -301,12 +256,12 @@
       "sources": [
         "npm-install"
       ],
-      "approvedBy": "heskew",
+      "approvedBy": "tps-flint",
       "introducedBy": "harper -> fast-uri",
-      "reason": "Authority injection via an unvalidated port in serialize. Patched in fast-uri 3.1.7 and 4.1.4, but harper's npm-shrinkwrap still pins 3.1.0 and nested 4.1.2, which npm honours over root overrides. The bun override (fast-uri ^4.1.4) resolves a patched copy in bun.lock. Reachable only through harper's nested fastify/ajv URI helpers, not Flair's own request path. Retired when harper ships a shrinkwrap resolving fast-uri >=3.1.7 on the 3.x line and >=4.1.4 on the 4.x line.",
+      "reason": "Published 2026-09-28. Resolved inside harper's pinned npm-shrinkwrap (fast-uri 3.1.0 + 4.1.2 nested), which npm honours over root overrides. The bun override (fast-uri ^4.1.4, raised for this advisory) keeps bun.lock on the fixed 4.1.4, but npm installs carry harper's pins. flair does not import fast-uri; it is reached only through harper's fastify stack (@fastify/ajv-compiler, fast-json-stringify). Same edge and same retirement path as the other fast-uri entries, so it shares their expiry.",
       "added": "2026-09-28",
       "expires": "2026-11-02",
-      "removeWhen": "harper ships a shrinkwrap resolving fast-uri >=3.1.7 on the 3.x line and >=4.1.4 on the 4.x line"
+      "removeWhen": "harper ships a shrinkwrap resolving every fast-uri copy out of the vulnerable ranges (>=3.1.7 on 3.x, >=4.1.4 on 4.x)"
     },
     {
       "ghsa": "GHSA-f886-m6hf-6m8v",
@@ -446,10 +401,10 @@
       "package": "joi",
       "severity": "low",
       "class": "vendor-pinned",
-      "sources": ["bun", "npm-install"],
+      "sources": ["npm-install"],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> joi",
-      "reason": "Transitive via harper@5.2.8 shrinkwrap (joi pinned 17.13.4); cannot be overridden from this repo (the bun-only override does not reach npm installs, flair#1498/#1510). Flair authors no joi schemas (no joi in package.json, no .rename( anywhere in the repo); the vuln requires object().rename(regex, Joi.x(), {multiple:true}) which Flair does not use - not reachable in Flair code. Residual is harper's internal joi usage, which is un-audited (bundled dep). Security sign-off: tps-sherlock 2026-09-09.",
+      "reason": "Transitive via harper@5.2.8 shrinkwrap (joi pinned 17.13.4). Since 2026-09-28 the root override (joi ^17.13.6) resolves 17.13.8 in bun.lock, so only npm installs still carry the pin, which that override does not reach (flair#1498/#1510). Flair authors no joi schemas (no joi in package.json, no .rename( anywhere in the repo); the vuln requires object().rename(regex, Joi.x(), {multiple:true}) which Flair does not use - not reachable in Flair code. Residual is harper's internal joi usage, which is un-audited (bundled dep). Security sign-off: tps-sherlock 2026-09-09.",
       "added": "2026-09-09",
       "expires": "2027-02-06",
       "removeWhen": "harper ships a build resolving joi >=17.13.5 (out of the vulnerable range), or flair stops depending on harper. Re-evaluate on ANY harper version bump; if harper ships a release note touching joi rename/validation, re-check before the next merge."
@@ -459,10 +414,10 @@
       "package": "joi",
       "severity": "low",
       "class": "vendor-pinned",
-      "sources": ["bun", "npm-install"],
+      "sources": ["npm-install"],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> joi",
-      "reason": "Transitive via harper@5.2.8 shrinkwrap (joi pinned 17.13.4); cannot be overridden from this repo (bun-only override does not reach npm installs). Prototype pollution via a __proto__ language key in joi's custom message config (messages/message/prefs({messages})/Joi.extend/rule({message})); trigger is attacker-controlled data passed into joi message config. Flair authors zero joi schemas AND zero joi message config (no joi import, no Joi.extend, no prefs/messages usage in the repo) - not reachable in Flair code. Residual is harper's internal joi usage, un-audited (bundled dep); message config is almost always static developer strings, not runtime data. Security sign-off: tps-sherlock 2026-09-09.",
+      "reason": "Transitive via harper@5.2.8 shrinkwrap (joi pinned 17.13.4). Since 2026-09-28 the root override (joi ^17.13.6) resolves 17.13.8 in bun.lock, so only npm installs still carry the pin, which that override does not reach. Prototype pollution via a __proto__ language key in joi's custom message config (messages/message/prefs({messages})/Joi.extend/rule({message})); trigger is attacker-controlled data passed into joi message config. Flair authors zero joi schemas AND zero joi message config (no joi import, no Joi.extend, no prefs/messages usage in the repo) - not reachable in Flair code. Residual is harper's internal joi usage, un-audited (bundled dep); message config is almost always static developer strings, not runtime data. Security sign-off: tps-sherlock 2026-09-09.",
       "added": "2026-09-09",
       "expires": "2027-02-06",
       "removeWhen": "harper ships a build resolving joi >=17.13.6 (out of the vulnerable range), or flair stops depending on harper. Re-evaluate on ANY harper version bump; if harper ships a release note touching joi validation, re-check before the next merge."
