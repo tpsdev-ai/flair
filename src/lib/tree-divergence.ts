@@ -15,9 +15,12 @@
  *
  *   - macOS: the launchd plist for THIS data directory (its ROOTPATH is this
  *     data dir) has a running job whose PID is the serving PID;
- *   - Linux: a systemd USER unit that names the serving tree has that PID as
- *     its MainPID, and systemd reports that very file as the unit's
- *     FragmentPath (the file it loaded, not another file of the same name).
+ *   - Linux: the serving process's own cgroup (/proc/<pid>/cgroup) places it
+ *     in a systemd USER unit of this user; systemd reports that PID as the
+ *     unit's MainPID, and the unit's FragmentPath is a file of that name in
+ *     this user's unit directory. The unit is found FROM THE PROCESS, never
+ *     from a tree path in a unit file, so it is still found after `flair init`
+ *     re-pointed the file at another tree (the restart-pending state).
  *
  * The serving PID is the process that ANSWERED (see identifyAnsweringPid): the
  * one process listening on the instance's port, which must also be the PID the
@@ -36,7 +39,7 @@
  * service-manager read, so the whole decision is unit-testable without a real
  * launchd, systemd or running instance.
  */
-import { resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import semver from "semver";
 import { classifyServiceNodePin, readPlistProgramRefs, type NodePinDeps, type ServiceNodePin } from "./launchd-management.js";
 import { unescapeXml } from "./xml-escape.js";
@@ -107,8 +110,12 @@ export interface ServingTreeProbe {
   launchd?: { label: string; plistPath: string };
   /** macOS: the running PID of a launchd job, or null when it is not loaded / not running. */
   launchdJobPid?: (label: string) => number | null;
-  /** Linux: systemd USER units that name `tree` in WorkingDirectory/ExecStart. */
-  findUserUnitsForTree?: (tree: string) => Array<{ name: string; path: string }>;
+  /** Linux: the text of /proc/<pid>/cgroup (throws when it cannot be read). */
+  procCgroup?: (pid: number) => string;
+  /** Linux: this user's uid (its user manager is user@<uid>.service). */
+  uid?: number;
+  /** Linux: this user's systemd unit directory (~/.config/systemd/user). */
+  userUnitDir?: string;
   /** Linux: a user unit as the manager reports it, or null when it could not be read. */
   systemdUserUnit?: (unitName: string) => SystemdUnitManagerState | null;
   /** The @tpsdev-ai/flair package a live PID runs from, or null. */
@@ -171,6 +178,61 @@ export function identifyAnsweringPid(
     };
   }
   return { pid };
+}
+
+/** Which systemd unit a process's cgroup places it in (see cgroupOwner). */
+export type CgroupOwner =
+  /** Exactly `/user.slice/user-<uid>.slice/user@<uid>.service/[<x>.slice/…]<unit>.service`. */
+  | { kind: "user-service"; unit: string; path: string }
+  /** Any other `.service` in the path: a system unit, another user's, a sub-cgroup of a unit. */
+  | { kind: "service"; unit: string; path: string; user: boolean }
+  /** No service in the path (a login-session scope, for example): no manager owns it. */
+  | { kind: "none"; path: string }
+  /** No cgroup v2 (`0::`) entry to read. */
+  | { kind: "unreadable"; reason: string };
+
+/**
+ * Read /proc/<pid>/cgroup text: the unified (`0::`) entry names the cgroup,
+ * and a systemd unit's processes live in a cgroup named after the unit. This
+ * is the service manager's own placement of the process, so it identifies the
+ * unit without reading any unit file.
+ */
+export function cgroupOwner(text: string, uid: number): CgroupOwner {
+  const line = text.split(/\r?\n/).find((l) => l.startsWith("0::"));
+  if (line === undefined) return { kind: "unreadable", reason: "it has no cgroup v2 (0::) entry" };
+  const path = line.slice(3);
+  const exact = new RegExp(
+    `^/user\\.slice/user-${uid}\\.slice/user@${uid}\\.service/(?:[A-Za-z0-9:_.\\\\-]+\\.slice/)*([A-Za-z0-9:_.@\\\\-]+\\.service)$`,
+  ).exec(path);
+  if (exact) return { kind: "user-service", unit: exact[1]!, path };
+  const services = path.split("/").filter((c) => c.endsWith(".service") && !/^user@\d+\.service$/.test(c));
+  if (services.length > 0) {
+    return { kind: "service", unit: services[services.length - 1]!, path, user: /\/user@\d+\.service\//.test(path) };
+  }
+  return { kind: "none", path };
+}
+
+/**
+ * The Linux probe from raw reads — /proc/<pid>/cgroup and `systemctl --user
+ * show` output — so the adapter in src/cli.ts and the tests run the same
+ * parsing and lookup.
+ */
+export function linuxUnitProbe(io: {
+  readFile: (p: string) => string;
+  /** `systemctl --user show <unit> -p MainPID -p FragmentPath -p DropInPaths -p WorkingDirectory` stdout, or null. */
+  systemctlShow: (unit: string) => string | null;
+  uid: number;
+  userUnitDir: string;
+}): Pick<ServingTreeProbe, "procCgroup" | "uid" | "userUnitDir" | "systemdUserUnit"> {
+  return {
+    procCgroup: (pid) => io.readFile(`/proc/${pid}/cgroup`),
+    uid: io.uid,
+    userUnitDir: io.userUnitDir,
+    systemdUserUnit: (unit) => {
+      const out = io.systemctlShow(unit);
+      return out === null ? null : systemdUnitStateFromShow(out);
+    },
+  };
 }
 
 /** Parse `systemctl show -p A -p B …` output (`Key=value` lines) into a map. */
@@ -316,47 +378,133 @@ export function proveServingTree(p: ServingTreeProbe): ServingTree {
     const pid = who.pid;
     const pkg = p.servingPackage(pid);
     if (!pkg) return unknown(`the install tree of the serving process (pid ${pid}) could not be read`);
-    const units = p.findUserUnitsForTree?.(pkg.dir) ?? [];
-    const notLoaded: string[] = [];
-    for (const u of units) {
-      const state = p.systemdUserUnit?.(u.name) ?? null;
-      if (!state || state.mainPid !== pid) continue;
-      // The PID belongs to the unit NAME; only the file systemd actually loaded
-      // for that name is proof about this file.
-      if (state.fragmentPath === null || !samePath(state.fragmentPath, u.path)) {
-        notLoaded.push(`systemd loads ${u.name} from ${state.fragmentPath ?? "no file"}, not ${u.path}`);
-        continue;
-      }
-      let refs: { nodeBin: string | null; workingDirectory: string | null } = { nodeBin: null, workingDirectory: null };
-      // With drop-ins, the unit file alone does not say what systemd runs.
-      if (state.dropInPaths.length === 0) {
-        try {
-          refs = readSystemdServiceRefs(p.read(u.path));
-        } catch { /* the proof is the MainPID + FragmentPath; the refs are detail */ }
-      }
-      return {
-        kind: "proven",
-        dir: pkg.dir,
-        version: pkg.version,
-        pid,
-        manager: "systemd-user",
-        unitName: u.name,
-        unitPath: u.path,
-        unitNodeBin: refs.nodeBin,
-        unitTree: refs.workingDirectory,
-        dropInPaths: state.dropInPaths,
-      };
+    if (!p.procCgroup || p.uid === undefined || !p.userUnitDir) {
+      return unknown("this host's process cgroups cannot be read, so no systemd unit can be proven to own the serving process");
     }
-    if (notLoaded.length > 0) {
-      return unknown(`the serving process (pid ${pid}) belongs to a systemd user unit, but ${notLoaded.join("; ")}`);
+    // The unit comes from the process (its cgroup), never from a tree path in a
+    // unit file: after a re-point the file names this CLI's tree while the
+    // process still runs the old one, and it must still be found.
+    let owner: CgroupOwner;
+    try {
+      owner = cgroupOwner(p.procCgroup(pid), p.uid);
+    } catch (err) {
+      return unknown(`the cgroup of the serving process (pid ${pid}) could not be read (${(err as Error)?.message ?? err})`);
     }
-    return unknown(
-      `no systemd user unit that names ${pkg.dir} owns the serving process (pid ${pid}) — it was started directly, ` +
-        "by a system-level unit, or by another supervisor",
-    );
+    if (owner.kind === "unreadable") return unknown(`the cgroup of the serving process (pid ${pid}) cannot be read: ${owner.reason}`);
+    if (owner.kind === "none") {
+      return unknown(`no systemd unit owns the serving process (pid ${pid}, cgroup ${owner.path}) — it was started directly`);
+    }
+    if (owner.kind === "service") {
+      return unknown(
+        `the serving process (pid ${pid}) runs in the systemd unit ${owner.unit} (cgroup ${owner.path}), which is not a ` +
+          "user unit of this user that flair re-points (a system-level unit, another user's, or a sub-cgroup)",
+      );
+    }
+    const unit = owner.unit;
+    const state = p.systemdUserUnit?.(unit) ?? null;
+    if (!state) return unknown(`systemd did not report the user unit ${unit} that owns the serving process (pid ${pid})`);
+    if (state.mainPid !== pid) {
+      return unknown(`the serving process (pid ${pid}) is in ${unit}, but systemd reports its MainPID as ${state.mainPid ?? "none"}`);
+    }
+    // Only a file of that name in this user's unit directory is a file flair reads and re-points.
+    const fragment = state.fragmentPath;
+    if (fragment === null || basename(fragment) !== unit || !samePath(dirname(fragment), p.userUnitDir)) {
+      return unknown(
+        `systemd loads ${unit} from ${fragment ?? "no file"}, not from ${unit} in this user's unit directory ${p.userUnitDir}`,
+      );
+    }
+    let refs: { nodeBin: string | null; workingDirectory: string | null } = { nodeBin: null, workingDirectory: null };
+    // With drop-ins, the unit file alone does not say what systemd runs.
+    if (state.dropInPaths.length === 0) {
+      try {
+        refs = readSystemdServiceRefs(p.read(fragment));
+      } catch { /* the proof is the cgroup + MainPID + FragmentPath; the refs are detail */ }
+    }
+    return {
+      kind: "proven",
+      dir: pkg.dir,
+      version: pkg.version,
+      pid,
+      manager: "systemd-user",
+      unitName: unit,
+      unitPath: fragment,
+      unitNodeBin: refs.nodeBin,
+      unitTree: refs.workingDirectory,
+      dropInPaths: state.dropInPaths,
+    };
   }
 
   return unknown(`${p.platform} has no service manager flair can check`);
+}
+
+export type LinuxRestartPlan = { kind: "systemd"; unit: string } | { kind: "direct" } | { kind: "refuse"; detail: string };
+
+/**
+ * How `flair restart` may restart the instance on Linux. A proven user unit is
+ * restarted THROUGH systemd. Otherwise the direct path (stop by signal, spawn
+ * again) is allowed only when no process it could stop runs in a systemd
+ * service: a process a service manager owns is never stopped and respawned
+ * outside that manager — it is refused, with the systemctl command to use.
+ */
+export function planLinuxRestart(input: {
+  serving: ServingTree;
+  /** The processes the direct path could stop: the live PID-file PID and the port's listeners. */
+  pids: number[];
+  procCgroup: (pid: number) => string;
+  uid: number;
+}): LinuxRestartPlan {
+  const s = input.serving;
+  if (s.kind === "proven" && s.manager === "systemd-user") return { kind: "systemd", unit: s.unitName };
+  const why = s.kind === "unknown" ? s.reason : `it is served by ${describeUnit(s)}`;
+  for (const pid of new Set(input.pids)) {
+    let owner: CgroupOwner;
+    try {
+      owner = cgroupOwner(input.procCgroup(pid), input.uid);
+    } catch (err) {
+      owner = { kind: "unreadable", reason: (err as Error)?.message ?? String(err) };
+    }
+    if (owner.kind === "none") continue;
+    if (owner.kind === "unreadable") {
+      return {
+        kind: "refuse",
+        detail:
+          `refusing to restart: the cgroup of pid ${pid} cannot be read (${owner.reason}), so flair cannot tell whether a ` +
+          "service manager owns it, and it does not stop a process it cannot place. Restart it through whatever runs it.",
+      };
+    }
+    const cmd =
+      owner.kind === "user-service" || owner.user ? `systemctl --user restart ${owner.unit}` : `systemctl restart ${owner.unit} (as root)`;
+    return {
+      kind: "refuse",
+      detail:
+        `refusing to restart: pid ${pid} runs in the systemd unit ${owner.unit} (cgroup ${owner.path}), and flair could ` +
+        `not prove that unit runs this instance (${why}). flair does not stop a process a service manager owns and start ` +
+        `it again outside that manager. Restart it through systemd: ${cmd}`,
+    };
+  }
+  return { kind: "direct" };
+}
+
+/**
+ * After `systemctl --user restart <unit>`: why the unit's new main process is
+ * not a restarted process running from the unit's WorkingDirectory, or null.
+ */
+export function restartedUnitProblem(
+  unit: string,
+  oldPid: number | null,
+  state: SystemdUnitManagerState | null,
+  cwdOf: (pid: number) => string | null,
+  samePath: (a: string, b: string) => boolean,
+): string | null {
+  if (!state) return `systemd did not report ${unit} after the restart`;
+  if (state.mainPid === null) return `${unit} has no main process after the restart`;
+  if (oldPid !== null && state.mainPid === oldPid) return `${unit}'s main process is still pid ${oldPid}`;
+  const cwd = cwdOf(state.mainPid);
+  if (cwd === null) return `the working directory of ${unit}'s new main process (pid ${state.mainPid}) could not be read`;
+  if (state.workingDirectory === null || !samePath(cwd, state.workingDirectory)) {
+    return `${unit}'s new main process (pid ${state.mainPid}) runs in ${cwd}, not the unit's WorkingDirectory ${state.workingDirectory ?? "(none)"}`;
+  }
+  return null;
 }
 
 /**

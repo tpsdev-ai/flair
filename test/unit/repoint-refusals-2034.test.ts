@@ -80,6 +80,12 @@ const NEW_TREE = `${NEW_PREFIX}/lib/node_modules/@tpsdev-ai/flair`;
 const OLD_NODE = `${OLD_PREFIX}/bin/node`;
 const NEW_NODE = `${NEW_PREFIX}/bin/node`;
 const UNIT = "/home/u/.config/systemd/user/flair.service";
+/** The serving process (pid 77) placed in flair.service by the user manager of uid 1000. */
+const USER_UNIT_CGROUP = {
+  procCgroup: () => "0::/user.slice/user-1000.slice/user@1000.service/app.slice/flair.service\n",
+  uid: 1000,
+  userUnitDir: "/home/u/.config/systemd/user",
+};
 
 const targets: RepointTargets = {
   launcher: `${NEW_TREE}/${LAUNCHER}`,
@@ -128,7 +134,7 @@ describe("1 — the serving PID is the process that answered, never a PID file t
       dataDir: DATA,
       respondingPid: null,
       localPids: () => evidence,
-      findUserUnitsForTree: () => [{ name: "flair.service", path: UNIT }],
+      ...USER_UNIT_CGROUP,
       systemdUserUnit: () => ({ mainPid: 77, fragmentPath: UNIT, dropInPaths: [], workingDirectory: OLD_TREE }),
       servingPackage: () => ({ dir: OLD_TREE, version: "0.57.0" }),
       exists: () => true,
@@ -217,7 +223,7 @@ describe("2 — systemd: FragmentPath must be the selected file; drop-ins anywhe
       dataDir: DATA,
       respondingPid: 77,
       localPids: () => ({ pidFile: 77, listeners: [77] }),
-      findUserUnitsForTree: () => [{ name: "flair.service", path: UNIT }],
+      ...USER_UNIT_CGROUP,
       systemdUserUnit: () => state,
       servingPackage: () => ({ dir: OLD_TREE, version: "0.57.0" }),
       exists: () => true,
@@ -1059,7 +1065,7 @@ describe("round 4 / 1 — a non-empty listener result must be exactly the one re
     dataDir: DATA,
     respondingPid,
     localPids: () => evidence,
-    findUserUnitsForTree: () => [{ name: "flair.service", path: UNIT }],
+    ...USER_UNIT_CGROUP,
     systemdUserUnit: () => ({ mainPid: 77, fragmentPath: UNIT, dropInPaths: [], workingDirectory: OLD_TREE }),
     servingPackage: () => ({ dir: OLD_TREE, version: "0.57.0" }),
     exists: () => true,

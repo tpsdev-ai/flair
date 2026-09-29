@@ -9,9 +9,13 @@
   at all (`lsof` missing or failing) does the reported PID stand on its own.
   Harper's PID file is only a cross-check: a live one that names another
   process makes the tree unknown. On macOS the launchd job for
-  this data directory must be running as that process; on Linux a systemd user
-  unit that names the tree must have it as its MainPID, and systemd must report
-  that very file as the unit's FragmentPath. The tree is read from the process.
+  this data directory must be running as that process. On Linux the process's
+  own cgroup (`/proc/<pid>/cgroup`, cgroup v2) must place it in a systemd user
+  unit of this user whose MainPID it is and whose FragmentPath is that unit's
+  file in `~/.config/systemd/user`. The unit is found from the process, not
+  from a tree path in a unit file, so it is still found after `flair init`
+  re-points the file (the state is then diverged with a restart pending). The
+  tree is read from the process.
   Without that proof (a remote `--target`, a directly started server, a
   system-level or other supervisor, a server under a different HOME, a host
   where the port's listeners cannot be read and no PID was reported) the
@@ -80,7 +84,11 @@
   `flair init` is still the full setup command and also re-runs its other
   idempotent setup for the data directory, which creates or saves instance
   state. `flair restart` restarts through the proven systemd user unit on
-  Linux, and afterwards reports which tree serves the instance.
+  Linux (`systemctl --user restart`), checks that the unit's new main process
+  runs from the unit's WorkingDirectory, and afterwards reports which tree
+  serves the instance. It never stops a process that runs in a systemd service
+  and starts it again outside that service: when such a process is not the
+  proven unit's, it refuses and names the `systemctl` command to use.
 
   `flair init` and `flair doctor --fix` also re-point the federation-sync shim
   when it runs another npm-global tree. Only the shim's exec line changes; the

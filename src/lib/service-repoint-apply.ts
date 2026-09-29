@@ -22,13 +22,22 @@
  *      reported with the manager's state as UNVERIFIED.
  *   3. Linux: a unit with drop-ins — any the manager reports, from any
  *      location, or a `<unit>.d` directory beside the file — is refused.
+ *   4. `flair restart` on Linux (restartOnLinux): a proven user unit is
+ *      restarted through systemd and its new main process verified; a process
+ *      any other systemd service owns is never stopped and respawned outside it.
  *
  * Every filesystem and service-manager call is injectable, so each branch is
  * driven by a test with no real launchd, systemd or operator file.
  */
 import { snapshotRegularFile, writeFilesAtomically, type AtomicWriteHooks, type FileSnapshot } from "./atomic-write.js";
 import { planSystemdUnitRuntimeRepoint, type RepointDeps, type RepointPlan, type RepointTargets } from "./service-repoint.js";
-import type { ProvenServingTree, SystemdUnitManagerState } from "./tree-divergence.js";
+import {
+  planLinuxRestart,
+  restartedUnitProblem,
+  type ProvenServingTree,
+  type ServingTree,
+  type SystemdUnitManagerState,
+} from "./tree-divergence.js";
 
 export type MainServiceRepointResult =
   | { kind: "repointed" | "would-repoint" | "current" | "pinned-node"; unitPath: string; detail: string }
@@ -253,4 +262,50 @@ export function repointSystemdUserUnit(
       return null;
     },
   });
+}
+
+export interface LinuxRestartDeps {
+  serving: ServingTree;
+  /** The processes the direct path could stop: the live PID-file PID and the port's listeners. */
+  pids: number[];
+  procCgroup: (pid: number) => string;
+  uid: number;
+  /** Run `systemctl <args>`; throws on failure. */
+  systemctl: (args: string[]) => void;
+  /** Wait until the instance answers again. */
+  waitHealthy: () => Promise<void>;
+  unitState: (unitName: string) => SystemdUnitManagerState | null;
+  /** The resolved working directory of a live process, or null. */
+  cwdOf: (pid: number) => string | null;
+  samePath: (a: string, b: string) => boolean;
+  /** Checks to run before a systemd restart (the engine-version guard). */
+  beforeRestart?: (serving: ProvenServingTree) => void;
+  /** The direct path: stop by signal, spawn again. */
+  direct: () => Promise<void>;
+  log?: (line: string) => void;
+}
+
+/**
+ * `flair restart` on Linux (see planLinuxRestart). A proven user unit is
+ * restarted THROUGH systemd and its new main process must run from the unit's
+ * WorkingDirectory; a process in any systemd service that is not that proven
+ * unit is refused, never stopped and respawned outside its manager; only a
+ * process no manager owns takes the direct path.
+ */
+export async function restartOnLinux(d: LinuxRestartDeps): Promise<"systemd" | "direct"> {
+  const plan = planLinuxRestart({ serving: d.serving, pids: d.pids, procCgroup: d.procCgroup, uid: d.uid });
+  if (plan.kind === "refuse") throw new Error(plan.detail);
+  if (plan.kind === "direct") {
+    await d.direct();
+    return "direct";
+  }
+  const s = d.serving as ProvenServingTree;
+  d.beforeRestart?.(s);
+  d.log?.(`  (restarting through the systemd user unit that runs this instance: ${plan.unit})`);
+  d.systemctl(["--user", "daemon-reload"]);
+  d.systemctl(["--user", "restart", plan.unit]);
+  await d.waitHealthy();
+  const problem = restartedUnitProblem(plan.unit, s.pid, d.unitState(plan.unit), d.cwdOf, d.samePath);
+  if (problem) throw new Error(`restarted ${plan.unit} through systemd, but ${problem}`);
+  return "systemd";
 }

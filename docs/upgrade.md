@@ -107,9 +107,13 @@ on the instance's port, which must also be the PID the instance reported about
 itself when it reported one. Two listeners, none, or a PID file that names
 another process make the answer unknown; only when the port's listeners cannot
 be read at all (`lsof` missing or failing) does a reported PID stand on its own.
-On Linux, systemd must also report
-the unit file flair selected as the one it loaded (`FragmentPath`). Otherwise
-the serving tree is reported as unknown and nothing is advised from it.
+On Linux, the unit is found from that process — its cgroup (`/proc/<pid>/cgroup`,
+cgroup v2) names the systemd user unit it runs in — and systemd must report that
+process as the unit's MainPID and the unit's file in `~/.config/systemd/user` as
+its `FragmentPath`. Because the unit comes from the process, not from a tree path
+in a unit file, it is still found after `flair init` re-pointed the file: the
+state is then diverged with `flair restart` as the remedy. Otherwise the serving
+tree is reported as unknown and nothing is advised from it.
 
 The remedy is `flair init && flair restart`. `flair init` re-points the
 instance's own unit — **only** its launcher, node, Harper entry and working
@@ -143,7 +147,11 @@ reports systemd's state as unverified. Every refusal names the file, what did no
 remedy — the paths to set by hand, an update of this CLI's tree, or a
 reinstall; after a hand edit, `flair restart` brings the instance up under
 the edited unit (macOS reloads the plist; on Linux, when the unit is proven to
-run the instance, it reloads systemd and restarts through the unit).
+run the instance, it reloads systemd, restarts through the unit and checks that
+the unit's new main process runs from its WorkingDirectory). On Linux,
+`flair restart` never stops a process that runs in a systemd service and starts
+it again outside that service: if the process is not the proven unit's, it
+refuses and names the `systemctl` command to use.
 
 The federation-sync shim (`~/.flair/bin/flair-federation-sync`) is re-pointed
 the same way: only its exec line changes, the scheduler unit is never

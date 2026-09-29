@@ -138,7 +138,9 @@ describe("proveServingTree — Linux", () => {
       dataDir: DATA,
       respondingPid: 77,
       localPids: () => ({ pidFile: 77, listeners: [77] }),
-      findUserUnitsForTree: (tree) => (tree === OLD_TREE ? [{ name: "my-flair.service", path: UNIT }] : []),
+      procCgroup: (pid) => (pid === 77 ? "0::/user.slice/user-1000.slice/user@1000.service/app.slice/my-flair.service\n" : ""),
+      uid: 1000,
+      userUnitDir: "/home/u/.config/systemd/user",
       systemdUserUnit: (name) =>
         name === "my-flair.service" ? { mainPid: 77, fragmentPath: UNIT, dropInPaths: [], workingDirectory: OLD_TREE } : null,
       servingPackage: () => ({ dir: OLD_TREE, version: "0.57.0" }),
@@ -148,7 +150,7 @@ describe("proveServingTree — Linux", () => {
     };
   }
 
-  test("proven: a user unit (any name) naming the tree has the serving pid as MainPID", () => {
+  test("proven: the serving process's cgroup names a user unit (any name) whose MainPID it is", () => {
     const s = proveServingTree(linuxProbe());
     expect(s.kind).toBe("proven");
     if (s.kind !== "proven") return;
@@ -158,8 +160,8 @@ describe("proveServingTree — Linux", () => {
     expect(s.unitTree).toBe(OLD_TREE);
   });
 
-  test("a system-level unit (no user unit names the tree): unknown", () => {
-    const s = proveServingTree(linuxProbe({ findUserUnitsForTree: () => [] }));
+  test("a system-level unit owns the serving process: unknown", () => {
+    const s = proveServingTree(linuxProbe({ procCgroup: () => "0::/system.slice/flair.service\n" }));
     expect(s.kind).toBe("unknown");
     if (s.kind === "unknown") expect(s.reason).toContain("system-level");
   });

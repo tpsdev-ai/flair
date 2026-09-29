@@ -171,6 +171,7 @@ import {
 } from "./lib/launchd-repair.js";
 import {
   assessTreeDivergence,
+  linuxUnitProbe,
   proveServingTree,
   systemdUnitStateFromShow,
   type LocalPidEvidence,
@@ -179,7 +180,7 @@ import {
   type TreeAssessment,
 } from "./lib/tree-divergence.js";
 import { planPlistRuntimeRepoint, type PlistOwnership, type RepointDeps, type RepointTargets } from "./lib/service-repoint.js";
-import { applyRepointPlan, repointSystemdUserUnit, type MainServiceRepointResult } from "./lib/service-repoint-apply.js";
+import { applyRepointPlan, repointSystemdUserUnit, restartOnLinux, type MainServiceRepointResult } from "./lib/service-repoint-apply.js";
 import { snapshotRegularFile, type AtomicWriteHooks, type FileSnapshot } from "./lib/atomic-write.js";
 import { preferVersionManagerAlias } from "./lib/node-alias-path.js";
 import { stabilizeMqttNetworkKeyOrder } from "./lib/stabilize-mqtt-network.js";
@@ -342,6 +343,7 @@ import {
   decidePlainTreeRollback,
   discardPlainTreePrevious,
   findSystemdUnitsForTree,
+  userSystemdDir,
   formatPlainTreeBanner,
   formatPlainTreePlan,
   formatPlainTreeScopeFooter,
@@ -5379,14 +5381,23 @@ function realRepointDeps(): RepointDeps {
  * every drop-in it applies (DropInPaths) and its WorkingDirectory. null when it
  * could not be read. Read-only and bounded; never throws.
  */
-function systemdUserUnitState(unitName: string): SystemdUnitManagerState | null {
+function systemctlUserShow(unitName: string): string | null {
   const res = spawnSync(
     "systemctl",
     ["--user", "show", "-p", "MainPID", "-p", "FragmentPath", "-p", "DropInPaths", "-p", "WorkingDirectory", "--", unitName],
     { encoding: "utf-8", timeout: LAUNCHCTL_QUERY_TIMEOUT_MS },
   );
-  if (res.status !== 0) return null;
-  return systemdUnitStateFromShow(String(res.stdout ?? ""));
+  return res.status === 0 ? String(res.stdout ?? "") : null;
+}
+
+function systemdUserUnitState(unitName: string): SystemdUnitManagerState | null {
+  const out = systemctlUserShow(unitName);
+  return out === null ? null : systemdUnitStateFromShow(out);
+}
+
+/** /proc/<pid>/cgroup, read directly. */
+function readProcCgroup(pid: number): string {
+  return readFileSync(`/proc/${pid}/cgroup`, "utf-8");
 }
 
 /**
@@ -5435,11 +5446,14 @@ function resolveServingTree(dataDir: string, port: number, query: ServingTreeQue
     localPids: () => localPidEvidence(dataDir, port),
     launchd: { label, plistPath },
     launchdJobPid: (l) => readLaunchctlJobState(l, realLaunchctlLister).pid,
-    findUserUnitsForTree: (tree) =>
-      findSystemdUnitsForTree(tree, { systemDirs: [], envUnit: "" })
-        .filter((u) => u.scope === "user")
-        .map((u) => ({ name: u.name, path: u.path })),
-    systemdUserUnit: systemdUserUnitState,
+    // Linux: the unit is found from the serving process's cgroup, then checked
+    // against what systemd reports for it (MainPID, FragmentPath, drop-ins).
+    ...linuxUnitProbe({
+      readFile: (p) => readFileSync(p, "utf-8"),
+      systemctlShow: systemctlUserShow,
+      uid: typeof process.getuid === "function" ? process.getuid() : -1,
+      userUnitDir: userSystemdDir(),
+    }),
     servingPackage: (pid) => resolveServingFlairPackage(pid),
     exists: existsSync,
     read: (p) => readFileSync(p, "utf-8"),
@@ -6738,21 +6752,45 @@ async function startFlairProcess(port: number, dataDir: string): Promise<void> {
  */
 async function restartFlair(port: number, dataDir: string): Promise<void> {
   // flair#2034 §2: on Linux, an instance proven to run under a systemd USER
-  // unit (the unit's MainPID is the serving process) is restarted THROUGH that
-  // unit. The signal-and-respawn path below would either race the unit's own
-  // Restart= policy or leave the instance running outside the unit — and a
-  // unit that `flair init` just re-pointed would never be used.
-  const unitOwner = process.platform === "linux" ? resolveServingTree(dataDir, port, { local: true }) : null;
-  if (unitOwner?.kind === "proven" && unitOwner.manager === "systemd-user") {
-    if (unitOwner.unitTree !== null && samePathCanonical(unitOwner.unitTree, flairPackageDir())) {
-      guardEngineNotBackwards(dataDir);
+  // unit (found from the serving process's cgroup; its MainPID is that
+  // process) is restarted THROUGH that unit, and the unit's new main process
+  // must run from the unit's WorkingDirectory. The signal-and-respawn path
+  // below would leave the instance running outside the unit — so it is used
+  // only when no process it could stop runs in any systemd service; a process
+  // a service manager owns is refused with the systemctl command instead.
+  if (process.platform === "linux") {
+    const ev = localPidEvidence(dataDir, port);
+    const how = await restartOnLinux({
+      serving: resolveServingTree(dataDir, port, { local: true }),
+      pids: [...(ev.pidFile !== null ? [ev.pidFile] : []), ...(ev.listeners ?? [])],
+      procCgroup: readProcCgroup,
+      uid: typeof process.getuid === "function" ? process.getuid() : -1,
+      systemctl: (args) => {
+        execFileSync("systemctl", args, { stdio: "pipe", timeout: args[1] === "restart" ? STARTUP_TIMEOUT_MS * 2 : 30_000 });
+      },
+      waitHealthy: () => waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS),
+      unitState: systemdUserUnitState,
+      cwdOf: (pid) => {
+        try {
+          return realpathSync(`/proc/${pid}/cwd`);
+        } catch {
+          return null;
+        }
+      },
+      samePath: samePathCanonical,
+      beforeRestart: (s) => {
+        if (s.unitTree !== null && samePathCanonical(s.unitTree, flairPackageDir())) guardEngineNotBackwards(dataDir);
+      },
+      direct: async () => {
+        await stopFlairProcess(port, dataDir);
+        await startFlairProcess(port, dataDir);
+      },
+      log: (line) => console.log(line),
+    });
+    if (how === "systemd") {
+      readyOpsSocketPosture(dataDir);
+      stampEngineVersionIfRunning(dataDir);
     }
-    console.log(`  (restarting through the systemd user unit that runs this instance: ${unitOwner.unitName})`);
-    execFileSync("systemctl", ["--user", "daemon-reload"], { stdio: "pipe", timeout: 30_000 });
-    execFileSync("systemctl", ["--user", "restart", unitOwner.unitName], { stdio: "pipe", timeout: STARTUP_TIMEOUT_MS * 2 });
-    await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
-    readyOpsSocketPosture(dataDir);
-    stampEngineVersionIfRunning(dataDir);
   } else {
     await stopFlairProcess(port, dataDir);
     await startFlairProcess(port, dataDir);
