@@ -640,4 +640,10 @@ describe("isDirectRun — the entry-point check without import.meta.main", () =>
   test("import.meta.main, where the runtime provides it, decides first", () => {
     expect(isDirectRun("file:///nowhere/x.js", undefined, true)).toBe(true);
   });
+
+  test("import.meta.main === false decides too, even when the paths match", () => {
+    const file = join(dir, "prompt-recall-hook.js");
+    writeFileSync(file, "");
+    expect(isDirectRun(pathToFileURL(file).href, file, false)).toBe(false);
+  });
 });

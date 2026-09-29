@@ -721,7 +721,8 @@ export function isDirectRun(
   metaMain: boolean | undefined,
   realpath: (p: string) => string = realpathSync,
 ): boolean {
-  if (metaMain === true) return true;
+  // Where the runtime provides import.meta.main, its answer decides, true or false.
+  if (metaMain !== undefined) return metaMain;
   if (argv1 == null || argv1 === "") return false;
   try {
     return realpath(fileURLToPath(moduleUrl)) === realpath(argv1);
