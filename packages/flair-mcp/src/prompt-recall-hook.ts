@@ -54,7 +54,8 @@
  * NOT bounded: a response that arrives in full within the budget is parsed,
  * and every result in it mapped, synchronously inside flair-client before it
  * returns. A timer cannot interrupt that work, and the response size is not
- * capped; the deadline takes effect once it finishes.
+ * capped. When it finishes, a successful result may be written before an
+ * overdue timer runs: the first answer wins.
  * When Flair is unreachable, slow or refuses the request, or the client cannot
  * be built, the output carries NO memories, only one line saying recall was
  * unavailable for this prompt (with the failure kind — never a message text, a
