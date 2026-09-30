@@ -370,7 +370,7 @@ describe("recordCitations — the ledger core receives the writer's read-scope p
   });
 });
 
-// ─── MemoryUsage reads: a ledger row is shown only about a readable memory ──
+// ─── Non-admin MemoryUsage reads: a row is shown only about a readable memory
 
 const READER = "agt_reader";
 const ledgerRow = (memoryId: string | undefined) => ({ id: `${READER}:${memoryId}`, agentId: READER, memoryId });

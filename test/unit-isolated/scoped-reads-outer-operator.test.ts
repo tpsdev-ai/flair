@@ -50,8 +50,9 @@ mock.module("harper", () => ({
       MemoryUsage: baseFor("MemoryUsage"),
       MemoryGrant: baseFor("MemoryGrant"),
       Agent: { get: async () => null, search: async () => [] },
-      // MemoryUsage reads show a row only about a memory the reader can read,
-      // so the ledger rows below name memories that exist and are readable.
+      // A non-admin MemoryUsage read shows a row only about a memory the reader
+      // can read, so the ledger rows below name memories that exist and are
+      // readable.
       Memory: { get: async (id: string) => stores.Memory?.get(id) ?? null, search: async () => [] },
     },
   },

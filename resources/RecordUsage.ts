@@ -34,13 +34,18 @@
  * (and its ownership gate) — its own auth model is verified-agent +
  * within-org + the caller's READ SCOPE + explicitly NO ownership requirement.
  *
- * READ SCOPE: usage is recorded only for a memory the caller can read —
- * `resolveReadScope(caller).isAllowed(record)`, the predicate Memory.get()
- * applies to a by-id read (the caller's own memories at any visibility, and
- * every other agent's non-private memories). Agent B can report using agent
- * A's shared memory; a memory B cannot read is treated exactly like an id
- * that does not exist: the same response, no ledger row for B, and no change
- * to that memory's counters. The scope is resolved once per call and fails
+ * READ SCOPE: usage is recorded only for a memory in the caller's read scope
+ * — `resolveReadScope(caller).isAllowed(record)`: the caller's own memories
+ * at any visibility, and every other agent's non-private memories. That is
+ * the scope Memory.get() applies to a NON-ADMIN by-id read; here it applies
+ * to admin callers too, although an admin's Memory reads are unfiltered.
+ * Agent B can report using agent A's shared memory; a memory outside B's
+ * scope is treated like an id that does not exist: the same response, and
+ * no change to that memory's counters. The ledger core checks the scope on
+ * its first read of the memory, before it writes B's ledger row, so a memory
+ * outside the scope there gets no row; a memory that leaves the scope before
+ * the re-read that precedes the count bump keeps the row already written,
+ * and the count is not bumped. The scope is resolved once per call and fails
  * CLOSED (nothing is recorded if it cannot be resolved). Citation-on-write
  * applies the same rule (./usage-recording.ts's module doc).
  *

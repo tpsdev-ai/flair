@@ -43,10 +43,12 @@
  *
  * And within its own contributions, a non-admin agent sees a row only while
  * the memory the row names exists and is in its Memory read scope
- * (resolveReadScope — the rule Memory.get() applies). A row about a memory
- * the reader cannot read reads exactly like a row that does not exist: 404 by
- * id, absent from a collection read. A ledger row is therefore never evidence
- * about a memory its reader cannot otherwise see. The rule lives in
+ * (resolveReadScope — the rule Memory.get() applies to a non-admin reader).
+ * A row about a memory the reader cannot read reads exactly like a row that
+ * does not exist: 404 by id, absent from a collection read. A ledger row is
+ * therefore never evidence, to a non-admin reader, about a memory it cannot
+ * otherwise see. Admin and trusted internal reads are unfiltered (get() and
+ * search() below). The rule lives in
  * ./usage-recording.ts (isLedgerRowVisible / readableLedgerRows), next to the
  * write-side gate. Like Memory's reads, a non-admin read here ignores the
  * caller's `select`/`property`, so the decision always sees the stored

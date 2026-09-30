@@ -29,23 +29,29 @@
  * scope vets the cited ids, the cited ids never widen anything).
  *
  * READ SCOPE, ON BOTH SURFACES. A contribution is recorded only for a memory
- * the contributing agent can read: `resolveReadScope(agentId).isAllowed(record)`
- * — the same predicate Memory.get() applies to a by-id read. A memory outside
- * that scope takes the SAME branch as an id that does not exist: the caller
- * gets the same response, no ledger row is written for it, and the memory's
- * counters do not change. Any difference between the two (an error, a
- * response or shape difference, a ledger row the caller can read back) would
- * tell the caller "that id exists but you can't see it".
- *   - recordUsageContribution() REQUIRES the predicate (`canRead`) and applies
- *     it to every Memory row it reads before writing, so no caller of the
- *     ledger core can credit a memory without a read-scope decision.
+ * in the contributing agent's read scope: `resolveReadScope(agentId).isAllowed(record)`
+ * — the scope Memory.get() applies to a NON-ADMIN by-id read. It applies to
+ * admin agents here too, although an admin's Memory reads are unfiltered. A
+ * memory outside that scope takes the SAME branch as an id that does not
+ * exist: the caller gets the same response and the memory's counters do not
+ * change. Any difference between the two (an error, a response or shape
+ * difference, a ledger row the caller can read back) would tell the caller
+ * "that id exists but you can't see it".
+ *   - recordUsageContribution() REQUIRES the predicate (`canRead`). It applies
+ *     it to its first read of the memory, before the ledger row is written
+ *     (out of scope there: no row), and again to the re-read before the count
+ *     bump (out of scope there: the row already written stays, and the count
+ *     is not bumped). No caller of the ledger core can credit a memory without
+ *     a read-scope decision.
  *   - recordUsageBatch() (POST /RecordUsage) and recordCitations()
  *     (citation-on-write) each resolve the caller's scope ONCE per batch and
  *     fail CLOSED: if the scope cannot be resolved, nothing in the batch is
  *     credited. recordCitations() also pre-checks each cited id (flair#775).
  *   - The ledger's own read path (resources/MemoryUsage.ts) applies the same
- *     rule through isLedgerRowVisible()/readableLedgerRows(): a reader sees
- *     its own row only while the memory it names exists and is readable.
+ *     rule to NON-ADMIN reads through isLedgerRowVisible()/readableLedgerRows():
+ *     a non-admin reader sees its own row only while the memory it names
+ *     exists and is readable. Admin and trusted internal ledger reads are
+ *     unfiltered.
  */
 import { databases } from "harper";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
@@ -72,8 +78,10 @@ export type CanReadMemory = (record: ScopableRecord | null | undefined) => boole
  * (`resolveReadScope(agentId).isAllowed`, resolved once per batch by the
  * caller). The memory row is checked against it before the ledger row is
  * written, and the re-fetched row is checked again before the count is
- * bumped. A memory that does not exist and a memory the agent cannot read end
- * on the same silent no-op: no ledger row, no count change.
+ * bumped. At the first read, a memory that does not exist and a memory the
+ * agent cannot read end on the same silent no-op: no ledger row, no count
+ * change. At the re-read the ledger row is already written; a rejection there
+ * leaves the row in place and skips the count bump.
  *
  * Ledger-row-create FIRST, THEN the Memory.usageCount bump — so a crash
  * between the two leaves the SAFE failure state (ledger row exists, count
@@ -150,7 +158,8 @@ export async function recordUsageContribution(
   // count (RecordUsage.ts module doc's "WHY THIS IS ITS OWN ENDPOINT").
   const fresh = await withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(memoryId)).catch(() => null);
   // Deleted, or moved out of the agent's read scope, between the check above
-  // and now — no-op. The count is only ever bumped on a row the agent can read.
+  // and now — the count is not bumped (the ledger row written above stays).
+  // The count is only ever bumped on a row in the agent's read scope.
   if (!fresh || !canRead(fresh)) return;
   const usageRow = { ...fresh, usageCount: (fresh.usageCount ?? 0) + 1 };
   stripUndeclaredMemoryAttributes(usageRow);
@@ -275,8 +284,9 @@ export async function recordCitations(
  * default) under the CALLER's read scope.
  *
  *   - The caller's scope is resolved ONCE per batch via resolveReadScope — the
- *     same source Memory.get() uses — and its `isAllowed` predicate is handed
- *     to every contribution, which applies it to each Memory row it reads.
+ *     scope Memory.get() applies to non-admin readers, applied here to admin
+ *     callers too — and its `isAllowed` predicate is handed to every
+ *     contribution, which applies it to each Memory row it reads.
  *   - Fail CLOSED: if the scope cannot be resolved, nothing in the batch is
  *     credited. The endpoint's response does not change (RecordUsage.ts's
  *     "NO ID ENUMERATION"), so a failure is visible only in the server log.
@@ -325,7 +335,8 @@ export async function recordUsageBatch(
 // names exists and is in the reader's read scope. A row about a memory the
 // reader cannot read reads exactly like a row that does not exist. A failed
 // scope resolution or a failed Memory read hides the row: unknown evidence is
-// never treated as readable.
+// never treated as readable. Admin and trusted internal ledger reads do not go
+// through these helpers (resources/MemoryUsage.ts leaves them unfiltered).
 
 /**
  * Is this one ledger row about a memory `scope` can read? A row with no

@@ -9,18 +9,18 @@
 //   2. cross-agent write succeeds WITHOUT ownership — agent B can report
 //      usage on agent A's memory (unlike Memory.put(), which would 403 this)
 //      — and no OTHER field on A's memory changes. The cross-agent fixtures
-//      are `visibility: "shared"`: B can only report a memory it can read
-//      (property 5), and a `standard` memory defaults to private.
+//      are `visibility: "shared"`: B can only report a memory in its read
+//      scope (property 5), and a `standard` memory defaults to private.
 //   3. dedup — each (agentId, memoryId) pair contributes AT MOST 1 to
 //      usageCount, even across repeated calls.
 //   4. no ID enumeration — the response is IDENTICAL for a not-found id, an
 //      already-counted id, and a fresh valid id (a caller can't distinguish
 //      "doesn't exist" from "you already used it" from "recorded").
-//   5. read scope — usage is recorded only for a memory the caller can read
-//      (its own at any visibility, another agent's non-private); a memory the
-//      caller cannot read is handled exactly like a missing id, and the
-//      caller's own MemoryUsage ledger never shows a row about a memory it
-//      cannot read.
+//   5. read scope — usage is recorded only for a memory in the caller's read
+//      scope (its own at any visibility, another agent's non-private); a
+//      memory outside it is handled exactly like a missing id, and a
+//      non-admin caller's own MemoryUsage ledger never shows a row about a
+//      memory it cannot read.
 //
 // MODEL: test/integration/dedup-supersede-e2e.test.ts (real Harper spawn,
 // signed TPS-Ed25519 requests, admin-op seeding for fixtures).

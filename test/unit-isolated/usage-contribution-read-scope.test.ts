@@ -2,10 +2,11 @@
  * resources/usage-recording.ts's recordUsageContribution() — the one ledger
  * write shared by POST /RecordUsage and citation-on-write — records a
  * contribution only for a memory its `canRead` predicate (the contributing
- * agent's resolveReadScope().isAllowed) accepts. A memory it rejects ends on
- * the same no-op as a missing id: no ledger row, no count change. The rule is
- * applied to every Memory row the core reads, including the re-read right
- * before the count bump.
+ * agent's resolveReadScope().isAllowed, admin agents included) accepts. A
+ * memory it rejects on the first read ends on the same no-op as a missing id:
+ * no ledger row, no count change. The predicate is applied again to the
+ * re-read right before the count bump; a rejection there skips the bump, and
+ * the ledger row written after the first read stays.
  *
  * Driven against an in-memory double of the two raw tables it touches
  * (Memory, MemoryUsage), with the REAL resolveReadScope predicate. Isolated
@@ -89,7 +90,8 @@ describe("recordUsageContribution — the contributing agent's read scope", () =
 
   it("a memory that leaves the agent's read scope before the count bump is not counted", async () => {
     // First read: shared (passes the gate, ledger row written). Re-read right
-    // before the bump: the owner has made it private.
+    // before the bump: the owner has made it private. The bump is skipped; the
+    // row written after the first read stays.
     memoryReadScript.set("other-shared", [
       { id: "other-shared", agentId: OWNER, visibility: "shared", content: "shared" },
       { id: "other-shared", agentId: OWNER, visibility: "private", content: "shared" },
