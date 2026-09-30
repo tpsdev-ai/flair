@@ -167,10 +167,15 @@ instead (see below).
 - **Public clients with PKCE.** The document of an app that signs people in
   must declare `token_endpoint_auth_method: none`, or leave the field out. Any
   other value is refused with `invalid_client`. Every authorization request must
-  carry a PKCE `code_challenge` with method `S256`. The server's metadata
-  advertises `none`, `client_secret_basic` and `client_secret_post` as token
-  endpoint auth methods; the last two apply only to registered clients. It does
-  not advertise `private_key_jwt`.
+  carry a PKCE `code_challenge` with method `S256`. With the shipped
+  `config.yaml`, the server's metadata advertises `none`, `client_secret_basic`
+  and `client_secret_post` as token endpoint auth methods (the last two apply
+  only to registered clients) and does not advertise `private_key_jwt`. Setting
+  `mcp.clientCredentials.enabled: true`, which turns on the headless grant,
+  changes the metadata: it then also lists `private_key_jwt`, the
+  `client_credentials` grant type and `EdDSA` as the assertion signing
+  algorithm. The document of an app that signs people in is still refused
+  unless it declares `none` or leaves the field out.
 
 ### Changing the list
 
@@ -231,8 +236,11 @@ A connection acts as its principal:
   `config.yaml`). A request with an expired or invalid token gets HTTP 401 with
   error `invalid_token` and a `WWW-Authenticate: Bearer resource_metadata="…"`
   header.
-- The app also gets a refresh token, unless its metadata lists grant types
-  without `refresh_token`. Refresh tokens are single-use: each refresh returns a
+- With the shipped `config.yaml`, which does not set
+  `mcp.refreshTokenRequiresOfflineAccess`, the app also gets a refresh token
+  unless its metadata lists grant types without `refresh_token`. When that
+  option is set to true, the granted scope must also include `offline_access`.
+  Refresh tokens are single-use: each refresh returns a
   new one. A refresh token that was already used is refused (`invalid_grant`),
   and the plugin attempts to revoke that sign-in's whole refresh-token family;
   if that revocation write fails, the failure is logged and the token is still
