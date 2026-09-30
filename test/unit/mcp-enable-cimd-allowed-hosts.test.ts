@@ -353,7 +353,8 @@ describe("enableMcp, non-Fabric target — the clientIdMetadataDocuments.allowed
     expect(readFileSync(p.localConfigPath, "utf-8")).toBe(before);
     const step = result.steps.find((s) => s.step === "cimd-allowed-hosts");
     expect(step?.ok).toBe(true);
-    expect(step?.detail).toContain("the target was not checked, and nothing was written");
+    expect(step?.detail).toContain("the target was not checked, and the list was not written");
+    expect(existsSync(p.signingKeyFilePath)).toBe(false);
     expect(result.cimdAllowedHosts).toBeUndefined();
   });
 });

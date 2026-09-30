@@ -466,7 +466,7 @@ async function promptText(question: string): Promise<string> {
  * They claim only what the run checked: the self-verify step's OAuth metadata
  * check (the /mcp route itself is not probed), and, when this run wrote
  * --cimd-allowed-hosts, whether that list includes claude.ai. With no flag the
- * command does not read the list, so it says nothing about claude.ai.
+ * command does not inspect allowedHosts, so it says nothing about claude.ai.
  */
 export function enableSuccessLines(result: EnableMcpResult): string[] {
   const lines = [
@@ -784,7 +784,7 @@ export function register(program: Command): void {
     .option("--admin-pass <pass>", "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance")
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--confirm-secrets-applied", "Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)")
-    .option("--dry-run", "Generate keys/tokens/config and validate inputs; skip every remote call")
+    .option("--dry-run", "Validate inputs and report the signing key a real run would reuse or generate; write no file and make no remote call")
     .option("--json", "Print machine-readable JSON instead of a human summary")
     .action(async (opts) => {
       const instance: string | undefined = opts.instance ?? process.env.FLAIR_URL;

@@ -466,7 +466,7 @@ flair mcp enable
       description: Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)
       attr: confirmSecretsApplied
     --dry-run
-      description: Generate keys/tokens/config and validate inputs; skip every remote call
+      description: Validate inputs and report the signing key a real run would reuse or generate; write no file and make no remote call
       attr: dryRun
     --json
       description: Print machine-readable JSON instead of a human summary
@@ -3081,7 +3081,7 @@ Options:
   --admin-pass <pass>                                Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance
   --admin-user <name>                                Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
   --confirm-secrets-applied                          Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)
-  --dry-run                                          Generate keys/tokens/config and validate inputs; skip every remote call
+  --dry-run                                          Validate inputs and report the signing key a real run would reuse or generate; write no file and make no remote call
   --json                                             Print machine-readable JSON instead of a human summary
   -h, --help                                         display help for command
 

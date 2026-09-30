@@ -1837,7 +1837,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         `${CIMD_ALLOWED_HOSTS_CONFIG_KEY} in ${current.path}: ${JSON.stringify(current.current ?? null)} -> ` +
         `${JSON.stringify(cimdAllowedHosts)}`;
       if (dryRun) {
-        push(true, `${change} (--dry-run: the target was not checked, and nothing was written)`);
+        push(true, `${change} (--dry-run: the target was not checked, and the list was not written)`);
       } else {
         const target = await checkTargetRunsFromConfig(
           params.instance, params.adminUser, params.adminPass, current.path!,
@@ -1861,8 +1861,22 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
 
     // ── RS256 signing keypair ─────────────────────────────────────────────────
     currentStep = "signing-key";
-    const keyResult = ensureSigningKeyFile(params.signingKeyFilePath, { generate: deps.generateRsaKeyPair });
-    push(true, `signing key ${keyResult.reused ? "reused" : "generated"} at ${keyResult.path} (0600)`);
+    // flair#2113 review: --dry-run writes no file, so it reports the key a real
+    // run would reuse or generate instead of creating one. Same path and same
+    // existence test as ensureSigningKeyFile.
+    let keyResult: { path: string; reused: boolean };
+    if (dryRun) {
+      const keyPath = params.signingKeyFilePath ?? defaultSigningKeyFilePath();
+      keyResult = { path: keyPath, reused: existsSync(keyPath) };
+      push(true,
+        keyResult.reused
+          ? `signing key found at ${keyPath}; a run without --dry-run reuses it`
+          : `no signing key at ${keyPath}; a run without --dry-run generates one there (0600). --dry-run did not create it`,
+      );
+    } else {
+      keyResult = ensureSigningKeyFile(params.signingKeyFilePath, { generate: deps.generateRsaKeyPair });
+      push(true, `signing key ${keyResult.reused ? "reused" : "generated"} at ${keyResult.path} (0600)`);
+    }
 
     // ── @harperfast/oauth config (flair#1136: shipped in config.yaml) ──────
     // The block ships uncommented with mcp.enabled: false (inert default).
@@ -1894,9 +1908,9 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     push(true, `${idpProvider} OAuth app credentials present; callback URL: ${callbackUrl}`);
 
     if (dryRun) {
-      // Dry-run stops here — everything above is pure/local generation; no
-      // remote mutation has happened, and nothing below this line would run
-      // without --dry-run either.
+      // Dry-run stops here. Under --dry-run nothing above wrote a file or made
+      // a remote call (the signing-key step only reports the key path), and
+      // nothing below this line runs.
       return {
         ok: true,
         dryRun: true,

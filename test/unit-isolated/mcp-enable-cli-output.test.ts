@@ -5,8 +5,8 @@
  * reads what it prints. The success lines claim only what the run checked: the
  * OAuth metadata check passed (the /mcp route is not probed), and, when this
  * run wrote --cimd-allowed-hosts, whether that list includes claude.ai. With no
- * flag the command reads no list, so it must not say "claude.ai can now
- * connect" whatever list the instance has.
+ * flag the command does not inspect allowedHosts, so it must not say
+ * "claude.ai can now connect" whatever list the instance has.
  *
  * Isolated because it changes process-wide state for the length of each test:
  * the working directory (the command resolves ./config.yaml), HOME, global
@@ -15,7 +15,7 @@
  * process started as `... run .` in the temp config's directory.
  */
 import { describe, expect, test } from "bun:test";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -33,6 +33,9 @@ interface RunResult {
   foreign: string[];
   configAfter: string;
   configBefore: string;
+  /** Did the run leave a signing key or a secrets staging file in the temp dir? */
+  keyWritten: boolean;
+  secretsWritten: boolean;
 }
 
 /** Run `flair mcp enable` in a temp dir holding `config` as ./config.yaml. */
@@ -118,7 +121,16 @@ async function runEnable(config: string, extraArgs: string[], targetRunsFromTemp
     } catch (e: any) {
       if (!String(e?.message ?? "").includes("process.exit")) throw e;
     }
-    return { out: out.join("\n"), err: err.join("\n"), exit, foreign, configAfter: readFileSync(configPath, "utf-8"), configBefore: config };
+    return {
+      out: out.join("\n"),
+      err: err.join("\n"),
+      exit,
+      foreign,
+      configAfter: readFileSync(configPath, "utf-8"),
+      configBefore: config,
+      keyWritten: existsSync(join(tmp, "signing-key.pem")),
+      secretsWritten: existsSync(join(tmp, "secrets.env")),
+    };
   } finally {
     console.log = origLog;
     console.error = origError;
@@ -140,7 +152,7 @@ function allowedHosts(text: string): unknown {
 }
 
 describe("flair mcp enable — the printed success claims only what was checked", () => {
-  test("no flag, and the instance's unchanged list leaves claude.ai out: no claude.ai claim, only the metadata check", async () => {
+  test("no flag, and the instance's unchanged list leaves claude.ai out: prints the metadata-check line and no claude.ai claim", async () => {
     expect(allowedHosts(WITHOUT_CLAUDE_AI)).toEqual(["flair.example.com"]);
     const r = await runEnable(WITHOUT_CLAUDE_AI, [], true);
     expect(r.foreign).toEqual([]);
@@ -170,7 +182,20 @@ describe("flair mcp enable — the printed success claims only what was checked"
     expect(r.out).not.toContain("claude.ai is not in");
   }, 20000);
 
-  test("the target runs on another host: the command exits 1, prints the refusal, and writes nothing", async () => {
+  test("--dry-run, with and without the flag: writes no signing key, staged secrets or config change, and says where a key would be generated", async () => {
+    for (const flag of [[], ["--cimd-allowed-hosts", "flair.example.com"]]) {
+      const r = await runEnable(SHIPPED, ["--dry-run", ...flag], true);
+      expect(r.foreign).toEqual([]);
+      expect(r.exit).toBeNull();
+      expect(r.out).toContain("a run without --dry-run generates one there (0600). --dry-run did not create it");
+      expect(r.out).toContain("dry-run: no remote calls were made.");
+      expect(r.keyWritten).toBe(false);
+      expect(r.secretsWritten).toBe(false);
+      expect(r.configAfter).toBe(r.configBefore);
+    }
+  }, 20000);
+
+  test("the target runs on another host: the command exits 1, prints the refusal, and writes no signing key, staged secrets or config change", async () => {
     const r = await runEnable(SHIPPED, ["--cimd-allowed-hosts", "flair.example.com"], false);
     expect(r.foreign).toEqual([]);
     expect(r.exit).toBe("process.exit(1)");
@@ -178,5 +203,7 @@ describe("flair mcp enable — the printed success claims only what was checked"
     expect(r.out).toContain("another-host");
     expect(r.out).not.toContain("The OAuth metadata check passed.");
     expect(r.configAfter).toBe(r.configBefore);
+    expect(r.keyWritten).toBe(false);
+    expect(r.secretsWritten).toBe(false);
   }, 20000);
 });
