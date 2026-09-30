@@ -5,11 +5,13 @@
  * caller is an administrator or a trusted internal call. Harper runs the
  * resource's `allowCreate()` check before `post()`, and that check can refuse
  * the POST first; a POST that reaches the guard is answered 403 for a verified
- * agent and 401 for a caller without a valid credential.
+ * non-admin agent and 401 for a caller without a valid credential, and is
+ * refused when the caller cannot be resolved.
  *
  * ── The seam ────────────────────────────────────────────────────────────────
  * `guardInheritedPosts` gives every table class in the flair database's table
- * registry its own instance `post()`, read from that registry at load
+ * registry that has a `post()` its own instance `post()`, read from that
+ * registry at load
  * (resources/table-posts.ts), not from a list someone maintains:
  *   - a table added to the schema is in that registry, so its class gets the
  *     guard without anyone naming it;
@@ -23,12 +25,17 @@
  *     missing or empty, or an entry could not be guarded (`tablePostGuardGaps`).
  * test/integration/collection-post-attribution.test.ts reads every table in the
  * database at runtime, sends a collection POST built from the table's declared
- * attributes as a verified non-admin agent, and checks each row that POST wrote
- * (found under the table's primary key): the table's registered owner field,
- * if it has one, must be the caller. The body carries an `originatorInstanceId`
- * and a `provenance` only where the table declares them, and only those
- * declared fields are checked: `originatorInstanceId` must be the server's
- * value, and `provenance` must not contain the body's sentinel timestamp.
+ * attributes (plus a value a table's own validation requires) as a verified
+ * non-admin agent, and checks each row that POST wrote (found under the
+ * table's primary key): the table's registered owner field, if it has one,
+ * must be the caller. The body carries an `originatorInstanceId` and a
+ * `provenance` only where the table declares them, and only those declared
+ * fields are checked: `originatorInstanceId` must be this instance's id on a
+ * new row and the previous value on an existing one, and `provenance` must
+ * not contain the body's sentinel timestamp. The guard's non-admin refusals
+ * are unit-tested (test/unit/table-post-policy.test.ts,
+ * test/unit/table-posts.test.ts); the integration test covers an
+ * administrator's POST through the guard (Peer).
  *
  * This module has no imports, so it is unit-tested directly
  * (test/unit/table-post-policy.test.ts); the dependencies it needs are passed in
@@ -91,10 +98,12 @@ export function unverifiedPostCallerRefusal(table: string): Error & { statusCode
 }
 
 /**
- * Give every table class in `tables` its own instance `post()` that, when the
- * resource defines no `post()` of its own, refuses a caller who is not an
- * administrator or a trusted internal call, then delegates to the inherited
- * `post()` unchanged. Idempotent. Returns the names of the guarded tables.
+ * Give every table class in `tables` that has a `post()` its own instance
+ * `post()`. When the resource defines no `post()` of its own, that `post()`
+ * refuses a caller who is not an administrator or a trusted internal call; an
+ * admitted caller, and every call on a resource with its own `post()`, is
+ * delegated to the inherited `post()` unchanged. Idempotent. Returns the names
+ * of the guarded tables.
  */
 export function guardInheritedPosts(
   tables: Record<string, unknown> | null | undefined,

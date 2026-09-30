@@ -1,9 +1,11 @@
-// A verified non-admin agent's collection POST stores no owner or attribution
-// taken from the request body.
+// Checks that a verified non-admin agent's collection POST does not store the
+// owner, `originatorInstanceId` or provenance sentinel the request body supplies,
+// within the limits listed for each case below.
 //
-// A table whose resource defines no post() of its own refuses a non-admin HTTP
-// collection POST (resources/table-post-policy.ts); Relationship's post()
-// applies the same preparation as its put().
+// A non-admin HTTP collection POST to a table whose resource defines no post()
+// of its own is refused, by the resource's allowCreate() check or by the guard
+// in resources/table-post-policy.ts; Relationship's post() applies the same
+// preparation as its put().
 //
 // Every case runs on two Harpers, one per `authentication.authorizeLocal`
 // setting (on, the harness default; and off), and on each Harper twice: before
@@ -23,17 +25,21 @@
 //       timestamp. A successful POST must have written a row that is found. A
 //       table whose own validation refuses the generated body is checked only
 //       for what that refusal wrote.
-//   (b) Relationship: a verified non-admin agent's collection POST is created
-//       with the caller as owner and server-side `originatorInstanceId` and
-//       `provenance`; a body naming another agent is refused; an existing id is
-//       refused; an anonymous caller is refused.
-//   (c) The write routes of the four tables whose rows carry
+//   (b) Relationship: a verified non-admin agent's valid collection POST is
+//       created with the caller as owner, this instance's
+//       `originatorInstanceId`, and `provenance` whose verified agent is the
+//       caller and whose timestamp is not the sentinel; a body without an owner
+//       is stamped with the caller; a body naming another agent is refused with
+//       403; a valid POST to an existing id is refused with 409; an anonymous
+//       POST is refused. The other-owner and anonymous POSTs leave no row, and
+//       the existing row's subject is unchanged after the 409.
+//   (c) The write routes of the four tables whose schema declares
 //       `originatorInstanceId`: for Memory, Relationship and Soul, a collection
 //       POST, a PUT to a new id and a PUT to an existing id; for Agent, a
 //       collection POST and a PATCH. Each stores this instance's own id, never
 //       the body's value.
-//   (d) An administrator's collection POST on a table whose resource defines no
-//       post() still creates the row.
+//   (d) An administrator's collection POST to Peer, whose resource defines no
+//       post(), still creates the row.
 //
 // Mutation check: remove Relationship's post() and the table POST guard — (a)
 // and (b) go red. Let Presence's post() take its owner from the body — (a) goes
@@ -99,7 +105,7 @@ function bodyProvenance(owner: string): Record<string, unknown> {
 }
 
 for (const config of HARPERS) {
-  describe(`a collection POST stores no body-supplied owner or attribution — ${config.name}`, () => {
+  describe(`collection POST attribution — ${config.name}`, () => {
     let harper: HarperInstance;
     const tag = config.authorizeLocal ?? "default";
     // This instance's own federation identity: the one Instance row, seeded in
@@ -159,7 +165,11 @@ for (const config of HARPERS) {
         .map(String);
     }
 
-    /** A body that is valid for `table`'s declared attributes, with the given owner and body-supplied attribution. */
+    /**
+     * A body built from `table`'s declared attributes plus its VALID_FIELDS: the
+     * given owner in each declared owner-shaped field and, where declared, a
+     * body `originatorInstanceId` and a `provenance` with the sentinel timestamp.
+     */
     function bodyFor(table: string, attributes: any[], id: string, owner: string): Record<string, unknown> {
       const now = new Date().toISOString();
       const body: Record<string, unknown> = {};
@@ -181,9 +191,10 @@ for (const config of HARPERS) {
 
     /**
      * What is wrong with a row a POST wrote (`prior` is the row before it, if
-     * any): an owner that is not the caller, an `originatorInstanceId` that is
-     * not this instance's id on a new row or the previous value on an existing
-     * one, or the body's provenance.
+     * any): a registered owner field (OWNER_FIELDS) that is not the caller; a
+     * declared `originatorInstanceId` that is not this instance's id on a new
+     * row or the previous value on an existing one; or a declared `provenance`
+     * that contains the sentinel timestamp.
      */
     function attributionProblems(table: string, row: any, prior: any, declared: Set<string>): string[] {
       const problems: string[] = [];
@@ -200,7 +211,7 @@ for (const config of HARPERS) {
     function cases(phase: string) {
       const p = `tpost-${tag}-${phase}`;
 
-      test("(a) every table, with a body from its declared attributes: each row a non-admin collection POST writes has the caller in its owner field and none of the body's declared attribution values", async () => {
+      test("(a) every table, with a body from its declared attributes: each row a non-admin collection POST writes has the caller in its registered owner field, the server's originatorInstanceId where declared, and no sentinel provenance timestamp where declared", async () => {
         const described = await adminOp({ operation: "describe_database", database: "flair" });
         const tables = Object.keys(described).sort();
         for (const t of ["Relationship", "Memory", "Soul", "Agent"]) expect(tables, `${t} is a table`).toContain(t);
@@ -239,7 +250,7 @@ for (const config of HARPERS) {
         for (const t of ["Presence", "Relationship"]) expect([...inspected], `${t}'s successful POST was inspected`).toContain(t);
       }, 120_000);
 
-      test("(b) Relationship: a collection POST is created with the caller as owner and server-side attribution", async () => {
+      test("(b) Relationship: a verified non-admin agent's collection POST is created with the caller as owner and server-side attribution; other-owner, existing-id and anonymous POSTs are refused", async () => {
         const now = new Date().toISOString();
         const id = `${p}-rel-${randomUUID()}`;
         const created = await send("POST", "/Relationship/", {
@@ -308,7 +319,7 @@ for (const config of HARPERS) {
         await check("Agent PATCH (update)", "Agent", "PATCH", `/Agent/${a1}`, { name: `${a1}-renamed` }, "basic", a1);
       }, 60_000);
 
-      test("(d) an administrator's collection POST on a table whose resource defines no post() still creates the row", async () => {
+      test("(d) an administrator's collection POST to Peer, whose resource defines no post(), still creates the row", async () => {
         const described = await adminOp({ operation: "describe_database", database: "flair" });
         const id = `${p}-peer-${randomUUID()}`;
         const r = await send("POST", "/Peer/", bodyFor("Peer", described.Peer.attributes ?? [], id, B.id), "basic");

@@ -1,8 +1,10 @@
 // resources/table-posts.ts guards every table class in the flair database's
 // table registry when it loads, with the caller resolved from the resource's
-// context (resources/agent-auth.ts's resolveAgentAuth). The policy itself is
-// covered by test/unit/table-post-policy.test.ts and the live route by
-// test/integration/collection-post-attribution.test.ts.
+// context (resources/agent-auth.ts's resolveAgentAuth), here against a mocked
+// registry. The policy itself is covered by test/unit/table-post-policy.test.ts.
+// The non-admin refusal through the installed guard is unit-tested here; live
+// integration (test/integration/collection-post-attribution.test.ts) covers the
+// administrator path through the guard, an administrator's POST to Peer.
 import { describe, expect, test, mock } from "bun:test";
 import { TABLE_POST_GUARD } from "../../resources/table-post-policy";
 

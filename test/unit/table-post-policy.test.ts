@@ -1,7 +1,9 @@
 // resources/table-post-policy.ts: a table whose resource defines no post() of
 // its own admits a collection POST only from an administrator or a trusted
-// internal call. The live route is covered by
-// test/integration/collection-post-attribution.test.ts.
+// internal call. The non-admin refusals (403, 401, and a caller that cannot be
+// resolved) are unit-tested here. Live integration
+// (test/integration/collection-post-attribution.test.ts) covers the
+// administrator path through the guard, an administrator's POST to Peer.
 import { describe, expect, test } from "bun:test";
 import {
   guardInheritedPosts,

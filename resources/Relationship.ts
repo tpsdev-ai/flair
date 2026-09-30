@@ -187,10 +187,12 @@ export class Relationship extends (databases as any).flair.Relationship {
    * POST (a collection create). Prepares the body with the same rules as put()
    * before the row is created. For a verified non-admin agent, the owner is that
    * agent (a body that names another agent is refused); an administrator or a
-   * trusted internal caller keeps the owner it supplies, as in put(). For every
-   * caller admitted, the fields are validated and normalized, provenance is
-   * built server-side, and `originatorInstanceId` is stamped as a create. An id
-   * that already exists is refused (409), so a POST never updates a row.
+   * trusted internal caller keeps the owner it supplies, and must supply one, as
+   * in put(). The preparation can refuse the write (401, 403, 429 or 400); a
+   * body that passes it is normalized, gets provenance built server-side, and
+   * has `originatorInstanceId` stamped as a create. A create that is otherwise
+   * admitted, valid and within the rate limit is refused with 409 when its id
+   * already exists, so a POST never updates a row.
    */
   async post(content: any, query?: any) {
     const denial = await prepareRelationshipWrite(this, content, RECORD_TYPES.Relationship.attribution.post);
@@ -252,11 +254,13 @@ export class Relationship extends (databases as any).flair.Relationship {
 }
 
 /**
- * The write preparation Relationship's post() and put() share: resolve the
- * caller (anonymous → 401), apply the owner attribution for `mode` (a verified
- * non-admin agent's own id is stamped; a body naming another agent is refused),
- * rate-limit, validate and normalize the triple, and build provenance
- * server-side. Returns the refusal, or null when the body is ready to write.
+ * The write preparation Relationship's post() and put() share, in order:
+ * resolve the caller (an anonymous verdict is refused with 401); apply the
+ * owner attribution for `mode` (a verified non-admin agent's own id is stamped;
+ * a body naming another agent is refused with 403); require an owner (400);
+ * rate-limit an agent caller (429); validate the triple (400); then normalize
+ * it and build provenance server-side. Returns the first refusal, or null when
+ * the body is ready to write.
  * `originatorInstanceId` is the caller's to apply: a create stamp for post(),
  * the stored-row rule for put().
  */

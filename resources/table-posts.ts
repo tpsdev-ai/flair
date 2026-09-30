@@ -1,6 +1,7 @@
 /**
  * Installs the collection-POST guard (resources/table-post-policy.ts) on every
- * table class in the flair database's table registry when the component loads:
+ * table class in the flair database's table registry that has a `post()`, when
+ * the component loads:
  * on a table whose resource defines no `post()` of its own, a collection POST
  * creates a row only for an administrator or a trusted internal call. The
  * tables are read from the registry, so the class of a table added to the
