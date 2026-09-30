@@ -55,9 +55,10 @@
  *     file untouched (scenario S7: compaction ≠ restart; no rotation, no new
  *     sessionId).
  *
- * PRE-COMPACTION RECORD (flair#2069): the `flair-precompact` hook writes ONE
- * more row into a session's journal just before compaction, in this row shape
- * with meta.hook "PreCompact". It quotes user turns, so unlike the journal
+ * PRE-COMPACTION RECORD (flair#2069): the `flair-precompact` hook writes at
+ * most ONE more row into a session's journal per compaction, just before it
+ * (none when there is nothing to record or the write fails), in this row
+ * shape with meta.hook "PreCompact". It quotes user turns, so unlike the journal
  * lines it is redacted, and it is the one continuity row whose CONTENT
  * flair-session-start shows (first, after a compaction or a restart). Its
  * rules live in ./precompact.ts; nothing above changes for journal rows. That
@@ -595,9 +596,8 @@ function rowsFrom(result: unknown): RawJournalRow[] {
 
 /** Expired rows are excluded HERE, not just by MemoryMaintenance — the reap is
  *  asynchronous, so a row whose expiresAt is past may still be in storage
- *  (scenario S4: it must never reach the agent regardless). Exported for the
- *  pre-compaction record's read (./precompact.ts), which applies the same rule. */
-export function isLive(row: Pick<RawJournalRow, "expiresAt">, now: Date): boolean {
+ *  (scenario S4: it must never reach the agent regardless). */
+function isLive(row: RawJournalRow, now: Date): boolean {
   if (typeof row.expiresAt !== "string" || row.expiresAt === "") return true;
   const expiry = Date.parse(row.expiresAt);
   return !Number.isFinite(expiry) || expiry > now.getTime();

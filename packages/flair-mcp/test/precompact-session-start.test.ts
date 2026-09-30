@@ -67,6 +67,8 @@ class Store {
   readonly paths: string[] = [];
   bootstrapContext = "## Bootstrap context";
   failGet = false;
+  /** What a by-id GET returns as the row's expiry; undefined leaves the field out. */
+  expiresAt: unknown = "2999-01-01T00:00:00.000Z";
 
   client() {
     return {
@@ -82,7 +84,7 @@ class Store {
           if (this.failGet) throw new TypeError("fetch failed");
           const row = this.rows.get(decodeURIComponent(path.slice("/Memory/".length)));
           if (!row) throw Object.assign(new Error("not found"), { status: 404 });
-          return { ...row, expiresAt: "2999-01-01T00:00:00.000Z" };
+          return this.expiresAt === undefined ? { ...row } : { ...row, expiresAt: this.expiresAt };
         }
         return {};
       },
@@ -233,6 +235,20 @@ describe("session start shows the pre-compaction record first (flair#2069)", () 
     store.failGet = true;
     const failed = contextOf(await runHook(JSON.stringify({ cwd: "/repo", source: "compact", session_id: HARNESS }), () => store.client()));
     expect(failed).toBe("## Bootstrap context");
+  });
+
+  test("a record whose expiry is missing or does not parse is not shown: only a provably live row is; boot proceeds", async () => {
+    seedSession(sessionDir, AGENT, HARNESS);
+    const store = new Store();
+    await compact(store);
+    const start = async () =>
+      contextOf(await runHook(JSON.stringify({ cwd: "/repo", source: "compact", session_id: HARNESS }), () => store.client()));
+
+    expect((await start()).startsWith(HEADER_START)).toBe(true); // positive control: a future expiry is shown
+    for (const expiresAt of [undefined, "", "not a date"]) {
+      store.expiresAt = expiresAt;
+      expect({ expiresAt, ctx: await start() }).toEqual({ expiresAt, ctx: "## Bootstrap context" });
+    }
   });
 
   test("a hanging read is bounded by the continuity timeout and degrades to the normal output", async () => {

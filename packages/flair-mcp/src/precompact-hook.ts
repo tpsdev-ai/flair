@@ -2,8 +2,9 @@
 
 /**
  * Flair PreCompact hook for Claude Code (flair#2069): save one bounded
- * continuity record before context is lost, so the next session start shows
- * it first. The record's content, bounds, redaction, storage and dedup are
+ * continuity record before context is lost, when the transcript tail holds
+ * something to record and the write succeeds, so the next session start
+ * shows it first. The record's content, bounds, redaction, storage and dedup are
  * defined in ./precompact.ts; this file is the binary around them.
  *
  * PER RUN
@@ -29,25 +30,29 @@
  * `decision: "block"` object. This binary does neither on any path: it exits 0
  * and prints either nothing or ONE `{"systemMessage": …}` object (a warning
  * Claude Code shows the user). The time budget (FLAIR_PRECOMPACT_TIMEOUT_MS,
- * default 5 s) starts when the process does: the entry point arms a
- * process-level deadline before reading stdin. When it passes, the timer starts
+ * default 5 s) is a process-level deadline armed in main(), after the module
+ * has loaded and the entry-point check (isDirectRun) has run, and before
+ * stdin is read. When it passes, the timer starts
  * finishing whatever asynchronous work is still pending (stdin held open, a
  * slow read, a write in flight): the hook prints the one timeout note and exits
  * 0 once stdout drains, waiting at most a further STDOUT_DRAIN_GRACE_MS (1 s).
  * Synchronous work can delay the timer itself; Claude Code's hook timeout is
  * the outer bound. stdin is read up
- * to STDIN_MAX_BYTES; a larger payload is ignored. Every local file the hook
- * reads is read asynchronously with a size cap checked (fstat) before any byte
- * is read: the transcript by its tail caps, the continuity state file and the
- * marker by SESSION_FILE_MAX_BYTES; a larger file, or one that is not a
- * regular file, is refused with a note. Its local writes are asynchronous too,
- * so none of the hook's own file work can hold the process past the deadline.
+ * to STDIN_MAX_BYTES; a larger payload is ignored. The hook's own local files
+ * (the transcript, the continuity state file and the marker) are read
+ * asynchronously with a size cap checked (fstat) before any byte is read: the
+ * transcript by its tail caps, the state file and the marker by
+ * SESSION_FILE_MAX_BYTES. A state file or marker larger than that, or anything
+ * at those three paths that is not a regular file, is refused with a note.
+ * Its local writes are asynchronous too, so none of the hook's own file work
+ * can hold the process past the deadline.
  * The deadline bounds asynchronous work only: a timer cannot preempt
  * synchronous code, and one local read is synchronous and not this hook's
  * own: flair-client reads the agent's key file synchronously while the client
- * is built. The outer bound on the whole process is Claude Code's own hook
- * `timeout` in the settings entry. What runs before this process starts (the
- * launcher, node's start-up) is outside the budget too.
+ * is built, outside the size caps above. The outer bound on the whole process
+ * is Claude Code's own hook `timeout` in the settings entry. What runs before
+ * main() arms the deadline (the launcher, the runtime's start-up, module
+ * loading, the entry-point check) is outside the budget too.
  *
  * NOTES (the only output)
  * -----------------------
@@ -103,7 +108,7 @@ export const PRECOMPACT_TIMEOUT_CEILING_MS = 15_000;
 /** Upper bound on the hook's stdin (the PreCompact payload is a few hundred bytes). */
 export const STDIN_MAX_BYTES = 256 * 1024;
 
-/** The process-level budget (armed at start; when it passes, finishing starts and the process exits once stdout drains, at most STDOUT_DRAIN_GRACE_MS later):
+/** The process-level budget (armed in main(), before stdin is read; when it passes, finishing starts and the process exits once stdout drains, at most STDOUT_DRAIN_GRACE_MS later):
  *  FLAIR_PRECOMPACT_TIMEOUT_MS when in range, else the default. */
 export function resolvePreCompactBudgetMs(env: Env = process.env): number {
   const raw = readEnvOrUnset(ENV_PRECOMPACT_TIMEOUT_MS, env as NodeJS.ProcessEnv);
