@@ -232,8 +232,11 @@ A connection acts as its principal:
 
 ### Tokens
 
-- An access token lasts 900 seconds (`accessTokenTtl: 900` in the shipped
-  `config.yaml`). A request with an expired or invalid token gets HTTP 401 with
+- With the shipped `config.yaml` (`accessTokenTtl: 900`), an access token from
+  the authorization-code grant, or from refreshing one, lasts 900 seconds. When
+  the headless `client_credentials` grant is enabled, its access tokens last
+  300 seconds unless `mcp.clientCredentials.accessTokenTtl` is set. A request
+  with an expired or invalid token gets HTTP 401 with
   error `invalid_token` and a `WWW-Authenticate: Bearer resource_metadata="…"`
   header.
 - With the shipped `config.yaml`, which does not set
