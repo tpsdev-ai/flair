@@ -777,8 +777,9 @@ export function register(program: Command): void {
       "--cimd-allowed-hosts <hosts>",
       "Comma-separated lowercase hostnames written as mcp.clientIdMetadataDocuments.allowedHosts into the config.yaml " +
         "this command edits on this machine (./config.yaml, else ~/.flair/config.yaml), then read back, before the restart. " +
-        "Refused unless the target's ops API shows it runs from that file on this machine, and for a *.harperfabric.com " +
-        "instance. Without it the list is not changed (shipped: claude.ai,claude.com)",
+        "Without --dry-run, refused unless the target's ops API shows it runs from that file on this machine; --dry-run " +
+        "neither calls nor checks the target and writes nothing. Always refused for a *.harperfabric.com instance. " +
+        "Without it the list is not changed (shipped: claude.ai,claude.com)",
     )
     .option("--signing-key-file <path>", "RS256 signing key PEM file (else ~/.flair/mcp-signing-key.pem)")
     .option("--admin-pass <pass>", "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance")

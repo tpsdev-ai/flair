@@ -272,7 +272,8 @@ export function selectSecretsMechanism(instanceUrl: string, override?: SecretsMe
 // file it already edits for mcp.enabled), and only when the target instance is
 // shown to run from that file (`checkTargetRunsFromConfig`). It refuses the flag
 // everywhere else: a Fabric origin, whose config.yaml is deployed with the
-// component, and any target it cannot match to that file.
+// component, and, outside --dry-run, any target it cannot match to that file.
+// --dry-run neither calls nor checks the target and never writes the list.
 
 /** The config key the flag writes, as operator messages name it. */
 export const CIMD_ALLOWED_HOSTS_CONFIG_KEY = "mcp.clientIdMetadataDocuments.allowedHosts";
@@ -1705,9 +1706,9 @@ export interface EnableMcpParams {
    *  before the restart, and only when `checkTargetRunsFromConfig` shows the
    *  target runs from that file. Refused, before anything changes, for a Fabric
    *  origin, for invalid entries, when that file is missing, cannot be parsed,
-   *  or has no `@harperfast/oauth` → `mcp` block, and when the target is not
-   *  shown to run from it. `dryRun` checks all but the target and writes
-   *  nothing. Unset: the list is not touched. */
+   *  or has no `@harperfast/oauth` → `mcp` block, and (without `dryRun`) when
+   *  the target is not shown to run from it. `dryRun` neither calls nor checks
+   *  the target and writes nothing. Unset: the list is not touched. */
   cimdAllowedHosts?: string[];
   dryRun?: boolean;
   /** Operator confirms the staged secrets are live in the target's process
