@@ -23,8 +23,9 @@
  * agent verifier. From resources/ed25519-auth.ts it uses Flair's header
  * parser (parseTpsEd25519Header), key importer (importEd25519Key) and time
  * window (WINDOW_MS); it builds the canonical payload itself and runs the
- * Ed25519 check with Web Crypto against the fixture agent's PUBLIC key, and
- * answers 401 to anything that does not verify. Unlike Flair's verifier
+ * Ed25519 check with Web Crypto against the fixture agent's PUBLIC key. In
+ * its store mode it answers 401 to anything that does not verify; in its
+ * hang mode it answers nothing at all. Unlike Flair's verifier
  * (resources/agent-auth.ts), it records no nonces (no replay check) and does
  * not check the principal's status. It
  * stores PUT bodies by id (an existing id is updated, as Memory.put upserts).
