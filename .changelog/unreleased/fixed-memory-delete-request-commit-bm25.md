@@ -1,1 +1,0 @@
-- **Memory delete waits for request commit before updating the lexical index.** Request-owned deletes now reach BM25 through the committed change feed, so aborting the request leaves a surviving memory searchable. Context-less deletes still update the warmed index after their owned transaction commits.
