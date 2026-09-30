@@ -66,7 +66,8 @@
  * present (./precompact.ts PRECOMPACT_DEDUP_WINDOW_MS). It quotes user turns, so unlike the journal
  * lines it is redacted, and it is the one continuity row whose CONTENT
  * flair-session-start shows (first, after a compaction or a restart, when the
- * local marker names it). Its rules live in ./precompact.ts; nothing above
+ * local marker names it and the GET returns an eligible live row). Its rules
+ * live in ./precompact.ts; nothing above
  * changes for journal rows. That
  * hook arms a process-level deadline, which can fire only between
  * asynchronous steps, so it reads the state file through

@@ -279,7 +279,7 @@ describe("PreCompact record: acceptance (flair#2069)", () => {
     expect(content).toContain("Standing instructions (quoted from user turns):");
     expect(content).toContain("- From now on, always run the unit lane before pushing.");
     expect(content).toContain("- Never force-push a shared branch.");
-    expect(content).not.toContain("Can you always check CI first?"); // a question is not an instruction
+    expect(content).not.toContain("Can you always check CI first?"); // a sentence ending in "?" is not an instruction
     expect(content).not.toContain("flaky test in the parser suite"); // a plain request is not a standing instruction
     expect(content).toContain("Open tasks:\n- [in_progress] Write the changelog fragment\n- [pending] Fix the flaky parser test");
     expect(content).not.toContain("Read the old issue"); // completed
@@ -661,7 +661,7 @@ describe("PreCompact hook: failures print one note and never block compaction", 
 // ── pieces ──────────────────────────────────────────────────────────────────
 
 describe("PreCompact pieces", () => {
-  test("instruction heuristic: rule words at the start or anywhere; never a question; plain requests skipped", () => {
+  test("instruction heuristic: rule words at the start or anywhere; never a sentence ending in \"?\"; plain requests skipped", () => {
     expect(
       extractInstructions(
         [

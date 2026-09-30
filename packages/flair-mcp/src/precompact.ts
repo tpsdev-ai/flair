@@ -1,7 +1,8 @@
 /**
  * Pre-compaction continuity record (flair#2069): the shared core behind the
  * `flair-precompact` hook binary (./precompact-hook.ts, the write side) and
- * the block `flair-session-start` shows first after a compaction or a restart
+ * the block `flair-session-start` shows first after a compaction or a restart,
+ * when the marker matches and the GET returns an eligible live row
  * (./session-start-hook.ts, the read side).
  *
  * WHY: compaction replaces the conversation with a summary, and what the
@@ -85,7 +86,8 @@
  *
  * SURFACING: unlike journal rows (agent-pull: a count and a tag, never
  * content), this record's CONTENT is shown by flair-session-start, first,
- * framed as a signal to check rather than an instruction. That is the point
+ * when the marker matches and the GET returns an eligible live row, framed as a signal to check
+ * rather than an instruction. That is the point
  * of the record, and it is why the record is bounded and redacted at write
  * time. The hook writes transcript-derived text, and the row can be changed
  * after that, so what is shown is the row as Flair returns it, redacted again
@@ -369,7 +371,8 @@ export async function readTranscriptTail(
  * sentence qualifies when it STARTS with a rule-giving phrase (don't, do not,
  * never, always, stop, avoid, make sure, remember to, from now on, going
  * forward; optionally after "please") or CONTAINS always / never / from now on
- * / going forward / in (the) future. Questions (ending in "?") never qualify.
+ * / going forward / in (the) future. A sentence that ends in "?" never
+ * qualifies; a question that ends otherwise is not recognized as one.
  *
  * Deliberately simple and deterministic. It misses instructions phrased any
  * other way ("I'd rather you ask first", other languages) and it can pick up a

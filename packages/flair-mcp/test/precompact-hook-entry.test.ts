@@ -19,10 +19,14 @@
  * 5,000 ms, so those two must finish before their deadline fires. The
  * held-stdin case must also take at least its budget less 50 ms.
  *
- * The stand-in authenticates the way Flair does: it parses the Authorization
- * header and verifies the Ed25519 signature over the canonical payload with
- * Flair's OWN verifier code (resources/ed25519-auth.ts) against the fixture
- * agent's PUBLIC key, and answers 401 to anything that does not verify. It
+ * The stand-in checks every request's signature, but it is not Flair's full
+ * agent verifier. From resources/ed25519-auth.ts it uses Flair's header
+ * parser (parseTpsEd25519Header), key importer (importEd25519Key) and time
+ * window (WINDOW_MS); it builds the canonical payload itself and runs the
+ * Ed25519 check with Web Crypto against the fixture agent's PUBLIC key, and
+ * answers 401 to anything that does not verify. Unlike Flair's verifier
+ * (resources/agent-auth.ts), it records no nonces (no replay check) and does
+ * not check the principal's status. It
  * stores PUT bodies by id (an existing id is updated, as Memory.put upserts).
  *
  * Spawns the SOURCE entries, not dist/ (see session-start-hook-probe.test.ts:
@@ -101,9 +105,11 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
-/** Flair's own check (resources/agent-auth.ts): header grammar, time window,
- *  then Ed25519 over `id:ts:nonce:METHOD:pathname+search` with the agent's
- *  public key. Only the fixture agent is registered. */
+/** The stand-in's own signature check, modelled on Flair's
+ *  (resources/agent-auth.ts) but not the same: Flair's header parser and time
+ *  window, then Ed25519 over `id:ts:nonce:METHOD:pathname+search` with the
+ *  agent's public key through Flair's key importer and Web Crypto. No replay
+ *  or principal-status check. Only the fixture agent is registered. */
 async function verifyAgentSignature(req: IncomingMessage): Promise<boolean> {
   const parsed = parseTpsEd25519Header(String(req.headers.authorization ?? ""));
   if (!parsed || parsed.agentId !== AGENT || !agentPublicKey) return false;

@@ -195,7 +195,7 @@ Then the CLAUDE.md simplifies to:
 
 When Claude Code compacts a conversation, it replaces the history with a summary, and whatever the summary leaves out is gone from the agent's context: a rule the user gave an hour ago, the open task list, the work in flight. `flair-precompact` is a `PreCompact` hook that saves one bounded record just before that happens (when the end of the transcript holds something to record and the write succeeds), and `flair-session-start` can show the saved record the local marker file names first, when Flair returns it as an eligible live row: when the session continues after the compaction, or when the next session starts after a restart and the marker still names the previous session (see the limits below).
 
-It needs `flair-session-start` installed (`flair hook install`): that hook creates the per-session continuity state the record belongs to, and it is the one that shows the record. `flair hook install` does not write the PreCompact entry, so add it to `~/.claude/settings.json` by hand:
+It needs `flair-session-start` installed (`flair hook install`): that hook creates the per-session continuity state the record belongs to, and it is the one that shows the record, when the marker matches and Flair returns an eligible live row. `flair hook install` does not write the PreCompact entry, so add it to `~/.claude/settings.json` by hand:
 
 ```json
 {
@@ -219,7 +219,7 @@ Swap `my-project` for your agent ID and `<version>` for `flair --version`. With 
 
 What the record holds: text copied from the end of the transcript (no model call, no summary), under fixed section headings, with a status label on each task (taken from the transcript only when it looks like one, at most 20 lowercase letters and underscores, and is not credential-shaped; else `open`) and a tool label (`bash:`, `write:`, `edit:` or `notebook-edit:`) on each in-flight line:
 
-- **Standing instructions**: sentences from the turns the transcript labels as user turns (once the harness markup described below is removed) that start with a rule-giving phrase (don't, do not, never, always, stop, avoid, make sure, remember to, from now on, going forward) or contain always, never, from now on, going forward or in (the) future. Questions are skipped. At most 6, the newest, 200 characters each.
+- **Standing instructions**: sentences from the turns the transcript labels as user turns (once the harness markup described below is removed) that start with a rule-giving phrase (don't, do not, never, always, stop, avoid, make sure, remember to, from now on, going forward) or contain always, never, from now on, going forward or in (the) future. Extracted sentences that end in `?` are skipped. At most 6, the newest, 200 characters each.
 - **Open tasks**: the task tools' list (`TaskCreate`/`TaskUpdate`, and `TodoWrite` when a session has it enabled), minus completed and deleted tasks. At most 8.
 - **In-flight work**: the last 5 file edits and shell commands, one line each (a repeated one included), recorded the way `flair-continuity-capture` records them: a file's path, a shell command's description, never the command itself.
 - **The last assistant message**: its text blocks joined in order, cut to 300 characters.

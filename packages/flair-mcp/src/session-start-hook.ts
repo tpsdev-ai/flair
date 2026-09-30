@@ -143,7 +143,8 @@ interface SessionStartInput {
 // hint (scenario S7 holds by construction).
 //
 // Pre-compaction record (flair#2069): when the PreCompact hook
-// (./precompact-hook.ts) saved a record, this hook shows it FIRST: after a
+// (./precompact-hook.ts) saved a record, this hook shows it FIRST, when the
+// marker matches and the GET returns an eligible live row: after a
 // compaction, the record this harness session saved; after a restart, the
 // one the previous session saved, when the marker still names that session.
 // Which record is decided locally, without a request: the marker file
