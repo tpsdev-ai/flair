@@ -12,12 +12,15 @@
   On a Fabric instance the `fabric-operator-deploy` step failed on every run, so a
   re-run after the operator's restart stopped there again. The step now runs
   self-verify against the public origin first and completes `enable` when it
-  passes; otherwise it reports why and asks for a re-run with
-  `--confirm-secrets-applied` after the restart. A run reaches that step only
-  after `--confirm-secrets-applied` or a yes at the prompt; there, when the
-  secrets were pushed to the instance, it asks for a restart instead of asking
-  to apply the staged file. The Fabric summary no longer says to set
-  `mcp.enabled: true` in `config.yaml` and redeploy, and asks for a restart only
-  when the instance's environment changed.
+  passes. When a response came back but self-verify did not pass, the step
+  reports why and asks for a re-run with `--confirm-secrets-applied` after the
+  restart; if the run pushed the secrets to the instance, it asks for a restart
+  instead of asking to apply the staged file. When the request itself fails, it
+  names the URL it tried and asks the operator to check DNS, HTTPS reachability
+  from this machine and that the instance is running before re-running. A run
+  reaches that step only after `--confirm-secrets-applied` or a yes at the
+  prompt. The Fabric summary no longer says to set `mcp.enabled: true` in
+  `config.yaml` and redeploy, and asks for a restart only when the instance's
+  environment changed.
 
   (Closes #2116)

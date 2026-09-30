@@ -642,6 +642,8 @@ describe("selfVerifyMcpMetadata", () => {
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("404");
     expect(result.detail).toContain("FLAIR_MCP_OAUTH");
+    // A response was read, so this is not the unreachable case.
+    expect(result.unreachable).toBeUndefined();
   });
 
   test("ok:false when the endpoint is unreachable", async () => {
@@ -649,6 +651,8 @@ describe("selfVerifyMcpMetadata", () => {
     const result = await selfVerifyMcpMetadata(ISSUER, { fetchImpl });
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("could not reach");
+    // flair#2116: marked, so a caller can tell "nothing was read" from "read and not active".
+    expect(result.unreachable).toBe(true);
   });
 
   test("ok:false on an issuer mismatch (defense against a spoofed/misrouted response)", async () => {
@@ -1645,7 +1649,7 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
     expect(step.detail).not.toContain("apply the staged secrets");
   });
 
-  test("Fabric: a failed self-verify read never completes enable", async () => {
+  test("Fabric: a failed self-verify read never completes enable, and asks for checks, not activation", async () => {
     const { fetchImpl, calls } = fabricFetch(async () => { throw new Error("ECONNRESET"); });
     const result = await enableMcp(fabricParams(), { fetchImpl });
 
@@ -1653,8 +1657,20 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
     expect(result.failedStep).toBe("fabric-operator-deploy");
     expect(result.pasteBlock).toBeUndefined();
     expect(result.steps.some((s) => s.step === "self-verify")).toBe(false);
-    expect(result.steps.find((s) => s.step === "fabric-operator-deploy")!.detail).toContain("ECONNRESET");
     expect(calls).not.toContain("ops:restart");
+    const detail = result.steps.find((s) => s.step === "fabric-operator-deploy")!.detail;
+    // flair#2116: says what was tried and that it failed …
+    expect(detail).toContain(`the public issuer could not be reached (could not reach ${FABRIC}/.well-known/oauth-authorization-server: ECONNRESET)`);
+    expect(detail).toContain("does not show that the environment is wrong or that a restart is needed");
+    // … gives checks to run …
+    expect(detail).toContain("resolves in DNS");
+    expect(detail).toContain("reach it over HTTPS");
+    expect(detail).toContain("the instance is running in Fabric");
+    expect(detail).toContain("--confirm-secrets-applied");
+    // … and not the activation instruction, which a failed read gives no reason for.
+    expect(detail).not.toContain("To activate");
+    expect(detail).not.toContain("apply the staged secrets");
+    expect(detail).not.toContain("restart the instance");
   });
 
   test("Fabric origin: result includes issuer and resource for status checks", async () => {

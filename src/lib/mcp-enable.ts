@@ -938,6 +938,10 @@ export interface SelfVerifyResult {
    *  whenever the response body parses far enough to check; `undefined`
    *  only when the fetch itself failed or returned non-JSON. */
   cimdSupported?: boolean;
+  /** True only when the request itself failed (DNS, connection, TLS, timeout):
+   *  no response was read, so nothing is known about the surface's state
+   *  (flair#2116). Absent whenever a response came back, whatever its status. */
+  unreachable?: true;
   detail: string;
 }
 
@@ -966,7 +970,7 @@ export async function selfVerifyMcpMetadata(
   try {
     res = await fetchImpl(url, { signal: AbortSignal.timeout(15_000) } as RequestInit);
   } catch (err: any) {
-    return { ok: false, detail: `could not reach ${url}: ${err?.message ?? err}` };
+    return { ok: false, unreachable: true, detail: `could not reach ${url}: ${err?.message ?? err}` };
   }
   if (!res.ok) {
     return {
@@ -1548,7 +1552,17 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
           callbackUrl,
         };
       }
-      const msg = [
+      // A request that failed read nothing: it shows neither that the
+      // environment is wrong nor that a restart is needed, so it gets checks
+      // to run instead of the activation instructions (flair#2116).
+      const msg = live.unreachable
+        ? [
+          `Fabric deployment detected (${host}); the public issuer could not be reached (${live.detail}).`,
+          `A failed request does not show that the environment is wrong or that a restart is needed.`,
+          `Check first that the host in that URL resolves in DNS, that this machine can reach it over HTTPS, and that the instance is running in Fabric.`,
+          `Then re-run \`flair mcp enable\` with the same options plus --confirm-secrets-applied: this step checks ${issuer} again, passes once self-verify does, and says what to apply if the surface answers but is not active.`,
+        ].join(" ")
+        : [
         `Fabric deployment detected (${host}); self-verify on ${issuer} has not passed yet (${live.detail}).`,
         `The @harperfast/oauth block ships in config.yaml with mcp.enabled: \${FLAIR_MCP_OAUTH} (env-referenced, flair#1152) — no config edit is needed.`,
         secretsPushed
