@@ -1,33 +1,40 @@
-// A collection POST never stores an owner or attribution taken from the body.
+// A verified non-admin agent's collection POST stores no owner or attribution
+// taken from the request body.
 //
-// For every table in the flair database, a verified non-admin agent's POST to
-// the collection route `/<Table>/` either is refused and creates no row, or
-// creates a row whose owner is the caller and whose `originatorInstanceId` and
-// `provenance` (where the table declares them) are the server's values, never
-// the body's. A table whose resource defines no post() of its own refuses a
-// non-admin collection POST (resources/table-post-policy.ts); Relationship's
-// post() applies the same preparation as its put().
+// A table whose resource defines no post() of its own refuses a non-admin HTTP
+// collection POST (resources/table-post-policy.ts); Relationship's post()
+// applies the same preparation as its put().
 //
 // Every case runs on two Harpers, one per `authentication.authorizeLocal`
 // setting (on, the harness default; and off), and on each Harper twice: before
 // the least-privilege `flair-agent` Harper user is provisioned and after.
 //   (a) ENUMERATION — every table, read from the database at runtime, with a
-//       body built from the table's declared attributes: owner fields naming
-//       another agent, then the caller; a body-supplied `originatorInstanceId`
-//       and `provenance` in both.
-//   (b) Relationship: a collection POST is created with the caller as owner and
-//       server-side `originatorInstanceId` and `provenance`; a body naming
-//       another agent is refused; an existing id is refused; an anonymous
-//       caller is refused.
+//       body built from the table's declared attributes (plus the values in
+//       VALID_FIELDS that a table's own validation requires): owner fields
+//       naming another agent, then the caller; a body-supplied
+//       `originatorInstanceId` and `provenance` in both. The table is read under
+//       its primary key before and after each POST. Every row the POST wrote
+//       (new or changed, or under the body id or a key the response names) must
+//       have the caller as owner; this instance's `originatorInstanceId` on a
+//       new row and the previous value on an existing one; and not the body's
+//       `provenance`. A successful POST must
+//       have written a row that is found. A table whose own validation refuses
+//       the generated body is checked only for what that refusal wrote.
+//   (b) Relationship: a verified non-admin agent's collection POST is created
+//       with the caller as owner and server-side `originatorInstanceId` and
+//       `provenance`; a body naming another agent is refused; an existing id is
+//       refused; an anonymous caller is refused.
 //   (c) The write routes of the four tables whose rows carry
-//       `originatorInstanceId` (Memory, Relationship, Soul, Agent): a
-//       collection POST, a PUT to a new id and an update of an existing row
-//       each store this instance's own id, never the body's value.
+//       `originatorInstanceId`: for Memory, Relationship and Soul, a collection
+//       POST, a PUT to a new id and a PUT to an existing id; for Agent, a
+//       collection POST and a PATCH. Each stores this instance's own id, never
+//       the body's value.
 //   (d) An administrator's collection POST on a table whose resource defines no
 //       post() still creates the row.
 //
 // Mutation check: remove Relationship's post() and the table POST guard — (a)
-// and (b) go red.
+// and (b) go red. Let Presence's post() take its owner from the body — (a) goes
+// red.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
@@ -75,6 +82,9 @@ const B = mkAgent("tpost-b"); // the verified non-admin caller
 const BODY_ORIGIN = "body-supplied-origin";
 const BODY_TS = "2001-01-01T00:00:00.000Z";
 const OWNER_SHAPED = ["agentId", "authorId", "principalId", "ownerId", "from"];
+// Field values a table's own validation requires, so that its POST succeeds and
+// the row it writes is inspected.
+const VALID_FIELDS: Record<string, Record<string, unknown>> = { Presence: { activity: "idle" } };
 
 const HARPERS = [
   { name: "authorizeLocal on (harness default)", authorizeLocal: undefined },
@@ -115,11 +125,39 @@ for (const config of HARPERS) {
       if (auth === "basic") headers.Authorization = basic();
       else if (auth) headers.Authorization = ed25519Header(auth, method, path);
       const res = await fetch(`${harper.httpURL}${path}`, { method, headers, body: JSON.stringify(body) });
-      return { status: res.status, text: (await res.text()).slice(0, 300) };
+      const raw = await res.text();
+      return { status: res.status, text: raw.slice(0, 300), raw };
+    }
+
+    /** The primary key describe_database reports for a table: the key its rows are written under. */
+    function primaryKeyOf(description: any): string {
+      const d = description ?? {};
+      const declared = (d.attributes ?? []).find((a: any) => a.is_primary_key === true)?.attribute;
+      return String(d.primary_key ?? d.hash_attribute ?? declared ?? "id");
+    }
+
+    /** Every stored row of `table`, keyed by its primary key value. */
+    async function snapshot(table: string, key: string): Promise<Map<string, any>> {
+      const rows = await adminOp({ operation: "search_by_value", database: "flair", table, search_attribute: key, search_value: "*", get_attributes: ["*"] });
+      const out = new Map<string, any>();
+      for (const row of Array.isArray(rows) ? rows : []) out.set(String(row[key]), row);
+      return out;
+    }
+
+    /** The keys a POST response names: a returned id, or the key field or `id` of a returned object. */
+    function responseKeys(raw: string, key: string): string[] {
+      let parsed: unknown;
+      try { parsed = JSON.parse(raw); } catch { return []; }
+      if (typeof parsed === "string" || typeof parsed === "number") return [String(parsed)];
+      if (!parsed || typeof parsed !== "object") return [];
+      return [key, "id"]
+        .map((k) => (parsed as Record<string, unknown>)[k])
+        .filter((v): v is string | number => typeof v === "string" || typeof v === "number")
+        .map(String);
     }
 
     /** A body that is valid for `table`'s declared attributes, with the given owner and body-supplied attribution. */
-    function bodyFor(attributes: any[], id: string, owner: string): Record<string, unknown> {
+    function bodyFor(table: string, attributes: any[], id: string, owner: string): Record<string, unknown> {
       const now = new Date().toISOString();
       const body: Record<string, unknown> = {};
       for (const a of attributes) {
@@ -135,15 +173,23 @@ for (const config of HARPERS) {
         else if (type === "String" || type === "ID") body[name] = `${name}-${id}`;
       }
       if (!("id" in body)) body.id = id;
-      return body;
+      return { ...body, ...(VALID_FIELDS[table] ?? {}) };
     }
 
-    /** What is wrong with a stored row, or null: owner not the caller, or body-supplied attribution kept. */
-    function attributionProblems(table: string, row: any, declared: Set<string>): string[] {
+    /**
+     * What is wrong with a row a POST wrote (`prior` is the row before it, if
+     * any): an owner that is not the caller, an `originatorInstanceId` that is
+     * not this instance's id on a new row or the previous value on an existing
+     * one, or the body's provenance.
+     */
+    function attributionProblems(table: string, row: any, prior: any, declared: Set<string>): string[] {
       const problems: string[] = [];
       const ownerField = OWNER_FIELDS[table];
       if (ownerField && row[ownerField] !== B.id) problems.push(`${ownerField}=${JSON.stringify(row[ownerField])}`);
-      if (declared.has("originatorInstanceId") && row.originatorInstanceId !== LOCAL_INSTANCE) problems.push(`originatorInstanceId=${JSON.stringify(row.originatorInstanceId)}`);
+      const expectedOrigin = prior ? prior.originatorInstanceId : LOCAL_INSTANCE;
+      if (declared.has("originatorInstanceId") && row.originatorInstanceId !== expectedOrigin) {
+        problems.push(`originatorInstanceId=${JSON.stringify(row.originatorInstanceId)}`);
+      }
       if (declared.has("provenance") && JSON.stringify(row.provenance ?? null).includes(BODY_TS)) problems.push("provenance from the body");
       return problems;
     }
@@ -151,24 +197,43 @@ for (const config of HARPERS) {
     function cases(phase: string) {
       const p = `tpost-${tag}-${phase}`;
 
-      test("(a) every table in the database: a non-admin collection POST stores no body-supplied owner or attribution", async () => {
+      test("(a) every table, with a body from its declared attributes: each row a non-admin collection POST writes has the caller as owner and none of the body's attribution", async () => {
         const described = await adminOp({ operation: "describe_database", database: "flair" });
         const tables = Object.keys(described).sort();
         for (const t of ["Relationship", "Memory", "Soul", "Agent"]) expect(tables, `${t} is a table`).toContain(t);
         const found: string[] = [];
+        const inspected = new Set<string>();
         for (const t of tables) {
           const attributes = described[t].attributes ?? [];
           const declared = new Set<string>(attributes.map((a: any) => String(a.attribute)));
+          const key = primaryKeyOf(described[t]);
           for (const [label, owner] of [["another agent as owner", A.id], ["own owner", B.id]] as const) {
             const id = `${p}-${t}-${randomUUID()}`;
-            const r = await send("POST", `/${t}/`, bodyFor(attributes, id, owner), B);
-            const row = await rowIn(t, id);
-            if (!row) continue; // refused, or no row under this id
-            const problems = attributionProblems(t, row, declared);
-            if (problems.length > 0) found.push(`${t} (${label}): POST ${r.status} stored ${problems.join(", ")}`);
+            const before = await snapshot(t, key);
+            const r = await send("POST", `/${t}/`, bodyFor(t, attributes, id, owner), B);
+            const after = await snapshot(t, key);
+            // The rows this POST wrote, under the table's own primary key: every
+            // new or changed row, and any row under the body id or a key the
+            // response names.
+            const written = new Set<string>();
+            for (const [k, row] of after) {
+              if (!before.has(k) || JSON.stringify(before.get(k)) !== JSON.stringify(row)) written.add(k);
+            }
+            for (const k of [id, ...responseKeys(r.raw, key)]) if (after.has(k)) written.add(k);
+            if (r.status >= 200 && r.status < 300) {
+              if (written.size === 0) found.push(`${t} (${label}): POST ${r.status} succeeded, but no row it wrote was found under ${key}`);
+              else inspected.add(t);
+            }
+            for (const k of written) {
+              const problems = attributionProblems(t, after.get(k), before.get(k), declared);
+              if (problems.length > 0) found.push(`${t} (${label}): POST ${r.status} stored ${problems.join(", ")} under ${key}=${k}`);
+            }
           }
         }
         expect(found, `tables: ${tables.join(", ")}`).toEqual([]);
+        // The check reads back successful writes: Presence writes under agentId,
+        // Relationship under the body id.
+        for (const t of ["Presence", "Relationship"]) expect([...inspected], `${t}'s successful POST was inspected`).toContain(t);
       }, 120_000);
 
       test("(b) Relationship: a collection POST is created with the caller as owner and server-side attribution", async () => {
@@ -243,7 +308,7 @@ for (const config of HARPERS) {
       test("(d) an administrator's collection POST on a table whose resource defines no post() still creates the row", async () => {
         const described = await adminOp({ operation: "describe_database", database: "flair" });
         const id = `${p}-peer-${randomUUID()}`;
-        const r = await send("POST", "/Peer/", bodyFor(described.Peer.attributes ?? [], id, B.id), "basic");
+        const r = await send("POST", "/Peer/", bodyFor("Peer", described.Peer.attributes ?? [], id, B.id), "basic");
         expect(r.status, r.text).toBeLessThan(300);
         expect(await rowIn("Peer", id), "row created").not.toBeNull();
       }, 60_000);

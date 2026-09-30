@@ -8,6 +8,7 @@ import {
   inheritedPostRefusal,
   resourceDefinesPost,
   TABLE_POST_GUARD,
+  tablePostGuardGaps,
   unverifiedPostCallerRefusal,
   type PostCaller,
 } from "../../resources/table-post-policy";
@@ -177,5 +178,28 @@ describe("guardInheritedPosts", () => {
   test("a missing registry guards nothing", () => {
     expect(guardInheritedPosts(undefined, { resolveAuth: async () => ADMIN })).toEqual([]);
     expect(guardInheritedPosts(null, { resolveAuth: async () => ADMIN })).toEqual([]);
+  });
+});
+
+describe("tablePostGuardGaps", () => {
+  test("a complete installation has no gaps", () => {
+    const t = makeTables();
+    const tables = { Plain: t.tables.Plain, Other: t.tables.Other };
+    expect(tablePostGuardGaps(tables, guardInheritedPosts(tables, { resolveAuth: async () => ADMIN }))).toEqual([]);
+  });
+
+  test("a missing or empty registry is a gap", () => {
+    for (const tables of [undefined, null, {}]) {
+      expect(tablePostGuardGaps(tables, [])).toEqual(["the flair table registry is missing or empty"]);
+    }
+  });
+
+  test("each entry that is not a table class with a post() is named", () => {
+    const t = makeTables();
+    const gaps = tablePostGuardGaps(t.tables, guardInheritedPosts(t.tables, { resolveAuth: async () => ADMIN }));
+    expect(gaps.sort()).toEqual([
+      "notATable is not a table class with a post() to guard",
+      "nothing is not a table class with a post() to guard",
+    ]);
   });
 });

@@ -22,12 +22,23 @@ const databasesMock = { flair: { Relationship, Instance, Peer } as Record<string
 
 mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: databasesMock, Resource: class {} }));
 
-await import("../../resources/table-posts.ts");
+const loadErrors: string[] = [];
+const consoleError = console.error;
+console.error = (...args: unknown[]) => { loadErrors.push(args.map(String).join(" ")); };
+try {
+  await import("../../resources/table-posts.ts");
+} finally {
+  console.error = consoleError;
+}
 const { internalContext } = await import("../../resources/in-process.ts");
 
 const asAgent = (agentId: string, isAdmin: boolean) => ({ request: { tpsAgent: agentId, tpsAgentIsAdmin: isAdmin } });
 
 describe("table-posts: every table in the registry is guarded at load", () => {
+  test("a complete installation logs no gap", () => {
+    expect(loadErrors.filter((line) => line.includes("collection POST guard"))).toEqual([]);
+  });
+
   test("each table class in databases.flair has its own guarded post()", () => {
     for (const [name, table] of Object.entries(databasesMock.flair)) {
       expect(Object.prototype.hasOwnProperty.call(table, TABLE_POST_GUARD), name).toBe(true);

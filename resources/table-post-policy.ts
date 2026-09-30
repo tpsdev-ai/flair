@@ -1,10 +1,9 @@
 /**
- * A collection POST creates a row through the resource's own `post()`, which
- * applies that resource's create rules: the owner from the authenticated
- * caller, and server-stamped attribution. On a table whose resource defines no
- * `post()` of its own, a collection POST is refused unless the caller is an
- * administrator or a trusted internal call: a verified agent gets 403, a
- * caller without a valid credential 401.
+ * A non-admin HTTP collection POST is served only by a resource's own `post()`,
+ * which applies that resource's own write rules. On a table whose resource
+ * defines no `post()` of its own, a collection POST is refused unless the
+ * caller is an administrator or a trusted internal call: a verified agent gets
+ * 403, a caller without a valid credential 401.
  *
  * ── The seam ────────────────────────────────────────────────────────────────
  * `guardInheritedPosts` gives every table class in the flair database's table
@@ -16,10 +15,14 @@
  *     derived `post()`, and when that override ends in `super.post()` the guard
  *     sees that the resource defines one and lets the call through;
  *   - a resource class without a `post()` of its own reaches the guard directly,
- *     and a non-admin caller is refused before Harper's `create()` runs.
+ *     and a non-admin caller is refused before Harper's `create()` runs;
+ *   - resources/table-posts.ts logs an error at load when the registry is
+ *     missing or empty, or an entry could not be guarded (`tablePostGuardGaps`).
  * test/integration/collection-post-attribution.test.ts reads every table in the
- * database at runtime and fails if a non-admin collection POST stores an owner,
- * `originatorInstanceId` or `provenance` taken from the request body.
+ * database at runtime, sends a collection POST built from the table's declared
+ * attributes as a verified non-admin agent, and checks each row that POST wrote
+ * (found under the table's primary key) for the caller as owner and for
+ * `originatorInstanceId` and `provenance` that are not the body's.
  *
  * This module has no imports, so it is unit-tested directly
  * (test/unit/table-post-policy.test.ts); the dependencies it needs are passed in
@@ -124,4 +127,20 @@ export function guardInheritedPosts(
     guarded.push(name);
   }
   return guarded;
+}
+
+/**
+ * What an installation left unguarded, given the registry and the names
+ * `guardInheritedPosts` returned: a missing or empty registry, or each entry
+ * that is not a table class with a `post()` to guard. Empty when every entry
+ * is guarded.
+ */
+export function tablePostGuardGaps(
+  tables: Record<string, unknown> | null | undefined,
+  guarded: readonly string[],
+): string[] {
+  const names = Object.keys(tables ?? {});
+  if (names.length === 0) return ["the flair table registry is missing or empty"];
+  const done = new Set(guarded);
+  return names.filter((name) => !done.has(name)).map((name) => `${name} is not a table class with a post() to guard`);
 }

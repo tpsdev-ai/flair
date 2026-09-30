@@ -185,12 +185,12 @@ export class Relationship extends (databases as any).flair.Relationship {
 
   /**
    * POST (a collection create). Prepares the body with the same rules as put()
-   * before the row is created: the owner comes from the authenticated agent (a
-   * body that names another agent is refused), the fields are validated and
-   * normalized, provenance is built server-side, and `originatorInstanceId` is
-   * stamped as a create. An id that already exists is refused (409), so a POST
-   * never updates a row. Administrator and trusted internal callers are handled
-   * as in put().
+   * before the row is created. For a verified non-admin agent, the owner is that
+   * agent (a body that names another agent is refused); an administrator or a
+   * trusted internal caller keeps the owner it supplies, as in put(). For every
+   * caller admitted, the fields are validated and normalized, provenance is
+   * built server-side, and `originatorInstanceId` is stamped as a create. An id
+   * that already exists is refused (409), so a POST never updates a row.
    */
   async post(content: any, query?: any) {
     const denial = await prepareRelationshipWrite(this, content, RECORD_TYPES.Relationship.attribution.post);

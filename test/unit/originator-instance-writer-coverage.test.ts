@@ -152,7 +152,8 @@ test("every stamped raw create writer applies the shared rule; dynamic exception
 });
 
 // The four resource writers (Memory, Soul, Agent, Relationship) are checked on
-// their REST create routes, not by source text: see
-// test/integration/collection-post-attribution.test.ts, which sends each
-// collection POST and PUT with a body-supplied originatorInstanceId and reads
-// back the stored value.
+// their REST write routes, not by source text: see
+// test/integration/collection-post-attribution.test.ts, which sends a
+// collection POST to each, a PUT to a new and an existing id for Memory,
+// Relationship and Soul, and a PATCH for Agent, each with a body-supplied
+// originatorInstanceId, and reads back the stored value.
