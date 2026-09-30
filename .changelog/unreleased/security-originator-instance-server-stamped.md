@@ -19,10 +19,11 @@
   `POST /FeedMemories` ingest, `POST /AgentSeed`, and the MCP / IdP principal
   provisioning paths (one shared delegate, `resources/originator-instance.ts`).
 
-  The federation merge path keeps the value carried in the pushed row: it applies
-  rows through the raw table handle, never through a resource's write method, and
-  takes the originator from the record's own authenticated data. That path is an
-  EXCEPTION to the stamping rule, not a client-writable field.
+  The federation merge path applies rows through the raw table handle, never
+  through a resource's write method. It takes the incoming originator only for a
+  new or newer row and otherwise keeps the stored value, and a per-record
+  originator signature is verified when present or when policy requires one. That
+  path is an EXCEPTION to the stamping rule.
   `POST /FederationSync` verifies the batch against the known, non-revoked
   sending peer's pinned key and verifies any record signature against its
   envelope originator's pinned key; an omitted envelope originator defaults to
