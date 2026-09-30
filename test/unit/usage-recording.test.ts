@@ -1,18 +1,22 @@
 /**
- * usage-recording.test.ts — resources/usage-recording.ts's recordCitations()
- * (flair#744 slice A: citation-on-write; flair#775 slice 1: read-scope gate).
+ * usage-recording.test.ts — resources/usage-recording.ts's batch helpers and
+ * ledger read rule: recordCitations() (flair#744 slice A: citation-on-write;
+ * flair#775 slice 1: read-scope gate), recordUsageBatch() (POST /RecordUsage's
+ * batch under the caller's read scope) and isLedgerRowVisible() /
+ * readableLedgerRows() (the MemoryUsage read rule).
  *
  * Pure unit coverage via the `recordFn`/`fetchFn`/`scopeFn` injection seams —
- * no Harper. `recordUsageContribution()` itself (the real ledger-write core,
- * moved unchanged from RecordUsage.ts's former private `_recordOne()`)
- * already has end-to-end coverage via
- * test/integration/record-usage-e2e.test.ts (real Harper); this file covers
- * ONLY recordCitations()'s batch-orchestration contract in isolation: auth
- * gating, validation, dedup+cap, the flair#775 read-scope gate (scope-denied
- * ids dropped on the SAME branch as nonexistent ids, scope resolved once per
- * batch, fail-closed on scope-resolution failure), per-id failure isolation,
- * and that the agentId credited is always the resolved auth context's —
- * never anything derived from the ids/args (flair#744 slice A invariant 4).
+ * no Harper. `recordUsageContribution()` itself (the real ledger-write core)
+ * has end-to-end coverage via test/integration/record-usage-e2e.test.ts (real
+ * Harper) and its read-scope gate is pinned against a table double in
+ * test/unit-isolated/usage-contribution-read-scope.test.ts; this file covers
+ * the batch-orchestration contracts in isolation: auth gating, validation,
+ * dedup+cap, the read-scope gate (scope-denied ids dropped on the SAME branch
+ * as nonexistent ids, scope resolved once per batch, fail-closed on
+ * scope-resolution failure), the predicate handed to the ledger core, per-id
+ * failure isolation, that the agentId credited is always the resolved auth
+ * context's — never anything derived from the ids/args (flair#744 slice A
+ * invariant 4) — and which ledger rows a reader is shown.
  *
  * The scope-gate tests deliberately use the REAL default `scopeFn`
  * (resolveReadScope — pure, no DB access) against fetch doubles, so they
@@ -34,7 +38,7 @@ mock.module("harper", () => ({
   Resource: class {},
 }));
 
-const { recordCitations, MAX_USAGE_IDS_PER_CALL } = await import("../../resources/usage-recording.ts");
+const { recordCitations, recordUsageBatch, isLedgerRowVisible, readableLedgerRows, MAX_USAGE_IDS_PER_CALL } = await import("../../resources/usage-recording.ts");
 
 const CITER_ID = "agt_citer";
 const AGENT: AgentAuthVerdict = { kind: "agent", agentId: CITER_ID, isAdmin: false };
@@ -277,5 +281,161 @@ describe("recordCitations — read-scope gate (flair#775 slice 1)", () => {
     };
     await expect(recordCitations({}, AGENT, ["m1", "m2"], NOW, fn, fetchOrgOpen, failingScope as any)).resolves.toBeUndefined();
     expect(calls).toEqual([]);
+  });
+});
+
+// ─── POST /RecordUsage's batch: the caller's read scope ─────────────────────
+
+interface ScopedCall extends Call {
+  allowed: { ownPrivate: boolean; otherShared: boolean; otherPrivate: boolean; missing: boolean };
+}
+
+/** A recorder double that also evaluates the read-scope predicate it was handed
+ *  against the four record shapes that matter, so a test can assert WHICH rule
+ *  reached the ledger core — not just that one did. */
+function scopeProbingRecorder(): {
+  fn: (ctx: any, agentId: string, memoryId: string, attribution: string | undefined, now: string, canRead: any) => Promise<void>;
+  calls: ScopedCall[];
+} {
+  const calls: ScopedCall[] = [];
+  const fn = async (_ctx: any, agentId: string, memoryId: string, attribution: string | undefined, now: string, canRead: any) => {
+    calls.push({
+      agentId,
+      memoryId,
+      attribution,
+      now,
+      allowed: {
+        ownPrivate: canRead({ agentId, visibility: "private" }),
+        otherShared: canRead({ agentId: "agt_owner", visibility: "shared" }),
+        otherPrivate: canRead({ agentId: "agt_owner", visibility: "private" }),
+        missing: canRead(null),
+      },
+    });
+  };
+  return { fn, calls };
+}
+
+describe("recordUsageBatch — credits under the caller's read scope", () => {
+  it("hands every contribution the caller's own read-scope predicate (own any visibility, others' non-private, never a missing row)", async () => {
+    const { fn, calls } = scopeProbingRecorder();
+    await recordUsageBatch({}, "agt_reporter", ["m1", "m2"], "grounded", NOW, fn);
+    expect(calls.map((c) => c.memoryId)).toEqual(["m1", "m2"]);
+    for (const c of calls) {
+      expect(c.agentId).toBe("agt_reporter");
+      expect(c.attribution).toBe("grounded");
+      expect(c.now).toBe(NOW);
+      expect(c.allowed).toEqual({ ownPrivate: true, otherShared: true, otherPrivate: false, missing: false });
+    }
+  });
+
+  it("resolves the scope exactly once per batch, for the caller", async () => {
+    const { fn, calls } = trackingRecorder();
+    const scopeCalls: string[] = [];
+    const countingScope = async (agentId: string) => {
+      scopeCalls.push(agentId);
+      return { allowedOwners: [agentId], condition: {}, isAllowed: () => true };
+    };
+    await recordUsageBatch({}, "agt_reporter", ["m1", "m2", "m3"], undefined, NOW, fn, countingScope as any);
+    expect(scopeCalls).toEqual(["agt_reporter"]);
+    expect(calls.length).toBe(3);
+  });
+
+  it("a failed scope lookup records nothing — no contribution is attempted, and it resolves cleanly", async () => {
+    const { fn, calls } = trackingRecorder();
+    const failingScope = async () => {
+      throw new Error("simulated scope-resolution failure");
+    };
+    await expect(recordUsageBatch({}, "agt_reporter", ["m1", "m2"], undefined, NOW, fn, failingScope as any)).resolves.toBeUndefined();
+    expect(calls).toEqual([]);
+  });
+
+  it("one contribution throwing still attempts every other id, and the batch never throws", async () => {
+    const seen: string[] = [];
+    const throwingFn = async (_ctx: any, _agentId: string, memoryId: string) => {
+      seen.push(memoryId);
+      if (memoryId === "bad") throw new Error("simulated ledger failure");
+    };
+    await expect(recordUsageBatch({}, "agt_reporter", ["m1", "bad", "m2"], undefined, NOW, throwingFn as any)).resolves.toBeUndefined();
+    expect(seen).toEqual(["m1", "bad", "m2"]);
+  });
+});
+
+describe("recordCitations — the ledger core receives the writer's read-scope predicate", () => {
+  it("each credited id is handed the writer's own isAllowed", async () => {
+    const { fn, calls } = scopeProbingRecorder();
+    await recordCitations({}, AGENT, ["m1"], NOW, fn, fetchOrgOpen);
+    expect(calls.length).toBe(1);
+    expect(calls[0].agentId).toBe(CITER_ID);
+    expect(calls[0].allowed).toEqual({ ownPrivate: true, otherShared: true, otherPrivate: false, missing: false });
+  });
+});
+
+// ─── Non-admin MemoryUsage reads: a row is shown only about a readable memory
+
+const READER = "agt_reader";
+const ledgerRow = (memoryId: string | undefined) => ({ id: `${READER}:${memoryId}`, agentId: READER, memoryId });
+const memoryFixtures: Record<string, { id: string; agentId: string; visibility?: string }> = {
+  "own-private": { id: "own-private", agentId: READER, visibility: "private" },
+  "other-shared": { id: "other-shared", agentId: "agt_owner", visibility: "shared" },
+  "other-legacy": { id: "other-legacy", agentId: "agt_owner" },
+  "other-private": { id: "other-private", agentId: "agt_owner", visibility: "private" },
+};
+const fetchFixture = async (_ctx: any, memoryId: string) => {
+  if (memoryId === "fetch-throws") throw new Error("simulated Memory read failure");
+  return memoryFixtures[memoryId] ?? null;
+};
+
+describe("isLedgerRowVisible — the by-id ledger read rule", () => {
+  it("shows a row about the reader's own memory (any visibility) and about another agent's non-private memory", async () => {
+    for (const id of ["own-private", "other-shared", "other-legacy"]) {
+      expect(await isLedgerRowVisible({}, READER, ledgerRow(id), undefined, fetchFixture), id).toBe(true);
+    }
+  });
+
+  it("hides a row about another agent's private memory — the same answer as a row about a missing memory", async () => {
+    expect(await isLedgerRowVisible({}, READER, ledgerRow("other-private"), undefined, fetchFixture)).toBe(false);
+    expect(await isLedgerRowVisible({}, READER, ledgerRow("missing"), undefined, fetchFixture)).toBe(false);
+  });
+
+  it("a failed Memory read, a row without a memoryId, and a failed scope lookup all hide the row", async () => {
+    expect(await isLedgerRowVisible({}, READER, ledgerRow("fetch-throws"), undefined, fetchFixture)).toBe(false);
+    expect(await isLedgerRowVisible({}, READER, ledgerRow(undefined), undefined, fetchFixture)).toBe(false);
+    const failingScope = async () => {
+      throw new Error("simulated scope-resolution failure");
+    };
+    expect(await isLedgerRowVisible({}, READER, ledgerRow("own-private"), failingScope as any, fetchFixture)).toBe(false);
+  });
+});
+
+describe("readableLedgerRows — the collection ledger read rule", () => {
+  async function collect(it: AsyncIterable<any>): Promise<string[]> {
+    const out: string[] = [];
+    for await (const r of it) out.push(r.memoryId);
+    return out;
+  }
+
+  it("yields only rows about readable memories, in source order", async () => {
+    const rows = ["other-private", "own-private", "missing", "other-shared", "fetch-throws", "other-legacy"].map(ledgerRow);
+    expect(await collect(readableLedgerRows({}, READER, rows, undefined, fetchFixture))).toEqual([
+      "own-private",
+      "other-shared",
+      "other-legacy",
+    ]);
+  });
+
+  it("accepts an async source (Harper's search result shape)", async () => {
+    async function* source() {
+      yield ledgerRow("other-private");
+      yield ledgerRow("own-private");
+    }
+    expect(await collect(readableLedgerRows({}, READER, source(), undefined, fetchFixture))).toEqual(["own-private"]);
+  });
+
+  it("a failed scope lookup yields nothing", async () => {
+    const failingScope = async () => {
+      throw new Error("simulated scope-resolution failure");
+    };
+    const rows = ["own-private", "other-shared"].map(ledgerRow);
+    expect(await collect(readableLedgerRows({}, READER, rows, failingScope as any, fetchFixture))).toEqual([]);
   });
 });
