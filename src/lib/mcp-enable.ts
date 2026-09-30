@@ -1205,10 +1205,12 @@ export async function provisionIdpIdentityMapping(
     //
     // 404 in particular almost always means the request reached the SERVED
     // origin instead of the ops API: the flair REST component owns `/` there and
-    // answers 404. Say that, and name the flag that fixes it.
+    // answers 404. Say that, and say where the address came from: `enable` has
+    // no option to point its ops calls elsewhere (flair#2116: this hint used to
+    // name an --ops-url flag that does not exist).
     const hint =
       findRes.status === 404
-        ? ` — a 404 here usually means ${opsUrl} is the served origin rather than the ops API (the REST component owns "/" and answers 404). The ops API is a DIFFERENT port (conventionally ${HOSTED_OPS_PORT} on hosted instances) and is not derivable from the served port. Pass --ops-url <url> to point at it explicitly.`
+        ? ` — a 404 here usually means ${opsUrl} is the served origin rather than the ops API (the REST component owns "/" and answers 404). The ops API is a DIFFERENT port (conventionally ${HOSTED_OPS_PORT} on hosted instances) and is not derivable from the served port. \`flair mcp enable\` derives this address from the instance URL (--instance or FLAIR_URL: same host, port ${HOSTED_OPS_PORT}) and has no option to override it, so the target's operations API has to answer at ${opsUrl}.`
         : "";
     throw new Error(
       `Identity mapping: the ops API call to ${opsUrl} failed (HTTP ${findRes.status})${hint}${text ? `: ${text}` : ""}`,
@@ -1397,6 +1399,10 @@ export interface SelfVerifyResult {
    *  whenever the response body parses far enough to check; `undefined`
    *  only when the fetch itself failed or returned non-JSON. */
   cimdSupported?: boolean;
+  /** True only when the request itself failed (DNS, connection, TLS, timeout):
+   *  no response was read, so nothing is known about the surface's state
+   *  (flair#2116). Absent whenever a response came back, whatever its status. */
+  unreachable?: true;
   detail: string;
 }
 
@@ -1425,7 +1431,7 @@ export async function selfVerifyMcpMetadata(
   try {
     res = await fetchImpl(url, { signal: AbortSignal.timeout(15_000) } as RequestInit);
   } catch (err: any) {
-    return { ok: false, detail: `could not reach ${url}: ${err?.message ?? err}` };
+    return { ok: false, unreachable: true, detail: `could not reach ${url}: ${err?.message ?? err}` };
   }
   if (!res.ok) {
     return {
@@ -1890,16 +1896,19 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     }
 
     // ── @harperfast/oauth config (flair#1136: shipped in config.yaml) ──────
-    // The block ships uncommented with mcp.enabled: false (inert default).
+    // The block ships uncommented with mcp.enabled: ${FLAIR_MCP_OAUTH}
+    // (flair#1152), so the environment turns it on. This step writes nothing;
+    // it reports the block config.yaml ships (flair#2116: it used to print
+    // false), and a --cimd-allowed-hosts value only as requested, never as shipped.
     // set_configuration is removed — the block lives in the component's own
     // config.yaml, not in harperdb-config.yaml where Fabric would wipe it.
-    const cimdAllowedHostsNote = cimdAllowedHosts
-      ? "handled by the cimd-allowed-hosts step"
-      : `not changed by this run, shipped default ${JSON.stringify(DEFAULT_CIMD_ALLOWED_HOSTS)}`;
     currentStep = "config-block";
     push(true,
-      `@harperfast/oauth config ships in config.yaml (mcp.enabled=false, ` +
-        `dynamicClientRegistration.enabled=false, clientIdMetadataDocuments.allowedHosts: ${cimdAllowedHostsNote})`,
+      `@harperfast/oauth config ships in config.yaml; this step writes nothing (mcp.enabled=${MCP_ENABLED_ENV_REFERENCE}, read from the instance environment; ` +
+        `dynamicClientRegistration.enabled=false, clientIdMetadataDocuments.allowedHosts=${JSON.stringify(DEFAULT_CIMD_ALLOWED_HOSTS)})` +
+        (cimdAllowedHosts
+          ? `; --cimd-allowed-hosts ${JSON.stringify(cimdAllowedHosts)} was requested; the cimd-allowed-hosts step above says whether and when this run writes it`
+          : ""),
     );
 
     // ── IdP OAuth-app credential intake ───────────────────────────────────────
@@ -2054,27 +2063,66 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     }
 
     // ── flair#1136: config delivery is now SHIPPED in config.yaml ────────────
-    // The @harperfast/oauth block ships uncommented with mcp.enabled: false
-    // (inert default). set_configuration is REMOVED — Fabric regenerates
-    // harperdb-config.yaml on every container restart, so writing the block
-    // there was always a race against the next deploy. Instead:
+    // The @harperfast/oauth block ships uncommented with mcp.enabled:
+    // ${FLAIR_MCP_OAUTH} (flair#1152). set_configuration is REMOVED — Fabric
+    // regenerates harperdb-config.yaml on every container restart, so writing
+    // the block there was always a race against the next deploy. Instead:
     //
-    //   - Standalone-local: flip mcp.enabled to true in the local config.yaml,
-    //     restart, self-verify.
-    //   - Fabric: the operator must set mcp.enabled: true in their deployed
-    //     component config.yaml. Report the requirement LOUDLY — never report
-    //     success with /mcp still dark.
+    //   - Standalone-local: set mcp.enabled to the env reference in the local
+    //     config.yaml (updateLocalConfigMcpEnabled), restart, self-verify.
+    //   - Fabric: `enable` does not restart the instance; the operator applies
+    //     the environment and restarts. Report the requirement LOUDLY — never
+    //     report success with /mcp still dark.
     const isFabric = isFabricOrigin(params.instance);
 
     if (isFabric) {
       // ── Fabric: operator-deploy requirement ──────────────────────────────
       currentStep = "fabric-operator-deploy";
-      const msg = [
-        `Fabric deployment detected (${new URL(params.instance).hostname}).`,
+      const host = new URL(params.instance).hostname;
+      // flair#2116: this step used to fail unconditionally, so a re-run after
+      // the operator's restart ended here with the same instructions, forever.
+      // Ask the public origin first. Only self-verify passing ends this step
+      // with success; a failed or unusable read fails it as before.
+      const live = await selfVerifyMcpMetadata(issuer, { fetchImpl: deps.fetchImpl });
+      if (live.ok) {
+        push(true,
+          `Fabric deployment (${host}): the /mcp OAuth surface already passes self-verify on ${issuer}. ` +
+            `If this run changed a secret value (a new IdP client secret, for example), restart the instance so its process picks the new value up.`,
+        );
+        currentStep = "self-verify";
+        push(true, live.detail);
+        const resource = `${issuer}/mcp`;
+        return {
+          ok: true,
+          dryRun: false,
+          steps,
+          issuer,
+          resource,
+          pasteBlock: buildClaudePasteBlock(resource),
+          secretsMechanism: secretsResult.mechanism,
+          secretsPath: secretsResult.path,
+          signingKeyFilePath: keyResult.path,
+          callbackUrl,
+        };
+      }
+      // A request that failed read nothing: it shows neither that the
+      // environment is wrong nor that a restart is needed, so it gets checks
+      // to run instead of the activation instructions (flair#2116).
+      const msg = live.unreachable
+        ? [
+          `Fabric deployment detected (${host}); the public issuer could not be reached (${live.detail}).`,
+          `A failed request does not show that the environment is wrong or that a restart is needed.`,
+          `Check first that the host in that URL resolves in DNS, that this machine can reach it over HTTPS, and that the instance is running in Fabric.`,
+          `Then re-run \`flair mcp enable\` with the same options plus --confirm-secrets-applied: this step checks ${issuer} again, passes once self-verify does, and says what to apply if the surface answers but is not active.`,
+        ].join(" ")
+        : [
+        `Fabric deployment detected (${host}); self-verify on ${issuer} has not passed yet (${live.detail}).`,
         `The @harperfast/oauth block ships in config.yaml with mcp.enabled: \${FLAIR_MCP_OAUTH} (env-referenced, flair#1152) — no config edit is needed.`,
-        `To activate: apply the staged secrets (FLAIR_MCP_OAUTH=true among them) to the instance's environment (Fabric env), then restart the instance.`,
+        secretsPushed
+          ? `To activate: the secrets were pushed to the instance above (FLAIR_MCP_OAUTH=true among them); restart the instance.`
+          : `To activate: apply the staged secrets (FLAIR_MCP_OAUTH=true among them) to the instance's environment (Fabric env), then restart the instance.`,
         `Deploys can no longer revert the choice — it lives in the environment, not the packed file.`,
-        `Then re-run \`flair mcp enable\` — earlier steps are idempotent and will be reused.`,
+        `Then re-run \`flair mcp enable\` with the same options plus --confirm-secrets-applied: this step checks ${issuer} again and passes once self-verify does.`,
       ].join(" ");
       push(false, msg);
       return {

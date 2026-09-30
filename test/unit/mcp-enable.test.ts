@@ -580,17 +580,22 @@ describe("provisionIdpIdentityMapping", () => {
     expect(calls).toHaveLength(1);
   });
 
-    test("a 404 names the served-origin cause and the flag that fixes it", async () => {
+    test("a 404 names the served-origin cause and the address the command derived", async () => {
       // The failure an operator actually hit: ops calls sent to the served
       // origin, where the flair REST component owns "/" and answers 404. The old
       // message pointed at principals; this one has to point at the port.
       const { fetchImpl } = mockOpsFetch({ failFind: true, failFindStatus: 404 });
-      await expect(
-        provisionIdpIdentityMapping(
-          { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
-          { fetchImpl },
-        ),
-      ).rejects.toThrow(/served origin rather than the ops API/);
+      const err: Error = await provisionIdpIdentityMapping(
+        { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
+        { fetchImpl },
+      ).then(() => { throw new Error("expected a throw"); }, (e: Error) => e);
+      expect(err.message).toMatch(/served origin rather than the ops API/);
+      // flair#2116: the remedy used to be "Pass --ops-url <url>", a flag
+      // `flair mcp enable` does not have. It now names where the address came
+      // from and the address itself.
+      expect(err.message).not.toContain("--ops-url");
+      expect(err.message).toContain("has no option to override it");
+      expect(err.message).toContain("answer at https://flair.example.com:9925/");
     });
 });
 
@@ -638,6 +643,8 @@ describe("selfVerifyMcpMetadata", () => {
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("404");
     expect(result.detail).toContain("FLAIR_MCP_OAUTH");
+    // A response was read, so this is not the unreachable case.
+    expect(result.unreachable).toBeUndefined();
   });
 
   test("ok:false when the endpoint is unreachable", async () => {
@@ -645,6 +652,8 @@ describe("selfVerifyMcpMetadata", () => {
     const result = await selfVerifyMcpMetadata(ISSUER, { fetchImpl });
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("could not reach");
+    // flair#2116: marked, so a caller can tell "nothing was read" from "read and not active".
+    expect(result.unreachable).toBe(true);
   });
 
   test("ok:false on an issuer mismatch (defense against a spoofed/misrouted response)", async () => {
@@ -859,6 +868,49 @@ describe("enableMcp — the confirm-secrets-applied gate", () => {
     expect(result.ok).toBe(false);
   });
 });
+
+describe("enableMcp — config-block step (flair#2116)", () => {
+  test("reports the shipped block: mcp.enabled env reference (not false), DCR off and the allowed hosts, as in the repo's config.yaml", async () => {
+    const { fetchImpl } = fullMockFetch();
+    const result = await enableMcp({ ...BASE_PARAMS, ...tempPaths(), dryRun: true }, { fetchImpl });
+    const step = result.steps.find((s) => s.step === "config-block");
+    expect(step?.ok).toBe(true);
+    expect(step!.detail).toContain("this step writes nothing");
+    expect(step!.detail).toContain("mcp.enabled=${FLAIR_MCP_OAUTH}");
+    expect(step!.detail).not.toContain("mcp.enabled=false");
+    // Every field it reports as shipped is the one the shipped component config carries.
+    const mcp = shippedMcpBlock();
+    expect(step!.detail).toContain(`mcp.enabled=${mcp.enabled}`);
+    expect(step!.detail).toContain(`dynamicClientRegistration.enabled=${mcp.dynamicClientRegistration.enabled}`);
+    expect(step!.detail).toContain(`clientIdMetadataDocuments.allowedHosts=${JSON.stringify(mcp.clientIdMetadataDocuments.allowedHosts)})`);
+    expect(step!.detail).not.toContain("--cimd-allowed-hosts");
+  });
+
+  test("labels --cimd-allowed-hosts as requested and points to the cimd-allowed-hosts step above, never as the shipped list (flair#2116)", async () => {
+    const { fetchImpl } = fullMockFetch();
+    const result = await enableMcp(
+      { ...BASE_PARAMS, ...tempPaths(), dryRun: true, cimdAllowedHosts: ["example.com"] },
+      { fetchImpl },
+    );
+    const step = result.steps.find((s) => s.step === "config-block")!;
+    const shippedHosts = JSON.stringify(shippedMcpBlock().clientIdMetadataDocuments.allowedHosts);
+    expect(step.detail).toContain(`clientIdMetadataDocuments.allowedHosts=${shippedHosts})`);
+    expect(step.detail).not.toContain('allowedHosts=["example.com"]');
+    expect(step.detail).toContain(
+      '--cimd-allowed-hosts ["example.com"] was requested; the cimd-allowed-hosts step above says whether and when this run writes it',
+    );
+    // "above": the step the pointer names ran, and was reported, before this one.
+    const cimdStep = result.steps.findIndex((s) => s.step === "cimd-allowed-hosts");
+    expect(cimdStep).toBeGreaterThanOrEqual(0);
+    expect(cimdStep).toBeLessThan(result.steps.indexOf(step));
+  });
+});
+
+/** The `@harperfast/oauth` → `mcp` block of the repo's shipped config.yaml. */
+function shippedMcpBlock(): any {
+  const doc = yaml.load(readFileSync(join(import.meta.dir, "..", "..", "config.yaml"), "utf8")) as any;
+  return doc["@harperfast/oauth"].mcp;
+}
 
 describe("enableMcp — full happy path", () => {
   test("runs every step in order and returns a working paste block with no DCR call anywhere", async () => {
@@ -1530,6 +1582,124 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
     const byStep = Object.fromEntries(result.steps.map((s) => [s.step, s.ok]));
     expect(byStep["secrets-provisioning"]).toBe(true);
     expect(byStep["identity-mapping"]).toBe(true);
+  });
+
+  // flair#2116: the step used to fail unconditionally, so every re-run after
+  // the operator's restart ended at it with the same instructions.
+  const FABRIC = "https://my-flair.harperfabric.com";
+  const fabricParams = () => ({
+    instance: FABRIC,
+    idpClientId: "client-id",
+    idpClientSecret: "client-secret",
+    idpSubject: "octocat",
+    adminUser: "admin",
+    adminPass: "pw",
+    signingKeyFilePath: join(dir, "signing-key.pem"),
+    secretsStagingPath: join(dir, "secrets.env"),
+    confirmSecretsApplied: true,
+  });
+  const fabricFetch = (wellKnown: () => Promise<Response>, ops?: (body: any) => Response | null) => {
+    const calls: string[] = [];
+    const creds = credentialTable();
+    const fetchImpl = (async (url: any, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (urlStr === `${FABRIC}/.well-known/oauth-authorization-server`) {
+        calls.push("self-verify");
+        return wellKnown();
+      }
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      calls.push(`ops:${body.operation ?? urlStr}`);
+      const custom = ops?.(body);
+      if (custom) return custom;
+      if (body.operation === "search_by_value") return new Response(JSON.stringify([{ id: "self" }]), { status: 200 });
+      const credRes = creds.handle(body);
+      if (credRes) return credRes;
+      return new Response(JSON.stringify({ message: "ok" }), { status: 200 });
+    }) as typeof fetch;
+    return { fetchImpl, calls };
+  };
+
+  test("Fabric re-run once the operator has restarted: the step passes on self-verify and enable completes", async () => {
+    const live = {
+      ...CIMD_METADATA,
+      issuer: FABRIC,
+      registration_endpoint: undefined,
+      token_endpoint: `${FABRIC}/oauth/mcp/token`,
+    };
+    const { fetchImpl, calls } = fabricFetch(async () => new Response(JSON.stringify(live), { status: 200 }));
+    const result = await enableMcp(fabricParams(), { fetchImpl });
+
+    expect(result.ok).toBe(true);
+    expect(result.failedStep).toBeUndefined();
+    expect(result.steps.every((s) => s.ok)).toBe(true);
+    expect(result.steps.map((s) => s.step).slice(-2)).toEqual(["fabric-operator-deploy", "self-verify"]);
+    const step = result.steps.find((s) => s.step === "fabric-operator-deploy")!;
+    expect(step.detail).toContain(`already passes self-verify on ${FABRIC}`);
+    expect(result.pasteBlock).toContain(`${FABRIC}/mcp`);
+    // Still never restarts a Fabric instance.
+    expect(calls).not.toContain("ops:restart");
+    expect(calls).toContain("self-verify");
+  });
+
+  test("Fabric first run: the step says self-verify has not passed, why, and what the re-run needs", async () => {
+    const { fetchImpl } = fabricFetch(async () => new Response("Not found", { status: 404 }));
+    const result = await enableMcp(fabricParams(), { fetchImpl });
+
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("fabric-operator-deploy");
+    const step = result.steps.find((s) => s.step === "fabric-operator-deploy")!;
+    expect(step.detail).toContain("self-verify on https://my-flair.harperfabric.com has not passed yet");
+    expect(step.detail).toContain("returned HTTP 404");
+    // Nothing was pushed (the capability probe found no env-secrets support), so the staged file is the remedy.
+    expect(step.detail).toContain("apply the staged secrets");
+    expect(step.detail).toContain("--confirm-secrets-applied");
+    expect(step.detail).not.toContain("earlier steps are idempotent");
+  });
+
+  test("Fabric first run after an env-secrets push: the step says to restart, not to apply the staged file", async () => {
+    const { publicKey } = generateRsaSigningKeyPair();
+    const { fetchImpl } = fabricFetch(
+      async () => new Response("Not found", { status: 404 }),
+      (body) => {
+        if (body.operation === "get_secrets_public_key") return new Response(JSON.stringify({ public_key: publicKey }), { status: 200 });
+        if (body.operation === "set_secret") return new Response("{}", { status: 200 });
+        if (body.operation === "search_by_value" && body.table === "hdb_secret") {
+          return new Response(JSON.stringify([{ name: body.search_value, processEnv: true }]), { status: 200 });
+        }
+        return null;
+      },
+    );
+    const result = await enableMcp(fabricParams(), { fetchImpl });
+
+    expect(result.failedStep).toBe("fabric-operator-deploy");
+    expect(result.steps.find((s) => s.step === "secrets-provisioning")!.detail).toContain("pushed to the target");
+    const step = result.steps.find((s) => s.step === "fabric-operator-deploy")!;
+    expect(step.detail).toContain("the secrets were pushed to the instance above");
+    expect(step.detail).not.toContain("apply the staged secrets");
+  });
+
+  test("Fabric: a failed self-verify read never completes enable, and asks for checks, not activation", async () => {
+    const { fetchImpl, calls } = fabricFetch(async () => { throw new Error("ECONNRESET"); });
+    const result = await enableMcp(fabricParams(), { fetchImpl });
+
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("fabric-operator-deploy");
+    expect(result.pasteBlock).toBeUndefined();
+    expect(result.steps.some((s) => s.step === "self-verify")).toBe(false);
+    expect(calls).not.toContain("ops:restart");
+    const detail = result.steps.find((s) => s.step === "fabric-operator-deploy")!.detail;
+    // flair#2116: says what was tried and that it failed …
+    expect(detail).toContain(`the public issuer could not be reached (could not reach ${FABRIC}/.well-known/oauth-authorization-server: ECONNRESET)`);
+    expect(detail).toContain("does not show that the environment is wrong or that a restart is needed");
+    // … gives checks to run …
+    expect(detail).toContain("resolves in DNS");
+    expect(detail).toContain("reach it over HTTPS");
+    expect(detail).toContain("the instance is running in Fabric");
+    expect(detail).toContain("--confirm-secrets-applied");
+    // … and not the activation instruction, which a failed read gives no reason for.
+    expect(detail).not.toContain("To activate");
+    expect(detail).not.toContain("apply the staged secrets");
+    expect(detail).not.toContain("restart the instance");
   });
 
   test("Fabric origin: result includes issuer and resource for status checks", async () => {
