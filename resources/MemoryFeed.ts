@@ -239,14 +239,14 @@ export class FeedMemories extends Resource {
   }
 
   /**
-   * The memory feed applies the ordinary Memory read rule to every event:
-   * a non-admin agent receives a record only when
-   * `resolveReadScope(agentId).isAllowed(record)` allows it, the same predicate
-   * Memory.get()/search() use (its own records at any visibility, plus every
-   * other agent's non-private records). Admin agents and trusted internal
-   * calls are unfiltered, as before. The request object for a scoped
-   * subscription is built here, so no caller-supplied option (rawEvents,
-   * eventFilter, a filter of its own) reaches it.
+   * A non-admin subscriber receives a Memory event only when
+   * `resolveReadScope(agentId).isAllowed(record)` allows the record the event
+   * is decided from: the predicate Memory.get()/search() use (the reader's own
+   * records at any visibility, plus every other agent's non-private records).
+   * Admin agents and trusted internal calls are unfiltered, as before. The
+   * request object for a scoped subscription is built here, so no
+   * caller-supplied option (rawEvents, eventFilter, a filter of its own)
+   * reaches it.
    *
    * Two layers decide what a non-admin subscriber receives:
    *
@@ -259,13 +259,14 @@ export class FeedMemories extends Resource {
    *    a raw event) is withheld from a filtered subscriber. This layer holds
    *    only where the host Harper honours `rowFilter`.
    *
-   * 2. The loop below, which does not depend on `rowFilter` or on the shape of
-   *    the event: see readableRowEvent(). Only a `put`/`invalidate` event
-   *    carrying a row object can be delivered. When that row carries both
-   *    fields the predicate reads (`agentId`, `visibility`), the predicate
-   *    decides from them; otherwise the stored row is re-read by the event id
-   *    and the predicate decides from the stored row. A re-read that fails, or
-   *    returns no Memory row, withholds the event.
+   * 2. The loop below (see readableRowEvent()), which does not rely on
+   *    `rowFilter`. It delivers only a `put` or `invalidate` event whose value
+   *    is an object; every other event is withheld. When that object carries a
+   *    string `agentId` and a defined `visibility`, the predicate decides from
+   *    those two fields of the event. Otherwise the stored row is re-read by
+   *    the event id and the predicate decides from the stored row; the event is
+   *    withheld when it has no id, when the re-read throws, or when the re-read
+   *    returns anything other than an object with a string `agentId`.
    */
   async *connect(target: any, incomingMessages: any) {
     const auth = await resolveAgentAuth((this as any).getContext?.());
@@ -302,15 +303,17 @@ export class FeedMemories extends Resource {
 /**
  * The scoped memory feed's second layer: may this event reach the reader?
  *
- * - Only a `put` or `invalidate` event carrying a row object is a candidate;
- *   every other event (a delete, a message, anything without a row) is
- *   withheld.
- * - The read predicate reads `agentId` and `visibility`. If the event's row
- *   carries both, the predicate decides from them.
- * - Otherwise (a partial row, or a row stored without a `visibility` field) the
- *   AUTHORITATIVE stored row is re-read by the event id, and the predicate
- *   decides from that row. A re-read that throws, or that returns anything but
- *   a Memory row (no row, no `agentId`), withholds the event.
+ * - Only a `put` or `invalidate` event whose value is an object is a
+ *   candidate; every other event (a delete, a message, a `put` without an
+ *   object value) is withheld.
+ * - The read predicate reads `agentId` and `visibility`. If the event's value
+ *   carries a string `agentId` and a defined `visibility`, the predicate
+ *   decides from those two fields.
+ * - Otherwise (a partial value, or a row stored without a `visibility` field)
+ *   the stored row is re-read by the event id, and the predicate decides from
+ *   the stored row. The event is withheld when it has no id, when the re-read
+ *   throws, or when the re-read returns anything other than an object with a
+ *   string `agentId`.
  *
  * The event itself is what is delivered; the stored row is only the input to
  * the decision.

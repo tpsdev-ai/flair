@@ -1,13 +1,15 @@
 /**
  * FeedMemories.connect(): the loop that decides what a non-admin subscriber
- * receives does not depend on Harper's `rowFilter` or on the shape of the
- * event. Isolated: owns the harper mock for MemoryFeed.ts.
+ * receives, checked without Harper's `rowFilter`. Isolated: owns the harper
+ * mock for MemoryFeed.ts.
  *
  * The mocked table subscription IGNORES the `rowFilter` it is given and yields
  * the crafted events exactly as listed, as a host Harper that does not honour
- * `rowFilter` would. Every assertion below is therefore about the second layer
- * alone. The real-Harper behaviour of both layers together is covered by
- * test/integration/feed-read-scope.test.ts.
+ * `rowFilter` would. Every assertion below is therefore about the loop alone:
+ * which events it delivers (a `put`/`invalidate` whose value is an object),
+ * when it decides from the event's own `agentId` and `visibility`, and when it
+ * re-reads the stored row by id instead. The real-Harper behaviour of both
+ * layers together is covered by test/integration/feed-read-scope.test.ts.
  */
 import { describe, expect, test, beforeEach, mock } from "bun:test";
 
@@ -102,7 +104,7 @@ describe("FeedMemories.connect: partial events are decided from the stored row",
     expect(reads).toEqual(["w-shared"]);
   });
 
-  test("a partial put whose stored row is gone, or is not a Memory row, is not delivered", async () => {
+  test("a partial put whose stored row is gone, or has no string agentId, is not delivered", async () => {
     stored.set("not-a-row", { id: "not-a-row", content: "no owner" });
     events = [
       put("gone", { id: "gone", content: "deleted meanwhile" }),
