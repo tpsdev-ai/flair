@@ -12,6 +12,7 @@ import { extractPointerInputs } from "./memory-host-source.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { buildProvenance } from "./provenance.js";
 import { applyFederationBookkeeping, applyOriginatorInstanceId } from "./originator-instance.js";
+import { resolveReadScope } from "./memory-read-scope.js";
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -228,15 +229,180 @@ export class FeedMemories extends Resource {
     return record;
   }
 
-  async *connect(target: any, incomingMessages: any) {
-    const subscription = await (databases as any).flair.Memory.subscribe(target);
+  // Subscription admission: verified agents, admins and trusted internal
+  // calls; anonymous HTTP is refused (the same gate as FeedSouls). Admission is
+  // decided here, by the caller's resolved identity, not by which Harper user
+  // the request carries. What a subscriber then RECEIVES is decided per record
+  // in connect() below.
+  async allowRead(): Promise<boolean> {
+    return allowVerified((this as any).getContext?.());
+  }
 
-    if (!incomingMessages) {
-      return subscription;
+  /**
+   * A non-admin subscriber receives a Memory event only when
+   * `resolveReadScope(agentId).isAllowed(record)` allows the record the event
+   * is decided from: the predicate Memory.get()/search() use (the reader's own
+   * records at any visibility, plus every other agent's non-private records).
+   * Admin agents and trusted internal calls are unfiltered, as before. The
+   * request for a scoped subscription is built here from an allowlist of the
+   * caller's options (see SUBSCRIPTION_OPTIONS: the record id, descendants,
+   * and replay), and the server's `rowFilter` is set last; no caller-supplied
+   * filter, `rawEvents`, `select` or unknown option reaches it.
+   *
+   * Two layers decide what a non-admin subscriber receives:
+   *
+   * 1. Harper's synchronous `SubscriptionRequest.rowFilter`, set to the
+   *    predicate. In the pinned Harper (5.2.8) the filter is evaluated on the
+   *    full stored row for the rows replayed when the subscription opens, for
+   *    every live change (an update is re-read from the primary store and
+   *    delivered as a full-row `put`) and for reload re-deliveries; a history
+   *    replay (`startTime`, `previousCount`) is evaluated on each earlier
+   *    version of the row as it was stored. An event with no stored row (a delete tombstone, a published message,
+   *    a raw event) is withheld from a filtered subscriber. This layer holds
+   *    only where the host Harper honours `rowFilter`.
+   *
+   * 2. The loop below (see readableRowEvent()), which does not rely on
+   *    `rowFilter`. It delivers only a `put` or `invalidate` event whose value
+   *    is an object; every other event is withheld. When that object carries a
+   *    string `agentId` and a defined `visibility`, the predicate decides from
+   *    those two fields of the event. Otherwise the stored row is re-read by
+   *    the event id and the predicate decides from the stored row; the event is
+   *    withheld when it has no id, when the re-read throws, or when the re-read
+   *    returns anything other than an object with a string `agentId`. When the
+   *    subscription asked for `startTime` or `previousCount`, every event also
+   *    needs the record's current stored row, re-read by id, to be readable
+   *    (see storedRowReadable()).
+   */
+  async *connect(target: any, incomingMessages: any) {
+    const auth = await resolveAgentAuth((this as any).getContext?.());
+    if (auth.kind === "anonymous") {
+      // allowRead() refuses anonymous HTTP before connect() runs; this is the
+      // in-process backstop.
+      throw Object.assign(new Error("authentication required"), { statusCode: 401 });
     }
 
+    if (auth.kind === "internal" || auth.isAdmin) {
+      const subscription = await (databases as any).flair.Memory.subscribe(target);
+
+      if (!incomingMessages) {
+        return subscription;
+      }
+
+      for await (const event of subscription) {
+        yield event;
+      }
+      return;
+    }
+
+    const scope = await resolveReadScope(auth.agentId);
+    // The caller's subscription request is connect()'s second argument in
+    // instance mode and its first when loadAsInstance is false, the same choice
+    // Harper's own Resource.connect() makes.
+    const callerRequest = (this.constructor as any).loadAsInstance === false ? target : incomingMessages;
+    const request = scopedSubscriptionRequest(callerRequest, (record: any) => scope.isAllowed(record));
+    const subscription = await (databases as any).flair.Memory.subscribe(request);
+    const readStored = (id: any) => (databases as any).flair.Memory.get(id);
+    const replaysHistory = request.startTime !== undefined || request.previousCount !== undefined;
     for await (const event of subscription) {
+      if (!(await readableRowEvent(event, scope.isAllowed, readStored))) continue;
+      if (replaysHistory && !(await storedRowReadable(event?.id, scope.isAllowed, readStored))) continue;
       yield event;
     }
   }
+}
+
+/**
+ * The options a non-admin caller's subscription request may carry into the
+ * table subscription, each with the type it must have. These are the options
+ * Harper's `Table.subscribe` reads to choose WHICH record ids it follows and
+ * WHAT it replays before live events: `id` (one record), `isCollection` and
+ * `onlyChildren` (a record's descendants), and `startTime`, `previousCount`
+ * and `omitCurrent` (the replay). None of them widens what the read predicate
+ * allows. Every other property is dropped, including any filter, `rowFilter`,
+ * `eventFilter`, `select`, `rawEvents`, `listener` and any unknown option.
+ */
+const SUBSCRIPTION_OPTIONS: Readonly<Record<string, (value: unknown) => boolean>> = Object.freeze({
+  id: (value: unknown) =>
+    typeof value === "string" ||
+    (typeof value === "number" && Number.isFinite(value)) ||
+    (Array.isArray(value) && value.every((part) => part === null || typeof part === "string" || typeof part === "number")),
+  isCollection: (value: unknown) => typeof value === "boolean",
+  onlyChildren: (value: unknown) => typeof value === "boolean",
+  startTime: (value: unknown) => typeof value === "number" && Number.isFinite(value),
+  previousCount: (value: unknown) => typeof value === "number" && Number.isFinite(value),
+  omitCurrent: (value: unknown) => typeof value === "boolean",
+});
+
+/**
+ * Build the scoped subscription request: the allowlisted options the caller
+ * supplied with the expected type, then the server-owned `rowFilter`, set last.
+ */
+function scopedSubscriptionRequest(callerRequest: any, rowFilter: (record: any) => boolean): any {
+  const request: any = {};
+  if (callerRequest != null && typeof callerRequest === "object") {
+    for (const [option, hasExpectedType] of Object.entries(SUBSCRIPTION_OPTIONS)) {
+      const value = callerRequest[option];
+      if (value !== undefined && hasExpectedType(value)) request[option] = value;
+    }
+  }
+  request.rowFilter = rowFilter;
+  return request;
+}
+
+/**
+ * The scoped memory feed's second layer: may this event reach the reader?
+ *
+ * - Only a `put` or `invalidate` event whose value is an object is a
+ *   candidate; every other event (a delete, a message, a `put` without an
+ *   object value) is withheld.
+ * - The read predicate reads `agentId` and `visibility`. If the event's value
+ *   carries a string `agentId` and a defined `visibility`, the predicate
+ *   decides from those two fields.
+ * - Otherwise (a partial value, or a row stored without a `visibility` field)
+ *   the stored row is re-read by the event id, and the predicate decides from
+ *   the stored row. The event is withheld when it has no id, when the re-read
+ *   throws, or when the re-read returns anything other than an object with a
+ *   string `agentId`.
+ *
+ * The event itself is what is delivered; the stored row is only the input to
+ * the decision.
+ */
+async function readableRowEvent(
+  event: any,
+  isAllowed: (record: any) => boolean,
+  readStored: (id: any) => Promise<any> | any,
+): Promise<boolean> {
+  if (!event || (event.type !== "put" && event.type !== "invalidate")) return false;
+  const row = event.value;
+  if (row == null || typeof row !== "object") return false;
+  if (typeof row.agentId === "string" && row.visibility !== undefined) return isAllowed(row);
+  return storedRowReadable(event.id, isAllowed, readStored);
+}
+
+/**
+ * Re-read the stored row by id and apply the read predicate to it. An absent
+ * id, a read that throws, or a result that is not an object with a string
+ * `agentId` returns false.
+ *
+ * Also used for every event of a subscription that asked for `startTime` or
+ * `previousCount`: Harper then replays earlier versions of a record, and each
+ * version carries its own `agentId` and `visibility`. Such an event reaches a
+ * non-admin subscriber only when the record's current stored row is readable
+ * too, so a record that is private or deleted now is not replayed from its
+ * earlier versions.
+ */
+async function storedRowReadable(
+  id: any,
+  isAllowed: (record: any) => boolean,
+  readStored: (id: any) => Promise<any> | any,
+): Promise<boolean> {
+  if (id == null) return false;
+  let stored: any;
+  try {
+    stored = await readStored(id);
+  } catch {
+    return false;
+  }
+  if (stored == null || typeof stored !== "object" || typeof stored.agentId !== "string") return false;
+  return isAllowed(stored);
 }
