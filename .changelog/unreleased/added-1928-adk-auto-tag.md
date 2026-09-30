@@ -21,10 +21,9 @@
   than throwing, except after a rejected POST, where the refusal stays
   `adk-ref-write-rejected` and the read-back is reported as `not read`. The `tomllib` reader
   runs `python3 -I` with only `PATH` in its environment, so a module in the
-  checkout cannot shadow the standard library and no token reaches it. The
-  post-POST read-back has THREE distinct refusals, each reporting only what that run
-  OBSERVED: the ref did not read back at all (MISSING); it read back but could not
-  be resolved to a commit (UNRESOLVED); or it resolves elsewhere. The rejected-POST
+  checkout cannot shadow the standard library and no token reaches it. After an
+  accepted POST, read-back distinguishes four refusals: the read failed, the ref is
+  missing, the ref cannot resolve to a commit, or it resolves elsewhere. The rejected-POST
   and elsewhere texts name the two refs' read-back values (the raw ref type and SHA
   when unresolvable, or `not found`) and the check the operator runs next. The
   pyproject's membership+read is ONE function: a `git ls-tree` that does not answer
