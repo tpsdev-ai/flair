@@ -244,22 +244,28 @@ export class FeedMemories extends Resource {
    * `resolveReadScope(agentId).isAllowed(record)` allows it, the same predicate
    * Memory.get()/search() use (its own records at any visibility, plus every
    * other agent's non-private records). Admin agents and trusted internal
-   * calls are unfiltered, as before.
+   * calls are unfiltered, as before. The request object for a scoped
+   * subscription is built here, so no caller-supplied option (rawEvents,
+   * eventFilter, a filter of its own) reaches it.
    *
-   * The decision is made on the FULL stored row, through Harper's synchronous
-   * `SubscriptionRequest.rowFilter`. Harper applies that filter to the
-   * subscribe-time replay of current rows, to every live event (an update is
-   * re-read from the primary store and delivered as a full-row `put`), and to
-   * history/reload re-deliveries. An event that carries no stored row to
-   * decide from — a delete tombstone, a published message, a raw/partial
-   * event — is not delivered to a filtered subscriber at all: fail-closed,
-   * since there is no record left to check. The request object is built here,
-   * so no caller-supplied option (rawEvents, eventFilter, a filter of its own)
-   * reaches the scoped subscription.
+   * Two layers decide what a non-admin subscriber receives:
    *
-   * The loop re-applies the identical predicate to what the subscription
-   * yields, so a host Harper that does not honour `rowFilter` fails closed
-   * rather than open.
+   * 1. Harper's synchronous `SubscriptionRequest.rowFilter`, set to the
+   *    predicate. In the pinned Harper (5.2.8) the filter is evaluated on the
+   *    full stored row for the rows replayed when the subscription opens, for
+   *    every live change (an update is re-read from the primary store and
+   *    delivered as a full-row `put`), and for history/reload re-deliveries;
+   *    an event with no stored row (a delete tombstone, a published message,
+   *    a raw event) is withheld from a filtered subscriber. This layer holds
+   *    only where the host Harper honours `rowFilter`.
+   *
+   * 2. The loop below, which does not depend on `rowFilter` or on the shape of
+   *    the event: see readableRowEvent(). Only a `put`/`invalidate` event
+   *    carrying a row object can be delivered. When that row carries both
+   *    fields the predicate reads (`agentId`, `visibility`), the predicate
+   *    decides from them; otherwise the stored row is re-read by the event id
+   *    and the predicate decides from the stored row. A re-read that fails, or
+   *    returns no Memory row, withholds the event.
    */
   async *connect(target: any, incomingMessages: any) {
     const auth = await resolveAgentAuth((this as any).getContext?.());
@@ -286,20 +292,45 @@ export class FeedMemories extends Resource {
     const subscription = await (databases as any).flair.Memory.subscribe({
       rowFilter: (record: any) => scope.isAllowed(record),
     });
+    const readStored = (id: any) => (databases as any).flair.Memory.get(id);
     for await (const event of subscription) {
-      if (isReadableRowEvent(event, scope.isAllowed)) yield event;
+      if (await readableRowEvent(event, scope.isAllowed, readStored)) yield event;
     }
   }
 }
 
 /**
- * True for an event that carries a full stored row the reader may see. Mirrors
- * the events Harper hands to `rowFilter` (a `put` or `invalidate` with a row);
- * every other event type is withheld from a filtered subscriber.
+ * The scoped memory feed's second layer: may this event reach the reader?
+ *
+ * - Only a `put` or `invalidate` event carrying a row object is a candidate;
+ *   every other event (a delete, a message, anything without a row) is
+ *   withheld.
+ * - The read predicate reads `agentId` and `visibility`. If the event's row
+ *   carries both, the predicate decides from them.
+ * - Otherwise (a partial row, or a row stored without a `visibility` field) the
+ *   AUTHORITATIVE stored row is re-read by the event id, and the predicate
+ *   decides from that row. A re-read that throws, or that returns anything but
+ *   a Memory row (no row, no `agentId`), withholds the event.
+ *
+ * The event itself is what is delivered; the stored row is only the input to
+ * the decision.
  */
-function isReadableRowEvent(event: any, isAllowed: (record: any) => boolean): boolean {
+async function readableRowEvent(
+  event: any,
+  isAllowed: (record: any) => boolean,
+  readStored: (id: any) => Promise<any> | any,
+): Promise<boolean> {
   if (!event || (event.type !== "put" && event.type !== "invalidate")) return false;
   const row = event.value;
   if (row == null || typeof row !== "object") return false;
-  return isAllowed(row);
+  if (typeof row.agentId === "string" && row.visibility !== undefined) return isAllowed(row);
+  if (event.id == null) return false;
+  let stored: any;
+  try {
+    stored = await readStored(event.id);
+  } catch {
+    return false;
+  }
+  if (stored == null || typeof stored !== "object" || typeof stored.agentId !== "string") return false;
+  return isAllowed(stored);
 }
