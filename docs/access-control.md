@@ -4,14 +4,14 @@ Three separate checks decide who can use the native `/mcp` endpoint of a hosted
 Flair. **Which people:** a person signs in at your identity provider, and Flair
 acts as the principal that login is mapped to. A login with no mapping cannot
 call tools, unless you turn on just-in-time provisioning (off by default), which
-creates a principal for it. **Which apps:** an app identifies itself with a
+creates a principal for it. **Which apps:** new apps identify themselves with a
 Client ID Metadata Document, and the shipped `allowedHosts` list (`claude.ai`
 and `claude.com`) limits which hosts may serve one. Registration of new clients
-is off; clients registered while it was on stay usable until their records are
-removed. **What they can touch:** a connection acts as its principal. For a
-non-admin principal, that means writing its own memories and reading them plus
-other agents' non-private ones. `flair principal disable` cuts a principal off
-and keeps its data.
+is off; clients registered while it was on keep using their stored client IDs
+until their records are removed. **What they can touch:** a connection acts as
+its principal. For a non-admin principal, that means writing its own memories
+and reading them plus other agents' non-private ones. `flair principal disable`
+marks a principal deactivated, which refuses its calls and keeps its data.
 
 This page covers `/mcp`, where apps such as Claude sign people in with OAuth.
 Agents that sign each request with their own Ed25519 key use a different path,
@@ -67,12 +67,12 @@ flair mcp enable \
 - `--admin-pass` is the target instance's admin password. Outside `--dry-run`,
   this command does not fall back to `FLAIR_ADMIN_PASS` or
   `~/.flair/admin-pass`. It writes the mapping through the target's operations
-  API on port 9925 of the `--instance` host. <!-- docs-freshness-allow: hosted ops API port, not legacy data port -->
+  API on port 9925 of the `--instance` host. <!-- docs-freshness-allow: hosted operations API port, not the data port -->
 - In a terminal, and outside `--dry-run`, it prompts for the GitHub OAuth app's
   client id and secret when `--idp-client-id` and `--idp-client-secret` are not
   passed.
 
-The step prints the mapping it wrote. The line starts:
+The step's output states the mapping it wrote. The line starts:
 
 ```
 connector identity: sub 'alice' (provider 'github') resolves to Agent 'alice' — every /mcp call reads and writes AS 'alice'. principal created; Credential(kind:idp) created (cred_idp_github_<12 hex digits>).
@@ -82,8 +82,9 @@ connector identity: sub 'alice' (provider 'github') resolves to Agent 'alice' �
 person to an instance that is already enabled, also pass
 `--secrets-mechanism env-file`, so that the secrets it stages go to a local
 `0600` file and are not sent to the instance. Then answer `n` when it asks
-whether the staged secrets are applied. By then the mapping is written; the
-command stops before restarting the instance, reports the
+whether the staged secrets are applied. The `identity-mapping` step has run by
+then; a ✓ on it in the printed steps means the mapping was written and read
+back. The command stops before restarting the instance, reports the
 `secrets-provisioning` step as not applied, and exits non-zero.
 
 ### One active mapping per login
@@ -120,9 +121,11 @@ environment, like `FLAIR_MCP_OAUTH`.
 
 ## 2. Which apps
 
-An app identifies itself with a Client ID Metadata Document (CIMD): its
+New apps identify themselves with a Client ID Metadata Document (CIMD): the
 `client_id` is an HTTPS URL, and Flair's authorization server fetches the
-document from that URL, and caches it, when a person starts to sign in.
+document from that URL, and caches it, when a person starts to sign in. Clients
+registered before registration was turned off use their stored client IDs
+instead (see below).
 
 - **Registration of new clients is off.** The shipped `config.yaml` sets
   `dynamicClientRegistration.enabled: false`, so `POST /oauth/mcp/register`
@@ -136,9 +139,13 @@ document from that URL, and caches it, when a person starts to sign in.
   list below does not apply to it. Flair has no command that lists or removes
   these records; such a client stays usable until its record is deleted.
 - **Listed hosts.** When `clientIdMetadataDocuments.allowedHosts` is non-empty,
-  a `client_id` URL is accepted only if its host is on the list. An empty list
-  (`[]`) or no `allowedHosts` key places no restriction on the host. The
-  shipped list, `claude.ai` and `claude.com`, is there for Claude. With a
+  a `client_id` URL is accepted only if its host is on the list. For the
+  document of an app that signs people in, an empty list (`[]`) or no
+  `allowedHosts` key places no restriction on the host. A headless
+  (`client_credentials`) document is refused unless the list is non-empty; with
+  the shipped `config.yaml`, Flair's authorization server does not take that
+  grant at all (see [example 5](#5-a-bot-reaches-another-oauth-protected-mcp-server-as-itself)).
+  The shipped list, `claude.ai` and `claude.com`, is there for Claude. With a
   non-empty list, a `client_id` on any other host gets HTTP 400 from the
   authorization endpoint, with error `invalid_client` and the description
   `Unknown client_id`.
@@ -171,8 +178,8 @@ The list lives in `config.yaml`:
 Edit the `config.yaml` your instance runs (on Fabric, the one you deploy) and
 restart Flair so the component loads the new list. The list is a literal in that
 file, not an environment reference. The package ships the file with the default
-list, and an upgrade installs the new version's file, so re-apply your edit
-after upgrading. `flair mcp enable --cimd-allowed-hosts` does not change this
+list, and a completed upgrade installs the new version's file, so re-apply your
+edit after upgrading. `flair mcp enable --cimd-allowed-hosts` does not change this
 setting: the command only shows the list in its output.
 
 ### ChatGPT
@@ -230,11 +237,14 @@ flair principal disable alice
 When the operations API accepts the update, it prints
 `✅ Principal 'alice' deactivated`.
 
-- It sends the update to the operations API at `127.0.0.1` on the machine it
+- It sends an `update` to the operations API at `127.0.0.1` on the machine it
   runs on (port from `--ops-port`, `FLAIR_OPS_PORT` or the local Flair config).
   It has no option for a remote instance.
-- It sets the principal's `status` to `deactivated`. The principal's memories
-  and its login mapping stay.
+- The update sets the principal's `status` to `deactivated`, and its
+  `updatedAt`, and nothing else: the principal's memories and its login mapping
+  stay. The operations API of Harper 5.2.8, the version Flair pins, also accepts
+  an update for an id that has no record, so the ✅ line does not show that the
+  principal exists.
 - Flair reads the principal's status on every tool call, and refuses a
   deactivated principal's calls, including calls that carry a token issued
   before the change:
@@ -297,24 +307,30 @@ flair mcp enable \
   --admin-pass "$TARGET_ADMIN_PASS"
 ```
 
-It prints each step as it runs. The steps that act:
+When it finishes, it prints each step it ran, marked ✓ or ✗. The steps that
+act:
 
 - `signing-key` creates `~/.flair/mcp-signing-key.pem` (or the
   `--signing-key-file` path), or reuses the file if it exists.
-- `idp-credentials` takes the OAuth app's client id and secret (it prompts for
-  them).
+- `idp-credentials` checks that the OAuth app's client id and secret are
+  present; in a terminal, the command prompts for them before the steps run.
 - `secrets-provisioning` always stages the secrets the instance needs in a local
-  `0600` file. Without `--secrets-mechanism`, it also pushes them to the
-  instance when the instance supports Harper's env-secrets.
-- `identity-mapping` maps `alice`. The command then asks you to confirm that the
-  secrets are applied to the instance.
+  `0600` file. Without `--secrets-mechanism`, when the instance reports that it
+  supports Harper's env-secrets, the step also attempts to push each secret and
+  reads it back. If any push does not complete, the step names the variables
+  that failed and gives the staged-file instructions instead.
+- `identity-mapping` writes the mapping for `alice` and reads it back. The
+  command then asks you to confirm that the secrets are applied to the instance
+  (or takes `--confirm-secrets-applied`).
 - `local-config-update` takes the first `config.yaml` it finds, in the current
-  directory and then in `~/.flair/`, on the machine you run it on. If that file
-  has the `'@harperfast/oauth'` → `mcp` block, it sets `mcp.enabled` to
-  `${FLAIR_MCP_OAUTH}`; otherwise the step is marked failed and the command
-  continues.
-- `restart`, `verify-restart` and `self-verify` restart the instance through its
-  operations API, wait for a new process, and check the published metadata.
+  directory and then in `~/.flair/`, on the machine you run it on, and sets
+  `mcp.enabled` to `${FLAIR_MCP_OAUTH}` when that file has the
+  `'@harperfast/oauth'` → `mcp` block. When there is no such file or block, or
+  the write fails, the step is marked failed and the command continues.
+- `restart` sends a restart through the instance's operations API,
+  `verify-restart` waits up to 30 seconds for a new process ID, and
+  `self-verify` checks the published metadata; any of the three can fail the
+  run.
 
 On success it ends with:
 
@@ -365,8 +381,9 @@ shares her connector's memories.
     --admin-pass "$TARGET_ADMIN_PASS"
   ```
 
-  Answer `n` when asked whether the staged secrets are applied. The output says
-  `re-pointed`, and the connector acts as `alice-laptop` from then on. Memories
+  Answer `n` when asked whether the staged secrets are applied. When the
+  `identity-mapping` step shows ✓, its output says `re-pointed`, and the
+  connector acts as `alice-laptop` from then on. Memories
   already written as `alice` stay with `alice`.
 
 **How to choose:** use one principal when both apps should see the same private
@@ -391,8 +408,9 @@ flair mcp enable \
   --admin-pass "$TARGET_ADMIN_PASS"
 ```
 
-Answer `n` when asked whether the staged secrets are applied; the mapping is
-already written (see [Map a person to a principal](#map-a-person-to-a-principal)).
+Answer `n` when asked whether the staged secrets are applied; the
+`identity-mapping` step has run by then (see
+[Map a person to a principal](#map-a-person-to-a-principal)).
 Repeat for `dave`. Each of them reads their own memories and the others'
 non-private ones.
 
@@ -426,20 +444,26 @@ flair agent add bob-the-bot \
 ```
 
 The password file must be mode `0600`. For an `https` target on port 443, the
-command writes the Agent record through the operations API on port 9925 of the <!-- docs-freshness-allow: hosted ops API port, not legacy data port -->
+command sends the Agent record to the operations API on port 9925 of the <!-- docs-freshness-allow: hosted operations API port, not the data port -->
 same host; pass `--ops-target <url>` if yours is elsewhere. It writes a new key
 to `~/.flair/keys/bob-the-bot.key` (mode `0600`), or reuses the key already
-there, and prints, among other lines:
+there, sends an `insert` for the Agent record, and prints, among other lines:
 
 ```
 ✅ Agent 'bob-the-bot' (bob-the-bot) registered (ops: <operations API URL>)
 ```
 
+If an Agent record with that id already exists, the insert leaves it unchanged,
+including its public key (Harper 5.2.8, the version Flair pins, skips an insert
+for an existing id), and the command still prints that line. Requests signed
+with a key that does not match the stored one then get `invalid_signature`
+(below).
+
 Configure the stdio adapter (`@tpsdev-ai/flair-mcp`) on the bot's host with
 `FLAIR_URL=https://flair.example.com` and `FLAIR_AGENT_ID=bob-the-bot`. With
 `FLAIR_KEY_PATH` and `FLAIR_KEY_DIR` unset, it looks for the key at
-`~/.flair/keys/bob-the-bot.key`, and signs each request it sends to Flair with
-it:
+`~/.flair/keys/bob-the-bot.key` and, when it finds it, signs each request it
+sends to Flair with it:
 
 ```
 Authorization: TPS-Ed25519 bob-the-bot:<unix-ms>:<nonce>:<base64 signature>
@@ -467,9 +491,15 @@ request gets `{"error":"principal_deactivated"}`.
 
 - searches the agent's `Memory` and `Soul` rows and sends a delete for each one
   it finds, without checking whether each delete succeeded;
-- deletes the `Agent` record, and stops with an error if that delete fails;
-- deletes the agent's key files on the machine it runs on, unless you pass
-  `--keep-keys`.
+- sends a delete for the `Agent` record, and stops with an error if the
+  operations API rejects it;
+- unless you pass `--keep-keys`, attempts to delete the agent's key files
+  (private, public and `.bak`) from the keys directory on the machine it runs
+  on, ignoring any failure;
+- prints `Key files deleted.` (with `--keep-keys`,
+  `Key files preserved (--keep-keys).`) and then
+  `✅ Agent 'bob-the-bot' removed successfully`, without checking the Memory,
+  Soul and key-file deletions.
 
 Rows the agent owns in other tables, such as its workspace state, are left in
 place.
@@ -483,9 +513,9 @@ without a person signing in, using its Flair key as its client credential
 When `FLAIR_MCP_ISSUER` or `FLAIR_PUBLIC_URL` is set, Flair publishes a Client
 ID Metadata Document at `/MCPClientMetadata/<agent-id>` for an agent whose record
 holds an Ed25519 public key (64 hex characters, or base64 that decodes to 32
-bytes). With
-`FLAIR_MCP_ISSUER=https://flair.example.com`, the document for `bob-the-bot` is
-served at `https://flair.example.com/MCPClientMetadata/bob-the-bot`:
+bytes). With `FLAIR_MCP_ISSUER=https://flair.example.com`, the document for
+`bob-the-bot` is served at
+`https://flair.example.com/MCPClientMetadata/bob-the-bot`:
 
 ```json
 {
@@ -555,9 +585,9 @@ Why a separate principal:
   the bot's `private` memories are not returned to alice (neither is an admin).
   Non-private memories are readable by both. A `memory_store` without a
   `visibility` and with the default `standard` durability is `private`.
-- **Revocation.** `flair principal disable bob-the-bot` stops the job and leaves
-  alice working. A job that runs as `alice` cannot be cut off without cutting
-  off alice too.
+- **Revocation.** `flair principal disable bob-the-bot` gets the job's requests
+  refused and leaves alice working. A job that runs as `alice` cannot be cut
+  off without cutting off alice too.
 
 What the bot reads follows [What they can touch](#3-what-they-can-touch): its
 own memories and other agents' non-private ones. `flair grant` does not narrow
