@@ -15,10 +15,12 @@
   trusted internal subscribers are unchanged.
 
   `POST /FeedMemories` writes do not take the durability-keyed visibility
-  default that `Memory` writes use. A new `ephemeral` feed record without
-  `visibility` lands `private`; any other new feed record without `visibility`
-  has no visibility field, which reads as non-private; an update that names no
-  visibility keeps a stored `private`/`shared` value. The feed's write response
-  is the stored record, so it names `visibility` only when the record has
-  one. The 0.33.0 entry "Every memory write now reports the visibility it
-  landed on" describes writes through the `Memory` resource.
+  default that `Memory.post()` and `Memory.put()` apply. A new `ephemeral` feed
+  record without `visibility` lands `private`; any other new feed record
+  without `visibility` has no visibility field, which reads as non-private; an
+  update that names no visibility keeps a stored `private`/`shared` value. The
+  feed's write response is the stored record, so it names `visibility` only
+  when the record has one. The 0.33.0 entry "Every memory write now reports
+  the visibility it landed on" describes the write response of `Memory.post()`
+  and `Memory.put()` (the calls behind `memory_store`, `flair memory add` and
+  the SDK writes), apart from the admin-only `_reindex` re-PUT.
