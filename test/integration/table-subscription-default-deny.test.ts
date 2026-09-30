@@ -1,36 +1,59 @@
 // Table subscriptions are served to administrators only.
 //
-// Every table in the flair database has its own subscription route — SSE
+// An exported table in the flair database has a subscription route — SSE
 // (Accept: text/event-stream) and WebSocket on `/<Table>/` and `/<Table>/<id>`.
 // That route admits administrators and trusted internal calls, and refuses
 // everyone else: a verified non-admin agent gets 403 (WebSocket close 3003), a
-// caller without a valid credential 401. Agents subscribe through the feed
-// resources (FeedMemories, FeedSouls), which are not tables and decide their
-// own subscribers.
+// caller without a valid credential 401. Resources that are not tables, such
+// as the feed resources, decide their own subscribers.
 //
 // The rule is checked four ways, on two Harpers (one per
 // `authentication.authorizeLocal` setting) and on each Harper twice: before the
 // least-privilege `flair-agent` Harper user is provisioned (verified agents then
 // resolve to the shared admin Harper user) and after.
 //   (a) ENUMERATION — every table in the flair database, read from the database
-//       itself at runtime: each table with a route refuses a non-admin
-//       subscriber on both transports. A table added later is covered here
+//       itself at runtime: on each table's collection route and by-id route
+//       (a stored row's id when an administrator can list one), a non-admin
+//       subscriber is refused (or finds no route) on both transports and
+//       receives nothing. A table added later is enumerated, and so checked,
 //       without anyone naming it.
 //   (b) The Memory, Message and MemoryUsage routes refuse a non-admin
 //       subscriber and deliver nothing, including rows written after the
 //       attempt; an anonymous subscriber gets 401.
 //   (c) Administrators (Basic and an admin agent) still subscribe and receive rows.
-//   (d) FeedMemories and FeedSouls still serve a verified agent.
+//   (d) The feed resources are not table routes: FeedSouls serves a verified
+//       agent, and FeedMemories never answers with the table-route refusal.
 //
 // Mutation check: make the table guard admit every caller — every table whose
 // own read gate admits the agent goes red in (a), and (b) goes red.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
 import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
+
+/**
+ * Refuse to talk to anything but this test's own ephemeral instance: loopback,
+ * the OS-assigned ports this instance was started on, never a production port,
+ * and a data directory under the temp dir.
+ */
+function assertOwnInstance(harper: HarperInstance): void {
+  const http = new URL(harper.httpURL);
+  const ops = new URL(harper.opsURL);
+  const httpPort = Number(http.port);
+  const opsPort = Number(ops.port);
+  for (const [label, u, port] of [["http", http, httpPort], ["ops", ops, opsPort]] as const) {
+    if (u.hostname !== "127.0.0.1" || !(port > 0) || port === 9925 || port === 9926) {
+      throw new Error(`refusing to run against ${label} target ${u.href}: not this test's ephemeral instance`);
+    }
+  }
+  if (httpPort === opsPort || !harper.process?.pid || !harper.installDir.startsWith(tmpdir())) {
+    throw new Error(`refusing to run: ${harper.httpURL} / ${harper.opsURL} is not an instance this test started`);
+  }
+}
 
 function mkAgent(id: string): TestAgent {
   const kp = nacl.sign.keyPair();
@@ -213,15 +236,18 @@ for (const config of HARPERS) {
      * something that is not the table (a resource that shares its name), "none"
      * when there is no route.
      */
-    async function routeKind(table: string): Promise<"table" | "other" | "none"> {
+    async function routeKind(table: string): Promise<{ kind: "table" | "other" | "none"; sampleId?: string }> {
       const res = await fetch(`${harper.httpURL}/${table}/`, { headers: { Authorization: basicAuth(harper), Accept: "application/json" } });
       const text = await res.text();
-      if (res.status === 404) return "none";
-      if (res.status !== 200) return "other";
+      if (res.status === 404) return { kind: "none" };
+      if (res.status !== 200) return { kind: "other" };
       try {
-        return Array.isArray(JSON.parse(text)) ? "table" : "other";
+        const rows = JSON.parse(text);
+        if (!Array.isArray(rows)) return { kind: "other" };
+        const id = rows.find((r: any) => typeof r?.id === "string" && r.id.length > 0)?.id;
+        return { kind: "table", sampleId: id };
       } catch {
-        return "other";
+        return { kind: "other" };
       }
     }
 
@@ -244,13 +270,15 @@ for (const config of HARPERS) {
         await adminInsert("Soul", { id: ids.soul, agentId: A.id, key: "role", value: `${p} role`, durability: "permanent", createdAt: now(), updatedAt: now() });
       }, 60_000);
 
-      test("(a) every table in the database refuses a non-admin subscriber on its route, over SSE and WebSocket", async () => {
+      test("(a) every table in the database refuses a non-admin subscriber on its collection and by-id routes, over SSE and WebSocket", async () => {
         const tables = await flairTables();
         const listable: string[] = []; // an administrator's collection read returns the table's rows
+        const sampleIds = new Map<string, string>(); // a stored row's id, when one was listed
         const found: string[] = [];
         for (const t of tables) {
-          const kind = await routeKind(t);
+          const { kind, sampleId } = await routeKind(t);
           if (kind === "table") listable.push(t);
+          if (sampleId) sampleIds.set(t, sampleId);
           if (kind === "other" && !NOT_TABLE_ROUTES.has(t)) {
             found.push(`${t}: /${t}/ is served by something that does not list the table's rows; if that is a resource that is not the table, add it to NOT_TABLE_ROUTES`);
           }
@@ -259,20 +287,22 @@ for (const config of HARPERS) {
         for (const t of ["Memory", "Message", "MemoryUsage"]) expect(listable, `${t} is listed by an administrator`).toContain(t);
 
         for (const t of tables) {
-          const path = `/${t}/`;
-          const sub = sseAs(B, path);
-          const status = await sub.statusWithin(3_000);
-          await sub.stop();
-          const ws = await wsAttempt(wsUrl(path), ed25519Header(B, "GET", path), 2_000);
-          if (sub.events().length > 0) found.push(`${t}: SSE delivered ${sub.events().length} rows`);
-          if (ws.events.length > 0) found.push(`${t}: WebSocket delivered ${ws.events.length} rows`);
-          if (NOT_TABLE_ROUTES.has(t)) continue; // not the table: it only has to deliver none of the table's rows
-          // Refused (403 / close 3003) or no route at all (404 / close 1011).
-          // A table an administrator can list has a route, so it must be refused.
-          const refused = listable.includes(t) ? [403] : [403, 404];
-          const closed = listable.includes(t) ? [3003] : [3003, 1011];
-          if (!refused.includes(status as number)) found.push(`${t}: SSE ${status ?? "no answer in 3 s"}, expected ${refused.join(" or ")}`);
-          if (!closed.includes(ws.closeCode as number)) found.push(`${t}: WebSocket close ${ws.closeCode ?? "none in 2 s"}, expected ${closed.join(" or ")}`);
+          const byId = `/${t}/${encodeURIComponent(sampleIds.get(t) ?? `absent-${randomUUID()}`)}`;
+          for (const path of [`/${t}/`, byId]) {
+            const sub = sseAs(B, path);
+            const status = await sub.statusWithin(3_000);
+            await sub.stop();
+            const ws = await wsAttempt(wsUrl(path), ed25519Header(B, "GET", path), 2_000);
+            if (sub.events().length > 0) found.push(`${path}: SSE delivered ${sub.events().length} rows`);
+            if (ws.events.length > 0) found.push(`${path}: WebSocket delivered ${ws.events.length} rows`);
+            if (NOT_TABLE_ROUTES.has(t)) continue; // not the table: it only has to deliver none of the table's rows
+            // Refused (403 / close 3003) or no route at all (404 / close 1011).
+            // A table an administrator can list has a route, so it must be refused.
+            const refused = listable.includes(t) ? [403] : [403, 404];
+            const closed = listable.includes(t) ? [3003] : [3003, 1011];
+            if (!refused.includes(status as number)) found.push(`${path}: SSE ${status ?? "no answer in 3 s"}, expected ${refused.join(" or ")}`);
+            if (!closed.includes(ws.closeCode as number)) found.push(`${path}: WebSocket close ${ws.closeCode ?? "none in 2 s"}, expected ${closed.join(" or ")}`);
+          }
         }
         expect(found, `tables: ${tables.join(", ")}; listed by an administrator: ${listable.join(", ")}`).toEqual([]);
       }, 300_000);
@@ -345,7 +375,7 @@ for (const config of HARPERS) {
         expect(ws.events.map((e) => e.id), "Basic admin over WebSocket").toContain(ids.memory);
       }, 60_000);
 
-      test("(d) FeedMemories and FeedSouls are not table routes: they still decide their own subscribers", async () => {
+      test("(d) the feed resources are not table routes: FeedSouls serves a verified agent, and FeedMemories never answers with the table-route refusal", async () => {
         // FeedMemories admits whom its own gate admits. Whatever it answers, it
         // is never the table-route refusal, and an admitted agent is served.
         const own = `${p}-b-own`;
@@ -378,6 +408,7 @@ for (const config of HARPERS) {
       else process.env.AUTHENTICATION_AUTHORIZELOCAL = config.authorizeLocal;
       try {
         harper = await startHarper();
+        assertOwnInstance(harper);
       } finally {
         if (prior === undefined) delete process.env.AUTHENTICATION_AUTHORIZELOCAL;
         else process.env.AUTHENTICATION_AUTHORIZELOCAL = prior;

@@ -183,7 +183,7 @@ See **[DESIGN.md](DESIGN.md)** for the invariants behind the three primitives â€
 | **Federation** | Hub-and-spoke sync between instances using signed requests and pairing tokens. Originator enforcement blocks cross-node replay. [docs/federation.md](docs/federation.md) |
 | **Memory hygiene (REM)** | On-demand (`flair rem rapid`) and scheduled nightly distillation. Candidates are staged and promoted one at a time with a required rationale â€” never auto-applied. [docs/rem.md](docs/rem.md) |
 | **Memory bridges** | Import/export to foreign memory systems via a YAML descriptor or a code plugin. [docs/bridges.md](docs/bridges.md) |
-| **Real-time feeds** | Subscribe to memory or soul changes over WebSocket/SSE through `/FeedMemories` and `/FeedSouls`. Table routes serve subscriptions to administrators only. |
+| **Real-time feeds** | Administrators subscribe to table changes over WebSocket/SSE; verified agents subscribe to soul changes through `/FeedSouls`. |
 | **OAuth 2.1 server** | PKCE, dynamic client registration, standards-compliant token endpoint. Delegate auth to Flair without a separate IdP. [docs/auth.md](docs/auth.md) |
 | **XAA** | Bind agent identities to Google Workspace, Azure AD or Okta accounts. |
 | **Web admin** | Server-rendered UI for principals, connectors, IdPs and instance config. No separate dashboard service. |

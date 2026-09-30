@@ -4,7 +4,8 @@
  * (resources/table-subscription-policy.ts).
  *
  * The integration test (test/integration/table-subscription-default-deny.test.ts)
- * proves the rule on every table of a real Harper. These cases pin the parts a
+ * checks the rule on the collection and by-id routes of every table of a real
+ * Harper, over SSE and WebSocket. These cases pin the parts a
  * real Harper does not exercise on demand: the static `connect()` it replaces,
  * inheritance by resource subclasses, how the caller's context is resolved, a
  * caller that cannot be resolved, and the length limit on the refusal text.
@@ -155,8 +156,9 @@ describe("refusal text", () => {
       expect(Buffer.byteLength(`Error: ${err.message}`)).toBeLessThanOrEqual(MAX_REFUSAL_REASON_BYTES);
     }
   });
-  it("names the resources agents subscribe through", () => {
-    expect(tableSubscriptionRefusal({ kind: "agent", agentId: "b", isAdmin: false })!.message).toContain("FeedMemories or FeedSouls");
+  it("states the rule and nothing else", () => {
+    expect(tableSubscriptionRefusal({ kind: "agent", agentId: "b", isAdmin: false })!.message).toBe("table subscriptions are for administrators");
+    expect(tableSubscriptionRefusal({ kind: "anonymous" })!.message).toBe("table subscriptions need an administrator credential");
   });
   it("admits only administrators and internal calls", () => {
     expect(tableSubscriptionRefusal({ kind: "internal" })).toBeNull();
